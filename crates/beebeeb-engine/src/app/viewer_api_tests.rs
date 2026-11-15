@@ -490,8 +490,65 @@ fn local(engine: &TestEngine, id: &str, max: u64) -> Result<LocalCopy, OpenFileE
 fn opened(result: Result<LocalCopy, OpenFileError>) -> OpenedLocalCopy {
     match result.expect("the copy is read") {
         LocalCopy::Opened(copy) => copy,
-        LocalCopy::NotHere => panic!("the copy on this computer was not read"),
+        LocalCopy::NotHere | LocalCopy::Behind => panic!("the copy on this computer was not read"),
     }
+}
+
+/// Set the version the local state holds for `id`, keeping the agreed content and its base.
+fn set_current_version(db: &StateDb, id: &str, version: i64) {
+    let mut contract = db.get_file_contract_state(id).unwrap().unwrap();
+    contract.current_version = version;
+    db.set_file_contract_state(&contract).unwrap();
+}
+
+/// Review of desktop#432 (P1-2): another device's version was pulled (the row's version raised, the copy here not
+/// replaced: nothing re-fetches a `Local` file's bytes on that raise). The copy is never read as that version: the
+/// viewer labels what it shows with the version the local state holds, and an edit saved from older bytes under it
+/// would replace the newer version.
+#[test]
+fn a_copy_of_a_version_older_than_the_one_beebeeb_has_now_is_not_read() {
+    let fake = fake("behind");
+    // A closed loopback port: nothing can be downloaded, so every answer is the copy's own.
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let (_dir, _root, db) = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    // The copy is version 4's (a hydrate recorded it as agreed), and 4 is the version the local state holds.
+    set_current_version(&db, NOTE, 4);
+    db.record_local_baseline(NOTE, 4, "invented-agreed-hash").unwrap();
+    assert_eq!(
+        opened(local(&engine, NOTE, NO_LIMIT)).copy,
+        OnThisPc::InSync,
+        "the control: a copy of the version Beebeeb has is read"
+    );
+    // The pull raises the version to another device's 5; the base and the bytes stay version 4's.
+    set_current_version(&db, NOTE, 5);
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)));
+    // A change not sent yet, made on the older base: not read either, and not "unreadable" (Beebeeb's newer
+    // version is shown, said as not this PC's).
+    db.set_status(NOTE, FileStatus::Uploading).unwrap();
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)));
+    db.set_status(NOTE, FileStatus::Local).unwrap();
+    // Caught up (a hydrate wrote version 5's bytes): read again.
+    db.record_local_baseline(NOTE, 5, "invented-agreed-hash-5").unwrap();
+    assert_eq!(opened(local(&engine, NOTE, NO_LIMIT)).copy, OnThisPc::InSync);
+    // Which version the copy is, is not known (no agreed content, nothing fetched): not provably Beebeeb's.
+    db.mark_content_unknown(NOTE).unwrap();
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)));
+}
+
+/// A file that never landed in Beebeeb (version 0, a new file on this PC) has no newer version to be behind.
+#[test]
+fn a_copy_of_a_file_not_in_beebeeb_yet_is_read() {
+    let fake = fake("new-here");
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let _kept = with_folder(
+        &engine,
+        &fake.first,
+        FileStatus::Uploading,
+        Some(b"a new invented note"),
+    );
+    assert_eq!(opened(local(&engine, NOTE, NO_LIMIT)).copy, OnThisPc::NotSentYet);
 }
 
 #[test]

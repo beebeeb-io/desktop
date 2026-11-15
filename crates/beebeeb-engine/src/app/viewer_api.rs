@@ -153,6 +153,11 @@ pub enum LocalCopy {
     /// The file's bytes are not wholly on this computer (or cannot be told to be, or no folder is set up for
     /// them): nothing was read and nothing was fetched. The caller downloads the file instead.
     NotHere,
+    /// The copy on this computer is of a version older than the one the local state holds now (another device's
+    /// version was pulled and these bytes were not replaced), or which version it is is not known: it is never
+    /// read as the version Beebeeb has. Nothing was read and nothing was fetched. The caller downloads the file
+    /// instead, and says that the copy on this computer is not in sync with it.
+    Behind,
 }
 
 /// Why a file was not opened. Fixed kinds: none carries a name, an id or a server's words.
@@ -306,19 +311,33 @@ impl<C: CredentialStores> Engine<C> {
         cancel: &AtomicBool,
     ) -> Result<LocalCopy, OpenFileError> {
         let turn = self.acct.session_generation();
-        let entry = self
+        // The row and whether its copy is behind, in one visit to the local state.
+        let (entry, behind) = self
             .local_state()
             .map_err(refused)?
-            .with(|db| db.get_file(file_id))
+            .with(|db| {
+                let Some(entry) = db.get_file(file_id)? else {
+                    return Ok((None, false));
+                };
+                Ok::<_, rusqlite::Error>((Some(entry), copy_is_behind(db, file_id)?))
+            })
             .map_err(refused)?
-            .map_err(|_| OpenFileError::Failed)?
-            .ok_or(OpenFileError::NotFound)?;
+            .map_err(|_| OpenFileError::Failed)?;
+        let entry = entry.ok_or(OpenFileError::NotFound)?;
         if entry.is_dir() {
             return Err(OpenFileError::NotFound);
         }
         let Some(recorded) = on_this_pc(&entry.status) else {
             return Ok(LocalCopy::NotHere);
         };
+        // Review of desktop#432 (P1-2): a copy of an older version than the one the local state holds is never
+        // read: the viewer labels what it shows with that version, and an edit saved from older bytes under it
+        // would replace the newer version without the two-versions question. Before the size check below: the
+        // pull has already moved the row's size to the newer version's. Its own answer, never `not_read()`: a
+        // copy with a change that is not sent is not "unreadable", and Beebeeb's newer version is what is shown.
+        if behind {
+            return Ok(LocalCopy::Behind);
+        }
         // The key of the session the read is for, copied under the session-write lock as every other hand-over
         // copies it (never while a session change is half done): the hand-over below asks whether it is still
         // that session.
@@ -395,6 +414,25 @@ impl<C: CredentialStores> Engine<C> {
         let path = crate::file_ops::full_path(&root, rel_path).ok()?;
         matches!(crate::name_alias::conflict_below(&root, &path), Ok(None)).then_some(path)
     }
+}
+
+/// Whether the copy on this computer is behind the version the local state holds for `file_id` (`current_version`):
+/// the version its bytes are is the agreed content's (`local_base_version`, while `local_hash` is recorded), else the
+/// version the fetches served (`fetched_content`, the lowest one when they served more than one), as the sync's own
+/// reading of a sync-folder file has it (`engine_bridge::syncflow`). Not known (neither recorded) is behind too: it
+/// is not provably the version Beebeeb has. A file at version 0 (never landed in Beebeeb) is never behind.
+fn copy_is_behind(db: &crate::state_db::StateDb, file_id: &str) -> rusqlite::Result<bool> {
+    let Some(contract) = db.get_file_contract_state(file_id)? else {
+        return Ok(true);
+    };
+    if contract.current_version <= 0 {
+        return Ok(false);
+    }
+    let copy = match contract.local_hash {
+        Some(_) => Some(contract.local_base_version).filter(|version| *version > 0),
+        None => db.fetched_content(file_id)?.map(|(version, _)| version),
+    };
+    Ok(copy.is_none_or(|version| version < contract.current_version))
 }
 
 /// Whether `metadata` describes a plain file whose every byte is on this computer: core's reading of it, the

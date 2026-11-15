@@ -104,3 +104,27 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
   now, arriving on the poll. With the editor open nothing is read again (the frame refuses).
 - **Not traced:** that the sync engine raises `current_version` in the local state when another device's save lands
   while a file is open. The tests move it in the fake engine; whether it moves in a real sync is for the native rung.
+
+## A newer version: fix round of #432 (lane fix432, 2026-11-15)
+
+- **What a read found is weighed on the window's thread** (`viewer_change::take_settled` → `weigh`): the worker only
+  reads (`Engine::edit_facts_for`) and sends the version, the opening it began under, and the time. `Opening::seen`
+  is written by the window's thread alone and never goes down. A read for an earlier opening (before Show it, Try
+  again or a reopen) is dropped. Reads run only for a text or a note (the kinds that draw the banner), and the
+  window is woken for the next one (`ViewerSource::next_check`), so the banner comes without a press.
+- **The view's own save is never "a newer version":** Saved moves the view to the version it became; a save
+  stored here only ("Saved on this PC · sends when Beebeeb can be reached") keeps the view at the save's base, and
+  the version it becomes once it lands is the engine's to tell (`EditFacts::own_landed`, read without forgetting
+  the queued save). A version past that one is another device's and is announced. The two-versions question does
+  not move the view: after Cancel and Discard changes the next read still announces the newer version. A read that
+  comes back in the same drain as a change's answer is weighed on the next pump. A save stored here keeps a newer
+  version noticed while it waited (its banner shows once the editor closes).
+- **Show it never labels older bytes with a newer version.** The label is read before the content (an open, Show
+  it, Keep theirs). The engine does not read a copy on this PC whose version is behind the one it holds now, or is
+  not known (`LocalCopy::Behind`): Beebeeb's version is downloaded, and the status line says "The version in
+  Beebeeb, decrypted on this PC · the copy on this PC is not in sync with it."
+- **Show it refused** (the file is gone, the session ended, it could not be read now): the version on screen stays
+  open, its banner too, and the toast says why: **"Newer version not opened: the file is gone"** (also "the
+  session ended", "nothing has synced on this PC yet", "this PC's data couldn't be confirmed as this account's",
+  "Beebeeb is locked or signed out", "couldn't read it right now"). No board draws this toast: the words follow
+  the status line's "Not opened: …".

@@ -22,6 +22,7 @@ fn what_the_local_state_says_is_what_the_switch_and_the_version_show() {
         version: 7,
         kept: true,
         can_write: true,
+        own_landed: None,
     });
     let (source, file, _) = opened(&fake, NOTE);
     assert!(source.knows_offline());
@@ -41,6 +42,7 @@ fn what_the_local_state_says_is_what_the_switch_and_the_version_show() {
         version: 3,
         kept: false,
         can_write: false,
+        own_landed: None,
     });
     let (source, _, _) = opened(&fake, NOTE);
     assert!(source.knows_offline() && !source.can_save());
@@ -147,6 +149,7 @@ fn the_three_keeps() {
         version: 5,
         kept: false,
         can_write: true,
+        own_landed: None,
     });
     assert_eq!(source.resolve(NOTE, "mine", Keep::Mine), SaveOutcome::Working);
     assert!(matches!(settled(&mut source, NOTE), Settled::Saved { .. }));
@@ -187,7 +190,27 @@ fn bump(fake: &Fake, version: i64) {
         version,
         kept: false,
         can_write: true,
+        own_landed: None,
     });
+}
+
+/// The local state holds `version`, and the view's own queued save became `own` once it landed.
+fn bump_own(fake: &Fake, version: i64, own: i64) {
+    fake.s().edit = Some(EditFacts {
+        version,
+        kept: false,
+        can_write: true,
+        own_landed: Some(own),
+    });
+}
+
+/// Wait until a read of the version started by `settled` has sent its answer (not taken yet).
+fn read_done(source: &Source) {
+    let began = Instant::now();
+    while source.changes.checking.load(Ordering::SeqCst) {
+        assert!(began.elapsed() < Duration::from_secs(10), "the read did not end");
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 #[test]
@@ -236,19 +259,200 @@ fn the_views_own_save_is_not_a_newer_version() {
 
 #[test]
 fn a_banner_for_a_session_that_moved_on_is_dropped() {
+    // The control (review of #432, P3): the same steps with the session unchanged raise the banner, so the drop
+    // below is the session's doing, not a read that never answered.
+    let fake = Fake::new();
+    let (mut source, _, _) = opened(&fake, NOTE);
+    source.changes.every = Duration::ZERO;
+    bump(&fake, 5);
+    assert!(source.settled(NOTE).is_none());
+    read_done(&source);
+    assert!(matches!(source.settled(NOTE), Some(Settled::Newer(_))), "the control");
+
     let fake = Fake::new();
     let (mut source, _, _) = opened(&fake, NOTE);
     source.changes.every = Duration::ZERO;
     bump(&fake, 5);
     // The read starts; the account is another one before its answer is taken.
     assert!(source.settled(NOTE).is_none());
-    let began = Instant::now();
-    while source.changes.checking.load(Ordering::SeqCst) {
-        assert!(began.elapsed() < Duration::from_secs(10), "the read did not end");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    read_done(&source);
     fake.new_session("b@example.eu");
     assert!(source.settled(NOTE).is_none(), "another session's answer is dropped");
+}
+
+/// Review of #432, P1-1: a save that ends "Saved on this PC" lands later as the version it becomes. That version
+/// is the view's own (the engine says so: `EditFacts::own_landed`), never "A newer version arrived"; a version past
+/// it is another device's.
+#[test]
+fn a_queued_save_that_lands_later_is_not_announced_as_a_newer_version() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Queued);
+    let (mut source, file, _) = opened(&fake, NOTE);
+    assert_eq!(source.save(NOTE, "mine", file.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Queued { .. }));
+    source.changes.every = Duration::ZERO;
+    // Not landed yet: the local state still holds 3.
+    assert!(newer_answer(&mut source, NOTE).is_none());
+    // Landed: 4, the version the view's own save became.
+    bump_own(&fake, 4, 4);
+    for _ in 0..3 {
+        assert!(
+            newer_answer(&mut source, NOTE).is_none(),
+            "the view's own landed save is not another device's"
+        );
+    }
+    // Another device saved after it.
+    bump_own(&fake, 5, 4);
+    assert!(matches!(newer_answer(&mut source, NOTE), Some(Settled::Newer(_))));
+}
+
+/// The own save landed as 4 and another device saved 5 inside one interval: the first read sees 5, which is not the
+/// view's own, and says so.
+#[test]
+fn another_devices_version_past_the_own_landed_one_is_announced_at_the_first_read() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Queued);
+    let (mut source, file, _) = opened(&fake, NOTE);
+    source.save(NOTE, "mine", file.version);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Queued { .. }));
+    source.changes.every = Duration::ZERO;
+    bump_own(&fake, 5, 4);
+    assert!(matches!(newer_answer(&mut source, NOTE), Some(Settled::Newer(_))));
+}
+
+/// Review of #432, P2: a save answered with the two-versions question leaves the view on its own version; the
+/// person cancels and discards, and the newer version is still announced by the next read.
+#[test]
+fn a_conflict_does_not_hide_the_newer_version_from_the_next_read() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Conflict { theirs: 5 });
+    let (mut source, file, _) = opened(&fake, NOTE);
+    source.save(NOTE, "mine", file.version);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Conflict(_)));
+    bump(&fake, 5);
+    source.changes.every = Duration::ZERO;
+    assert!(matches!(newer_answer(&mut source, NOTE), Some(Settled::Newer(_))));
+}
+
+/// Review of #432, P2: a read that noticed another device's version comes back in the same drain as a change's
+/// answer. The change's answer comes first; the banner on the next pump, not never.
+#[test]
+fn a_newer_version_read_in_the_same_drain_as_a_change_is_kept_for_the_next_pump() {
+    let fake = Fake::new();
+    let (mut source, _, _) = opened(&fake, NOTE);
+    source.changes.every = Duration::ZERO;
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert!(source.set_offline(NOTE, true));
+    bump(&fake, 5);
+    let wakes = fake.s().wakes;
+    // The read starts (the change waits at the door) and answers; then the change answers.
+    assert!(source.settled(NOTE).is_none());
+    read_done(&source);
+    drop(door);
+    until("the change answered", || fake.s().wakes >= wakes + 2);
+    assert!(matches!(
+        source.settled(NOTE),
+        Some(Settled::Offline { on: true, done: true })
+    ));
+    assert!(
+        source.next_check().is_some_and(|after| after.is_zero()),
+        "woken at once"
+    );
+    assert!(matches!(source.settled(NOTE), Some(Settled::Newer(_))));
+}
+
+/// Review of #432, P2: the window is woken for the next read while an open text's version is read, so the banner
+/// comes without a press. Not for a kind that draws no banner, and not without the version.
+#[test]
+fn the_window_is_woken_for_the_next_read_of_an_open_text() {
+    let fake = Fake::new();
+    let (source, _, _) = opened(&fake, NOTE);
+    let after = source.next_check().expect("an open note's version is read");
+    assert!(after <= super::super::change::NEWER_EVERY, "{after:?}");
+    fake.s().edit = None;
+    let (source, _, _) = opened(&fake, NOTE);
+    assert!(source.next_check().is_none(), "no version read: nothing to wake for");
+}
+
+/// Review of #432, P3: only a text and a note draw the banner, so only their version is read.
+#[test]
+fn the_version_of_a_photo_is_not_read() {
+    let fake = Fake::new();
+    fake.put("f-photo", "Invented photo.png", &png_bytes(4, 4));
+    let (mut source, _, _) = opened(&fake, "f-photo");
+    source.changes.every = Duration::ZERO;
+    let reads = fake.s().edit_reads;
+    for _ in 0..3 {
+        assert!(source.settled("f-photo").is_none());
+        read_done(&source);
+    }
+    assert_eq!(fake.s().edit_reads, reads, "no read of the version");
+    assert!(source.next_check().is_none());
+}
+
+/// Review of #432, P3: a read begun under one opening is not taken by the next (Show it opened the file again).
+#[test]
+fn a_read_begun_before_show_it_is_not_the_new_openings() {
+    let fake = Fake::new();
+    let (mut source, _, _) = opened(&fake, NOTE);
+    source.changes.every = Duration::from_secs(3600);
+    source.changes.checked = None;
+    bump(&fake, 6);
+    // The read answers 6, not taken yet.
+    assert!(source.settled(NOTE).is_none());
+    read_done(&source);
+    // Show it opens the file again; the local state now holds 5 (the new opening holds 5).
+    bump(&fake, 5);
+    source.newer(NOTE).expect("the file opens again");
+    assert!(
+        source.settled(NOTE).is_none(),
+        "the earlier opening's read says nothing about this one"
+    );
+}
+
+/// Review of #432, P3: Show it that cannot read the file leaves the open one as it was: its editor and its reads.
+#[test]
+fn show_it_that_is_refused_keeps_the_file_open_as_it_was() {
+    let fake = Fake::new();
+    let (mut source, _, _) = opened(&fake, NOTE);
+    fake.s().facts_error = Some((OpenFileError::NotFound, 1));
+    assert_eq!(source.newer(NOTE).err(), Some(OpenError::NotFound));
+    assert!(source.can_save(), "still open: the editor is offered");
+    source.changes.every = Duration::ZERO;
+    bump(&fake, 5);
+    assert!(
+        matches!(newer_answer(&mut source, NOTE), Some(Settled::Newer(_))),
+        "and read"
+    );
+}
+
+/// Review of #432, P1-2: Keep theirs reads the version before the content. A version that lands during the
+/// download leaves the label older than the bytes (a save from there is a conflict), never newer.
+#[test]
+fn keep_theirs_labels_the_content_with_the_version_read_before_it() {
+    let fake = Fake::new();
+    let (mut source, _, _) = opened(&fake, NOTE);
+    bump(&fake, 5);
+    fake.s().lands_during_fetch = Some(6);
+    assert_eq!(source.resolve(NOTE, "mine", Keep::Theirs), SaveOutcome::Working);
+    let Settled::Opened { version, .. } = settled(&mut source, NOTE) else {
+        panic!("theirs");
+    };
+    assert_eq!(version, 5, "the version read before the download began");
+}
+
+/// Review of #432, P1-2: a copy on this PC older than Beebeeb's version now is not shown as it (the engine says
+/// `Behind`): Beebeeb's is downloaded, and the line says the copy here is not in sync with it.
+#[test]
+fn a_copy_behind_beebeebs_version_is_downloaded_and_said_not_in_sync() {
+    let fake = Fake::new();
+    fake.keep(NOTE, OnThisPc::InSync, Some(b"the older invented words\n"));
+    fake.s().local_behind = true;
+    let (source, _, body) = opened(&fake, NOTE);
+    assert_eq!(words(&body), NOTE_TEXT, "Beebeeb's version, downloaded");
+    assert_eq!(fake.s().fetches, [NOTE.to_string()]);
+    assert_eq!(source.origin(NOTE), Origin::BeebeebNotThisPcs);
 }
 
 #[test]

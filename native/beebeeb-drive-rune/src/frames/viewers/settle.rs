@@ -31,10 +31,11 @@ impl Ui {
                 };
                 self.outcome(SaveOutcome::Saved { file, at });
             }
+            // Stored here, not sent yet: a newer version noticed while the save waited stays offered (its banner is
+            // drawn once the editor closes, below).
             Settled::Queued { body } => {
                 let file = OpenFile {
                     body,
-                    newer: None,
                     ..self.file.clone()
                 };
                 self.show(file);

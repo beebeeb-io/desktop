@@ -84,6 +84,12 @@ struct Inner {
     copies: Vec<(String, String)>,
     /// The next change waits here until the test lets it go (a change "on its way").
     change_waits: bool,
+    /// How many times the version was read (`edit_facts`).
+    edit_reads: usize,
+    /// A version that lands while a download runs: the local state holds it from then on.
+    lands_during_fetch: Option<i64>,
+    /// The engine says the copy on this PC is behind the version Beebeeb has (`LocalCopy::Behind`).
+    local_behind: bool,
 }
 
 struct Fake {
@@ -124,6 +130,7 @@ impl Fake {
                     version: 3,
                     kept: false,
                     can_write: true,
+                    own_landed: None,
                 }),
                 kept_calls: Vec::new(),
                 kept_refused: false,
@@ -131,6 +138,9 @@ impl Fake {
                 save_answer: Ok(SaveEnd::Saved { version: 4 }),
                 copies: Vec::new(),
                 change_waits: false,
+                edit_reads: 0,
+                lands_during_fetch: None,
+                local_behind: false,
             }),
             door: Mutex::new(()),
         };
@@ -230,6 +240,9 @@ impl ViewerEngine for Fake {
             return Err(OpenFileError::Cancelled);
         }
         let turn = s.answers_for.unwrap_or(s.turn);
+        if s.local_behind {
+            return Ok(LocalCopy::Behind);
+        }
         let stored = s.files.get(file_id).ok_or(OpenFileError::NotFound)?;
         let (Some(here), Some(copy)) = (stored.here, stored.copy.clone()) else {
             return Ok(LocalCopy::NotHere);
@@ -262,6 +275,9 @@ impl ViewerEngine for Fake {
             s.fetches.push(file_id.to_string());
             s.limits.push(max_bytes);
             assert!(!s.panics, "an invented panic in the download");
+            if let (Some(version), Some(edit)) = (s.lands_during_fetch.take(), s.edit.as_mut()) {
+                edit.version = version;
+            }
             (s.files.get(file_id).map(|stored| stored.bytes.clone()), s.turn)
         };
         let bytes = bytes.ok_or(OpenFileError::NotFound)?;
@@ -303,7 +319,9 @@ impl ViewerEngine for Fake {
     }
 
     fn edit_facts(&self, _session: SessionGeneration, _file_id: &str) -> Option<EditFacts> {
-        self.s().edit
+        let mut s = self.s();
+        s.edit_reads += 1;
+        s.edit
     }
 
     fn set_kept(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), ()> {

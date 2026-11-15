@@ -575,6 +575,11 @@ pub trait ViewerSource {
     fn answers_later(&self) -> bool {
         false
     }
+    /// How long until this source next reads whether a newer version arrived (DW-1519), while it reads one: the
+    /// window asks to be woken then, so the banner comes without a press. `None`: it does not read.
+    fn next_check(&self) -> Option<std::time::Duration> {
+        None
+    }
     /// Download and decrypt again after a failure.
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError>;
     /// A picture of the open file as decoded pixels (the photo, a strip thumbnail, the artwork,

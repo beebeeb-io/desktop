@@ -77,6 +77,10 @@ impl ViewerSource for Recording {
     }
     fn newer(&mut self, id: &str) -> Result<OpenFile, OpenError> {
         self.calls.borrow_mut().push(format!("newer {id}"));
+        // A test refuses Show it by asking for it in the calls.
+        if self.calls.borrow().iter().any(|call| call == "refuse newer") {
+            return Err(OpenError::NotFound);
+        }
         self.inner.newer(id)
     }
     fn colours(&self, file: &OpenFile, text: &str) -> Vec<Vec<Run>> {
@@ -567,6 +571,43 @@ fn a_newer_version_the_engine_noticed_is_said_without_a_device_name() {
         Some("A newer version arrived, 09:14.")
     );
     assert_eq!(viewer(&rt).file.version, 3, "the version on screen stays until Show it");
+}
+
+/// Review of #432, P2: a newer version noticed while a save waited stays offered when the save ends stored on this
+/// PC only; its banner is drawn once the editor closes.
+#[test]
+fn a_save_stored_here_keeps_a_newer_version_noticed_meanwhile() {
+    let (mut rt, _) = note(false, false);
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.settle(super::source::Settled::Newer(super::source::Newer {
+            from: String::new(),
+            at: "09:14".into(),
+        }));
+        let body = ui.file.body.clone();
+        ui.settle(super::source::Settled::Queued { body });
+    });
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(viewer(&rt).file.newer.is_some(), "still offered");
+    assert_eq!(
+        info(&rt, "banner-text").text.as_deref(),
+        Some("A newer version arrived, 09:14.")
+    );
+}
+
+/// Review of #432, P3: Show it that is refused leaves the version on screen, its banner too, and says why.
+#[test]
+fn show_it_that_is_refused_says_why_and_keeps_the_version_on_screen() {
+    let (mut rt, calls) = note(true, false);
+    calls.borrow_mut().push("refuse newer".into());
+    operate(&mut rt, "banner-btn");
+    assert_eq!(viewer(&rt).file.version, 3, "the version on screen stays");
+    assert!(has(&rt, "banner"), "the newer version is still offered");
+    assert_eq!(
+        viewer(&rt).toast.as_deref(),
+        Some("Newer version not opened: the file is gone")
+    );
 }
 
 #[test]
