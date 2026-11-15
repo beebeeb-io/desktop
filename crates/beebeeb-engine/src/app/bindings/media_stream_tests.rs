@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,8 +21,8 @@ use serde_json::json;
 use zeroize::Zeroizing;
 
 use super::{
-    Limits, MEDIA_CACHE_CEILING, MEDIA_MAX_READ, MEDIA_REFETCH_SLACK, MediaOrigin, MediaReadError, MediaReader,
-    WIRE_OVERHEAD,
+    Limits, MEDIA_CACHE_CEILING, MEDIA_CACHE_MAX, MEDIA_MAX_READ, MEDIA_REFETCH_SLACK, MEDIA_TWO_STRIDES_FROM,
+    MediaOrigin, MediaReadError, MediaReader, WIRE_OVERHEAD,
 };
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
@@ -393,6 +393,7 @@ fn media_cache_is_bounded() {
     reader.limits = Limits {
         cache_floor: cap,
         cache_ceiling: MEDIA_CACHE_CEILING,
+        two_strides_from: MEDIA_TWO_STRIDES_FROM,
         read_ahead: 0,
         refetch_slack: MEDIA_REFETCH_SLACK,
     };
@@ -471,6 +472,7 @@ fn media_refetch_budget_stops() {
     reader.limits = Limits {
         cache_floor: STRIDE,
         cache_ceiling: STRIDE,
+        two_strides_from: MEDIA_TWO_STRIDES_FROM,
         read_ahead: 0,
         refetch_slack: 0,
     };
@@ -745,6 +747,7 @@ fn media_large_first_chunk_is_not_pinned() {
     let limits = Limits {
         cache_floor: 100,
         cache_ceiling: 2_500,
+        two_strides_from: MEDIA_TWO_STRIDES_FROM,
         read_ahead: 300,
         refetch_slack: 0,
     };
@@ -892,5 +895,277 @@ fn media_real_stride_run_counts_fetches_per_chunk() {
     assert!(
         per_index.values().all(|fetches| *fetches <= 1),
         "a chunk fetched more than once: {per_index:?}"
+    );
+}
+
+// ── 12. Core's largest stride ────────────────────────────────────────────────────────────────────────────────────
+
+/// Row 9 (lead ruling 22:12): core's largest stride (256 MiB, for files over 4 GiB) holds the chunk played AND the
+/// next one, whatever the ceiling (384 MiB), so a play finds the next chunk read ahead at every boundary instead of
+/// fetching it there. The play runs at the shipped limits scaled down by 1 024 (a 256 KiB stride, every limit and the
+/// read size divided by 1 024, a file of 16½ chunks: "over 4 GiB"); the shipped numbers are asserted on the cap itself
+/// (two real 256 MiB chunks are not allocated in a unit test). Red at the base: the cap was the ceiling, less than two
+/// chunks, so nothing was read ahead and every boundary was a fetch by the read itself. Mutant (row 9): the
+/// two-strides clause in `Limits::cache_cap` removed → red here (boundary 1).
+#[test]
+fn media_largest_stride_has_the_next_chunk_ready_at_each_boundary() {
+    const SCALE: u32 = 10;
+    const CHUNK: u64 = (256 << 20) >> SCALE;
+    const LEN: u64 = 16 * CHUNK + CHUNK / 2;
+    let shipped = Limits::SHIPPED;
+    let scaled = Limits {
+        cache_floor: shipped.cache_floor >> SCALE,
+        cache_ceiling: shipped.cache_ceiling >> SCALE,
+        two_strides_from: shipped.two_strides_from >> SCALE,
+        read_ahead: shipped.read_ahead >> SCALE,
+        refetch_slack: shipped.refetch_slack >> SCALE,
+    };
+    let cap = scaled.cache_cap(CHUNK);
+    let (mut reader, fetches) = counting(LEN, CHUNK, scaled);
+    let step = u64::from(MEDIA_MAX_READ >> SCALE);
+    let mut boundaries = 0u32;
+    let mut at = 0u64;
+    while at < LEN {
+        let len = step.min(LEN - at);
+        let index = u32::try_from(at / CHUNK).expect("a test chunk's index");
+        if index > 0 && at % CHUNK == 0 {
+            let next = CHUNK.min(LEN - at);
+            let cache = reader.shared.lock();
+            assert!(
+                cache.chunks.contains_key(&index),
+                "boundary {index}: the next chunk was read ahead before the play reached it"
+            );
+            assert_eq!(
+                cache.held,
+                CHUNK + next,
+                "boundary {index}: the chunk played and the next one are held"
+            );
+            boundaries += 1;
+        }
+        let got = read(&mut reader, at, u32::try_from(len).expect("a read's length"))
+            .unwrap_or_else(|why| panic!("read at {at}: {why:?}"));
+        assert!(
+            got.len() as u64 == len && got.iter().all(|byte| *byte == index as u8),
+            "read at {at}: the bytes of chunk {index}"
+        );
+        settle(&reader);
+        let held = reader.cached_bytes();
+        assert!(held <= cap, "read at {at}: held {held} of {cap}");
+        at += len;
+    }
+    assert_eq!(boundaries, 16, "precondition: the play crossed every boundary");
+    drop(reader);
+    let expected: HashMap<u32, u32> = (0..17).map(|index| (index, 1)).collect();
+    assert_eq!(*fetches.lock().unwrap(), expected, "every chunk fetched once");
+
+    // The shipped numbers: two chunks of 256 MiB, and every smaller stride as before.
+    assert_eq!(cap, 2 * CHUNK, "the scaled cap is two chunks, as the shipped one");
+    assert_eq!(
+        shipped.cache_cap(256 << 20),
+        512 << 20,
+        "two chunks of core's largest stride"
+    );
+    assert_eq!(
+        shipped.cache_cap(128 << 20),
+        MEDIA_CACHE_CEILING,
+        "three chunks of 128 MiB: the ceiling"
+    );
+    assert_eq!(shipped.cache_cap(32 << 20), 96 << 20, "three chunks of 32 MiB");
+    assert_eq!(shipped.cache_cap(1 << 20), MEDIA_CACHE_MAX, "the floor");
+}
+
+// ── 13. A seek with the read-ahead on ────────────────────────────────────────────────────────────────────────────
+
+/// What a held fetch is told, and tells.
+#[derive(Default)]
+struct Hold {
+    /// The held fetch may answer.
+    released: AtomicBool,
+    /// The held fetch answered (its chunk, or `Cancelled` when its stop said so first).
+    answered: AtomicBool,
+}
+
+/// Waits (five seconds at most) until `done` says so.
+fn wait_until(done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// [`counting`], but the fetch of chunk `held` (the read-ahead's, in these tests) waits until the test releases it or
+/// its stop says so (as Beebeeb's fetch stops: `Cancelled`), five seconds at most. The fetch of chunk `releaser`, when
+/// named (the seek's own read), releases it first, waits for its answer, and then 100 ms more, so the worker has done
+/// with that answer what the code does with it.
+fn holding(
+    len: u64,
+    stride: u64,
+    limits: Limits,
+    held: u32,
+    releaser: Option<u32>,
+) -> (MediaReader, Fetches, Arc<Hold>) {
+    let fetches: Fetches = Arc::new(Mutex::new(HashMap::new()));
+    let hold = Arc::new(Hold::default());
+    let (counted, told) = (fetches.clone(), hold.clone());
+    let fetch = move |index: u32, stop: &dyn Fn() -> bool| -> Result<Zeroizing<Vec<u8>>, MediaReadError> {
+        *counted.lock().unwrap().entry(index).or_insert(0) += 1;
+        if index == held {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stopped = false;
+            while !told.released.load(Ordering::SeqCst) && Instant::now() < deadline {
+                if stop() {
+                    stopped = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            told.answered.store(true, Ordering::SeqCst);
+            if stopped {
+                return Err(MediaReadError::Cancelled);
+            }
+        }
+        if Some(index) == releaser {
+            told.released.store(true, Ordering::SeqCst);
+            wait_until(|| told.answered.load(Ordering::SeqCst));
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let start = u64::from(index) * stride;
+        let size = usize::try_from(len.saturating_sub(start).min(stride)).expect("a test chunk's size");
+        Ok(Zeroizing::new(vec![index as u8; size]))
+    };
+    (
+        MediaReader::over_fetch(len, stride, limits, Box::new(fetch)),
+        fetches,
+        hold,
+    )
+}
+
+/// Row 10: a forward seek while the read-ahead fetches inside its window (chunk 1 under way, chunk 2 still to come)
+/// gives that window up at once: the fetch under way is stopped and not kept, chunk 2 is never asked for, the seek's
+/// bytes are chunk 12's, and the new window (chunks 13 and 14) is read ahead. Mutant (row 10, a): the generation step
+/// in `seek_to` removed → chunk 1 is kept and chunk 2 fetched while the seek reads → red here.
+#[test]
+fn media_forward_seek_with_read_ahead_gives_up_the_window() {
+    const CHUNK: u64 = 1_000;
+    // Room for eight chunks: nothing is evicted in this test, so a chunk kept is still there to be seen.
+    let limits = Limits {
+        cache_floor: 8 * CHUNK,
+        cache_ceiling: MEDIA_CACHE_CEILING,
+        two_strides_from: MEDIA_TWO_STRIDES_FROM,
+        read_ahead: 2_500,
+        refetch_slack: 0,
+    };
+    let (mut reader, fetches, _hold) = holding(20 * CHUNK, CHUNK, limits, 1, Some(12));
+    assert!(
+        read(&mut reader, 0, 250)
+            .expect("chunk 0")
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+    wait_until(|| reader.shared.lock().in_flight == Some(1));
+    {
+        let cache = reader.shared.lock();
+        assert!(
+            cache.in_flight == Some(1) && cache.job.next < cache.job.end,
+            "precondition: chunk 1 under way, more of the window to come"
+        );
+    }
+
+    let got = read(&mut reader, 12 * CHUNK, 250).expect("the seek's range");
+    assert!(
+        got.len() == 250 && got.iter().all(|byte| *byte == 12),
+        "the seek's bytes are chunk 12's"
+    );
+    settle(&reader);
+    {
+        let cache = reader.shared.lock();
+        assert!(!cache.chunks.contains_key(&1), "the old window's fetch was not kept");
+        assert!(
+            cache.chunks.contains_key(&13) && cache.chunks.contains_key(&14),
+            "the new window was read ahead"
+        );
+    }
+    let counts = fetches.lock().unwrap().clone();
+    assert_eq!(
+        counts.get(&2),
+        None,
+        "the rest of the old window was never asked for: {counts:?}"
+    );
+    assert!(
+        [1, 12, 13, 14].iter().all(|index| counts.get(index) == Some(&1)),
+        "{counts:?}"
+    );
+}
+
+/// Row 10: a seek right after the read-ahead took the LAST chunk of its window (chunk 1 under way, nothing more to
+/// come, so `seek_to` has nothing to give up) still begins a new window once the seek's read is done: the fetch under
+/// way is not kept. Then a backward seek begins one too: the chunk after it is read ahead before any read asks for it.
+/// The reads in a row before them move one window on (no new one). Mutants (row 10): (b) the generation step of a new
+/// window in `ahead` removed → chunk 1 is kept → red here; (c) `ahead`'s window test made always true (every read
+/// moves the window on) → chunk 1 is kept, and after the backward seek chunk 6 is never read ahead → red here.
+#[test]
+fn media_seek_after_the_windows_last_chunk_begins_a_new_window() {
+    const CHUNK: u64 = 1_000;
+    let limits = Limits {
+        cache_floor: 4 * CHUNK,
+        cache_ceiling: MEDIA_CACHE_CEILING,
+        two_strides_from: MEDIA_TWO_STRIDES_FROM,
+        read_ahead: 300,
+        refetch_slack: 0,
+    };
+    let (mut reader, fetches, hold) = holding(20 * CHUNK, CHUNK, limits, 1, None);
+    for at in [0, 250, 500, 750] {
+        assert!(
+            read(&mut reader, at, 250)
+                .expect("chunk 0")
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+    }
+    wait_until(|| reader.shared.lock().in_flight == Some(1));
+    let generation = {
+        let cache = reader.shared.lock();
+        assert!(
+            cache.in_flight == Some(1) && cache.job.next == cache.job.end,
+            "precondition: chunk 1 under way, the window's last"
+        );
+        assert_eq!(cache.job.generation, 0, "the reads in a row moved one window on");
+        cache.job.generation
+    };
+
+    // Forward, to a chunk past the window.
+    let got = read(&mut reader, 12 * CHUNK, 250).expect("the forward seek's range");
+    assert!(got.iter().all(|byte| *byte == 12), "the forward seek's bytes");
+    hold.released.store(true, Ordering::SeqCst);
+    wait_until(|| hold.answered.load(Ordering::SeqCst));
+    settle(&reader);
+    assert!(
+        !reader.shared.lock().chunks.contains_key(&1),
+        "the old window's fetch was not kept"
+    );
+
+    // Backward, to a chunk never fetched.
+    let got = read(&mut reader, 5 * CHUNK + 700, 250).expect("the backward seek's range");
+    assert!(got.iter().all(|byte| *byte == 5), "the backward seek's bytes");
+    settle(&reader);
+    assert!(
+        reader.shared.lock().chunks.contains_key(&6),
+        "the chunk after the backward seek was read ahead"
+    );
+    assert!(
+        read(&mut reader, 6 * CHUNK, 250)
+            .expect("chunk 6")
+            .iter()
+            .all(|byte| *byte == 6)
+    );
+    assert_eq!(
+        fetches.lock().unwrap().get(&6),
+        Some(&1),
+        "chunk 6 fetched once, by the read-ahead"
+    );
+    assert_eq!(
+        reader.shared.lock().job.generation,
+        generation + 2,
+        "each seek began one window, the reads in a row none"
     );
 }
