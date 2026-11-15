@@ -57,7 +57,7 @@ fn create_file_with(
     write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
 ) -> Result<String, DriveError> {
     let name = validate_name(name)?;
-    if bytes.len() as u64 > limit {
+    if bytes.len() as u64 >= limit {
         return Err(DriveError::TooLarge);
     }
     refuse_if_shared_read_only(db, parent)?;
@@ -94,6 +94,7 @@ fn write_new(
     if let Err(error) = write(&mut file, bytes) {
         drop(file);
         // Best effort: when even the removal fails, the write's own error is still the answer.
+        let _ = std::fs::remove_file(path);
         return Err(DriveError::io(error));
     }
     Ok(())
