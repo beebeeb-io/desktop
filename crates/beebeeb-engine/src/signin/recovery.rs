@@ -94,7 +94,7 @@ pub async fn recovered_key_matches_account(
 ) -> Result<bool, String> {
     recovery_check_answer(client, base_url, session_token, master_key)
         .await
-        .map(|answer| answer == RecoveryCheckAnswer::Matches)
+        .map(|answer| answer != RecoveryCheckAnswer::Mismatch)
 }
 
 /// The 12 words as the phrase's derivation reads them: lower case, letters only, one space between. One wiping

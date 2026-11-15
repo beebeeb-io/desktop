@@ -32,7 +32,7 @@ impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")
             .field("token", &"<redacted>")
-            .field("master_key", &self.master_key)
+            .field("master_key", &"<redacted>")
             .field("email", &self.email.as_deref().map(|_| "<set>").unwrap_or("<unset>"))
             .finish()
     }
