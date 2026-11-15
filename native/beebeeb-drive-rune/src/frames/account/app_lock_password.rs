@@ -29,7 +29,8 @@ use super::forms::button;
 use super::source::{AccountSource, BoardAccount, SecurityFacts};
 use super::{AccountUi, Dialog};
 
-/// The row's link ("Use your password"), as `fm::link` keys it.
+/// The row's link ("Use your password"), as `fm::link` keys it (tests find it by this).
+#[cfg(test)]
 pub const LINK_KEY: &str = "link-9-box";
 /// The step's title (the account pages' own words for a password asked to confirm a change).
 pub const TITLE: &str = "Confirm it's you";
@@ -49,9 +50,6 @@ impl LockPassword {
     /// The text moved out of the secure field at the press.
     pub fn new(text: Zeroizing<String>) -> Self {
         LockPassword(text)
-    }
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
     /// The wiping buffer, for the engine's proof and nothing else. Called by an `AccountSource` implementation only.
     pub fn into_proof(self) -> Zeroizing<String> {

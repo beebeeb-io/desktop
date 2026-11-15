@@ -169,6 +169,42 @@ fn a_password_offer_from_an_earlier_session_turn_does_nothing() {
     assert_eq!(offered(&source), None);
 }
 
+/// R2, the #424 trap: the screen locks and opens again (another turn of the session) while the password is checked.
+/// Its answer comes back after the move and is dropped before it is said: no toast, no step, and nothing written for
+/// the new turn.
+#[test]
+fn a_password_answer_after_the_session_moved_is_dropped_before_it_is_said() {
+    let server = server();
+    let (engine, mut source) = without_hello(&server);
+    source.set_app_lock(false);
+    settle(&mut source);
+    server.proof_delay_ms.store(1_500, Ordering::SeqCst);
+    let seen = source.app_lock.answers_seen.len();
+    source.app_lock_with_password(password(PASSWORD));
+    assert!(offered(&source).is_some_and(|offer| offer.checking));
+    let moved = Instant::now();
+    engine.lock_screen().unwrap();
+    engine.unlock_screen_platform_verified(engine.session_turn()).unwrap();
+    assert!(
+        moved.elapsed() < Duration::from_millis(1_000),
+        "the session moved while the password was checked"
+    );
+    let began = Instant::now();
+    while !source.app_lock.answers_seen[seen..]
+        .iter()
+        .any(|answer| answer.starts_with("Set"))
+    {
+        assert!(began.elapsed() < Duration::from_secs(10), "the answer never came");
+        source.pump();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    settle(&mut source);
+    assert_eq!(source.notice(), None, "said nothing");
+    assert_eq!(offered(&source), None, "no step");
+    assert!(stored(&engine), "nothing was written for the new turn");
+    assert_eq!(switch(&source), Some(true));
+}
+
 /// R5 (lead's ruling 2026-11-15 14:34, in place of a log capture): the password's wrapper prints a fixed placeholder,
 /// never the text; nothing this part keeps or answers holds it after a wrong and a right try; and the password path's
 /// source has no log macro and formats nothing of the password.
@@ -268,6 +304,12 @@ fn verified_hello_shows_no_password_step() {
     settle(&mut source);
     assert_eq!(prompts.asked(), 1, "on asks nothing");
     assert!(stored(&engine));
+    assert_eq!(offered(&source), None);
+    // A shorter delay asks nothing and shows no step either.
+    source.set_lock_after("Immediately");
+    settle(&mut source);
+    assert_eq!(prompts.asked(), 1, "shorter asks nothing");
+    assert_eq!(stored_after(&engine), Some(LockAfter::Immediately));
     assert_eq!(offered(&source), None);
 }
 
