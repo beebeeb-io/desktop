@@ -294,16 +294,8 @@ fn le32(v: u32) -> [u8; 4] {
 
 #[test]
 fn office_decode_refuses_a_declared_length_past_the_end() {
-    // The largest item there is, declared u32::MAX times with nothing behind it. Trusting the count would ask the
-    // allocator for hundreds of gigabytes before the first item fails to read.
-    assert_eq!(CellData::decode(&le32(u32::MAX)), Err(DecodeError::LengthPastEnd));
-    assert_eq!(OpenedSheets::decode(&le32(u32::MAX)), Err(DecodeError::LengthPastEnd));
-    assert_eq!(OutlineData::decode(&le32(u32::MAX)), Err(DecodeError::LengthPastEnd));
-    let mut opened = le32(1).to_vec();
-    opened.extend_from_slice(&le32(u32::MAX));
-    assert_eq!(Opened::decode(&opened), Err(DecodeError::LengthPastEnd));
-
-    // One item more than the bytes hold, for every vector.
+    // One item more than the bytes hold, for every vector (first, so a missing bound fails an assertion here
+    // before the u32::MAX cases below can abort the test binary on an allocation).
     // Opened: two sizes declared, one present.
     let mut p = le32(2).to_vec();
     p.extend_from_slice(&le32(2));
@@ -366,6 +358,15 @@ fn office_decode_refuses_a_declared_length_past_the_end() {
     p.extend_from_slice(&le32(0));
     p.extend_from_slice(&le32(0));
     assert_eq!(OutlineData::decode(&p), Err(DecodeError::LengthPastEnd));
+
+    // The largest item there is, declared u32::MAX times with nothing behind it. Trusting the count would ask the
+    // allocator for hundreds of gigabytes before the first item fails to read.
+    assert_eq!(CellData::decode(&le32(u32::MAX)), Err(DecodeError::LengthPastEnd));
+    assert_eq!(OpenedSheets::decode(&le32(u32::MAX)), Err(DecodeError::LengthPastEnd));
+    assert_eq!(OutlineData::decode(&le32(u32::MAX)), Err(DecodeError::LengthPastEnd));
+    let mut opened = le32(1).to_vec();
+    opened.extend_from_slice(&le32(u32::MAX));
+    assert_eq!(Opened::decode(&opened), Err(DecodeError::LengthPastEnd));
 }
 
 #[test]
