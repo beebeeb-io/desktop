@@ -91,6 +91,9 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 ("passkeys_api.rs", 1),
                 ("account_password_api.rs", 1),
                 ("account_email_resend_api.rs", 1),
+                // session_watch.rs: the engine's session watch (task 2535) copies the token and notes its answer under
+                // the session's lock; no person call, it runs behind a locked screen too.
+                ("session_watch.rs", 1),
             ],
         ),
         (
