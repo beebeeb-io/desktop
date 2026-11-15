@@ -137,6 +137,9 @@ impl Ui {
     /// Reads the source again. A selection past the end of a shorter list goes.
     pub fn refresh(&mut self) {
         self.snapshot = self.source.snapshot();
+        if let Some(running) = self.covered {
+            self.snapshot = covered(&self.snapshot, running);
+        }
         let rows = self.rows().len();
         self.selected = self.selected.filter(|&row| row < rows);
     }
