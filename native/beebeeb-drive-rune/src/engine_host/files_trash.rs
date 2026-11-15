@@ -6,8 +6,11 @@
 //!   anything else; the engine sends nothing unless the session in memory is still that one (asked under its
 //!   session-write lock, with the token copy).
 //! - Undo keeps the stamp of the move it undoes: an item is put back only under the session it was moved to Trash
-//!   in. What Undo may put back is held here, by id, with that stamp; an id this source did not move to Trash in the
-//!   session that is here is refused with nothing sent.
+//!   in. What Undo may put back is guarded here, by id, with that stamp; an id this source did not move to Trash in
+//!   the session that is here is refused with nothing sent.
+//! - What Undo holds has one owner: the window (`Actions::undo`). The guard here is not a second copy of it: it is
+//!   what Beebeeb moved for this session and the window may still offer, let go at each Undo press (the window hands
+//!   over all it holds) and taken back for what Beebeeb did not put back (review of 2468, L321).
 //! - The call itself only says "accepted" or why not; what was done arrives through `FilesSource::changes`
 //!   (`Change::Trash`), per item, once Beebeeb answered. Nothing is drawn before that.
 //! - An answer that lands under another session or account is dropped: no row, no message, nothing kept of it.
@@ -52,9 +55,9 @@ pub struct TrashCalls<C: CredentialStores> {
     seen: Option<Stamp>,
     /// The items a change is on its way for, each with the session of its press.
     in_flight: HashMap<String, SessionGeneration>,
-    /// What Undo may put back: the items this source moved to Trash in the session that is here, and the stamp of
-    /// those presses (one stamp: everything held goes when it moves).
-    undo: Option<(Stamp, HashSet<String>)>,
+    /// What an Undo may ask for: the items this source moved to Trash in the session that is here and that the
+    /// window may still hold for Undo, and the stamp of those presses (one stamp: everything goes when it moves).
+    moved: Option<(Stamp, HashSet<String>)>,
     /// What Beebeeb answered and the window has not taken yet.
     changes: Vec<Change>,
     /// Tests only: the next call waits on the first, on its worker, before it asks the engine anything, and says on
@@ -73,7 +76,7 @@ impl<C: CredentialStores> TrashCalls<C> {
             inbox,
             seen: None,
             in_flight: HashMap::new(),
-            undo: None,
+            moved: None,
             changes: Vec::new(),
             #[cfg(test)]
             next_call: None,
@@ -87,7 +90,7 @@ impl<C: CredentialStores> TrashCalls<C> {
         }
         self.seen = Some(now.clone());
         self.in_flight.clear();
-        self.undo = None;
+        self.moved = None;
         self.changes.clear();
     }
 
@@ -108,14 +111,19 @@ impl<C: CredentialStores> TrashCalls<C> {
         self.look(&now);
         // The stamp of the move to Trash, never one taken at this press. (`look` just dropped what was held if the
         // stamp moved, so the two are equal here; the held one is sent so that does not rest on `look` alone.)
-        let Some((moved_under, held)) = &self.undo else {
-            return Err(ActionError::Unavailable);
+        let moved_under = match &self.moved {
+            Some((under, held)) if items.iter().all(|item| held.contains(&item.id)) => under.clone(),
+            _ => return Err(ActionError::Unavailable),
         };
-        if !items.iter().all(|item| held.contains(&item.id)) {
-            return Err(ActionError::Unavailable);
-        }
         let ids = items.iter().map(|item| item.id.clone()).collect();
-        self.start(Action::Restore, moved_under.clone(), ids)
+        self.start(Action::Restore, moved_under, ids)?;
+        // The window handed over everything its Undo holds, and holds nothing more for Undo until this is answered:
+        // nor does this guard. What Beebeeb does not put back is taken back when it answers (`pump`), as the window
+        // takes it back (review of 2468, L321).
+        if let Some((_, held)) = &mut self.moved {
+            held.clear();
+        }
+        Ok(())
     }
 
     fn start(&mut self, action: Action, pressed: Stamp, ids: Vec<String>) -> Result<(), ActionError> {
@@ -186,19 +194,32 @@ impl<C: CredentialStores> TrashCalls<C> {
             match answer.action {
                 Action::Trash => {
                     let done: HashSet<String> = done.map(|item| item.id.clone()).collect();
-                    // Added to what is held (the window may still hold rows of an earlier move for Undo); all of
-                    // it is this session's, or `look` would have dropped it.
-                    match &mut self.undo {
+                    // Added to what is held (the window adds them to its Undo too, beside rows of an earlier move);
+                    // all of it is this session's, or `look` would have dropped it.
+                    match &mut self.moved {
                         Some((_, held)) => held.extend(done),
-                        None if !done.is_empty() => self.undo = Some((answer.pressed, done)),
+                        None if !done.is_empty() => self.moved = Some((answer.pressed, done)),
                         None => {}
                     }
                 }
                 _ => {
-                    if let Some((_, held)) = &mut self.undo {
-                        for item in done {
-                            held.remove(&item.id);
+                    // Put back: no longer in Trash. Not put back: still in Trash, and the window holds it for Undo
+                    // again; so does this guard (it let go of it at the press, `restore`).
+                    let left: HashSet<String> = answer
+                        .items
+                        .iter()
+                        .filter(|item| item.left.is_some())
+                        .map(|item| item.id.clone())
+                        .collect();
+                    match &mut self.moved {
+                        Some((_, held)) => {
+                            for item in done {
+                                held.remove(&item.id);
+                            }
+                            held.extend(left);
                         }
+                        None if !left.is_empty() => self.moved = Some((answer.pressed, left)),
+                        None => {}
                     }
                 }
             }
