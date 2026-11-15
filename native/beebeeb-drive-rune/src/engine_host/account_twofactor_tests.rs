@@ -622,3 +622,29 @@ fn a_password_answer_stays_not_current_after_another_kind_is_taken_under_a_moved
         "the password press was made under the earlier turn"
     );
 }
+
+/// An engine write moves the session's turn on (`claim`: a changed password stores its new session token that way).
+/// A success answered across such a write is still its press's answer: current, so the page says it.
+#[test]
+fn a_success_answered_across_an_engine_write_stays_current() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    fake.disable_delay_ms.store(400, Ordering::SeqCst);
+    assert!(source.start_call(CallKind::TurnOffTwoFactor, "123456", ""));
+    std::thread::sleep(Duration::from_millis(100));
+    let before = engine.session_turn();
+    assert!(
+        engine.email_changed_for(before, &fake.account.email),
+        "a write the engine claims"
+    );
+    assert_ne!(engine.session_turn(), before, "the write moved the turn on");
+    assert!(matches!(
+        answer(&mut source),
+        Some((CallKind::TurnOffTwoFactor, Answered::Done))
+    ));
+    assert!(
+        source.call_mark(CallKind::TurnOffTwoFactor).unwrap().current,
+        "the same session's success, answered across the engine's own write"
+    );
+}
