@@ -22,6 +22,9 @@ path = "src/lib.rs"
 [[bin]]
 name = "beebeeb-office-render"   # fixed: the latency test uses env!("CARGO_BIN_EXE_beebeeb-office-render"), the host's helper_exe() this name
 path = "src/main.rs"
+# main.rs has no tests of its own (the library's and tests/ hold them): no empty test binary in the count. The
+# integration tests still build this binary and get its path.
+test = false
 
 [dependencies]
 beebeeb-office = { git = "https://github.com/beebeeb-io/desktop-office", rev = "573582cd6da1bc83d739a61a4ddf757cfd17f0f5" }
