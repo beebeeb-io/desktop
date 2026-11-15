@@ -468,14 +468,100 @@ fn a_second_channel_while_one_is_saving_waits_and_says_so() {
     assert_eq!(about(&rig.part).channel, Channel::Stable);
 }
 
+/// What a release build runs with (`release_config`, which the Windows release path calls): the pinned key alone, the
+/// one host, nothing below 0.9.0, the build's own time; no config at all without a build time or a release version.
+/// On that config a release our test key signed is refused before anything is downloaded: only the pinned key is
+/// trusted.
 #[test]
-fn a_build_that_is_not_a_release_asks_nothing_and_says_why() {
-    let mut part = UpdatesPart::not_a_release(&TEST, Channel::Stable, Channel::Stable, "test build".into());
-    assert_eq!(words(&part), NOT_A_RELEASE);
+fn the_release_config_is_the_pinned_key_and_the_one_host() {
+    let folder = tempfile::tempdir().expect("a temp dir");
+    let built = beebeeb_updater::V2_KEY_CREATED;
+    assert!(
+        release_config(None, Some("0.9.1"), folder.path()).is_none(),
+        "no build time"
+    );
+    assert!(
+        release_config(Some(built), None, folder.path()).is_none(),
+        "no release version"
+    );
+    assert!(release_config(Some(built), Some("test build"), folder.path()).is_none());
+    let config = release_config(Some(built), Some("0.9.1"), folder.path()).expect("a release");
+    assert_eq!(config.base_url, "https://releases.beebeeb.io");
+    assert_eq!(config.trust.allowed_hosts, ["releases.beebeeb.io"]);
+    assert_eq!(config.trust.keys.len(), 1, "one key");
+    // The key itself is `PublicKey::updater_v2()` through `host::windows_trust_built_at` (pinned by the crate's own
+    // `a_release_build_trusts_one_key_one_host_and_never_goes_below_0_9_0`); here: it is not a key made in a test.
+    let other = TestKey::generate();
+    let signed = beebeeb_updater::Signature::from_base64(&other.sign(b"bytes", testkit::NOW, "stable.json"))
+        .expect("a signature");
+    assert!(config.trust.signer(&signed).is_none(), "a test key is not trusted");
+    assert_eq!(config.trust.floor.to_string(), "0.9.0");
+    assert_eq!(config.trust.not_before, built);
+    assert_eq!(config.staging_dir, folder.path().join("updates"));
+
+    let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(64));
+    let artifact = release.url.clone();
+    let seen = Seen::default();
+    let http = Logged {
+        inner: serving(&other, &[release]),
+        seen: seen.clone(),
+    };
+    let clock = FakeClock(Cell::new(testkit::NOW));
+    let mut updater = Updater::new(
+        config,
+        http,
+        clock,
+        MemStore::default(),
+        Recording { did: Did::default() },
+    );
+    let mut state = updater
+        .step(Event::Check {
+            channel: Line::Stable,
+            intent: Intent::Manual,
+        })
+        .clone();
+    while busy(&state) {
+        state = updater.step(Event::Tick).clone();
+    }
+    assert_eq!(
+        state,
+        State::Failed {
+            failure: Failure::Refused(Refusal::ManifestSignature),
+            resume: None
+        }
+    );
+    let manifest = testkit::manifest_url(Line::Stable);
+    assert_eq!(*seen.lock().unwrap(), [manifest.clone(), format!("{manifest}.sig")]);
+    assert!(!seen.lock().unwrap().contains(&artifact));
+}
+
+/// An updater that panics ends its worker: About says the updater did not start, and is not left on Checking…
+#[test]
+fn a_worker_that_ends_says_so_and_is_not_left_checking() {
+    struct Panics;
+    impl Drive for Panics {
+        fn step(&mut self, _event: Event) -> State {
+            panic!("an updater that fails (test)");
+        }
+        fn background_check_due(&self) -> bool {
+            false
+        }
+        fn freshness(&self) -> Freshness {
+            Freshness::Verified
+        }
+    }
+    let make: MakeDrive = Box::new(|| Box::new(Panics) as Box<dyn Drive>);
+    let mut part = UpdatesPart::live(make, &TEST, Channel::Stable, Channel::Stable, "0.9.1".into());
+    let began = Instant::now();
+    while words(&part) != NO_UPDATER {
+        assert!(began.elapsed() < Duration::from_secs(10), "{}", words(&part));
+        part.pump();
+        std::thread::sleep(Duration::from_millis(5));
+    }
     part.check_now();
-    let (_, toast, busy) = part.pump();
-    assert_eq!((toast, busy), (None, false), "nothing is out");
-    assert_eq!(words(&part), NOT_A_RELEASE);
+    let (_, _, busy) = part.pump();
+    assert!(!busy, "nothing is out");
+    assert_eq!(words(&part), NO_UPDATER);
 }
 
 /// A refusal never says "Try again in a moment": that is for no answer, or the server's own trouble, alone.

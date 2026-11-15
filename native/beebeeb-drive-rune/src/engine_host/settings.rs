@@ -476,7 +476,7 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
         }
     }
 
-    /// Where this build has an updater (a Windows release; a build that is not a release says it takes no updates).
+    /// Where this build has an updater: a Windows release build (no other build has one).
     fn updates_available(&self) -> bool {
         self.updates.is_some()
     }

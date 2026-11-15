@@ -17,9 +17,11 @@
 //! - **Nothing is installed by a check.** A check only asks; an older version on a channel is said (`About::older`)
 //!   and never offered; a download and "Restart to update" are separate events that no press sends yet (see
 //!   `UpdatesPart::fill`: General never says a download is waiting).
-//! - **A build that is not a release takes no update and asks nothing.** Without a build time
-//!   (`host::BUILD_NOT_BEFORE`) or a release version the updater would refuse every manifest (`NoBuildTime`); it is
-//!   not even started, so not one request leaves this PC, and About says why.
+//! - **A build that is not a release has no updater and asks nothing.** Without a build time
+//!   (`host::BUILD_NOT_BEFORE`) or a release version the updater would refuse every manifest (`NoBuildTime`), after
+//!   two requests: it is not built ([`release_config`] is `None`), not one request leaves this PC, and About draws the
+//!   versions only, as it does on macOS and Linux (no Check now beside a foot line that says Beebeeb checks). The
+//!   release workflow refuses a binary without the build time, so no published build is in this state.
 //! - **Not per account.** The updater is this PC's: no request carries an account, an email, a file or a token, and
 //!   its answers are not an account's, so they are not stamped with the session the way account reads are.
 //!
@@ -124,9 +126,7 @@ struct Worker {
 enum Mode {
     /// The updater runs on its worker.
     Live(Worker),
-    /// Not a release build: no updater, no request.
-    NotARelease,
-    /// The worker could not be started.
+    /// The worker could not be started, or it ended.
     NoWorker,
 }
 
@@ -264,11 +264,8 @@ impl UpdatesPart {
         #[cfg(all(windows, not(test)))]
         {
             let (channel, from) = channels(config);
-            let installed = super::version_words();
-            Some(match release::updater(engine.clone(), identity) {
-                Some(make) => Self::live(make, identity, channel, from, installed),
-                None => Self::not_a_release(identity, channel, from, installed),
-            })
+            let make = release::updater(engine.clone(), identity)?;
+            Some(Self::live(make, identity, channel, from, super::version_words()))
         }
         #[cfg(not(all(windows, not(test))))]
         {
@@ -300,16 +297,6 @@ impl UpdatesPart {
             }
         };
         Self::with_mode(mode, identity, channel, from, installed)
-    }
-
-    /// The part of a build that takes no update: nothing is started and nothing is asked.
-    pub(crate) fn not_a_release(
-        identity: &'static EngineIdentity,
-        channel: Channel,
-        from: Channel,
-        installed: String,
-    ) -> Self {
-        Self::with_mode(Mode::NotARelease, identity, channel, from, installed)
     }
 
     fn with_mode(
@@ -419,16 +406,35 @@ impl UpdatesPart {
                 toast = toast.or(Some(CHANNEL_NOT_SAVED));
             }
         }
+        let mut ended = false;
         if let Mode::Live(worker) = &self.mode {
-            while let Ok(report) = worker.reports.try_recv() {
-                changed = true;
-                if self.asked.is_some_and(|asked| report.serial >= asked) && !busy(&report.state) {
-                    self.asked = None;
+            loop {
+                match worker.reports.try_recv() {
+                    Ok(report) => {
+                        changed = true;
+                        if self.asked.is_some_and(|asked| report.serial >= asked) && !busy(&report.state) {
+                            self.asked = None;
+                        }
+                        self.last = Some(report);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    // The worker ended (a panic in the updater): never left saying Checking… for good.
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        ended = true;
+                        break;
+                    }
                 }
-                self.last = Some(report);
             }
         }
-        let working = self.last.as_ref().is_some_and(|report| busy(&report.state));
+        if ended {
+            log("settings: the updater's worker has ended");
+            self.mode = Mode::NoWorker;
+            self.asked = None;
+            self.last = None;
+            changed = true;
+        }
+        let working =
+            matches!(self.mode, Mode::Live(_)) && self.last.as_ref().is_some_and(|report| busy(&report.state));
         (changed, toast, self.asked.is_some() || self.saving.is_some() || working)
     }
 
@@ -488,7 +494,6 @@ impl UpdatesPart {
 
     fn check(&self) -> UpdateCheck {
         match &self.mode {
-            Mode::NotARelease => return UpdateCheck::Checked(NOT_A_RELEASE.into()),
             Mode::NoWorker => return UpdateCheck::Checked(NO_UPDATER.into()),
             Mode::Live(_) => {}
         }
@@ -658,6 +663,26 @@ impl<C: CredentialStores> Apply for EngineApply<C> {
     }
 }
 
+/// What a release build of this PC takes updates with: the pinned key (`keys/updater-v2.pub`) for 0.9.0 and later,
+/// signed after `build_time`; the one host; the staging folder in `folder`. `None` without a build time or a release
+/// version: no updater at all. (`host::windows_release_trust` is this trust with the build's own time.)
+#[cfg(any(windows, test))]
+pub(crate) fn release_config(
+    build_time: Option<u64>,
+    version: Option<&str>,
+    folder: &std::path::Path,
+) -> Option<beebeeb_updater::Config> {
+    let not_before = build_time?;
+    let installed = beebeeb_updater::Version::parse(version?)?;
+    let trust = beebeeb_updater::host::windows_trust_built_at(not_before).ok()?;
+    Some(beebeeb_updater::Config {
+        trust,
+        base_url: beebeeb_updater::host::RELEASE_BASE_URL.to_string(),
+        installed,
+        staging_dir: folder.join("updates"),
+    })
+}
+
 /// The release build's updater: the trust baked into this build, the one host, this PC's record and folder.
 #[cfg(all(windows, not(test)))]
 mod release {
@@ -665,9 +690,9 @@ mod release {
 
     use beebeeb_engine::app::{CredentialStores, Engine};
     use beebeeb_engine::identity::EngineIdentity;
-    use beebeeb_updater::host::{FileStore, RELEASE_BASE_URL, SystemClock, windows_release_trust};
+    use beebeeb_updater::host::{BUILD_MARK, BUILD_NOT_BEFORE, FileStore, SystemClock};
     use beebeeb_updater::net::HttpsClient;
-    use beebeeb_updater::{Config, Http, Response, Unreachable, Updater, Version};
+    use beebeeb_updater::{Http, Response, Unreachable, Updater};
 
     use super::{Drive, EngineApply, MakeDrive};
     use crate::engine_host::log;
@@ -692,18 +717,12 @@ mod release {
         engine: Arc<Engine<C>>,
         identity: &'static EngineIdentity,
     ) -> Option<MakeDrive> {
-        beebeeb_updater::host::BUILD_NOT_BEFORE?;
-        let installed = Version::parse(option_env!("BEEBEEB_RELEASE_VERSION")?)?;
-        let trust = windows_release_trust().ok()?;
+        // Keeps the build's mark in the binary: the release workflow reads it there (as `windows_release_trust` does).
+        std::hint::black_box(BUILD_MARK);
         let dirs = rune::dirs::AppDirs::new(crate::shell::identity::AppIdentity::CURRENT.state_dir_id())?;
         let folder = crate::shell::local_data_of(&dirs, "windows");
+        let config = super::release_config(BUILD_NOT_BEFORE, option_env!("BEEBEEB_RELEASE_VERSION"), &folder)?;
         Some(Box::new(move || {
-            let config = Config {
-                trust,
-                base_url: RELEASE_BASE_URL.to_string(),
-                installed,
-                staging_dir: folder.join("updates"),
-            };
             let client = HttpsClient::new().map_or_else(
                 |_| {
                     log("settings: the updater's https client could not be built");
