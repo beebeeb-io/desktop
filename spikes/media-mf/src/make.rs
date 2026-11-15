@@ -194,11 +194,11 @@ fn main() {
             "gap: WMV 9 (WMV3) + WMA Pro, ASF, made by the in-box encoders",
         ),
         (
-            "wvc1-wmalossless.wmv",
-            "av",
+            "wvc1.wmv",
+            "v",
             Some(MFVideoFormat_WVC1),
-            Some(MFAudioFormat_WMAudio_Lossless),
-            "gap: VC-1 Advanced (WVC1) + WMA Lossless, ASF, made by the in-box encoders",
+            None,
+            "gap: VC-1 Advanced (WVC1), ASF, made by the in-box encoder",
         ),
         (
             "wmapro.wma",
