@@ -259,8 +259,7 @@ mod tests {
     }
 
     /// D-MB2-1 (a): an MP3 file's ID3v2 title and artist are read, no picture is ever sent (the APIC frame is read and
-    /// dropped), and the pass never reads
-    /// past the end of the file.
+    /// dropped), and the pass never reads past the end of the file.
     #[test]
     fn an_audio_files_title_and_artist_are_read_and_no_picture_is_sent() {
         let mut file = id3_tag(
