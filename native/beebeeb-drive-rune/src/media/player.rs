@@ -36,6 +36,14 @@
 //! **Session rule:** every answer a worker publishes carries its run's generation; a run that was stopped or
 //! replaced publishes nothing more.
 //!
+//! **No sound is said, never silent:** a file whose audio track does not play here (`Opened::no_sound`) plays its
+//! video on the wall clock, and a sound device that went away for good (`AudioSink::failed`) is dropped: a video
+//! goes on on the wall clock, a recording pauses where it was. Either way the state's `no_sound` says why.
+//!
+//! **The system-decoder profile** (decision 2541): a helper in the default profile that answers `NoSystemDecoder`
+//! before `Opened` is killed and ONE new helper is started in the profile `transport::profile_for_file` names (only
+//! while the switch is on); the same answer from that one is the PC's answer. Never a third helper for one item.
+//!
 //! **TEST builds only** (the build's identity, never the real app): after 1 s of playback, one `media.played` line
 //! (the codec's protocol number, the frames shown and the RMS of the sound in that second, whether the helper was
 //! confined), read by the VM 401 rung. No name, id, tag or byte is logged, here or anywhere in the player.
@@ -47,7 +55,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use beebeeb_media_protocol::{Codec, FromHelper, KindHint, ToHelper};
+use beebeeb_media_protocol::{Codec, FromHelper, KindHint, MEDIA_SYSTEM_DECODER_ON, ToHelper};
+use beebeeb_office_sandbox::Profile;
 use zeroize::Zeroizing;
 
 use super::StopReason;
@@ -79,6 +88,11 @@ pub trait Link: Send {
 /// Starts a helper for one item.
 pub trait LinkFactory: Send + Sync {
     fn start(&self) -> Result<Box<dyn Link>, Refusal>;
+    /// Starts a helper in `profile`. Default: the plain start (fakes that never see a System answer).
+    fn start_in(&self, profile: Profile) -> Result<Box<dyn Link>, Refusal> {
+        let _ = profile;
+        self.start()
+    }
 }
 
 /// The sound device: interleaved f32 PCM at its own format, and the clock everything else follows.
@@ -93,6 +107,10 @@ pub trait AudioSink: Send {
     fn resume(&mut self);
     /// Drops what is queued (a seek).
     fn flush(&mut self);
+    /// The device is gone for good (lost and not rebuilt). Asked after each push. Default: never.
+    fn failed(&self) -> bool {
+        false
+    }
 }
 
 /// Opens the sound device.
@@ -165,6 +183,16 @@ pub enum Refusal {
     NoSandbox,
 }
 
+/// Why a file plays without sound. The view says it ("Sound isn't available on this PC", with the codec's name for
+/// [`NoSound::Codec`]) with "Open in another app…" one press away; the picture keeps playing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoSound {
+    /// The file's audio track is a codec this PC cannot play here (`Opened::no_sound`).
+    Codec(Codec),
+    /// The sound device went away and was not rebuilt (`AudioSink::failed`).
+    Device,
+}
+
 /// What the view draws of the player.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PlayState {
@@ -180,6 +208,8 @@ pub struct PlayState {
     /// "Reduced quality on this PC" (decision D-MED-7).
     pub reduced_quality: bool,
     pub refused: Option<Refusal>,
+    /// The file plays without sound, and why. `None`: its sound plays (or it has no audio track).
+    pub no_sound: Option<NoSound>,
 }
 
 /// Times and flags, never the id or a word of a tag.
@@ -192,6 +222,7 @@ impl fmt::Debug for PlayState {
             .field("buffering", &self.buffering)
             .field("reduced_quality", &self.reduced_quality)
             .field("refused", &self.refused)
+            .field("no_sound", &self.no_sound)
             .finish_non_exhaustive()
     }
 }
@@ -270,6 +301,9 @@ struct Player {
     /// The drawn stage in device pixels (`set_view_size`); frames are asked at this size, capped at 1920 x 1080.
     view: (u32, u32),
     clock: Arc<dyn Clock>,
+    /// Whether a helper may be restarted in the system-decoder profile (decision 2541's switch,
+    /// `MEDIA_SYSTEM_DECODER_ON`; the tests set it).
+    system_on: bool,
     /// Bumped by every open, stop and failure: a worker of an older generation publishes nothing.
     generation: u64,
     phase: Phase,
@@ -412,6 +446,7 @@ impl Player {
             artist: String::new(),
             reduced_quality: false,
             refused: None,
+            no_sound: None,
         });
         let slots = Arc::new(Slots::default());
         let (commands, taken) = mpsc::channel();
@@ -423,6 +458,7 @@ impl Player {
             links: Arc::clone(&self.links),
             audio: Arc::clone(&self.audio),
             clock: Arc::clone(&self.clock),
+            system_on: self.system_on,
             slots: Arc::clone(&slots),
             commands: taken,
             previous: self.previous.take(),
@@ -470,6 +506,7 @@ impl Player {
             state.buffering = false;
             state.title.clear();
             state.artist.clear();
+            state.no_sound = None;
             state.refused = Some(refusal);
         }
         self.blank();
@@ -523,6 +560,7 @@ impl PlayerHandle {
                     surface,
                     view: (0, 0),
                     clock: Arc::new(Monotonic(Instant::now())),
+                    system_on: MEDIA_SYSTEM_DECODER_ON,
                     generation: 0,
                     phase: Phase::Idle,
                     shown: None,
@@ -546,6 +584,12 @@ impl PlayerHandle {
     #[cfg(test)]
     fn set_clock(&self, clock: Arc<dyn Clock>) {
         self.with(|player| player.clock = clock);
+    }
+
+    /// The tests' switch for the system-decoder profile, before anything is opened.
+    #[cfg(test)]
+    fn set_system_decoder(&self, on: bool) {
+        self.with(|player| player.system_on = on);
     }
 
     /// The same player (not a copy of its state).

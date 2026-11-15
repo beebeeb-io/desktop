@@ -18,6 +18,15 @@
 //! [`HelperLink::kill`] ends the helper (it is not asked), lets go of both pipes and waits at most [`KILL_WAIT`] for
 //! the two threads (they end once the helper's pipes broke). It never waits on the helper itself.
 //!
+//! **Two profiles** (decision 2541): every helper starts in the sandbox's default profile (no capability). A file
+//! whose stream the helper answers `NoSystemDecoder(codec)` for is restarted once in the system-decoder profile
+//! ([`profile_for_file`]); while the switch `MEDIA_SYSTEM_DECODER_ON` is off, that answer is always `None` and no
+//! helper ever starts in it.
+//!
+//! **Crash reports:** before the first helper of this process starts, the app writes the per-user Windows Error
+//! Reporting exclusion for the helper's exe ([`ErrorReports`]), so a crash of the helper (which holds decrypted
+//! bytes) leaves no dump on disk and sends none. A failed write starts no helper: [`Refusal::NoSandbox`].
+//!
 //! The tests speak the protocol to a fake helper thread over two in-memory pipes ([`HelperLink::from_pipes`], test
 //! builds only): the same threads, the same checks.
 
@@ -25,12 +34,15 @@ use std::collections::VecDeque;
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use beebeeb_media_protocol::{Codec, FromHelper, MAX_READ, ToHelper, WireError, read_to_app, write_msg};
-use beebeeb_office_sandbox::{Child, Limits, Sandbox};
+use beebeeb_media_protocol::{
+    Codec, FromHelper, MAX_READ, MEDIA_SYSTEM_DECODER_ON, Route, ToHelper, WireError, profile_for_with, read_to_app,
+    write_msg,
+};
+use beebeeb_office_sandbox::{Child, Limits, Profile, Sandbox};
 use zeroize::Zeroize;
 
 use super::player::{Link, LinkFactory, Refusal};
@@ -38,25 +50,128 @@ use super::player::{Link, LinkFactory, Refusal};
 /// The helper's committed memory: 1 GiB (decision D-MED-3).
 pub const HELPER_LIMITS: Limits = Limits { memory_bytes: 1 << 30 };
 
-/// The helper's file name, next to the app's exe.
-const HELPER_NAME: &str = if cfg!(windows) {
+/// The helper's file name, next to the app's exe. Also the name its crash-report exclusion is written under.
+pub(crate) const HELPER_NAME: &str = if cfg!(windows) {
     "beebeeb-media-helper.exe"
 } else {
     "beebeeb-media-helper"
 };
 
-/// A sandbox profile other than today's (decision 2541 (a), answered yes: two helper profiles, chosen per file by
-/// the route table). It has no value yet: today's profile (an AppContainer with no capabilities) is the only one a
-/// helper can be started in. Lane `media-mf-route` replaces it with its own `Profile`.
-pub enum HelperProfile {}
+/// The profile to restart a helper in for a stream of `codec` (decision 2541), with the shipped switch
+/// (`MEDIA_SYSTEM_DECODER_ON`, off). `None`: the default profile. The app has no route table: a helper started in the
+/// default profile that answers `NoSystemDecoder(codec)` names a stream whose route is `System`.
+pub fn profile_for_file(codec: Option<Codec>) -> Option<Profile> {
+    profile_for_file_with(MEDIA_SYSTEM_DECODER_ON, codec)
+}
 
-/// HOOK for lane `media-mf-route` (decision 2541): the profile for the file a helper is started for. `None`: today's
-/// profile. That lane makes it `profile_for(route, codec)` (its helper/protocol side, the route from the codec's
-/// row), and it alone writes the second profile. Until its branch lands, every file gets today's profile, and a
-/// codec routed to the system's decoder is refused as before (`Refusal::NoSystemDecoder`).
-pub fn profile_for_file(codec: Option<Codec>) -> Option<HelperProfile> {
-    let _ = codec;
-    None
+/// [`profile_for_file`] with the switch given (the player's own field, so its tests hold it at both values).
+pub(crate) fn profile_for_file_with(on: bool, codec: Option<Codec>) -> Option<Profile> {
+    codec
+        .and_then(|codec| profile_for_with(on, Route::System, codec))
+        .map(|profile| Profile::SystemDecoder { hevc: profile.hevc })
+}
+
+/// Where the per-user Windows Error Reporting exclusion is written (a seam: the tests hand their own).
+pub(crate) trait ErrorReports: Send + Sync {
+    /// Excludes the exe called `exe_name` (its file name, never a path) from Windows Error Reporting for this user:
+    /// no dump of it is kept or sent.
+    fn exclude(&self, exe_name: &str) -> io::Result<()>;
+}
+
+/// The real one: `HKCU\Software\Microsoft\Windows\Windows Error Reporting\ExcludedApplications`, a `REG_DWORD` 1
+/// named after the exe. Off Windows there is no such thing, and it does nothing.
+pub(crate) struct WindowsErrorReports;
+
+impl ErrorReports for WindowsErrorReports {
+    fn exclude(&self, exe_name: &str) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            wer::exclude(exe_name)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = exe_name;
+            Ok(())
+        }
+    }
+}
+
+/// Whether this process wrote the exclusion. Once written it is never written again; a failed write is tried again
+/// at the next start (and that start is refused).
+pub(crate) struct Excluded(OnceLock<()>);
+
+impl Excluded {
+    pub(crate) const fn new() -> Excluded {
+        Excluded(OnceLock::new())
+    }
+}
+
+/// The process's own: the first helper's start writes the exclusion.
+static EXCLUDED: Excluded = Excluded::new();
+
+/// Writes the crash-report exclusion (once per `excluded`), THEN runs `spawn`. A failed write runs nothing:
+/// [`Refusal::NoSandbox`]. Every helper is started through this.
+pub(crate) fn excluded_then<T>(
+    excluded: &Excluded,
+    reports: &dyn ErrorReports,
+    spawn: impl FnOnce() -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    if excluded.0.get().is_none() {
+        reports.exclude(HELPER_NAME).map_err(|_| Refusal::NoSandbox)?;
+        let _ = excluded.0.set(());
+    }
+    spawn()
+}
+
+/// The registry write, Windows only (`windows-sys`, HKEY_CURRENT_USER only, as the shell's Run value).
+#[cfg(windows)]
+mod wer {
+    use std::io;
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW,
+        RegSetValueExW,
+    };
+
+    const KEY: &str = "Software\\Microsoft\\Windows\\Windows Error Reporting\\ExcludedApplications";
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    pub(super) fn exclude(exe_name: &str) -> io::Result<()> {
+        let (key, name) = (wide(KEY), wide(exe_name));
+        let mut hkey: HKEY = ptr::null_mut();
+        // SAFETY: `key` is NUL-terminated and outlives the call; no class, no security attributes and no disposition
+        // are asked for (null is allowed for each); `hkey` receives the opened key.
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                key.as_ptr(),
+                0,
+                ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                ptr::null(),
+                &mut hkey,
+                ptr::null_mut(),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let one = 1u32.to_le_bytes();
+        // SAFETY: `hkey` was opened above with KEY_SET_VALUE; `name` is NUL-terminated; `one` is 4 bytes for the call.
+        let status = unsafe { RegSetValueExW(hkey, name.as_ptr(), 0, REG_DWORD, one.as_ptr(), one.len() as u32) };
+        // SAFETY: `hkey` was opened above and is closed once, here.
+        unsafe { RegCloseKey(hkey) };
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        Ok(())
+    }
 }
 
 /// How many batches the reader may have handed over and the player not yet taken.
@@ -103,17 +218,23 @@ pub struct HelperLink {
 }
 
 impl HelperLink {
-    /// Starts the helper at `exe`, confined. Where the OS has no sandbox module, or the sandbox refuses:
-    /// [`Refusal::NoSandbox`], and nothing runs.
-    ///
-    /// Every helper is started here, and its profile is asked of [`profile_for_file`] here (decision 2541): the
-    /// player starts a helper before the file was read, so no codec is known yet.
+    /// Starts the helper at `exe`, confined, in the default profile (no capability). Where the OS has no sandbox
+    /// module, or the sandbox refuses: [`Refusal::NoSandbox`], and nothing runs.
     pub fn start(exe: &Path) -> Result<HelperLink, Refusal> {
-        // The one seam: lane `media-mf-route` spawns in the profile this answers; `None`, today's profile (the only
-        // one there is yet), spawns as below.
-        let profile = profile_for_file(None);
-        debug_assert!(profile.is_none(), "no second profile before lane media-mf-route");
-        let sandbox = Sandbox::new(HELPER_LIMITS).map_err(|_| Refusal::NoSandbox)?;
+        HelperLink::start_in(exe, Profile::default())
+    }
+
+    /// Starts the helper at `exe`, confined, in `profile` (decision 2541: the system-decoder profile only for a file
+    /// whose stream the helper answered `NoSystemDecoder` for, [`profile_for_file`]). The process's first start
+    /// writes the crash-report exclusion before anything runs; a failed write, no sandbox here, or a sandbox that
+    /// refuses: [`Refusal::NoSandbox`], and nothing runs.
+    pub fn start_in(exe: &Path, profile: Profile) -> Result<HelperLink, Refusal> {
+        excluded_then(&EXCLUDED, &WindowsErrorReports, || HelperLink::spawn_in(exe, profile))
+    }
+
+    /// The spawn itself, through the sandbox only.
+    fn spawn_in(exe: &Path, profile: Profile) -> Result<HelperLink, Refusal> {
+        let sandbox = Sandbox::with_profile(HELPER_LIMITS, profile).map_err(|_| Refusal::NoSandbox)?;
         let mut child = sandbox.spawn(exe).map_err(|_| Refusal::NoSandbox)?;
         let Some(pipes) = child.take_pipes() else {
             let _ = child.kill();
@@ -335,12 +456,16 @@ pub fn helper_exe() -> Option<PathBuf> {
     exe.is_file().then_some(exe)
 }
 
-/// The real helpers: [`helper_exe`], started by [`HelperLink::start`]. The player's tests hand their own factory.
+/// The real helpers: [`helper_exe`], started by [`HelperLink::start_in`]. The player's tests hand their own factory.
 pub struct SandboxedHelpers;
 
 impl LinkFactory for SandboxedHelpers {
     fn start(&self) -> Result<Box<dyn Link>, Refusal> {
+        self.start_in(Profile::default())
+    }
+
+    fn start_in(&self, profile: Profile) -> Result<Box<dyn Link>, Refusal> {
         let exe = helper_exe().ok_or(Refusal::NotInstalled)?;
-        Ok(Box::new(HelperLink::start(&exe)?))
+        Ok(Box::new(HelperLink::start_in(&exe, profile)?))
     }
 }
