@@ -23,6 +23,9 @@
 //!   fails; the ones before it are marked).
 //! - A read that fails. One rule, judged for the read as a whole and the same in whatever order the answers land:
 //!   - Beebeeb ended the session (401) on either half: nothing of the account stays drawn.
+//!   - A write of this session (a mark, a switch's change) was told the session ended: what fails after that is
+//!     never kept as possibly out of date, whichever answer landed first (a read that was already out and fails
+//!     drops what was held; the read after it is judged as any). The part's `ended_told`.
 //!   - It follows a write that failed and said so (a mark that was refused, a switch whose result is unknown; no
 //!     connection is the usual reason for both): what was held stays drawn, the write's toast is the only one,
 //!     [`NotificationsPart::unconfirmed`] says it may be out of date and both panes draw that with "Try again".
@@ -430,6 +433,11 @@ pub(super) struct NotificationsPart<C: CredentialStores> {
     /// The session the writes on their way were sent under (`marking`, `switching` count answers still to come,
     /// whichever session asked): only a write of the read's own session defers that read's verdict.
     writes_of: Option<SessionGeneration>,
+    /// A write under this session (a mark, a switch's change) was told by Beebeeb that the session ended. From
+    /// then on nothing of it is kept as possibly out of date: [`Self::read_unjudged`] drops what is held instead
+    /// of saying "unconfirmed", and a read that fails is never judged as one after a failed write. Cleared when
+    /// the session moves on ([`Self::pump`]).
+    ended_told: Option<SessionGeneration>,
     /// Test builds: the next write's worker waits for a word down this before it calls the engine.
     #[cfg(test)]
     hold_next_write: Option<mpsc::Receiver<()>>,
@@ -483,6 +491,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             loud: false,
             recheck: false,
             writes_of: None,
+            ended_told: None,
             #[cfg(test)]
             hold_next_write: None,
             #[cfg(test)]
@@ -796,8 +805,9 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                 let write_out = (self.marking > 0 || self.switching) && self.writes_of == Some(session);
                 let older = writes != self.write_answers;
                 let later = self.again || write_out || older;
-                // After a write that failed and said so, under the session of that write.
-                let unconfirmed = self.unconfirmed == Some(session);
+                // After a write that failed and said so, under the session of that write; never once a write of
+                // that session was told the session ended (nothing of it is kept as possibly out of date).
+                let unconfirmed = self.unconfirmed == Some(session) && self.ended_told != Some(session);
                 let keeps = later || unconfirmed;
                 let mut reread = false;
                 match switches {
@@ -897,6 +907,13 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                     }
                     Err(kind) => {
                         log(format!("settings: a notification setting was not changed ({kind})"));
+                        // Told the session ended: recorded for it, so nothing of it is kept, whichever answer
+                        // lands first (`read_unjudged`).
+                        if ended(kind)
+                            && let Some((session, _)) = &mine
+                        {
+                            self.ended_told = Some(*session);
+                        }
                         if mine.is_some() {
                             match kind {
                                 AccountCallError::ServerError => *toast = Some(ALERT_NOT_SAVED),
@@ -936,8 +953,13 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                         self.seen.remove(id);
                     }
                     // Said: if the read fails too, what is held stays, said to be unconfirmed. A session Beebeeb
-                    // ended says nothing here and keeps nothing: the read's own failure is then drawn.
-                    if !ended(kind) {
+                    // ended says nothing here and keeps nothing: the read's own failure is then drawn. It is
+                    // recorded, so a read already out that fails after this answer keeps nothing either.
+                    if ended(kind) {
+                        if let Some((session, _)) = &made_for {
+                            self.ended_told = Some(*session);
+                        }
+                    } else {
                         *toast = Some(NOT_MARKED);
                         self.unconfirmed = made_for.map(|(session, _)| session);
                         self.unsure_since = self.write_answers;
@@ -965,10 +987,17 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     /// read whose failure is judged).
     fn read_unjudged(&mut self) {
         if self.recheck && self.marking == 0 && !self.switching && self.engine.has_session() {
-            // What was kept while the write was out stays if this read fails too, said to be possibly out of
-            // date: a failure that was not judged then is not a reason to drop what a write has just confirmed.
-            self.unconfirmed = Some(self.engine.session_turn());
-            self.unsure_since = self.write_answers;
+            let turn = self.engine.session_turn();
+            if self.ended_told == Some(turn) {
+                // A write of this session was told the session ended: nothing of it is kept, never "possibly out
+                // of date", whichever answer landed first. The read asked for now is judged as any.
+                self.forget();
+            } else {
+                // What was kept while the write was out stays if this read fails too, said to be possibly out of
+                // date: a failure that was not judged then is not a reason to drop what a write has just confirmed.
+                self.unconfirmed = Some(turn);
+                self.unsure_since = self.write_answers;
+            }
             self.read();
         }
     }
@@ -1004,6 +1033,11 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         {
             self.forget();
             changed = true;
+        }
+        // Beebeeb's word that a session ended holds for that session only.
+        let turn = self.engine.session_turn();
+        if self.ended_told.is_some_and(|session| session != turn) {
+            self.ended_told = None;
         }
         while let Ok(answer) = self.inbox.try_recv() {
             self.take_in(answer, &mut toast);
