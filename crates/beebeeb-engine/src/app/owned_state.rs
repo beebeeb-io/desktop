@@ -419,7 +419,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     fn owned_state(&self, mode: Mode, call: Call) -> Result<OwnedState<'_>, LocalStateRefused> {
-        self.owned_state_as(mode, call, Ended::OwnSearchesWipe)
+        self.owned_state_as(mode, call, Ended::Refused)
     }
 
     fn owned_state_as(&self, mode: Mode, call: Call, ended: Ended) -> Result<OwnedState<'_>, LocalStateRefused> {
