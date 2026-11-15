@@ -15,12 +15,19 @@
 //! and a fetched chunk is handed over only while the session is still the one they were copied from.
 //!
 //! What a reader holds: the plan (its file key wipes itself on drop) and a cache of decrypted chunks, each in a
-//! `Zeroizing` buffer, least recently used first out, at most [`MEDIA_CACHE_MAX`] bytes, chunk 0 never evicted (the
-//! container's header is read again and again). A worker fetches ahead up to [`MEDIA_READ_AHEAD`] past each read; a
-//! read far from it (a seek) gives that up. A playback never fetches more than twice the file's size plus
-//! [`MEDIA_REFETCH_SLACK`] (read-ahead included): past it every read answers [`MediaReadError::OverBudget`].
-//! Dropping the reader wipes the cache at once (the `Zeroizing` buffers zero themselves as they are dropped), and the
-//! worker, told so, gives up its fetch within [`ASK_EVERY`] and drops what it fetched.
+//! `Zeroizing` buffer, least recently used first out. The cache holds three chunks of the file's stride (the one
+//! before the read, the one read, the next one fetched ahead), never less than [`MEDIA_CACHE_MAX`] and never more
+//! than [`MEDIA_CACHE_CEILING`]; a chunk larger than that is never kept. Chunk 0 (the container's header, read again
+//! and again) is never evicted while it is at most a quarter of that. A worker fetches ahead up to
+//! [`MEDIA_READ_AHEAD`] past each read, when the cache holds two chunks; a read far from it (a seek) gives that up. A
+//! playback never fetches more than twice the file's size plus [`MEDIA_REFETCH_SLACK`] (read-ahead included): past
+//! it every read answers [`MediaReadError::OverBudget`]. Dropping the reader wipes the cache at once (the `Zeroizing`
+//! buffers zero themselves as they are dropped), and the worker, told so, gives up its fetch within [`ASK_EVERY`] and
+//! drops what it fetched.
+//!
+//! The worker lives as long as the reader from its first read of Beebeeb's chunks, and it watches the session: within
+//! [`WATCH_EVERY`] of a lock, a sign-out or an account change it wipes what the reader holds, also when no read comes
+//! again (a paused player).
 //!
 //! Versions: a reader reads ONE version for its whole life. The server's named version (`download_version`) is
 //! carried by every chunk request, and one that went away is [`MediaReadError::Gone`] for this and every later read
@@ -47,9 +54,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
@@ -58,8 +64,8 @@ use zeroize::Zeroizing;
 
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
-use crate::app::viewer_api::{LocalCopy, OpenFileError, failure};
-use crate::app::{CredentialStores, Engine, LocalStateRefused};
+use crate::app::viewer_api::{LocalCopy, OpenFileError, failure, is_plain_and_wholly_here, open_for_the_read, refused};
+use crate::app::{CredentialStores, Engine};
 use crate::download_pin::{PinLost, VersionGone};
 use crate::engine_bridge::{EngineBridge, EngineError};
 use crate::state_db::FileStatus;
@@ -68,8 +74,11 @@ use crate::state_db::FileStatus;
 #[path = "media_stream_tests.rs"]
 mod tests;
 
-/// The most decrypted chunk bytes one reader holds (a zeroized LRU; chunk 0 stays).
+/// The fewest decrypted chunk bytes one reader may hold (a zeroized LRU): its cap is three chunks of the file's
+/// stride, never under this.
 pub const MEDIA_CACHE_MAX: u64 = 32 << 20;
+/// The most decrypted chunk bytes one reader holds, whatever the stride.
+pub const MEDIA_CACHE_CEILING: u64 = 384 << 20;
 /// How far past the last read the reader fetches ahead, on a worker.
 pub const MEDIA_READ_AHEAD: u64 = 8 << 20;
 /// What one playback may fetch beyond twice the file's size (a helper that loops seeks cannot make the app download
@@ -82,6 +91,8 @@ pub const MEDIA_MAX_READ: u32 = 4 << 20;
 /// How often a fetch under way, or a read waiting for the read-ahead's fetch, asks whether it was cancelled or its
 /// session ended.
 const ASK_EVERY: Duration = Duration::from_millis(50);
+/// How often the worker of an idle reader asks whether its session ended (a lock wipes the reader within this).
+const WATCH_EVERY: Duration = Duration::from_millis(250);
 /// What a chunk costs on the wire beyond its plaintext (nonce and tag), defined once in core.
 const WIRE_OVERHEAD: u64 = beebeeb_core::chunk_stream::CHUNK_OVERHEAD;
 
@@ -121,21 +132,31 @@ fn sticky(why: MediaReadError) -> bool {
     )
 }
 
-/// A reader's limits: the constants above. A test sets smaller ones (with the test server's 1 KiB chunks the real ones
-/// are out of a test's reach).
+/// A reader's limits: the constants above. A test sets smaller ones (with the test server's 1 KiB chunks the shipped
+/// ones are out of a test's reach).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Limits {
-    cache_max: u64,
+    /// The cache's cap is never under this ...
+    cache_floor: u64,
+    /// ... and never over this.
+    cache_ceiling: u64,
     read_ahead: u64,
     refetch_slack: u64,
 }
 
 impl Limits {
-    const REAL: Self = Self {
-        cache_max: MEDIA_CACHE_MAX,
+    const SHIPPED: Self = Self {
+        cache_floor: MEDIA_CACHE_MAX,
+        cache_ceiling: MEDIA_CACHE_CEILING,
         read_ahead: MEDIA_READ_AHEAD,
         refetch_slack: MEDIA_REFETCH_SLACK,
     };
+
+    /// The most decrypted bytes a reader of chunks of `stride` bytes holds: three chunks (the one before the read,
+    /// the one read, the next one fetched ahead), never under the floor, never over the ceiling.
+    fn cache_cap(&self, stride: u64) -> u64 {
+        stride.saturating_mul(3).max(self.cache_floor).min(self.cache_ceiling)
+    }
 }
 
 /// One chunk of the pinned version, fetched and decrypted in memory: `(index, stop)`, `stop` asked while it runs.
@@ -181,8 +202,9 @@ struct Local {
 
 /// The engine, as a reader asks it. Type-erased: a reader is not generic over the engine's credential stores.
 struct Host {
-    /// Whether no session change happened since the reader's session was read.
-    unchanged: Box<dyn Fn() -> bool + Send + Sync>,
+    /// Whether no session change happened since the reader's session was read. Shared with the worker, which asks
+    /// it while the reader is idle.
+    unchanged: Arc<dyn Fn() -> bool + Send + Sync>,
     /// The hand-over question: the session in memory is still that one, with no session change half done.
     handover: Box<dyn Fn() -> bool + Send + Sync>,
     /// Beebeeb's side of the file, planned now (one metadata read): a local copy's fallback.
@@ -203,8 +225,10 @@ struct Job {
 #[derive(Default)]
 struct Cache {
     chunks: HashMap<u32, Zeroizing<Vec<u8>>>,
-    /// Least recently used first. Chunk 0 is never in it: it is never evicted.
+    /// Least recently used first. Chunk 0 is not in it while it is pinned (never evicted).
     order: VecDeque<u32>,
+    /// Chunk 0 is held and pinned: it was at most a quarter of the cap when it was kept.
+    first_pinned: bool,
     /// Bytes in `chunks`.
     held: u64,
     /// Bytes asked of Beebeeb so far, read-ahead included: each chunk's wire size, booked before it is asked for.
@@ -215,6 +239,8 @@ struct Cache {
     closed: bool,
     /// The chunk the read-ahead is fetching now (a read that needs it waits for it).
     in_flight: Option<u32>,
+    /// The chunk a read is fetching itself now (the read-ahead does not fetch it too).
+    reading: Option<u32>,
     job: Job,
 }
 
@@ -223,12 +249,13 @@ impl Cache {
     fn wipe(&mut self) {
         self.chunks.clear();
         self.order.clear();
+        self.first_pinned = false;
         self.held = 0;
     }
 
     /// `index` was just used.
     fn touch(&mut self, index: u32) {
-        if index == 0 {
+        if index == 0 && self.first_pinned {
             return;
         }
         if let Some(at) = self.order.iter().position(|held| *held == index) {
@@ -239,11 +266,14 @@ impl Cache {
 
     /// Keeps `bytes` as chunk `index`, the least recently used chunks out first until it fits under `cap`. Not kept
     /// (and so wiped now) when the reader has ended or closed, when it is held already, or when it cannot fit.
+    /// Chunk 0 is pinned only while it is at most a quarter of `cap`: a larger one would leave no room for the chunk
+    /// played and the next one.
     fn insert(&mut self, index: u32, bytes: Zeroizing<Vec<u8>>, cap: u64) {
         if self.ended.is_some() || self.closed || self.chunks.contains_key(&index) {
             return;
         }
         let size = bytes.len() as u64;
+        let pin = index == 0 && size <= cap / 4;
         while self.held.saturating_add(size) > cap {
             let Some(oldest) = self.order.pop_front() else {
                 break;
@@ -257,7 +287,11 @@ impl Cache {
         }
         self.held += size;
         self.chunks.insert(index, bytes);
-        self.touch(index);
+        if pin {
+            self.first_pinned = true;
+        } else {
+            self.touch(index);
+        }
     }
 
     /// Books `cost` wire bytes against `budget`; `false` (nothing booked) when they would pass it.
@@ -324,17 +358,6 @@ impl fmt::Debug for MediaReader {
     }
 }
 
-/// The kind of a refusal of the local state, as the viewer's open names it.
-fn state_refused(refusal: LocalStateRefused) -> OpenFileError {
-    match refusal {
-        LocalStateRefused::SessionEnded => OpenFileError::SessionEnded,
-        LocalStateRefused::NothingSynced => OpenFileError::NothingSynced,
-        LocalStateRefused::Unreadable => OpenFileError::Failed,
-        refusal if refusal.not_this_accounts() => OpenFileError::NotYours,
-        _ => OpenFileError::NotSignedIn,
-    }
-}
-
 /// A refusal of the open, as a read answers it.
 fn from_open(error: OpenFileError) -> MediaReadError {
     match error {
@@ -392,7 +415,7 @@ impl<C: CredentialStores> Engine<C> {
             local,
             network,
             shared: Arc::new(Shared::default()),
-            limits: Limits::REAL,
+            limits: Limits::SHIPPED,
             worker: false,
         })
     }
@@ -403,7 +426,7 @@ impl<C: CredentialStores> Engine<C> {
         let (unchanged, handover, plan) = (Arc::downgrade(self), Arc::downgrade(self), Arc::downgrade(self));
         let file_id = file_id.to_owned();
         Host {
-            unchanged: Box::new(move || {
+            unchanged: Arc::new(move || {
                 unchanged
                     .upgrade()
                     .is_some_and(|engine| engine.acct.session_unchanged_since(session))
@@ -455,7 +478,7 @@ impl<C: CredentialStores> Engine<C> {
     /// chunk and hands a chunk over only while the session is still the one they were copied from.
     fn media_network(self: &Arc<Self>, session: SessionGeneration, file_id: &str) -> Result<Network, OpenFileError> {
         let (api, key) = self.media_client(session).ok_or(OpenFileError::NotSignedIn)?;
-        let state = self.local_state_for_changes().map_err(state_refused)?;
+        let state = self.local_state_for_changes().map_err(refused)?;
         let planned = state
             .with_shared(|db| {
                 let bridge = EngineBridge::new(self.identity, db, api);
@@ -463,7 +486,7 @@ impl<C: CredentialStores> Engine<C> {
                     !self.acct.session_unchanged_since(session)
                 })
             })
-            .map_err(state_refused)?;
+            .map_err(refused)?;
         let plan = match planned {
             Some(planned) => planned.map_err(failure)?,
             None => return Err(OpenFileError::NotSignedIn),
@@ -480,7 +503,7 @@ impl<C: CredentialStores> Engine<C> {
             let (api, key) = engine.media_client(session).ok_or(MediaReadError::NotSignedIn)?;
             let state = engine
                 .local_state_for_changes()
-                .map_err(|refusal| from_open(state_refused(refusal)))?;
+                .map_err(|refusal| from_open(refused(refusal)))?;
             let fetched = state
                 .with_shared(|db| {
                     let bridge = EngineBridge::new(engine.identity, db, api);
@@ -488,7 +511,7 @@ impl<C: CredentialStores> Engine<C> {
                         stop() || !engine.acct.session_unchanged_since(session)
                     })
                 })
-                .map_err(|refusal| from_open(state_refused(refusal)))?;
+                .map_err(|refusal| from_open(refused(refusal)))?;
             let bytes = match fetched {
                 Some(fetched) => fetched.map_err(read_failure)?,
                 // Stopped: what was decrypted was dropped (and wiped) with the read.
@@ -519,9 +542,9 @@ impl<C: CredentialStores> Engine<C> {
     fn media_copy_here(&self, session: SessionGeneration, file_id: &str) -> Result<Option<Local>, OpenFileError> {
         let (entry, contract) = self
             .local_state()
-            .map_err(state_refused)?
+            .map_err(refused)?
             .with(|db| Ok::<_, rusqlite::Error>((db.get_file(file_id)?, db.get_file_contract_state(file_id)?)))
-            .map_err(state_refused)?
+            .map_err(refused)?
             .map_err(|_| OpenFileError::Failed)?;
         let Some(entry) = entry else {
             return Ok(None);
@@ -570,7 +593,8 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The account's folder on this computer and where the file at `rel_path` of the local state is in it, as the
     /// viewer resolves it. `None`: no folder is known, the path is not one below it, or its name leads to a different
-    /// file here (a Windows short name).
+    /// file here (a Windows short name). Beside the viewer's `local_copy_path` because it also answers the folder:
+    /// every read asks again that the name below it leads to this file (`read_local`).
     fn media_copy_path(&self, rel_path: &str) -> Option<(PathBuf, PathBuf)> {
         let root = match self.configured_sync_root().ok()? {
             Some(root) => root,
@@ -697,6 +721,9 @@ impl MediaReader {
         if want == 0 {
             return Ok(out);
         }
+        // The worker (and its session watch) runs before the first chunk is fetched, so no decrypted chunk is ever
+        // held without it, whatever this read answers.
+        self.start_worker(&network);
         let stride = network.chunk_size;
         let first = u32::try_from(offset / stride).map_err(|_| MediaReadError::OutOfRange)?;
         let last = u32::try_from((end - 1) / stride).map_err(|_| MediaReadError::OutOfRange)?;
@@ -715,8 +742,13 @@ impl MediaReader {
                 None => Err(MediaReadError::Failed),
             })??;
         }
-        self.ahead(&network, end);
+        self.ahead(&network, first, end);
         Ok(out)
+    }
+
+    /// The most decrypted bytes this reader holds: three chunks of the network's stride, within the limits.
+    fn cache_cap(&self, network: &Network) -> u64 {
+        self.limits.cache_cap(network.chunk_size)
     }
 
     /// `take` over chunk `index`: the one in the cache, the one the read-ahead is fetching (waited for), or one
@@ -762,24 +794,29 @@ impl MediaReader {
             self.shared.end(MediaReadError::OverBudget);
             return Err(MediaReadError::OverBudget);
         }
+        // The read-ahead leaves this chunk to the read (one fetch of it, not two).
+        cache.reading = Some(index);
         drop(cache);
         let stop = || cancel.load(Ordering::SeqCst) || self.shared.lock().ended.is_some();
-        let bytes = match (network.fetch)(index, &stop) {
+        let fetched = (network.fetch)(index, &stop);
+        let mut cache = self.shared.lock();
+        cache.reading = None;
+        let bytes = match fetched {
             Ok(bytes) => bytes,
             Err(why) => {
+                drop(cache);
                 if sticky(why) {
                     self.shared.end(why);
                 }
                 return Err(why);
             }
         };
-        let mut cache = self.shared.lock();
         // Ended while it was fetched: dropped here, and wiped with it.
         if let Some(why) = cache.ended {
             return Err(why);
         }
         let answer = take(&bytes);
-        cache.insert(index, bytes, self.limits.cache_max);
+        cache.insert(index, bytes, self.cache_cap(network));
         drop(cache);
         self.shared.changed.notify_all();
         Ok(answer)
@@ -795,13 +832,14 @@ impl MediaReader {
         }
     }
 
-    /// After a read that ended at `end`: the read-ahead fetches up to the limit past it (the window grows while
-    /// the reads follow each other; a new one begins after a seek).
-    fn ahead(&mut self, network: &Arc<Network>, end: u64) {
-        if self.limits.read_ahead == 0 || end >= self.len {
+    /// After a read of chunks `first..` that ended at `end`: the read-ahead fetches up to the limit past it (the
+    /// window moves on and grows while the reads follow each other; a new one begins after a seek). None when the
+    /// cache cannot hold the chunk played and the next one (the next one would evict the one played).
+    fn ahead(&self, network: &Network, first: u32, end: u64) {
+        let stride = network.chunk_size;
+        if self.limits.read_ahead == 0 || end >= self.len || stride.saturating_mul(2) > self.cache_cap(network) {
             return;
         }
-        let stride = network.chunk_size;
         let until = end.saturating_add(self.limits.read_ahead).min(self.len);
         let (Ok(from), Ok(to)) = (u32::try_from(end / stride), u32::try_from((until - 1) / stride + 1)) else {
             return;
@@ -813,24 +851,77 @@ impl MediaReader {
                 return;
             }
             let job = &mut cache.job;
-            if job.next < job.end && (job.start..=job.end).contains(&from) {
+            if (job.start..=job.end).contains(&from) {
+                // The reads follow each other: the window moves on with them, and the chunk the worker is fetching
+                // stays wanted, also when it was the window's last (a new window would drop it, and the read that
+                // needs it would fetch it a second time).
+                job.start = first;
+                job.next = job.next.max(from);
                 job.end = job.end.max(to);
             } else {
                 job.generation += 1;
-                job.start = from;
+                job.start = first;
                 job.next = from;
                 job.end = to;
             }
         }
         self.shared.changed.notify_all();
-        if !self.worker {
-            self.worker = true;
-            let (shared, network) = (Arc::clone(&self.shared), Arc::clone(network));
-            let (cache_max, budget) = (self.limits.cache_max, self.budget());
-            // No worker (the system refused a thread): no read-ahead, every read fetches what it needs itself.
-            let _ = std::thread::Builder::new()
-                .name("media-read-ahead".to_string())
-                .spawn(move || read_ahead(&shared, &network, cache_max, budget));
+    }
+
+    /// Starts the worker once: the read-ahead and the session watch. No worker (the system refused a thread): no
+    /// read-ahead and no watch, every read fetches what it needs itself and asks the session first; asked again at
+    /// the next read.
+    fn start_worker(&mut self, network: &Arc<Network>) {
+        if self.worker {
+            return;
+        }
+        let (shared, network) = (Arc::clone(&self.shared), Arc::clone(network));
+        let unchanged = Arc::clone(&self.host.unchanged);
+        let (cap, budget) = (self.cache_cap(&network), self.budget());
+        self.worker = std::thread::Builder::new()
+            .name("media-read-ahead".to_string())
+            .spawn(move || read_ahead(&shared, &network, &*unchanged, cap, budget))
+            .is_ok();
+    }
+
+    /// The decrypted bytes the reader holds now (a test watches an idle reader without reading).
+    #[cfg(test)]
+    fn cached_bytes(&self) -> u64 {
+        self.shared.lock().held
+    }
+
+    /// The read-ahead has nothing left to fetch and nothing under way (a test waits for it after a read).
+    #[cfg(test)]
+    fn read_ahead_idle(&self) -> bool {
+        let cache = self.shared.lock();
+        cache.job.next >= cache.job.end && cache.in_flight.is_none()
+    }
+
+    /// A reader of `len` bytes in chunks of `stride` over `fetch` alone: no engine, no server, no crypto. The session
+    /// never changes.
+    #[cfg(test)]
+    fn over_fetch(len: u64, stride: u64, limits: Limits, fetch: Box<FetchChunk>) -> Self {
+        let chunk_count = u32::try_from(len.div_ceil(stride).max(1)).expect("a test's chunk count");
+        MediaReader {
+            len,
+            origin: MediaOrigin::Beebeeb,
+            host: Host {
+                unchanged: Arc::new(|| true),
+                handover: Box::new(|| true),
+                plan: Box::new(|| Err(OpenFileError::Failed)),
+            },
+            local: None,
+            network: Some(Arc::new(Network {
+                len,
+                chunk_size: stride,
+                chunk_count,
+                object_version_id: None,
+                version_number: None,
+                fetch,
+            })),
+            shared: Arc::new(Shared::default()),
+            limits,
+            worker: false,
         }
     }
 }
@@ -847,24 +938,34 @@ impl Drop for MediaReader {
     }
 }
 
-/// The read-ahead worker: the chunks of the current window, one at a time, each booked against the budget before it
-/// is asked for, kept only while the reader still wants that window. Leaves when the reader is dropped or ended.
-fn read_ahead(shared: &Shared, network: &Network, cache_max: u64, budget: u64) {
+/// The reader's worker: the chunks of the current window, one at a time, each booked against the budget before it
+/// is asked for, kept only while the reader still wants that window. Between them it watches the session, at least
+/// every [`WATCH_EVERY`]: a change ends the reader with [`MediaReadError::NotSignedIn`] and wipes what it holds
+/// ([`Shared::end`]), also when no read comes again. Leaves when the reader is dropped or ended.
+fn read_ahead(shared: &Shared, network: &Network, unchanged: &(dyn Fn() -> bool + Send + Sync), cap: u64, budget: u64) {
     loop {
         let mut cache = shared.lock();
-        while !(cache.closed || cache.ended.is_some() || cache.job.next < cache.job.end) {
-            cache = match shared.changed.wait(cache) {
-                Ok(cache) => cache,
-                Err(poisoned) => poisoned.into_inner(),
+        loop {
+            if cache.closed || cache.ended.is_some() {
+                return;
+            }
+            if !unchanged() {
+                drop(cache);
+                shared.end(MediaReadError::NotSignedIn);
+                return;
+            }
+            if cache.job.next < cache.job.end {
+                break;
+            }
+            cache = match shared.changed.wait_timeout(cache, WATCH_EVERY) {
+                Ok((cache, _)) => cache,
+                Err(poisoned) => poisoned.into_inner().0,
             };
-        }
-        if cache.closed || cache.ended.is_some() {
-            return;
         }
         let index = cache.job.next;
         cache.job.next += 1;
         let generation = cache.job.generation;
-        if cache.chunks.contains_key(&index) {
+        if cache.chunks.contains_key(&index) || cache.reading == Some(index) {
             continue;
         }
         let Some(size) = network.chunk_len(index) else {
@@ -885,7 +986,7 @@ fn read_ahead(shared: &Shared, network: &Network, cache_max: u64, budget: u64) {
         let mut cache = shared.lock();
         cache.in_flight = None;
         match fetched {
-            Ok(bytes) if cache.job.generation == generation => cache.insert(index, bytes, cache_max),
+            Ok(bytes) if cache.job.generation == generation => cache.insert(index, bytes, cap),
             // A seek gave the window up: dropped, and wiped with it.
             Ok(_) => {}
             Err(MediaReadError::NotSignedIn) => {
@@ -944,24 +1045,4 @@ fn read_local(local: &Local, offset: u64, len: u32) -> Result<Zeroizing<Vec<u8>>
     file.seek(SeekFrom::Start(offset)).map_err(|_| ())?;
     file.read_exact(&mut bytes).map_err(|_| ())?;
     Ok(bytes)
-}
-
-/// Whether `metadata` describes a plain file whose every byte is on this computer (core's reading of it, as the
-/// viewer's copy read asks it): no folder, no link or special file, nothing offline.
-fn is_plain_and_wholly_here(metadata: &std::fs::Metadata) -> bool {
-    let attrs = beebeeb_backup::attrs_of(metadata);
-    !(attrs.is_dir || attrs.is_link || attrs.not_local)
-}
-
-/// Opens `path` for a read. Unix: a link is never followed, and the open never waits (a pipe put where the file was
-/// is opened at once, and refused by the check through the handle).
-fn open_for_the_read(path: &Path) -> std::io::Result<File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    options.open(path)
 }

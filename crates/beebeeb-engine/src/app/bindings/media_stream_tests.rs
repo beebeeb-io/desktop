@@ -6,18 +6,24 @@
 //! recorded as the account's. Sessions are put in memory as a sign-in and an unlock leave them. Every name, key and
 //! byte is invented.
 //!
-//! The limits are the reader's own fields: a test sets smaller ones where the real ones are out of its reach (with
+//! The limits are the reader's own fields: a test sets smaller ones where the shipped ones are out of its reach (with
 //! 1 KiB chunks, 32 MiB of cache is 32 768 chunk requests), and sets the read-ahead to 0 where it counts requests.
+//! The cache against real chunk strides is read over a counting fetch alone (`MediaReader::over_fetch`: no server,
+//! no crypto), and once, ignored, against the fake server with a real 1 GiB file (MCP2's real-stride run).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use zeroize::Zeroizing;
 
-use super::{Limits, MEDIA_MAX_READ, MEDIA_REFETCH_SLACK, MediaOrigin, MediaReadError, MediaReader, WIRE_OVERHEAD};
+use super::{
+    Limits, MEDIA_CACHE_CEILING, MEDIA_MAX_READ, MEDIA_REFETCH_SLACK, MediaOrigin, MediaReadError, MediaReader,
+    WIRE_OVERHEAD,
+};
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::{Engine, EngineConfig};
@@ -37,6 +43,8 @@ const CLIP: &str = "a0000000-0000-4000-8000-000000000601";
 const BIG: &str = "a0000000-0000-4000-8000-000000000602";
 /// Forty chunks.
 const LONG: &str = "a0000000-0000-4000-8000-000000000603";
+/// A real 1 GiB file at the desktop ladder's stride for its size (32 MiB): the ignored real-stride run only.
+const FILM: &str = "a0000000-0000-4000-8000-000000000604";
 
 const STRIDE: u64 = CONTENT_CHUNK_BYTES as u64;
 /// The server's own sentence for a pinned version that is gone.
@@ -67,22 +75,24 @@ fn version_id(n: u32) -> String {
 /// The manifest the server names for a version whose plaintext is `plain`: one entry per 1 KiB chunk, each the
 /// chunk's plaintext plus core's per-chunk overhead on the wire.
 fn manifest(version: &str, plain: &[u8]) -> serde_json::Value {
-    let pieces: Vec<&[u8]> = if plain.is_empty() {
-        vec![plain]
-    } else {
-        plain.chunks(STRIDE as usize).collect()
-    };
-    let chunks: Vec<serde_json::Value> = pieces
-        .iter()
-        .enumerate()
-        .map(|(index, piece)| json!({ "index": index, "size_bytes": piece.len() as u64 + WIRE_OVERHEAD }))
+    manifest_of(version, plain.len() as u64, STRIDE)
+}
+
+/// The manifest of a version of `len` plaintext bytes in chunks of `stride` (an empty file is one empty chunk).
+fn manifest_of(version: &str, len: u64, stride: u64) -> serde_json::Value {
+    let count = len.div_ceil(stride).max(1);
+    let chunks: Vec<serde_json::Value> = (0..count)
+        .map(|index| {
+            let piece = len.saturating_sub(index * stride).min(stride);
+            json!({ "index": index, "size_bytes": piece + WIRE_OVERHEAD })
+        })
         .collect();
     json!({
         "object_version_id": version,
-        "chunk_count": pieces.len(),
-        "chunk_size_bytes": STRIDE,
-        "plaintext_size_bytes": plain.len(),
-        "ciphertext_size_bytes": plain.len() as u64 + WIRE_OVERHEAD * pieces.len() as u64,
+        "chunk_count": count,
+        "chunk_size_bytes": stride,
+        "plaintext_size_bytes": len,
+        "ciphertext_size_bytes": len + WIRE_OVERHEAD * count,
         "chunks": chunks,
     })
 }
@@ -369,8 +379,8 @@ fn media_read_after_lock_is_refused() {
 
 // ── 4. The cache's bound ─────────────────────────────────────────────────────────────────────────────────────────
 
-/// Reads over three times the cache's cap of distinct chunks (forty chunks against a cap of three) never hold more
-/// than the cap, and chunk 0 stays.
+/// Reads over three times the cache's cap of distinct chunks (forty chunks against a cap of four) never hold more
+/// than the cap, and chunk 0 stays (it is a quarter of the cap: pinned).
 #[test]
 fn media_cache_is_bounded() {
     let fake = fake("bounded");
@@ -379,12 +389,14 @@ fn media_cache_is_bounded() {
     signed_in(&engine, &fake.account);
     let _state = local_state(&engine, &fake.account);
     let mut reader = open(&engine, LONG);
-    let cap = 3 * STRIDE;
+    let cap = 4 * STRIDE;
     reader.limits = Limits {
-        cache_max: cap,
+        cache_floor: cap,
+        cache_ceiling: MEDIA_CACHE_CEILING,
         read_ahead: 0,
         refetch_slack: MEDIA_REFETCH_SLACK,
     };
+    assert_eq!(reader.limits.cache_cap(STRIDE), cap);
     let content = long_clip();
     let mut distinct = 0u64;
     for index in (0..40u64).chain((0..40u64).rev()) {
@@ -455,8 +467,10 @@ fn media_read_over_max_refused() {
 fn media_refetch_budget_stops() {
     let (fake, engine, _state) = clip_setup("budget");
     let mut reader = open(&engine, CLIP);
+    // A cap of one chunk: the ceiling (three strides would pass it).
     reader.limits = Limits {
-        cache_max: STRIDE,
+        cache_floor: STRIDE,
+        cache_ceiling: STRIDE,
         read_ahead: 0,
         refetch_slack: 0,
     };
@@ -612,4 +626,271 @@ fn media_local_copy_falls_back_only_to_its_own_version() {
     std::fs::remove_file(root.path().join("Invented folder").join("Invented clip.mp4")).unwrap();
     assert_eq!(read(&mut reader, 1_500, 100).err(), Some(MediaReadError::Failed));
     assert_eq!(fake.chunks_asked(CLIP), vec![1], "nothing more was downloaded");
+}
+
+// ── 10. An idle reader at a lock ─────────────────────────────────────────────────────────────────────────────────
+
+/// A paused player: one read, then none. A lock wipes what the reader holds within a second, with no read to do it
+/// (a read wipes by itself, so this test reads again only once the cache is seen empty). The read-ahead is off: the
+/// worker watches the session for every reader. Mutant (f): the worker's session question deleted → red here.
+#[test]
+fn media_idle_reader_is_wiped_at_a_lock() {
+    let (_fake, engine, _state) = clip_setup("idle");
+    let mut reader = quiet(open(&engine, CLIP));
+    assert!(read(&mut reader, 0, 100).expect("chunk 0")[..] == clip()[..100]);
+    assert!(
+        reader.cached_bytes() > 0,
+        "precondition: the reader holds a decrypted chunk"
+    );
+
+    engine.forget_session(SessionTransition::Lock);
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while reader.cached_bytes() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        reader.cached_bytes(),
+        0,
+        "the idle reader's plaintext is wiped within a second of the lock"
+    );
+    assert!(reader.shared.lock().chunks.is_empty());
+    assert_eq!(read(&mut reader, 0, 100).err(), Some(MediaReadError::NotSignedIn));
+}
+
+// ── 11. The cache against real chunk strides ─────────────────────────────────────────────────────────────────────
+
+/// Fetches per chunk index, counted as each is asked for.
+type Fetches = Arc<Mutex<HashMap<u32, u32>>>;
+
+/// A reader of `len` bytes in chunks of `stride` over a counting fetch: chunk `i` is the byte `i as u8` throughout.
+fn counting(len: u64, stride: u64, limits: Limits) -> (MediaReader, Fetches) {
+    let fetches: Fetches = Arc::new(Mutex::new(HashMap::new()));
+    let counted = fetches.clone();
+    let fetch = move |index: u32, _stop: &dyn Fn() -> bool| -> Result<Zeroizing<Vec<u8>>, MediaReadError> {
+        *counted.lock().unwrap().entry(index).or_insert(0) += 1;
+        let start = u64::from(index) * stride;
+        let size = usize::try_from(len.saturating_sub(start).min(stride)).expect("a test chunk's size");
+        Ok(Zeroizing::new(vec![index as u8; size]))
+    };
+    (MediaReader::over_fetch(len, stride, limits, Box::new(fetch)), fetches)
+}
+
+/// Waits (five seconds at most) until the read-ahead has fetched what the last read asked of it: a play that lets
+/// the worker keep up, so a count of fetches does not hang on the threads' timing.
+fn settle(reader: &MediaReader) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !reader.read_ahead_idle() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// The chunks fetched more than once, as `(index, fetches)`, in index order.
+fn fetched_twice(fetches: &Fetches) -> Vec<(u32, u32)> {
+    let mut twice: Vec<(u32, u32)> = fetches
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .map(|(index, n)| (*index, *n))
+        .collect();
+    twice.sort_unstable();
+    twice
+}
+
+/// The lead's test at its real numbers: a 1 GiB file in chunks of 32 MiB (the desktop ladder's stride for it), 200
+/// reads of the longest read in a row, the shipped limits, the read-ahead on. Every chunk is fetched once, no read
+/// passes the budget, and the cache holds the next chunk beside the one played. Red at the base: a 32 MiB cache
+/// holds one such chunk, so every read fetches its chunk again. Mutant (e): the cap → `MEDIA_CACHE_MAX` → red here.
+#[test]
+fn media_sequential_play_at_real_stride_fetches_each_chunk_once() {
+    const LEN: u64 = 1 << 30;
+    const CHUNK: u64 = 32 << 20;
+    let (mut reader, fetches) = counting(LEN, CHUNK, Limits::SHIPPED);
+    let step = u64::from(MEDIA_MAX_READ);
+    for round in 0..200u64 {
+        let at = round * step;
+        let answer = read(&mut reader, at, MEDIA_MAX_READ);
+        assert_ne!(
+            answer.as_ref().err(),
+            Some(&MediaReadError::OverBudget),
+            "read {round} passed the budget"
+        );
+        let got = answer.unwrap_or_else(|why| panic!("read {round}: {why:?}"));
+        let index = (at / CHUNK) as u8;
+        assert!(
+            got.len() == step as usize && got[0] == index && got[got.len() - 1] == index,
+            "read {round}: the bytes of chunk {index}"
+        );
+        settle(&reader);
+    }
+    let held = reader.cached_bytes();
+    assert!(
+        (2 * CHUNK..=3 * CHUNK).contains(&held),
+        "the chunk played and the next one are held: {held} bytes"
+    );
+    drop(reader);
+    assert_eq!(fetched_twice(&fetches), Vec::new(), "chunks fetched more than once");
+    let crossed = fetches.lock().unwrap().len();
+    assert!(crossed >= 25, "precondition: the play crossed {crossed} chunks");
+}
+
+/// A stride whose three chunks pass the ceiling (the cap is the ceiling, 2 500) and a chunk 0 of more than a quarter
+/// of it (1 000): chunk 0 is not pinned, sequential play evicts it, and every later chunk is still fetched once.
+/// Mutant (g): chunk 0 pinned always → chunk 0 stays (and the chunk played is evicted) → red here.
+#[test]
+fn media_large_first_chunk_is_not_pinned() {
+    const CHUNK: u64 = 1_000;
+    const LEN: u64 = 10 * CHUNK;
+    let limits = Limits {
+        cache_floor: 100,
+        cache_ceiling: 2_500,
+        read_ahead: 300,
+        refetch_slack: 0,
+    };
+    assert_eq!(limits.cache_cap(CHUNK), 2_500, "precondition: the cap is the ceiling");
+    let (mut reader, fetches) = counting(LEN, CHUNK, limits);
+    for round in 0..40u64 {
+        let at = round * 250;
+        let got = read(&mut reader, at, 250).expect("a range inside the file");
+        let index = (at / CHUNK) as u8;
+        assert!(
+            got.iter().all(|byte| *byte == index),
+            "read {round}: the bytes of chunk {index}"
+        );
+        settle(&reader);
+        let held = reader.cached_bytes();
+        assert!(held <= 2_500, "read {round}: held {held} of 2 500");
+    }
+    assert!(
+        !reader.shared.lock().chunks.contains_key(&0),
+        "chunk 0 was evicted once the play went past it"
+    );
+    drop(reader);
+    let expected: HashMap<u32, u32> = (0..10).map(|index| (index, 1)).collect();
+    assert_eq!(*fetches.lock().unwrap(), expected, "every chunk fetched once");
+}
+
+/// MCP2's real-stride run (`--ignored`, on the testrig): a real 1 GiB file in chunks of 32 MiB, encrypted by core under
+/// the account's key and served by the fake as the server serves it (its version named, every chunk request pinned),
+/// played from its first byte to its last with the shipped limits and the read-ahead on, at the threads' own pace.
+/// Prints the fetches of every chunk index; each is asked for once.
+#[test]
+#[ignore = "MCP2's real-stride run: a real 1 GiB file (about 1.5 GiB of memory); run with --ignored on the testrig"]
+fn media_real_stride_run_counts_fetches_per_chunk() {
+    use beebeeb_core::chunk_stream::{ChunkEncryptor, ExpectedChunkFormat};
+    const LEN: u64 = 1 << 30;
+    const CHUNK: u64 = 32 << 20;
+    let byte_at = |position: u64| (position % 253) as u8;
+
+    let (account, _) = FakeAccount::register("film@example.eu", "an invented password", TEST_PHRASE);
+    let account = Arc::new(account);
+    account.add_item(FILM, None, "Invented film.mkv", false, LEN);
+    // As an upload of this account stores it (`FakeAccount::add_file_with_content`, at the real stride).
+    let master = beebeeb_core::kdf::MasterKey::from_bytes(account.master_key);
+    let file_key = beebeeb_core::kdf::derive_file_key(&master, FILM.as_bytes());
+    let mut encryptor = ChunkEncryptor::for_push_with_file_key(file_key, FILM, LEN, CHUNK)
+        .expect("a chunk encryptor")
+        .with_recorded_pin(ExpectedChunkFormat::Unrecorded)
+        .expect("the format of the name");
+    let frames: Vec<Vec<u8>> = (0..LEN.div_ceil(CHUNK))
+        .map(|index| {
+            let start = index * CHUNK;
+            let plain: Vec<u8> = (start..(start + CHUNK).min(LEN)).map(byte_at).collect();
+            encryptor.push_chunk(&plain).expect("an encrypted chunk").data
+        })
+        .collect();
+    let version = encryptor
+        .version_commitment_after(None)
+        .expect("the upload's commitment");
+    encryptor.finish().expect("the last chunk");
+    let name_key = beebeeb_core::kdf::derive_file_key(&master, FILM.as_bytes());
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name_for_version(
+        &name_key,
+        "Invented film.mkv",
+        None,
+        ExpectedChunkFormat::Unrecorded,
+        version,
+    )
+    .expect("the completion name");
+
+    let rest: Handler = account_handler(account.clone());
+    let token = account.session_token.clone();
+    let frames = Arc::new(frames);
+    let api = FakeApi::start(Arc::new(move |req: &Request| {
+        let route = req.route();
+        let Some(path) = route.strip_prefix("GET /api/v1/files/") else {
+            return rest(req);
+        };
+        let (id, chunk) = match path.split_once("/chunks/") {
+            Some((id, index)) => (id, Some(index)),
+            None => (path, None),
+        };
+        if id != FILM {
+            return rest(req);
+        }
+        if req.bearer() != Some(token.as_str()) {
+            return Reply::error(401, "unauthorized");
+        }
+        let Some(index) = chunk else {
+            let reply = rest(req);
+            if reply.status != 200 {
+                return reply;
+            }
+            let mut row: serde_json::Value = serde_json::from_slice(&reply.body).expect("the fake's row");
+            row["name_encrypted"] = json!(name_encrypted);
+            row["chunk_count"] = json!(frames.len());
+            row["chunk_size_bytes"] = json!(CHUNK);
+            row["download_version"] = manifest_of(&version_id(1), LEN, CHUNK);
+            return Reply::ok(row);
+        };
+        if req
+            .query("object_version_id")
+            .is_some_and(|asked| !asked.eq_ignore_ascii_case(&version_id(1)))
+        {
+            return Reply::error(409, GONE);
+        }
+        match index.parse::<usize>().ok().and_then(|index| frames.get(index)) {
+            Some(frame) => Reply::bytes(200, frame.clone()),
+            None => Reply::error(404, "not_found"),
+        }
+    }));
+    let fake = Fake {
+        api,
+        account,
+        current: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.account);
+    let _state = local_state(&engine, &fake.account);
+
+    let mut reader = open(&engine, FILM);
+    assert_eq!((reader.len(), reader.origin()), (LEN, MediaOrigin::Beebeeb));
+    let step = u64::from(MEDIA_MAX_READ);
+    for round in 0..LEN / step {
+        let at = round * step;
+        let got = read(&mut reader, at, MEDIA_MAX_READ).unwrap_or_else(|why| panic!("read {round}: {why:?}"));
+        assert!(
+            got.len() == step as usize && got[0] == byte_at(at) && got[got.len() - 1] == byte_at(at + step - 1),
+            "read {round}: the plaintext at its place"
+        );
+    }
+    drop(reader);
+
+    let mut per_index: HashMap<u32, u32> = HashMap::new();
+    for index in fake.chunks_asked(FILM) {
+        *per_index.entry(index).or_insert(0) += 1;
+    }
+    let count = u32::try_from(LEN.div_ceil(CHUNK)).unwrap();
+    for index in 0..count {
+        println!("chunk {index}: {} fetches", per_index.get(&index).copied().unwrap_or(0));
+    }
+    assert!(
+        (0..count).all(|index| per_index.contains_key(&index)),
+        "precondition: every chunk was asked for"
+    );
+    assert!(
+        per_index.values().all(|fetches| *fetches <= 1),
+        "a chunk fetched more than once: {per_index:?}"
+    );
 }
