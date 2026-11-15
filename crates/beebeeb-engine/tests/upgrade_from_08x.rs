@@ -10,7 +10,9 @@
 //! The premise, made in the copy (the committed files are never opened): the 0.8.25 image has no owner record (the
 //! release had none) and its account rows (2 file rows, 1 staged payload), but no queued operation. One due
 //! operation is added through the engine's own writer (`StateDb::enqueue_operation`), and the sync folder's local
-//! items (`Documents/` with the file the image names) are made by the test.
+//! items (`Documents/` with the file the image names) are made by the test. That first open of the copy is the
+//! test's own `StateDb::open`, so the engine's start finds it migrated; the release's raw first open is
+//! `engine_bridge::tests::upgrade_from_0_8_25`'s.
 //!
 //! The credential store, as 0.8.25 left it: the engine's own sign-in on the fake account writes it (the password,
 //! and the 12 words where a test names a vault key), on a first handle that is then dropped. The upgraded app is a
@@ -20,9 +22,9 @@
 //! Each test runs in a process of its own (`in_own_process`): the state folder is a process-wide global
 //! (`state_paths`), set once per process, and `tests/common` makes a new one per setup.
 //!
-//! Mutants (BRANCH-NOTES of the lane): M1 no candidate at `account_binding::adopt_unbound`; M2 a Windows start that
-//! may reset; M3 `close_adoption_window` a no-op; M4 an adoption that accepts an unknown identity; M5 the bind after
-//! the registration.
+//! Mutants: M1 no candidate at `account_binding::adopt_unbound`; M2' a Windows start that may reset (the start's
+//! bind with `reset_allowed` true AND `LocalState::reset` answering `Ok(())`); M3 `close_adoption_window` a no-op;
+//! M4'' the start's two identity checks removed; M5 the bind after the registration.
 
 mod common;
 
@@ -72,7 +74,7 @@ fn an_upgraded_pc_keeps_its_queue_for_the_account_whose_session_it_held() {
 /// Rule 2: after rule 1's adoption, A signs out keeping the local data (the Windows sign-out), B signs in and
 /// unlocks. B's start is refused with `OtherAccountsData`; the owner, the queue and the files are A's as they were.
 /// A comes back: `Started`, the queue intact.
-/// Mutant M2 (a Windows start that may reset: `reset_allowed` true at the start's bind AND `LocalState::reset`
+/// Mutant M2' (a Windows start that may reset: `reset_allowed` true at the start's bind AND `LocalState::reset`
 /// `Ok(())`): B's start runs and B becomes the owner.
 #[cfg(not(target_os = "macos"))]
 #[test]
@@ -138,7 +140,7 @@ fn another_account_on_an_upgraded_pc_is_refused_and_takes_nothing() {
 /// on Windows it is refused with `OtherAccountsData`. The adoption window is shut by then: an adoption asked after it
 /// adopts nobody.
 /// Mutant M3 (`close_adoption_window` a no-op): the window is still open after the second start.
-/// Mutant M2 (see rule 2): the second start resets the unowned data and records A.
+/// Mutant M2' (see rule 2): the second start resets the unowned data and records A.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn no_vault_key_no_adoption_and_the_window_shuts_after_the_first_start() {
@@ -198,7 +200,10 @@ fn no_vault_key_no_adoption_and_the_window_shuts_after_the_first_start() {
 /// Rule 4: the store holds a token and a key but NO email and no owner tags (a session stored before the email was
 /// kept), and the new handle has no cached profile. Open + restore + start: the start is refused with
 /// `IdentityUnknown`, nothing is adopted, nothing is purged, no engine exists.
-/// Mutant M4 (an adoption that accepts an unknown identity) cannot turn this red through the start: see BRANCH-NOTES.
+/// Mutant M4'' (the start's own `!identity.is_known()` refusal AND `decide`'s `Refuse` for an unknown session both
+/// removed): the unowned data is then "another account's" and the start answers `OtherAccountsData`. An adoption that
+/// accepts an unknown identity cannot turn this red: the start refuses before it binds, and an unknown identity
+/// records no owner field.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn an_unidentified_session_adopts_nothing() {
