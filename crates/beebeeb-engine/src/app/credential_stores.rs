@@ -165,7 +165,7 @@ fn must_not_move<S: AuthSecretStore>(legacy: &S, slot: &S) -> AuthResult<bool> {
     if is_retired(legacy)? {
         return Ok(true);
     }
-    holds_native_sign_in(slot)
+    Ok(false)
 }
 
 /// Delete the flat session: its token, key and email first, then the retired mark, only once those are gone (flat

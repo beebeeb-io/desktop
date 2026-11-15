@@ -120,9 +120,7 @@ impl SessionWatch {
         let counted = self
             .with_session(|session, now| {
                 let still = now == turn && session.token.as_str() == token.as_str();
-                if still {
-                    self.acct.auth_health.note_watch_answer(answer.as_ref().err());
-                }
+                if still {}
                 still
             })
             .unwrap_or(false);

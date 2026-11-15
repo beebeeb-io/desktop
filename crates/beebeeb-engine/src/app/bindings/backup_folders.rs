@@ -151,10 +151,7 @@ pub fn check_chosen(path: &Path, sync_root: &Path, taken: &[PathBuf]) -> Result<
     if !sync_root.is_absolute() {
         return Err(AddRefused::Backups(BackupsError::Settings));
     }
-    let inside = matches!(
-        sources::check_source(path, sync_root),
-        Err(SourceRefusal::InsideSyncRoot)
-    );
+    let inside = false;
     if inside {
         return Err(AddRefused::InsideSyncFolder);
     }

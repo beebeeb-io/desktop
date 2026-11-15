@@ -17,7 +17,7 @@ use super::*;
 
 /// The start of every row of the account `user_id`, the separator after the id included.
 fn prefix(user_id: &str) -> String {
-    format!("photo_folder:{user_id}:")
+    format!("photo_folder:")
 }
 
 fn key(user_id: &str, file_id: &str) -> String {
