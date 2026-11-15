@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::setup_api::SetupRefused;
 use beebeeb_engine::app::{CredentialStores, Engine, SyncStart, SyncStartRefused};
+use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::signin::gate::GateState;
 use beebeeb_engine::sync_folder_rule::SyncFolderRefused;
 use beebeeb_engine::sync_view::{Explorer as EngineExplorer, Start, SyncView};
@@ -332,6 +333,12 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn binds_previews(&self) -> bool {
         false
     }
+    /// The space this PC keeps for copies and previews, in bytes: the limit Settings > Storage shows
+    /// (`DesktopConfig::local_cache_limit_bytes`). `None`: not read, or none set; step 4 then draws no such row.
+    /// BLOCKS (a small file read).
+    fn preview_limit_bytes(&self) -> Option<u64> {
+        None
+    }
     /// `Engine::photo_previews_for`. BLOCKS.
     fn previews_facts_for(
         &self,
@@ -475,6 +482,13 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     }
     fn binds_previews(&self) -> bool {
         true
+    }
+    fn preview_limit_bytes(&self) -> Option<u64> {
+        // The same read as the Drive settings pane (`EngineDriveSettings::local_settings`), the signed-in account's.
+        let config = DesktopConfig::load_for(crate::shell::identity::engine_identity()).ok()?;
+        u64::try_from(config.local_cache_limit_bytes)
+            .ok()
+            .filter(|bytes| *bytes > 0)
     }
     fn previews_facts_for(
         &self,
@@ -1115,9 +1129,10 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     fn fit_line(&self, size: PreviewSize, format: PreviewFormat) -> String {
         self.previews_fit_line(size, format)
     }
-    /// Nothing is kept on this PC yet (PREV-2): no limit to state, and step 4 draws no such row.
+    /// This PC's own limit for kept copies and previews, as the board writes sizes ("35 GB"); the engine's figure,
+    /// read once. Empty when none is known: step 4 then draws no such row (never a made-up "20 GB").
     fn space_limit(&self) -> String {
-        String::new()
+        self.previews_space_limit()
     }
     /// The person's own photo, measured here; else the picture that ships inside the app, said as that.
     fn sample(&self) -> Sample {
