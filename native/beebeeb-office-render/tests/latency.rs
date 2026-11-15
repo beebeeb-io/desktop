@@ -155,8 +155,7 @@ impl Session {
 
         let pixels = out.as_slice()[..got.w as usize * got.h as usize * 4].to_vec();
         let full = started.elapsed();
-        // Not timed: the sandbox zeroizes the section as it drops.
-        drop(out);
+        // Not timed: the sandbox zeroizes the section as it drops, at the end of this function (after `full`).
         (full, render_only, pixels, got.w, got.h)
     }
 }
