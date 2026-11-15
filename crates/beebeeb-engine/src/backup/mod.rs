@@ -28,10 +28,14 @@ use crate::state_db::StateDb;
 /// resolved the device folder is `None`.
 pub fn own_backups(identity: &'static crate::identity::EngineIdentity, db: &StateDb) -> Option<OwnBackups> {
     let cfg = crate::config::DesktopConfig::load_for(identity).ok()?;
-    Some(own_backups_for(
-        db,
-        &sources::backup_sources_quiet(&cfg.known_folder_backup, &cfg.known_folder_source),
-    ))
+    let mut on = sources::backup_sources_quiet(&cfg.known_folder_backup, &cfg.known_folder_source);
+    // The folders the person chose (DW-0737) are protected like the known ones while they are on.
+    on.extend(sources::chosen_sources(
+        &cfg.backup_chosen_folders,
+        &cfg.known_folder_backup,
+        None,
+    ));
+    Some(own_backups_for(db, &on))
 }
 
 pub fn own_backups_for(db: &StateDb, sources: &[scheduler::BackupSource]) -> OwnBackups {

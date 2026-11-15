@@ -32,7 +32,7 @@ use crate::State;
 use crate::shell::app::{Screen, SettingsPane};
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
 use crate::ui::backups_kit::CODE_LEN;
-use source::{BackupsSource, FixtureSource};
+use source::{BackupsSource, FixtureSource, Stopped};
 
 /// The registry's line for the section (`shell/registry.rs`).
 pub const FRAME: Frame = Frame {
@@ -115,6 +115,14 @@ pub struct BackupsUi {
     /// The device a "Delete this backup" was sent for and not answered yet (a source that answers late): its answer
     /// goes to that device's dialog only.
     delete_sent: Option<String>,
+    /// DW-1410's second step (NOT ON THE BOARD, flagged in `frames/this_pc/FRAMES.md`): "Stop and move the backup to
+    /// Trash" asks for the account password where the source proves it (`BackupsSource::trash_needs_password`). The
+    /// password is typed into `code`, like "Delete this backup".
+    stop_asks_password: bool,
+    /// Why the last move to Trash was not done, under the password field while the step is open.
+    stop_refusal: Option<&'static str>,
+    /// The chosen folder a move to Trash was sent for and not answered yet: its answer goes to that folder's dialog.
+    stop_sent: Option<String>,
 }
 
 impl BackupsUi {
@@ -137,6 +145,9 @@ impl BackupsUi {
             notice: None,
             delete_refusal: None,
             delete_sent: None,
+            stop_asks_password: false,
+            stop_refusal: None,
+            stop_sent: None,
         }
     }
 
@@ -185,11 +196,11 @@ impl BackupsUi {
         self.dialog = None;
         self.code.clear();
         self.delete_refusal = None;
+        self.stop_asks_password = false;
+        self.stop_refusal = None;
     }
 
-    /// What Backups asked of the shell since the last call, oldest first. (The shell lane
-    /// takes them; until it does, only the tests call this.)
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// What Backups asked of the shell since the last call, oldest first (`shell::intents` takes them).
     pub fn take_intents(&mut self) -> Vec<Intent> {
         std::mem::take(&mut self.intents)
     }
@@ -221,9 +232,9 @@ impl BackupsUi {
         self.ask(Intent::PickFolder);
     }
 
-    /// The folder picker's answer. `false`: Beebeeb's own folder, or one inside it, cannot
-    /// be chosen; nothing changed.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The folder picker's answer (`shell::intents` hands it over). `false`: nothing was asked (the fixture: Beebeeb's
+    /// own folder, or one inside it, cannot be chosen). A source that answers late takes it as "sent" and says a
+    /// refusal in the section, in the engine's words.
     pub fn folder_picked(&mut self, path: &str) -> bool {
         self.source.as_mut().is_some_and(|source| source.add_folder(path))
     }
@@ -234,12 +245,86 @@ impl BackupsUi {
         self.dialog = Some(Dialog::StopFolder(id.to_string()));
     }
 
-    /// DW-1410's two answers. Nothing on Windows is touched either way.
+    /// DW-1410's two answers. Nothing on Windows is touched either way. Where the source proves the account password
+    /// before a move to Trash, "Stop and move the backup to Trash" opens the dialog's second step instead.
     pub fn stop_folder(&mut self, move_copy_to_trash: bool) {
+        let needs_password = self.source().is_some_and(|source| source.trash_needs_password());
+        if move_copy_to_trash && needs_password {
+            if matches!(self.dialog, Some(Dialog::StopFolder(_))) {
+                self.stop_asks_password = true;
+                self.stop_refusal = None;
+                self.code.clear();
+                self.focus_password = true;
+            }
+            return;
+        }
         if let (Some(Dialog::StopFolder(id)), Some(source)) = (self.dialog.clone(), &mut self.source) {
             source.remove_folder(&id, move_copy_to_trash);
         }
         self.close_dialog();
+    }
+
+    /// DW-1410's second step is open: the account password before the move to Trash.
+    pub(crate) fn stop_asks_password(&self) -> bool {
+        self.stop_asks_password && matches!(self.dialog, Some(Dialog::StopFolder(_)))
+    }
+
+    /// "Move to Trash" in the second step: off until a password is typed. The source proves it (the engine: core's
+    /// step-up) before anything moves; the field is wiped either way. The dialog stays, says it is moving and sends
+    /// nothing more, until the answer comes through [`poll`] (done: closed; refused: the words under the field).
+    pub fn stop_folder_to_trash(&mut self) -> bool {
+        let Some(Dialog::StopFolder(id)) = self.dialog.clone() else {
+            return false;
+        };
+        if !self.stop_asks_password || self.code_len() == 0 {
+            return false;
+        }
+        let Some(source) = self.source.as_mut() else {
+            return false;
+        };
+        if source.stopping() {
+            return false;
+        }
+        let sent = source.remove_folder_to_trash(&id, &self.code.text);
+        self.code.clear();
+        self.stop_refusal = None;
+        if sent {
+            self.stop_sent = Some(id);
+        }
+        sent
+    }
+
+    /// A move to Trash is on its way.
+    pub(crate) fn stopping(&self) -> bool {
+        self.source().is_some_and(|source| source.stopping())
+    }
+
+    /// Why the last move to Trash was not done, while its step is open.
+    pub(crate) fn stop_refusal(&self) -> Option<&'static str> {
+        self.stop_refusal.filter(|_| self.stop_asks_password())
+    }
+
+    /// The answer to a move to Trash that was sent. Done: the dialog closes (the source reads the list again).
+    /// Refused, nothing changed: the words under the password field, or in the section when the dialog was closed
+    /// meanwhile. Stopped without the move: the dialog closes and the section says so.
+    fn stop_answered(&mut self, answer: Stopped) {
+        let sent = self.stop_sent.take();
+        let open = self.stop_asks_password()
+            && matches!(&self.dialog, Some(Dialog::StopFolder(id)) if sent.as_deref() == Some(id.as_str()));
+        match answer {
+            Stopped::Done if open => self.close_dialog(),
+            Stopped::Done => {}
+            Stopped::Refused(words) if open => self.stop_refusal = Some(words),
+            Stopped::Refused(words) => {
+                self.notice = Some((words, LIST_SHOWS, std::time::Instant::now()));
+            }
+            Stopped::StoppedOnly(words) => {
+                if open {
+                    self.close_dialog();
+                }
+                self.notice = Some((words, LIST_SHOWS, std::time::Instant::now()));
+            }
+        }
     }
 
     pub fn open_in_photos(&mut self, device: &str) {
@@ -590,6 +675,8 @@ pub fn sync(s: &mut State) {
 const DELETE_NOTICE_SUB: &str = "Other devices shows what Beebeeb has.";
 /// The line under a refused change of a folder.
 const NOTHING_CHANGED: &str = "Nothing was changed.";
+/// The line under what a move to Trash did, said in the section (its words say what changed).
+const LIST_SHOWS: &str = "This PC's list shows what is backed up now.";
 
 /// How long a refusal stays in the section.
 const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
@@ -615,6 +702,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         ui.focus_password = false;
         tx.focus(view::PASSWORD_KEY, true);
     }
+    if ui.focus_password && ui.stop_asks_password() {
+        ui.focus_password = false;
+        tx.focus(view::STOP_PASSWORD_KEY, true);
+    }
     let Some(source) = ui.source.as_mut() else {
         return false;
     };
@@ -630,6 +721,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     if let Some(answer) = pumped.deleted {
         ui.delete_answered(answer);
+        changed = true;
+    }
+    if let Some(answer) = pumped.stopped {
+        ui.stop_answered(answer);
         changed = true;
     }
     if ui.notice.is_some_and(|(_, _, at)| at.elapsed() >= NOTICE_FOR) {
@@ -658,6 +753,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         && ui.code_len() > 0
     {
         ui.delete_device();
+        return true;
+    }
+    // DW-1410's second step takes the password in its own field too.
+    if ui.stop_asks_password() && ev.key == Key::Enter && ui.code_len() > 0 {
+        ui.stop_folder_to_trash();
         return true;
     }
     let code_dialog = matches!(ui.dialog, Some(Dialog::MailTurnOff));
