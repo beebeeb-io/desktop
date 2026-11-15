@@ -274,9 +274,8 @@ fn the_late_notice_keeps_the_window_behind_it_working() {
     assert!(super::tests::find(&r.rt, "late-change-text").is_some(), "still said");
 }
 
-/// #440 review, P2 and P3: the set-up page that adopts a key request of an earlier turn says it waits (never that the
-/// set-up could not start), and the key that comes for that turn is not drawn (the engine wiped it: a QR code that can
-/// never be turned on). The page asks for a key of its own.
+/// #440 review, P2: the key that comes for an earlier turn to a set-up page that adopted its request is not drawn (the
+/// engine wiped it: a QR code that can never be turned on). The page asks for a key of its own.
 #[test]
 fn the_set_up_page_never_draws_a_key_of_an_earlier_turn() {
     let mut r = rig("DW-A69", like_the_engine());
@@ -286,12 +285,6 @@ fn the_set_up_page_never_draws_a_key_of_an_earlier_turn() {
     r.held.moved.set(true);
     r.go("DW-A69");
     assert_eq!(r.started(), [CallKind::BeginTwoFactor], "nothing new while it is out");
-    let said = r.text();
-    assert!(said.contains("still being made"), "it says it waits: {said}");
-    assert!(
-        !said.contains("Could not start the set-up"),
-        "never that it failed while it waits"
-    );
     r.answer(Answered::Setup(super::source::Setup {
         modules: vec![vec![true; 21]; 21],
         key: Secret::new("JBSW Y3DP EHPK 3PXP"),
@@ -334,4 +327,18 @@ fn the_late_notice_can_be_dismissed() {
     assert!(r.rt.state.account.late_change.is_none(), "and not kept");
     r.go("DW-A67");
     assert_eq!(r.rt.state.account.form.problem, None, "nothing said of it later");
+}
+
+/// #440 review, P3: the set-up page that adopts a key request still out says it waits, never that it could not start.
+#[test]
+fn the_set_up_page_says_it_waits_for_a_key_still_on_its_way() {
+    let mut r = rig("DW-A69", like_the_engine());
+    r.go("DW-A71");
+    r.go("DW-A69");
+    let said = r.text();
+    assert!(said.contains("still being made"), "it says it waits: {said}");
+    assert!(
+        !said.contains("Could not start the set-up"),
+        "never that it failed while it waits"
+    );
 }
