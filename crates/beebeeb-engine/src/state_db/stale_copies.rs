@@ -70,17 +70,19 @@ impl StateDb {
     }
 
     /// Windows: `copy`'s placeholder was emptied and verified empty under one exclusive handle. The row says so in
-    /// one statement, only while the rule still names it with the same agreed content: nothing on this PC, no agreed
-    /// content, nothing fetched. Agreed content is cleared in the same statement, so the cloud-only fold leaves no
-    /// candidate of the older version (whose bytes are gone) to make the next fetch read as mixed. A kept file is
-    /// recorded cloud-only too (it is, until it is fetched again). The row keeps the pulled version's size and time,
-    /// which the placeholder now carries. `false`: the row moved; nothing was written.
+    /// one statement, only while the rule still names it with the same agreed content: cloud-only, as "Free up space"
+    /// and the poison step record an emptied placeholder. The cloud-only trigger folds the agreed content into the
+    /// fetch candidate (version and hash of the older version): an app that still had the older version open and
+    /// saves into the empty placeholder makes a change sent on that version (the two-versions question), never one
+    /// of unknown content that is held and never sent; a whole fetch of the current version records it as agreed
+    /// (`record_whole_fetch`). A kept file is recorded cloud-only too (it is, until it is fetched again). The row keeps
+    /// the pulled version's size and time, which the placeholder now carries. `false`: the row moved; nothing was
+    /// written.
     pub fn record_stale_copy_emptied(&self, copy: &StaleCopy) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn.execute(
             &format!(
-                "UPDATE files SET status = 'cloud_only', local_hash = NULL, fetched_min_version = 0,
-                     fetched_hash = NULL, cache_path = NULL, cache_bytes = 0
+                "UPDATE files SET status = 'cloud_only', cache_path = NULL, cache_bytes = 0
                  WHERE file_id = ?1 AND local_base_version = ?2 AND local_hash = ?3 AND {STALE_AGREED_COPY_SQL}"
             ),
             params![copy.file_id, copy.local_base_version, copy.local_hash],
@@ -168,8 +170,10 @@ mod tests {
     }
 
     /// Windows' row write after a verified-empty dehydrate: one compare-and-set on the content it checked. The row is
-    /// cloud-only with no agreed content and nothing fetched (the fold leaves no candidate of the older version), and
-    /// it keeps the pulled version's size and time. A row that moved is not written.
+    /// cloud-only, keeps the pulled version's size and time, and its older agreed content joins the fetch candidate:
+    /// an app that saves into the empty placeholder with the older version still open makes a change sent on version
+    /// 1 (the two-versions question), never bytes of unknown content that would be held and never sent. A row that
+    /// moved is not written.
     #[test]
     fn an_emptied_copy_is_recorded_once_and_only_as_it_was_checked() {
         let (_dir, db) = db_with(&[("f", "local", 2, 1, Some("h1")), ("g", "local", 2, 1, Some("h1"))]);
@@ -197,14 +201,20 @@ mod tests {
         assert_eq!(contract.local_hash, None);
         assert_eq!(
             db.fetched_content("f").unwrap(),
-            None,
-            "no candidate of the older version"
+            Some((1, Some("h1".to_string()))),
+            "the older version's content is the candidate"
         );
-        assert!(
-            !db.is_unknown_content("f").unwrap(),
-            "not a file of unknown content either"
-        );
+        assert!(!db.is_unknown_content("f").unwrap(), "not a file of unknown content");
         assert_eq!(ids(&db.list_stale_agreed_copies(10).unwrap()), vec!["g"]);
+        // An editor that still had version 1 open saves into the emptied placeholder, before any fetch.
+        let dir = tempfile::tempdir().unwrap();
+        let place = dir.path().join("f.txt");
+        std::fs::write(&place, b"saved over the emptied placeholder").unwrap();
+        assert_eq!(
+            crate::engine_bridge::sync_folder_content(&db, "f", &place, None).unwrap(),
+            crate::engine_bridge::SyncFolderContent::Changed { base: Some(1) },
+            "a change sent on version 1: the two-versions question, never held as content unknown"
+        );
     }
 
     /// F2 (task 2523): a landing that did not write the file's place (the viewer on Windows and Linux) moves the

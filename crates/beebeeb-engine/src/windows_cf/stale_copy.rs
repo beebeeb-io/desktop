@@ -127,6 +127,10 @@ unsafe fn refresh_under(
                     return Refreshed::Later("identity");
                 }
             }
+            // Review F9 (as `stamp_if_agreed`): wholly on disk, read through the handle that then reads the bytes.
+            RefreshStep::CheckAgreedBytes if !super::placeholders::held_fully_on_disk(file) => {
+                return Refreshed::Later("not_wholly_on_disk");
+            }
             RefreshStep::CheckAgreedBytes => match hash_through(file) {
                 Some(hash) if hash == copy.local_hash => {}
                 Some(_) => return Refreshed::Changed,
