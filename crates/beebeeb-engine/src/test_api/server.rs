@@ -177,6 +177,7 @@ pub fn fixture_account() -> Arc<FakeAccount> {
     let (mut account, _phrase) = FakeAccount::register(FIXTURE_EMAIL, FIXTURE_PASSWORD, TEST_PHRASE);
     account.user_id = FIXTURE_USER_ID.to_string();
     add_sample_tree(&account);
+    account.serve_security_routes(true);
     Arc::new(account)
 }
 

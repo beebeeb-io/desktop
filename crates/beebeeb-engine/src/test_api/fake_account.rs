@@ -117,9 +117,25 @@ pub struct FakeAccount {
     restore_refusal: Mutex<Option<u16>>,
     /// The next version restore is read and made, and the connection is closed without an answer.
     restore_hangs_up: AtomicBool,
+    /// `account/sessions`, `me/activity`, `me/profile` and `me/two-factor` answer. Off (a test's own fake, the
+    /// default): they are 404 as before, so a test that sets its own state for them is never shadowed.
+    /// [`Self::serve_security_routes`]; the `bb-fake-server` fixture turns it on.
+    security_routes: AtomicBool,
+    /// What `me/two-factor` says ([`Self::set_two_factor`]); off at the start.
+    two_factor_on: AtomicBool,
 }
 
 impl FakeAccount {
+    /// Answer the Security page's four routes (see the field); the fixture of `bb-fake-server` does.
+    pub fn serve_security_routes(&self, on: bool) {
+        self.security_routes.store(on, Ordering::SeqCst);
+    }
+
+    /// Whether `me/two-factor` says two-factor is on.
+    pub fn set_two_factor(&self, on: bool) {
+        self.two_factor_on.store(on, Ordering::SeqCst);
+    }
+
     /// Register a new invented account with the real OPAQUE protocol and a real recovery check. The recovery
     /// phrase is returned alongside the account so tests can unlock with it.
     pub fn register(email: &str, password: &str, recovery_phrase: &str) -> (Self, String) {
@@ -154,6 +170,8 @@ impl FakeAccount {
             restores: AtomicUsize::new(0),
             restore_refusal: Mutex::new(None),
             restore_hangs_up: AtomicBool::new(false),
+            security_routes: AtomicBool::new(false),
+            two_factor_on: AtomicBool::new(false),
         };
         (account, recovery_phrase.to_string())
     }
@@ -569,7 +587,7 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
             }
 
             // ── What the Security page reads: invented rows, in the client's shapes ──
-            "GET /api/v1/account/sessions" => {
+            "GET /api/v1/account/sessions" if account.security_routes.load(Ordering::SeqCst) => {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
@@ -583,7 +601,7 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }] }))
             }
 
-            "GET /api/v1/me/activity" => {
+            "GET /api/v1/me/activity" if account.security_routes.load(Ordering::SeqCst) => {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
@@ -596,18 +614,18 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }] }))
             }
 
-            "GET /api/v1/me/profile" => {
+            "GET /api/v1/me/profile" if account.security_routes.load(Ordering::SeqCst) => {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
                 Reply::ok(json!({ "display_name": "Fixture" }))
             }
 
-            "GET /api/v1/me/two-factor" => {
+            "GET /api/v1/me/two-factor" if account.security_routes.load(Ordering::SeqCst) => {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
-                Reply::ok(json!({ "enabled": false }))
+                Reply::ok(json!({ "enabled": account.two_factor_on.load(Ordering::SeqCst) }))
             }
 
             // ── Recovery check ──────────────────────────────────────────

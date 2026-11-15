@@ -202,3 +202,39 @@ fn the_security_page_routes_answer_in_the_shapes_the_client_reads() {
         "sessions, of them current, activity recorded, activity events none?, a display name, two-factor on"
     );
 }
+
+#[test]
+fn an_account_that_does_not_serve_the_security_routes_leaves_them_404_and_two_factor_follows_its_state() {
+    use super::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
+    let (account, _) = FakeAccount::register("plain@example.invalid", "a password", TEST_PHRASE);
+    let account = Arc::new(account);
+    let handler = account_handler(account.clone());
+    let token = Some(account.session_token.as_str());
+    let routes = [
+        "/api/v1/account/sessions",
+        "/api/v1/me/activity",
+        "/api/v1/me/profile",
+        "/api/v1/me/two-factor",
+    ];
+    let status = |h: &super::Handler| -> Vec<u16> {
+        routes
+            .iter()
+            .map(|r| call(h, "GET", r, token, Value::Null).status)
+            .collect()
+    };
+    let off = status(&handler);
+    account.serve_security_routes(true);
+    let on = status(&handler);
+    let factor = |h: &super::Handler| {
+        serde_json::from_slice::<Value>(&call(h, "GET", "/api/v1/me/two-factor", token, Value::Null).body).unwrap()["enabled"]
+            .clone()
+    };
+    let before = factor(&handler);
+    account.set_two_factor(true);
+    let after = factor(&handler);
+    assert_eq!(
+        (off, on, before, after),
+        (vec![404; 4], vec![200; 4], json!(false), json!(true)),
+        "statuses off, statuses on, two-factor before and after the account's own state changed"
+    );
+}
