@@ -6,8 +6,8 @@ repairs it on request. It reads and writes only through ports (the bridge, the e
 lifecycle log). This note carries those rules and is the acceptance list for the macOS phase: every rule the native
 macOS app must keep, and every test of each file with what it asserts.
 
-**Reference implementation:** the shipped tag `desktop-v0.8.25`, at the paths named below. The files are also on the
-`v2-native` line at `a57b9592` until the old shell is deleted; where a file differs between the two, its section says so.
+**Reference implementation:** the shipped tag `desktop-v0.8.25`, at the paths named below. The files also exist at
+`a57b9592` (the commit this note was written from) until the old shell is deleted; where a file differs between the two, its section says so.
 
 **Related notes:** `file-provider-bridge.md` (the Objective-C bridge and the Rust layer over it, the stale-domain sweep
 at start), `file-provider-removal-and-kept-folders.md` (a removal keeps the files that never reached the server, and

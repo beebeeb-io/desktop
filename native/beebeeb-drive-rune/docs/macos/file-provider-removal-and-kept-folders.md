@@ -8,7 +8,7 @@ that, and for every other folder the 0.8.x Mac app kept for the person and showe
 
 **Reference implementation:** the shipped tag `desktop-v0.8.25`, under the paths named below (for example
 `desktop-v0.8.25:src-tauri/src/finder_removal.rs`). Every test named here exists at that tag with the same name;
-the files are also on the `v2-native` line at `a57b9592` until the old shell is deleted. Specs:
+the files also exist at `a57b9592` (the commit this note was written from) until the old shell is deleted. Specs:
 `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` (the removal) and
 `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md` (the sign-out keep step).
 
@@ -164,9 +164,15 @@ A Mac on 0.8.x may hold all four keys in `desktop.toml`: `kept_unsynced_folder`,
 `kept_unsent_unfinished`, `kept_conflict_copies`. The engine's settings type already reads every one of them
 (`crates/beebeeb-engine/src/config/types.rs`, the `kept_*` fields). The native macOS app must show each non-empty
 one in Settings › Sync and let the person dismiss it (forget, never delete); where a row offers "Show in Finder", it
-reveals only that row's saved folder or listed copy. Rules 7–9. Every writer of the first two keys is macOS code (`finder_removal.rs` `record_kept_folder`, and the
-sign-out keep step, which is built only on macOS), so a 0.8.x Windows PC never wrote them and the Windows app has
-nothing to show.
+reveals only that row's saved folder or listed copy. Rules 7–9.
+
+Why a 0.8.x Windows PC holds neither of the first two keys:
+- `kept_unsent_folder` (and its list) has one writer, the sign-out keep step (`sign_out/keep.rs`, built only on macOS).
+- `kept_unsynced_folder` is written through `record_kept_folder`. Its Windows and Linux route
+  (`remember_kept_folder_held`, from Add to Finder's cleanup, its rollback and Repair) records only a folder that a
+  File Provider removal reported, and on Windows and Linux every File Provider install and removal answers
+  "File Provider is only available on macOS." with nothing kept (`desktop-v0.8.25:src-tauri/src/local_state_purge.rs`,
+  `install_file_provider_domain` and `remove_file_provider_domain`). So that route never runs with a folder.
 
 ---
 
@@ -342,7 +348,7 @@ The kept-folder parts, each a rule the native macOS app must keep:
 - Windows parts (`kept_unknown_files_dir`, files of unknown content kept on Windows) are superseded on Windows and
   not carried here.
 
-**0.8.x data:** the two keys these commands read are written only by macOS code (see rule 10). The native macOS app
+**0.8.x data:** on a 0.8.x Mac only macOS code ever writes the two keys these commands read (rule 10 says why). The native macOS app
 must show a non-empty `kept_unsynced_folder` and `kept_unsent_folder` once in Settings › Sync and let the person
 dismiss each one.
 

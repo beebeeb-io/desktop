@@ -17,7 +17,7 @@ Finder visibility rule for shared items is in `crates/beebeeb-engine/src/finder_
 ## Reference implementation
 
 The shipped tag `desktop-v0.8.25` holds the reference implementation, at the same paths as below. Where a file or a test
-differs between that tag and `a57b9592` (the last commit before the Tauri code is deleted), the section says so. The
+differs between that tag and `a57b9592` (the commit this note was written from; the old shell is deleted after it), the section says so. The
 Objective-C bridge, `macos_workspace.rs` and `extension_log_pin.rs` are byte-identical at both.
 
 ```mermaid
