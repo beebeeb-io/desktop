@@ -92,7 +92,6 @@ impl BindingKind {
     }
 }
 
-// a known weakness
 pub fn decide(owner: Option<&Identity>, session: &Identity, kind: BindingKind) -> Binding {
     // A session that does not know who it is (a sign-in whose account record could not be fetched) is never
     // compared with, adopted into or reset against anything: nothing starts and nothing is deleted until a fetch
