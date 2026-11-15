@@ -207,6 +207,12 @@ Sources: `src-tauri/src/surfaces/launch.rs`, `launch_wiring_tests.rs`, `update_w
 - The Windows and Linux rows of `surfaces/policy.rs` and the Windows/Linux frame of `surfaces/window_state.rs` (the Tauri `main-app`
   shell). The native Windows app has its own window frame (`shell/window_state.rs`, e.g. `maximized_is_carried_and_no_displays_means_defaults`,
   `saving_keeps_the_normal_rectangle_while_maximized_or_minimized`) and close-to-tray (`shell/host.rs`). Linux is dropped by 2537.
+- **Finding (Windows, not macOS; found while carrying):** the Tauri shell fitted the Beebeeb window's DEFAULT size to the display's
+  work area minus a 24 pt margin (`FIT_MARGIN`), and the minimum followed (the four `fit_*` tests of 9.12). The native window opens
+  at `MAIN_SIZE` 1280 × 800 points (`native/beebeeb-drive-rune/src/shell/surfaces.rs:39`, `shell/mod.rs:359`) and only a SAVED size
+  is cut to its display (`shell/window_state.rs:80`, `size_for`; pinned by `a_window_larger_than_its_display_is_cut_to_it`). On a
+  1366 × 768 display at 125 % the work area is about 1093 × 582 points, so a first open is larger than the screen. Not built here
+  (outside this note's area); reported to the delete batch's checkpoint.
 
 ## 9. Acceptance list: every test of the carried files
 
@@ -413,7 +419,7 @@ engine or native test that already holds it), or **Linux, dropped (2537)**.
 - `visible_reports_exactly_what_is_showing`: exact visibility.
 - `close_policy_table`: popover hides, `main` is destroyed.
 
-### 9.12 `src-tauri/src/surfaces/window_state.rs` (22; the last 8 are base-only, the Tauri Windows/Linux frame)
+### 9.12 `src-tauri/src/surfaces/window_state.rs` (22; the last 8 are base-only, the Tauri Windows/Linux frame, not macOS)
 - `a_display_is_its_physical_frame_over_its_own_scale`: per-display logical frames.
 - `the_icon_names_its_display_on_a_mixed_dpi_desk_on_either_display`: mixed DPI.
 - `one_display_holding_the_icon_names_it_whatever_the_icon_height`: one holder.
@@ -428,12 +434,12 @@ engine or native test that already holds it), or **Linux, dropped (2537)**.
 - `a_window_larger_than_the_work_area_keeps_its_title_bar_on_screen`: title bar on screen.
 - `the_file_round_trips_and_anything_else_is_no_frame`: round trip; garbage is none.
 - `no_displays_place_nothing_and_a_bad_scale_counts_as_one`: none; scale 1.
-- `fit_1920x1080_at_100_keeps_the_board_size`: **MOVED** (native `shell/window_state.rs`, Windows; Linux dropped).
-- `fit_1366x768_at_125_shrinks_and_the_minimum_follows`: **MOVED** (as above).
-- `fit_1280x720_at_150_fits_inside_the_margin`: **MOVED** (as above).
-- `fit_portrait_1080x1920_shrinks_the_width_only`: **MOVED** (as above).
+- `fit_1920x1080_at_100_keeps_the_board_size`: 1920 × 1080 at 100 %: the board size stays. **No native copy found** (finding, section 8); Linux dropped.
+- `fit_1366x768_at_125_shrinks_and_the_minimum_follows`: 1366 × 768 at 125 %: the default shrinks to the work area minus the margin and the minimum follows. **No native copy found** (finding, section 8); Linux dropped.
+- `fit_1280x720_at_150_fits_inside_the_margin`: 1280 × 720 at 150 %: the window and its minimum fit inside the 24 pt margin. **No native copy found** (finding, section 8); Linux dropped.
+- `fit_portrait_1080x1920_shrinks_the_width_only`: portrait 1080 × 1920: only the width shrinks. **No native copy found** (finding, section 8); Linux dropped.
 - `a_kept_frame_comes_back_and_a_maximized_flag_survives`: **MOVED**, native pin `shell/window_state_tests.rs:maximized_is_carried_and_no_displays_means_defaults`.
-- `an_off_screen_kept_frame_falls_back_to_the_fitted_default`: **MOVED**, native pin `shell/window_state_tests.rs:a_window_on_a_display_that_is_gone_is_centred_on_the_primary`.
+- `an_off_screen_kept_frame_falls_back_to_the_fitted_default`: **MOVED** for the off-screen fallback, native pin `shell/window_state_tests.rs:a_window_on_a_display_that_is_gone_is_centred_on_the_primary`; its "fitted default" half is the finding of section 8.
 - `maximizing_keeps_the_last_ordinary_frame`: **MOVED**, native pin `shell/window_state_tests.rs:saving_keeps_the_normal_rectangle_while_maximized_or_minimized`.
 - `the_wiring_reads_the_file_and_a_corrupt_one_is_the_default`: **MOVED**, native pin `shell/window_state_tests.rs:nonsense_is_ignored`.
 

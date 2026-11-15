@@ -101,18 +101,18 @@ ID Application identity), `MACOS_APP_PROVISION_PROFILE`, `MACOS_FILE_PROVIDER_PR
 
 ```mermaid
 flowchart TD
-  S1["1. Release state: tools, Apple Silicon, clean tree, HEAD = tag commit, CI release exists, notes and blockers, identity, notary key, minisign"] --> S2["2. Build the .app only, hardened runtime, version patched for the build only, updater artefacts off, updater key stripped from the env"]
-  S2 --> S3["3. Preflight the unnotarised .app (spctl execute skipped)"]
-  S3 --> S4["4. Notarise the .app (zip, notarytool submit --wait; Accepted or fetch the log and stop)"]
-  S4 --> S5["5. Staple the .app; codesign verify deep strict; full preflight"]
-  S5 --> S6["6. Rebuild the .dmg from the stapled app (hdiutil UDZO, /Applications link); sign it with a timestamp; verify"]
-  S6 --> S7["7. Notarise the .dmg; the mounted app is stapled and carries VERSION"]
-  S7 --> S8["8. Staple the .dmg; full preflight (hdiutil verify, spctl install)"]
-  S8 --> S9["9. Recreate Beebeeb.app.tar.gz from the stapled app; the app inside is stapled"]
-  S9 --> S10["10. Upload .dmg + tarball to the GitHub release (clobber), read both back"]
-  S10 --> S11["11. Dispatch sign-macos-updater-artifact; wait on OUR run; download the .sig; minisign-verify it against the tarball"]
-  S11 --> S12["12. Dispatch release.yml publish_existing to backfill the channel manifest"]
-  S12 --> S13["13. Assert the manifest: version, darwin-aarch64 url = this tag, signature = the uploaded .sig, Windows/Linux entries on this tag"]
+  S1["Step 1: Release state: tools, Apple Silicon, clean tree, HEAD = tag commit, CI release exists, notes and blockers, identity, notary key, minisign"] --> S2["Step 2: Build the .app only, hardened runtime, version patched for the build only, updater artefacts off, updater key stripped from the env"]
+  S2 --> S3["Step 3: Preflight the unnotarised .app (spctl execute skipped)"]
+  S3 --> S4["Step 4: Notarise the .app (zip, notarytool submit --wait; Accepted or fetch the log and stop)"]
+  S4 --> S5["Step 5: Staple the .app; codesign verify deep strict; full preflight"]
+  S5 --> S6["Step 6: Rebuild the .dmg from the stapled app (hdiutil UDZO, /Applications link); sign it with a timestamp; verify"]
+  S6 --> S7["Step 7: Notarise the .dmg; the mounted app is stapled and carries VERSION"]
+  S7 --> S8["Step 8: Staple the .dmg; full preflight (hdiutil verify, spctl install)"]
+  S8 --> S9["Step 9: Recreate Beebeeb.app.tar.gz from the stapled app; the app inside is stapled"]
+  S9 --> S10["Step 10: Upload .dmg + tarball to the GitHub release (clobber), read both back"]
+  S10 --> S11["Step 11: Dispatch sign-macos-updater-artifact; wait on OUR run; download the .sig; minisign-verify it against the tarball"]
+  S11 --> S12["Step 12: Dispatch release.yml publish_existing to backfill the channel manifest"]
+  S12 --> S13["Step 13: Assert the manifest: version, darwin-aarch64 url = this tag, signature = the uploaded .sig, Windows/Linux entries on this tag"]
 ```
 
 Step details that are rules, not plumbing:

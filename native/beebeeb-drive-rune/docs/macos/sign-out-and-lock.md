@@ -57,18 +57,18 @@ nothing before it refuses, except where the row says what it leaves.
 
 ```mermaid
 flowchart TD
-  G["1. Gate (W5): one read of the queue against the accepted ask"] -->|refuse: E1 or E3, nothing changed| X1[stop]
-  G --> E["2. Forget the email prefill (a switch only)"]
-  E --> R["3. Finder: the reconciler cancels any check, removes the domain (keeps unsynced files, task 1882), holds"]
-  R --> S["4. Take the engine slot, stop the engine, confirm the stop; empty upload staging"]
+  G["Step 1: Gate (W5): one read of the queue against the accepted ask"] -->|refuse: E1 or E3, nothing changed| X1[stop]
+  G --> E["Step 2: Forget the email prefill (a switch only)"]
+  E --> R["Step 3: Finder: the reconciler cancels any check, removes the domain (keeps unsynced files, task 1882), holds"]
+  R --> S["Step 4: Take the engine slot, stop the engine, confirm the stop; empty upload staging"]
   S -->|unconfirmed stop| X2["refuse; the slot gate stays closed until restart"]
-  S --> K["5. Keep step (W6-W9): close Finder accepts, copy waiting saves, record the folder"]
+  S --> K["Step 5: Keep step (W6-W9): close Finder accepts, copy waiting saves, record the folder"]
   K -->|copy fails: E2| X3["refuse; accepts reopened; keys stay; sync restarts"]
-  K --> P["6. Purge (macOS + Linux): guard, files, waiting copies last, rows, marker"]
+  K --> P["Step 6: Purge (macOS + Linux): guard, files, waiting copies last, rows, marker"]
   P -->|any failure| X4["refuse; the kept folder rides the error"]
-  P --> C["7. Clear the session in memory and the Keychain, holding the slot; last turn checks nothing is left"]
-  C --> V["8. End every dropped token on the server (task 1886), after the clear, slot free"]
-  V --> A["9. One alert: our kept folder, then 1882's folder"]
+  P --> C["Step 7: Clear the session in memory and the Keychain, holding the slot; last turn checks nothing is left"]
+  C --> V["Step 8: End every dropped token on the server (task 1886), after the clear, slot free"]
+  V --> A["Step 9: One alert: our kept folder, then 1882's folder"]
 ```
 
 1. **The gate first (W5).** `gate_sign_out` (`sign_out_commands.rs:945`) reads the queue once and compares it with the snapshot the
@@ -311,7 +311,7 @@ Each line: the test name, then what it asserts. "Pinned" names an engine or nati
 - `a_completed_purge_clears_the_unfinished_list` (U39 c): a later completed sign-out clears the list and never touches 1882's key; the row stays until dismissed.
 - `a_sign_out_purge_that_stops_leaves_the_unfinished_list` (W13): a purge that stops on a file or at the guard returns its own error and leaves the list and the row.
 - `a_failed_marker_clear_is_logged_without_the_kept_folder` (W13, W10): a marker clear that fails does not stop a purge that cleared the rows; its warning names the step, never the path.
-- `an_interrupted_sign_out_still_names_its_folder_after_a_restart` (U42): a real process death at each crash point (after the keep save, after the first group, between waiting copies, before the row clear) still leaves the folder named, its bytes on disk, and the next sign-out's folder added to the list.
+- `an_interrupted_sign_out_still_names_its_folder_after_a_restart` (U42): a real process death at each crash point (`AfterKeepSave` and `AfterFirstGroup`: 0 writes missing; `BetweenWaitingCopies`: 1; `BeforeRowClear`: 3) leaves the row and the unfinished list naming the first folder, which holds the bytes; the next ask names it as an earlier folder only when a write is missing; a second interrupted sign-out adds its own folder to the list.
 - `the_purge_removes_sources_from_every_staging_root` (U27): the purge removes both staging roots' sources after keeping them.
 - `clear_session_refuses_while_changes_wait` (U6): the switch's sign-out with changes waiting is refused by the gate first; the Keychain session and the email prefill are untouched.
 
