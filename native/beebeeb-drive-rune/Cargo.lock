@@ -596,6 +596,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
  "url",
  "wgpu",
  "windows 0.58.0",
