@@ -26,6 +26,8 @@ const CLIPBOARD_CLEARS: Duration = Duration::from_secs(60);
 pub fn pane(pane: Pane, source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &Theme) -> (El, Option<El>) {
     match (pane, &f.setup, &f.codes) {
         (Pane::TwoFactorSetup, Some(_), _) => (setup(f, t), None),
+        // The key could not be asked for (no open session) or Beebeeb did not make one: the set-up page says so.
+        (Pane::TwoFactorSetup, None, _) if f.problem.is_some() => (setup(f, t), None),
         (Pane::BackupCodes, _, Some(_)) => (
             backup_codes(f, t),
             (dialog == Some(&Dialog::LeaveCodes)).then(|| leave_codes(t)),
