@@ -588,6 +588,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     );
     // While covered, the flyout shows the lock's state too.
     let covered = registry::covered(s).then(|| s.shell.sync_runs());
+    s.shell.tell_flyout_covered(covered);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
