@@ -21,6 +21,8 @@
 //!   page is then handed over as lacking text ([`Rendered::lacks_text`]), and the view says so under it.
 //!   (Measured: the renderer asks its font resolver for such a font and gives no warning of its own; text in a
 //!   Japanese or Chinese font that is not in the file came out as empty space.)
+//! - Find ([`Document::find`], `viewer_pdf_find.rs`) reads the text of the pages on this same worker, asked down the same
+//!   channel ([`Ask::Find`]); its answer is delivered like a page's, and not at all once `cancel` is set.
 //! - Not done here: a password prompt (a protected PDF says so and stays closed), text search, drawing text in
 //!   a font the file does not carry beyond the Latin stand-ins (no other font is bundled). Not noticed: a
 //!   one-byte font that is not in the file and writes another script than the stand-ins hold (the renderer
@@ -42,6 +44,23 @@ use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings};
 use zeroize::Zeroizing;
+
+use crate::frames::viewers::source::Match;
+
+/// What the window asks of the worker that holds the document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// Render page N (from 1).
+    Page(u32),
+    /// Where the words are in the text; the answer carries `serial` back, so the window takes only the one it waits for.
+    Find { serial: u64, words: String },
+}
+
+impl From<u32> for Ask {
+    fn from(page: u32) -> Ask {
+        Ask::Page(page)
+    }
+}
 
 /// The most pages a PDF may have to be opened here (the view lists every page).
 pub const PAGES_MAX: u32 = 2_000;
@@ -201,6 +220,28 @@ impl Document {
     /// to its end, bounded by the page limits (8,000 pixels a side, 8 million in all), and what it made is
     /// dropped here, never delivered. Then this returns, and the caller drops the document and its bytes.
     pub fn serve(&self, asks: &mpsc::Receiver<u32>, cancel: &AtomicBool, deliver: &dyn Fn(u32, Option<Rendered>)) {
+        self.serve_all(asks, cancel, deliver, &|_, _| {});
+    }
+
+    /// [`Document::serve`], and the finds asked down the same channel: the newest find waiting is run after the
+    /// newest page waiting, and its matches go to `found` with the serial it was asked under (never once `cancel` is set).
+    pub fn serve_asks(
+        &self,
+        asks: &mpsc::Receiver<Ask>,
+        cancel: &AtomicBool,
+        deliver: &dyn Fn(u32, Option<Rendered>),
+        found: &dyn Fn(u64, Vec<Match>),
+    ) {
+        self.serve_all(asks, cancel, deliver, found);
+    }
+
+    fn serve_all<T: Into<Ask>>(
+        &self,
+        asks: &mpsc::Receiver<T>,
+        cancel: &AtomicBool,
+        deliver: &dyn Fn(u32, Option<Rendered>),
+        found: &dyn Fn(u64, Vec<Match>),
+    ) {
         // The renderer asks for a font the file names and does not carry. Where the answer is a Latin stand-in
         // that cannot draw the text, the page says so.
         let lacking = Arc::new(AtomicBool::new(false));
@@ -222,38 +263,54 @@ impl Document {
         // The cache keeps a font once asked for, so a later page would not ask again: from the first page that
         // lacks text on, every page starts from an empty cache and is asked for itself.
         let mut ask_each_page = false;
-        while let Ok(mut page) = asks.recv() {
-            while let Ok(newer) = asks.try_recv() {
-                page = newer;
-            }
-            if cancel.load(Ordering::SeqCst) {
-                return;
-            }
-            if ask_each_page {
-                cache = RenderCache::new();
-            }
-            lacking.store(false, Ordering::SeqCst);
-            let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.render(page, &cache, &settings, &render_settings)
-            }));
-            let lacks_text = lacking.load(Ordering::SeqCst);
-            ask_each_page |= lacks_text;
-            let rendered = match rendered {
-                // Either note says it: the resolver's, or the page's own content.
-                Ok(rendered) => rendered.map(|rendered| Rendered {
-                    lacks_text: lacks_text || rendered.lacks_text,
-                    ..rendered
-                }),
-                Err(_) => {
-                    // What the cache held half-made goes with the page that broke.
-                    cache = RenderCache::new();
-                    None
-                }
+        while let Ok(first) = asks.recv() {
+            let (mut page, mut find) = (None, None);
+            let mut take = |ask: Ask| match ask {
+                Ask::Page(asked) => page = Some(asked),
+                Ask::Find { serial, words } => find = Some((serial, words)),
             };
+            take(first.into());
+            while let Ok(newer) = asks.try_recv() {
+                take(newer.into());
+            }
             if cancel.load(Ordering::SeqCst) {
                 return;
             }
-            deliver(page, rendered);
+            if let Some(page) = page {
+                if ask_each_page {
+                    cache = RenderCache::new();
+                }
+                lacking.store(false, Ordering::SeqCst);
+                let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.render(page, &cache, &settings, &render_settings)
+                }));
+                let lacks_text = lacking.load(Ordering::SeqCst);
+                ask_each_page |= lacks_text;
+                let rendered = match rendered {
+                    // Either note says it: the resolver's, or the page's own content.
+                    Ok(rendered) => rendered.map(|rendered| Rendered {
+                        lacks_text: lacks_text || rendered.lacks_text,
+                        ..rendered
+                    }),
+                    Err(_) => {
+                        // What the cache held half-made goes with the page that broke.
+                        cache = RenderCache::new();
+                        None
+                    }
+                };
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                deliver(page, rendered);
+            }
+            if let Some((serial, words)) = find {
+                let matches = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.find(&words, cancel)))
+                    .unwrap_or_default();
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                found(serial, matches);
+            }
         }
     }
 
@@ -306,6 +363,9 @@ impl Document {
         })
     }
 }
+
+#[path = "viewer_pdf_find.rs"]
+mod find;
 
 #[cfg(test)]
 #[path = "viewer_pdf_tests.rs"]
