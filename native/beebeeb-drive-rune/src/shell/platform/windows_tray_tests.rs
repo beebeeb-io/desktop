@@ -381,6 +381,24 @@ fn a_resume_says_how_long_the_pc_was_away_once_and_only_after_a_suspend() {
     assert_eq!(h.faults(), 0);
 }
 
+/// Review of #452 (P2-A): the tray's window registers for the power broadcast (a Modern Standby PC sends the suspend
+/// only to a window that registered), and the registration ends with the window.
+#[test]
+fn the_window_registers_for_suspend_and_resume_and_ends_it_with_the_window() {
+    let h = Harness::new("power-register", syncing());
+    assert_eq!(
+        h.context.power.get(),
+        0,
+        "the harness's window registers nothing by itself"
+    );
+    register_for_power(h.hwnd, &h.context);
+    assert_ne!(h.context.power.get(), 0, "Windows took the registration");
+    let context = h.context.clone();
+    drop(h);
+    assert_eq!(context.power.get(), 0, "ended at WM_DESTROY");
+    assert_eq!(context.faults.load(Ordering::SeqCst), 0);
+}
+
 /// Enter on the focused b sends NIN_KEYSELECT twice: one toggle.
 #[test]
 fn a_key_select_and_its_repeat_are_one_activation() {
