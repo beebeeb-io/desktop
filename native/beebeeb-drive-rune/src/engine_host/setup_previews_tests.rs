@@ -8,6 +8,43 @@ use beebeeb_engine::photo_previews::{PreviewFormat as Wire, PreviewsSummary};
 use super::*;
 use crate::frames::signin::setup::Ui;
 
+/// The setup double's step-4 read: what the test set, after a hold the test may keep.
+pub(super) fn fake_read(fake: &Fake) -> Result<PreviewsFacts, PreviewsRefused> {
+    drop(fake.previews_held.lock().unwrap());
+    fake.previews
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or(Err(PreviewsRefused::NotSignedIn))
+}
+
+/// The setup double's write, as the engine's: only for the session in memory.
+pub(super) fn fake_set(
+    fake: &Fake,
+    session: SessionGeneration,
+    setting: PreviewSetting,
+) -> Result<(), PreviewsRefused> {
+    if session != fake.stamp().0 {
+        return Err(PreviewsRefused::NotSignedIn);
+    }
+    fake.previews_sets.lock().unwrap().push((session, setting));
+    Ok(())
+}
+
+/// The setup double's sample: an invented photo of the account when the test says there is one.
+pub(super) fn fake_sample(fake: &Fake, session: SessionGeneration) -> Result<SampleFacts, PreviewsRefused> {
+    let photo = fake.previews_photo.load(Ordering::SeqCst).then(|| {
+        let png = |n: u8| zeroize::Zeroizing::new(vec![0x89, b'P', b'N', b'G', n]);
+        beebeeb_engine::app::photo_previews_api::SamplePhoto {
+            original_bytes: 4_000_000,
+            weights: vec![(1280, 200_000), (1920, 410_000), (2560, 700_000), (3840, 1_200_000)],
+            original_png: png(0),
+            previews_png: vec![(1280, png(1)), (1920, png(2)), (2560, png(3)), (3840, png(4))],
+        }
+    });
+    Ok(SampleFacts { session, photo })
+}
+
 fn facts(enabled: bool, format: Wire, px: u32, count: u64) -> PreviewsFacts {
     PreviewsFacts {
         session: session(1),

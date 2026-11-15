@@ -132,36 +132,17 @@ impl SetupEngine for Fake {
         self.previews.lock().unwrap().is_some()
     }
     fn previews_facts_for(&self, _session: SessionGeneration) -> Result<PreviewsFacts, PreviewsRefused> {
-        drop(self.previews_held.lock().unwrap());
-        self.previews
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or(Err(PreviewsRefused::NotSignedIn))
+        previews_tests::fake_read(self)
     }
-    // As the engine: only for the session in memory.
     fn set_previews_for(&self, session: SessionGeneration, setting: PreviewSetting) -> Result<(), PreviewsRefused> {
-        if session != self.stamp().0 {
-            return Err(PreviewsRefused::NotSignedIn);
-        }
-        self.previews_sets.lock().unwrap().push((session, setting));
-        Ok(())
+        previews_tests::fake_set(self, session, setting)
     }
     fn measure_sample_for(
         &self,
         session: SessionGeneration,
-        _picked: Option<PathBuf>,
+        _: Option<PathBuf>,
     ) -> Result<SampleFacts, PreviewsRefused> {
-        let photo = self.previews_photo.load(Ordering::SeqCst).then(|| {
-            let png = |n: u8| zeroize::Zeroizing::new(vec![0x89, b'P', b'N', b'G', n]);
-            beebeeb_engine::app::photo_previews_api::SamplePhoto {
-                original_bytes: 4_000_000,
-                weights: vec![(1280, 200_000), (1920, 410_000), (2560, 700_000), (3840, 1_200_000)],
-                original_png: png(0),
-                previews_png: vec![(1280, png(1)), (1920, png(2)), (2560, png(3)), (3840, png(4))],
-            }
-        });
-        Ok(SampleFacts { session, photo })
+        previews_tests::fake_sample(self, session)
     }
     // As the engine: a write for a session that is not the one in memory writes nothing, and off needs a proof.
     fn set_app_lock_for(
