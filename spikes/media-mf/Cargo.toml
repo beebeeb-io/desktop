@@ -14,6 +14,19 @@ beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
 sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
+# The spike's copy of the sandbox (`src/variant/`) uses the sandbox crate's own bindings and version, plus
+# `DeriveCapabilitySidsFromName` (Win32_Security) and `LocalFree` (Win32_Foundation).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Isolation",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
 # `#[implement]` expands to paths under `windows_core`, so the crate is named directly.
 windows-core = "0.62"
 windows = { version = "0.62", features = [

@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 
 use beebeeb_office_sandbox::{Limits, Sandbox};
 
+/// The spike's copy of the sandbox, with switches (see its module doc). Not the product's crate.
+mod variant;
+
 const TIMEOUT: Duration = Duration::from_secs(90);
 
 struct Row {
@@ -166,6 +169,69 @@ fn run_confined(probe: &Path, request: &[u8]) -> Outcome {
     }
 }
 
+/// A column `v:<spec>`: the spike's copy of the sandbox with one switch changed (`variant::Options::parse`).
+/// `v:lpac` is the product's confinement exactly, and must answer like `confined`: that proves the copy is faithful.
+fn run_variant(exe: &Path, request: &[u8], spec: &str) -> Outcome {
+    let started = Instant::now();
+    let fail = |what: String| Outcome {
+        lines: vec![format!("RUNNER {what}")],
+        exit: "not-started".into(),
+        ms: started.elapsed().as_millis(),
+    };
+    let Some(options) = variant::Options::parse(spec) else {
+        return fail(format!("bad variant {spec}"));
+    };
+    let sandbox = match variant::Sandbox::new(variant::Limits::default(), options) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("variant refused: {e}")),
+    };
+    let mut child = match sandbox.spawn(exe) {
+        Ok(c) => c,
+        Err(e) => return fail(format!("variant spawn failed: {e}")),
+    };
+    let Some(pipes) = child.take_pipes() else {
+        return fail("no pipes".into());
+    };
+    let stdout = read_all_in_thread(pipes.from_helper);
+    write_all_in_thread(pipes.to_helper, request.to_vec());
+    let exit = match child.wait_timeout(TIMEOUT) {
+        Ok(Some(status)) => format!("{:#X}", status.code()),
+        Ok(None) => {
+            let _ = child.kill();
+            "timeout-killed".into()
+        }
+        Err(e) => format!("wait-error {e}"),
+    };
+    let lines = stdout
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    Outcome {
+        lines,
+        exit,
+        ms: started.elapsed().as_millis(),
+    }
+}
+
+/// Starts `exe` in one column and returns what it printed.
+fn run_column(column: &str, exe: &Path, request: &[u8], windir: &str) -> Outcome {
+    match column {
+        "plain" => run_plain(exe, request, false, windir),
+        "plainenv" => run_plain(exe, request, true, windir),
+        "confined" => run_confined(exe, request),
+        other => match other.strip_prefix("v:") {
+            Some(spec) => run_variant(exe, request, spec),
+            None => Outcome {
+                lines: vec![format!("RUNNER unknown column {other}")],
+                exit: "not-started".into(),
+                ms: 0,
+            },
+        },
+    }
+}
+
 fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     line.split_whitespace()
         .find_map(|w| w.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
@@ -189,16 +255,7 @@ fn load_check(columns: &str) {
     let exe = sibling("media-mf-loadcheck.exe");
     println!("RUN load exe-exists={}", exe.is_file());
     for column in columns.split(',') {
-        let o = match column {
-            "plain" => run_plain(&exe, b"", false, &windir),
-            "plainenv" => run_plain(&exe, b"", true, &windir),
-            "confined" => run_confined(&exe, b""),
-            other => Outcome {
-                lines: vec![format!("RUNNER unknown column {other}")],
-                exit: "not-started".into(),
-                ms: 0,
-            },
-        };
+        let o = run_column(column, &exe, b"", &windir);
         println!("== load {column} exit={} ms={}", o.exit, o.ms);
         for l in &o.lines {
             println!("  {l}");
@@ -253,21 +310,10 @@ fn main() {
         .collect();
     println!("RUN rows={}", rows.len());
 
-    let start = |column: &str, request: &[u8]| -> Outcome {
-        match column {
-            "plain" => run_plain(&probe, request, false, &windir),
-            "plainenv" => run_plain(&probe, request, true, &windir),
-            "confined" => run_confined(&probe, request),
-            other => Outcome {
-                lines: vec![format!("RUNNER unknown column {other}")],
-                exit: "not-started".into(),
-                ms: 0,
-            },
-        }
-    };
+    let start = |column: &str, request: &[u8]| -> Outcome { run_column(column, &probe, request, &windir) };
 
-    // What Media Foundation can find, per column.
-    if only.is_none() {
+    // What Media Foundation can find, per column (`files` = `all` or a list holding `E`).
+    if only.as_ref().is_none_or(|o| o.iter().any(|f| f == "E")) {
         for column in &columns {
             let o = start(column, b"E\n");
             println!("== decoders {column} exit={} ms={}", o.exit, o.ms);
