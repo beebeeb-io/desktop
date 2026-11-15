@@ -201,3 +201,7 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
     open: Save a copy keeps it as a new file."**
   - held back: **"Not saved: an earlier change to this file on this PC is held back and is not sent until it is
     settled in Sync history. Your edit stays open: Save a copy keeps it as a new file."**
+
+## DW-0611, the video player (lane mb2-surface, 2026-11-15)
+
+- **D-MED-4:** Rune draws the player controls in the board's geometry; the board says Windows' own player.

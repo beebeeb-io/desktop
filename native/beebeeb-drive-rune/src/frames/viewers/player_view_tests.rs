@@ -6,9 +6,10 @@
 use beebeeb_media_protocol::Codec;
 use rune::{Env, Runtime};
 
-use super::set_scene;
-use super::video::{Times, ask_size, letterbox, refusal_words, space_toggles};
-use crate::media::player::{PlayState, Refusal};
+use super::super::set_scene;
+use super::{Times, ask_size, letterbox, no_sound_line, no_sound_words, refusal_words, space_toggles};
+use crate::media::player::{NoSound, PlayState, Refusal};
+use crate::theme::tokens::theme;
 use crate::{State, init, view};
 
 fn scene(frame: &str) -> Runtime<State> {
@@ -41,6 +42,7 @@ fn state(at_ms: u64, length_ms: u64) -> PlayState {
         title: "Harbour sessions".into(),
         artist: "Anna".into(),
         reduced_quality: false,
+        no_sound: None,
         refused: None,
     }
 }
@@ -127,6 +129,16 @@ fn refusal_words_name_the_format() {
         refusal_words(&Refusal::NoSystemDecoder(Codec::Hevc)),
         "This PC can't play HEVC video without Microsoft's HEVC extension."
     );
+    // Only HEVC names Microsoft's extension; any other system codec says "here" (row 24).
+    assert_eq!(
+        refusal_words(&Refusal::NoSystemDecoder(Codec::Aac)),
+        "This PC can't play AAC files here."
+    );
+    // An edition of Windows with no media codecs (row 25).
+    assert_eq!(
+        refusal_words(&Refusal::NoSystemMedia(Codec::Aac)),
+        "This PC can't play AAC files: this edition of Windows has no media codecs."
+    );
     assert_eq!(refusal_words(&Refusal::CouldNotPlay), "This file could not be played.");
     assert_eq!(
         refusal_words(&Refusal::NoSandbox),
@@ -135,5 +147,140 @@ fn refusal_words_name_the_format() {
     assert_eq!(
         refusal_words(&Refusal::NotInstalled),
         "Playback isn't available on this PC."
+    );
+}
+
+/// A window that draws only the no-sound line, so the test needs no player.
+fn no_sound_view(_: &State, _: &mut rune::Cx<State>) -> rune::El {
+    rune::col().key("window").child(no_sound_line(
+        "video",
+        NoSound::Codec(Codec::Aac),
+        rune::Color::WHITE,
+        &theme(false),
+    ))
+}
+
+fn no_sound_scene() -> Runtime<State> {
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(init(), no_sound_view, (600.0, 200.0), env);
+    rt.frame(0.0);
+    rt
+}
+
+/// 6. The no-sound line names the missing track's FORMAT (never the file), and the device's own words.
+#[test]
+fn no_sound_line_names_the_missing_track() {
+    assert_eq!(
+        no_sound_words(NoSound::Codec(Codec::Aac)),
+        "Sound isn't available on this PC (AAC)"
+    );
+    assert_eq!(no_sound_words(NoSound::Device), "Sound isn't available on this PC");
+    let rt = no_sound_scene();
+    let words = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("video-no-sound-words") && !e.exiting)
+        .expect("the line is drawn");
+    assert_eq!(words.text.as_deref(), Some("Sound isn't available on this PC (AAC)"));
+}
+
+/// 7. The line offers "Open in another app\u{2026}" one press away.
+#[test]
+fn the_no_sound_line_offers_another_app() {
+    let rt = no_sound_scene();
+    let keys = keys(&rt);
+    assert!(keys.iter().any(|k| k == "video-no-sound"), "the line is drawn");
+    assert!(
+        keys.iter().any(|k| k == "no-sound-open"),
+        "Open in another app is one press away"
+    );
+}
+
+/// 8. D-MED-7: "Reduced quality on this PC" is the details panel's line, not the caption's.
+#[test]
+fn reduced_quality_is_said_in_the_details() {
+    fn panel_view(s: &State, _: &mut rune::Cx<State>) -> rune::El {
+        let ui = s.viewer.ui.as_ref().expect("a file is open");
+        super::super::details::panel_with(&ui.file, false, true, &theme(false))
+    }
+    let mut state = init();
+    set_scene(&mut state, "DW-1503");
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, panel_view, (600.0, 800.0), env);
+    rt.frame(0.0);
+    let line = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("detail-reduced") && !e.exiting)
+        .expect("the details panel carries the line");
+    assert_eq!(line.text.as_deref(), Some("Reduced quality on this PC"));
+}
+
+/// A source with one video and a player that counts how often the view asked for it.
+struct OneVideo {
+    asked: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl super::super::source::ViewerSource for OneVideo {
+    fn open(&mut self, file_id: &str) -> Result<super::super::source::OpenFile, super::super::source::OpenError> {
+        Ok(super::super::source::OpenFile {
+            id: file_id.to_string(),
+            path: Vec::new(),
+            name: "Clip.mp4".into(),
+            facts: "Video".into(),
+            version: 1,
+            body: super::super::source::Body::Video(super::super::kinds::VideoDoc { length: 0 }),
+            details: super::super::source::Details {
+                kind: "Video".into(),
+                size: String::new(),
+                facts: Vec::new(),
+                offline: false,
+            },
+            newer: None,
+        })
+    }
+    fn poll(&mut self, _file_id: &str) -> Option<super::super::source::Body> {
+        None
+    }
+    fn cancel(&mut self, _file_id: &str) {}
+    fn retry(&mut self, file_id: &str) -> Result<super::super::source::OpenFile, super::super::source::OpenError> {
+        self.open(file_id)
+    }
+    fn player(&self) -> Option<crate::media::player::PlayerHandle> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+}
+
+/// 9. Space on a video opened from Files is the viewer's (it reaches the player), and another key is not.
+#[test]
+fn space_on_a_files_video_toggles_its_player() {
+    use std::sync::atomic::Ordering;
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut state = init();
+    let ui = super::super::Ui::open(Box::new(OneVideo { asked: asked.clone() }), "v").expect("the video opens");
+    state.viewer.ui = Some(ui);
+    let before = asked.load(Ordering::SeqCst);
+    let key = |text: &str| rune::KeyEvent {
+        key: rune::Key::Text(text.into()),
+        mods: rune::Mods::default(),
+    };
+    assert!(
+        super::super::media::on_key(&mut state, &key(" ")),
+        "Space is the video's"
+    );
+    assert!(
+        asked.load(Ordering::SeqCst) > before,
+        "Space went to the video's player"
+    );
+    assert!(
+        !super::super::media::on_key(&mut state, &key("x")),
+        "another key is not"
     );
 }
