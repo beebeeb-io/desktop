@@ -986,11 +986,12 @@ fn a_real_confined_helper_renders_page_one() {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
-    use windows_sys::Win32::Foundation::{BOOL, CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::Foundation::{BOOL, CloseHandle, GetLastError, HANDLE, STILL_ACTIVE};
     use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenIsAppContainer};
     use windows_sys::Win32::System::JobObjects::IsProcessInJob;
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
+        GetExitCodeProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        TerminateProcess,
     };
 
     let helper = std::env::var_os("BB_OFFICE_HELPER")
@@ -1060,8 +1061,11 @@ fn a_real_confined_helper_renders_page_one() {
     assert_eq!((w, h), (want_w, want_h));
     drop(spike);
 
-    // The helper's process: an AppContainer token, inside a job. Then our own kill, from outside the host.
-    let pid = host.helper_pid().expect("a live helper has a process id");
+    // The helper's process: alive while the document is open, an AppContainer token, inside a job. Then our own
+    // kill, from outside the host.
+    let pid = host
+        .helper_pid()
+        .expect("while the document is open, its helper has a process id");
     // SAFETY: Win32 calls on handles this test opens and closes itself; every out pointer is a local of its type.
     unsafe {
         let process: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, 0, pid);
@@ -1069,6 +1073,17 @@ fn a_real_confined_helper_renders_page_one() {
             !process.is_null(),
             "OpenProcess on the helper failed with system code {}",
             GetLastError()
+        );
+        let mut code: u32 = 0;
+        let read = GetExitCodeProcess(process, &mut code);
+        assert!(
+            read != 0,
+            "GetExitCodeProcess failed with system code {}",
+            GetLastError()
+        );
+        assert_eq!(
+            code, STILL_ACTIVE as u32,
+            "the helper process runs while the document is open"
         );
         let mut token: HANDLE = std::ptr::null_mut();
         let opened = OpenProcessToken(process, TOKEN_QUERY, &mut token);
