@@ -900,7 +900,7 @@
   },
   "view-toggle": {
    "kind": "box",
-   "x": 800.23,
+   "x": 764.23,
    "y": 40.75,
    "w": 61,
    "h": 28,
@@ -913,7 +913,7 @@
   },
   "view-list": {
    "kind": "box",
-   "x": 802.23,
+   "x": 766.23,
    "y": 42.75,
    "w": 28,
    "h": 24,
@@ -927,7 +927,7 @@
   },
   "view-list-icon": {
    "kind": "icon",
-   "x": 808.73,
+   "x": 772.73,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -949,7 +949,7 @@
   },
   "view-grid": {
    "kind": "box",
-   "x": 831.23,
+   "x": 795.23,
    "y": 42.75,
    "w": 28,
    "h": 24,
@@ -957,7 +957,7 @@
   },
   "view-grid-icon": {
    "kind": "icon",
-   "x": 837.73,
+   "x": 801.73,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -977,7 +977,7 @@
   },
   "sort-btn": {
    "kind": "box",
-   "x": 869.23,
+   "x": 833.23,
    "y": 40.75,
    "w": 42,
    "h": 28,
@@ -985,7 +985,7 @@
   },
   "sort-icon": {
    "kind": "icon",
-   "x": 875.23,
+   "x": 839.23,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -1005,7 +1005,7 @@
   },
   "sort-caret": {
    "kind": "icon",
-   "x": 894.23,
+   "x": 858.23,
    "y": 49.25,
    "w": 11,
    "h": 11,
@@ -1022,7 +1022,7 @@
   },
   "panel-toggle-btn": {
    "kind": "box",
-   "x": 919.23,
+   "x": 883.23,
    "y": 40.75,
    "w": 28,
    "h": 28,
@@ -1036,7 +1036,7 @@
   },
   "panel-icon": {
    "kind": "icon",
-   "x": 925.23,
+   "x": 889.23,
    "y": 46.75,
    "w": 16,
    "h": 16,
@@ -3788,210 +3788,6 @@
    "w": 24.25,
    "h": 15,
    "text": "Text",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 400,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0,
-   "lh": "15px",
-   "align": "start",
-   "italic": false
-  },
-  "type-2": {
-   "kind": "box",
-   "x": 592.59,
-   "y": 374.75,
-   "w": 92.8,
-   "h": 101,
-   "css": {
-    "radius": "10px",
-    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px inset",
-    "pad": "12px 0px",
-    "gap": "8px"
-   }
-  },
-  "type-2-doc": {
-   "kind": "box",
-   "x": 616.99,
-   "y": 386.75,
-   "w": 44,
-   "h": 54,
-   "css": {
-    "radius": "4px",
-    "shadow": "oklch(0.52 0.01 78) 0px 0px 0px 1.5px inset"
-   }
-  },
-  "type-2-ext": {
-   "kind": "text",
-   "x": 623.99,
-   "y": 405.25,
-   "w": 30,
-   "h": 17,
-   "text": ".docx",
-   "family": "mono",
-   "fontFamily": "JetBrains Mono",
-   "size": 10,
-   "weight": 400,
-   "color": [
-    70,
-    66,
-    61,
-    255
-   ],
-   "tracking": 0,
-   "lh": "17px",
-   "align": "start",
-   "italic": false
-  },
-  "type-2-label": {
-   "kind": "text",
-   "x": 623.95,
-   "y": 448.75,
-   "w": 30.08,
-   "h": 15,
-   "text": "Word",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 400,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0,
-   "lh": "15px",
-   "align": "start",
-   "italic": false
-  },
-  "type-3": {
-   "kind": "box",
-   "x": 697.4,
-   "y": 374.75,
-   "w": 92.8,
-   "h": 101,
-   "css": {
-    "radius": "10px",
-    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px inset",
-    "pad": "12px 0px",
-    "gap": "8px"
-   }
-  },
-  "type-3-doc": {
-   "kind": "box",
-   "x": 721.8,
-   "y": 386.75,
-   "w": 44,
-   "h": 54,
-   "css": {
-    "radius": "4px",
-    "shadow": "oklch(0.52 0.01 78) 0px 0px 0px 1.5px inset"
-   }
-  },
-  "type-3-ext": {
-   "kind": "text",
-   "x": 728.8,
-   "y": 405.25,
-   "w": 30,
-   "h": 17,
-   "text": ".xlsx",
-   "family": "mono",
-   "fontFamily": "JetBrains Mono",
-   "size": 10,
-   "weight": 400,
-   "color": [
-    70,
-    66,
-    61,
-    255
-   ],
-   "tracking": 0,
-   "lh": "17px",
-   "align": "start",
-   "italic": false
-  },
-  "type-3-label": {
-   "kind": "text",
-   "x": 728.66,
-   "y": 448.75,
-   "w": 30.26,
-   "h": 15,
-   "text": "Excel",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 400,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0,
-   "lh": "15px",
-   "align": "start",
-   "italic": false
-  },
-  "type-4": {
-   "kind": "box",
-   "x": 802.2,
-   "y": 374.75,
-   "w": 92.8,
-   "h": 101,
-   "css": {
-    "radius": "10px",
-    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px inset",
-    "pad": "12px 0px",
-    "gap": "8px"
-   }
-  },
-  "type-4-doc": {
-   "kind": "box",
-   "x": 826.59,
-   "y": 386.75,
-   "w": 44,
-   "h": 54,
-   "css": {
-    "radius": "4px",
-    "shadow": "oklch(0.52 0.01 78) 0px 0px 0px 1.5px inset"
-   }
-  },
-  "type-4-ext": {
-   "kind": "text",
-   "x": 833.59,
-   "y": 405.25,
-   "w": 30,
-   "h": 17,
-   "text": ".pptx",
-   "family": "mono",
-   "fontFamily": "JetBrains Mono",
-   "size": 10,
-   "weight": 400,
-   "color": [
-    70,
-    66,
-    61,
-    255
-   ],
-   "tracking": 0,
-   "lh": "17px",
-   "align": "start",
-   "italic": false
-  },
-  "type-4-label": {
-   "kind": "text",
-   "x": 816.3,
-   "y": 448.75,
-   "w": 64.6,
-   "h": 15,
-   "text": "PowerPoint",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 12,
