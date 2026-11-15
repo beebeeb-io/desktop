@@ -274,3 +274,60 @@ fn a_kept_copy_is_whole_and_never_written_over() {
     assert!(keep_in_changes_not_sent(&root, "dir", "op", "A/c.txt", dir.path()).is_err());
     assert!(!root.join("dir").exists());
 }
+
+/// Data review of #458, P1-1 (check 1): a path that could lead out of "Changes not sent" (a drive prefix, a parent
+/// step in either separator) is refused before anything is made: the write stays, nothing is kept anywhere.
+#[test]
+fn a_path_that_could_lead_out_of_the_folder_is_refused_and_nothing_is_made() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("staged");
+    std::fs::write(&source, THIS_PC).unwrap();
+    let root = dir.path().join("Changes not sent");
+    let mut kept_anyway = Vec::new();
+    for rel in ["C:x/a.txt", "..\\..\\x.txt", "A/..\\b.txt"] {
+        if let Ok(kept) = keep_in_changes_not_sent(&root, "e", "op", rel, &source) {
+            kept_anyway.push(format!("{rel} kept at {}", kept.display()));
+        }
+    }
+    assert!(kept_anyway.is_empty(), "{kept_anyway:#?}");
+    assert!(!root.exists(), "nothing is made for a refused path");
+}
+
+/// Data review of #458, P1-1 (Windows): a name part Windows refuses is kept under a name Windows takes, and the copy
+/// is listed in its folder under that name with every byte: never a hidden stream of another file, never a folder
+/// that cannot be made. The review's three names.
+#[cfg(windows)]
+#[test]
+fn names_windows_refuses_are_kept_under_a_name_windows_takes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("staged");
+    std::fs::write(&source, THIS_PC).unwrap();
+    let root = dir.path().join("Changes not sent");
+    let cases: [(&str, &[&str]); 3] = [
+        ("a:b.txt", &["a_b.txt"]),
+        ("x:y/a.txt", &["x_y", "a.txt"]),
+        ("NUL.txt", &["_NUL.txt"]),
+    ];
+    let mut wrong = Vec::new();
+    for (i, (rel, meant)) in cases.iter().enumerate() {
+        let event = format!("e{i}");
+        let expected = meant.iter().fold(root.join(&event), |path, part| path.join(part));
+        match keep_in_changes_not_sent(&root, &event, "op", rel, &source) {
+            Err(e) => wrong.push(format!("{rel}: refused ({e})")),
+            Ok(kept) if kept != expected => wrong.push(format!("{rel}: kept at {}", kept.display())),
+            Ok(kept) => {
+                let listed: Vec<String> = std::fs::read_dir(kept.parent().unwrap())
+                    .unwrap()
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect();
+                if listed != [meant[meant.len() - 1].to_string()] {
+                    wrong.push(format!("{rel}: the folder lists {listed:?}"));
+                } else if std::fs::read(&kept).unwrap() != THIS_PC {
+                    wrong.push(format!("{rel}: the kept bytes differ"));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
