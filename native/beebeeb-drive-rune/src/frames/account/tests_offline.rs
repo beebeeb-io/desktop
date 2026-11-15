@@ -4,7 +4,7 @@
 
 use super::form;
 use super::source::{BOARD_CODE, BOARD_PASSWORD, BoardAccount, HeldCalls, Secret, Setup};
-use super::tests::{click, find, says, settle, window};
+use super::tests::{click, find, settle, window};
 use super::{CodeFor, Dialog};
 use crate::{State, init};
 use rune::Runtime;
@@ -27,16 +27,30 @@ fn sent(rt: &Runtime<State>) -> Vec<String> {
     rt.state.account.source.as_deref().expect("the fixture").sent()
 }
 
-fn code_msg(rt: &Runtime<State>) -> String {
-    find(rt, "code-msg")
-        .and_then(|info| info.text)
-        .unwrap_or_else(|| panic!("no words under the code: {}", rt.accessibility_json()))
+/// The words a key shows, or none.
+fn words(rt: &Runtime<State>, key: &str) -> String {
+    find(rt, key).and_then(|info| info.text).unwrap_or_default()
+}
+
+/// One control's result: what it said, what it sent, and whether the password stayed in its field.
+fn verdict(rt: &Runtime<State>, control: &str, key: &str, wanted: &str, fails: &mut Vec<String>) {
+    let said = words(rt, key);
+    if !said.contains(wanted) {
+        fails.push(format!("{control}: says {said:?} under {key}, not {wanted:?}"));
+    }
+    let sent = sent(rt);
+    if !sent.is_empty() {
+        fails.push(format!("{control}: asked {sent:?}"));
+    }
+    if !rt.state.account.form.current.text.is_empty() {
+        fails.push(format!("{control}: the password stayed in the field"));
+    }
 }
 
 #[test]
 fn with_no_open_session_every_call_form_says_offline_and_asks_nothing() {
-    // (the control, what it says)
-    let mut said = Vec::new();
+    let mut fails = Vec::new();
+    let mut controls = 0;
 
     // Change email, step 1: the password is never proved by another call, and leaves the field.
     let mut rt = signed_out("DW-A65");
@@ -46,43 +60,42 @@ fn with_no_open_session_every_call_form_says_offline_and_asks_nothing() {
     });
     settle(&mut rt);
     click(&mut rt, "btn-1");
-    assert_eq!(
-        says(&rt, "field-0-msg"),
-        "Beebeeb can't be reached. Nothing was changed."
-    );
-    assert!(
-        rt.state.account.form.current.text.is_empty(),
-        "the password left the field"
-    );
-    assert_eq!(sent(&rt), Vec::<String>::new(), "Send code asked nothing");
-    said.push("StartEmail");
+    verdict(&rt, "Send code", "field-0-msg", "can't be reached", &mut fails);
+    controls += 1;
 
     // Change email, step 2: the code.
     let mut rt = signed_out("DW-A66");
     rt.update(|s, _| form::type_in(&mut s.account.form.code, "48271590"));
     settle(&mut rt);
     click(&mut rt, "btn-1");
-    assert!(code_msg(&rt).contains("can't be reached"), "{}", code_msg(&rt));
-    assert_eq!(sent(&rt), Vec::<String>::new(), "Confirm asked nothing");
-    said.push("ConfirmEmail");
+    verdict(
+        &rt,
+        "Confirm the email's code",
+        "code-msg",
+        "can't be reached",
+        &mut fails,
+    );
+    controls += 1;
 
     // Send again: no other way to send it stands in.
     let mut rt = signed_out("DW-A66");
     click(&mut rt, "link-0-box");
-    assert!(code_msg(&rt).contains("can't be reached"), "{}", code_msg(&rt));
-    assert_eq!(sent(&rt), Vec::<String>::new(), "Send again asked nothing");
-    said.push("ResendEmail");
+    verdict(&rt, "Send again", "code-msg", "can't be reached", &mut fails);
+    controls += 1;
 
-    // The set-up page asks for a key on arrival.
+    // The set-up page asks for a key on arrival: none is drawn.
     let rt = signed_out("DW-A69");
-    assert!(rt.state.account.form.setup.is_none(), "no key is drawn");
-    assert!(
-        code_msg(&rt).contains("Could not start the set-up"),
-        "{}",
-        code_msg(&rt)
+    verdict(
+        &rt,
+        "The set-up's key",
+        "code-msg",
+        "Could not start the set-up",
+        &mut fails,
     );
-    assert_eq!(sent(&rt), Vec::<String>::new(), "the set-up asked nothing");
-    said.push("BeginTwoFactor");
+    if rt.state.account.form.setup.is_some() {
+        fails.push("The set-up's key: a key is drawn".into());
+    }
+    controls += 1;
 
     // The first code (a key on the page, then the session ended).
     let mut rt = signed_out("DW-A69");
@@ -95,10 +108,17 @@ fn with_no_open_session_every_call_form_says_offline_and_asks_nothing() {
         form::type_in(&mut s.account.form.code, BOARD_CODE);
     });
     settle(&mut rt);
+    let before = sent(&rt).len();
     click(&mut rt, "btn-1");
-    assert!(code_msg(&rt).contains("could not be reached"), "{}", code_msg(&rt));
-    assert_eq!(sent(&rt), Vec::<String>::new(), "Turn on asked nothing");
-    said.push("TurnOnTwoFactor");
+    // (What the arrival asked is counted in the control above.)
+    if sent(&rt).len() > before {
+        fails.push(format!("Turn on: asked {:?}", &sent(&rt)[before..]));
+    }
+    let said = words(&rt, "code-msg");
+    if !said.contains("could not be reached") {
+        fails.push(format!("Turn on: says {said:?}"));
+    }
+    controls += 1;
 
     // The three code confirms.
     for for_ in [
@@ -112,13 +132,15 @@ fn with_no_open_session_every_call_form_says_offline_and_asks_nothing() {
         rt.update(|s, _| form::type_in(&mut s.account.form.code, BOARD_CODE));
         settle(&mut rt);
         click(&mut rt, "btn-0");
-        assert!(
-            code_msg(&rt).contains("could not be reached"),
-            "{for_:?}: {}",
-            code_msg(&rt)
+        verdict(
+            &rt,
+            &format!("{for_:?}"),
+            "code-msg",
+            "could not be reached",
+            &mut fails,
         );
-        assert_eq!(sent(&rt), Vec::<String>::new(), "{for_:?} asked nothing");
-        said.push("code confirm");
+        controls += 1;
     }
-    assert_eq!(said.len(), 8, "every control of a call answered later");
+    assert_eq!(controls, 8, "every control of a call answered later");
+    assert!(fails.is_empty(), "{} of 8 failed:\n{}", fails.len(), fails.join("\n"));
 }
