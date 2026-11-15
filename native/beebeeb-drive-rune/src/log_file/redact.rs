@@ -84,7 +84,6 @@ const CREDENTIAL_WORDS: &[&str] = &[
     "cookie",
     "nonce",
     "salt",
-    "pass",
     "password",
     "passphrase",
     "phrase",
