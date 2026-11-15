@@ -9,6 +9,9 @@ pub mod fake_account;
 pub mod fake_signup;
 pub mod server;
 
+#[cfg(test)]
+mod gap_tests;
+
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
