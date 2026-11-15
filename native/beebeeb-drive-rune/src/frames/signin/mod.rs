@@ -686,7 +686,7 @@ impl Ui {
                         self.focus = Some(TITLE_KEY);
                     }
                     DeviceStatus::OtherAccount => {
-                        self.screen = Screen::KeysNotReceived;
+                        self.screen = Screen::NotSignedIn { other_account: true };
                         self.focus = Some(TITLE_KEY);
                     }
                     DeviceStatus::NotSignedIn => {
