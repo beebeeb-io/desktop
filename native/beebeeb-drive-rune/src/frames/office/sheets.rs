@@ -266,6 +266,7 @@ fn formula_bar(view: &SheetView, t: &Theme) -> El {
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
         .child(cellbox)
+        .child(fitted("sh-fx", "fx", CELL_BOLD, t.text_tertiary))
         .child(
             kit::label("sh-formula", view.formula.clone(), MONO, t.text)
                 .truncate()
@@ -406,7 +407,7 @@ fn grid(view: &SheetView, t: &Theme) -> El {
                 .w(*w)
                 .h(HEADER_H)
                 .center()
-                .fill(t.selection)
+                .fill(t.surface)
                 .border_sides([0.0, kit::HAIR, kit::HAIR, 0.0], t.separator)
                 .border_layout()
                 .child(fitted(
