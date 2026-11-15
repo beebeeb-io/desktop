@@ -1133,15 +1133,23 @@ fn a_trashed_file_this_computer_never_synced_opens_in_memory_and_nothing_about_i
 
     // Nothing about it was recorded here: no row, no contract, nothing kept; and the id is in no table of the local
     // state at all (every file of its directory, the database and its write-ahead log, read as bytes).
-    let mentioned: Vec<String> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            let bytes = std::fs::read(path).unwrap_or_default();
-            bytes.windows(TRASHED.len()).any(|w| w == TRASHED.as_bytes())
-        })
-        .map(|path| path.display().to_string())
-        .collect();
+    let files_naming = |id: &str| -> Vec<String> {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let bytes = std::fs::read(path).expect("a file of the local state reads");
+                bytes.windows(id.len()).any(|w| w == id.as_bytes())
+            })
+            .map(|path| path.display().to_string())
+            .collect()
+    };
+    // The scan finds what IS written: the note's id, a row of this local state.
+    assert!(
+        !files_naming(NOTE).is_empty(),
+        "the scan sees the local state's own rows"
+    );
+    let mentioned = files_naming(TRASHED);
     assert!(
         mentioned.is_empty(),
         "the trashed file's id was written to {mentioned:?}"

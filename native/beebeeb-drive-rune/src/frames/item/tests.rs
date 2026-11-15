@@ -368,3 +368,46 @@ fn an_item_dialog_that_is_not_drawn_never_keeps_the_keys() {
     assert_eq!(rt.state.frames.shared.dialog, None);
     assert_eq!(rt.state.frames.trash.selected, Some(0), "the key reached the list");
 }
+
+/// Another account under a gate that stays Ready: ONE poll of the shell closes the Preview (the session-end block's
+/// first call), and its page and read go.
+#[test]
+fn an_account_switch_closes_the_item_dialog_in_the_poll_that_sees_it() {
+    let (mut rt, engine, counts) = app_on_trash(page("invented words of a trashed note"));
+    press(&mut rt, space());
+    assert!(rt.find("pv-page").is_some());
+    let cancels = counts.borrow().cancels;
+    engine.set_account("someone-else@example.eu");
+    rt.update(|s, tx| {
+        crate::shell::host::poll(s, 0.0, tx);
+        assert_eq!(
+            s.frames.shared.dialog, None,
+            "closed by the poll that saw the other account"
+        );
+        assert_eq!(s.frames.shared.fields.preview.state(), None);
+    });
+    assert_eq!(counts.borrow().cancels, cancels + 1);
+}
+
+/// The server ended the session while the gate stays Ready (the shell's session gate closes): ONE poll closes the
+/// Preview (the session-end block's second call), and its page and read go.
+#[test]
+fn a_session_the_server_ended_closes_the_item_dialog_in_the_poll_that_sees_it() {
+    use crate::frames::global::source::board;
+    use crate::frames::global::{GlobalFixture, Ui};
+    let (mut rt, _engine, counts) = app_on_trash(page("invented words of a trashed note"));
+    press(&mut rt, space());
+    assert!(rt.find("pv-page").is_some());
+    let cancels = counts.borrow().cancels;
+    rt.update(|s, tx| {
+        s.global = Ui::new(Box::new(GlobalFixture::of(board::signed_out())));
+        crate::shell::host::poll(s, 0.0, tx);
+        assert_eq!(s.shell.app.gate(), GateState::Ready, "the gate stayed Ready");
+        assert_eq!(
+            s.frames.shared.dialog, None,
+            "closed by the poll that saw the session end"
+        );
+        assert_eq!(s.frames.shared.fields.preview.state(), None);
+    });
+    assert_eq!(counts.borrow().cancels, cancels + 1);
+}

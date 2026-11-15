@@ -627,31 +627,10 @@ fn engine_trash_actions_follow_the_listing() {
 /// read for it.
 #[test]
 fn trash_details_is_the_server_row() {
-    use beebeeb_engine::account_binding::Identity;
-    use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
     let fake = fake("details");
     let engine = signed_in(&fake);
     // This PC's local state, the first account's, with another name for the trashed contract, at the top.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("state.db");
-    let db = StateDb::open(&path).unwrap();
-    let entry = FileEntry {
-        file_id: CONTRACT.into(),
-        path: "A local name of the contract.pdf".into(),
-        status: FileStatus::CloudOnly,
-        size_bytes: 9,
-        modified_at: 1_794_000_000,
-        content_hash: None,
-        remote_updated_at: 1_794_000_000,
-        parent_id: None,
-        item_kind: ItemKind::File,
-    };
-    db.upsert_file_with_contract(&entry, |contract| contract.item_kind = ItemKind::File)
-        .unwrap();
-    db.set_owner(&Identity::new(Some(&fake.first.user_id), Some(&fake.first.email)))
-        .unwrap();
-    drop(db);
-    engine.use_local_state_for_test(path);
+    let _dir = this_pcs_local_state(&engine, &fake.first, &[(CONTRACT, "A local name of the contract.pdf")]);
     let mut state = crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), engine.clone());
     let env = Env {
         system_dark: false,
@@ -682,5 +661,91 @@ fn trash_details_is_the_server_row() {
     assert!(
         !words(&rt).contains("A local name"),
         "nothing of the local state is drawn"
+    );
+}
+
+/// This PC's local state, recorded as `owner`'s, with these files at the top, and the engine reading it.
+fn this_pcs_local_state(
+    engine: &Engine<MemoryCredentials>,
+    owner: &FakeAccount,
+    rows: &[(&str, &str)],
+) -> tempfile::TempDir {
+    use beebeeb_engine::account_binding::Identity;
+    use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let db = StateDb::open(&path).unwrap();
+    for (id, name) in rows {
+        let entry = FileEntry {
+            file_id: (*id).into(),
+            path: (*name).into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 9,
+            modified_at: 1_794_000_000,
+            content_hash: None,
+            remote_updated_at: 1_794_000_000,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        db.upsert_file_with_contract(&entry, |contract| contract.item_kind = ItemKind::File)
+            .unwrap();
+    }
+    db.set_owner(&Identity::new(Some(&owner.user_id), Some(&owner.email)))
+        .unwrap();
+    drop(db);
+    engine.use_local_state_for_test(path);
+    dir
+}
+
+/// The running app's window, wired as `shell::state::init_on_engine` wires it: a text file in Trash that this PC
+/// never synced shows its first lines in the read-only Preview, downloaded from Beebeeb and decrypted in memory; and
+/// nothing about it is written to the local state.
+#[test]
+fn a_trashed_text_file_shows_its_lines_in_the_running_apps_preview() {
+    const NOTES: &str = "a0000000-0000-4000-8000-000000000205";
+    let fake = fake("preview");
+    fake.first.add_file_with_content(
+        NOTES,
+        None,
+        "Invented trip notes.txt",
+        b"train at eight\npack the charger",
+    );
+    assert!(fake.first.trash_item(NOTES));
+    let engine = signed_in(&fake);
+    let dir = this_pcs_local_state(&engine, &fake.first, &[]);
+    let mut state = crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), engine.clone());
+    crate::frames::go(&mut state, Section::Trash);
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, crate::view, (1278.0, 798.0), env);
+    poll(&mut rt);
+    assert!(words(&rt).contains("Invented trip notes.txt"), "listed in Trash");
+    rt.update(|s, tx| {
+        assert!(
+            crate::frames::item::open_preview(s, NOTES, tx),
+            "the row is in the listing"
+        );
+    });
+    let began = Instant::now();
+    while rt.state.frames.shared.fields.preview.is_loading() {
+        assert!(began.elapsed() < Duration::from_secs(10), "the preview did not answer");
+        std::thread::sleep(Duration::from_millis(10));
+        rt.update(|s, tx| {
+            crate::frames::item::poll(s, tx);
+        });
+    }
+    draw(&mut rt);
+    let seen = words(&rt);
+    assert!(seen.contains("train at eight"), "the first lines are drawn: {seen}");
+    assert!(
+        rt.find("pv-share").is_none() && rt.find("pv-open").is_none(),
+        "read-only"
+    );
+    let db = beebeeb_engine::state_db::StateDb::open(&dir.path().join("state.db")).unwrap();
+    assert!(
+        db.get_file(NOTES).unwrap().is_none(),
+        "nothing about it was written here"
     );
 }
