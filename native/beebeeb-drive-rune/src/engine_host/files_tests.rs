@@ -445,6 +445,8 @@ fn where_a_selection_cannot_be_reclaimed_free_up_space_is_refused_before_anythin
         s.kept = vec!["f-1".into()];
     }
     let mut copies = LocalCopies::new(fake.clone());
+    copies.pump();
+    settled(&mut copies);
     assert_eq!(
         copies.ask(Action::FreeUpSpace, items(&[("f-1", true), ("f-2", false)])),
         Err(ActionError::NotOnThisSystem)
@@ -572,6 +574,9 @@ fn the_window_is_woken_when_a_message_is_due_and_not_before() {
 fn without_an_open_vault_or_a_running_engine_nothing_is_sent() {
     let fake = Arc::new(Fake::default());
     let mut copies = LocalCopies::new(fake.clone());
+    // The first look reads the Backups folder's id; let that settle, so `idle` below speaks of the refused asks only.
+    copies.pump();
+    settled(&mut copies);
     fake.s().running = false;
     assert_eq!(
         copies.ask(Action::KeepOffline, items(&[("f-1", false)])),
