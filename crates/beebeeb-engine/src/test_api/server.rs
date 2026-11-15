@@ -42,6 +42,12 @@ pub const FIXTURE_USER_ID: &str = "f1c70000-2475-4000-8000-000000000001";
 pub const END_SESSION_LINE: &str = "end-session";
 /// The line on standard input that refuses the device route (see [`fixture_handler`]).
 pub const HEARTBEAT_OFF_LINE: &str = "heartbeat-off";
+/// The line on standard input that makes the upload routes unreachable (see [`fixture_handler`]).
+pub const UPLOADS_OFF_LINE: &str = "uploads-off";
+/// The control route that stores a newer version of a file, as another device's save (no token: a loopback control).
+pub const NEWER_VERSION_ROUTE: &str = "POST /fake-control/newer-version";
+/// The control route that turns the refusal of uploads on or off.
+pub const UPLOADS_REFUSED_ROUTE: &str = "POST /fake-control/uploads-refused";
 /// `--max-seconds` when it is not given.
 pub const DEFAULT_MAX_SECONDS: u64 = 3600;
 const MAX_SECONDS: u64 = 86_400;
@@ -55,6 +61,10 @@ stderr. Two more lines are switches, each set until the server stops:
 `end-session` refuses this account's session token: from then on every request with a session token is answered
 401, as a server that no longer accepts the session.
 `heartbeat-off` refuses the device route (POST /api/v1/clients/devices) with 503, so the app's heartbeat never starts.
+`uploads-off` makes every upload route (/api/v1/uploads/...) hang up without an answer, as a server that cannot be
+reached for them (the same switch: POST /fake-control/uploads-refused with a JSON body {refused: true or false} sets it either way).
+Control, one HTTP call each, no token, loopback only: POST /fake-control/newer-version with a JSON body of file_id
+or path, and content_text or content_base64, saves a newer version of that file as another device would.
 A development binary: built only with --features fake-server, never in a release profile, never in an app.";
 
 /// What the command line asked for.
@@ -194,6 +204,8 @@ pub type LineWriter = Arc<dyn Fn(&str) + Send + Sync>;
 /// The two switches a line on standard input sets (each stays set until the server stops).
 #[derive(Debug, Clone, Default)]
 pub struct Switches {
+    /// A line [`UPLOADS_OFF_LINE`], or the control route: every upload route hangs up (off at the start).
+    pub uploads_off: Arc<AtomicBool>,
     /// A line [`END_SESSION_LINE`]: the server refuses this account's session token on every call.
     pub session_ended: Arc<AtomicBool>,
     /// A line [`HEARTBEAT_OFF_LINE`]: the device route (`POST /api/v1/clients/devices`) is refused, so the app's
@@ -215,7 +227,11 @@ pub fn fixture_handler(
 ) -> Handler {
     let routes = account_handler(account.clone());
     Arc::new(move |request: &Request| {
-        let reply = if switches.session_ended.load(Ordering::SeqCst) && request.bearer().is_some() {
+        let reply = if let Some(reply) = control(&account, &switches, request) {
+            reply
+        } else if switches.uploads_off.load(Ordering::SeqCst) && is_upload_call(request) {
+            Reply::hang_up()
+        } else if switches.session_ended.load(Ordering::SeqCst) && request.bearer().is_some() {
             Reply::error(401, "unauthorized")
         } else if switches.heartbeat_off.load(Ordering::SeqCst) && request.route() == "POST /api/v1/clients/devices" {
             Reply::error(503, "unavailable")
@@ -228,6 +244,61 @@ pub fn fixture_handler(
         lines(&access_line(request, reply.status));
         reply
     })
+}
+
+/// An upload session route: `init`, a chunk, `complete`, `heartbeat` (the picture and abandon routes are not uploads).
+fn is_upload_call(request: &Request) -> bool {
+    matches!(request.method.as_str(), "POST" | "PUT") && request.route().contains(" /api/v1/uploads/")
+}
+
+/// The control routes: they answer without a token and are never part of the API a client sees.
+fn control(account: &FakeAccount, switches: &Switches, request: &Request) -> Option<Reply> {
+    use base64::Engine as _;
+    match request.route().as_str() {
+        NEWER_VERSION_ROUTE => {
+            let body = request.json();
+            let id = match (
+                body.get("file_id").and_then(Value::as_str),
+                body.get("path").and_then(Value::as_str),
+            ) {
+                (Some(id), _) => Some(id.to_string()),
+                (None, Some(path)) => account.find_by_path(path),
+                (None, None) => return Some(Reply::error(400, "file_id or path")),
+            };
+            let Some(id) = id else {
+                return Some(Reply::error(404, "no such file"));
+            };
+            let content = match (
+                body.get("content_text").and_then(Value::as_str),
+                body.get("content_base64").and_then(Value::as_str),
+            ) {
+                (Some(text), _) => text.as_bytes().to_vec(),
+                (None, Some(encoded)) => match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Some(Reply::error(400, "content_base64")),
+                },
+                (None, None) => return Some(Reply::error(400, "content_text or content_base64")),
+            };
+            Some(match account.push_newer_version(&id, &content) {
+                Ok(made) => Reply::ok(json!({
+                    "file_id": made.file_id,
+                    "version_number": made.version_number,
+                    "size_bytes": made.size_bytes,
+                    "updated_at": made.updated_at,
+                })),
+                Err(why) => Reply::json(409, json!({ "error": why })),
+            })
+        }
+        UPLOADS_REFUSED_ROUTE => {
+            let refused = request.json().get("refused").and_then(Value::as_bool);
+            let Some(refused) = refused else {
+                return Some(Reply::error(400, "refused"));
+            };
+            switches.uploads_off.store(refused, Ordering::SeqCst);
+            Some(Reply::ok(json!({ "refused": refused })))
+        }
+        _ => None,
+    }
 }
 
 fn is_sign_in_leg(request: &Request) -> bool {
@@ -305,6 +376,13 @@ fn read_until_stop<R: BufRead>(mut input: R, switches: &Switches) -> Stop {
                 if !switches.heartbeat_off.swap(true, Ordering::SeqCst) {
                     say(
                         "bb-fake-server: the device route is refused (a line `heartbeat-off`): the heartbeat cannot start from now on",
+                    );
+                }
+            }
+            Ok(_) if line.trim() == UPLOADS_OFF_LINE => {
+                if !switches.uploads_off.swap(true, Ordering::SeqCst) {
+                    say(
+                        "bb-fake-server: the upload routes are unreachable (a line `uploads-off`): they hang up from now on",
                     );
                 }
             }

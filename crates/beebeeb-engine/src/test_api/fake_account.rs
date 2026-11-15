@@ -18,18 +18,18 @@ use super::{FakeApi, Handler, OpaqueAccount, Reply, Request};
 
 /// One version of a file in the fake vault (`GET /api/v1/files/{id}/versions`).
 #[derive(Debug, Clone)]
-struct FakeVersion {
-    id: String,
-    number: i64,
-    created_at: String,
-    size_bytes: u64,
+pub(super) struct FakeVersion {
+    pub(super) id: String,
+    pub(super) number: i64,
+    pub(super) created_at: String,
+    pub(super) size_bytes: u64,
 }
 
 /// The versions of one file: in the order they were made, and which number is the current one.
 #[derive(Debug, Clone, Default)]
-struct FakeVersions {
-    list: Vec<FakeVersion>,
-    current: i64,
+pub(super) struct FakeVersions {
+    pub(super) list: Vec<FakeVersion>,
+    pub(super) current: i64,
 }
 
 /// One item in the fake vault: a folder or a file, with its encrypted name produced by core's `encrypt_name_for`.
@@ -50,6 +50,8 @@ pub struct VaultItem {
     /// account's own file key; an empty file has none). `None`: the item has no content to download
     /// ([`FakeAccount::add_file_with_content`] gives it one).
     pub content_frames: Option<Vec<Vec<u8>>>,
+    /// The object version a completed upload (or [`FakeAccount::push_newer_version`]) made current; `None` until one did.
+    pub object_version_id: Option<String>,
 }
 
 impl VaultItem {
@@ -65,6 +67,9 @@ impl VaultItem {
             "version_number": self.version_number,
             "content_hash": self.content_hash,
         });
+        if let Some(object) = &self.object_version_id {
+            node["current_object_version_id"] = json!(object);
+        }
         // A file with content also says how it is cut, as the server's row does: what a download reads.
         if let Some(frames) = &self.content_frames {
             node["chunk_count"] = json!(frames.len());
@@ -91,9 +96,9 @@ pub struct FakeAccount {
     /// The master key bytes (32), for building encrypted vault items.
     pub master_key: [u8; 32],
     /// Items in the vault (file tree), keyed by id.
-    items: Mutex<HashMap<String, VaultItem>>,
+    pub(super) items: Mutex<HashMap<String, VaultItem>>,
     /// The current seq_id (monotonic).
-    seq: AtomicI64,
+    pub(super) seq: AtomicI64,
     /// How much storage this account uses.
     pub used_bytes: u64,
     pub quota_bytes: u64,
@@ -110,7 +115,9 @@ pub struct FakeAccount {
     /// `GET /api/v1/shares/mine` names this file on every row, whatever file the link is to.
     links_listed_as: Mutex<Option<String>>,
     /// The versions of the files that have some ([`Self::add_version`]), by file id.
-    versions: Mutex<HashMap<String, FakeVersions>>,
+    pub(super) versions: Mutex<HashMap<String, FakeVersions>>,
+    /// Whole uploads, the change log and stored pictures ([`super::fake_uploads`]).
+    pub(super) uploads: super::fake_uploads::UploadState,
     /// How many version restores reached this account (a request with its token), whatever the answer.
     restores: AtomicUsize,
     /// The status the next version restore is answered with, without being made.
@@ -167,6 +174,7 @@ impl FakeAccount {
             links_list_wrapped_key: std::sync::atomic::AtomicBool::new(false),
             links_listed_as: Mutex::new(None),
             versions: Mutex::new(HashMap::new()),
+            uploads: Default::default(),
             restores: AtomicUsize::new(0),
             restore_refusal: Mutex::new(None),
             restore_hangs_up: AtomicBool::new(false),
@@ -201,6 +209,7 @@ impl FakeAccount {
             version_number: 1,
             content_hash: if is_folder { None } else { Some(format!("hash-{id}")) },
             content_frames: None,
+            object_version_id: None,
         };
         self.items.lock().expect("vault items").insert(id.to_string(), item);
     }
@@ -690,13 +699,18 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
-                // We return no ops: the fake is a static tree.
+                // The change log: empty for a static tree; an upload or a pushed version adds its ops
+                // (`fake_uploads`), each with the sequence number it took.
                 let seq = account.seq.load(Ordering::SeqCst);
-                Reply::ok(json!({
-                    "ops": [],
-                    "since": seq,
-                    "head_seq": seq,
-                }))
+                let since = req.query("since").and_then(|v| v.parse::<i64>().ok());
+                match since {
+                    Some(since) => Reply::ok(json!({
+                        "ops": account.ops_since(since),
+                        "since": since,
+                        "head_seq": seq,
+                    })),
+                    None => Reply::ok(json!({ "ops": [], "since": seq, "head_seq": seq })),
+                }
             }
 
             // ── Files listing ───────────────────────────────────────────
@@ -875,28 +889,18 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
             // ── Logout ──────────────────────────────────────────────────
             "POST /api/v1/auth/logout" => Reply::ok(json!({})),
 
-            // ── Upload init ─────────────────────────────────────────────
+            // ── Whole uploads: init, chunks, heartbeat, complete, abandon; stored pictures (`fake_uploads`) ──
             "POST /api/v1/uploads/init" => {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
-                let body = req.json();
-                let file_id = body
-                    .get("file_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("file-{}", uuid::Uuid::new_v4()));
-                Reply::ok(json!({
-                    "file_id": file_id,
-                    "tenant_id": "tenant-1",
-                    "object_version_id": "ver-1",
-                    "upload_session_id": format!("upload-{}", uuid::Uuid::new_v4()),
-                    "chunk_size_bytes": 5_242_880,
-                    "chunk_count": 1,
-                    "storage_format_version": 1,
-                    "storage_pool_id": "pool-1",
-                    "region": "europe",
-                }))
+                account.upload_init(&req.json())
+            }
+            route_str if account.is_upload_route(route_str) => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.upload_route(&req)
             }
 
             // ── Search shards ───────────────────────────────────────────

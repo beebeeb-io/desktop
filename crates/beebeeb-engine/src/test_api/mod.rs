@@ -7,6 +7,7 @@
 
 pub mod fake_account;
 pub mod fake_signup;
+pub mod fake_uploads;
 pub mod password_change;
 pub mod server;
 
