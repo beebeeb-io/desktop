@@ -7,6 +7,12 @@
 //! | Restricted token: privileges removed, Administrators deny-only | whatever an elevated parent's token would add |
 //! | Handle list | every handle of the parent except the two pipe ends |
 //!
+//! **Shared memory.** A [`crate::Section`] is an unnamed section backed by the paging file; its handle is not
+//! inheritable. A grant duplicates it into the running helper with exactly the rights asked for (map-read, or
+//! map-read and map-write), never "the same access" as the app's handle. The helper maps it with `map` below, which
+//! owns that handle from then on. Dropping a section writes zeros over all of it (volatile writes) before it is
+//! unmapped, so a helper still holding a view sees zeros. The job's memory cap does not count the app's sections.
+//!
 //! **The container profile exists only while the helper is suspended.** Windows refuses to create an AppContainer
 //! process for an identity that has no registered profile (system code 2, measured), and a registered profile comes
 //! with a folder and registry entries of its own, meant for its process. So each helper gets a profile of its own
@@ -41,7 +47,8 @@ use std::time::Duration;
 
 use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::Foundation::{
-    GetLastError, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    DuplicateHandle, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows_sys::Win32::Security::Isolation::{CreateAppContainerProfile, DeleteAppContainerProfile};
@@ -58,6 +65,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_UILIMIT_WRITECLIPBOARD, JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
     SetInformationJobObject, TerminateJobObject,
+};
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE,
+    UnmapViewOfFile,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Registry::{
@@ -76,7 +87,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::block::{checked_path, command_line, environment_block, is_our_profile_name, profile_name};
-use crate::{ExitStatus, KILLED_EXIT_CODE, Limits, Pipes, SandboxError};
+use crate::{Access, ExitStatus, Granted, KILLED_EXIT_CODE, Limits, Pipes, SandboxError};
 
 /// `PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT`: the helper's token is not a member of the "all application
 /// packages" group, so the files that group may read on every PC are closed to it as well.
@@ -171,6 +182,180 @@ impl Drop for ChildInner {
         // The job handle closes right after this and would end the helper too; killing first leaves no window.
         let _ = self.kill();
     }
+}
+
+impl ChildInner {
+    /// Places a handle to `section` in the helper with exactly the rights of `access`, not inheritable.
+    pub(crate) fn grant(&self, section: &SectionInner, access: Access) -> Result<Granted, SandboxError> {
+        let mut wire: HANDLE = null_mut();
+        // SAFETY: `section.mapping` is an open section handle; `process` is the helper's open process handle,
+        // returned by process creation with full access (so with the right to place a handle in it); `wire` receives
+        // the value in the helper. Not inheritable; the rights are exactly `granted_rights(access)`, no options (so
+        // not "the same access" as the app's handle).
+        let ok = unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                section.mapping.as_raw_handle(),
+                self.process.as_raw_handle(),
+                &mut wire,
+                granted_rights(access),
+                0,
+                0,
+            )
+        };
+        if ok == 0 {
+            return Err(os("grant"));
+        }
+        Ok(Granted {
+            wire: wire as usize as u64,
+            len: section.len as u64,
+        })
+    }
+}
+
+/// The rights a grant carries into the helper: exactly these, never the rights of the app's own handle.
+fn granted_rights(access: Access) -> u32 {
+    match access {
+        Access::Read => FILE_MAP_READ,
+        Access::ReadWrite => FILE_MAP_READ | FILE_MAP_WRITE,
+    }
+}
+
+/// An unnamed section backed by the paging file, and the app's read-write view of all of it.
+pub(crate) struct SectionInner {
+    mapping: OwnedHandle,
+    view: MEMORY_MAPPED_VIEW_ADDRESS,
+    len: usize,
+}
+
+// SAFETY: the view is memory of this process that only this value unmaps; a shared reference lends it for reading
+// and an exclusive one for writing, as a `Vec<u8>` would.
+unsafe impl Send for SectionInner {}
+// SAFETY: as above.
+unsafe impl Sync for SectionInner {}
+
+impl SectionInner {
+    /// `len` is 1 byte to 4 GiB (checked by the caller).
+    pub(crate) fn new(len: usize) -> Result<Self, SandboxError> {
+        let size = len as u64;
+        let (high, low) = ((size >> 32) as u32, size as u32);
+        // SAFETY: no file (the paging file backs it); null attributes: default security and a handle that is not
+        // inheritable; read-write pages; the size; and a null name, so no other process can open it by name.
+        let raw = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, null(), PAGE_READWRITE, high, low, null()) };
+        if raw.is_null() {
+            return Err(os("section"));
+        }
+        let mapping = owned(raw);
+        // SAFETY: `mapping` is the open section just made, `len` bytes long; the view is unmapped once, in `drop`.
+        let view = unsafe { MapViewOfFile(mapping.as_raw_handle(), FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, len) };
+        if view.Value.is_null() {
+            return Err(os("section view"));
+        }
+        Ok(Self { mapping, view, len })
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        // SAFETY: the view is mapped read-write for `len` bytes until `drop`; `&self` lends it for reading only.
+        unsafe { std::slice::from_raw_parts(self.view.Value.cast(), self.len) }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: as above, and `&mut self` makes this the only reference into the view.
+        unsafe { std::slice::from_raw_parts_mut(self.view.Value.cast(), self.len) }
+    }
+
+    pub(crate) fn raw_handle(&self) -> HANDLE {
+        self.mapping.as_raw_handle()
+    }
+}
+
+impl Drop for SectionInner {
+    fn drop(&mut self) {
+        zeroize(self.as_mut_slice());
+        #[cfg(test)]
+        tests::record_zeroed(self.as_slice());
+        // SAFETY: the address `MapViewOfFile` returned in `new`, unmapped once, here. The section's handle closes
+        // right after, when `mapping` is dropped.
+        unsafe { UnmapViewOfFile(self.view) };
+    }
+}
+
+/// Writes zero over every byte with volatile writes, which the compiler may not leave out.
+fn zeroize(bytes: &mut [u8]) {
+    // SAFETY: every bit pattern is a valid `u64`, so the aligned middle of the bytes may be written as words.
+    let (head, words, tail) = unsafe { bytes.align_to_mut::<u64>() };
+    for word in words {
+        // SAFETY: `word` is a valid, aligned and exclusive reference.
+        unsafe { std::ptr::write_volatile(word, 0) };
+    }
+    for byte in head.iter_mut().chain(tail) {
+        // SAFETY: `byte` is a valid and exclusive reference.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A granted section, mapped in the helper: its view and the grant's handle, both released on drop.
+pub(crate) struct MappedInner {
+    view: MEMORY_MAPPED_VIEW_ADDRESS,
+    len: usize,
+    writable: bool,
+    _grant: OwnedHandle,
+}
+
+// SAFETY: as for `SectionInner`: the view is memory of this process that only this value unmaps.
+unsafe impl Send for MappedInner {}
+// SAFETY: as above.
+unsafe impl Sync for MappedInner {}
+
+impl MappedInner {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        // SAFETY: the view is mapped readable for `len` bytes until `drop`; `&self` lends it for reading only.
+        unsafe { std::slice::from_raw_parts(self.view.Value.cast(), self.len) }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> Option<&mut [u8]> {
+        if !self.writable {
+            return None;
+        }
+        // SAFETY: a view mapped read-write for `len` bytes until `drop`; `&mut self` makes this the only reference.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(self.view.Value.cast(), self.len) };
+        Some(bytes)
+    }
+}
+
+impl Drop for MappedInner {
+    fn drop(&mut self) {
+        // SAFETY: the address `MapViewOfFile` returned in `map`, unmapped once, here. The grant's handle closes right
+        // after, when `_grant` is dropped.
+        unsafe { UnmapViewOfFile(self.view) };
+    }
+}
+
+/// The helper's side: maps the section behind `wire`, a handle the app placed in this process with `grant`.
+pub(crate) fn map(wire: u64, len: usize, access: Access) -> Result<MappedInner, SandboxError> {
+    let value = usize::try_from(wire).map_err(|_| SandboxError::Limits("a grant that does not fit this platform"))?;
+    // SAFETY: the value is the handle the app placed in this process for this one grant; nothing else here owns it,
+    // and it is closed once, by this value. In a confined helper a value that names no handle of this process ends
+    // the process at its first use (strict handle checks), before any memory is touched.
+    let grant = unsafe { OwnedHandle::from_raw_handle(value as HANDLE) };
+    let rights = if access == Access::ReadWrite {
+        FILE_MAP_READ | FILE_MAP_WRITE
+    } else {
+        FILE_MAP_READ
+    };
+    // SAFETY: `grant` is a section handle of this process (see above); the view is `len` bytes, the length of the
+    // app's section; it is unmapped once, in `drop`.
+    let view = unsafe { MapViewOfFile(grant.as_raw_handle(), rights, 0, 0, len) };
+    if view.Value.is_null() {
+        return Err(os("map"));
+    }
+    Ok(MappedInner {
+        view,
+        len,
+        writable: access == Access::ReadWrite,
+        _grant: grant,
+    })
 }
 
 /// A process-creation attribute list. The values it points to are borrowed for `'a`, so they outlive it.
@@ -701,9 +886,41 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     const ALREADY_EXISTS: u32 = 0x8007_00B7;
+
+    thread_local! {
+        /// How many bytes of the last section dropped on this thread were zero right before it was unmapped.
+        static ZEROED_AT_DROP: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    /// The test-only hook of `SectionInner::drop`.
+    pub(super) fn record_zeroed(view: &[u8]) {
+        ZEROED_AT_DROP.set(Some(view.iter().filter(|&&byte| byte == 0).count()));
+    }
+
+    #[test]
+    fn a_dropped_section_is_zeroed() {
+        // Neither a multiple of eight nor of the page size, so the zeroing has a tail to cover.
+        let len = 3 * 4096 + 5;
+        let mut section = crate::Section::new(len).unwrap();
+        section.as_mut_slice().fill(0xA5);
+        assert_eq!(
+            section.as_slice().iter().filter(|&&byte| byte == 0).count(),
+            0,
+            "the instrument can fail: before the drop no byte is zero"
+        );
+        ZEROED_AT_DROP.set(None);
+        drop(section);
+        assert_eq!(
+            ZEROED_AT_DROP.get(),
+            Some(len),
+            "every byte was zero when the memory was released"
+        );
+    }
 
     fn wide(name: &str) -> Vec<u16> {
         name.encode_utf16().chain([0]).collect()
