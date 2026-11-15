@@ -646,20 +646,8 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     let (_engine, mut source) = source(&fake);
     assert_eq!(source.shared_session(), None);
     assert!(source.sign_up_available(), "sign-up is bound (owner ruling 2026-11-14)");
-
-    source.begin_recovery_verify("someone@example.eu", &words(TEST_PHRASE));
-    assert_eq!(
-        source.poll(),
-        Some(SignInEvent::RecoveryPhraseVerified(Err(PhraseProblem::Other)))
-    );
-    source.begin_set_password("an invented new password");
-    assert_eq!(source.poll(), Some(SignInEvent::PasswordSet(Err(SignInProblem::Other))));
-    // The passkey sign-in is bound (the system's dialog on a thread of its own): its tests are `passkeys_tests`.
-    source.begin_device_request();
-    assert_eq!(
-        source.poll(),
-        Some(SignInEvent::DeviceRequested(Err(SignInProblem::Other)))
-    );
+    // The recovery with the twelve words, its new password, the device request and the passkey sign-in are bound:
+    // `the_recovery_and_the_device_request_are_bound_and_answer_from_the_engine` below, and `passkeys_tests`.
     source.begin_hello();
     assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
     // Leaving a step does not drop these: they belong to no step that can be left.
@@ -667,6 +655,52 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     source.discard_partial_sign_in();
     assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
     assert_eq!(fake.fake.routes().len(), 0, "nothing was asked of the server");
+}
+
+/// The recovery's two steps and the device request are bound (slices K6 and K5): the in-app doors are drawn, and
+/// each call is a step of the engine that answers later, through the channel, never the at-once refusal of a call
+/// that is not bound. The words reach the server only as core's check (the recovery's own tests), the device request
+/// opens its socket at the server, and a new password with no recovery held is refused by the engine, which sends
+/// nothing for it.
+#[test]
+fn the_recovery_and_the_device_request_are_bound_and_answer_from_the_engine() {
+    let fake = fake("bound");
+    let (_engine, mut source) = source(&fake);
+    assert!(source.in_app_doors_available(), "both doors are drawn");
+
+    source.begin_set_password("an invented new password");
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::PasswordSet(Err(SignInProblem::Other)),
+        "no recovery is held: the engine refuses"
+    );
+    assert_eq!(
+        fake.fake.routes().len(),
+        0,
+        "and a refused new password asks the server nothing"
+    );
+
+    source.begin_recovery_verify(&fake.first.email, &words(TEST_PHRASE));
+    assert!(
+        matches!(next(&mut source), SignInEvent::RecoveryPhraseVerified(_)),
+        "the engine answers the words"
+    );
+    assert!(
+        requests(&fake, "/onboarding") >= 1,
+        "the engine read the server's numbers for the new password: {:?}",
+        fake.fake.routes()
+    );
+
+    source.begin_device_request();
+    assert!(
+        matches!(next(&mut source), SignInEvent::DeviceRequested(Err(_))),
+        "the fake has no device socket: the request ends before a code"
+    );
+    assert!(
+        requests(&fake, "/auth/cli") >= 1,
+        "the request went to the server's device socket: {:?}",
+        fake.fake.routes()
+    );
 }
 
 #[test]
