@@ -25,7 +25,7 @@ pub(super) fn button(index: usize, label: &str, look: Look, dimmed: bool, t: &Th
     )
 }
 
-fn refused(why: Refused) -> Problem {
+pub(super) fn refused(why: Refused) -> Problem {
     match why {
         Refused::WrongPassword | Refused::NotConfirmed => Problem::WrongPassword,
         Refused::Locked => Problem::Locked,
@@ -194,21 +194,23 @@ pub fn email(f: &Form, t: &Theme) -> El {
 }
 
 fn send_code(ui: &mut AccountUi) -> Option<&'static str> {
+    ui.source.as_deref()?;
+    let address = ui.form.email.text.trim().to_string();
+    if !address.contains('@') {
+        ui.form.problem = Some(Problem::NotAnAddress);
+        form::focus(&mut ui.form, Some(form::EMAIL_KEY));
+        return None;
+    }
+    if ui.form.waiting.is_some() {
+        return None;
+    }
+    // Every call starts through `calls::start`, which records the press the answer belongs to.
+    let typed = zeroize::Zeroizing::new(ui.form.current.text.clone());
+    if super::calls::start(ui, CallKind::StartEmail, &address, &typed) {
+        return None;
+    }
     let source = ui.source.as_deref_mut()?;
     let f = &mut ui.form;
-    let address = f.email.text.trim().to_string();
-    if !address.contains('@') {
-        f.problem = Some(Problem::NotAnAddress);
-        form::focus(f, Some(form::EMAIL_KEY));
-        return None;
-    }
-    if f.waiting.is_some() {
-        return None;
-    }
-    if source.start_call(CallKind::StartEmail, &address, &f.current.text) {
-        f.waiting = Some(CallKind::StartEmail);
-        return None;
-    }
     let confirmation = match source.step_up(Password::from_field(&f.current.text), Purpose::ChangeEmail) {
         Ok(confirmation) => confirmation,
         Err(why) => {
@@ -340,32 +342,68 @@ fn confirm_email(ui: &mut AccountUi) -> Option<&'static str> {
 
 /// Change password (DW-A67), and the same page after a wrong current password (DW-A68: the
 /// new password is kept, only the current one is retyped).
+/// What the Change password page says while a change is out (from this visit or an earlier one).
+pub(super) const CHANGING: &str = "A password change is still being made. Wait for it to finish.";
+
+/// A change that finished while the person was on another page.
+pub(super) const CHANGED_AWAY: &str =
+    "Your password was changed while you were away. Use the new one the next time you sign in.";
+
 pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
+    let out = f.waiting == Some(CallKind::ChangePassword);
     let current = match f.problem {
+        _ if out => Some(CHANGING),
         Some(Problem::WrongPassword) => Some("Current password is incorrect. Nothing was changed."),
         Some(Problem::Locked) => Some("Unlock first, then change your password."),
         Some(Problem::Offline) => Some(OFFLINE),
         Some(Problem::Unconfirmed) => Some(UNCONFIRMED),
+        Some(Problem::Changed) => Some(CHANGED_AWAY),
         _ => None,
     };
     let weak = f.problem == Some(Problem::Weak);
     let mismatch = f.problem == Some(Problem::Mismatch);
-    let (cancel, cancel_b) = button(0, "Cancel", Look::Plain, false, t);
-    let (change, change_b) = button(1, "Change password", Look::Primary, false, t);
+    // While the change is out the page takes no press (a second change, a way out): nothing is drawn as changed
+    // before Beebeeb answered, and its answer finds the page it is for.
+    // The fields are not editable and Change is off; Cancel stays, as the way out (the answer is settled when the
+    // page is opened again).
+    // While a change is out the button leaves the page and says so: it does not cancel the change.
+    let (cancel, cancel_b) = button(0, if out { "Leave this page" } else { "Cancel" }, Look::Plain, false, t);
+    let (mut change, change_b) = button(1, "Change password", Look::Primary, out, t);
+    let cancel = cancel.on_press(|s: &mut State| super::go(s, "DW-A52"));
+    if !out {
+        change = change.default_button().on_press(super::act(change_password));
+    }
+    let frozen = |field: El| {
+        if out {
+            field.disabled(true).focusable(false)
+        } else {
+            field
+        }
+    };
     let lock = Some(&icons::PADLOCK);
-    let mut new = rune::col().key("new-password").w_full().gap(6.0).child(fm::field(
-        1,
-        &Field {
-            label: "New password",
-            icon: lock,
-            message: None,
-            error: weak,
-            input_key: form::NEW_KEY,
-        },
-        &f.new,
-        |s: &mut State| &mut s.account.form.new,
-        t,
-    ));
+    let mut new = rune::col()
+        .key("new-password")
+        .w_full()
+        .gap(6.0)
+        .child(frozen(fm::field(
+            1,
+            &Field {
+                label: "New password",
+                icon: lock,
+                message: None,
+                error: weak,
+                input_key: form::NEW_KEY,
+            },
+            &f.new,
+            move |s: &mut State| {
+                if out {
+                    &mut s.account.form.sink
+                } else {
+                    &mut s.account.form.new
+                }
+            },
+            t,
+        )));
     if !f.new.text.is_empty() {
         // Read after the new password: how strong core finds it.
         let strength = source.password_strength(&Password::from_field(&f.new.text));
@@ -375,21 +413,27 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
     set::pane(
         vec![
             set::heading("Change password", None, None, t),
-            fm::field(
+            frozen(fm::field(
                 0,
                 &Field {
                     label: "Current password",
                     icon: lock,
                     message: current,
-                    error: current.is_some(),
+                    error: current.is_some() && !out && f.problem != Some(Problem::Changed),
                     input_key: form::CURRENT_KEY,
                 },
                 &f.current,
-                |s: &mut State| &mut s.account.form.current,
+                move |s: &mut State| {
+                    if out {
+                        &mut s.account.form.sink
+                    } else {
+                        &mut s.account.form.current
+                    }
+                },
                 t,
-            ),
+            )),
             new,
-            fm::field(
+            frozen(fm::field(
                 2,
                 &Field {
                     label: "New password again",
@@ -399,9 +443,15 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
                     input_key: form::AGAIN_KEY,
                 },
                 &f.again,
-                |s: &mut State| &mut s.account.form.again,
+                move |s: &mut State| {
+                    if out {
+                        &mut s.account.form.sink
+                    } else {
+                        &mut s.account.form.again
+                    }
+                },
                 t,
-            ),
+            )),
             au::banner(
                 &mut keys,
                 Tone::Neutral,
@@ -413,17 +463,24 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
                 false,
                 t,
             ),
-            fm::actions(vec![
-                (cancel.on_press(|s: &mut State| super::go(s, "DW-A52")), cancel_b),
-                (change.default_button().on_press(super::act(change_password)), change_b),
-            ]),
+            fm::actions(vec![(cancel, cancel_b), (change, change_b)]),
         ],
         t,
     )
 }
 
 fn change_password(ui: &mut AccountUi) -> Option<&'static str> {
+    if ui.form.waiting.is_some() {
+        return None;
+    }
     let source = ui.source.as_deref_mut()?;
+    // A change from an earlier visit of this page is still out: this press is refused with nothing sent, and the
+    // page shows that wait. Its answer is that change's, and is drawn as that (never as a second press's).
+    if let Some(mark) = source.call_mark(CallKind::ChangePassword).filter(|mark| mark.out) {
+        ui.form.waiting_serial = mark.serial;
+        ui.form.waiting = Some(CallKind::ChangePassword);
+        return None;
+    }
     let f = &mut ui.form;
     // The new password first: a wrong current password must not be asked twice for a typo.
     if !source.password_strength(&Password::from_field(&f.new.text)).accepted() {
@@ -436,9 +493,23 @@ fn change_password(ui: &mut AccountUi) -> Option<&'static str> {
         form::focus(f, Some(form::AGAIN_KEY));
         return None;
     }
-    let outcome = source
-        .step_up(Password::from_field(&f.current.text), Purpose::ChangePassword)
-        .and_then(|confirmation| source.change_password(confirmation, Password::from_field(&f.new.text)));
+    let stepped = source.step_up(Password::from_field(&f.current.text), Purpose::ChangePassword);
+    let outcome = match stepped {
+        Ok(confirmation) => {
+            // A source that asks Beebeeb on a worker takes the change here: the page waits for its answer
+            // (`calls::settle`). One that answers at once is asked as before.
+            let new = zeroize::Zeroizing::new(f.new.text.clone());
+            if super::calls::start(ui, CallKind::ChangePassword, &new, "") {
+                return None;
+            }
+            let (Some(source), f) = (ui.source.as_deref_mut(), &mut ui.form) else {
+                return None;
+            };
+            source.change_password(confirmation, Password::from_field(&f.new.text))
+        }
+        Err(why) => Err(why),
+    };
+    let f = &mut ui.form;
     match outcome {
         Ok(()) => Some("DW-A52"),
         Err(why) => {

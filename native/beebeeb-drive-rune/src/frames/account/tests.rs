@@ -1021,3 +1021,67 @@ fn a_stored_delay_the_menu_does_not_have_checks_no_row() {
     key(&mut rt, Key::Enter);
     assert_eq!(source(&rt).security().lock_after, "Immediately", "chosen, not assumed");
 }
+
+/// Review of desktop#427 (P1, twice): a password change that is still out when the page is left and opened again.
+/// The page says so (in words, fields not editable, Change off), a second change is never sent, and the answer that
+/// lands is that change's: shown as its result, never as a password the person did not send.
+#[test]
+fn a_change_that_is_still_out_is_shown_as_out_when_the_page_comes_back_and_its_answer_is_its_own() {
+    use super::source::{Answered, BoardAccount, HeldCalls};
+    const A: &str = "the first long passphrase 42";
+    const B: &str = "a second long passphrase 77";
+    let held = HeldCalls::default();
+    let mut rt = runtime("DW-A67");
+    rt.update(|s, _| s.account.source = Some(Box::new(BoardAccount::new().holding_calls(held.clone()))));
+    rt.update(|s, _| {
+        let f = &mut s.account.form;
+        form::type_in(&mut f.current, BOARD_PASSWORD);
+        form::type_in(&mut f.new, A);
+        form::type_in(&mut f.again, A);
+    });
+    settle(&mut rt);
+    // Press A: it goes out on a worker and the page waits.
+    click(&mut rt, "btn-1");
+    assert_eq!(held.started.borrow().len(), 1, "A was sent");
+    assert_eq!(
+        rt.state.account.pane,
+        Pane::Password,
+        "nothing is drawn as changed before the answer"
+    );
+
+    // Leave (Cancel) and come back: the page tells the truth about the change that is out.
+    click(&mut rt, "btn-0");
+    assert_ne!(rt.state.account.pane, Pane::Password);
+    rt.update(|s, _| super::go(s, "DW-A67"));
+    settle(&mut rt);
+    assert_eq!(rt.state.account.pane, Pane::Password);
+    assert_eq!(
+        says(&rt, "field-0-msg"),
+        super::forms::CHANGING,
+        "the page says a change is still being made"
+    );
+
+    // B cannot be typed or sent.
+    let before = rt.state.account.form.current.text.clone();
+    click(&mut rt, "field-0");
+    key(&mut rt, Key::Text("x".into()));
+    assert_eq!(rt.state.account.form.current.text, before, "the field takes no typing");
+    rt.update(|s, _| {
+        let f = &mut s.account.form;
+        form::type_in(&mut f.current, BOARD_PASSWORD);
+        form::type_in(&mut f.new, B);
+        form::type_in(&mut f.again, B);
+    });
+    settle(&mut rt);
+    click(&mut rt, "btn-1");
+    key(&mut rt, Key::Enter);
+    assert_eq!(held.started.borrow().len(), 1, "B was never sent");
+    assert_eq!(rt.state.account.pane, Pane::Password, "no answer yet: still the wait");
+
+    // A's answer lands: it is A's result (its normal path), and nothing says B was saved.
+    *held.answer.borrow_mut() = Some(Answered::Done);
+    settle(&mut rt);
+    assert_eq!(rt.state.account.pane, Pane::Security, "A's Done takes the normal path");
+    assert!(rt.state.account.form.waiting.is_none(), "the form is live again");
+    assert_eq!(held.started.borrow().len(), 1);
+}

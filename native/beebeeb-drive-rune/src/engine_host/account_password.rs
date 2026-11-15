@@ -12,10 +12,11 @@
 //!   wiped when dropped ([`Zeroizing`]).
 //! - The new password leaves the form's field only as a wiped copy for the one call.
 //!
-//! Thread rule, said plainly: [`AccountSource::change_password`] returns its answer, so it waits for the engine's
-//! call on the window's thread (a handful of requests, each given up after 30 seconds). The engine never touches a
-//! window; a frame that shows "Changing..." while a worker runs needs the form to ask in two parts, which the form
-//! does not yet.
+//! Thread rule: the form changes the password through `CallKind::ChangePassword` (`start_call`): the engine's call
+//! runs on a worker, stamped with the session and account of the press, and its answer is dropped when the account
+//! moved on; the form takes no second press (its buttons dimmed) until it lands. [`AccountSource::change_password`]
+//! stays for a source that answers at once; on the engine's it waits on the calling thread, so the form never uses
+//! it where `start_call` is taken.
 //!
 //! Must not: log either password; keep one past the call; send anything for a confirmation of another purpose,
 //! one already used, or one made under another session or account.
@@ -120,6 +121,13 @@ impl<C: CredentialStores> PasswordCalls<C> {
             .map_err(refusal)
     }
 
+    /// The password the step-up kept, for the change that starts now on a worker: only when it was kept under
+    /// `now` (the session and account of this press); it is used once, so it is taken either way.
+    pub fn take_kept_for(&mut self, now: &Stamp) -> Option<Zeroizing<String>> {
+        let kept = self.kept.take()?;
+        (kept.pressed == *now).then_some(kept.password)
+    }
+
     /// The session or account moved on, or the pane closed: what was kept is gone.
     pub fn forget_if_moved(&mut self) {
         if self
@@ -141,7 +149,7 @@ impl<C: CredentialStores> PasswordCalls<C> {
 /// change's finish left, so nothing was. A finish that left and was not refused outright is
 /// [`PasswordChangeError::Unconfirmed`]: the password may have changed, and the form says so (review of desktop#423,
 /// P2 #9).
-fn refusal(error: PasswordChangeError) -> Refused {
+pub(super) fn refusal(error: PasswordChangeError) -> Refused {
     match error {
         PasswordChangeError::WrongPassword => Refused::WrongPassword,
         PasswordChangeError::SamePassword | PasswordChangeError::TooWeak | PasswordChangeError::Breached => {

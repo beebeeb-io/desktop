@@ -66,7 +66,9 @@ fn option(
         )
 }
 
-pub fn forgot(k: &mut Keys, t: &Theme) -> El {
+/// `doors`: the source can approve this PC from another device. Where it cannot, that card is not drawn: it would
+/// promise an approval and lead to the web's password recovery.
+pub fn forgot(k: &mut Keys, doors: bool, t: &Theme) -> El {
     au::column()
         .child(back_to("Sign in", Ui::open_sign_in, t))
         .child(au::heading(
@@ -85,16 +87,18 @@ pub fn forgot(k: &mut Keys, t: &Theme) -> El {
             Ui::recover_with_phrase,
             t,
         ))
-        .child(option(
-            k,
-            &icons::PHONE,
-            "I have another device signed in",
-            "Approve this PC from a device where you're already signed in. No phrase needed.",
-            "Sign in with another device",
-            ButtonKind::Outline,
-            Ui::ask_other_device,
-            t,
-        ))
+        .children(doors.then(|| {
+            option(
+                k,
+                &icons::PHONE,
+                "I have another device signed in",
+                "Approve this PC from a device where you're already signed in. No phrase needed.",
+                "Sign in with another device",
+                ButtonKind::Outline,
+                Ui::ask_other_device,
+                t,
+            )
+        }))
         .child(option(
             k,
             &icons::CROSS,

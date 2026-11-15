@@ -1,7 +1,7 @@
 //! Two versions on the engine's rows (`ConflictCalls`), against a double of the engine: what is drawn and when, the
 //! words for each side, what an answer sends, and the session rule. Every name is invented.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use beebeeb_engine::app::conflicts_api::{Conflicts, WaitingConflict};
@@ -18,6 +18,10 @@ struct Double {
     answer: Mutex<Result<(), ResolveRefused>>,
     /// The first answer waits for this before it returns.
     gate: Mutex<Option<mpsc::Receiver<()>>>,
+    /// The read of the waiting files fails (the engine has no local state to read).
+    read_fails: AtomicBool,
+    /// How often the window was woken.
+    wakes: AtomicUsize,
 }
 
 impl Double {
@@ -29,6 +33,8 @@ impl Double {
             asked: Mutex::default(),
             answer: Mutex::new(Ok(())),
             gate: Mutex::default(),
+            read_fails: AtomicBool::new(false),
+            wakes: AtomicUsize::new(0),
         })
     }
 }
@@ -56,6 +62,9 @@ impl ConflictEngine for Double {
     }
     fn waiting(&self, session: SessionGeneration) -> Result<Conflicts, ConflictsRefused> {
         self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.read_fails.load(Ordering::SeqCst) {
+            return Err(ConflictsRefused::NoLocalState);
+        }
         Ok(Conflicts {
             session,
             files: self.waiting.lock().unwrap().clone(),
@@ -79,7 +88,9 @@ impl ConflictEngine for Double {
         }
         answer
     }
-    fn wake(&self) {}
+    fn wake(&self) {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Pump until `done` holds (the workers answer on their own threads).
@@ -199,4 +210,37 @@ fn a_file_the_engine_did_not_list_is_refused_with_nothing_sent() {
     until(&mut calls, |c| !c.conflicts().is_empty());
     assert_eq!(calls.keep("other", Keep::Here), Err(ActionError::Failed));
     assert!(engine.asked.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_read_is_not_asked_again_every_frame_and_wakes_the_window_at_most_once() {
+    let engine = Double::new();
+    engine.read_fails.store(true, Ordering::SeqCst);
+    let mut calls = ConflictCalls::new(engine.clone());
+    // 60 frames over 300 ms: the window asks `take` every frame.
+    for _ in 0..60 {
+        calls.take();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(engine.reads.load(Ordering::SeqCst), 1, "one read, not one per frame");
+    assert!(
+        engine.wakes.load(Ordering::SeqCst) <= 1,
+        "a failure the screen does not show wakes nothing"
+    );
+    assert!(
+        calls.conflicts().is_empty(),
+        "a list that could not be read is not drawn"
+    );
+}
+
+#[test]
+fn a_failed_read_is_tried_again_after_its_wait_and_then_draws_the_answer() {
+    let engine = Double::new();
+    engine.read_fails.store(true, Ordering::SeqCst);
+    let mut calls = ConflictCalls::new(engine.clone());
+    calls.refresh = Duration::from_millis(100);
+    until(&mut calls, |_| engine.reads.load(Ordering::SeqCst) >= 1);
+    engine.read_fails.store(false, Ordering::SeqCst);
+    until(&mut calls, |c| !c.conflicts().is_empty());
+    assert_eq!(engine.reads.load(Ordering::SeqCst), 2, "one retry, which worked");
 }

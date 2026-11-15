@@ -1108,6 +1108,8 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
         self.a_call_answer()
     }
+    #[rustfmt::skip]
+    fn call_mark(&self, kind: CallKind) -> Option<crate::frames::account::source::CallMark> { self.a_call_mark(kind) }
     fn late_codes(&mut self) -> Option<(CallKind, Vec<Secret>)> {
         self.a_late_codes()
     }

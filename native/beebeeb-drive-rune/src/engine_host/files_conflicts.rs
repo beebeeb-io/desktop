@@ -39,7 +39,7 @@ use crate::frames::files::source::{Action, ActionError, Change};
 #[path = "files_conflicts_tests.rs"]
 mod tests;
 
-/// The list is read again when it is this old.
+/// The list is read again when it is this old, and a read that failed is tried again after this long.
 const REFRESH: Duration = Duration::from_secs(20);
 
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is its own.
@@ -106,6 +106,11 @@ pub struct ConflictCalls<E: ConflictEngine> {
     held: Option<(Vec<Conflict>, Instant)>,
     /// A read is on its way.
     reading: bool,
+    /// When the last read failed, until a read works: the next one waits for [`Self::refresh`], and the failure is
+    /// said once, not on every frame.
+    failed_at: Option<Instant>,
+    /// How long a list, and a failed read, stand before the next read.
+    refresh: Duration,
     /// An answer was applied: the list is read again now, whatever its age.
     due: bool,
     /// Moves on every answer applied, so a read that started before it is not trusted after.
@@ -127,6 +132,8 @@ impl<E: ConflictEngine> ConflictCalls<E> {
             seen: None,
             held: None,
             reading: false,
+            failed_at: None,
+            refresh: REFRESH,
             due: false,
             epoch: 0,
             resolving: HashMap::new(),
@@ -146,6 +153,7 @@ impl<E: ConflictEngine> ConflictCalls<E> {
         self.seen = Some(now.clone());
         self.held = None;
         self.reading = false;
+        self.failed_at = None;
         self.due = false;
         self.epoch += 1;
         self.resolving.clear();
@@ -228,8 +236,21 @@ impl<E: ConflictEngine> ConflictCalls<E> {
                 Answer::List { pressed, epoch, list } => {
                     if epoch == self.epoch && here && pressed == now {
                         self.reading = false;
-                        // A failed read holds nothing: a list that cannot be trusted is not drawn.
-                        self.held = list.ok().map(|list| (list, Instant::now()));
+                        // A failed read holds nothing: a list that cannot be trusted is not drawn, and the next
+                        // read waits (said once: not on every frame).
+                        match list {
+                            Ok(list) => {
+                                self.held = Some((list, Instant::now()));
+                                self.failed_at = None;
+                            }
+                            Err(_) => {
+                                self.held = None;
+                                if self.failed_at.is_none() {
+                                    log("files: the files that wait for a choice could not be read");
+                                }
+                                self.failed_at = Some(Instant::now());
+                            }
+                        }
                         self.due = false;
                     } else if pressed == now {
                         // Older than an answer applied since: read again.
@@ -258,7 +279,12 @@ impl<E: ConflictEngine> ConflictCalls<E> {
                 }
             }
         }
-        if here && !self.reading && (self.due || self.held.as_ref().is_none_or(|(_, at)| at.elapsed() >= REFRESH)) {
+        let stale = match (&self.held, self.failed_at) {
+            (Some((_, at)), _) => at.elapsed() >= self.refresh,
+            (None, Some(failed)) => failed.elapsed() >= self.refresh,
+            (None, None) => true,
+        };
+        if here && !self.reading && (self.due || stale) {
             self.read(now);
         }
         std::mem::take(&mut self.changes)
@@ -266,6 +292,8 @@ impl<E: ConflictEngine> ConflictCalls<E> {
 
     fn read(&mut self, pressed: Stamp) {
         let (engine, answers, epoch) = (self.engine.clone(), self.answers.clone(), self.epoch);
+        // A list that was drawn and is now gone changes the screen; a failure with nothing drawn changes nothing.
+        let had_list = self.held.as_ref().is_some_and(|(list, _)| !list.is_empty());
         let started = std::thread::Builder::new()
             .name("files-conflicts".into())
             .spawn(move || {
@@ -275,9 +303,12 @@ impl<E: ConflictEngine> ConflictCalls<E> {
                         Err(ConflictsRefused::NoLocalState)
                     })
                     .map(|read| read.files.iter().map(shown).collect::<Vec<Conflict>>());
-                let changed = !matches!(&list, Ok(list) if list.is_empty());
+                let changed = match &list {
+                    Ok(list) => !list.is_empty(),
+                    Err(_) => had_list,
+                };
                 let _ = answers.send(Answer::List { pressed, epoch, list });
-                // An empty answer changes nothing on the screen: no redraw for it.
+                // An empty answer, and a failed read with nothing drawn, change nothing on the screen: no redraw.
                 if changed {
                     engine.wake();
                 }

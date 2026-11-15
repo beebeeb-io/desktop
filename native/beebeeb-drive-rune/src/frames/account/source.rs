@@ -580,6 +580,19 @@ pub enum CallKind {
     NewBackupCodes,
     /// "Send again": the email's code once more.
     ResendEmail,
+    /// Change password: `input` is the new password; the current one is the one the step-up kept (never an
+    /// argument of the call). The answer is `Done` or `Refused`.
+    ChangePassword,
+}
+
+/// The latest call of one kind (see [`AccountSource::call_mark`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallMark {
+    pub serial: u64,
+    pub out: bool,
+    /// The session and the account are still the ones this call's answer was taken under (always true while it is
+    /// out). A late answer that is kept for a page is said only while this holds.
+    pub current: bool,
 }
 
 /// How a started call ended.
@@ -746,6 +759,13 @@ pub trait AccountSource {
     /// `false`: this source answers the sync methods above instead.
     fn start_call(&mut self, _kind: CallKind, _input: &str, _password: &str) -> bool {
         false
+    }
+    /// The latest call of this kind: its serial (one per call that was started, never reused) and whether it is
+    /// still out. A page that was left and opened again asks this: it shows the wait instead of starting a second
+    /// call, and an answer is settled only for the serial the page waits for. `None`: never started (or a source
+    /// that answers at once).
+    fn call_mark(&self, _kind: CallKind) -> Option<CallMark> {
+        None
     }
     /// The answer of a call that was started, once; one that belongs to a session or an account that is over is
     /// dropped by the source.
@@ -944,6 +964,8 @@ pub fn score(factors: &[Factor]) -> (usize, usize) {
 
 mod board;
 // Every public item of the fixture keeps its path here; `BOARD_BACKUP_CODE` has no reader outside it yet.
+#[cfg(test)]
+pub use board::HeldCalls;
 #[allow(unused_imports)]
 pub use board::{
     BOARD_BACKUP_CODE, BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, BOARD_SIGN_OUT_REFUSED, BoardAccount, SignOutMode,

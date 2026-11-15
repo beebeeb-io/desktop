@@ -672,14 +672,20 @@ fn open_in_its_app_never_opens_the_windows_viewer() {
             .position(|item| item.name == NOTE_NAME)
             .expect("the note is listed");
     w.click(&format!("row-{row}-date"));
-    w.rt.update(|s, tx| {
-        assert!(s.preview(), "the preview panel opens");
-        s.open_from_preview(tx);
-    });
+    w.rt.update(|s, _| assert!(s.preview(), "the preview panel opens"));
+    // The panel's own preview downloads the note on a worker. Wait for its answer (drawn in the panel: every one of
+    // its chunk requests is in by then), instead of racing it: the count below is what the panel itself asked.
+    w.until_drawn(NOTE_WORDS);
+    let by_the_panel = w.chunk_requests();
+    w.rt.update(|s, tx| s.open_from_preview(tx));
     w.settle();
     assert_eq!(w.route_item(), None, "the route did not go to the viewer");
     assert!(w.rt.state.viewer.ui.is_none());
-    assert_eq!(w.chunk_requests(), 0);
+    assert_eq!(
+        w.chunk_requests(),
+        by_the_panel,
+        "Open in its app downloaded nothing through the viewer"
+    );
     // Enter on the same row is the viewer's (the file is not on this PC).
     w.press(Key::Enter, Mods::default());
     w.until_drawn(NOTE_WORDS);
