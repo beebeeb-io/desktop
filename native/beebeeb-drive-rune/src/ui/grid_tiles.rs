@@ -73,6 +73,20 @@ pub fn columns(width: f32) -> usize {
     (((inner + COL_GAP) / (CELL_W + COL_GAP)).floor() as usize).max(1)
 }
 
+/// A picture asked for stays held until its tile is this many rows out of view.
+pub const KEEP_ROWS: usize = 3;
+
+/// The items whose tiles are in view, and one row above and below: `offset` is how far the tiles' box is scrolled,
+/// `viewport` the scrolling area's height. Before the first layout (`viewport` 0) the first screenful stands in.
+pub fn items_in_view(offset: f32, viewport: f32, columns: usize, count: usize) -> std::ops::Range<usize> {
+    let pitch = CELL_H + ROW_GAP;
+    let columns = columns.max(1);
+    let viewport = if viewport > 0.0 { viewport } else { 5.0 * pitch };
+    let first = ((offset.max(0.0) / pitch).floor() as usize).saturating_sub(1);
+    let last = (((offset.max(0.0) + viewport) / pitch).ceil() as usize) + 1;
+    (first * columns).min(count)..(last * columns).min(count)
+}
+
 /// One tile (`.mk-gcell`). The caller adds what a press does.
 pub fn tile(i: usize, item: &Tile, t: &Theme) -> El {
     let k = format!("grid-{i}");
