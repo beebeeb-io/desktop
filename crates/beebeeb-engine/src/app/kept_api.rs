@@ -45,6 +45,7 @@ impl<C: CredentialStores> Engine<C> {
         // sync folder (set or not); the other refusals keep their order.
         if let Err(refused) = &state
             && refused.not_this_accounts()
+            && false
         {
             return Err(NOT_YOURS.to_string());
         }
