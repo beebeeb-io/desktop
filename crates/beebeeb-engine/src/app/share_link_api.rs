@@ -49,7 +49,7 @@ const LOCAL_WEB_APP: &str = "http://localhost:5173";
 /// at another API never hands out a link to production. `https://api.<domain>` is `https://app.<domain>`; an
 /// API on loopback is the local web app; for any other API base no link is made. (Core refuses anything that
 /// is not `https` or loopback as well.)
-fn web_origin(api_base: &str) -> Option<String> {
+pub(super) fn web_origin(api_base: &str) -> Option<String> {
     let base = api_base.trim_end_matches('/');
     if let Some(domain) = base.strip_prefix("https://api.") {
         let plain = |c: char| c.is_ascii_alphanumeric() || c == '.' || c == '-';
@@ -82,7 +82,7 @@ impl std::fmt::Debug for LinkChoices {
 pub struct MadeLink {
     /// A host compares it with [`Engine::session_turn`] and drops a link whose session is gone.
     pub session: SessionGeneration,
-    link: Zeroizing<String>,
+    pub(super) link: Zeroizing<String>,
 }
 
 impl MadeLink {
@@ -268,7 +268,7 @@ fn local_refusal(refusal: LocalStateRefused) -> ShareLinkError {
 /// The key that opens the file `id`, from the account's local state (the rule of `owner_keys`'
 /// `resolved_owned_key`): its key record, else an owner-class id's derivation. A folder is refused before any key
 /// is looked up.
-fn key_of(db: &StateDb, master: &MasterKey, id: &str) -> Result<FileKey, ShareLinkError> {
+pub(super) fn key_of(db: &StateDb, master: &MasterKey, id: &str) -> Result<FileKey, ShareLinkError> {
     let entry = db
         .get_file(id)
         .map_err(|_| ShareLinkError::Refused)?

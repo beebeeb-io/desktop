@@ -543,7 +543,7 @@ fn canonical(id: &str) -> Option<&str> {
 /// One of the account's own items, from its local state: `Some(is_folder)`. `None` for an item that is gone or
 /// going, a received share's, the Backups root and anything in its tree, and a file whose key this computer cannot
 /// have (a foreign id with no owned-key record).
-fn own_item(db: &StateDb, id: &str) -> rusqlite::Result<Option<bool>> {
+pub(super) fn own_item(db: &StateDb, id: &str) -> rusqlite::Result<Option<bool>> {
     let Some(entry) = db.get_file(id)?.filter(|e| e.status != FileStatus::Trashing) else {
         return Ok(None);
     };
