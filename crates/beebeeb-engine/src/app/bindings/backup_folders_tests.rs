@@ -507,3 +507,46 @@ fn choosing_a_moved_folders_source_settles_its_question() {
         "the question is settled"
     );
 }
+
+/// Never backed up twice: a folder inside one that is backed up (a chosen one, or a known folder's place such as
+/// Documents) and a folder that holds one are refused, at any depth; a sibling whose name only starts the same way is
+/// not nested. The settings' own add refuses it too (a racing add).
+#[test]
+fn a_folder_inside_or_holding_a_backed_up_folder_cannot_be_chosen() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Invented Drive");
+    let documents = dir.path().join("Documents");
+    let deep = documents.join("Work").join("2026");
+    let parent = dir.path().join("Everything");
+    let held = parent.join("Notes");
+    let sibling = dir.path().join("Documents Old");
+    for folder in [&root, &deep, &held, &sibling] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let taken = [documents.clone(), held.clone()];
+    assert_eq!(check_chosen(&deep, &root, &taken), Err(AddRefused::InsideBackedUp));
+    assert_eq!(
+        check_chosen(&documents.join("Work"), &root, &taken),
+        Err(AddRefused::InsideBackedUp)
+    );
+    assert_eq!(check_chosen(&parent, &root, &taken), Err(AddRefused::HoldsBackedUp));
+    assert_eq!(
+        check_chosen(&documents, &root, &taken),
+        Err(AddRefused::AlreadyBackedUp)
+    );
+    assert_eq!(
+        check_chosen(&sibling, &root, &taken),
+        Ok(()),
+        "a name prefix is not nesting"
+    );
+
+    let mut config = DesktopConfig::default();
+    add_to(&mut config, &documents, &[]).unwrap();
+    assert_eq!(add_to(&mut config, &deep, &[]), Err(AddRefused::InsideBackedUp));
+    assert_eq!(add_to(&mut config, dir.path(), &[]), Err(AddRefused::HoldsBackedUp));
+    assert_eq!(config.backup_chosen_folders.len(), 1, "a refused add writes nothing");
+    assert_eq!(
+        AddRefused::InsideBackedUp.words(),
+        "This folder is inside a folder that is backed up already."
+    );
+}

@@ -52,6 +52,11 @@ pub enum AddRefused {
     HoldsSyncFolder,
     /// Backed up already: a folder chosen before, or where one of the known folders is.
     AlreadyBackedUp,
+    /// Inside a folder backed up already (a chosen one, or a known folder such as Documents): its files are in that
+    /// backup, so it would be backed up twice.
+    InsideBackedUp,
+    /// Holds a folder backed up already: that folder's files would be backed up twice.
+    HoldsBackedUp,
     /// Not a folder on this PC (a file, a folder that is gone, a path that is not absolute).
     NotAFolder,
     /// The local state or the settings file refused (signed out, another session, unreadable, ...).
@@ -69,6 +74,10 @@ impl AddRefused {
                 "This folder holds Beebeeb's own folder, so it can't be chosen. Choose a folder inside it."
             }
             Self::AlreadyBackedUp => "This folder is backed up already.",
+            Self::InsideBackedUp => "This folder is inside a folder that is backed up already.",
+            Self::HoldsBackedUp => {
+                "This folder holds a folder that is backed up already. Choose one of them, not both."
+            }
             Self::NotAFolder => "This isn't a folder on this PC.",
             Self::Backups(_) => "Couldn't add this folder. Try again in a moment.",
         }
@@ -80,6 +89,8 @@ impl AddRefused {
             Self::InsideSyncFolder => "inside_sync_folder",
             Self::HoldsSyncFolder => "holds_sync_folder",
             Self::AlreadyBackedUp => "already_backed_up",
+            Self::InsideBackedUp => "inside_backed_up",
+            Self::HoldsBackedUp => "holds_backed_up",
             Self::NotAFolder => "not_a_folder",
             Self::Backups(error) => error.kind(),
         }
@@ -168,6 +179,17 @@ pub fn check_chosen(path: &Path, sync_root: &Path, taken: &[PathBuf]) -> Result<
     if taken.iter().any(|folder| sources::same_folder(folder, path)) {
         return Err(AddRefused::AlreadyBackedUp);
     }
+    // Nested either way: a folder inside a backed-up one, or one that holds a backed-up one, is backed up twice.
+    for folder in taken.iter().filter(|folder| folder.is_absolute()) {
+        let inside = matches!(sources::check_source(path, folder), Err(SourceRefusal::InsideSyncRoot));
+        if inside {
+            return Err(AddRefused::InsideBackedUp);
+        }
+        let holds = matches!(sources::check_source(folder, path), Err(SourceRefusal::InsideSyncRoot));
+        if holds {
+            return Err(AddRefused::HoldsBackedUp);
+        }
+    }
     Ok(())
 }
 
@@ -210,6 +232,21 @@ pub fn add_to(config: &mut DesktopConfig, path: &Path, in_backup: &[String]) -> 
         .any(|folder| sources::same_folder(&folder.path, path))
     {
         return Err(AddRefused::AlreadyBackedUp);
+    }
+    // Another add may have landed since the rule ran: the nesting is refused here too.
+    for folder in &config.backup_chosen_folders {
+        if matches!(
+            sources::check_source(path, &folder.path),
+            Err(SourceRefusal::InsideSyncRoot)
+        ) {
+            return Err(AddRefused::InsideBackedUp);
+        }
+        if matches!(
+            sources::check_source(&folder.path, path),
+            Err(SourceRefusal::InsideSyncRoot)
+        ) {
+            return Err(AddRefused::HoldsBackedUp);
+        }
     }
     let mut taken: Vec<&str> = config
         .backup_chosen_folders
