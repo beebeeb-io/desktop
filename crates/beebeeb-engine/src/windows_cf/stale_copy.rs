@@ -13,7 +13,9 @@
 //! A kept file is fetched again by the caller after the handle is closed (`placeholders::hydrate_placeholder`, as a
 //! pin does), off the tick.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use std::os::windows::io::AsRawHandle;
 
@@ -22,14 +24,16 @@ use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, FILE_BASIC_INFO};
 
 use super::poison::{identity_of_handle, keep_lost_pin, set_pin, set_pin_by_path, standard_info};
-use crate::engine_bridge::{REFRESH_ORDER, RefreshStep};
+use crate::engine_bridge::{ContentFingerprint, REFRESH_ORDER, RefreshStep};
 use crate::state_db::{StaleCopy, StateDb};
 
 /// What the refresh did with one placeholder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refreshed {
-    /// Emptied, at the current version's size and time; the row records it (cloud-only, no agreed content).
-    Emptied,
+    /// Emptied, at the current version's size and time; the row records it (cloud-only, its older agreed content
+    /// kept as the fetched candidate). `kept`: the placeholder was pinned, as its handle read it (review P2-2: a pin set
+    /// in Explorer that the database has not recorded yet is kept too), so the caller fetches it again.
+    Emptied { kept: bool },
     /// Its bytes are not the agreed content: a change, left exactly as it is.
     Changed,
     /// Not now; the word says why (`in_use`, `not_wholly_on_disk`, `identity`, `row_moved`, a failed step whose
@@ -55,6 +59,11 @@ pub fn refresh_with(
     if !super::placeholders::fully_on_disk(path) {
         return Refreshed::Later("not_wholly_on_disk");
     }
+    // Review P3-5: a copy read last time and found to differ is not opened and read again while it is the same.
+    let before = ContentFingerprint::of(path).ok();
+    if still_differs(copy, before) {
+        return Refreshed::Changed;
+    }
     // LD-0113 Amendment 7: a read-only Backups file is changed by the engine too; the attribute is set again after.
     let _read_only = super::read_only::Lifted::new(path);
     const SHARING_VIOLATION: i32 = 32;
@@ -70,6 +79,7 @@ pub fn refresh_with(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Refreshed::Later("missing"),
         Err(_) => return Refreshed::Later("open"),
     };
+    remember_differs(copy, before, outcome);
     if undo.failed && !undo.not_in_sync {
         // A change step failed and NOT_IN_SYNC could not be put back through the handle: by path, so what is left
         // on disk is never left marked in sync (LD-0105 I6). Agreed bytes are marked in sync again by the stamp pass.
@@ -82,6 +92,35 @@ pub fn refresh_with(
         undo.pin_lost.filter(|pin| !set_pin_by_path(path, *pin)),
     );
     outcome
+}
+
+/// Review P3-5: the copies whose bytes were read through the handle and found to differ from their agreed content,
+/// with that agreed content and the fingerprint (size, times, volume and file index) the copy had before the read.
+/// While a copy keeps both it still differs (a write moves its change time, a file renamed over it has another
+/// index), so it is not opened with share 0, locking it against its own editor, and read in full every tick. Only
+/// "differs" is remembered: a copy is emptied only after its bytes were read through the exclusive handle.
+static DIFFERS: LazyLock<Mutex<HashMap<String, (String, ContentFingerprint)>>> = LazyLock::new(Default::default);
+
+fn still_differs(copy: &StaleCopy, now: Option<ContentFingerprint>) -> bool {
+    now.is_some_and(|now| {
+        DIFFERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&copy.file_id)
+            .is_some_and(|(agreed, seen)| *agreed == copy.local_hash && *seen == now)
+    })
+}
+
+fn remember_differs(copy: &StaleCopy, before: Option<ContentFingerprint>, outcome: Refreshed) {
+    let mut differs = DIFFERS.lock().unwrap_or_else(PoisonError::into_inner);
+    match (outcome, before) {
+        (Refreshed::Changed, Some(seen)) => {
+            differs.insert(copy.file_id.clone(), (copy.local_hash.clone(), seen));
+        }
+        _ => {
+            differs.remove(&copy.file_id);
+        }
+    }
 }
 
 /// What a failed change step put back through the handle.
@@ -200,7 +239,9 @@ unsafe fn refresh_under(
         }
         between(step, handle);
     }
-    Refreshed::Emptied
+    Refreshed::Emptied {
+        kept: pin == CF_PIN_STATE_PINNED,
+    }
 }
 
 /// The SHA-256 of `file`'s bytes, read through its handle from the start (the placeholder is wholly on disk, so

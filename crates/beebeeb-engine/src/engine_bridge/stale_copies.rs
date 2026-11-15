@@ -38,7 +38,8 @@ pub enum RefreshStep {
     CheckAgreedBytes,
     /// The rule still names the row with that same agreed content.
     CheckRow,
-    /// The pin and the in-sync state, read to be put back.
+    /// The pin, read to be put back. (The in-sync state is not read: a failed step marks the copy NOT_IN_SYNC, and
+    /// the stamp pass marks agreed bytes in sync again at the next tick.)
     RecordState,
     /// A pinned placeholder refuses to dehydrate (`0x80070188`).
     Unpin,
@@ -50,15 +51,16 @@ pub enum RefreshStep {
     /// The current version's size and time on the empty placeholder, in sync, so the first fetch asks for the new
     /// length (an old length is a failed fetch first, `callbacks.rs`).
     SetCurrentMetadata,
-    /// The row: cloud-only, no agreed content, nothing fetched; only while it still reads as checked. Before the
-    /// pin goes back, so a fetch the pin starts never meets the older version's agreed content.
+    /// The row: cloud-only, its older agreed content kept as the fetched candidate (as "Free up space" records an
+    /// emptied placeholder); only while it still reads as checked. Before the pin goes back, so a fetch the pin
+    /// starts never meets the row as `local`.
     RecordRow,
     /// The pin as it was.
     RestorePin,
 }
 
-/// The order. Nothing changes before every check passed; on a failure from `Unpin` to `VerifyEmpty` the in-sync
-/// state and the pin are put back before the handle is released.
+/// The order. Nothing changes before every check passed; on a failure from `Unpin` to `VerifyEmpty` the copy is
+/// marked NOT_IN_SYNC and its pin put back before the handle is released.
 pub const REFRESH_ORDER: [RefreshStep; 11] = [
     RefreshStep::CheckIdentity,
     RefreshStep::CheckAgreedBytes,
@@ -129,9 +131,10 @@ impl EngineBridge {
     ) -> Result<(), EngineError> {
         use crate::windows_cf::stale_copy::Refreshed;
         match crate::windows_cf::stale_copy::refresh(&self.db, copy, place) {
-            Refreshed::Emptied => {
+            // Review P2-2: kept when the handle read a pin, or the database names one.
+            Refreshed::Emptied { kept } => {
                 pass.emptied.push(copy.file_id.clone());
-                if copy.pinned {
+                if kept || copy.pinned {
                     pass.refetch.push(place.to_path_buf());
                 }
             }

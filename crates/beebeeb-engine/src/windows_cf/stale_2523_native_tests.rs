@@ -54,11 +54,16 @@ fn stale_2523_native_an_agreed_copy_behind_its_version_is_emptied_at_the_new_siz
     std::fs::write(qa.path("stale-changed.txt"), b"an edit made here").unwrap();
     let busy = stale_2523_copy(&qa, &db, "qa-stale-open", "stale-open.txt", old, 17, false);
     let open = std::fs::File::open(qa.path("stale-open.txt")).unwrap();
+    // Review P2-2: kept in Explorer, not yet recorded in the database (its row says no pin).
+    let explorer = stale_2523_copy(&qa, &db, "qa-stale-explorer", "stale-explorer.txt", old, 17, false);
+    placeholders::set_pin_state(&qa.path("stale-explorer.txt"), true, false).unwrap();
+    assert!(!explorer.pinned, "precondition: the database names no pin");
     let outcomes: Vec<(&str, Refreshed)> = [
         ("stale.txt", &plain),
         ("stale-kept.txt", &kept),
         ("stale-changed.txt", &changed),
         ("stale-open.txt", &busy),
+        ("stale-explorer.txt", &explorer),
     ]
     .into_iter()
     .map(|(name, copy)| (name, refresh(&db, copy, &qa.path(name))))
@@ -78,10 +83,11 @@ fn stale_2523_native_an_agreed_copy_behind_its_version_is_emptied_at_the_new_siz
     assert_eq!(
         outcomes.iter().map(|(_, o)| *o).collect::<Vec<_>>(),
         vec![
-            Refreshed::Emptied,
-            Refreshed::Emptied,
+            Refreshed::Emptied { kept: false },
+            Refreshed::Emptied { kept: true },
             Refreshed::Changed,
-            Refreshed::Later("in_use")
+            Refreshed::Later("in_use"),
+            Refreshed::Emptied { kept: true },
         ]
     );
     assert_eq!(after[0].1, (OnDisk::Nothing, true, false), "emptied, in sync");
@@ -97,7 +103,7 @@ fn stale_2523_native_an_agreed_copy_behind_its_version_is_emptied_at_the_new_siz
         b"an edit made here"
     );
     assert_eq!(after[3].1, (OnDisk::Wholly, true, false), "untouched while open");
-    for id in ["qa-stale", "qa-stale-kept"] {
+    for id in ["qa-stale", "qa-stale-kept", "qa-stale-explorer"] {
         let row = db.get_file(id).unwrap().unwrap();
         let contract = db.get_file_contract_state(id).unwrap().unwrap();
         assert_eq!(
@@ -106,6 +112,34 @@ fn stale_2523_native_an_agreed_copy_behind_its_version_is_emptied_at_the_new_siz
             "{id}"
         );
     }
+    // Review P3-5: the changed copy, the same as when it was read, is not opened or read again (no step runs); once
+    // it is written again it is read again (the identity is checked, then the bytes).
+    let again = |db: &crate::state_db::StateDb| {
+        let mut steps = Vec::new();
+        let outcome =
+            crate::windows_cf::stale_copy::refresh_with(db, &changed, &qa.path("stale-changed.txt"), &mut |step, _| {
+                steps.push(step)
+            });
+        (outcome, steps)
+    };
+    let unchanged = again(&db);
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(qa.path("stale-changed.txt"), b"an edit made here, then another").unwrap();
+    let rewritten = again(&db);
+    println!("stale-2523-native p3-5: unchanged {unchanged:?} rewritten {rewritten:?}");
+    assert_eq!(
+        unchanged,
+        (Refreshed::Changed, vec![]),
+        "not read again while unchanged"
+    );
+    assert_eq!(
+        rewritten,
+        (
+            Refreshed::Changed,
+            vec![crate::engine_bridge::RefreshStep::CheckIdentity]
+        ),
+        "read again once written"
+    );
     let left: Vec<String> = db
         .list_stale_agreed_copies(64)
         .unwrap()
