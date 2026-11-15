@@ -91,6 +91,8 @@ pub struct Shell {
     sync_off_opened: u32,
     /// The away lock's host half (`away.rs`): what it measured, and the one wake it armed.
     pub(crate) away: super::away::AwayLock,
+    /// What the flyout was last told of the away lock's cover (`registry::covered`): `Some(sync runs)` while covered.
+    pub(crate) flyout_covered: Option<bool>,
     /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle): a list that showed
     /// an error or nothing is read again then ([`read_again_after_a_check`]).
     check_finished: bool,
@@ -134,6 +136,7 @@ impl Shell {
             sync_off_opened: 0,
             check_finished: false,
             away: super::away::AwayLock::default(),
+            flyout_covered: None,
         }
     }
 
@@ -311,6 +314,21 @@ impl Shell {
 
     /// Asks the flyout to read the engine and the tray inputs again: one read of the engine and
     /// of this PC's state database, when Rune runs it on the flyout's turn.
+    /// Tells the flyout whether the window is covered (`registry::covered`), when that changed: covered, it shows the
+    /// lock's state, no file name and no activity (`frames::tray::Ui::cover`), in one commit with no exit fade.
+    fn tell_flyout_covered(&mut self, covered: Option<bool>) {
+        if self.flyout_covered == covered {
+            return;
+        }
+        self.flyout_covered = covered;
+        if let Some(flyout) = &self.wiring.flyout {
+            flyout.update(move |s, tx| {
+                s.tray.cover(covered);
+                tx.instant();
+            });
+        }
+    }
+
     fn read_flyout(&mut self) {
         if let Some(flyout) = &self.wiring.flyout {
             flyout.update(|s, _| s.refresh());
@@ -568,6 +586,9 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         shell.wiring.main.as_ref(),
         tx,
     );
+    // While covered, the flyout shows the lock's state too.
+    let covered = registry::covered(s).then(|| s.shell.sync_runs());
+    s.shell.tell_flyout_covered(covered);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
@@ -788,8 +809,15 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     shell_keys(s, ev, tx)
 }
 
-/// The shell's own shortcuts, then the frame's keys.
+/// The shell's own shortcuts, then the frame's keys. While the window is covered (`registry::covered`), only the lock
+/// screen's: no shortcut of the shell and no key of the frame behind the cover, which the person does not see.
 fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if registry::covered(s) {
+        if let Some(keys) = registry::frame(registry::FrameGroup::Locked).and_then(|frame| frame.on_key) {
+            keys(s, ev, tx);
+        }
+        return true;
+    }
     let plain_alt = ev.mods.alt && !ev.mods.cmd && !ev.mods.shift;
     let plain_cmd = !ev.mods.alt && !ev.mods.shift;
     // "/" is a shifted key on many layouts (Shift+7 on German): Shift is part of typing it.

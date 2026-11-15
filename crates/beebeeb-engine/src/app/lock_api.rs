@@ -381,8 +381,8 @@ impl<C: CredentialStores> Engine<C> {
     /// [`Self::close_ended_session`], or (`confirmed_at`: the turn of a password proof the server refused with a 401
     /// that a second question, `GET /auth/me`, confirmed) the same close without waiting for the refusal streak. A
     /// session that moved since `confirmed_at` closes nothing. A running ownership proof stops first. The account's
-    /// recent searches are deleted on the confirmed close only: after the refusal streak the account-bound handle
-    /// refuses (`SessionEnded`), and they stay until the next sign-out, Clear or purge.
+    /// recent searches are deleted on both closes, after the refusal streak too: the one wipe the account-bound handle
+    /// still makes for a session the server ended ([`Self::delete_own_recent_searches_at_session_end`]).
     pub(super) fn close_session_the_server_refused(
         &self,
         confirmed_at: Option<SessionGeneration>,
@@ -405,8 +405,8 @@ impl<C: CredentialStores> Engine<C> {
             // A proof stops wherever a session ends, before the engine, as at a lock and a sign-out.
             self.stop_proofs().await;
             // The account's recent searches leave this computer while the session is still in memory, as at a
-            // sign-out. The handle refuses once the refusal run marked the session ended: then they stay.
-            let _ = self.delete_recent_searches_at_sign_out(self.acct.session_generation());
+            // sign-out, also once the refusal run marked the session ended (its own row only).
+            let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
             let vault = self.vault();
             // Core: the check record and the wrong-try count are deleted with the key, and the mark is written.
             let _ = vault.clear_lock_flag(LockFlag::ScreenCheck);
