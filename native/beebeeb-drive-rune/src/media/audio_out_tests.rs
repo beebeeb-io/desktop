@@ -103,3 +103,59 @@ fn the_player_sees_a_lost_device() {
         "the player asks through the trait and must hear the failure"
     );
 }
+
+// The callback's fill step (M4-1'): no cpal stream, so it runs on Linux with the two formats the callback supports.
+#[cfg(not(any(windows, target_os = "macos")))]
+impl DeviceSample for f32 {
+    fn from_f32(s: f32) -> f32 {
+        s
+    }
+}
+#[cfg(not(any(windows, target_os = "macos")))]
+impl DeviceSample for i16 {
+    fn from_f32(s: f32) -> i16 {
+        (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+    }
+}
+
+#[test]
+fn device_fill_f32_writes_the_queued_samples_then_silence() {
+    let shared = Shared::new(1000, 1);
+    shared.ring().push(0, &[0.25, -0.5, 0.75, -1.0]);
+    let mut scratch = Vec::new();
+    let mut data = [9.0f32; 6];
+    fill_device(&shared, &mut scratch, &mut data);
+    assert_eq!(
+        data,
+        [0.25, -0.5, 0.75, -1.0, 0.0, 0.0],
+        "the sound, in order, then silence only past it"
+    );
+}
+
+#[test]
+fn device_fill_i16_writes_the_converted_samples_then_silence() {
+    let shared = Shared::new(1000, 1);
+    shared.ring().push(0, &[0.5, -0.5, 0.25]);
+    let mut scratch = Vec::new();
+    let mut data = [7i16; 5];
+    fill_device(&shared, &mut scratch, &mut data);
+    assert!(
+        data[0] > 0 && data[1] < 0 && data[2] > 0,
+        "signs follow the samples: {data:?}"
+    );
+    assert!(data[0] > data[2], "0.5 is louder than 0.25: {data:?}");
+    assert_eq!(data[0], -data[1], "symmetric: {data:?}");
+    assert_eq!(&data[3..], &[0, 0], "silence only past the sound");
+}
+
+#[test]
+fn device_fill_empty_ring_is_silence() {
+    let shared = Shared::new(1000, 2);
+    let mut scratch = Vec::new();
+    let mut f = [9.0f32; 8];
+    fill_device(&shared, &mut scratch, &mut f);
+    assert!(f.iter().all(|s| *s == 0.0));
+    let mut i = [9i16; 8];
+    fill_device(&shared, &mut scratch, &mut i);
+    assert!(i.iter().all(|s| *s == 0));
+}
