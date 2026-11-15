@@ -59,6 +59,11 @@ mod windows {
     /// The system's socket library refuses to start inside the container, so no verb that goes through it gets a
     /// socket (what is left below the library: `no_network_verb_succeeds_in_the_confined_helper`).
     const NETWORK_REFUSED: &str = "err network-start 10107";
+    /// The system resolver's answer to the confined helper: no DNS server for this caller (`DNS_ERROR_NO_DNS_SERVERS`,
+    /// measured on the Windows build VM). A server's answer instead (the name exists, or does not, or has no record)
+    /// means a lookup was made for the helper, even one the DNS client service's cache does not show: with the
+    /// package opt-out removed, the lookup is answered and no cache line appears.
+    const LOOKUP_REFUSED: &str = "err 9852";
     /// The system ends a container process that uses a handle value it does not hold (invalid handle).
     const ENDED_FOR_INVALID_HANDLE: u32 = 0xC000_0008;
     /// Kill on close, one active process, die on an unhandled exception, memory cap; and all eight UI classes.
@@ -1256,6 +1261,11 @@ mod windows {
                 "{case}: lookups made for the confined helper (it answered {answer})"
             );
         }
+        // The cache shows only the lookups the service makes and keeps; the answer shows whether any server answered.
+        assert_eq!(
+            confined_seen[0].1, LOOKUP_REFUSED,
+            "resolver: the confined helper's lookup is refused, not answered by a server"
+        );
     }
 
     /// A file on a network share, opened by its share path, is out of reach of the confined helper: on Windows the
