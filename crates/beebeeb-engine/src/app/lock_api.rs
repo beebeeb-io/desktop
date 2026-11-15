@@ -201,8 +201,7 @@ impl<C: CredentialStores> Engine<C> {
             ask_password_at_start: vault.lock_flag(LockFlag::AskPasswordAtStart),
             vault_closed: vault.lock_flag(LockFlag::VaultClosed),
             // Absent is ON, and so is an entry that cannot be read (core's `read_lock_setting(.., true)`).
-            // RED: today's behaviour, the start never reads app lock.
-            app_lock: None,
+            app_lock: vault.lock_setting(LockFlag::AppLock, true),
         };
         let flow = LockFlow::at_start(facts);
         if flow.state() == LockState::VaultClosed && facts.vault_closed != Some(true) {
@@ -451,8 +450,7 @@ impl<C: CredentialStores> Engine<C> {
             // No account at all on this computer (no email either: a token the server rejected keeps it): this
             // account's first sign-in here carries nothing of a lock setting (core's first `Session::save`), so a
             // sign-out cut short never hands its `lock.app_lock = 0` to the next account. Refused when it cannot.
-            // RED: today's behaviour, nothing is cleared.
-            if false && vault.account_email().map_err(|_| REFUSED.to_string())?.is_none() {
+            if vault.account_email().map_err(|_| REFUSED.to_string())?.is_none() {
                 vault
                     .clear_lock_entries()
                     .map_err(|_| "the lock settings of an earlier account could not be removed".to_string())?;

@@ -634,8 +634,7 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             Step::Notifications | Step::Login => true,
             // Passkey, Lock, Backup, Previews: see the methods below. Done is not a step of the list.
             Step::Backup => super::backups::TURNED_ON && !self.backups.is_empty(),
-            // RED: today's behaviour, not offered.
-            Step::Lock => false && self.engine.binds_app_lock(),
+            Step::Lock => self.engine.binds_app_lock(),
             Step::Passkey | Step::Previews | Step::Done => false,
         }
     }
@@ -953,8 +952,7 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     /// The app lock (step 2), through core's rule (`setup_app_lock.rs`). The delay is not set in this version
     /// ([`SetupSource::sets_lock_after`]): the step draws no such row.
     fn set_app_lock(&mut self, on: bool, _after: LockAfter) {
-        // RED: today's behaviour, nothing is switched.
-        let _ = on;
+        self.ask_app_lock(on);
     }
     fn sets_lock_after(&self) -> bool {
         false

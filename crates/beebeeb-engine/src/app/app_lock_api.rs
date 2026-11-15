@@ -86,8 +86,7 @@ impl<C: CredentialStores> Engine<C> {
     /// The app lock switch of this PC for the session `session` (core's `Client::app_lock`): on unless it was read
     /// as off. `Err(Overtaken)`: the session moved on, and the answer is not for the window that asked.
     pub fn app_lock_for(&self, session: SessionGeneration) -> Result<bool, AppLockRefused> {
-        // RED: today's behaviour, always on.
-        let on = true;
+        let on = away_locks_screen(self.vault().lock_setting(LockFlag::AppLock, true));
         if !self.acct.session_unchanged_since(session) {
             return Err(AppLockRefused::Overtaken);
         }
@@ -113,9 +112,8 @@ impl<C: CredentialStores> Engine<C> {
         proof: Option<AppLockProof>,
         now_ms: u64,
     ) -> Result<(), AppLockRefused> {
-        if true {
-            // RED: today's behaviour, nothing is stored.
-            return Err(AppLockRefused::NotSaved);
+        if !self.acct.session_unchanged_since(session) {
+            return Err(AppLockRefused::Overtaken);
         }
         let given = proof.as_ref().map(screen_proof);
         self.app_lock_may_change_now(on, given)?;
@@ -166,8 +164,7 @@ impl<C: CredentialStores> Engine<C> {
     /// timer fires. The answer is the state after. "Lock now" by hand is [`Engine::lock_screen`].
     pub fn lock_after_away(&self) -> LockState {
         let app_lock = self.vault().lock_setting(LockFlag::AppLock, true);
-        if true {
-            // RED: today's behaviour, no automatic lock.
+        if !away_locks_screen(app_lock) {
             return self.lock_state();
         }
         let locked = {

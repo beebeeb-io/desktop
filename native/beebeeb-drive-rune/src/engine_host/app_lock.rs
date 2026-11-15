@@ -132,8 +132,7 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
 
     /// What Sign-in and security draws: the switch, and no delay (see the module's doc).
     pub(super) fn facts(&self) -> Option<(bool, String)> {
-        // RED: today's behaviour, never known.
-        None
+        self.known().map(|on| (on, String::new()))
     }
 
     pub(super) fn opened(&mut self, pane: Pane) {
@@ -179,9 +178,7 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
 
     /// The switch was pressed: `on` is what it asks for.
     pub(super) fn set(&mut self, on: bool) {
-        // RED: today's behaviour, the press does nothing.
-        if true || self.changing.is_some() || !self.open() {
-            let _ = on;
+        if self.changing.is_some() || !self.open() {
             return;
         }
         let Some(stored) = self.known() else {
