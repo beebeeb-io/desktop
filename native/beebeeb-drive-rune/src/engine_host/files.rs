@@ -46,12 +46,6 @@ use crate::frames::files::source::{Action, ActionError, Change, LocalOutcome};
 #[path = "files_tests.rs"]
 mod tests;
 
-/// Whether the Backups folder's id is handed to the Files window in a real build. `false` until `protection`,
-/// `backup_entry` and `folder_notice` answer too: with the id alone the sidebar's Backups would open the tree as a
-/// plain folder, with no device rows and no words for why nothing in it can change. While it is `false` nothing is
-/// read for it either.
-pub const BACKUPS_SECTION_ON: bool = false;
-
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is its own.
 pub trait FilesEngine: Send + Sync + 'static {
     /// Someone is signed in and the vault is open. Never waits.
@@ -265,9 +259,7 @@ impl<E: FilesEngine> LocalCopies<E> {
         self.in_flight.clear();
         self.changes.clear();
         self.root = None;
-        if BACKUPS_SECTION_ON {
-            self.send(Ask::BackupsRoot);
-        }
+        self.send(Ask::BackupsRoot);
         true
     }
 
@@ -391,9 +383,9 @@ impl<E: FilesEngine> LocalCopies<E> {
         std::mem::take(&mut self.changes)
     }
 
-    /// The Backups folder's id, while the vault is open for the account it was read for (and the section is on).
+    /// The Backups folder's id, while the vault is open for the account it was read for.
     pub fn backups_root(&self) -> Option<String> {
-        if !BACKUPS_SECTION_ON || !self.engine.unlocked() {
+        if !self.engine.unlocked() {
             return None;
         }
         let account = self.engine.account();

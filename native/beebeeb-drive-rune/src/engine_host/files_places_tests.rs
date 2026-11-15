@@ -414,7 +414,7 @@ fn this_pcs_backup_row_says_this_pc_and_others_say_nothing() {
     );
 }
 
-// ── The sidebar's Backups on the real adapter (BACKUPS_SECTION_ON) ───────────────────────────────
+// ── The sidebar's Backups on the real adapter ─────────────────────────────────────────
 
 /// Pump the source until it hands out the Backups id (the worker's read lands on `changes`).
 fn backups_root_of(source: &mut Source) -> Option<String> {
