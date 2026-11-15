@@ -105,7 +105,6 @@ impl<C: CredentialStores> Engine<C> {
                     Ok(None) => return Err(DiscardRefusal::NotPoisoned),
                     Err(_) => return Err(DiscardRefusal::LocalState(LocalStateRefused::Unreadable)),
                 }
-                refuse_an_upload(board.as_deref(), file_id)?;
                 step(file_id)
             })
             .map_err(DiscardRefusal::LocalState)?;
