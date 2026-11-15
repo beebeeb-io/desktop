@@ -703,8 +703,8 @@ fn take_answers(s: &mut State) {
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A51", |s| open_on(s, "DW-A51")),
     // Sign-in and security, the one page (no board frame: `FRAMES.md`, "Sign-in and security, one page"). Its
-    // states have ids of their own, DW-S..; the board ids it replaced (DW-A52, DW-A84, DW-A84a, DW-A57,
-    // DW-A57a, DW-0716, DW-0716b) are retired as frames and stay as names `go` understands.
+    // states have ids of their own, DW-S..; the board ids it replaced (DW-A84, DW-A84a) are retired as frames and
+    // stay as names `go` understands. DW-A52, DW-A57, DW-A57a, DW-0716 and DW-0716b are scenes again below.
     ("DW-S01", |s| open_on(s, "DW-A52")),
     // The page as a source draws it that knows two-factor and how many are signed in and nothing else (the
     // running app today).
@@ -723,6 +723,17 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-S01a", |s| {
         open_on(s, "DW-A84a");
         s.account.source = Some(Box::new(source::BoardAccount::new().without_passkeys()));
+    }),
+    // The board's own ids for the same states, gated again (lead ruling 2026-11-15, `FRAMES.md`).
+    ("DW-A52", |s| open_on(s, "DW-A52")),
+    ("DW-A57", |s| open_on(s, "DW-A57")),
+    ("DW-A57a", |s| open_on(s, "DW-A57a")),
+    ("DW-0716", |s| open_on(s, "DW-0716")),
+    ("DW-0716b", |s| {
+        open_on(s, "DW-0716b");
+        if let Some(source) = s.account.source.as_mut() {
+            source.set_app_lock(false);
+        }
     }),
     ("DW-A55", |s| open_on(s, "DW-A55")),
     ("DW-A56", |s| {
@@ -829,7 +840,8 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A82", |s| {
         s.account.source = Some(Box::new(source::BoardAccount::new().with_deletion(
             source::Deletion::Scheduled {
-                on: "8 November at 19:42".into(),
+                // The board's own sample date (the flow's fixture keeps its own, `board.rs`).
+                on: "5 December at 18:42".into(),
             },
         )));
         go(s, "DW-A82");

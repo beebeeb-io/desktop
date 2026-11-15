@@ -74,8 +74,13 @@ fn the_score_and_every_state_are_on_the_one_page() {
 fn the_checkups_frame_ids_lead_to_the_page() {
     // The checkup is not a screen any more: its ids show the page, so a link to one still arrives.
     for frame in ["DW-A84", "DW-A84a", "DW-A52"] {
+        // DW-A52 is a scene again (below); DW-A84 and DW-A84a stay names only.
         // Retired as frames (no scene of their own); still names `go` understands.
-        assert!(!super::FRAMES.iter().any(|(id, _)| *id == frame), "{frame} is retired");
+        assert_eq!(
+            super::FRAMES.iter().any(|(id, _)| *id == frame),
+            frame == "DW-A52",
+            "{frame}"
+        );
         let mut rt = runtime("DW-A51");
         rt.update(move |s, _| super::go(s, frame));
         settle(&mut rt);
@@ -475,4 +480,39 @@ fn security_logging_off_is_said_and_shows_no_event() {
     assert!(find(&rt, "item-2-1").is_none());
     click(&mut rt, "item-2-0");
     assert_eq!(rt.state.account.pane, Pane::Activity);
+}
+
+/// The board ids that were retired for one page are scenes again, so `compare.sh` gates them: each shows the one page,
+/// with the confirm or the menu its board frame has open (lead ruling 2026-11-15).
+#[test]
+fn the_five_board_ids_of_the_security_page_are_scenes_showing_their_own_state() {
+    let cases = [
+        ("DW-A52", None),
+        ("DW-A57", Some(Dialog::SignOutApp)),
+        ("DW-A57a", Some(Dialog::SignOutAllApps)),
+        ("DW-0716", Some(Dialog::LockDelay(Some(1)))),
+        ("DW-0716b", None),
+    ];
+    for (frame, dialog) in cases {
+        let mut state = init();
+        assert!(super::scene(frame, &mut state), "{frame} has no scene");
+        assert_eq!(state.account.pane, Pane::Security, "{frame}");
+        assert_eq!(state.account.dialog, dialog, "{frame}");
+    }
+    let mut state = init();
+    assert!(super::scene("DW-0716b", &mut state));
+    let rt = window(state);
+    assert!(find(&rt, "item-1-0-pop").is_none(), "app lock off: no time choice");
+}
+
+/// DW-A82's scene uses the board's own sample date, not the flow fixture's.
+#[test]
+fn the_scheduled_deletion_scene_names_the_boards_date() {
+    let mut state = init();
+    assert!(super::scene("DW-A82", &mut state));
+    let rt = window(state);
+    assert_eq!(
+        says(&rt, "set-sub"),
+        "Your account will be deleted after 5 December at 18:42."
+    );
 }

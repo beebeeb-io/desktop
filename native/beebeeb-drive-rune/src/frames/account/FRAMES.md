@@ -17,13 +17,13 @@ Since 2026-11-13 Settings > Security is ONE page with frame ids of its own (`DW-
 | Frame | What it is | Status |
 | --- | --- | --- |
 | `DW-A51` | Who is signed in, what became of the recovery phrase, which Beebeeb products this account uses. | built; light: 0 failing on all six lines; dark: 1 pixel line red (`item-0-0-avatar edge 10 > 9`: the rim of the 32 pt avatar disc; measured, the board's disc is 0.2 device px smaller under its ring) |
-| `DW-A52` | Sign-in and security: everything about getting in, who else is in, and getting out. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S01`. Not a gated frame any more; the id stays a name the app's links understand |
+| `DW-A52` | Sign-in and security: everything about getting in, who else is in, and getting out. | scene again (lead ruling 2026-11-15): the same one page as `DW-S01`, so `compare.sh` gates the recaptured board; was retired by the owner's ruling 2026-11-13 (option C) |
 | `DW-A84` | Security checkup: the account's security factors in one list, with a score (7 of 7). | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S01` (the checkup is on the page). Not a gated frame any more |
 | `DW-A84a` | The same page with one thing left: no passkey yet (6 of 7). | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S01a`. Not a gated frame any more |
 | `DW-A55` | Devices and sessions: see and end every session of the account. | built (light and dark: 0 failing on all six lines) |
 | `DW-A56` | Confirm ending one device's sessions. | built (light and dark: 0 failing on all six lines) |
-| `DW-A57` | Confirm signing out of this app only. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S02` (the same confirm, over the one page). Not a gated frame any more |
-| `DW-A57a` | Confirm signing out of all Beebeeb apps on this PC. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S02a`. Not a gated frame any more |
+| `DW-A57` | Confirm signing out of this app only. | scene again (lead ruling 2026-11-15): the confirm over the one page, gated against the recaptured board (`DW-S02` is the same state) |
+| `DW-A57a` | Confirm signing out of all Beebeeb apps on this PC. | scene again (lead ruling 2026-11-15), gated against the recaptured board (`DW-S02a` is the same state) |
 
 ## Sign-in and security, one page (8; a design of this app's, no board frame)
 
@@ -91,6 +91,10 @@ D-2 of wave 2 (lead, 2026-11-15) has it drawn from the kit until the board gets 
 | `APPLOCK-password` | The step for turning app lock off, a password typed. |
 | `APPLOCK-password-wrong` | After a wrong password: the field empty, "That password isn't right." under it. |
 | `APPLOCK-password-checking` | The password is being checked: Continue says "Checking…", the field is frozen. |
+
+Decision (lane, 2026-11-15, lead ruling, CP2 row 13.1): DW-A52, DW-A57, DW-A57a, DW-0716 and DW-0716b are scenes again
+(`FRAMES` in `mod.rs`: the one page, with the confirm or the menu open), so `compare.sh` gates their recaptured goldens;
+DW-A84 and DW-A84a stay retired.
 
 Decision (lane, 2026-11-13): DW-A52, DW-A84, DW-A84a, DW-A57, DW-A57a, DW-0716 and DW-0716b are retired by the
 owner's ruling of 2026-11-13 (option C of three rendered options: one page), because the two screens listed the
@@ -176,7 +180,7 @@ Flagged deviations (lane p40-delete-account, 2026-11-15, lead rulings 16:35 and 
   (DW-A81) and Undo deletion (DW-A82) open a password dialog over the page (`Dialog::DeletionPassword`), which the
   board does not draw.
 - Board says 72 hours; the server keeps the account for 30 days; board update after 0.9.0. The copy names no length of
-  time: DW-A58 and the Security page's Delete row say it can be undone "until the date shown" / "for a time", and
+  time: DW-A58 and DW-A25's row say it can be undone "until a date we show you", the Security page's Delete row "for a time", and
   DW-A82 names Beebeeb's own `cancel_until` ("Your account will be deleted after {date}."; the note under it drops "72
   hours" and "within 30 days").
 - DW-A82's banner: the board says "We sent a second email … with a link to undo it"; Beebeeb sends no email at the
@@ -191,8 +195,8 @@ built here (`plan.rs`, `app_lock.rs`) and are scenes of `frames::account::FRAMES
 | Frame | What it is | Status |
 | --- | --- | --- |
 | `DW-0708` | The plan, read only: a dialog over Account, from the plan card. | built; gate red, light and dark: the board draws an older Account pane behind the dialog (the plan card on top, no identity rows, a 540 pt column in Drive's settings kit), the app has one Account pane (DW-A51). In the gate, 9 of the dialog's 16 keys are at 0 (`scrim`, `dlg`, `dlg-title`, `dlg-text-0`, `dlg-foot`, `btn-0`, `btn-1` and the two labels) and 7 are RED: its list (`list-1-body`, `item-1-0`, `item-1-1` and their titles and values), which the board numbers `list-1` and the app `list-3` (the real pane has lists 0 to 2). Mapped by hand, `list-1` to `list-3`, those 7 are within 1 px; the gate does not measure that |
-| `DW-0716` | App lock's delay: the pop-up open on Immediately, 5 min, 30 min, 60 min. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S03`. Before that: built; gate red, light and dark: the board draws this frame in Drive's settings kit (28 pt sidebar rows, a 540 pt column) and DW-A52, "the same pane", in the account kit (30 pt, 520 pt). The app has ONE Security pane, DW-A52's, which gates at 0. DW-A52 itself still gates at 0 with the menu's anchor in its row. In the gate the menu's 10 keys are RED on geometry: the menu hangs 4 pt inside the card's trailing edge, the card is 520 pt here and 540 pt on this drawing, so the menu is 20 px to the left of the board's. Measured by hand as an offset from the pop-up button they are within 1 px; the gate does not measure that |
-| `DW-0716b` | App lock off: no time choice. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S03b` |
+| `DW-0716` | App lock's delay: the pop-up open on Immediately, 5 min, 30 min, 60 min. | scene again (lead ruling 2026-11-15, row 13.1), gated against the recaptured board; the older note on its kit mismatch (retired 2026-11-13) is kept below |
+| `DW-0716b` | App lock off: no time choice. | scene again (lead ruling 2026-11-15, row 13.1), gated against the recaptured board |
 
 Decision (lane, 2026-11-12): one Security pane and one Account pane, in the account kit, because DW-0716's own rule
 says "Security is one pane (final review C3): DW-A52" and DW-0708's says it is "reached from the plan card Drive adds
