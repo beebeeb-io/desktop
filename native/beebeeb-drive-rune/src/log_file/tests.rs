@@ -1,0 +1,261 @@
+//! The local log file: a warning reaches it, every forbidden shape never does, the cap holds.
+
+use std::fs;
+use std::path::Path;
+
+use super::{AppLog, FILE_NAME, MAX_FILE_BYTES, OLD_FILE_NAME, redact};
+
+/// Runs `body` with the file log (cap `max_bytes`) as the thread's subscriber, then returns the current file's text.
+fn logged(dir: &Path, max_bytes: u64, body: impl FnOnce()) -> String {
+    let log = AppLog::open(dir, max_bytes).expect("the log opens");
+    tracing::subscriber::with_default(log, body);
+    fs::read_to_string(dir.join(FILE_NAME)).unwrap_or_default()
+}
+
+#[test]
+fn an_engine_warning_reaches_the_file_with_its_opaque_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_id = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let text = logged(dir.path(), MAX_FILE_BYTES, || {
+        // The engine's own line shape (`engine_bridge/syncflow.rs`, `lockfile.rs`): a target, opaque ids, a count.
+        tracing::warn!(target: "beebeeb_engine::runner", file_id = %file_id, attempt = 3_u64, reason = "attempts_used_up", "upload parked with its bytes kept in the queue");
+    });
+    assert_eq!(text.lines().count(), 1, "one event is one line: {text}");
+    assert!(
+        text.contains(" WARN beebeeb_engine::runner upload parked with its bytes kept in the queue"),
+        "{text}"
+    );
+    assert!(
+        text.contains(file_id),
+        "an opaque file id is the diagnostic and stays: {text}"
+    );
+    assert!(
+        text.contains("attempt=3") && text.contains("reason=attempts_used_up"),
+        "{text}"
+    );
+}
+
+#[test]
+fn info_is_written_and_debug_and_trace_are_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = logged(dir.path(), MAX_FILE_BYTES, || {
+        tracing::error!("e-line");
+        tracing::warn!("w-line");
+        tracing::info!("i-line");
+        tracing::debug!("d-line");
+        tracing::trace!("t-line");
+    });
+    assert_eq!(text.lines().count(), 3, "{text}");
+    assert!(text.contains("e-line") && text.contains("w-line") && text.contains("i-line"));
+    assert!(!text.contains("d-line") && !text.contains("t-line"), "{text}");
+}
+
+/// Every shape the brief forbids, as (what it is, the secret part that must never be in the file, the text it is in).
+fn forbidden_in_messages() -> Vec<(&'static str, &'static str, String)> {
+    let base64 = "q83Jx0aZpL2mN8vB4cT7yU1wE5rHkD9sFgA6oPiXzQ3";
+    vec![
+        (
+            "windows path",
+            "Holiday2026",
+            r"could not read C:\Users\anna\Documents\Holiday2026\x for sync".into(),
+        ),
+        (
+            "unix path",
+            "tax-return",
+            "could not read /home/anna/Documents/tax-return for sync".into(),
+        ),
+        (
+            "unc path",
+            "fileserver",
+            r"could not read \\fileserver\share\secret for sync".into(),
+        ),
+        ("home path", "diary", "could not read ~/diary for sync".into()),
+        (
+            "file name",
+            "Passport-scan.pdf",
+            "could not upload Passport-scan.pdf to the server".into(),
+        ),
+        (
+            "file name in quotes",
+            "Salary.xlsx",
+            "could not upload 'Salary.xlsx' to the server".into(),
+        ),
+        ("email", "anna@example.eu", "signed in as anna@example.eu".into()),
+        (
+            "url",
+            "example.eu/api/v1/files",
+            "request to https://example.eu/api/v1/files failed".into(),
+        ),
+        ("base64 token", base64, format!("session refused for {base64}")),
+        (
+            "hex key",
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "key 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 refused".into(),
+        ),
+        ("verification code", "493817", "the code 493817 was refused".into()),
+        (
+            "recovery phrase",
+            "abandon",
+            "phrase was abandon ability able about above absent absorb abstract absurd accident account accuse here"
+                .into(),
+        ),
+        (
+            "json server body",
+            "hunter2",
+            r#"server said {"error":"bad","detail":"hunter2"} and stopped"#.into(),
+        ),
+        (
+            "html server body",
+            "secretvalue",
+            "<html><body>secretvalue</body></html>".into(),
+        ),
+        (
+            "key=value inside a message",
+            "Holiday",
+            "retrying path=Holiday after the failure".into(),
+        ),
+    ]
+}
+
+#[test]
+fn no_forbidden_shape_in_a_message_reaches_the_file() {
+    for (what, secret, message) in forbidden_in_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = logged(dir.path(), MAX_FILE_BYTES, || {
+            tracing::warn!("{message}");
+        });
+        assert!(
+            text.contains(" WARN "),
+            "{what}: the event itself is still logged: {text}"
+        );
+        assert!(!text.contains(secret), "{what}: `{secret}` reached the file: {text}");
+        assert_eq!(text.lines().count(), 1, "{what}: {text}");
+    }
+}
+
+#[test]
+fn no_forbidden_shape_in_a_field_value_reaches_the_file() {
+    // The same shapes, as the value of a field whose NAME is harmless (`error`, `detail`): the shape check catches them.
+    for (what, secret, message) in forbidden_in_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = logged(dir.path(), MAX_FILE_BYTES, || {
+            tracing::warn!(error = %message, detail = ?message, "step failed");
+        });
+        assert!(
+            !text.contains(secret),
+            "{what}: `{secret}` reached the file through a field value: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_field_named_like_a_secret_is_dropped_whatever_its_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = logged(dir.path(), MAX_FILE_BYTES, || {
+        tracing::warn!(
+            path = "plain",
+            rel_path = "plain2",
+            name = "plain3",
+            file_name = "plain4",
+            email = "plain5",
+            token = "plain6",
+            api_key = "plain7",
+            password = "plain8",
+            phrase = "plain9",
+            code = 123_u64,
+            body = "plain10",
+            url = "plain11",
+            sync_root = "plain12",
+            state_dir = "plain13",
+            dest = "plain14",
+            "dropped fields"
+        );
+    });
+    for n in 2..=14 {
+        assert!(
+            !text.contains(&format!("plain{n}")),
+            "plain{n} reached the file: {text}"
+        );
+    }
+    assert!(!text.contains("path=plain "), "{text}");
+    assert!(
+        text.contains("path=<redacted>") && text.contains("code=<redacted>"),
+        "the field is named, its value is not: {text}"
+    );
+}
+
+#[test]
+fn an_opaque_id_field_is_kept_even_when_a_denied_word_comes_first() {
+    assert!(!redact::denied_name("root_id") && !redact::denied_name("key_count") && !redact::denied_name("file_id"));
+    assert!(redact::denied_name("root") && redact::denied_name("request_key") && redact::denied_name("filename"));
+}
+
+#[test]
+fn a_long_value_is_capped_and_one_event_stays_one_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let long = "word ".repeat(400);
+    let text = logged(dir.path(), MAX_FILE_BYTES, || {
+        tracing::warn!(error = %format!("line one\nline two\r\n{long}"), "multi-line");
+    });
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.len() < 400, "{} bytes", text.len());
+}
+
+#[test]
+fn the_cap_holds_two_files_and_the_oldest_lines_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let cap = 4 * 1024;
+    let log = AppLog::open(dir.path(), cap).unwrap();
+    tracing::subscriber::with_default(log, || {
+        for i in 0..400_u64 {
+            tracing::warn!(
+                n = i,
+                "a line of the cap test, long enough to fill a file in a few dozen events"
+            );
+        }
+    });
+    let current = fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
+    let old = fs::read_to_string(dir.path().join(OLD_FILE_NAME)).unwrap();
+    let one_line = current.lines().next().unwrap().len() as u64 + 1;
+    assert!(
+        current.len() as u64 <= cap + one_line && old.len() as u64 <= cap + one_line,
+        "{} / {}",
+        current.len(),
+        old.len()
+    );
+    let files: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
+    assert_eq!(files.len(), 2, "exactly two files: {files:?}");
+    assert!(current.contains("n=399"), "the newest line is kept");
+    assert!(
+        !old.contains("n=0 ") && !current.contains("n=0 "),
+        "the oldest line is dropped"
+    );
+}
+
+#[test]
+fn the_log_appends_to_what_an_earlier_run_left() {
+    let dir = tempfile::tempdir().unwrap();
+    logged(dir.path(), MAX_FILE_BYTES, || tracing::warn!("first run"));
+    let text = logged(dir.path(), MAX_FILE_BYTES, || tracing::warn!("second run"));
+    assert!(text.contains("first run") && text.contains("second run"), "{text}");
+}
+
+#[test]
+fn a_log_folder_that_cannot_be_made_is_not_a_failure_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("a-file");
+    fs::write(&blocker, b"x").unwrap();
+    assert!(AppLog::open(&blocker.join("logs"), MAX_FILE_BYTES).is_none());
+    assert!(!super::install(&blocker), "install reports false and does not panic");
+}
+
+#[test]
+fn harmless_shapes_stay_readable() {
+    // Over-redaction is accepted, but the lines a person reads in a support case must mostly survive.
+    let text =
+        redact::scrub("sync tick failed (status 503) retry in 30 s, hresult 0x80070005, version 0.9.0, state.db busy");
+    assert_eq!(
+        text,
+        "sync tick failed (status 503) retry in 30 s, hresult 0x80070005, version 0.9.0, state.db busy"
+    );
+}

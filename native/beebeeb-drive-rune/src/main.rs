@@ -29,6 +29,7 @@ mod engine_host;
 #[cfg(feature = "feedback")]
 mod feedback;
 mod frames;
+mod log_file;
 mod shell;
 mod source;
 // The engine lane's read API (PR 280): only `EngineSource::open` and `list` have a caller
