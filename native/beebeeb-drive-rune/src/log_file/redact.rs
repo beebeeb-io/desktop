@@ -430,17 +430,24 @@ fn mark_quoted(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut i = 0;
     while i < chars.len() {
-        if !OPENING.contains(&chars[i]) {
+        let Some(style) = OPENING.iter().position(|c| *c == chars[i]) else {
             out.push(chars[i]);
             i += 1;
             continue;
-        }
+        };
         out.push(' ');
         out.push(NAME_MARK);
         out.push(' ');
-        i = match chars[i + 1..].iter().rposition(|c| CLOSING.contains(c)) {
-            Some(last) => i + 1 + last + 1,
-            None => chars.len(),
+        let rest = &chars[i + 1..];
+        // Fails closed: with no closing quote of the opener's OWN style after it (`’` alone is an apostrophe, not the end
+        // of `“…`), the rest of the text is the name. With one, the name runs to the last closing quote of ANY style.
+        i = if rest.contains(&CLOSING[style]) {
+            match rest.iter().rposition(|c| CLOSING.contains(c)) {
+                Some(last) => i + 1 + last + 1,
+                None => chars.len(),
+            }
+        } else {
+            chars.len()
         };
     }
     out

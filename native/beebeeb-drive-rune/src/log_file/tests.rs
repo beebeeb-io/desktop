@@ -844,4 +844,10 @@ fn quotes_of_mixed_styles_mark_from_the_first_opening_to_the_last_closing() {
         "Files",
         "\u{ab}a\u{bb} moved to \u{201c}Anna\u{bb}s Files\u{201d} today",
     );
+    // No closing quote of its own style: an apostrophe is not the end of `\u{201c}`, so the rest of the text is the name.
+    assert_never_written(
+        "unclosed double quote, then an apostrophe",
+        "Photos",
+        "could not open \u{201c}Anna Smith\u{2019}s Holiday Photos today",
+    );
 }
