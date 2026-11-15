@@ -167,20 +167,19 @@ fn the_three_keeps() {
     assert_eq!(file.version, 3);
 }
 
-/// Poll `settled` until the version read on its worker is over and its answer (if any) was taken.
+/// One read of the version, from its start to its end, and what it said. `settled` starts a read (the interval is
+/// zero) and takes an answer; the answer is taken only after the worker let go of its flag, so no new read starts
+/// between the wait and the take.
 fn newer_answer(source: &mut Source, id: &str) -> Option<Settled> {
+    if let Some(settled) = source.settled(id) {
+        return Some(settled);
+    }
     let began = Instant::now();
-    loop {
-        if let Some(settled) = source.settled(id) {
-            return Some(settled);
-        }
-        if !source.changes.checking.load(Ordering::SeqCst) && source.changes.checked.is_some() {
-            // One more look: the answer may have been sent just before the worker let go of its flag.
-            return source.settled(id);
-        }
+    while source.changes.checking.load(Ordering::SeqCst) {
         assert!(began.elapsed() < Duration::from_secs(10), "the read did not end");
         std::thread::sleep(Duration::from_millis(2));
     }
+    source.settled(id)
 }
 
 fn bump(fake: &Fake, version: i64) {
