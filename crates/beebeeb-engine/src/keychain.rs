@@ -12,6 +12,14 @@ use std::fmt;
 use super::identity::EngineIdentity;
 const MASTER_KEY_BYTES: usize = 32;
 
+#[cfg(any())]
+fn mutant_p6() -> Result<(), String> {
+    let mut c = DesktopConfig::load()?;
+    c.pause_sync = true;
+    c.save()?;
+    Ok(())
+}
+
 #[derive(PartialEq, Eq)]
 pub struct SecretBytes(Vec<u8>);
 
