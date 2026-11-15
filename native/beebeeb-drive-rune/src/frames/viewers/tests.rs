@@ -759,13 +759,17 @@ fn refuse(rt: &mut Runtime<State>) {
     rt.frame(0.0);
 }
 
-/// Press the control keyed `key` with the pointer, at its middle.
+/// Press the control keyed `key` with the pointer, at its middle, once what enters has settled (as `media_tests`).
 fn click(rt: &mut Runtime<State>, key: &str) {
+    rt.settle_all();
+    rt.frame(0.0);
     let r = info(rt, key).rect;
     let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(0.0);
+    rt.frame(0.0);
+    rt.settle_all();
 }
 
 /// Task 2530, item 1: the refusal offers Save a copy, the two-versions question's Keep both. Pressing it asks for ONE
