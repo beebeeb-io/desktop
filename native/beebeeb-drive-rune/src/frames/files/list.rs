@@ -330,14 +330,23 @@ fn file_row_full(
     match &uploading {
         // `.mk-mac.is-up`, `.mk-mac`: an arrow in the deep Amber while it uploads, a clock while it waits.
         Some(UploadState::Uploading { .. }) => {
-            pc = pc.child(kit::state_glyph(
-                format!("{k}-pc"),
-                &crate::theme::icons_files::ARROW_UP,
-                None,
-                "uploading",
-                14.0,
-                t.accent_deep,
-            ));
+            pc = pc
+                .child(kit::state_glyph(
+                    format!("{k}-pc"),
+                    &crate::theme::icons_files::ARROW_UP,
+                    None,
+                    "uploading",
+                    14.0,
+                    t.accent_deep,
+                ))
+                // The board's export keeps the date's cell here too, holding nothing: the date and size gave way to
+                // the words and the bar (as with a copy on its way down, below).
+                .child(
+                    kit::label(format!("{k}-date"), "", type_::META_MONO, meta)
+                        .absolute(0.0, 0.0)
+                        .w(COL_PC_W)
+                        .h(14.0),
+                );
         }
         Some(UploadState::Waiting(_)) => {
             pc = pc.child(kit::state_glyph(

@@ -97,7 +97,7 @@ pub fn drag_over_documents(s: &mut State) {
 }
 
 /// A row of Lisbon trip that is on its way up (the board's two: one moving, one waiting).
-fn arriving(id: &str, name: &str, bytes: i64) -> DriveItem {
+fn arriving(id: &str, name: &str, bytes: i64, pc: &str) -> DriveItem {
     DriveItem {
         id: id.to_string(),
         parent_id: Some("f-lisbon".to_string()),
@@ -106,8 +106,9 @@ fn arriving(id: &str, name: &str, bytes: i64) -> DriveItem {
         modified_at: "2026-11-05T09:30:00Z".to_string(),
         mime: Some("image/heic".to_string()),
         has_thumbnail: true,
-        // Not here yet, not in Beebeeb yet: its PC column says uploading or waiting.
-        pc_status: None,
+        // Not in Beebeeb yet: its PC column says uploading or waiting. The status line counts the one that moves
+        // as on this PC and the one that waits as online only (the board's "2 on this PC ... 7 online only").
+        pc_status: Some(pc.to_string()),
         ..super::actions_data::blank_item()
     }
 }
@@ -133,8 +134,10 @@ pub fn uploading(s: &mut State) {
     if s.upload(Some("f-lisbon".to_string()), &files, &mut tx) {
         s.listing
             .items
-            .push(arriving("up-miradouro", "Miradouro.heic", 3_774_874));
-        s.listing.items.push(arriving("up-ponte", "Ponte.heic", 3_355_443));
+            .push(arriving("up-miradouro", "Miradouro.heic", 3_774_874, "on_this_pc"));
+        s.listing
+            .items
+            .push(arriving("up-ponte", "Ponte.heic", 3_355_443, "online_only"));
     }
 }
 
