@@ -235,8 +235,10 @@ impl Link for FakeLink {
         Ok(())
     }
 
-    fn recv(&mut self, _timeout: Duration) -> Result<FromHelper, LinkError> {
+    fn recv(&mut self, timeout: Duration) -> Result<FromHelper, LinkError> {
         if self.inbox.is_empty() {
+            // As a real link: nothing came within the wait (the worker's tick), not at once.
+            std::thread::sleep(timeout);
             return Err(LinkError::Timeout);
         }
         Ok(self.inbox.remove(0))
@@ -288,9 +290,20 @@ fn source(world: &Arc<World>) -> EngineViewerSource<World> {
     EngineViewerSource::on(world.clone())
 }
 
+/// Stops the test's player when the test ends, a failed assertion too. The world and its player hold each other, so
+/// the player is never dropped, and a run the fake helper keeps fed would go on through the rest of the test binary.
+struct StopsThePlayer(Arc<World>);
+
+impl Drop for StopsThePlayer {
+    fn drop(&mut self) {
+        self.0.handle().stop(crate::media::StopReason::Closed);
+    }
+}
+
 #[test]
 fn audio_open_plays_through_the_shell_player() {
     let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
     let mut source = source(&world);
     assert!(
         source.can_play(),
@@ -439,6 +452,7 @@ fn can_play_false_without_sandbox_or_helper() {
 #[test]
 fn leaving_the_view_keeps_audio_playing() {
     let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
     let mut source = source(&world);
     source.open("t1").expect("opens");
     assert!(source.play("t1", true));
@@ -452,6 +466,7 @@ fn leaving_the_view_keeps_audio_playing() {
 #[test]
 fn closing_a_video_stops_it() {
     let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
     let mut source = source(&world);
     let file = source.open("v1").expect("opens");
     assert!(matches!(file.body, Body::Video(_)), "a video opens as a video");
