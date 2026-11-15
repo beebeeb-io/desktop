@@ -258,8 +258,11 @@ impl<C: CredentialStores> Engine<C> {
     /// The stored delay of this PC for the session `session`. `Ok(None)`: an entry is there that is not one of the
     /// choices (another build's value): the away lock uses [`LockAfter::DEFAULT`] and a window says it is not known.
     pub fn lock_after_for(&self, session: SessionGeneration) -> Result<Option<LockAfter>, AppLockRefused> {
-        let _ = (session, self.stored_lock_after());
-        Ok(None) // RED: the skeleton
+        let stored = self.stored_lock_after();
+        if !self.acct.session_unchanged_since(session) {
+            return Err(AppLockRefused::Overtaken);
+        }
+        Ok(stored)
     }
 
     /// Set the delay for the session `session`. The same or a shorter delay needs nothing. A longer one lowers what
@@ -283,8 +286,29 @@ impl<C: CredentialStores> Engine<C> {
         proof: Option<AppLockProof>,
         now_ms: u64,
     ) -> Result<(), AppLockRefused> {
-        let _ = (session, after, proof, now_ms, self.lock_after_in_force());
-        Err(AppLockRefused::NotSaved) // RED: the skeleton
+        if !self.acct.session_unchanged_since(session) {
+            return Err(AppLockRefused::Overtaken);
+        }
+        let given = proof.as_ref().map(screen_proof);
+        let longer = after > self.lock_after_in_force();
+        self.app_lock_may_change_now(!longer, given)?;
+        if let (true, Some(AppLockProof::Password(password))) = (longer, proof) {
+            self.password_proof_checked(session, password, now_ms)?;
+        }
+        let _writes = self.writes.read().unwrap_or_else(|p| p.into_inner());
+        if !self.acct.session_unchanged_since(session) {
+            return Err(AppLockRefused::Overtaken);
+        }
+        // What is stored may have moved while the proof was checked: the rule again, against it. A change that has
+        // become longer since had no proof checked for it (a password is checked only for a longer delay).
+        let longer_now = after > self.lock_after_in_force();
+        if longer_now && !longer {
+            return Err(AppLockRefused::ProofNeeded);
+        }
+        self.app_lock_may_change_now(!longer_now, given)?;
+        self.vault()
+            .set_lock_entry(LockFlag::LockAfter, &after.to_bytes())
+            .map_err(|_| AppLockRefused::NotSaved)
     }
 
     /// The host's idle and OS-lock hooks (core's `Client::lock_after_away` is the lock; this is when). `session`:
@@ -293,19 +317,37 @@ impl<C: CredentialStores> Engine<C> {
     /// delay's [`LockAfter::idle`], and otherwise says how long is left (an idle time of an earlier turn locks
     /// nothing: measure again). App lock off, or any state but open: nothing, ever.
     pub fn away_for(&self, session: SessionGeneration, seen: Away) -> AwayAnswer {
-        let _ = (
-            session,
-            seen,
-            LockAfter::Immediately.locks_on_leaving(),
-            LockAfter::DEFAULT.idle(),
-        );
-        if false {
-            let _ = self.lock_after_away_of(None);
-        }
-        AwayAnswer {
-            state: self.lock_state(),
+        let state = self.lock_state();
+        let nothing = AwayAnswer {
+            state,
             check_again_in: None,
-        } // RED: the skeleton
+        };
+        if state != LockState::Open || !away_locks_screen(self.vault().lock_setting(LockFlag::AppLock, true)) {
+            return nothing;
+        }
+        let after = self.lock_after_in_force();
+        let measured_for = match seen {
+            Away::SessionLocked => None,
+            Away::LeftTheApp if after.locks_on_leaving() => None,
+            Away::LeftTheApp => return nothing,
+            Away::Idle(_) if !self.acct.session_unchanged_since(session) => {
+                return AwayAnswer {
+                    state,
+                    check_again_in: Some(Duration::ZERO),
+                };
+            }
+            Away::Idle(idle) if idle < after.idle() => {
+                return AwayAnswer {
+                    state,
+                    check_again_in: Some(after.idle() - idle),
+                };
+            }
+            Away::Idle(_) => Some(session),
+        };
+        AwayAnswer {
+            state: self.lock_after_away_of(measured_for),
+            check_again_in: None,
+        }
     }
 
     /// The stored delay: absent is the default; `None`: an entry that is not one of the choices, or a store that
