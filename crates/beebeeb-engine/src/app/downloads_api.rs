@@ -27,6 +27,9 @@ pub struct DownloadRow {
     pub done: u64,
     /// The declared total; `0` while it is not known yet.
     pub total: u64,
+    /// This account keeps the file on this PC. A range read, a placeholder fetch or a conflict copy also shows on
+    /// the board, and is NOT a keep.
+    pub kept: bool,
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -62,6 +65,7 @@ impl<C: CredentialStores> Engine<C> {
                 file_id: t.file_id,
                 done: t.done,
                 total: t.total,
+                kept: false,
             })
             .collect())
     }

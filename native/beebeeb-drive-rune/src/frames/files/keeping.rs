@@ -21,6 +21,9 @@ pub struct Download {
     pub id: String,
     pub done: u64,
     pub total: u64,
+    /// This PC keeps the file (Available offline). A copy that comes down for another reason (a player reading it, a
+    /// conflict copy) shows its bar and does not claim a keep.
+    pub kept: bool,
 }
 
 impl Download {
@@ -116,6 +119,7 @@ pub fn scene(s: &mut State) {
         id: s.listing.items[CONTRACT].id.clone(),
         done: total * 7 / 12,
         total,
+        kept: true,
     }];
     // The row is one of the kept ones, the way `keep_offline` leaves it.
     s.listing.items[CONTRACT].pc_status = Some("available_offline".into());

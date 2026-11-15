@@ -12,6 +12,7 @@ struct Double {
     stamp: Mutex<Stamp>,
     read: Mutex<Result<Vec<DownloadRow>, LocalStateRefused>>,
     reads: AtomicUsize,
+    word: Mutex<Option<&'static str>>,
 }
 
 fn session(n: u64) -> SessionGeneration {
@@ -23,6 +24,7 @@ fn one() -> Vec<DownloadRow> {
         file_id: "f-down".into(),
         done: 4_000,
         total: 9_000,
+        kept: true,
     }]
 }
 
@@ -32,6 +34,7 @@ impl Double {
             stamp: Mutex::new((session(1), Some("one@example.eu".into()))),
             read: Mutex::new(read),
             reads: AtomicUsize::new(0),
+            word: Mutex::new(Some(words::SYNCING)),
         })
     }
     fn move_to(&self, n: u64, account: &str) {
@@ -49,6 +52,9 @@ impl DownloadsEngine for Double {
     fn downloads_for(&self, _: SessionGeneration) -> Result<Vec<DownloadRow>, LocalStateRefused> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.read.lock().unwrap().clone()
+    }
+    fn word(&self) -> Option<&'static str> {
+        *self.word.lock().unwrap()
     }
     fn wake(&self) {}
 }
@@ -83,7 +89,8 @@ fn what_the_engine_read_is_shown_as_the_rows_figures() {
         vec![Download {
             id: "f-down".into(),
             done: 4_000,
-            total: 9_000
+            total: 9_000,
+            kept: true
         }]
     );
 }
@@ -170,4 +177,92 @@ fn the_status_word_is_never_up_to_date_while_a_copy_comes_down() {
         "the engine's other words stand"
     );
     assert_eq!(with_downloads(None, true), None);
+}
+
+#[test]
+fn a_copy_that_ended_leaves_the_row_at_the_engines_next_pulse_whatever_the_reads_age() {
+    let engine = Double::new(Ok(one()));
+    let mut calls = DownloadCalls::new(engine.clone());
+    calls.ask();
+    take_until(&mut calls, |c| !c.downloads().is_empty());
+    let first = engine.reads.load(Ordering::SeqCst);
+    // The copy lands; the engine's own word moves to Idle in the same pulse. The held read is a moment old.
+    *engine.read.lock().unwrap() = Ok(Vec::new());
+    *engine.word.lock().unwrap() = Some(words::UP_TO_DATE);
+    take_until(&mut calls, |c| c.downloads().is_empty());
+    assert!(calls.downloads().is_empty(), "the row left");
+    assert!(
+        engine.reads.load(Ordering::SeqCst) > first,
+        "by one read, not by waiting out the age"
+    );
+    assert_eq!(
+        with_downloads(Some(words::UP_TO_DATE), !calls.downloads().is_empty()),
+        Some(words::UP_TO_DATE),
+        "and the status word is the engine's again"
+    );
+}
+
+#[test]
+fn a_wake_while_the_engine_reports_syncing_reads_after_the_watch_ended() {
+    let engine = Double::new(Ok(Vec::new()));
+    *engine.word.lock().unwrap() = Some(words::UP_TO_DATE);
+    let mut calls = DownloadCalls::new(engine.clone()).with_watch(Duration::ZERO);
+    calls.ask();
+    take_until(&mut calls, |_| engine.reads.load(Ordering::SeqCst) > 0);
+    std::thread::sleep(Duration::from_millis(50));
+    calls.take();
+    assert!(calls.downloads().is_empty());
+    // A download starts later: the engine's word says so.
+    *engine.read.lock().unwrap() = Ok(one());
+    *engine.word.lock().unwrap() = Some(words::SYNCING);
+    std::thread::sleep(STALE + Duration::from_millis(100));
+    take_until(&mut calls, |c| !c.downloads().is_empty());
+    assert_eq!(calls.downloads().len(), 1, "it got its bar");
+}
+
+#[test]
+fn the_watch_ends_and_an_idle_engine_is_not_read_again() {
+    let engine = Double::new(Ok(Vec::new()));
+    *engine.word.lock().unwrap() = Some(words::UP_TO_DATE);
+    let mut calls = DownloadCalls::new(engine.clone()).with_watch(Duration::from_millis(100));
+    calls.ask();
+    take_until(&mut calls, |_| engine.reads.load(Ordering::SeqCst) > 0);
+    std::thread::sleep(STALE + Duration::from_millis(200));
+    let reads = engine.reads.load(Ordering::SeqCst);
+    for _ in 0..5 {
+        calls.take();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        engine.reads.load(Ordering::SeqCst),
+        reads,
+        "no read once the watch ended and nothing syncs"
+    );
+}
+
+#[test]
+fn a_copy_that_is_not_kept_is_shown_as_such() {
+    let mut rows = one();
+    rows[0].kept = false;
+    let engine = Double::new(Ok(rows));
+    let mut calls = DownloadCalls::new(engine.clone());
+    calls.ask();
+    take_until(&mut calls, |c| !c.downloads().is_empty());
+    assert!(!calls.downloads()[0].kept);
+}
+
+/// The wiring of `EngineFilesSource` (a real engine is not built here): the status line goes through
+/// `with_downloads`, a kept copy that was accepted reads, and the account leaving forgets the held rows.
+#[test]
+fn the_files_source_wires_the_downloads_in() {
+    let host = include_str!("../engine_host.rs");
+    let body = |head: &str| {
+        let from = host.find(head).unwrap_or_else(|| panic!("{head} is gone"));
+        host[from..].split("\n    fn ").next().unwrap().to_string()
+    };
+    assert!(body("fn sync_state(&self)").contains("files_downloads::with_downloads"));
+    assert!(body("fn changes(&mut self)").contains("self.downloads.ask()"));
+    assert!(body("fn changes(&mut self)").contains("self.downloads.take()"));
+    assert!(body("fn forget_downloads(&mut self)").contains("self.downloads.forget()"));
+    assert!(body("fn downloads(&self)").contains("self.downloads.downloads()"));
 }

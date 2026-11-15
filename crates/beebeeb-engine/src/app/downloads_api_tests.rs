@@ -90,7 +90,8 @@ fn a_download_is_listed_with_how_far_it_has_come() {
         vec![DownloadRow {
             file_id: "f-down".into(),
             done: 4_000,
-            total: 9_000
+            total: 9_000,
+            kept: false
         }]
     );
     drop(down);
@@ -131,4 +132,52 @@ fn downloads_for_a_session_that_moved_on_are_refused() {
         engine.downloads_for(before).unwrap_err(),
         LocalStateRefused::SessionChanged
     );
+}
+
+#[test]
+fn only_a_file_this_account_keeps_is_marked_kept() {
+    let (engine, board) = engine("an-invented-downloads-slot-5");
+    signed_in(&engine, "downloads-one@example.eu");
+    let (_dir, _db) = local_state(&engine, "downloads-one@example.eu", |db| {
+        held(db);
+        db.set_recursive_pin("f-down", true, 1).unwrap();
+    });
+    let _kept = board.begin_download("f-down", "Docs/Invented down.pdf", 9_000);
+    let _range = board.begin_download("f-up", "Invented up.txt", 300);
+    let mut read = engine.downloads_for(engine.session_turn()).expect("the read");
+    read.sort_by(|a, b| a.file_id.cmp(&b.file_id));
+    let seen: Vec<(&str, bool)> = read.iter().map(|r| (r.file_id.as_str(), r.kept)).collect();
+    assert_eq!(seen, vec![("f-down", true), ("f-up", false)]);
+}
+
+#[test]
+fn a_total_the_board_does_not_know_yet_is_the_files_size() {
+    let (engine, board) = engine("an-invented-downloads-slot-6");
+    signed_in(&engine, "downloads-one@example.eu");
+    let (_dir, _db) = local_state(&engine, "downloads-one@example.eu", held);
+    let _down = board.begin_download("f-down", "Docs/Invented down.pdf", 0);
+    let read = engine.downloads_for(engine.session_turn()).expect("the read");
+    assert_eq!((read[0].done, read[0].total), (0, 9_000));
+}
+
+#[test]
+fn a_locked_vault_refuses_the_read() {
+    let (engine, _board) = engine("an-invented-downloads-slot-7");
+    let (_dir, _db) = local_state(&engine, "downloads-one@example.eu", held);
+    // A token is stored, no keys are in memory: locked.
+    engine.set_auth_present(true);
+    assert_eq!(
+        engine.downloads_for(engine.session_turn()).unwrap_err(),
+        LocalStateRefused::Locked
+    );
+}
+
+/// What a person sees goes through the person's door: a locked SCREEN refuses it (`local_state`), which the work's
+/// door (`local_state_for_work`) does not. A test of the source, as the census of owned_state does for the others.
+#[test]
+fn the_read_goes_through_the_persons_door() {
+    let source = include_str!("downloads_api.rs");
+    let body = &source[source.find("pub fn downloads_for").unwrap()..];
+    assert!(body.contains("self.local_state()?"));
+    assert!(!body.contains("local_state_for_work") && !body.contains("local_state_for_changes"));
 }

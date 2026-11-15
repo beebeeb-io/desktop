@@ -38,6 +38,8 @@ pub trait DownloadsEngine: Send + Sync + 'static {
     fn stamp(&self) -> Stamp;
     fn has_session(&self) -> bool;
     fn downloads_for(&self, session: SessionGeneration) -> Result<Vec<DownloadRow>, LocalStateRefused>;
+    /// The engine's own status word (`sync::sync_word` of its view), read without waiting.
+    fn word(&self) -> Option<&'static str>;
     fn wake(&self);
 }
 
@@ -50,6 +52,9 @@ impl<C: CredentialStores> DownloadsEngine for Engine<C> {
     }
     fn downloads_for(&self, session: SessionGeneration) -> Result<Vec<DownloadRow>, LocalStateRefused> {
         Engine::downloads_for(self, session)
+    }
+    fn word(&self) -> Option<&'static str> {
+        super::sync::sync_word(&self.view())
     }
     fn wake(&self) {
         self.wake_host();
@@ -77,6 +82,8 @@ pub struct DownloadCalls<E: DownloadsEngine> {
     watch_until: Option<Instant>,
     /// Moves at every forget: an answer of an earlier one is dropped.
     epoch: u64,
+    /// How long a watch lasts.
+    watch: Duration,
 }
 
 impl<E: DownloadsEngine> DownloadCalls<E> {
@@ -92,7 +99,14 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
             reading: false,
             watch_until: None,
             epoch: 0,
+            watch: WATCH,
         }
+    }
+
+    #[cfg(test)]
+    fn with_watch(mut self, watch: Duration) -> Self {
+        self.watch = watch;
+        self
     }
 
     fn look(&mut self, now: &Stamp) {
@@ -103,14 +117,14 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
         self.held = None;
         self.reading = false;
         // A copy may already come down under this session: the wake reads for a while.
-        self.watch_until = Some(Instant::now() + WATCH);
+        self.watch_until = Some(Instant::now() + self.watch);
     }
 
     /// Read now (the window came to the front, a copy was kept) and keep watching for a while. One read at a time.
     pub fn ask(&mut self) {
         let now = self.engine.stamp();
         self.look(&now);
-        self.watch_until = Some(Instant::now() + WATCH);
+        self.watch_until = Some(Instant::now() + self.watch);
         self.start_read(now);
     }
 
@@ -151,6 +165,7 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
                 id: row.file_id.clone(),
                 done: row.done,
                 total: row.total,
+                kept: row.kept,
             })
             .collect()
     }

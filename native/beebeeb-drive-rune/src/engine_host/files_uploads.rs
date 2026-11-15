@@ -47,6 +47,8 @@ pub trait UploadsEngine: Send + Sync + 'static {
     fn cancel_upload_for(&self, session: SessionGeneration, change: &str) -> Result<CancelOutcome, LocalStateRefused>;
     /// The sync pause (`Engine::pause` / `resume`): writes a file, so a worker's.
     fn set_paused(&self, paused: bool) -> Result<(), String>;
+    /// The engine's own status word (`sync::sync_word` of its view), read without waiting.
+    fn word(&self) -> Option<&'static str>;
     fn wake(&self);
 }
 
@@ -73,6 +75,9 @@ impl<C: CredentialStores> UploadsEngine for Engine<C> {
     }
     fn set_paused(&self, paused: bool) -> Result<(), String> {
         if paused { self.pause() } else { self.resume() }
+    }
+    fn word(&self) -> Option<&'static str> {
+        super::sync::sync_word(&self.view())
     }
     fn wake(&self) {
         self.wake_host();
