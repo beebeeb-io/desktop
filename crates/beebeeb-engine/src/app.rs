@@ -582,10 +582,7 @@ impl<C: CredentialStores> Engine<C> {
             }
         };
         let screen_check = self.take_pending_screen_check(&typed_email);
-        let email = match profile.email.trim() {
-            "" => typed_email,
-            named => named.to_string(),
-        };
+        let email = typed_email;
         // A stored session this sign-in replaces (the strong unlock): it must be this account's, and the key and
         // the engine of the old session leave first (`lock_api`).
         let (turn, replaced) = match self.prepare_replacement(turn, &profile).await {
@@ -1026,7 +1023,9 @@ impl<C: CredentialStores> Engine<C> {
     async fn sign_out_holding_step(&self) -> Result<(), String> {
         {
             self.stop_proofs().await;
-            let _ = self.stop_holding_step().await;
+            if self.stop_holding_step().await == SyncStop::Unconfirmed {
+                return Err(account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
+            }
             let mut vault = self.vault();
             let token = vault
                 .session_token()
