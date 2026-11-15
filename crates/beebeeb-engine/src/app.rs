@@ -54,6 +54,7 @@ pub mod account_password_api;
 pub mod account_twofactor_api;
 pub mod backup_devices_api;
 mod session_revoke;
+mod session_watch;
 use session_revoke::revoke;
 pub mod account_twofactor_status_api;
 pub mod backups_api;
@@ -323,6 +324,7 @@ impl<C: CredentialStores> Engine<C> {
         let view = Arc::new(ViewCell::default());
         let host: Arc<dyn EngineHost> = Arc::new(ViewHost::new(host, view.clone()));
         downloads_api::wake_the_host_for_downloads(&host);
+        session_watch::start(&runtime, &acct, &config.api_base);
         Ok(Self {
             identity,
             config,
