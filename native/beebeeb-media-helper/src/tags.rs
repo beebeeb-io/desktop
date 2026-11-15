@@ -1,11 +1,12 @@
 //! The file's title and artist (decision D-MB2-1 (a)): read by symphonia's metadata readers inside this sandboxed
-//! process, over the same app ranges as the decoders ([`crate::read::PipeReader`]). No artwork in 0.9.0: pictures are
-//! skipped by the reader (a limit of 0 bytes) and `Tags::art` is always `None`; the app shows the file name and the
-//! generic art (the board's own fallback).
+//! process, over the same app ranges as the decoders ([`crate::read::PipeReader`]). No artwork in 0.9.0: `Tags::art`
+//! is always `None`, and the app shows the file name and the generic art (the board's own fallback). symphonia 0.5.5's
+//! readers do not enforce `MetadataOptions`' limits (only `symphonia-core` defines them), so an embedded picture is
+//! read and dropped; the limits are set anyway, for a version that honours them.
 //!
-//! Only an audio file's tags are read (the audio viewer shows them); a video shows its file name. The pass is bounded:
-//! it reads at most [`TAG_READ_MAX`] bytes, never a byte past the file's end, and a tag over [`TAG_BYTES_MAX`] is
-//! skipped. A file whose tags cannot be read plays as before, without `Tags`.
+//! Only an audio file's tags are read (the audio viewer shows them); a video shows its file name. The pass is bounded
+//! by what it reads: at most [`TAG_READ_MAX`] bytes, never a byte past the file's end. A file whose tags cannot be read
+//! within that (a picture larger than the limit among them) plays as before, without `Tags`.
 //!
 //! Never logs a word of a tag.
 
@@ -20,7 +21,7 @@ use symphonia::core::probe::Hint;
 
 /// The most bytes one tag pass reads from the app.
 pub const TAG_READ_MAX: u64 = 16 << 20;
-/// The most bytes one tag may take once read; a larger one is skipped by the reader.
+/// The most bytes one tag may take once read, for a symphonia that enforces it (0.5.5 does not: see the module doc).
 pub const TAG_BYTES_MAX: usize = 64 << 10;
 
 /// The title and artist of the file behind `reader`, or `None` when it has neither (or they cannot be read).
@@ -257,10 +258,11 @@ mod tests {
         tag
     }
 
-    /// D-MB2-1 (a): an MP3 file's ID3v2 title and artist are read, no picture is ever sent, and the pass never reads
+    /// D-MB2-1 (a): an MP3 file's ID3v2 title and artist are read, no picture is ever sent (the APIC frame is read and
+    /// dropped), and the pass never reads
     /// past the end of the file.
     #[test]
-    fn an_audio_files_title_and_artist_are_read_and_its_picture_is_not() {
+    fn an_audio_files_title_and_artist_are_read_and_no_picture_is_sent() {
         let mut file = id3_tag(
             &[
                 id3_frame(b"TIT2", b"Harbour sessions, take 3"),
@@ -280,6 +282,35 @@ mod tests {
         file.extend(fixture("mp3.mp3"));
         let tags = read(Counted::new(file)).expect("the tag is read");
         assert_eq!(tags.title, "Harbour sessions, take 3");
+    }
+
+    /// FLAC's own Vorbis comment (the container's tags, not an ID3v2 tag before it): title and artist are read.
+    #[test]
+    fn a_flac_files_vorbis_comment_gives_its_title_and_artist() {
+        let file = fixture("flac.flac");
+        assert_eq!(&file[..4], b"fLaC");
+        assert_eq!(file[4], 0, "STREAMINFO first, more blocks after it");
+        assert_eq!(&file[5..8], &[0, 0, 34], "a 34-byte STREAMINFO");
+        let mut body = Vec::new();
+        body.extend(4u32.to_le_bytes());
+        body.extend(b"test");
+        let comments: [&[u8]; 2] = [b"TITLE=Harbour sessions", b"ARTIST=Ana Alvares"];
+        body.extend(2u32.to_le_bytes());
+        for comment in comments {
+            body.extend(u32::try_from(comment.len()).expect("short").to_le_bytes());
+            body.extend(comment);
+        }
+        // A VORBIS_COMMENT block (type 4, not the last) right after STREAMINFO.
+        let mut tagged = file[..42].to_vec();
+        tagged.push(4);
+        tagged.extend(&u32::try_from(body.len()).expect("short").to_be_bytes()[1..]);
+        tagged.extend(body);
+        tagged.extend(&file[42..]);
+        let reader = Counted::new(tagged);
+        let tags = read(reader.clone()).expect("the Vorbis comment is read");
+        assert_eq!(tags.title, "Harbour sessions");
+        assert_eq!(tags.artist, "Ana Alvares");
+        assert_eq!(reader.past_end.load(Ordering::Relaxed), 0);
     }
 
     /// A file without tags (the fixture as ffmpeg writes it) has none: no empty `Tags` is sent.
