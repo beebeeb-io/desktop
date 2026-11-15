@@ -7,12 +7,21 @@ use super::*;
 #[test]
 fn now_playing_never_carries_a_path() {
     let path = r"C:\Users\someone\Studio demos\take 3.m4a";
-    let now = NowPlaying::for_item(path, "", "", None, true, 0, 1000);
+    let now = NowPlaying::for_item(path, "", "", None, true, 0, 1000, false);
     assert_eq!(now.title, "take 3");
     assert!(!now.title.contains("Studio demos") && !now.title.contains('\\') && !now.title.contains(':'));
-    let unix = NowPlaying::for_item("/home/someone/Studio demos/take 3.m4a", "", "", None, true, 0, 1000);
+    let unix = NowPlaying::for_item(
+        "/home/someone/Studio demos/take 3.m4a",
+        "",
+        "",
+        None,
+        true,
+        0,
+        1000,
+        false,
+    );
     assert_eq!(unix.title, "take 3");
-    let tagged = NowPlaying::for_item(path, "Morning", "A band", None, true, 0, 1000);
+    let tagged = NowPlaying::for_item(path, "Morning", "A band", None, true, 0, 1000, false);
     assert_eq!(tagged.title, "Morning");
     assert_eq!(tagged.artist, "A band");
     // A tag that is only control characters is no title.
@@ -64,4 +73,13 @@ fn buttons_are_drained_once() {
         .join()
         .unwrap();
     assert_eq!(queue.drain(), vec![OsButton::Previous]);
+}
+
+/// C4: a video shows as a video in Quick Settings, a song as music.
+#[test]
+fn a_video_shows_as_video() {
+    let video = NowPlaying::for_item("clip.mp4", "", "", None, true, 0, 1000, true);
+    let music = NowPlaying::for_item("song.m4a", "", "", None, true, 0, 1000, false);
+    assert_eq!(playback_kind(&video), PlaybackKind::Video);
+    assert_eq!(playback_kind(&music), PlaybackKind::Music);
 }
