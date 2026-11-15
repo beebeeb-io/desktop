@@ -1,9 +1,8 @@
 //! The identity pin: a per-app name exists in ONE file per crate, and every consumer reads it from the identity
 //! it was handed.
 //!
-//! Three rules over the PRODUCTION text (test items and comments removed) of all three Rust trees: the engine
-//! (`crates/beebeeb-engine/src`), the Tauri shell (`src-tauri/src`) and the native app
-//! (`native/beebeeb-drive-rune/src` and its `build.rs`).
+//! Three rules over the PRODUCTION text (test items and comments removed) of both Rust trees: the engine
+//! (`crates/beebeeb-engine/src`) and the native app (`native/beebeeb-drive-rune/src` and its `build.rs`).
 //!
 //! 1. **Literals** ([`literal_hits`]): a string or number that IS a per-app name (a bundle identifier or any text
 //!    holding `io.beebeeb`, the config folder, the sync folder, the provider name, the daemon socket, the app
@@ -12,8 +11,8 @@
 //!    `…/provider_identity.rs` is not on it.
 //! 2. **Naming an identity** ([`naming_hits`]): the tokens `REAL` and `TEST` (through any module path, alias,
 //!    `use` list or glob), and in the native app `AppIdentity`'s variants `Real`/`Test` and its bridge
-//!    `.engine()`, may stand only where [`NAMING_ALLOWED`] says: the two identity files, the shell's
-//!    `real_app.rs` and the native build script. Everything else is handed its identity. A third identity cannot
+//!    `.engine()`, may stand only where [`NAMING_ALLOWED`] says: the two identity files and the native build
+//!    script. Everything else is handed its identity. A third identity cannot
 //!    be made anywhere else: the struct's fields are private
 //!    (`the_identity_type_cannot_be_built_outside_its_file`).
 //! 3. **The consumer census** ([`CONSUMERS`]): every read of an identity accessor in the engine, by file and
@@ -24,12 +23,10 @@
 //! so the pin is seen to fail in every run, not only on the day it was written.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::source_census::{TEST_ITEM_GATES, is_test_file, rust_files};
+use crate::source_census::{NATIVE_PREFIX, TEST_ITEM_GATES, is_test_file, rust_files_with_native};
 use crate::source_pin::without_items;
-
-const NATIVE_PREFIX: &str = "native/beebeeb-drive-rune/";
 
 /// A string literal that is exactly one of these is a per-app name.
 const EXACT_NAMES: [&str; 5] = ["beebeeb", "beebeeb-test", "Beebeeb", "Beebeeb Test", "BeebeebTest"];
@@ -135,29 +132,16 @@ const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
         &["Beebeeb"],
         "the logo's accessibility label (the brand, for both builds)",
     ),
-    (
-        "macos_file_provider.rs",
-        &["io.beebeeb.app.domain"],
-        "the macOS File Provider domain id; the test build does not run on macOS",
-    ),
-    ("engine_host.rs", &["Beebeeb"], "a notification's title (the brand)"),
-    (
-        "native_menu.rs",
-        &["Beebeeb", "Beebeeb", "Beebeeb"],
-        "menu titles (the brand)",
-    ),
-    ("tray_window.rs", &["Beebeeb", "Beebeeb"], "window titles (the brand)"),
 ];
 
 /// Rule 2's allow-list: `(file, namings, why)`.
-const NAMING_ALLOWED: [(&str, usize, &str); 4] = [
+const NAMING_ALLOWED: [(&str, usize, &str); 3] = [
     (
         "crates/beebeeb-engine/src/identity.rs",
         9,
         "where the two values are made (`pub static REAL`, `pub static TEST`), compared (`is_real`, the bundle \
          identifier's lookup) and told apart (`other_build`)",
     ),
-    ("real_app.rs", 1, "the Tauri shell is the real app: `APP`"),
     (
         "native/beebeeb-drive-rune/build.rs",
         8,
@@ -401,31 +385,9 @@ fn production_text(path: &Path) -> String {
     without_items(&text, &TEST_ITEM_GATES)
 }
 
-fn native_files() -> Vec<(String, PathBuf)> {
-    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
-        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
-            let path = entry.expect("dir entry").path();
-            if path.is_dir() {
-                walk(&path, root, out);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-                out.push((format!("{NATIVE_PREFIX}{rel}"), path));
-            }
-        }
-    }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../native/beebeeb-drive-rune");
-    let mut files = Vec::new();
-    walk(&root.join("src"), &root, &mut files);
-    files.push((format!("{NATIVE_PREFIX}build.rs"), root.join("build.rs")));
-    assert!(files.len() > 20, "the native tree is read: {} files", files.len());
-    files
-}
-
-/// Every production file of the three trees as `(name, production text)`.
+/// Every production file of both trees as `(name, production text)`.
 fn production_files() -> Vec<(String, String)> {
-    let mut all = rust_files();
-    all.extend(native_files());
-    let files: Vec<(String, String)> = all
+    let files: Vec<(String, String)> = rust_files_with_native()
         .into_iter()
         .filter(|(name, _)| !is_test_file(name))
         .map(|(name, path)| (name, production_text(&path)))

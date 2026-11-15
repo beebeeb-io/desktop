@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // Fails when an updater signature was made by a different minisign key than the
-// one baked into src-tauri/tauri.conf.json (plugins.updater.pubkey).
+// one baked into every 0.8.x build (crates/beebeeb-updater/keys/updater-0.8.pub).
 //
 // Why this exists: task-1240 baked the new updater key C6FADFD59D732197 into
 // 0.3.0, but CI kept signing with the old key 545D7BA77EDEA7E1 through 0.8.3.
@@ -104,7 +104,9 @@ async function loadManifest(source) {
 
 async function main(argv) {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-  let config = path.join(repoRoot, 'src-tauri', 'tauri.conf.json')
+  // The default source of the baked key is the 0.8.x key file; `--config` still reads a Tauri config's value.
+  const defaultKeyFile = path.join(repoRoot, 'crates', 'beebeeb-updater', 'keys', 'updater-0.8.pub')
+  let config = null
   let pubkeyFile = null
   let manifestSource = null
   let allowTransition = false
@@ -124,10 +126,11 @@ async function main(argv) {
     throw new Error('pass exactly one of --manifest <path-or-url> or --sig <file.sig>...')
   }
 
-  const pubkey = pubkeyFile
-    ? fs.readFileSync(pubkeyFile, 'utf8').trim()
+  const keySource = pubkeyFile ?? (config ? null : defaultKeyFile)
+  const pubkey = keySource
+    ? fs.readFileSync(keySource, 'utf8').trim()
     : JSON.parse(fs.readFileSync(config, 'utf8'))?.plugins?.updater?.pubkey
-  if (!pubkey) throw new Error(`${pubkeyFile ?? config} has no updater public key`)
+  if (!pubkey) throw new Error(`${keySource ?? config} has no updater public key`)
 
   const result = manifestSource
     ? checkManifestSignatures(await loadManifest(manifestSource), pubkey)

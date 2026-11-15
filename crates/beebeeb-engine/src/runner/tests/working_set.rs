@@ -71,14 +71,6 @@ fn task_2190_a_commands_undelivered_signal_is_carried_by_the_next_tick() {
     };
     assert!(body("signal_working_set_owing").contains("owed.take_command_debt();"));
     assert!(body("signal_owed_debt_after_a_failed_tick").contains("owed_working_set_signal.take_command_debt();"));
-    // The decision owes what its own signal did not deliver.
-    let lib = crate::root_source::lib_rs().replace("\r\n", "\n");
-    let decide = &lib[lib
-        .find("async fn resolve_parked_conflict(")
-        .expect("the decision command")..];
-    assert!(decide.contains(
-            "if crate::finder_setup::macos_ports::signal_working_set().is_err() {\n                crate::runner::owe_working_set_signal(&ids);"
-        ));
 }
 
 #[test]

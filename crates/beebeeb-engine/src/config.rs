@@ -36,6 +36,8 @@ mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod write_pin_tests;
 
 pub use error::ConfigError;
 pub use lock::{HeldConfig, UpdateError};
