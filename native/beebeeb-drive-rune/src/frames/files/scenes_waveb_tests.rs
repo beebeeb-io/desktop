@@ -96,6 +96,7 @@ fn a_download_reads_its_figures_in_the_unit_of_the_whole() {
         id: "x".into(),
         done: 734_003,
         total: 1_258_291,
+        kept: true,
     };
     assert_eq!(d.figures(), "0.7 of 1.2 MB");
     assert!((d.fraction() - 0.583).abs() < 0.001);
@@ -103,6 +104,7 @@ fn a_download_reads_its_figures_in_the_unit_of_the_whole() {
         id: "x".into(),
         done: 100 * 1024,
         total: 220 * 1024,
+        kept: true,
     };
     assert_eq!(small.figures(), "100 of 220 KB");
 }

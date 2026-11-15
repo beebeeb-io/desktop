@@ -2,8 +2,9 @@
 //! ("Downloading, 0.7 of 1.2 MB") with a bar, its PC mark is the download tray, the panel's
 //! Available offline card says the same, and the status line says "Syncing".
 //!
-//! The figures come from `FilesSource::downloads`. A source that cannot tell how far a copy has
-//! come (the engine, today) answers nothing, and the row then shows no bar: never a made-up one.
+//! The figures come from `FilesSource::downloads`: on the engine, the transfer board's whole-file
+//! downloads of this account (`Engine::downloads_for`). A source that cannot tell how far a copy has
+//! come answers nothing, and the row then shows no bar: never a made-up one.
 
 use super::source::{Action, FilesFixture};
 use crate::State;
@@ -20,6 +21,9 @@ pub struct Download {
     pub id: String,
     pub done: u64,
     pub total: u64,
+    /// This PC keeps the file (Available offline). A copy that comes down for another reason (a player reading it, a
+    /// conflict copy) shows its bar and does not claim a keep.
+    pub kept: bool,
 }
 
 impl Download {
@@ -115,6 +119,7 @@ pub fn scene(s: &mut State) {
         id: s.listing.items[CONTRACT].id.clone(),
         done: total * 7 / 12,
         total,
+        kept: true,
     }];
     // The row is one of the kept ones, the way `keep_offline` leaves it.
     s.listing.items[CONTRACT].pc_status = Some("available_offline".into());

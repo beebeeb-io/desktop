@@ -364,6 +364,8 @@ pub trait FilesSource: Send + 'static {
     fn downloads(&self) -> Vec<super::keeping::Download> {
         Vec::new()
     }
+    /// The account left (a sign-out, another account): forget what was read of the copies coming down.
+    fn forget_downloads(&mut self) {}
     /// What uploads now: what stopped, what moves, what waits (DW-0426, DW-0427). `None`: nothing.
     fn uploads(&self) -> Option<super::uploads::Uploads> {
         None
