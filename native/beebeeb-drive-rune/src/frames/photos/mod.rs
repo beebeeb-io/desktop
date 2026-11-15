@@ -145,6 +145,8 @@ pub enum Toast {
     },
     /// A control whose work is not connected in this build yet was pressed: it says so, and nothing else happens.
     NotYet,
+    /// Something asked for could not be done, in these words (Add a folder…, Move…).
+    Words(&'static str),
 }
 
 /// One row of the grid: a day's heading, if this is its first row, and up to `across` tiles.
@@ -633,6 +635,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         front.push(overlay::scrim(&t));
         front.push(overlay::dialog(ui, dialog, cx.env().scale, &t));
     }
+    // The folder dialog of Files, opened by Add a folder… / Move…: its own layer, in front of all of it.
+    front.extend(crate::frames::files::dialogs::layer(s, &t));
     match ui.viewing() {
         Some(viewing) => chrome::window(
             s,
@@ -659,7 +663,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 }
 
 /// The group's keys. The shell's own shortcuts ran first (`host::on_key`).
-pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // The folder dialog of Files, when Photos opened it, takes every key (it has the same keys as in Files).
+    if s.actions.dialog.is_some() {
+        return crate::frames::files::keys::on_key(s, ev, tx);
+    }
     let ui = &mut s.photos;
     let plain = !ev.mods.cmd && !ev.mods.alt;
     let space = matches!(&ev.key, Key::Text(t) if t == " ");

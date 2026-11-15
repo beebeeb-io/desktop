@@ -15,7 +15,7 @@
 //!    read. Then the install, in the engine's step: the account behind the arriving session is checked against the
 //!    session stored here and against this PC's local data (another account's: `AccountMismatch`, nothing stored); the
 //!    session goes through the password sign-in's own install (`finish_sign_in`), and the handed-over key is kept as a
-//!    passkey's is (`keep_device_key`: the steps of `passkeys_api::keep_passkey_key`, which is private to that file).
+//!    passkey's is (`passkeys_api::keep_handed_over_key`, the one helper both use).
 //!
 //! Every way out before the install stores nothing, and a session the server made for a request that is not installed
 //! is ended at the server (best effort).
@@ -51,11 +51,7 @@ use zeroize::Zeroizing;
 use crate::account::SessionGeneration;
 use crate::account_binding::{self, Binding, BindingKind, Identity};
 use crate::account_dto::AccountProfile;
-use crate::app::lock_api::SessionMoved;
 use crate::app::{CredentialStores, Engine};
-use crate::keychain::SecretBytes;
-use crate::session::Session;
-use crate::signin::key_owner;
 use crate::state_db::{ReadOnlyOpenError, StateDb};
 use crate::state_paths;
 
@@ -286,7 +282,8 @@ impl<C: CredentialStores> Engine<C> {
         {
             return Err(DeviceRequestRefused::NotStored);
         }
-        let vault_unlocked = self.keep_device_key(&token, &key);
+        // The ONE key-storing step of a sign-in that hands a key over (the passkey's too): `passkeys_api`.
+        let vault_unlocked = self.keep_handed_over_key(&token, &key);
         Ok(DeviceSignedIn { by, vault_unlocked })
     }
 
@@ -335,53 +332,6 @@ impl<C: CredentialStores> Engine<C> {
             return path;
         }
         state_paths::state_db_path_from_state_dir(&self.config.state_dir)
-    }
-
-    /// The vault key the other device handed over, stored for the session that was just installed, as a passkey's key
-    /// is (`passkeys_api::keep_passkey_key`, the same steps). Nothing is stored when the vault is open already (this
-    /// computer's stored key of the same account was loaded: a re-sign-in) or when the stored session is not this
-    /// request's any more. `true`: the vault is open.
-    fn keep_device_key(&self, token: &str, key: &Zeroizing<[u8; 32]>) -> bool {
-        if self.unlocked() {
-            return true;
-        }
-        let turn = self.acct.session_generation();
-        let Ok(_write) = self.claim(turn) else {
-            return false;
-        };
-        let vault = self.vault();
-        let still = vault
-            .session_token()
-            .ok()
-            .flatten()
-            .is_some_and(|stored| stored.expose_for_request() == token);
-        if !still {
-            return false;
-        }
-        if vault
-            .store_wrapped_master_key(SecretBytes::new_master_key(key))
-            .is_err()
-        {
-            return false;
-        }
-        if let Err(error) = key_owner::bind_key_to_session_owner(&vault) {
-            tracing::warn!(%error, "could not record the vault key's owner in the credential store");
-        }
-        let email = self.account_email();
-        let Ok(mut guard) = self.acct.session.lock() else {
-            return false;
-        };
-        *guard = Some(Session {
-            token: token.to_string(),
-            master_key: **key,
-            email,
-        });
-        drop(guard);
-        self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
-        // Keys handed over by a device the account's owner approved with a fresh step-up are a strong proof, as the
-        // twelve words and a PRF passkey are: the lock opens in the same hold as the key's install.
-        self.lock_follows(SessionMoved::StrongProof);
-        true
     }
 
     /// End a session the server made for a request that is not installed. Best effort; never logs.

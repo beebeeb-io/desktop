@@ -1,0 +1,689 @@
+//! The worker of one open document: it starts the helper, sends the requests, checks every answer and keeps the
+//! timers (the rules are in `office_host.rs`). It runs on its own thread; a reader thread per helper puts the helper's
+//! frames into the same channel as the window's commands, and a writer thread per helper writes the requests.
+
+use std::collections::VecDeque;
+use std::io::{Read, Write};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread;
+use std::time::Instant;
+
+use beebeeb_office_protocol::check;
+use beebeeb_office_protocol::frame::{self, Frame, FrameError, Ids, Side};
+use beebeeb_office_protocol::office::{self, ErrorCode, Message};
+use beebeeb_office_sandbox as sandbox;
+use zeroize::{Zeroize, Zeroizing};
+
+use super::{
+    CannotOpen, CellData, Command, DocKind, Event, Helper, Input, Link, MAX_IN_FLIGHT, NoPreview, OfficeState, Out,
+    OutlineEntry, PageSize, RenderAsk, RequestId, Shared, Starter, Stop, Timeouts, wipe_cells, wipe_entries,
+    wipe_message,
+};
+
+/// Starts the worker of one document on a thread of its own. `false` when no thread could be made: the worker, and
+/// the bytes in it, are dropped (wiped).
+pub(super) fn spawn<S: Starter>(
+    starter: S,
+    kind: DocKind,
+    shared: Arc<Shared>,
+    inputs: Receiver<Input>,
+    timeouts: Timeouts,
+    bytes: Zeroizing<Vec<u8>>,
+) -> bool {
+    let worker = Worker {
+        starter,
+        kind,
+        shared,
+        inputs,
+        timeouts,
+        doc: Doc::Bytes(bytes),
+        run: None,
+        links: 0,
+        retried: false,
+        phase: Phase::Opening,
+    };
+    thread::Builder::new()
+        .name("office-host".to_owned())
+        .spawn(move || worker.run())
+        .is_ok()
+}
+
+/// The document: its bytes until they are in a section, then the section (kept for Try again), then gone.
+enum Doc<T> {
+    Bytes(Zeroizing<Vec<u8>>),
+    Section(T),
+    Gone,
+}
+
+enum Phase {
+    Opening,
+    Pages { sizes: Vec<PageSize> },
+    Sheets,
+    Stopped { can_retry: bool },
+    Done,
+}
+
+type Outgoing = (u16, u32, Vec<u8>);
+
+/// One started helper.
+struct Run<S: Starter> {
+    link: u64,
+    helper: Arc<S::Process>,
+    writer: Sender<Outgoing>,
+    ids: Ids,
+    /// When this helper's start was requested: the open timer counts from here.
+    started_at: Instant,
+    /// When the oldest request out became the oldest: the request timer counts from here.
+    oldest_since: Instant,
+    /// The requests out, oldest first: the helper answers them in this order.
+    sent: VecDeque<Sent<S::Section>>,
+    /// Renders not sent yet (more than [`MAX_IN_FLIGHT`] asked).
+    waiting: VecDeque<RenderAsk>,
+    /// The outline's entries so far, while it is being asked.
+    outline: Option<Vec<OutlineEntry>>,
+}
+
+struct Sent<T> {
+    wire: u32,
+    asked: Asked<T>,
+    cancelled: bool,
+}
+
+enum Asked<T> {
+    Open,
+    Render {
+        ask: RenderAsk,
+        request: office::Render,
+        section: T,
+    },
+    Outline(office::Outline),
+    Stats,
+    Cells(office::Cells),
+}
+
+struct Worker<S: Starter> {
+    starter: S,
+    kind: DocKind,
+    shared: Arc<Shared>,
+    inputs: Receiver<Input>,
+    timeouts: Timeouts,
+    doc: Doc<S::Section>,
+    run: Option<Run<S>>,
+    /// Helpers started so far: numbers each helper's frames.
+    links: u64,
+    retried: bool,
+    phase: Phase,
+}
+
+impl<S: Starter> Worker<S> {
+    fn run(mut self) {
+        self.start_helper();
+        while !self.done() {
+            let input = match self.deadline() {
+                Some(at) => {
+                    let now = Instant::now();
+                    if at <= now {
+                        self.stopped(Stop::TimedOut);
+                        continue;
+                    }
+                    match self.inputs.recv_timeout(at - now) {
+                        Ok(input) => input,
+                        Err(RecvTimeoutError::Timeout) => {
+                            self.stopped(Stop::TimedOut);
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                None => match self.inputs.recv() {
+                    Ok(input) => input,
+                    Err(_) => break,
+                },
+            };
+            match input {
+                Input::Close => break,
+                Input::Frame { link, frame } => self.on_frame(link, frame),
+                Input::Command(command) => self.on_command(command),
+            }
+        }
+        self.finish();
+    }
+
+    fn done(&self) -> bool {
+        matches!(self.phase, Phase::Done) || self.shared.is_closed()
+    }
+
+    /// The oldest request's deadline: `Open` from the start request, any other from when it became the oldest.
+    fn deadline(&self) -> Option<Instant> {
+        let run = self.run.as_ref()?;
+        let oldest = run.sent.front()?;
+        Some(match oldest.asked {
+            Asked::Open => run.started_at + self.timeouts.open,
+            _ => run.oldest_since + self.timeouts.request,
+        })
+    }
+
+    /// Drops every section and the document. A close killed the helper already (the shared handle); dropping its
+    /// handle here ends it too.
+    fn finish(mut self) {
+        if let Some(run) = self.run.take() {
+            wipe_run(run);
+        }
+        self.doc = Doc::Gone;
+        self.shared.mark_worker_ended();
+    }
+
+    fn start_helper(&mut self) {
+        let started_at = Instant::now();
+        if !self.starter.installed() {
+            return self.end_with(OfficeState::NoPreview(NoPreview::NotInstalled));
+        }
+        // Before any helper starts: Windows Error Reporting keeps no dump of it.
+        if self.starter.exclude_from_crash_reports().is_err() {
+            return self.stopped(Stop::Failed);
+        }
+        // The document's section, once: the bytes are copied in and wiped.
+        self.doc = match std::mem::replace(&mut self.doc, Doc::Gone) {
+            Doc::Bytes(bytes) => match self.starter.section(bytes.len()) {
+                Ok(mut section) => {
+                    self.starter.fill(&mut section, &bytes);
+                    Doc::Section(section)
+                }
+                Err(error) => {
+                    self.doc = Doc::Bytes(bytes);
+                    return self.start_failed(error);
+                }
+            },
+            other => other,
+        };
+        if matches!(self.doc, Doc::Gone) {
+            return self.stopped(Stop::Failed);
+        }
+        let link = match self.starter.start() {
+            Ok(link) => link,
+            Err(error) => return self.start_failed(error),
+        };
+        let Link {
+            helper,
+            to_helper,
+            from_helper,
+        } = link;
+        let helper = Arc::new(helper);
+        let handle: Arc<dyn Helper> = helper.clone();
+        // A close that came while the helper was starting: it is killed now and nothing is sent.
+        if !self.shared.adopt(handle) {
+            helper.end();
+            return;
+        }
+        self.links += 1;
+        let link_no = self.links;
+        let writer = spawn_writer(to_helper);
+        let reading = spawn_reader(from_helper, link_no, self.shared.commands.clone());
+        let (Some(writer), true) = (writer, reading) else {
+            helper.end();
+            self.shared.disown();
+            return self.stopped(Stop::Failed);
+        };
+        self.run = Some(Run {
+            link: link_no,
+            helper,
+            writer,
+            ids: Ids::new(Side::App),
+            started_at,
+            oldest_since: started_at,
+            sent: VecDeque::new(),
+            waiting: VecDeque::new(),
+            outline: None,
+        });
+        let granted = match (self.run.as_ref(), &self.doc) {
+            (Some(run), Doc::Section(section)) => Some(self.starter.grant(&run.helper, section, sandbox::Access::Read)),
+            _ => None,
+        };
+        let Some(Ok(granted)) = granted else {
+            return self.stopped(Stop::Failed);
+        };
+        let open = office::Open {
+            kind: self.kind,
+            doc: office::GrantRef {
+                wire: granted.wire,
+                len: granted.len,
+            },
+        };
+        self.ask(Message::Open(open), Asked::Open);
+    }
+
+    fn start_failed(&mut self, error: sandbox::SandboxError) {
+        if error == sandbox::SandboxError::Unsupported {
+            self.end_with(OfficeState::NoPreview(NoPreview::NoSandbox));
+        } else {
+            self.stopped(Stop::Failed);
+        }
+    }
+
+    /// Kills the running helper and drops its sections.
+    fn kill_run(&mut self) {
+        if let Some(run) = self.run.take() {
+            run.helper.end();
+            self.shared.disown();
+            wipe_run(run);
+        }
+    }
+
+    /// "Renderer stopped". The document's section stays for Try again; without one it goes now.
+    fn stopped(&mut self, why: Stop) {
+        self.kill_run();
+        let can_retry = !self.retried && !matches!(self.doc, Doc::Gone);
+        if can_retry {
+            self.phase = Phase::Stopped { can_retry: true };
+        } else {
+            self.phase = Phase::Done;
+            self.doc = Doc::Gone;
+        }
+        self.shared.push(Out::State(OfficeState::Stopped { why, can_retry }));
+    }
+
+    /// A state with no Try again (no preview, cannot open): the helper and the document go.
+    fn end_with(&mut self, state: OfficeState) {
+        self.kill_run();
+        self.doc = Doc::Gone;
+        self.phase = Phase::Done;
+        self.shared.push(Out::State(state));
+    }
+
+    fn retry(&mut self) {
+        if !matches!(self.phase, Phase::Stopped { can_retry: true }) {
+            return;
+        }
+        self.retried = true;
+        self.phase = Phase::Opening;
+        self.start_helper();
+    }
+
+    fn on_command(&mut self, command: Command) {
+        match command {
+            Command::Retry => self.retry(),
+            Command::Render(ask) => {
+                if !matches!(self.phase, Phase::Pages { .. }) {
+                    return;
+                }
+                let Some(run) = self.run.as_mut() else {
+                    return;
+                };
+                run.waiting.push_back(ask);
+                self.pump_renders();
+            }
+            Command::Cancel(id) => self.cancel(id),
+            Command::Outline => self.start_outline(),
+            Command::Stats => {
+                if matches!(self.phase, Phase::Pages { .. }) {
+                    self.ask(Message::Stats(office::Stats), Asked::Stats);
+                }
+            }
+            Command::Cells { sheet, range } => {
+                if matches!(self.phase, Phase::Sheets) {
+                    let asked = office::Cells { sheet, range };
+                    self.ask(Message::Cells(asked), Asked::Cells(asked));
+                }
+            }
+        }
+    }
+
+    /// Sends `message` with a new id and keeps it as the newest request out.
+    fn ask(&mut self, message: Message, asked: Asked<S::Section>) -> bool {
+        let Ok(payload) = message.encode() else {
+            self.stopped(Stop::Failed);
+            return false;
+        };
+        let Some(run) = self.run.as_mut() else {
+            return false;
+        };
+        let id = run.ids.next_id();
+        if run.writer.send((message.kind(), id, payload)).is_err() {
+            // The writer ended: the helper's pipe is gone.
+            self.stopped(Stop::Exited);
+            return false;
+        }
+        if run.sent.is_empty() {
+            run.oldest_since = Instant::now();
+        }
+        run.sent.push_back(Sent {
+            wire: id,
+            asked,
+            cancelled: false,
+        });
+        true
+    }
+
+    /// Sends waiting renders while fewer than [`MAX_IN_FLIGHT`] are out (a cancelled one counts until answered).
+    fn pump_renders(&mut self) {
+        loop {
+            let Some(run) = self.run.as_mut() else {
+                return;
+            };
+            let out = run
+                .sent
+                .iter()
+                .filter(|sent| matches!(sent.asked, Asked::Render { .. }))
+                .count();
+            if out >= MAX_IN_FLIGHT {
+                return;
+            }
+            let Some(ask) = run.waiting.pop_front() else {
+                return;
+            };
+            if !self.send_render(ask) {
+                return;
+            }
+        }
+    }
+
+    /// A section of exactly the asked `w * h * 4` bytes, granted read-write, and the `Render` at the asked scale.
+    fn send_render(&mut self, ask: RenderAsk) -> bool {
+        let len = ask.w as usize * ask.h as usize * 4;
+        let section = match self.starter.section(len) {
+            Ok(section) => section,
+            Err(_) => {
+                self.stopped(Stop::Failed);
+                return false;
+            }
+        };
+        let granted = self
+            .run
+            .as_ref()
+            .map(|run| self.starter.grant(&run.helper, &section, sandbox::Access::ReadWrite));
+        let Some(Ok(granted)) = granted else {
+            self.stopped(Stop::Failed);
+            return false;
+        };
+        let request = office::Render {
+            page: ask.page,
+            scale: ask.scale,
+            region: ask.region,
+            out: office::GrantRef {
+                wire: granted.wire,
+                len: granted.len,
+            },
+        };
+        self.ask(Message::Render(request), Asked::Render { ask, request, section })
+    }
+
+    fn cancel(&mut self, id: RequestId) {
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        if let Some(at) = run.waiting.iter().position(|ask| ask.id == id) {
+            let _ = run.waiting.remove(at);
+            return;
+        }
+        let sent = run
+            .sent
+            .iter_mut()
+            .find(|sent| !sent.cancelled && matches!(&sent.asked, Asked::Render { ask, .. } if ask.id == id));
+        let Some(sent) = sent else {
+            return;
+        };
+        sent.cancelled = true;
+        let wire = sent.wire;
+        if let Ok(payload) = office::Cancel.encode() {
+            // The frame's id is the cancelled request's. A failed send: the helper is gone and its reader says so.
+            let _ = run.writer.send((office::KIND_CANCEL, wire, payload));
+        }
+    }
+
+    fn start_outline(&mut self) {
+        if !matches!(self.phase, Phase::Pages { .. }) {
+            return;
+        }
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        if run.outline.is_some() {
+            return;
+        }
+        run.outline = Some(Vec::new());
+        let asked = office::Outline { from: 0 };
+        self.ask(Message::Outline(asked), Asked::Outline(asked));
+    }
+
+    fn on_frame(&mut self, link: u64, frame: Result<Frame, FrameError>) {
+        let (current, oldest) = match &self.run {
+            Some(run) => (run.link, run.sent.front().map(|sent| sent.wire)),
+            None => return,
+        };
+        if current != link {
+            return;
+        }
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(FrameError::TooLong | FrameError::TooShort) => return self.stopped(Stop::Protocol),
+            // The pipe closed or failed: the helper is gone (a crash, out of memory).
+            Err(FrameError::Closed | FrameError::Truncated | FrameError::Io(_)) => return self.stopped(Stop::Exited),
+        };
+        let Frame { kind, id, mut payload } = frame;
+        // An app id, and the oldest one out: the helper answers in request order.
+        if check::check_answer_id(id, |id| Some(id) == oldest).is_err() {
+            payload.zeroize();
+            return self.stopped(Stop::Protocol);
+        }
+        let decoded = Message::decode(kind, &payload);
+        payload.zeroize();
+        let Ok(message) = decoded else {
+            return self.stopped(Stop::Protocol);
+        };
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        let Some(sent) = run.sent.pop_front() else {
+            return self.stopped(Stop::Protocol);
+        };
+        run.oldest_since = Instant::now();
+        self.answer(sent, message);
+    }
+
+    fn kind_has_pages(&self) -> bool {
+        matches!(self.kind, DocKind::Docx | DocKind::Doc | DocKind::Pptx)
+    }
+
+    /// The answer to the oldest request: it must be the kind that request takes, then pass its check.
+    fn answer(&mut self, sent: Sent<S::Section>, message: Message) {
+        let Sent { asked, cancelled, .. } = sent;
+        let pages = self.kind_has_pages();
+        match (asked, message) {
+            (Asked::Open, Message::Opened(opened)) if pages => self.opened(opened),
+            (Asked::Open, Message::OpenedSheets(opened)) if !pages => self.opened_sheets(opened),
+            (Asked::Open, Message::Error(error)) => self.open_refused(error.code),
+            // Cancelled: its answer is checked for id, order and kind (above), then discarded with its section.
+            (Asked::Render { .. }, Message::Rendered(_) | Message::Error(_)) if cancelled => {}
+            (Asked::Render { ask, request, section }, Message::Rendered(got)) => {
+                self.rendered(ask, request, section, got)
+            }
+            (Asked::Outline(asked), Message::OutlineData(got)) => self.outline_page(asked, got),
+            (Asked::Stats, Message::StatsData(got)) => self.shared.push(Out::Event(Event::Stats { words: got.words })),
+            (Asked::Cells(asked), Message::CellData(got)) => self.cells(asked, got),
+            (Asked::Cells(asked), Message::Error(error)) => self.cells_refused(asked, error.code),
+            (Asked::Render { .. } | Asked::Outline(_) | Asked::Stats, Message::Error(error)) => {
+                self.request_refused(error.code)
+            }
+            // Any other kind of answer: not what was asked.
+            (_, mut other) => {
+                wipe_message(&mut other);
+                self.stopped(Stop::Protocol);
+            }
+        }
+        self.pump_renders();
+    }
+
+    fn opened(&mut self, opened: office::Opened) {
+        if check::check_opened(&opened, &check::Limits::CONTRACT).is_err() {
+            return self.stopped(Stop::Protocol);
+        }
+        let office::Opened { pages, sizes } = opened;
+        self.phase = Phase::Pages { sizes: sizes.clone() };
+        self.shared.push(Out::State(OfficeState::Pages { pages, sizes }));
+    }
+
+    fn opened_sheets(&mut self, mut opened: office::OpenedSheets) {
+        if check::check_sheets(&opened, &check::Limits::CONTRACT).is_err() {
+            for sheet in &mut opened.sheets {
+                sheet.name.zeroize();
+            }
+            return self.stopped(Stop::Protocol);
+        }
+        self.phase = Phase::Sheets;
+        self.shared.push(Out::State(OfficeState::Sheets {
+            sheets: opened.sheets,
+            more: opened.more,
+        }));
+    }
+
+    /// The helper's answer to `Open` with an error: its typed state; the helper goes.
+    fn open_refused(&mut self, code: ErrorCode) {
+        match code {
+            ErrorCode::Unsupported => self.end_with(OfficeState::NoPreview(NoPreview::ThisType)),
+            ErrorCode::Password => self.end_with(OfficeState::NoPreview(NoPreview::Password)),
+            ErrorCode::Damaged => self.end_with(OfficeState::CannotOpen(CannotOpen::Damaged)),
+            ErrorCode::TooLarge => self.end_with(OfficeState::CannotOpen(CannotOpen::TooLarge)),
+            ErrorCode::Internal => self.stopped(Stop::Failed),
+            // Only ever an answer to `Cells`.
+            ErrorCode::RangeTooLarge => self.stopped(Stop::Protocol),
+        }
+    }
+
+    /// An error to a request that was not cancelled (not `Cells`).
+    fn request_refused(&mut self, code: ErrorCode) {
+        if code == ErrorCode::RangeTooLarge {
+            self.stopped(Stop::Protocol);
+        } else {
+            self.stopped(Stop::Failed);
+        }
+    }
+
+    fn rendered(&mut self, ask: RenderAsk, request: office::Render, section: S::Section, got: office::Rendered) {
+        let Phase::Pages { sizes } = &self.phase else {
+            return self.stopped(Stop::Protocol);
+        };
+        let Some(size) = sizes.get(ask.page as usize).copied() else {
+            return self.stopped(Stop::Protocol);
+        };
+        let len = self.starter.section_len(&section);
+        if check::check_rendered(&request, &size, len as u64, &got, &check::Limits::CONTRACT).is_err() {
+            return self.stopped(Stop::Protocol);
+        }
+        let mut rgba = vec![0u8; len];
+        self.starter.copy_out(&section, &mut rgba);
+        drop(section);
+        self.shared.push(Out::Event(Event::Page {
+            id: ask.id,
+            page: ask.page,
+            scale: ask.scale,
+            region: ask.region,
+            w: got.w,
+            h: got.h,
+            rgba,
+            missing_content: got.missing_content,
+        }));
+    }
+
+    /// One page of the outline: checked (it must move forward and stay under the limit), then the next page is asked,
+    /// or the whole outline goes to the window.
+    fn outline_page(&mut self, asked: office::Outline, mut got: office::OutlineData) {
+        let pages = match &self.phase {
+            Phase::Pages { sizes } => sizes.len() as u32,
+            _ => {
+                wipe_entries(&mut got.entries);
+                return self.stopped(Stop::Protocol);
+            }
+        };
+        if check::check_outline(&asked, &got, pages, &check::Limits::CONTRACT).is_err() {
+            wipe_entries(&mut got.entries);
+            return self.stopped(Stop::Protocol);
+        }
+        let office::OutlineData { entries, next } = got;
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        run.outline.get_or_insert_with(Vec::new).extend(entries);
+        match next {
+            Some(from) => {
+                let asked = office::Outline { from };
+                self.ask(Message::Outline(asked), Asked::Outline(asked));
+            }
+            None => {
+                let all = run.outline.take().unwrap_or_default();
+                self.shared.push(Out::Event(Event::Outline(all)));
+            }
+        }
+    }
+
+    fn cells(&mut self, asked: office::Cells, mut got: CellData) {
+        if check::check_cells(&asked, &got, &check::Limits::CONTRACT).is_err() {
+            wipe_cells(&mut got);
+            return self.stopped(Stop::Protocol);
+        }
+        self.shared.push(Out::Event(Event::Cells {
+            sheet: asked.sheet,
+            range: asked.range,
+            data: got,
+        }));
+    }
+
+    /// `RangeTooLarge`: both halves are asked (each its own answer); a range that cannot be halved is the helper's
+    /// error. Any other code: stopped.
+    fn cells_refused(&mut self, asked: office::Cells, code: ErrorCode) {
+        if code != ErrorCode::RangeTooLarge {
+            return self.stopped(Stop::Failed);
+        }
+        match check::halve_range(&asked) {
+            Ok(halves) => {
+                for half in halves {
+                    if !self.ask(Message::Cells(half), Asked::Cells(half)) {
+                        return;
+                    }
+                }
+            }
+            Err(_) => self.stopped(Stop::Protocol),
+        }
+    }
+}
+
+/// Reads frames from the helper into the worker's channel until the pipe ends (the helper is gone) or the worker is.
+fn spawn_reader(mut from_helper: Box<dyn Read + Send>, link: u64, to_worker: Sender<Input>) -> bool {
+    thread::Builder::new()
+        .name("office-helper-read".to_owned())
+        .spawn(move || {
+            loop {
+                let frame = frame::read_frame(&mut from_helper);
+                let last = frame.is_err();
+                if to_worker.send(Input::Frame { link, frame }).is_err() || last {
+                    return;
+                }
+            }
+        })
+        .is_ok()
+}
+
+/// Writes the worker's frames to the helper, so that a full pipe never holds the worker. Ends when the worker drops
+/// its sender or a write fails.
+fn spawn_writer(mut to_helper: Box<dyn Write + Send>) -> Option<Sender<Outgoing>> {
+    let (sender, outgoing) = mpsc::channel::<Outgoing>();
+    thread::Builder::new()
+        .name("office-helper-write".to_owned())
+        .spawn(move || {
+            for (kind, id, payload) in outgoing {
+                if frame::write_frame(&mut to_helper, kind, id, &payload).is_err() {
+                    return;
+                }
+            }
+        })
+        .ok()?;
+    Some(sender)
+}
+
+/// Drops a helper's state: the outline text so far is wiped, every page section dropped (zeroized by the sandbox).
+fn wipe_run<S: Starter>(mut run: Run<S>) {
+    if let Some(entries) = run.outline.as_mut() {
+        wipe_entries(entries);
+    }
+    drop(run);
+}

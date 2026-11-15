@@ -213,10 +213,10 @@ static ZOOM_MORE: Icon = Icon {
 const PAGE_W: f32 = 520.0;
 const OUTLINE_W: f32 = 210.0;
 
-/// A bar of the skeleton: the board's `color-mix(in oklch, ink 9%, ground)`, taken from THIS theme's ink and ground (in
-/// dark the ink is light, so the bar is a dark grey on the white page and stays visible).
+/// A bar of the skeleton: the board's `color-mix(in oklch, ink 9%, ground)`, taken from THIS theme's ink and ground (the
+/// board's `--kit-ground` is `surface`: paper-2 in light, paper in dark; on `bg` the bars were nearly white in light).
 pub fn bone_fill(t: &Theme) -> Color {
-    let (ink, ground) = (t.text, t.bg);
+    let (ink, ground) = (t.text, t.surface);
     let mix = |a: f32, b: f32| a * 0.09 + b * 0.91;
     Color {
         r: mix(ink.r, ground.r),
@@ -224,6 +224,11 @@ pub fn bone_fill(t: &Theme) -> Color {
         b: mix(ink.b, ground.b),
         a: 1.0,
     }
+}
+
+/// The ground behind the pages: the board's `color-mix(in oklch, ink 6%, ground)` (light [231,228,224], dark [26,23,19]).
+pub fn stage_fill(t: &Theme) -> Color {
+    rune::color::hex(if t.dark { "#1A1713" } else { "#E7E4E0" }).unwrap_or(Color::BLACK)
 }
 
 fn bone(key: String, w: f32, h: f32, t: &Theme) -> El {
@@ -326,6 +331,13 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
                 }),
             );
     }
+    kit::note_text(
+        "empty-text",
+        "empty-text-box",
+        &format!("{line}{TRY_HINT}"),
+        SUB,
+        t.text_tertiary,
+    );
     col()
         .key("empty")
         .role("alert")
@@ -347,19 +359,20 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
                 .level(1),
         )
         .child(
-            // The board's text block: the reason, then the one hint under it (both inside `empty-text`).
+            // The board's text block: the reason, then the one hint under it. The gate reads the block as ONE text,
+            // `empty-text` (both lines, in the board's grey); the hint keeps its own key inside it.
             col()
-                .key("empty-text")
+                .key("empty-text-box")
                 .w(227.0)
                 .items_center()
                 .child(
-                    kit::label("empty-reason", line, SUB, t.text_secondary)
+                    kit::label("empty-reason", line.clone(), SUB, t.text_tertiary)
                         .wrap()
                         .w_full()
                         .align(rune::Align::Center),
                 )
                 .child(
-                    kit::label("empty-hint", TRY_HINT, HINT, t.text_secondary)
+                    kit::label("empty-hint", TRY_HINT, HINT, t.text_tertiary)
                         .wrap()
                         .w(216.68)
                         .align(rune::Align::Center),
@@ -422,7 +435,7 @@ pub fn skeleton(t: &Theme) -> El {
                 .h_full()
                 .pt(24.0)
                 .justify_center()
-                .fill(t.field)
+                .fill(stage_fill(t))
                 .child(page),
         )
 }
@@ -751,7 +764,7 @@ mod tests {
         );
         assert_ne!(fill_of("empty-tile"), Some(t.tile.hex()), "not the grey tile");
         assert!(
-            keyed(&rt, "empty-text") && keyed(&rt, "empty-hint"),
+            keyed(&rt, "empty-text-box") && keyed(&rt, "empty-hint"),
             "both lines are drawn"
         );
         let words = said(&rt);
@@ -831,12 +844,40 @@ mod tests {
         let mut s = init();
         scene_opening(&mut s);
         assert_eq!(state_mut(&mut s).map(|b| b.state), Some(OfficeState::Opening));
+        // DW-1564 opens the DOCUMENT with the one quiet line (no state panel): the board draws the pages and the status
+        // bar's line, so the scene carries no `StateBody` and the line sits on the document.
         scene_quiet(&mut s);
-        assert_eq!(state_mut(&mut s).map(|b| b.state), Some(OfficeState::ContentMissing));
+        assert!(
+            state_mut(&mut s).is_none(),
+            "the quiet scene is the document, not a state panel"
+        );
+        assert_eq!(
+            viewers::doc_mut(&mut s).and_then(|d| d.quiet),
+            Some(QUIET_LINE),
+            "the document carries the one quiet line"
+        );
         scene_failed(&mut s);
         assert_eq!(
             state_mut(&mut s).map(|b| b.state),
             Some(OfficeState::Stopped { retried: false })
+        );
+    }
+
+    /// 11.2 / 11.9: the stage is the board's grey and the skeleton's bars are told apart from the page in BOTH themes.
+    #[test]
+    fn office_states_stage_and_bones_are_the_boards_greys() {
+        assert_eq!(
+            stage_fill(&tokens::theme(false)).hex(),
+            rune::color::hex("#E7E4E0").unwrap().hex()
+        );
+        assert_eq!(
+            stage_fill(&tokens::theme(true)).hex(),
+            rune::color::hex("#1A1713").unwrap().hex()
+        );
+        let bar = bone_fill(&tokens::theme(false));
+        assert!(
+            bar.r < 0.95 && bar.g < 0.95,
+            "the light bars are grey on the white page, not near white: {bar:?}"
         );
     }
 }

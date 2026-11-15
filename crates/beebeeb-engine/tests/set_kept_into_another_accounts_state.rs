@@ -2,8 +2,10 @@
 //! engine's own words (`NOT_YOURS`), and nothing is written into that state. The first account signs in, unlocks and
 //! syncs for real (7 items, a sync folder set); it signs out keeping its local data; a second account signs in and
 //! unlocks on the same computer and asks to keep one of the first account's files.
-//! Mutant: `set_kept_in` lets an owner check that fails pass (`kept_api.rs`, the `not_this_accounts()` branch maps to
-//! `Ok`/falls through) -> the refusal is gone and this is red.
+//! The order is the point: the second account has no sync folder set, so the owner check must come before the
+//! sync-folder read. Mutant (`kept_api.rs`, `set_kept_in`): the guard `&& refused.not_this_accounts()` gets a
+//! `&& false` after it -> the owner refusal falls through to the sync-folder read and the refusal at the first
+//! `set_kept` reads "no sync folder is set on this computer": red. (The order before the fix is the same red.)
 
 mod common;
 

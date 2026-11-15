@@ -61,6 +61,19 @@ pub struct MoveTo {
     pub picked: Option<usize>,
     /// Why the last Move did not happen (a name already used there).
     pub error: Option<String>,
+    /// Who asked: Files' own Move, or Photos (a Move of photos; the folder to add in Photo sources).
+    pub purpose: Purpose,
+}
+
+/// What the Move dialog is for. Photos borrows the dialog: its folders are the Files tree, so the picker is the same.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    /// Move the items of the Files window (DW-0409).
+    Files,
+    /// Move photos (DW-0409 from Photos): `items` are the photos' files.
+    PhotosMove,
+    /// Choose a folder for Photo sources (DW-0604): nothing moves, `items` is empty.
+    PhotosFolder,
 }
 
 impl MoveTo {
@@ -81,14 +94,23 @@ impl MoveTo {
         }
     }
 
-    /// The items are there already: nothing to move.
+    /// Nothing to do: the items are there already. A Photos move names no parent folder (the library knows the names of
+    /// the folders above a photo, not their ids), so it is never "there already"; choosing a folder for Photo sources
+    /// has nothing to do at the root (the whole of Files is not a folder to add).
     pub fn is_where_they_are(&self) -> bool {
         let target = self.target().id;
-        self.items.iter().all(|item| item.parent_id == target)
+        match self.purpose {
+            Purpose::Files => self.items.iter().all(|item| item.parent_id == target),
+            Purpose::PhotosMove => false,
+            Purpose::PhotosFolder => target.is_none(),
+        }
     }
 
     /// "Contract draft.pdf", or "3 items".
     pub fn subject(&self) -> String {
+        if self.purpose == Purpose::PhotosFolder {
+            return "Photos shows the pictures and videos in it, with its subfolders".to_string();
+        }
         match &self.items[..] {
             [one] => one.name.clone(),
             many => format!("{} items", many.len()),
@@ -150,6 +172,11 @@ impl State {
 
     /// The Move dialog for these items, on the root's folders, the first one chosen.
     pub fn open_move(&mut self, items: Vec<DriveItem>) {
+        self.open_move_for(items, Purpose::Files);
+    }
+
+    /// The same dialog for Photos: its photos' files to move (`PhotosMove`), or a folder to choose (`PhotosFolder`, no items).
+    pub fn open_move_for(&mut self, items: Vec<DriveItem>, purpose: Purpose) {
         let root = self.listing.path.first().cloned().unwrap_or(Crumb {
             id: None,
             name: "Files".into(),
@@ -163,6 +190,7 @@ impl State {
             path: vec![root],
             choices,
             error: None,
+            purpose,
         }));
     }
 
@@ -266,6 +294,14 @@ impl State {
         let Some(Dialog::Move(mut m)) = self.actions.dialog.take() else {
             return;
         };
+        if m.purpose == Purpose::PhotosFolder {
+            // Choosing only: the folder goes to Photo sources, nothing here moves.
+            match m.target().id {
+                Some(folder) => self.photos.folder_chosen(&folder),
+                None => self.actions.dialog = Some(Dialog::Move(m)),
+            }
+            return;
+        }
         // A move to Trash of one of them began while the dialog was open: the dialog closes, nothing is moved
         // (review of 2468, L320).
         if self.trash_on_its_way(&m.items) {
@@ -288,7 +324,10 @@ impl State {
                 }
             }
         }
+        let for_photos = m.purpose == Purpose::PhotosMove;
         match self.actions.source.move_to(&m.items, target.id.as_deref()) {
+            Ok(()) if for_photos => self.photos.moved(),
+            Err(why) if for_photos && why != ActionError::NameTaken => self.photos.move_left(),
             Ok(()) => {
                 self.forget_undo();
                 if self.listing.folder.id != target.id {
@@ -704,7 +743,12 @@ fn move_to(m: &MoveTo, t: &Theme) -> El {
 
     let target = m.target();
     let stay = m.is_where_they_are();
-    let label = format!("Move to {}", target.name);
+    let adding = m.purpose == Purpose::PhotosFolder;
+    let label = if adding {
+        format!("Add {}", target.name)
+    } else {
+        format!("Move to {}", target.name)
+    };
     let mut primary = settings_dialog::button(0, &label, Weight::Primary, t).w_full();
     primary = if stay {
         // The items are in that folder already.
@@ -728,7 +772,8 @@ fn move_to(m: &MoveTo, t: &Theme) -> El {
                 .w_full()
                 .on_press_tx(|s: &mut State, tx: &mut Tx| s.close_dialog(tx)),
         );
-    shell("Move to", 460.0, "Move to", Some(&m.subject()), body, foot, t)
+    let title = if adding { "Add a folder" } else { "Move to" };
+    shell(title, 460.0, title, Some(&m.subject()), body, foot, t)
 }
 
 /// The open dialog, as the window's top layer.

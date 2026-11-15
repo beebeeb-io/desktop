@@ -138,6 +138,37 @@ dimmed, "Verifying…"); a wrong backup code; a code, a phrase or a vault passwo
 tries (the sign-in form's words for the same problem; "Too many tries. Wait an hour."; "Too many attempts. For
 security, wait an hour and try again."); a vault password or a new password the engine refuses.
 
+## Flagged deviations (states the board has no frame for; CP2 rows 3.4 and 3.5)
+
+- **The new password's answers (DW-A49, row 3.5).** The board draws no error on DW-A49, and every refusal used to show
+  the sign-in form's "We couldn't sign you in. Nothing was unlocked.", which was untrue when the password had changed.
+  Each answer now has its own words (`view_recover.rs`): too short and breached under the field ("Nothing was
+  changed"), and a banner above the fields, as DW-A48 draws its own, for Beebeeb unreachable (or a breach check that
+  could not be made: the engine names both `Offline`), too many tries, an ended recovery and a step that did not
+  finish. Past the registration request the window cannot tell whether the password changed,
+  so those words are true either way ("If your new password was already set, sign in with it"). An ended recovery
+  turns "Set new password" off and adds "Sign in". No countdown is promised for the wait (none runs).
+- **Password updated, sign in to open the vault (`Screen::PasswordChanged`, row 3.5).** The password WAS changed and
+  the account asks for a normal sign-in with it (two-factor, or an older server), so nothing was unlocked. DW-A50's
+  layout (green check, "Password updated") with the words that are true here, and one button, "Sign in", to the form
+  with the address kept. DW-A50 itself ("Your vault is unlocked") is drawn only when the recovery signed in. Board,
+  please draw it.
+- **A request lost after its code was shown (row 3.4).** The connection dropped (a new connection is a new code, so it
+  cannot be joined again), or Beebeeb ended the request with an error. It was drawn as DW-A10's "This code expired".
+  Now: DW-A10's layout with "This request was lost" / "Nothing was signed in. Ask for a new code." and the pill "Lost"
+  ("lost" is DW-A07's own word for a request that ends). DW-A10 itself is unchanged.
+- **An approval this PC did not take (`Screen::NotSignedIn`, row 3.4).** It was drawn as DW-A08's error state,
+  "Approved, but the keys did not arrive", which is untrue: the keys arrived. Laid out as that error state, with the
+  words of what happened: "Approved, but this PC holds another account" / "Nothing was signed in on this PC, and no
+  keys were kept." when its stored session or its local files are another account's; "Approved, but this PC did not
+  sign in" / "Nothing was signed in. Ask again." when it moved on while it waited (a sign-in, a lock or a sign-out
+  here) or could not store the session. No account is named.
+- **DW-A08 is not seen after a real approval (row 3.4, open).** The engine opens the session before the request's
+  answer reaches the window, and the shell draws this group only while signed out (`shell/app.rs` `AppMachine::screen`:
+  `SignedOut` is the sign-in window, `Ready` is Files, the first run is its own gate). The gate decides which screen
+  shows, as after a password sign-in. Nothing in this group can hold DW-A08 on screen over an open gate.
+  Fixing it needs the shell to keep the sign-in window for "Open Drive" (`shell/host.rs`), outside this group.
+
 ## Where each screen lives
 
 | Screens | State and rules | View |

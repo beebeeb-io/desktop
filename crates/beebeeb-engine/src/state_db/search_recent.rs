@@ -1,8 +1,9 @@
 //! The recent searches of Search (DW-0801): one `sync_state` row per account, `search_recent:{user id}`, its value the
 //! searches as a JSON list, newest first.
 //!
-//! Deleted at sign-out (lead ruling 2026-11-15 17:25, privacy): `Engine::sign_out_for` deletes the row of the account
-//! that signs out ([`StateDb::clear_search_recent`]). The purge of an account's rows (`clear_account_data`) wipes the
+//! Deleted at sign-out (lead ruling 2026-11-15 17:25, privacy): every session end deletes the row of its account
+//! ([`StateDb::clear_search_recent`]), and an engine start with nobody signed in deletes every account's
+//! ([`StateDb::clear_every_search_recent`], lead ruling 23:03). The purge of an account's rows (`clear_account_data`) wipes the
 //! rows of every account too: `sign_out_sync_state_purge` keeps only the rows it names, and these are not among them.
 //! Unlike the guide mark they count as account data (`sql::account_rows`): they are only ever written into a state
 //! proven the account's own, so they never make a state nobody owns read as somebody's.
@@ -14,8 +15,16 @@
 use super::*;
 use rusqlite::TransactionBehavior;
 
+/// Every row of recent searches starts with this (and only these rows do).
+const PREFIX: &str = "search_recent:";
+
 fn key(user_id: &str) -> String {
-    format!("search_recent:{user_id}")
+    format!("{PREFIX}{user_id}")
+}
+
+/// A `GLOB` pattern for every row of recent searches (in `GLOB`, unlike `LIKE`, the `_` of the prefix is itself).
+fn every_key() -> String {
+    format!("{PREFIX}*")
 }
 
 /// A stored value as the list it holds. A value that does not read as a list of words is no list: nothing is shown,
@@ -83,6 +92,24 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM sync_state WHERE key = ?1", params![key(user_id)])?;
         Ok(())
+    }
+
+    /// Whether any account has a row of recent searches here. Reads only: asked on a read-only connection.
+    pub fn has_any_search_recent(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sync_state WHERE key GLOB ?1",
+            params![every_key()],
+            |row| row.get(0),
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// WRITES: the recent searches of EVERY account are gone (the engine's start with nobody signed in, lead ruling
+    /// 2026-11-15 23:03: `app::owned_state`). Answers how many rows were deleted. Idempotent.
+    pub fn clear_every_search_recent(&self) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM sync_state WHERE key GLOB ?1", params![every_key()])
     }
 
     /// Whether the account `user_id` has a row of recent searches on disk at all (a test asks: deleted, not emptied).

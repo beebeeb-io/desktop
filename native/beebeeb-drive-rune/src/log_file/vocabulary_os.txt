@@ -97,6 +97,8 @@ The process cannot access the file because another process has locked a portion 
 The directory is not empty.
 The filename, directory name, or volume label syntax is incorrect.
 There is not enough space on the disk.
+# ERROR_HANDLE_DISK_FULL (39): its text in Microsoft Learn, "System Error Codes (0-499)"
+The disk is full.
 The network path was not found.
 The network name cannot be found.
 The specified network name is no longer available.
@@ -124,6 +126,9 @@ A connection attempt failed because the connected party did not properly respond
 established connection failed because connected host has failed to respond.
 No such host is known.
 HRESULT
+# macOS: Foundation's error domain identifier (Apple Developer Documentation, "NSCocoaErrorDomain"); an NSError
+# is written as its domain and its code
+NSCocoaErrorDomain
 # The HTTP client (reqwest, hyper, rustls)
 HTTP HTTPS TLS DNS TCP
 error sending request for url
