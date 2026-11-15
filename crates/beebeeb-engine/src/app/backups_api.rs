@@ -301,10 +301,12 @@ impl<C: CredentialStores> Engine<C> {
             Err(refused) => return Err(BackupsError::Refused(refused)),
         };
         let config = DesktopConfig::load_for(self.identity).map_err(|_| BackupsError::Settings)?;
+        // This account's chosen folders alone (P3-8).
+        let chosen = self.chosen_folders_seen(handle.as_ref(), &config.backup_chosen_folders);
         // The handle goes before anything is counted.
         let state = match handle {
             Some(handle) => handle
-                .with(|db| read_state_with(db, &config.backup_chosen_folders))
+                .with(|db| read_state_with(db, &chosen))
                 .map_err(BackupsError::Refused)??,
             None => StateRead::default(),
         };
@@ -315,12 +317,9 @@ impl<C: CredentialStores> Engine<C> {
             kfm::known_folder_paths,
             count,
         );
-        overview.folders.extend(chosen_rows(
-            &config.backup_chosen_folders,
-            &config.known_folder_backup,
-            &state,
-            count,
-        ));
+        overview
+            .folders
+            .extend(chosen_rows(&chosen, &config.known_folder_backup, &state, count));
         Ok(overview)
     }
 
@@ -329,10 +328,8 @@ impl<C: CredentialStores> Engine<C> {
     /// in Beebeeb. Refused, with nothing written, unless the local state is the signed-in account's or nothing has
     /// synced on this computer yet. BLOCKS: a worker's.
     pub fn set_backup_folder(&self, key: &str, on: bool) -> Result<(), BackupsError> {
-        let chosen = || {
-            DesktopConfig::load_for(self.identity)
-                .is_ok_and(|config| config.backup_chosen_folders.iter().any(|folder| folder.key() == key))
-        };
+        // A chosen folder of this account's alone (P3-8).
+        let chosen = || self.chosen_key_seen(key);
         if known_folder_by_key(key).is_none() && !chosen() {
             return Err(BackupsError::UnknownFolder);
         }

@@ -13,10 +13,19 @@
 //!   backup" ends there: its backup stays in Backups, read-only. "Stop and move the backup to Trash" then proves the
 //!   ACCOUNT PASSWORD and moves that one folder's backup to Trash through the engine's one delete of a backup
 //!   (`Engine::delete_device_backup_for`: core's OPAQUE step-up, one single-use token, one move to Trash); a refusal
-//!   before anything was sent puts the folder back as it was ([`remove_steps`]). No file on this PC is touched,
-//!   either way: nothing here opens, moves or deletes anything under the folder's path.
-//! - [`Engine::choose_backup_source`] (S11): the answer to "which folder do you want to back up?" for a moved known
-//!   folder, written to `known_folder_source`; its question is settled and the protection follows.
+//!   before anything moved puts the folder back as it was ([`remove_steps`]); asked to move a backup this PC has not
+//!   found, nothing changes at all. No file on this PC is touched, either way: nothing here opens, moves or deletes
+//!   anything under the folder's path.
+//! - [`Engine::choose_backup_source_for`] (S11): the answer to "which folder do you want to back up?" for a moved
+//!   known folder, written to `known_folder_source`; its question is settled and the protection follows.
+//!
+//! Per account (review of #463, P3-8): the settings file is the PC's, so each chosen folder carries its owner's tag
+//! ([`owner_tag`], a digest, never an email or an id in clear). Only that account backs it up ([`passed_for`], what the
+//! runner and the protection read), lists it and removes it ([`visible_to`]); nothing is written for another account.
+//! A folder written before folders were per account carries no tag: the account this PC's local data is bound to
+//! takes it in at its first start (the runner, [`runner_chosen`]); no other account ever sees it, and with no bound
+//! owner it is passed for nobody. Names stay unique across every account's folders (their `custom:<name>` switch keys
+//! share the one backup set).
 //!
 //! Session-bound like its neighbours (`*_for(session)`): every call is asked for the session the host read at its
 //! press, and refused, with nothing written, once that session is no longer the one in memory.
@@ -27,8 +36,10 @@
 use std::path::{Path, PathBuf};
 
 use beebeeb_core::backup::{category_folder_name, custom_category_name, fold_name};
+use sha2::{Digest, Sha256};
 
 use crate::account::SessionGeneration;
+use crate::account_binding::{Identity, canonical_email};
 use crate::app::backups_api::BackupsError;
 use crate::app::{CredentialStores, Engine, LocalStateRefused, OwnedState};
 use crate::backup::kfm;
@@ -102,6 +113,9 @@ impl AddRefused {
 pub enum RemoveRefused {
     /// No folder the person chose has this id (removed meanwhile). Nothing changed.
     NotChosen,
+    /// Asked to move the backup to Trash, but this PC has not found the folder's backup (nothing synced yet, or the
+    /// backup is not in its list yet). Nothing changed: the folder is still backed up, and nothing was sent.
+    NoCopyFound,
     /// The local state or the settings file refused. Nothing changed (a half-done removal is put back).
     Backups(BackupsError),
     /// The move to Trash was refused before anything was sent (the password, the rule, the session): the folder was
@@ -117,6 +131,9 @@ impl RemoveRefused {
     pub fn words(&self) -> &'static str {
         match self {
             Self::NotChosen => "This folder is no longer in the list. Nothing was changed.",
+            Self::NoCopyFound => {
+                "This PC hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed."
+            }
             Self::Backups(_) => "Couldn't stop backing up this folder. Nothing was changed.",
             Self::PasswordRefused(DeleteBackupError::WrongPassword) => {
                 "That password isn't right. Nothing was changed."
@@ -139,6 +156,7 @@ impl RemoveRefused {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::NotChosen => "not_chosen",
+            Self::NoCopyFound => "not_found",
             Self::Backups(error) => error.kind(),
             Self::PasswordRefused(_) => "trash_refused",
             Self::TrashNotDone(_) => "trash_unconfirmed",
@@ -193,10 +211,123 @@ pub fn check_chosen(path: &Path, sync_root: &Path, taken: &[PathBuf]) -> Result<
     Ok(())
 }
 
-/// Where the folders this PC backs up already are: the chosen ones, and each known folder's default and current
-/// location (whether its switch is on or not: a known folder is switched, never added).
-pub fn taken_paths(config: &DesktopConfig) -> Vec<PathBuf> {
-    let mut taken: Vec<PathBuf> = config.backup_chosen_folders.iter().map(|f| f.path.clone()).collect();
+fn digest(key: &str) -> String {
+    crate::hexfmt::encode(&Sha256::digest(key.as_bytes()))
+}
+
+/// The tag a chosen folder carries for `owner` (P3-8): a SHA-256 digest of the owner key the backup's own rows use
+/// (`user:<id>` when the user id is known, else `email:<canonical email>`), so the PC's settings file never holds an
+/// email or an id in clear. `None`: an owner with neither.
+pub fn owner_tag(owner: &Identity) -> Option<String> {
+    owner
+        .user_id
+        .as_deref()
+        .map(|id| digest(&format!("user:{id}")))
+        .or_else(|| {
+            owner
+                .email
+                .as_deref()
+                .map(|email| digest(&format!("email:{}", canonical_email(email))))
+        })
+}
+
+/// Whether `folder` is `owner`'s: its tag is the digest of the owner's user id or of its email (a tag made while only
+/// one of the two was known still matches). Untagged, or no owner: never.
+pub fn is_owners(folder: &ChosenFolder, owner: Option<&Identity>) -> bool {
+    let (Some(tag), Some(owner)) = (folder.owner.as_deref(), owner) else {
+        return false;
+    };
+    let by_id = owner.user_id.as_deref().map(|id| digest(&format!("user:{id}")));
+    let by_email = owner
+        .email
+        .as_deref()
+        .map(|email| digest(&format!("email:{}", canonical_email(email))));
+    by_id.as_deref() == Some(tag) || by_email.as_deref() == Some(tag)
+}
+
+/// `owner`'s chosen folders alone, in the file's order. An untagged folder is nobody's here; no owner: none.
+pub fn chosen_for(chosen: &[ChosenFolder], owner: Option<&Identity>) -> Vec<ChosenFolder> {
+    chosen
+        .iter()
+        .filter(|folder| is_owners(folder, owner))
+        .cloned()
+        .collect()
+}
+
+/// The lead's adoption rule (P3-8): every untagged folder in `chosen` takes `owner`'s tag. Called only for the owner
+/// this PC's local data is bound to. How many were taken in (none for an owner without a tag).
+pub fn adopt_untagged(chosen: &mut [ChosenFolder], owner: &Identity) -> usize {
+    let Some(tag) = owner_tag(owner) else {
+        return 0;
+    };
+    let mut adopted = 0;
+    for folder in chosen.iter_mut().filter(|folder| folder.owner.is_none()) {
+        folder.owner = Some(tag.clone());
+        adopted += 1;
+    }
+    adopted
+}
+
+/// What is backed up for `bound`, the owner this PC's local data is bound to: its own folders, with the untagged ones
+/// taken in by it (the runner writes that down: [`runner_chosen`]), and how many were taken in. No bound owner:
+/// nothing, and nothing is taken in. What the runner passes and the protection keeps.
+pub fn passed_for(chosen: &[ChosenFolder], bound: Option<&Identity>) -> (Vec<ChosenFolder>, usize) {
+    let Some(bound) = bound else {
+        return (Vec::new(), 0);
+    };
+    let mut mine = chosen.to_vec();
+    let adopted = adopt_untagged(&mut mine, bound);
+    (chosen_for(&mine, Some(bound)), adopted)
+}
+
+/// The chosen folders an account sees, lists and removes: for the owner of the local state (`bound`), what
+/// [`passed_for`] passes; for a session with nothing synced on this PC yet, its own tagged folders only (an untagged
+/// folder is taken in by the bound owner alone).
+pub fn visible_to(chosen: &[ChosenFolder], asker: &Identity, bound: bool) -> Vec<ChosenFolder> {
+    if bound {
+        passed_for(chosen, Some(asker)).0
+    } else {
+        chosen_for(chosen, Some(asker))
+    }
+}
+
+/// The runner's read of the chosen folders, for the account `db` is bound to ([`passed_for`]). The first time it
+/// finds untagged folders, it writes them into the settings file as taken in by that account (the lead's adoption
+/// rule: at that account's first start); a write that fails is tried again on the next tick, and they are passed
+/// meanwhile. A state with no owner recorded: nothing.
+pub fn runner_chosen(identity: &'static EngineIdentity, db: &StateDb, config: &DesktopConfig) -> Vec<ChosenFolder> {
+    let bound = db.owner().ok().flatten();
+    let (passed, adopted) = passed_for(&config.backup_chosen_folders, bound.as_ref());
+    if adopted > 0
+        && let Some(bound) = bound.as_ref()
+    {
+        let written = DesktopConfig::update_for(identity, |config| {
+            let count = adopt_untagged(&mut config.backup_chosen_folders, bound);
+            (count > 0, count)
+        });
+        match written {
+            Ok(count) => tracing::info!(
+                count,
+                "backups: chosen folders from an earlier version were taken in by the account of the local data"
+            ),
+            Err(_) => {
+                tracing::warn!("backups: chosen folders from an earlier version could not be written as taken in")
+            }
+        }
+    }
+    passed
+}
+
+/// Where the folders `owner` backs up already are: its chosen ones (and an untagged one: refused rather than backed
+/// up twice once it is taken in), and each known folder's default and current location (whether its switch is on or
+/// not: a known folder is switched, never added).
+pub fn taken_paths(config: &DesktopConfig, owner: &Identity) -> Vec<PathBuf> {
+    let mut taken: Vec<PathBuf> = config
+        .backup_chosen_folders
+        .iter()
+        .filter(|folder| folder.owner.is_none() || is_owners(folder, Some(owner)))
+        .map(|folder| folder.path.clone())
+        .collect();
     for folder in KNOWN_FOLDERS {
         let both = kfm::known_folder_paths(folder.key);
         taken.extend(both.default);
@@ -206,35 +337,66 @@ pub fn taken_paths(config: &DesktopConfig) -> Vec<PathBuf> {
 }
 
 /// The names of the folders in this device's backup (`Backups/<device>/*`) the local state knows, so a new custom
-/// name never lands in the backup of a folder removed earlier and kept. No layout yet: none.
+/// name never lands in the backup of a folder removed earlier and kept (P3-10: a pass adopts a live folder of its name,
+/// `backup::host`'s `category_folder`).
+///
+/// No layout yet (nothing passed since this local state began, so which device folder is this PC's is not known): the
+/// names in EVERY device's backup the local rows know (each Backups root, by its role, then each device folder in it).
+/// A name another device uses is skipped too; only the new folder's name changes for it. Rows not pulled yet hold no
+/// name: that case stays open (the pass's to close).
 pub fn backup_folder_names(db: &StateDb) -> Result<Vec<String>, BackupsError> {
-    let Some(layout) = db.backup_layout().map_err(|_| BackupsError::State)? else {
-        return Ok(Vec::new());
+    let folders_in = |parent: &str| -> Result<Vec<(String, String)>, BackupsError> {
+        let children = db.children_of(Some(parent)).map_err(|_| BackupsError::State)?;
+        Ok(children
+            .into_iter()
+            .filter(|(entry, _)| entry.is_dir())
+            .filter_map(|(entry, _)| {
+                let name = entry.path.rsplit('/').next()?.to_string();
+                (!name.is_empty()).then_some((entry.file_id, name))
+            })
+            .collect())
     };
-    let children = db
-        .children_of(Some(&layout.device_folder_id))
-        .map_err(|_| BackupsError::State)?;
-    Ok(children
-        .into_iter()
-        .filter(|(entry, _)| entry.is_dir())
-        .filter_map(|(entry, _)| entry.path.rsplit('/').next().map(str::to_string))
-        .filter(|name| !name.is_empty())
-        .collect())
+    if let Some(layout) = db.backup_layout().map_err(|_| BackupsError::State)? {
+        return Ok(folders_in(&layout.device_folder_id)?
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect());
+    }
+    let mut names = Vec::new();
+    for (root_id, _) in db.backups_roots().map_err(|_| BackupsError::State)? {
+        for (device_id, _) in folders_in(&root_id)? {
+            names.extend(folders_in(&device_id)?.into_iter().map(|(_, name)| name));
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
-/// The settings' part of an add: `path` joins the chosen folders under core's custom name (unique among the chosen
-/// names and `in_backup`, the names already in this device's backup) and its key joins the backup set. Its key back.
-/// Refused, with nothing changed, when the file already holds the same folder (another add landed first).
-pub fn add_to(config: &mut DesktopConfig, path: &Path, in_backup: &[String]) -> Result<String, AddRefused> {
-    if config
+/// The settings' part of an add for `owner`: `path` joins the chosen folders under core's custom name (unique among
+/// EVERY account's chosen names, their switch keys share the backup set, and `in_backup`, the names already in this
+/// device's backup), tagged as `owner`'s, and its key joins the backup set. Its key back. Refused, with nothing
+/// changed, when the file already holds the same folder for `owner` (another add landed first; an untagged one counts),
+/// or `owner` has no tag.
+pub fn add_to(
+    config: &mut DesktopConfig,
+    path: &Path,
+    in_backup: &[String],
+    owner: &Identity,
+) -> Result<String, AddRefused> {
+    let tag = owner_tag(owner).ok_or(AddRefused::Backups(BackupsError::Refused(
+        LocalStateRefused::IdentityUnknown,
+    )))?;
+    let owners: Vec<&ChosenFolder> = config
         .backup_chosen_folders
         .iter()
-        .any(|folder| sources::same_folder(&folder.path, path))
-    {
+        .filter(|folder| folder.owner.is_none() || is_owners(folder, Some(owner)))
+        .collect();
+    if owners.iter().any(|folder| sources::same_folder(&folder.path, path)) {
         return Err(AddRefused::AlreadyBackedUp);
     }
     // Another add may have landed since the rule ran: the nesting is refused here too.
-    for folder in &config.backup_chosen_folders {
+    for folder in owners {
         if matches!(
             sources::check_source(path, &folder.path),
             Err(SourceRefusal::InsideSyncRoot)
@@ -261,6 +423,7 @@ pub fn add_to(config: &mut DesktopConfig, path: &Path, in_backup: &[String]) -> 
     let folder = ChosenFolder {
         name: custom_category_name(&raw, &taken),
         path: path.to_path_buf(),
+        owner: Some(tag),
     };
     let key = folder.key();
     config.backup_chosen_folders.push(folder);
@@ -344,20 +507,21 @@ pub fn backup_copy_of(db: &StateDb, folder: &ChosenFolder) -> Result<Option<Stri
         .map(|entry| entry.file_id))
 }
 
-/// Whether a refused move to Trash may have reached Beebeeb (then nothing is put back: the folder stays out of the set).
+/// Whether a refused move to Trash may have moved something in Beebeeb (then nothing is put back: the folder stays out
+/// of the set). `NotFound` is not one (P3-12): before anything is sent it is an id that is no file id or no such row,
+/// and from the server (404) the move found nothing to move; either way nothing moved.
 fn may_have_reached(error: &DeleteBackupError) -> bool {
-    matches!(
-        error,
-        DeleteBackupError::Offline | DeleteBackupError::NotFound | DeleteBackupError::Failed("server")
-    )
+    matches!(error, DeleteBackupError::Offline | DeleteBackupError::Failed("server"))
 }
 
 /// DW-1410 as one sequence, its steps handed in (the engine's: the settings file and the state database, the
 /// password-proven move to Trash; a test's: fakes):
+/// 0. With `password` and no `copy` (this PC has not found the folder's backup): refused before anything, nothing
+///    changed (P3-9: "done" would claim a move to Trash that never happened).
 /// 1. `leave`: the folder leaves the backup set. A refusal there changed nothing (`leave` puts back what it did).
 /// 2. Only with `password` and a `copy` (its backup's id): `trash` proves the password and moves that one folder to
-///    Trash. Refused before anything was sent: `put_back` puts the folder back as it was, nothing changed. Refused
-///    after it may have reached Beebeeb: the folder stays out of the set, and the refusal says so.
+///    Trash. Refused before anything moved: `put_back` puts the folder back as it was, nothing changed. Refused after
+///    it may have moved something: the folder stays out of the set, and the refusal says so.
 ///
 /// Without a password ("Stop and keep the backup") `trash` is never called.
 pub fn remove_steps<Undo>(
@@ -367,6 +531,9 @@ pub fn remove_steps<Undo>(
     trash: impl FnOnce(&str, &[u8]) -> Result<(), DeleteBackupError>,
     put_back: impl FnOnce(Undo),
 ) -> Result<(), RemoveRefused> {
+    if password.is_some() && copy.is_none() {
+        return Err(RemoveRefused::NoCopyFound);
+    }
     let undo = leave().map_err(RemoveRefused::Backups)?;
     let (Some(password), Some(copy)) = (password, copy) else {
         return Ok(());
@@ -431,17 +598,61 @@ impl<C: CredentialStores> Engine<C> {
         Ok(Some(handle))
     }
 
+    /// Whose chosen folders a call under `handle` reads and writes (P3-8), and whether that is the owner this PC's
+    /// local data is bound to: with a local state, its recorded owner (`true`); with nothing synced on this PC yet,
+    /// the session's own identity (`false`). Refused when neither is known.
+    fn chosen_asker(&self, handle: Option<&OwnedState<'_>>) -> Result<(Identity, bool), BackupsError> {
+        match handle {
+            Some(handle) => match handle.with(StateDb::owner).map_err(BackupsError::Refused)? {
+                Ok(Some(owner)) => Ok((owner, true)),
+                Ok(None) => Err(BackupsError::Refused(LocalStateRefused::IdentityUnknown)),
+                Err(_) => Err(BackupsError::State),
+            },
+            None => Ok((self.session_identity().map_err(BackupsError::Refused)?, false)),
+        }
+    }
+
+    /// The chosen folders in `chosen` the signed-in account sees under `handle` ([`visible_to`]); none when whose they
+    /// are cannot be told. For the overview and "Back up again" (`backups_api`).
+    pub(crate) fn chosen_folders_seen(
+        &self,
+        handle: Option<&OwnedState<'_>>,
+        chosen: &[ChosenFolder],
+    ) -> Vec<ChosenFolder> {
+        match self.chosen_asker(handle) {
+            Ok((asker, bound)) => visible_to(chosen, &asker, bound),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Whether `key` is one of the signed-in account's chosen folders ("Back up again" after its stop,
+    /// `set_backup_folder`). While the local state is refused, any folder with that key answers (as before folders were
+    /// per account): the caller's own handle refuses next, with its reason, and writes nothing.
+    pub(crate) fn chosen_key_seen(&self, key: &str) -> bool {
+        let Ok(config) = DesktopConfig::load_for(self.identity) else {
+            return false;
+        };
+        let seen = match self.local_state() {
+            Ok(handle) => self.chosen_folders_seen(Some(&handle), &config.backup_chosen_folders),
+            Err(LocalStateRefused::NothingSynced) => self.chosen_folders_seen(None, &config.backup_chosen_folders),
+            Err(_) => config.backup_chosen_folders,
+        };
+        seen.iter().any(|folder| folder.key() == key)
+    }
+
     /// WRITES: add `path` (DW-0738's picker's answer) to the folders this PC backs up, for the session a person
-    /// pressed under. The rule is [`check_chosen`]; see the module's doc. Its key back (`custom:<name>`, the id the
-    /// window lists it under). Never runs a pass here: the runner's next tick passes it. BLOCKS: a worker's.
+    /// pressed under, as that account's. The rule is [`check_chosen`]; see the module's doc. Its key back
+    /// (`custom:<name>`, the id the window lists it under). Never runs a pass here: the runner's next tick passes it.
+    /// BLOCKS: a worker's.
     pub fn add_backup_folder_for(&self, session: SessionGeneration, path: &Path) -> Result<String, AddRefused> {
         let handle = self.backup_folders_state(session).map_err(AddRefused::Backups)?;
+        let (owner, _) = self.chosen_asker(handle.as_ref()).map_err(AddRefused::Backups)?;
         let identity = self.identity;
         let sync_root = self
             .sync_root()
             .map_err(|_| AddRefused::Backups(BackupsError::Settings))?;
         let config = DesktopConfig::load_for(identity).map_err(|_| AddRefused::Backups(BackupsError::Settings))?;
-        check_chosen(path, &sync_root, &taken_paths(&config))?;
+        check_chosen(path, &sync_root, &taken_paths(&config, &owner))?;
         let in_backup = match &handle {
             Some(handle) => handle
                 .with(backup_folder_names)
@@ -450,7 +661,7 @@ impl<C: CredentialStores> Engine<C> {
             None => Vec::new(),
         };
         // Written under the settings file's lock: the duplicate is checked again against what the file holds now.
-        let key = DesktopConfig::update_for(identity, |config| match add_to(config, path, &in_backup) {
+        let key = DesktopConfig::update_for(identity, |config| match add_to(config, path, &in_backup, &owner) {
             Ok(key) => (true, Ok(key)),
             Err(refused) => (false, Err(refused)),
         })
@@ -472,7 +683,8 @@ impl<C: CredentialStores> Engine<C> {
     /// WRITES: stop backing up the chosen folder `id` (DW-1410), for the session a person pressed under. Without
     /// `trash_password` its backup stays in Backups ("Stop and keep the backup"); with it, the account password is
     /// proven and that one folder's backup moves to Trash ("Stop and move the backup to Trash"). See
-    /// [`remove_steps`] for what a refusal leaves. Never touches the folder on this PC. BLOCKS: a worker's.
+    /// [`remove_steps`] for what a refusal leaves. Only a folder of this account's. Never touches the folder on this
+    /// PC. BLOCKS: a worker's.
     pub fn remove_backup_folder_for(
         &self,
         session: SessionGeneration,
@@ -480,13 +692,13 @@ impl<C: CredentialStores> Engine<C> {
         trash_password: Option<&[u8]>,
     ) -> Result<(), RemoveRefused> {
         let handle = self.backup_folders_state(session).map_err(RemoveRefused::Backups)?;
+        let (owner, bound) = self.chosen_asker(handle.as_ref()).map_err(RemoveRefused::Backups)?;
         let identity = self.identity;
         let config = DesktopConfig::load_for(identity).map_err(|_| RemoveRefused::Backups(BackupsError::Settings))?;
-        let Some(folder) = config
-            .backup_chosen_folders
-            .iter()
+        // Only a folder of this account's (P3-8): another account's is "not in the list" here.
+        let Some(folder) = visible_to(&config.backup_chosen_folders, &owner, bound)
+            .into_iter()
             .find(|folder| folder.key() == id)
-            .cloned()
         else {
             return Err(RemoveRefused::NotChosen);
         };
@@ -536,22 +748,21 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// S11 (wave 3, folded into A7): which folder the known folder `key`, moved by OneDrive's Known Folder Move, is
-    /// backed up from (LD-0113 Amendment 9, "Ask once"). The answer is written to the settings file
-    /// (`known_folder_source`), its question is settled and the protection follows. Refused, with nothing written, for
-    /// a key that is not one of the six, and unless the local state is the signed-in account's or nothing has synced
-    /// on this computer yet. BLOCKS: a worker's.
-    pub fn choose_backup_source(&self, key: &str, choice: KnownFolderSource) -> Result<(), BackupsError> {
+    /// backed up from (LD-0113 Amendment 9, "Ask once"), for the session a person pressed under (P3-14: bound to that
+    /// session like its neighbours). The answer is written to the settings file (`known_folder_source`), its question
+    /// is settled and the protection follows. Refused, with nothing written, for a key that is not one of the six, once
+    /// `session` is not the one in memory, and unless the local state is the signed-in account's or nothing has
+    /// synced on this computer yet. BLOCKS: a worker's.
+    pub fn choose_backup_source_for(
+        &self,
+        session: SessionGeneration,
+        key: &str,
+        choice: KnownFolderSource,
+    ) -> Result<(), BackupsError> {
         if known_folder_by_key(key).is_none() {
             return Err(BackupsError::UnknownFolder);
         }
-        let handle = match self.local_state_for_changes() {
-            Ok(handle) => Some(handle),
-            Err(LocalStateRefused::NothingSynced) => None,
-            Err(refused) => return Err(BackupsError::Refused(refused)),
-        };
-        if let Some(handle) = &handle {
-            handle.still_this_session().map_err(BackupsError::Refused)?;
-        }
+        let handle = self.backup_folders_state(session)?;
         let identity = self.identity;
         DesktopConfig::update_for(identity, |config| {
             let was = config.known_folder_source.insert(key.to_string(), choice);

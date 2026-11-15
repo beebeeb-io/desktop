@@ -24,10 +24,16 @@ const RECIPES: &str = "0193b1a6-0000-7000-8000-000000000004";
 const DOCUMENTS: &str = "0193b1a6-0000-7000-8000-000000000005";
 const OTHER_DEVICE: &str = "0193b1a6-0000-7000-8000-000000000006";
 const OTHER_PROJECTS: &str = "0193b1a6-0000-7000-8000-000000000007";
+const PROJECTS_AGAIN: &str = "0193b1a6-0000-7000-8000-000000000008";
+
+/// The account the test's local state is bound to.
+fn me() -> Identity {
+    Identity::new(Some("u-invented"), None)
+}
 
 fn owned_db(dir: &Path) -> StateDb {
     let db = StateDb::open(dir.join("state.db")).unwrap();
-    db.set_owner(&Identity::new(Some("u-invented"), None)).unwrap();
+    db.set_owner(&me()).unwrap();
     db
 }
 
@@ -70,10 +76,12 @@ fn laid_out(dir: &Path) -> StateDb {
     db
 }
 
+/// A folder [`me`] chose.
 fn chosen(name: &str, path: PathBuf) -> ChosenFolder {
     ChosenFolder {
         name: name.into(),
         path,
+        owner: owner_tag(&me()),
     }
 }
 
@@ -222,7 +230,7 @@ fn an_add_names_the_folder_once_and_switches_it_on() {
     let projects = dir.path().join("Projects");
     std::fs::create_dir_all(&projects).unwrap();
     let mut config = DesktopConfig::default();
-    let key = add_to(&mut config, &projects, &["Projects".to_string()]).unwrap();
+    let key = add_to(&mut config, &projects, &["Projects".to_string()], &me()).unwrap();
     assert_eq!(
         key, "custom:Projects (2)",
         "a kept backup of an earlier Projects is never written into"
@@ -233,7 +241,10 @@ fn an_add_names_the_folder_once_and_switches_it_on() {
     );
     assert!(config.known_folder_enabled(&key));
     let before = config.backup_chosen_folders.clone();
-    assert_eq!(add_to(&mut config, &projects, &[]), Err(AddRefused::AlreadyBackedUp));
+    assert_eq!(
+        add_to(&mut config, &projects, &[], &me()),
+        Err(AddRefused::AlreadyBackedUp)
+    );
     assert_eq!(config.backup_chosen_folders, before);
 }
 
@@ -378,12 +389,22 @@ fn remove_never_touches_local_files() {
 
     for password in [None, Some(&b"invented password"[..])] {
         let mut config = DesktopConfig::default();
-        check_chosen(&folder, &root, &taken_paths(&config)).unwrap();
-        let key = add_to(&mut config, &folder, &backup_folder_names(&db).unwrap()).unwrap();
+        check_chosen(&folder, &root, &taken_paths(&config, &me())).unwrap();
+        let key = add_to(&mut config, &folder, &backup_folder_names(&db).unwrap(), &me()).unwrap();
         start_over(&REAL, &db, &key).unwrap();
         let added = config.backup_chosen_folders[0].clone();
+        if password.is_some() {
+            // It passed once: its backup is in this device's backup, so the move to Trash has one to move (P3-9).
+            folder_row(
+                &db,
+                PROJECTS_AGAIN,
+                "Backups/Invented-Laptop/Projects (2)",
+                Some(DEVICE),
+            );
+        }
         let config = RefCell::new(config);
         let copy = backup_copy_of(&db, &added).unwrap();
+        assert_eq!(copy.is_some(), password.is_some());
         let removed = remove_steps(
             password,
             copy.as_deref(),
@@ -477,12 +498,18 @@ fn a_call_for_another_session_writes_nothing() {
             LocalStateRefused::SessionChanged
         )))
     );
+    // P3-14: bound to the session of the press. A key that is not one of the six is refused first (nothing read);
+    // then a session that is not the one in memory, before the local state is asked (that would answer `SignedOut`).
     assert_eq!(
-        engine.choose_backup_source("not-a-folder", KnownFolderSource::OneDrive),
+        engine.choose_backup_source_for(another, "not-a-folder", KnownFolderSource::OneDrive),
         Err(BackupsError::UnknownFolder)
     );
     assert_eq!(
-        engine.choose_backup_source("documents", KnownFolderSource::OneDrive),
+        engine.choose_backup_source_for(another, "documents", KnownFolderSource::OneDrive),
+        Err(BackupsError::Refused(LocalStateRefused::SessionChanged))
+    );
+    assert_eq!(
+        engine.choose_backup_source_for(engine.session_turn(), "documents", KnownFolderSource::OneDrive),
         Err(BackupsError::Refused(LocalStateRefused::SignedOut))
     );
     let after = DesktopConfig::load_for(&REAL)
@@ -541,12 +568,220 @@ fn a_folder_inside_or_holding_a_backed_up_folder_cannot_be_chosen() {
     );
 
     let mut config = DesktopConfig::default();
-    add_to(&mut config, &documents, &[]).unwrap();
-    assert_eq!(add_to(&mut config, &deep, &[]), Err(AddRefused::InsideBackedUp));
-    assert_eq!(add_to(&mut config, dir.path(), &[]), Err(AddRefused::HoldsBackedUp));
+    add_to(&mut config, &documents, &[], &me()).unwrap();
+    assert_eq!(add_to(&mut config, &deep, &[], &me()), Err(AddRefused::InsideBackedUp));
+    assert_eq!(
+        add_to(&mut config, dir.path(), &[], &me()),
+        Err(AddRefused::HoldsBackedUp)
+    );
     assert_eq!(config.backup_chosen_folders.len(), 1, "a refused add writes nothing");
     assert_eq!(
         AddRefused::InsideBackedUp.words(),
         "This folder is inside a folder that is backed up already."
     );
+}
+
+// ── Review of #463: P3-8 (per account), P3-9, P3-10, P3-12 ─────────────────────────────────────────────────────────
+
+/// P3-8: a chosen folder is its account's alone. Only that account's folders are passed, listed and removed; a tagged
+/// folder of A is never passed for B; an untagged folder (written before folders were per account) is taken in by the
+/// owner this PC's local data is bound to and kept backing up, never by another account, and with no bound owner it is
+/// passed for nobody. The tag holds neither the id nor the email in clear.
+#[test]
+fn chosen_folders_are_the_choosing_accounts_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = Identity::new(Some("u-other"), Some("other@example.invalid"));
+    let mine = chosen("Projects", dir.path().join("Projects"));
+    let theirs = ChosenFolder {
+        owner: owner_tag(&other),
+        ..chosen("Recipes", dir.path().join("Recipes"))
+    };
+    let earlier = ChosenFolder {
+        owner: None,
+        ..chosen("Letters", dir.path().join("Letters"))
+    };
+    let all = vec![mine.clone(), theirs.clone(), earlier.clone()];
+
+    // Tagged: each account its own; nobody without an owner. An untagged folder is nobody's until it is taken in.
+    assert_eq!(chosen_for(&all, Some(&me())), vec![mine.clone()]);
+    assert_eq!(chosen_for(&all, Some(&other)), vec![theirs.clone()]);
+    assert_eq!(chosen_for(&all, None), Vec::<ChosenFolder>::new());
+
+    // The bound owner takes the untagged folder in and keeps backing it up; the other account never sees it.
+    let (passed, adopted) = passed_for(&all, Some(&me()));
+    assert_eq!(adopted, 1);
+    let mine_names: Vec<&str> = passed.iter().map(|folder| folder.name.as_str()).collect();
+    assert_eq!(mine_names, ["Projects", "Letters"]);
+    assert_eq!(passed[1].owner, owner_tag(&me()), "taken in as the bound owner's");
+    assert_eq!(
+        passed_for(&all, None),
+        (Vec::new(), 0),
+        "no bound owner: passed for nobody"
+    );
+    assert_eq!(visible_to(&all, &other, false), vec![theirs.clone()]);
+    assert_eq!(
+        visible_to(&all, &me(), false),
+        vec![mine.clone()],
+        "a session alone takes nothing in"
+    );
+    assert_eq!(visible_to(&all, &me(), true), passed);
+    let mut written = all.clone();
+    assert_eq!(adopt_untagged(&mut written, &me()), 1);
+    assert_eq!(
+        chosen_for(&written, Some(&other)),
+        vec![theirs.clone()],
+        "never the other account's"
+    );
+    assert_eq!(adopt_untagged(&mut written, &me()), 0, "taken in once");
+
+    // A tag made from the email alone still matches the owner whose record later has the id too.
+    let by_email = Identity::new(None, Some("Other@Example.invalid"));
+    let tagged_by_email = ChosenFolder {
+        owner: owner_tag(&by_email),
+        ..chosen("Maps", dir.path().join("Maps"))
+    };
+    assert!(is_owners(&tagged_by_email, Some(&other)));
+    assert!(!is_owners(&tagged_by_email, Some(&me())));
+    let tag = owner_tag(&other).unwrap();
+    assert!(
+        !tag.contains("u-other") && !tag.contains("example"),
+        "no id or email in clear"
+    );
+    assert_eq!(tag.len(), 64);
+
+    // An add is tagged as its account's; its name is clear of every account's names (their switch keys share one
+    // backup set); the same folder is "backed up already" only for the same account.
+    let shared = dir.path().join("Recipes");
+    std::fs::create_dir_all(&shared).unwrap();
+    let mut config = settings_with(&[&theirs]);
+    let key = add_to(&mut config, &shared, &[], &me()).unwrap();
+    assert_eq!(key, "custom:Recipes (2)");
+    assert_eq!(config.backup_chosen_folders[1].owner, owner_tag(&me()));
+    assert_eq!(
+        add_to(&mut config, &shared, &[], &me()),
+        Err(AddRefused::AlreadyBackedUp)
+    );
+    assert_eq!(
+        add_to(&mut config, &shared, &[], &Identity::new(None, None)),
+        Err(AddRefused::Backups(BackupsError::Refused(
+            LocalStateRefused::IdentityUnknown
+        ))),
+        "an owner without a tag writes nothing"
+    );
+    assert_eq!(config.backup_chosen_folders.len(), 2);
+    assert_eq!(taken_paths(&config, &other).first(), Some(&shared));
+}
+
+/// P3-8, the runner's read: only the folders of the account this local data is bound to are passed; another
+/// account's local data passes its own; a local state with no owner recorded passes nothing.
+#[test]
+fn the_runner_passes_the_local_datas_owners_folders_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = Identity::new(Some("u-other"), None);
+    let mine = chosen("Projects", dir.path().join("Projects"));
+    let theirs = ChosenFolder {
+        owner: owner_tag(&other),
+        ..chosen("Recipes", dir.path().join("Recipes"))
+    };
+    let config = settings_with(&[&mine, &theirs]);
+
+    let a = tempfile::tempdir().unwrap();
+    assert_eq!(runner_chosen(&REAL, &owned_db(a.path()), &config), vec![mine.clone()]);
+    let b = tempfile::tempdir().unwrap();
+    let theirs_db = StateDb::open(b.path().join("state.db")).unwrap();
+    theirs_db.set_owner(&other).unwrap();
+    assert_eq!(runner_chosen(&REAL, &theirs_db, &config), vec![theirs.clone()]);
+    let c = tempfile::tempdir().unwrap();
+    let unowned = StateDb::open(c.path().join("state.db")).unwrap();
+    assert_eq!(runner_chosen(&REAL, &unowned, &config), Vec::<ChosenFolder>::new());
+}
+
+/// P3-9: "Stop and move the backup to Trash" for a folder whose backup this PC has not found is refused before
+/// anything: the folder is not taken out of the set, nothing is sent, nothing is answered as done.
+#[test]
+fn trash_without_a_found_backup_changes_nothing() {
+    let removed = remove_steps(
+        Some(b"invented password"),
+        None,
+        || -> Result<(), BackupsError> { panic!("the folder is not taken out of the set") },
+        |_, _| panic!("nothing is sent"),
+        |_: ()| panic!("nothing to put back"),
+    );
+    assert_eq!(removed, Err(RemoveRefused::NoCopyFound));
+    assert!(!RemoveRefused::NoCopyFound.stopped_backing_up());
+    assert_eq!(
+        RemoveRefused::NoCopyFound.words(),
+        "This PC hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed."
+    );
+    // "Stop and keep the backup" needs no backup found: the folder leaves the set, nothing is sent.
+    let left = std::cell::Cell::new(false);
+    let kept = remove_steps(
+        None,
+        None,
+        || -> Result<(), BackupsError> {
+            left.set(true);
+            Ok(())
+        },
+        |_, _| panic!("nothing is sent"),
+        |_: ()| panic!("nothing to put back"),
+    );
+    assert_eq!(kept, Ok(()));
+    assert!(left.get());
+}
+
+/// P3-12: a move to Trash answered "not found" moved nothing (refused before it was sent, or the server found nothing
+/// to move), so the folder is put back as it was and the words say nothing changed.
+#[test]
+fn a_not_found_puts_the_folder_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = laid_out(dir.path());
+    let projects = chosen("Projects", dir.path().join("Projects"));
+    let key = projects.key();
+    let config = RefCell::new(settings_with(&[&projects]));
+    let copy = backup_copy_of(&db, &projects).unwrap();
+    let removed = remove_steps(
+        Some(b"invented password"),
+        copy.as_deref(),
+        leave_from(&config, &db, &key),
+        |_, _| Err(DeleteBackupError::NotFound),
+        |removed: Removed| put_back_into(&mut config.borrow_mut(), &removed),
+    );
+    assert_eq!(
+        removed,
+        Err(RemoveRefused::PasswordRefused(DeleteBackupError::NotFound))
+    );
+    assert_eq!(config.borrow().backup_chosen_folders, vec![projects.clone()]);
+    assert!(config.borrow().known_folder_enabled(&key), "back on, as it was");
+    assert!(!removed.unwrap_err().stopped_backing_up());
+}
+
+/// P3-10: before this PC knows its backup layout, a new folder's name is kept clear of every name the local rows know
+/// in any device's backup, so it never takes the name of an earlier folder that was stopped and kept (a pass adopts a
+/// live folder of its name).
+#[test]
+fn with_no_layout_a_new_name_skips_every_devices_backup_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = owned_db(dir.path());
+    assert!(db.backup_layout().unwrap().is_none());
+    assert_eq!(
+        backup_folder_names(&db).unwrap(),
+        Vec::<String>::new(),
+        "no rows: no name"
+    );
+    folder_row(&db, ROOT, "Backups", None);
+    assert!(db.mark_backups_root_for_test(ROOT).unwrap());
+    folder_row(&db, DEVICE, "Backups/Invented-Laptop", Some(ROOT));
+    folder_row(&db, PROJECTS, "Backups/Invented-Laptop/Projects", Some(DEVICE));
+    folder_row(&db, OTHER_DEVICE, "Backups/Invented-Mac", Some(ROOT));
+    folder_row(&db, OTHER_PROJECTS, "Backups/Invented-Mac/Recipes", Some(OTHER_DEVICE));
+    // A folder called "Backups" without the role is an ordinary folder: its subfolders are not backups.
+    folder_row(&db, RECIPES, "Elsewhere", None);
+    folder_row(&db, DOCUMENTS, "Elsewhere/Documents", Some(RECIPES));
+    assert_eq!(backup_folder_names(&db).unwrap(), ["Projects", "Recipes"]);
+
+    let projects = dir.path().join("Projects");
+    std::fs::create_dir_all(&projects).unwrap();
+    let mut config = DesktopConfig::default();
+    let key = add_to(&mut config, &projects, &backup_folder_names(&db).unwrap(), &me()).unwrap();
+    assert_eq!(key, "custom:Projects (2)", "the kept Projects is never written into");
 }
