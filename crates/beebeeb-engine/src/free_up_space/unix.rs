@@ -287,14 +287,25 @@ fn unchanged(
 
 /// Step 4: a write lease on `file`, which the kernel grants only while no other descriptor has the file open (any
 /// process, any mode). Refused or unsupported: the copy is kept.
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )
+))]
 fn hold_write_lease(file: &std::fs::File) -> Result<(), &'static str> {
     use std::os::fd::AsRawFd;
+    // `fcntl` command 10 on these architectures (the `libc` crate does not export it for every target).
+    const F_SETSIG: libc::c_int = 10;
     let fd = file.as_raw_fd();
     // SAFETY: `fcntl` on a descriptor this function's caller owns, with integer arguments only.
     unsafe {
         // The break signal as SIGURG (default: ignored); the default SIGIO would end the process.
-        if libc::fcntl(fd, libc::F_SETSIG, libc::SIGURG) == -1 {
+        if libc::fcntl(fd, F_SETSIG, libc::SIGURG) == -1 {
             return Err(KEPT_NO_LEASE);
         }
         if libc::fcntl(fd, libc::F_SETLEASE, libc::F_WRLCK) == -1 {
@@ -307,8 +318,21 @@ fn hold_write_lease(file: &std::fs::File) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Where there are no leases (macOS), a copy in the sync folder cannot be shown to be open nowhere else: kept.
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+/// Where there are no leases (macOS), or the signal number is not known here, a copy in the sync folder cannot be
+/// shown to be open nowhere else: kept.
+#[cfg(not(any(
+    target_os = "windows",
+    all(
+        target_os = "linux",
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "riscv64"
+        )
+    )
+)))]
 fn hold_write_lease(_file: &std::fs::File) -> Result<(), &'static str> {
     Err(KEPT_NO_LEASE)
 }
