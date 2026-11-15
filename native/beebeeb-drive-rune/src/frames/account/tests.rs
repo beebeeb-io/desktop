@@ -113,6 +113,11 @@ fn source(rt: &Runtime<State>) -> &dyn AccountSource {
     rt.state.account.source.as_deref().expect("the fixture")
 }
 
+/// App lock and its delay, as the Security page is told them.
+fn lock_facts(rt: &Runtime<State>) -> (bool, String) {
+    source(rt).security_facts().app_lock.expect("the board knows app lock")
+}
+
 pub(super) fn asked(rt: &Runtime<State>) -> Vec<Intent> {
     rt.state.settings.intents.clone()
 }
@@ -272,11 +277,24 @@ fn app_lock_turns_by_keyboard_and_without_it_there_is_no_time_choice() {
     assert!(find(&rt, "item-1-0-pop").is_some());
     tab_to(&mut rt, "item-1-0-switch");
     key(&mut rt, Key::Text(" ".into()));
-    assert!(!source(&rt).security().app_lock);
+    assert!(!lock_facts(&rt).0);
     assert!(find(&rt, "item-1-0-pop").is_none(), "off: no time choice (DW-0716b)");
     assert_eq!(says(&rt, "item-1-0-sub"), "Off: anyone using this PC can open Beebeeb");
     key(&mut rt, Key::Enter);
-    assert!(source(&rt).security().app_lock);
+    assert!(lock_facts(&rt).0);
+}
+
+/// The real app's row: a source that gives no delay (nothing in this version acts on one) draws the switch and no
+/// time choice, and says no "locks again after".
+#[test]
+fn app_lock_with_no_delay_draws_no_time_choice() {
+    let mut state = init();
+    assert!(super::scene("DW-S01", &mut state));
+    state.account.source.as_mut().expect("the fixture").set_lock_after("");
+    let rt = window(state);
+    assert_eq!(info(&rt, "item-1-0-switch").label.as_deref(), Some("Lock Beebeeb"));
+    assert!(find(&rt, "item-1-0-pop").is_none(), "no delay: no time choice");
+    assert_eq!(says(&rt, "item-1-0-sub"), "Windows Hello");
 }
 
 #[test]
@@ -467,7 +485,7 @@ fn a_seeded_secret_is_in_no_element_tree_and_no_label() {
 // ---------------------------------------------------------------------------
 
 use super::form;
-use super::source::{BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, CodeRefused, Deletion, Strength};
+use super::source::{BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, Deletion, Strength};
 
 /// Everything a screen reader, the frame gate or the feedback mode could read of the window.
 fn every_word(rt: &Runtime<State>) -> String {
@@ -545,13 +563,19 @@ fn the_password_changes_through_the_step_up_and_is_in_no_request() {
         rt.state.account.form.current.text.is_empty(),
         "the current one is retyped"
     );
-    assert_eq!(source(&rt).security().password_changed, "3 weeks ago");
+    assert_eq!(
+        source(&rt).security_facts().password_changed.unwrap_or_default(),
+        "3 weeks ago"
+    );
 
     rt.update(|s, _| form::type_in(&mut s.account.form.current, BOARD_PASSWORD));
     settle(&mut rt);
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.account.pane, Pane::Security, "back to Sign-in and security");
-    assert_eq!(source(&rt).security().password_changed, "Just now");
+    assert_eq!(
+        source(&rt).security_facts().password_changed.unwrap_or_default(),
+        "Just now"
+    );
     assert!(
         rt.state.account.form.new.text.is_empty(),
         "nothing typed outlives the page"
@@ -578,6 +602,19 @@ fn the_password_changes_through_the_step_up_and_is_in_no_request() {
     for sent in &board.wire {
         assert!(!sent.contains(NEW) && !sent.contains(BOARD_PASSWORD), "{sent}");
     }
+}
+
+/// Review of desktop#423, P2 #9: a change whose end is not known (its finish left and no answer refused it) is said
+/// as such under the current password, never as "Nothing was changed".
+#[test]
+fn a_password_change_that_may_have_been_made_says_so() {
+    let mut rt = runtime("DW-A67");
+    rt.update(|s, _| s.account.form.problem = Some(form::Problem::Unconfirmed));
+    settle(&mut rt);
+    assert_eq!(
+        says(&rt, "field-0-msg"),
+        "We couldn't confirm the change. Try signing in with your new password; if that fails, use your old one."
+    );
 }
 
 /// Name and email: an empty name is refused in the board's words; the email changes only once
@@ -706,8 +743,8 @@ fn deleting_the_account_takes_four_steps_and_can_be_undone() {
     assert_eq!(source(&rt).deletion(), Deletion::None);
 
     let mut board = BoardAccount::new();
-    assert_eq!(board.stop_activity("000000"), Err(CodeRefused::Wrong));
-    assert!(board.activity().is_some(), "a wrong code stops nothing");
+    assert!(!board.stop_activity_confirmed(Password::from_field("not the password")));
+    assert!(board.activity().is_some(), "a wrong password stops nothing");
 }
 
 /// The board's sample devices, word for word (DW-A55's rows, DW-A56's sentence): the confirm
@@ -749,10 +786,10 @@ fn the_confirm_names_the_apps_the_source_gives_for_that_device() {
     );
 }
 
-/// Sign-in activity (DW-A77 to DW-A79): turning it off asks for a current code first (DW-A78),
-/// Esc and a wrong code stop nothing, the right code stops it, and turning it on asks nothing.
+/// Sign-in activity (DW-A77 to DW-A79): turning it off asks the account password first (DW-A78), Esc and a wrong
+/// password stop nothing, the right password stops it, and turning it on asks nothing.
 #[test]
-fn sign_in_activity_stops_only_after_a_current_code() {
+fn sign_in_activity_stops_only_after_the_password() {
     let mut rt = runtime("DW-A77");
     assert_eq!(info(&rt, "item-0-0-switch").role, "switch");
     assert!(source(&rt).activity().is_some());
@@ -763,7 +800,7 @@ fn sign_in_activity_stops_only_after_a_current_code() {
         Some(Dialog::Code(super::CodeFor::StopActivity)),
         "the switch opens the confirm (DW-A78)"
     );
-    assert!(source(&rt).activity().is_some(), "nothing stops before the code");
+    assert!(source(&rt).activity().is_some(), "nothing stops before the password");
     assert_eq!(info(&rt, "dlg").role, "dialog");
     key(&mut rt, Key::Escape);
     assert_eq!(rt.state.account.dialog, None, "Esc cancels");
@@ -771,12 +808,12 @@ fn sign_in_activity_stops_only_after_a_current_code() {
     assert_eq!(section(&rt), Some(SettingsPane::Security), "and settings stays open");
 
     click(&mut rt, "item-0-0-switch");
-    rt.update(|s, _| form::type_in(&mut s.account.form.code, "000000"));
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, "not the password"));
     settle(&mut rt);
-    click(&mut rt, "btn-0");
-    assert_eq!(says(&rt, "code-msg"), "Incorrect code. Try again.");
-    assert!(source(&rt).activity().is_some(), "a wrong code stops nothing");
-    rt.update(|s, _| form::type_in(&mut s.account.form.code, BOARD_CODE));
+    key(&mut rt, Key::Enter);
+    assert!(source(&rt).activity().is_some(), "a wrong password stops nothing");
+    click(&mut rt, "item-0-0-switch");
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, BOARD_PASSWORD));
     settle(&mut rt);
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.account.dialog, None);
@@ -907,7 +944,7 @@ fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
     );
     key(&mut rt, Key::Up);
     key(&mut rt, Key::Enter);
-    assert_eq!(source(&rt).security().lock_after, "30 min");
+    assert_eq!(lock_facts(&rt).1, "30 min");
     assert_eq!(rt.state.account.dialog, None, "the pop-up closes");
     assert_eq!(says(&rt, "item-1-0-pop-label"), "30 min");
     assert_eq!(rt.state.account.pane, Pane::Security);
@@ -925,18 +962,18 @@ fn the_delay_menu_takes_a_press_and_esc_changes_nothing() {
     );
     key(&mut rt, Key::Escape);
     assert_eq!(rt.state.account.dialog, None);
-    assert_eq!(source(&rt).security().lock_after, "5 min", "Esc chooses nothing");
+    assert_eq!(lock_facts(&rt).1, "5 min", "Esc chooses nothing");
     assert_eq!(section(&rt), Some(SettingsPane::Security), "and settings stays open");
     click(&mut rt, "item-1-0-pop-button");
     click(&mut rt, "menu-0-item-3");
-    assert_eq!(source(&rt).security().lock_after, "60 min");
+    assert_eq!(lock_facts(&rt).1, "60 min");
     assert!(find(&rt, "menu-0").is_none());
 }
 
 #[test]
 fn with_the_lock_off_there_is_no_delay_and_turning_it_on_brings_it_back() {
     let mut rt = runtime("DW-S03b");
-    assert!(!source(&rt).security().app_lock);
+    assert!(!lock_facts(&rt).0);
     assert!(find(&rt, "item-1-0-pop").is_none(), "no time choice");
     assert!(find(&rt, "menu-0").is_none());
     assert_eq!(says(&rt, "item-1-0-sub"), "Off: anyone using this PC can open Beebeeb");
@@ -945,7 +982,7 @@ fn with_the_lock_off_there_is_no_delay_and_turning_it_on_brings_it_back() {
     settle(&mut rt);
     assert_eq!(rt.state.account.dialog, None);
     click(&mut rt, "item-1-0-switch");
-    assert!(source(&rt).security().app_lock, "DW-0716");
+    assert!(lock_facts(&rt).0, "DW-0716");
     assert_eq!(says(&rt, "item-1-0-sub"), "Windows Hello · locks again after");
     assert!(find(&rt, "item-1-0-pop").is_some());
 }
@@ -987,11 +1024,75 @@ fn a_stored_delay_the_menu_does_not_have_checks_no_row() {
     // Enter with no row under the keys takes nothing; the stored delay stays.
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.account.dialog, None);
-    assert_eq!(source(&rt).security().lock_after, "15 min");
+    assert_eq!(lock_facts(&rt).1, "15 min");
     // The keys still reach every row: Down starts at the first.
     click(&mut rt, "item-1-0-pop-button");
     key(&mut rt, Key::Down);
     assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(Some(0))));
     key(&mut rt, Key::Enter);
-    assert_eq!(source(&rt).security().lock_after, "Immediately", "chosen, not assumed");
+    assert_eq!(lock_facts(&rt).1, "Immediately", "chosen, not assumed");
+}
+
+/// Review of desktop#427 (P1, twice): a password change that is still out when the page is left and opened again.
+/// The page says so (in words, fields not editable, Change off), a second change is never sent, and the answer that
+/// lands is that change's: shown as its result, never as a password the person did not send.
+#[test]
+fn a_change_that_is_still_out_is_shown_as_out_when_the_page_comes_back_and_its_answer_is_its_own() {
+    use super::source::{Answered, BoardAccount, HeldCalls};
+    const A: &str = "the first long passphrase 42";
+    const B: &str = "a second long passphrase 77";
+    let held = HeldCalls::default();
+    let mut rt = runtime("DW-A67");
+    rt.update(|s, _| s.account.source = Some(Box::new(BoardAccount::new().holding_calls(held.clone()))));
+    rt.update(|s, _| {
+        let f = &mut s.account.form;
+        form::type_in(&mut f.current, BOARD_PASSWORD);
+        form::type_in(&mut f.new, A);
+        form::type_in(&mut f.again, A);
+    });
+    settle(&mut rt);
+    // Press A: it goes out on a worker and the page waits.
+    click(&mut rt, "btn-1");
+    assert_eq!(held.started.borrow().len(), 1, "A was sent");
+    assert_eq!(
+        rt.state.account.pane,
+        Pane::Password,
+        "nothing is drawn as changed before the answer"
+    );
+
+    // Leave (Cancel) and come back: the page tells the truth about the change that is out.
+    click(&mut rt, "btn-0");
+    assert_ne!(rt.state.account.pane, Pane::Password);
+    rt.update(|s, _| super::go(s, "DW-A67"));
+    settle(&mut rt);
+    assert_eq!(rt.state.account.pane, Pane::Password);
+    assert_eq!(
+        says(&rt, "field-0-msg"),
+        super::forms::CHANGING,
+        "the page says a change is still being made"
+    );
+
+    // B cannot be typed or sent.
+    let before = rt.state.account.form.current.text.clone();
+    click(&mut rt, "field-0");
+    key(&mut rt, Key::Text("x".into()));
+    assert_eq!(rt.state.account.form.current.text, before, "the field takes no typing");
+    rt.update(|s, _| {
+        let f = &mut s.account.form;
+        form::type_in(&mut f.current, BOARD_PASSWORD);
+        form::type_in(&mut f.new, B);
+        form::type_in(&mut f.again, B);
+    });
+    settle(&mut rt);
+    click(&mut rt, "btn-1");
+    key(&mut rt, Key::Enter);
+    assert_eq!(held.started.borrow().len(), 1, "B was never sent");
+    assert_eq!(rt.state.account.pane, Pane::Password, "no answer yet: still the wait");
+
+    // A's answer lands: it is A's result (its normal path), and nothing says B was saved.
+    *held.answer.borrow_mut() = Some(Answered::Done);
+    settle(&mut rt);
+    assert_eq!(rt.state.account.pane, Pane::Security, "A's Done takes the normal path");
+    assert!(rt.state.account.form.waiting.is_none(), "the form is live again");
+    assert_eq!(held.started.borrow().len(), 1);
 }

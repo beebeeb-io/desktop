@@ -9,7 +9,7 @@
 
 use rune::{SecretCopy, TextEdit};
 
-use super::source::{Secret, Setup, StepUp};
+use super::source::{CallKind, Secret, Setup, StepUp};
 use super::{AccountUi, CodeFor, Dialog, Pane};
 
 /// The text inputs' keys (tests, `Tx::focus`).
@@ -36,6 +36,21 @@ pub enum Problem {
     WrongCode,
     /// "I've opened the link", and the link has not been used.
     LinkNotUsed,
+    /// "Send again" was asked too soon: the page says how long to wait (the source counts it down).
+    ResendWait,
+    /// No more codes for this change.
+    ResendLimit,
+    /// Beebeeb did not take the new name (it answered with an error, or no longer accepts the session).
+    NameRefused,
+    /// A password change whose end is not known: it may have been made.
+    Unconfirmed,
+    /// A password change that finished while the person was on another page: said when the page is opened again.
+    Changed,
+    /// The same call is already out (an earlier press, or a visit before this one): this press started nothing, and
+    /// the page waits for that call's answer.
+    StillOut,
+    /// Beebeeb did not take the new password (the same as now, too weak, or found in a breach): nothing changed.
+    NotAccepted,
 }
 
 pub struct Form {
@@ -45,6 +60,8 @@ pub struct Form {
     pub current: TextEdit,
     pub new: TextEdit,
     pub again: TextEdit,
+    /// Where the typing of a frozen password page goes (a change is out): thrown away, never a password field.
+    pub sink: TextEdit,
     /// The digits of a code (secure, shown): the email's 8, the authenticator's 6, a backup code's 8.
     pub code: TextEdit,
     /// A passkey's new name, while it is renamed.
@@ -64,10 +81,22 @@ pub struct Form {
     pub copied: Option<SecretCopy>,
     /// The file the backup codes were saved to, or why not: said under the buttons.
     pub saved: Option<Result<String, String>>,
+    /// The new name was sent and Beebeeb has not answered: Save waits and takes no press.
+    pub saving_name: bool,
+    /// The call that is out and not answered yet (`calls`): a press while it is does nothing.
+    pub waiting: Option<CallKind>,
+    /// The serial of the call `waiting` is for (`AccountSource::call_mark`): only its answer settles the page.
+    pub waiting_serial: u64,
+    /// The first code was wrong and the key it belonged to was replaced: the page says to scan again.
+    pub key_replaced: bool,
 }
 
-fn secure() -> TextEdit {
+pub(super) fn secure() -> TextEdit {
     TextEdit::new("").secure()
+}
+
+pub(super) fn fresh_code() -> TextEdit {
+    code_edit()
 }
 
 fn code_edit() -> TextEdit {
@@ -82,6 +111,7 @@ impl Default for Form {
             current: secure(),
             new: secure(),
             again: secure(),
+            sink: secure(),
             code: code_edit(),
             rename: TextEdit::new(""),
             problem: None,
@@ -92,6 +122,10 @@ impl Default for Form {
             renaming: None,
             copied: None,
             saved: None,
+            saving_name: false,
+            waiting: None,
+            waiting_serial: 0,
+            key_replaced: false,
         }
     }
 }
@@ -141,11 +175,39 @@ pub fn code(form: &Form, count: usize) -> String {
 /// was just opened or closed): the last problem goes, the secrets of other pages go, the
 /// field a person types in first gets the keyboard.
 pub fn arrive(ui: &mut AccountUi) {
+    // A password change, or a change of email, from an earlier visit may still be out: the page shows that wait (and
+    // its answer is that call's), never a blank form that could start a second one.
+    let adopts = match ui.pane {
+        Pane::Password if ui.dialog.is_none() => Some(CallKind::ChangePassword),
+        Pane::Email if ui.dialog.is_none() => Some(CallKind::StartEmail),
+        _ => None,
+    };
+    let out = adopts
+        .and_then(|kind| ui.source.as_deref().and_then(|s| s.call_mark(kind)))
+        .filter(|mark| mark.out);
+    // The answer of a change that landed while this page was not open: said here, in full, once (`late`).
+    let late = (ui.pane == Pane::Password && out.is_none())
+        .then(|| super::late::take(ui))
+        .flatten();
     let f = &mut ui.form;
     f.problem = None;
+    f.waiting = out.and(adopts);
+    f.waiting_serial = out.map_or(0, |mark| mark.serial);
+    f.key_replaced = false;
     f.renaming = None;
     f.saved = None;
     focus(f, None);
+    match late {
+        Some(Ok(())) => {
+            (f.current, f.new, f.again) = (secure(), secure(), secure());
+            f.problem = Some(Problem::Changed);
+        }
+        Some(Err(why)) => {
+            (f.current, f.new, f.again) = (secure(), secure(), secure());
+            f.problem = Some(super::forms::refused(why));
+        }
+        None => {}
+    }
     if ui.pane != Pane::TwoFactorSetup {
         f.setup = None;
     }
@@ -162,9 +224,23 @@ pub fn arrive(ui: &mut AccountUi) {
         (f.new, f.again) = (secure(), secure());
     }
     f.code = code_edit();
+    f.sink = secure();
     if let Some(dialog) = &ui.dialog {
-        if matches!(dialog, Dialog::Code(_)) {
+        if matches!(
+            dialog,
+            Dialog::Code(super::CodeFor::StopActivity) | Dialog::LockPassword { .. }
+        ) {
+            // Stopping the recording asks the password (owner ruling 2026-11-14; the board's DW-A78), and so does App
+            // lock's change Windows Hello did not confirm (D-2).
+            focus(f, Some(CURRENT_KEY));
+        } else if matches!(dialog, Dialog::Code(_)) {
             focus(f, Some(CODE_KEY));
+        }
+        // Removing a passkey asks the password in its confirm (a source that needs it).
+        if matches!(dialog, Dialog::RemovePasskey(_))
+            && ui.source.as_deref().is_some_and(|s| s.passkeys_need_password())
+        {
+            focus(f, Some(CURRENT_KEY));
         }
         return;
     }
@@ -191,11 +267,12 @@ pub fn arrive(ui: &mut AccountUi) {
             focus(f, Some(CODE_KEY));
         }
         Pane::TwoFactorSetup => {
-            f.current = secure();
-            if f.setup.is_none() {
-                f.setup = ui.source.as_deref_mut().and_then(|s| s.begin_two_factor(None).ok());
+            ui.form.current = secure();
+            if ui.form.setup.is_none() {
+                // No open session: no key is asked for, and the page says the set-up could not start.
+                super::calls::ask_for_a_key(ui);
             }
-            focus(f, Some(CODE_KEY));
+            focus(&mut ui.form, Some(CODE_KEY));
         }
         _ => f.current = secure(),
     }

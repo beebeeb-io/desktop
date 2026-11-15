@@ -6,7 +6,11 @@
 //! a recovery check derived from [`TEST_PHRASE`], the sample tree, and a FIXED user id, so a TEST build's local data
 //! stays bound to the same account when the server restarts (the build also binds its data to the origin, port
 //! included: give the same `--listen` again). In front of it, [`fixture_handler`] answers a sign-in for any other email
-//! as a wrong password before OPAQUE runs, and writes one [`access_line`] per answer.
+//! as a wrong password before OPAQUE runs, answers every call with a session token `401` once a line
+//! [`END_SESSION_LINE`] came on standard input (a native check of the app's session watcher), refuses the device route
+//! once a line [`HEARTBEAT_OFF_LINE`] came (so only the sync tick feeds that watcher), and writes one [`access_line`]
+//! per answer. The end-session switch models "the server refuses this account's sessions", not "this one session was
+//! revoked": the account has one token, so a password sign-in after the end gets the same refused token back.
 //!
 //! The binary (`src/test_api/bin_main.rs`) is built only with `--features fake-server`, which implies `test-support`:
 //! the default feature set never builds it, a release profile refuses to compile it (`lib.rs`), and no app enables it
@@ -19,7 +23,7 @@
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -34,6 +38,16 @@ pub const FIXTURE_EMAIL: &str = "fixture@example.invalid";
 pub const FIXTURE_PASSWORD: &str = "fixture password 2475";
 /// Its user id, the same at every start: a TEST build binds its local data to it.
 pub const FIXTURE_USER_ID: &str = "f1c70000-2475-4000-8000-000000000001";
+/// The line on standard input that ends the fixture account's session (see [`fixture_handler`]).
+pub const END_SESSION_LINE: &str = "end-session";
+/// The line on standard input that refuses the device route (see [`fixture_handler`]).
+pub const HEARTBEAT_OFF_LINE: &str = "heartbeat-off";
+/// The line on standard input that makes the upload routes unreachable (see [`fixture_handler`]).
+pub const UPLOADS_OFF_LINE: &str = "uploads-off";
+/// The control route that stores a newer version of a file, as another device's save (no token: a loopback control).
+pub const NEWER_VERSION_ROUTE: &str = "POST /fake-control/newer-version";
+/// The control route that turns the refusal of uploads on or off.
+pub const UPLOADS_REFUSED_ROUTE: &str = "POST /fake-control/uploads-refused";
 /// `--max-seconds` when it is not given.
 pub const DEFAULT_MAX_SECONDS: u64 = 3600;
 const MAX_SECONDS: u64 = 86_400;
@@ -43,7 +57,15 @@ pub const USAGE: &str =
 Serves the engine's fixture account (a fake of the API, for tests) on loopback only; the default address is
 127.0.0.1:0 (a free port). Once it listens it prints ONE line on stdout: `bb-fake-server listening http://<address>`.
 It stops when its standard input closes, on a line `stop`, or after --max-seconds (default 3600), and says why on
-stderr. A development binary: built only with --features fake-server, never in a release profile, never in an app.";
+stderr. Two more lines are switches, each set until the server stops:
+`end-session` refuses this account's session token: from then on every request with a session token is answered
+401, as a server that no longer accepts the session.
+`heartbeat-off` refuses the device route (POST /api/v1/clients/devices) with 503, so the app's heartbeat never starts.
+`uploads-off` makes every upload route (/api/v1/uploads/...) hang up without an answer, as a server that cannot be
+reached for them (the same switch: POST /fake-control/uploads-refused with a JSON body {refused: true or false} sets it either way).
+Control, one HTTP call each, no token, loopback only: POST /fake-control/newer-version with a JSON body of file_id
+or path, and content_text or content_base64, saves a newer version of that file as another device would.
+A development binary: built only with --features fake-server, never in a release profile, never in an app.";
 
 /// What the command line asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +187,7 @@ pub fn fixture_account() -> Arc<FakeAccount> {
     let (mut account, _phrase) = FakeAccount::register(FIXTURE_EMAIL, FIXTURE_PASSWORD, TEST_PHRASE);
     account.user_id = FIXTURE_USER_ID.to_string();
     add_sample_tree(&account);
+    account.serve_security_routes(true);
     Arc::new(account)
 }
 
@@ -178,21 +201,111 @@ pub fn access_line(request: &Request, status: u16) -> String {
 /// Where the [`access_line`]s go (stderr in the binary, a list in a test).
 pub type LineWriter = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// The fixture account's routes ([`account_handler`]) behind the server's two rules: a sign-in leg for any other email
-/// is answered as a wrong password (`401`, what core reads as "Invalid email or password") before OPAQUE runs, and
-/// every answer is counted in `served` and written as an [`access_line`].
-pub fn fixture_handler(account: Arc<FakeAccount>, lines: LineWriter, served: Arc<AtomicU64>) -> Handler {
+/// The two switches a line on standard input sets (each stays set until the server stops).
+#[derive(Debug, Clone, Default)]
+pub struct Switches {
+    /// A line [`UPLOADS_OFF_LINE`], or the control route: every upload route hangs up (off at the start).
+    pub uploads_off: Arc<AtomicBool>,
+    /// A line [`END_SESSION_LINE`]: the server refuses this account's session token on every call.
+    pub session_ended: Arc<AtomicBool>,
+    /// A line [`HEARTBEAT_OFF_LINE`]: the device route (`POST /api/v1/clients/devices`) is refused, so the app's
+    /// heartbeat never starts and only the sync tick feeds its session watcher.
+    pub heartbeat_off: Arc<AtomicBool>,
+}
+
+/// The fixture account's routes ([`account_handler`]) behind the server's four rules: once `session_ended` is set (a
+/// line [`END_SESSION_LINE`]), every request with a session token is answered `401` before any route runs, as a server
+/// that no longer accepts the session (the sign-in legs carry no token and are not touched); once `heartbeat_off` is set
+/// (a line [`HEARTBEAT_OFF_LINE`]), the device route is answered `503`; a sign-in leg for any
+/// other email is answered as a wrong password (`401`, what core reads as "Invalid email or password") before OPAQUE
+/// runs; and every answer is counted in `served` and written as an [`access_line`].
+pub fn fixture_handler(
+    account: Arc<FakeAccount>,
+    lines: LineWriter,
+    served: Arc<AtomicU64>,
+    switches: Switches,
+) -> Handler {
     let routes = account_handler(account.clone());
+    // The photo-preview routes (PREV-1), with one line per stored preview for the native check.
+    let previews = super::fake_previews::PreviewRoutes::new(account.clone());
     Arc::new(move |request: &Request| {
-        let reply = if is_sign_in_leg(request) && !names_email(request, &account.email) {
+        let reply = if let Some(reply) = control(&account, &switches, request) {
+            reply
+        } else if switches.uploads_off.load(Ordering::SeqCst) && is_upload_call(request) {
+            Reply::hang_up()
+        } else if switches.session_ended.load(Ordering::SeqCst) && request.bearer().is_some() {
+            Reply::error(401, "unauthorized")
+        } else if switches.heartbeat_off.load(Ordering::SeqCst) && request.route() == "POST /api/v1/clients/devices" {
+            Reply::error(503, "unavailable")
+        } else if is_sign_in_leg(request) && !names_email(request, &account.email) {
             Reply::json(401, json!({}))
+        } else if let Some(reply) = previews.answer(request) {
+            reply
         } else {
             routes(request)
         };
         served.fetch_add(1, Ordering::SeqCst);
         lines(&access_line(request, reply.status));
+        if let Some(line) = previews.note(request, reply.status) {
+            lines(&line);
+        }
         reply
     })
+}
+
+/// An upload session route: `init`, a chunk, `complete`, `heartbeat` (the picture and abandon routes are not uploads).
+fn is_upload_call(request: &Request) -> bool {
+    matches!(request.method.as_str(), "POST" | "PUT") && request.route().contains(" /api/v1/uploads/")
+}
+
+/// The control routes: they answer without a token and are never part of the API a client sees.
+fn control(account: &FakeAccount, switches: &Switches, request: &Request) -> Option<Reply> {
+    use base64::Engine as _;
+    match request.route().as_str() {
+        NEWER_VERSION_ROUTE => {
+            let body = request.json();
+            let id = match (
+                body.get("file_id").and_then(Value::as_str),
+                body.get("path").and_then(Value::as_str),
+            ) {
+                (Some(id), _) => Some(id.to_string()),
+                (None, Some(path)) => account.find_by_path(path),
+                (None, None) => return Some(Reply::error(400, "file_id or path")),
+            };
+            let Some(id) = id else {
+                return Some(Reply::error(404, "no such file"));
+            };
+            let content = match (
+                body.get("content_text").and_then(Value::as_str),
+                body.get("content_base64").and_then(Value::as_str),
+            ) {
+                (Some(text), _) => text.as_bytes().to_vec(),
+                (None, Some(encoded)) => match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Some(Reply::error(400, "content_base64")),
+                },
+                (None, None) => return Some(Reply::error(400, "content_text or content_base64")),
+            };
+            Some(match account.push_newer_version(&id, &content) {
+                Ok(made) => Reply::ok(json!({
+                    "file_id": made.file_id,
+                    "version_number": made.version_number,
+                    "size_bytes": made.size_bytes,
+                    "updated_at": made.updated_at,
+                })),
+                Err(why) => Reply::json(409, json!({ "error": why })),
+            })
+        }
+        UPLOADS_REFUSED_ROUTE => {
+            let refused = request.json().get("refused").and_then(Value::as_bool);
+            let Some(refused) = refused else {
+                return Some(Reply::error(400, "refused"));
+            };
+            switches.uploads_off.store(refused, Ordering::SeqCst);
+            Some(Reply::ok(json!({ "refused": refused })))
+        }
+        _ => None,
+    }
 }
 
 fn is_sign_in_leg(request: &Request) -> bool {
@@ -231,14 +344,19 @@ impl Stop {
     }
 }
 
-/// Read `input` on a thread of its own until it ends or a line `stop` comes (other lines are ignored); the first of
-/// that and `deadline` is the answer.
-pub fn wait_for_stop<R: BufRead + Send + 'static>(input: R, deadline: Duration) -> io::Result<Stop> {
+/// Read `input` on a thread of its own until it ends or a line `stop` comes; the first of that and `deadline` is the
+/// answer. A line [`END_SESSION_LINE`] or [`HEARTBEAT_OFF_LINE`] sets its switch (and says so on stderr, once);
+/// other lines are ignored.
+pub fn wait_for_stop<R: BufRead + Send + 'static>(
+    input: R,
+    deadline: Duration,
+    switches: Switches,
+) -> io::Result<Stop> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("fake-server-input".into())
         .spawn(move || {
-            let _ = tx.send(read_until_stop(input));
+            let _ = tx.send(read_until_stop(input, &switches));
         })?;
     Ok(match rx.recv_timeout(deadline) {
         Ok(stop) => stop,
@@ -247,13 +365,34 @@ pub fn wait_for_stop<R: BufRead + Send + 'static>(input: R, deadline: Duration) 
     })
 }
 
-fn read_until_stop<R: BufRead>(mut input: R) -> Stop {
+fn read_until_stop<R: BufRead>(mut input: R, switches: &Switches) -> Stop {
     let mut line = String::new();
     loop {
         line.clear();
         match input.read_line(&mut line) {
             Ok(0) | Err(_) => return Stop::InputClosed,
             Ok(_) if line.trim() == "stop" => return Stop::StopLine,
+            Ok(_) if line.trim() == END_SESSION_LINE => {
+                if !switches.session_ended.swap(true, Ordering::SeqCst) {
+                    say(
+                        "bb-fake-server: the session was ended (a line `end-session`): every request with a session token is answered 401 from now on",
+                    );
+                }
+            }
+            Ok(_) if line.trim() == HEARTBEAT_OFF_LINE => {
+                if !switches.heartbeat_off.swap(true, Ordering::SeqCst) {
+                    say(
+                        "bb-fake-server: the device route is refused (a line `heartbeat-off`): the heartbeat cannot start from now on",
+                    );
+                }
+            }
+            Ok(_) if line.trim() == UPLOADS_OFF_LINE => {
+                if !switches.uploads_off.swap(true, Ordering::SeqCst) {
+                    say(
+                        "bb-fake-server: the upload routes are unreachable (a line `uploads-off`): they hang up from now on",
+                    );
+                }
+            }
             Ok(_) => {}
         }
     }
@@ -286,9 +425,10 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> ExitCode {
     // Register the fixture account (Argon2id, ~27 s) BEFORE binding, so the port does not accept connections while
     // the handler is not ready (P2-3 of the PR #338 review).
     let served = Arc::new(AtomicU64::new(0));
+    let switches = Switches::default();
     let lines: LineWriter = Arc::new(say);
     let account = fixture_account();
-    let handler = fixture_handler(account, lines, served.clone());
+    let handler = fixture_handler(account, lines, served.clone(), switches.clone());
     let listener = match bind(options.listen) {
         Ok(listener) => listener,
         Err(error) => {
@@ -318,6 +458,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> ExitCode {
     let stop = match wait_for_stop(
         io::BufReader::new(io::stdin()),
         Duration::from_secs(options.max_seconds),
+        switches,
     ) {
         Ok(stop) => stop,
         Err(error) => {
@@ -473,6 +614,7 @@ mod tests {
             fixture(),
             Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
             served.clone(),
+            Switches::default(),
         );
         // A message OPAQUE cannot read: OPAQUE answers it with 400, the email rule with 401 before OPAQUE is asked.
         let start = |email: &str| {
@@ -602,12 +744,70 @@ mod tests {
 
     #[test]
     fn it_stops_when_the_input_closes_on_a_stop_line_or_at_the_deadline() {
-        let wait = |text: &'static str| wait_for_stop(io::Cursor::new(text), Duration::from_secs(10)).unwrap();
+        let wait = |text: &'static str| {
+            wait_for_stop(io::Cursor::new(text), Duration::from_secs(10), Switches::default()).unwrap()
+        };
         assert_eq!(wait(""), Stop::InputClosed);
         assert_eq!(wait("hello\nnot stop\n"), Stop::InputClosed);
         assert_eq!(wait("hello\n stop \nlater\n"), Stop::StopLine);
         let (_held, rx) = mpsc::channel::<()>();
         let open = io::BufReader::new(OpenInput(rx));
-        assert_eq!(wait_for_stop(open, Duration::from_millis(300)).unwrap(), Stop::Deadline);
+        assert_eq!(
+            wait_for_stop(open, Duration::from_millis(300), Switches::default()).unwrap(),
+            Stop::Deadline
+        );
+    }
+
+    #[test]
+    fn a_line_end_session_ends_the_session_and_only_that_line_does() {
+        let ended_by = |text: &'static str| {
+            let switches = Switches::default();
+            let stop = wait_for_stop(io::Cursor::new(text), Duration::from_secs(10), switches.clone()).unwrap();
+            (stop, switches.session_ended.load(Ordering::SeqCst))
+        };
+        assert_eq!(ended_by("hello\nend\nend-sessions\n"), (Stop::InputClosed, false));
+        assert_eq!(ended_by(" end-session \n"), (Stop::InputClosed, true));
+        assert_eq!(ended_by("end-session\nend-session\nstop\n"), (Stop::StopLine, true));
+        // `stop` first: the server stops before it reads the line after it.
+        assert_eq!(ended_by("stop\nend-session\n"), (Stop::StopLine, false));
+    }
+
+    #[test]
+    fn an_ended_session_is_refused_on_every_call_with_a_token_and_the_sign_in_legs_are_not_touched() {
+        let account = fixture();
+        let switches = Switches::default();
+        let ended = switches.session_ended.clone();
+        let handler = fixture_handler(
+            account.clone(),
+            Arc::new(|_: &str| {}),
+            Arc::new(AtomicU64::new(0)),
+            switches,
+        );
+        let with_token = |method: &str, path: &str, body: Value| Request {
+            method: method.into(),
+            path: path.into(),
+            headers: vec![("Authorization".into(), format!("Bearer {}", account.session_token))],
+            body: body.to_string().into_bytes(),
+        };
+        let calls = [
+            with_token("GET", "/api/v1/sync/snapshot", Value::Null),
+            with_token("GET", "/api/v1/auth/me", Value::Null),
+            with_token("POST", "/api/v1/clients/devices", json!({ "hostname": "fixture-pc" })),
+        ];
+        // A message OPAQUE cannot read, for the fixture's email: OPAQUE's own 400, before and after the end.
+        let sign_in_leg = post(
+            "/api/v1/opaque/login-start",
+            json!({ "email": FIXTURE_EMAIL, "client_message": "AA==" }),
+        );
+        let before: Vec<u16> = calls.iter().map(|r| handler(r).status).collect();
+        let leg_before = handler(&sign_in_leg).status;
+        ended.store(true, Ordering::SeqCst);
+        let after: Vec<u16> = calls.iter().map(|r| handler(r).status).collect();
+        let leg_after = handler(&sign_in_leg).status;
+        assert_eq!(
+            (before, leg_before, after, leg_after),
+            (vec![200, 200, 200], 400, vec![401, 401, 401], 400),
+            "calls with the token before, the sign-in leg before, calls after the end, the sign-in leg after"
+        );
     }
 }

@@ -21,12 +21,18 @@ use zeroize::Zeroizing;
 
 use super::*;
 
+#[path = "app_lock_tests.rs"]
+mod app_lock;
+#[path = "account_bound_tests.rs"]
+mod bound;
 #[path = "account_tests_engine.rs"]
 mod engine;
 #[path = "account_tests_security.rs"]
 mod security;
 #[path = "account_tests_sign_out.rs"]
 mod sign_out;
+#[path = "account_tests_toasts.rs"]
+mod toasts;
 #[path = "account_tests_window.rs"]
 mod window;
 
@@ -75,6 +81,8 @@ struct Server {
     change_mode: Arc<AtomicU8>,
     read_delay_ms: Arc<AtomicU64>,
     change_delay_ms: Arc<AtomicU64>,
+    /// How long a password proof's last leg waits before the accounts' handler answers it (app lock's password step).
+    proof_delay_ms: Arc<AtomicU64>,
     /// Every session id a DELETE named, in order, and how many times "all others" was asked.
     deleted: Arc<Mutex<Vec<String>>>,
     revoked_all: Arc<AtomicU64>,
@@ -147,6 +155,8 @@ fn server() -> Server {
     let refused_ids: Arc<Mutex<Vec<&'static str>>> = Arc::default();
     let (mock_in, refused_in) = (plan_mock.clone(), refused_ids.clone());
     let (deleted, revoked_all) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicU64::new(0)));
+    let proof_delay_ms = Arc::new(AtomicU64::new(0));
+    let proof_delay_in = proof_delay_ms.clone();
     let (people_in, read_in, plan_in, change_in, read_delay_in, change_delay_in, deleted_in, revoked_in) = (
         people.clone(),
         read_mode.clone(),
@@ -274,7 +284,12 @@ fn server() -> Server {
                     Reply::ok(json!({ "revoked": true }))
                 })
             }
-            _ => rest[who](req),
+            _ => {
+                if route.ends_with("/password-proof/finish") {
+                    std::thread::sleep(Duration::from_millis(proof_delay_in.load(Ordering::SeqCst)));
+                }
+                rest[who](req)
+            }
         }
     }));
     Server {
@@ -289,6 +304,7 @@ fn server() -> Server {
         change_mode,
         read_delay_ms,
         change_delay_ms,
+        proof_delay_ms,
         deleted,
         revoked_all,
         during_read,
@@ -416,15 +432,6 @@ fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
     let server = server();
     let source = Source::new(signed_in(&server));
     for pane in [
-        Pane::Name,
-        Pane::Email,
-        Pane::EmailCode,
-        Pane::Password,
-        Pane::TwoFactor,
-        Pane::TwoFactorSetup,
-        Pane::BackupCodes,
-        Pane::Passkeys,
-        Pane::Activity,
         Pane::Delete,
         Pane::DeleteFactor,
         Pane::DeleteLink,
@@ -438,6 +445,12 @@ fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
     assert_ne!(source.pane_state(Pane::Account), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Security), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Sessions), PaneState::Unwired);
+    // The Name page and Sign-in activity answer too (`account_actions.rs`, `account_activity.rs`).
+    assert_ne!(source.pane_state(Pane::Name), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::Activity), PaneState::Unwired);
+    // The password change and the passkeys answer too (`account_password.rs`, `passkeys.rs`).
+    assert_ne!(source.pane_state(Pane::Password), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::Passkeys), PaneState::Unwired);
 }
 
 #[test]

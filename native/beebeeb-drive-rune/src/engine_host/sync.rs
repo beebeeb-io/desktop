@@ -8,11 +8,10 @@
 //!
 //! Never logged or shown: a path. The folder appears by its name only, in the modal (the person's own screen).
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use beebeeb_engine::app::{CredentialStores, Engine, SyncStart, SyncStartRefused};
+use beebeeb_engine::app::{CredentialStores, Engine, SyncStartRefused};
 use beebeeb_engine::engine_status::{EngineStatusView, State as Reported};
 use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::sync_view::{Explorer, Start, SyncView};
@@ -69,24 +68,22 @@ impl StartWorker {
     }
 }
 
-/// Start sync into the folder the settings name, else the identity's suggestion (`Engine::sync_root`), and keep its
-/// name for the modal. Blocks: a `start-sync` worker's. The log line names the refusal's kind only.
-pub fn start_sync_now<C: CredentialStores>(engine: &Engine<C>, folder: &Mutex<Option<String>>) {
-    let sync_root = match engine.sync_root() {
-        Ok(sync_root) => sync_root,
-        Err(_) => return super::log("sync was not started: the settings could not be read"),
-    };
-    *folder.lock().unwrap_or_else(PoisonError::into_inner) = name_of(&sync_root);
-    match engine.start_sync(sync_root) {
-        Ok(SyncStart::Started) => super::log("sync started"),
-        Ok(SyncStart::AlreadyRunning) => {}
-        Ok(SyncStart::NoSession) => super::log("sync was not started: no session"),
-        Err(refused) => super::log(format!("sync was not started: {}", refused.kind())),
-    }
+/// May sync be asked to start under this gate? Sync is the app's work, not a person's action: it starts behind a
+/// locked screen too (core's lock contract, section 1: "the stored key is loaded, sync starts, the app window
+/// opens screen-locked"). A closed vault, a session without its key and no session have no key: nothing starts.
+pub fn may_start(gate: EngineGate) -> bool {
+    matches!(gate, EngineGate::Ready | EngineGate::ScreenLocked)
 }
 
-fn name_of(folder: &Path) -> Option<String> {
-    folder.file_name().map(|name| name.to_string_lossy().into_owned())
+/// Start sync and keep the folder's name for the modal: [`super::setup::start_now`] on the real engine (the
+/// folder the settings name, else the one the first run chose, else the identity's suggestion; none while a
+/// first run still has to ask). Blocks: a `start-sync` worker's.
+pub fn start_sync_now<C: CredentialStores>(
+    engine: &Engine<C>,
+    folder: &Mutex<Option<String>>,
+    first_run: &super::setup::FirstRun,
+) {
+    super::setup::start_now(engine, folder, first_run);
 }
 
 /// The status line's word for the view (DW-0401's `.mk-foot`); `None` while the window shows no Files (signed out,
@@ -123,7 +120,7 @@ pub fn tray_inputs_of(sync: &SyncView, status: &EngineStatusView) -> TrayInputs 
     TrayInputs {
         signed_in: gate != EngineGate::SignedOut && !session_expired,
         session_expired,
-        locked: gate == EngineGate::Locked,
+        locked: matches!(gate, EngineGate::Locked | EngineGate::ScreenLocked),
         paused: sync.paused,
         explorer_ready: running && sync.explorer == Explorer::Added,
         engine: if running {

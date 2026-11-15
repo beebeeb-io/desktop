@@ -186,7 +186,7 @@ pub(crate) fn badge_for(s: &State, section: SidebarSection) -> Option<Count> {
             (n > 0).then_some(Count::Pill(n))
         }
         SidebarSection::Trash => {
-            // The source's count: `None` when it cannot count without reading the whole list (the engine's).
+            // The source's count: `None` is no badge (Beebeeb has not said a number for this session and account).
             let n = s.frames.trash.source.count().unwrap_or(0) as u32;
             (n > 0).then_some(Count::Plain(n))
         }
@@ -499,7 +499,7 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
 }
 
 /// Format bytes as "240 GB", "1 TB" (base 10, as the board shows storage).
-fn format_storage(bytes: i64) -> String {
+pub(crate) fn format_storage(bytes: i64) -> String {
     const GB: i64 = 1_000_000_000;
     const TB: i64 = 1_000_000_000_000;
 

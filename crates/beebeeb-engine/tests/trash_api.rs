@@ -9,7 +9,7 @@
 //! with `#[cfg(not(target_os = "macos"))]`.
 #![cfg_attr(target_os = "macos", allow(unused_imports, dead_code))]
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use beebeeb_engine::app::settings_api::AccountCallError;
@@ -34,6 +34,9 @@ const SESSION_ENDED: u8 = 2;
 const PROTECTED: u8 = 3;
 /// A move to Trash is made and answered 204 with no body.
 const NO_BODY: u8 = 4;
+/// The file counters answer without the trashed count, or with it null.
+const COUNT_MISSING: u8 = 5;
+const COUNT_NULL: u8 = 6;
 
 const DOCS: &str = "a0000000-0000-4000-8000-000000000101";
 const CONTRACT: &str = "a0000000-0000-4000-8000-000000000102";
@@ -49,6 +52,8 @@ struct Account {
     paged: Arc<AtomicBool>,
     /// Runs once, inside the next listing request, before it answers.
     during: Hook,
+    /// What `GET /api/v1/files/count` says is in Trash.
+    count: Arc<AtomicU64>,
     email: String,
     phrase: String,
 }
@@ -71,8 +76,25 @@ fn account(email: &str) -> Account {
     let mode = Arc::new(AtomicU8::new(ANSWER));
     let paged = Arc::new(AtomicBool::new(false));
     let during: Hook = Arc::new(Mutex::new(None));
-    let (mode_in, paged_in, during_in) = (mode.clone(), paged.clone(), during.clone());
+    let count = Arc::new(AtomicU64::new(0));
+    let (mode_in, paged_in, during_in, count_in) = (mode.clone(), paged.clone(), during.clone(), count.clone());
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
+        if req.route() == "GET /api/v1/files/count" {
+            return match mode_in.load(Ordering::SeqCst) {
+                SERVER_ERROR => Reply::json(500, json!({ "error": BODY_MARKER })),
+                SESSION_ENDED => Reply::json(401, json!({ "error": BODY_MARKER })),
+                _ if req.bearer() != Some(token.as_str()) => Reply::json(401, json!({ "error": "unauthorized" })),
+                COUNT_MISSING => {
+                    Reply::ok(json!({ "total_files": 9, "total_folders": 1, "total_bytes": 1, "trashed_bytes": 1 }))
+                }
+                COUNT_NULL => Reply::ok(json!({ "trashed_files": null, "trashed_bytes": 1 })),
+                // The server's shape: the whole counter row, of which the engine reads `trashed_files`.
+                _ => Reply::ok(json!({
+                    "total_files": 9, "total_folders": 1, "total_bytes": 1,
+                    "trashed_files": count_in.load(Ordering::SeqCst), "trashed_bytes": 1
+                })),
+            };
+        }
         let restoring = is_restore(req) || is_trash(req);
         if !restoring && !(req.route() == "GET /api/v1/files" && req.query("trashed") == Some("true")) {
             return rest(req);
@@ -124,6 +146,7 @@ fn account(email: &str) -> Account {
         mode,
         paged,
         during,
+        count,
         email: email.to_string(),
         phrase,
     }
@@ -323,8 +346,7 @@ fn a_listing_is_bound_to_its_session_and_one_that_outlives_it_is_dropped() {
 }
 
 /// A listing asked while a lock is ending its session is never handed over, not even under the turn the lock
-/// leaves behind: the call ends as "not signed in". The lock is held half done until the listing's request has
-/// reached the fake, and the fake holds its reply until the lock is done (no clock decides the order).
+/// leaves behind: the call ends as "not signed in". The listing is asked while the lock is held half done.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn a_listing_asked_while_its_session_is_ending_is_never_handed_over() {
@@ -344,27 +366,22 @@ fn a_listing_asked_while_its_session_is_ending_is_never_handed_over() {
         1
     );
 
-    let (reached, was_reached) = std::sync::mpsc::channel::<()>();
-    let (release, released) = std::sync::mpsc::channel::<()>();
-    *account.during.lock().unwrap() = Some(Box::new(move || {
-        let _ = reached.send(());
-        let _ = released.recv_timeout(WAIT);
-    }));
+    // Since a person's call takes its session through the one choke point, a listing asked while the lock is under way
+    // is refused before any request leaves: it never reaches the fake, so there is no reply to hold back.
     let (answered, answer) = std::sync::mpsc::channel();
     let reader = engine.clone();
     engine.during_next_forget_for_test(Box::new(move || {
+        let (ended, ended_in) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = answered.send(reader.trash_listing().map(|listing| listing.items.len()));
+            let _ = ended.send(reader.trash_listing().map(|listing| listing.items.len()));
         });
-        was_reached
-            .recv_timeout(WAIT)
-            .expect("the listing's request reached the fake while the lock was under way");
+        // The lock stays half done until the listing's call ended.
+        let _ = answered.send(ended_in.recv_timeout(WAIT).expect("the listing call ended"));
     }));
     let _ = engine.lock();
     assert!(!engine.has_session(), "locked");
-    release.send(()).expect("the fake still holds the reply");
     assert_eq!(
-        answer.recv_timeout(WAIT).expect("the listing call ended"),
+        answer.recv_timeout(WAIT).expect("the lock saw the listing end"),
         Err(AccountCallError::NotSignedIn),
         "a listing for a session that ended is not handed over"
     );
@@ -747,4 +764,118 @@ fn a_session_bound_trash_fails_by_kind() {
         engine.trash_items_for(now, &[CONTRACT]),
         Err(NotTrashed::Call(AccountCallError::Offline))
     );
+}
+
+fn counts(fake: &FakeApi) -> usize {
+    fake.requests()
+        .iter()
+        .filter(|r| r.route() == "GET /api/v1/files/count")
+        .count()
+}
+
+/// The sidebar's count is the server's own number, asked for the session of the press: it lists nothing, it is sent
+/// under no other session (a lock and an unlock, a sign-out and a sign-in in between), a refusal is its kind and
+/// never the server's words, and no session asks nothing.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_trash_count_is_the_servers_number_for_the_session_of_the_press() {
+    let account = account("trash-count@example.eu");
+    account.count.store(7, Ordering::SeqCst);
+    let engine = signed_in(&account);
+
+    let now = engine.session_turn();
+    assert_eq!(engine.trash_count_for(now), Ok(7));
+    assert_eq!(
+        (counts(&account.fake), listings(&account.fake)),
+        (1, 0),
+        "one count, no listing"
+    );
+    account.count.store(0, Ordering::SeqCst);
+    assert_eq!(
+        engine.trash_count_for(now),
+        Ok(0),
+        "an empty Trash is a zero the server said"
+    );
+
+    // Another session than the press's: nothing is sent.
+    let before = counts(&account.fake);
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert_eq!(engine.trash_count_for(now), Err(AccountCallError::NotSignedIn));
+    assert_eq!(counts(&account.fake), before, "nothing was sent after the unlock");
+
+    // Refusals are kinds, never the server's body.
+    let now = engine.session_turn();
+    account.mode.store(SERVER_ERROR, Ordering::SeqCst);
+    assert_eq!(engine.trash_count_for(now), Err(AccountCallError::ServerError));
+    account.mode.store(SESSION_ENDED, Ordering::SeqCst);
+    assert_eq!(engine.trash_count_for(now), Err(AccountCallError::SessionEnded));
+
+    let signed_out = engine_at(&account.fake.base);
+    let before = counts(&account.fake);
+    assert_eq!(
+        signed_out.trash_count_for(signed_out.session_turn()),
+        Err(AccountCallError::NotSignedIn)
+    );
+    assert_eq!(counts(&account.fake), before, "nothing is asked without a session");
+}
+
+/// A counter row without the number (missing, or null) is an error of its own kind, never a zero.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_count_without_the_number_is_unreadable_never_zero() {
+    let account = account("trash-count-body@example.eu");
+    let engine = signed_in(&account);
+    let now = engine.session_turn();
+    for mode in [COUNT_MISSING, COUNT_NULL] {
+        account.mode.store(mode, Ordering::SeqCst);
+        assert_eq!(
+            engine.trash_count_for(now),
+            Err(AccountCallError::Unreadable),
+            "mode {mode}: no number is no answer"
+        );
+    }
+}
+
+/// Every move to or from Trash that moved an item is counted on the handle (a window that keeps the Trash count
+/// reads it); one that moved nothing is not.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn moves_to_and_from_trash_are_counted_on_the_handle() {
+    let account = account("trash-moves@example.eu");
+    account.vault.add_item(DOCS, None, "An invented name", false, 1);
+    let engine = signed_in(&account);
+    let now = engine.session_turn();
+    assert_eq!(engine.trash_moves(), 0);
+    engine.trash_items_for(now, &[DOCS]).expect("moved");
+    assert_eq!(engine.trash_moves(), 1);
+    engine.restore_items_for(now, &[DOCS]).expect("restored");
+    assert_eq!(engine.trash_moves(), 2);
+    engine.trash_items_for(now, &[]).expect("nothing to do");
+    assert_eq!(engine.trash_moves(), 2, "no item, no move");
+    account.mode.store(SERVER_ERROR, Ordering::SeqCst);
+    let _ = engine.trash_items_for(now, &[DOCS]);
+    assert_eq!(engine.trash_moves(), 2, "a refused move is not counted");
+}
+
+/// A locked screen keeps the session but refuses a person's call: the handle says so without sending anything.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_person_call_is_not_allowed_behind_a_locked_vault() {
+    let account = account("trash-allowed@example.eu");
+    let engine = signed_in(&account);
+    assert!(engine.person_calls_allowed());
+    engine.lock_screen().expect("the screen locks");
+    assert!(
+        !engine.person_calls_allowed(),
+        "a locked screen refuses a person's call"
+    );
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the screen opens");
+    assert!(engine.person_calls_allowed());
+    let _ = engine.lock();
+    assert!(!engine.person_calls_allowed(), "a closed vault too");
 }

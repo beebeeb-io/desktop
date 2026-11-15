@@ -61,6 +61,8 @@ pub struct BackupFolderRow {
     pub items: Option<u64>,
     /// When its last pass ran (server clock, milliseconds); `None` before its first.
     pub last_pass_at_ms: Option<i64>,
+    /// Why the backup turned itself off, in core's words (`backup_stop_words`); `Some` only while it is stopped.
+    pub stop_words: Option<String>,
 }
 
 /// What the Backups section reads about this computer.
@@ -104,6 +106,8 @@ pub struct StateRead {
     pub stopped: Vec<String>,
     /// Each known folder's last pass (server clock, milliseconds).
     pub last_pass: BTreeMap<String, i64>,
+    /// The stop rows themselves (reason and time), for the words of a stopped folder.
+    pub stops: Vec<crate::state_db::BackupStop>,
 }
 
 /// The backup rows of the signed-in account's state database.
@@ -115,12 +119,8 @@ pub fn read_state(db: &StateDb) -> Result<StateRead, BackupsError> {
             root_id: layout.root_id,
             device_folder: layout.device_folder_name,
         });
-    let stopped = db
-        .backup_stops()
-        .map_err(|_| BackupsError::State)?
-        .into_iter()
-        .map(|stop| stop.category)
-        .collect();
+    let stops = db.backup_stops().map_err(|_| BackupsError::State)?;
+    let stopped = stops.iter().map(|stop| stop.category.clone()).collect();
     let mut last_pass = BTreeMap::new();
     for folder in KNOWN_FOLDERS {
         let mark = db.backup_pass_mark(folder.key).map_err(|_| BackupsError::State)?;
@@ -132,6 +132,7 @@ pub fn read_state(db: &StateDb) -> Result<StateRead, BackupsError> {
         root,
         stopped,
         last_pass,
+        stops,
     })
 }
 
@@ -179,6 +180,9 @@ pub fn overview_from(
                 state: folder_state,
                 items: read_from.as_deref().filter(|_| reads_default).and_then(&count),
                 last_pass_at_ms: state.last_pass.get(folder.key).copied(),
+                stop_words: (folder_state == FolderState::Stopped)
+                    .then(|| crate::backup::stop::stop_view(&state.stops, folder.key, folder.display_name, false))
+                    .and_then(|view| view.stop_words),
             }
         })
         .collect();
@@ -256,17 +260,52 @@ impl<C: CredentialStores> Engine<C> {
             // Still this session before the settings file is written.
             handle.still_this_session().map_err(BackupsError::Refused)?;
         }
-        DesktopConfig::update_for(self.identity, |config| {
-            let changed = config.known_folder_enabled(key) != on;
-            config.set_known_folder(key, on);
-            (changed, ())
-        })
-        .map_err(|_| BackupsError::Settings)?;
-        match handle {
-            Some(handle) => handle
-                .with(|db| apply_switch(self.identity, db, key, on))
-                .map_err(BackupsError::Refused)?,
-            None => Ok(()),
+        let identity = self.identity;
+        switched_or_undone(
+            || {
+                DesktopConfig::update_for(identity, |config| {
+                    let was = config.known_folder_enabled(key);
+                    config.set_known_folder(key, on);
+                    (was != on, was)
+                })
+                .map_err(|_| BackupsError::Settings)
+            },
+            || match handle {
+                Some(handle) => handle
+                    .with(|db| apply_switch(identity, db, key, on))
+                    .map_err(BackupsError::Refused)?,
+                None => Ok(()),
+            },
+            |was| {
+                // Best effort: the switch must read as it did before, not half done.
+                if DesktopConfig::update_for(identity, |config| {
+                    config.set_known_folder(key, was);
+                    (true, ())
+                })
+                .is_err()
+                {
+                    tracing::warn!("backups: a failed switch could not be put back in the settings file");
+                }
+            },
+        )
+    }
+}
+
+/// The switch as one step: `write` changes the settings file first (and says what it was), then `database` does the
+/// state database's part (off purges the folder's pending uploads, on clears a stop). When the database part does not
+/// happen (a failed purge, or the session changed in between) `undo` puts the settings file back, so a folder is
+/// never left "off" with its uploads still queued (review of desktop#384). Nothing here names a folder.
+fn switched_or_undone<W: Copy>(
+    write: impl FnOnce() -> Result<W, BackupsError>,
+    database: impl FnOnce() -> Result<(), BackupsError>,
+    undo: impl FnOnce(W),
+) -> Result<(), BackupsError> {
+    let was = write()?;
+    match database() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            undo(was);
+            Err(error)
         }
     }
 }

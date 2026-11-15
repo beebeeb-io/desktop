@@ -304,20 +304,48 @@ impl Ui {
         self.unlock_problem
     }
 
+    /// Whether the "Use a passkey" door is drawn: only where the source can sign in with one.
+    pub fn passkey_available(&self) -> bool {
+        self.source.passkey_available()
+    }
+
+    /// Whether the in-app doors are drawn: approval from another device, recovery with the 12 words.
+    pub fn in_app_doors(&self) -> bool {
+        self.source.in_app_doors_available()
+    }
+
+    /// "Open the recovery page" on "Trouble signing in?": recovery replaces the password and
+    /// re-wraps the keys, so the web does it (the shell opens the page).
+    pub fn open_recovery_page(&mut self) {
+        if self.screen == Screen::Forgot {
+            self.go(Intent::OpenRecoveryPage);
+        }
+    }
+
+    /// The doors the engine does not bind in the app (another device, the 12 words): they open the web's page.
+    pub(super) fn open_recovery_page_from_any(&mut self) {
+        if !self.busy && !self.passkey_waiting {
+            self.go(Intent::OpenRecoveryPage);
+        }
+    }
+
     /// "Use a passkey": Windows asks; the app never sees the passkey.
     pub fn use_passkey(&mut self) {
-        if self.busy || self.passkey_waiting || self.screen != Screen::SignIn {
+        if self.busy || self.passkey_waiting || self.screen != Screen::SignIn || !self.passkey_available() {
             return;
         }
         self.passkey_waiting = true;
         self.problem = None;
         self.deleted = false;
-        self.source.begin_passkey();
+        self.source.begin_passkey_for(self.email.text.trim());
         self.pump();
     }
 
     pub fn can_unlock(&self) -> bool {
-        self.screen == Screen::UnlockVault && !self.unlocking && !self.password.text.is_empty()
+        self.screen == Screen::UnlockVault
+            && !self.unlocking
+            && !self.password.text.is_empty()
+            && !self.lock_password_waiting()
     }
 
     /// Unlock, and Enter in the password field (DW-A30).
@@ -325,9 +353,14 @@ impl Ui {
         if !self.can_unlock() {
             return;
         }
-        self.unlocking = true;
-        self.unlock_problem = None;
-        self.source.begin_unlock(&self.password.text);
+        self.lock_notice = None;
+        // The screen lock's password goes to its own path (counted tries, no new session); the vault level's is
+        // the strong unlock.
+        if !self.lock_submit_password() {
+            self.unlocking = true;
+            self.unlock_problem = None;
+            self.source.begin_unlock(&self.password.text);
+        }
         self.pump();
     }
 
@@ -346,6 +379,10 @@ impl Ui {
     /// "Recover with phrase" (DW-A45), and Back from the new password: recovery's first step,
     /// the email and the twelve words (DW-A47).
     pub fn recover_with_phrase(&mut self) {
+        if !self.in_app_doors() && matches!(self.screen, Screen::Forgot | Screen::NewPassword) {
+            self.open_recovery_page_from_any();
+            return;
+        }
         if !matches!(self.screen, Screen::Forgot | Screen::NewPassword) || self.setting {
             return;
         }
@@ -466,8 +503,17 @@ impl Ui {
                     // The partial sign-in ran out: back to the password.
                     Err(TwoFactorProblem::Expired) => {
                         self.drop_steps();
-                        self.screen = Screen::SignIn;
-                        self.problem = Some(SignInProblem::Other);
+                        if self.lock_level().is_some() {
+                            // A lock holds the window: back to the lock's own password screen, never the
+                            // sign-in form (an account is signed in; the form could only refuse).
+                            self.screen = Screen::UnlockVault;
+                            self.password.clear();
+                            self.unlock_problem = Some(SignInProblem::Other);
+                            self.code_problem = None;
+                        } else {
+                            self.screen = Screen::SignIn;
+                            self.problem = Some(SignInProblem::Other);
+                        }
                         self.focus = Some(PASSWORD_KEY);
                     }
                     Err(problem) => {

@@ -14,8 +14,8 @@
 //! with nothing behind it (`--db`): it knows nothing and refuses every action.
 //! The engine's implementation is another lane's.
 
-use crate::source::{DriveItem, format_size};
-use crate::ui::file_list::format_date;
+pub use super::actions_data::Read;
+use crate::source::DriveItem;
 
 /// What the details panel shows of one item. `None`: the source does not know, and the row is left out.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +61,15 @@ pub enum ActionError {
     /// This system cannot do it at all (Free up space for a selection, off Windows): nothing was changed, and
     /// Try again would change nothing either.
     NotOnThisSystem,
+    /// This app cannot do it yet (a link to a folder, to several items, a view-only link): nothing was sent.
+    NotYet,
+    /// Copy link left it: the file already has a link, and that link cannot be copied again yet. No second link
+    /// was made, and Try again would change nothing.
+    HasLink,
+    /// Cancel upload left it: its copy (the only one: it was never uploaded) cannot go to the Recycle Bin (none on
+    /// its drive, too big for it, or the move failed), and it is never deleted for good. The file and its upload
+    /// stay as they were.
+    NotToRecycleBin,
 }
 
 /// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").
@@ -194,25 +203,17 @@ pub enum Change {
     /// A move to Trash (`Action::Trash`) or its Undo (`Action::Restore`) was tried: per item asked, whether
     /// Beebeeb made it. Only from a source that answers later.
     Trash { action: Action, items: Vec<TrashOutcome> },
+    /// The upload with this id was cancelled (copy in the Recycle Bin, change dropped).
+    Cancelled { id: String },
+    /// A link (`Action::CopyLink`, `Action::ShareLink`) was asked for: the link Beebeeb accepted, for the
+    /// clipboard, or why there is none. Only from a source that answers later.
+    Link {
+        action: Action,
+        answer: Result<super::link::LinkText, ActionError>,
+    },
 }
 
-/// One item of a [`Change::Trash`]. `left`: `None`: it was made; otherwise why this item was left as it was.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrashOutcome {
-    pub id: String,
-    pub left: Option<ActionError>,
-}
-
-/// One item of a [`Change::Local`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LocalOutcome {
-    pub id: String,
-    /// The row's `pc_status` as the engine reports it AFTER the work (`Some(None)`: no mark, a folder that is
-    /// not kept). `None`: the engine could not say, and the row stays as it is drawn.
-    pub now: Option<Option<String>>,
-    /// `None`: the change was made. Otherwise why this item was left; Try again is for these alone.
-    pub left: Option<ActionError>,
-}
+pub use super::outcomes::{LocalOutcome, TrashOutcome};
 
 /// The counts beside the sidebar's sections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,7 +262,8 @@ pub trait FilesSource: Send + 'static {
     /// `taken`: the folder's names as the window shows them.
     fn duplicate(&mut self, items: &[DriveItem], taken: &[&str]) -> Result<(), ActionError>;
     fn keep_offline(&mut self, items: &[DriveItem], keep: bool) -> Result<(), ActionError>;
-    /// Put the share link of these on the clipboard. `Ok`: it is there.
+    /// Put the share link of these on the clipboard. `Ok`: it is there, or (a source that answers later)
+    /// accepted: the link arrives as `Change::Link` and the WINDOW copies it (only a handler's `Tx` can).
     fn copy_link(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     /// Open these files in their apps (downloaded and decrypted on this PC first).
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
@@ -283,10 +285,9 @@ pub trait FilesSource: Send + 'static {
     fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError>;
     /// What accepted actions changed since the last call, oldest first.
     fn changes(&mut self) -> Vec<Change>;
-    /// Does this source answer `keep_offline`, `free_up_space`, `trash` and `restore` LATER (`Ok` is "accepted",
-    /// what happened arrives through [`FilesSource::changes`] as `Change::Local`, `Change::Trash` or
-    /// `Change::Failed`)? Then the window draws nothing of the change before that, and asks `changes` every
-    /// frame. Default: answered in the call.
+    /// Does this source answer `keep_offline`, `free_up_space`, `trash`, `restore`, `copy_link` and `share_link`
+    /// LATER (`Ok` is "accepted"; what happened arrives through [`FilesSource::changes`])? Then the window draws
+    /// nothing of the change before that, and asks `changes` every frame. Default: answered in the call.
     fn answers_later(&self) -> bool {
         false
     }
@@ -303,8 +304,12 @@ pub trait FilesSource: Send + 'static {
     // ---- The action dialogs (lane files-actions). Each has a default for a source that knows
     // nothing: no sample data in a build that ships, and every action refused. ----
 
-    /// Make a link to these with these options and put it on the clipboard (DW-0407). The link
-    /// itself is never handed to the window: it is not drawn anywhere.
+    /// Is an accepted link still unanswered? `false`: its answer was dropped, and the window forgets the press.
+    fn link_pending(&self) -> bool {
+        true
+    }
+    /// Make a link to these with these options and put it on the clipboard (DW-0407). The link is never drawn;
+    /// a source that answers later hands it over once, in `Change::Link`, for the clipboard only.
     fn share_link(
         &mut self,
         _items: &[DriveItem],
@@ -325,10 +330,22 @@ pub trait FilesSource: Send + 'static {
     fn restore_version(&mut self, _item: &DriveItem, _version: &str) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    /// The Versions or the Details dialog of this FILE opened: read its versions if what is held is old.
+    fn ask_versions(&mut self, _item: &DriveItem) {}
+    /// Where the read of a file's versions stands (what [`FilesSource::versions`] is empty for).
+    fn versions_state(&self, _item: &DriveItem) -> Read {
+        Read::Answered
+    }
     /// What Preview shows of a file (DW-0408). `None`: no preview for it (DW-0408b).
     fn preview(&mut self, _item: &DriveItem) -> Option<super::actions_data::PreviewOf> {
         None
     }
+    /// Where the preview of `item` stands, for a source that answers `preview` later (`Shown` is handed over once).
+    fn preview_later(&mut self, _item: &DriveItem) -> Option<super::actions_data::Previewed> {
+        None
+    }
+    /// The panel closed or moved to another file: stop the read, wipe what it decrypted.
+    fn cancel_preview(&mut self) {}
     /// Windows' app chooser for this file; it is decrypted for the app picked (DW-0408b).
     fn open_with(&mut self, _item: &DriveItem) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
@@ -342,6 +359,13 @@ pub trait FilesSource: Send + 'static {
     fn keep_version(&mut self, _file: &str, _keep: super::actions_data::Keep) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    /// The copies coming down now, each with how far it has come (DW-0412). Empty: none is, or this
+    /// source cannot tell.
+    fn downloads(&self) -> Vec<super::keeping::Download> {
+        Vec::new()
+    }
+    /// The account left (a sign-out, another account): forget what was read of the copies coming down.
+    fn forget_downloads(&mut self) {}
     /// What uploads now: what stopped, what moves, what waits (DW-0426, DW-0427). `None`: nothing.
     fn uploads(&self) -> Option<super::uploads::Uploads> {
         None
@@ -350,13 +374,19 @@ pub trait FilesSource: Send + 'static {
     fn retry_upload(&mut self, _id: &str) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
-    /// Cancel the upload with this id; nothing is left half-uploaded.
+    /// Cancel the upload with this id (a NEW file only): the copy goes to the Recycle Bin, the change is dropped.
+    /// A source that answers later says what it did as [`Change::Cancelled`].
     fn cancel_upload(&mut self, _id: &str) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
-    /// The account that was uploading left (a sign-out, another account): cancel what is in
-    /// flight and forget every upload of it, so that [`FilesSource::uploads`] says nothing of the
-    /// earlier account. Nothing is left half-uploaded. Default: a source that keeps no uploads.
+    /// The Uploads panel opened: read again if what is held is old.
+    fn ask_uploads(&mut self) {}
+    /// Can this source cancel THIS upload? `false` (the default): the row menu does not offer it.
+    fn cancels_upload(&self, _id: &str) -> bool {
+        false
+    }
+    /// The account that was uploading left: forget what is shown of its uploads. Unsent changes are the
+    /// engine's sign-out's, never this call's. Default: a source that keeps no uploads.
     fn forget_uploads(&mut self) {}
     /// Pause every upload, or let them go on.
     fn pause_uploads(&mut self, _pause: bool) -> Result<(), ActionError> {
@@ -367,6 +397,11 @@ pub trait FilesSource: Send + 'static {
     fn backups_root(&self) -> Option<String> {
         None
     }
+    /// The sidebar's Backups has no folder to show (`backups_root` is `None`): the source may look again, now and
+    /// then, in case the folder came to be. Called on the window's thread: it must not wait.
+    fn look_for_backups(&mut self) {}
+    /// The window now shows this folder (`None`: the top of Files): read what the source needs for it.
+    fn folder_shown(&mut self, _folder: Option<&str>) {}
     /// Why `item` (with no item: anything in `folder`) cannot be moved, renamed or deleted, with
     /// the core's words for it (DW-0425). `None`: it can.
     fn protection(&self, _folder: Option<&str>, _item: Option<&DriveItem>) -> Option<super::protected::Protection> {
@@ -386,67 +421,7 @@ fn ids(items: &[DriveItem]) -> Vec<String> {
     items.iter().map(|i| i.id.clone()).collect()
 }
 
-/// What a row itself says about the item, for a source that knows no more.
-pub fn details_of_row(item: &DriveItem, folder: &str) -> Details {
-    let size = if item.is_folder {
-        item.child_count.map(|c| format!("{c} items")).unwrap_or_default()
-    } else {
-        item.size.map(format_size).unwrap_or_default()
-    };
-    let kept = item.pc_status.as_deref() == Some("available_offline");
-    let place = match item.pc_status.as_deref() {
-        Some("online_only") => "Online only now",
-        Some("on_this_pc") => "Downloaded",
-        Some("available_offline") => "Kept on this PC",
-        _ => "",
-    };
-    let offline_note = match (place.is_empty(), size.is_empty()) {
-        (false, false) => format!("{place} \u{00B7} {size}"),
-        (false, true) => place.to_string(),
-        (true, _) => size.clone(),
-    };
-    let shared = if item.shared_type.is_some() {
-        "Anyone with the link".to_string()
-    } else if item.shared_badges.is_empty() {
-        "Only you".to_string()
-    } else {
-        item.shared_badges
-            .iter()
-            .map(|b| b.initials.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    Details {
-        kind: kind_of(item).to_string(),
-        size,
-        changed: format_date(&item.modified_at),
-        changed_on: None,
-        added: None,
-        where_: folder.to_string(),
-        versions: None,
-        shared,
-        offline_note,
-        kept_offline: kept,
-        picture: item.has_thumbnail,
-    }
-}
-
-pub fn kind_of(item: &DriveItem) -> &'static str {
-    if item.is_folder {
-        return "Folder";
-    }
-    match item.mime.as_deref() {
-        Some("application/pdf") => "PDF document",
-        Some(m) if m.contains("spreadsheet") => "Spreadsheet",
-        Some(m) if m.contains("presentation") || m.contains("keynote") => "Presentation",
-        Some(m) if m.starts_with("image/heic") || m.starts_with("image/heif") => "HEIC image",
-        Some(m) if m.starts_with("image/") => "Image",
-        Some(m) if m.starts_with("video/") => "Video",
-        Some(m) if m.starts_with("audio/") => "Audio",
-        Some(m) if m.contains("document") => "Document",
-        _ => "File",
-    }
-}
+pub use super::row_facts::{details_of_row, kind_of};
 
 /// "Contract draft.pdf" → "Contract draft copy.pdf"; taken → "Contract draft copy 2.pdf" (DW-0406).
 pub fn copy_name(name: &str, taken: &[&str]) -> String {
@@ -660,7 +635,11 @@ impl FilesSource for FilesFixture {
     }
 
     fn sync_state(&self) -> Option<String> {
-        Some("Up to date".into())
+        Some(super::keeping::sync_word(&self.more.downloads))
+    }
+
+    fn downloads(&self) -> Vec<super::keeping::Download> {
+        self.more.downloads.clone()
     }
 
     fn details(&self, item: &DriveItem, folder: &str) -> Details {
@@ -974,6 +953,10 @@ impl FilesSource for FilesFixture {
             upload.state = super::uploads::UploadState::Waiting("Waiting to upload".to_string());
         }
         Ok(())
+    }
+
+    fn cancels_upload(&self, _id: &str) -> bool {
+        true
     }
 
     fn cancel_upload(&mut self, id: &str) -> Result<(), ActionError> {

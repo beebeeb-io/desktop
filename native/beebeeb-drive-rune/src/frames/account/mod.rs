@@ -15,13 +15,16 @@
 
 mod activity;
 mod app_lock;
+pub mod app_lock_password;
 pub mod approve;
 #[cfg(test)]
 mod approve_tests;
+mod calls;
 mod delete;
 mod form;
 mod forms;
 pub mod icons;
+pub mod late;
 mod overview;
 mod passkeys;
 mod plan;
@@ -32,7 +35,15 @@ pub mod source;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_calls;
+#[cfg(test)]
+mod tests_late;
+#[cfg(test)]
+mod tests_offline;
+#[cfg(test)]
 mod tests_security;
+#[cfg(test)]
+mod tests_wipe;
 mod two_factor;
 
 use crate::State;
@@ -175,6 +186,11 @@ pub enum Dialog {
     Plan,
     /// The menu of App lock's delays (DW-0716): the item under the pointer or the keys.
     LockDelay(Option<usize>),
+    /// App lock's change with the account password (no board frame: D-2; `app_lock_password`). `sent`: the password
+    /// went to the engine and its answer has not come (the field is not focused meanwhile).
+    LockPassword {
+        sent: bool,
+    },
     /// Approving a sign-in: the review with its code field (DW-A13), Windows Hello asking
     /// (DW-A14), and the three ends (DW-A15, DW-A16, DW-A17; `handled`: "Already handled").
     ApproveReview,
@@ -207,6 +223,7 @@ impl std::fmt::Debug for Dialog {
             Dialog::LeaveCodes => f.write_str("LeaveCodes"),
             Dialog::Plan => f.write_str("Plan"),
             Dialog::LockDelay(hot) => write!(f, "LockDelay({hot:?})"),
+            Dialog::LockPassword { sent } => write!(f, "LockPassword {{ sent: {sent} }}"),
             Dialog::ApproveReview => f.write_str("ApproveReview"),
             Dialog::ApproveHello => f.write_str("ApproveHello"),
             Dialog::ApproveApproved => f.write_str("ApproveApproved"),
@@ -245,6 +262,8 @@ impl Dialog {
             Dialog::Plan => false,
             // DW-0716: four lengths of time. No key material.
             Dialog::LockDelay(_) => false,
+            // D-2: takes the account password.
+            Dialog::LockPassword { .. } => true,
         }
     }
 }
@@ -277,6 +296,9 @@ pub struct AccountUi {
     told_open: Option<Pane>,
     /// A sign-out asked from the Security page's confirm: waiting for its answer, or refused.
     pub signing_out: security_overview::SigningOut,
+    /// A password change answered while its page was not open, to be said wherever the person is (`late`). Outside
+    /// the form: leaving the account's sections keeps it; the end of the session drops it.
+    pub late_change: Option<late::Late>,
 }
 
 impl Default for AccountUi {
@@ -289,6 +311,7 @@ impl Default for AccountUi {
             source: source::first(instance::DEV_BUILD),
             told_open: None,
             signing_out: security_overview::SigningOut::default(),
+            late_change: None,
         }
     }
 }
@@ -321,7 +344,9 @@ pub fn sync(s: &mut State) {
     let section = routed(s);
     if section != Some(s.account.pane.section()) {
         s.account.show(section.and_then(Pane::root).unwrap_or(Pane::Account));
-        // What was typed, and every secret a page held, goes with the page.
+        // What was typed, and every secret a page held, goes with the page. Backup codes on screen go back to the
+        // source, which keeps them for after a screen lock of the same account and wipes them otherwise.
+        hand_back_codes(&mut s.account);
         s.account.form = form::Form::default();
         approve::leave(&mut s.account);
     }
@@ -334,10 +359,42 @@ pub fn sync(s: &mut State) {
 pub fn end_flows(s: &mut State) {
     let ui = &mut s.account;
     approve::leave(ui);
+    // Backup codes on screen: the source keeps them through a screen lock of the same account (review of
+    // desktop#424), and wipes them for a sign-out, a closed vault or another account.
+    hand_back_codes(ui);
     ui.form = form::Form::default();
+    // A password answer kept to be said belongs to the session that ended.
+    ui.late_change = None;
     // A sign-out that waited for its answer: the session it was for is over, its late answer is the source's to drop.
     ui.signing_out = security_overview::SigningOut::default();
     ui.show(Pane::root(ui.pane.section()).unwrap_or(Pane::Account));
+}
+
+/// Backup codes a page held go back to the source when the page ends ([`AccountSource::keep_codes`]).
+fn hand_back_codes(ui: &mut AccountUi) {
+    if let Some(codes) = ui.form.codes.take()
+        && let Some(source) = ui.source.as_deref_mut()
+    {
+        source.keep_codes(codes);
+    }
+}
+
+/// Backup codes a screen lock kept from the page, once the window is open again (the gate is Ready): the Backup
+/// codes page shows them, as it does for an answer the page waited for.
+fn show_late_codes(s: &mut State) -> bool {
+    if s.shell.app.gate() != crate::shell::app::GateState::Ready {
+        return false;
+    }
+    let Some((kind, codes)) = s.account.source.as_deref_mut().and_then(|source| source.late_codes()) else {
+        return false;
+    };
+    if s.account.form.waiting == Some(kind) {
+        s.account.form.waiting = None;
+    }
+    s.account.form.codes = Some(codes);
+    s.account.pane = Pane::BackupCodes;
+    go(s, "DW-A70");
+    true
 }
 
 /// The pane the window shows now, when the route is on one of this lane's sections.
@@ -370,24 +427,51 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         }
     }
     let pumped = source.pump();
+    let call = source.call_answer();
+    // A password answer kept to be said: dropped once its press's session or account is no longer the one now.
+    late::check(ui);
+    // App lock's password step closes once nothing offers it any more.
+    let step_closed = app_lock_password::follow(ui);
+    let Some(source) = ui.source.as_mut() else {
+        return false;
+    };
     // A sign-out that is out: its answer, when it came. Only then is anything of it drawn.
     let answered = match ui.signing_out.waiting {
         Some(all) => source.sign_out_result().map(|answer| (all, answer)),
         None => None,
     };
-    if pumped.busy || pumped.watch || ui.signing_out.waiting.is_some() {
+    // A name that was sent: its answer, when it came.
+    let named = forms::take_in_name(ui);
+    if pumped.busy || pumped.watch || ui.signing_out.waiting.is_some() || ui.form.saving_name {
         tx.wake_after(POLL_EVERY);
     }
     // A toast that goes by itself: look again when its time is up.
     if let Some(stay) = pumped.wake_in {
         tx.wake_after(stay);
     }
+    if let Some((kind, answered)) = call {
+        // Beebeeb's answer to a call a page started: shown as the press would have shown it, or dropped when the
+        // page no longer waits for it.
+        let frame = calls::settle(&mut s.account, kind, answered);
+        if let Some(frame) = frame {
+            go(s, frame);
+        }
+        return true;
+    }
     if let Some((all, answer)) = answered {
         s.account.signing_out.waiting = None;
         security_overview::settle_sign_out(s, all, answer);
         return true;
     }
-    pumped.changed
+    if let Some(frame) = named {
+        go(s, frame);
+        return true;
+    }
+    // Last: everything taken from the source above is settled first.
+    if show_late_codes(s) {
+        return true;
+    }
+    pumped.changed || step_closed
 }
 
 /// The toast over a pane. Something that worked is the settings toast, as before. Something that was not done
@@ -409,19 +493,7 @@ fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
             }
         },
     });
-    Some(
-        row()
-            .key("toast-0-line")
-            .pin(Some(set::SIDEBAR_W), None, Some(0.0), Some(42.0))
-            .justify_center()
-            .child(crate::ui::toast::toast(
-                &crate::theme::icons_settings::WARN_CIRCLE,
-                crate::ui::toast::Tone::Failed,
-                words,
-                again,
-                t,
-            )),
-    )
+    Some(crate::ui::settings_notice::standing("toast", words, again, 0, t))
 }
 
 /// How soon the window looks again while an answer is out (the worker also wakes it).
@@ -610,6 +682,15 @@ fn open_on(s: &mut State, frame: &'static str) {
     go(s, frame);
 }
 
+/// A scene has no poll: the answers the board gave are taken here, as the window's poll takes them (`poll`).
+fn take_answers(s: &mut State) {
+    while let Some((kind, answered)) = s.account.source.as_deref_mut().and_then(|source| source.call_answer()) {
+        if let Some(frame) = calls::settle(&mut s.account, kind, answered) {
+            go(s, frame);
+        }
+    }
+}
+
 /// The frames of this group that are built: the id, and what shows it on a fresh `State`.
 /// A page whose board frame shows typed text gets that text; the board draws most of them at
 /// a later moment than their opening (fields filled, no field in focus).
@@ -682,14 +763,17 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     }),
     ("DW-A69", |s| {
         open_on(s, "DW-A69");
+        take_answers(s);
         form::type_in(&mut s.account.form.code, "51");
     }),
     ("DW-A70", |s| {
         open_on(s, "DW-A69");
+        take_answers(s);
         form::type_in(&mut s.account.form.code, source::BOARD_CODE);
         if let Some(frame) = two_factor::turn_on(&mut s.account) {
             go(s, frame);
         }
+        take_answers(s);
     }),
     ("DW-A71", |s| open_on(s, "DW-A71")),
     ("DW-A72", |s| {
@@ -712,7 +796,6 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A77", |s| open_on(s, "DW-A77")),
     ("DW-A78", |s| {
         open_on(s, "DW-A78");
-        form::type_in(&mut s.account.form.code, "51");
     }),
     ("DW-A79", |s| {
         open_on(s, "DW-A79");
@@ -879,7 +962,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .and_then(|_| source.plan_details())
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
-        Pane::Security => security_overview::pane(source, dialog, &ui.signing_out, &t),
+        Pane::Security => {
+            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, &t);
+            (page, over.or_else(|| app_lock_password::over(source, form, dialog, &t)))
+        }
         Pane::Sessions => sessions::pane(source, dialog, &t),
         Pane::Name => (forms::name(form, &t), None),
         Pane::Email => (forms::email(form, &t), None),
@@ -942,11 +1028,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if ev.key != Key::Escape {
         return false;
     }
-    if approve::on_escape(s) {
+    if approve::on_escape(s) || app_lock_password::on_escape(s) {
         return true;
     }
     // A sign-out that is out cannot be called back: its confirm stays until the answer.
-    if s.account.signing_out.waiting.is_some() {
+    if s.account.signing_out.waiting.is_some() || (s.account.form.saving_name && s.account.pane == Pane::Name) {
         return true;
     }
     if s.account.dialog.take().is_some() {

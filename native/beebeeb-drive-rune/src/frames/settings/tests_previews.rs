@@ -82,7 +82,7 @@ fn press(rt: &mut Runtime<State>, target: &str) {
 fn stored(rt: &Runtime<State>) -> (PreviewSize, PreviewFormat, bool) {
     match rt.state.settings.drive.photo_previews() {
         PhotoPreviews::Ready(p) => (p.size, p.format, p.on),
-        PhotoPreviews::Unavailable => panic!("the fixture answers"),
+        _ => panic!("the fixture answers"),
     }
 }
 
@@ -368,7 +368,7 @@ fn every_size_and_format_says_its_weight_or_that_it_is_not_measured() {
             assert!(!line.contains("\u{b7} ,") && !line.contains("  "), "{name}: {line}");
             let weight = match rt.state.settings.drive.photo_previews() {
                 PhotoPreviews::Ready(p) => p.weight(size, format),
-                PhotoPreviews::Unavailable => panic!("the fixture answers"),
+                _ => panic!("the fixture answers"),
             };
             let says = weight.clone().unwrap_or_else(|| NOT_MEASURED.to_string());
             assert_eq!(line, format!("{name} \u{b7} {says}, original 30.9 MB"));

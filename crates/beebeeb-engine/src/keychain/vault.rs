@@ -2,7 +2,75 @@
 
 use super::*;
 
+/// The flags of the two-level lock that outlive the app (core's `flows::lock::StartFacts`), stored beside the
+/// session under core's own entry names, as the bytes `1` / `0`. Not secrets: they say how the app starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockFlag {
+    /// "Ask for my password when Beebeeb starts".
+    AskPasswordAtStart,
+    /// The vault was closed (by hand, by the start setting, or because a flag could not be read).
+    VaultClosed,
+    /// Not a flag: the screen lock's wrong-try count (`screen_lock::AttemptState::to_bytes`), under core's entry name
+    /// `lock.attempts`. Read and written only as bytes ([`AuthVault::lock_entry`]); never logged.
+    Attempts,
+    /// Not a flag: the screen lock's local check record (`ScreenCheckRecord::to_bytes`), under core's entry name
+    /// `lock.screen_check`. Bytes only; never logged.
+    ScreenCheck,
+    /// "App lock", the screen level's per-device switch (core's `lock.app_lock`). ABSENT IS ON: read it only with
+    /// [`AuthVault::lock_setting`]`(.., true)`, never [`AuthVault::lock_flag`]; bytes that are neither value, or a
+    /// failed read, count as on.
+    AppLock,
+    /// Not a flag: "Locks again after", how long the person may be away before an open app locks its screen by
+    /// itself while app lock is on (decision 2519: an engine entry beside `lock.app_lock`, `lock.after`). The bytes
+    /// are the delay in seconds, one of a closed set (`app::lock_password_api::LockAfter`); read and written only as
+    /// bytes ([`AuthVault::lock_entry`]). Absent is the default; bytes that are not one of the set, or a failed read,
+    /// count as the strictest choice. Not a secret.
+    LockAfter,
+}
+
+impl LockFlag {
+    /// App lock first: a removal of every entry that stops part way must never leave `lock.app_lock = 0` behind
+    /// (it would open the next account's start without a proof). Every removal is tried. An entry left behind by a
+    /// removal that failed fails closed, except `lock.after`: a valid delay left behind stays that delay for the
+    /// next account (a long one is weaker than the default) until that account's first sign-in removes the entries
+    /// again (review of #452, P3-5).
+    pub const ALL: [Self; 6] = [
+        Self::AppLock,
+        Self::AskPasswordAtStart,
+        Self::VaultClosed,
+        Self::Attempts,
+        Self::ScreenCheck,
+        Self::LockAfter,
+    ];
+
+    pub const fn leaf(self) -> &'static str {
+        match self {
+            Self::AskPasswordAtStart => "lock.ask_password_at_start",
+            Self::VaultClosed => "lock.vault_closed",
+            Self::Attempts => "lock.attempts",
+            Self::ScreenCheck => "lock.screen_check",
+            Self::AppLock => "lock.app_lock",
+            Self::LockAfter => "lock.after",
+        }
+    }
+}
+
+const LOCK_FLAGS_UNSUPPORTED: AuthStoreError = AuthStoreError::Unsupported("lock flags are not kept by this store");
+
 pub trait AuthSecretStore: Send + Sync {
+    /// Store one lock flag's bytes. A store that keeps none refuses: the lock then lasts for this run only.
+    fn save_lock_flag(&self, _flag: LockFlag, _bytes: &[u8]) -> AuthResult<()> {
+        Err(LOCK_FLAGS_UNSUPPORTED)
+    }
+    /// Read one lock flag's bytes; `Ok(None)`: never written. A store that keeps none answers an error, which the
+    /// start rule reads as "could not be read": the vault starts closed.
+    fn load_lock_flag(&self, _flag: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        Err(LOCK_FLAGS_UNSUPPORTED)
+    }
+    /// Remove one lock flag. A no-op success when absent.
+    fn delete_lock_flag(&self, _flag: LockFlag) -> AuthResult<()> {
+        Ok(())
+    }
     fn save_session_token(&self, token: &SessionToken) -> AuthResult<()>;
     fn load_session_token(&self) -> AuthResult<Option<SessionToken>>;
     fn delete_session_token(&self) -> AuthResult<()>;
@@ -249,6 +317,51 @@ impl<S: AuthSecretStore> AuthVault<S> {
         self.state = VaultLockState::Locked;
     }
 
+    /// A stored lock flag, by core's rule (`read_lock_flag`): absent is off; `None` means it could not be read (a
+    /// store failure, or bytes that are neither flag value) and the caller treats the vault as closed.
+    pub fn lock_flag(&self, flag: LockFlag) -> Option<bool> {
+        self.lock_setting(flag, false)
+    }
+
+    /// A stored lock setting with what an absent entry means (core's `read_lock_setting`). `None`: it could not be
+    /// read (a store failure, or bytes that are neither value); the caller takes the safe side.
+    pub fn lock_setting(&self, flag: LockFlag, absent: bool) -> Option<bool> {
+        match self.store.load_lock_flag(flag) {
+            Ok(None) => Some(absent),
+            Ok(Some(bytes)) if bytes == b"1" => Some(true),
+            Ok(Some(bytes)) if bytes == b"0" => Some(false),
+            Ok(Some(_)) | Err(_) => None,
+        }
+    }
+
+    /// Remove every lock entry, app lock first ([`LockFlag::ALL`]'s order); every removal is tried. An account's
+    /// first sign-in on this computer carries nothing of a lock setting (core's first `Session::save`).
+    pub fn clear_lock_entries(&self) -> AuthResult<()> {
+        LockFlag::ALL
+            .into_iter()
+            .fold(Ok(()), |done, flag| done.and(self.store.delete_lock_flag(flag)))
+    }
+
+    /// The raw bytes of a lock entry that is not a 1/0 flag ([`LockFlag::Attempts`], [`LockFlag::ScreenCheck`],
+    /// [`LockFlag::LockAfter`]).
+    pub fn lock_entry(&self, entry: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        self.store.load_lock_flag(entry)
+    }
+
+    /// Store the raw bytes of such an entry.
+    pub fn set_lock_entry(&self, entry: LockFlag, bytes: &[u8]) -> AuthResult<()> {
+        self.store.save_lock_flag(entry, bytes)
+    }
+
+    /// Remove a lock flag (absent reads as off).
+    pub fn clear_lock_flag(&self, flag: LockFlag) -> AuthResult<()> {
+        self.store.delete_lock_flag(flag)
+    }
+
+    pub fn set_lock_flag(&self, flag: LockFlag, on: bool) -> AuthResult<()> {
+        self.store.save_lock_flag(flag, if on { b"1" } else { b"0" })
+    }
+
     /// Remove only the session token: R8, a token the server rejected, found at startup. The wrapped vault key and the
     /// account email stay; [`Self::clear_session`] remains the full sign-out.
     pub fn clear_session_token(&mut self) -> AuthResult<()> {
@@ -262,6 +375,9 @@ impl<S: AuthSecretStore> AuthVault<S> {
     /// cannot be removed must not leave the vault key, the email or the owner tags behind as well.
     pub fn clear_session(&mut self) -> AuthResult<()> {
         self.lock();
+        // App lock goes FIRST (core's device sign-out): a sign-out cut short must never leave `lock.app_lock = 0`
+        // for the next account. Tried again with the other lock entries below.
+        let app_lock = self.store.delete_lock_flag(LockFlag::AppLock);
         let token = self.store.delete_session_token();
         let key = self.store.delete_wrapped_master_key();
         // Also drop the persisted account email so logout leaves no PII behind.
@@ -270,7 +386,16 @@ impl<S: AuthSecretStore> AuthVault<S> {
         let email = self.store.delete_account_email();
         let key_owner = self.store.delete_vault_key_owner();
         let session_owner = self.store.delete_session_owner();
-        token.and(key).and(email).and(key_owner).and(session_owner)
+        // The lock's flags belong to the account on this computer: they leave with its session (core removes them
+        // at the same place).
+        let flags = self.clear_lock_entries();
+        app_lock
+            .and(token)
+            .and(key)
+            .and(email)
+            .and(key_owner)
+            .and(session_owner)
+            .and(flags)
     }
 
     pub fn master_key(&self) -> AuthResult<&[u8]> {

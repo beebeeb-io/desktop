@@ -92,7 +92,7 @@ impl ApiBase {
     }
 }
 
-/// Why a `--api-base` value was refused. The app then does not start (`shell::run`: one line on stderr, exit 2) and
+/// Why a `--api-base` value was refused. The app then does not start (one line on stderr and the start-refusal box, `shell::refuse_start`, exit 2) and
 /// never talks to the default in its place: whoever passed the flag meant another server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
@@ -260,7 +260,7 @@ impl fmt::Display for OtherServer {
         };
         write!(
             f,
-            "this test build's data on this computer was made for {made}, and this run asks for {asked}. The app did \
+            "This test build's data on this computer was made for {made}, and this run asks for {asked}. The app did \
              not start."
         )
     }
@@ -277,7 +277,7 @@ impl fmt::Display for CredentialsWithoutData {
     /// The state and nothing else: never a token, an account or an origin.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
-            "this test build has stored credentials without local data on this computer: nothing says which server \
+            "This test build has stored credentials without local data on this computer: nothing says which server \
              they were made for, so no server gets them. The app did not start.",
         )
     }
@@ -430,6 +430,9 @@ pub fn open<C: CredentialStores>(
     let identity = crate::shell::identity::engine_identity();
     beebeeb_engine::state_paths::init_from_app_local_data_dir(identity, local_data)?;
     let state_dir = beebeeb_engine::state_paths::beebeeb_state_dir_for(identity)?;
+    // Before anything else writes the settings (contract §5.1): an install whose settings already name a sync
+    // folder was set up by 0.8.x and never sees the native first run; any other has it to do.
+    beebeeb_engine::app::setup_api::decide_first_run(identity)?;
     let account_id = beebeeb_engine::config::DesktopConfig::ensure_account_id_for(identity)?;
     // Before the engine reads a stored session or `state.db`. The real app never talks to another server, so its data
     // gets no record.

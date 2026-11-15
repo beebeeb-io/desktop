@@ -40,6 +40,8 @@ mod tests_drive;
 mod tests_more;
 #[cfg(test)]
 mod tests_previews;
+#[cfg(test)]
+mod tests_update;
 
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
@@ -159,8 +161,10 @@ pub enum Intent {
     Open(&'static str),
     /// Open a web page in the browser: the page's NAME (the shell holds the addresses).
     Web(&'static str),
-    /// Download the new version's installer and show it in File Explorer (DW-0781, DW-0789b).
-    DownloadUpdate,
+    /// "Restart to update" or "Try again" (DW-0781, DW-0789b), ONE press: the settings source's updater downloads
+    /// the newer version, checks its signature, stops sync and starts the verified installer
+    /// (`SettingsSource::restart_to_update`); the quit that follows comes through [`poll`]. Recorded for the shell.
+    RestartToUpdate,
     /// Save the support bundle and open an email to support in the person's email app (DW-0782).
     SaveBundleAndWriteEmail,
     /// Put this text on the clipboard (About › Copy: the version lines).
@@ -264,6 +268,18 @@ impl SettingsUi {
     pub fn check_for_updates(&mut self) {
         self.source.check_for_updates();
         self.ask(Intent::CheckForUpdates);
+    }
+
+    /// The update's button (General's banner, the release notes): what it does now ([`source::Press`]). One press:
+    /// "Restart to update", and "Try again" after a step of it failed, run the same thing.
+    pub fn press_update(&mut self, press: source::Press) {
+        match press {
+            source::Press::Restart | source::Press::Retry => {
+                self.source.restart_to_update();
+                self.ask(Intent::RestartToUpdate);
+            }
+            source::Press::Wait => {}
+        }
     }
 
     /// The theme the window draws in: the person's choice, or the system's.
@@ -389,6 +405,17 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0750b", |s| {
         s.settings.source = Box::new(BoardSettings::new().with_notifications_off_in_windows());
         open_on(s, "DW-0750");
+    }),
+    // Two states of this app's own (no board frame): what the pane says over itself.
+    ("DW-0750n", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_account_alerts_not_read());
+        open_on(s, "DW-0750");
+    }),
+    ("DW-0750u", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_notifications_unconfirmed());
+        open_on(s, "DW-0750");
+        // A change Beebeeb refused while that stands: its toast, above the notice.
+        s.settings.toast = Some(notifications::NOT_SAVED);
     }),
     ("DW-0791", |s| open_on(s, "DW-0791")),
     ("DW-0791b", |s| {
@@ -520,7 +547,7 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0751" => (Pane::About, None, None),
         "DW-0789" => (Pane::About, None, Some(MenuKind::Channel)),
         "DW-0789b" => (Pane::About, Some(Dialog::ReleaseNotes), None),
-        "DW-0750" | "DW-0750b" => (Pane::Notifications, None, None),
+        "DW-0750" | "DW-0750b" | "DW-0750n" | "DW-0750u" => (Pane::Notifications, None, None),
         "DW-0791" | "DW-0791b" => (Pane::Recent, None, None),
         "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => (Pane::StorageLocation, None, None),
         "DW-0746" | "DW-0746d" | "DW-0746e" => (Pane::Sync, None, None),
@@ -575,14 +602,34 @@ pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let pumped = s.settings.source.pump();
     // A refusal of Drive's panes (Keep, Free up space, Pause) is the same toast.
-    let toast = pumped.toast.or_else(|| s.settings.drive.take_toast());
+    // A toast about the account's notifications belongs to their two panes: one that lands after the person
+    // went elsewhere is not said over another pane.
+    let showing = matches!(s.settings.pane, Pane::Notifications | Pane::Recent);
+    let toast = pumped
+        .toast
+        .filter(|words| showing || notifications::toast_worked(words).is_none())
+        .or_else(|| s.settings.drive.take_toast());
     if let Some(toast) = toast {
         s.settings.toast = Some(toast);
+    }
+    // "Checking what the server has" is over when nothing is out any more. The check's answer took its place
+    // above, or the check failed and the pane says so itself: either way it does not stay.
+    let checked = toast.is_none() && !pumped.busy && s.settings.toast == Some(notifications::UNKNOWN);
+    if checked {
+        s.settings.toast = None;
     }
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
-    pumped.changed || toast.is_some()
+    // The update's hand-off (`engine_host::settings::updates`): the installer did not start after sync was stopped
+    // for it, so sync starts again; or it started, so the app quits (the installer waits for that).
+    if pumped.start_sync {
+        s.shell.start_sync();
+    }
+    if pumped.restart {
+        tx.quit();
+    }
+    pumped.changed || toast.is_some() || checked || pumped.start_sync || pumped.restart
 }
 
 /// The frame a recent alert leads to.
@@ -772,10 +819,13 @@ const DRIVE_SECTIONS: &[Section] = &[
     },
 ];
 
-fn sidebar(section: Pane, t: &Theme) -> El {
+fn sidebar(section: Pane, previews: bool, t: &Theme) -> El {
     let items = |sections: &'static [Section]| -> Vec<El> {
         sections
             .iter()
+            // Thumbnails and previews is not listed where nothing answers for it (the engine makes no preview
+            // setting yet): a pane that only says "not built yet" is a dead door.
+            .filter(|sec| previews || sec.pane != Some(Pane::Previews))
             .map(|sec| {
                 let frame = sec.frame;
                 shell::nav_item(sec.label, sec.icon, 16.0, sec.pane == Some(section), t)
@@ -834,7 +884,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(pane.section(), &t))
+        .child(sidebar(
+            pane.section(),
+            ui.drive.photo_previews() != previews::PhotoPreviews::Unavailable,
+            &t,
+        ))
         .child(pane_el);
     if let Some(overlay) = overlay {
         body = body.child(overlay);

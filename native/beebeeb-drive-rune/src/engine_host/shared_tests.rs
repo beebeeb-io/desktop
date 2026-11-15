@@ -30,6 +30,9 @@ const INV_B: &str = "b0000000-0000-4000-8000-000000000102";
 const INV_IN: &str = "b0000000-0000-4000-8000-000000000103";
 const INV_GOT: &str = "b0000000-0000-4000-8000-000000000104";
 const REQ: &str = "b0000000-0000-4000-8000-000000000105";
+/// A file of the first account's, shared with no one yet (it is only in the local state).
+const PLAN: &str = "a0000000-0000-4000-8000-000000000504";
+const INV_NEW: &str = "b0000000-0000-4000-8000-000000000106";
 
 struct Fake {
     fake: FakeApi,
@@ -93,8 +96,11 @@ const PATHS: [&str; 4] = [
 ];
 
 fn fake(tag: &str) -> Fake {
-    let (first, first_phrase) = FakeAccount::register(&format!("{tag}-one@example.eu"), PASSWORD, TEST_PHRASE);
-    let (second, second_phrase) = FakeAccount::register(&format!("{tag}-two@example.eu"), PASSWORD, TEST_PHRASE);
+    let (mut first, first_phrase) = FakeAccount::register(&format!("{tag}-one@example.eu"), PASSWORD, TEST_PHRASE);
+    let (mut second, second_phrase) = FakeAccount::register(&format!("{tag}-two@example.eu"), PASSWORD, TEST_PHRASE);
+    // Account ids as the server writes them (UUIDs): an invitation keeps its safety-number marks under the account's.
+    first.user_id = "d0000000-0000-4000-8000-000000000601".into();
+    second.user_id = "d0000000-0000-4000-8000-000000000602".into();
     let (first, second) = (Arc::new(first), Arc::new(second));
     let (one, two): (Handler, Handler) = (account_handler(first.clone()), account_handler(second.clone()));
     let (second_email, second_token) = (second.email.clone(), second.session_token.clone());
@@ -113,7 +119,7 @@ fn fake(tag: &str) -> Fake {
             req.bearer() == Some(second_token.as_str())
         };
         let at = PATHS.iter().position(|path| route == *path);
-        if at.is_none() && !route.contains("/api/v1/shares/invites/") {
+        if at.is_none() && !route.contains("/api/v1/shares/") && !route.contains("/api/v1/file-requests/") {
             return if theirs { two(req) } else { one(req) };
         }
         std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
@@ -121,6 +127,10 @@ fn fake(tag: &str) -> Fake {
             (0, _) | (_, None) => code.load(Ordering::SeqCst),
             (read, Some(_)) => read,
         };
+        // An invitation to someone without an account yet (DW-0514).
+        if code == 200 && route == "POST /api/v1/shares/invites" {
+            return Reply::json(201, json!({ "invite_id": INV_NEW, "status": "pending" }));
+        }
         match (code, at) {
             (200, Some(at)) => Reply::ok(if theirs { &theirs_lists } else { &ours }[at].clone()),
             (200, None) => Reply::ok(json!({})),
@@ -277,8 +287,8 @@ fn the_lists_are_read_when_shared_opens_and_drawn_from_what_beebeeb_answered() {
     assert_eq!(
         links,
         [
-            (TRIP.to_string(), "Invented trip".to_string(), false),
-            (THEIRS.to_string(), "Shared item".to_string(), true)
+            (REQ.to_string(), "Invented trip".to_string(), false),
+            (INV_A.to_string(), "Shared item".to_string(), true)
         ]
     );
     let lines: Vec<_> = source.links().into_iter().map(|l| l.line).collect();
@@ -467,14 +477,7 @@ fn what_is_not_bound_sends_nothing_and_says_not_available() {
     let fake = fake("unbound");
     let mut source = EngineSharedSource::new(signed_in(&fake));
     opened(&mut source);
-    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 6] = [
-        &|s| s.decline(INV_IN),
-        &|s| s.keep_offline(OTHERS),
-        &|s| s.stop_sharing(TRIP),
-        &|s| s.close_request(REQ),
-        &|s| s.remove_request(INV_B),
-        &|s| s.invite(TRIP, "new@example.eu", Access::View),
-    ];
+    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 1] = [&|s| s.keep_offline(OTHERS)];
     for act in unbound {
         assert!(!act(&mut source));
         assert_eq!(settle(&mut source), [Notice::NotAvailable]);
@@ -482,6 +485,64 @@ fn what_is_not_bound_sends_nothing_and_says_not_available() {
     assert!(changes(&fake.fake).is_empty());
     assert_eq!(source.invitations().len(), 1);
     assert_eq!(source.people_shares().len(), 1);
+}
+
+#[test]
+fn decline_stop_sharing_and_close_request_go_out_once_by_id_and_nothing_is_drawn_before_beebeeb_answered() {
+    let fake = fake("ends");
+    let mut source = EngineSharedSource::new(signed_in(&fake));
+    // Before the lists are here nothing can be ended.
+    assert!(!source.decline(INV_IN) && !source.stop_sharing(TRIP) && !source.close_request(REQ));
+    opened(&mut source);
+    let before = source.held.clone();
+
+    // Not an invitation, not a row, a request that is closed already: nothing is sent, nothing is said.
+    assert!(!source.decline(INV_A) && !source.decline("owner"));
+    assert!(
+        !source.stop_sharing(OTHERS) && !source.stop_sharing(THEIRS),
+        "an item's id names no link row"
+    );
+    assert!(!source.close_request(INV_B), "closed already");
+    assert!(!source.close_request(INV_A));
+    assert!(settle(&mut source).is_empty());
+    assert!(changes(&fake.fake).is_empty());
+
+    fake.delay_ms.store(150, Ordering::SeqCst);
+    assert!(source.decline(INV_IN));
+    assert!(source.stop_sharing(TRIP), "a share with people: every invite of it");
+    assert!(source.close_request(REQ));
+    assert!(!source.decline(INV_IN), "an answer is on its way");
+    assert!(!source.stop_sharing(TRIP) && !source.close_request(REQ));
+    assert_eq!(source.held, before, "nothing is drawn as ended before Beebeeb said so");
+    assert!(settle(&mut source).is_empty());
+    // (This fake gives a link and a request one id: a link row is named by its link's id.)
+    assert!(source.stop_sharing(REQ), "a link row is named by its link");
+    assert!(settle(&mut source).is_empty());
+    let mut sent = changes(&fake.fake);
+    sent.sort();
+    let mut expected = vec![
+        format!("POST /api/v1/shares/invites/{INV_IN}/decline"),
+        format!("DELETE /api/v1/shares/invites/{INV_A}"),
+        format!("DELETE /api/v1/shares/invites/{INV_B}"),
+        format!("DELETE /api/v1/shares/{REQ}"),
+        format!("POST /api/v1/file-requests/{REQ}/close"),
+    ];
+    expected.sort();
+    assert_eq!(sent, expected);
+    assert_eq!(
+        source.held, before,
+        "the lists are Beebeeb's, read again (this fake still lists everything)"
+    );
+
+    // Refused: the words say it was not made, and the row stays.
+    fake.status.store(500, Ordering::SeqCst);
+    assert!(source.decline(INV_IN));
+    let notices = settle(&mut source);
+    assert!(
+        !notices.is_empty() && notices.iter().all(|n| *n == Notice::ChangeRefused),
+        "{notices:?}"
+    );
+    assert_eq!(source.held, before);
 }
 
 #[test]
@@ -573,7 +634,7 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
     // A control that is not bound says so in the window.
     rt.state.frames.shared.selected = Some(0);
     rt.update(|s, _| {
-        s.frames.shared.source.stop_sharing(TRIP);
+        s.frames.shared.source.keep_offline(OTHERS);
     });
     poll(&mut rt);
     assert!(words(&rt).contains("Not available yet in this version"));
@@ -619,4 +680,160 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
     assert!(words(&rt).contains("Loading Shared"));
     assert!(!words(&rt).contains("You haven\u{2019}t shared anything"));
     poll(&mut rt);
+}
+
+/// The first account's local state: [`PLAN`], one of its own files, and nothing else.
+fn own_plan(engine: &Engine<MemoryCredentials>, account: &FakeAccount) -> tempfile::TempDir {
+    use beebeeb_engine::account_binding::Identity;
+    use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let db = StateDb::open(&path).unwrap();
+    let entry = FileEntry {
+        file_id: PLAN.into(),
+        path: "/Invented plan.pdf".into(),
+        status: FileStatus::CloudOnly,
+        size_bytes: 2_048,
+        modified_at: 1_794_000_000,
+        content_hash: None,
+        remote_updated_at: 1_794_000_000,
+        parent_id: None,
+        item_kind: ItemKind::File,
+    };
+    db.upsert_file_with_contract(&entry, |contract| contract.item_kind = entry.item_kind.clone())
+        .unwrap();
+    db.set_owner(&Identity::new(Some(&account.user_id), Some(&account.email)))
+        .unwrap();
+    drop(db);
+    engine.use_local_state_for_test(path);
+    dir
+}
+
+#[test]
+fn share_invite_goes_once_per_share_answers_from_the_engine_and_a_late_answer_is_dropped() {
+    let fake = fake("invite");
+    let engine = signed_in(&fake);
+    let _state = own_plan(&engine, &fake.first);
+    let mut source = EngineSharedSource::new(engine.clone());
+    opened(&mut source);
+    let sent_reads = |fake: &FakeApi| fake.routes().iter().filter(|r| *r == PATHS[1]).count();
+    let invites = |fake: &FakeApi| {
+        changes(fake)
+            .iter()
+            .filter(|r| *r == "POST /api/v1/shares/invites")
+            .count()
+    };
+    let before = sent_reads(&fake.fake);
+
+    assert!(!source.start_invite(PLAN, "  "), "nothing typed: nothing is sent");
+    // An item shared with no one yet: the engine decides it is the account's own.
+    assert!(source.start_invite(PLAN, "new@example.eu"));
+    assert!(
+        !source.start_invite(PLAN, "new@example.eu"),
+        "one invitation per share at a time: a second press sends nothing"
+    );
+    assert!(source.busy());
+    settle(&mut source);
+    assert_eq!(source.invite_answer(), Some((PLAN.to_string(), InviteResult::Sent)));
+    assert_eq!(source.invite_answer(), None, "each answer once");
+    assert_eq!(invites(&fake.fake), 1);
+    // The person is never inserted here: the lists were read again (the invite's own read of the sent list, then
+    // the lists after the answer).
+    assert_eq!(sent_reads(&fake.fake), before + 2);
+
+    // Refused, in words: not one of the account's own items on this computer. Nothing was sent.
+    assert!(source.start_invite(THEIRS, "new@example.eu"));
+    settle(&mut source);
+    assert_eq!(
+        source.invite_answer(),
+        Some((
+            THEIRS.to_string(),
+            InviteResult::Refused(refusal_words(InviteRefused::NotYours))
+        ))
+    );
+    assert_eq!(invites(&fake.fake), 1);
+
+    // An answer that lands after another account signed in is dropped: nothing opens, nothing is read for it.
+    fake.delay_ms.store(150, Ordering::SeqCst);
+    assert!(source.start_invite(PLAN, "late@example.eu"));
+    std::thread::sleep(Duration::from_millis(40));
+    engine.sign_out_keeping_local_data().expect("signed out");
+    sign_in(&engine, &fake.second, &fake.second_phrase);
+    fake.delay_ms.store(0, Ordering::SeqCst);
+    let reads_then = sent_reads(&fake.fake);
+    settle(&mut source);
+    // The account change may have emptied the source before the worker answered: give the worker time to answer
+    // (its request was held 150 ms at the fake), then take in what came.
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = source.pump();
+    assert_eq!(
+        source.invite_answer(),
+        None,
+        "an answer of another session is never handed out"
+    );
+    assert_eq!(
+        sent_reads(&fake.fake),
+        reads_then,
+        "nothing is read for a dropped answer"
+    );
+}
+
+#[test]
+fn remove_from_my_list_is_the_hide_route_never_the_delete_and_each_409_has_its_words() {
+    let fake = fake("hide");
+    let mut source = EngineSharedSource::new(signed_in(&fake));
+    // Before the lists are here, and for a row that is not one: nothing is sent.
+    assert!(!source.remove_request(INV_B));
+    opened(&mut source);
+    assert!(!source.remove_request(OTHERS) && !source.remove_request("../x"));
+    assert!(changes(&fake.fake).is_empty());
+
+    let before = source.held.clone();
+    assert!(source.remove_request(INV_B));
+    assert!(!source.remove_request(INV_B), "an answer is on its way");
+    assert_eq!(
+        source.held, before,
+        "nothing is drawn as removed before Beebeeb answered"
+    );
+    assert!(settle(&mut source).is_empty());
+    let sent = changes(&fake.fake);
+    assert_eq!(sent, [format!("POST /api/v1/file-requests/{INV_B}/hide")]);
+    assert_eq!(sent.iter().filter(|r| r.starts_with("DELETE ")).count(), 0);
+
+    // 409: the request is still open; an invitation that was accepted meanwhile.
+    fake.read_status.store(200, Ordering::SeqCst);
+    fake.status.store(409, Ordering::SeqCst);
+    assert!(source.remove_request(REQ));
+    assert_eq!(settle(&mut source), [Notice::RequestStillOpen]);
+    assert!(source.decline(INV_IN));
+    assert_eq!(settle(&mut source), [Notice::AlreadyAccepted]);
+    assert_eq!(
+        changes(&fake.fake).iter().filter(|r| r.starts_with("DELETE ")).count(),
+        0
+    );
+}
+
+/// Review of desktop#426 (P2): the words for an invite the engine could not finish say what is known. A refused
+/// approval: they hold no key they can open. An approval that left without an answer: Beebeeb cannot say.
+#[test]
+fn an_unfinished_invite_says_whether_the_approval_left() {
+    let refused = invite_result(&InviteAnswer::Unfinished {
+        invite_id: "an-invented-invite".into(),
+        approval_sent: false,
+    });
+    assert_eq!(refused, InviteResult::Refused(UNFINISHED));
+    let unanswered = invite_result(&InviteAnswer::Unfinished {
+        invite_id: "an-invented-invite".into(),
+        approval_sent: true,
+    });
+    assert_eq!(unanswered, InviteResult::Refused(UNFINISHED_UNCONFIRMED));
+    assert!(
+        UNFINISHED.contains("can\u{2019}t open anything yet"),
+        "true where the approval never took"
+    );
+    assert!(
+        !UNFINISHED_UNCONFIRMED.contains("can\u{2019}t open anything yet")
+            && UNFINISHED_UNCONFIRMED.contains("Check Shared"),
+        "never claims they cannot open it when that is not known"
+    );
 }

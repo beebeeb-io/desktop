@@ -91,6 +91,17 @@ pub fn device_self(identity: &crate::identity::EngineIdentity) -> Option<DeviceS
     device_self_from(identity, backup_device_name()?, &machine_id()?)
 }
 
+/// This device's name as [`device_self`] gives it (the identity's suffix included), also when no machine id gives it
+/// a device id: for the rule that keeps a PC's own folder out of "Delete this backup" on such a PC.
+pub fn device_name_for(identity: &crate::identity::EngineIdentity) -> Option<String> {
+    Some(named(identity, backup_device_name()?))
+}
+
+/// `name` with the identity's suffix (`GLegion (test)`).
+fn named(identity: &crate::identity::EngineIdentity, name: String) -> String {
+    format!("{name}{}", identity.backup_device_name_suffix())
+}
+
 pub(crate) fn device_self_from(
     identity: &crate::identity::EngineIdentity,
     name: String,
@@ -104,7 +115,7 @@ pub(crate) fn device_self_from(
     };
     Some(DeviceSelf {
         device_id,
-        name: format!("{name}{}", identity.backup_device_name_suffix()),
+        name: named(identity, name),
         platform: PLATFORM,
     })
 }

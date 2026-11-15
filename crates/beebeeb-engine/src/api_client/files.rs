@@ -197,6 +197,19 @@ impl ApiClient {
         Ok(out)
     }
 
+    /// `GET /api/v1/files/count` — how many items are in the account's Trash (`trashed_files`), counted by the
+    /// server: the same set the flat Trash listing returns, without listing or decrypting any of it. A body
+    /// without the number is an error (never a made-up zero).
+    pub async fn trashed_file_count(&self) -> anyhow::Result<u64> {
+        let resp = self
+            .send_with_retry(|| self.client.get(self.url("/api/v1/files/count")))
+            .await?;
+        let body: serde_json::Value = resp.json().await?;
+        body["trashed_files"]
+            .as_u64()
+            .ok_or_else(|| DesktopApiError::InvalidCountResponse.into())
+    }
+
     pub async fn list_versions(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
         let resp = self
             .client
@@ -290,6 +303,33 @@ impl ApiClient {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    /// Delete many trashed items for good with ONE confirmation token (`POST /api/v1/files/permanent`, at most 500
+    /// ids). The answer is per item: what was deleted and the folders Beebeeb kept, each with its reason; a refusal
+    /// of the whole call is in [`BulkPurged::error`], never an `Err` (that is only a transport failure).
+    pub async fn bulk_permanent_delete(
+        &self,
+        ids: &[String],
+        confirm_token: &str,
+    ) -> anyhow::Result<crate::app::trash_bulk_api::BulkPurged> {
+        let resp = self
+            .client
+            .post(self.url("/api/v1/files/permanent"))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("X-Confirm-Token", confirm_token)
+            .json(&serde_json::json!({ "ids": ids }))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let text = resp.text().await.unwrap_or_default();
+        let answer = beebeeb_core::auth_flow::HttpResponse::from_text(status, &text, retry_after);
+        Ok(crate::app::trash_bulk_api::parse_answer(&answer))
     }
 
     pub async fn update_metadata(

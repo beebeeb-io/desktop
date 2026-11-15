@@ -32,6 +32,9 @@ fn on_files_route(s: &State) -> bool {
 /// name being typed in a row, an open menu. No source is asked anything.
 pub fn close_dialogs(s: &mut State) {
     let a = &mut s.actions;
+    if matches!(a.dialog, Some(super::dialogs::Dialog::Preview(_))) {
+        a.source.cancel_preview();
+    }
     a.dialog = None;
     a.menu = None;
     a.rename = None;
@@ -75,6 +78,7 @@ pub fn end_session(s: &mut State, account_left: bool) {
         sort,
         undo,
         trash,
+        link,
         // Stays: the ids of board frames that were asked for, no name of a file.
         intents: _,
         retry_upload,
@@ -111,6 +115,10 @@ pub fn end_session(s: &mut State, account_left: bool) {
     if account_left && source.uploads().is_some() {
         source.forget_uploads();
     }
+    // The copies read from the engine are the account's too: forgotten whenever it leaves.
+    if account_left {
+        source.forget_downloads();
+    }
     // What Try again would repeat: a share names a file, an upload names paths on this PC.
     *retry_share = None;
     *retry_upload = None;
@@ -120,6 +128,8 @@ pub fn end_session(s: &mut State, account_left: bool) {
     undo.clear();
     // An Undo that was not answered, and the ids Try again of a move to Trash would ask for.
     *trash = super::to_trash::Ui::default();
+    // A link that landed and is not on the clipboard yet, and what Try again of a link would ask for.
+    *link = super::link::Ui::default();
     *toast = None;
     *toast_until = None;
     selection.clear();
@@ -207,5 +217,6 @@ pub fn poll(s: &mut State) -> bool {
     s.actions.retry_upload = None;
     s.actions.local.retry = None;
     s.actions.trash.again = None;
+    s.actions.link.again = None;
     true
 }

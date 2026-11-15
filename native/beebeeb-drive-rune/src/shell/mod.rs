@@ -21,6 +21,7 @@ pub mod app;
 // The pure half of Windows-only code: used by `platform/windows.rs`, tested on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod autostart;
+pub mod away;
 // The transport is Windows-only (`platform/windows_control.rs`); the protocol is tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod control;
@@ -31,6 +32,7 @@ pub mod flyout_window;
 pub mod host;
 pub mod identity;
 pub mod instance;
+pub mod intents;
 pub mod placeholder;
 pub mod platform;
 pub mod registry;
@@ -46,6 +48,7 @@ pub mod tray_icon;
 // The pure half of `platform/windows_tray.rs`; tested on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod tray_win;
+pub mod web_pages;
 pub mod window_state;
 
 use std::io::Write as _;
@@ -266,6 +269,13 @@ pub fn run() {
     } else {
         None
     };
+    // The first run (DW-0201 to DW-0208 are Windows' frames): whether this PC still has it to do is read here,
+    // once, before the first window is chosen, so a start with a stored session opens on the right one.
+    if cfg!(target_os = "windows")
+        && let Some((_, live)) = &real_engine
+    {
+        live.wire_first_run();
+    }
     let engine: Arc<dyn EngineActions> = match &real_engine {
         Some((opened, live)) => {
             host::log(format!("the engine is open; the stored session says {:?}", opened.gate));
@@ -410,14 +420,21 @@ pub fn run() {
         state_file,
     };
     let (shell_actions, shell_platform) = (actions.clone(), platform.clone());
-    let init_engine = real_engine.as_ref().map(|(opened, _)| opened.engine.clone());
+    let init_engine = real_engine
+        .as_ref()
+        .map(|(opened, live)| (opened.engine.clone(), live.clone()));
     // From here on the engine's reports wake the window (`host::poll` reads what changed).
     *wake_target.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(main.clone());
     let main_app = main_app.init(move || {
         let shell = Shell::new(shell_actions, shell_platform, wiring);
         match (source, init_engine) {
             (Some(source), _) => state::init_from(shell, source, None),
-            (None, Some(engine)) => state::init_on_engine(shell, engine),
+            (None, Some((engine, live))) => {
+                let mut s = state::init_on_engine(shell, engine.clone());
+                // The first run on this PC, when it is still to do (`engine_host::setup`).
+                state::wire_first_run(&mut s, engine, &live);
+                s
+            }
             (None, None) => state::init_with(shell),
         }
     });
@@ -487,12 +504,12 @@ pub(crate) fn local_data_of(dirs: &rune::dirs::AppDirs, os: &str) -> std::path::
 
 /// Ends a start that stops for a reason the person must read (decision 2462: a refused `--api-base`, the test
 /// build's data on this computer not for this run's server, stored credentials without local data). `line` names no
-/// value. It goes to stderr, and into the start-refusal box unless this start shows none (`instance::refusal_is_shown`:
-/// not at login, not the installer's call, not a tooling run): a release build has no console, so without the box such
+/// value. It goes to stderr, and into the start-refusal box unless this start shows none (`instance::start_refusal_is_shown`:
+/// not the installer's call, not a tooling run; at login it is shown): a release build has no console, so without the box such
 /// a start would stop without a word. Returns 2, the exit code `run` ends with.
 fn refuse_start(platform: &dyn Platform, launch: &instance::Launch, identity: AppIdentity, line: &str) -> i32 {
     eprintln!("beebeeb-drive: {line}");
-    if instance::refusal_is_shown(launch) {
+    if instance::start_refusal_is_shown(launch) {
         platform.show_start_refusal(identity.product_name(), line);
     }
     2
@@ -533,6 +550,8 @@ fn open_engine(
         .ok_or_else(|| "The folder for app data could not be found.".to_string())?;
     // Never a reason not to start: a closed or broken stdout loses the line, it does not stop the app.
     let _ = writeln!(std::io::stdout(), "{}", api_base.start_line());
+    // The local log file (`log_file.rs`), before the engine starts so its first warning is kept. Best effort.
+    let _ = crate::log_file::install(&local_data_of(&dirs, std::env::consts::OS));
     let (opened, messages) = crate::engine_host::open::open(
         &local_data_of(&dirs, std::env::consts::OS),
         api_base,
@@ -544,6 +563,9 @@ fn open_engine(
             }
         },
     )?;
+    // The real app only (never in `engine_host::open::open`, which tests use): a session the server ended closes
+    // the vault by itself, as core says.
+    opened.engine.watch_session();
     let live = Arc::new(crate::engine_host::LiveEngine::new(&opened, messages));
     Ok((opened, live))
 }

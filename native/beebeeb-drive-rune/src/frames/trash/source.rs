@@ -47,6 +47,26 @@ pub enum Notice {
     RefreshFailed,
     /// The control needs something this version does not have yet.
     NotAvailable,
+    /// Deleting for good stopped before it was done (what is still in Trash stays there). `done`: how many are gone;
+    /// `why`: the reason in words, never a server's.
+    PurgeStopped { done: usize, why: String },
+    /// A delete for good took what it could and kept `folders` folders, which hold `inside` items that are not in
+    /// Trash (`done`: how many are gone). The kept folders are still listed.
+    FoldersKept { done: usize, folders: usize, inside: u64 },
+    /// The delete request left and Beebeeb never confirmed it (the connection dropped, or a gateway answered): some
+    /// items may be gone for good. `done`: how many are known to be gone. Never "nothing was deleted".
+    PurgeNotConfirmed { done: usize },
+}
+
+/// How a delete for good (Empty Trash, Delete permanently) ended, for the dialog that asked for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PurgeEnd {
+    /// Everything asked for is gone.
+    Done,
+    /// The password was not the account's: nothing was deleted, and the dialog stays for another try.
+    WrongPassword,
+    /// It stopped early (the notice says why); the dialog closes.
+    Stopped,
 }
 
 /// What [`TrashSource::pump`] took in.
@@ -57,6 +77,10 @@ pub struct Pumped {
     /// A read or a restore is still on its way: poll again.
     pub busy: bool,
     pub notice: Option<Notice>,
+    /// A delete for good that was asked for ended.
+    pub purge: Option<PurgeEnd>,
+    /// Poll again after this long even if nothing is on its way (the sidebar's count is due for a refresh).
+    pub wake_in: Option<std::time::Duration>,
 }
 
 pub trait TrashSource {
@@ -84,7 +108,7 @@ pub trait TrashSource {
     }
     /// The session or the account changed: drop every name and count at once.
     fn forget(&mut self) {}
-    /// The sidebar's count. `None`: no badge (a source that cannot count without reading the whole list).
+    /// The sidebar's count. `None`: no badge (the source has no number of Beebeeb's for this session and account).
     fn count(&self) -> Option<usize> {
         Some(self.totals().items)
     }
@@ -92,6 +116,26 @@ pub trait TrashSource {
     /// says "not available yet" instead.
     fn actions_available(&self) -> bool {
         true
+    }
+    /// Whether Empty Trash and Delete permanently can be done here (a password is asked first). `false`: pressing
+    /// them says "not available yet" instead.
+    fn purge_available(&self) -> bool {
+        self.actions_available()
+    }
+    /// Delete for good after proving the account `password`: the item `id`, or `None` for everything in Trash.
+    /// `false`: nothing was started (no such item, nothing to delete, another delete is on its way, or this source
+    /// cannot). The answer comes through [`TrashSource::pump`] ([`Pumped::purge`]).
+    fn purge(&mut self, _id: Option<&str>, _password: &str) -> bool {
+        false
+    }
+    /// A delete for good is on its way (the dialog's button waits).
+    fn purging(&self) -> bool {
+        false
+    }
+    /// What Empty Trash deletes in ONE go: the count and size of the first batch, and how many items stay for
+    /// another Empty Trash (a batch is at most 500 under one password proof). The dialog says both before the press.
+    fn purge_batch(&self) -> (TrashTotals, usize) {
+        (self.totals(), 0)
     }
 }
 
@@ -101,6 +145,8 @@ pub struct BoardTrash {
     /// Items in Trash that are not among the listed rows.
     unlisted: usize,
     emptying: Option<Emptying>,
+    /// How the last delete for good ended (told once, by the next pump).
+    ended: Option<PurgeEnd>,
 }
 
 fn row(id: &str, name: &str, kind: Kind, date: &str, size: &str, from: &str) -> Row {
@@ -163,6 +209,7 @@ impl BoardTrash {
             ],
             unlisted: 6,
             emptying: None,
+            ended: None,
         }
     }
 
@@ -182,6 +229,7 @@ impl BoardTrash {
             rows,
             unlisted: 0,
             emptying: None,
+            ended: None,
         }
     }
 
@@ -191,6 +239,7 @@ impl BoardTrash {
             rows: Vec::new(),
             unlisted: 0,
             emptying: None,
+            ended: None,
         }
     }
 }
@@ -215,6 +264,35 @@ impl TrashSource for BoardTrash {
         let before = self.rows.len();
         self.rows.retain(|r| r.id != id);
         self.rows.len() != before
+    }
+
+    /// The board's sample takes any non-empty password (it proves nothing: no account is behind it).
+    fn purge(&mut self, id: Option<&str>, password: &str) -> bool {
+        if password.is_empty() {
+            return false;
+        }
+        let started = match id {
+            Some(id) => self.restore(id),
+            None => {
+                let any = !self.rows.is_empty();
+                self.rows.clear();
+                self.unlisted = 0;
+                any
+            }
+        };
+        if started {
+            self.ended = Some(PurgeEnd::Done);
+        }
+        started
+    }
+
+    fn pump(&mut self) -> Pumped {
+        let purge = self.ended.take();
+        Pumped {
+            changed: purge.is_some(),
+            purge,
+            ..Pumped::default()
+        }
     }
 }
 

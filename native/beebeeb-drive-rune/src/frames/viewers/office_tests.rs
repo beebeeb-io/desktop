@@ -178,7 +178,7 @@ const SAVED_7: &str = "saved as version 7 \u{00B7} 09:12";
 #[test]
 fn every_frame_of_the_editor_draws_its_words_in_both_themes() {
     let frames: &[(&str, &[(&str, &str)])] = &[
-        ("DW-1507", &[("st-7", SAVED_7), ("pg-0", "Service agreement")]),
+        ("DW-1507e", &[("st-7", SAVED_7), ("pg-0", "Service agreement")]),
         (
             "DW-1511",
             &[("banner-text", super::office::OLDER_FORMAT), ("st-0", "Page 1 of 1")],
@@ -234,7 +234,7 @@ fn every_frame_of_the_editor_draws_its_words_in_both_themes() {
 #[test]
 fn the_unsaved_dot_shows_only_while_there_are_changes_no_version_holds() {
     for (frame, dot) in [
-        ("DW-1507", false),
+        ("DW-1507e", false),
         ("DW-1511", false),
         ("DW-1552", true),
         ("DW-1553", false),

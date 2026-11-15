@@ -10,6 +10,8 @@ use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_BINARY, REG_SZ, RRF_NOEXPAND, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RRF_RT_REG_EXPAND_SZ,
     RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
+use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongPtrW, MB_ICONINFORMATION, MB_OK, MessageBoxW, SetWindowDisplayAffinity,
     SetWindowLongPtrW, WS_EX_TOOLWINDOW,
@@ -199,6 +201,14 @@ impl Platform for WindowsPlatform {
         read_taskbar_theme()
     }
 
+    fn pick_folder(&self, title: &str, start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
+        super::windows_folder::pick_folder(title, start)
+    }
+
+    fn pick_photo(&self, title: &str, start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
+        super::windows_photo::pick_photo(title, start)
+    }
+
     fn autostart_enabled(&self) -> Result<bool, PlatformError> {
         let run = reg_read_string(autostart::RUN_KEY, run_value_name())?;
         let approved = reg_read(autostart::STARTUP_APPROVED_KEY, run_value_name(), RRF_RT_REG_BINARY).unwrap_or(None);
@@ -276,6 +286,10 @@ impl Platform for WindowsPlatform {
         }
     }
 
+    fn idle_for(&self) -> Option<Duration> {
+        pc_idle()
+    }
+
     fn set_capture_exclusion(&self, window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {
         let Some(window) = window else {
             return Err(PlatformError::Os("no window handle yet".into()));
@@ -317,4 +331,21 @@ fn round_corners(hwnd: HWND) -> i32 {
             std::mem::size_of_val(&preference) as u32,
         )
     }
+}
+
+/// How long this Windows session has had no input: `GetLastInputInfo`, the tick of the session's last input, any app's
+/// (a key, the pointer, touch), against `GetTickCount`, the same 32-bit millisecond clock (the subtraction wraps as it
+/// does, every 49.7 days). `None`: Windows did not say. The away lock's idle count, and the tray's at a suspend.
+pub(super) fn pc_idle() -> Option<Duration> {
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a live LASTINPUTINFO with its size set, as the call requires; it writes only `dwTime`.
+    if unsafe { GetLastInputInfo(&mut info) } == 0 {
+        return None;
+    }
+    // SAFETY: takes nothing, returns the tick count.
+    let now = unsafe { GetTickCount() };
+    Some(Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime))))
 }

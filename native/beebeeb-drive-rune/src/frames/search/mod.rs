@@ -18,6 +18,7 @@ pub mod source;
 #[cfg(test)]
 mod tests;
 mod view;
+pub use view::PLAIN_NOTE;
 
 use rune::{El, Key, KeyEvent, TextEdit, Tx};
 
@@ -40,6 +41,9 @@ pub struct SearchUi {
     /// A board frame's focused field: the board draws the field focused, with its caret, and a
     /// headless render has no focus to draw either. Only a scene sets it; the first key clears it.
     pub pictured: bool,
+    /// The list-on-this-PC view of the board (DW-1105): the status line holds the note of what
+    /// search can't do, and no details panel opens beside the results. Only a scene sets it.
+    pub plain_note: bool,
     /// The gate and account the last poll saw: a change drops every name the source holds at once.
     seen: Option<(crate::shell::app::GateState, Option<String>)>,
     /// Whether search was open at the last poll.
@@ -60,6 +64,7 @@ impl Default for SearchUi {
             narrow: Narrow::All,
             selected: None,
             pictured: false,
+            plain_note: false,
             seen: None,
             was_open: false,
             asked: None,
@@ -223,9 +228,14 @@ pub fn holds_back(s: &State) -> bool {
         && !files_busy(s)
 }
 
+/// Whether Search's window is what the Files window shows now ([`over_files`]).
+pub fn shows_over_files(s: &State) -> bool {
+    is_open(s) && !files_busy(s)
+}
+
 /// The Files window's view while search is open (the registry's Files line asks first).
 pub fn over_files(s: &State, cx: &mut rune::Cx<State>) -> Option<El> {
-    (is_open(s) && !files_busy(s)).then(|| view::window(s, cx))
+    shows_over_files(s).then(|| view::window(s, cx))
 }
 
 /// The Files window's keys while search is open: `Some` takes the key (no key reaches the list
@@ -297,6 +307,27 @@ fn hits(s: &State) -> Vec<Hit> {
     }
 }
 
+/// The result of `id` among the results shown now (`frames::item`'s Details over Search).
+pub fn hit(s: &State, id: &str) -> Option<Hit> {
+    hits(s).into_iter().find(|hit| hit.id == id)
+}
+
+/// The result of `id` is no longer among results that are all here: the field changed, or the search answered
+/// without it. While results still load, or the query is still being answered, it is not gone.
+pub fn hit_gone(s: &State, id: &str) -> bool {
+    match s.frames.find.shows(&s.search.text) {
+        Shows::Results { hits, loading } => loading.is_none() && !hits.iter().any(|hit| hit.id == id),
+        Shows::Searching | Shows::Nothing { loading: Some(_) } => false,
+        _ => true,
+    }
+}
+
+/// The selected result's row key, where focus goes back after a dialog over the results.
+pub fn selected_row_key(s: &State) -> Option<String> {
+    let hits = hits(s);
+    s.frames.find.selected_index(&hits).map(row_key)
+}
+
 /// The key of result `i` in the list: focus goes where the selection goes.
 fn row_key(i: usize) -> String {
     format!("row-{i}")
@@ -335,6 +366,11 @@ fn open_result(s: &mut State, hits: &[Hit], i: usize) -> bool {
 /// nowhere): the arrows, Home and End select, Enter opens, the Menu key asks for the file menu,
 /// Alt+Enter for Details. In the recent searches: the arrows move, Enter runs one.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // An item's Details over the results: its keys first, and none reaches the results behind it. (The one place:
+    // `files_key` hands its keys here once search is open, so a Files key with search closed never touches it.)
+    if let Some(took) = crate::frames::shared::dialogs::section_keys(s, ev, tx, Section::Files) {
+        return took;
+    }
     s.frames.find.pictured = false;
     if ev.key == Key::Escape && frames::plain(ev) {
         close(s, tx);
@@ -513,6 +549,12 @@ pub fn dw_0801(s: &mut State) {
 /// Results for "Contr": the pills, three rows with Where, the first one's details.
 pub fn dw_0802(s: &mut State) {
     scene(s, "Contr", BoardSearch::new());
+}
+/// Instant search on the list on this PC (DW-1105): the results as DW-0802 has them, with the note of what
+/// search can't do in the status line and no details panel. Called by `files::scenes_waveb`.
+pub fn dw_1105(s: &mut State) {
+    scene(s, "Contr", BoardSearch::new());
+    s.frames.find.plain_note = true;
 }
 /// The same during a first sign-in: the note with the live count.
 pub fn dw_0802b(s: &mut State) {

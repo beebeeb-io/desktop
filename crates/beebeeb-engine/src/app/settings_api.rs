@@ -196,12 +196,14 @@ impl<C: CredentialStores> Engine<C> {
         Fut: Future<Output = anyhow::Result<T>>,
     {
         // A session mutex a panic poisoned: nothing is sent (as before the helper, which reads through poison).
+        // A locked screen sends nothing for a person (core's `call_may_run`), as a session that is not there.
         if self.acct.session.is_poisoned() {
             return Err(AccountCallError::NotSignedIn);
         }
         let token = self
-            .acct
-            .while_session_is(&self.writes, session, |current| current.token.clone())
+            .person_session(|current, generation| (generation == session).then(|| current.token.clone()))
+            .ok()
+            .flatten()
             .ok_or(AccountCallError::NotSignedIn)?;
         let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
         self.runtime.block_on(call(api)).map_err(|error| kind_of(&error))
@@ -217,6 +219,7 @@ pub(super) fn kind_of(error: &anyhow::Error) -> AccountCallError {
                 DesktopApiError::HttpStatus { status, .. } if status.as_u16() == 401 => AccountCallError::SessionEnded,
                 DesktopApiError::HttpStatus { .. } => AccountCallError::ServerError,
                 DesktopApiError::Transport(error) => transport_kind(error),
+                DesktopApiError::InvalidCountResponse => AccountCallError::Unreadable,
                 _ => AccountCallError::ServerError,
             };
         }

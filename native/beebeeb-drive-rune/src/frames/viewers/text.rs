@@ -4,7 +4,7 @@
 use rune::{Align, Color, El, Icon, Span, col, el, row, text_input};
 
 use super::chrome::{Dot, Status};
-use super::source::{Cut, Ink, OpenFile, Run, TextDoc, count_words};
+use super::source::{Cut, Ink, Keep, OpenFile, Run, TextDoc, count_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
 use crate::theme::tokens::Theme;
@@ -353,7 +353,12 @@ pub fn editor_tools(t: &Theme) -> Vec<El> {
 /// screen stays until Show it.
 pub fn newer_banner(file: &OpenFile, t: &Theme) -> Option<El> {
     let newer = file.newer.as_ref()?;
-    let words = format!("A newer version arrived from {}, {}.", newer.from, newer.at);
+    // No device name in 0.9.0 (decision 2505): "A newer version arrived, 09:14."
+    let words = if newer.from.is_empty() {
+        format!("A newer version arrived, {}.", newer.at)
+    } else {
+        format!("A newer version arrived from {}, {}.", newer.from, newer.at)
+    };
     // The time is a figure: mono.
     let time = words.len() - newer.at.len() - 1;
     let show = super::chrome::button("banner-btn", "Show it", super::chrome::ButtonKind::Outline, true, t).on_press(
@@ -389,8 +394,37 @@ pub fn banner_el(icon: &'static Icon, words: &str, action: Option<El>, t: &Theme
     banner_spans(icon, words, Vec::new(), action, t)
 }
 
+/// A save refused behind an earlier change to the file on this PC (delta 3 of desktop#432): why, and Save a copy,
+/// which keeps the edit as a new file next to this one: the two-versions question's Keep both, by its press path
+/// (task 2530, item 1). No board draws it: DW-1519's banner, its words wrapped (they are longer than a line).
+pub fn refused_banner(words: Option<&str>, t: &Theme) -> Option<El> {
+    let words = words?;
+    let copy = super::chrome::button("banner-btn", "Save a copy", super::chrome::ButtonKind::Outline, true, t)
+        .on_press(|s: &mut State| {
+            if let Some(ui) = ui(s) {
+                ui.resolve(Keep::Both);
+            }
+        });
+    let sentence = kit::label("banner-text", words, style::BANNER, t.text_secondary)
+        .wrap()
+        .grow(1.0)
+        .min_w(0.0);
+    Some(banner_of(&icons::INFO, sentence, Some(copy), t))
+}
+
 /// [`banner_el`] with spans in its sentence (a figure in mono).
 pub fn banner_spans(icon: &'static Icon, words: &str, spans: Vec<Span>, action: Option<El>, t: &Theme) -> El {
+    let sentence = kit::label("banner-text", words, style::BANNER, t.text_secondary).grow(1.0);
+    let sentence = if spans.is_empty() {
+        sentence
+    } else {
+        sentence.spans(spans)
+    };
+    banner_of(icon, sentence, action, t)
+}
+
+/// The banner's row around its sentence.
+fn banner_of(icon: &'static Icon, sentence: El, action: Option<El>, t: &Theme) -> El {
     let mut b = row()
         .key("banner")
         .role("status")
@@ -404,14 +438,7 @@ pub fn banner_spans(icon: &'static Icon, words: &str, spans: Vec<Span>, action: 
         .radius(10.0)
         .fill(style::banner(t))
         .child(kit::glyph("banner-icon", icon, 16.0, t.text_secondary))
-        .child({
-            let sentence = kit::label("banner-text", words, style::BANNER, t.text_secondary).grow(1.0);
-            if spans.is_empty() {
-                sentence
-            } else {
-                sentence.spans(spans)
-            }
-        });
+        .child(sentence);
     if let Some(action) = action {
         b = b.child(action);
     }

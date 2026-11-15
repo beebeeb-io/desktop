@@ -27,6 +27,10 @@ const SCORE_HEAD: TextStyle = TextStyle::new(20.0, 650.0).lh(24.0).tracking(-0.3
 pub(super) const NOT_KNOWN: &str = "Not known";
 /// What a function says when this build has not bound it.
 pub(super) const NOT_YET: &str = "Not available yet";
+/// The Approve a sign-in row of a source that does not have it (0.9.0).
+pub(super) const APPROVE_ON_WEB: &str = "Not available in this version yet. Approve on the web.";
+/// The name the shell holds the web's delete-account page under (`Intent::Web`).
+pub const DELETE_PAGE: &str = "delete-account";
 
 fn factor_icon(kind: FactorKind) -> &'static rune::Icon {
     match kind {
@@ -270,7 +274,8 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
 }
 
 /// App lock is Drive's own row (the board's `securityExtra` slot, DW-0716): its switch and delay are here,
-/// not on a page behind it.
+/// not on a page behind it. A source that gives no delay (an empty one: nothing acts on it in this version)
+/// gets no delay control and no "locks again after".
 fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
     let it = Row::new(Lead::Icon(&icons::APP_LOCK), "Lock Beebeeb");
     let Some((on, after)) = &facts.app_lock else {
@@ -283,8 +288,9 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
         );
     };
     let on = *on;
+    let delay = on && !after.is_empty();
     let mut controls = Vec::new();
-    if on {
+    if delay {
         controls.push(
             el().key("item-1-0-pop-button")
                 .role("combobox")
@@ -303,6 +309,10 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
                 .size(0.0, 0.0),
         );
     }
+    // Windows Hello did not confirm turning it off or a longer delay: the account password can (D-2).
+    if facts.app_lock_password.is_some() {
+        controls.push(super::app_lock_password::link(t));
+    }
     controls.push(
         lists::switch("item-1-0", "Lock Beebeeb", on, t).on_press(move |s: &mut State| {
             if let Some(source) = s.account.source.as_mut() {
@@ -313,14 +323,34 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
     set::item(
         1,
         0,
-        &it.sub(if on {
+        &it.sub(if delay {
             "Windows Hello · locks again after"
+        } else if on {
+            "Windows Hello"
         } else {
             "Off: anyone using this PC can open Beebeeb"
         }),
         controls,
         t,
     )
+}
+
+/// Approving a sign-in from another device. A source that has it opens it; one that has not says so, with the
+/// way that works (the web), and no code field behind the row.
+fn approve_row(source: &dyn AccountSource, t: &Theme) -> El {
+    let it = Row::new(Lead::Icon(&icons::SCAN), "Approve a sign-in");
+    if answered(source, "DW-A12") {
+        return leads(
+            1,
+            2,
+            it.sub("Let another device sign in"),
+            State_::None,
+            "DW-A12",
+            source,
+            t,
+        );
+    }
+    set::item(1, 2, &it.sub(APPROVE_ON_WEB), Vec::new(), t)
 }
 
 fn devices(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
@@ -338,15 +368,7 @@ fn devices(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
         vec![
             app_lock_row(facts, t),
             leads(1, 1, sessions, State_::Marked(signed_in), "DW-A55", source, t),
-            leads(
-                1,
-                2,
-                Row::new(Lead::Icon(&icons::SCAN), "Approve a sign-in").sub("Let another device sign in"),
-                State_::None,
-                "DW-A12",
-                source,
-                t,
-            ),
+            approve_row(source, t),
         ],
         None,
         t,
@@ -410,30 +432,50 @@ fn sign_out(facts: &SecurityFacts, t: &Theme) -> El {
             arrive(&mut s.account);
         })
     };
+    let mut rows = vec![one(
+        0,
+        Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of Drive"),
+        Dialog::SignOutApp,
+    )];
+    // A source that signs Drive out and has no other Beebeeb app to sign out does not draw "all apps". One that
+    // signs nothing out draws both as text, as before.
+    let all = facts.can_sign_out_all || !facts.can_sign_out;
+    if all {
+        rows.push(one(
+            1,
+            Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of all Beebeeb apps").sub("On this PC"),
+            Dialog::SignOutAllApps,
+        ));
+    }
     lists::list(
         3,
         Some("Sign out"),
-        vec![
-            one(
-                0,
-                Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of Drive"),
-                Dialog::SignOutApp,
-            ),
-            one(
-                1,
-                Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of all Beebeeb apps").sub("On this PC"),
-                Dialog::SignOutAllApps,
-            ),
-        ],
-        Some("Signing out of Drive signs out Drive on this PC only. The other Beebeeb apps stay signed in."),
+        rows,
+        Some(if all {
+            "Signing out of Drive signs out Drive on this PC only. The other Beebeeb apps stay signed in."
+        } else {
+            "Signing out of Drive signs out Drive on this PC only."
+        }),
         t,
     )
 }
 
 fn delete(source: &dyn AccountSource, t: &Theme) -> El {
-    let it = Row::new(Lead::Icon(&icons::TRASH), "Delete your Beebeeb account");
-    // The red ink is for a row that deletes: one that leads nowhere yet is not drawn as a danger.
-    let it = if answered(source, "DW-A58") { it.danger() } else { it };
+    // A source that has no deletion flow leads to the web's, which does: a link, never a button that is not there.
+    if !answered(source, "DW-A58") {
+        let it = Row::new(Lead::Icon(&icons::TRASH), "Delete your account on the web").link(true);
+        return lists::list(
+            4,
+            Some("Delete"),
+            vec![
+                set::item(4, 0, &it, Vec::new(), t)
+                    .on_press(|s: &mut State| s.settings.ask(crate::frames::settings::Intent::Web(DELETE_PAGE))),
+            ],
+            Some("Deleting your account is done on the web in this version."),
+            t,
+        );
+    }
+    let it = Row::new(Lead::Icon(&icons::TRASH), "Delete your Beebeeb account").danger();
     lists::list(
         4,
         Some("Delete"),
@@ -450,8 +492,14 @@ pub fn arrive(ui: &mut super::AccountUi) {
     if ui.signing_out.waiting.is_none() {
         ui.signing_out = SigningOut::default();
     }
-    if matches!(ui.dialog, Some(Dialog::SignOutApp | Dialog::SignOutAllApps))
-        && !ui.source.as_deref().is_some_and(|s| s.security_facts().can_sign_out)
+    let facts = ui.source.as_deref().map(|s| s.security_facts());
+    let may = |all: bool| {
+        facts
+            .as_ref()
+            .is_some_and(|f| if all { f.can_sign_out_all } else { f.can_sign_out })
+    };
+    if (matches!(ui.dialog, Some(Dialog::SignOutApp)) && !may(false))
+        || (matches!(ui.dialog, Some(Dialog::SignOutAllApps)) && !may(true))
     {
         ui.dialog = None;
     }
@@ -470,7 +518,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &Signi
             signing,
             t,
         )),
-        Some(Dialog::SignOutAllApps) if facts.can_sign_out => Some(sign_out_confirm(
+        Some(Dialog::SignOutAllApps) if facts.can_sign_out_all => Some(sign_out_confirm(
             "Sign out of all Beebeeb apps on this PC?",
             "Drive, Pass, VPN, Chat and Mail on this PC are signed out. Their data stays encrypted on this PC; signing in again opens it. Your other devices stay signed in.",
             "Sign out of all",
@@ -479,7 +527,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &Signi
             t,
         )),
         Some(Dialog::LockDelay(hot)) => match &facts.app_lock {
-            Some((true, after)) => Some(super::app_lock::menu(after, *hot, t)),
+            Some((true, after)) if !after.is_empty() => Some(super::app_lock::menu(after, *hot, t)),
             _ => None,
         },
         _ => None,

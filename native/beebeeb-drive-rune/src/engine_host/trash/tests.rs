@@ -25,6 +25,8 @@ use super::*;
 use crate::State;
 use crate::shell::app::Section;
 
+mod count;
+mod purge;
 mod session;
 
 const PASSWORD: &str = "an invented password for trash";
@@ -32,6 +34,8 @@ const PASSWORD: &str = "an invented password for trash";
 const ANSWER: u8 = 0;
 const SERVER_ERROR: u8 = 1;
 const SESSION_ENDED: u8 = 2;
+const COUNT_MISSING: u8 = 5;
+const COUNT_NULL: u8 = 6;
 
 const DOCS: &str = "a0000000-0000-4000-8000-000000000201";
 const CONTRACT: &str = "a0000000-0000-4000-8000-000000000202";
@@ -51,11 +55,15 @@ struct Fake {
     list_mode: Arc<AtomicU8>,
     /// How a restore answers.
     restore_mode: Arc<AtomicU8>,
+    /// How the count (`GET /api/v1/files/count`) answers.
+    count_mode: Arc<AtomicU8>,
     /// How long the listing waits before it answers (with what Beebeeb held when it was asked), in ms.
     list_delay_ms: Arc<AtomicU64>,
     /// The next restore request says on the first that it reached the fake, then waits on the second before
     /// anything is done with it.
     restore_hold: RestoreHold,
+    /// The permanent deletes of the first account: what the fake purged, and how it answers.
+    purge: purge::PurgeFake,
 }
 
 type RestoreHold = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
@@ -83,10 +91,17 @@ fn fake(tag: &str) -> Fake {
         Arc::new(AtomicU64::new(0)),
     );
     let (list_in, restore_in, delay_in) = (list_mode.clone(), restore_mode.clone(), list_delay_ms.clone());
+    let count_mode = Arc::new(AtomicU8::new(ANSWER));
+    let count_in = count_mode.clone();
     let restore_hold = RestoreHold::default();
     let hold_in = restore_hold.clone();
+    let purge = purge::PurgeFake::new(first.clone());
+    let purge_in = purge.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
+        if let Some(answer) = purge_in.answer(req) {
+            return answer;
+        }
         let sign_in = route.starts_with("POST /api/v1/opaque/");
         let theirs = if sign_in {
             names_email(req, &second_email)
@@ -95,6 +110,25 @@ fn fake(tag: &str) -> Fake {
         };
         let rest = if theirs { &two } else { &one };
         let restoring = route.starts_with("POST /api/v1/files/") && route.ends_with("/restore");
+        if route == "GET /api/v1/files/count" {
+            match count_in.load(Ordering::SeqCst) {
+                SERVER_ERROR => return Reply::json(500, json!({ "error": "a server body" })),
+                SESSION_ENDED => return Reply::json(401, json!({ "error": "a server body" })),
+                // The counter row without the number, or with it null.
+                COUNT_MISSING => return Reply::ok(json!({ "total_files": 40, "trashed_bytes": 1 })),
+                COUNT_NULL => return Reply::ok(json!({ "trashed_files": null })),
+                _ => {}
+            }
+            // The server counts the same set its Trash listing returns, for the account whose token this is.
+            let mut as_listing = req.clone();
+            as_listing.path = "/api/v1/files?trashed=true".into();
+            let body: Value = serde_json::from_slice(&rest(&as_listing).body).expect("the fake's listing");
+            let trashed = purge_in.without_purged(&body["items"]).as_array().map_or(0, Vec::len);
+            return Reply::ok(json!({
+                "total_files": 40, "total_folders": 2, "total_bytes": 1,
+                "trashed_files": trashed, "trashed_bytes": 1
+            }));
+        }
         if !is_listing(req) && !restoring {
             return rest(req);
         }
@@ -119,7 +153,7 @@ fn fake(tag: &str) -> Fake {
         // The fake answers `items`; the server (and the engine's client) say `files` and `next_cursor`.
         let body: Value = serde_json::from_slice(&rest(req).body).expect("the fake's listing");
         std::thread::sleep(Duration::from_millis(delay_in.load(Ordering::SeqCst)));
-        Reply::ok(json!({ "files": body["items"], "next_cursor": null }))
+        Reply::ok(json!({ "files": purge_in.without_purged(&body["items"]), "next_cursor": null }))
     }));
     // The first account: a folder, a PDF and a photo in Trash, one file not. The second: one item in Trash.
     first.add_item(DOCS, None, "Invented old invoices", true, 0);
@@ -139,8 +173,10 @@ fn fake(tag: &str) -> Fake {
         second_phrase,
         list_mode,
         restore_mode,
+        count_mode,
         list_delay_ms,
         restore_hold,
+        purge,
     }
 }
 
@@ -245,8 +281,9 @@ fn the_trash_is_the_accounts_newest_deleted_first_with_names_decrypted_in_the_en
             size: crate::source::format_size(1_153_434 + 2_097_152),
         }
     );
-    assert_eq!(source.count(), None, "no badge: the engine has no count call");
-    assert!(!source.actions_available());
+    assert_eq!(source.count(), Some(3), "the badge is the server's number");
+    // Details and Preview act on this list (W3b: they were not bound before).
+    assert!(source.actions_available());
     assert_eq!(source.emptying(), None);
 
     // Opening again while the list is fresh reads nothing.
@@ -512,10 +549,13 @@ fn the_window_shows_no_name_of_a_locked_session_or_of_the_account_before() {
     poll(&mut rt);
     let seen = words(&rt);
     assert!(seen.contains("Invented contract.pdf"), "the Trash is drawn: {seen}");
-    assert!(
-        !rt.elements().iter().any(|e| e.key.as_deref() == Some("Trash-badge")),
-        "no badge from the engine"
-    );
+    let badge = |rt: &Runtime<State>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("Trash-badge"))
+            .and_then(|e| e.text)
+    };
+    assert_eq!(badge(&rt).as_deref(), Some("3"), "the badge is the server's count");
 
     let _ = engine.lock();
     poll(&mut rt);
@@ -524,6 +564,7 @@ fn the_window_shows_no_name_of_a_locked_session_or_of_the_account_before() {
         assert!(!seen.contains(name), "{name} is still drawn after the lock");
     }
     assert!(seen.contains("Signed out"), "the signed-out state is drawn: {seen}");
+    assert_eq!(badge(&rt), None, "no badge for a locked session");
 
     engine.sign_out_keeping_local_data().expect("signed out");
     sign_in(&engine, &fake.second, &fake.second_phrase);
@@ -543,6 +584,7 @@ fn the_window_shows_no_name_of_a_locked_session_or_of_the_account_before() {
         seen.contains("Second account budget.xlsx"),
         "the second account's Trash: {seen}"
     );
+    assert_eq!(badge(&rt).as_deref(), Some("1"), "the second account's own count");
 }
 
 #[test]
@@ -561,4 +603,149 @@ fn a_time_reads_as_today_yesterday_or_its_date_on_this_computers_clock() {
     assert_eq!(seconds_of("2026-11-02T10:00:00Z"), Some(1_793_613_600));
     assert_eq!(seconds_of("1700000001"), Some(1_700_000_001));
     assert_eq!(seconds_of("not a time"), None);
+}
+
+/// Details and Preview act only on a list of the session in memory: none before the first read, none after the
+/// window forgot it, none once the session turned (a lock); again once a list of the new session is read.
+#[test]
+fn engine_trash_actions_follow_the_listing() {
+    let fake = fake("actions");
+    let engine = signed_in(&fake);
+    let mut source = EngineTrashSource::new(engine.clone());
+    assert!(!source.actions_available(), "before the first read");
+    opened(&mut source);
+    assert!(source.actions_available(), "with a list of this session");
+    source.forget();
+    assert!(!source.actions_available(), "after the window forgot it");
+    opened(&mut source);
+    assert!(source.actions_available());
+    let _ = engine.lock();
+    assert!(!source.actions_available(), "after a lock, before any poll");
+}
+
+/// Details of a row of Trash is the SERVER's row: a local state on this PC that names the same id otherwise is never
+/// read for it.
+#[test]
+fn trash_details_is_the_server_row() {
+    let fake = fake("details");
+    let engine = signed_in(&fake);
+    // This PC's local state, the first account's, with another name for the trashed contract, at the top.
+    let _dir = this_pcs_local_state(&engine, &fake.first, &[(CONTRACT, "A local name of the contract.pdf")]);
+    let mut state = crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), engine.clone());
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    // The window on Files first, as the app opens (Files' list is read from the local state).
+    crate::frames::go(&mut state, Section::Files);
+    let mut rt = Runtime::new(state, crate::view, (1278.0, 798.0), env);
+    draw(&mut rt);
+    crate::frames::go(&mut rt.state, Section::Trash);
+    poll(&mut rt);
+    rt.update(|s, tx| {
+        assert!(
+            crate::frames::item::open_details(s, CONTRACT, tx),
+            "the row is in the listing"
+        );
+    });
+    draw(&mut rt);
+    assert_eq!(
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("dlg-file-name"))
+            .and_then(|e| e.text)
+            .as_deref(),
+        Some("Invented contract.pdf"),
+        "the listing's name"
+    );
+    assert!(
+        !words(&rt).contains("A local name"),
+        "nothing of the local state is drawn"
+    );
+}
+
+/// This PC's local state, recorded as `owner`'s, with these files at the top, and the engine reading it.
+fn this_pcs_local_state(
+    engine: &Engine<MemoryCredentials>,
+    owner: &FakeAccount,
+    rows: &[(&str, &str)],
+) -> tempfile::TempDir {
+    use beebeeb_engine::account_binding::Identity;
+    use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let db = StateDb::open(&path).unwrap();
+    for (id, name) in rows {
+        let entry = FileEntry {
+            file_id: (*id).into(),
+            path: (*name).into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 9,
+            modified_at: 1_794_000_000,
+            content_hash: None,
+            remote_updated_at: 1_794_000_000,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        db.upsert_file_with_contract(&entry, |contract| contract.item_kind = ItemKind::File)
+            .unwrap();
+    }
+    db.set_owner(&Identity::new(Some(&owner.user_id), Some(&owner.email)))
+        .unwrap();
+    drop(db);
+    engine.use_local_state_for_test(path);
+    dir
+}
+
+/// The running app's window, wired as `shell::state::init_on_engine` wires it: a text file in Trash that this PC
+/// never synced shows its first lines in the read-only Preview, downloaded from Beebeeb and decrypted in memory; and
+/// nothing about it is written to the local state.
+#[test]
+fn a_trashed_text_file_shows_its_lines_in_the_running_apps_preview() {
+    const NOTES: &str = "a0000000-0000-4000-8000-000000000205";
+    let fake = fake("preview");
+    fake.first.add_file_with_content(
+        NOTES,
+        None,
+        "Invented trip notes.txt",
+        b"train at eight\npack the charger",
+    );
+    assert!(fake.first.trash_item(NOTES));
+    let engine = signed_in(&fake);
+    let dir = this_pcs_local_state(&engine, &fake.first, &[]);
+    let mut state = crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), engine.clone());
+    crate::frames::go(&mut state, Section::Trash);
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, crate::view, (1278.0, 798.0), env);
+    poll(&mut rt);
+    assert!(words(&rt).contains("Invented trip notes.txt"), "listed in Trash");
+    rt.update(|s, tx| {
+        assert!(
+            crate::frames::item::open_preview(s, NOTES, tx),
+            "the row is in the listing"
+        );
+    });
+    let began = Instant::now();
+    while rt.state.frames.shared.fields.preview.is_loading() {
+        assert!(began.elapsed() < Duration::from_secs(10), "the preview did not answer");
+        std::thread::sleep(Duration::from_millis(10));
+        rt.update(|s, tx| {
+            crate::frames::item::poll(s, tx);
+        });
+    }
+    draw(&mut rt);
+    let seen = words(&rt);
+    assert!(seen.contains("train at eight"), "the first lines are drawn: {seen}");
+    assert!(
+        rt.find("pv-share").is_none() && rt.find("pv-open").is_none(),
+        "read-only"
+    );
+    let db = beebeeb_engine::state_db::StateDb::open(&dir.path().join("state.db")).unwrap();
+    assert!(
+        db.get_file(NOTES).unwrap().is_none(),
+        "nothing about it was written here"
+    );
 }

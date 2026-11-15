@@ -444,6 +444,9 @@ impl ThumbSource for TripThumbs {
             "belem" => Some(2),
             "tram28" => Some(3),
             "sunset" => Some(4),
+            // DW-0426: the two files that upload, as the board pictures them.
+            "up-miradouro" => Some(6),
+            "up-ponte" => Some(2),
             _ => BOARD_ROWS
                 .iter()
                 .find(|row| row.1 > 0 && id_of(row.0) == id)

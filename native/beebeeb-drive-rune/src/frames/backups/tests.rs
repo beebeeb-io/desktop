@@ -105,7 +105,11 @@ fn source(rt: &Runtime<State>) -> &dyn BackupsSource {
 
 #[test]
 fn the_six_built_frames_show_the_boards_words() {
-    assert_eq!(FRAMES.len(), 6, "the Backups frames this lane built");
+    assert_eq!(
+        FRAMES.len(),
+        16,
+        "the Backups frames built: 6 of Backups, 10 of Mail Backup"
+    );
     let rt = runtime("DW-0737");
     assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::Backups));
     assert_eq!(text(&rt, "set-title"), "Backups");
@@ -154,7 +158,7 @@ fn the_six_built_frames_show_the_boards_words() {
     let rt = runtime("DW-0742");
     assert_eq!(text(&rt, "dlg-title"), "Delete this backup?");
     assert!(text(&rt, "dlg-text-0").starts_with("4,120 photos and 38 GB will be moved to Trash."));
-    assert_eq!(rt.state.backups.code_len(), 2);
+    assert_eq!(rt.state.backups.code_len(), 13);
 
     let rt = runtime("DW-0741");
     assert_eq!(text(&rt, "set-title"), "Couldn't back up");
@@ -288,31 +292,34 @@ fn what_could_not_back_up_retries_one_or_all_and_never_an_exclusion() {
 }
 
 #[test]
-fn deleting_a_devices_backup_needs_six_digits_and_a_code_the_engine_accepts() {
+fn deleting_a_devices_backup_needs_the_account_password_the_engine_accepts() {
     let mut rt = runtime("DW-0737");
     click(&mut rt, "item-1-1");
     assert_eq!(rt.state.backups.page, Page::Device("ipad".into()));
     click(&mut rt, "item-2-0");
     assert_eq!(info(&rt, "dlg").role, "dialog");
-    assert!(!info(&rt, "btn-0").focusable, "Delete backup is off until six digits");
-    click(&mut rt, "btn-0");
-    assert_eq!(source(&rt).devices().len(), 3);
-
-    type_text(&mut rt, "51x4");
-    assert_eq!(rt.state.backups.code_len(), 3, "digits only");
-    press(&mut rt, Key::Backspace);
-    assert_eq!(rt.state.backups.code_len(), 2);
+    assert!(
+        !info(&rt, "btn-0").focusable,
+        "Delete backup is off until a password is typed"
+    );
+    assert!(
+        !has(&rt, "secure-code"),
+        "no authenticator code boxes: the engine proves the password"
+    );
     press(&mut rt, Key::Enter);
-    assert_eq!(source(&rt).devices().len(), 3, "Enter does nothing before six digits");
-    type_text(&mut rt, "42639");
-    assert_eq!(rt.state.backups.code_len(), 6, "six at most");
+    assert_eq!(source(&rt).devices().len(), 3, "Enter does nothing before a password");
+
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "pw");
+    assert_eq!(rt.state.backups.code_len(), 2);
     assert!(info(&rt, "btn-0").focusable);
 
-    // A code the engine does not accept: the boxes empty, the dialog stays, nothing is deleted.
+    // A password the engine does not accept: the field empties, the dialog stays, nothing is deleted.
     let mut refused = runtime("DW-0739");
     click(&mut refused, "item-2-0");
-    type_text(&mut refused, "000000");
-    press(&mut refused, Key::Enter);
+    click(&mut refused, super::view::PASSWORD_KEY);
+    type_text(&mut refused, "wrong password");
+    click(&mut refused, "btn-0");
     assert_eq!(source(&refused).devices().len(), 3);
     assert_eq!(refused.state.backups.code_len(), 0);
     assert!(refused.state.backups.dialog.is_some());
@@ -321,42 +328,29 @@ fn deleting_a_devices_backup_needs_six_digits_and_a_code_the_engine_accepts() {
     assert_eq!(source(&rt).devices().len(), 2);
     assert_eq!(rt.state.backups.page, Page::Section);
     assert_eq!(rt.state.backups.dialog, None);
-    assert_eq!(rt.state.backups.code_len(), 0, "the code is wiped after use");
+    assert_eq!(rt.state.backups.code_len(), 0, "the password is wiped after use");
     assert_eq!(text(&rt, "item-1-1-title"), "Old iPhone");
 }
 
 #[test]
-fn the_code_is_in_no_name_and_no_text_of_the_element_tree() {
+fn the_password_is_in_no_name_and_no_text_of_the_element_tree() {
     let mut rt = runtime("DW-0739");
     click(&mut rt, "item-2-0");
-    type_text(&mut rt, "73913");
-    assert_eq!(rt.state.backups.code_len(), 5);
-    assert_eq!(info(&rt, "secure-code").role, "textbox");
-    assert_eq!(label(&rt, "secure-code"), "Authenticator code, 6 digits, 5 entered");
-    assert!(has(&rt, "code-4-digit") && !has(&rt, "code-5-digit"));
-    let dialog = info(&rt, "dlg").rect;
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "hunter22x");
+    assert_eq!(rt.state.backups.code_len(), 9);
     for e in rt.elements() {
-        // The dialog's own sentences hold the board's "4,120 photos": only what sits inside
-        // the code field is checked for digits, and everything for the whole code.
-        let inside_field = e
-            .key
-            .as_deref()
-            .is_some_and(|k| k.starts_with("code-") || k == "secure-code");
         for words in [e.label.as_deref(), e.text.as_deref(), e.help.as_deref()]
             .into_iter()
             .flatten()
         {
-            assert!(!words.contains("73913"), "{:?} holds the code: {words:?}", e.key);
-            if inside_field && e.key.as_deref() != Some("secure-code") && e.key.as_deref() != Some("code-label") {
-                assert!(
-                    !words.chars().any(|c| c.is_ascii_digit()),
-                    "{:?} shows a digit to the tree: {words:?}",
-                    e.key
-                );
-            }
+            assert!(
+                !words.contains("hunter22x"),
+                "{:?} holds the password: {words:?}",
+                e.key
+            );
         }
     }
-    assert!(dialog[2] > 0.0);
     // Closing the dialog wipes what was typed.
     press(&mut rt, Key::Escape);
     assert_eq!(rt.state.backups.code_len(), 0);
@@ -391,7 +385,7 @@ fn rows_that_lead_elsewhere_ask_the_shell_and_carry_the_devices_id() {
 #[test]
 fn leaving_the_section_forgets_what_was_open_and_wipes_the_code() {
     let mut rt = runtime("DW-0742");
-    assert_eq!(rt.state.backups.code_len(), 2);
+    assert_eq!(rt.state.backups.code_len(), 13);
     rt.update(|s, _| crate::frames::settings::go(s, "DW-0701"));
     rt.frame(0.0);
     assert_eq!(rt.state.backups.dialog, None);
@@ -424,4 +418,277 @@ fn a_build_with_no_source_draws_the_not_built_frame_never_sample_values() {
     assert!(super::source::first(true).is_some());
     // The fixture the scenes use is the board's.
     assert_eq!(FixtureSource::board().folders().len(), 7);
+}
+
+/// A source that answers late, as the engine's does: a delete is sent, then answered; another device's backup that
+/// this PC cannot read; no device links (the shell does not take them).
+struct Late {
+    devices: Vec<super::source::Device>,
+    deleting: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<(String, usize)>>>,
+}
+
+impl BackupsSource for Late {
+    fn wired(&self, part: super::source::Part) -> bool {
+        use super::source::Part;
+        matches!(part, Part::Root | Part::Folders | Part::Devices | Part::DeleteDevice)
+    }
+    fn deleting(&self) -> bool {
+        self.deleting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn root(&self) -> super::source::BackupsRoot {
+        super::source::BackupsRoot {
+            id: String::new(),
+            is_protected: true,
+            device_folder: String::new(),
+        }
+    }
+    fn status(&self) -> Status {
+        Status::Plain {
+            title: String::new(),
+            sub: String::new(),
+            can_run: false,
+        }
+    }
+    fn folders(&self) -> Vec<super::source::Folder> {
+        Vec::new()
+    }
+    fn devices(&self) -> Vec<super::source::Device> {
+        self.devices.clone()
+    }
+    fn not_backed_up(&self) -> Vec<super::source::NotBackedUp> {
+        Vec::new()
+    }
+    fn mail_backup_on(&self) -> bool {
+        false
+    }
+    fn back_up_now(&mut self) {}
+    fn set_folder(&mut self, _id: &str, _on: bool) {}
+    fn add_folder(&mut self, _path: &str) -> bool {
+        false
+    }
+    fn remove_folder(&mut self, _id: &str, _move_copy_to_trash: bool) {}
+    fn retry(&mut self, _id: &str) {}
+    fn retry_all(&mut self) {}
+    fn delete_device_backup(&mut self, id: &str, code: &str) -> bool {
+        // The password's length only: the test never keeps it.
+        self.asked.lock().unwrap().push((id.to_string(), code.len()));
+        self.deleting.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+}
+
+fn texts(rt: &Runtime<State>) -> Vec<String> {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| e.text.or(e.label))
+        .collect()
+}
+
+/// Review of desktop#425: a device that may be this PC's own backup says it cannot read it and why it cannot be
+/// deleted here; no "Delete this backup", and pressing the row opens nothing.
+#[test]
+fn a_device_that_may_be_this_pcs_has_no_delete() {
+    use super::source::{Backed, Device, DeviceKind};
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let late = Late {
+        devices: vec![Device {
+            id: "maybe-me".into(),
+            name: "Invented PC".into(),
+            model: "device".into(),
+            kind: DeviceKind::Unknown,
+            backed: Backed::Unreadable,
+            size: None,
+            last_backup: None,
+            signed_in: None,
+            deletable: false,
+        }],
+        deleting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        asked: asked.clone(),
+    };
+    let mut state = init();
+    crate::frames::settings::go(&mut state, "DW-0737");
+    state.backups = BackupsUi::new(Some(Box::new(late)));
+    state.backups.show(Page::Device("maybe-me".into()));
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (958.0, 958.0), env);
+    rt.frame(0.0);
+    let page = texts(&rt);
+    for present in [
+        super::view::CANT_READ,
+        super::view::MAY_BE_THIS_PC,
+        "Can't delete this backup here",
+    ] {
+        assert!(page.iter().any(|t| t == present), "{present} is drawn");
+    }
+    assert!(!page.iter().any(|t| t == "Delete this backup"), "never offered");
+    click(&mut rt, "item-2-0");
+    assert_eq!(rt.state.backups.dialog, None, "pressing the row opens nothing");
+    assert!(asked.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_late_delete_keeps_the_dialog_until_the_answer_and_a_refusal_shows_under_the_field() {
+    use super::source::{Backed, Device, DeviceKind};
+    let deleting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let late = Late {
+        devices: vec![Device {
+            id: "pc".into(),
+            name: "Invented old laptop".into(),
+            model: "device".into(),
+            kind: DeviceKind::Unknown,
+            backed: Backed::Unreadable,
+            size: None,
+            last_backup: None,
+            signed_in: None,
+            deletable: true,
+        }],
+        deleting: deleting.clone(),
+        asked: asked.clone(),
+    };
+    let mut state = init();
+    crate::frames::settings::go(&mut state, "DW-0737");
+    state.backups = BackupsUi::new(Some(Box::new(late)));
+    state.backups.show(Page::Device("pc".into()));
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (958.0, 958.0), env);
+    rt.on_key = Some(crate::shell::host::on_key);
+    rt.frame(0.0);
+    let page = texts(&rt);
+    assert!(
+        page.iter().any(|t| t == super::view::CANT_READ),
+        "the page says it cannot read it"
+    );
+    for absent in [
+        "Open in Photos",
+        "Open in Files",
+        "Status",
+        "Signed in",
+        "Not signed in",
+    ] {
+        assert!(!page.iter().any(|t| t == absent), "{absent} is not drawn");
+    }
+
+    click(&mut rt, "item-2-0");
+    assert_eq!(rt.state.backups.dialog, Some(Dialog::DeleteDevice("pc".into())));
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "an invented password");
+    click(&mut rt, "btn-0");
+    assert_eq!(*asked.lock().unwrap(), [("pc".to_string(), 20)]);
+    assert_eq!(
+        rt.state.backups.dialog,
+        Some(Dialog::DeleteDevice("pc".into())),
+        "sent: the dialog stays until Beebeeb answers"
+    );
+    assert_eq!(rt.state.backups.code_len(), 0, "the password is wiped once handed over");
+    assert!(texts(&rt).iter().any(|t| t == "Deleting\u{2026}"));
+    // A second press while it is on its way sends nothing: the button is off, and the call refuses too.
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "again");
+    assert_eq!(rt.state.backups.code_len(), 5, "typed into the field");
+    assert!(
+        !info(&rt, "btn-0").focusable,
+        "Delete backup is off while one is on its way"
+    );
+    click(&mut rt, "btn-0");
+    assert!(!rt.state.backups.delete_device());
+    assert_eq!(asked.lock().unwrap().len(), 1);
+
+    // Refused: the words under the field, the dialog open, the device still listed.
+    deleting.store(false, std::sync::atomic::Ordering::SeqCst);
+    rt.state
+        .backups
+        .delete_answered(Err("That password isn't right. Nothing was deleted."));
+    settle(&mut rt);
+    assert_eq!(rt.state.backups.dialog, Some(Dialog::DeleteDevice("pc".into())));
+    assert!(
+        texts(&rt)
+            .iter()
+            .any(|t| t == "That password isn't right. Nothing was deleted.")
+    );
+    assert_eq!(source(&rt).devices().len(), 1);
+
+    // Done: the dialog closes and the section shows (the source reads its list again).
+    rt.state.backups.code.clear();
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "an invented password");
+    assert_eq!(rt.state.backups.code_len(), 20, "typed into the field");
+    click(&mut rt, "btn-0");
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    deleting.store(false, std::sync::atomic::Ordering::SeqCst);
+    rt.state.backups.delete_answered(Ok(()));
+    assert_eq!(rt.state.backups.dialog, None);
+    assert_eq!(rt.state.backups.page, Page::Section);
+
+    // An answer after the dialog was closed is said in the section, with what it means for the list.
+    rt.state
+        .backups
+        .delete_answered(Err("This backup could not be found. Nothing was deleted."));
+    assert_eq!(
+        rt.state.backups.notice(),
+        Some((
+            "This backup could not be found. Nothing was deleted.",
+            super::DELETE_NOTICE_SUB
+        ))
+    );
+}
+
+#[test]
+fn a_delete_answer_never_lands_in_another_devices_dialog() {
+    use super::source::{Backed, Device, DeviceKind};
+    let device = |id: &str| Device {
+        id: id.into(),
+        name: format!("Invented {id}"),
+        model: "device".into(),
+        kind: DeviceKind::Computer,
+        backed: Backed::Folders(1),
+        size: None,
+        last_backup: None,
+        signed_in: None,
+        deletable: true,
+    };
+    let deleting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut ui = BackupsUi::new(Some(Box::new(Late {
+        devices: vec![device("a"), device("b")],
+        deleting: deleting.clone(),
+        asked: asked.clone(),
+    })));
+    ui.ask_delete_device("a");
+    ui.code.replace_text("an invented password");
+    assert!(ui.delete_device());
+    // Closed while A's is on its way; B's dialog opens.
+    ui.close_dialog();
+    ui.ask_delete_device("b");
+    assert!(
+        ui.deleting_for("a") && !ui.deleting_for("b"),
+        "B's dialog does not say Deleting"
+    );
+    ui.code.replace_text("an invented password");
+    assert!(!ui.delete_device(), "one at a time");
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    // A's refusal: said in the section, never under B's field.
+    deleting.store(false, std::sync::atomic::Ordering::SeqCst);
+    ui.delete_answered(Err("That password isn't right. Nothing was deleted."));
+    assert_eq!(ui.delete_refusal(), None);
+    assert_eq!(
+        ui.dialog,
+        Some(Dialog::DeleteDevice("b".into())),
+        "B's dialog stays open"
+    );
+    assert_eq!(
+        ui.notice().map(|(words, _)| words),
+        Some("That password isn't right. Nothing was deleted.")
+    );
+    // An answer with nothing sent closes nothing.
+    ui.delete_answered(Ok(()));
+    assert_eq!(ui.dialog, Some(Dialog::DeleteDevice("b".into())));
 }

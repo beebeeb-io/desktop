@@ -309,3 +309,52 @@ fn try_again_is_not_offered_when_nothing_can_be_asked_again() {
     rt.update(|s, _| s.forget_undo());
     assert!(!rt.state.offers_try_again(Action::Restore, ActionError::Failed));
 }
+
+/// Review of desktop#424: a row that leaves because an upload was cancelled moves the rows under it, and the
+/// selection follows the ROWS (by id), never the drawn positions: an action on "the selection" lands on the same
+/// files that were selected, never on their neighbours.
+#[test]
+fn a_cancelled_upload_leaves_the_selection_on_the_same_files() {
+    let (mut rt, spy, ids, other) = window();
+    // [other, A, B]: A and B selected (B last), `other` (not selected) is about to go.
+    rt.update(|s, _| {
+        s.listing.items.swap(0, 2);
+        s.listing.items.swap(1, 2);
+    });
+    let order: Vec<String> = rt.state.listing.items[..3].iter().map(|item| item.id.clone()).collect();
+    assert_eq!(order[0], other);
+    let row_of = |rt: &Runtime<State>, id: &str| rt.state.listing.items.iter().position(|item| item.id == id);
+    rt.update(|s, _| {
+        s.selected = Some(2);
+        s.actions.anchor = Some(1);
+        s.actions.selection.clear();
+        s.actions.selection.extend([1, 2]);
+    });
+    let (first, last) = (order[1].clone(), order[2].clone());
+    spy.later.lock().unwrap().push(Change::Cancelled { id: other.clone() });
+    frame(&mut rt);
+    assert!(!shown(&rt, &other), "the cancelled upload's row is gone");
+    let selected: Vec<&str> = rt
+        .state
+        .actions
+        .selection
+        .iter()
+        .map(|&row| rt.state.listing.items[row].id.as_str())
+        .collect();
+    assert_eq!(
+        selected,
+        [first.as_str(), last.as_str()],
+        "the same two files stay selected"
+    );
+    assert_eq!(
+        rt.state.selected,
+        row_of(&rt, &last),
+        "the current row is still the same file"
+    );
+    assert_eq!(
+        rt.state.actions.anchor,
+        row_of(&rt, &first),
+        "the anchor is still the same file"
+    );
+    let _ = ids;
+}

@@ -22,6 +22,8 @@ pub mod create;
 mod create_kit;
 pub mod create_source;
 pub mod icons;
+// The two lock levels in the window: the lock screen's Windows Hello and the password in front of it.
+pub mod lock;
 pub mod qr;
 pub mod setup;
 pub mod source;
@@ -35,6 +37,8 @@ mod view_steps;
 
 #[cfg(test)]
 mod create_tests;
+#[cfg(test)]
+mod lock_tests;
 #[cfg(test)]
 mod steps_tests;
 #[cfg(test)]
@@ -133,6 +137,8 @@ pub enum Intent {
     /// DW-A35's rows: the page opens in the browser, not in the app.
     OpenTerms,
     OpenPrivacy,
+    /// "Trouble signing in?": the web's recovery page opens in the browser.
+    OpenRecoveryPage,
     /// DW-A39: a save dialog for a text file of the phrase, and a print-ready page. No word
     /// travels in the intent: whoever acts on it asks the engine.
     SavePhraseAsFile,
@@ -176,6 +182,8 @@ pub struct Ui {
     passkey_waiting: bool,
     unlocking: bool,
     unlock_problem: Option<SignInProblem>,
+    /// The sentence the vault level's password screen starts with after the screen path sent the person there.
+    lock_notice: Option<&'static str>,
     /// The field a scene draws holding the keyboard (`steps::Pictured`).
     pictured: Option<Pictured>,
     /// Recovery: the phrase is being verified (DW-A47).
@@ -189,6 +197,10 @@ pub struct Ui {
     pub(super) create: create::Create,
     /// The session's gate as the last poll saw it (`follow_gate`).
     gate_seen: Option<GateState>,
+    /// The window got the focus before any poll followed a gate (B5): the poll starts the lock's prompt.
+    focus_before_first_poll: bool,
+    /// What the window keeps while a lock closes the gate (`lock`).
+    lock: lock::Lock,
     /// The device request was asked from the twelve words (a session without a key is waiting behind it): leaving
     /// the request, or its refusal, goes back to the words, and the session is not discarded.
     words_behind: bool,
@@ -231,6 +243,7 @@ impl Ui {
             passkey_waiting: false,
             unlocking: false,
             unlock_problem: None,
+            lock_notice: None,
             pictured: None,
             recovering: false,
             confirm: TextEdit::new("").secure(),
@@ -238,6 +251,8 @@ impl Ui {
             set_problem: None,
             create: create::Create::new(),
             gate_seen: None,
+            focus_before_first_poll: false,
+            lock: lock::Lock::default(),
             words_behind: false,
         }
     }
@@ -354,7 +369,8 @@ impl Ui {
     }
 
     pub fn open_sign_in(&mut self) {
-        if self.step_running() {
+        // While a lock holds the window, back leads to the lock's own screens, never to the form.
+        if self.lock_back() || self.step_running() {
             return;
         }
         if self.words_behind && matches!(self.screen, Screen::Device { .. }) {
@@ -399,6 +415,11 @@ impl Ui {
 
     /// "Sign in with another device", "Ask again" and "Get a new code".
     pub fn ask_other_device(&mut self) {
+        if !self.in_app_doors() {
+            // Approving this PC from another device is the web's here: the door stays, and opens that page.
+            self.open_recovery_page_from_any();
+            return;
+        }
         if self.step_running() || self.passkey_waiting {
             return;
         }
@@ -593,11 +614,15 @@ impl Ui {
                     self.problem = (seconds > 0).then_some(SignInProblem::RateLimited { seconds });
                 }
             }
+            SignInEvent::Hello(outcome) if self.lock_hello_waiting() => self.lock_hello_answered(outcome),
+            SignInEvent::ScreenPassword(outcome) if self.unlocking => self.lock_screen_password_answered(outcome),
+            SignInEvent::ScreenWaitLeft { seconds } => self.lock_wait_left(seconds),
             SignInEvent::Hello(outcome) if self.hello_waiting && self.screen == Screen::ContinueAs(None) => {
                 self.hello_waiting = false;
                 match outcome {
                     HelloOutcome::Succeeded(next) => self.proceed(next),
-                    HelloOutcome::NotRecognized => {
+                    // No prompt at all is not "you cancelled": the frame that says nothing was signed in.
+                    HelloOutcome::NotRecognized | HelloOutcome::Unavailable => {
                         self.screen = Screen::ContinueAs(Some(HelloFailure::NotRecognized));
                         // "Focus returns to Try again" (DW-A05).
                         self.focus = Some(FIRST_BUTTON_KEY);
@@ -701,24 +726,36 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
 
 /// The engine's answers that arrive between presses (a tick, the other device's answer, a
 /// sign-in that took a second). `true`: the view must run again. For `shell::host::poll`.
-#[cfg_attr(not(test), allow(dead_code))] // waits for its one line in `shell/host.rs` (PR body)
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let gate = s.shell.app.gate();
     let Some(ui) = ui(s) else { return false };
     let mut changed = ui.pump();
     changed |= ui.follow_gate(gate);
+    changed |= ui.follow_lock(gate == GateState::Locked);
+    // A focus that came before the first poll followed the lock: the prompt starts now (once per lock).
+    if std::mem::take(&mut ui.focus_before_first_poll) {
+        ui.lock_window_focused();
+    }
     ui.settle(tx);
     changed
 }
 
 /// The window lost or got focus. Leaving it hides a password that was shown, so the app
 /// switcher's picture of the window holds bullets (DW-A02). For `App::on_focus` in the shell.
-#[cfg_attr(not(test), allow(dead_code))] // waits for its one line in `shell/mod.rs` (PR body)
 pub fn on_window_focus(s: &mut State, focused: bool) {
-    if let (false, Some(ui)) = (focused, ui(s))
-        && ui.password.is_revealed()
-    {
-        ui.password.set_revealed(false);
+    let Some(ui) = ui(s) else { return };
+    if focused {
+        // DW-0009: "Windows Hello starts by itself when the window opens". A focus before the first poll waits
+        // for the poll to follow the lock; a lock that begins later never starts a prompt by itself.
+        if ui.gate_seen.is_none() {
+            ui.focus_before_first_poll = true;
+        }
+        ui.lock_window_focused();
+    } else {
+        ui.focus_before_first_poll = false;
+        if ui.password.is_revealed() {
+            ui.password.set_revealed(false);
+        }
     }
 }
 

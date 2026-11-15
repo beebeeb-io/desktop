@@ -143,10 +143,7 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
     assert!(state.listing.items.is_empty());
     assert_eq!(state.list_error, Some(SourceError::Unreadable));
     assert!(state.selected.is_none());
-    assert!(
-        !state.backups.has_source(),
-        "Backups is 'not built yet' on a real engine"
-    );
+    assert!(state.backups.has_source(), "Backups reads the engine on a real engine");
     // Shared, Photos: unwired on a real engine, never sample data. Trash reads the engine
     // (`engine_host::trash`): this handle has no session in memory, so it draws the signed-out state, no row.
     // This PC reads the engine (`engine_host::this_pc`) but is held off until its chrome is honest.
@@ -171,8 +168,9 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
     assert_eq!(
         state.this_pc.wired(),
         crate::engine_host::this_pc::TURNED_ON,
-        "This PC: held off until its chrome is honest"
+        "This PC answers from the engine"
     );
+    assert!(state.this_pc.wired(), "This PC is on in the running app");
     assert_eq!(state.this_pc.changes().len() + state.this_pc.kept_count(), 0);
     assert_eq!(started.live.drain(), 0, "nothing reported, nothing queued");
 }
@@ -632,16 +630,16 @@ fn photos_shows_0_fixture_days_on_a_live_engine() {
 #[test]
 fn this_pc_shows_0_fixture_changes_on_a_live_engine() {
     let s = engine_state();
-    // Engine-backed (`engine_host::this_pc`), held off until its chrome is honest; no name shows either way.
+    // Engine-backed (`engine_host::this_pc`); with no session it holds nothing, and never a sample.
     assert_eq!(s.this_pc.wired(), crate::engine_host::this_pc::TURNED_ON);
     assert_eq!(s.this_pc.changes().len(), 0);
     assert_eq!(s.this_pc.kept_count(), 0);
 }
 
 #[test]
-fn backups_has_no_source_on_a_live_engine() {
+fn backups_has_the_engines_source_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.backups.has_source());
+    assert!(s.backups.has_source());
 }
 
 #[test]
@@ -649,23 +647,22 @@ fn settings_is_unwired_on_a_live_engine() {
     use crate::frames::settings::Pane;
     let s = engine_state();
     // Task 2473: General and Storage location answer from the engine; so do Notifications and Recent
-    // notifications (`engine_host::settings::notifications`); every other pane is the shell's frame.
+    // notifications (`engine_host::settings::notifications`) and About; every other pane is the shell's frame.
     assert!(s.settings.source.wired(Pane::General) && s.settings.source.wired(Pane::StorageLocation));
     assert!(s.settings.source.wired(Pane::Notifications) && s.settings.source.wired(Pane::Recent));
-    for pane in [Pane::About] {
-        assert!(!s.settings.source.wired(pane), "{pane:?}");
-    }
-    // Drive's panes (`engine_host::drive_settings`): Storage insights answers; the rest is the shell's frame.
-    assert!(s.settings.drive.wired(Pane::Insights));
+    assert!(s.settings.source.wired(Pane::About));
+    // Drive's panes (`engine_host::drive_settings`): Storage insights, Sync, Bandwidth, Diagnostics and Thumbnails and
+    // previews (`engine_host::drive_previews`) answer; Storage is the shell's frame.
     for pane in [
-        Pane::Storage,
+        Pane::Insights,
         Pane::Sync,
         Pane::Bandwidth,
-        Pane::Previews,
         Pane::Diagnostics,
+        Pane::Previews,
     ] {
-        assert!(!s.settings.drive.wired(pane), "{pane:?}");
+        assert!(s.settings.drive.wired(pane), "{pane:?}");
     }
+    assert!(!s.settings.drive.wired(Pane::Storage));
     assert!(!s.settings.source.sample());
 }
 
@@ -679,7 +676,9 @@ fn account_is_the_engines_source_on_a_live_engine_and_unbound_panes_are_unwired(
     assert_ne!(source.pane_state(AccountPane::Account), PaneState::Unwired);
     assert_ne!(source.pane_state(AccountPane::Sessions), PaneState::Unwired);
     assert_ne!(source.pane_state(AccountPane::Security), PaneState::Unwired);
-    assert_eq!(source.pane_state(AccountPane::Password), PaneState::Unwired);
+    // The password change answers too: signed out, it says so, and is not the shell's frame.
+    assert_ne!(source.pane_state(AccountPane::Password), PaneState::Unwired);
+    assert_eq!(source.pane_state(AccountPane::Delete), PaneState::Unwired);
     assert!(source.identity().email.is_empty() && source.sessions().is_empty());
     // Nothing was read: the Security page is told nothing, and may do nothing.
     let facts = source.security_facts();
@@ -897,6 +896,24 @@ fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
 
     // Clean up: remove the sync root so subsequent runs start clean.
     let _ = std::fs::remove_dir_all(&sync_root);
+}
+
+/// R4: the menu's and the tray's Open in File Explorer (the shell-side action) ask for the sync root and refuse as
+/// the Files source does while sync is not running: `NotAvailable`, never `NotBuilt`.
+#[test]
+fn the_menu_opens_the_sync_root() {
+    use crate::shell::actions::EngineActions;
+    let started = started();
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let live = LiveEngine::new(&started.opened, rx);
+    let mut files = EngineFilesSource::new(started.opened.engine.clone());
+    let from_files = files.open_in_file_explorer(None);
+    assert_eq!(from_files, Err(ActionError::Unavailable));
+    assert_eq!(
+        live.open_in_file_explorer(),
+        Err(actions::ActionError::NotAvailable("sync is not running")),
+        "not the NotBuilt of before"
+    );
 }
 
 /// The sync guard is the `is_syncing()` check in `local()`. Dropping the guard (mutant: removing

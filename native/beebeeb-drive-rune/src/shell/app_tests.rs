@@ -392,3 +392,37 @@ fn the_first_run_gate_has_its_own_screen_and_nothing_of_the_account_behind_it() 
     assert_eq!(m.apply(session(GateState::Ready, "user-a")), Outcome::Changed);
     assert_eq!(m.screen(), Screen::Drive(files()));
 }
+
+/// The first run has one dialog, the refusal modal (the sync-start contract's S2), and Esc closes it. No other
+/// dialog opens there, nothing else moves, and no other closed gate shows any dialog.
+#[test]
+fn the_first_run_shows_the_refusal_modal_and_no_other_dialog() {
+    let mut m = AppMachine::for_session(Session::of(GateState::FirstRun, "user-a"));
+    assert_eq!(m.apply(Event::OpenDialog(Dialog::Shortcuts)), Outcome::Refused);
+    assert_eq!(m.dialog(), None);
+    assert_eq!(m.apply(Event::Escape), Outcome::Refused, "nothing to close");
+    assert_eq!(m.apply(Event::OpenDialog(Dialog::SyncOff)), Outcome::Changed);
+    assert_eq!(m.dialog(), Some(&Dialog::SyncOff));
+    assert_eq!(
+        m.screen(),
+        Screen::Gate(GateState::FirstRun),
+        "over the first run, not in place of it"
+    );
+    assert_eq!(
+        m.apply(Event::OpenSettings(SettingsPane::Account)),
+        Outcome::Refused,
+        "nothing else moves"
+    );
+    assert_eq!(m.apply(Event::Escape), Outcome::Changed);
+    assert_eq!(m.dialog(), None);
+
+    for gate in [GateState::Locked, GateState::SignedOut, GateState::NeedsRecoveryPhrase] {
+        let mut m = AppMachine::for_session(Session::of(gate, "user-a"));
+        assert_eq!(
+            m.apply(Event::OpenDialog(Dialog::SyncOff)),
+            Outcome::Refused,
+            "{gate:?}"
+        );
+        assert_eq!(m.dialog(), None, "{gate:?}");
+    }
+}

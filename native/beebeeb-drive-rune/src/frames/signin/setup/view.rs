@@ -4,8 +4,8 @@
 use rune::tok::Family;
 use rune::{Color, Cx, El, Span, TextStyle, col, el, row};
 
-use super::source::{Explorer, LockAfter, PreviewFormat, PreviewSize};
-use super::{Compare, CompareMode, PHOTO, SHEET, Setting, Step, Ui, act, icons};
+use super::source::{Explorer, LockAfter, PreviewFormat, PreviewSize, Switch};
+use super::{Answered, Compare, CompareMode, PHOTO, SHEET, Setting, Step, Ui, act, folder, icons};
 use crate::State;
 use crate::frames::signin::icons as signin_icons;
 use crate::theme::tokens::{self, Theme, type_};
@@ -32,14 +32,30 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
     let column = match (ui.step, ui.compare.is_some()) {
         // The board draws step 4 behind the compare view as its heading and its two buttons.
         (Step::Previews, true) => previews_behind(&mut k, &t),
+        // A step nothing answers for keeps its place and says so.
+        (step, _) if step != Step::Done && !ui.available(step) => folder::not_yet(step, &mut k, &t),
+        // The sync folder is asked for before File Explorer has anything to add.
+        (Step::Explorer, _) if ui.asks_folder() => folder::ask(&ui.folder, &mut k, &t),
+        // A start worked, but this PC didn't keep the folder: said as an error, never as "Added".
+        (Step::Explorer, _) if ui.folder_unsaved() => folder::unsaved(&mut k, &t),
         (Step::Passkey, _) => passkey(&mut k, &t),
         (Step::Lock, _) => lock(ui, &mut k, &t),
+        (Step::Backup, _) if ui.loading(Step::Backup) => folder::backup_loading(&mut k, &t),
+        (Step::Backup, _) if ui.failed(Step::Backup) => folder::backup_failed(&mut k, &t),
+        (Step::Backup, _) if ui.folders.is_empty() => folder::backup_none(&mut k, &t),
         (Step::Backup, _) => backup(ui, &mut k, &t),
+        (Step::Previews, _) if ui.loading(Step::Previews) => previews_loading(&mut k, &t),
+        (Step::Previews, _) if ui.failed(Step::Previews) => previews_failed(&mut k, &t),
         (Step::Previews, _) => previews(ui, &mut k, &t),
         (Step::Explorer, _) => match &ui.explorer {
             Explorer::Added => explorer_added(&mut k, &t),
             Explorer::Adding => explorer_adding(&mut k, &t),
-            Explorer::Failed { code } => explorer_failed(code, &mut k, &t),
+            Explorer::Failed { code } => {
+                explorer_failed(WINDOWS_REFUSED, WINDOW_WORKS, code, ui.can_choose_again(), &mut k, &t)
+            }
+            Explorer::NotSyncing => {
+                explorer_failed(SYNC_DID_NOT_START, NOTHING_SYNCS, "", ui.can_choose_again(), &mut k, &t)
+            }
         },
         (Step::Notifications, _) => notifications(&mut k, &t),
         (Step::Login, _) => login(ui, &mut k, &t),
@@ -59,7 +75,19 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
     let adding_words = format!("Adding {name} to File Explorer\u{2026}");
     let added_words = format!("{name} is in File Explorer");
     let failed_words = format!("Couldn't add {name} to File Explorer");
+    let not_yet_words = format!("{name} isn't in File Explorer yet");
     let status = match &ui.explorer {
+        // Nothing is being added while no folder is chosen, or where nothing adds one.
+        _ if ui.asks_folder() || !ui.available(Step::Explorer) => Status {
+            icon: &icons::EXPLORER,
+            words: &not_yet_words,
+            failed: false,
+        },
+        _ if ui.folder_unsaved() => Status {
+            icon: &icons::ALERT,
+            words: "Beebeeb's folder isn't saved on this PC yet",
+            failed: true,
+        },
         Explorer::Adding => Status {
             icon: &icons::ADDING,
             words: &adding_words,
@@ -70,7 +98,7 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
             words: &added_words,
             failed: false,
         },
-        Explorer::Failed { .. } => Status {
+        Explorer::Failed { .. } | Explorer::NotSyncing => Status {
             icon: &icons::ALERT,
             words: &failed_words,
             failed: true,
@@ -103,11 +131,11 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
 }
 
 /// `.au-actions`: the buttons at the foot of a column, 6 apart, 6 below the column's gap.
-fn actions() -> El {
+pub(super) fn actions() -> El {
     col().key("au-actions").w_full().gap(6.0).mt(6.0)
 }
 
-fn primary(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to: fn(&mut Ui)) -> El {
+pub(super) fn primary(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to: fn(&mut Ui)) -> El {
     let b = au::button(k, label, None, ButtonKind::Primary, ButtonSize::Lg, state, t);
     if state == ButtonState::Enabled {
         b.on_press_tx(act(to)).default_button()
@@ -116,7 +144,7 @@ fn primary(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to: fn(&mut
     }
 }
 
-fn ghost(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to: fn(&mut Ui)) -> El {
+pub(super) fn ghost(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to: fn(&mut Ui)) -> El {
     let b = au::button(k, label, None, ButtonKind::Ghost, ButtonSize::Lg, state, t);
     if state == ButtonState::Enabled {
         b.on_press_tx(act(to))
@@ -182,18 +210,21 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let on = ui.lock_on;
     let chosen = LockAfter::ALL.iter().position(|a| *a == ui.lock_after).unwrap_or(1);
     let labels: Vec<&str> = LockAfter::ALL.iter().map(|a| a.label()).collect();
-    let rows = vec![
-        setup::item(
-            k,
-            Some(&icons::FACE),
-            "App lock",
-            Some("Your PC's password works if Windows Hello doesn't"),
-            |key| vec![switch(key, "App lock", on, t, Ui::toggle_lock)],
-            None,
-            false,
-            t,
-        ),
-        setup::item(
+    // A source that sets no delay draws no "Lock again after" (never a choice nothing acts on), and neither does
+    // the switch off (off never locks).
+    let delay = ui.sets_lock_after() && on;
+    let mut rows = vec![setup::item(
+        k,
+        Some(&icons::FACE),
+        "App lock",
+        Some("Your PC's password works if Windows Hello doesn't"),
+        |key| vec![switch(key, "App lock", on, t, Ui::toggle_lock)],
+        None,
+        false,
+        t,
+    )];
+    if delay {
+        rows.push(setup::item(
             k,
             None,
             "Lock again after",
@@ -213,8 +244,8 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             None,
             true,
             t,
-        ),
-    ];
+        ));
+    }
     setup::column()
         .child(au::heading(
             "Lock Beebeeb",
@@ -400,10 +431,49 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             t,
             |j, tab| tab.on_press_tx(act(move |ui: &mut Ui| ui.set_format(PreviewFormat::ALL[j]))),
         ))
-        .child(setup::list(k, vec![space], Some(&ui.fit_line()), t))
+        // No limit to state (nothing is kept on this PC yet): no row, only the line under the choices.
+        .child(if limit.is_empty() {
+            setup::note(k, &ui.fit_line(), setup::FOOT, 16.0, t)
+        } else {
+            setup::list(k, vec![space], Some(&ui.fit_line()), t)
+        })
         .child(
             actions()
                 .child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+/// Step 4 while the account's preview setting is being read: its heading, a line that says so, nothing chosen and
+/// nothing stored until the read answered. "Not now" stays.
+fn previews_loading(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Thumbnails and previews",
+            Some("Reading your preview settings\u{2026}"),
+            false,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Continue", ButtonState::Disabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+/// Step 4 when reading the preview setting failed: said as a failure, never as "off" or "not in this version". Try
+/// again reads it again; Not now goes on with nothing changed.
+fn previews_failed(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Thumbnails and previews",
+            Some("Beebeeb couldn\u{2019}t read your preview settings. Nothing is changed."),
+            false,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::retry_previews))
                 .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
         )
 }
@@ -566,15 +636,35 @@ fn explorer_adding(k: &mut Keys, t: &Theme) -> El {
         .child(actions().child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on)))
 }
 
-fn explorer_failed(code: &str, k: &mut Keys, t: &Theme) -> El {
+/// DW-0280's banner title: Windows was asked and did not finish.
+const WINDOWS_REFUSED: &str = "Windows didn't finish adding Beebeeb to File Explorer";
+/// The banner's title when sync did not start, so Windows was never asked (`Explorer::NotSyncing`).
+const SYNC_DID_NOT_START: &str = "Sync didn't start on this PC, so Beebeeb isn't in File Explorer yet";
+
+/// DW-0280's sentence under the heading: true when only the File Explorer entry failed.
+const WINDOW_WORKS: &str = "Your files are safe, and the Beebeeb window works without File Explorer.";
+/// The sentence when sync itself did not start (the contract's ruling Q3: the board's sentence is not true then).
+const NOTHING_SYNCS: &str = "Your files are safe in Beebeeb. Nothing syncs with this PC until sync starts.";
+
+/// `code`: Windows' code for support; empty when there is none (the sentence then stands alone). `another`: no
+/// folder was kept yet, so another one can be chosen (the folder may be what was refused).
+fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Keys, t: &Theme) -> El {
     let (mark, _, wash) = au::tone(Tone::Red, t);
     let key = k.next("banner");
     let lead = "Try again in a moment.";
-    let words = format!("{lead} {code}");
-    let mono = Span {
-        mono: true,
-        size: Some(11.0),
-        ..Span::new(lead.len() + 1, words.len())
+    let words = if code.is_empty() {
+        lead.to_string()
+    } else {
+        format!("{lead} {code}")
+    };
+    let spans = if code.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span {
+            mono: true,
+            size: Some(11.0),
+            ..Span::new(lead.len() + 1, words.len())
+        }]
     };
     let code_style = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(17.0);
     kit::note_text(
@@ -602,14 +692,9 @@ fn explorer_failed(code: &str, k: &mut Keys, t: &Theme) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .child(
-                    kit::label(
-                        format!("{key}-title"),
-                        "Windows didn't finish adding Beebeeb to File Explorer",
-                        type_au::BANNER_TITLE,
-                        t.text,
-                    )
-                    .wrap()
-                    .w_full(),
+                    kit::label(format!("{key}-title"), title, type_au::BANNER_TITLE, t.text)
+                        .wrap()
+                        .w_full(),
                 )
                 .child(
                     el().w_full()
@@ -620,23 +705,23 @@ fn explorer_failed(code: &str, k: &mut Keys, t: &Theme) -> El {
                                 type_au::BANNER_TEXT,
                                 t.text_secondary,
                             )
-                            .spans(vec![mono])
+                            .spans(spans)
                             .w_full(),
                         )
                         // The error's own box, for the gate: where the mono run stands in the line.
-                        .child(
+                        .children((!code.is_empty()).then(|| {
                             el().key(format!("{key}-code-box"))
                                 .a11y_hidden()
                                 .absolute(rune::text::advance(&format!("{lead} "), type_au::BANNER_TEXT), 1.25)
                                 .w(rune::text::advance(code, code_style))
-                                .h(14.5),
-                        ),
+                                .h(14.5)
+                        })),
                 ),
         );
     setup::column()
         .child(au::heading(
             "Couldn't add Beebeeb to File Explorer",
-            Some("Your files are safe, and the Beebeeb window works without File Explorer."),
+            Some(sub),
             false,
             t,
         ))
@@ -644,6 +729,15 @@ fn explorer_failed(code: &str, k: &mut Keys, t: &Theme) -> El {
         .child(
             actions()
                 .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::go_on))
+                .children(another.then(|| {
+                    ghost(
+                        k,
+                        "Choose another folder\u{2026}",
+                        ButtonState::Enabled,
+                        t,
+                        Ui::choose_folder,
+                    )
+                }))
                 .child(ghost(
                     k,
                     "Continue without File Explorer",
@@ -714,14 +808,24 @@ fn on_off(on: bool) -> &'static str {
 fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let r = &ui.results;
     let explorer = match &ui.explorer {
+        _ if ui.asks_folder() => "Off",
         Explorer::Added => "On",
         Explorer::Adding => "Adding\u{2026}",
-        Explorer::Failed { .. } => "Off",
+        Explorer::Failed { .. } | Explorer::NotSyncing => "Off",
     };
-    let backup = if r.backup.is_empty() {
-        "Off".to_string()
-    } else {
-        r.backup.join(", ")
+    let backup = match ui.answered(Switch::Backup) {
+        Some(Answered::Waiting) => "Saving\u{2026}".to_string(),
+        Some(Answered::NotKnown | Answered::NotChanged) => "Not changed".to_string(),
+        _ if r.backup.is_empty() => "Off".to_string(),
+        _ => r.backup.join(", "),
+    };
+    // A switch whose change is answered after the press draws no value before the answer, and never the value
+    // that was asked for when the change did not happen.
+    let switch = |switch: Switch, on: bool| match ui.answered(switch) {
+        Some(Answered::NotAsked) => "Not set here",
+        Some(Answered::Waiting) => "Saving\u{2026}",
+        Some(Answered::NotKnown) => "Not changed",
+        Some(Answered::NotChanged) | None => on_off(on),
     };
     let rows: [(&str, String, Setting); 7] = [
         (
@@ -729,17 +833,41 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             if r.passkey { "Added" } else { "Not added" }.into(),
             Setting::Passkey,
         ),
-        ("App lock", on_off(r.app_lock).into(), Setting::AppLock),
+        ("App lock", switch(Switch::AppLock, r.app_lock).into(), Setting::AppLock),
         ("Backup", backup, Setting::Backup),
-        ("Previews", ui.preview_name(), Setting::Previews),
+        (
+            "Previews",
+            match ui.answered(Switch::Previews) {
+                Some(Answered::NotAsked) => "Not set here".into(),
+                Some(Answered::Waiting) => "Saving\u{2026}".into(),
+                Some(Answered::NotKnown | Answered::NotChanged) => "Not changed".into(),
+                None => ui.preview_name(),
+            },
+            Setting::Previews,
+        ),
         ("File Explorer", explorer.into(), Setting::FileExplorer),
-        ("Notifications", on_off(r.notifications).into(), Setting::Notifications),
-        ("Open at login", on_off(r.open_at_login).into(), Setting::OpenAtLogin),
+        (
+            "Notifications",
+            switch(Switch::Notifications, r.notifications).into(),
+            Setting::Notifications,
+        ),
+        (
+            "Open at login",
+            switch(Switch::OpenAtLogin, r.open_at_login).into(),
+            Setting::OpenAtLogin,
+        ),
     ];
+    let links = ui.opens_settings();
     let rows: Vec<El> = rows
         .into_iter()
         .map(|(title, value, setting)| {
-            setup::item(
+            // A step nothing answered for set nothing: its row says so, never a value.
+            let value = if ui.available(setting.step()) {
+                value
+            } else {
+                "Not available yet".to_string()
+            };
+            let row = setup::item(
                 k,
                 None,
                 title,
@@ -749,15 +877,31 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 false,
                 t,
             )
-            .role("link")
-            .label(format!("{title}, {value}"))
-            .hover(t.hover)
-            .press(t.press)
-            .focusable(true)
-            .cursor(rune::Cursor::Pointer)
-            .on_press_tx(act(move |ui: &mut Ui| ui.open_setting(setting)))
+            .label(format!("{title}, {value}"));
+            if !links {
+                // Nothing opens the setting from here: the row is its value, not a link.
+                return row.role("group");
+            }
+            row.role("link")
+                .hover(t.hover)
+                .press(t.press)
+                .focusable(true)
+                .cursor(rune::Cursor::Pointer)
+                .on_press_tx(act(move |ui: &mut Ui| ui.open_setting(setting)))
         })
         .collect();
+    // What was asked and did not happen, said in words (the rows show what is set).
+    let not_changed: Vec<&str> = [
+        (Switch::Notifications, "notifications"),
+        (Switch::OpenAtLogin, "open at login"),
+        (Switch::Backup, "backup"),
+        (Switch::AppLock, "app lock"),
+        (Switch::LockAfter, "lock delay"),
+    ]
+    .into_iter()
+    .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))
+    .map(|(_, name)| name)
+    .collect();
     setup::column()
         .child(au::heading(
             "You're set up",
@@ -766,6 +910,18 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             t,
         ))
         .child(setup::list(k, rows, None, t))
+        .children((!not_changed.is_empty()).then(|| {
+            el().key("not-changed").role("alert").w_full().child(setup::note(
+                k,
+                &format!(
+                    "Couldn't change {}. You can set it in Settings.",
+                    not_changed.join(" and ")
+                ),
+                type_::CAPTION,
+                0.0,
+                t,
+            ))
+        }))
         .child(setup::note(
             k,
             "Your file list and thumbnails keep loading in the background.",

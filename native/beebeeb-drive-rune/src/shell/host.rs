@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use rune::{AppHandle, Key, KeyEvent, Tx, WindowHandle};
 
-use super::actions::{FixtureEngine, HostActions, ShellActions};
+use super::actions::{Away, FixtureEngine, HostActions, ShellActions};
 use super::app::{AppMachine, Dialog, Event, Intent, Outcome, Route, Section, SettingsPane};
 use super::control::Request;
 use super::flyout::{self, Toggle};
@@ -89,12 +89,19 @@ pub struct Shell {
     /// How often the refusal modal opened, for the tests.
     #[cfg(test)]
     sync_off_opened: u32,
+    /// The away lock's host half (`away.rs`): what it measured, and the one wake it armed.
+    pub(crate) away: super::away::AwayLock,
     /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle): a list that showed
     /// an error or nothing is read again then ([`read_again_after_a_check`]).
     check_finished: bool,
 }
 
 impl Shell {
+    /// The engine's sync is running (or finishing a check): the lock screen's line says so.
+    pub fn sync_runs(&self) -> bool {
+        self.tray_inputs.engine != EngineState::NotRunning
+    }
+
     pub fn new(actions: Arc<dyn ShellActions>, platform: Arc<dyn Platform>, wiring: Wiring) -> Shell {
         let app = AppMachine::for_session(actions.session());
         let window_kind = surfaces::kind_for(&app.screen());
@@ -126,6 +133,7 @@ impl Shell {
             #[cfg(test)]
             sync_off_opened: 0,
             check_finished: false,
+            away: super::away::AwayLock::default(),
         }
     }
 
@@ -167,6 +175,12 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn sync_off_opened(&self) -> u32 {
         self.sync_off_opened
+    }
+
+    /// The slot the main window's native handle is put in once it exists: the lock screen's Windows Hello
+    /// prompt is owned by that window (`engine_host::hello`).
+    pub(crate) fn main_window_slot(&self) -> Arc<Mutex<Option<WindowHandle>>> {
+        self.wiring.window.clone()
     }
 
     /// Asks the engine to start syncing; refused while another agent holds the profile.
@@ -451,17 +465,43 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::photos::poll(s, tx);
     // Search: a gate or account change drops its names; opening it and a new query ask the source; answers come in.
     changed |= crate::frames::search::poll(s, tx);
+    // Backups: the engine's answers, the section opening, a pass that ended (`frames::backups::poll`).
+    changed |= crate::frames::backups::poll(s, tx);
     // This PC's answers and refusals (`frames::this_pc::poll`).
     changed |= crate::frames::this_pc::poll(s, tx);
     // The speed test's steps (Settings, Bandwidth).
     changed |= crate::frames::settings::bandwidth::poll(s, _seconds, tx);
     // What the sign-in screens asked the shell for.
     changed |= drain_signin_intents(s);
+    // What Settings asked for: web pages, the clipboard, Windows Settings.
+    changed |= super::intents::drain_in_poll(s, tx);
+    // An item's Details or Preview over Trash, Shared or Search: closed when its section, session or row went;
+    // a Preview's answer (`frames::item::poll`).
+    changed |= crate::frames::item::poll(s, tx);
     // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
     changed |= crate::frames::signin::setup::guide::poll(s, tx);
+    // The first run's answers (File Explorer finished, a switch was set, the first run ended).
+    changed |= crate::frames::signin::setup::poll(s, tx);
     // The session and the tray: the engine may have changed since the last frame.
     let gate_before = s.shell.app.gate();
+    // (Only while a first run shows: whose it is.)
+    let first_run_of = s.setup.is_some().then(|| s.shell.app.account().map(str::to_string));
     changed |= s.shell.refresh();
+    let first_run_shows = s.shell.app.gate() == super::app::GateState::FirstRun;
+    if s.shell.app.gate() == gate_before && s.setup_source.is_some() {
+        // Another account under the same gate: the first run is the new session's, from its first step. And a
+        // gate that was moved by a refresh outside this poll (the b's menu) still gets, or loses, its first run,
+        // and its start (the same condition `on_gate_change` uses).
+        let another_account = first_run_of.is_some_and(|before| before.as_deref() != s.shell.app.account());
+        if another_account || s.setup.is_some() != first_run_shows {
+            start_first_run(s);
+            let gate = s.shell.app.gate();
+            if gate == super::app::GateState::FirstRun || gate == super::app::GateState::Ready {
+                s.shell.start_sync();
+            }
+            changed = true;
+        }
+    }
     let read_by_the_gate = s.shell.app.gate() != gate_before;
     if read_by_the_gate {
         on_gate_change(s);
@@ -490,6 +530,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             crate::frames::files::reset::end_session(s, now.1 != account);
             // An open file: its decrypted content goes with the account that leaves.
             crate::frames::viewers::end_session(s, now.1 != account);
+            // An item's Details or Preview: the page and what its read decrypted go too.
+            crate::frames::item::end_session(s);
             changed = true;
         }
         // The rows are the session's too. `on_gate_change` reads them again when THIS poll's
@@ -507,11 +549,23 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     let open_now = super::session_gate::open(s);
     if std::mem::replace(&mut s.shell.gate_open_seen, open_now) && !open_now {
         crate::frames::files::reset::session_closed(s);
+        crate::frames::item::end_session(s);
         changed = true;
     }
     // Windows Hello's answer to an approval of another device's sign-in (DW-A14). Read after the
     // session: an answer that comes with a lock or a sign-out finds its wait already ended.
     changed |= crate::frames::account::approve::poll(s);
+    // The away lock: how long this PC had no input, to the engine, while the engine's lock is open
+    // (`away.rs`), whatever the window shows: the first-run steps and the no-plan screen too (review
+    // of #452, the lead's ruling: no exception).
+    let shell = &mut s.shell;
+    changed |= shell.away.poll(
+        shell.actions.screen_open(),
+        shell.platform.idle_for(),
+        &shell.actions,
+        shell.wiring.main.as_ref(),
+        tx,
+    );
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
@@ -542,6 +596,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::files::reset::poll(s);
     // Backups shows its own folder in the Files window (`frames::files::protected`, DW-0422).
     changed |= crate::frames::files::protected::poll(s);
+    // A link the source answered since: only this `Tx` can put it on the clipboard (`frames::files::link`).
+    changed |= crate::frames::files::link::poll(s, tx);
     changed
 }
 
@@ -577,6 +633,10 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
     leaving
 }
 
+fn open_web_page(url: &str) {
+    super::intents::open_for_signin(url);
+}
+
 /// Takes every intent the sign-in screens queued (`signin::Ui::take_intents`) and acts on it. A finished
 /// sign-in is not routed from here: the session's gate is the one authority on which screen shows, and
 /// [`on_gate_change`] runs when it opens. What the shell cannot do yet is logged, never dropped silently.
@@ -593,12 +653,15 @@ pub fn drain_signin_intents(s: &mut State) -> bool {
             // Sign-up is a set of screens of the same window (DW-A31 to DW-A44), where the source has it.
             SignIn::CreateAccount => {
                 if !s.signin.as_mut().is_some_and(crate::frames::signin::Ui::start_create) {
-                    log("NotWired(sign-in: create an account)");
+                    // No sign-up screens in this build: the web page creates the account.
+                    open_web_page(super::web_pages::SIGN_UP_PAGE);
                 }
             }
-            SignIn::OpenTerms | SignIn::OpenPrivacy => log("NotWired(sign-up: open a page in the browser)"),
+            SignIn::OpenRecoveryPage => open_web_page(super::web_pages::RECOVERY_PAGE),
+            SignIn::OpenTerms => open_web_page(super::web_pages::TERMS_PAGE),
+            SignIn::OpenPrivacy => open_web_page(super::web_pages::PRIVACY_PAGE),
             SignIn::SavePhraseAsFile | SignIn::PrintPhrase => log("NotWired(sign-up: save or print the phrase)"),
-            SignIn::WriteToSupport => log("NotWired(sign-in: write to support)"),
+            SignIn::WriteToSupport => open_web_page(&super::web_pages::support_mailto("Help signing in")),
             SignIn::CancelBilling | SignIn::EraseAllFiles | SignIn::DeleteAccount => {
                 log("NotWired(sign-in: an account dialog)")
             }
@@ -631,15 +694,35 @@ fn on_gate_change(s: &mut State) {
     s.listing = listing;
     s.list_error = list_error;
     s.selected = None;
-    if s.shell.app.gate() == super::app::GateState::Ready {
+    let gate = s.shell.app.gate();
+    start_first_run(s);
+    // The first run's File Explorer step is about the sync folder: a start is asked for with it, as when the main
+    // window opens (the start worker holds it back until the first run has a folder). A start refused during
+    // the first run is said by that step and by the refusal modal (`open_sync_refusal`). Sync is the app's work:
+    // it also starts behind a lock (the engine refuses it for a closed vault).
+    if matches!(
+        gate,
+        super::app::GateState::Ready | super::app::GateState::Locked | super::app::GateState::FirstRun
+    ) {
         s.shell.start_sync();
     }
 }
 
+/// The first run's state follows the gate, in the running app (a scene sets its own): made for the session that
+/// is signed in when the gate shows the first run, dropped the moment the gate shows anything else, and made
+/// again when the account under it changed. Nothing of one session's first run is drawn or pressed in another.
+fn start_first_run(s: &mut State) {
+    let Some(make) = &s.setup_source else {
+        return;
+    };
+    s.setup =
+        (s.shell.app.gate() == super::app::GateState::FirstRun).then(|| crate::frames::signin::setup::Ui::new(make()));
+}
+
 /// The refusal modal (the owner's ruling Q3 on the sync-start contract): it opens once per refused start attempt,
-/// over whatever the window shows, only while the gate is Ready. An attempt refused while the gate is closed is
-/// never shown later (a stale refusal); another dialog in front keeps it waiting until that one closes. `true`: it
-/// opened.
+/// over whatever the window shows, only while the gate is Ready or the first run shows ("the first run uses the
+/// same modal", S2). An attempt refused while the gate is closed is never shown later (a stale refusal); another
+/// dialog in front keeps it waiting until that one closes. `true`: it opened.
 fn open_sync_refusal(s: &mut State) -> bool {
     let Some(refusal) = s.shell.actions.sync_refusal() else {
         return false;
@@ -647,7 +730,8 @@ fn open_sync_refusal(s: &mut State) -> bool {
     if s.shell.refusal_seen == Some(refusal.attempt) {
         return false;
     }
-    if s.shell.app.gate() != super::app::GateState::Ready {
+    let gate = s.shell.app.gate();
+    if gate != super::app::GateState::Ready && gate != super::app::GateState::FirstRun {
         s.shell.refusal_seen = Some(refusal.attempt);
         return false;
     }
@@ -767,6 +851,21 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
         }
         // `taskkill` without /F, Restart Manager: quit cleanly instead of ignoring it.
         TrayEvent::CloseRequested => tx.quit(),
+        // Windows locked this session: the engine decides whether the app locks (app lock on).
+        TrayEvent::SessionLocked => {
+            let shell = &mut s.shell;
+            shell
+                .away
+                .event(Away::SessionLocked, &shell.actions, shell.wiring.main.as_ref());
+        }
+        // The PC woke: how long it was away goes to the engine as idle time, before the wake's own
+        // key press can count as input (review of #452, P2-1).
+        TrayEvent::Resumed { away } => {
+            let shell = &mut s.shell;
+            shell
+                .away
+                .event(Away::Idle(away), &shell.actions, shell.wiring.main.as_ref());
+        }
     }
 }
 
@@ -819,7 +918,13 @@ pub fn on_close(s: &mut State, tx: &mut Tx) {
     s.shell.save_window_place();
     if s.shell.close_quits() {
         tx.quit();
+        return;
     }
+    // The window went to the tray: the person left Beebeeb ("Locks again after: Immediately" locks).
+    let shell = &mut s.shell;
+    shell
+        .away
+        .event(Away::LeftTheApp, &shell.actions, shell.wiring.main.as_ref());
 }
 
 /// The quit hook: every quit comes through here (the b's menu, the installer's

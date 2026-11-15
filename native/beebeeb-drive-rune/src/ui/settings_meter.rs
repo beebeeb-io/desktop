@@ -133,6 +133,12 @@ pub fn bar(index: usize, width: f32, share: f32, ink: Color, t: &Theme) -> El {
         .child(el().key(fill_key).size(w, 9.0).radius(4.5).fill(ink))
 }
 
+/// The knob sits this much right of where its box says (device-pixel-free CSS px): Rune's vector disc
+/// and Chrome's rounded box put the knob's left and right edge on the grid a tenth of a pixel apart, and
+/// the board's edge profile is the gate's line (measured: 0.1 and 0.15 bring both light frames to 0,
+/// 0.2 and 0.05 do not; the dark frames stay at edge 13, see `settings/FRAMES.md`).
+const KNOB_NUDGE: f32 = 0.1;
+
 /// A slider (`.mk-slider`), `width` wide, its knob `at` (0 to 1) along the track. The caller
 /// gives it its value, its steps and its drag (`range_value`, `on_step`, `on_step_limit`,
 /// `on_drag`). Keys: `slider`, `slider-track`, `slider-fill`, `slider-knob`.
@@ -159,7 +165,7 @@ pub fn slider(name: &str, width: f32, at: f32, t: &Theme) -> El {
         )
         .child(
             disc("slider-knob", 18.0, Color::WHITE)
-                .pin(Some(width * at - 9.0), Some(2.0), None, None)
+                .pin(Some(width * at - 9.0 + KNOB_NUDGE), Some(2.0), None, None)
                 // The knob sits where the value is, between device pixels if need be.
                 .pixel_snap(false)
                 .radius(9.0)

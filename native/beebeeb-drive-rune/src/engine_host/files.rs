@@ -46,12 +46,6 @@ use crate::frames::files::source::{Action, ActionError, Change, LocalOutcome};
 #[path = "files_tests.rs"]
 mod tests;
 
-/// Whether the Backups folder's id is handed to the Files window in a real build. `false` until `protection`,
-/// `backup_entry` and `folder_notice` answer too: with the id alone the sidebar's Backups would open the tree as a
-/// plain folder, with no device rows and no words for why nothing in it can change. While it is `false` nothing is
-/// read for it either.
-pub const BACKUPS_SECTION_ON: bool = false;
-
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is its own.
 pub trait FilesEngine: Send + Sync + 'static {
     /// Someone is signed in and the vault is open. Never waits.
@@ -192,6 +186,9 @@ enum Answer {
     },
 }
 
+/// How long a Backups id that came back none (or not at all) waits before it is read again.
+const ROOT_RETRY: Duration = Duration::from_secs(3);
+
 /// See the module's doc.
 pub struct LocalCopies<E: FilesEngine> {
     engine: Arc<E>,
@@ -208,6 +205,9 @@ pub struct LocalCopies<E: FilesEngine> {
     changes: Vec<Change>,
     /// The Backups folder's id, read for `seen`'s account. The outer `None`: not read (or not readable).
     root: Option<Option<String>>,
+    /// When the Backups id was last asked for, and how long a none or failed answer waits before it is asked again.
+    root_asked: Option<Instant>,
+    pub(crate) root_retry: Duration,
     /// The one timer that wakes the window when a message's time is over ([`Self::wake_after`]).
     wakes: Option<mpsc::Sender<Instant>>,
 }
@@ -227,6 +227,8 @@ impl<E: FilesEngine> LocalCopies<E> {
             in_flight: HashSet::new(),
             changes: Vec::new(),
             root: None,
+            root_asked: None,
+            root_retry: ROOT_RETRY,
             wakes: None,
         }
     }
@@ -265,10 +267,27 @@ impl<E: FilesEngine> LocalCopies<E> {
         self.in_flight.clear();
         self.changes.clear();
         self.root = None;
-        if BACKUPS_SECTION_ON {
-            self.send(Ask::BackupsRoot);
-        }
+        self.root_asked = Some(Instant::now());
+        self.send(Ask::BackupsRoot);
         true
+    }
+
+    /// The sidebar's Backups has no folder to show: ask again, now and then, while the answer is none or failed (a
+    /// first sync brings the folder in, and a first backup creates it). Never once per session; never while a folder
+    /// is known; at most one ask per [`ROOT_RETRY`], and the window is woken for the next one.
+    pub fn look_for_backups(&mut self) {
+        self.look();
+        if matches!(self.root, Some(Some(_))) || !self.seen.0 || self.seen.1.is_none() {
+            return;
+        }
+        if self.root_asked.is_some_and(|at| at.elapsed() < self.root_retry) {
+            return;
+        }
+        self.root_asked = Some(Instant::now());
+        if self.send(Ask::BackupsRoot) {
+            let after = self.root_retry;
+            self.wake_after(after);
+        }
     }
 
     fn send(&mut self, ask: Ask) -> bool {
@@ -391,9 +410,9 @@ impl<E: FilesEngine> LocalCopies<E> {
         std::mem::take(&mut self.changes)
     }
 
-    /// The Backups folder's id, while the vault is open for the account it was read for (and the section is on).
+    /// The Backups folder's id, while the vault is open for the account it was read for.
     pub fn backups_root(&self) -> Option<String> {
-        if !BACKUPS_SECTION_ON || !self.engine.unlocked() {
+        if !self.engine.unlocked() {
             return None;
         }
         let account = self.engine.account();

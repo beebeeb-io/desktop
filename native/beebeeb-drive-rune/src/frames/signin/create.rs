@@ -308,6 +308,11 @@ impl Ui {
         self.create.email_problem
     }
 
+    /// The web page the server named for creating an account while it refuses sign-up from this app.
+    pub fn web_signup_address(&self) -> Option<String> {
+        self.source.sign_up_web_address()
+    }
+
     /// The email changed: what stood under it was about the address that was tried.
     pub fn sign_up_email_changed(&mut self) {
         self.create.pictured = None;

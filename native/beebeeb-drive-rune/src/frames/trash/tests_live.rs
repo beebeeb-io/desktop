@@ -57,6 +57,8 @@ impl TrashSource for Stub {
             changed: true,
             busy: false,
             notice: self.0.borrow_mut().notice.take(),
+            purge: None,
+            wake_in: None,
         }
     }
     fn count(&self) -> Option<usize> {

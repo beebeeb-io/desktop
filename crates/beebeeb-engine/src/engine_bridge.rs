@@ -94,6 +94,9 @@ pub struct EngineBridge {
     /// LD-0113 (spec Amendment 8): `api` for the backup pass, built on first use; every request it makes carries
     /// `X-Beebeeb-Origin: backup` ([`ApiClient::for_backup_pass`]).
     backup_api: std::sync::OnceLock<Arc<ApiClient>>,
+    /// Which queued write of a file a content modify may be queued after ([`Self::chained_after`]): any, unless the
+    /// caller says otherwise (the viewer's save: its own opening's only).
+    chain_after: crate::write_token::ChainAfter,
     #[cfg(any(test, feature = "test-support"))]
     pub seams: Seams,
 }
@@ -117,6 +120,20 @@ mod local_classify;
 mod local_layout;
 mod operations;
 mod shared_roots;
+// S6: a kept file this PC does not hold is fetched again.
+mod kept_refetch;
+#[cfg(all(target_os = "windows", test))]
+pub(crate) use kept_refetch::fetch_kept_placeholder;
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+pub(crate) use kept_refetch::queue_kept_step;
+#[cfg(target_os = "windows")]
+pub(crate) use kept_refetch::spawn_kept_batch;
+pub use kept_refetch::{
+    KEPT_REFETCH_PER_TICK, KEPT_REFETCH_READ_PER_TICK, KeptBatch, KeptFetch, KeptPlace, KeptRefetch, RunningGuard,
+};
+// Task 2523: another device's version reaches the copy on this PC.
+mod stale_copies;
+pub use stale_copies::{REFRESH_ORDER, RefreshStep, STALE_COPIES_PER_PASS, STALE_COPIES_READ_PER_PASS, StaleCopyPass};
 // LD-0105 W2: a Windows range session's preparation and its "whole" record.
 mod range_fetch;
 pub use backup_tree::{BackupChild, BackupFolderState, tighter_clock};
@@ -237,6 +254,8 @@ mod tests {
     mod finder_queue_6;
     mod hydrate_files;
     mod ipc;
+    // S6: a kept file this PC does not hold is fetched again (Linux, through the queue).
+    mod kept_refetch_s6;
     mod ld0105_u1_rows;
     mod ld0113_protect;
     mod logging;
@@ -253,6 +272,10 @@ mod tests {
     mod review_t3;
     mod scan;
     mod shared_2;
+    // Task 2523: another device's version reaches the copy on this PC; a held edit is never hydrated over.
+    mod stale_2523;
+    // S6: a hydrate's start look; a save made after it is never replaced (Linux).
+    mod start_look_s6;
     mod sync;
     mod sync_2;
     mod sync_3;
@@ -279,6 +302,8 @@ mod tests {
     mod name_alias_2407;
     #[cfg(windows)]
     mod name_alias_2407_windows;
+    // Task 2530: the ways out of a parked upload beyond the stale base.
+    mod parked_exit;
     // Task 2409: Try again on a change that failed.
     mod unsent_retry;
 
@@ -468,18 +493,20 @@ pub(crate) use types::engine_remove;
 mod open_in_memory;
 pub(crate) use open_in_memory::InMemoryOpen;
 use open_in_memory::{OverInMemoryLimit, body_cap};
+pub(crate) use upload_v2::RestoreSent;
 
 mod errors;
 use errors::*;
 pub use errors::{
-    AcceptsClosed, EngineError, ItemInTrash, ParkNow, QueueStateMoved, QueuedCopyMissing, StagedCopyGone,
-    ThumbnailNotYet, UnknownItem, UnsentLocalChange, engine_cause, error_category, error_http_status, loggable_id,
+    AcceptsClosed, BehindAnotherWrite, EngineError, ItemInTrash, ParkNow, QueueStateMoved, QueuedCopyMissing,
+    StagedCopyGone, ThumbnailNotYet, UnknownItem, UnsentLocalChange, engine_cause, error_category, error_http_status,
+    loggable_id,
 };
 pub use errors::{OperationFailureClass, classify_operation_error, retry_delay_seconds};
 
 mod content;
 use content::*;
-pub use content::{ContentFingerprint, cached_sha256_file_hex, content_frame, sha256_file_hex, sha256_hex};
+pub use content::{ContentFingerprint, PlaceSeen, cached_sha256_file_hex, content_frame, sha256_file_hex, sha256_hex};
 
 mod media;
 use media::*;

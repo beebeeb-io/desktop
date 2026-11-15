@@ -75,8 +75,16 @@ impl ViewerSource for Recording {
         self.calls.borrow_mut().push(format!("resolve {id} {keep:?}"));
         self.inner.resolve(id, text, keep)
     }
+    /// A test says a change is on its way by asking for it in the calls.
+    fn saving(&self) -> bool {
+        self.calls.borrow().iter().any(|call| call == "saving")
+    }
     fn newer(&mut self, id: &str) -> Result<OpenFile, OpenError> {
         self.calls.borrow_mut().push(format!("newer {id}"));
+        // A test refuses Show it by asking for it in the calls.
+        if self.calls.borrow().iter().any(|call| call == "refuse newer") {
+            return Err(OpenError::NotFound);
+        }
         self.inner.newer(id)
     }
     fn colours(&self, file: &OpenFile, text: &str) -> Vec<Vec<Run>> {
@@ -549,6 +557,105 @@ fn a_newer_version_waits_for_show_it() {
 }
 
 #[test]
+fn a_newer_version_the_engine_noticed_is_said_without_a_device_name() {
+    let (mut rt, _) = note(false, false);
+    assert!(!has(&rt, "banner"), "nothing newer, no banner");
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.settle(super::source::Settled::Newer(super::source::Newer {
+            from: String::new(),
+            at: "09:14".into(),
+        }));
+    });
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(info(&rt, "banner").role, "status");
+    assert_eq!(
+        info(&rt, "banner-text").text.as_deref(),
+        Some("A newer version arrived, 09:14.")
+    );
+    assert_eq!(viewer(&rt).file.version, 3, "the version on screen stays until Show it");
+}
+
+/// Review of #432, P2: a newer version noticed while a save waited stays offered when the save ends stored on this
+/// PC only; its banner is drawn once the editor closes.
+#[test]
+fn a_save_stored_here_keeps_a_newer_version_noticed_meanwhile() {
+    let (mut rt, _) = note(false, false);
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.settle(super::source::Settled::Newer(super::source::Newer {
+            from: String::new(),
+            at: "09:14".into(),
+        }));
+        let body = ui.file.body.clone();
+        ui.settle(super::source::Settled::Queued { body, version: 3 });
+    });
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(viewer(&rt).file.newer.is_some(), "still offered");
+    assert_eq!(
+        info(&rt, "banner-text").text.as_deref(),
+        Some("A newer version arrived, 09:14.")
+    );
+}
+
+/// Delta check of #432, P1-2: a save stored here only is labelled with the version it was saved from (the text on
+/// screen is based on it), not with the label the screen had.
+#[test]
+fn a_save_stored_here_is_labelled_with_the_version_it_was_saved_from() {
+    let (mut rt, _) = note(false, false);
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        let body = ui.file.body.clone();
+        ui.settle(super::source::Settled::Queued { body, version: 5 });
+    });
+    assert_eq!(viewer(&rt).file.version, 5);
+}
+
+/// Delta check of #432, P1-2: a change of an earlier opening is said and nothing on screen changes.
+#[test]
+fn a_change_of_an_earlier_opening_is_said_and_changes_nothing_on_screen() {
+    let (mut rt, _) = note(false, false);
+    let before = viewer(&rt).file.version;
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.settle(super::source::Settled::Said("Your earlier edit was not saved".into()));
+    });
+    assert_eq!(viewer(&rt).toast.as_deref(), Some("Your earlier edit was not saved"));
+    assert_eq!(viewer(&rt).file.version, before);
+    assert!(viewer(&rt).editor.is_none());
+}
+
+/// Delta check of #432, P1-2: Show it while a change of the open file is on its way opens nothing and says so.
+#[test]
+fn show_it_while_a_change_is_on_its_way_waits_and_says_so() {
+    let (mut rt, calls) = note(true, false);
+    calls.borrow_mut().push("saving".into());
+    operate(&mut rt, "banner-btn");
+    assert_eq!(viewer(&rt).file.version, 3, "the version on screen stays");
+    assert!(
+        !calls.borrow().iter().any(|call| call.starts_with("newer")),
+        "nothing opened"
+    );
+    assert_eq!(viewer(&rt).toast.as_deref(), Some(super::NOT_WHILE_SAVING));
+}
+
+/// Review of #432, P3: Show it that is refused leaves the version on screen, its banner too, and says why.
+#[test]
+fn show_it_that_is_refused_says_why_and_keeps_the_version_on_screen() {
+    let (mut rt, calls) = note(true, false);
+    calls.borrow_mut().push("refuse newer".into());
+    operate(&mut rt, "banner-btn");
+    assert_eq!(viewer(&rt).file.version, 3, "the version on screen stays");
+    assert!(has(&rt, "banner"), "the newer version is still offered");
+    assert_eq!(
+        viewer(&rt).toast.as_deref(),
+        Some("Newer version not opened: the file is gone")
+    );
+}
+
+#[test]
 fn typing_marks_the_edit_unsaved_and_ctrl_s_saves_a_new_version() {
     let (mut rt, calls) = note(false, false);
     edit_and_type(&mut rt);
@@ -623,6 +730,107 @@ fn leaving_with_changes_asks_first_and_each_answer_does_what_it_says() {
     operate(&mut rt, "back");
     assert!(rt.state.viewer.ui.is_none());
     assert!(!on_a_file(&rt));
+}
+
+/// Delta 3 of desktop#432: a save refused because an earlier change to the file has not been sent yet keeps the edit
+/// open and unsaved, and says why.
+#[test]
+fn a_refused_save_keeps_the_edit_and_says_why() {
+    let (mut rt, _) = note(false, false);
+    edit_and_type(&mut rt);
+    refuse(&mut rt);
+    let ui = viewer(&rt);
+    assert!(ui.editor.is_some() && ui.dirty(), "the edit stays, unsaved");
+    assert_eq!(ui.dialog, None);
+    assert_eq!(ui.toast, None, "said once, in the banner");
+    assert_eq!(
+        info(&rt, "banner-text").text.as_deref(),
+        Some("Not saved: an invented reason")
+    );
+    assert_eq!(ui.file.version, 3);
+}
+
+/// The engine refused the save (an earlier change to the file is not sent yet), as `pump` hands it over.
+fn refuse(rt: &mut Runtime<State>) {
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.settle(super::source::Settled::Refused("Not saved: an invented reason".into()));
+    });
+    rt.frame(0.0);
+}
+
+/// Press the control keyed `key` with the pointer, at its middle, once what enters has settled (as `media_tests`).
+fn click(rt: &mut Runtime<State>, key: &str) {
+    rt.settle_all();
+    rt.frame(0.0);
+    let r = info(rt, key).rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    rt.settle_all();
+}
+
+/// Task 2530, item 1: the refusal offers Save a copy, the two-versions question's Keep both. Pressing it asks for ONE
+/// copy with the editor's text; the note itself is not saved again, and the view then shows the copy as Keep both does.
+#[test]
+fn the_refusal_offers_save_a_copy() {
+    let (mut rt, calls) = note(false, false);
+    edit_and_type(&mut rt);
+    let typed = viewer(&rt).editor.as_ref().expect("the editor").edit.text.clone();
+    refuse(&mut rt);
+    assert_eq!(info(&rt, "banner-btn").label.as_deref(), Some("Save a copy"));
+    let before = calls.borrow().len();
+    click(&mut rt, "banner-btn");
+    assert_eq!(
+        calls.borrow()[before..],
+        ["resolve meeting-notes-4-nov.md Both".to_string()],
+        "one copy asked for, nothing else"
+    );
+    let ui = viewer(&rt);
+    assert!(ui.editor.is_none(), "as Keep both: the copy is shown");
+    assert_eq!(ui.file.name, "Meeting notes 4 Nov (Anna-Laptop).md");
+    let Body::Markdown(doc) = &ui.file.body else {
+        panic!("the copy is shown as the note it is");
+    };
+    assert_eq!(doc.source, typed, "the edit's text, unchanged");
+    assert!(!has(&rt, "banner-btn"), "the refusal went with the edit");
+}
+
+/// R5: a refusal of the copy itself keeps the edit open and says it was not saved (the words Keep both has for it).
+#[test]
+fn a_refused_copy_keeps_the_edit_and_says_not_saved() {
+    let (mut rt, _) = note(false, false);
+    edit_and_type(&mut rt);
+    let ui = rt.state.viewer.ui.as_mut().expect("a file is open");
+    ui.settle(super::source::Settled::Refused("Not saved: an invented reason".into()));
+    ui.settle(super::source::Settled::Failed);
+    let ui = viewer(&rt);
+    assert!(ui.editor.is_some() && ui.dirty(), "the edit stays, unsaved");
+    assert_eq!(ui.toast.as_deref(), Some("Not saved"));
+    assert_eq!(ui.file.version, 3);
+}
+
+/// Delta check of desktop#432, round 3: the engine cannot say who saved the other version (another device, or an
+/// earlier opening of this file on this PC). The question then names nobody: changed since you opened it, the other
+/// version.
+#[test]
+fn the_two_versions_question_names_nobody_when_the_other_side_is_not_known() {
+    let (mut rt, _) = note(false, true);
+    edit_and_type(&mut rt);
+    ctrl(&mut rt, 's');
+    let Some(Dialog::Conflict(mut other)) = viewer(&rt).dialog.clone() else {
+        panic!("the two-versions question is up");
+    };
+    other.from = String::new();
+    rt.state.viewer.ui.as_mut().expect("a file is open").dialog = Some(Dialog::Conflict(other));
+    rt.invalidate();
+    rt.frame(0.0);
+    let sub = info(&rt, "dlg-sub").text.unwrap_or_default();
+    assert!(sub.ends_with(" \u{00B7} changed since you opened it"), "{sub}");
+    assert_eq!(info(&rt, "dlg-card-1-title").text.as_deref(), Some("The other version"));
+    assert_eq!(info(&rt, "dlg-btn-2").label.as_deref(), Some("Keep the other version"));
 }
 
 #[test]

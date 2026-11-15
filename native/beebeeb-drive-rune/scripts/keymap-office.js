@@ -5,7 +5,7 @@
 // by the editor's structure, numbered in document order; the native side counts the same way.
 {
   const ofFrame = (win.closest('[id^="DW-"]') || {}).id || '';
-  if (/^DW-(15(0[7-9]|1[01]|5\d|6[01])|1234)$/.test(ofFrame)) {
+  if (/^DW-(15(0[7-9]|1[01]|5\d|6[01])e?|1234)$/.test(ofFrame)) {
     const shown = (el) => !!el && el.getClientRects().length > 0;
     const box = (key, el, extra = {}) => { if (shown(el)) api.box(key, el, extra); };
     const text = (key, el, extra = {}) => { if (shown(el) && el.textContent.trim()) api.text(key, el, extra); };

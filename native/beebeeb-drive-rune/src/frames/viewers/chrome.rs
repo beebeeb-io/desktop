@@ -159,6 +159,19 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
         }
     });
 
+    // Open in File Explorer (board b4ffef881): the last icon button, never dimmed; the viewer shows no folder of its
+    // own, so it opens the Beebeeb location.
+    let explorer_btn = tool_button(
+        "open-explorer",
+        "Open in File Explorer",
+        &crate::theme::icons_settings::FOLDER,
+        16.0,
+        ToolState::Idle,
+        t,
+    )
+    .help("Open in File Explorer")
+    .on_press_tx(crate::ui::toolbar::open_beebeeb_location);
+
     let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
 
     let new_btn = row()
@@ -237,6 +250,7 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
         .child(view_toggle)
         .child(sort_btn)
         .child(panel_btn)
+        .child(explorer_btn)
         .child(sep)
         .child(new_btn)
         .child(search_field)
@@ -306,6 +320,10 @@ pub const FROM_THIS_PC_UNSENT: &str = "Opened from the copy on this PC \u{00B7} 
 /// The same, for a copy read while sync is off: nothing says it is still the version Beebeeb has.
 pub const FROM_THIS_PC_SYNC_OFF: &str =
     "Opened from the copy on this PC \u{00B7} sync is off, Beebeeb may have a newer version";
+/// What the line says for the version Beebeeb has of a file whose copy on this PC could not be confirmed as that
+/// version (older, or of a version not known: `LocalCopy::Behind`).
+pub const FROM_BEEBEEB_UNCONFIRMED_HERE: &str =
+    "The version in Beebeeb, decrypted on this PC \u{00B7} couldn't confirm the copy on this PC is this version";
 /// What the line says for the version Beebeeb has of a file whose copy on this PC is not in sync with it.
 pub const FROM_BEEBEEB_NOT_THIS_PCS: &str =
     "The version in Beebeeb, decrypted on this PC \u{00B7} the copy on this PC is not in sync with it";
@@ -336,6 +354,7 @@ pub(super) fn origin_status(origin: super::source::Origin, shows_content: bool, 
         Origin::ThisPc { unsent: true } => Some((FROM_THIS_PC_UNSENT, true)),
         Origin::ThisPcSyncOff => Some((FROM_THIS_PC_SYNC_OFF, true)),
         Origin::BeebeebNotThisPcs => Some((FROM_BEEBEEB_NOT_THIS_PCS, true)),
+        Origin::BeebeebUnconfirmedHere => Some((FROM_BEEBEEB_UNCONFIRMED_HERE, true)),
     };
     match said {
         Some((text, warns)) => Status {

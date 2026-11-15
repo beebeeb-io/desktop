@@ -77,7 +77,13 @@ mod backups;
 mod files;
 mod search;
 mod shares;
+mod tracking;
+pub use tracking::{MyActivity, MyActivityEvent};
+mod two_factor;
+pub use two_factor::TwoFactorStatus;
+mod previews;
 mod upload;
+pub use previews::{PreviewPutError, preview_retry_wait};
 
 #[cfg(any(test, feature = "test-support"))]
 mod region_set_fixture {

@@ -3,7 +3,7 @@
 
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
-use super::source::{FixtureSource, ThisPcSource};
+use super::source::{Exit, FixtureSource, ThisPcSource};
 use super::{Filter, Intent, scenes};
 use crate::State;
 use crate::shell::registry::view;
@@ -38,6 +38,11 @@ fn has(rt: &Runtime<State>, key: &str) -> bool {
 
 fn text(rt: &Runtime<State>, key: &str) -> String {
     info(rt, key).text.unwrap_or_default()
+}
+
+/// What assistive technology reads for a control (a button's words).
+fn label(rt: &Runtime<State>, key: &str) -> String {
+    info(rt, key).label.unwrap_or_default()
 }
 
 fn count(rt: &Runtime<State>, prefix: &str, suffix: &str) -> usize {
@@ -387,4 +392,636 @@ fn day_labels_read_today_yesterday_then_the_day_in_words() {
     assert_eq!(super::history::day_label(d(2, 11), today), "Yesterday");
     assert_eq!(super::history::day_label(d(1, 11), today), "Sunday 1 Nov");
     assert_eq!(super::history::day_label(d(31, 10), today), "Saturday 31 Oct");
+}
+
+// ---- What the sections ask of the window (`carry_out`), and what they say without lists ----
+
+use super::source::{Change, Kept, Standing};
+use crate::frames::files::source::{Action, ActionError, Call, FilesFixture};
+
+type Calls = std::sync::Arc<std::sync::Mutex<Vec<Call>>>;
+type Fails = std::sync::Arc<std::sync::Mutex<Vec<(Action, ActionError)>>>;
+
+/// A scene with a Files source that records what it is asked.
+fn recording(scene: fn(&mut State)) -> (Runtime<State>, Calls, Fails) {
+    let mut rt = runtime(scene, false);
+    let fixture = FilesFixture::default();
+    let (calls, fails) = (fixture.calls.clone(), fixture.fail.clone());
+    rt.state.actions.source = Box::new(fixture);
+    (rt, calls, fails)
+}
+
+/// One poll as the shell runs it, then a frame.
+fn poll(rt: &mut Runtime<State>) {
+    rt.update(|s, tx| {
+        super::poll(s, tx);
+    });
+    rt.frame(0.0);
+}
+
+#[test]
+fn show_in_file_explorer_asks_the_windows_files_source_and_says_a_refusal() {
+    let (mut rt, calls, fails) = recording(scenes::dw_0428);
+    rt.state.this_pc.ask(Intent::ShowInFileExplorer("c-21".into()));
+    poll(&mut rt);
+    assert_eq!(*calls.lock().unwrap(), [Call::ShowInFileExplorer(vec!["c-21".into()])]);
+    assert!(rt.state.this_pc.refusal.is_none());
+    assert!(rt.state.this_pc.take_intents().is_empty(), "carried out once");
+
+    // Refused (sync does not run, the file is not on this PC): the window says so, in fixed words.
+    fails
+        .lock()
+        .unwrap()
+        .push((Action::ShowInFileExplorer, ActionError::Unavailable));
+    rt.state.this_pc.ask(Intent::ShowInFileExplorer("c-21".into()));
+    poll(&mut rt);
+    assert_eq!(rt.state.this_pc.refusal.map(|(words, _)| words), Some(super::NOT_SHOWN));
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref() == Some(super::NOT_SHOWN) && !e.exiting),
+        "the refusal is on screen"
+    );
+}
+
+#[test]
+fn show_in_beebeeb_goes_to_trash_for_a_trashed_file_and_to_files_otherwise() {
+    let (mut rt, _, _) = recording(scenes::dw_1301);
+    let history = rt.state.this_pc.source.history();
+    let trashed = history
+        .iter()
+        .find(|c| matches!(c.what, super::What::MovedToTrash { .. }))
+        .expect("the board has a file moved to Trash")
+        .id
+        .clone();
+    let other = history
+        .iter()
+        .find(|c| matches!(c.what, super::What::Uploaded { .. }))
+        .expect("the board has an upload")
+        .id
+        .clone();
+    rt.state.this_pc.ask(Intent::ShowInBeebeeb(trashed));
+    poll(&mut rt);
+    assert_eq!(rt.state.shell.app.route().section, super::Section::Trash);
+
+    rt.state.this_pc.ask(Intent::ShowInBeebeeb(other));
+    poll(&mut rt);
+    assert_eq!(rt.state.shell.app.route().section, super::Section::Files);
+}
+
+#[test]
+fn open_goes_into_a_kept_folder_and_opens_a_kept_file_through_the_files_source() {
+    let (mut rt, calls, fails) = recording(scenes::dw_0715);
+    let kept = rt.state.this_pc.kept();
+    let folder = kept
+        .iter()
+        .find(|k| k.kind == super::source::Kind::Folder)
+        .unwrap()
+        .id
+        .clone();
+    let file = kept
+        .iter()
+        .find(|k| k.kind != super::source::Kind::Folder)
+        .unwrap()
+        .id
+        .clone();
+
+    // A file: its own app, through the Files source (no viewer is routed in this section).
+    rt.state.this_pc.ask(Intent::Open(file.clone()));
+    poll(&mut rt);
+    assert_eq!(*calls.lock().unwrap(), [Call::Open(vec![file.clone()])]);
+    assert_eq!(rt.state.shell.app.route().section, super::Section::AvailableOffline);
+
+    // Refused: said.
+    fails.lock().unwrap().push((Action::Open, ActionError::Offline));
+    rt.state.this_pc.ask(Intent::Open(file));
+    poll(&mut rt);
+    assert_eq!(
+        rt.state.this_pc.refusal.map(|(words, _)| words),
+        Some(super::NOT_OPENED)
+    );
+
+    // An id the list does not hold: nothing is asked of anyone.
+    let before = calls.lock().unwrap().len();
+    rt.state.this_pc.ask(Intent::Open("not-kept".into()));
+    poll(&mut rt);
+    assert_eq!(calls.lock().unwrap().len(), before);
+
+    // A folder: Files, inside it.
+    rt.state.this_pc.ask(Intent::Open(folder.clone()));
+    poll(&mut rt);
+    let route = rt.state.shell.app.route();
+    assert_eq!(route.section, super::Section::Files);
+    assert_eq!(route.folder, Some(folder));
+}
+
+#[test]
+fn new_goes_to_files_with_its_new_menu_open() {
+    let (mut rt, _, _) = recording(scenes::dw_1301);
+    rt.state.this_pc.ask(Intent::New);
+    poll(&mut rt);
+    assert_eq!(rt.state.shell.app.route().section, super::Section::Files);
+    assert_eq!(
+        rt.state.actions.menu.map(|m| m.kind),
+        Some(crate::frames::files::MenuKind::New)
+    );
+}
+
+/// Lets every animation end (a frame at 0.0 seconds never does).
+fn settle(rt: &mut Runtime<State>) {
+    rt.settle_all();
+    rt.frame(0.016);
+}
+
+/// Presses "Remove all from this PC" and lets the ask settle: the dialog comes in and goes out with an animation,
+/// and a press while one is under way reaches nothing (a frame at 0.0 seconds never ends it). So the one that
+/// closed before is finished first.
+fn open_ask(rt: &mut Runtime<State>) {
+    settle(rt);
+    click(rt, "btn-remove-all-from-this-pc");
+    poll(rt);
+    settle(rt);
+}
+
+#[test]
+fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
+    let (mut rt, _, _) = recording(scenes::dw_0715);
+    open_ask(&mut rt);
+    assert!(has(&rt, "dlg"), "the ask is on screen");
+    assert_eq!(info(&rt, "dlg").role, "dialog");
+    assert_eq!(text(&rt, "dlg-title"), "Remove all from this PC?");
+    assert_eq!(
+        text(&rt, "dlg-sub"),
+        "3 items will be online only. Nothing is deleted from Beebeeb."
+    );
+    assert_eq!(rt.state.this_pc.kept_count(), 3, "nothing is removed before the answer");
+
+    // Cancel says no; so does Esc. Nothing is removed, and a list key does not reach the list under the ask.
+    click(&mut rt, "btn-remove-all-cancel");
+    assert!(!rt.state.this_pc.confirm_remove_all, "Cancel was heard");
+    assert!(!has(&rt, "dlg"));
+    assert_eq!(rt.state.this_pc.kept_count(), 3);
+    open_ask(&mut rt);
+    let selected = rt.state.this_pc.selected;
+    press(&mut rt, Key::Down);
+    assert_eq!(rt.state.this_pc.selected, selected, "the list is under the ask");
+    press(&mut rt, Key::Escape);
+    assert!(!has(&rt, "dlg"));
+    assert_eq!(rt.state.this_pc.kept_count(), 3);
+
+    // The keyboard reaches the ask's own buttons: Tab to Cancel, Space presses it. Enter does not press the focused
+    // button (Rune: Return presses the window's default button, and this ask has none), so a stray Enter on
+    // "Remove all" removes nothing.
+    open_ask(&mut rt);
+    tab_to(&mut rt, "btn-remove-all-yes");
+    press(&mut rt, Key::Enter);
+    settle(&mut rt);
+    assert!(
+        rt.state.this_pc.confirm_remove_all,
+        "Enter on Remove all does not answer the ask"
+    );
+    assert_eq!(rt.state.this_pc.kept_count(), 3, "Enter removed nothing");
+    tab_to(&mut rt, "btn-remove-all-cancel");
+    press(&mut rt, Key::Text(" ".into()));
+    settle(&mut rt);
+    assert!(!rt.state.this_pc.confirm_remove_all, "Space on Cancel was heard");
+    assert!(!has(&rt, "dlg"), "Space on Cancel says no");
+    assert_eq!(rt.state.this_pc.kept_count(), 3);
+
+    // Yes, from the keyboard: everything goes, the ask with it.
+    open_ask(&mut rt);
+    tab_to(&mut rt, "btn-remove-all-yes");
+    press(&mut rt, Key::Text(" ".into()));
+    settle(&mut rt);
+    assert!(!rt.state.this_pc.confirm_remove_all, "Space on Remove all was heard");
+    assert!(!has(&rt, "dlg"));
+    assert_eq!(rt.state.this_pc.kept_count(), 0);
+    assert_eq!(text(&rt, "empty-title"), "Nothing available offline");
+}
+
+#[test]
+fn going_from_one_section_to_the_other_asks_the_source_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counts(std::sync::Arc<AtomicUsize>);
+    impl ThisPcSource for Counts {
+        fn opened(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn today(&self) -> chrono::NaiveDate {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+        }
+        fn history(&self) -> Vec<Change> {
+            Vec::new()
+        }
+        fn problems(&self) -> Vec<Change> {
+            Vec::new()
+        }
+        fn retry(&mut self, _: &str) {}
+        fn retry_all(&mut self) {}
+        fn settle(&mut self, _: &str, _: Exit) {}
+        fn kept(&self) -> Vec<Kept> {
+            Vec::new()
+        }
+        fn remove_from_pc(&mut self, _: &str) {}
+        fn remove_all_from_pc(&mut self) {}
+    }
+    let opened = std::sync::Arc::new(AtomicUsize::new(0));
+    let mut rt = with_source(super::Section::SyncHistory, Box::new(Counts(opened.clone())));
+    poll(&mut rt);
+    poll(&mut rt);
+    assert_eq!(opened.load(Ordering::SeqCst), 1, "once per arrival, not per frame");
+    rt.update(|s, _| {
+        crate::shell::host::dispatch(
+            s,
+            crate::shell::app::Event::Navigate(crate::shell::app::Route::section(super::Section::AvailableOffline)),
+        );
+    });
+    poll(&mut rt);
+    assert_eq!(opened.load(Ordering::SeqCst), 2, "the other section is an opening too");
+}
+
+#[test]
+fn the_ask_does_not_outlive_its_section() {
+    let (mut rt, _, _) = recording(scenes::dw_0715);
+    click(&mut rt, "btn-remove-all-from-this-pc");
+    poll(&mut rt);
+    assert!(rt.state.this_pc.confirm_remove_all);
+    rt.update(|s, _| {
+        crate::shell::host::dispatch(
+            s,
+            crate::shell::app::Event::Navigate(crate::shell::app::Route::section(super::Section::SyncHistory)),
+        );
+    });
+    poll(&mut rt);
+    assert!(!rt.state.this_pc.confirm_remove_all, "gone with the section");
+}
+
+/// A source with no lists, in one standing; real, not a sample (the status line never says the board's counts).
+struct NoLists(Standing);
+
+impl ThisPcSource for NoLists {
+    fn standing(&self) -> Standing {
+        self.0
+    }
+    fn today(&self) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+    }
+    fn history(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn problems(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn retry(&mut self, _: &str) {}
+    fn retry_all(&mut self) {}
+    fn settle(&mut self, _: &str, _: Exit) {}
+    fn kept(&self) -> Vec<Kept> {
+        Vec::new()
+    }
+    fn remove_from_pc(&mut self, _: &str) {}
+    fn remove_all_from_pc(&mut self) {}
+}
+
+fn with_source(section: super::Section, source: Box<dyn ThisPcSource>) -> Runtime<State> {
+    with_state(section, source, |_| {})
+}
+
+/// A window on `section` with `source`, its state prepared before the first frame (nothing animates in).
+fn with_state(section: super::Section, source: Box<dyn ThisPcSource>, prepare: fn(&mut State)) -> Runtime<State> {
+    let mut state = init();
+    crate::shell::host::dispatch(
+        &mut state,
+        crate::shell::app::Event::Navigate(crate::shell::app::Route::section(section)),
+    );
+    state.this_pc = super::Ui::new(source);
+    prepare(&mut state);
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (958.0, 638.0), env);
+    rt.frame(0.0);
+    rt
+}
+
+#[test]
+fn without_lists_each_section_says_why_and_never_that_the_pc_is_empty() {
+    let cases = [
+        (Standing::Reading, "Reading this PC"),
+        (Standing::Unreadable, "Couldn't read this PC"),
+        (Standing::AnotherAccounts, "Not available for this account"),
+    ];
+    for (standing, title) in cases {
+        for section in [super::Section::SyncHistory, super::Section::AvailableOffline] {
+            let rt = with_source(section, Box::new(NoLists(standing)));
+            assert_eq!(text(&rt, "empty-title"), title, "{standing:?} in {section:?}");
+            assert!(has(&rt, "empty-sub"));
+            for said in rt.elements().iter().filter_map(|e| e.text.clone()) {
+                assert!(
+                    !["No changes yet", "Nothing available offline", "No items"].contains(&said.as_str()),
+                    "{standing:?} in {section:?} reads as an empty PC: {said}"
+                );
+            }
+            assert!(
+                !text(&rt, "status-details").contains("available offline"),
+                "no count of something nobody read"
+            );
+        }
+    }
+    // Ready with nothing: the board's own empty states.
+    let rt = with_source(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)));
+    assert_eq!(text(&rt, "empty-title"), "No changes yet");
+    let rt = with_source(super::Section::AvailableOffline, Box::new(NoLists(Standing::Ready)));
+    assert_eq!(text(&rt, "empty-title"), "Nothing available offline");
+}
+
+#[test]
+fn a_real_pc_never_draws_the_boards_sample_status_line() {
+    const SAMPLE: &str = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
+    // Nothing kept, and kept items with the row menu open: the two places the board keeps Files' sample counts.
+    let rt = with_source(super::Section::AvailableOffline, Box::new(NoLists(Standing::Ready)));
+    assert_eq!(text(&rt, "status-details"), "Nothing available offline");
+    let mut rt = with_source(super::Section::AvailableOffline, Box::new(FixtureSource::synced()));
+    rt.update(|s, _| s.this_pc.open_menu(0, (430.0, 190.0)));
+    rt.frame(0.0);
+    assert!(has(&rt, "menu"));
+    assert_ne!(text(&rt, "status-details"), SAMPLE);
+    assert!(text(&rt, "status-details").starts_with("3 available offline"));
+}
+
+#[test]
+fn the_status_line_says_the_sources_sync_word_or_none() {
+    // The window's own source has no word for sync (nothing syncs here): no dot, no word, never "Up to date".
+    let mut rt = with_source(super::Section::SyncHistory, Box::new(FixtureSource::board()));
+    rt.update(|s, _| {
+        s.this_pc = super::Ui::new(Box::new(NoLists(Standing::Ready)));
+        s.actions.source = Box::new(crate::frames::files::source::NoEngine);
+    });
+    rt.frame(0.0);
+    assert!(!has(&rt, "status-text") && !has(&rt, "status-dot"));
+    // The board's own source says "Up to date": that word, with its dot.
+    rt.update(|s, _| s.actions.source = Box::new(FilesFixture::default()));
+    rt.frame(0.0);
+    assert_eq!(text(&rt, "status-text"), "Up to date");
+    assert!(has(&rt, "status-dot"));
+
+    // An item that did not sync: "Sync stopped", whatever the source's word.
+    let rt = runtime(scenes::dw_0428, false);
+    assert_eq!(text(&rt, "status-text"), "Sync stopped");
+}
+
+#[test]
+fn the_sidebar_foot_draws_the_account_and_the_storage_the_window_read() {
+    // The board's scene: the fixture's account and split, as before.
+    let rt = runtime(scenes::dw_1301, false);
+    assert_eq!(text(&rt, "account-name"), "Anna Visser");
+    assert_eq!(text(&rt, "storage-files"), "Files 24 GB");
+
+    // A window whose source names no account and has read no storage: no sample name, no figure, no breakdown.
+    let rt = with_state(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)), |s| {
+        s.actions.source = Box::new(crate::frames::files::source::NoEngine);
+        s.storage_known = false;
+        s.storage_split = None;
+    });
+    assert_eq!(text(&rt, "account-name"), "");
+    assert!(has(&rt, "account-email-off") && !has(&rt, "account-email") && !has(&rt, "avatar"));
+    assert_eq!(text(&rt, "storage-value"), "Unavailable");
+    assert!(!has(&rt, "storage-breakdown"));
+    assert_eq!(
+        info(&rt, "meter-fill-0").rect[2],
+        0.0,
+        "no fill for storage nobody read"
+    );
+    for said in rt.elements().iter().filter_map(|e| e.text.clone()) {
+        assert!(
+            !said.contains("Anna") && !said.contains("northwind"),
+            "a sample name: {said}"
+        );
+    }
+
+    // Storage read, no split from the source: the total, one segment, no Files/Photos line.
+    let rt = with_state(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)), |s| {
+        s.actions.source = Box::new(crate::frames::files::source::NoEngine);
+        s.storage_known = true;
+        s.storage_split = None;
+        s.storage.used_bytes = 240_000_000_000;
+        s.storage.quota_bytes = 1_000_000_000_000;
+    });
+    assert!(text(&rt, "storage-value").contains(" of "));
+    assert!(!has(&rt, "storage-breakdown"));
+    assert!(info(&rt, "meter-fill-0").rect[2] > 0.0);
+    assert_eq!(info(&rt, "meter-fill-1").rect[2], 0.0);
+}
+
+/// Task 2524: a source whose problems are the given changes (the history holds them too, as the engine's does); task
+/// 2530: the ways out it was asked for, in order.
+struct Problems(Vec<Change>, Asked);
+
+type Asked = std::sync::Arc<std::sync::Mutex<Vec<(String, Exit)>>>;
+
+impl ThisPcSource for Problems {
+    fn today(&self) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+    }
+    fn history(&self) -> Vec<Change> {
+        self.0.clone()
+    }
+    fn problems(&self) -> Vec<Change> {
+        self.0.clone()
+    }
+    fn retry(&mut self, _: &str) {}
+    fn retry_all(&mut self) {}
+    fn settle(&mut self, problem: &str, exit: Exit) {
+        self.1.lock().unwrap().push((problem.to_string(), exit));
+    }
+    fn kept(&self) -> Vec<Kept> {
+        Vec::new()
+    }
+    fn remove_from_pc(&mut self, _: &str) {}
+    fn remove_all_from_pc(&mut self) {}
+}
+
+/// A problem row as the engine host makes it: a held edit has no way out; any other here has Try again.
+fn problem_row(id: &str, name: &str, reason: super::source::Reason) -> Change {
+    let exits = if matches!(reason, super::source::Reason::Held(_)) {
+        Vec::new()
+    } else {
+        vec![Exit::TryAgain]
+    };
+    problem_row_with(id, name, reason, exits)
+}
+
+fn problem_row_with(id: &str, name: &str, reason: super::source::Reason, exits: Vec<Exit>) -> Change {
+    Change {
+        id: id.into(),
+        name: name.into(),
+        kind: super::source::Kind::Document,
+        what: super::source::What::Failed {
+            problem: id.into(),
+            reason,
+            exits,
+        },
+        origin: super::source::Origin::ThisPc,
+        date: chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+        time: "09:39".into(),
+    }
+}
+
+const HELD_WORDS: &str = "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on this PC. Nothing was lost.";
+
+fn on_problems(rows: Vec<Change>) -> Runtime<State> {
+    on_problems_asked(rows).0
+}
+
+fn on_problems_asked(rows: Vec<Change>) -> (Runtime<State>, Asked) {
+    let asked = Asked::default();
+    let mut rt = with_state(
+        super::Section::SyncHistory,
+        Box::new(Problems(rows, asked.clone())),
+        |s| {
+            s.this_pc.filter = Filter::Problems;
+        },
+    );
+    rt.on_key = Some(crate::shell::host::on_key);
+    (rt, asked)
+}
+
+/// A held edit is drawn as a problem with its words, and with no Try again (the engine has no action for it); a
+/// problem the queue can try again keeps its button next to it.
+#[test]
+fn a_held_edit_is_drawn_with_its_words_and_no_try_again() {
+    use super::source::Reason;
+    let rt = on_problems(vec![
+        problem_row("op-1", "Rates.xlsx", Reason::Said("Stopped after 5 tries.")),
+        problem_row("held:f-1", "Plan.txt", Reason::Held(HELD_WORDS)),
+    ]);
+    assert_eq!(text(&rt, "change-0-sub"), "Stopped after 5 tries.");
+    assert_eq!(text(&rt, "change-1-name"), "Plan.txt");
+    assert_eq!(text(&rt, "change-1-sub"), HELD_WORDS);
+    let buttons = rt
+        .elements()
+        .iter()
+        .filter(|e| {
+            e.key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("btn-try-again") && !k.ends_with("-icon") && !k.ends_with("-label"))
+        })
+        .count();
+    assert_eq!(buttons, 1, "one Try again, for the queue's problem only");
+    assert!(has(&rt, "btn-try-all-again"));
+}
+
+/// Only held edits: the Can't sync bar is there, and nothing offers an action that does nothing.
+#[test]
+fn only_held_edits_offer_no_try_again_at_all() {
+    use super::source::Reason;
+    let rt = on_problems(vec![problem_row("held:f-1", "Plan.txt", Reason::Held(HELD_WORDS))]);
+    assert!(has(&rt, "problems-bar"));
+    assert_eq!(text(&rt, "change-0-sub"), HELD_WORDS);
+    assert!(!has(&rt, "btn-try-again"));
+    assert!(!has(&rt, "btn-try-all-again"));
+    assert_eq!(rt.state.this_pc.problem_count(), 1);
+    assert_eq!(rt.state.this_pc.retryable_problem_count(), 0);
+}
+
+const PARKED_WORDS: &str =
+    "Not sent: Beebeeb lost track of the change made before this one. Your change stays on this PC. Nothing was lost.";
+
+/// Task 2530 (R7): a row draws only the ways out the engine listed for it. A parked change with Keep both and Keep the
+/// other has Choose and no Try again; Choose asks the two-versions question with exactly those two answers, Keep both
+/// first, and an answer is asked of the source once.
+#[test]
+fn the_row_offers_only_the_engines_exits() {
+    use super::source::Reason;
+    let (mut rt, asked) = on_problems_asked(vec![problem_row_with(
+        "op-lost",
+        "Plan.txt",
+        Reason::Said(PARKED_WORDS),
+        vec![Exit::KeepBoth, Exit::KeepOther],
+    )]);
+    assert_eq!(text(&rt, "change-0-sub"), PARKED_WORDS);
+    assert!(!has(&rt, "btn-try-again"), "no Try again the engine did not list");
+    assert!(!has(&rt, "btn-try-all-again"));
+    assert!(!has(&rt, "change-0-remove"));
+    assert_eq!(rt.state.this_pc.retryable_problem_count(), 0);
+
+    settle(&mut rt);
+    click(&mut rt, "change-0-choose");
+    // The dialog comes in with an animation; a press while it runs reaches nothing.
+    settle(&mut rt);
+    assert_eq!(text(&rt, "dlg-title"), "Two versions");
+    assert_eq!(text(&rt, "dlg-sub"), "Plan.txt");
+    assert_eq!(label(&rt, "settle-0"), "Keep both");
+    assert_eq!(label(&rt, "settle-1"), "Keep the other");
+    assert!(!has(&rt, "settle-2"), "no Keep this PC's: the row did not list it");
+    assert!(has(&rt, "settle-cancel"));
+    assert!(asked.lock().unwrap().is_empty(), "nothing is asked before an answer");
+
+    click(&mut rt, "settle-1");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![("op-lost".to_string(), Exit::KeepOther)],
+        "asked once, the answer pressed"
+    );
+    settle(&mut rt);
+    assert!(!has(&rt, "dialog-settle"), "the question closed");
+}
+
+/// Task 2530: Remove from the list asks once, in the contract's words; Cancel and Esc ask nothing of the source.
+#[test]
+fn remove_from_the_list_asks_once_and_cancel_asks_nothing() {
+    use super::source::Reason;
+    let (mut rt, asked) = on_problems_asked(vec![problem_row_with(
+        "op-missing",
+        "Notes.md",
+        Reason::Said(
+            "This PC no longer has the bytes of this change, so it can’t be sent. The file on Beebeeb is as it was.",
+        ),
+        vec![Exit::RemoveFromList],
+    )]);
+    assert!(!has(&rt, "btn-try-again"));
+    assert!(!has(&rt, "change-0-choose"));
+    settle(&mut rt);
+    click(&mut rt, "change-0-remove");
+    settle(&mut rt);
+    assert_eq!(text(&rt, "dlg-title"), super::settle::REMOVE_TITLE);
+    assert_eq!(text(&rt, "dlg-sub"), super::settle::REMOVE_WORDS);
+    assert_eq!(label(&rt, "settle-0"), "Remove from the list");
+    click(&mut rt, "settle-cancel");
+    settle(&mut rt);
+    assert!(!has(&rt, "dialog-settle"));
+    click(&mut rt, "change-0-remove");
+    settle(&mut rt);
+    press(&mut rt, Key::Escape);
+    settle(&mut rt);
+    assert!(!has(&rt, "dialog-settle"), "Esc says no");
+    assert!(asked.lock().unwrap().is_empty(), "nothing was asked");
+    click(&mut rt, "change-0-remove");
+    settle(&mut rt);
+    click(&mut rt, "settle-0");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![("op-missing".to_string(), Exit::RemoveFromList)]
+    );
+}
+
+/// Task 2530: the question does not outlive its problem (answered elsewhere, or gone after a read).
+#[test]
+fn the_question_closes_when_its_problem_leaves_the_list() {
+    let mut rt = with_state(super::Section::SyncHistory, Box::new(FixtureSource::board()), |s| {
+        s.this_pc.filter = Filter::Problems
+    });
+    rt.update(|s, _| {
+        s.this_pc.asking = Some(super::Asking {
+            problem: "p-gone".into(),
+            name: "Gone.txt".into(),
+            exits: vec![Exit::KeepBoth],
+        })
+    });
+    rt.update(|s, tx| {
+        super::poll(s, tx);
+    });
+    rt.frame(0.0);
+    assert!(rt.state.this_pc.asking.is_none());
+    assert!(!has(&rt, "dialog-settle"));
 }

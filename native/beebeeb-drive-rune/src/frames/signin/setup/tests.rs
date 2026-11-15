@@ -7,9 +7,12 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use super::source::{
     BUNDLED_SAMPLE_PNG, Explorer, FixtureSetupSource, PreviewFormat, PreviewSize, Script, SetupSource,
 };
-use super::{CompareMode, Intent, SHEET, Setting, Step, Ui, scene};
+use super::{Answered, CompareMode, Intent, SHEET, Setting, Step, Ui, scene};
 use crate::shell::app::Event;
 use crate::{State, init, view};
+
+#[path = "folder_tests.rs"]
+mod folder_tests;
 
 /// The first-run window's client area on the board (960 x 640 less the 1 px frame the OS draws).
 const WINDOW: (f32, f32) = (958.0, 638.0);
@@ -208,7 +211,7 @@ fn the_compare_view_fits_inside_the_window() {
 fn with_no_photo_of_their_own_the_bundled_sample_is_loaded() {
     let (ui, _) = fixture(Script::default());
     assert!(ui.sample().bundled);
-    assert_eq!(ui.sample().original_png, BUNDLED_SAMPLE_PNG);
+    assert_eq!(&ui.sample().original_png[..], BUNDLED_SAMPLE_PNG);
     assert_eq!(
         &BUNDLED_SAMPLE_PNG[..8],
         b"\x89PNG\r\n\x1a\n",
@@ -357,6 +360,12 @@ fn switches_and_choices_work_from_the_keyboard() {
     assert_eq!(info(&rt, "item-0-switch").role, "switch");
     press(&mut rt, Key::Text(" ".into()));
     assert!(!ui(&mut rt).lock_on, "Space turns the switch off");
+    // Off never locks: no "Lock again after" while the switch is off.
+    rt.settle_all();
+    rt.frame(0.0);
+    assert_eq!(count(&rt, "seg-0-3-tab"), 0, "no delay row with app lock off");
+    press(&mut rt, Key::Text(" ".into()));
+    assert!(ui(&mut rt).lock_on, "Space turns it on again");
     click(&mut rt, "seg-0-3-tab");
     assert_eq!(ui(&mut rt).lock_after, super::source::LockAfter::Min60);
     assert_eq!(info(&rt, "seg-0-on").label.as_deref(), Some("60 min"));
@@ -507,4 +516,55 @@ fn without_a_setup_state_no_sample_value_is_shown() {
     rt.frame(0.0);
     assert_eq!(count(&rt, "au-col"), 0);
     assert!(rt.elements().iter().all(|e| e.text.as_deref() != Some("Add a passkey")));
+}
+
+/// A source that answers a switch after the press: the value drawn is the one the answer names, never the one
+/// that was asked for; a change that did not happen is kept as that until the next answer.
+#[test]
+fn an_answered_switch_draws_what_the_answer_says_not_what_was_asked() {
+    use super::source::{Outcome, Switch};
+    let mut ui = Ui::new(Box::new(FixtureSetupSource::new(Script::default())));
+    ui.results.open_at_login = true;
+    ui.results.notifications = true;
+    // Asked on, and the entry is off: the change did not happen, and the row says what is set.
+    ui.take_in(Outcome {
+        switch: Switch::OpenAtLogin,
+        done: false,
+        now: Some(false),
+    });
+    assert!(!ui.results.open_at_login, "what the answer names");
+    assert_eq!(ui.answered(Switch::OpenAtLogin), Some(Answered::NotChanged));
+    // Not done, and what is set is not known: the asked value is not claimed either way.
+    ui.take_in(Outcome {
+        switch: Switch::Notifications,
+        done: false,
+        now: None,
+    });
+    assert_eq!(ui.answered(Switch::Notifications), Some(Answered::NotKnown));
+    // The next answer for the same switch replaces the last: made, so nothing is left to say.
+    ui.take_in(Outcome {
+        switch: Switch::OpenAtLogin,
+        done: true,
+        now: Some(true),
+    });
+    assert!(ui.results.open_at_login);
+    assert_eq!(ui.answered(Switch::OpenAtLogin), None);
+    assert_eq!(
+        ui.answered(Switch::Notifications),
+        Some(Answered::NotKnown),
+        "the other one stands"
+    );
+    // Made, and what is set could not be read back: it was made (the value that was asked for stands).
+    ui.results.notifications = true;
+    ui.take_in(Outcome {
+        switch: Switch::Notifications,
+        done: true,
+        now: None,
+    });
+    assert!(ui.results.notifications);
+    assert_eq!(ui.answered(Switch::Notifications), None);
+    // The fixture's changes are made at once: nothing waits, every step is answered for, and no folder is
+    // asked for (the board).
+    assert!(Step::STEPS.into_iter().all(|step| ui.available(step)));
+    assert!(ui.opens_settings() && !ui.asks_folder() && !ui.can_choose_again());
 }

@@ -56,6 +56,42 @@ of a list read before a sign-out); the rest says so.
 | `DW-S03` | App lock's delay menu, open (was DW-0716). | built (light and dark: 0 failing on all six lines) |
 | `DW-S03b` | App lock off: no time choice (was DW-0716b). | built (light and dark: 0 failing on all six lines) |
 
+Deviation (lane, 2026-11-15): on the real engine App lock's switch is bound (core's `lock.app_lock`; off asks Windows
+Hello first) but its delay is not: the away lock that "locks again after" sets has no idle timer in this version. So
+the running app draws the row ON as "Lock Beebeeb · Windows Hello" with the switch and NO time choice (never a delay
+nothing acts on), and Setup's step 2 draws no "Lock again after" row. The board's frames (`DW-S03`, `DW-S03b`,
+`DW-0202`) keep theirs and still gate at 0. Ends when the away lock lands.
+
+Ended (lane w5, 2026-11-15, decision 2519): the away lock landed. The delay is the engine's entry `lock.after` (five
+minutes while nothing is stored), read with the switch and drawn as the board draws it, only while app lock is on;
+Setup's step 2 draws its row (with the switch on) and writes it. A longer delay asks Windows Hello first, as off does;
+a stored value the menu does not have is drawn as "Not known". "Immediately" locks when the main window closes to the
+tray and after one minute without input while it stays (no time at all cannot be told from reading). The shell
+measures (Windows' whole-PC idle, its session lock); the engine compares and locks through core's `lock_after_away`.
+
+### App lock with the account password: not on the board (D-2)
+
+The board's rule (DW-0716, Rules) is "The Windows app's password works when Windows Hello doesn't"; its Actions say
+turning app lock off or changing the delay asks Windows Hello first. No board frame draws the password step: decision
+D-2 of wave 2 (lead, 2026-11-15) has it drawn from the kit until the board gets the frame in the next designs PR.
+`app_lock_password.rs`, bound in `engine_host/app_lock.rs`, tests in `engine_host/app_lock_password_tests.rs`.
+
+- When Windows Hello cancels, fails or is not set up on this PC for turning app lock off or a longer delay, the Lock
+  Beebeeb row offers "Use your password" (a link, the lock screen's words) while Sign-in and security shows.
+- The step is the account kit's password confirm (DW-A78's): "Confirm it's you", one line for the change ("Turning off
+  app lock needs your account password." / "A longer lock delay needs your account password."), "Account password",
+  Continue and Cancel. While the password is checked, Continue says "Checking…" and nothing closes the step.
+- The sentence under the field after an answer that keeps the step open is the lock screen's for the same outcome
+  ("Screen lock: password" in `frames/signin/FRAMES.md`), without a prefix; an answer that ends the step is a toast
+  that starts "App lock is still on: " or "The lock delay was not changed: ".
+
+| Scene (no board id, no golden, not gated) | What it is |
+| --- | --- |
+| `APPLOCK-password-offered` | The page after Windows Hello did not confirm: "Use your password" in the Lock Beebeeb row. |
+| `APPLOCK-password` | The step for turning app lock off, a password typed. |
+| `APPLOCK-password-wrong` | After a wrong password: the field empty, "That password isn't right." under it. |
+| `APPLOCK-password-checking` | The password is being checked: Continue says "Checking…", the field is frozen. |
+
 Decision (lane, 2026-11-13): DW-A52, DW-A84, DW-A84a, DW-A57, DW-A57a, DW-0716 and DW-0716b are retired by the
 owner's ruling of 2026-11-13 (option C of three rendered options: one page), because the two screens listed the
 same subjects twice and the pane was a menu that said nothing about the account's state. The ruling wins over the
@@ -68,6 +104,12 @@ because the board has no drawing of this page and the lead ruled that the new id
 is: a record of the approved render that fails when the page changes afterwards. It does not say the app matches
 a design. Proven able to fail: with the score card's padding changed, `DW-S01` reads `geometry: 155 checked, 92
 failing`. When the board draws the page, capture these goldens from the board instead.
+
+Decision (lead, 2026-11-15 02:05, PR #428): the goldens of `DW-S01u` (both themes) are recaptured from the app with the
+honest wording on the "Approve a sign-in" row, "Not available in this version yet. Approve on the web." (the triage's
+honest state, `TRIAGE-fixture-only-1114.md` section 4), in place of the old sub "Let another device sign in" with the
+value "Not available yet". An intended change, not a regression: the page has no board frame, so its golden is the
+app's own record of the approved render (above). `compare.sh DW-S01u` reads 0 failing in both themes after it.
 
 Decision (lane, 2026-11-14): the steps that are DONE are not listed on the page (the checkup listed all seven):
 the ruling's page shows the count, what is left, and the three sign-in rows. Recorded here as a removed
@@ -82,6 +124,21 @@ behaviour; a "done" list in the score card is a follow-up if the owner wants it.
 | `DW-A66` | Prove the new address: the 8-digit code. | built (light and dark: 0 failing on all six lines) |
 | `DW-A67` | Change the password. | built (light and dark: 0 failing on all six lines) |
 | `DW-A68` | The current password was wrong: nothing changed. | built (light and dark: 0 failing on all six lines) |
+
+### States of these pages with no board frame (lane w1, 2026-11-15; desktop#427's follow-up)
+
+The board draws none of these; each sentence is this app's, and says only what is true:
+- Change email while its code is being sent: the fields frozen, "Leave this page", and under the address
+  "A code is still being sent. Wait for it to finish." DW-A66 names the address Beebeeb sent the code to (its own
+  word), or "your new address" when it is not known; never what the field holds.
+- A password change answered after the person left its page: a notice over the window, whatever it shows
+  ("Your password was changed" / "Your password change could not be confirmed" / "Your password was not changed",
+  with Show), and the full sentence on the Change password page, once.
+- Beebeeb refusing a new password (the same as now, too weak, found in a breach): "Beebeeb did not accept the new
+  password. Nothing was changed. Choose a different one." under New password.
+- A code confirm or the first code while the same call is still out: "Your earlier request is still being made.
+  Wait for it to finish."; the email's code: "Your code is still being checked. Wait for it to finish."
+- With no open session every one of these calls says the page's Offline line and asks nothing.
 
 ## Two-factor and passkeys in settings (8)
 

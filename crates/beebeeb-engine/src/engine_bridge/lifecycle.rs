@@ -39,6 +39,7 @@ impl EngineBridge {
             newly_held: Default::default(),
             resume: crate::runner::ResumeTicket::default(),
             backup_api: std::sync::OnceLock::new(),
+            chain_after: crate::write_token::ChainAfter::Any,
             #[cfg(any(test, feature = "test-support"))]
             seams: Seams::default(),
         }
@@ -123,6 +124,14 @@ impl EngineBridge {
         // rows, with their file names, that an earlier engine left on the shared board.
         board.forget_failed();
         self.transfers = board;
+        self
+    }
+
+    /// Queue a content modify only after the queued write `chain` allows (review of desktop#432, delta 3): the
+    /// viewer's save follows its own opening's latest queued save alone. Any other is refused, nothing queued
+    /// ([`BehindAnotherWrite`]).
+    pub(crate) fn with_chain_after(mut self, chain: crate::write_token::ChainAfter) -> Self {
+        self.chain_after = chain;
         self
     }
 
@@ -681,7 +690,25 @@ impl EngineBridge {
                 } else {
                     return Err(anyhow::anyhow!("hydrate operation target missing from state").into());
                 };
-                self.hydrate_file(file_id, &dest, &[sync_root]).await?;
+                // Task 2523 (review P1-1): a re-download of a copy behind its version writes only into the file's own
+                // place, where the hydrate's guards look. A destination the row has left (moved since it was queued)
+                // may hold the person's file at the old name: the re-download is dropped, never written there.
+                if super::stale_copies::is_tick_fetch(op)
+                    && !self.dest_is_files_sync_folder_place(file_id, &dest, &[sync_root])?
+                {
+                    tracing::info!(file_id = %file_id, "stale copy: the file moved since its re-download was queued; dropped");
+                    return Ok(OpDone::Remove { release: None });
+                }
+                match self.hydrate_queued(file_id, &dest, &[sync_root]).await {
+                    Ok(()) => {}
+                    // Task 2523: a re-download of a copy behind the current version met a change made since its
+                    // pass checked the bytes. The change keeps its bytes; the re-download is dropped, never retried
+                    // over it (the pass does not queue it again while the bytes differ from the agreed content).
+                    Err(error) if super::stale_copies::tick_fetch_met_a_change(op, &error) => {
+                        tracing::info!(file_id = %file_id, "stale copy: changed since it was checked; kept as it is");
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 Ok(OpDone::Remove { release: None })
             }
             OperationKind::CreateFolder => {

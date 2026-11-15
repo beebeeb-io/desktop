@@ -26,6 +26,12 @@ pub struct FakePlatform {
     pub capture_exclusions: Mutex<Vec<bool>>,
     /// When true, `set_capture_exclusion` fails with `PlatformError::Os`.
     pub capture_exclusion_fails: AtomicBool,
+    /// What the folder picker answers, one per call, oldest first; with none left it was closed without a folder.
+    pub picks: Mutex<std::collections::VecDeque<Result<Option<std::path::PathBuf>, PlatformError>>>,
+    /// The title and the start folder of every `pick_folder` call, in order.
+    pub pick_asks: Mutex<Vec<(String, std::path::PathBuf)>>,
+    /// What `idle_for` answers: how long the PC has had no input. Tests set it.
+    pub idle: Mutex<Option<Duration>>,
 }
 
 impl Default for FakePlatform {
@@ -41,6 +47,9 @@ impl Default for FakePlatform {
             tray_handler: Mutex::default(),
             capture_exclusions: Mutex::default(),
             capture_exclusion_fails: AtomicBool::new(false),
+            picks: Mutex::default(),
+            pick_asks: Mutex::default(),
+            idle: Mutex::new(Some(Duration::ZERO)),
         }
     }
 }
@@ -127,6 +136,17 @@ impl Platform for FakePlatform {
         Ok(())
     }
 
+    fn pick_folder(&self, title: &str, start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
+        if self.unbuilt {
+            return Err(PlatformError::NotBuilt("the folder picker"));
+        }
+        self.pick_asks
+            .lock()
+            .unwrap()
+            .push((title.to_string(), start.to_path_buf()));
+        self.picks.lock().unwrap().pop_front().unwrap_or(Ok(None))
+    }
+
     fn show_start_refusal(&self, title: &str, message: &str) {
         self.refusals
             .lock()
@@ -148,6 +168,10 @@ impl Platform for FakePlatform {
 
     fn send_control(&self, _identity: AppIdentity, _request: &Request, _timeout: Duration) -> Delivery {
         Delivery::Unreachable
+    }
+
+    fn idle_for(&self) -> Option<Duration> {
+        *self.idle.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn set_capture_exclusion(&self, _window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {

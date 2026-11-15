@@ -128,6 +128,8 @@ pub struct Security {
 pub struct SecurityFacts {
     /// App lock on this PC: on, and how soon it locks again. `None`: this build cannot set it yet.
     pub app_lock: Option<(bool, String)>,
+    /// "Use your password" on App lock's row (no board frame: D-2). `None`: not offered.
+    pub app_lock_password: Option<super::app_lock_password::PasswordOffer>,
     /// "3 weeks ago".
     pub password_changed: Option<String>,
     pub two_factor: Option<bool>,
@@ -141,8 +143,11 @@ pub struct SecurityFacts {
     pub activity: Option<Option<Vec<Event>>>,
     /// The checkup's factors. `None` or empty: there is no score, and the page says so.
     pub factors: Option<Vec<Factor>>,
-    /// This source can sign this app out (`sign_out_this_app`, `sign_out_all_apps`).
+    /// This source can sign this app out (`sign_out_this_app`).
     pub can_sign_out: bool,
+    /// This source can also sign every Beebeeb app on this PC out (`sign_out_all_apps`). A source whose app is
+    /// the only Beebeeb app on this PC has nothing to mean by it: the row is not drawn.
+    pub can_sign_out_all: bool,
 }
 
 /// A count the page shows: read, being read, or not known. A list that is older than a change the source
@@ -153,6 +158,26 @@ pub enum Count {
     /// Asked, not answered yet: the row says so (the rest of the page does not wait for it).
     Reading,
     NotKnown,
+}
+
+/// How saving the name ended, or stands ([`AccountSource::save_name`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameAnswer {
+    /// Beebeeb has the new name.
+    Saved,
+    /// Not saved, and nothing changed.
+    NotSaved(NameWhy),
+    /// Sent, not answered yet: the answer comes through [`AccountSource::name_result`].
+    Pending,
+}
+
+/// Why a name was not saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameWhy {
+    /// Beebeeb could not be reached.
+    Offline,
+    /// Beebeeb (or the session) did not take it.
+    Refused,
 }
 
 /// How a sign-out of this app ended, or stands.
@@ -171,6 +196,7 @@ impl SecurityFacts {
     pub fn unknown() -> Self {
         SecurityFacts {
             app_lock: None,
+            app_lock_password: None,
             password_changed: None,
             two_factor: None,
             backup_codes: None,
@@ -179,6 +205,7 @@ impl SecurityFacts {
             activity: None,
             factors: None,
             can_sign_out: false,
+            can_sign_out_all: false,
         }
     }
 }
@@ -351,6 +378,11 @@ pub enum Refused {
     Locked,
     /// Beebeeb could not be reached.
     Offline,
+    /// The new password is not accepted: below the minimum, the same as the current one, or in a known breach.
+    Weak,
+    /// The change was sent and how it ended is not known: the password may have changed. Never told as "nothing
+    /// changed" (review of desktop#423, P2 #9).
+    Unconfirmed,
 }
 
 /// A secret a pane shows once (the two-factor key, a backup code). It cannot be printed, copied
@@ -405,14 +437,19 @@ pub struct Passkey {
     pub added: String,
     /// Whether it can unlock the data on a new device (PRF), or only sign in.
     pub can_unlock: bool,
+    /// Whether the server said which of the two it is. `false`: not known, and the row says only what is true of
+    /// every passkey ("Signs you in"), never "Sign-in only".
+    pub unlock_known: bool,
 }
 
 impl Passkey {
     pub fn does(&self) -> &'static str {
         if self.can_unlock {
             "Can unlock data"
-        } else {
+        } else if self.unlock_known {
             "Sign-in only"
+        } else {
+            "Signs you in"
         }
     }
 }
@@ -513,6 +550,68 @@ pub enum EmailRefused {
     Offline,
 }
 
+/// Why the email's code was not sent again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resend {
+    /// Too soon: seconds to wait (Beebeeb's `Retry-After`).
+    Wait(u32),
+    /// No more codes for this change: start again.
+    Limit,
+    /// No change is waiting any more: back to step 1.
+    Gone,
+    Offline,
+}
+
+/// The calls of the Account pages that are answered later: a source that sends them on a worker starts one with
+/// [`AccountSource::start_call`] and the window takes the answer with [`AccountSource::call_answer`]; nothing of the
+/// answer is drawn before it came.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallKind {
+    /// The new address and the password: Beebeeb mails the 8-digit code.
+    StartEmail,
+    /// The 8 digits of the email's code.
+    ConfirmEmail,
+    /// A new authenticator key (the set-up page).
+    BeginTwoFactor,
+    /// The first 6-digit code: turns two-factor on.
+    TurnOnTwoFactor,
+    /// A current code: turns two-factor off.
+    TurnOffTwoFactor,
+    /// A current code, before moving to a new authenticator.
+    CheckCode,
+    /// A current code: 8 new backup codes.
+    NewBackupCodes,
+    /// "Send again": the email's code once more.
+    ResendEmail,
+    /// Change password: `input` is the new password; the current one is the one the step-up kept (never an
+    /// argument of the call). The answer is `Done` or `Refused`.
+    ChangePassword,
+}
+
+/// The latest call of one kind (see [`AccountSource::call_mark`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallMark {
+    pub serial: u64,
+    pub out: bool,
+    /// The session and the account are still the ones this call's press was made under (always true while it is
+    /// out). Kept per kind: another kind's answer never makes it true again. An answer, or a late answer kept for a
+    /// page, is said only while this holds.
+    pub current: bool,
+}
+
+/// How a started call ended.
+pub enum Answered {
+    Done,
+    Setup(Setup),
+    /// The first code was wrong: the key it belonged to is spent, and this is the new one.
+    NewKey(Setup),
+    Codes(Vec<Secret>),
+    Email(EmailRefused),
+    Resend(Resend),
+    Code(CodeRefused),
+    Refused(Refused),
+}
+
 /// Where a pane's content stands. A source that answers at once (the board's fixture) is always `Ready`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneState {
@@ -587,14 +686,10 @@ pub trait AccountSource {
     fn products(&self) -> Vec<(ProductKind, ProductState)>;
     /// Engine: the plan summary (`GET /api/v1/billing/plan`); `None` hides the card.
     fn plan(&self) -> Option<Plan>;
-    /// Engine: `GET /api/v1/account/security` and the app-lock setting of this PC.
-    fn security(&self) -> Security;
-    /// Engine: `GET /api/v1/account/security-score`, checked each time the page opens.
-    fn factors(&self) -> Vec<Factor>;
     /// What the Security page draws. This body knows nothing, so a source that forgets it draws no score, no
-    /// mark and no control: a source says here what it really read ([`all_known`] for one that knows every
-    /// part). (Seam: Beebeeb's `GET /api/v1/account/security` and the score's own "can this be said" mark
-    /// fill more of it once the engine reads them.)
+    /// mark and no control: a source says here what it really read (the board's fixture knows every part).
+    /// (Seam: Beebeeb's `GET /api/v1/account/security` and the score's own "can this be said" mark fill more of it
+    /// once the engine reads them.)
     fn security_facts(&self) -> SecurityFacts {
         SecurityFacts::unknown()
     }
@@ -608,9 +703,15 @@ pub trait AccountSource {
     fn plan_details(&self) -> Option<PlanDetails> {
         None
     }
-    /// Engine: how soon the app locks again (`settings.app_lock_after`), one of
-    /// `app_lock::DELAYS`. Windows Hello is asked first, as for `set_app_lock`.
+    /// Engine: how soon the app locks again (the engine's `lock.after`), one of
+    /// `app_lock::DELAYS`. A longer delay asks Windows Hello first, as turning app lock off does;
+    /// a shorter one asks nothing.
     fn set_lock_after(&mut self, _delay: &str) {}
+    /// Engine: app lock's change that Windows Hello did not confirm, with the account password instead (offered in
+    /// `security_facts().app_lock_password`). The engine checks it, counted as the screen unlock's tries are, and
+    /// makes the change; how it ended comes back through `security_facts` and the toast. A source that cannot do it
+    /// offers nothing; given one anyway, it does nothing (the buffer is wiped as it is dropped).
+    fn app_lock_with_password(&mut self, _password: super::app_lock_password::LockPassword) {}
     /// Engine: `DELETE /api/v1/account/sessions?device=<id>`: ends all of that device's
     /// Beebeeb sessions. `false`: no such device, or it is this one.
     fn sign_out_device(&mut self, id: &str) -> bool;
@@ -632,19 +733,61 @@ pub trait AccountSource {
     /// carrying OPAQUE messages only). The one call that takes a password.
     fn step_up(&mut self, password: Password<'_>, purpose: Purpose) -> Result<StepUp, Refused>;
 
-    /// Engine: `PATCH /api/v1/account` `{display_name}`; 1 to 64 characters, trimmed. `false`:
-    /// refused (empty, too long, or Beebeeb could not be reached); nothing changed.
-    fn set_name(&mut self, name: &str) -> bool;
-    /// Engine: `POST /api/v1/account/email-change` with the step-up's token and the new address;
-    /// the server sends an 8-digit code there. The old address stays until the code is entered.
-    fn start_email_change(&mut self, confirmation: StepUp, new_email: &str) -> Result<(), EmailRefused>;
-    /// Engine: `POST /api/v1/account/email-change/confirm` with the 8 digits.
-    fn confirm_email_change(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// Engine: `PATCH /api/v1/account` `{display_name}`; 1 to 64 characters, trimmed. `Saved` or `NotSaved` from
+    /// a source that answers at once, or `Pending` from one that asks Beebeeb on a worker (the answer comes through
+    /// [`AccountSource::name_result`]).
+    fn save_name(&mut self, name: &str) -> NameAnswer;
+    /// How a save that answered `Pending` ended, once; `None` while it is out. A source drops an answer that
+    /// belongs to a session or an account that is over.
+    fn name_result(&mut self) -> Option<NameAnswer> {
+        None
+    }
+    /// The address Beebeeb sent the email change's code to (its own word, from the start or a resend), while that
+    /// change waits for its code: DW-A66 names it, never what a field holds. `None`: not known.
+    fn email_code_sent_to(&self) -> Option<String> {
+        None
+    }
     /// Engine: seconds until another code or link may be sent (60 after each one); 0: now.
     fn resend_wait(&self) -> u32;
-    /// Engine: sends the code (email change) or the link (deletion) again. `false`: too soon.
+    /// Sends the account deletion's code again (DW-A81). `false`: too soon. (The email's code is sent again through
+    /// `start_call(ResendEmail)`.)
     fn send_again(&mut self) -> bool;
 
+    /// Starts `kind` on a worker: `input` is the address, or the code; `password` goes with the address only (it is
+    /// copied into a wiping buffer for the call). `true`: it is out (or the same call already was: the serial of
+    /// `call_mark` says which), and its answer comes through `call_answer`; `false`: nothing was started (no open
+    /// session): the page says Beebeeb can't be reached, and nothing else is asked. Change email (both steps and
+    /// Send again) and every two-factor call go only this way.
+    fn start_call(&mut self, _kind: CallKind, _input: &str, _password: &str) -> bool {
+        false
+    }
+    /// The latest call of this kind: its serial (one per call that was started, never reused) and whether it is
+    /// still out. A page that was left and opened again asks this: it shows the wait instead of starting a second
+    /// call, and an answer is settled only for the serial the page waits for. `None`: never started (or a source
+    /// that answers at once).
+    fn call_mark(&self, _kind: CallKind) -> Option<CallMark> {
+        None
+    }
+    /// The answer of a call that was started, once; one that belongs to a session or an account that is over is
+    /// dropped by the source.
+    fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
+        None
+    }
+    /// Backup codes Beebeeb made that a screen lock kept from the page (review of desktop#424): handed over once,
+    /// after the unlock, for the same account; never while the screen is locked, never after a sign-out, a closed
+    /// vault or another account.
+    fn late_codes(&mut self) -> Option<(CallKind, Vec<Secret>)> {
+        None
+    }
+    /// The page that showed `codes` ends (a lock, a sign-out, another account, a page that was left): the source
+    /// keeps them for after the unlock when a screen lock of the same account ended it, else they are wiped.
+    fn keep_codes(&mut self, _codes: Vec<Secret>) {}
+
+    /// Whether "Send again" is offered for the account deletion's code (DW-A81): `false` when Beebeeb has no route
+    /// that sends it again. A fixture says `true` (the board).
+    fn can_send_again_deletion(&self) -> bool {
+        true
+    }
     /// Engine: `core::password::strength` on this device, and the leak check by hashed prefix.
     fn password_strength(&self, candidate: &Password<'_>) -> Strength;
     /// Engine: core re-wraps the vault key under the new password and registers it with OPAQUE
@@ -654,40 +797,51 @@ pub trait AccountSource {
 
     /// Engine: `GET /api/v1/account/two-factor`.
     fn two_factor(&self) -> TwoFactor;
-    /// Engine: `POST /api/v1/account/two-factor/setup`: a new secret, not active until a code
-    /// from it is entered. `confirmation`: the step-up the server wants when the session is
-    /// older than 5 minutes, or a current code's proof when moving to a new authenticator.
-    fn begin_two_factor(&mut self, confirmation: Option<StepUp>) -> Result<Setup, Refused>;
-    /// Engine: `POST /api/v1/account/two-factor/enable` with the 6 digits: turns it on (or
-    /// replaces the secret) and returns the 8 new backup codes, shown once.
-    fn turn_on_two_factor(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused>;
-    /// Engine: `POST /api/v1/account/two-factor/backup-codes` with a current code: 8 new codes;
-    /// the old ones stop working.
-    fn new_backup_codes(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused>;
-    /// Engine: `POST /api/v1/account/two-factor/verify` with a current code, before the set-up
-    /// screen is shown again (moving to a new authenticator).
-    fn check_code(&mut self, code: &str) -> Result<(), CodeRefused>;
-    /// Engine: `DELETE /api/v1/account/two-factor` with a current code.
-    fn turn_off_two_factor(&mut self, code: &str) -> Result<(), CodeRefused>;
 
     /// Engine: `GET /api/v1/account/passkeys`.
     fn passkeys(&self) -> Vec<Passkey>;
-    /// Engine: confirms it is the person (Windows Hello), then the system passkey dialog (the
-    /// Windows WebAuthn API, no web view) and `POST /api/v1/account/passkeys`.
-    fn add_passkey(&mut self) -> Result<(), Refused>;
+    /// Engine: the account password (core's step-up: the server requires it), then the system passkey dialog (the
+    /// Windows WebAuthn API, no web view) and `POST /api/v1/account/passkeys`. `password`: what the person typed,
+    /// where [`Self::passkeys_need_password`]; a source that needs it refuses `None` as not confirmed and asks
+    /// nothing. `Ok`: it began (the system dialog is up); how it ended comes as a toast ([`AccountSource::notice`])
+    /// and the list is read again. The board's fixture ignores the password.
+    fn add_passkey(&mut self, password: Option<Password<'_>>) -> Result<(), Refused>;
     /// Engine: `PATCH /api/v1/account/passkeys/<id>` `{name}`: Beebeeb's name for it only.
     fn rename_passkey(&mut self, id: &str, name: &str) -> bool;
-    /// Engine: `DELETE /api/v1/account/passkeys/<id>`. The copy in the password manager stays.
-    fn remove_passkey(&mut self, id: &str) -> bool;
+    /// Engine: `DELETE /api/v1/account/passkeys/<id>` after the password, as for the add. The copy in the password
+    /// manager stays. `true`: it began (the engine) or was done (the fixture).
+    fn remove_passkey(&mut self, id: &str, password: Option<Password<'_>>) -> bool;
+    /// Adding and removing a passkey asks the account password first (owner ruling): the pane then draws a password
+    /// field and hands it to `add_passkey` / `remove_passkey`. A fixture says `false` (the board draws no field).
+    fn passkeys_need_password(&self) -> bool {
+        false
+    }
+    /// `false`: this PC has no passkey dialog (no WebAuthn), so the pane draws no "Add a passkey".
+    fn can_add_passkey(&self) -> bool {
+        true
+    }
+    /// `false`: this source cannot rename a passkey, so the menu draws no "Rename".
+    fn can_rename_passkey(&self) -> bool {
+        true
+    }
 
     /// Engine: `GET /api/v1/account/activity`, by period ("Today", "October", "Earlier");
     /// `None` while security logging is off.
     fn activity(&self) -> Option<Vec<(String, Vec<Event>)>>;
     /// Engine: `PUT /api/v1/account/activity-tracking` on: a new log starts at once.
     fn start_activity(&mut self);
-    /// Engine: the same, off, with a current two-factor code (the step-up when two-factor is
-    /// off): recording stops and what was recorded is deleted within 30 days.
-    fn stop_activity(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// Engine: the same, off, with the account PASSWORD the person typed (owner ruling 2026-11-14: the dialog always
+    /// asks it, the board's DW-A78 too): recording stops and what was recorded is deleted within 30 days. `true`: it
+    /// began; how it ended comes as a toast and the log is read again.
+    fn stop_activity_confirmed(&mut self, _password: Password<'_>) -> bool {
+        false
+    }
+    /// Whether this source can stop the recording from the pane. A source that cannot (Beebeeb asks for the
+    /// password's own proof to stop it, which the pane's code dialog does not give) shows the switch as a value,
+    /// with the way on the web.
+    fn can_stop_activity(&self) -> bool {
+        true
+    }
 
     /// Engine: `GET /api/v1/account/deletion`.
     fn deletion(&self) -> Deletion;
@@ -743,29 +897,6 @@ pub trait AccountSource {
     }
 }
 
-/// The Security page's facts of a source that knows every part: taken from its accessors. For a fixture: a
-/// source that reads from Beebeeb fills `SecurityFacts::unknown()` with what it read (a score only once it
-/// may be said).
-pub fn all_known<S: AccountSource + ?Sized>(source: &S) -> SecurityFacts {
-    let sec = source.security();
-    let two = source.two_factor();
-    SecurityFacts {
-        backup_codes: sec.two_factor.then_some((two.codes_left, two.codes_total)),
-        app_lock: Some((sec.app_lock, sec.lock_after)),
-        password_changed: Some(sec.password_changed),
-        two_factor: Some(sec.two_factor),
-        passkeys: Some(sec.passkeys),
-        sessions: Count::Known(sec.sessions),
-        activity: Some(
-            source
-                .activity()
-                .map(|periods| periods.into_iter().flat_map(|(_, events)| events).collect()),
-        ),
-        factors: Some(source.factors()),
-        can_sign_out: true,
-    }
-}
-
 /// Counts what is done: "7 of 7".
 pub fn score(factors: &[Factor]) -> (usize, usize) {
     (factors.iter().filter(|f| f.done).count(), factors.len())
@@ -773,6 +904,8 @@ pub fn score(factors: &[Factor]) -> (usize, usize) {
 
 mod board;
 // Every public item of the fixture keeps its path here; `BOARD_BACKUP_CODE` has no reader outside it yet.
+#[cfg(test)]
+pub use board::HeldCalls;
 #[allow(unused_imports)]
 pub use board::{
     BOARD_BACKUP_CODE, BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, BOARD_SIGN_OUT_REFUSED, BoardAccount, SignOutMode,

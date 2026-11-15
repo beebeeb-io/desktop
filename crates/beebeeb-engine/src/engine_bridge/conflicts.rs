@@ -151,7 +151,7 @@ impl EngineBridge {
     /// the next tick from re-flagging a conflict if the user's old
     /// `content_hash` is still on the row (it isn't anymore — the row
     /// was already in Conflict — but we belt-and-brace anchor anyway).
-    pub async fn resolve_keep_theirs(&self, file_id: &str, sync_root: &Path) -> anyhow::Result<()> {
+    pub async fn resolve_theirs_seen(&self, file_id: &str, sync_root: &Path, seen: PlaceSeen) -> anyhow::Result<()> {
         let mut entry = self
             .db
             .get_file(file_id)?
@@ -160,7 +160,7 @@ impl EngineBridge {
         // hydrate_file flips Conflict → Downloading → Local on success
         // (or Error on failure). We don't care about the intermediate
         // state for this path.
-        self.hydrate_file(file_id, &dest, &[sync_root]).await?;
+        self.hydrate_seen(file_id, &dest, &[sync_root], seen).await?;
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -348,6 +348,10 @@ impl EngineBridge {
     /// - `Both` (D4): the Mac's bytes are queued as a new file named [`keep_both_name`] beside the
     ///   original, and the op is retired, in ONE transaction (review-169 #3): if it moved, nothing
     ///   is queued.
+    ///
+    /// Task 2530: `Remote` and `Both` also settle the parks This PC offers them for
+    /// ([`crate::state_db::ParkedSettle`]: `Remote` a `predecessor_lost` or `permission_denied` write, `Both` a
+    /// `predecessor_lost` one), with every other guard of the stale base; `Local` stays the stale base's only.
     pub fn resolve_parked(
         &self,
         op_id: &str,
@@ -368,7 +372,11 @@ impl EngineBridge {
                 None => ParkedResolution::Moved,
             });
         }
-        if !self.db.is_decidable_parked_at(op_id, shown)? {
+        let settle = match choice {
+            ParkedChoice::Remote => crate::state_db::ParkedSettle::KeepOther,
+            _ => crate::state_db::ParkedSettle::KeepBoth,
+        };
+        if !self.db.is_settleable_parked_at(op_id, shown, settle)? {
             return Ok(ParkedResolution::Moved);
         }
         let op = self

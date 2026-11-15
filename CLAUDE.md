@@ -86,7 +86,11 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 
 ## How we work
 
-Workspace `CLAUDE.md` → "How we work" is the rule set (evidence, design before code, done, parallel agents). Here: the truth lines above; macOS UI follows the
+Workspace `CLAUDE.md` → "How we work" is the rule set (evidence, design before code, done, parallel agents).
+**Native 0.9.0 work (branch `v2-native`) runs in waves** (2026-11-15: "a batch of coding all at once and at the end do builds &
+gates"): each builder pushes a branch with a compile check (Linux + Windows), its own new tests red→green and `scripts/compare.sh` for
+its own frames, and opens no PR; ONE integration PR per wave carries the ONE full run (engine + native crates) and the ONE review.
+Workspace `AGENTS.md` → "Batch, then gate". Here: the truth lines above; macOS UI follows the
 specs in `docs/specs/` and the design files in `design/` (design wins over code; deviations are recorded before the code changes).
 New command: `#[tauri::command]` in `lib.rs`, register in `invoke_handler!`, permission in `capabilities/default.json` if it touches an OS API.
 

@@ -46,8 +46,27 @@ fn emit_app_identifier() {
     println!("cargo:rustc-env=BEEBEEB_APP_IDENTITY_MARK=beebeeb-app-identity={identifier};");
 }
 
+/// The revision of core the engine links, read from the engine's own manifest (the one place it is pinned), so
+/// About says what this build contains and cannot drift from it.
+fn emit_core_rev() {
+    let manifest = "../../crates/beebeeb-engine/Cargo.toml";
+    println!("cargo:rerun-if-changed={manifest}");
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return;
+    };
+    let rev = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("beebeeb-core"))
+        .and_then(|l| l.split("rev = \"").nth(1))
+        .and_then(|r| r.split('"').next());
+    if let Some(rev) = rev.filter(|r| r.len() >= 7 && r.bytes().all(|b| b.is_ascii_hexdigit())) {
+        println!("cargo:rustc-env=BEEBEEB_CORE_REV={rev}");
+    }
+}
+
 fn main() {
     emit_app_identifier();
+    emit_core_rev();
     println!("cargo:rerun-if-env-changed=BEEBEEB_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=BEEBEEB_BUILD_KIND");
     if let Some(log) = git(&["rev-parse", "--git-path", "logs/HEAD"]) {

@@ -5,18 +5,21 @@
 //! One process, one fake server, invented accounts. `BB_API_BASE` is set once, before anything reads it.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use beebeeb_engine::app::{Engine, EngineConfig, SyncStart, SyncStop};
+use beebeeb_engine::app::lock_api::{Call, CallRefused, LockRefused, LockState, LockedAction};
+use beebeeb_engine::app::lock_password_api::AppLockProof;
+use beebeeb_engine::app::owned_state::guide_mark::GuideMark;
+use beebeeb_engine::app::{Engine, EngineConfig, LocalStateRefused, SyncStart, SyncStop};
 use beebeeb_engine::backup_actions::BackupMark;
 use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::drive_v2::model::Sort;
 use beebeeb_engine::host::{ChannelHost, EngineEvent, HostMessage};
-use beebeeb_engine::keychain::{AuthSecretStore, AuthVault, SecretBytes};
+use beebeeb_engine::keychain::{AuthSecretStore, AuthVault, LockFlag, SecretBytes};
 use beebeeb_engine::signin::gate::{self, GateState, NextAfterSignIn, SignInProblem};
 use beebeeb_engine::signin::key_owner::FOREIGN_KEY_NOT_REMOVED;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
@@ -101,18 +104,28 @@ struct World {
     revoked: Vec<String>,
 }
 
-/// How the fake answers the step-up's two legs.
-static STEP_UP: AtomicU8 = AtomicU8::new(STEP_UP_ANSWERS);
-const STEP_UP_ANSWERS: u8 = 0;
-const STEP_UP_RATE_LIMITED: u8 = 1;
-const STEP_UP_NO_ANSWER: u8 = 2;
-const STEP_UP_SESSION_ENDED: u8 = 3;
-
-fn step_up_requests() -> usize {
+/// How many requests of the sync engine the fake has answered.
+fn sync_requests() -> usize {
     fake_api()
         .routes()
         .iter()
-        .filter(|route| route.contains("/auth/confirm-opaque-"))
+        .filter(|route| route.starts_with("GET /api/v1/sync/"))
+        .count()
+}
+
+fn sign_ins() -> usize {
+    fake_api()
+        .routes()
+        .iter()
+        .filter(|route| route.as_str() == "POST /api/v1/opaque/login-start")
+        .count()
+}
+
+fn sign_outs() -> usize {
+    fake_api()
+        .routes()
+        .iter()
+        .filter(|route| route.as_str() == "POST /api/v1/auth/logout")
         .count()
 }
 
@@ -199,28 +212,6 @@ fn fake_api() -> &'static FakeApi {
                         Reply::ok(json!({ "valid": true }))
                     } else {
                         Reply::error(400, "invalid_recovery_phrase")
-                    }
-                }
-                // The step-up (core's `auth_flow::step_up`), answered as `STEP_UP` says.
-                "POST /api/v1/auth/confirm-opaque-start" | "POST /api/v1/auth/confirm-opaque-finish"
-                    if STEP_UP.load(Ordering::SeqCst) == STEP_UP_RATE_LIMITED =>
-                {
-                    Reply::error(429, "rate_limited")
-                }
-                "POST /api/v1/auth/confirm-opaque-start" | "POST /api/v1/auth/confirm-opaque-finish"
-                    if STEP_UP.load(Ordering::SeqCst) == STEP_UP_NO_ANSWER =>
-                {
-                    Reply::hang_up()
-                }
-                "POST /api/v1/auth/confirm-opaque-start" if STEP_UP.load(Ordering::SeqCst) == STEP_UP_SESSION_ENDED => {
-                    Reply::error(401, "unauthorized")
-                }
-                "POST /api/v1/auth/confirm-opaque-start" => opaque.login_start(&body),
-                "POST /api/v1/auth/confirm-opaque-finish" => {
-                    if opaque.login_finish(&body) {
-                        Reply::ok(json!({ "confirmation_token": "a-grant", "expires_at": "2026-01-01T00:05:00Z" }))
-                    } else {
-                        Reply::error(401, "invalid_credentials")
                     }
                 }
                 "POST /api/v1/auth/logout" => {
@@ -338,6 +329,13 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
         Ok(NextAfterSignIn::RecoveryPhrase)
     );
     assert_eq!(host.engine.gate(), GateState::NeedsRecoveryPhrase);
+    // The strong sign-in made the screen lock's local check record of the typed password, and no wrong-try count.
+    assert_eq!(
+        flag(&credentials, LockFlag::ScreenCheck).map(|record| record.len()),
+        Some(beebeeb_core::screen_lock::RECORD_LEN),
+        "the sign-in writes the record"
+    );
+    assert_eq!(flag(&credentials, LockFlag::Attempts), None);
     assert_eq!(host.engine.account_email().as_deref(), Some(EMAIL));
     assert_eq!(host.engine.user_id().as_deref(), Some(USER));
     assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
@@ -358,7 +356,10 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     // The first sync: the snapshot's rows land with their real, nested names.
     assert_eq!(host.engine.start_sync(sync_root.clone()), Ok(SyncStart::Started));
     assert_eq!(host.engine.start_sync(sync_root.clone()), Ok(SyncStart::AlreadyRunning));
-    wait_for("the first snapshot", || names(&host, None).len() == 3);
+    // The snapshot's rows land one after another: the last one is the folder's child.
+    wait_for("the first snapshot", || {
+        names(&host, None).len() == 3 && names(&host, Some(DOCS)).len() == 1
+    });
     // The Backups root first, then by name.
     assert_eq!(names(&host, None), ["Backups", "Docs", "apple.txt"]);
     assert_eq!(names(&host, Some(DOCS)), ["Report.pdf"]);
@@ -368,7 +369,15 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     assert_eq!(root[1].backup, BackupMark::default());
 
     // Typed events arrived through the queue, each with a wake, in the engine's order: a status first.
+    // The state database is shared by every test in this process, so an earlier test's rows can already be
+    // listed before this engine's runner reports: wait for the first message, never assume it is there.
     let mut events = Vec::new();
+    wait_for("the engine's first message", || {
+        while let Ok(message) = host.messages.try_recv() {
+            events.push(message);
+        }
+        !events.is_empty()
+    });
     while let Ok(message) = host.messages.try_recv() {
         events.push(message);
     }
@@ -424,17 +433,150 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     #[cfg(target_os = "linux")]
     assert_eq!(engine_threads(), 0, "no engine thread outlives the handle");
 
-    // A restart: the stored token and key (this account's) restore to Ready without the phrase.
+    // A restart, no password asked: the app starts SCREEN-LOCKED. The stored key (this account's) is in memory, so
+    // sync starts and runs; the window is shown nothing of the account.
     let again = open(&credentials);
-    assert_eq!(again.engine.restore(), GateState::Ready);
+    assert_eq!(again.engine.restore(), GateState::ScreenLocked);
+    assert_eq!(again.engine.lock_state(), LockState::ScreenLocked);
+    assert_eq!(again.engine.view().gate, GateState::ScreenLocked);
+    let synced_before = sync_requests();
+    assert_eq!(again.engine.start_sync(sync_root.clone()), Ok(SyncStart::Started));
+    wait_for("the engine asks the server while the screen is locked", || {
+        sync_requests() > synced_before
+    });
+    assert!(again.engine.is_syncing(), "sync runs behind a locked screen");
+    assert_eq!(again.engine.check_call(Call::Work), Ok(()));
+    // A person's read is refused as locked (never as an error of its own), and nothing is listed.
+    assert_eq!(
+        again.engine.check_call(Call::Person(LockedAction::MutateFiles)),
+        Err(CallRefused::ScreenLocked)
+    );
+    assert_eq!(again.engine.local_state_refusal(), Some(LocalStateRefused::Locked));
+    assert!(again.engine.listing(None, Sort::default(), 0, 100).is_err());
+    let asked_for_a_person = || {
+        fake_api()
+            .routes()
+            .iter()
+            .filter(|route| route.contains("/billing/usage"))
+            .count()
+    };
+    let before_the_ask = asked_for_a_person();
+    assert!(again.engine.storage_info().is_err());
+    assert_eq!(
+        asked_for_a_person(),
+        before_the_ask,
+        "nothing is asked of the server for a person behind a locked screen"
+    );
+    // The two things a locked screen allows: unlock and sign out. The password path's own rules are tested in
+    // `lock_password_api_tests`; here only that an empty password checks nothing and the start setting waits for an
+    // open app.
+    assert_eq!(again.engine.check_call(Call::Person(LockedAction::SignOut)), Ok(()));
+    assert_eq!(
+        again.engine.unlock_screen_with_password(secret("")),
+        Err(LockRefused::NothingTyped)
+    );
+    assert_eq!(
+        again.engine.set_ask_password_at_start(true, None),
+        Err(beebeeb_engine::app::lock_password_api::StartSettingRefused::NotOpen)
+    );
+    assert_eq!(again.engine.ask_password_at_start(), Some(false), "off by default");
+
+    // Windows verified the person (the host's statement, stamped when the prompt was asked for): the screen opens,
+    // and sync was never interrupted.
+    let asked = again.engine.session_turn();
+    let wakes = again.wakes.load(Ordering::SeqCst);
+    assert_eq!(again.engine.unlock_screen_platform_verified(asked), Ok(()));
+    assert!(again.wakes.load(Ordering::SeqCst) > wakes, "the window is woken");
+    assert_eq!(again.engine.gate(), GateState::Ready);
+    assert_eq!(again.engine.lock_state(), LockState::Open);
+    assert!(again.engine.is_syncing(), "an unlock neither stops nor restarts sync");
     assert_eq!(again.engine.account_email().as_deref(), Some(EMAIL));
     assert_eq!(names(&again, None), ["Backups", "Docs", "apple.txt"]);
+    assert_eq!(
+        again
+            .engine
+            .unlock_screen_platform_verified(again.engine.session_turn()),
+        Err(LockRefused::NotAtThisLevel)
+    );
 
-    // Lock keeps the stored key; sign-out removes the token, the key and their owners, and keeps the files' state.
-    assert_eq!(again.engine.lock(), SyncStop::WasNotRunning);
+    // Lock now: the screen locks, sync runs on, and an answer of a prompt asked before this lock opens nothing.
+    assert_eq!(again.engine.lock_screen(), Ok(()));
+    assert_eq!(again.engine.gate(), GateState::ScreenLocked);
+    assert!(again.engine.is_syncing());
+    // The lock moved the session's turn on; the work is not refused for it: the engine keeps asking the server.
+    let synced_at_the_lock = sync_requests();
+    wait_for("the engine asks the server after the screen was locked by hand", || {
+        sync_requests() > synced_at_the_lock
+    });
+    assert_ne!(
+        again.engine.session_turn(),
+        asked,
+        "what was asked before the lock is another turn's"
+    );
+    assert_eq!(
+        again.engine.unlock_screen_platform_verified(asked),
+        Err(LockRefused::Overtaken)
+    );
+    assert_eq!(again.engine.gate(), GateState::ScreenLocked);
+    assert!(names(&again, None).is_empty());
+    assert_eq!(
+        again
+            .engine
+            .unlock_screen_platform_verified(again.engine.session_turn()),
+        Ok(())
+    );
+
+    // The vault lock: the mark is stored, sync stops, the keys leave memory; the stored key stays.
+    let locked = again.engine.lock_vault();
+    assert_eq!(locked.stopped, SyncStop::Stopped);
+    assert!(locked.survives_restart);
     assert_eq!(again.engine.gate(), GateState::Locked);
-    assert_eq!(again.engine.restore(), GateState::Ready);
+    assert_eq!(again.engine.lock_state(), LockState::VaultClosed);
+    assert!(!again.engine.is_syncing());
+    assert_eq!(again.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
+    assert_eq!(again.engine.check_call(Call::Work), Err(CallRefused::VaultClosed));
+    assert_eq!(again.engine.start_sync(sync_root.clone()), Ok(SyncStart::NoSession));
+    // No screen proof opens a closed vault, and a closed vault is not screen-locked.
+    assert_eq!(
+        again
+            .engine
+            .unlock_screen_platform_verified(again.engine.session_turn()),
+        Err(LockRefused::NeedsThePassword)
+    );
+    assert_eq!(again.engine.lock_screen(), Err(LockRefused::NotAtThisLevel));
+    // It survives a restart, and the key entry is not read at all while it is closed: not by a start, not by the
+    // gate's question.
+    let key_reads = credentials.key_reads();
+    assert_eq!(again.engine.restore(), GateState::Locked);
+    let third = open(&credentials);
+    assert_eq!(third.engine.restore(), GateState::Locked);
+    assert_eq!(third.engine.gate(), GateState::Locked);
+    assert_eq!(third.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
+    assert_eq!(
+        credentials.key_reads(),
+        key_reads,
+        "a closed vault's key entry is not read"
+    );
+    drop(third);
+    // Sign-out removes the token, the key, their owners and the lock's flags, and keeps the files' state.
+    // A wrong-try count is left behind by a wrong password: a sign-out deletes the record AND the count.
+    credentials
+        .store_for("acct-host-contract")
+        .save_lock_flag(
+            LockFlag::Attempts,
+            &beebeeb_core::screen_lock::AttemptState::new()
+                .counting_try(1)
+                .to_bytes(),
+        )
+        .unwrap();
+    assert!(flag(&credentials, LockFlag::ScreenCheck).is_some());
     assert_eq!(again.engine.sign_out_keeping_local_data(), Ok(()));
+    assert_eq!(
+        flag(&credentials, LockFlag::ScreenCheck),
+        None,
+        "a sign-out deletes the record"
+    );
+    assert_eq!(flag(&credentials, LockFlag::Attempts), None, "and the count");
     assert_eq!(again.engine.gate(), GateState::SignedOut);
     assert!(
         credentials.is_empty(),
@@ -551,6 +693,8 @@ fn another_accounts_stored_key_is_refused_and_removed() {
         vault
             .bind_vault_key_owner("99999999-9999-4999-8999-999999999999")
             .unwrap();
+        // And that account's app lock turned off: it never reaches this one.
+        store.save_lock_flag(LockFlag::AppLock, b"0").unwrap();
     }
     let host = open(&credentials);
     assert_eq!(host.engine.restore(), GateState::SignedOut);
@@ -562,117 +706,236 @@ fn another_accounts_stored_key_is_refused_and_removed() {
         store.load_wrapped_master_key().unwrap().is_none(),
         "the foreign key is gone"
     );
+    assert_eq!(flag(&credentials, LockFlag::AppLock), None, "and its lock setting");
     assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
     assert_eq!(gate::problem_from(FOREIGN_KEY_NOT_REMOVED, 0), SignInProblem::StaleKey);
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
 }
 
-/// Signed in as `EMAIL` and unlocked with the phrase, then locked: the key is in the store, not in memory.
-fn locked(credentials: &MemoryCredentials) -> Host {
+/// Signed in as `email` and unlocked with the phrase: the key is in the store and in memory, the app is open.
+fn open_vault(credentials: &MemoryCredentials, email: &str) -> Host {
     let host = open(credentials);
     assert_eq!(host.engine.restore(), GateState::SignedOut);
-    assert_eq!(
-        host.engine.sign_in_password(EMAIL, secret(PASSWORD)),
-        Ok(NextAfterSignIn::RecoveryPhrase)
-    );
+    match host.engine.sign_in_password(email, secret(PASSWORD)) {
+        Ok(NextAfterSignIn::TwoFactor) => {
+            assert_eq!(
+                host.engine.two_factor(secret(TOTP)),
+                Ok(NextAfterSignIn::RecoveryPhrase)
+            );
+        }
+        next => assert_eq!(next, Ok(NextAfterSignIn::RecoveryPhrase)),
+    }
     assert_eq!(host.engine.unlock_with_phrase(secret(PHRASE)), Ok(()));
+    assert_eq!(host.engine.lock_state(), LockState::Open);
+    host
+}
+
+/// [`open_vault`], then the vault lock: the key is in the store, not in memory, and the closed mark is set.
+fn locked(credentials: &MemoryCredentials) -> Host {
+    let host = open_vault(credentials, EMAIL);
     assert_eq!(host.engine.lock(), SyncStop::WasNotRunning);
     assert_eq!(host.engine.gate(), GateState::Locked);
     host
 }
 
+fn flag(credentials: &MemoryCredentials, flag: LockFlag) -> Option<Vec<u8>> {
+    credentials
+        .store_for("acct-host-contract")
+        .load_lock_flag(flag)
+        .unwrap()
+}
+
 #[test]
-fn a_locked_vault_opens_with_the_accounts_password_proven_by_the_server() {
+fn a_closed_vault_opens_with_the_accounts_password_proven_in_a_new_sign_in() {
     let _serial = serial();
-    STEP_UP.store(STEP_UP_ANSWERS, Ordering::SeqCst);
     let credentials = MemoryCredentials::default();
     let host = locked(&credentials);
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed).as_deref(), Some(&b"1"[..]));
+    let store = credentials.store_for("acct-host-contract");
+    let closed_token = store.load_session_token().unwrap().unwrap();
     let wakes = host.wakes.load(Ordering::SeqCst);
 
-    // Not the password: refused in the sign-in form's one sentence, and the vault stays locked.
+    // Not the password: refused in the sign-in form's one sentence; the vault stays closed and marked.
     assert_eq!(
-        host.engine.unlock_with_password(secret("not the password")),
+        host.engine.unlock_vault_with_password(secret("not the password")),
         Err(SignInProblem::Invalid)
     );
     assert_eq!(host.engine.gate(), GateState::Locked);
     assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed).as_deref(), Some(&b"1"[..]));
     assert!(
         host.wakes.load(Ordering::SeqCst) > wakes,
         "a refusal wakes the window too"
     );
 
-    // The server says wait: said as it is. No answer at all: offline. Neither unlocks.
-    STEP_UP.store(STEP_UP_RATE_LIMITED, Ordering::SeqCst);
+    // The password: a new session for the same account, the stored key in memory under it, the mark cleared, and
+    // the session it replaced ended at the server.
+    let ended = sign_outs();
     assert_eq!(
-        host.engine.unlock_with_password(secret(PASSWORD)),
-        Err(SignInProblem::RateLimited { seconds: 30 })
+        host.engine.unlock_vault_with_password(secret(PASSWORD)),
+        Ok(NextAfterSignIn::Drive)
     );
-    STEP_UP.store(STEP_UP_NO_ANSWER, Ordering::SeqCst);
-    assert_eq!(
-        host.engine.unlock_with_password(secret(PASSWORD)),
-        Err(SignInProblem::Offline)
-    );
-    assert_eq!(host.engine.gate(), GateState::Locked);
-    STEP_UP.store(STEP_UP_ANSWERS, Ordering::SeqCst);
-
-    // The password: the stored key is in memory again, for the same account.
-    assert_eq!(host.engine.unlock_with_password(secret(PASSWORD)), Ok(()));
     assert_eq!(host.engine.gate(), GateState::Ready);
+    assert_eq!(host.engine.lock_state(), LockState::Open);
     assert_eq!(
         host.engine.keys_for_engine_start().map(|identity| identity.user_id),
         Ok(Some(USER.to_string()))
     );
-    // Already open: nothing is asked of the server.
-    let asked = step_up_requests();
-    assert_eq!(host.engine.unlock_with_password(secret("anything")), Ok(()));
-    assert_eq!(step_up_requests(), asked);
-
-    // A session the server no longer accepts: no password is judged, and nothing unlocks.
-    assert_eq!(host.engine.lock(), SyncStop::WasNotRunning);
-    STEP_UP.store(STEP_UP_SESSION_ENDED, Ordering::SeqCst);
     assert_eq!(
-        host.engine.unlock_with_password(secret(PASSWORD)),
-        Err(SignInProblem::Other)
+        flag(&credentials, LockFlag::VaultClosed),
+        None,
+        "only the strong proof clears the mark"
+    );
+    let new_token = store.load_session_token().unwrap().unwrap();
+    assert_ne!(new_token.expose_for_request(), closed_token.expose_for_request());
+    assert_eq!(sign_outs(), ended + 1, "the replaced session is ended at the server");
+    // The next start is the default one again: screen-locked, the key loaded.
+    let next = open(&credentials);
+    assert_eq!(next.engine.restore(), GateState::ScreenLocked);
+    drop(next);
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+    assert!(credentials.is_empty(), "the lock's flags leave with the session");
+}
+
+#[test]
+fn the_strong_unlock_asks_the_authenticator_code_and_opens_a_locked_screen_too() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    // An account with an authenticator: the password alone opens nothing, the code finishes it.
+    let host = open_vault(&credentials, EMAIL_2FA);
+    assert_eq!(host.engine.lock(), SyncStop::WasNotRunning);
+    assert_eq!(
+        host.engine.unlock_vault_with_password(secret(PASSWORD)),
+        Ok(NextAfterSignIn::TwoFactor)
     );
     assert_eq!(host.engine.gate(), GateState::Locked);
-    STEP_UP.store(STEP_UP_ANSWERS, Ordering::SeqCst);
-    // It was not counted as a wrong password: the next wrong one is the second of this handle, not a lock hint.
+    assert_eq!(host.engine.lock_state(), LockState::VaultClosed);
+    assert_eq!(host.engine.two_factor(secret(TOTP)), Ok(NextAfterSignIn::Drive));
+    assert_eq!(host.engine.gate(), GateState::Ready);
     assert_eq!(
-        host.engine.unlock_with_password(secret("not the password")),
-        Err(SignInProblem::Invalid)
+        host.engine.keys_for_engine_start().map(|identity| identity.user_id),
+        Ok(Some(USER_2FA.to_string()))
     );
+    drop(host);
+
+    // From a locked screen (a PC without Windows Hello): the same proof opens it. The session it replaces is
+    // ended, and nothing keeps working under it: the key left memory before the new session was stored.
+    let host = open(&credentials);
+    assert_eq!(host.engine.restore(), GateState::ScreenLocked);
+    let before = host.engine.session_turn();
+    let ended = sign_outs();
+    assert_eq!(
+        host.engine.unlock_vault_with_password(secret(PASSWORD)),
+        Ok(NextAfterSignIn::TwoFactor)
+    );
+    assert_eq!(
+        host.engine.gate(),
+        GateState::ScreenLocked,
+        "a password without its code opens nothing"
+    );
+    assert_eq!(host.engine.two_factor(secret(TOTP)), Ok(NextAfterSignIn::Drive));
+    assert_eq!(host.engine.gate(), GateState::Ready);
+    assert_eq!(host.engine.lock_state(), LockState::Open);
+    assert_ne!(host.engine.session_turn(), before);
+    assert_eq!(sign_outs(), ended + 1);
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
 }
 
 #[test]
-fn a_password_unlocks_only_a_key_that_is_here_and_only_when_signed_in() {
+fn a_password_unlocks_only_the_account_whose_session_is_stored() {
     let _serial = serial();
-    STEP_UP.store(STEP_UP_ANSWERS, Ordering::SeqCst);
     let credentials = MemoryCredentials::default();
     let host = open(&credentials);
     assert_eq!(host.engine.restore(), GateState::SignedOut);
-    let asked = step_up_requests();
-    // Signed out: nothing to unlock.
+    let asked = sign_ins();
+    // Signed out: nothing to unlock, and nothing is asked of the server.
     assert_eq!(
-        host.engine.unlock_with_password(secret(PASSWORD)),
+        host.engine.unlock_vault_with_password(secret(PASSWORD)),
         Err(SignInProblem::Other)
     );
-    // Signed in on a computer without the key: the twelve words are the way, the password opens nothing.
+    assert_eq!(sign_ins(), asked);
+    drop(host);
+
+    // The stored session is recorded as another account's than the one the server names for the proof: nothing is
+    // stored, the new session is ended, the vault stays closed and marked.
+    let host = locked(&credentials);
+    let store = credentials.store_for("acct-host-contract");
+    let closed_token = store.load_session_token().unwrap().unwrap();
+    store
+        .save_session_owner("99999999-9999-4999-8999-999999999999")
+        .unwrap();
+    let ended = sign_outs();
     assert_eq!(
-        host.engine.sign_in_password(EMAIL, secret(PASSWORD)),
-        Ok(NextAfterSignIn::RecoveryPhrase)
-    );
-    assert_eq!(
-        host.engine.unlock_with_password(secret(PASSWORD)),
+        host.engine.unlock_vault_with_password(secret(PASSWORD)),
         Err(SignInProblem::Other)
     );
-    assert_eq!(host.engine.gate(), GateState::NeedsRecoveryPhrase);
+    assert_eq!(host.engine.gate(), GateState::Locked);
     assert_eq!(
-        step_up_requests(),
-        asked,
-        "no proof is asked when there is no key to load"
+        store.load_session_token().unwrap().unwrap().expose_for_request(),
+        closed_token.expose_for_request(),
+        "the stored session is not replaced"
     );
+    assert_eq!(sign_outs(), ended + 1, "the session the refused proof made is ended");
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed).as_deref(), Some(&b"1"[..]));
+    store.save_session_owner(USER).unwrap();
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+#[test]
+fn a_start_is_closed_by_the_setting_the_mark_or_a_flag_that_cannot_be_read_and_reads_no_key() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    let host = open_vault(&credentials, EMAIL);
+    drop(host);
+    let store = credentials.store_for("acct-host-contract");
+    let start = |expected: GateState| {
+        let reads = credentials.key_reads();
+        let host = open(&credentials);
+        assert_eq!(host.engine.restore(), expected);
+        assert_eq!(host.engine.gate(), expected);
+        let read = credentials.key_reads() - reads;
+        if expected == GateState::Locked {
+            assert_eq!(host.engine.lock_state(), LockState::VaultClosed);
+            assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
+        }
+        read
+    };
+    // The default: no flag was ever written, the key is loaded.
+    assert!(start(GateState::ScreenLocked) > 0);
+
+    // The lock's flags cannot be read: closed, and the key entry is not touched. The mark could not be written
+    // either, so this closing lasts for that run only.
+    credentials.fail_lock_flags(true);
+    assert_eq!(start(GateState::Locked), 0);
+    credentials.fail_lock_flags(false);
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed), None);
+    assert!(start(GateState::ScreenLocked) > 0);
+
+    // Bytes that are neither flag value: unreadable, so closed; and a closed start writes the mark.
+    store.save_lock_flag(LockFlag::AskPasswordAtStart, b"yes").unwrap();
+    assert_eq!(start(GateState::Locked), 0);
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed).as_deref(), Some(&b"1"[..]));
+    // The mark alone keeps every later start closed, whatever the setting says by then.
+    store.save_lock_flag(LockFlag::AskPasswordAtStart, b"0").unwrap();
+    assert_eq!(start(GateState::Locked), 0);
+
+    // The strong proof opens it and clears the mark; with the setting on, the next start is closed again.
+    let host = open(&credentials);
+    assert_eq!(host.engine.restore(), GateState::Locked);
+    assert_eq!(
+        host.engine.unlock_vault_with_password(secret(PASSWORD)),
+        Ok(NextAfterSignIn::Drive)
+    );
+    drop(host);
+    assert!(start(GateState::ScreenLocked) > 0);
+    store.save_lock_flag(LockFlag::AskPasswordAtStart, b"1").unwrap();
+    assert_eq!(start(GateState::Locked), 0);
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed).as_deref(), Some(&b"1"[..]));
+
+    let host = open(&credentials);
+    host.engine.restore();
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+    assert!(credentials.is_empty());
 }
 
 #[test]
@@ -720,4 +983,313 @@ fn leaving_a_half_done_sign_in_forgets_the_code_step_and_signs_a_keyless_session
     assert_eq!(host.engine.gate(), GateState::Locked);
     assert!(!credentials.is_empty());
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+// ── A session the server ended closes the vault; a locked screen answers a person nothing ──────────────────────────
+
+/// Three refusals in a row: the engine holds the session as ended (as its sync loop would after three 401s).
+fn session_ended_by_the_server(host: &Host) {
+    assert!(
+        !host.engine.account_session_refused(),
+        "precondition: the session is accepted"
+    );
+    for _ in 0..3 {
+        host.engine.note_call_for_test(true);
+    }
+    assert!(host.engine.account_session_refused(), "precondition: the session ended");
+}
+
+/// The vault is closed the way core says: no key in memory, the gate locked, the mark stored, and the stored session
+/// and key still in the credential store.
+fn assert_closed_by_an_ended_session(host: &Host, credentials: &MemoryCredentials) {
+    assert_eq!(host.engine.lock_state(), LockState::VaultClosed);
+    assert_eq!(host.engine.gate(), GateState::Locked);
+    assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
+    assert_eq!(flag(credentials, LockFlag::VaultClosed).as_deref(), Some(&b"1"[..]));
+    let store = credentials.store_for("acct-host-contract");
+    assert!(
+        store.load_session_token().unwrap().is_some(),
+        "the stored session stays"
+    );
+}
+
+#[test]
+fn a_session_the_server_ended_closes_the_vault_and_keeps_the_stored_session() {
+    let _serial = serial();
+    // From an open app.
+    let credentials = MemoryCredentials::default();
+    let host = open_vault(&credentials, EMAIL);
+    session_ended_by_the_server(&host);
+    let closed = host.engine.close_ended_session();
+    assert_eq!(closed.map(|closed| closed.survives_restart), Some(true));
+    assert_closed_by_an_ended_session(&host, &credentials);
+    assert_eq!(host.engine.close_ended_session(), None, "closed once");
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+    drop(host);
+
+    // From a locked screen.
+    let credentials = MemoryCredentials::default();
+    let host = open_vault(&credentials, EMAIL);
+    assert_eq!(host.engine.lock_screen(), Ok(()));
+    assert_eq!(host.engine.lock_state(), LockState::ScreenLocked);
+    session_ended_by_the_server(&host);
+    assert!(host.engine.close_ended_session().is_some());
+    assert_closed_by_an_ended_session(&host, &credentials);
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+#[test]
+fn windows_hello_opens_nothing_after_the_server_ended_the_session() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    let host = open_vault(&credentials, EMAIL);
+    assert_eq!(host.engine.lock_screen(), Ok(()));
+    let asked = host.engine.session_turn();
+    session_ended_by_the_server(&host);
+    assert!(host.engine.close_ended_session().is_some());
+    assert_eq!(
+        host.engine.unlock_screen_platform_verified(host.engine.session_turn()),
+        Err(LockRefused::NeedsThePassword)
+    );
+    assert_eq!(
+        host.engine.unlock_screen_platform_verified(asked),
+        Err(LockRefused::Overtaken),
+        "an answer asked for before the close opens nothing either"
+    );
+    assert_eq!(host.engine.gate(), GateState::Locked);
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+#[test]
+fn the_next_start_after_an_ended_session_reads_no_key() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    let host = open_vault(&credentials, EMAIL);
+    session_ended_by_the_server(&host);
+    assert!(host.engine.close_ended_session().is_some());
+    drop(host);
+    let reads = credentials.key_reads();
+    let next = open(&credentials);
+    assert_eq!(next.engine.restore(), GateState::Locked);
+    assert_eq!(next.engine.lock_state(), LockState::VaultClosed);
+    assert_eq!(
+        credentials.key_reads(),
+        reads,
+        "a session the server ended loads no key"
+    );
+    assert_eq!(next.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+#[test]
+fn nothing_closes_while_the_session_is_accepted_or_already_closed() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    // Signed out: nothing to close.
+    let host = open(&credentials);
+    assert_eq!(host.engine.restore(), GateState::SignedOut);
+    session_ended_by_the_server(&host);
+    assert_eq!(host.engine.close_ended_session(), None);
+    assert_eq!(host.engine.lock_state(), LockState::SignedOut);
+    drop(host);
+
+    // Accepted: nothing to close, state and mark unchanged.
+    let credentials = MemoryCredentials::default();
+    let host = open_vault(&credentials, EMAIL);
+    assert_eq!(host.engine.close_ended_session(), None);
+    assert_eq!(host.engine.lock_state(), LockState::Open);
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed), None);
+    // Already closed by the person: an ended session changes nothing more.
+    assert_eq!(host.engine.lock(), SyncStop::WasNotRunning);
+    let before = host.engine.session_turn();
+    session_ended_by_the_server(&host);
+    assert_eq!(host.engine.close_ended_session(), None);
+    assert_eq!(host.engine.lock_state(), LockState::VaultClosed);
+    assert_eq!(host.engine.session_turn(), before);
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed).as_deref(), Some(&b"1"[..]));
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+#[test]
+fn the_strong_unlock_after_an_ended_session_opens_and_stays_open() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    let host = open_vault(&credentials, EMAIL);
+    session_ended_by_the_server(&host);
+    assert!(host.engine.close_ended_session().is_some());
+    assert_eq!(
+        host.engine.unlock_vault_with_password(secret(PASSWORD)),
+        Ok(NextAfterSignIn::Drive)
+    );
+    assert_eq!(host.engine.lock_state(), LockState::Open);
+    assert_eq!(
+        host.engine.close_ended_session(),
+        None,
+        "the ended run was the replaced session's"
+    );
+    assert_eq!(host.engine.lock_state(), LockState::Open);
+    assert_eq!(host.engine.gate(), GateState::Ready);
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed), None);
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+#[cfg(target_os = "linux")]
+fn session_watch_threads() -> usize {
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+        .filter(|name| name.trim() == "session-watch")
+        .count()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_watcher_closes_an_ended_session_and_ends_with_its_handle() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    let (host, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "acct-host-contract".to_string(),
+        state_dir: beebeeb_engine::state_paths::init_for_test(),
+        api_base: beebeeb_engine::runner::api_base_url(),
+    };
+    let engine = Arc::new(Engine::open(&beebeeb_engine::identity::REAL, config, host, credentials.clone()).unwrap());
+    assert_eq!(engine.restore(), GateState::SignedOut);
+    assert!(matches!(
+        engine.sign_in_password(EMAIL, secret(PASSWORD)),
+        Ok(NextAfterSignIn::RecoveryPhrase)
+    ));
+    assert_eq!(engine.unlock_with_phrase(secret(PHRASE)), Ok(()));
+    assert_eq!(engine.lock_state(), LockState::Open);
+    assert_eq!(session_watch_threads(), 0);
+
+    engine.watch_session_every(Duration::from_millis(20));
+    engine.watch_session_every(Duration::from_millis(20));
+    wait_for("the watcher thread", || session_watch_threads() == 1);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(session_watch_threads(), 1, "a second call starts no second thread");
+    assert_eq!(
+        engine.lock_state(),
+        LockState::Open,
+        "an accepted session is left alone"
+    );
+    for _ in 0..3 {
+        engine.note_call_for_test(true);
+    }
+    wait_for("the watcher closing the ended session", || {
+        engine.lock_state() == LockState::VaultClosed
+    });
+    assert_eq!(flag(&credentials, LockFlag::VaultClosed).as_deref(), Some(&b"1"[..]));
+    assert_eq!(engine.sign_out_keeping_local_data(), Ok(()));
+    drop(engine);
+    wait_for("the watcher ending with its handle", || session_watch_threads() == 0);
+}
+
+#[test]
+fn a_locked_screen_refuses_the_guide_mark_read_and_write() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    let sync_root: PathBuf = tempfile::tempdir().unwrap().keep();
+    DesktopConfig::update_for(&beebeeb_engine::identity::REAL, |cfg| {
+        cfg.sync_root = Some(sync_root.clone());
+        (true, ())
+    })
+    .unwrap();
+    let host = open_vault(&credentials, EMAIL);
+    // An owned state database first: without one both calls are refused as `NothingSynced` and prove nothing.
+    assert_eq!(host.engine.start_sync(sync_root.clone()), Ok(SyncStart::Started));
+    wait_for("the first snapshot", || names(&host, None).len() == 3);
+    assert_eq!(host.engine.stop(), SyncStop::Stopped);
+    // Not locked: the read answers (the setup works).
+    assert_eq!(
+        host.engine.guide_mark_for(host.engine.session_turn()),
+        GuideMark::NotDone
+    );
+
+    assert_eq!(host.engine.lock_screen(), Ok(()));
+    let turn = host.engine.session_turn();
+    assert_eq!(
+        host.engine.guide_mark_for(turn),
+        GuideMark::NotKnown(LocalStateRefused::Locked)
+    );
+    assert_eq!(host.engine.mark_guide_done_for(turn), Err(LocalStateRefused::Locked));
+
+    // Nothing was written: after the unlock the mark still reads not done.
+    assert_eq!(host.engine.unlock_screen_platform_verified(turn), Ok(()));
+    assert_eq!(
+        host.engine.guide_mark_for(host.engine.session_turn()),
+        GuideMark::NotDone
+    );
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+/// App lock (core #117): off, the next start opens directly, the window included; on, it is screen-locked.
+#[test]
+fn app_lock_off_opens_the_next_start_directly_and_on_opens_it_screen_locked() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    let host = open_vault(&credentials, EMAIL);
+    let turn = host.engine.session_turn();
+    assert_eq!(host.engine.app_lock_for(turn), Ok(true), "on by default");
+    assert_eq!(
+        host.engine
+            .set_app_lock_for(turn, false, Some(AppLockProof::PlatformVerified)),
+        Ok(())
+    );
+    assert_eq!(flag(&credentials, LockFlag::AppLock).as_deref(), Some(&b"0"[..]));
+    drop(host);
+
+    // A restart with app lock off: open, nothing asked, and a person's call runs.
+    let again = open(&credentials);
+    assert_eq!(again.engine.restore(), GateState::Ready);
+    assert_eq!(again.engine.lock_state(), LockState::Open);
+    assert_eq!(again.engine.view().gate, GateState::Ready, "the window opens directly");
+    assert_eq!(again.engine.check_call(Call::Person(LockedAction::ViewFiles)), Ok(()));
+    assert_eq!(again.engine.app_lock_for(again.engine.session_turn()), Ok(false));
+    // "Lock now" still locks with it off.
+    assert_eq!(again.engine.lock_screen(), Ok(()));
+    assert_eq!(again.engine.view().gate, GateState::ScreenLocked);
+    let asked = again.engine.session_turn();
+    assert_eq!(again.engine.unlock_screen_platform_verified(asked), Ok(()));
+
+    // On again (asks nothing): the next start is screen-locked.
+    let turn = again.engine.session_turn();
+    assert_eq!(again.engine.set_app_lock_for(turn, true, None), Ok(()));
+    drop(again);
+    let third = open(&credentials);
+    assert_eq!(third.engine.restore(), GateState::ScreenLocked);
+    assert_eq!(third.engine.lock_state(), LockState::ScreenLocked);
+    assert_eq!(third.engine.view().gate, GateState::ScreenLocked);
+    let asked = third.engine.session_turn();
+    assert_eq!(third.engine.unlock_screen_platform_verified(asked), Ok(()));
+    assert_eq!(third.engine.sign_out_keeping_local_data(), Ok(()));
+    assert!(
+        credentials.is_empty(),
+        "the sign-out removes the setting with the session"
+    );
+}
+
+/// A sign-out cut short may leave `lock.app_lock = 0` behind; an account's first sign-in on this computer carries
+/// nothing of a lock setting, so the next start is screen-locked again.
+#[test]
+fn a_leftover_app_lock_off_never_reaches_the_next_accounts_first_sign_in() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    credentials
+        .store_for("acct-host-contract")
+        .save_lock_flag(LockFlag::AppLock, b"0")
+        .unwrap();
+    let host = open_vault(&credentials, EMAIL);
+    assert_eq!(
+        flag(&credentials, LockFlag::AppLock),
+        None,
+        "cleared by the first sign-in"
+    );
+    assert_eq!(host.engine.app_lock_for(host.engine.session_turn()), Ok(true));
+    drop(host);
+    let again = open(&credentials);
+    assert_eq!(again.engine.restore(), GateState::ScreenLocked);
+    let asked = again.engine.session_turn();
+    assert_eq!(again.engine.unlock_screen_platform_verified(asked), Ok(()));
+    assert_eq!(again.engine.sign_out_keeping_local_data(), Ok(()));
+    assert!(credentials.is_empty());
 }

@@ -178,7 +178,7 @@ thread_local! {
 }
 
 /// `CfSetPinState(pin)` by path, with its own handle (the retry when the step's handle could not).
-fn set_pin_by_path(path: &Path, pin: CF_PIN_STATE) -> bool {
+pub(super) fn set_pin_by_path(path: &Path, pin: CF_PIN_STATE) -> bool {
     // LD-0113 Amendment 7: the write-access open below is refused on a read-only Backups file.
     let _read_only = super::read_only::Lifted::new(path);
     #[cfg(any(test, feature = "test-support"))]
@@ -203,7 +203,7 @@ fn set_pin_by_path(path: &Path, pin: CF_PIN_STATE) -> bool {
 
 /// `(pin state, bytes held)` of the placeholder behind `handle` (standard info, no fetch). Bytes held
 /// are on-disk plus modified data, as `placeholders::platform_view` counts "nothing on disk".
-fn standard_info(handle: HANDLE) -> Option<(CF_PIN_STATE, i64)> {
+pub(super) fn standard_info(handle: HANDLE) -> Option<(CF_PIN_STATE, i64)> {
     let mut buffer = vec![0u64; 512];
     // SAFETY: the buffer is writable for its stated length; `handle` is an open placeholder handle.
     unsafe {
@@ -321,7 +321,7 @@ struct Restore {
 /// `CfSetPinState(pin)` through the step's handle (or the test seam's failure).
 ///
 /// SAFETY: `handle` is open.
-unsafe fn set_pin(handle: HANDLE, pin: CF_PIN_STATE) -> bool {
+pub(super) unsafe fn set_pin(handle: HANDLE, pin: CF_PIN_STATE) -> bool {
     #[cfg(any(test, feature = "test-support"))]
     if FAIL_PIN_RESTORE_BY_HANDLE.get() && pin != CF_PIN_STATE_UNSPECIFIED {
         return false;
@@ -527,7 +527,7 @@ fn restore_recorded_pin(db: &crate::state_db::StateDb, file_id: &str, path: &Pat
 }
 
 /// A pin the empty step put back neither through its handle nor by path: recorded to retry.
-fn keep_lost_pin(db: &crate::state_db::StateDb, file_id: &str, pin_lost: Option<CF_PIN_STATE>) {
+pub(super) fn keep_lost_pin(db: &crate::state_db::StateDb, file_id: &str, pin_lost: Option<CF_PIN_STATE>) {
     if let Some(pin) = pin_lost {
         tracing::warn!(file_id = %file_id, "poison sweep: the pin could not be put back yet; kept to retry");
         if let Err(e) = db.record_pin_to_restore(file_id, pin.0) {
@@ -666,7 +666,7 @@ pub fn poison_now(
 
 /// The FileIdentity (the UTF-8 file id, `placeholders.rs`) of the placeholder `handle` holds; none for a
 /// plain file or one that cannot be read.
-fn identity_of_handle(handle: HANDLE) -> Option<Vec<u8>> {
+pub(super) fn identity_of_handle(handle: HANDLE) -> Option<Vec<u8>> {
     super::placeholders::read_standard_info(handle)
         .ok()
         .flatten()

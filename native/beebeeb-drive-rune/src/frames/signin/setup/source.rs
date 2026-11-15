@@ -16,8 +16,96 @@ pub enum Explorer {
     Adding,
     /// DW-0206.
     Added,
-    /// DW-0280. `code`: what `CfRegisterSyncRoot` returned, for support ("0x8007017C").
+    /// DW-0280. `code`: what `CfRegisterSyncRoot` returned, for support ("0x8007017C"); empty when Windows
+    /// gave none.
     Failed { code: String },
+    /// Sync did not start on this PC, so Windows was not asked to add the folder at all. Drawn as DW-0280 with
+    /// its own sentence and no code: it is not Windows that refused.
+    NotSyncing,
+}
+
+/// The sync folder, while the first run still has to ask for it (the sync-start contract's ruling Q2: the first
+/// run asks for the folder before the first start). The board has no frame for it: it is the first state of the
+/// File Explorer step.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub enum FolderAsk {
+    /// Nothing to ask: the settings name the folder, or it was chosen in this first run.
+    #[default]
+    Settled,
+    Ask {
+        /// The folder that is suggested, as the person's own PC writes it. Shown, never logged.
+        folder: String,
+        /// Why the last choice was not taken.
+        said: Option<FolderSaid>,
+        /// A choice is being checked, or Windows' folder picker is open: no second one is asked.
+        busy: bool,
+    },
+    /// A start already worked in the folder chosen first, and a later pick was not taken: the step says that
+    /// moving the folder isn't available in this version, with one "OK".
+    AlreadySyncs,
+}
+
+/// Never prints the folder: a path is shown to the person who chose it and nowhere else.
+impl std::fmt::Debug for FolderAsk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Settled => f.write_str("Settled"),
+            Self::Ask { said, busy, .. } => f
+                .debug_struct("Ask")
+                .field("said", said)
+                .field("busy", busy)
+                .finish_non_exhaustive(),
+            Self::AlreadySyncs => f.write_str("AlreadySyncs"),
+        }
+    }
+}
+
+/// Why a folder was not taken as the sync folder. Nothing was created or written for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderSaid {
+    /// A folder on the network.
+    Network,
+    /// A drive itself, or a folder of Windows or its programs.
+    System,
+    /// The home folder itself, or the folder apps keep their data in.
+    Home,
+    /// Beebeeb's own data.
+    OwnData,
+    /// Not a folder.
+    NotAFolder,
+    /// Another app's sync folder.
+    AnotherApps,
+    /// The folder could not be read.
+    Unreadable,
+    /// Not a full path to a folder on this PC.
+    NotAFullPath,
+    /// Windows' folder picker could not be opened.
+    NoPicker,
+}
+
+/// A switch of setup whose change is answered after the press ([`SetupSource::take_outcomes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    Notifications,
+    OpenAtLogin,
+    /// Step 3: the folders chosen to back up (done when every one was switched on).
+    Backup,
+    /// Step 2: app lock.
+    AppLock,
+    /// Step 4: photo previews turned on at the chosen size and format.
+    Previews,
+    /// Step 2: "Lock again after", asked with app lock on (no row of "You're set up": said only when not changed).
+    LockAfter,
+}
+
+/// How a change asked through the source ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outcome {
+    pub switch: Switch,
+    /// The change was made.
+    pub done: bool,
+    /// What the switch is now, when that is known (after a change that failed it may not be).
+    pub now: Option<bool>,
 }
 
 /// One folder the Windows app can back up (DW-0203), in the app's own order.
@@ -95,15 +183,60 @@ impl LockAfter {
     }
 }
 
-/// The photo the compare view shows: an encoded image (PNG) and where it comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The photo the compare view shows: an encoded image (PNG) and where it comes from. Shared, never copied: a
+/// window compares it on every poll (the same `Arc` compares without reading the bytes).
+#[derive(Clone, PartialEq, Eq)]
 pub struct Sample {
     /// PNG bytes of the original as the compare view draws it.
-    pub original_png: &'static [u8],
+    pub original_png: std::sync::Arc<[u8]>,
     /// PNG bytes of the preview at the chosen size and format.
-    pub preview_png: &'static [u8],
+    pub preview_png: std::sync::Arc<[u8]>,
     /// `true`: the photo that ships inside the app, because the account has no photo yet.
     pub bundled: bool,
+}
+
+/// A sample can be the person's own photo: its `Debug` prints sizes only.
+impl std::fmt::Debug for Sample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sample")
+            .field("original_png", &self.original_png.len())
+            .field("preview_png", &self.preview_png.len())
+            .field("bundled", &self.bundled)
+            .finish()
+    }
+}
+
+/// The person's photo is wiped by whoever lets go of it last; the picture that ships inside the app is never the
+/// last (its holder lives as long as the app).
+impl Drop for Sample {
+    fn drop(&mut self) {
+        if std::sync::Arc::ptr_eq(&self.original_png, &self.preview_png) {
+            // One picture held twice (with HEIC the original is compared with itself): let go of one hold first.
+            self.preview_png = std::sync::Arc::from(&[][..]);
+        }
+        wipe_if_last(&mut self.original_png);
+        wipe_if_last(&mut self.preview_png);
+    }
+}
+
+/// Wipe `bytes` when nothing else holds them (a picture of the person's photo, let go of).
+pub fn wipe_if_last(bytes: &mut std::sync::Arc<[u8]>) {
+    if let Some(bytes) = std::sync::Arc::get_mut(bytes) {
+        zeroize::Zeroize::zeroize(bytes);
+    }
+}
+
+impl Sample {
+    /// The picture that ships inside the app, said as that.
+    pub fn bundled() -> Self {
+        static BUNDLED: std::sync::OnceLock<std::sync::Arc<[u8]>> = std::sync::OnceLock::new();
+        let png = BUNDLED.get_or_init(|| std::sync::Arc::from(BUNDLED_SAMPLE_PNG)).clone();
+        Sample {
+            original_png: png.clone(),
+            preview_png: png,
+            bundled: true,
+        }
+    }
 }
 
 /// The sample photo that ships inside the app: the picture the board itself draws in the compare
@@ -111,9 +244,74 @@ pub struct Sample {
 pub const BUNDLED_SAMPLE_PNG: &[u8] = include_bytes!("../../../../assets/sample/compare-sample.png");
 
 pub trait SetupSource {
+    /// Whether something answers for a step. `false`: the step keeps its place in the list (the first run has
+    /// its seven steps), says that it is not available in this version yet, and turns nothing on; its row of
+    /// "You're set up" says so too. Never a step that looks done while nothing was set. The fixture answers for
+    /// all of them (the board).
+    fn available(&self, _step: super::Step) -> bool {
+        true
+    }
+    /// Whether this step's content is still being read: the step is drawn as a loading state (never as absent, never
+    /// with a sample), then as what the read found. The fixture has everything from the start.
+    fn loading(&self, _step: super::Step) -> bool {
+        false
+    }
+    /// Whether this step's read FAILED (not "nothing found"): it says it could not read, with Try again.
+    fn failed(&self, _step: super::Step) -> bool {
+        false
+    }
+    /// Try again after a failed read of step 3's folders.
+    fn retry_backups(&mut self) {}
+    /// Try again after a failed read of step 4's preview setting.
+    fn retry_previews(&mut self) {}
+    /// Whether the first run still has to ask for the sync folder, and what it suggests.
+    fn folder_ask(&self) -> FolderAsk {
+        FolderAsk::Settled
+    }
+    /// "Use this folder": the suggested folder is the sync folder, if it may be; then sync starts.
+    fn keep_folder(&mut self) {}
+    /// "Choose another folder": Windows' folder picker; the folder picked there is the sync folder, if it may
+    /// be; then sync starts.
+    fn choose_folder(&mut self) {}
+    /// Whether another folder can still be chosen after a start that was refused: only while no folder was
+    /// kept in the settings (no start has worked yet).
+    fn can_choose_again(&self) -> bool {
+        false
+    }
+    /// A start worked and its folder could not be written to the settings, while sync runs.
+    fn folder_unsaved(&self) -> bool {
+        false
+    }
+    /// "Try again" on a folder that was not saved: write it.
+    fn save_folder(&mut self) {}
+    /// "OK" on the note that the folder cannot be moved yet.
+    fn dismiss_folder_note(&mut self) {}
+    /// Whether a row of "You're set up" leads to its setting. `false`: the rows are values, not links.
+    fn opens_settings(&self) -> bool {
+        true
+    }
+    /// `true`: a switch this source changes is answered after the press ([`SetupSource::take_outcomes`]), and
+    /// "You're set up" draws its value only then. The fixture's changes are made at once.
+    fn answers_later(&self) -> bool {
+        false
+    }
+    /// `false`: "Lock again after" is not set by this source, and step 2 draws no such row (never a choice
+    /// nothing acts on). The fixture draws the board's; the engine's sets it. Drawn only while the switch is on.
+    fn sets_lock_after(&self) -> bool {
+        true
+    }
+    /// The changes that were answered since the last call, oldest first.
+    fn take_outcomes(&mut self) -> Vec<Outcome> {
+        Vec::new()
+    }
     fn explorer(&self) -> Explorer;
     /// The six known folders with their sizes. Engine: `known_folder::list` + a size scan.
     fn folders(&self) -> Vec<Folder>;
+    /// The folders, when a source reads them late: `Some` once, when a read arrived since the last call (the first
+    /// run then draws the new list). The fixture has them from the start.
+    fn fresh_folders(&mut self) -> Option<Vec<Folder>> {
+        None
+    }
     /// The original's weight: "30.9 MB". Engine: the chosen photo's size.
     fn original_weight(&self) -> String;
     /// What a preview at this size and format weighs for the chosen photo ("1.0 MB"), if it has
@@ -126,6 +324,11 @@ pub trait SetupSource {
     fn space_limit(&self) -> String;
     /// The photo to compare: one of the account's, or the bundled sample when it has none.
     fn sample(&self) -> Sample;
+    /// The size and format the account has stored, once read: step 4 starts on it, so "Continue" on untouched
+    /// choices changes nothing but turning previews on. `None` (the fixture): the board's own choice.
+    fn stored_previews(&self) -> Option<(PreviewSize, PreviewFormat)> {
+        None
+    }
 
     /// "Add a passkey". Engine: Windows' passkey dialog (WebAuthn create), then
     /// `auth_v2::passkey_register`. `true`: a passkey was added.
@@ -165,6 +368,12 @@ pub struct Script {
     pub explorer_after_retry: Explorer,
     /// `false`: Windows' passkey dialog was cancelled.
     pub passkey_added: bool,
+    /// The sync folder's question (the board has none: `Settled`).
+    pub folder: FolderAsk,
+    /// The steps nothing answers for (the board has none).
+    pub not_available: &'static [super::Step],
+    /// Another folder can be chosen after a start that was refused (the board has no such state).
+    pub choose_again: bool,
 }
 
 impl Default for Script {
@@ -173,6 +382,9 @@ impl Default for Script {
             explorer: Explorer::Adding,
             explorer_after_retry: Explorer::Added,
             passkey_added: true,
+            folder: FolderAsk::Settled,
+            not_available: &[],
+            choose_again: false,
         }
     }
 }
@@ -206,6 +418,28 @@ impl FixtureSetupSource {
 }
 
 impl SetupSource for FixtureSetupSource {
+    fn available(&self, step: super::Step) -> bool {
+        !self.script.not_available.contains(&step)
+    }
+
+    fn folder_ask(&self) -> FolderAsk {
+        self.script.folder.clone()
+    }
+
+    fn keep_folder(&mut self) {
+        self.note("keep_folder".into());
+        self.script.folder = FolderAsk::Settled;
+        self.changed = true;
+    }
+
+    fn choose_folder(&mut self) {
+        self.note("choose_folder".into());
+    }
+
+    fn can_choose_again(&self) -> bool {
+        self.script.choose_again
+    }
+
     fn explorer(&self) -> Explorer {
         self.script.explorer.clone()
     }
@@ -255,11 +489,7 @@ impl SetupSource for FixtureSetupSource {
     }
 
     fn sample(&self) -> Sample {
-        Sample {
-            original_png: BUNDLED_SAMPLE_PNG,
-            preview_png: BUNDLED_SAMPLE_PNG,
-            bundled: true,
-        }
+        Sample::bundled()
     }
 
     fn add_passkey(&mut self) -> bool {

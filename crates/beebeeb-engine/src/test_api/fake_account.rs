@@ -7,7 +7,7 @@
 //! Tests only (`test` or the `test-support` feature). Every key, name and id is invented.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -15,6 +15,22 @@ use serde_json::{Value, json};
 use super::{FakeApi, Handler, OpaqueAccount, Reply, Request};
 
 // ── The vault tree ──────────────────────────────────────────────────────────────
+
+/// One version of a file in the fake vault (`GET /api/v1/files/{id}/versions`).
+#[derive(Debug, Clone)]
+pub(super) struct FakeVersion {
+    pub(super) id: String,
+    pub(super) number: i64,
+    pub(super) created_at: String,
+    pub(super) size_bytes: u64,
+}
+
+/// The versions of one file: in the order they were made, and which number is the current one.
+#[derive(Debug, Clone, Default)]
+pub(super) struct FakeVersions {
+    pub(super) list: Vec<FakeVersion>,
+    pub(super) current: i64,
+}
 
 /// One item in the fake vault: a folder or a file, with its encrypted name produced by core's `encrypt_name_for`.
 #[derive(Debug, Clone)]
@@ -34,6 +50,8 @@ pub struct VaultItem {
     /// account's own file key; an empty file has none). `None`: the item has no content to download
     /// ([`FakeAccount::add_file_with_content`] gives it one).
     pub content_frames: Option<Vec<Vec<u8>>>,
+    /// The object version a completed upload (or [`FakeAccount::push_newer_version`]) made current; `None` until one did.
+    pub object_version_id: Option<String>,
 }
 
 impl VaultItem {
@@ -49,6 +67,9 @@ impl VaultItem {
             "version_number": self.version_number,
             "content_hash": self.content_hash,
         });
+        if let Some(object) = &self.object_version_id {
+            node["current_object_version_id"] = json!(object);
+        }
         // A file with content also says how it is cut, as the server's row does: what a download reads.
         if let Some(frames) = &self.content_frames {
             node["chunk_count"] = json!(frames.len());
@@ -75,9 +96,9 @@ pub struct FakeAccount {
     /// The master key bytes (32), for building encrypted vault items.
     pub master_key: [u8; 32],
     /// Items in the vault (file tree), keyed by id.
-    items: Mutex<HashMap<String, VaultItem>>,
+    pub(super) items: Mutex<HashMap<String, VaultItem>>,
     /// The current seq_id (monotonic).
-    seq: AtomicI64,
+    pub(super) seq: AtomicI64,
     /// How much storage this account uses.
     pub used_bytes: u64,
     pub quota_bytes: u64,
@@ -85,9 +106,43 @@ pub struct FakeAccount {
     devices: Mutex<Vec<Value>>,
     /// Client sync sessions.
     sessions: Mutex<Vec<Value>>,
+    /// The account's share links, as `POST /api/v1/shares` stored them (every field of the request, and an id).
+    links: Mutex<Vec<Value>>,
+    /// The next `POST /api/v1/shares` answers "this token is taken" once.
+    link_token_taken: std::sync::atomic::AtomicBool,
+    /// `GET /api/v1/shares/mine` also carries each link's `wrapped_file_key`.
+    links_list_wrapped_key: std::sync::atomic::AtomicBool,
+    /// `GET /api/v1/shares/mine` names this file on every row, whatever file the link is to.
+    links_listed_as: Mutex<Option<String>>,
+    /// The versions of the files that have some ([`Self::add_version`]), by file id.
+    pub(super) versions: Mutex<HashMap<String, FakeVersions>>,
+    /// Whole uploads, the change log and stored pictures ([`super::fake_uploads`]).
+    pub(super) uploads: super::fake_uploads::UploadState,
+    /// How many version restores reached this account (a request with its token), whatever the answer.
+    restores: AtomicUsize,
+    /// The status the next version restore is answered with, without being made.
+    restore_refusal: Mutex<Option<u16>>,
+    /// The next version restore is read and made, and the connection is closed without an answer.
+    restore_hangs_up: AtomicBool,
+    /// `account/sessions`, `me/activity`, `me/profile` and `me/two-factor` answer. Off (a test's own fake, the
+    /// default): they are 404 as before, so a test that sets its own state for them is never shadowed.
+    /// [`Self::serve_security_routes`]; the `bb-fake-server` fixture turns it on.
+    security_routes: AtomicBool,
+    /// What `me/two-factor` says ([`Self::set_two_factor`]); off at the start.
+    two_factor_on: AtomicBool,
 }
 
 impl FakeAccount {
+    /// Answer the Security page's four routes (see the field); the fixture of `bb-fake-server` does.
+    pub fn serve_security_routes(&self, on: bool) {
+        self.security_routes.store(on, Ordering::SeqCst);
+    }
+
+    /// Whether `me/two-factor` says two-factor is on.
+    pub fn set_two_factor(&self, on: bool) {
+        self.two_factor_on.store(on, Ordering::SeqCst);
+    }
+
     /// Register a new invented account with the real OPAQUE protocol and a real recovery check. The recovery
     /// phrase is returned alongside the account so tests can unlock with it.
     pub fn register(email: &str, password: &str, recovery_phrase: &str) -> (Self, String) {
@@ -114,6 +169,17 @@ impl FakeAccount {
             quota_bytes: 10 * 1024 * 1024 * 1024, // 10 GiB
             devices: Mutex::new(Vec::new()),
             sessions: Mutex::new(Vec::new()),
+            links: Mutex::new(Vec::new()),
+            link_token_taken: std::sync::atomic::AtomicBool::new(false),
+            links_list_wrapped_key: std::sync::atomic::AtomicBool::new(false),
+            links_listed_as: Mutex::new(None),
+            versions: Mutex::new(HashMap::new()),
+            uploads: Default::default(),
+            restores: AtomicUsize::new(0),
+            restore_refusal: Mutex::new(None),
+            restore_hangs_up: AtomicBool::new(false),
+            security_routes: AtomicBool::new(false),
+            two_factor_on: AtomicBool::new(false),
         };
         (account, recovery_phrase.to_string())
     }
@@ -143,6 +209,7 @@ impl FakeAccount {
             version_number: 1,
             content_hash: if is_folder { None } else { Some(format!("hash-{id}")) },
             content_frames: None,
+            object_version_id: None,
         };
         self.items.lock().expect("vault items").insert(id.to_string(), item);
     }
@@ -232,6 +299,86 @@ impl FakeAccount {
         beebeeb_core::encrypt::encrypt_thumbnail(&key, plain).expect("a sealed picture")
     }
 
+    /// Add a version to the file `file_id` (made after the ones it has; it becomes the current one), as the server
+    /// lists it: its id, when it was made and its size. The server's list order is the order they were added.
+    pub fn add_version(&self, file_id: &str, version_id: &str, created_at: &str, size_bytes: u64) {
+        let mut all = self.versions.lock().expect("versions");
+        let versions = all.entry(file_id.to_string()).or_default();
+        let number = versions.list.len() as i64 + 1;
+        versions.list.push(FakeVersion {
+            id: version_id.to_string(),
+            number,
+            created_at: created_at.to_string(),
+            size_bytes,
+        });
+        versions.current = number;
+    }
+
+    /// The id of the current version of `file_id`, and how many versions it has. `None`: it has none.
+    pub fn version_state(&self, file_id: &str) -> Option<(String, usize)> {
+        let all = self.versions.lock().expect("versions");
+        let versions = all.get(file_id)?;
+        let current = versions.list.iter().find(|v| v.number == versions.current)?;
+        Some((current.id.clone(), versions.list.len()))
+    }
+
+    /// How many version restores reached this account (with its token), whatever they were answered.
+    pub fn restore_requests(&self) -> usize {
+        self.restores.load(Ordering::SeqCst)
+    }
+
+    /// Answer the next version restore with this status, without making it.
+    pub fn refuse_next_restore_with(&self, status: u16) {
+        *self.restore_refusal.lock().expect("restore switch") = Some(status);
+    }
+
+    /// Read the next version restore, make it, then close the connection without an answer.
+    pub fn make_next_restore_then_hang_up(&self) {
+        self.restore_hangs_up.store(true, Ordering::SeqCst);
+    }
+
+    /// `GET /api/v1/files/{id}/versions`. `None`: no such file.
+    fn versions_payload(&self, file_id: &str) -> Option<Value> {
+        self.items.lock().expect("vault items").get(file_id)?;
+        let all = self.versions.lock().expect("versions");
+        let empty = FakeVersions::default();
+        let versions = all.get(file_id).unwrap_or(&empty);
+        let list: Vec<Value> = versions
+            .list
+            .iter()
+            .map(|v| {
+                json!({
+                    "id": v.id,
+                    "version_number": v.number,
+                    "created_at": v.created_at,
+                    "size_bytes": v.size_bytes,
+                })
+            })
+            .collect();
+        Some(json!({ "versions": list, "current_version": versions.current }))
+    }
+
+    /// Make `version_id` the current version of `file_id`: one more version is minted from it, as the server's
+    /// restore does. Returns false: no such file or version.
+    fn restore_version(&self, file_id: &str, version_id: &str) -> bool {
+        let mut all = self.versions.lock().expect("versions");
+        let Some(versions) = all.get_mut(file_id) else {
+            return false;
+        };
+        let Some(source) = versions.list.iter().find(|v| v.id == version_id).cloned() else {
+            return false;
+        };
+        let number = versions.list.len() as i64 + 1;
+        versions.list.push(FakeVersion {
+            id: format!("restored-{number}-of-{}", source.id),
+            number,
+            created_at: format!("2026-11-14T12:{:02}:00Z", number.min(59)),
+            size_bytes: source.size_bytes,
+        });
+        versions.current = number;
+        true
+    }
+
     /// Trash an item by id. Returns true if found and not already trashed.
     pub fn trash_item(&self, id: &str) -> bool {
         let mut items = self.items.lock().expect("vault items");
@@ -246,6 +393,24 @@ impl FakeAccount {
         false
     }
 
+    /// The ids of the account's live files (not folders, not trashed), sorted: what an owner's media read lists.
+    pub fn live_file_ids(&self) -> Vec<String> {
+        let items = self.items.lock().expect("vault items");
+        let mut ids: Vec<String> = items
+            .values()
+            .filter(|item| !item.is_folder && !item.is_trashed)
+            .map(|item| item.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// A live item's version: when it last changed (unix seconds) and its size.
+    pub fn item_version(&self, id: &str) -> Option<(i64, u64)> {
+        let items = self.items.lock().expect("vault items");
+        items.get(id).map(|item| (item.updated_at, item.size_bytes))
+    }
+
     /// Restore a trashed item. Returns true if found and was trashed.
     pub fn restore_item(&self, id: &str) -> bool {
         let mut items = self.items.lock().expect("vault items");
@@ -258,6 +423,107 @@ impl FakeAccount {
             }
         }
         false
+    }
+
+    /// The account's share links as they were posted: each row is the request's body plus `id` and `revoked`.
+    pub fn links(&self) -> Vec<Value> {
+        self.links.lock().expect("links").clone()
+    }
+
+    /// The next `POST /api/v1/shares` is refused once with 409 `token_taken`, and stores nothing.
+    pub fn take_the_next_link_token(&self) {
+        self.link_token_taken.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether `GET /api/v1/shares/mine` carries each link's `wrapped_file_key` (off: as the listing is today).
+    pub fn list_links_with_their_wrapped_key(&self, on: bool) {
+        self.links_list_wrapped_key.store(on, Ordering::SeqCst);
+    }
+
+    /// A list that lies: from now on every row of `GET /api/v1/shares/mine` names `file_id`, whatever file its
+    /// link is to.
+    pub fn list_every_link_as(&self, file_id: &str) {
+        *self.links_listed_as.lock().expect("links") = Some(file_id.to_string());
+    }
+
+    /// Every link of the account is listed as past its expiry.
+    pub fn expire_links(&self) {
+        for link in self.links.lock().expect("links").iter_mut() {
+            link["listed_expires_at"] = json!("2020-01-01T00:00:00Z");
+        }
+    }
+
+    /// Every link of the account is listed as opened as often as it may be (once).
+    pub fn use_up_links(&self) {
+        for link in self.links.lock().expect("links").iter_mut() {
+            link["max_opens"] = json!(1);
+            link["open_count"] = json!(1);
+        }
+    }
+
+    /// Every link of the account is revoked.
+    pub fn revoke_links(&self) {
+        for link in self.links.lock().expect("links").iter_mut() {
+            link["revoked"] = json!(true);
+        }
+    }
+
+    /// `POST /api/v1/shares`: a link to a live item of this account; another id is not found.
+    fn post_link(&self, body: &Value) -> Reply {
+        let file_id = body.get("file_id").and_then(Value::as_str).unwrap_or_default();
+        let known = self
+            .items
+            .lock()
+            .expect("vault items")
+            .get(file_id)
+            .is_some_and(|item| !item.is_trashed);
+        if !known {
+            return Reply::json(404, json!({ "error": "not_found" }));
+        }
+        if self.link_token_taken.swap(false, Ordering::SeqCst) {
+            return Reply::json(409, json!({ "code": "token_taken" }));
+        }
+        let mut link = body.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        link["id"] = json!(id);
+        link["revoked"] = json!(false);
+        self.links.lock().expect("links").push(link);
+        Reply::ok(json!({ "id": id }))
+    }
+
+    /// `GET /api/v1/shares/mine`: every link of the account, whatever the query asks for (a client must match the
+    /// file itself), in the listing's shape: no token, and the wrapped file key only when switched on.
+    fn list_links(&self) -> Reply {
+        let with_key = self.links_list_wrapped_key.load(Ordering::SeqCst);
+        let listed_as = self.links_listed_as.lock().expect("links").clone();
+        let shares: Vec<Value> = self
+            .links
+            .lock()
+            .expect("links")
+            .iter()
+            .map(|link| {
+                let mut row = json!({
+                    "id": link["id"],
+                    "file_id": link["file_id"],
+                    "share_type": "file",
+                    "expires_at": link.get("listed_expires_at").cloned().unwrap_or(Value::Null),
+                    "max_opens": link.get("max_opens").cloned().unwrap_or(Value::Null),
+                    "open_count": link.get("open_count").cloned().unwrap_or(json!(0)),
+                    "has_passphrase": link.get("passphrase").is_some(),
+                    "revoked": link["revoked"],
+                    "owner_wrapped_key": link["owner_wrapped_key"],
+                    "owner_wrapped_token": link["owner_wrapped_token"],
+                });
+                if with_key {
+                    row["wrapped_file_key"] = link["wrapped_file_key"].clone();
+                }
+                if let Some(file_id) = &listed_as {
+                    row["file_id"] = json!(file_id);
+                }
+                row
+            })
+            .collect();
+        Reply::ok(json!({ "shares": shares }))
     }
 
     /// `name` encrypted as this account's own item `id` holds it (the envelope a share row carries as
@@ -327,6 +593,68 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }))
             }
 
+            // ── Password proof (the screen lock's password unlock): the fixture password, the same OPAQUE flow as
+            // the sign-in, for the account whose token this is ──────────────────────────
+            "POST /api/v1/auth/password-proof/start" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.opaque.login_start(&req.json())
+            }
+
+            "POST /api/v1/auth/password-proof/finish" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                if account.opaque.login_finish(&req.json()) {
+                    Reply::ok(json!({ "proven": true, "password_counter": 1 }))
+                } else {
+                    Reply::error(403, "password_not_proven")
+                }
+            }
+
+            // ── What the Security page reads: invented rows, in the client's shapes ──
+            "GET /api/v1/account/sessions" if account.security_routes.load(Ordering::SeqCst) => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                Reply::ok(json!({ "sessions": [{
+                    "id": "fixture-session-1",
+                    "device_name": "Fixture PC",
+                    "device_kind": "desktop",
+                    "country_code": "DE",
+                    "last_active_at": "2026-11-15T05:00:00Z",
+                    "is_current": true,
+                }] }))
+            }
+
+            "GET /api/v1/me/activity" if account.security_routes.load(Ordering::SeqCst) => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                Reply::ok(json!({ "opted_in": true, "events": [{
+                    "type": "auth.login.success",
+                    "outcome": "success",
+                    "device": "Fixture PC",
+                    "country_code": "DE",
+                    "created_at": "2026-11-15T05:00:00Z",
+                }] }))
+            }
+
+            "GET /api/v1/me/profile" if account.security_routes.load(Ordering::SeqCst) => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                Reply::ok(json!({ "display_name": "Fixture" }))
+            }
+
+            "GET /api/v1/me/two-factor" if account.security_routes.load(Ordering::SeqCst) => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                Reply::ok(json!({ "enabled": account.two_factor_on.load(Ordering::SeqCst) }))
+            }
+
             // ── Recovery check ──────────────────────────────────────────
             "POST /api/v1/auth/verify-recovery-check" => {
                 if req.bearer() != Some(&account.session_token) {
@@ -389,13 +717,18 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
-                // We return no ops: the fake is a static tree.
+                // The change log: empty for a static tree; an upload or a pushed version adds its ops
+                // (`fake_uploads`), each with the sequence number it took.
                 let seq = account.seq.load(Ordering::SeqCst);
-                Reply::ok(json!({
-                    "ops": [],
-                    "since": seq,
-                    "head_seq": seq,
-                }))
+                let since = req.query("since").and_then(|v| v.parse::<i64>().ok());
+                match since {
+                    Some(since) => Reply::ok(json!({
+                        "ops": account.ops_since(since),
+                        "since": since,
+                        "head_seq": seq,
+                    })),
+                    None => Reply::ok(json!({ "ops": [], "since": seq, "head_seq": seq })),
+                }
             }
 
             // ── Files listing ───────────────────────────────────────────
@@ -438,6 +771,48 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }
             }
 
+            // ── A file's versions, and the restore of one ───────────────
+            route_str if route_str.starts_with("GET /api/v1/files/") && route_str.ends_with("/versions") => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                let path_only = req.path.split('?').next().unwrap_or("");
+                let id = path_only
+                    .strip_prefix("/api/v1/files/")
+                    .and_then(|rest| rest.strip_suffix("/versions"))
+                    .unwrap_or("");
+                match account.versions_payload(id) {
+                    Some(payload) => Reply::ok(payload),
+                    None => Reply::error(404, "not_found"),
+                }
+            }
+            route_str
+                if route_str.starts_with("POST /api/v1/files/")
+                    && route_str.contains("/versions/")
+                    && route_str.ends_with("/restore") =>
+            {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.restores.fetch_add(1, Ordering::SeqCst);
+                let path_only = req.path.split('?').next().unwrap_or("");
+                let (id, version) = path_only
+                    .strip_prefix("/api/v1/files/")
+                    .and_then(|rest| rest.strip_suffix("/restore"))
+                    .and_then(|rest| rest.split_once("/versions/"))
+                    .unwrap_or(("", ""));
+                if let Some(status) = account.restore_refusal.lock().expect("restore switch").take() {
+                    return Reply::error(status, "a refusal");
+                }
+                if !account.restore_version(id, version) {
+                    return Reply::error(404, "not_found");
+                }
+                if account.restore_hangs_up.swap(false, Ordering::SeqCst) {
+                    return Reply::hang_up();
+                }
+                Reply::ok(json!({ "success": true }))
+            }
+
             // ── Restore ─────────────────────────────────────────────────
             route_str if route_str.starts_with("POST /api/v1/files/") && route_str.ends_with("/restore") => {
                 if req.bearer() != Some(&account.session_token) {
@@ -461,15 +836,27 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                     return Reply::error(401, "unauthorized");
                 }
                 let body = req.json();
-                let device_id = format!("device-{}", uuid::Uuid::new_v4());
+                // The server upserts on (hostname, platform); the row is named by `id`, as the client reads it.
+                let mut devices = account.devices.lock().expect("devices");
+                let at = devices
+                    .iter()
+                    .position(|d| d["hostname"] == body["hostname"] && d["platform"] == body["platform"]);
                 let device = json!({
-                    "device_id": device_id,
+                    "id": at
+                        .map(|i| devices[i]["id"].clone())
+                        .unwrap_or_else(|| json!(format!("device-{}", uuid::Uuid::new_v4()))),
                     "hostname": body.get("hostname"),
                     "platform": body.get("platform"),
-                    "app_version": body.get("app_version"),
+                    "bb_version": body.get("bb_version"),
+                    "last_seen": "2026-11-15T05:00:00Z",
+                    "created_at": "2026-11-15T05:00:00Z",
+                    "session_count": 0,
                 });
-                account.devices.lock().expect("devices").push(device.clone());
-                Reply::ok(json!({ "device_id": device_id }))
+                match at {
+                    Some(i) => devices[i] = device.clone(),
+                    None => devices.push(device.clone()),
+                }
+                Reply::ok(device)
             }
 
             "GET /api/v1/clients/devices" => {
@@ -487,13 +874,24 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }
                 let body = req.json();
                 let session_id = format!("session-{}", uuid::Uuid::new_v4());
+                // Named by `id`, with the interval the app asked for (the server defaults it to 60).
+                let interval = body
+                    .get("heartbeat_interval_secs")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(60);
                 let session = json!({
-                    "session_id": session_id,
+                    "id": session_id,
                     "device_id": body.get("device_id"),
-                    "sync_path": body.get("sync_path"),
+                    "name": body.get("name"),
+                    "session_type": body.get("session_type"),
+                    "local_path": body.get("local_path"),
+                    "remote_path": body.get("remote_path"),
+                    "status": "idle",
+                    "heartbeat_interval_secs": interval,
+                    "created_at": "2026-11-15T05:00:00Z",
                 });
-                account.sessions.lock().expect("sessions").push(session);
-                Reply::ok(json!({ "session_id": session_id }))
+                account.sessions.lock().expect("sessions").push(session.clone());
+                Reply::ok(session)
             }
 
             // ── Heartbeat ───────────────────────────────────────────────
@@ -509,28 +907,18 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
             // ── Logout ──────────────────────────────────────────────────
             "POST /api/v1/auth/logout" => Reply::ok(json!({})),
 
-            // ── Upload init ─────────────────────────────────────────────
+            // ── Whole uploads: init, chunks, heartbeat, complete, abandon; stored pictures (`fake_uploads`) ──
             "POST /api/v1/uploads/init" => {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
-                let body = req.json();
-                let file_id = body
-                    .get("file_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("file-{}", uuid::Uuid::new_v4()));
-                Reply::ok(json!({
-                    "file_id": file_id,
-                    "tenant_id": "tenant-1",
-                    "object_version_id": "ver-1",
-                    "upload_session_id": format!("upload-{}", uuid::Uuid::new_v4()),
-                    "chunk_size_bytes": 5_242_880,
-                    "chunk_count": 1,
-                    "storage_format_version": 1,
-                    "storage_pool_id": "pool-1",
-                    "region": "europe",
-                }))
+                account.upload_init(&req.json())
+            }
+            route_str if account.is_upload_route(route_str) => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.upload_route(&req)
             }
 
             // ── Search shards ───────────────────────────────────────────
@@ -538,6 +926,20 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
 
             // ── Shares invites ──────────────────────────────────────────
             "GET /api/v1/shares/invites/incoming" => Reply::ok(json!({ "invites": [] })),
+
+            // ── Share links: make one, list the account's ───────────────
+            "POST /api/v1/shares" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.post_link(&req.json())
+            }
+            route_str if route_str.split('?').next() == Some("GET /api/v1/shares/mine") => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.list_links()
+            }
 
             // ── One chunk of a file with content (`FakeAccount::add_file_with_content`) ──
             route_str if route_str.starts_with("GET /api/v1/files/") && route_str.contains("/chunks/") => {

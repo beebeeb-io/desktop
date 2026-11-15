@@ -2,7 +2,7 @@
 //! the selected item's own details.
 
 use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
-use super::{sidebar, toolbar};
+use super::{select_bar, sidebar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
 use crate::theme::{icons, icons_files};
@@ -90,6 +90,7 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
         MenuKind::File => ("File", menus::FILE_MENU_W),
         MenuKind::Sort => ("Sort", menus::SORT_MENU_W),
         MenuKind::New => ("New", menus::NEW_MENU_W),
+        MenuKind::Background => ("List", super::background_menu::MENU_W),
     };
     // The menu is modal, so what is outside it hears no key: its keys are heard on the menu itself.
     let surface =
@@ -100,7 +101,40 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
         // and 36 more with the Open in File Explorer button beside it; of New: 42 pt.
         MenuKind::Sort => layer(226.0 + 36.0, surface),
         MenuKind::New => layer(42.0, surface),
+        MenuKind::Background => {
+            // Sort by's choices belong to the menu: a press on them is a press inside it.
+            let surface = match background_sort_flyout(s, t) {
+                Some(flyout) => surface.child(flyout),
+                None => surface,
+            };
+            surface.absolute(open.at.0, open.at.1)
+        }
     })
+}
+
+/// Sort by's choices beside the background menu (DW-1103), while "Sort by" is the highlighted entry.
+fn background_sort_flyout(s: &State, t: &Theme) -> Option<El> {
+    let (x, y) = s.background_sort_at()?;
+    let at = s.actions.menu?.at;
+    let entries = super::background_menu::sort_entries(s);
+    // Its own keys, `menu-1`: the board names the second menu so.
+    Some(
+        menu::flyout(
+            "menu-1",
+            "Sort by",
+            super::background_menu::SUB_W,
+            &entries,
+            t,
+            pick_sort,
+            |_, _| {},
+            close,
+        )
+        .absolute(x - at.0, y - at.1),
+    )
+}
+
+fn pick_sort(s: &mut State, index: usize, tx: &mut Tx) {
+    s.pick_background_sort(index, tx);
 }
 
 /// `again`: does a failure's message offer Try again (`State::offers_try_again`)?
@@ -123,6 +157,13 @@ fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
             &icons::AVAILABLE_OFFLINE,
             toast::Tone::Neutral,
             "Keeping on this PC",
+            None,
+            t,
+        ),
+        Toast::UploadCancelled => toast::toast(
+            &icons::TRASH,
+            toast::Tone::Neutral,
+            "Upload cancelled. The copy is in the Recycle Bin.",
             None,
             t,
         ),
@@ -236,9 +277,41 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 })
         }));
         if s.show_detail_pane {
-            let selected = s.selected.and_then(|i| s.listing.items.get(i));
-            let facts = selected.map(|item| (item, s.actions.source.details(item, &s.listing.folder.name)));
-            body = body.child(details::details_pane(facts, &t));
+            // A copy on its way down is not on this PC yet, and says so on the Available offline card (DW-0412).
+            let selected = s
+                .selected
+                .and_then(|i| s.listing.items.get(i))
+                .map(|item| match s.download_of(&item.id) {
+                    Some(d) => (
+                        crate::source::DriveItem {
+                            pc_status: Some("downloading".into()),
+                            ..item.clone()
+                        },
+                        Some(d),
+                    ),
+                    None => (item.clone(), None),
+                });
+            let facts = selected.as_ref().map(|(item, download)| {
+                let mut facts = s.actions.source.details(item, &s.listing.folder.name);
+                if let Some(d) = download {
+                    // A copy that comes down for another reason (a player reading it) is not a keep.
+                    if d.kept {
+                        facts.offline_note = d.panel_words();
+                        facts.kept_offline = true;
+                    }
+                }
+                (item, facts)
+            });
+            body = body.child(if s.selects_several() {
+                let items: Vec<_> = s
+                    .selected_rows()
+                    .iter()
+                    .filter_map(|&i| s.listing.items.get(i))
+                    .collect();
+                select_bar::panel(&items, &t)
+            } else {
+                details::details_pane(facts, &t)
+            });
         }
     }
 
@@ -256,6 +329,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .or_else(|| crate::frames::global::under_toolbar(s, &t))
                 .or_else(|| super::protected::notice(s, &t)),
         )
+        // Several rows selected: what can be done to all of them (DW-0403).
+        .children(select_bar::bar(s, &t))
         .child(body)
         .child({
             // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).

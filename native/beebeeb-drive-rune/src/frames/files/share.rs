@@ -13,7 +13,7 @@
 
 use super::actions_data::{LinkAccess, LinkExpiry, ShareOptions};
 use super::dialogs::{self, Dialog};
-use super::source::Action;
+use super::source::{Action, ActionError};
 use super::{Intent, Toast};
 use crate::State;
 use crate::source::{DriveItem, format_size};
@@ -137,8 +137,15 @@ impl State {
         if self.needs_session(tx) {
             return;
         }
+        // One link at a time (`link.rs`). Refused before anything is read or closed: the dialog stays as it is,
+        // with what was typed, and the press can be repeated when the link on its way answered.
+        if self.link_on_its_way() {
+            self.show_toast(Toast::Failed(Action::ShareLink, ActionError::InFlight), tx);
+            return;
+        }
         let typed = self.actions.share_password.text.clone();
-        if share.password_on && typed.is_empty() {
+        // Spaces are not a password: a link made with them would ask for none.
+        if share.password_on && typed.trim().is_empty() {
             if let Some(share) = self.share_mut() {
                 share.password_missing = true;
             }
@@ -156,6 +163,19 @@ impl State {
         // The dialog closes either way; a failure says so, with Try again (DW-0109).
         self.close_dialog(tx);
         match answer {
+            // Accepted, not made: "Link copied" is said when the link is on the clipboard (`link.rs`), and a
+            // failure then opens this dialog again as a refusal at the press does.
+            Ok(()) if self.actions.source.answers_later() => {
+                // An earlier message is not this press's.
+                self.actions.toast = None;
+                self.actions.toast_until = None;
+                self.actions.retry_share = None;
+                self.actions.link.share = Some(Share {
+                    password_missing: false,
+                    menu: None,
+                    ..share
+                });
+            }
             Ok(()) => {
                 self.actions.retry_share = None;
                 self.show_toast(Toast::LinkCopied, tx);
@@ -195,19 +215,19 @@ impl State {
         };
         self.close_dialog(tx);
         self.intent(Intent::Frame("DW-0514"));
-        let id = share
+        // The item's share (or, for an item not shared with anyone yet, the item itself) and its name for the title.
+        let target = share
             .items
             .first()
-            .and_then(|item| self.actions.source.share_of(item))
-            .filter(|id| self.frames.shared.share(id).is_some());
-        let Some(id) = id else {
-            // There is no share to invite to (the engine makes one; nothing is wired here).
+            .and_then(|item| Some((self.actions.source.share_of(item)?, item.name.clone())));
+        let Some((id, name)) = target else {
+            // Nothing to invite to (not one of the account's own items).
             self.failed(Action::Invite, super::source::ActionError::Unavailable, tx);
             return;
         };
         use crate::shell::app::{Event, Route, Section};
         crate::shell::host::dispatch(self, Event::Navigate(Route::section(Section::Shared)));
-        self.frames.shared.start_invite(&id);
+        self.frames.shared.start_invite_named(&id, &name);
     }
 }
 

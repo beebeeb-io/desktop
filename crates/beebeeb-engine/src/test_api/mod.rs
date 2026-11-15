@@ -6,7 +6,14 @@
 //! Must not: be reachable from a release build, or hold anything a test did not put there.
 
 pub mod fake_account;
+pub mod fake_previews;
+pub mod fake_signup;
+pub mod fake_uploads;
+pub mod password_change;
 pub mod server;
+
+#[cfg(test)]
+mod gap_tests;
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -68,6 +75,8 @@ pub struct Reply {
     pub status: u16,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    /// The `Retry-After` header, in seconds (a 429 that says how long to wait).
+    pub retry_after: Option<u64>,
 }
 
 impl Reply {
@@ -76,6 +85,7 @@ impl Reply {
             status,
             content_type: "application/json",
             body: body.to_string().into_bytes(),
+            retry_after: None,
         }
     }
 
@@ -88,7 +98,14 @@ impl Reply {
             status,
             content_type: "application/octet-stream",
             body,
+            retry_after: None,
         }
+    }
+
+    /// The same answer with a `Retry-After` header.
+    pub fn retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds);
+        self
     }
 
     pub fn empty(status: u16) -> Self {
@@ -209,8 +226,12 @@ fn serve(mut stream: TcpStream, handler: &Handler, log: Option<&Mutex<Vec<Reques
         "ERR"
     };
     let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT");
+    let retry_after = reply
+        .retry_after
+        .map(|seconds| format!("Retry-After: {seconds}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "HTTP/1.1 {} {reason}\r\nDate: {date}\r\nServer: {FAKE_API_MARK}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {reason}\r\nDate: {date}\r\nServer: {FAKE_API_MARK}\r\nContent-Type: {}\r\n{retry_after}Content-Length: {}\r\nConnection: close\r\n\r\n",
         reply.status,
         reply.content_type,
         reply.body.len()

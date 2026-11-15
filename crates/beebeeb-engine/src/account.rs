@@ -130,11 +130,17 @@ pub struct AccountRuntime {
     session_generation: AtomicU64,
     /// What moved it last (a [`SessionTransition`] as a `u8`).
     last_transition: AtomicU8,
+    /// How many session-ending steps were ASKED (`Engine::session_ending_step`): counted before a step waits for the
+    /// engine's step lock, so a step on its way is seen before it moves the generation. Never reset, also not at a
+    /// sign-out or a sign-in (one runtime per engine, as the generation).
+    session_steps_asked: AtomicU64,
     /// The identify request's single flight and its debounce (see [`IdentifyFlight`]).
     pub identify_flight: Mutex<IdentifyFlight>,
     /// The naming could not write the session's email to the Keychain; the next naming trigger writes it again
     /// (Task 12 fix round 2, item 3).
     pub keychain_email_pending: AtomicBool,
+    /// The viewer's saves, per opening of a file (`app::viewer_edit_api`): emptied whenever the session moves.
+    pub(crate) viewer_saves: crate::app::viewer_edit_api::ViewerSavesStore,
     /// The last binding refusal of an engine start for the current session (Task 12 fix round 2, ruling P), shown as
     /// `sync_status.engine_refusal`. A start that runs clears it, and so does every session transition.
     pub engine_refusal: Mutex<Option<crate::account_binding::Refusal>>,
@@ -174,8 +180,10 @@ impl AccountRuntime {
             engine_stop_unconfirmed: AtomicBool::new(false),
             session_generation: AtomicU64::new(0),
             last_transition: AtomicU8::new(0),
+            session_steps_asked: AtomicU64::new(0),
             identify_flight: Mutex::new(IdentifyFlight::default()),
             keychain_email_pending: AtomicBool::new(false),
+            viewer_saves: Default::default(),
             engine_refusal: Mutex::new(None),
             auth_resume_asked: Arc::new(AtomicU64::new(0)),
             auth_resume_done: Arc::new(AtomicU64::new(0)),
@@ -187,6 +195,17 @@ impl AccountRuntime {
     /// The account's current [`SessionGeneration`]. Capture it before starting work for the current session.
     pub fn session_generation(&self) -> SessionGeneration {
         SessionGeneration(self.session_generation.load(Ordering::SeqCst))
+    }
+
+    /// A session-ending step was asked (a sign-out, a vault lock, the close of a session the server ended, leaving a
+    /// half-done sign-in): counted BEFORE it waits for the engine's step lock.
+    pub(crate) fn note_session_step_asked(&self) {
+        self.session_steps_asked.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many session-ending steps were asked so far (monotonic).
+    pub(crate) fn session_steps_asked(&self) -> u64 {
+        self.session_steps_asked.load(Ordering::SeqCst)
     }
 
     /// Whether no session transition has happened since `generation` was captured: the session is still the one the
@@ -237,6 +256,8 @@ impl AccountRuntime {
         if matches!(by, SessionTransition::Lock | SessionTransition::SignOut) {
             self.keychain_email_pending.store(false, Ordering::SeqCst);
         }
+        // The viewer's saves are the session's: none of them is any later session's own.
+        self.viewer_saves.clear();
         moved
     }
 

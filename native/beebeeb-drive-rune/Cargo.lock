@@ -510,9 +510,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "beebeeb-api"
+version = "0.3.0"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
+dependencies = [
+ "beebeeb-core",
+ "beebeeb-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "beebeeb-backup"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -524,12 +537,12 @@ dependencies = [
 [[package]]
 name = "beebeeb-core"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "aes",
  "aes-gcm",
  "argon2",
- "base64 0.22.1",
+ "base64 0.23.1",
  "beebeeb-types",
  "bip39",
  "blake3",
@@ -569,10 +582,12 @@ name = "beebeeb-drive-rune"
 version = "0.0.1"
 dependencies = [
  "beebeeb-engine",
+ "beebeeb-updater",
  "chrono",
  "hayro",
  "png",
  "pulldown-cmark",
+ "qrcode",
  "raw-window-handle",
  "rune",
  "rune-kit",
@@ -581,6 +596,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
  "url",
  "wgpu",
  "windows 0.58.0",
@@ -594,6 +610,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "beebeeb-api",
  "beebeeb-backup",
  "beebeeb-core",
  "beebeeb-sync",
@@ -634,7 +651,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-sync"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -652,7 +669,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-transfer"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -667,9 +684,21 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "beebeeb-updater"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "minisign",
+ "minisign-verify",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1219,6 +1248,12 @@ dependencies = [
  "hybrid-array",
  "rand_core 0.10.1",
 ]
+
+[[package]]
+name = "ct-codecs"
+version = "1.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fd9f3db6f2cfef61c10613071955154ffdc9e515daebff26de4b54e35038fdd"
 
 [[package]]
 name = "ctr"
@@ -1832,6 +1867,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -1889,9 +1925,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
+ "futures-io",
  "futures-macro",
  "futures-sink",
  "futures-task",
+ "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -2958,6 +2996,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5848f5a9e8117cf94f2f90faac24a87ff81600ff8628c1e3deaab572e76bfa1"
 
 [[package]]
+name = "minisign"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26541387415a1e829df5d532aad019fb11bc723e2b5bc99edefa4cf5bfad0de7"
+dependencies = [
+ "ct-codecs",
+ "getrandom 0.2.17",
+ "rpassword",
+ "scrypt",
+]
+
+[[package]]
+name = "minisign-verify"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3860,6 +3916,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest 0.10.7",
+ "hmac 0.12.1",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4226,6 +4292,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4517,7 +4589,9 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
@@ -4619,6 +4693,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "rpassword"
+version = "7.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa2c5d9304b618df61ff17f3d3485c6e1854a3d94902a49abbb8d43dfbe0464"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4899,6 +4994,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "salsa20"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97a22f5af31f73a954c10289c93e8a50cc23d971e80ee446f1f6f7137a088213"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4927,6 +5031,17 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "scrypt"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0516a385866c09368f0b5bcd1caff3366aace790fcd46e2bb032697bb172fd1f"
+dependencies = [
+ "pbkdf2",
+ "salsa20",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "sctk-adwaita"

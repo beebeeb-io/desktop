@@ -1,5 +1,6 @@
 //! Trash (`DW-0747`, an item's menu `DW-0748`, emptying `DW-0749b`, and its empty state `DW-0117`): what was deleted in the last 30 days and
-//! where it came from. Nothing here opens; an item can be restored.
+//! where it came from. Nothing here opens (an item can be restored); Details and a read-only Preview show over the list
+//! (`frames::item`).
 
 pub mod scenes;
 pub mod source;
@@ -9,6 +10,7 @@ mod tests;
 mod tests_live;
 
 use crate::State;
+use crate::frames::shared::dialogs::{Dialog, PASSWORD_INPUT};
 use crate::frames::shared::parts::controls::{ButtonKind, button};
 use crate::frames::shared::parts::menu::{Entry, Open, Took, menu};
 use crate::frames::shared::parts::table::{Columns, header, rows, table_row};
@@ -18,7 +20,7 @@ use crate::frames::{self, Intent};
 use crate::theme::{icons, tokens};
 use crate::ui::kit;
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el};
-use source::{BoardTrash, Loaded, Notice, TrashSource};
+use source::{BoardTrash, Loaded, Notice, PurgeEnd, TrashSource};
 
 const COLUMNS: Columns = Columns {
     names: ["Name", "Deleted", "Size", "Where it was", ""],
@@ -79,12 +81,38 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if let Some(notice) = pumped.notice {
         ui.notice = Some(notice);
     }
+    // A delete for good ended: its dialog closes (a wrong password keeps it, for another try).
+    match pumped.purge {
+        Some(PurgeEnd::Done | PurgeEnd::Stopped) => s.frames.shared.close_purge_dialog(),
+        Some(PurgeEnd::WrongPassword) => {
+            s.frames.shared.fields.password.clear();
+            s.frames.shared.fields.problem = Some("That password is not right. Nothing was deleted.");
+            tx.focus(PASSWORD_INPUT, true);
+        }
+        None => {}
+    }
+    let ui = &mut s.frames.trash;
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
+    } else if let Some(after) = pumped.wake_in {
+        tx.wake_after(after);
     }
     changed |= pumped.changed;
     if pumped.changed {
         ui.resync();
+        // The item a Delete permanently? dialog is about is not in the list any more (restored, or gone): it closes.
+        let gone = match &s.frames.shared.dialog {
+            Some(Dialog::DeleteForever(id)) => {
+                let ui = &s.frames.trash;
+                !ui.source.purging()
+                    && ui.source.loaded() == Loaded::Ready
+                    && !ui.source.items().iter().any(|r| &r.id == id)
+            }
+            _ => false,
+        };
+        if gone {
+            s.frames.shared.close_purge_dialog();
+        }
     }
     changed
 }
@@ -104,15 +132,28 @@ fn pick(s: &mut State, n: usize, tx: &mut Tx) {
         (0, _) => {
             s.frames.trash.restore_selected();
         }
-        (1 | 2, Some(_)) if !s.frames.trash.source.actions_available() => {
+        (1, Some(_)) if !s.frames.trash.source.actions_available() => {
+            s.frames.trash.notice = Some(Notice::NotAvailable);
+        }
+        (2, Some(_)) if !s.frames.trash.source.purge_available() => {
             s.frames.trash.notice = Some(Notice::NotAvailable);
         }
         (1, Some(id)) => s.frames.intents.push(Intent::About("DW-0411", id)),
-        // The warning for THIS item (DW-0748: "the same big warning as Empty Trash, for this item").
-        (2, Some(id)) => s.frames.intents.push(Intent::Do("delete-permanently", id)),
+        // The warning for THIS item (DW-0748: "the same big warning as Empty Trash, for this item"), and the password.
+        (2, Some(id)) => {
+            open_purge(s, Dialog::DeleteForever(id), tx);
+            return;
+        }
         _ => {}
     }
     return_focus(s, tx);
+}
+
+/// Open the password dialog of a delete for good over Trash, its field in focus.
+fn open_purge(s: &mut State, dialog: Dialog, tx: &mut Tx) {
+    s.frames.trash.menu = None;
+    s.frames.shared.open_dialog(dialog);
+    tx.focus(PASSWORD_INPUT, true);
 }
 
 fn close_menu(s: &mut State, tx: &mut Tx) {
@@ -206,7 +247,7 @@ impl TrashUi {
 }
 
 /// The words of a notice.
-fn notice_words(notice: &Notice) -> String {
+pub(crate) fn notice_words(notice: &Notice) -> String {
     match notice {
         Notice::RestoreRefused(name) => {
             format!("Couldn\u{2019}t restore \u{201C}{name}\u{201D}. It\u{2019}s still in Trash.")
@@ -217,7 +258,43 @@ fn notice_words(notice: &Notice) -> String {
         }
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Trash. What\u{2019}s shown may be out of date.".into(),
         Notice::NotAvailable => "Not available yet in this version.".into(),
+        Notice::FoldersKept { done, folders, inside } => folders_kept_words(*done, *folders, *inside),
+        Notice::PurgeNotConfirmed { done: 0 } => {
+            "Beebeeb didn\u{2019}t confirm the delete. Some items may be gone; check Trash.".into()
+        }
+        Notice::PurgeNotConfirmed { done } => format!(
+            "{} deleted for good. Beebeeb didn\u{2019}t confirm the rest. Some of them may be gone; check Trash.",
+            plural(*done, "item", "items")
+        ),
+        Notice::PurgeStopped { done: 0, why } => format!("Nothing was deleted. {why}"),
+        Notice::PurgeStopped { done, why } => format!(
+            "{} deleted for good. The rest are still in Trash. {why}",
+            plural(*done, "item", "items")
+        ),
     }
+}
+
+/// The words when a delete kept folders (and what it deleted): the reason is the server's, in our words.
+fn folders_kept_words(done: usize, folders: usize, inside: u64) -> String {
+    let one = folders == 1;
+    let gone = plural(done, "item", "items");
+    let kept = plural(folders, "folder", "folders");
+    let stay = if one { "stays" } else { "stay" };
+    let what = if inside == 0 {
+        format!(
+            "{} items that cannot be deleted from Trash",
+            if one { "it holds" } else { "they hold" }
+        )
+    } else {
+        format!(
+            "{} {} that {} not in Trash",
+            if one { "it holds" } else { "they hold" },
+            plural(inside as usize, "item", "items"),
+            if inside == 1 { "is" } else { "are" }
+        )
+    };
+    let see = if one { "the folder" } else { "the folders" };
+    format!("{gone} deleted for good. {kept} {stay} in Trash because {what}. Restore {see} to see inside.")
 }
 
 /// The notice over the list (`.mk-banner` without a bar). Keys: `notice`, `notice-words`.
@@ -363,13 +440,15 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         vec![button("Empty Trash\u{2026}", ButtonKind::GhostOff, None, &t)]
     } else {
         vec![
-            button("Empty Trash\u{2026}", ButtonKind::GhostDanger, None, &t).on_press(|s: &mut State| {
-                if s.frames.trash.source.actions_available() {
-                    s.frames.intents.push(Intent::Frame("DW-0749"));
-                } else {
-                    s.frames.trash.notice = Some(Notice::NotAvailable);
-                }
-            }),
+            button("Empty Trash\u{2026}", ButtonKind::GhostDanger, None, &t).on_press_tx(
+                |s: &mut State, tx: &mut Tx| {
+                    if s.frames.trash.source.purge_available() {
+                        open_purge(s, Dialog::EmptyTrash, tx);
+                    } else {
+                        s.frames.trash.notice = Some(Notice::NotAvailable);
+                    }
+                },
+            ),
         ]
     };
     let bar = toolbar(
@@ -513,8 +592,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Home => ui.select(0, tx),
         Key::End => ui.select(count - 1, tx),
         Key::Delete => match ui.selected_id() {
-            Some(_) if !ui.source.actions_available() => ui.notice = Some(Notice::NotAvailable),
-            Some(id) => s.frames.intents.push(Intent::Do("delete-permanently", id)),
+            Some(_) if !ui.source.purge_available() => ui.notice = Some(Notice::NotAvailable),
+            Some(id) => open_purge(s, Dialog::DeleteForever(id), tx),
             None => return false,
         },
         _ => return false,

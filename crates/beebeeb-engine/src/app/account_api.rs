@@ -179,12 +179,10 @@ impl<C: CredentialStores> Engine<C> {
     /// The token and the generation of the session in memory, taken under one lock. No session: `NotSignedIn`.
     /// A session Beebeeb no longer accepts: `SessionEnded`, and nothing is asked. The copy of the token wipes
     /// itself when it is dropped: a refusal after this point leaves none behind.
-    fn token_of_this_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), AccountCallError> {
-        let stamped = {
-            let guard = self.acct.session.lock().map_err(|_| AccountCallError::NotSignedIn)?;
-            let current = guard.as_ref().ok_or(AccountCallError::NotSignedIn)?;
-            (Zeroizing::new(current.token.clone()), self.acct.session_generation())
-        };
+    pub(super) fn token_of_this_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), AccountCallError> {
+        let stamped = self
+            .person_session(|session, generation| (Zeroizing::new(session.token.clone()), generation))
+            .map_err(|_| AccountCallError::NotSignedIn)?;
         if self.acct.auth_health.is_expired() {
             return Err(AccountCallError::SessionEnded);
         }
@@ -193,7 +191,7 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Whether the session in memory is, now, the one `generation` names: asked with no session change half done
     /// (the session-write lock is held for the question). Never waits: during a session change the answer is no.
-    fn account_session_is_still(&self, generation: SessionGeneration) -> bool {
+    pub(super) fn account_session_is_still(&self, generation: SessionGeneration) -> bool {
         self.acct.while_session_is(&self.writes, generation, |_| ()).is_some()
     }
 
@@ -214,7 +212,7 @@ impl<C: CredentialStores> Engine<C> {
     /// [`Engine::note_account_call`], only while the session in memory is still `session` (asked with no session
     /// change half done): a late answer of an earlier session never counts for, or clears, the next one's run.
     /// `false`: the session moved on, and nothing was noted.
-    fn note_for_session(&self, session: SessionGeneration, failed_as: Option<AccountCallError>) -> bool {
+    pub(super) fn note_for_session(&self, session: SessionGeneration, failed_as: Option<AccountCallError>) -> bool {
         self.acct
             .while_session_is(&self.writes, session, |_| self.note_account_call(failed_as))
             .is_some()
@@ -273,3 +271,7 @@ impl<C: CredentialStores> Engine<C> {
         answer
     }
 }
+
+#[path = "session_owner_api.rs"]
+mod session_owner;
+pub use session_owner::OwnerSettled;

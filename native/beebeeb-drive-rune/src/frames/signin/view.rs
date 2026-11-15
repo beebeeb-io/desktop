@@ -38,7 +38,7 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         Screen::Phrase => view_steps::phrase(ui, &mut k, &t),
         Screen::UnlockVault => view_steps::unlock(ui, &mut k, &t),
         Screen::NoPhrase => view_recovery::no_phrase(&mut k, &t),
-        Screen::Forgot => view_recovery::forgot(&mut k, &t),
+        Screen::Forgot => view_recovery::forgot(&mut k, ui.in_app_doors(), &t),
         Screen::CannotRecover => view_recovery::cannot_recover(&mut k, &t),
         Screen::Recover => view_recover::recover(ui, &mut k, &t),
         Screen::NewPassword => view_recover::new_password(ui, &mut k, &t),
@@ -85,7 +85,12 @@ pub(super) fn actions(top: f32) -> El {
 }
 
 pub(super) fn back(t: &Theme) -> El {
-    au::back_link("Sign in", &icons::BACK, t).on_press_tx(act(Ui::open_sign_in))
+    back_as("Sign in", t)
+}
+
+/// The back link under another name: "Back" while a lock holds the window (it leads to the lock's own screens).
+pub(super) fn back_as(label: &str, t: &Theme) -> El {
+    au::back_link(label, &icons::BACK, t).on_press_tx(act(Ui::open_sign_in))
 }
 
 fn use_password_instead(k: &mut Keys, label: &str, t: &Theme) -> El {
@@ -266,7 +271,7 @@ fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
     if let Some(session) = ui.shared() {
         c = c
             .child(continue_card(session, ui, k, t))
-            .child(other_device_button(ui, k, t))
+            .children(ui.in_app_doors().then(|| other_device_button(ui, k, t)))
             .child(au::or_divider(k, "or use email and password", t));
     }
     c = c.child(au::field(
@@ -334,20 +339,22 @@ fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
             t.text_secondary,
         );
     }
-    c = c.child(
-        row()
-            .key("au-links")
-            .w_full()
-            .h(15.0)
-            .center_y()
-            .justify_between()
-            .child(way_out(au::link(k, "Forgot password?", None, t), ui, Ui::forgot))
-            .child(way_out(
-                au::link(k, "Use a passkey", Some(&icons::PASSKEY), t),
-                ui,
-                Ui::use_passkey,
-            )),
-    );
+    // "Use a passkey" is drawn only where the source can sign in with one.
+    let mut links = row()
+        .key("au-links")
+        .w_full()
+        .h(15.0)
+        .center_y()
+        .justify_between()
+        .child(way_out(au::link(k, "Forgot password?", None, t), ui, Ui::forgot));
+    if ui.passkey_available() {
+        links = links.child(way_out(
+            au::link(k, "Use a passkey", Some(&icons::PASSKEY), t),
+            ui,
+            Ui::use_passkey,
+        ));
+    }
+    c = c.child(links);
 
     let with_card = ui.shared().is_some();
     let (label, state) = if ui.busy {
@@ -376,7 +383,8 @@ fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
         submit = submit.on_press_tx(act(Ui::submit)).default_button();
     }
     let mut foot = actions(if with_card { 4.0 } else { 0.0 }).child(submit);
-    if !with_card {
+    // Approval from another device is drawn only where the source can do it: never a door that leads elsewhere.
+    if !with_card && ui.in_app_doors() {
         foot = foot
             .child(au::or_divider(k, "or", t))
             .child(other_device_button(ui, k, t));

@@ -89,6 +89,50 @@ impl EngineBridge {
         allowed_roots: &[&Path],
         progress: Option<&HydrateProgressFn>,
     ) -> anyhow::Result<()> {
+        self.hydrate_from(file_id, dest_path, allowed_roots, progress, HydrateStart::Here)
+            .await
+    }
+
+    /// S6 (R7 b): a hydrate the queue runs (a pin, a re-download, a kept fetch). Never the person's resolution: unknown
+    /// bytes at the place refuse it whatever the row's status, so the retry of a failed fetch (its row left `Error`)
+    /// never replaces a file made at the place meanwhile.
+    pub(super) async fn hydrate_queued(&self, file_id: &str, dest: &Path, roots: &[&Path]) -> anyhow::Result<()> {
+        self.hydrate_from(file_id, dest, roots, None, HydrateStart::Queued)
+            .await
+    }
+
+    /// S6 (R9): a hydrate whose start look the caller took (Keep there, before its safety copy reads a byte), so a
+    /// save made after that look is never replaced. A destination other than the place it looked at refuses.
+    pub async fn hydrate_seen(
+        &self,
+        file_id: &str,
+        dest: &Path,
+        roots: &[&Path],
+        seen: PlaceSeen,
+    ) -> anyhow::Result<()> {
+        self.hydrate_from(file_id, dest, roots, None, HydrateStart::Seen(seen))
+            .await
+    }
+
+    /// Keep there for a caller that takes no look of its own (the Tauri-era command): the look is taken here, before
+    /// anything is downloaded. The native Keep there looks before its safety copy ([`Self::resolve_theirs_seen`]).
+    pub async fn resolve_keep_theirs(&self, file_id: &str, sync_root: &Path) -> anyhow::Result<()> {
+        let entry = self.db.get_file(file_id)?;
+        let path = entry
+            .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?
+            .path;
+        let seen = PlaceSeen::take_async(&local_file_path_under_sync_root(sync_root, &path)?).await?;
+        self.resolve_theirs_seen(file_id, sync_root, seen).await
+    }
+
+    async fn hydrate_from(
+        &self,
+        file_id: &str,
+        dest_path: &Path,
+        allowed_roots: &[&Path],
+        progress: Option<&HydrateProgressFn>,
+        start: HydrateStart,
+    ) -> anyhow::Result<()> {
         // Task 1247 self-defense: validate `dest_path` against the caller's
         // trusted root(s) BEFORE any directory creation or plaintext write.
         // `dest_path` reaches the one untrusted caller (the IPC socket handler)
@@ -115,21 +159,29 @@ impl EngineBridge {
         // read BEFORE the download: at most the version the bytes are, so a later change can only
         // be refused as stale, never accepted over a newer one.
         let legacy_version = self.legacy_download_version(file_id)?;
-        if in_sync_folder && dest_path.exists() {
-            let content = sync_folder_content(&self.db, file_id, dest_path, None)?;
-            // Task 2191 (G-engine): a file of unknown content (in the population, conflicts and
-            // errors excepted: their resolution is the person's) is never written over while its
-            // place holds bytes; they may be the person's only copy of a change.
-            // Review-157 F3: Windows only (elsewhere nothing marks a row empty, and a hydrate never
-            // writes in place).
-            let unknown_with_bytes = cfg!(any(target_os = "windows", any(test, feature = "test-support")))
-                && matches!(content, SyncFolderContent::Unknown)
-                && self.db.is_unknown_population(file_id)?
-                && place_holds_bytes(dest_path);
-            if unknown_with_bytes || matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {
-                tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
-                return Err(anyhow::Error::new(UnsentLocalChange).into());
+        // A conflict or an error is the person's to resolve (Keep there keeps a copy first): read once, here, before
+        // the row becomes `Downloading`, for both checks below. Never for a queued hydrate (S6 R7 b).
+        let persons_resolution = !matches!(start, HydrateStart::Queued)
+            && self
+                .db
+                .get_file(file_id)?
+                .is_some_and(|entry| matches!(entry.status, FileStatus::Conflict | FileStatus::Error));
+        // S6 (R8): the start look, before the start content look: right before the place is replaced it must still be
+        // what this look saw, so a save made at any point after it (during the download included) is never replaced.
+        let seen_at_start = match (in_sync_folder, start) {
+            (false, _) => None,
+            (true, HydrateStart::Seen(seen)) if seen.place == dest_path => Some(seen.fingerprint),
+            (true, HydrateStart::Seen(_)) => {
+                tracing::warn!(file_id = %file_id, "hydrate refused: not the place that was looked at");
+                return Err(anyhow::Error::new(UnsentLocalChange));
             }
+            (true, HydrateStart::Here | HydrateStart::Queued) => {
+                Some(PlaceSeen::take_async(dest_path).await?.fingerprint)
+            }
+        };
+        if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution)? {
+            tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
+            return Err(anyhow::Error::new(UnsentLocalChange).into());
         }
         // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
         // own (a Finder upload that has not parked): no `Downloading`, `Local` or `Error`.
@@ -211,7 +263,38 @@ impl EngineBridge {
                 // `dest_path` — there is no separate "delete the half-written
                 // file" step needed here because the primitive itself never
                 // makes one externally visible.
-                let write_result = write_hydrated_plaintext(dest_path, allowed_roots, &buf);
+                // Task 2523: the download took time, and the place may have been changed meanwhile (on Linux
+                // nothing would ever notice it): asked again right before the place is replaced. A change keeps
+                // its bytes; the row goes back to what it was.
+                self.seam("hydrate:before_write");
+                let refuse_changed = |buf: &mut Vec<u8>, why: &'static str| {
+                    buf.zeroize();
+                    if let Some(guard) = &downloading_guard {
+                        let _ = self
+                            .db
+                            .set_status_if(file_id, FileStatus::Downloading, guard.restore.clone());
+                    }
+                    tracing::warn!(file_id = %file_id, "hydrate refused: {why}");
+                    anyhow::Error::new(UnsentLocalChange)
+                };
+                if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution)? {
+                    return Err(refuse_changed(&mut buf, "the local file was changed during the download").into());
+                }
+                // Review P2-1, S6 (R8): the place (its size, times and inode) compared with the start look once the copy
+                // is written, right before it replaces the place: a save after the start look is never replaced.
+                let mut place_unchanged = || {
+                    self.seam("hydrate:before_replace");
+                    seen_at_start
+                        .as_ref()
+                        .is_none_or(|before| *before == place_fingerprint(dest_path))
+                };
+                let write_result =
+                    write_hydrated_plaintext_checked(dest_path, allowed_roots, &buf, &mut place_unchanged);
+                if write_result.as_ref().is_err_and(place_changed_before_replace) {
+                    return Err(
+                        refuse_changed(&mut buf, "the local file was changed while the download was written").into(),
+                    );
+                }
                 let hydrated_hash = in_sync_folder.then(|| sha256_hex(&buf));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
@@ -278,6 +361,32 @@ impl EngineBridge {
                 Err(e.into())
             }
         }
+    }
+
+    /// Task 1640 / 2191 / 2523: the bytes at `place` (the file's own place in the sync folder) may be the person's
+    /// only copy of a change, so a hydrate never writes over them: bytes that differ from the content this device last
+    /// agreed with the server on, a queued upload, or bytes of unknown content (no agreed content and nothing fetched
+    /// recorded) while the place holds any. Every row, wherever its content came from (task 2523, F3: before, the
+    /// unknown case covered only files hydrated before 0.8.13, and a held edit after a viewer save was not one).
+    /// `persons_resolution`: the row was a conflict or an error when the hydrate began; its unknown bytes are then the
+    /// person's to resolve (Keep there keeps a copy first), and only a change against agreed content refuses.
+    pub(super) fn place_holds_an_unsent_change(
+        &self,
+        file_id: &str,
+        place: &Path,
+        persons_resolution: bool,
+    ) -> Result<bool, EngineError> {
+        if !place.exists() {
+            return Ok(false);
+        }
+        let content = sync_folder_content(&self.db, file_id, place, None)?;
+        if matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {
+            return Ok(true);
+        }
+        if !matches!(content, SyncFolderContent::Unknown) {
+            return Ok(false);
+        }
+        Ok(!persons_resolution && place_holds_bytes(place))
     }
 
     /// Record where a hydrate wrote `file_id`'s plaintext, for the cache accounting and the
@@ -1038,4 +1147,20 @@ impl EngineBridge {
             covers_whole_file: plan.covers_whole_file,
         }))
     }
+}
+
+/// Who starts a hydrate, for its start look and the person's-resolution exemption (S6).
+enum HydrateStart {
+    /// A caller here and now (the IPC hydrate, Keep both, a conflict's own path): its own start look.
+    Here,
+    /// The queue: its own start look, and never the person's resolution (R7 b).
+    Queued,
+    /// The caller's start look (Keep there's, taken before its safety copy).
+    Seen(PlaceSeen),
+}
+
+/// Review P2-1: what the place is (its size, times, device and inode), `None` when nothing is there. Nothing there before
+/// and something there now is a change too.
+fn place_fingerprint(place: &Path) -> Option<ContentFingerprint> {
+    ContentFingerprint::of(place).ok()
 }

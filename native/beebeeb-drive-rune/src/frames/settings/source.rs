@@ -40,9 +40,46 @@ impl ThemeChoice {
 pub enum Update {
     /// This is the newest version known.
     Current,
-    /// A newer one can be downloaded.
-    Available { version: String },
+    /// A newer one is known. `press` is what its button does now; `says`, when set, takes the caption's place
+    /// while a press is worked on or after one did not go through (the updater's own fixed words).
+    Available {
+        version: String,
+        press: Press,
+        says: Option<String>,
+    },
 }
+
+/// What the update's one button does now (DW-0781, DW-0789b). ONE press (owner ruling 2026-11-15): "Restart to
+/// update" downloads the newer version, checks its signature, and, the moment the file is verified, stops sync and
+/// hands it to the installer, and Beebeeb closes (spec `docs/superpowers/specs/2026-11-11-native-installer-updater.md`
+/// §4, "Apply": the hand-off is still the only way to the installer). Nothing installs without the press.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Press {
+    /// "Restart to update": the board's own words and drawing.
+    #[default]
+    Restart,
+    /// A step of the press failed and nothing was installed: "Try again" runs the press again (the words in the
+    /// caption's place say what failed).
+    Retry,
+    /// The press is being worked on (downloading, checking the signature, handing off), or no press can install now
+    /// (a stop of sync that was not confirmed: the words say to restart Beebeeb): the button waits.
+    Wait,
+}
+
+impl Press {
+    /// The button's words.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Retry => "Try again",
+            Self::Restart | Self::Wait => "Restart to update",
+        }
+    }
+}
+
+/// The caption beside the update's button (DW-0781's banner, DW-0789b's dialog). It follows the one press, not the
+/// board's "Download it, then open it to install." (lead ruling 2026-11-15, owner ruling 2026-11-15; the design note
+/// is in `FRAMES.md`).
+pub const UPDATE_CAPTION: &str = "Its signature is checked first. It installs only when you choose Restart to update.";
 
 /// The General pane's values.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -94,6 +131,9 @@ pub struct ReleaseNotes {
     pub released: String,
     /// The release's own notes, a line each. Empty: the release came without notes.
     pub lines: Vec<String>,
+    /// What the dialog's button does now. Only a newer version's notes are ever here: an older one is never
+    /// offered (DW-0789, Rules).
+    pub press: Press,
 }
 
 /// The About pane's values (DW-0751).
@@ -124,6 +164,8 @@ pub enum UpdateCheck {
     Checked(String),
     /// Asked, not answered yet.
     Checking,
+    /// The update's press is being worked on: the step it is at, in the row's words. Check now waits.
+    Working(String),
     /// The last check did not get an answer.
     Failed,
 }
@@ -133,7 +175,7 @@ impl UpdateCheck {
     /// (`src/macSettingsModel.ts`, `updateRow`), which the board's rule cites.
     pub fn says(&self) -> &str {
         match self {
-            Self::Checked(words) => words,
+            Self::Checked(words) | Self::Working(words) => words,
             Self::Checking => "Checking…",
             Self::Failed => "Couldn’t check for updates. Try again in a moment.",
         }
@@ -158,10 +200,14 @@ impl OlderChannel {
     }
     pub fn says(&self) -> String {
         format!(
-            "This PC runs {}, from the {} channel. Read the release notes before you go back to an older version.",
-            self.runs,
-            self.from.label()
+            "{} Read the release notes before you go back to an older version.",
+            self.runs_from()
         )
+    }
+    /// The row's words where no release notes open (the app never shows an older version's notes: DW-0789b's
+    /// button would offer it): what this PC runs, without a pointer to notes that are not there.
+    pub fn runs_from(&self) -> String {
+        format!("This PC runs {}, from the {} channel.", self.runs, self.from.label())
     }
 }
 
@@ -277,6 +323,12 @@ pub struct Pumped {
     pub toast: Option<&'static str>,
     /// An answer is still out: the window looks again soon.
     pub busy: bool,
+    /// "Restart to update" started the verified installer: the app quits now (the installer waits for that, puts
+    /// the new version in place and starts it).
+    pub restart: bool,
+    /// The installer did not start after the hand-off stopped a running sync: the shell starts sync again, so no
+    /// "sync is off" is left behind by an update that did not happen.
+    pub start_sync: bool,
 }
 
 pub trait SettingsSource {
@@ -289,6 +341,10 @@ pub trait SettingsSource {
     /// shell's "not built yet" frame in its place, never a value of it.
     fn wired(&self, pane: super::Pane) -> bool {
         let _ = pane;
+        true
+    }
+    /// `false` where no updater runs: About then draws the versions only (no Check now, channel or notes).
+    fn updates_available(&self) -> bool {
         true
     }
     /// `false` for a frame over a wired pane (a dialog) that this source has nothing real behind
@@ -339,6 +395,10 @@ pub trait SettingsSource {
     /// Engine: ask the updater whether a newer version exists, now. The check stands at
     /// `UpdateCheck::Checking` until it answers.
     fn check_for_updates(&mut self);
+    /// Engine: "Restart to update" (or "Try again" after a step of it failed), ONE press: download the newer
+    /// version on offer, check its signature, and the moment it is verified stop sync, start the verified installer,
+    /// and quit (`Pumped::restart`). Never an older version; nothing installs without this press.
+    fn restart_to_update(&mut self);
     /// Engine: the account's notifications, newest first, grouped by day ("Today",
     /// "Yesterday", "3 Nov"). Empty: nothing to show.
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)>;
@@ -377,6 +437,10 @@ pub struct BoardSettings {
     locations: Option<Locations>,
     notifications: Notifications,
     recent: Vec<(String, Vec<RecentAlert>)>,
+    /// DW-0750u: what is drawn of the account could not be confirmed.
+    unconfirmed: bool,
+    /// The release notes have nothing to show (the app with no newer version on offer): DW-0789b does not open.
+    notes_closed: bool,
 }
 
 impl BoardSettings {
@@ -407,12 +471,15 @@ impl BoardSettings {
                         "Sync history keeps 30 days on every PC.".into(),
                         "A file badge no longer stays on Uploading after the upload finished.".into(),
                     ],
+                    press: Press::Restart,
                 },
                 company: "Initlabs B.V.".into(),
             },
             locations: Some(board_locations()),
             notifications: board_notifications(),
             recent: board_recent(),
+            unconfirmed: false,
+            notes_closed: false,
         }
     }
 
@@ -420,6 +487,13 @@ impl BoardSettings {
     #[cfg(test)]
     pub fn with_check_failed(mut self) -> Self {
         self.about.check = UpdateCheck::Failed;
+        self
+    }
+
+    /// As the app is with no newer version on offer: the release notes (DW-0789b) do not open.
+    #[cfg(test)]
+    pub fn with_notes_closed(mut self) -> Self {
+        self.notes_closed = true;
         self
     }
 
@@ -436,10 +510,25 @@ impl BoardSettings {
         self
     }
 
-    /// DW-0781: version 0.9.2 can be downloaded.
+    /// DW-0781 and DW-0789b at another step of the press: what the button does, and the words in the caption's place
+    /// (the board draws the version on offer only, `with_update_available`).
+    #[cfg(test)]
+    pub fn with_update_press(mut self, press: Press, says: Option<&str>) -> Self {
+        self.general.update = Update::Available {
+            version: "0.9.2".into(),
+            press,
+            says: says.map(str::to_string),
+        };
+        self.about.notes.press = press;
+        self
+    }
+
+    /// DW-0781: version 0.9.2 is on offer; "Restart to update" downloads it, checks it and installs it.
     pub fn with_update_available(mut self) -> Self {
         self.general.update = Update::Available {
             version: "0.9.2".into(),
+            press: Press::Restart,
+            says: None,
         };
         self
     }
@@ -535,12 +624,17 @@ fn board_notifications() -> Notifications {
 
 impl BoardSettings {
     /// The account's switches without a value, from a source that says nothing about why (`alerts_state` is the
-    /// trait's default): the pane must still draw no switch.
-    #[cfg(test)]
+    /// trait's default): the pane must still draw no switch. Also the scene DW-0750n.
     pub fn with_account_alerts_not_read(mut self) -> Self {
         for alert in &mut self.notifications.groups[0].1 {
             alert.on = None;
         }
+        self
+    }
+
+    /// DW-0750u: the account's switches are drawn, and could not be confirmed with Beebeeb.
+    pub fn with_notifications_unconfirmed(mut self) -> Self {
+        self.unconfirmed = true;
         self
     }
 
@@ -621,6 +715,12 @@ impl SettingsSource for BoardSettings {
     fn sample(&self) -> bool {
         true
     }
+    fn opens(&self, frame: &str) -> bool {
+        !(self.notes_closed && frame == "DW-0789b")
+    }
+    fn notifications_unconfirmed(&self) -> bool {
+        self.unconfirmed
+    }
     fn mark_recent_seen(&mut self) {
         for (_, alerts) in &mut self.recent {
             for alert in alerts {
@@ -632,6 +732,8 @@ impl SettingsSource for BoardSettings {
     fn check_for_updates(&mut self) {
         self.about.check = UpdateCheck::Checking;
     }
+    // The sample does not move: a press is recorded in `SettingsUi::intents`.
+    fn restart_to_update(&mut self) {}
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
         self.recent.clone()
     }
@@ -715,6 +817,7 @@ impl SettingsSource for Unwired {
     }
     fn mark_recent_seen(&mut self) {}
     fn check_for_updates(&mut self) {}
+    fn restart_to_update(&mut self) {}
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
         Vec::new()
     }
@@ -751,6 +854,7 @@ impl SettingsSource for Unwired {
                 channel: Channel::Stable,
                 released: String::new(),
                 lines: Vec::new(),
+                press: Press::Restart,
             },
             company: String::new(),
         }

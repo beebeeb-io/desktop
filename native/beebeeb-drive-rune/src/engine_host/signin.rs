@@ -3,14 +3,18 @@
 //! What it binds, and to which engine step:
 //! - the password ([`Engine::sign_in_password`]), the code of an authenticator app or a backup code
 //!   ([`Engine::two_factor`]: core tells the two apart), the twelve words on a computer that holds no key
-//!   ([`Engine::unlock_with_phrase`]), a locked vault's password ([`Engine::unlock_with_password`]), and leaving a
-//!   half-done sign-in ([`Engine::discard_partial_sign_in`]);
+//!   ([`Engine::unlock_with_phrase`]), and leaving a half-done sign-in ([`Engine::discard_partial_sign_in`]);
+//! - the two-level lock (core's rules, through the engine's `lock_api`): the lock screen's Windows Hello prompt
+//!   (`hello::HelloPrompter`), whose yes is handed to [`Engine::unlock_screen_platform_verified`] with the
+//!   session's turn AS READ AT THE PRESS, and the account's password for a closed vault or a locked screen
+//!   ([`Engine::unlock_vault_with_password`]: proven to the server in a new sign-in, the code step after it
+//!   when the account has one);
 //! - the wait after "too many tries" (DW-A21): counted down here, once a second, from the seconds the server named.
 //!
-//! What it does not bind answers AT ONCE with the refusal its screen draws, never with silence: Windows Hello and the
-//! Continue-as card (no shared session store and no Hello prompt exist for this app yet), a device request, a
-//! passkey, "Forgot password?" with the phrase (core's `recovery_flow` has no engine step yet) and sign-up (the
-//! trait's defaults: `sign_up_available` stays `false`).
+//! What it does not bind answers AT ONCE with the refusal its screen draws, never with silence: the Continue-as
+//! card (no shared session store exists for this app yet, so Windows Hello is asked for the lock screen only), a
+//! device request, a passkey and "Forgot password?" with the phrase (core's `recovery_flow` has no engine step yet).
+//! Creating an account is bound in `signup.rs` (owner ruling 2026-11-14: sign-up in any app).
 //!
 //! Threads: nothing here waits for Beebeeb on the window's thread. Every step is a job on ONE worker, run in the
 //! order the person asked (leaving a step, then signing in again, happen in that order); its answer goes down a
@@ -27,18 +31,26 @@
 //! Must not: log an email, a password, a code, a word, a token or a key; start a thread per key press.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
 use zeroize::Zeroizing;
 
+use beebeeb_engine::app::lock_api::{LockRefused, LockState};
+use beebeeb_engine::app::lock_password_api::ScreenUnlock;
 use beebeeb_engine::app::{CredentialStores, Engine};
 
+use super::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult, NoHello};
 use super::{log, map_gate_signin, map_next, map_problem, phrase_problem, two_factor_problem};
+use beebeeb_engine::app::signup_api::SignupAttempt;
+
+#[path = "signup.rs"]
+mod signup;
+use crate::frames::signin::create_source::{PasswordVerdict, SignUpEvent};
 use crate::frames::signin::source::{
-    CodeKind, GateState, HelloOutcome, NextAfterSignIn, PasskeyOutcome, PhraseProblem, SharedSession, SignInEvent,
-    SignInProblem, SignInSource,
+    CodeKind, GateState, HelloOutcome, NextAfterSignIn, PasskeyOutcome, PhraseProblem, ScreenPasswordOutcome,
+    SharedSession, SignInEvent, SignInProblem, SignInSource,
 };
 
 /// The waits an answer can belong to. An attempt of one is over when the person leaves its screen.
@@ -48,13 +60,27 @@ enum Wait {
     TwoFactor,
     Restore,
     Unlock,
+    /// A passkey sign-in: the system's dialog, on a thread of its own.
+    Passkey,
     /// The countdown after "too many tries".
     Retry,
+    /// The screen lock's password check, and the countdown of the wait after it.
+    ScreenPassword,
+    ScreenWait,
+    /// The lock screen's Windows Hello prompt.
+    Hello,
+    /// Sign-up's steps and the wait for a new code (`signup.rs`).
+    SignUpCode,
+    SignUpVerify,
+    SignUpPassword,
+    SignUpConfirm,
+    SignUpCreate,
+    SignUpTick,
     /// A call this source does not bind: answered at once, never stale.
     Unbound,
 }
 
-const WAITS: usize = 6;
+const WAITS: usize = Wait::Unbound as usize + 1;
 
 /// One answer: the wait it belongs to, which attempt of it, and the event for the screen.
 struct Answer {
@@ -76,11 +102,27 @@ pub struct EngineSignInSource<C: CredentialStores> {
     jobs: Option<mpsc::Sender<Job<C>>>,
     /// One step of the countdown (a second; a test shortens it).
     tick: Duration,
+    /// The Windows Hello prompt, and the way to take the one that is up away.
+    hello: Box<dyn HelloPrompter>,
+    hello_up: Option<HelloCancel>,
+    /// The lock a password is opening, as it was when the password was sent; shared with the worker, which
+    /// puts that lock back when the person left the step and it finished anyway. `None`: a sign-in.
+    unlocking: Arc<Mutex<Option<LockState>>>,
+    /// The account being created, if any: owned here, wiped when sign-up is left (`signup.rs`).
+    signup: Arc<SignupAttempt>,
 }
 
 impl<C: CredentialStores> EngineSignInSource<C> {
+    /// Without a Windows Hello prompt: the lock screen's Unlock answers "not available" and offers the password.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
         Self::with_tick(engine, Duration::from_secs(1))
+    }
+
+    /// The running app's: `hello` shows the prompt for the lock screen.
+    pub fn with_hello(engine: Arc<Engine<C>>, hello: Box<dyn HelloPrompter>) -> Self {
+        let mut source = Self::new(engine);
+        source.hello = hello;
+        source
     }
 
     pub(super) fn with_tick(engine: Arc<Engine<C>>, tick: Duration) -> Self {
@@ -103,6 +145,10 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             attempts: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
             jobs: started.is_ok().then_some(jobs),
             tick,
+            hello: Box::new(NoHello),
+            hello_up: None,
+            unlocking: Arc::new(Mutex::new(None)),
+            signup: Arc::new(SignupAttempt::new()),
         }
     }
 
@@ -122,6 +168,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
     ) {
         let attempt = self.next_attempt(wait);
         let (answers, attempts, tick) = (self.answers.clone(), self.attempts.clone(), self.tick);
+        let unlocking = self.unlocking.clone();
         let job: Job<C> = Box::new(move |engine| {
             if attempts[wait as usize].load(Ordering::SeqCst) != attempt {
                 return;
@@ -130,7 +177,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             // The person left this step while it ran (`discard_partial_sign_in` moved the attempt on): its answer
             // is dropped by `poll`, and what it did is undone here, before the next job. Back wins.
             if attempts[wait as usize].load(Ordering::SeqCst) != attempt {
-                undo_left_step(engine, &answers, &event);
+                undo_left_step(engine, &answers, &event, *lock(&unlocking));
                 engine.wake_host();
                 return;
             }
@@ -138,10 +185,34 @@ impl<C: CredentialStores> EngineSignInSource<C> {
                 SignInEvent::SignedIn(Err(SignInProblem::RateLimited { seconds })) => Some(*seconds),
                 _ => None,
             };
+            let screen_wait_seconds = match &event {
+                SignInEvent::ScreenPassword(
+                    ScreenPasswordOutcome::Wait { wait_ms } | ScreenPasswordOutcome::Wrong { wait_ms },
+                ) => Some(seconds_up(*wait_ms)),
+                _ => None,
+            };
+            let resend_seconds = match &event {
+                SignInEvent::SignUp(SignUpEvent::CodeSent(Ok(sent))) => Some(sent.resend_seconds),
+                _ => None,
+            };
             let _ = answers.send(Answer { wait, attempt, event });
+            if let Some(seconds) = resend_seconds {
+                signup::count_down_resend(engine, &answers, &attempts, seconds, tick);
+            }
             // After the answer is in the channel: no tick can come before the problem it counts down.
             if let Some(seconds) = wait_seconds {
                 count_down(engine, &answers, &attempts, seconds, tick);
+            }
+            if let Some(seconds) = screen_wait_seconds.filter(|seconds| *seconds > 0) {
+                count_down_as(
+                    engine,
+                    &answers,
+                    &attempts,
+                    seconds,
+                    tick,
+                    Wait::ScreenWait,
+                    |seconds| SignInEvent::ScreenWaitLeft { seconds },
+                );
             }
             engine.wake_host();
         });
@@ -166,6 +237,31 @@ impl<C: CredentialStores> EngineSignInSource<C> {
     }
 }
 
+/// The engine's answer for the window.
+fn map_screen_unlock(answer: Result<ScreenUnlock, LockRefused>) -> ScreenPasswordOutcome {
+    match answer {
+        Ok(ScreenUnlock::Opened) => ScreenPasswordOutcome::Opened,
+        Ok(ScreenUnlock::Wrong { wait_ms }) => ScreenPasswordOutcome::Wrong { wait_ms },
+        Ok(ScreenUnlock::Wait { wait_ms }) => ScreenPasswordOutcome::Wait { wait_ms },
+        Ok(ScreenUnlock::ServerLimit { wait_ms }) => ScreenPasswordOutcome::ServerLimit { wait_ms },
+        Ok(ScreenUnlock::LocalCheckOff) => ScreenPasswordOutcome::LocalCheckOff,
+        Ok(ScreenUnlock::OfflineNoRecord) => ScreenPasswordOutcome::OfflineNoRecord,
+        Ok(ScreenUnlock::AccountUpgradeNeeded) => ScreenPasswordOutcome::AccountUpgradeNeeded,
+        Ok(ScreenUnlock::SessionEnded) => ScreenPasswordOutcome::SessionEnded,
+        Err(LockRefused::Overtaken | LockRefused::NotAtThisLevel | LockRefused::NeedsThePassword) => {
+            ScreenPasswordOutcome::Overtaken
+        }
+        Err(LockRefused::NothingTyped | LockRefused::AlreadyChecking | LockRefused::CouldNotCheck) => {
+            ScreenPasswordOutcome::Failed
+        }
+    }
+}
+
+/// Whole seconds of a wait in milliseconds, rounded up (a wait of 1 ms is a second).
+fn seconds_up(wait_ms: u64) -> u32 {
+    u32::try_from(wait_ms.div_ceil(1_000)).unwrap_or(u32::MAX)
+}
+
 /// A secret as the engine takes it: one wiping buffer, made at its full size so it never moves.
 fn secret(text: &str) -> Zeroizing<String> {
     let mut buffer = Zeroizing::new(String::with_capacity(text.len()));
@@ -186,19 +282,53 @@ fn phrase_of(words: &[&str]) -> Zeroizing<String> {
     phrase
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A step the person left finished anyway (it held the engine's turn): undo what it did. A sign-in that the code
-/// or the twelve words completed is signed out (the local files and state stay); a vault the password opened is
-/// locked again. A step that was refused did nothing. A sign-out that does not finish is said to the window
-/// (`StillSignedIn`), never only logged.
-fn undo_left_step<C: CredentialStores>(engine: &Arc<Engine<C>>, answers: &mpsc::Sender<Answer>, event: &SignInEvent) {
-    match event {
-        SignInEvent::TwoFactor(Ok(_)) | SignInEvent::PhraseRestored(Ok(_)) => {
+/// or the twelve words completed is signed out (the local files and state stay). A lock that the password (or
+/// the code after it) opened is put back at the level it had (`unlocking`): the screen lock for a locked screen,
+/// the vault lock for a closed vault. A step that was refused did nothing. A sign-out that does not finish is
+/// said to the window (`StillSignedIn`), never only logged.
+fn undo_left_step<C: CredentialStores>(
+    engine: &Arc<Engine<C>>,
+    answers: &mpsc::Sender<Answer>,
+    event: &SignInEvent,
+    unlocking: Option<LockState>,
+) {
+    let opened = matches!(
+        event,
+        SignInEvent::TwoFactor(Ok(NextAfterSignIn::Drive))
+            | SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::Drive))
+            | SignInEvent::PhraseRestored(Ok(_))
+    );
+    match (event, unlocking) {
+        (_, Some(LockState::ScreenLocked)) if opened => {
+            let _ = engine.lock_screen();
+        }
+        // A screen password the person left finished anyway and opened the screen: locked again.
+        (SignInEvent::ScreenPassword(ScreenPasswordOutcome::Opened), _) => {
+            let _ = engine.lock_screen();
+        }
+        (_, Some(_)) if opened => {
+            let _ = engine.lock_vault();
+        }
+        // A left password step that ended at the code step opened and stored nothing: it locks nothing (the queued
+        // discard forgets the half-done step). Every other `Ok` (the keyless case: a session WAS stored) locks.
+        (SignInEvent::VaultUnlocked(Ok(next)), _) if *next != NextAfterSignIn::TwoFactor => {
+            let _ = engine.lock_vault();
+        }
+        (
+            SignInEvent::TwoFactor(Ok(_))
+            | SignInEvent::PhraseRestored(Ok(_))
+            | SignInEvent::SignUp(SignUpEvent::Created(Ok(_)))
+            | SignInEvent::Passkey(PasskeyOutcome::Succeeded(_)),
+            None,
+        ) => {
             if engine.sign_out_keeping_local_data().is_err() {
                 still_signed_in(answers);
             }
-        }
-        SignInEvent::VaultUnlocked(Ok(_)) => {
-            let _ = engine.lock();
         }
         _ => {}
     }
@@ -225,12 +355,27 @@ fn count_down<C: CredentialStores>(
     seconds: u32,
     tick: Duration,
 ) {
-    let attempt = attempts[Wait::Retry as usize].fetch_add(1, Ordering::SeqCst) + 1;
+    count_down_as(engine, answers, attempts, seconds, tick, Wait::Retry, |seconds| {
+        SignInEvent::RetryAfter { seconds }
+    });
+}
+
+/// [`count_down`] for the wait `wait`, its event made by `event`.
+fn count_down_as<C: CredentialStores>(
+    engine: &Arc<Engine<C>>,
+    answers: &mpsc::Sender<Answer>,
+    attempts: &Arc<[AtomicU64; WAITS]>,
+    seconds: u32,
+    tick: Duration,
+    wait: Wait,
+    event: fn(u32) -> SignInEvent,
+) {
+    let attempt = attempts[wait as usize].fetch_add(1, Ordering::SeqCst) + 1;
     let over = || {
         let _ = answers.send(Answer {
-            wait: Wait::Retry,
+            wait,
             attempt,
-            event: SignInEvent::RetryAfter { seconds: 0 },
+            event: event(0),
         });
     };
     if seconds == 0 {
@@ -241,15 +386,14 @@ fn count_down<C: CredentialStores>(
         let mut left = seconds;
         while left > 0 {
             thread::sleep(tick);
-            if attempts_in[Wait::Retry as usize].load(Ordering::SeqCst) != attempt {
+            if attempts_in[wait as usize].load(Ordering::SeqCst) != attempt {
                 return;
             }
             left -= 1;
-            let event = SignInEvent::RetryAfter { seconds: left };
             let tick = Answer {
-                wait: Wait::Retry,
+                wait,
                 attempt,
-                event,
+                event: event(left),
             };
             if answers_in.send(tick).is_err() {
                 return;
@@ -275,6 +419,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     }
 
     fn begin_sign_in(&mut self, email: &str, password: &str) {
+        *lock(&self.unlocking) = None;
         let (email, password) = (email.to_string(), secret(password));
         // A wait the server names is counted down by `ask`, after this answer is in the channel.
         self.ask(
@@ -287,11 +432,58 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         );
     }
 
+    /// The lock screen's Unlock. The session's turn is read HERE, at the press: a yes that outlives a lock, an
+    /// unlock, a sign-out or another account's sign-in opens nothing (the engine refuses a turn that moved on,
+    /// under the session's lock; every one of those moves it, so the turn names the account too). Only a
+    /// verified prompt reaches the engine.
     fn begin_hello(&mut self) {
-        self.not_bound("begin_hello", SignInEvent::Hello(HelloOutcome::Cancelled));
+        let attempt = self.next_attempt(Wait::Hello);
+        self.hello_up = None;
+        let asked_at = self.engine.session_turn();
+        let answer = move |event| Answer {
+            wait: Wait::Hello,
+            attempt,
+            event: SignInEvent::Hello(event),
+        };
+        if self.engine.lock_state() != LockState::ScreenLocked {
+            // Nothing a prompt could open: no prompt is shown.
+            let _ = self.answers.send(answer(HelloOutcome::Cancelled));
+            return;
+        }
+        let (engine, answers, attempts) = (self.engine.clone(), self.answers.clone(), self.attempts.clone());
+        let done: HelloDone = Box::new(move |result| {
+            let outcome = match result {
+                HelloResult::Verified => {
+                    let still_asked = attempts[Wait::Hello as usize].load(Ordering::SeqCst) == attempt;
+                    if still_asked && engine.unlock_screen_platform_verified(asked_at).is_ok() {
+                        HelloOutcome::Succeeded(NextAfterSignIn::Drive)
+                    } else {
+                        // Late, or refused by core's rule: nothing opened, and the button works again.
+                        HelloOutcome::Cancelled
+                    }
+                }
+                HelloResult::Cancelled => HelloOutcome::Cancelled,
+                HelloResult::Failed => HelloOutcome::NotRecognized,
+                HelloResult::Unavailable => HelloOutcome::Unavailable,
+            };
+            let _ = answers.send(answer(outcome));
+            engine.wake_host();
+        });
+        match self.hello.start(done) {
+            Ok(cancel) => self.hello_up = Some(cancel),
+            Err(()) => {
+                let _ = self.answers.send(answer(HelloOutcome::Unavailable));
+            }
+        }
     }
 
-    fn cancel_hello(&mut self) {}
+    /// The person left the lock screen's prompt: no answer of it is handed out, and the prompt is taken away.
+    fn cancel_hello(&mut self) {
+        self.next_attempt(Wait::Hello);
+        if let Some(cancel) = self.hello_up.take() {
+            cancel();
+        }
+    }
 
     fn begin_device_request(&mut self) {
         self.not_bound(
@@ -328,20 +520,93 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         );
     }
 
+    /// Core's passkey sign-in starts from an address: [`SignInSource::begin_passkey_for`] is the call a screen makes.
     fn begin_passkey(&mut self) {
-        self.not_bound("begin_passkey", SignInEvent::Passkey(PasskeyOutcome::Unavailable));
+        self.begin_passkey_for("");
     }
 
-    /// A locked vault's password: proven by the server, then the key this computer holds is loaded
-    /// ([`Engine::unlock_with_password`]).
+    fn passkey_available(&self) -> bool {
+        self.engine.passkeys_supported()
+    }
+
+    /// The system's passkey dialog for the address typed, on a thread of its own (it stays up for as long as the
+    /// person takes; the shared worker keeps serving the other steps). The person leaving ([`Self::cancel_passkey`])
+    /// moves the attempt on: its answer is dropped, and a sign-in it completed is undone.
+    fn begin_passkey_for(&mut self, email: &str) {
+        let attempt = self.next_attempt(Wait::Passkey);
+        let (engine, answers, attempts) = (self.engine.clone(), self.answers.clone(), self.attempts.clone());
+        let email = email.to_string();
+        let started = thread::Builder::new().name("signin-passkey".into()).spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::passkeys::sign_in_outcome(&engine, &email)
+            }))
+            .unwrap_or(PasskeyOutcome::Unavailable);
+            let event = SignInEvent::Passkey(outcome);
+            if attempts[Wait::Passkey as usize].load(Ordering::SeqCst) != attempt {
+                undo_left_step(&engine, &answers, &event, None);
+            } else {
+                let _ = answers.send(Answer {
+                    wait: Wait::Passkey,
+                    attempt,
+                    event,
+                });
+            }
+            engine.wake_host();
+        });
+        if started.is_err() {
+            log("sign-in: the passkey thread did not start");
+            let _ = self.answers.send(Answer {
+                wait: Wait::Passkey,
+                attempt,
+                event: SignInEvent::Passkey(PasskeyOutcome::Unavailable),
+            });
+        }
+    }
+
+    /// The person left while the dialog was up. The system's dialog cannot be closed from here: it ends when they
+    /// close it, and nothing it did is kept (an answer of an attempt that was left is undone, never drawn).
+    fn cancel_passkey(&mut self) {
+        self.next_attempt(Wait::Passkey);
+    }
+
+    /// The account's password for a lock: a closed vault, or a locked screen whose Windows Hello cannot answer.
+    /// Core's strong unlock through the engine ([`Engine::unlock_vault_with_password`]): the password is proven
+    /// to the server in a new sign-in for the account whose session is stored; `TwoFactor` asks the code next.
+    /// Needs the network: offline it answers `Offline` and opens nothing.
     fn begin_unlock(&mut self, password: &str) {
         let password = secret(password);
+        *lock(&self.unlocking) = Some(self.engine.lock_state());
         self.ask(
             Wait::Unlock,
             SignInEvent::VaultUnlocked(Err(SignInProblem::Other)),
-            move |engine| match engine.unlock_with_password(password) {
-                Ok(()) => SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::Drive)),
+            move |engine| match engine.unlock_vault_with_password(password) {
+                Ok(next) => SignInEvent::VaultUnlocked(Ok(map_next(next))),
                 Err(problem) => SignInEvent::VaultUnlocked(Err(map_problem(problem))),
+            },
+        );
+    }
+
+    /// The screen lock's password: counted tries and the server's proof that makes no session
+    /// ([`Engine::unlock_screen_with_password`]). The session's turn is read HERE, at the press: an answer that
+    /// outlived a lock, a sign-out or another sign-in is dropped (`Overtaken`), and a press that was superseded
+    /// has its answer dropped by `poll`. A password the person left behind that opened the screen locks it again
+    /// (`undo_left_step`). `AccountUpgradeNeeded` closes the vault so the strong unlock's screen follows.
+    fn begin_screen_password(&mut self, password: &str) {
+        let password = secret(password);
+        let asked_at = self.engine.session_turn();
+        *lock(&self.unlocking) = Some(LockState::ScreenLocked);
+        self.ask(
+            Wait::ScreenPassword,
+            SignInEvent::ScreenPassword(ScreenPasswordOutcome::Failed),
+            move |engine| {
+                if engine.session_turn() != asked_at {
+                    return SignInEvent::ScreenPassword(ScreenPasswordOutcome::Overtaken);
+                }
+                let outcome = map_screen_unlock(engine.unlock_screen_with_password(password));
+                if outcome == ScreenPasswordOutcome::AccountUpgradeNeeded {
+                    let _ = engine.lock_vault();
+                }
+                SignInEvent::ScreenPassword(outcome)
             },
         );
     }
@@ -358,6 +623,61 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             "begin_set_password",
             SignInEvent::PasswordSet(Err(SignInProblem::Other)),
         );
+    }
+
+    fn sign_up_available(&self) -> bool {
+        self.signup_available()
+    }
+
+    fn sign_up_web_address(&self) -> Option<String> {
+        self.signup.web_address()
+    }
+
+    fn begin_sign_up_code(&mut self, email: &str) {
+        self.signup_begin_code(email);
+    }
+
+    fn begin_sign_up_verify(&mut self, code: &str) {
+        self.signup_begin_verify(code);
+    }
+
+    fn sign_up_password(&self, password: &str) -> Option<PasswordVerdict> {
+        Some(self.signup_password_verdict(password))
+    }
+
+    fn begin_sign_up_password(&mut self, password: &str) {
+        self.signup_begin_password(password);
+    }
+
+    fn with_sign_up_phrase(&self, show: &mut dyn FnMut(&[&str])) {
+        self.signup.with_phrase(show);
+    }
+
+    /// The window holds none of the words, so leaving the screen that shows them has nothing to wipe here.
+    fn sign_up_phrase_left(&mut self) {}
+
+    fn sign_up_confirm_positions(&self) -> Option<[usize; crate::frames::signin::create_source::CONFIRM_WORDS]> {
+        self.signup.confirm_positions()
+    }
+
+    fn sign_up_suggestions(&self, typed: &str) -> Vec<&'static str> {
+        self.signup_suggestions(typed)
+    }
+
+    fn begin_sign_up_confirm(&mut self, words: &[&str]) {
+        self.signup_begin_confirm(words);
+    }
+
+    fn sign_up_device_name(&self) -> String {
+        self.signup_device_name()
+    }
+
+    fn begin_sign_up_create(&mut self, device_name: &str) {
+        self.signup_begin_create(device_name);
+    }
+
+    fn cancel_sign_up(&mut self) {
+        self.signup_cancel();
     }
 
     /// The next answer that is still waited for; an answer of a step the person left is dropped here.
@@ -394,6 +714,36 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             log("sign-in: leaving the step could not be passed to the engine");
         }
     }
+}
+
+/// Opens one of our own addresses by the same OS call a file opens with: the address is one argument, never a
+/// command line. Only three schemes open (`https://`, `mailto:`, `ms-settings:`); anything else is refused in
+/// every build. The addresses come from `shell::web_pages` only, never from the server, a file or a typed string.
+pub fn open_web_page(url: &str) -> Result<(), ()> {
+    if !is_allowed_address(url) {
+        return Err(());
+    }
+    // A test run opens nothing on the machine it runs on; it records what it was asked to open.
+    #[cfg(test)]
+    {
+        OPENED.with(|o| o.borrow_mut().push(url.to_string()));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    super::open_path(std::path::Path::new(url)).map_err(|_| ())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The addresses `open_web_page` accepted on this thread, oldest first (tests only).
+    pub(crate) static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether `url` starts with one of the three schemes the opener allows.
+pub fn is_allowed_address(url: &str) -> bool {
+    ["https://", "mailto:", "ms-settings:"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
 }
 
 #[cfg(test)]

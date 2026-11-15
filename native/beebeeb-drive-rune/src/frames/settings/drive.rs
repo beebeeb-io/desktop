@@ -175,8 +175,25 @@ pub struct SyncPane {
     pub not_uploaded: Option<(u32, String)>,
 }
 
+/// A control a source may not be able to honour: it is not drawn where the source says so (the honest state of a
+/// setting no engine call answers for).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Control {
+    /// Sync and File Explorer: "Show sync status on files".
+    StatusOnFiles,
+    /// Bandwidth: "Sync on metered connections".
+    SyncOnMetered,
+    /// Bandwidth: the speed test, and the link to it in Diagnostics.
+    SpeedTest,
+}
+
 /// What Drive's settings panes read and change.
 pub trait DriveSettings {
+    /// Whether `control` is drawn. A source with nothing behind it says `false`: no switch that does nothing.
+    fn shows(&self, control: Control) -> bool {
+        let _ = control;
+        true
+    }
     /// `false` for a pane nothing answers for yet: it draws the shell's "not built yet" frame
     /// instead of any value.
     fn wired(&self, pane: super::Pane) -> bool {
@@ -230,6 +247,11 @@ pub trait DriveSettings {
     /// Limit a direction to so many megabits per second on this PC, or not at all. It
     /// applies straight away and stays until changed (DW-0785c).
     fn set_speed_limit(&mut self, _direction: Direction, _mbps: Option<u32>) {}
+    /// `true` where something detects a metered network and honours the switch. `false` (the default): "Sync on
+    /// metered connections" is not drawn.
+    fn metered_control(&self) -> bool {
+        false
+    }
     /// Sync on networks Windows marks as metered, or wait on them (DW-0785f).
     fn set_sync_on_metered(&mut self, _on: bool) {}
     /// Start the speed test against Beebeeb's own servers; one test at a time (DW-0786).
@@ -306,6 +328,8 @@ pub trait DriveSettings {
     fn apply_previews(&mut self, _size: super::previews::PreviewSize, _format: super::previews::PreviewFormat) {}
     /// Make every preview again at the stored size and format (DW-0744, Rebuild previews).
     fn rebuild_previews(&mut self) {}
+    /// Read Thumbnails and previews again after a failed read (its Try again).
+    fn reload_previews(&mut self) {}
 }
 
 /// The board's sample content for Drive's settings panes.
@@ -498,6 +522,9 @@ impl BoardDrive {
 }
 
 impl DriveSettings for BoardDrive {
+    fn metered_control(&self) -> bool {
+        true
+    }
     fn storage(&self) -> Storage {
         self.storage.clone()
     }

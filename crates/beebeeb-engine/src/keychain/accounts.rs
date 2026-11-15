@@ -109,6 +109,16 @@ pub(super) fn account_path(prefix: Option<&AccountId>, account: KeychainAccount)
     }
 }
 
+/// A lock flag's leaf name beside the account's other items (`<id>/lock.vault_closed`).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg_attr(all(target_os = "macos", not(any(test, feature = "test-support"))), allow(dead_code))]
+pub(super) fn flag_path(prefix: Option<&AccountId>, flag: LockFlag) -> String {
+    match prefix {
+        Some(id) => format!("{id}/{}", flag.leaf()),
+        None => flag.leaf().to_string(),
+    }
+}
+
 /// The whole name of one stored item: `<the identity's credential service>/<account path>`. On Windows it is
 /// the credential's target name; on macOS the Keychain item's service and account. The one place the two halves
 /// are joined, so a store cannot name an item outside its identity's service.

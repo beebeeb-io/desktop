@@ -426,6 +426,42 @@ fn every_webp_an_encoder_writes_is_still_decoded_and_shown() {
 }
 
 #[test]
+fn a_webp_whose_last_chunk_has_no_pad_byte_is_decoded_and_shown() {
+    let (_, still, (width, height)) = viewer_picture::tests::webps_an_encoder_writes()
+        .into_iter()
+        .find(|(which, ..)| *which == "a lossy still with alpha")
+        .expect("the fixture");
+    let restate = |bytes: &mut Vec<u8>| {
+        let stated = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&stated.to_le_bytes());
+    };
+    // One odd-length metadata chunk with no pad byte after it.
+    let mut unpadded = still.clone();
+    unpadded.extend_from_slice(b"EXIF");
+    unpadded.extend_from_slice(&3u32.to_le_bytes());
+    unpadded.extend_from_slice(&[1, 2, 3]);
+    restate(&mut unpadded);
+    // A 2 MiB metadata chunk, padded, with the length right.
+    let mut large = still;
+    large.extend_from_slice(b"EXIF");
+    large.extend_from_slice(&((2u32 << 20) as u32).to_le_bytes());
+    large.extend(std::iter::repeat(0u8).take(2 << 20));
+    restate(&mut large);
+    for (which, bytes) in [("no pad byte", unpadded), ("2 MiB of metadata", large)] {
+        assert!(viewer_picture::check(&bytes).is_ok(), "{which}");
+        let before = DECODES.with(|count| count.get());
+        let content = picture_body(&bytes, &AtomicBool::new(false));
+        assert_eq!(DECODES.with(|count| count.get()), before + 1, "{which}");
+        assert!(matches!(content.body, Some(Body::Photo(_))), "{which}");
+        assert_eq!(
+            content.picture.as_ref().expect(which).size(),
+            (width, height),
+            "{which}"
+        );
+    }
+}
+
+#[test]
 fn a_file_named_as_a_picture_that_is_another_format_by_its_content_never_reaches_a_decoder() {
     let fake = Fake::new();
     // The toolkit picks a decoder by content and HAS one for this: an icon container with a PNG inside. The viewer
@@ -700,4 +736,52 @@ fn a_download_that_passed_the_limit_on_its_way_claims_no_size() {
         body,
         Body::NotPreviewable(NoPreview::OverLimit { limit: IN_MEMORY_MAX })
     );
+}
+
+#[test]
+fn a_source_that_cannot_save_or_keep_offline_says_so_on_the_press() {
+    // The default source (the board's) can: the editor opens.
+    struct CannotSave(InState);
+    impl ViewerSource for CannotSave {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.0.open(id)
+        }
+        fn poll(&mut self, id: &str) -> Option<Body> {
+            self.0.poll(id)
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.0.retry(id)
+        }
+        fn can_save(&self) -> bool {
+            false
+        }
+        fn knows_offline(&self) -> bool {
+            false
+        }
+    }
+    let text = Body::Text(TextDoc {
+        lines: plain_lines("an invented line"),
+        truncated: None,
+    });
+    let (mut can, _) = ui_in(text.clone(), true);
+    can.edit();
+    assert!(can.editor.is_some(), "a source that saves opens the editor");
+
+    let inner = InState {
+        body: text,
+        retries: Default::default(),
+        there: true,
+    };
+    let mut cannot = crate::frames::viewers::Ui::open(Box::new(CannotSave(inner)), "f-state").expect("it opened");
+    cannot.edit();
+    assert!(cannot.editor.is_none());
+    assert_eq!(cannot.toast.as_deref(), Some("Not built yet: Edit and save from here"));
+    cannot.toggle_offline();
+    assert!(!cannot.file.details.offline, "nothing was switched");
+    assert_eq!(
+        cannot.toast.as_deref(),
+        Some("Not built yet: Available offline from here")
+    );
+    assert!(!cannot.knows_offline());
 }

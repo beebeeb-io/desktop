@@ -29,12 +29,15 @@ mod md_source;
 pub mod media;
 mod media_icons;
 pub mod new_file;
+mod new_file_scene;
+pub use new_file_scene::set_new_file_scene;
 pub mod office;
 pub mod office_board;
 mod office_icons;
 pub mod office_over;
 mod pdf;
 mod photo;
+mod settle;
 pub mod source;
 mod states;
 mod style;
@@ -59,10 +62,7 @@ use crate::shell::app::{Event, Screen};
 use crate::shell::host;
 use crate::shell::registry::FrameGroup;
 use crate::theme::tokens;
-use source::{
-    Body, Conflict, Elsewhere, FixtureViewerSource, Keep, OpenError, OpenFile, SaveOutcome, TextDoc, ViewerSource,
-    board,
-};
+use source::{Body, Conflict, Elsewhere, FixtureViewerSource, Keep, OpenError, OpenFile, TextDoc, ViewerSource, board};
 
 /// Where the person goes when an action leaves this group. The shell opens it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +113,24 @@ pub const NOT_BUILT: &str = "Not built yet";
 /// What Try again says when the file could not even be asked for again (signed out, gone from this PC's list).
 pub const NOT_REOPENED: &str = "Couldn't open this file again. Go back to Files and open it from there.";
 
+/// What Show it says while a change of the open file is still on its way (a save, or the Available offline switch):
+/// nothing is opened meanwhile.
+pub const NOT_WHILE_SAVING: &str = "Newer version not opened yet: your last change is still on its way";
+
+/// What Show it says when the newer version did not open: the version on screen stays, and why.
+pub fn not_shown(why: OpenError) -> String {
+    let reason = match why.stopped() {
+        Some(source::Stopped::Gone) => "the file is gone",
+        Some(source::Stopped::SessionEnded) => "the session ended",
+        Some(source::Stopped::NothingSynced) => "nothing has synced on this PC yet",
+        Some(source::Stopped::NotThisAccounts) => "this PC's data couldn't be confirmed as this account's",
+        // Signed out or locked: the shell's own gate says it.
+        None => "Beebeeb is locked or signed out",
+        Some(_) => "couldn't read it right now",
+    };
+    format!("Newer version not opened: {reason}")
+}
+
 /// What "Open in another app…" says when the account's folder on this PC is not in sync now.
 pub const NEEDS_SYNC_ELSEWHERE: &str =
     "Couldn't open it in another app. It opens from your Beebeeb folder, so sync has to be on for this PC.";
@@ -143,6 +161,9 @@ impl Intent {
 pub struct Editor {
     pub edit: rune::TextEdit,
     base: String,
+    /// Why the last save was refused behind an earlier change to the file on this PC (the engine's words), while it
+    /// is the last answer: its banner offers Save a copy (task 2530, item 1). It goes with the edit.
+    refused: Option<String>,
 }
 
 impl Editor {
@@ -279,7 +300,7 @@ impl Ui {
             return;
         }
         let on = !self.file.details.offline;
-        if self.source.set_offline(&self.file.id, on) {
+        if self.source.set_offline(&self.file.id, on) && !self.source.answers_later() {
             self.file.details.offline = on;
         }
     }
@@ -401,7 +422,11 @@ impl Ui {
         }
         let mut edit = rune::TextEdit::new(text.clone());
         edit.set_caret(text.len());
-        self.editor = Some(Editor { edit, base: text });
+        self.editor = Some(Editor {
+            edit,
+            base: text,
+            refused: None,
+        });
         self.toast = None;
         self.focus = Some(EDITOR_KEY);
     }
@@ -416,20 +441,6 @@ impl Ui {
         match &self.editor {
             Some(editor) => self.source.colours(&self.file, &editor.edit.text),
             None => Vec::new(),
-        }
-    }
-
-    fn outcome(&mut self, outcome: SaveOutcome) {
-        match outcome {
-            SaveOutcome::Saved { file, at } => {
-                self.toast = Some(format!("Saved \u{00B7} encrypted \u{00B7} version {}", file.version));
-                self.saved_at = Some(at);
-                self.show(file);
-            }
-            SaveOutcome::Opened(file) => self.show(file),
-            SaveOutcome::Conflict(other) => self.ask(Dialog::Conflict(other)),
-            // Not saved: the edit stays as it is, and so does what the status line says.
-            SaveOutcome::Failed => self.dialog = None,
         }
     }
 
@@ -483,9 +494,18 @@ impl Ui {
         if self.file.newer.is_none() || self.editor.is_some() {
             return;
         }
-        if let Ok(file) = self.source.newer(&self.file.id) {
-            self.replace(file);
-            self.focus = Some("tb-btn-0");
+        // A change still on its way belongs to what is on screen: the newer version waits until it answered.
+        if self.source.saving() {
+            self.toast = Some(NOT_WHILE_SAVING.to_string());
+            return;
+        }
+        match self.source.newer(&self.file.id) {
+            Ok(file) => {
+                self.replace(file);
+                self.focus = Some("tb-btn-0");
+            }
+            // The version on screen stays, still open; the press says why the newer one did not open.
+            Err(why) => self.toast = Some(not_shown(why)),
         }
     }
 
@@ -512,6 +532,10 @@ impl Ui {
 
     /// The engine's progress since the last call. `true`: the view must run again.
     pub fn pump(&mut self) -> bool {
+        if let Some(settled) = self.source.settled(&self.file.id) {
+            self.settle(settled);
+            return true;
+        }
         match self.source.poll(&self.file.id) {
             Some(body) => {
                 let another_kind = std::mem::discriminant(&body) != std::mem::discriminant(&self.file.body);
@@ -827,6 +851,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     let Some(ui) = ui(s) else { return had || new_file };
     let changed = ui.pump() | ui.refind();
+    // An open text or note whose version is read: woken when the next read is due, not only by a press.
+    if let Some(after) = ui.source.next_check() {
+        tx.wake_after(after);
+    }
     if let Some(key) = ui.focus.take() {
         // Not after a key of this group (those take it in `on_key`): no ring is drawn.
         tx.focus(key, false);
@@ -904,7 +932,8 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             unsaved: dirty,
         };
         let body = text::editor(editor, &ui.editor_lines(), &t);
-        return chrome::window(s, cx, ui, head, text::editor_tools(&t), None, body, &status, &t);
+        let refused = text::refused_banner(editor.refused.as_deref(), &t);
+        return chrome::window(s, cx, ui, head, text::editor_tools(&t), refused, body, &status, &t);
     }
     let head = chrome::Head::default();
     let reading = |doc_truncated: Option<source::Truncated>| match &ui.saved_at {
@@ -974,8 +1003,9 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             return chrome::window(s, cx, ui, head, tools, None, body, &status, &t);
         }
         Body::Audio(doc) => {
-            let (tools, body) = (audio::tools(&t), audio::body(ui, doc, &t));
-            return chrome::window(s, cx, ui, head, tools, None, body, &audio::status(doc), &t);
+            let can_play = ui.can_play();
+            let (tools, body) = (audio::tools(can_play, &t), audio::body(ui, doc, &t));
+            return chrome::window(s, cx, ui, head, tools, None, body, &audio::status(doc, can_play), &t);
         }
         Body::Pdf(doc) => {
             let (tools, bar, body) = (pdf::tools(ui, &t), pdf::find_bar(ui, &t), pdf::body(ui, doc, &t));
@@ -1076,7 +1106,7 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
         "DW-1506" => board::PDF_FIND,
         "DW-1514" => board::CSV,
         "DW-1515" => board::ZIP,
-        "DW-1234" | "DW-1507" | "DW-1550" | "DW-1551" | "DW-1552" | "DW-1553" | "DW-1554" | "DW-1556" => board::DOCX,
+        "DW-1234" | "DW-1507e" | "DW-1550" | "DW-1551" | "DW-1552" | "DW-1553" | "DW-1554" | "DW-1556" => board::DOCX,
         "DW-1511" => board::DOC,
         _ => return None,
     })
@@ -1131,37 +1161,6 @@ pub fn set_scene(s: &mut State, frame: &str) {
     }
 }
 
-/// DW-1520 to DW-1522: the Files window as the board draws it under New (Contract draft.pdf
-/// selected, the details panel open), then New's menu on "New file…", or the dialog.
-pub fn set_new_file_scene(s: &mut State, frame: &str) {
-    s.select_only(6);
-    match frame {
-        "DW-1520" => {
-            s.actions.menu = Some(crate::frames::files::OpenMenu {
-                kind: crate::frames::files::MenuKind::New,
-                at: (0.0, 0.0),
-                hot: Some(1),
-            });
-        }
-        "DW-1521" => {
-            new_file::begin(s);
-        }
-        "DW-1522" => {
-            // Text, Continue, "export_invoices" typed and selected, .py picked.
-            new_file::begin(s);
-            new_file::choose(s, new_file::Kind::Text);
-            new_file::go_on(s);
-            new_file::choose_ext(s, ".py");
-            if let Some(nf) = s.viewer.new_file.as_mut() {
-                nf.name = rune::TextEdit::new("export_invoices");
-                nf.name.set_selection(0, nf.name.text.len());
-                nf.name.focused = true;
-            }
-        }
-        _ => {}
-    }
-}
-
 /// The group's board frames and the scene that shows each (`frames::scenes`).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1520", |s| set_new_file_scene(s, "DW-1520")),
@@ -1185,7 +1184,7 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1506", |s| set_scene(s, "DW-1506")),
     ("DW-1514", |s| set_scene(s, "DW-1514")),
     ("DW-1515", |s| set_scene(s, "DW-1515")),
-    ("DW-1507", |s| set_scene(s, "DW-1507")),
+    ("DW-1507e", |s| set_scene(s, "DW-1507e")),
     ("DW-1511", |s| set_scene(s, "DW-1511")),
     ("DW-1550", |s| set_scene(s, "DW-1550")),
     ("DW-1551", |s| set_scene(s, "DW-1551")),

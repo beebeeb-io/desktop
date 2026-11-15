@@ -11,7 +11,7 @@ use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_shell as shell;
 use rune::{El, col};
 
-use super::source::UpdateCheck;
+use super::source::{Press, UPDATE_CAPTION, Update, UpdateCheck};
 use super::{Dialog, Intent, MenuKind, SettingsUi};
 
 /// Where the Release channel menu drops, from its row's top-left corner (the board's place,
@@ -61,8 +61,9 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         t,
     );
 
-    // While a check runs the row says so and the button waits (DW-0751, Rules).
-    let checking = a.check == UpdateCheck::Checking;
+    // While a check runs the row says so and the button waits (DW-0751, Rules); so does the update's press, whose
+    // step the row says.
+    let checking = matches!(a.check, UpdateCheck::Checking | UpdateCheck::Working(_));
     let mut check_now = controls::button(1, "Check now", None, Emphasis::Plain, t);
     check_now = if checking {
         check_now.disabled(true).focusable(false)
@@ -92,33 +93,37 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         )
         .on_press(|s: &mut State| s.settings.toggle_menu(MenuKind::Channel)),
     ];
-    // The chosen channel is behind this PC's version: said, with the way to the notes; nothing
+    // The release notes open only where the source has notes to show (in the app: a newer version on offer). Where
+    // they do not, no row points to them: a link that opens nothing is a dead control (design note in FRAMES.md).
+    let notes_open = ui.source.opens("DW-0789b");
+    // The chosen channel is behind this PC's version: said, with the way to the notes where they open; nothing
     // is installed and nothing is offered (DW-0789, Rules).
     if let Some(older) = &a.older {
+        let row = if notes_open {
+            Item::new(Some(&ic::INFO), older.title()).sub(older.says()).opens()
+        } else {
+            Item::new(Some(&ic::INFO), older.title()).sub(older.runs_from())
+        };
+        let row = lists::item(1, update_rows.len(), &row.ruled(), t);
+        update_rows.push(if notes_open {
+            row.on_press(|s: &mut State| super::go(s, "DW-0789b"))
+        } else {
+            row
+        });
+    }
+    if notes_open {
         update_rows.push(
             lists::item(
                 1,
                 update_rows.len(),
-                &Item::new(Some(&ic::INFO), older.title())
-                    .sub(older.says())
-                    .opens()
-                    .ruled(),
+                &Item::new(Some(&ic::DOCUMENT), "Release notes")
+                    .sub("What changed in each version")
+                    .opens(),
                 t,
             )
             .on_press(|s: &mut State| super::go(s, "DW-0789b")),
         );
     }
-    update_rows.push(
-        lists::item(
-            1,
-            update_rows.len(),
-            &Item::new(Some(&ic::DOCUMENT), "Release notes")
-                .sub("What changed in each version")
-                .opens(),
-            t,
-        )
-        .on_press(|s: &mut State| super::go(s, "DW-0789b")),
-    );
     let updates = lists::list(
         1,
         Some("Updates"),
@@ -149,22 +154,25 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         3,
         Some("More"),
         vec![
-            web(3, 0, "About audits", "about-audits", false),
-            web(3, 1, "beebeeb.io", "beebeeb.io", true),
+            // "About audits" is not drawn: the site has no audits page to send to (`shell::web_pages`). The first
+            // row of its list: no rule above it (the board, recaptured without audits).
+            web(3, 0, "beebeeb.io", "beebeeb.io", false),
         ],
         Some(&a.company),
         t,
     );
 
-    let children = vec![
+    let mut children = vec![
         shell::crumb("General", t, |s: &mut State| super::go(s, "DW-0701")),
         shell::heading("About Beebeeb", None, t),
         product,
         versions,
-        updates,
-        open_source,
-        more,
     ];
+    // No updater runs in this build: Check now, the channel and the notes are not drawn (nothing answers them).
+    if ui.source.updates_available() {
+        children.push(updates);
+    }
+    children.extend([open_source, more]);
 
     let overlay = match ui.dialog {
         Some(Dialog::ReleaseNotes) => Some(release_notes(ui, t)),
@@ -177,27 +185,37 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 fn release_notes(ui: &SettingsUi, t: &Theme) -> El {
     let n = ui.source.about().notes;
     let title = format!("Beebeeb {}", n.version);
-    let sub = format!("{} channel · released {}", n.channel.label(), n.released);
+    // The updater's offer carries no release date: the sub says the channel alone then, never "released " and nothing.
+    let sub = if n.released.is_empty() {
+        format!("{} channel", n.channel.label())
+    } else {
+        format!("{} channel · released {}", n.channel.label(), n.released)
+    };
     let notes = if n.lines.is_empty() {
         dialogs::bullets(&["No release notes were provided for this version.".to_string()], t)
     } else {
         dialogs::bullets(&n.lines, t)
     };
-    let body = vec![
-        notes,
-        dialogs::caption(
-            0,
-            "Download it, then open it to install. Beebeeb never installs an update by itself.",
-            t,
-        ),
-    ];
+    // One press: Restart to update downloads, checks and installs (owner ruling 2026-11-15); a newer version's notes
+    // only (an older one is never offered: the source puts no older version's notes here). While the press has words
+    // (its step, what failed, why it waits), the caption says them, as General's banner does.
+    let caption = match ui.source.general().update {
+        Update::Available { says: Some(says), .. } => says,
+        _ => UPDATE_CAPTION.to_string(),
+    };
+    let body = vec![notes, dialogs::caption(0, &caption, t)];
+    let press = n.press;
+    let mut action = dialogs::button(2, press.label(), Weight::Primary, t);
+    action = if press == Press::Wait {
+        action.disabled(true).focusable(false)
+    } else {
+        action.default_button().on_press(move |s: &mut State| {
+            s.settings.dialog = None;
+            s.settings.press_update(press);
+        })
+    };
     let foot = vec![
-        dialogs::button(2, "Restart to update", Weight::Primary, t)
-            .default_button()
-            .on_press(|s: &mut State| {
-                s.settings.dialog = None;
-                s.settings.ask(Intent::DownloadUpdate);
-            }),
+        action,
         dialogs::button(3, "Close", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
     dialogs::dialog(&title, 480.0, &title, Some(&sub), body, foot, t)

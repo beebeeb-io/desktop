@@ -5,7 +5,7 @@ use chrono::{Datelike, NaiveDate, Weekday};
 use rune::{Align, Color, Cx, El, Icon, TextStyle, col, el, row};
 
 use super::chrome::{self, FilesControls};
-use super::source::{Change, Kind, Origin, What};
+use super::source::{Change, Exit, Kind, Origin, What};
 use super::{Filter, Section, Ui, icons};
 use crate::State;
 use crate::theme::icons as base;
@@ -15,7 +15,7 @@ use crate::ui::kit;
 const SEARCH_PLACEHOLDER: &str = "Search history";
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
-    // Nothing answers for This PC yet (a build that ships before the engine lane wires it):
+    // This PC turned off (`engine_host::this_pc::TURNED_ON`):
     // the shell's "not built yet" frame, never sample sync history.
     if !s.this_pc.wired() {
         return crate::shell::placeholder::window(s, cx, crate::shell::registry::group_for(&s.shell.app));
@@ -44,16 +44,32 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.bg)
         .child(toolbar);
     if ui.filter == Filter::Problems && ui.problem_count() > 0 {
-        main = main.child(problems_bar(&t));
+        main = main.child(problems_bar(ui.retryable_problem_count() > 0, &t));
     }
     main = main
-        .child(if ui.no_history() { empty(&t) } else { list(ui, &t) })
+        .child(match super::offline::not_ready(ui.standing()) {
+            // No lists: the section says why, never "No changes yet".
+            Some((title, words)) => super::offline::empty_state(&base::SYNC_HISTORY, title, words, &t),
+            None if ui.no_history() => empty(&t),
+            None => list(ui, &t),
+        })
         .child(chrome::status_line(
+            s,
             ui,
             "History of the last 30 days, on this PC only".into(),
             &t,
         ));
-    super::window(s, cx, Section::SyncHistory, main)
+    let window = super::window(s, cx, Section::SyncHistory, main);
+    // Task 2530: a problem's question, over the window (not on the board: `settle.rs`).
+    match &ui.asking {
+        Some(asking) => el()
+            .key("window-with-ask")
+            .w_full()
+            .h_full()
+            .child(window)
+            .child(super::settle::ask(asking, &t)),
+        None => window,
+    }
 }
 
 /// The filter (`.kit-seg.kit-seg-sm`): one of four, the chosen one raised.
@@ -102,10 +118,10 @@ fn filter(ui: &Ui, t: &Theme) -> El {
 }
 
 /// The bar under the toolbar on the Problems filter (`.mk-bulk`).
-fn problems_bar(t: &Theme) -> El {
+fn problems_bar(try_all: bool, t: &Theme) -> El {
     const WORDS: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
     const TITLE: TextStyle = TextStyle::new(12.5, 600.0).lh(17.0);
-    row()
+    let mut bar = row()
         .key("problems-bar")
         .role("group")
         .label("Can't sync")
@@ -124,11 +140,15 @@ fn problems_bar(t: &Theme) -> El {
             WORDS,
             t.text_secondary,
         ))
-        .child(el().key("problems-bar-spacer").grow(1.0))
-        .child(
+        .child(el().key("problems-bar-spacer").grow(1.0));
+    // Task 2524: held edits have no Try again; the bar offers it only while something can be tried again.
+    if try_all {
+        bar = bar.child(
             chrome::outline_button("btn-try-all-again", "Try all again", Some(&icons::RETRY), t)
                 .on_press(|s: &mut State| s.this_pc.retry_all()),
-        )
+        );
+    }
+    bar
 }
 
 /// "Today", "Yesterday", then the day in words: "Sunday 1 Nov".
@@ -183,7 +203,7 @@ fn list(ui: &Ui, t: &Theme) -> El {
             );
             d += 1;
         }
-        if change.problem().is_some() {
+        if change.can_retry() {
             retries += 1;
         }
         days = days.child(change_row(i, change, retries, t));
@@ -248,7 +268,9 @@ fn tile(k: &str, change: &Change, t: &Theme) -> El {
 
 /// One change (`.grid` 30 · rest · 150 · 96 · 48, 44 pt). Keys: `change-<i>` and
 /// `change-<i>-tile|icon|name|sub|device-icon|device|time`; a problem's button is
-/// `btn-try-again`, the second in the frame `btn-try-again-2` (+ `-icon`, `-label`).
+/// `btn-try-again`, the second in the frame `btn-try-again-2` (+ `-icon`, `-label`). Task 2530: the button is only
+/// a way out the engine listed for the row: Try again; else Choose (`change-<i>-choose`), which asks the two-versions
+/// question; else Remove (`change-<i>-remove`), which asks once. A row with none has no button.
 fn change_row(i: usize, change: &Change, retry_no: usize, t: &Theme) -> El {
     let k = format!("change-{i}");
     let line = change.what.line();
@@ -256,7 +278,9 @@ fn change_row(i: usize, change: &Change, retry_no: usize, t: &Theme) -> El {
     let shown = change.clone();
 
     let mut retry = el().key("retry-cell").w(96.0);
-    if let Some(problem) = failed.clone() {
+    // A held edit is a problem with no Try again (task 2524); a parked one has the ways out the engine lists (2530).
+    let exits = change.exits();
+    if let Some(problem) = failed.clone().filter(|_| change.can_retry()) {
         let key = if retry_no > 1 {
             format!("btn-try-again-{retry_no}")
         } else {
@@ -265,6 +289,16 @@ fn change_row(i: usize, change: &Change, retry_no: usize, t: &Theme) -> El {
         retry = retry.child(
             chrome::outline_button(&key, "Try again", Some(&icons::RETRY), t)
                 .on_press(move |s: &mut State| s.this_pc.retry(&problem)),
+        );
+    } else if let Some(problem) = failed.clone().filter(|_| exits.iter().any(|exit| exit.is_keep())) {
+        retry = retry.child(
+            chrome::outline_button(&format!("{k}-choose"), "Choose", None, t)
+                .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, false)),
+        );
+    } else if let Some(problem) = failed.clone().filter(|_| exits.contains(&Exit::RemoveFromList)) {
+        retry = retry.child(
+            chrome::outline_button(&format!("{k}-remove"), "Remove", None, t)
+                .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, true)),
         );
     }
 

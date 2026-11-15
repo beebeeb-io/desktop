@@ -171,6 +171,29 @@ fn fake(tag: &str) -> Fake {
                     Reply::error(401, "invalid_credentials")
                 }
             }
+            "POST /api/v1/auth/password-proof/start" | "POST /api/v1/auth/password-proof/finish" => {
+                // The screen lock's grant-nothing proof: the step-up's OPAQUE legs, minting nothing. The finish
+                // waits at the code door (a step that is on its way), and answers as the server's table does.
+                if let Some(reply) = refused(step_up_in.load(Ordering::SeqCst)) {
+                    return reply;
+                }
+                let Some(account) = [&first_in, &second_in]
+                    .into_iter()
+                    .find(|account| req.bearer() == Some(account.session_token.as_str()))
+                else {
+                    return Reply::error(401, "unauthorized");
+                };
+                if route.ends_with("start") {
+                    account.opaque.login_start(&req.json())
+                } else {
+                    door_in.pass();
+                    if account.opaque.login_finish(&req.json()) {
+                        Reply::ok(json!({ "proven": true, "password_counter": 1 }))
+                    } else {
+                        Reply::error(403, "password_not_proven")
+                    }
+                }
+            }
             "POST /api/v1/auth/verify-recovery-check" => {
                 // The phrase's proof waits at the same door as the code step.
                 door_in.pass();
@@ -442,50 +465,6 @@ fn too_many_tries_is_said_with_the_servers_wait_and_counted_down_to_zero() {
 }
 
 #[test]
-fn a_locked_vault_opens_with_the_password_and_with_nothing_else() {
-    let fake = fake("lock");
-    let (engine, mut source) = signed_in(&fake);
-    let _ = engine.lock();
-    assert_eq!(source.gate(), GateState::Locked);
-
-    source.begin_unlock("not the password");
-    assert_eq!(
-        next(&mut source),
-        SignInEvent::VaultUnlocked(Err(SignInProblem::Invalid))
-    );
-    assert_eq!(source.gate(), GateState::Locked);
-
-    fake.step_up.store(RATE_LIMITED, Ordering::SeqCst);
-    source.begin_unlock(PASSWORD);
-    assert_eq!(
-        next(&mut source),
-        SignInEvent::VaultUnlocked(Err(SignInProblem::RateLimited { seconds: 30 }))
-    );
-    fake.step_up.store(NO_ANSWER, Ordering::SeqCst);
-    source.begin_unlock(PASSWORD);
-    assert_eq!(
-        next(&mut source),
-        SignInEvent::VaultUnlocked(Err(SignInProblem::Offline))
-    );
-    assert_eq!(
-        source.gate(),
-        GateState::Locked,
-        "a proof that was not made unlocks nothing"
-    );
-    fake.step_up.store(ANSWERS, Ordering::SeqCst);
-
-    source.begin_unlock(PASSWORD);
-    assert_eq!(
-        next(&mut source),
-        SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::Drive))
-    );
-    assert_eq!(source.gate(), GateState::Ready);
-    assert_eq!(engine.account_email().as_deref(), Some(fake.first.email.as_str()));
-    // Lock, then unlock: the account's local state is handed out for the new session.
-    assert!(engine.keys_for_engine_start().is_ok());
-}
-
-#[test]
 fn another_account_signs_in_after_the_first_and_gets_only_its_own_session() {
     let fake = fake("other");
     let (engine, mut source) = signed_in(&fake);
@@ -666,7 +645,7 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     let fake = fake("unbound");
     let (_engine, mut source) = source(&fake);
     assert_eq!(source.shared_session(), None);
-    assert!(!source.sign_up_available());
+    assert!(source.sign_up_available(), "sign-up is bound (owner ruling 2026-11-14)");
 
     source.begin_recovery_verify("someone@example.eu", &words(TEST_PHRASE));
     assert_eq!(
@@ -675,8 +654,7 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     );
     source.begin_set_password("an invented new password");
     assert_eq!(source.poll(), Some(SignInEvent::PasswordSet(Err(SignInProblem::Other))));
-    source.begin_passkey();
-    assert_eq!(source.poll(), Some(SignInEvent::Passkey(PasskeyOutcome::Unavailable)));
+    // The passkey sign-in is bound (the system's dialog on a thread of its own): its tests are `passkeys_tests`.
     source.begin_device_request();
     assert_eq!(
         source.poll(),
@@ -685,9 +663,9 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     source.begin_hello();
     assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
     // Leaving a step does not drop these: they belong to no step that can be left.
-    source.begin_passkey();
+    source.begin_hello();
     source.discard_partial_sign_in();
-    assert_eq!(source.poll(), Some(SignInEvent::Passkey(PasskeyOutcome::Unavailable)));
+    assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
     assert_eq!(fake.fake.routes().len(), 0, "nothing was asked of the server");
 }
 
@@ -697,3 +675,7 @@ fn a_secret_reaches_the_engine_as_it_was_typed_and_the_words_as_one_phrase() {
     assert_eq!(phrase_of(&words(TEST_PHRASE)).as_str(), TEST_PHRASE);
     assert_eq!(phrase_of(&[]).as_str(), "");
 }
+
+// The two-level lock through this source: Windows Hello for a locked screen, the password for either level.
+#[path = "signin_lock_tests.rs"]
+mod lock;

@@ -90,7 +90,7 @@ impl fmt::Debug for Details {
 /// A newer version saved elsewhere.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Newer {
-    /// "Anna's iPhone".
+    /// "Anna's iPhone". Empty: no device is named (the engine does not say which device saved: decision 2505).
     pub from: String,
     /// "09:14".
     pub at: String,
@@ -191,6 +191,9 @@ pub enum Origin {
     /// Downloaded from Beebeeb, for a file whose copy on this PC is not settled with it (two versions to choose
     /// from, or a sync of this file that failed): what is shown may not be what is on this PC; the view says so.
     BeebeebNotThisPcs,
+    /// Downloaded from Beebeeb, for a file whose copy on this PC could not be confirmed as the version Beebeeb has
+    /// (older, or of a version not known): the copy is not shown as it; the view says so.
+    BeebeebUnconfirmedHere,
 }
 
 /// What the content area shows.
@@ -310,6 +313,43 @@ pub enum SaveOutcome {
     Conflict(Conflict),
     /// Not saved, and nothing changed.
     Failed,
+    /// Handed to the engine: what became of it comes by [`ViewerSource::settled`] (a save leaves the window's
+    /// thread). Nothing is drawn as saved before then.
+    Working,
+}
+
+/// What a change that left the window's thread became, read by [`ViewerSource::settled`].
+pub enum Settled {
+    /// Available offline was changed (`done`), or refused: `on` is what was asked.
+    Offline { on: bool, done: bool },
+    /// The edit is stored as the file's next version `version` (the file `id` under `name`: a Keep both is a new
+    /// file next to the first), when `at`.
+    Saved {
+        id: String,
+        name: String,
+        body: Body,
+        version: u32,
+        at: String,
+    },
+    /// The edit is stored on this PC and sent as soon as Beebeeb can be reached; the version it becomes is not known
+    /// yet. `version`: the one it was saved from, which the text on screen is based on (its label).
+    Queued { body: Body, version: u32 },
+    /// Keep theirs: the edit is dropped and the file as Beebeeb has it is shown.
+    Opened { body: Body, version: u32 },
+    /// The file is at a version past the one the edit began from (saved on another device, or by an earlier opening
+    /// on this PC: who is not known); nothing was written.
+    Conflict(Conflict),
+    /// The local state holds a version of the open file that this view does not (DW-1519). Nothing on screen
+    /// changed: the banner offers it.
+    Newer(Newer),
+    /// Not done, nothing changed.
+    Failed,
+    /// Not saved, and why (the words): nothing changed, the edit stays as it is (delta 3 of desktop#432: an earlier
+    /// change to the file on this PC has not been sent yet).
+    Refused(String),
+    /// A change begun before the file was opened again (Show it, Try again): what it came to, said. Nothing on
+    /// screen changes.
+    Said(String),
 }
 
 /// Which of the theme's inks a run of text is drawn in.
@@ -558,6 +598,25 @@ pub trait ViewerSource {
     fn knows_offline(&self) -> bool {
         true
     }
+    /// What a change handed over by `set_offline` (when [`ViewerSource::answers_later`]), `save` or `resolve`
+    /// became. `None`: nothing new.
+    fn settled(&mut self, _file_id: &str) -> Option<Settled> {
+        None
+    }
+    /// Whether `set_offline` answers by [`ViewerSource::settled`]: the switch moves when the engine did, not at the
+    /// press.
+    fn answers_later(&self) -> bool {
+        false
+    }
+    /// A change of the open file is on its way (a save, a keep, the switch): Show it waits until it answered.
+    fn saving(&self) -> bool {
+        false
+    }
+    /// How long until this source next reads whether a newer version arrived (DW-1519), while it reads one: the
+    /// window asks to be woken then, so the banner comes without a press. `None`: it does not read.
+    fn next_check(&self) -> Option<std::time::Duration> {
+        None
+    }
     /// Download and decrypt again after a failure.
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError>;
     /// A picture of the open file as decoded pixels (the photo, a strip thumbnail, the artwork,
@@ -569,6 +628,11 @@ pub trait ViewerSource {
     /// Where `words` are in the open PDF, in reading order. Empty: nowhere, or no text to search.
     fn find(&mut self, _file_id: &str, _words: &str) -> Vec<Match> {
         Vec::new()
+    }
+    /// `true`: this source can play a recording. `false` (the default): the player draws no Play
+    /// button and offers "Open in another app" instead.
+    fn can_play(&self) -> bool {
+        false
     }
     /// Play or pause the open recording. `false`: not done.
     fn play(&mut self, _file_id: &str, _on: bool) -> bool {
@@ -947,6 +1011,10 @@ impl ViewerSource for FixtureViewerSource {
     fn find(&mut self, file_id: &str, words: &str) -> Vec<Match> {
         self.calls.push(format!("find {file_id} {words}"));
         super::fixture_media::find(file_id, words)
+    }
+
+    fn can_play(&self) -> bool {
+        true
     }
 
     fn play(&mut self, file_id: &str, on: bool) -> bool {

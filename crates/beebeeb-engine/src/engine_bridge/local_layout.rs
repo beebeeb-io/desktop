@@ -280,7 +280,7 @@ impl EngineBridge {
                     && entry.status == FileStatus::CloudOnly
                     && entry.size_bytes > 0
                 {
-                    self.enqueue_hydrate_operation(&entry, now)?;
+                    self.enqueue_hydrate_operation(&entry, now, "recursive_pin")?;
                     hydrate_operations += 1;
                 }
             }

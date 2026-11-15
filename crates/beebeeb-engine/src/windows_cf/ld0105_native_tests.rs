@@ -1176,3 +1176,11 @@ fn ld0105_p2_native_discard_empties_only_the_poisoned_file() {
 /// F2b (desktop #225 QA rung, robocopy ERROR 379): the diagnosis matrix and the fix's rung.
 #[path = "ld0105_f2b_native_tests.rs"]
 mod f2b;
+
+/// Task 2523 (F1): a copy behind the current version, emptied in the measured order at the new size.
+#[path = "stale_2523_native_tests.rs"]
+mod stale_2523;
+
+/// S6: a kept placeholder this PC does not hold is fetched by the batch's production fetch.
+#[path = "kept_refetch_s6_native_tests.rs"]
+mod kept_refetch_s6;

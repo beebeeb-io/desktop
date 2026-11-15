@@ -22,8 +22,12 @@ pub enum GateState {
     Ready,
     /// DW-A02 / DW-A03.
     SignedOut,
-    /// DW-0009.
+    /// DW-0009: the SCREEN is locked (core's `ScreenLocked`). The key is in memory and sync runs; Windows Hello
+    /// opens it.
     Locked,
+    /// The vault is closed (core's `VaultClosed`): no key in this app, nothing syncs. The account's password,
+    /// proven to the server, opens it (DW-A30's screen, with the lock's words).
+    VaultClosed,
     /// DW-A23.
     NeedsRecoveryPhrase,
     /// DW-0014.
@@ -91,6 +95,9 @@ pub enum HelloOutcome {
     NotRecognized,
     /// DW-A06.
     Cancelled,
+    /// Added by the lock lane: no prompt could be shown (Windows Hello is not set up, not present, or turned off
+    /// on this PC). The lock screen then offers the password.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +189,12 @@ pub enum SignInEvent {
     PhraseRestored(Result<NextAfterSignIn, PhraseProblem>),
     Passkey(PasskeyOutcome),
     VaultUnlocked(Result<NextAfterSignIn, SignInProblem>),
+    /// The screen lock's password path answered (`begin_screen_password`).
+    ScreenPassword(ScreenPasswordOutcome),
+    /// The wait after a wrong try or a refusal to try, once a second; `0` when it is over.
+    ScreenWaitLeft {
+        seconds: u32,
+    },
     /// Recovery, step 1 (DW-A47): the phrase re-derived this account's key.
     RecoveryPhraseVerified(Result<(), PhraseProblem>),
     /// Recovery, last step (DW-A49).
@@ -192,6 +205,34 @@ pub enum SignInEvent {
     /// belonged to could NOT be ended: this computer is still signed in. The window shows the screen the
     /// session's gate asks for again, never a form that can only refuse.
     StillSignedIn,
+}
+
+/// What the engine's screen-lock password path answered (`Engine::unlock_screen_with_password`), with the two
+/// answers that are not its own: the press could not be checked, and the press was overtaken. Waits are the
+/// engine's, in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenPasswordOutcome {
+    /// Accepted: the engine opened the lock, and the gate says so.
+    Opened,
+    Wrong {
+        wait_ms: u64,
+    },
+    Wait {
+        wait_ms: u64,
+    },
+    ServerLimit {
+        wait_ms: Option<u64>,
+    },
+    LocalCheckOff,
+    OfflineNoRecord,
+    /// The account must sign in again to finish its upgrade: the vault level's password screen follows.
+    AccountUpgradeNeeded,
+    /// The server ended the session: the vault is closed and its password screen follows.
+    SessionEnded,
+    /// The check could not run (nothing was counted, nothing opened).
+    Failed,
+    /// The session or the lock moved while the check ran: nothing opened, nothing is said.
+    Overtaken,
 }
 
 pub trait SignInSource {
@@ -213,10 +254,26 @@ pub trait SignInSource {
     fn begin_two_factor(&mut self, code: &str, kind: CodeKind);
     /// Engine: `auth_v2::unlock_with_recovery_phrase`.
     fn begin_restore(&mut self, words: &[&str]);
+    /// `false` (the default): the doors that need another sign-in on this account to approve this PC, and the
+    /// in-app recovery with the 12 words, are not available here: they are not drawn, and "Trouble signing in?"
+    /// opens the web's recovery page. A source that binds `begin_device_request` and `begin_recovery_verify`
+    /// says `true`.
+    fn in_app_doors_available(&self) -> bool {
+        false
+    }
+    /// `false` (the default): sign-in with a passkey is not available here, and the "Use a
+    /// passkey" door is not drawn. A source that binds `begin_passkey` says `true`.
+    fn passkey_available(&self) -> bool {
+        false
+    }
     /// Engine: the system passkey prompt (WebAuthn), then `auth_v2::passkey_sign_in`.
     fn begin_passkey(&mut self);
     /// Engine: `auth_v2::unlock_vault` with the password, after a passkey.
     fn begin_unlock(&mut self, password: &str);
+    /// The SCREEN lock's password (a locked screen whose Windows Hello cannot answer): counted tries and the
+    /// server's proof that makes no session (`Engine::unlock_screen_with_password`); the answer is
+    /// `SignInEvent::ScreenPassword`. The default does nothing: a source that can show a locked screen binds it.
+    fn begin_screen_password(&mut self, _password: &str) {}
     /// Engine: `auth_v2::recovery_verify_phrase`.
     fn begin_recovery_verify(&mut self, email: &str, words: &[&str]);
     /// Engine: `auth_v2::recovery_set_password`.
@@ -237,6 +294,11 @@ pub trait SignInSource {
     /// Added by lane f-signin-rest (a default): the person left while Windows' passkey dialog
     /// was up: dismiss it. No `Passkey` event of that attempt may arrive after this call.
     fn cancel_passkey(&mut self) {}
+    /// Added by lane bind-acct-d (a default that ignores the address): "Use a passkey" for the address typed in the
+    /// form. Beebeeb's passkey sign-in starts from an account's address, so a source that needs it takes it here.
+    fn begin_passkey_for(&mut self, _email: &str) {
+        self.begin_passkey();
+    }
 
     // ---- Sign-up (DW-A31 to DW-A44), added by lane signin-create. Every method has a default,
     // so a source written before it compiles and has no sign-up: `sign_up_available` is then
@@ -246,6 +308,11 @@ pub trait SignInSource {
     /// shell's (`Intent::CreateAccount`), as before these screens existed.
     fn sign_up_available(&self) -> bool {
         false
+    }
+    /// The web page the server names for creating an account, once it refused sign-up from this app
+    /// (`SendProblem::WebOnly`). `None`: it named none.
+    fn sign_up_web_address(&self) -> Option<String> {
+        None
     }
     /// Engine: send the email code, the first one and every new one (the old one stops
     /// working). Answers `SignUp(CodeSent)`; `SignUp(ResendTick)` follows once a second.
@@ -323,8 +390,14 @@ pub struct Script {
     pub shared_session: bool,
     pub sign_in: SignInAnswer,
     pub hello: HelloOutcome,
+    /// What the screen lock's password path answers.
+    pub screen_password: ScreenPasswordOutcome,
     pub device: Option<DeviceStatus>,
     pub passkey: PasskeyOutcome,
+    /// Whether the source offers sign-in with a passkey (the door is drawn only then).
+    pub passkey_available: bool,
+    /// Whether the source offers the in-app doors (approval from another device, recovery with the 12 words).
+    pub in_app_doors: bool,
     /// What a two-factor code gets instead of the check against the board's code (DW-A27 draws
     /// the board's own six digits as the wrong ones).
     pub two_factor_problem: Option<TwoFactorProblem>,
@@ -348,8 +421,11 @@ impl Default for Script {
             shared_session: true,
             sign_in: SignInAnswer::Next(NextAfterSignIn::TwoFactor),
             hello: HelloOutcome::Succeeded(NextAfterSignIn::Drive),
+            screen_password: ScreenPasswordOutcome::Opened,
             device: None,
             passkey: PasskeyOutcome::NeedsPassword,
+            passkey_available: true,
+            in_app_doors: true,
             two_factor_problem: None,
             hold: false,
             sign_up: SignUpScript::default(),
@@ -485,6 +561,14 @@ impl SignInSource for FixtureSignInSource {
         ));
     }
 
+    fn passkey_available(&self) -> bool {
+        self.script.passkey_available
+    }
+
+    fn in_app_doors_available(&self) -> bool {
+        self.script.in_app_doors
+    }
+
     fn begin_passkey(&mut self) {
         self.called("passkey");
         self.queue.push_back(SignInEvent::Passkey(self.script.passkey));
@@ -499,6 +583,12 @@ impl SignInSource for FixtureSignInSource {
                 Err(SignInProblem::Invalid)
             },
         ));
+    }
+
+    fn begin_screen_password(&mut self, _password: &str) {
+        self.called("screen_password");
+        self.queue
+            .push_back(SignInEvent::ScreenPassword(self.script.screen_password));
     }
 
     fn begin_recovery_verify(&mut self, _email: &str, words: &[&str]) {

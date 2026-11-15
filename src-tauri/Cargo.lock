@@ -375,15 +375,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "beebeeb-api"
+version = "0.3.0"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
+dependencies = [
+ "beebeeb-core",
+ "beebeeb-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "zeroize",
+]
+
+[[package]]
 name = "beebeeb-backup"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -395,12 +414,12 @@ dependencies = [
 [[package]]
 name = "beebeeb-core"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "aes",
  "aes-gcm",
  "argon2",
- "base64 0.22.1",
+ "base64 0.23.1",
  "beebeeb-types",
  "bip39",
  "blake3",
@@ -500,6 +519,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "beebeeb-api",
  "beebeeb-backup",
  "beebeeb-core",
  "beebeeb-sync",
@@ -540,7 +560,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-sync"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -558,7 +578,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-transfer"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -573,7 +593,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=56cd54fab366b3c7291145a8736b5c56f5107fe8#56cd54fab366b3c7291145a8736b5c56f5107fe8"
+source = "git+https://github.com/beebeeb-io/core?rev=7d5b5f97892bb10cd027c0285fdc6af00476140b#7d5b5f97892bb10cd027c0285fdc6af00476140b"
 dependencies = [
  "serde",
 ]

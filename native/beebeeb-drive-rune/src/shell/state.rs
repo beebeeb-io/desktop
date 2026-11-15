@@ -53,6 +53,9 @@ pub struct State {
     pub(crate) tray: Option<crate::frames::tray::Ui>,
     pub(crate) shortcuts: crate::frames::tray::shortcuts::Shortcuts,
     pub(crate) setup: Option<crate::frames::signin::setup::Ui>,
+    /// The running app: makes the first run's source for the session that is signed in now (`engine_host::setup`).
+    /// `None`: no first run is ever started from the gate (scenes set `setup` themselves).
+    pub(crate) setup_source: Option<SetupMaker>,
     /// The first-time guide over the main window (DW-0380, DW-0301 to DW-0305).
     pub(crate) guide: crate::frames::signin::setup::guide::Guide,
     /// Where the guide's "done" is kept, once per account (`guide_marks`).
@@ -131,6 +134,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         tray: None,
         shortcuts: Default::default(),
         setup: None,
+        setup_source: None,
         guide: Default::default(),
         guide_marks: crate::frames::signin::setup::guide_marks::first(crate::shell::instance::DEV_BUILD),
         this_pc: crate::frames::this_pc::Ui::fixture(),
@@ -143,6 +147,32 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
 /// read checks the data's owner against the session), so Search could answer with another account's names. While
 /// this is false the shell hands Search the `Unwired` source and no part of the adapter runs (no index, no worker).
 pub(crate) const SEARCH_ON_ENGINE: bool = false;
+
+/// Makes a first-run source for the session that is signed in when it is called.
+pub type SetupMaker = Box<dyn Fn() -> Box<dyn crate::frames::signin::setup::source::SetupSource>>;
+
+/// The running app's first run, on the real engine: give the window the way to make its source. Only the app's
+/// start calls this (after it read whether a first run is due, `LiveEngine::wire_first_run`): a window that was
+/// not wired never shows a first run (the gate stays as the engine says).
+pub fn wire_first_run<C: beebeeb_engine::app::CredentialStores + 'static>(
+    s: &mut State,
+    engine: std::sync::Arc<beebeeb_engine::app::Engine<C>>,
+    live: &std::sync::Arc<crate::engine_host::LiveEngine<C>>,
+) {
+    let hooks = live.setup_hooks(crate::shell::platform::current());
+    // Step 2's "off" asks the main window's Windows Hello prompt first.
+    let window = s.shell.main_window_slot();
+    s.setup_source = Some(Box::new(move || {
+        Box::new(
+            crate::engine_host::setup::EngineSetupSource::new(engine.clone(), hooks.clone()).with_hello(Box::new(
+                crate::engine_host::hello::WindowHello::for_reason(
+                    window.clone(),
+                    crate::engine_host::hello::TURN_APP_LOCK_OFF,
+                ),
+            )),
+        )
+    }));
+}
 
 /// The window on the real engine: Files and sign-in ask the handle. Every area not yet
 /// backed by the engine starts on its `Unwired` state (the shell's "not built yet" frame),
@@ -160,12 +190,17 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.global = crate::frames::global::Ui::new(Box::new(crate::engine_host::EngineGlobalSource::new(engine.clone())));
     s.settings.source = Box::new(crate::engine_host::settings::EngineSettingsSource::new(engine.clone()));
     // Drive's panes: Storage insights answers; every other pane is the shell's frame (`engine_host::drive_settings`).
-    s.settings.drive = Box::new(crate::engine_host::drive_settings::EngineDriveSettings::new(
-        engine.clone(),
-        crate::shell::platform::current(),
-    ));
+    s.settings.drive = Box::new(
+        crate::engine_host::drive_settings::EngineDriveSettings::new(engine.clone(), crate::shell::platform::current())
+            .with_previews(crate::engine_host::drive_previews::PreviewsHost::new(
+                engine.clone(),
+                crate::engine_host::drive_previews::shared_run(),
+            )),
+    );
+    // The lock screen's Windows Hello prompt is owned by the main window.
+    let hello = crate::engine_host::hello::WindowHello::new(s.shell.main_window_slot());
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
-        crate::engine_host::EngineSignInSource::new(engine.clone()),
+        crate::engine_host::EngineSignInSource::with_hello(engine.clone(), Box::new(hello)),
     )));
     // An open file: read from the engine, decrypted in memory (`engine_host::viewer`); one source per opened file.
     let viewer_engine = engine.clone();
@@ -184,9 +219,15 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     // the identity or a dev flag.
     // Account and Devices and sessions read the engine; every other account pane is the shell's frame
     // (`engine_host::account`).
-    s.account.source = Some(Box::new(crate::engine_host::account::EngineAccountSource::new(
-        engine.clone(),
-    )));
+    // Turning app lock off asks the main window's Windows Hello prompt first.
+    s.account.source = Some(Box::new(
+        crate::engine_host::account::EngineAccountSource::new(engine.clone()).with_hello(Box::new(
+            crate::engine_host::hello::WindowHello::for_reason(
+                s.shell.main_window_slot(),
+                crate::engine_host::hello::TURN_APP_LOCK_OFF,
+            ),
+        )),
+    ));
     s.storage_split = None;
     // The first-time guide's "done", once per account: the engine keeps it in the account's own local state.
     s.guide_marks = Box::new(crate::engine_host::guide::EngineGuideMarks::new(engine.clone()));
@@ -194,6 +235,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.frames.shared.source = Box::new(crate::engine_host::shared::EngineSharedSource::new(engine.clone()));
     // Trash reads the engine (`engine_host::trash`); Search only when `SEARCH_ON_ENGINE` (task 2488).
     s.frames.trash.source = Box::new(crate::engine_host::trash::EngineTrashSource::new(engine.clone()));
+    // An item's read-only Preview over Trash (Beebeeb only) and Shared (`engine_host::item_preview`).
+    s.frames.item_preview = Box::new(crate::engine_host::item_preview::EngineItemPreview::new(engine.clone()));
     s.frames.find = crate::frames::search::SearchUi::default();
     if SEARCH_ON_ENGINE {
         s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine.clone()));

@@ -74,6 +74,11 @@ fn api_version() -> Result<u32, PasskeyError> {
     Ok(version)
 }
 
+/// Whether the WebAuthn API of this Windows can do passkeys with PRF (the version check alone: no dialog).
+pub fn platform_available() -> bool {
+    api_version().is_ok()
+}
+
 fn platform_err(e: windows::core::Error) -> PasskeyError {
     if e.code().0 == NTE_USER_CANCELLED {
         PasskeyError::Cancelled

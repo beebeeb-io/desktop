@@ -42,6 +42,8 @@ pub enum DesktopApiError {
     ListingTooLarge { listing: Listing, cap: usize },
     /// The owner-key adoption answer carried no `adopted` boolean.
     InvalidAdoptionResponse,
+    /// The file counters answered without a trashed count (missing, null or not a whole number).
+    InvalidCountResponse,
 }
 
 /// Which listing outgrew its cap. The text names the listing, because a failure
@@ -83,6 +85,7 @@ impl std::fmt::Display for DesktopApiError {
                 write!(f, "{} listing exceeded hard cap of {cap}", listing.as_str())
             }
             DesktopApiError::InvalidAdoptionResponse => f.write_str("invalid adoption response"),
+            DesktopApiError::InvalidCountResponse => f.write_str("the file counters carry no trashed count"),
         }
     }
 }

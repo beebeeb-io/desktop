@@ -9,10 +9,18 @@
 //! - `Member::compared` is always `false`: the safety-number marks are not in the engine crate yet (see the PR).
 //!
 //! Bound changes ([`Engine::share_change`], by id, for the session the row was drawn under): `accept`, `set_access`,
-//! `remove_access` (the view confirms it, DW-0512b). A change is never drawn before Beebeeb confirmed it: the rows
-//! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a notice the view draws
-//! ("Not available yet"): `decline`, `stop_sharing`, `close_request` (the view asks no confirmation), `invite` (needs
-//! the safety marks and the key flows), `keep_offline`, `remove_request` (no server route).
+//! `remove_access` (the view confirms it, DW-0512b), `decline` (`/decline`: the sender sees it declined; 409 is "Already
+//! accepted."), `remove_request` ("Remove from my list" is the server's `/hide`, never DELETE, which destroys the key;
+//! 409 is "Close the request first."). A change is never drawn before Beebeeb confirmed it: the rows
+//! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a
+//! notice the view draws ("Not available yet"): `stop_sharing`, `close_request` (the view asks no confirmation),
+//! `keep_offline`, and the old synchronous `invite` (it cannot wait for the server).
+//!
+//! Invite someone (DW-0514, [`Engine::invite_for`]): `start_invite` stamps the press's session and account, runs the
+//! invite on a worker (one per share at a time) and answers through `invite_answer`; an answer under another session
+//! or account is dropped. After an invite that reached Beebeeb (and after a changed key, whose invite stays) the lists
+//! are read again: a person is never inserted here. The access is Beebeeb's default for a new invitation (Can view):
+//! core's invite carries none.
 //!
 //! When it reads: when the Shared section opens and the lists are missing or older than [`FRESH_FOR`], and after a
 //! change was answered. Never from a draw call: every accessor only reads what is here. So the sidebar's count of
@@ -27,23 +35,25 @@
 //!
 //! Must not: log a name, an address, an id or a server's words. Holds no token, key, link or link secret.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::settings_api::AccountCallError;
+use beebeeb_engine::app::share_invite_api::{InviteAnswer, InviteRefused};
 use beebeeb_engine::app::shares_api::{ShareChange, ShareChangeError, ShareMember, SharesOverview};
 use beebeeb_engine::app::{CredentialStores, Engine};
 use beebeeb_engine::drive_v2::model::mime_for_name;
 use chrono::{DateTime, Local};
 
 use super::log;
+use super::stamp::{Stamp, stamp};
 use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
 use crate::frames::shared::source::{
-    Access, Invitation, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped, Request, RequestState,
-    SharedSource,
+    Access, Invitation, InviteResult, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped, Request,
+    RequestState, SharedSource,
 };
 
 #[cfg(test)]
@@ -83,6 +93,10 @@ pub struct EngineSharedSource<C: CredentialStores> {
     unmade: bool,
     /// Something changed outside an answer: the next pump says so.
     dirty: bool,
+    /// The shares with an invitation on its way: one per share at a time.
+    inviting: HashSet<String>,
+    /// The invitations' answers of the current session and account, in order, for the view.
+    invite_answers: VecDeque<(String, InviteResult)>,
 }
 
 /// The lists as the view draws them.
@@ -94,6 +108,8 @@ pub(crate) struct Held {
     pub(crate) people: Vec<PeopleShare>,
     pub(crate) members: HashMap<String, Vec<Member>>,
     pub(crate) links: Vec<LinkShare>,
+    /// A link row's id to every live link behind it (what Stop sharing revokes).
+    pub(crate) link_shares: HashMap<String, Vec<String>>,
     pub(crate) requests: Vec<Request>,
 }
 
@@ -101,6 +117,8 @@ enum Answer {
     Read(u64, Result<SharesOverview, AccountCallError>),
     /// The change for this id, the session it was sent for, and what Beebeeb said.
     Changed(String, SessionGeneration, Result<(), ShareChangeError>),
+    /// The invitation for this share, the session and account it was sent under, and how it ended.
+    Invited(String, Stamp, InviteAnswer),
 }
 
 impl<C: CredentialStores> EngineSharedSource<C> {
@@ -121,6 +139,8 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             notice: None,
             unmade: false,
             dirty: false,
+            inviting: HashSet::new(),
+            invite_answers: VecDeque::new(),
         }
     }
 
@@ -253,12 +273,36 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                     Ok(()) => self.unmade = false,
                     Err(kind) => {
                         log(format!("shared: a change was not made ({kind})"));
-                        self.notice = Some(Notice::ChangeRefused);
+                        self.notice = Some(match kind {
+                            ShareChangeError::AlreadyAccepted => Notice::AlreadyAccepted,
+                            ShareChangeError::RequestOpen => Notice::RequestStillOpen,
+                            _ => Notice::ChangeRefused,
+                        });
                         self.unmade = true;
                     }
                 }
                 // Nothing was drawn ahead of the answer: the lists change when Beebeeb's are read again.
                 self.read();
+            }
+            Answer::Invited(share, asked, answer) => {
+                self.inviting.remove(&share);
+                // Sent under another session or account: dropped, nothing opens and nothing is read for it.
+                if asked != stamp(&self.engine) {
+                    return;
+                }
+                let result = invite_result(&answer);
+                if let InviteAnswer::Refused(kind) = answer {
+                    log(format!("shared: an invitation was not sent ({kind})"));
+                }
+                // The person is on the share now (a changed key's invite stays too, and so does one that could not be
+                // finished): the lists are Beebeeb's again.
+                if result.sent()
+                    || result == InviteResult::KeyChanged
+                    || matches!(answer, InviteAnswer::Unfinished { .. })
+                {
+                    self.read();
+                }
+                self.invite_answers.push_back((share, result));
             }
         }
     }
@@ -277,7 +321,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
 #[cfg(test)]
 impl<C: CredentialStores> EngineSharedSource<C> {
     fn busy(&self) -> bool {
-        self.reading.is_some() || !self.changing.is_empty()
+        self.reading.is_some() || !self.changing.is_empty() || !self.inviting.is_empty()
     }
 }
 
@@ -349,24 +393,114 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         )
     }
 
-    // Not bound (the module's doc says why): nothing is sent, and the view says so.
-    fn decline(&mut self, _id: &str) -> bool {
-        self.refuse(Notice::NotAvailable)
+    /// Sent once per press, for an invitation of the current session's lists (the web's Decline: the invitation
+    /// leaves the inbox). The card goes when the lists are read again after Beebeeb answered.
+    fn decline(&mut self, id: &str) -> bool {
+        let Some(session) = self
+            .current()
+            .filter(|held| held.invitations.iter().any(|i| i.id == id))
+            .map(|held| held.session)
+        else {
+            return false;
+        };
+        self.change(session, id, ShareChange::Decline { invite_id: id.into() })
     }
+
+    // Not bound (the module's doc says why): nothing is sent, and the view says so.
     fn keep_offline(&mut self, _id: &str) -> bool {
         self.refuse(Notice::NotAvailable)
     }
-    fn stop_sharing(&mut self, _id: &str) -> bool {
-        self.refuse(Notice::NotAvailable)
+
+    /// Sent once per press: a share with people (cancels every invite of it) or a link (revokes every live link of
+    /// the item). Both stay in the rows until Beebeeb answered and the lists were read again.
+    fn stop_sharing(&mut self, id: &str) -> bool {
+        let Some(held) = self.current() else {
+            return false;
+        };
+        let session = held.session;
+        let change = if held.people.iter().any(|p| p.id == id) {
+            let invite_ids: Vec<String> = held
+                .members
+                .get(id)
+                .into_iter()
+                .flatten()
+                .filter(|m| m.access.is_some())
+                .map(|m| m.id.clone())
+                .collect();
+            if invite_ids.is_empty() {
+                return false;
+            }
+            ShareChange::CancelInvites { invite_ids }
+        } else if let Some(share_ids) = held.link_shares.get(id) {
+            ShareChange::RevokeLinks {
+                share_ids: share_ids.clone(),
+            }
+        } else {
+            return false;
+        };
+        self.change(session, id, change)
     }
-    fn close_request(&mut self, _id: &str) -> bool {
-        self.refuse(Notice::NotAvailable)
+
+    /// Sent once per press, for an open request of the current session's lists.
+    fn close_request(&mut self, id: &str) -> bool {
+        let Some(session) = self
+            .current()
+            .filter(|held| {
+                held.requests
+                    .iter()
+                    .any(|r| r.id == id && r.state == RequestState::Open)
+            })
+            .map(|held| held.session)
+        else {
+            return false;
+        };
+        self.change(session, id, ShareChange::CloseRequest { request_id: id.into() })
     }
-    fn remove_request(&mut self, _id: &str) -> bool {
-        self.refuse(Notice::NotAvailable)
+
+    /// "Remove from my list": the server's HIDE (the row stays there with its key, so what arrived can still be
+    /// opened), never the DELETE route that destroys the key. A request that is still open answers 409
+    /// ("Close the request first."). The row leaves when the lists are read again after the answer.
+    fn remove_request(&mut self, id: &str) -> bool {
+        let Some(session) = self
+            .current()
+            .filter(|held| held.requests.iter().any(|r| r.id == id))
+            .map(|held| held.session)
+        else {
+            return false;
+        };
+        self.change(session, id, ShareChange::HideRequest { request_id: id.into() })
     }
-    fn invite(&mut self, _share: &str, _email: &str, _access: Access) -> bool {
-        self.refuse(Notice::NotAvailable)
+
+    /// Sent once per press, on a worker, under the session and account of the press. `share` is an item's id (one not
+    /// shared with anyone yet too: the engine decides whether it is the account's own). `false`: nothing typed, an
+    /// invitation for this share still on its way, no session, or no worker could start; nothing was sent.
+    fn start_invite(&mut self, share: &str, email: &str) -> bool {
+        let email = email.trim();
+        if email.is_empty() || self.inviting.contains(share) || !self.engine.has_session() {
+            return false;
+        }
+        let asked = stamp(&self.engine);
+        let (engine, answers) = (self.engine.clone(), self.answers.clone());
+        let (sent_for, address) = (share.to_string(), email.to_string());
+        let started = std::thread::Builder::new().name("shared-invite".into()).spawn(move || {
+            let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                engine.invite_for(asked.0, &sent_for, &address)
+            }))
+            .unwrap_or(InviteAnswer::Refused(InviteRefused::Failed));
+            let _ = answers.send(Answer::Invited(sent_for, asked, answer));
+            engine.wake_host();
+        });
+        if started.is_err() {
+            log("shared: could not start a thread for an invitation");
+            return false;
+        }
+        self.inviting.insert(share.to_string());
+        self.dirty = true;
+        true
+    }
+
+    fn invite_answer(&mut self) -> Option<(String, InviteResult)> {
+        self.invite_answers.pop_front()
     }
 
     fn loaded(&self) -> Loaded {
@@ -403,8 +537,8 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         }
         let notice = self.notice.take();
         Pumped {
-            changed: changed || notice.is_some(),
-            busy: self.reading.is_some() || !self.changing.is_empty(),
+            changed: changed || notice.is_some() || !self.invite_answers.is_empty(),
+            busy: self.reading.is_some() || !self.changing.is_empty() || !self.inviting.is_empty(),
             notice,
         }
     }
@@ -413,6 +547,8 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.held = None;
         self.again = false;
         self.changing.clear();
+        self.inviting.clear();
+        self.invite_answers.clear();
         self.unmade = false;
         self.read_at = None;
         self.notice = None;
@@ -490,10 +626,12 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         });
         members.insert(share.item_id, rows);
     }
+    let mut link_shares = HashMap::new();
     let links = overview
         .links
         .into_iter()
         .map(|link| {
+            link_shares.insert(link.share_id.clone(), link.share_ids.clone());
             let expiry = link.expires_at.as_deref().and_then(seconds_of);
             let expired = expiry.is_some_and(|at| at <= now.timestamp());
             let mut line = match expiry {
@@ -506,7 +644,7 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
             }
             LinkShare {
                 kind: kind(false, &link.name),
-                id: link.item_id,
+                id: link.share_id,
                 name: link.name,
                 line,
                 expired,
@@ -549,7 +687,53 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         people,
         members,
         links,
+        link_shares,
         requests,
+    }
+}
+
+/// The engine's answer as the view's, with the words a refusal shows (no key, address or name in any of them).
+fn invite_result(answer: &InviteAnswer) -> InviteResult {
+    match answer {
+        InviteAnswer::Shared { .. } => InviteResult::HasAccess,
+        InviteAnswer::Invited { .. } => InviteResult::Sent,
+        InviteAnswer::AwaitingApproval { .. } => InviteResult::WaitingForApproval,
+        InviteAnswer::PeerKeyChanged { .. } => InviteResult::KeyChanged,
+        // A claimed invite that stays (its key never went over, and it could not be withdrawn): never "nothing was
+        // shared" (review of desktop#424).
+        InviteAnswer::Unfinished {
+            approval_sent: true, ..
+        } => InviteResult::Refused(UNFINISHED_UNCONFIRMED),
+        InviteAnswer::Unfinished { .. } => InviteResult::Refused(UNFINISHED),
+        InviteAnswer::Refused(kind) => InviteResult::Refused(refusal_words(*kind)),
+    }
+}
+
+/// What the invite dialog says when they accepted, but the key never went over and the invite could not be withdrawn.
+pub(crate) const UNFINISHED: &str = "They accepted, but Beebeeb couldn\u{2019}t finish sharing and the invitation is still open. They can\u{2019}t open anything yet. Cancel it in Shared, then invite them again.";
+
+/// What the invite dialog says when the approval was sent and its answer was lost, and the invite could not be
+/// withdrawn either: Beebeeb cannot say whether they can open it now.
+pub(crate) const UNFINISHED_UNCONFIRMED: &str = "Beebeeb couldn\u{2019}t confirm whether they can open it yet. They may already be able to. Check Shared, and cancel it there if you didn\u{2019}t mean to share.";
+
+/// What the invite dialog says for a refusal. Every one ends in what was (not) done.
+pub(crate) fn refusal_words(kind: InviteRefused) -> &'static str {
+    match kind {
+        InviteRefused::AlreadyOnIt => "They\u{2019}re on this share already.",
+        InviteRefused::NotYours => "Only items in your own files can be shared with people. Nothing was shared.",
+        InviteRefused::FolderNeedsUpgrade => {
+            "This folder\u{2019}s sharing needs an update this version can\u{2019}t make yet. Nothing was shared."
+        }
+        InviteRefused::FolderKeyUnverified => {
+            "Beebeeb couldn\u{2019}t confirm this folder\u{2019}s key, so nothing was shared."
+        }
+        InviteRefused::InvalidEmail => "That isn\u{2019}t an email address Beebeeb can send to. Nothing was shared.",
+        InviteRefused::SharedFoldersFlagUnknown => {
+            "Couldn\u{2019}t check whether folder sharing is on. Nothing was shared. Try again in a moment."
+        }
+        InviteRefused::Offline => "Can\u{2019}t reach Beebeeb. Nothing was shared.",
+        InviteRefused::SessionEnded => "Your session ended. Sign in again to share. Nothing was shared.",
+        InviteRefused::Failed => "Couldn\u{2019}t send the invitation. Nothing was shared.",
     }
 }
 

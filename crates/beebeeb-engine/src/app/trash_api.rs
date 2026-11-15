@@ -63,15 +63,11 @@ impl<C: CredentialStores> Engine<C> {
         // The token, the key and the session's generation leave the session's lock together, as copies of their own,
         // wiped when this call ends (the token inside the call's client, which wipes it on drop; the key in a
         // `Zeroizing`).
-        let (token, key, session) = {
-            let guard = self.acct.session.lock().map_err(|_| AccountCallError::NotSignedIn)?;
-            let current = guard.as_ref().ok_or(AccountCallError::NotSignedIn)?;
-            (
-                current.token.clone(),
-                Zeroizing::new(current.master_key),
-                self.acct.session_generation(),
-            )
-        };
+        let (token, key, session) = self
+            .person_session(|current, generation| {
+                (current.token.clone(), Zeroizing::new(current.master_key), generation)
+            })
+            .map_err(|_| AccountCallError::NotSignedIn)?;
         let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
         let raw = self
             .runtime
@@ -88,6 +84,28 @@ impl<C: CredentialStores> Engine<C> {
             return Err(AccountCallError::NotSignedIn);
         }
         Ok(TrashListing { session, items })
+    }
+
+    /// How many items are in the account's Trash (`GET /api/v1/files/count`, the server's own count), for the session
+    /// `session` names and no other: the token is copied only while that session is still the one in memory, and
+    /// nothing is sent otherwise ([`AccountCallError::NotSignedIn`]). Reads nothing locally and decrypts nothing: the
+    /// sidebar's badge, which must not read the whole Trash. BLOCKS on the handle's runtime: call it from a worker.
+    pub fn trash_count_for(&self, session: SessionGeneration) -> Result<u64, AccountCallError> {
+        self.account_call_for(session, |api| async move { api.trashed_file_count().await })
+    }
+
+    /// How many moves to or from Trash this handle made (each [`Engine::trash_items_for`] or
+    /// [`Engine::restore_items_for`] that moved at least one item). A window that keeps the Trash count compares it
+    /// with the number it last saw: a change means the count may have moved. Never waits, sends nothing.
+    pub fn trash_moves(&self) -> u64 {
+        self.trash_moves.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether a person's call may be sent now: `false` behind a locked screen or a closed vault (core's answer).
+    /// Never waits, sends nothing.
+    pub fn person_calls_allowed(&self) -> bool {
+        self.check_call(super::lock_api::Call::Person(super::lock_api::LockedAction::ViewStatus))
+            .is_ok()
     }
 
     /// WRITES: put items back from Trash (`POST /api/v1/files/{id}/restore`, one call each, in order), for the
@@ -112,6 +130,7 @@ impl<C: CredentialStores> Engine<C> {
             restored = true;
         }
         if restored {
+            self.trash_moves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // Ask the sync engine to take the server's list again (the signed-in account's local state only; asks
             // nothing of a state that is not the session's), also when a later item failed.
             self.request_resnapshot();
@@ -150,6 +169,7 @@ impl<C: CredentialStores> Engine<C> {
             trashed = true;
         }
         if trashed {
+            self.trash_moves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // As after a restore: the signed-in account's local state only, also when a later item failed.
             self.request_resnapshot();
         }

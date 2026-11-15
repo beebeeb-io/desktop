@@ -101,6 +101,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if let Some(notice) = pumped.notice {
         ui.notice = Some(notice);
     }
+    // Invite someone's answers (DW-0514): the dialog that sent one closes or says why not.
+    while let Some((share, result)) = ui.source.invite_answer() {
+        ui.invite_answered(&share, result);
+        changed = true;
+    }
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
@@ -120,6 +125,8 @@ fn notice_words(notice: Notice) -> &'static str {
     match notice {
         Notice::NotAvailable => "Not available yet in this version. Nothing was changed.",
         Notice::ChangeRefused => "Couldn\u{2019}t make that change. Nothing was changed.",
+        Notice::AlreadyAccepted => "Already accepted.",
+        Notice::RequestStillOpen => "Close the request first.",
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Shared. What\u{2019}s shown may be out of date.",
     }
 }

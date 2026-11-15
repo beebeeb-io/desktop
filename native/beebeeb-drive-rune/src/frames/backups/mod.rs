@@ -17,6 +17,10 @@
 //! drop and on every close), is drawn as secure text inside `secure-code`, and is in no
 //! label. Comment mode stays denied on this section (`FRAME`).
 
+pub mod mail;
+#[cfg(test)]
+mod mail_tests;
+mod mail_view;
 pub mod source;
 #[cfg(test)]
 mod tests;
@@ -47,6 +51,8 @@ pub enum Page {
     Device(String),
     /// What could not back up (DW-0741).
     Failures,
+    /// Mail Backup: on, off, or its first archive running (DW-0740, DW-0740b, DW-1405, DW-1406).
+    Mail,
 }
 
 /// A dialog over a page.
@@ -56,6 +62,16 @@ pub enum Dialog {
     StopFolder(String),
     /// "Delete this backup?" for the device of this id, with the code (DW-0742).
     DeleteDevice(String),
+    /// "Turn on Mail Backup": what it does, before anything is asked (DW-1401).
+    MailTurnOn,
+    /// "Add a mail account": address, server, port, app password (DW-1402, DW-1403).
+    MailAccount,
+    /// "Choose folders" of the mailbox that just signed in (DW-1404).
+    MailFolders,
+    /// "Turn off Mail Backup?" with the code (DW-0743).
+    MailTurnOff,
+    /// "Keep Mail Backup's files?" once it is off (DW-0743b).
+    MailKeepFiles,
 }
 
 /// What Backups asks of the app around it; the shell takes them with [`BackupsUi::take_intents`].
@@ -68,8 +84,10 @@ pub enum Intent {
     OpenInPhotos(String),
     /// The device's folder inside the Backups root, in Files (DW-0422).
     OpenInFiles(String),
-    /// Mail Backup (DW-0740: another lane's).
+    /// Mail Backup, asked of the shell while no source answers for it (DW-0740).
     MailBackup,
+    /// Mail Backup's protected folder inside the Backups root, in Files (DW-0424).
+    OpenMailFolder,
 }
 
 /// The most intents kept while nothing takes them: the oldest fall off.
@@ -82,8 +100,21 @@ pub struct BackupsUi {
     pub page: Page,
     pub dialog: Option<Dialog>,
     /// The authenticator code being typed. Secure: wiped on drop, on close and after use.
-    code: TextEdit,
+    pub(crate) code: TextEdit,
+    /// Whether the password field of "Delete this backup?" still has to take the focus (set when it opens).
+    focus_password: bool,
+    /// What is typed in Mail Backup's dialogs. The app password is its one secret.
+    pub mail: mail::MailUi,
     intents: Vec<Intent>,
+    /// The section was open at the last poll (it reads again when it opens).
+    was_open: bool,
+    /// What the source refused to do, said in the section for a few seconds: the words and the line under them.
+    notice: Option<(&'static str, &'static str, std::time::Instant)>,
+    /// Why the last "Delete this backup" was not done, under the password field while the dialog is open.
+    delete_refusal: Option<&'static str>,
+    /// The device a "Delete this backup" was sent for and not answered yet (a source that answers late): its answer
+    /// goes to that device's dialog only.
+    delete_sent: Option<String>,
 }
 
 impl BackupsUi {
@@ -99,7 +130,13 @@ impl BackupsUi {
             page: Page::Section,
             dialog: None,
             code: TextEdit::new("").secure(),
+            focus_password: false,
+            mail: mail::MailUi::default(),
             intents: Vec::new(),
+            was_open: false,
+            notice: None,
+            delete_refusal: None,
+            delete_sent: None,
         }
     }
 
@@ -130,6 +167,8 @@ impl BackupsUi {
         // A device that is gone, or a list with nothing in it, shows the section.
         let known = match (&page, self.source()) {
             (Page::Device(id), Some(source)) => source.devices().iter().any(|d| &d.id == id),
+            // No page while nothing answers for Mail Backup.
+            (Page::Mail, Some(source)) => source.mail().is_some(),
             (_, Some(_)) => true,
             (_, None) => false,
         };
@@ -137,8 +176,15 @@ impl BackupsUi {
     }
 
     pub fn close_dialog(&mut self) {
+        if matches!(self.dialog, Some(Dialog::MailAccount | Dialog::MailFolders)) {
+            if let Some(source) = &mut self.source {
+                source.mail_forget_connection();
+            }
+            self.mail.clear();
+        }
         self.dialog = None;
         self.code.clear();
+        self.delete_refusal = None;
     }
 
     /// What Backups asked of the shell since the last call, oldest first. (The shell lane
@@ -210,14 +256,211 @@ impl BackupsUi {
         }
     }
 
+    /// The Mail Backup row: its page where a source answers for it, the shell otherwise.
     pub fn mail_backup(&mut self) {
-        self.ask(Intent::MailBackup);
+        if self.source().is_some_and(|source| source.mail().is_some()) {
+            self.show(Page::Mail);
+        } else {
+            self.ask(Intent::MailBackup);
+        }
+    }
+
+    /// Turn on…: what Mail Backup does, first (DW-1401).
+    pub fn mail_ask_turn_on(&mut self) {
+        self.close_dialog();
+        self.dialog = Some(Dialog::MailTurnOn);
+    }
+
+    /// "Add a mail account" with nothing typed (DW-1402).
+    pub fn mail_add_account(&mut self) {
+        self.close_dialog();
+        self.dialog = Some(Dialog::MailAccount);
+        self.mail.focus(Some(mail::Field::Email));
+    }
+
+    /// Update password (DW-1406): the account step with the address, server and port filled in,
+    /// the password asked again. It ends as adding an account does (Choose folders): the board
+    /// draws no other end, and the source reads a sign-in to an address it already archives as
+    /// that account's new password.
+    pub fn mail_update_password(&mut self) {
+        let failing = self.source().and_then(|source| source.mail()).and_then(|m| {
+            let failure = m.failure?;
+            m.accounts.into_iter().find(|a| a.address == failure.address)
+        });
+        self.mail_add_account();
+        if let Some(account) = failing {
+            self.mail.email.replace_text(account.address);
+            self.mail.server.replace_text(account.server);
+            self.mail.port.replace_text(account.port.to_string());
+            self.mail.focus(Some(mail::Field::Password));
+        }
+    }
+
+    /// Connect, or Try again: hands what was typed to the source. Nothing is asked while a
+    /// field is missing or an answer is still out. The dialog moves on only when the source
+    /// says the server accepted ([`BackupsUi::mail_answered`]).
+    pub fn mail_connect(&mut self) -> bool {
+        if self.dialog != Some(Dialog::MailAccount) || !self.mail.complete() {
+            return false;
+        }
+        let (Some(port), Some(source)) = (self.mail.port_number(), &mut self.source) else {
+            return false;
+        };
+        if source.mail_connection() == mail::Connection::Checking {
+            return false;
+        }
+        source.mail_connect(&mail::Entry {
+            address: self.mail.email.text.trim(),
+            server: self.mail.server.text.trim(),
+            port,
+            password: &self.mail.password.text,
+        });
+        self.mail_answered();
+        true
+    }
+
+    /// The source may have an answer to the sign-in: on "accepted" the password is wiped and
+    /// Choose folders is the step (DW-1404). A refusal stays in the account step (DW-1403).
+    /// Called after Connect and before every act on the folders. The view does not wait for
+    /// it: it draws Choose folders as soon as the source's answer says "accepted", so a late
+    /// answer shows with the next draw and is taken (the password wiped) with the first press.
+    /// (A window poll for Backups, as for [`source::BackupsSource::pump`], would wipe sooner.)
+    pub fn mail_answered(&mut self) {
+        if self.dialog != Some(Dialog::MailAccount) {
+            return;
+        }
+        let answer = self.source().map(|source| source.mail_connection());
+        if let Some(mail::Connection::Folders { folders, .. }) = answer {
+            self.mail.password.clear();
+            self.mail.focus(None);
+            self.mail.picked = folders.iter().filter(|f| f.suggested).map(|f| f.name.clone()).collect();
+            self.dialog = Some(Dialog::MailFolders);
+        }
+    }
+
+    /// Tick or untick a folder of the mailbox, by its name.
+    pub fn mail_toggle_folder(&mut self, name: &str) {
+        self.mail_answered();
+        if self.dialog != Some(Dialog::MailFolders) {
+            return;
+        }
+        match self.mail.picked.iter().position(|picked| picked == name) {
+            Some(at) => {
+                self.mail.picked.remove(at);
+            }
+            None => self.mail.picked.push(name.to_string()),
+        }
+    }
+
+    /// Start backup: the ticked folders, by name. `false`: nothing ticked, or the source did
+    /// not start; the dialog stays.
+    pub fn mail_start(&mut self) -> bool {
+        self.mail_answered();
+        if self.dialog != Some(Dialog::MailFolders) {
+            return false;
+        }
+        let Some(mail::Connection::Folders { folders, .. }) = self.source().map(|source| source.mail_connection())
+        else {
+            return false;
+        };
+        // Only names the mailbox still lists, in its order.
+        let names: Vec<String> = folders
+            .iter()
+            .filter(|folder| self.mail.picked.contains(&folder.name))
+            .map(|folder| folder.name.clone())
+            .collect();
+        if names.is_empty() {
+            return false;
+        }
+        let started = self.source.as_mut().is_some_and(|source| source.mail_start(&names));
+        if started {
+            if let Some(source) = &mut self.source {
+                source.mail_forget_connection();
+            }
+            self.dialog = None;
+            self.mail.clear();
+        }
+        started
+    }
+
+    /// Back, in Choose folders: the account step again. The sign-in is dropped; the password
+    /// was wiped when the server accepted it, so it is asked again.
+    pub fn mail_back(&mut self) {
+        self.mail_answered();
+        if self.dialog != Some(Dialog::MailFolders) {
+            return;
+        }
+        if let Some(source) = &mut self.source {
+            source.mail_forget_connection();
+        }
+        self.mail.picked.clear();
+        self.dialog = Some(Dialog::MailAccount);
+        self.mail.focus(Some(mail::Field::Password));
+    }
+
+    /// Pause, or carry on with, the first archive (DW-1405).
+    pub fn mail_pause(&mut self, paused: bool) {
+        if let Some(source) = &mut self.source {
+            source.mail_pause(paused);
+        }
+    }
+
+    /// Opening is the one thing the protected folder allows.
+    pub fn mail_open_folder(&mut self) {
+        let allowed = self
+            .source()
+            .is_some_and(|source| source.root().allows(source::RootAction::Open));
+        if allowed {
+            self.ask(Intent::OpenMailFolder);
+        }
+    }
+
+    /// Turn off Mail Backup: a code first (DW-0743).
+    pub fn mail_ask_turn_off(&mut self) {
+        self.close_dialog();
+        self.dialog = Some(Dialog::MailTurnOff);
+    }
+
+    /// "Turn off": off until six digits. The engine checks the code; one it does not accept
+    /// empties the boxes and the dialog stays. Accepted: Mail Backup is off, and where it kept
+    /// files the choice about them follows (DW-0743b).
+    pub fn mail_turn_off(&mut self) -> bool {
+        if self.dialog != Some(Dialog::MailTurnOff) || self.code_len() != CODE_LEN {
+            return false;
+        }
+        let accepted = self
+            .source
+            .as_mut()
+            .is_some_and(|source| source.mail_turn_off(&self.code.text));
+        self.code.clear();
+        if accepted {
+            let kept = self
+                .source()
+                .and_then(|source| source.mail())
+                .is_some_and(|m| m.used.is_some());
+            self.dialog = kept.then_some(Dialog::MailKeepFiles);
+        }
+        accepted
+    }
+
+    /// DW-0743b's two answers. Keeping changes nothing. Moving asks the source; while it has
+    /// not moved them the dialog stays.
+    pub fn mail_keep_files(&mut self, keep: bool) -> bool {
+        if self.dialog != Some(Dialog::MailKeepFiles) {
+            return false;
+        }
+        let done = keep || self.source.as_mut().is_some_and(|source| source.mail_files_to_trash());
+        if done {
+            self.close_dialog();
+        }
+        done
     }
 
     /// Delete this backup: the warning with a code first (DW-0742).
     pub fn ask_delete_device(&mut self, id: &str) {
         self.close_dialog();
         self.dialog = Some(Dialog::DeleteDevice(id.to_string()));
+        self.focus_password = true;
     }
 
     /// How many digits are typed. (The digits themselves leave this type only to be drawn
@@ -248,25 +491,72 @@ impl BackupsUi {
         }
     }
 
-    /// "Delete backup": off until six digits. The engine checks the code; a code it does not
-    /// accept empties the boxes and the dialog stays (the board draws no words for it).
+    /// "Delete backup": off until a password is typed. Deleting a backup proves the ACCOUNT PASSWORD (owner ruling
+    /// Q4: the engine's `backup_delete::delete_backup` steps up with the password, there is no authenticator
+    /// code here). One the engine does not accept empties the field and the dialog stays.
+    ///
+    /// A source that answers late takes the press as "sent": the dialog stays, says it is deleting and sends nothing
+    /// more, until the answer comes through [`poll`] (done: closed; refused: the words under the field). Nothing is
+    /// removed from the list before the answer.
     pub fn delete_device(&mut self) -> bool {
         let Some(Dialog::DeleteDevice(id)) = self.dialog.clone() else {
             return false;
         };
-        if self.code_len() != CODE_LEN {
+        if self.code_len() == 0 {
             return false;
         }
-        let accepted = self
-            .source
-            .as_mut()
-            .is_some_and(|source| source.delete_device_backup(&id, &self.code.text));
+        let Some(source) = self.source.as_mut() else {
+            return false;
+        };
+        if source.deleting() {
+            return false;
+        }
+        let accepted = source.delete_device_backup(&id, &self.code.text);
+        let late = source.deleting();
         self.code.clear();
-        if accepted {
+        self.delete_refusal = None;
+        if accepted && late {
+            self.delete_sent = Some(id);
+        } else if accepted {
             self.dialog = None;
             self.page = Page::Section;
         }
         accepted
+    }
+
+    /// A "Delete this backup" of this device is on its way.
+    pub(crate) fn deleting_for(&self, id: &str) -> bool {
+        self.deleting() && self.delete_sent.as_deref() == Some(id)
+    }
+
+    /// A "Delete this backup" is on its way.
+    pub(crate) fn deleting(&self) -> bool {
+        self.source().is_some_and(|source| source.deleting())
+    }
+
+    /// Why the last "Delete this backup" was not done, while its dialog is open.
+    pub(crate) fn delete_refusal(&self) -> Option<&'static str> {
+        self.delete_refusal
+            .filter(|_| matches!(self.dialog, Some(Dialog::DeleteDevice(_))))
+    }
+
+    /// The answer to a "Delete this backup" that was sent. Done: the dialog closes (the source reads the list again).
+    /// Refused: the words under the password field, or in the section when the dialog was closed meanwhile.
+    fn delete_answered(&mut self, answer: Result<(), &'static str>) {
+        // Only the dialog of the device it was sent for: another device's dialog opened meanwhile is not its.
+        let sent = self.delete_sent.take();
+        let open = matches!(&self.dialog, Some(Dialog::DeleteDevice(id)) if sent.as_deref() == Some(id.as_str()));
+        match answer {
+            Ok(()) if open => {
+                self.close_dialog();
+                self.page = Page::Section;
+            }
+            Ok(()) => {}
+            Err(words) if open => self.delete_refusal = Some(words),
+            Err(words) => {
+                self.notice = Some((words, DELETE_NOTICE_SUB, std::time::Instant::now()));
+            }
+        }
     }
 
     pub fn retry(&mut self, id: &str) {
@@ -293,15 +583,85 @@ pub fn sync(s: &mut State) {
     if !routed(s) {
         s.backups.reset();
     }
+    s.backups.mail_answered();
+}
+
+/// The line under a delete's refusal said in the section (its words say whether anything was deleted).
+const DELETE_NOTICE_SUB: &str = "Other devices shows what Beebeeb has.";
+/// The line under a refused change of a folder.
+const NOTHING_CHANGED: &str = "Nothing was changed.";
+
+/// How long a refusal stays in the section.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+/// How often the section looks at the engine while it is open (a pass that ends, a switch that was answered).
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+impl BackupsUi {
+    /// What the source refused to do and has not yet been said for long enough.
+    pub(crate) fn notice(&self) -> Option<(&'static str, &'static str)> {
+        self.notice
+            .filter(|(_, _, at)| at.elapsed() < NOTICE_FOR)
+            .map(|(words, sub, _)| (words, sub))
+    }
+}
+
+/// The shell's poll (every frame): a gate or account change drops what the source holds, the section opening reads
+/// again, and the workers' answers come in. `true`: draw again. The source's part never calls the engine and never
+/// waits (`engine_host::backups`).
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let open = routed(s);
+    let ui = &mut s.backups;
+    if ui.focus_password && ui.dialog.as_ref().is_some_and(|d| matches!(d, Dialog::DeleteDevice(_))) {
+        ui.focus_password = false;
+        tx.focus(view::PASSWORD_KEY, true);
+    }
+    let Some(source) = ui.source.as_mut() else {
+        return false;
+    };
+    if open && !ui.was_open {
+        source.opened();
+    }
+    ui.was_open = open;
+    let pumped = source.pump();
+    let mut changed = pumped.changed;
+    if let Some(words) = pumped.refusal {
+        ui.notice = Some((words, NOTHING_CHANGED, std::time::Instant::now()));
+        changed = true;
+    }
+    if let Some(answer) = pumped.deleted {
+        ui.delete_answered(answer);
+        changed = true;
+    }
+    if ui.notice.is_some_and(|(_, _, at)| at.elapsed() >= NOTICE_FOR) {
+        ui.notice = None;
+        changed = true;
+    }
+    if open && (pumped.busy || ui.notice.is_some()) {
+        tx.wake_after(POLL_EVERY);
+    } else if pumped.busy {
+        tx.wake_after(POLL_EVERY * 4);
+    }
+    changed
 }
 
 /// Backups' keyboard. Esc closes what is open, innermost first: the dialog, the page, then
 /// settings. The code dialog takes digits, Backspace and Enter. Everything else is Rune's.
 pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     let ui = &mut s.backups;
+    ui.mail_answered();
     let m = ev.mods;
     let plain = !m.cmd && !m.ctrl && !m.alt && !m.logo;
-    if matches!(ui.dialog, Some(Dialog::DeleteDevice(_))) && plain {
+    // Delete this backup takes a password in a text field of its own (the field has the keys); Mail Backup's
+    // turn-off still takes the code boxes.
+    if ui.dialog.as_ref().is_some_and(|d| matches!(d, Dialog::DeleteDevice(_)))
+        && ev.key == Key::Enter
+        && ui.code_len() > 0
+    {
+        ui.delete_device();
+        return true;
+    }
+    let code_dialog = matches!(ui.dialog, Some(Dialog::MailTurnOff));
+    if code_dialog && plain {
         match &ev.key {
             Key::Text(typed) if typed.chars().all(|c| c.is_ascii_digit()) && !typed.is_empty() => {
                 ui.type_code(typed);
@@ -312,7 +672,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                 return true;
             }
             Key::Enter if ui.code_len() == CODE_LEN => {
-                ui.delete_device();
+                ui.mail_turn_off();
                 return true;
             }
             _ => {}
@@ -362,7 +722,7 @@ fn dw_0739(s: &mut State) {
 fn dw_0742(s: &mut State) {
     dw_0739(s);
     s.backups.ask_delete_device("ipad");
-    s.backups.type_code("51");
+    s.backups.code.replace_text("correct horse");
 }
 
 fn dw_0741(s: &mut State) {
@@ -370,8 +730,82 @@ fn dw_0741(s: &mut State) {
     s.backups.show(Page::Failures);
 }
 
+fn mail_scene(s: &mut State, mail: mail::Mail) {
+    open(s, FixtureSource::with_mail(mail));
+    s.backups.show(Page::Mail);
+}
+
+fn dw_0740(s: &mut State) {
+    mail_scene(s, mail::board::on());
+}
+
+fn dw_0740b(s: &mut State) {
+    mail_scene(s, mail::board::off());
+}
+
+fn dw_1401(s: &mut State) {
+    dw_0740b(s);
+    s.backups.mail_ask_turn_on();
+}
+
+/// The account step filled in as the board draws it, the caret after the password.
+fn dw_1402(s: &mut State) {
+    dw_0740b(s);
+    s.backups.mail_add_account();
+    let typed = &mut s.backups.mail;
+    typed.email.replace_text(mail::board::ADDRESS);
+    typed.server.replace_text(mail::board::SERVER);
+    typed.password.replace_text(mail::board::APP_PASSWORD);
+    typed.focus(Some(mail::Field::Password));
+}
+
+/// The same step after the server refused a password of the same length.
+fn dw_1403(s: &mut State) {
+    dw_1402(s);
+    let wrong = "0".repeat(mail::board::APP_PASSWORD.len());
+    s.backups.mail.password.replace_text(wrong);
+    s.backups.mail_connect();
+    // The board draws the refused field without the keyboard in it.
+    s.backups.mail.focus(None);
+}
+
+fn dw_1404(s: &mut State) {
+    dw_1402(s);
+    s.backups.mail_connect();
+}
+
+fn dw_1405(s: &mut State) {
+    mail_scene(s, mail::board::first());
+}
+
+fn dw_1406(s: &mut State) {
+    mail_scene(s, mail::board::failed());
+}
+
+/// The code step with all six digits typed, as the board draws it.
+fn dw_0743(s: &mut State) {
+    dw_0740(s);
+    s.backups.mail_ask_turn_off();
+    s.backups.type_code(mail::board::CODE);
+}
+
+fn dw_0743b(s: &mut State) {
+    dw_0743(s);
+    s.backups.mail_turn_off();
+}
+
 /// The group's board frames, by frame id (`frames::scenes`).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
+    ("DW-0740", dw_0740),
+    ("DW-0740b", dw_0740b),
+    ("DW-1401", dw_1401),
+    ("DW-1402", dw_1402),
+    ("DW-1403", dw_1403),
+    ("DW-1404", dw_1404),
+    ("DW-1405", dw_1405),
+    ("DW-1406", dw_1406),
+    ("DW-0743", dw_0743),
+    ("DW-0743b", dw_0743b),
     ("DW-0737", dw_0737),
     ("DW-1411", dw_1411),
     ("DW-1410", dw_1410),

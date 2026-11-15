@@ -10,13 +10,15 @@
 //! here with this pane's keys. One shared component is the follow-up.
 
 use crate::State;
-use crate::frames::signin::setup::source::BUNDLED_SAMPLE_PNG;
+use crate::frames::signin::setup::source::{BUNDLED_SAMPLE_PNG, Sample};
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::kit;
+use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 use crate::ui::settings_list::{self as lists, Item, Trailing};
+use crate::ui::settings_meter as meters;
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
 use crate::ui::setup::{self, SegInk, SegSize};
@@ -59,11 +61,28 @@ pub struct Previews {
     /// How many of the account's photos the average was measured on.
     pub measured_on: u32,
     /// What it uses of the account's storage: all of it, then previews, fallback previews
-    /// and grid thumbnails.
+    /// and grid thumbnails. A row with no figure (`None`) is not drawn.
     pub total: String,
-    pub uses: [String; 3],
-    /// On this PC: what is kept, the limit, and whether every photo fits under it.
-    pub on_pc: String,
+    pub uses: [Option<String>; 3],
+    /// On this PC: what is kept, the limit, and whether every photo fits under it. `None`:
+    /// nothing is kept on this PC, and the list is not drawn.
+    pub on_pc: Option<OnPc>,
+    /// A sentence the Format caption adds (what this PC makes); `None`: the board's caption.
+    pub format_note: Option<&'static str>,
+    /// "Made automatically" lists the fallback preview made with HEIC, and says why. `false`:
+    /// neither is drawn (no app makes one).
+    pub fallback: bool,
+    /// What the pane says by itself while it holds (previews being made, or why that stopped).
+    pub notice: Option<&'static str>,
+    /// The person's own photo to compare, measured on this PC. `None`: the picture that ships
+    /// inside the app.
+    pub sample: Option<Sample>,
+}
+
+/// What is kept on this PC, against its limit.
+#[derive(Clone, PartialEq, Debug)]
+pub struct OnPc {
+    pub kept: String,
     pub limit: String,
     pub all_fit: bool,
 }
@@ -87,6 +106,10 @@ pub fn name(size: PreviewSize, format: PreviewFormat) -> String {
 pub enum PhotoPreviews {
     /// Nothing answers yet (the default of `DriveSettings::photo_previews`): no value is drawn.
     Unavailable,
+    /// The source is reading: the pane draws a loading state, never a value.
+    Loading,
+    /// The read failed: the pane says why (a fixed sentence) and offers Try again.
+    Failed(&'static str),
     Ready(Previews),
 }
 
@@ -98,6 +121,34 @@ pub struct PreviewsUi {
     pub compare: Compare,
     original: Pixels,
     preview: Pixels,
+    /// The sample the two pictures were decoded from (`None`: the bundled one). Shared: compared
+    /// without reading its bytes.
+    shown: std::sync::Mutex<Option<Sample>>,
+}
+
+impl PreviewsUi {
+    /// The two pictures of `sample` (the bundled ones for `None`), decoded only when it changed.
+    fn show(&self, sample: Option<&Sample>) {
+        let mut shown = self.shown.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if shown.as_ref() == sample {
+            return;
+        }
+        let bundled = bundled_decoded;
+        for (pixels, png) in [
+            (&self.original, sample.map(|s| &s.original_png)),
+            (&self.preview, sample.map(|s| &s.preview_png)),
+        ] {
+            match png.and_then(|png| decode_rgba(png)) {
+                Some((w, h, rgba)) => pixels.set(w, h, rgba),
+                None => {
+                    if let Some((w, h, rgba)) = bundled() {
+                        pixels.set(w, h, rgba);
+                    }
+                }
+            }
+        }
+        *shown = sample.cloned();
+    }
 }
 
 impl Default for PreviewsUi {
@@ -108,6 +159,7 @@ impl Default for PreviewsUi {
             // The sample that ships inside the app; the engine lane hands over the person's own.
             original: bundled_sample(),
             preview: bundled_sample(),
+            shown: std::sync::Mutex::new(None),
         }
     }
 }
@@ -115,12 +167,17 @@ impl Default for PreviewsUi {
 /// The bundled sample as pixels of the caller's own. The PNG is decoded once per process (every window state
 /// holds two of these, and a decode is the slowest step of building one); each call copies the decoded bytes.
 fn bundled_sample() -> Pixels {
-    static DECODED: std::sync::OnceLock<Option<(u32, u32, Vec<u8>)>> = std::sync::OnceLock::new();
     let pixels = Pixels::new();
-    if let Some((width, height, rgba)) = DECODED.get_or_init(|| decode_rgba(BUNDLED_SAMPLE_PNG)) {
-        pixels.set(*width, *height, rgba.clone());
+    if let Some((width, height, rgba)) = bundled_decoded() {
+        pixels.set(width, height, rgba);
     }
     pixels
+}
+
+/// The bundled sample, decoded once per process; each call copies the decoded bytes.
+fn bundled_decoded() -> Option<(u32, u32, Vec<u8>)> {
+    static DECODED: std::sync::OnceLock<Option<(u32, u32, Vec<u8>)>> = std::sync::OnceLock::new();
+    DECODED.get_or_init(|| decode_rgba(BUNDLED_SAMPLE_PNG)).clone()
 }
 
 fn fresh_compare() -> Compare {
@@ -152,7 +209,7 @@ impl SettingsUi {
     fn stored_previews(&self) -> Option<(PreviewSize, PreviewFormat)> {
         match self.drive.photo_previews() {
             PhotoPreviews::Ready(p) => Some((p.size, p.format)),
-            PhotoPreviews::Unavailable => None,
+            PhotoPreviews::Unavailable | PhotoPreviews::Loading | PhotoPreviews::Failed(_) => None,
         }
     }
 
@@ -255,7 +312,16 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         PhotoPreviews::Unavailable => {
             return (shell::pane(children, t), None);
         }
+        PhotoPreviews::Loading => {
+            children.push(loading(t));
+            return (shell::pane(children, t), None);
+        }
+        PhotoPreviews::Failed(why) => {
+            children.push(failed(why, t));
+            return (shell::pane(children, t), None);
+        }
     };
+    ui.previews.show(p.sample.as_ref());
 
     let on = p.on;
     children.push(lists::list(
@@ -319,20 +385,25 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 },
             ),
         )],
-        Some("HEIC is about half the size at the same quality. JPEG opens anywhere."),
+        Some(&match p.format_note {
+            Some(note) => format!("{FORMAT_CAPTION} {note}"),
+            None => FORMAT_CAPTION.to_string(),
+        }),
         t,
     ));
 
+    // A row with no figure is not drawn (the engine has none for fallback previews or grid
+    // thumbnails); the rows that are keep the board's keys and rules.
     let uses = ["Previews", "Fallback previews", "Grid thumbnails"]
         .iter()
         .zip(&p.uses)
         .enumerate()
-        .map(|(i, (title, value))| {
-            let mut it = Item::new(None, *title).trailing(Trailing::Mono(value.clone()));
+        .filter_map(|(i, (title, value))| {
+            let mut it = Item::new(None, *title).trailing(Trailing::Mono(value.clone()?));
             if i > 0 {
                 it = it.ruled();
             }
-            lists::item(3, i, &it, t)
+            Some(lists::item(3, i, &it, t))
         })
         .collect();
     let mut counts = format!(
@@ -349,49 +420,54 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     }
     children.push(lists::list(3, Some("What it uses"), uses, Some(&counts), t));
 
-    children.push(lists::list(
-        4,
-        Some("On this PC"),
-        vec![
-            lists::item(
-                4,
-                0,
-                &Item::new(None, format!("{} of {} limit", p.on_pc, p.limit))
-                    .sub(if p.all_fit {
-                        "All photos fit. Change the limit or clear these in Storage."
-                    } else {
-                        "Not every photo fits. Change the limit or clear these in Storage."
-                    })
-                    .opens(),
-                t,
-            )
-            .on_press(|s: &mut State| super::go(s, "DW-0712")),
-        ],
-        None,
+    if let Some(on_pc) = &p.on_pc {
+        children.push(lists::list(
+            4,
+            Some("On this PC"),
+            vec![
+                lists::item(
+                    4,
+                    0,
+                    &Item::new(None, format!("{} of {} limit", on_pc.kept, on_pc.limit))
+                        .sub(if on_pc.all_fit {
+                            "All photos fit. Change the limit or clear these in Storage."
+                        } else {
+                            "Not every photo fits. Change the limit or clear these in Storage."
+                        })
+                        .opens(),
+                    t,
+                )
+                .on_press(|s: &mut State| super::go(s, "DW-0712")),
+            ],
+            None,
+            t,
+        ));
+    }
+    let mut made = vec![lists::item(
+        5,
+        0,
+        &Item::new(None, "Grid thumbnails").trailing(Trailing::Value("WebP, 384 and 768 px".into())),
         t,
-    ));
+    )];
+    if p.fallback {
+        made.push(lists::item(
+            5,
+            1,
+            &Item::new(None, "Fallback preview, with HEIC")
+                .trailing(Trailing::Value("WebP, 720p".into()))
+                .ruled(),
+            t,
+        ));
+    }
     children.push(lists::list(
         5,
         Some("Made automatically"),
-        vec![
-            lists::item(
-                5,
-                0,
-                &Item::new(None, "Grid thumbnails").trailing(Trailing::Value("WebP, 384 and 768 px".into())),
-                t,
-            ),
-            lists::item(
-                5,
-                1,
-                &Item::new(None, "Fallback preview, with HEIC")
-                    .trailing(Trailing::Value("WebP, 720p".into()))
-                    .ruled(),
-                t,
-            ),
-        ],
-        Some(
-            "Thumbnails are made for every photo and can't be changed. If you choose HEIC, a 720p WebP is also stored so your photos still preview on devices that can't open HEIC.",
-        ),
+        made,
+        Some(if p.fallback {
+            "Thumbnails are made for every photo and can't be changed. If you choose HEIC, a 720p WebP is also stored so your photos still preview on devices that can't open HEIC."
+        } else {
+            "Thumbnails are made for every photo and can't be changed."
+        }),
         t,
     ));
     children.push(lists::list(
@@ -415,9 +491,46 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let overlay = match ui.dialog {
         Some(Dialog::ApplyPreviews) => Some(apply_question(ui, &p, t)),
         Some(Dialog::Compare) => Some(compare_view(ui, &p, t)),
-        _ => ui.toast.map(|words| notices::toast(0, words, t)),
+        _ => ui.toast.or(p.notice).map(|words| notices::toast(0, words, t)),
     };
     (shell::pane(children, t), overlay)
+}
+
+/// The Format caption on the board.
+const FORMAT_CAPTION: &str = "HEIC is about half the size at the same quality. JPEG opens anywhere.";
+
+/// While the source reads: one card of placeholders, never a value.
+fn loading(t: &Theme) -> El {
+    let mut card = cards::column(0, 16.0, 12.0, t).role("status").label("Loading");
+    for (i, (w, h)) in [(Some(120.0), 10.0), (Some(220.0), 24.0), (None, 26.0)]
+        .iter()
+        .enumerate()
+    {
+        card = card.child(meters::skeleton(i, *w, *h, t));
+    }
+    card
+}
+
+/// The read failed: said plainly, with one way to try again.
+fn failed(why: &'static str, t: &Theme) -> El {
+    const HEAD: &str = "Couldn't load your preview settings";
+    let again = controls::button(0, "Try again", None, Emphasis::Plain, t)
+        .on_press(|s: &mut State| s.settings.drive.reload_previews());
+    cards::card(0, t)
+        .items_start()
+        .role("alert")
+        .label(format!("{HEAD}. {why}"))
+        .child(notices::tile(0, Tone::Red, &ic::WARN_CIRCLE, t))
+        .child(
+            col()
+                .key("card-0-words")
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(cards::head(0, HEAD, t))
+                .child(kit::label("card-0-sub", why, SUB, t.text_tertiary))
+                .child(row().key("card-0-actions").pt(8.0).child(again)),
+        )
 }
 
 /// The sample: the photo, what its preview weighs against the original, and Compare
@@ -843,10 +956,16 @@ impl BoardPreviews {
                 weights,
                 measured_on: 50,
                 total: "3.1 GB".into(),
-                uses: ["2.4 GB".into(), "420 MB".into(), "300 MB".into()],
-                on_pc: "3.1 GB".into(),
-                limit: "20 GB".into(),
-                all_fit: true,
+                uses: [Some("2.4 GB".into()), Some("420 MB".into()), Some("300 MB".into())],
+                on_pc: Some(OnPc {
+                    kept: "3.1 GB".into(),
+                    limit: "20 GB".into(),
+                    all_fit: true,
+                }),
+                format_note: None,
+                fallback: true,
+                notice: None,
+                sample: None,
             },
         }
     }
@@ -865,17 +984,19 @@ impl BoardPreviews {
     pub fn apply(&mut self, size: PreviewSize, format: PreviewFormat) {
         if let Some(total) = self.cost(size, format) {
             self.previews.total = total.clone();
-            self.previews.on_pc = total;
+            if let Some(on_pc) = &mut self.previews.on_pc {
+                on_pc.kept = total;
+            }
         }
-        self.previews.uses[0] = match board_kb(size, format) {
+        self.previews.uses[0] = Some(match board_kb(size, format) {
             Some(kb) => words_of(kb * BOARD_PHOTOS),
             None => "Not measured yet".into(),
-        };
-        self.previews.uses[1] = if format == PreviewFormat::Heic {
+        });
+        self.previews.uses[1] = Some(if format == PreviewFormat::Heic {
             "420 MB".into()
         } else {
             "0 MB".into()
-        };
+        });
         self.previews.size = size;
         self.previews.format = format;
     }

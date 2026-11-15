@@ -8,6 +8,7 @@
 //!
 //! Nothing here is a secret: no password, code or phrase is shown or typed in these steps.
 
+mod folder;
 pub mod guide;
 pub mod guide_marks;
 pub mod icons;
@@ -25,7 +26,8 @@ use crate::State;
 use crate::shell::app::{Event, GateState};
 use crate::shell::host;
 use source::{
-    Explorer, FixtureSetupSource, Folder, LockAfter, PreviewFormat, PreviewSize, Sample, Script, SetupSource,
+    Explorer, FixtureSetupSource, Folder, FolderAsk, LockAfter, Outcome, PreviewFormat, PreviewSize, Sample, Script,
+    SetupSource, Switch,
 };
 
 pub use view::view;
@@ -88,18 +90,6 @@ impl Step {
             Step::Done => "You're set up",
         }
     }
-
-    fn next(self) -> Step {
-        match self {
-            Step::Passkey => Step::Lock,
-            Step::Lock => Step::Backup,
-            Step::Backup => Step::Previews,
-            Step::Previews => Step::Explorer,
-            Step::Explorer => Step::Notifications,
-            Step::Notifications => Step::Login,
-            Step::Login | Step::Done => Step::Done,
-        }
-    }
 }
 
 /// How the compare view shows the two pictures.
@@ -151,6 +141,35 @@ pub enum Setting {
     OpenAtLogin,
 }
 
+impl Setting {
+    /// The step that sets it.
+    pub fn step(self) -> Step {
+        match self {
+            Setting::Passkey => Step::Passkey,
+            Setting::AppLock => Step::Lock,
+            Setting::Backup => Step::Backup,
+            Setting::Previews => Step::Previews,
+            Setting::FileExplorer => Step::Explorer,
+            Setting::Notifications => Step::Notifications,
+            Setting::OpenAtLogin => Step::Login,
+        }
+    }
+}
+
+/// Where a switch of "You're set up" stands when its change is answered after the press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answered {
+    /// Never asked of a source that answers later ("Skip setup", a step that was left with nothing chosen):
+    /// nothing was set here, and no value is claimed.
+    NotAsked,
+    /// Asked, not answered yet: no value is drawn.
+    Waiting,
+    /// The change did not happen, and what the switch is now is known (`results` holds it).
+    NotChanged,
+    /// The change did not happen, and what the switch is now is not known.
+    NotKnown,
+}
+
 /// Where the person goes when they leave setup. The shell opens it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
@@ -191,6 +210,17 @@ pub struct Ui {
     intents: Vec<Intent>,
     /// "Open my Beebeeb" was pressed and the guide has not asked yet ([`Ui::guide_due`]).
     finished: bool,
+    /// The sync folder, while it still has to be asked for (the first state of the File Explorer step).
+    pub folder: FolderAsk,
+    /// A start worked and its folder could not be saved, while sync runs (`SetupSource::folder_unsaved`).
+    unsaved: bool,
+    /// Switches whose change is answered after the press, and where each stands. One that is not listed here was
+    /// made (or never asked): `results` says what it is.
+    answered: Vec<(Switch, Answered)>,
+    /// The switches that were asked of the source at all.
+    asked: Vec<Switch>,
+    /// A size or format was chosen on step 4: the stored one no longer moves it.
+    previews_chosen: bool,
 }
 
 /// Decode a PNG into pixels Rune draws. A file that does not decode draws nothing.
@@ -221,8 +251,12 @@ fn decode(png_bytes: &[u8]) -> Pixels {
 impl Ui {
     pub fn new(source: Box<dyn SetupSource>) -> Self {
         let sample = source.sample();
-        Ui {
+        let mut ui = Ui {
             step: Step::Passkey,
+            folder: source.folder_ask(),
+            unsaved: source.folder_unsaved(),
+            answered: Vec::new(),
+            asked: Vec::new(),
             compare: None,
             explorer: source.explorer(),
             // Step 2 draws the switch on and "5 min" chosen; step 7 draws its switch on.
@@ -240,18 +274,23 @@ impl Ui {
                 notifications: true,
                 open_at_login: true,
             },
-            original: decode(sample.original_png),
-            preview: decode(sample.preview_png),
+            original: decode(&sample.original_png),
+            preview: decode(&sample.preview_png),
             sample,
             source,
             focus: None,
             intents: Vec::new(),
             finished: false,
-        }
+            previews_chosen: false,
+        };
+        ui.start_on_stored_previews();
+        ui
     }
 
     /// What the shell should open, oldest first.
-    #[cfg_attr(not(test), allow(dead_code))] // waits for its reader in the shell (PR body)
+    // The shell reads none yet: the first run ends through the gate (`SetupSource::finish`), and the running
+    // app's rows of "You're set up" open no setting (`SetupSource::opens_settings`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn take_intents(&mut self) -> Vec<Intent> {
         std::mem::take(&mut self.intents)
     }
@@ -286,15 +325,125 @@ impl Ui {
         format!("{} {}", self.size.label(), self.format.label())
     }
 
+    /// Whether something answers for this step. One that nothing answers for says so, and turns nothing on.
+    pub fn available(&self, step: Step) -> bool {
+        self.source.available(step)
+    }
+
+    /// Whether this step's content is still being read (see `SetupSource::loading`).
+    pub fn loading(&self, step: Step) -> bool {
+        self.source.loading(step)
+    }
+
+    /// Whether this step's read failed (see `SetupSource::failed`).
+    pub fn failed(&self, step: Step) -> bool {
+        self.source.failed(step)
+    }
+
+    /// "Try again" on step 3 after a failed read.
+    pub fn retry_backup(&mut self) {
+        if self.step == Step::Backup && self.failed(Step::Backup) {
+            self.source.retry_backups();
+        }
+    }
+
+    /// "Try again" on step 4 after a failed read of the preview setting.
+    pub fn retry_previews(&mut self) {
+        if self.step == Step::Previews && self.failed(Step::Previews) {
+            self.source.retry_previews();
+        }
+    }
+
+    /// Whether the File Explorer step is still asking for the sync folder.
+    pub fn asks_folder(&self) -> bool {
+        self.available(Step::Explorer) && self.folder != FolderAsk::Settled
+    }
+
+    /// Whether the folder a start worked in could not be saved, while sync runs.
+    pub fn folder_unsaved(&self) -> bool {
+        self.unsaved
+    }
+
+    /// Whether another folder can be chosen after a start that was refused.
+    pub fn can_choose_again(&self) -> bool {
+        self.source.can_choose_again()
+    }
+
+    /// Whether a row of "You're set up" leads to its setting.
+    pub fn opens_settings(&self) -> bool {
+        self.source.opens_settings()
+    }
+
+    /// Where a switch stands while its change has not been made: `None` once it was (or when it was never asked).
+    pub fn answered(&self, switch: Switch) -> Option<Answered> {
+        if self.source.answers_later() && !self.asked.contains(&switch) {
+            return Some(Answered::NotAsked);
+        }
+        self.answered.iter().find(|(s, _)| *s == switch).map(|(_, a)| *a)
+    }
+
+    /// A switch was asked of the source. A source that answers later: no value is drawn until it does.
+    fn asked(&mut self, switch: Switch) {
+        if !self.asked.contains(&switch) {
+            self.asked.push(switch);
+        }
+        self.answered.retain(|(s, _)| *s != switch);
+        if self.source.answers_later() {
+            self.answered.push((switch, Answered::Waiting));
+        }
+    }
+
+    /// The source answered a change: the value it names is the one drawn, never the one that was asked for.
+    fn take_in(&mut self, outcome: Outcome) {
+        self.answered.retain(|(s, _)| *s != outcome.switch);
+        if let Some(now) = outcome.now {
+            match outcome.switch {
+                Switch::Notifications => self.results.notifications = now,
+                Switch::OpenAtLogin => self.results.open_at_login = now,
+                Switch::AppLock => self.results.app_lock = now,
+                Switch::Backup | Switch::Previews | Switch::LockAfter => {}
+            }
+        }
+        match (outcome.done, outcome.now) {
+            // Made (when what is set could not be read back, the value that was asked for stands).
+            (true, _) => {}
+            (false, None) => self.answered.push((outcome.switch, Answered::NotKnown)),
+            (false, Some(_)) => self.answered.push((outcome.switch, Answered::NotChanged)),
+        }
+    }
+
     fn advance(&mut self) {
-        self.step = self.step.next();
+        self.step = Step::STEPS
+            .into_iter()
+            .find(|step| *step > self.step)
+            .unwrap_or(Step::Done);
         self.focus = Some(TITLE_KEY);
+    }
+
+    /// "Use this folder" (the File Explorer step, while it asks for the sync folder).
+    pub fn keep_folder(&mut self) {
+        if self.step == Step::Explorer && self.asks_folder() {
+            self.source.keep_folder();
+            self.focus = Some(TITLE_KEY);
+        }
+    }
+
+    /// "Choose another folder": while the step asks for the sync folder, and after a start that was refused.
+    pub fn choose_folder(&mut self) {
+        if self.step == Step::Explorer && (self.asks_folder() || self.can_choose_again()) {
+            self.source.choose_folder();
+            self.focus = Some(TITLE_KEY);
+        }
     }
 
     /// "Add a passkey": Windows' own dialog, then step 2. A cancelled dialog stays on step 1.
     pub fn add_passkey(&mut self) {
         if self.step != Step::Passkey {
             return;
+        }
+        if !self.available(Step::Passkey) {
+            // Nothing answers for a passkey: the step is left, and nothing is claimed.
+            return self.advance();
         }
         if self.source.add_passkey() {
             self.results.passkey = true;
@@ -307,11 +456,20 @@ impl Ui {
         if self.compare.is_some() {
             return;
         }
+        if self.step != Step::Done && !self.available(self.step) {
+            // "Continue" on a step nothing answers for: the next step, nothing asked, nothing claimed.
+            return self.advance();
+        }
         match self.step {
             Step::Passkey | Step::Done => return,
             Step::Lock => {
                 self.source.set_app_lock(self.lock_on, self.lock_after);
                 self.results.app_lock = self.lock_on;
+                self.asked(Switch::AppLock);
+                // The delay goes with the switch on only (off never locks).
+                if self.lock_on && self.sets_lock_after() {
+                    self.asked(Switch::LockAfter);
+                }
             }
             Step::Backup => {
                 let on: Vec<String> = self.folders.iter().filter(|f| f.on).map(|f| f.name.clone()).collect();
@@ -320,11 +478,36 @@ impl Ui {
                 }
                 self.source.start_backup(&on);
                 self.results.backup = on;
+                self.asked(Switch::Backup);
             }
-            Step::Previews => self.source.set_previews(self.size, self.format),
+            // Nothing is stored before the account's own setting was read: Continue waits (loading), and a read
+            // that failed offers Try again instead.
+            Step::Previews if self.loading(Step::Previews) || self.failed(Step::Previews) => return,
+            Step::Previews => {
+                self.source.set_previews(self.size, self.format);
+                self.asked(Switch::Previews);
+            }
             Step::Explorer => {
+                // "OK" on the note that the folder cannot be moved yet.
+                if self.folder == FolderAsk::AlreadySyncs {
+                    self.source.dismiss_folder_note();
+                    self.pump();
+                    self.focus = Some(TITLE_KEY);
+                    return;
+                }
+                // "Use this folder" is the amber button while the step asks for the sync folder.
+                if self.asks_folder() {
+                    return self.keep_folder();
+                }
+                // "Try again" on a folder that was not saved: write it.
+                if self.unsaved {
+                    self.source.save_folder();
+                    self.pump();
+                    self.focus = Some(TITLE_KEY);
+                    return;
+                }
                 // "Try again" is the amber button while it failed (DW-0280).
-                if matches!(self.explorer, Explorer::Failed { .. }) {
+                if matches!(self.explorer, Explorer::Failed { .. } | Explorer::NotSyncing) {
                     self.source.retry_explorer();
                     self.pump();
                     self.focus = Some(TITLE_KEY);
@@ -334,10 +517,12 @@ impl Ui {
             Step::Notifications => {
                 self.source.set_notifications(true);
                 self.results.notifications = true;
+                self.asked(Switch::Notifications);
             }
             Step::Login => {
                 self.source.set_open_at_login(self.login_on);
                 self.results.open_at_login = self.login_on;
+                self.asked(Switch::OpenAtLogin);
             }
         }
         self.advance();
@@ -350,9 +535,12 @@ impl Ui {
         }
         match self.step {
             Step::Done => return,
-            Step::Notifications => {
+            // The sync folder is not skipped from its own question ("Skip setup" leaves the first run).
+            Step::Explorer if self.asks_folder() => return,
+            Step::Notifications if self.available(Step::Notifications) => {
                 self.source.set_notifications(false);
                 self.results.notifications = false;
+                self.asked(Switch::Notifications);
             }
             _ => {}
         }
@@ -372,6 +560,11 @@ impl Ui {
         self.lock_on = !self.lock_on;
     }
 
+    /// Whether step 2 draws "Lock again after" (`SetupSource::sets_lock_after`).
+    pub fn sets_lock_after(&self) -> bool {
+        self.source.sets_lock_after()
+    }
+
     pub fn set_lock_after(&mut self, after: LockAfter) {
         self.lock_after = after;
     }
@@ -388,10 +581,24 @@ impl Ui {
 
     pub fn set_size(&mut self, size: PreviewSize) {
         self.size = size;
+        self.previews_chosen = true;
     }
 
     pub fn set_format(&mut self, format: PreviewFormat) {
         self.format = format;
+        self.previews_chosen = true;
+    }
+
+    /// Step 4 starts on the size and format the account has stored, once the source read them, until the person
+    /// chose one: "Continue" on untouched choices then changes nothing but turning previews on.
+    fn start_on_stored_previews(&mut self) {
+        if self.previews_chosen {
+            return;
+        }
+        if let Some((size, format)) = self.source.stored_previews() {
+            self.size = size;
+            self.format = format;
+        }
     }
 
     /// "Compare" on step 4.
@@ -454,7 +661,7 @@ impl Ui {
 
     /// A row of "You're set up".
     pub fn open_setting(&mut self, setting: Setting) {
-        if self.step == Step::Done {
+        if self.step == Step::Done && self.opens_settings() && self.available(setting.step()) {
             self.intents.push(Intent::OpenSetting(setting));
         }
     }
@@ -479,11 +686,20 @@ impl Ui {
         if !self.source.poll() {
             return false;
         }
+        for outcome in self.source.take_outcomes() {
+            self.take_in(outcome);
+        }
+        if let Some(folders) = self.source.fresh_folders() {
+            self.folders = folders;
+        }
         self.explorer = self.source.explorer();
+        self.folder = self.source.folder_ask();
+        self.unsaved = self.source.folder_unsaved();
+        self.start_on_stored_previews();
         let sample = self.source.sample();
         if sample != self.sample {
-            self.original = decode(sample.original_png);
-            self.preview = decode(sample.preview_png);
+            self.original = decode(&sample.original_png);
+            self.preview = decode(&sample.preview_png);
             self.sample = sample;
         }
         true
@@ -512,9 +728,9 @@ pub fn act(f: impl Fn(&mut Ui) + 'static) -> impl Fn(&mut State, &mut Tx) + 'sta
     }
 }
 
-/// The registry's line for `FrameGroup::FirstRun`. With no setup state (nothing routes here
-/// until the engine lane adds the first-run state to the gate) the shell's "not built yet"
-/// frame shows, never sample values.
+/// The registry's line for `FrameGroup::FirstRun`. The shell makes the setup state when its gate turns to the
+/// first run (`shell::host::start_first_run`); with none (a build whose engine has no first run) the shell's
+/// "not built yet" frame shows, never sample values.
 pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
     let name = s.identity.product_name();
     match &s.setup {
@@ -524,7 +740,6 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
 }
 
 /// What the engine changed between presses (File Explorer finished). For `shell::host::poll`.
-#[allow(dead_code)] // waits for its one line in `shell/host.rs` (PR body)
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let Some(ui) = ui(s) else { return false };
     let changed = ui.pump();
@@ -593,6 +808,73 @@ pub fn scene(frame: &str) -> Option<Ui> {
         "DW-0208" => at(Step::Done, Explorer::Added),
         _ => return None,
     })
+}
+
+/// The steps the running app has no answer for yet, as its source says them (`engine_host::setup`).
+const NOT_IN_THIS_VERSION: &[Step] = &[Step::Passkey, Step::Backup, Step::Previews];
+
+/// The states of the first run the board has no frame for, by a name of their own, for a headless render
+/// (`--scene first-run-folder`): no frame gate, the lane looks at the render. `None`: not one of them.
+pub fn render_scene(name: &str) -> Option<Ui> {
+    let asks = |said| source::FolderAsk::Ask {
+        folder: r"C:\Users\Sam\Beebeeb".into(),
+        said,
+        busy: false,
+    };
+    let script = match name {
+        "first-run-not-yet" => Script::default(),
+        "first-run-folder" => Script {
+            folder: asks(None),
+            ..Script::default()
+        },
+        "first-run-folder-refused" => Script {
+            folder: asks(Some(source::FolderSaid::Network)),
+            ..Script::default()
+        },
+        "first-run-sync-off" => Script {
+            explorer: Explorer::NotSyncing,
+            choose_again: true,
+            ..Script::default()
+        },
+        "first-run-summary" => Script {
+            explorer: Explorer::Added,
+            ..Script::default()
+        },
+        _ => return None,
+    };
+    let mut ui = Ui::new(Box::new(FixtureSetupSource::new(Script {
+        not_available: NOT_IN_THIS_VERSION,
+        ..script
+    })));
+    let to = match name {
+        "first-run-not-yet" => Step::Passkey,
+        "first-run-summary" => Step::Done,
+        _ => Step::Explorer,
+    };
+    // At most one press per step: a step that does not move on is left as it is.
+    for _ in Step::STEPS {
+        if ui.step < to {
+            ui.go_on();
+        }
+    }
+    ui.focus = None;
+    Some(ui)
+}
+
+/// The names [`render_scene`] knows, for the shell's list of scenes.
+pub const RENDER_SCENES: &[(&str, fn(&mut State))] = &[
+    ("first-run-not-yet", |s| set_render_scene(s, "first-run-not-yet")),
+    ("first-run-folder", |s| set_render_scene(s, "first-run-folder")),
+    ("first-run-folder-refused", |s| {
+        set_render_scene(s, "first-run-folder-refused")
+    }),
+    ("first-run-sync-off", |s| set_render_scene(s, "first-run-sync-off")),
+    ("first-run-summary", |s| set_render_scene(s, "first-run-summary")),
+];
+
+fn set_render_scene(s: &mut State, name: &str) {
+    host::dispatch(s, Event::Gate(GateState::FirstRun));
+    s.setup = render_scene(name);
 }
 
 /// Every board frame of the first run, for `frames::scenes`.

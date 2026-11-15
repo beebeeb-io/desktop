@@ -9,7 +9,16 @@
 //!
 //! The tray lives on its own thread with a hidden top-level window (never shown), so it gets
 //! `TaskbarCreated`, `WM_SETTINGCHANGE` (the taskbar's light or dark mode), `WM_DISPLAYCHANGE`
-//! (a scale change) and `WM_ENDSESSION`, and answers while the app's window is closed.
+//! (a scale change) and `WM_ENDSESSION`, and answers while the app's window is closed. The same
+//! window is registered for this session's changes (`WTSRegisterSessionNotification`): a lock of
+//! the Windows session (Win+L, or Windows' own lock) is the away lock's event
+//! ([`TrayEvent::SessionLocked`]), whether the app's window is open or not. A sleep is too: the
+//! power broadcast's suspend and resume (`WM_POWERBROADCAST`) say how long the PC was away
+//! ([`TrayEvent::Resumed`]). The window registers for that broadcast too
+//! (`RegisterSuspendResumeNotification`): on a Modern Standby PC the suspend goes only to a
+//! window that registered (review of #452, P2-A); where it is sent to every top-level window the
+//! registration changes nothing. Where neither comes, the away lock's poll sees the gap
+//! (`shell/away.rs`).
 //!
 //! # The aliasing rule of this file
 //!
@@ -35,7 +44,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -44,6 +53,13 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromRect,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Power::{
+    HPOWERNOTIFY, RegisterSuspendResumeNotification, UnregisterSuspendResumeNotification,
+};
+use windows_sys::Win32::System::RemoteDesktop::{
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+};
+use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4,
@@ -56,7 +72,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SPI_GETCLIENTAREAANIMATION, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SystemParametersInfoW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTALIGN,
     TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION,
-    WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW,
+    WS_POPUP, WTS_SESSION_LOCK,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    DEVICE_NOTIFY_WINDOW_HANDLE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WM_POWERBROADCAST,
 };
 
 use super::windows::{os_error, read_taskbar_theme, wide};
@@ -145,6 +165,44 @@ struct Context {
     refresh_again: Cell<bool>,
     /// Panics caught at the procedure's boundary. Zero in a correct build.
     faults: Arc<AtomicU32>,
+    /// The PC is going to sleep or hibernate: when (two clocks) and how long it had been without input then. Taken
+    /// at the resume, which says how long it was away ([`TrayEvent::Resumed`]).
+    suspended: Cell<Option<Suspended>>,
+    /// The registration for the power broadcast (`RegisterSuspendResumeNotification`), ended at `WM_DESTROY`. `0`:
+    /// none (refused, or the harness's window, which never registers).
+    power: Cell<HPOWERNOTIFY>,
+}
+
+/// What the tray noted at a suspend.
+#[derive(Clone, Copy)]
+struct Suspended {
+    /// `GetTickCount64` then.
+    tick_ms: u64,
+    /// This PC's clock then.
+    wall: std::time::SystemTime,
+    /// The session's time without input then (`None`: Windows did not say; counted as none).
+    idle: Option<Duration>,
+}
+
+impl Suspended {
+    fn now() -> Self {
+        Self {
+            // SAFETY: takes nothing, returns the tick count.
+            tick_ms: unsafe { GetTickCount64() },
+            wall: std::time::SystemTime::now(),
+            idle: super::windows::pc_idle(),
+        }
+    }
+
+    /// How long the PC was away at a resume: its time without input at the suspend, and the sleep, by whichever of
+    /// the two clocks saw more of it. Microsoft's pages do not say that the tick count counts a sleep; the wall clock
+    /// does, and can be set back: the longer of the two never makes the lock come later than one that saw the sleep.
+    fn away_until_now(self) -> Duration {
+        // SAFETY: takes nothing, returns the tick count.
+        let ticks = Duration::from_millis(unsafe { GetTickCount64() }.saturating_sub(self.tick_ms));
+        let wall = self.wall.elapsed().unwrap_or_default();
+        self.idle.unwrap_or_default().saturating_add(ticks.max(wall))
+    }
 }
 
 impl Context {
@@ -534,6 +592,36 @@ fn handle(hwnd: HWND, context: &Context, message: u32, w: WPARAM, l: LPARAM) -> 
             unsafe { DestroyWindow(hwnd) };
             Some(0)
         }
+        // This Windows session was locked: the away lock's event. Every other change (an unlock,
+        // a remote connection) is Windows' own.
+        WM_WTSSESSION_CHANGE => {
+            if w == WTS_SESSION_LOCK as WPARAM {
+                context.send(TrayEvent::SessionLocked);
+            }
+            Some(0)
+        }
+        // The PC sleeps or hibernates (a top-level window gets this broadcast): what the resume needs
+        // is noted now, on this thread, before the PC stops. The resume says how long it was away,
+        // once (the resume a person's input adds after the automatic one is the same wake); a
+        // resume with no suspend seen says nothing (its length is not known).
+        WM_POWERBROADCAST => {
+            match w as u32 {
+                PBT_APMSUSPEND => {
+                    if context.suspended.get().is_none() {
+                        context.suspended.set(Some(Suspended::now()));
+                    }
+                }
+                PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
+                    if let Some(suspended) = context.suspended.take() {
+                        context.send(TrayEvent::Resumed {
+                            away: suspended.away_until_now(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            Some(1)
+        }
         // Something outside asks the app to close (`taskkill` without /F, Restart Manager, an
         // installer). The window stays (only the app ends the tray); the app is asked to quit.
         WM_CLOSE => {
@@ -541,10 +629,18 @@ fn handle(hwnd: HWND, context: &Context, message: u32, w: WPARAM, l: LPARAM) -> 
             Some(0)
         }
         WM_DESTROY => {
-            // SAFETY: timers on this thread's own window, which is being destroyed.
+            // SAFETY: timers on this thread's own window, which is being destroyed; the session
+            // notifications it was registered for end before it goes (a window never registered,
+            // the harness's, is refused and nothing changes).
             unsafe {
                 KillTimer(hwnd, TIMER_ANIMATE);
                 KillTimer(hwnd, TIMER_RETRY);
+                WTSUnRegisterSessionNotification(hwnd);
+            }
+            let power = context.power.replace(0);
+            if power != 0 {
+                // SAFETY: the handle RegisterSuspendResumeNotification gave for this window, ended once.
+                unsafe { UnregisterSuspendResumeNotification(power) };
             }
             context.shell.notify(NIM_DELETE, &icon_data(hwnd, 0));
             context.update(|state| state.added = false);
@@ -698,9 +794,25 @@ fn build(
         refreshing: Cell::new(false),
         refresh_again: Cell::new(false),
         faults,
+        suspended: Cell::new(None),
+        power: Cell::new(0),
     });
     let hwnd = create_window(&context, class_name)?;
     Ok((hwnd, context))
+}
+
+/// The away lock's other event: a sleep. On a Modern Standby PC the suspend broadcast goes only to a window that
+/// registered for it; registered, this window gets it wherever Windows sends it. Refused, the poll's gap still counts
+/// the sleep (`shell/away.rs`); it is said in the log, without anything of the person.
+fn register_for_power(hwnd: HWND, context: &Context) {
+    // SAFETY: this thread's own live window; the handle is kept and ended at WM_DESTROY.
+    let power = unsafe { RegisterSuspendResumeNotification(hwnd, DEVICE_NOTIFY_WINDOW_HANDLE) };
+    if power == 0 {
+        let error = os_error("registering for suspend and resume");
+        crate::shell::host::log(format!("the away lock will not hear of a sleep from Windows ({error})"));
+        return;
+    }
+    context.power.set(power);
 }
 
 /// Frees the last icon. After the window is gone.
@@ -735,6 +847,14 @@ fn tray_thread(
             return;
         }
     };
+    // The away lock's event: this session's lock. Refused (no session service), the idle count
+    // still locks; it is said in the log, without anything of the person.
+    // SAFETY: this thread's own live window.
+    if unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) } == 0 {
+        let error = os_error("registering for session changes");
+        crate::shell::host::log(format!("the away lock will not see a Windows lock ({error})"));
+    }
+    register_for_power(hwnd, &context);
     // The first add happens before the app is told the tray exists, so `present()` is the
     // truth by the time `create` returns.
     refresh(hwnd, &context);

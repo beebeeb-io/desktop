@@ -346,6 +346,9 @@ impl State {
 
     /// Cancel, Esc: close the dialog. New folder asked from Move goes back to Move.
     pub fn close_dialog(&mut self, tx: &mut Tx) {
+        if matches!(self.actions.dialog, Some(Dialog::Preview(_))) {
+            self.actions.source.cancel_preview();
+        }
         match self.actions.dialog.take() {
             Some(Dialog::NewFolder(NewFolder {
                 back_to: Some(back), ..

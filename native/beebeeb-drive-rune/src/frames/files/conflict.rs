@@ -7,8 +7,10 @@
 //!
 //! **Nothing is lost, whatever is pressed.** Cancel and Esc ask nothing of the source: both
 //! versions stay and the file keeps waiting. Each Keep asks once (`FilesSource::keep_version`);
-//! the source keeps the version that is not the file in the file's version history, or beside
-//! it under the device's name (Keep both). The next waiting file follows.
+//! the source keeps the version that is not the file in the file's version history, beside it
+//! under the device's name (Keep both), or, for this PC's version under Keep there (never
+//! uploaded, so in no history), in the app's own data under "Replaced on this PC". The next
+//! waiting file follows.
 
 use super::actions_data::{Conflict, Device, Keep, Side};
 use super::source::Action;
@@ -212,9 +214,11 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
             .gap(12.0)
             .child(side("version-here", &conflict.here, &t))
             .child(side("version-there", &conflict.there, &t)),
+        // Review of desktop#423, P2 #8: this PC's version under Keep there was never uploaded, so it is in no version
+        // history: the line says where it is kept instead (the engine's `conflicts_api::REPLACED_FOLDER`).
         kit::label(
             "dlg-text-0",
-            "Keep both saves the other one next to it with the device's name added. Either way, the other version stays in version history.",
+            "Keep both saves the other one next to it with the device's name added. Keeping the other one puts this PC's in Beebeeb's app data, under Replaced on this PC.",
             type_::CAPTION,
             t.text_tertiary,
         )

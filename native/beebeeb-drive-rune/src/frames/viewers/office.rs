@@ -191,7 +191,7 @@ pub(super) fn ask(command: &'static str) -> impl Fn(&mut State) + 'static {
 
 /// How a tool of the ribbon shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Tool {
+pub(crate) enum Tool {
     Idle,
     /// Chosen (the paragraph's alignment).
     On,
@@ -199,13 +199,13 @@ enum Tool {
     Off,
 }
 
-enum Face {
+pub(crate) enum Face {
     Glyph(&'static Icon, f32),
     Letter(&'static str, TextStyle),
 }
 
 /// A tool button (`.mk-tbtn`): 28 square, its glyph or its letter. Keys: `<key>`, `-icon` or `-letter`.
-fn tool(key: &str, name: &'static str, face: Face, state: Tool, command: &'static str, t: &Theme) -> El {
+pub(crate) fn tool(key: &str, name: &'static str, face: Face, state: Tool, command: &'static str, t: &Theme) -> El {
     let ink = match state {
         Tool::Idle => t.text_secondary,
         Tool::On => t.text,
@@ -258,14 +258,14 @@ pub(super) fn hairline(key: String, t: &Theme) -> El {
 }
 
 /// The raised look of a pop-up button and of the command search (`.mk-pop2`).
-fn raised(e: El, t: &Theme) -> El {
+pub(crate) fn raised(e: El, t: &Theme) -> El {
     e.fill(t.card)
         .box_shadow(kit::drop(0.5, 1.5, Color::BLACK.alpha(0.18)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
 }
 
 /// A pop-up button of the ribbon (`.mk-pop2`): the choice, a caret. Keys: `<key>`, `-label`, `-caret`.
-fn pop(key: &str, name: &'static str, choice: &str, w: f32, command: &'static str, t: &Theme) -> El {
+pub(crate) fn pop(key: &str, name: &'static str, choice: &str, w: f32, command: &'static str, t: &Theme) -> El {
     raised(
         row()
             .key(key.to_string())
@@ -288,7 +288,13 @@ fn pop(key: &str, name: &'static str, choice: &str, w: f32, command: &'static st
 }
 
 /// A small button of the ribbon's first row (`.kit-btn-sm`). Keys: `<key>`, `-icon`, `-label`, `-hint`.
-fn small_button(key: &str, label: &'static str, icon: &'static Icon, hint: Option<&'static str>, t: &Theme) -> El {
+pub(crate) fn small_button(
+    key: &str,
+    label: &'static str,
+    icon: &'static Icon,
+    hint: Option<&'static str>,
+    t: &Theme,
+) -> El {
     let mut b = row()
         .key(key.to_string())
         .role("button")
@@ -315,7 +321,7 @@ fn small_button(key: &str, label: &'static str, icon: &'static Icon, hint: Optio
 }
 
 /// The ribbon's first row: the tabs, the command search, Share, Save.
-fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
+pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let mut r = row().key("rib-tabs").w_full().h(32.0).px(12.0).gap(4.0).center_y();
     for (i, tab) in Tab::ALL.into_iter().enumerate() {
         let on = ui.office.tab == tab;
@@ -465,7 +471,7 @@ fn home_tools(t: &Theme) -> Vec<El> {
 }
 
 /// The ribbon (the tabs' row over the open tab's tools).
-fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
+pub(crate) fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let tools = match ui.office.tab {
         Tab::Home => home_tools(t),
         Tab::Insert => super::office_over::insert_tools(t),
@@ -683,7 +689,7 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
 
 /// How the document is kept, as the status line and Save show it.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Keeping {
+pub(crate) enum Keeping {
     Saved,
     Unsaved,
     /// The last save found a newer version; the question is open (DW-1554).
@@ -700,7 +706,7 @@ pub const OLDER_FORMAT: &str = "An older Word file (.doc). It opens and saves in
 
 /// The status line: what the document is, how it is kept, the zoom, About. Its parts are keyed
 /// `st-<N>` in order.
-fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t: &Theme) -> El {
+pub(crate) fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t: &Theme) -> El {
     let plain = |key: String, words: &str| style::fitted(key, words, type_::STATUS, t.text_tertiary);
     let sep = |key: &str| el().key(key.to_string()).w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
     let mut n = 0;
@@ -823,7 +829,7 @@ fn thousands(n: u32) -> String {
 }
 
 /// The window's toolbar with the document's path where a folder's title is (`ui::toolbar::bar`).
-fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
+pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let file = &ui.file;
     let mut crumbs = row()
         .key("crumbs")

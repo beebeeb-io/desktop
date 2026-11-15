@@ -2,8 +2,10 @@
 //! Lock Beebeeb row drops, and its keyboard. The row itself is `security_overview`'s.
 //!
 //! Nothing here is a secret: the menu holds four lengths of time. Turning the lock off or
-//! changing the delay asks for Windows Hello first; that question is the source's
+//! choosing a longer delay asks for Windows Hello first; that question is the source's
 //! (`AccountSource::set_app_lock`, `set_lock_after`), asked by the engine, never drawn here.
+//! When Windows Hello does not confirm it, the row offers the account password instead
+//! (`app_lock_password`, no board frame: D-2).
 
 use crate::State;
 use crate::theme::tokens::Theme;
@@ -35,7 +37,8 @@ pub fn arrive(ui: &mut AccountUi) {
     // From what the page itself draws: a source that cannot set the lock has no row for the menu to hang on.
     let lock = ui.source.as_deref().and_then(|s| s.security_facts().app_lock);
     ui.dialog = match lock {
-        Some((true, after)) => Some(Dialog::LockDelay(chosen(&after))),
+        // No delay (a source that sets none): no menu to open.
+        Some((true, after)) if !after.is_empty() => Some(Dialog::LockDelay(chosen(&after))),
         _ => None,
     };
 }

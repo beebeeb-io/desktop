@@ -55,6 +55,34 @@ pub struct UnsentChange {
     /// `copy_gone` (the staged copy to send is gone). [`StateDb::retry_unsent_change`] refuses it for the same reason.
     /// One still waiting out a backoff is tried again by the engine at `retry_at` all the same; the window words that.
     pub blocked: Option<&'static str>,
+    /// Task 2530: why a parked change parked (a `ParkReason` word, `other` for a class this build does not name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub park: Option<&'static str>,
+    /// Task 2530: the ways out a parked change offers now, read in the list's own transaction by the predicates each
+    /// choice checks again (`state_db::parked_exit`). Empty when not parked, or when nothing in this build settles it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exits: Vec<super::ParkExit>,
+    /// Task 2530: for a parked change with a way out, the file's version when the list was read: the version a choice
+    /// is made against (a file past it answers `Moved`, nothing changed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
+}
+
+/// Task 2530: a park's class as a fixed word (never a stored string handed on as is).
+fn park_word(class: &str) -> &'static str {
+    [
+        ParkReason::StaleBase,
+        ParkReason::BaseUnknown,
+        ParkReason::PayloadMissing,
+        ParkReason::PredecessorParked,
+        ParkReason::PredecessorLost,
+        ParkReason::RekeyFailed,
+        ParkReason::PermissionDenied,
+    ]
+    .into_iter()
+    .map(ParkReason::as_str)
+    .find(|word| *word == class)
+    .unwrap_or("other")
 }
 
 /// What [`StateDb::retry_unsent_change`] did.
@@ -143,7 +171,7 @@ fn unsent_sql_with(with: &str, held_folder_case: &str, tail: &str) -> String {
 }
 
 /// The kind word's key for one queue row. A `create_file` upload is a new file, whichever kind queued it.
-fn change_kind(kind: &str, metadata_json: Option<&str>) -> &'static str {
+pub(super) fn change_kind(kind: &str, metadata_json: Option<&str>) -> &'static str {
     match OperationKind::from_str(kind) {
         OperationKind::UploadFile => "new_file",
         OperationKind::UploadVersion => {
@@ -219,6 +247,9 @@ impl StateDb {
                         // Until the checks below say otherwise.
                         retryable: failed,
                         blocked: None,
+                        park: parked.then(|| park_word(error_class.as_deref().unwrap_or_default())),
+                        exits: Vec::new(),
+                        version: None,
                     })
                 })?
                 .collect::<Result<Vec<_>>>()?;
@@ -230,6 +261,20 @@ impl StateDb {
             if let Some(block) = presend_block_conn(&tx, &item.id)? {
                 item.retryable = false;
                 item.blocked = Some(blocked_word(block));
+            }
+        }
+        // Task 2530: a parked change's ways out, by primary key, only for the parked rows on this page.
+        for item in items.iter_mut().filter(|item| item.parked) {
+            item.exits = park_exits_conn(&tx, &item.id)?;
+            if !item.exits.is_empty() {
+                item.version = tx
+                    .query_row(
+                        "SELECT file.current_version FROM operation_queue AS op
+                         JOIN files AS file ON file.file_id = op.file_id WHERE op.op_id = ?1",
+                        params![item.id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
             }
         }
         tx.commit()?;
@@ -273,6 +318,9 @@ impl StateDb {
                     parked: false,
                     retryable: false,
                     blocked: None,
+                    park: None,
+                    exits: Vec::new(),
+                    version: None,
                 })
             })?
             .collect::<Result<Vec<_>>>()?

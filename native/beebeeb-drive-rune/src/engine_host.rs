@@ -42,14 +42,39 @@ use crate::shell::tray::TrayInputs;
 use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary};
 
 pub mod account;
+mod app_lock;
+mod away;
 pub mod backups;
+// Backups' "Other devices" and "Delete this backup" (`backups::EngineBackupsSource` delegates to it).
+pub mod backups_devices;
 #[cfg(test)]
 mod binding_tests;
+pub mod drive_previews;
 pub mod drive_settings;
 pub mod files;
+mod files_conflicts;
+mod files_downloads;
+mod files_facts;
+mod files_link;
+#[cfg(test)]
+#[path = "engine_host/files_open_with_tests.rs"]
+mod files_open_with_tests;
+mod files_places;
+mod files_preview;
 mod files_trash;
+mod files_uploads;
+mod files_versions;
+#[cfg(test)]
+#[path = "engine_host/files_window_support.rs"]
+mod files_window_support;
 pub mod guide;
+mod open_folder;
+// The Windows Hello prompt of the lock screen, behind one seam.
+pub mod hello;
+// An item's read-only Preview over Trash (from Beebeeb only) and Shared (`item_preview`).
+pub mod item_preview;
 pub mod open;
+pub mod passkeys;
 pub mod photos;
 pub mod search;
 pub mod settings;
@@ -62,6 +87,8 @@ pub(crate) mod tests;
 pub mod this_pc;
 pub mod thumbs;
 pub mod trash;
+// The first run's steps that have an engine function behind them (`setup`).
+pub mod setup;
 pub mod tray;
 // An open file: its facts from the local state, its content decrypted in memory (`viewer`).
 pub mod viewer;
@@ -78,7 +105,9 @@ fn map_gate_shell(g: EngineGate) -> ShellGate {
     match g {
         EngineGate::Ready => ShellGate::Ready,
         EngineGate::SignedOut => ShellGate::SignedOut,
-        EngineGate::Locked => ShellGate::Locked,
+        // Both lock levels close the window's gate; which one holds is the sign-in source's word
+        // (`map_gate_signin`), and the lock screens are drawn from it (`frames::signin::lock`).
+        EngineGate::ScreenLocked | EngineGate::Locked => ShellGate::Locked,
         EngineGate::NeedsRecoveryPhrase => ShellGate::NeedsRecoveryPhrase,
         EngineGate::NoPlan => ShellGate::NoPlan,
         EngineGate::KeyStoreUnavailable => ShellGate::KeyStoreUnavailable,
@@ -89,7 +118,8 @@ fn map_gate_signin(g: EngineGate) -> GateState {
     match g {
         EngineGate::Ready => GateState::Ready,
         EngineGate::SignedOut => GateState::SignedOut,
-        EngineGate::Locked => GateState::Locked,
+        EngineGate::ScreenLocked => GateState::Locked,
+        EngineGate::Locked => GateState::VaultClosed,
         EngineGate::NeedsRecoveryPhrase => GateState::NeedsRecoveryPhrase,
         EngineGate::NoPlan => GateState::NoPlan,
         EngineGate::KeyStoreUnavailable => GateState::KeyStoreUnavailable,
@@ -160,7 +190,8 @@ fn log(message: impl AsRef<str>) {
 // the files). Nothing here routes a path through cmd.exe, PowerShell, bash or
 // any shell. On Windows, `ShellExecuteW` takes the path as one wide string,
 // never a command line. On macOS/Linux, `Command::new("open"/"xdg-open").arg`
-// passes it as a single argv entry, never through a shell.
+// passes it as a single argv entry, never through a shell. The app chooser (`choose_app`) takes the path as one
+// wide string in a struct field, the same way.
 // ---------------------------------------------------------------------------
 
 /// Open a file or folder with the OS's default handler. Never passes the path
@@ -204,6 +235,44 @@ fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
             .map_err(|_| files_source::ActionError::Failed)?;
     }
     Ok(())
+}
+
+/// Windows' "Open with" chooser for this file, on a thread of its own (the dialog is modal for the thread that
+/// shows it: never the window's). `OAIF_EXEC`: the app picked opens the file; no `OAIF_ALLOW_REGISTRATION`, so
+/// the chooser cannot change the PC's default app. `Ok`: the thread started. Every other system: not there.
+fn choose_app(path: &std::path::Path) -> Result<(), files_source::ActionError> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+        use windows_sys::Win32::UI::Shell::{OAIF_EXEC, OPENASINFO, SHOpenWithDialog};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        std::thread::Builder::new()
+            .name("files-open-with".into())
+            .spawn(move || {
+                // SAFETY: COM is initialised on this thread and uninitialised before it ends (only when the
+                // initialisation succeeded); `wide` is NUL-ended and outlives the call, `pcszClass` is null.
+                unsafe {
+                    let com = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+                    let info = OPENASINFO {
+                        pcszFile: wide.as_ptr(),
+                        pcszClass: std::ptr::null(),
+                        oaifInFlags: OAIF_EXEC,
+                    };
+                    let _ = SHOpenWithDialog(std::ptr::null_mut(), &info);
+                    if com >= 0 {
+                        CoUninitialize();
+                    }
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| files_source::ActionError::Failed)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err(files_source::ActionError::NotOnThisSystem)
+    }
 }
 
 /// Reveal a file or folder in File Explorer / Finder / Files. Never passes the
@@ -256,6 +325,9 @@ pub struct LiveEngine<C: CredentialStores> {
     status: Mutex<EngineStatusView>,
     /// One start at a time, and the name of the folder it asked for ([`sync::StartWorker`]).
     starts: sync::StartWorker,
+    /// Whether this PC still has its first run to do. Not due until the app's start reads it
+    /// ([`LiveEngine::wire_first_run`]): a handle nobody wired never shows one.
+    first_run: Arc<setup::FirstRun>,
 }
 
 impl<C: CredentialStores> LiveEngine<C> {
@@ -266,6 +338,42 @@ impl<C: CredentialStores> LiveEngine<C> {
             messages: Mutex::new(messages),
             status: Mutex::new(EngineStatusView::default()),
             starts: sync::StartWorker::default(),
+            first_run: Arc::default(),
+        }
+    }
+
+    /// At the app's start, before the window's first frame: read whether this PC still has its first run to do
+    /// (the settings file, once). From then on a session that is signed in and unlocked shows the first-run steps
+    /// until they end ([`EngineActions::session`]).
+    pub fn wire_first_run(&self) {
+        self.first_run.read(&*self.engine);
+    }
+
+    /// What the first-run source asks of the shell: the one start path, the folder opener, the start-at-login
+    /// entry and the gate's flag.
+    pub fn setup_hooks(self: &Arc<Self>, platform: Arc<dyn crate::shell::platform::Platform>) -> setup::Hooks
+    where
+        C: 'static,
+    {
+        let live = self.clone();
+        setup::Hooks {
+            start_sync: Arc::new(move || live.start_sync().is_ok()),
+            open_folder: |folder| open_path(folder).is_ok(),
+            platform,
+            first_run: self.first_run.clone(),
+            explorer_step: cfg!(target_os = "windows"),
+            look_later: {
+                let engine = self.engine.clone();
+                Arc::new(move |after| {
+                    let engine = engine.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("first-run-look".into())
+                        .spawn(move || {
+                            std::thread::sleep(after);
+                            engine.wake_host();
+                        });
+                })
+            },
         }
     }
 
@@ -324,7 +432,11 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     /// The gate from the handle's view (read without waiting: the UI thread asks it on every frame).
     fn session(&self) -> Session {
         self.drain();
-        let gate = map_gate_shell(self.engine.view().gate);
+        let gate = match map_gate_shell(self.engine.view().gate) {
+            // Signed in and unlocked, and this PC has not had its first run: its steps, not the main window.
+            ShellGate::Ready if self.first_run.due() => ShellGate::FirstRun,
+            gate => gate,
+        };
         // Whose session: the email is known from the stored session at start, the user id only once the
         // server named it in this run. One of them, always the same one for one account in one run.
         let account = self
@@ -352,9 +464,9 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     }
 
     fn open_in_file_explorer(&self) -> Result<(), actions::ActionError> {
-        Err(actions::ActionError::NotBuilt(
-            "open in File Explorer from the native app",
-        ))
+        let path = open_folder::beebeeb_folder(&self.engine)
+            .map_err(|_| actions::ActionError::NotAvailable("sync is not running"))?;
+        open_path(&path).map_err(|_| actions::ActionError::Failed("the Beebeeb folder did not open".to_string()))
     }
 
     fn profile_holder(&self) -> Option<ProfileHolder> {
@@ -366,12 +478,12 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     /// `Ok` means "asked"; the view says where the start got to, and a refusal opens the modal. Without a session
     /// nothing is asked.
     fn start_sync(&self) -> Result<(), actions::ActionError> {
-        if self.engine.view().gate != EngineGate::Ready {
+        if !sync::may_start(self.engine.view().gate) {
             return Err(actions::ActionError::NotAvailable("not signed in and unlocked"));
         }
-        let (engine, folder) = (self.engine.clone(), self.starts.folder());
+        let (engine, folder, first_run) = (self.engine.clone(), self.starts.folder(), self.first_run.clone());
         self.starts
-            .ask(move || sync::start_sync_now(&engine, &folder))
+            .ask(move || sync::start_sync_now(&engine, &folder, &first_run))
             .map(|_| ())
             .map_err(|_| actions::ActionError::Failed("could not start a thread".into()))
     }
@@ -386,6 +498,15 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
 
     fn resume_after_cancelled_quit(&self) {
         log("NotWired(resume_after_cancelled_quit)");
+    }
+
+    /// The away lock: the engine compares and locks (`engine_host/away.rs`).
+    fn away_job(&self, seen: actions::Away) -> Option<actions::AwayJob> {
+        Some(away::job(&self.engine, seen))
+    }
+
+    fn screen_open(&self) -> bool {
+        away::screen_open(&self.engine)
     }
 }
 
@@ -468,8 +589,24 @@ pub struct EngineFilesSource<C: CredentialStores> {
     copies: files::LocalCopies<Engine<C>>,
     /// Move to Trash and its Undo.
     trash: files_trash::TrashCalls<C>,
+    /// Copy link and the Share dialog's link.
+    links: files_link::LinkCalls<C>,
     /// After a refused upload: the files of it that were not copied in.
     upload_left: Option<Vec<PathBuf>>,
+    /// The sidebar's figures and each folder's sort.
+    facts: files_facts::Facts<C>,
+    /// A file's versions and the restore of one.
+    versions: files_versions::VersionCalls<C>,
+    /// The files in two versions and the answer to one.
+    conflicts: files_conflicts::ConflictCalls<Engine<C>>,
+    /// Where each row stands in the Backups tree.
+    places: files_places::Places<C>,
+    /// The Uploads panel: what uploads, Try again, Pause all, Cancel.
+    uploads: files_uploads::UploadCalls<Engine<C>>,
+    /// The copies coming down: the rows' "Downloading" figures.
+    downloads: files_downloads::DownloadCalls<Engine<C>>,
+    /// What the Preview panel shows of a file.
+    previews: files_preview::Previews<viewer::LiveViewerEngine<C>>,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -478,6 +615,14 @@ impl<C: CredentialStores> EngineFilesSource<C> {
         Self {
             copies: files::LocalCopies::new(engine.clone()),
             trash: files_trash::TrashCalls::new(engine.clone()),
+            uploads: files_uploads::UploadCalls::new(engine.clone()),
+            downloads: files_downloads::DownloadCalls::new(engine.clone()),
+            links: files_link::LinkCalls::new(engine.clone()),
+            facts: files_facts::Facts::new(engine.clone()),
+            versions: files_versions::VersionCalls::new(engine.clone()),
+            conflicts: files_conflicts::ConflictCalls::new(engine.clone()),
+            places: files_places::Places::new(engine.clone()),
+            previews: files_preview::Previews::new(Arc::new(viewer::LiveViewerEngine::new(engine.clone()))),
             engine,
             upload_left: None,
         }
@@ -543,9 +688,26 @@ impl<C: CredentialStores> EngineFilesSource<C> {
     }
 }
 
+impl<C: CredentialStores> EngineFilesSource<C> {
+    /// "Open in another app…": the path is resolved under the account-bound handle FIRST (the one check behind
+    /// every hand-over of a file, [`path_the_system_opens`]); `choose` is asked only after that answered `Ok`.
+    fn open_with_by(
+        &self,
+        item: &DriveItem,
+        choose: impl FnOnce(&Path) -> Result<(), ActionError>,
+    ) -> Result<(), ActionError> {
+        if item.is_folder {
+            return Err(ActionError::Failed);
+        }
+        let path = self.local(|db, sync_root| path_the_system_opens(db, sync_root, &item.id))?;
+        choose(&path)
+    }
+}
+
 impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
+    /// Files kept on this PC, once read (`files_facts`); the other two counts are not known here (0: no badge).
     fn counts(&self) -> Option<Counts> {
-        None
+        self.facts.counts()
     }
 
     fn account(&self) -> Option<Account> {
@@ -560,21 +722,25 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn storage_split(&self) -> Option<StorageSplit> {
-        None
+        self.facts.storage_split()
     }
 
     /// The status line's word for the handle's view (`sync::sync_word`): read without waiting, on every frame, and
     /// never "Up to date" for an engine that does not run.
     fn sync_state(&self) -> Option<String> {
-        sync::sync_word(&self.engine.view()).map(str::to_string)
+        files_downloads::with_downloads(
+            sync::sync_word(&self.engine.view()),
+            !self.downloads.downloads().is_empty(),
+        )
+        .map(str::to_string)
     }
 
     fn details(&self, item: &DriveItem, folder: &str) -> Details {
         files_source::details_of_row(item, folder)
     }
 
-    fn changed_label(&self, _: &DriveItem) -> Option<String> {
-        None
+    fn changed_label(&self, item: &DriveItem) -> Option<String> {
+        files_facts::changed_label(item, chrono::Utc::now())
     }
 
     fn can_add(&self, _folder: Option<&str>) -> bool {
@@ -583,12 +749,12 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.engine.view().start == Start::Running
     }
 
-    fn sort_of(&self, _: Option<&str>) -> Option<crate::frames::files::Sort> {
-        None
+    fn sort_of(&self, folder: Option<&str>) -> Option<crate::frames::files::Sort> {
+        self.facts.sort_of(folder)
     }
 
-    fn set_sort(&mut self, _: Option<&str>, _: crate::frames::files::Sort) {
-        log("NotWired(set_sort)");
+    fn set_sort(&mut self, folder: Option<&str>, sort: crate::frames::files::Sort) {
+        self.facts.set_sort(folder, sort);
     }
 
     /// An API call, not a sync-folder operation: not gated by `is_syncing()`. Accepted here, sent on a worker for
@@ -621,8 +787,23 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.copies.ask(action, local_items(items))
     }
 
-    fn copy_link(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
-        Err(not_wired("copy_link"))
+    /// Accepted here, asked of the engine on a worker for the session of this press, answered through `changes`:
+    /// the window copies the link then.
+    fn copy_link(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.links.copy(items)
+    }
+
+    fn link_pending(&self) -> bool {
+        self.links.pending()
+    }
+
+    /// The Share dialog's link: as `copy_link`, a new link with the choices.
+    fn share_link(
+        &mut self,
+        items: &[DriveItem],
+        options: &crate::frames::files::actions_data::ShareOptions,
+    ) -> Result<(), ActionError> {
+        self.links.share(items, options)
     }
 
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
@@ -634,6 +815,70 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
                 .collect::<Result<Vec<_>, _>>()
         })?;
         paths.iter().try_for_each(|path| open_path(path))
+    }
+
+    fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
+        self.open_with_by(item, choose_app)
+    }
+
+    /// Invite someone… (DW-0514): the item's own id while it is one of the account's own (`Engine::share_target_of`,
+    /// the account-bound local state only: nothing is asked of the server on the press).
+    fn share_of(&self, item: &DriveItem) -> Option<String> {
+        self.engine.share_target_of(self.engine.session_turn(), &item.id)
+    }
+
+    fn versions(&self, item: &DriveItem) -> Vec<crate::frames::files::actions_data::Version> {
+        self.versions.versions(item)
+    }
+
+    fn ask_versions(&mut self, item: &DriveItem) {
+        self.versions.ask(item);
+    }
+
+    fn versions_state(&self, item: &DriveItem) -> files_source::Read {
+        self.versions.state(item)
+    }
+
+    fn restore_version(&mut self, item: &DriveItem, version: &str) -> Result<(), ActionError> {
+        self.versions.restore(item, version)
+    }
+
+    fn conflicts(&self) -> Vec<crate::frames::files::actions_data::Conflict> {
+        self.conflicts.conflicts()
+    }
+
+    fn keep_version(&mut self, file: &str, keep: crate::frames::files::actions_data::Keep) -> Result<(), ActionError> {
+        self.conflicts.keep(file, keep)
+    }
+
+    fn preview(&mut self, item: &DriveItem) -> Option<crate::frames::files::actions_data::PreviewOf> {
+        // Answered later: the read starts here, and the panel asks `preview_later` until it lands.
+        self.previews.start(item);
+        None
+    }
+
+    fn preview_later(&mut self, item: &DriveItem) -> Option<crate::frames::files::actions_data::Previewed> {
+        Some(self.previews.later(item))
+    }
+
+    fn cancel_preview(&mut self) {
+        self.previews.cancel();
+    }
+
+    fn folder_shown(&mut self, folder: Option<&str>) {
+        self.places.shown(folder);
+    }
+
+    fn protection(
+        &self,
+        folder: Option<&str>,
+        item: Option<&DriveItem>,
+    ) -> Option<crate::frames::files::protected::Protection> {
+        self.places.protection(folder, item)
+    }
+
+    fn backup_entry(&self, item: &DriveItem) -> Option<crate::frames::files::protected::BackupEntry> {
+        self.places.backup_entry(item)
     }
 
     fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
@@ -665,7 +910,48 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         // Also when every file is in and the answer was still refused (the session changed during the last
         // copy): an EMPTY list, which the window reads as "nothing to try again" (`None` would send all again).
         self.upload_left = upload_rest(files, copied, result.is_err());
+        if result.is_ok() {
+            // What was just accepted uploads now: the panel reads it.
+            self.uploads.ask();
+        }
         result
+    }
+
+    fn uploads(&self) -> Option<crate::frames::files::uploads::Uploads> {
+        self.uploads.uploads()
+    }
+
+    fn downloads(&self) -> Vec<crate::frames::files::keeping::Download> {
+        self.downloads.downloads()
+    }
+
+    fn ask_uploads(&mut self) {
+        self.uploads.ask();
+        self.downloads.ask();
+    }
+
+    fn retry_upload(&mut self, id: &str) -> Result<(), ActionError> {
+        self.uploads.retry(id)
+    }
+
+    fn cancel_upload(&mut self, id: &str) -> Result<(), ActionError> {
+        self.uploads.cancel(id)
+    }
+
+    fn cancels_upload(&self, id: &str) -> bool {
+        self.uploads.cancels(id)
+    }
+
+    fn pause_uploads(&mut self, pause: bool) -> Result<(), ActionError> {
+        self.uploads.pause(pause)
+    }
+
+    fn forget_uploads(&mut self) {
+        self.uploads.forget();
+    }
+
+    fn forget_downloads(&mut self) {
+        self.downloads.forget();
     }
 
     fn upload_left(&mut self) -> Option<Vec<PathBuf>> {
@@ -682,6 +968,10 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
 
     fn backups_root(&self) -> Option<String> {
         self.copies.backups_root()
+    }
+
+    fn look_for_backups(&mut self) {
+        self.copies.look_for_backups();
     }
 
     fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
@@ -728,11 +1018,25 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         open_path(&path)
     }
 
-    /// What Move to Trash, its Undo, Keep on this PC and Free up space did, once the engine answered (not an
-    /// activity feed).
+    /// What Move to Trash, its Undo, a link that was asked for, Keep on this PC and Free up space did, once the
+    /// engine answered (not an activity feed).
     fn changes(&mut self) -> Vec<Change> {
         let mut changes = self.trash.take();
-        changes.extend(self.copies.take());
+        changes.extend(self.uploads.take());
+        changes.extend(self.links.take());
+        let kept = self.copies.take();
+        if !kept.is_empty() {
+            // A copy that was kept comes down now: read how far.
+            self.downloads.ask();
+        }
+        self.downloads.take();
+        changes.extend(kept);
+        changes.extend(self.versions.take());
+        changes.extend(self.conflicts.take());
+        // Where the rows stand in the Backups tree: an arrival redraws by its wake.
+        self.places.pump();
+        // The sidebar's figures are read again after a change (`files_facts`); an arrival redraws by its wake.
+        self.facts.pump(!changes.is_empty());
         changes
     }
 }

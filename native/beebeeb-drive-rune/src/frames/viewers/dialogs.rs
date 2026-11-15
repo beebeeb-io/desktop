@@ -276,8 +276,25 @@ fn side(index: usize, icon: &'static rune::Icon, title: &str, sub: &str, t: &The
         .child(kit::label(format!("{key}-sub"), sub, style::CAP_MONO, t.text_tertiary).w_full())
 }
 
-/// DW-1526: someone saved the same file elsewhere while it was being edited.
+/// DW-1526: someone saved the same file elsewhere while it was being edited. While nobody can say where the other
+/// version was saved (`Conflict::from` empty: the engine does not know which device, or whether it was this one),
+/// the words stay neutral: changed since it was opened, "the other version" (delta check of desktop#432, round 3).
 pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El {
+    let known = !other.from.trim().is_empty();
+    let sub = if known {
+        format!("{file_name} \u{00B7} changed on {} while you were editing", other.from)
+    } else {
+        format!("{file_name} \u{00B7} changed since you opened it")
+    };
+    let (other_icon, other_title, keep_other) = if known {
+        (&icons::PHONE, other.from.clone(), format!("Keep {}'s", other.from))
+    } else {
+        (
+            &icons::REFRESH,
+            "The other version".to_string(),
+            "Keep the other version".to_string(),
+        )
+    };
     let head = col()
         .key("dlg-head")
         .w_full()
@@ -291,16 +308,7 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
                 .level(2)
                 .w_full(),
         )
-        .child(
-            kit::label(
-                "dlg-sub",
-                format!("{file_name} \u{00B7} changed on {} while you were editing", other.from),
-                style::SUB,
-                t.text_tertiary,
-            )
-            .wrap()
-            .w_full(),
-        );
+        .child(kit::label("dlg-sub", sub, style::SUB, t.text_tertiary).wrap().w_full());
     let body = col()
         .key("dlg-body")
         .w_full()
@@ -322,8 +330,8 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
                 ))
                 .child(side(
                     1,
-                    &icons::PHONE,
-                    &other.from,
+                    other_icon,
+                    &other_title,
                     &format!("{} \u{00B7} version {}", other.at, other.version),
                     t,
                 )),
@@ -358,7 +366,7 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
                 .on_press(keep(Keep::Mine)),
         )
         .child(
-            button(2, &format!("Keep {}'s", other.from), Look::Outline, t)
+            button(2, &keep_other, Look::Outline, t)
                 .w_full()
                 .on_press(keep(Keep::Theirs)),
         )
