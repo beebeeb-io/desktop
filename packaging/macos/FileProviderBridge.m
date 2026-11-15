@@ -177,7 +177,7 @@ static int BeebeebWaitForDomainReady(NSFileProviderDomain *domain, double timeou
 enum {
     BeebeebKeptNoneReported = 0,
     BeebeebKeptMissing = 1,
-    BeebeebKeptEmpty = 2,
+    BeebeebKeptEmpty = 7,
     BeebeebKeptHasEntries = 3,
     BeebeebKeptUnchecked = 4,
     BeebeebKeptNoPath = 5,
