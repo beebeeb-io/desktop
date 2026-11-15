@@ -6,6 +6,12 @@
 //!
 //! The press that opens the player stamps its session ([`stamp_press`]); the opener reads the stamp, never the
 //! engine's current session, so a file is opened for the session that was pressed or not at all.
+//!
+//! **The late-open guarantee lives here, in the opener.** The player opens a file on its own worker thread, after
+//! the press has returned. The opener, on that thread, opens only for the session stamped at the press
+//! (`stamped()` -> `open_media_for(session, ..)`); the engine refuses a session that has ended, and [`refusal_of`]
+//! turns that into `Refusal::NotSignedIn`, which the player shows. Nothing of a file opened late plays under
+//! another session.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -21,6 +27,9 @@ use crate::media::os_controls::{NowPlaying, OsButton, OsControls};
 use crate::media::player::{MediaBytes, MediaOpener, NowPlayingSink, PlayerHandle, Refusal};
 use crate::media::transport::SandboxedHelpers;
 use crate::media::video::VideoSurface;
+
+// The engine mirrors the protocol's longest read; one number, or the native crate (which sees both) does not build.
+const _: () = assert!(beebeeb_engine::app::bindings::media_stream::MEDIA_MAX_READ == beebeeb_media_protocol::MAX_READ);
 
 /// The session of the last press that opens the player. One player per process (`media::set_shell_player`), so one
 /// stamp: the press writes it right before it asks the player to open, and the opener reads it when the player
@@ -49,7 +58,7 @@ impl<C: CredentialStores> EngineMediaOpener<C> {
 
 /// What the player says when the engine refuses: not signed in for a session that is gone or locked, else the file
 /// could not be played. Never the engine's own words.
-fn refusal_of(error: OpenFileError) -> Refusal {
+pub(super) fn refusal_of(error: OpenFileError) -> Refusal {
     match error {
         OpenFileError::NotSignedIn | OpenFileError::SessionEnded | OpenFileError::NotYours => Refusal::NotSignedIn,
         _ => Refusal::CouldNotPlay,

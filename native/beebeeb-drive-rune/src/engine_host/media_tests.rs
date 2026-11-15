@@ -12,6 +12,7 @@ use beebeeb_media_protocol::{AudioInfo, Codec, FromHelper, Opened, ToHelper};
 use zeroize::Zeroizing;
 
 use super::*;
+use crate::engine_host::media::refusal_of;
 use crate::media::audio_out::AudioError;
 use crate::media::player::{AudioFactory, AudioSink, Link, LinkFactory, MediaBytes, MediaOpener, Refusal};
 use crate::media::transport::LinkError;
@@ -180,7 +181,9 @@ impl MediaOpener for FakeOpener {
         let mut s = self.0.s();
         s.opened.push(file_id.to_string());
         if s.ends_on_open {
+            // As the real opener answers a session that ended: the session is gone, the engine refuses it.
             s.turn += 1;
+            return Err(Refusal::NotSignedIn);
         }
         Ok(Box::new(Zeros))
     }
@@ -210,6 +213,7 @@ impl Link for FakeLink {
                     codec: Codec::Mp3,
                 }),
                 reduced_quality: false,
+                no_sound: None,
             }));
         }
         Ok(())
@@ -255,6 +259,15 @@ impl AudioSink for Silence {
     fn flush(&mut self) {}
 }
 
+/// Polls every 10 ms; gives up after 2 s with `what` in the panic. The player opens on its own worker thread.
+fn wait_until(what: &str, cond: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !cond() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for: {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn source(world: &Arc<World>) -> EngineViewerSource<World> {
     EngineViewerSource::on(world.clone())
 }
@@ -274,14 +287,17 @@ fn audio_open_plays_through_the_shell_player() {
         "an audio file opens as a recording, not as 'no preview'"
     );
     assert!(source.play("t1", true), "the first play opens it in the player");
-    let state = world.handle().state().expect("the player holds the file");
-    assert_eq!(state.file_id, "t1");
-    assert!(state.playing, "the player plays it");
+    wait_until("the engine opens the pressed file", || {
+        world.s().opened == vec!["t1".to_string()]
+    });
     assert_eq!(
         world.s().opened,
         vec!["t1".to_string()],
         "the engine opened the pressed file"
     );
+    let state = world.handle().state().expect("the player holds the file");
+    assert_eq!(state.file_id, "t1");
+    assert!(state.playing, "the player plays it");
     assert_eq!(
         world.s().presses,
         vec![SessionGeneration::for_test(1)],
@@ -298,17 +314,36 @@ fn late_open_under_another_session_is_dropped() {
     source.open("t1").expect("opens");
     // The session ends while the player opens the file: the answer comes back under another session.
     world.s().ends_on_open = true;
+    // The press returns before the worker opens the file, so what it answers is not the property: the state is.
+    source.play("t1", true);
+    // The open happens on the player's worker: wait for it, then for the refusal to land in the player's state.
+    wait_until("the opener was asked", || !world.s().opened.is_empty());
+    wait_until("the player settled", || {
+        world
+            .handle()
+            .state()
+            .is_none_or(|state| state.refused.is_some() || !state.playing)
+    });
+    let state = world.handle().state();
     assert!(
-        !source.play("t1", true),
-        "an open that came back under another session is not a play"
+        state.is_none() || state.as_ref().is_some_and(|s| s.refused == Some(Refusal::NotSignedIn)),
+        "the late open is refused as not signed in, never played"
     );
-    assert!(world.handle().state().is_none(), "nothing of it plays");
     // The poll of the same view says so honestly, never "playing".
     let after = source.poll("t1");
     assert!(
         !matches!(after, Some(Body::Audio(doc)) if doc.playing),
         "a recording of another session is never drawn as playing"
     );
+}
+
+#[test]
+fn engine_refusals_map_to_the_players_words() {
+    assert_eq!(refusal_of(OpenFileError::NotSignedIn), Refusal::NotSignedIn);
+    assert_eq!(refusal_of(OpenFileError::SessionEnded), Refusal::NotSignedIn);
+    assert_eq!(refusal_of(OpenFileError::NotYours), Refusal::NotSignedIn);
+    assert_eq!(refusal_of(OpenFileError::NotFound), Refusal::CouldNotPlay);
+    assert_eq!(refusal_of(OpenFileError::NothingSynced), Refusal::CouldNotPlay);
 }
 
 #[test]
