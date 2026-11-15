@@ -21,8 +21,11 @@ HE_AAC_SHA256=5c9dde438b06cd3ffb8c99bd975d1a16cb27c01324b93ed3c5775c2232139912
 encoders="$(ffmpeg -hide_banner -encoders 2>/dev/null)"
 av1=libaom-av1
 printf '%s\n' "$encoders" | grep -qE "^ [VAS][A-Z.]{5} libaom-av1( |$)" || av1=libsvtav1
-for enc_name in libx264 libx265 libvpx libvpx-vp9 "$av1" mpeg2video mpeg4 prores_ks wmv2 wmav2 libmp3lame aac flac alac \
-  libopus libvorbis pcm_s16le ac3 eac3; do
+# The list is read from this script's own encoder arguments (`-c:v NAME` / `-c:a NAME`), never kept apart from them, so a
+# changed ffmpeg line changes what is checked. The AV1 encoder is the one chosen above; the other is not needed.
+used="$(grep -vE '^[[:space:]]*#' "${BASH_SOURCE[0]}" | grep -oE -e '-c:[va] [A-Za-z0-9_-]+' | awk '{print $2}' | grep -vxE 'libaom-av1|libsvtav1' | sort -u)"
+[ -n "$used" ] || { echo "no encoder found in $0" >&2; exit 3; }
+for enc_name in $used "$av1"; do
   printf '%s\n' "$encoders" | grep -qE "^ [VAS][A-Z.]{5} ${enc_name}( |$)" ||
     { echo "ffmpeg has no encoder $enc_name" >&2; exit 3; }
 done
@@ -45,20 +48,23 @@ ST=(-ac 2 -ar 48000)
 manifest=manifest.tsv
 printf '#file\tkind\tcodec\texpect\tsha256\tref\n' >"$manifest"
 
-# file -> sha256 of the Y planes of the first 3 frames as ffmpeg decodes them (the planes are also kept in ref/<stem>.y,
-# so the test can compare the helper's picture against them and not only a hash).
+# file -> sha256 of the Y planes of the first 3 frames as ffmpeg decodes them (the planes are also kept in ref/<file>.y,
+# one per fixture, so the test can compare the helper's picture against them and not only a hash).
 ref_video() {
-  local file="$1" stem raw frame=$((W * H * 3 / 2)) ysize=$((W * H))
-  stem="${file%.*}"
+  local file="$1" raw frame=$((W * H * 3 / 2)) ysize=$((W * H))
   raw="$(mktemp)"
-  ffmpeg "${FFQ[@]}" -i "$file" -frames:v 3 -f rawvideo -pix_fmt yuv420p "$raw"
-  : >"ref/$stem.y"
+  ffmpeg "${FFQ[@]}" -i "$file" -fps_mode passthrough -frames:v 3 -f rawvideo -pix_fmt yuv420p "$raw"
+  : >"ref/$file.y"
   for i in 0 1 2; do
-    dd if="$raw" bs="$frame" skip="$i" count=1 status=none | head -c "$ysize" >>"ref/$stem.y"
+    dd if="$raw" bs="$frame" skip="$i" count=1 status=none | head -c "$ysize" >>"ref/$file.y"
   done
   command rm -f "$raw"
-  [ "$(stat -c %s "ref/$stem.y")" -eq $((ysize * 3)) ] || { echo "$file: fewer than 3 frames decoded" >&2; exit 1; }
-  sha256sum "ref/$stem.y" | cut -d' ' -f1
+  # Three different pictures, not one repeated: a container without pts (AVI) makes ffmpeg's default CFR output repeat
+  # picture 0. The test source changes every frame, so a repeat is a wrong reference.
+  [ "$(for i in 0 1 2; do dd if="ref/$file.y" bs="$ysize" skip="$i" count=1 status=none | sha256sum; done | sort -u | wc -l)" -eq 3 ] ||
+    { echo "$file: the first 3 reference frames are not 3 distinct pictures" >&2; exit 1; }
+  [ "$(stat -c %s "ref/$file.y")" -eq $((ysize * 3)) ] || { echo "$file: fewer than 3 frames decoded" >&2; exit 1; }
+  sha256sum "ref/$file.y" | cut -d' ' -f1
 }
 
 # file -> sha256 of the first second as s16 PCM, 48 kHz stereo
