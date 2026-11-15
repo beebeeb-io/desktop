@@ -40,6 +40,11 @@ fn text(rt: &Runtime<State>, key: &str) -> String {
     info(rt, key).text.unwrap_or_default()
 }
 
+/// What assistive technology reads for a control (a button's words).
+fn label(rt: &Runtime<State>, key: &str) -> String {
+    info(rt, key).label.unwrap_or_default()
+}
+
 fn count(rt: &Runtime<State>, prefix: &str, suffix: &str) -> usize {
     rt.elements()
         .iter()
@@ -943,8 +948,8 @@ fn the_row_offers_only_the_engines_exits() {
     click(&mut rt, "change-0-choose");
     assert_eq!(text(&rt, "dlg-title"), "Two versions");
     assert_eq!(text(&rt, "dlg-sub"), "Plan.txt");
-    assert_eq!(text(&rt, "settle-0"), "Keep both");
-    assert_eq!(text(&rt, "settle-1"), "Keep the other");
+    assert_eq!(label(&rt, "settle-0"), "Keep both");
+    assert_eq!(label(&rt, "settle-1"), "Keep the other");
     assert!(!has(&rt, "settle-2"), "no Keep this PC's: the row did not list it");
     assert!(has(&rt, "settle-cancel"));
     assert!(asked.lock().unwrap().is_empty(), "nothing is asked before an answer");
@@ -975,7 +980,7 @@ fn remove_from_the_list_asks_once_and_cancel_asks_nothing() {
     click(&mut rt, "change-0-remove");
     assert_eq!(text(&rt, "dlg-title"), super::settle::REMOVE_TITLE);
     assert_eq!(text(&rt, "dlg-sub"), super::settle::REMOVE_WORDS);
-    assert_eq!(text(&rt, "settle-0"), "Remove from the list");
+    assert_eq!(label(&rt, "settle-0"), "Remove from the list");
     click(&mut rt, "settle-cancel");
     assert!(!has(&rt, "dialog-settle"));
     click(&mut rt, "change-0-remove");
