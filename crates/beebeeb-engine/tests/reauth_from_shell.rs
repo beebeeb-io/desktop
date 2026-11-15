@@ -286,6 +286,68 @@ fn a_token_removed_during_the_phrase_proof_stores_nothing() {
     });
 }
 
+/// The shell's `an_unreadable_state_db_is_a_trace_and_settles_nothing` and
+/// `an_unreadable_owner_record_or_state_db_settles_nothing_and_the_same_account_then_stays_in_place`, where the engine
+/// reads this computer's record of its account: the start. A `state.db` that cannot be read is neither "no owner" nor
+/// another account's: the start is refused, the file is left exactly as it was, nothing is registered and no engine
+/// runs. Once the record reads again, the same account's start (paused, so it sends nothing) keeps its row and queue.
+/// The second start, with the same folder and port, is what shows the first was refused for the unreadable file.
+/// Mutant: `LocalState::for_engine_start` answers an open error by removing the file and opening a new one: the first
+/// start runs on an empty `state.db` and the file's bytes are gone.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_unreadable_state_db_settles_nothing_and_the_same_account_then_keeps_its_data() {
+    in_own_process(
+        "an_unreadable_state_db_settles_nothing_and_the_same_account_then_keeps_its_data",
+        || {
+            use beebeeb_engine::app::SyncStart;
+            use beebeeb_engine::config::DesktopConfig;
+            use beebeeb_engine::identity::TEST;
+
+            const UNREADABLE: &[u8] = b"an invented file that is not a database, so nothing can read an owner from it";
+            let s = common::setup();
+            s.sign_in();
+            s.unlock();
+            DesktopConfig::update_for(&TEST, |cfg| {
+                cfg.pause_sync = true;
+                (true, ())
+            })
+            .expect("the pause is written");
+            let folder = s.home.join("Beebeeb Test");
+            std::fs::create_dir_all(&folder).unwrap();
+            assert!(!s.state_db().exists(), "the premise: no state.db yet");
+            std::fs::create_dir_all(&s.state_dir).unwrap();
+            std::fs::write(s.state_db(), UNREADABLE).unwrap();
+            let port = common::Port::free();
+
+            assert!(
+                s.engine.start_sync_with(folder.clone(), &port).is_err(),
+                "an unreadable record of this computer's account settles nothing"
+            );
+            assert!(
+                std::fs::read(s.state_db()).unwrap() == UNREADABLE,
+                "the file is left as it was"
+            );
+            assert_eq!(port.registers(), 0, "nothing is registered");
+            assert!(!s.engine.is_syncing(), "no engine runs");
+
+            // The record reads again: this account's own data, one row and one queued change.
+            std::fs::remove_file(s.state_db()).unwrap();
+            s.state_db_with_one_row(&s.this_account());
+            pc::queue_one_change(&s);
+            assert_eq!(
+                s.engine.start_sync_with(folder, &port),
+                Ok(SyncStart::Started),
+                "the same account starts"
+            );
+            let _ = s.engine.stop();
+            let after = pc::Kept::now(&s);
+            assert_eq!(after.owner, Some(s.this_account()), "the owner is still this account");
+            assert_eq!((after.rows, after.due), (1, 1), "its row and its queue are kept");
+        },
+    );
+}
+
 /// FINDING F1. The shell's `a_kept_key_the_server_rejects_is_removed_the_lock_way_and_nothing_else_changes`,
 /// `a_stored_key_the_server_no_longer_accepts_is_removed_and_never_installed` and
 /// `with_the_same_id_the_server_proves_the_kept_key_and_another_id_asks_nothing` (spec §5.6, R8 rule 1): the account's
