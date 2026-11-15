@@ -1043,6 +1043,9 @@ impl<C: CredentialStores> Engine<C> {
             if let Ok(mut email) = self.acct.auth_email.lock() {
                 *email = None;
             }
+            if let Ok(mut profile) = self.acct.cached_profile.lock() {
+                *profile = None;
+            }
             self.remember_session_user_id(None);
             self.acct.auth_health.note_result(None);
             self.set_auth_present(false);
@@ -1154,7 +1157,7 @@ impl LocalState {
         if !path.exists() {
             state_paths::prepare_beebeeb_state_dir_at(sync_root, state_dir)?;
         }
-        let db = StateDb::open(&path).map_err(|e| format!("open state.db: {e}"))?;
+        let db = StateDb::r6_open_or_replace(&path).map_err(|e| format!("open state.db: {e}"))?;
         Ok(Self { db })
     }
 }

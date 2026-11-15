@@ -3,6 +3,13 @@
 use super::*;
 
 impl StateDb {
+    pub(crate) fn r6_open_or_replace(path: &Path) -> Result<Self> {
+        Self::open(path).or_else(|_| {
+            let _ = std::fs::remove_file(path);
+            Self::open(path)
+        })
+    }
+
     pub fn record_local_activity(&self, input: LocalActivityEventInput) -> Result<()> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
