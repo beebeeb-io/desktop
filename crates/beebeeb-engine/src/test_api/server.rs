@@ -200,9 +200,10 @@ pub struct Switches {
     pub heartbeat_off: Arc<AtomicBool>,
 }
 
-/// The fixture account's routes ([`account_handler`]) behind the server's three rules: once `session_ended` is set (a
+/// The fixture account's routes ([`account_handler`]) behind the server's four rules: once `session_ended` is set (a
 /// line [`END_SESSION_LINE`]), every request with a session token is answered `401` before any route runs, as a server
-/// that no longer accepts the session (the sign-in legs carry no token and are not touched); a sign-in leg for any
+/// that no longer accepts the session (the sign-in legs carry no token and are not touched); once `heartbeat_off` is set
+/// (a line [`HEARTBEAT_OFF_LINE`]), the device route is answered `503`; a sign-in leg for any
 /// other email is answered as a wrong password (`401`, what core reads as "Invalid email or password") before OPAQUE
 /// runs; and every answer is counted in `served` and written as an [`access_line`].
 pub fn fixture_handler(
@@ -215,6 +216,8 @@ pub fn fixture_handler(
     Arc::new(move |request: &Request| {
         let reply = if switches.session_ended.load(Ordering::SeqCst) && request.bearer().is_some() {
             Reply::error(401, "unauthorized")
+        } else if switches.heartbeat_off.load(Ordering::SeqCst) && request.route() == "POST /api/v1/clients/devices" {
+            Reply::error(503, "unavailable")
         } else if is_sign_in_leg(request) && !names_email(request, &account.email) {
             Reply::json(401, json!({}))
         } else {

@@ -548,6 +548,68 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }))
             }
 
+            // ── Password proof (the screen lock's password unlock): the fixture password, the same OPAQUE flow as
+            // the sign-in, for the account whose token this is ──────────────────────────
+            "POST /api/v1/auth/password-proof/start" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.opaque.login_start(&req.json())
+            }
+
+            "POST /api/v1/auth/password-proof/finish" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                if account.opaque.login_finish(&req.json()) {
+                    Reply::ok(json!({ "proven": true, "password_counter": 1 }))
+                } else {
+                    Reply::error(403, "password_not_proven")
+                }
+            }
+
+            // ── What the Security page reads: invented rows, in the client's shapes ──
+            "GET /api/v1/account/sessions" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                Reply::ok(json!({ "sessions": [{
+                    "id": "fixture-session-1",
+                    "device_name": "Fixture PC",
+                    "device_kind": "desktop",
+                    "country_code": "DE",
+                    "last_active_at": "2026-11-15T05:00:00Z",
+                    "is_current": true,
+                }] }))
+            }
+
+            "GET /api/v1/me/activity" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                Reply::ok(json!({ "opted_in": true, "events": [{
+                    "type": "auth.login.success",
+                    "outcome": "success",
+                    "device": "Fixture PC",
+                    "country_code": "DE",
+                    "created_at": "2026-11-15T05:00:00Z",
+                }] }))
+            }
+
+            "GET /api/v1/me/profile" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                Reply::ok(json!({ "display_name": "Fixture" }))
+            }
+
+            "GET /api/v1/me/two-factor" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                Reply::ok(json!({ "enabled": false }))
+            }
+
             // ── Recovery check ──────────────────────────────────────────
             "POST /api/v1/auth/verify-recovery-check" => {
                 if req.bearer() != Some(&account.session_token) {
@@ -724,15 +786,25 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                     return Reply::error(401, "unauthorized");
                 }
                 let body = req.json();
-                let device_id = format!("device-{}", uuid::Uuid::new_v4());
+                // The server upserts on (hostname, platform); the row is named by `id`, as the client reads it.
+                let mut devices = account.devices.lock().expect("devices");
+                let at = devices
+                    .iter()
+                    .position(|d| d["hostname"] == body["hostname"] && d["platform"] == body["platform"]);
                 let device = json!({
-                    "device_id": device_id,
+                    "id": at
+                        .map(|i| devices[i]["id"].clone())
+                        .unwrap_or_else(|| json!(format!("device-{}", uuid::Uuid::new_v4()))),
                     "hostname": body.get("hostname"),
                     "platform": body.get("platform"),
-                    "app_version": body.get("app_version"),
+                    "bb_version": body.get("bb_version"),
+                    "last_seen": "2026-11-15T05:00:00Z",
                 });
-                account.devices.lock().expect("devices").push(device.clone());
-                Reply::ok(json!({ "device_id": device_id }))
+                match at {
+                    Some(i) => devices[i] = device.clone(),
+                    None => devices.push(device.clone()),
+                }
+                Reply::ok(device)
             }
 
             "GET /api/v1/clients/devices" => {
@@ -750,13 +822,24 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }
                 let body = req.json();
                 let session_id = format!("session-{}", uuid::Uuid::new_v4());
+                // Named by `id`, with the interval the app asked for (the server defaults it to 60).
+                let interval = body
+                    .get("heartbeat_interval_secs")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(60);
                 let session = json!({
-                    "session_id": session_id,
+                    "id": session_id,
                     "device_id": body.get("device_id"),
-                    "sync_path": body.get("sync_path"),
+                    "name": body.get("name"),
+                    "session_type": body.get("session_type"),
+                    "local_path": body.get("local_path"),
+                    "remote_path": body.get("remote_path"),
+                    "status": "idle",
+                    "heartbeat_interval_secs": interval,
+                    "created_at": "2026-11-15T05:00:00Z",
                 });
-                account.sessions.lock().expect("sessions").push(session);
-                Reply::ok(json!({ "session_id": session_id }))
+                account.sessions.lock().expect("sessions").push(session.clone());
+                Reply::ok(session)
             }
 
             // ── Heartbeat ───────────────────────────────────────────────
