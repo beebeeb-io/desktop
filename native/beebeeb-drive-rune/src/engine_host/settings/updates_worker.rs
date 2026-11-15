@@ -8,6 +8,7 @@ use super::*;
 pub(super) fn work(
     make: MakeDrive,
     sync_back: SyncBack,
+    presence: Arc<Presence>,
     channel: beebeeb_updater::Channel,
     orders: mpsc::Receiver<Order>,
     reports: mpsc::Sender<Report>,
@@ -41,7 +42,7 @@ pub(super) fn work(
             Ok(Order {
                 serial,
                 work: Work::Update(version),
-            }) => one_press(&mut *updater, serial, version, state, channel, &to),
+            }) => one_press(&mut *updater, serial, version, state, channel, &presence, &to),
             Err(mpsc::RecvTimeoutError::Timeout) if updater.background_check_due() => {
                 run(&mut *updater, 0, background(channel), true, &to)
             }
@@ -124,12 +125,18 @@ fn verified(state: &State, version: Version) -> bool {
 /// `version`, the hand-off (`Event::Apply`: verified again, sync stops, the installer starts). Each leg runs only on
 /// what the leg before reached; a leg that did not reach it ends the order there, with nothing installed. The
 /// verified file is reported before the hand-off runs (its stop can take seconds), and the last report is `done`.
+///
+/// The hand-off runs only for the person who pressed (review of #444): when Beebeeb was locked, or the session
+/// changed (a sign-out, another sign-in) since the press, nothing stops and nothing starts, the verified file stays
+/// (`ReadyToRestart` at rest: About says it waits for the person), and the press is offered again once the lock is
+/// open. The hand-off asks the same again right before the installer starts (`EngineApply::launch`).
 fn one_press(
     updater: &mut dyn Drive,
     serial: u64,
     version: Version,
     mut state: State,
     channel: beebeeb_updater::Channel,
+    presence: &Presence,
     to: &Reports,
 ) -> Option<State> {
     if !to_download(&state, version) {
@@ -142,7 +149,11 @@ fn one_press(
     if to_download(&state, version) {
         state = run(updater, serial, Event::Download, false, to)?;
         if verified(&state, version) {
-            state = run(updater, serial, Event::Apply, false, to)?;
+            if presence.holds() {
+                state = run(updater, serial, Event::Apply, false, to)?;
+            } else {
+                log("settings: Beebeeb was locked or the session changed since the press; the update waits");
+            }
         }
     }
     to.send(updater, serial, &state, true).then_some(state)

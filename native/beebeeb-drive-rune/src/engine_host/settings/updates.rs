@@ -32,7 +32,10 @@
 //!   installer did not start: sync starts again if the hand-off had stopped it (`Pumped::start_sync`, also when the
 //!   worker ended in the middle of the hand-off: [`EngineApply`]'s drop). A stop of sync that was not confirmed in
 //!   this process (this hand-off's, a vault lock's, a sign-out's): no installer starts until Beebeeb restarts, the
-//!   words say so (never that sync runs), and the button waits.
+//!   words say so (never that sync runs), and the button waits. The hand-off runs only for the person who pressed
+//!   ([`Presence`], review of #444): Beebeeb locked, or the session changed (a sign-out, another sign-in) since the
+//!   press, and nothing stops and nothing starts; the verified file waits, and the press is offered again once the
+//!   lock is open. No press is taken while the lock is not open.
 //! - **A build that is not a release has no updater and asks nothing.** Without a build time
 //!   (`host::BUILD_NOT_BEFORE`) or a release version the updater would refuse every manifest (`NoBuildTime`), after
 //!   two requests: it is not built ([`release_config`] is `None`), not one request leaves this PC, and About draws the
@@ -114,6 +117,9 @@ pub const VERIFYING: &str = "Checking the download's signature…";
 /// starts. Never "Restarting" before the installer started.
 pub const HANDING_OFF: &str = "Signature checked. Stopping sync, then starting the installer…";
 pub const RESTARTING: &str = "Restarting to update…";
+/// The press's hand-off did not run: Beebeeb was locked, or the session changed (a sign-out, another sign-in) since
+/// the press. Nothing stopped, nothing started; the verified file is kept for the person's next press.
+pub const WAITS_FOR_YOU: &str = "It waits for you: it installs when you choose Restart to update.";
 /// A channel chosen while the press's order runs: not saved (the order checks the channel it started on).
 pub const UPDATE_UNDER_WAY: &str = "An update is under way. Choose the channel once it is done.";
 
@@ -310,6 +316,8 @@ pub(crate) struct UpdatesPart {
     toast_next: Option<&'static str>,
     /// The hand-off asks for sync back here.
     sync_back: SyncBack,
+    /// The person and the session the press is taken in (shared with the worker and the hand-off).
+    presence: Arc<Presence>,
     /// `Restarting` was seen and the quit asked for: once.
     quit_asked: bool,
 }
@@ -347,7 +355,12 @@ fn busy(state: &State) -> bool {
 
 #[path = "updates_worker.rs"]
 mod worker;
+#[cfg(any(windows, test))]
 use worker::work;
+
+#[path = "updates_presence.rs"]
+mod presence;
+pub(crate) use presence::Presence;
 
 impl UpdatesPart {
     /// The updater of this PC, when this build has one: a release build of the Windows app. `None` on macOS and
@@ -380,7 +393,8 @@ impl UpdatesPart {
                     ))
                 }
                 ReleaseSetup::Ready { config, record } => {
-                    let make = release::updater(engine.clone(), identity, config, record);
+                    let presence = Presence::of_engine(engine.clone());
+                    let make = release::updater(engine.clone(), identity, config, record, presence.clone());
                     let woken = engine.clone();
                     let tuning = Tuning::standard(Box::new(move || woken.wake_host()));
                     Some(Self::live_tuned(
@@ -390,6 +404,7 @@ impl UpdatesPart {
                         from,
                         super::version_words(),
                         tuning,
+                        presence,
                     ))
                 }
             }
@@ -417,10 +432,12 @@ impl UpdatesPart {
             from,
             installed,
             Tuning::standard(Box::new(|| {})),
+            Presence::open(),
         )
     }
 
-    /// The part on an updater `make` builds on the worker's thread, paced and waking as `tuning` says.
+    /// The part on an updater `make` builds on the worker's thread, paced and waking as `tuning` says; the press is
+    /// taken with `presence` (the hand-off `make` builds asks the same one).
     #[cfg(any(windows, test))]
     pub(crate) fn live_tuned(
         make: MakeDrive,
@@ -429,15 +446,17 @@ impl UpdatesPart {
         from: Channel,
         installed: String,
         tuning: Tuning,
+        presence: Arc<Presence>,
     ) -> Self {
         let (orders, inbox) = mpsc::channel();
         let (reports, taken) = mpsc::channel();
         let first = line(channel);
         let sync_back = SyncBack::default();
         let handed = sync_back.clone();
+        let asks = presence.clone();
         let started = std::thread::Builder::new()
             .name("settings-updates".into())
-            .spawn(move || work(make, handed, first, inbox, reports, tuning));
+            .spawn(move || work(make, handed, asks, first, inbox, reports, tuning));
         let mode = match started {
             Ok(_) => Mode::Live(Worker { orders, reports: taken }),
             Err(_) => {
@@ -447,6 +466,7 @@ impl UpdatesPart {
         };
         let mut part = Self::with_mode(mode, identity, channel, from, installed);
         part.sync_back = sync_back;
+        part.presence = presence;
         part
     }
 
@@ -474,6 +494,7 @@ impl UpdatesPart {
             saved,
             toast_next: None,
             sync_back: SyncBack::default(),
+            presence: Presence::closed(),
             quit_asked: false,
         }
     }
@@ -534,8 +555,10 @@ impl UpdatesPart {
     /// "Restart to update": ONE press for the newer version on offer (owner ruling 2026-11-15). The worker downloads
     /// it, checks its signature, and hands the verified file off by itself (`worker::one_press`); `pump` then asks the
     /// window to quit. After a step that failed, the same press tries again. Nothing while an order or a channel is
-    /// out, or after a stop of sync that was not confirmed in this process; never an older version (the machine would
-    /// need `DownloadDowngrade`, which nothing here sends).
+    /// out, while the lock is not open, or after a stop of sync that was not confirmed in this process (asked HERE,
+    /// before anything is downloaded); never an older version (the machine would need `DownloadDowngrade`, which
+    /// nothing here sends). The press is taken in the session of now ([`Presence::press`]): the hand-off runs only in
+    /// that one, with its lock open.
     pub(crate) fn restart_to_update(&mut self) {
         if self.press() == Press::Wait {
             return;
@@ -543,6 +566,14 @@ impl UpdatesPart {
         let Some(version) = self.upgrade().map(|offer| offer.version).or_else(|| self.retry()) else {
             return;
         };
+        if self.presence.stop_unconfirmed() {
+            log("settings: a stop of sync was not confirmed; the update waits for a restart of Beebeeb");
+            self.sync_unconfirmed = true;
+            return;
+        }
+        if !self.presence.press() {
+            return;
+        }
         if self.send(Work::Update(version)) {
             self.pressed = Some((self.sent, version));
         }
@@ -722,11 +753,12 @@ impl UpdatesPart {
     /// a stop of sync that was not confirmed in this process (no press can install until Beebeeb restarts); "Try
     /// again" after a step of the press failed; otherwise the one press.
     fn press(&self) -> Press {
-        if self.asked.is_some() || self.saving.is_some() || self.sync_unconfirmed {
+        if self.asked.is_some() || self.saving.is_some() || self.sync_unconfirmed || !self.presence.lock_open() {
             return Press::Wait;
         }
         match self.shown() {
-            Some(State::Available { .. }) => Press::Restart,
+            // A verified file at rest: the press's hand-off waited for the person (the session changed or locked).
+            Some(State::Available { .. } | State::ReadyToRestart { .. }) => Press::Restart,
             Some(State::Failed { .. }) => Press::Retry,
             _ => Press::Wait,
         }
@@ -821,10 +853,11 @@ impl UpdatesPart {
                 offer, received, total, ..
             } => checked(downloading(offer, *received, *total)),
             State::Verifying { .. } => checked(VERIFYING.into()),
-            // Only between a press's download and its hand-off (the press's order says HANDING_OFF then).
-            State::ReadyToRestart { offer, .. } => {
-                checked(format!("Version {} is downloaded and verified.", offer.version))
-            }
+            // At rest only when the press's hand-off waited for the person (while the order runs it says HANDING_OFF).
+            State::ReadyToRestart { offer, .. } => checked(format!(
+                "Version {} is downloaded and verified. {WAITS_FOR_YOU}",
+                offer.version
+            )),
             State::Restarting { .. } => checked(RESTARTING.into()),
             // A download the server did not send: never "couldn't check", nor "no update information" for a 404.
             State::Failed {
@@ -912,7 +945,9 @@ fn channels(config: Option<&DesktopConfig>) -> (Channel, Channel) {
 #[path = "updates_apply.rs"]
 mod apply;
 #[cfg(any(windows, test))]
-pub(crate) use apply::{EngineApply, StartInstaller};
+pub(crate) use apply::EngineApply;
+#[cfg(test)]
+pub(crate) use apply::StartInstaller;
 
 /// What a release build of this PC takes updates with: the pinned key (`keys/updater-v2.pub`) for 0.9.0 and later,
 /// signed after `build_time`; the one host; the staging folder in `folder`. `None` without a build time or a release
@@ -980,7 +1015,7 @@ mod release {
     use beebeeb_updater::net::HttpsClient;
     use beebeeb_updater::{Http, Response, Unreachable};
 
-    use super::{Drive, EngineApply, MakeDrive, Watching};
+    use super::{Drive, EngineApply, MakeDrive, Presence, Watching};
     use crate::engine_host::log;
 
     /// The https client, or none when it could not be built: every check then ends offline, in sight.
@@ -1003,6 +1038,7 @@ mod release {
         identity: &'static EngineIdentity,
         config: beebeeb_updater::Config,
         record: PathBuf,
+        presence: Arc<Presence>,
     ) -> MakeDrive {
         Box::new(move |sync_back| {
             let client = HttpsClient::new().map_or_else(
@@ -1013,7 +1049,7 @@ mod release {
                 Client::Https,
             );
             let store = FileStore::new(record);
-            let apply = EngineApply::new(engine, identity, sync_back);
+            let apply = EngineApply::new(engine, identity, sync_back, presence);
             Box::new(Watching::new(config, client, SystemClock, store, apply)) as Box<dyn Drive>
         })
     }

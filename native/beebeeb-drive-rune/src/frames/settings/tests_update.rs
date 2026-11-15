@@ -88,6 +88,15 @@ fn a_press_being_worked_on_says_what_happens_and_takes_no_press() {
 /// step failed; while the press is worked on it takes no press and the dialog stays.
 #[test]
 fn the_notes_button_follows_the_step_and_closes_the_dialog() {
+    // While the press has words (what failed, its step, why it waits) the caption says them, as General does.
+    let failed = "The installer did not start. Nothing was installed.";
+    let rt = on(
+        "DW-0789b",
+        BoardSettings::new().with_update_press(Press::Retry, Some(failed)),
+    );
+    assert_eq!(text(&rt, "dlg-text-0"), failed);
+    assert_eq!(text(&rt, "btn-2-label"), "Try again");
+
     let mut rt = on("DW-0789b", BoardSettings::new().with_update_press(Press::Retry, None));
     assert_eq!(rt.state.settings.dialog, Some(Dialog::ReleaseNotes));
     assert_eq!(text(&rt, "dlg-text-0"), UPDATE_CAPTION);

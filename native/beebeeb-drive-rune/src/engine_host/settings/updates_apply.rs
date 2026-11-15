@@ -37,6 +37,8 @@ pub(crate) struct EngineApply<C: CredentialStores> {
     /// back, and so does the drop (the worker ended in the middle of the hand-off). A sync that was not running is
     /// not started by an update that did not happen.
     stopped_running: bool,
+    /// The person and the session the press was taken in: asked again right before the installer starts.
+    presence: Arc<Presence>,
     start: StartInstaller,
 }
 
@@ -44,14 +46,20 @@ pub(crate) struct EngineApply<C: CredentialStores> {
 impl<C: CredentialStores> EngineApply<C> {
     /// The release's hand-off, with the real installer start ([`start_installer`]).
     #[cfg_attr(all(windows, test), allow(dead_code))]
-    pub(crate) fn new(engine: Arc<Engine<C>>, identity: &'static EngineIdentity, sync_back: SyncBack) -> Self {
-        Self::starting_with(engine, identity, sync_back, Box::new(start_installer))
+    pub(crate) fn new(
+        engine: Arc<Engine<C>>,
+        identity: &'static EngineIdentity,
+        sync_back: SyncBack,
+        presence: Arc<Presence>,
+    ) -> Self {
+        Self::starting_with(engine, identity, sync_back, presence, Box::new(start_installer))
     }
 
     pub(crate) fn starting_with(
         engine: Arc<Engine<C>>,
         identity: &'static EngineIdentity,
         sync_back: SyncBack,
+        presence: Arc<Presence>,
         start: StartInstaller,
     ) -> Self {
         Self {
@@ -59,20 +67,14 @@ impl<C: CredentialStores> EngineApply<C> {
             identity,
             sync_back,
             stopped_running: false,
+            presence,
             start,
         }
     }
 
-    /// A stop of sync was not confirmed in this process, by any path (this hand-off's, a vault lock's, a
-    /// sign-out's: `Engine::stop` and the lock's stop set the account's `engine_stop_unconfirmed`), for any account
-    /// this engine knows. Its engine slot is empty since, so a stop now would say `WasNotRunning` about a task that
-    /// may still run. A registry that cannot be read counts as such a stop: no proof without knowing.
+    /// A stop of sync was not confirmed in this process (`presence::any_stop_unconfirmed`).
     fn stop_unconfirmed(&self) -> bool {
-        self.engine.accounts().accounts.lock().map_or(true, |accounts| {
-            accounts
-                .iter()
-                .any(|account| account.engine_stop_unconfirmed.load(Ordering::SeqCst))
-        })
+        super::presence::any_stop_unconfirmed(&self.engine)
     }
 }
 
@@ -129,6 +131,12 @@ impl<C: CredentialStores> Apply for EngineApply<C> {
     /// (the installer is replacing this program), and the record cannot end the worker: a panic in it is caught, as
     /// `set_channel`'s is, so the window still hears `Restarting` and quits.
     fn launch(&mut self, installer: &VerifiedInstaller, offer: &Offer, stopped: EngineStopped) -> bool {
+        // The stop can take seconds: Beebeeb may have been locked, or the session changed, meanwhile. Then no
+        // installer starts; the machine resumes the sync this stop ended and keeps the verified file.
+        if !self.presence.holds() {
+            log("settings: Beebeeb was locked or the session changed during the stop; the installer was not started");
+            return false;
+        }
         if !(self.start)(installer, stopped) {
             return false;
         }

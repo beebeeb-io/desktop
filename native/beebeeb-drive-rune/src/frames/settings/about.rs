@@ -11,7 +11,7 @@ use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_shell as shell;
 use rune::{El, col};
 
-use super::source::{Press, UPDATE_CAPTION, UpdateCheck};
+use super::source::{Press, UPDATE_CAPTION, Update, UpdateCheck};
 use super::{Dialog, Intent, MenuKind, SettingsUi};
 
 /// Where the Release channel menu drops, from its row's top-left corner (the board's place,
@@ -197,8 +197,13 @@ fn release_notes(ui: &SettingsUi, t: &Theme) -> El {
         dialogs::bullets(&n.lines, t)
     };
     // One press: Restart to update downloads, checks and installs (owner ruling 2026-11-15); a newer version's notes
-    // only (an older one is never offered: the source puts no older version's notes here).
-    let body = vec![notes, dialogs::caption(0, UPDATE_CAPTION, t)];
+    // only (an older one is never offered: the source puts no older version's notes here). While the press has words
+    // (its step, what failed, why it waits), the caption says them, as General's banner does.
+    let caption = match ui.source.general().update {
+        Update::Available { says: Some(says), .. } => says,
+        _ => UPDATE_CAPTION.to_string(),
+    };
+    let body = vec![notes, dialogs::caption(0, &caption, t)];
     let press = n.press;
     let mut action = dialogs::button(2, press.label(), Weight::Primary, t);
     action = if press == Press::Wait {

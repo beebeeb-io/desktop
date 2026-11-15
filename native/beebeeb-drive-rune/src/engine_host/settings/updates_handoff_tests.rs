@@ -11,7 +11,7 @@ use super::*;
 /// A task in the engine's slot that runs until it is aborted, on a runtime that runs it: `Engine::is_syncing` says
 /// true, as while sync runs, and a stop ends it (after the graceful wait, by the forced abort) and is CONFIRMED:
 /// `SyncStop::Stopped`. Nothing syncs, so nothing is written in the process's state folder.
-fn hold_running_stoppable(engine: &Engine<MemoryCredentials>) -> tokio::runtime::Runtime {
+pub(super) fn hold_running_stoppable(engine: &Engine<MemoryCredentials>) -> tokio::runtime::Runtime {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -48,7 +48,7 @@ fn the_hand_off_stops_a_running_sync_and_only_then_mints_the_proof() {
     assert!(engine.is_syncing(), "the slot's task runs");
     let sync_back = SyncBack::default();
     let never: fn() -> StartInstaller = || Box::new(|_, _| panic!("no installer starts here"));
-    let mut apply = EngineApply::starting_with(engine.clone(), &TEST, sync_back.clone(), never());
+    let mut apply = EngineApply::starting_with(engine.clone(), &TEST, sync_back.clone(), pressed(), never());
     assert!(apply.stop_engine().is_some(), "a confirmed stop mints the proof");
     assert!(!engine.is_syncing(), "sync stopped");
     apply.resume_engine();
@@ -56,7 +56,7 @@ fn the_hand_off_stops_a_running_sync_and_only_then_mints_the_proof() {
     apply.resume_engine();
     assert!(!sync_back.take(), "once");
 
-    let mut idle = EngineApply::starting_with(engine, &TEST, sync_back.clone(), never());
+    let mut idle = EngineApply::starting_with(engine, &TEST, sync_back.clone(), pressed(), never());
     assert!(idle.stop_engine().is_some(), "no sync running: stopped, and the proof");
     idle.resume_engine();
     assert!(
@@ -79,6 +79,7 @@ fn a_stop_that_is_not_confirmed_starts_no_installer() {
         engine,
         &TEST,
         sync_back.clone(),
+        pressed(),
         Box::new(|_, _| panic!("no installer starts")),
     );
     assert!(apply.stop_engine().is_none(), "Unconfirmed mints no proof");
@@ -357,7 +358,15 @@ fn a_background_check_runs_only_when_the_updater_says_one_is_due() {
         look_every: Duration::from_millis(1),
         wake: Box::new(|| {}),
     };
-    let mut part = UpdatesPart::live_tuned(make, &TEST, Channel::Stable, Channel::Stable, "0.9.1".into(), tuning);
+    let mut part = UpdatesPart::live_tuned(
+        make,
+        &TEST,
+        Channel::Stable,
+        Channel::Stable,
+        "0.9.1".into(),
+        tuning,
+        Presence::open(),
+    );
     let looked = |n: usize| {
         let looks = looks.clone();
         move |_: &UpdatesPart| looks.load(Ordering::SeqCst) >= n
@@ -569,37 +578,45 @@ fn any_unconfirmed_stop_in_this_process_refuses_the_hand_off() {
 
     let sync_back = SyncBack::default();
     let never: StartInstaller = Box::new(|_, _| panic!("no installer starts here"));
-    let mut apply = EngineApply::starting_with(engine.clone(), &TEST, sync_back.clone(), never);
+    let mut apply = EngineApply::starting_with(engine.clone(), &TEST, sync_back.clone(), pressed(), never);
     assert!(apply.stop_engine().is_none(), "no proof after an unconfirmed stop");
     assert!(engine.is_syncing(), "nothing was stopped");
     apply.resume_engine();
     drop(apply);
     assert!(!sync_back.take(), "nothing asked back");
 
+    // The press asks the same (review of #444, P3): Wait and the words before anything is downloaded.
     let syncing_at_start = Arc::new(Mutex::new(Vec::new()));
     let key = TestKey::generate();
     let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
+    let artifact = release.url.clone();
+    let asked = engine.clone();
     let options = Options {
         hand: Hand::Engine {
             engine: engine.clone(),
             starts: true,
             syncing_at_start: syncing_at_start.clone(),
         },
+        presence: Presence::from_fns(
+            || (Some(SessionGeneration::for_test(1)), true),
+            move || crate::engine_host::settings::updates::presence::any_stop_unconfirmed(&asked),
+        ),
         ..Options::default()
     };
     let mut rig = rig_with(&key, "0.9.1", Channel::Stable, serving(&key, &[release]), options);
     settle(&mut rig.part);
-    rig.part.restart_to_update();
-    assert_eq!(settle_counting(&mut rig.part), (0, 0), "no quit, nothing asked back");
-    assert!(syncing_at_start.lock().unwrap().is_empty(), "no installer started");
-    assert!(engine.is_syncing());
-    assert_eq!(words(&rig.part), SYNC_UNCONFIRMED);
     let waits = Update::Available {
         version: "0.9.2".into(),
         press: Press::Wait,
         says: Some(SYNC_UNCONFIRMED.into()),
     };
-    assert_eq!(rig.part.update(), waits);
+    rig.part.restart_to_update();
+    assert_eq!(rig.part.update(), waits, "said at the press");
+    assert!(!rig.part.pump().busy, "the press sends nothing");
+    assert_eq!(settle_counting(&mut rig.part), (0, 0), "no quit, nothing asked back");
+    assert!(!rig.seen().contains(&artifact), "nothing downloaded");
+    assert!(syncing_at_start.lock().unwrap().is_empty(), "no installer started");
+    assert!(engine.is_syncing());
 
     rig.part.check_now();
     settle(&mut rig.part);
@@ -611,6 +628,7 @@ fn any_unconfirmed_stop_in_this_process_refuses_the_hand_off() {
     );
     rig.part.restart_to_update();
     assert!(!rig.part.pump().busy, "the press sends nothing");
+    assert!(!rig.seen().contains(&artifact), "nothing downloaded");
     account.engine_stop_unconfirmed.store(false, Ordering::SeqCst);
 }
 

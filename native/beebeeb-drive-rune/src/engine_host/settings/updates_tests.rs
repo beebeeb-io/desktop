@@ -3,7 +3,7 @@
 //! checked: the words of each answer; that a check asks for the channel's manifest and nothing else, with nothing of
 //! the person in it; that a file which is not the signed one is never handed off; that another host is refused (with
 //! no request at all when it is the base); that an older build on a channel is said and never offered (its notes are
-//! never the dialog's, neither press acts on it); the two presses and the hand-off (on a running engine: sync stops
+//! never the dialog's, the press does not act on it); the one press and the hand-off (on a running engine: sync stops
 //! before the installer starts; a stop that is not confirmed starts nothing; a failed start asks for sync back);
 //! "checked <time>" as the last verified check; the worker's cadence; the release glue; and the source's methods on
 //! the part.
@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::{Engine, EngineConfig};
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
@@ -61,11 +62,16 @@ struct Logged {
     seen: Seen,
     gate: Gate,
     offline: Arc<AtomicBool>,
+    /// A server the test puts in place of `inner` (from the next request on).
+    next: Arc<Mutex<Option<FakeHttp>>>,
 }
 
 impl Http for Logged {
     fn get(&mut self, url: &str, from: u64) -> Result<Response, Unreachable> {
         self.gate.pass();
+        if let Some(next) = self.next.lock().unwrap().take() {
+            self.inner = next;
+        }
         self.seen.lock().unwrap().push(url.to_string());
         if self.offline.load(Ordering::SeqCst) {
             return Err(Unreachable);
@@ -137,6 +143,8 @@ pub(crate) struct Rig {
     pub(crate) gate: Gate,
     /// Holds a recording hand-off's stop while closed.
     stop_gate: Gate,
+    /// The server that answers from the next request on.
+    next: Arc<Mutex<Option<FakeHttp>>>,
     offline: Arc<AtomicBool>,
     clock: Arc<AtomicU64>,
     did: Did,
@@ -172,6 +180,8 @@ struct Options {
     look_every: Duration,
     /// The gate starts closed: the launch check waits for the test.
     held: bool,
+    /// The person and the session the press is taken in (shared with the hand-off).
+    presence: Arc<Presence>,
 }
 
 impl Default for Options {
@@ -182,6 +192,7 @@ impl Default for Options {
             hand: Hand::Recording { starts: true },
             look_every: Duration::from_secs(60),
             held: false,
+            presence: Presence::open(),
         }
     }
 }
@@ -203,12 +214,15 @@ fn rig_with(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, op
         installed: testkit::version(installed),
         staging_dir: staging.path().join("updates"),
     };
+    let next = Arc::new(Mutex::new(None));
     let logged = Logged {
         inner: http,
         seen: seen.clone(),
         gate: gate.clone(),
         offline: offline.clone(),
+        next: next.clone(),
     };
+    let (presence, handed) = (options.presence.clone(), options.presence);
     let (moving, verified, hand, recorded) = (MovingClock(clock.clone()), options.verified, options.hand, did.clone());
     let make: MakeDrive = Box::new(move |sync_back| {
         let store = MemStore {
@@ -234,7 +248,7 @@ fn rig_with(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, op
             Hand::EnginePanicsAtStart { engine } => {
                 let start: StartInstaller =
                     Box::new(|_installer, _stopped| panic!("an installer start that fails (test)"));
-                let apply = EngineApply::starting_with(engine, &TEST, sync_back, start);
+                let apply = EngineApply::starting_with(engine, &TEST, sync_back, handed, start);
                 Box::new(Watching::new(config, logged, moving, store, apply)) as Box<dyn Drive>
             }
             Hand::Engine {
@@ -247,7 +261,7 @@ fn rig_with(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, op
                     syncing_at_start.lock().unwrap().push(watched.is_syncing());
                     starts
                 });
-                let apply = EngineApply::starting_with(engine, &TEST, sync_back, start);
+                let apply = EngineApply::starting_with(engine, &TEST, sync_back, handed, start);
                 Box::new(Watching::new(config, logged, moving, store, apply)) as Box<dyn Drive>
             }
         }
@@ -256,12 +270,13 @@ fn rig_with(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, op
         look_every: options.look_every,
         wake: Box::new(|| {}),
     };
-    let part = UpdatesPart::live_tuned(make, &TEST, channel, channel, installed.to_string(), tuning);
+    let part = UpdatesPart::live_tuned(make, &TEST, channel, channel, installed.to_string(), tuning, presence);
     Rig {
         part,
         seen,
         gate,
         stop_gate,
+        next,
         offline,
         clock,
         did,
@@ -709,6 +724,7 @@ fn the_release_config_is_the_pinned_key_and_the_one_host() {
         seen: seen.clone(),
         gate: Gate::default(),
         offline: Arc::new(AtomicBool::new(false)),
+        next: Arc::new(Mutex::new(None)),
     };
     let clock = FakeClock(Cell::new(testkit::NOW));
     let mut updater = Updater::new(
@@ -824,6 +840,13 @@ fn each_failure_says_why_and_only_no_answer_says_try_again() {
     );
 }
 
+/// An open presence with a press taken: a hand-off driven without the part (no press of the person's) may run.
+fn pressed() -> Arc<Presence> {
+    let presence = Presence::open();
+    assert!(presence.press());
+    presence
+}
+
 fn engine() -> Arc<Engine<MemoryCredentials>> {
     let (host, _messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
@@ -914,7 +937,7 @@ fn the_hand_off_starts_nothing_outside_windows() {
         http,
         clock,
         MemStore::default(),
-        EngineApply::new(engine, &TEST, SyncBack::default()),
+        EngineApply::new(engine, &TEST, SyncBack::default(), pressed()),
     );
     let mut settle = |event| {
         let mut state = updater.step(event).clone();
@@ -953,3 +976,6 @@ fn the_saved_channel_and_the_one_the_build_came_from() {
 
 #[path = "updates_handoff_tests.rs"]
 mod handoff;
+
+#[path = "updates_session_tests.rs"]
+mod session;
