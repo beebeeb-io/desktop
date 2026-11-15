@@ -270,3 +270,38 @@ fn a_stored_delay_the_menu_does_not_have_is_drawn_as_not_known() {
     opened(&mut source, Pane::Security);
     assert_eq!(source.security_facts().app_lock, Some((true, "Not known".to_string())));
 }
+
+/// Review of #452 (P3-3): the page's delay went stale (the engine's is shorter by now, written elsewhere): the engine
+/// wants a proof for the change the page thought shorter, and the page asks Windows Hello for it, never saying that
+/// Windows Hello did not confirm a prompt that was never shown.
+#[test]
+fn a_stale_delay_on_the_page_asks_windows_hello_when_the_engine_wants_a_proof() {
+    let server = server();
+    let (engine, mut source, prompts) = with_prompts(&server);
+    engine
+        .set_lock_after_for(
+            engine.session_turn(),
+            LockAfter::Minutes60,
+            Some(AppLockProof::PlatformVerified),
+        )
+        .unwrap();
+    source.closed();
+    opened(&mut source, Pane::Security);
+    assert_eq!(delay(&source).as_deref(), Some("60 min"));
+    // Shorter meanwhile, from another place (the first run's step 2 on this PC).
+    engine
+        .set_lock_after_for(engine.session_turn(), LockAfter::Immediately, None)
+        .unwrap();
+    source.set_lock_after("30 min");
+    settle(&mut source);
+    assert_eq!(
+        prompts.asked(),
+        1,
+        "Windows Hello is asked for the proof the engine wants"
+    );
+    assert_eq!(source.notice(), None);
+    prompts.answer(HelloResult::Verified);
+    settle(&mut source);
+    assert_eq!(stored_after(&engine), Some(LockAfter::Minutes30));
+    assert_eq!(delay(&source).as_deref(), Some("30 min"));
+}

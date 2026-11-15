@@ -777,3 +777,94 @@ fn a_save_refused_behind_an_unsent_change_says_why() {
     assert_eq!(words, super::super::change::EARLIER_NOT_SENT);
     assert!(!source.saving());
 }
+
+/// Review of #452 (P1-2): an edit kept open across a lock is saved for the session after it, by the same account, under
+/// a NEW opening of the file (the engine's record of the earlier opening's saves is not this one's), from the version
+/// the edit began from: a file that changed meanwhile is the two-versions question, never overwritten.
+#[test]
+fn an_edit_kept_across_a_lock_is_saved_for_the_session_after_it_under_a_new_opening() {
+    let fake = Fake::new();
+    let (mut source, file, _) = opened(&fake, NOTE);
+    let first = fake.s().epoch;
+    fake.new_session("a@example.eu");
+    assert_eq!(source.poll(NOTE), Some(Body::Stopped(Stopped::SessionChanged)));
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Saved { version: 4, .. }));
+    let s = fake.s();
+    assert_eq!(
+        s.saves.last().map(|save| save.2),
+        Some(3),
+        "from the version the edit began from"
+    );
+    assert!(
+        s.save_openings.last().is_some_and(|epoch| *epoch > first),
+        "under a new opening"
+    );
+    assert_eq!(
+        s.save_turns.last(),
+        Some(&SessionGeneration::for_test(2)),
+        "for the session after the lock"
+    );
+}
+
+#[test]
+fn an_edit_is_never_saved_for_another_account() {
+    let fake = Fake::new();
+    let (mut source, file, _) = opened(&fake, NOTE);
+    fake.new_session("b@example.eu");
+    assert_eq!(source.poll(NOTE), Some(Body::Stopped(Stopped::SessionChanged)));
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Failed);
+    // And not once the first account is back: the opening ended with the other account.
+    fake.new_session("a@example.eu");
+    assert_eq!(source.poll(NOTE), None);
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Failed);
+    assert!(fake.s().saves.is_empty());
+}
+
+/// Review of #452 (P1-2): a save on its way when the screen locked is answered for the session before the lock. The
+/// same account back: what it came to is said (never its text), and nothing is on its way any more.
+#[test]
+fn a_save_on_its_way_at_a_lock_says_what_it_came_to_after_the_unlock() {
+    let fake = Fake::new();
+    let (mut source, file, _) = opened(&fake, NOTE);
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    fake.new_session("a@example.eu");
+    drop(door);
+    let Settled::Said(words) = settled(&mut source, NOTE) else {
+        panic!("what the earlier save came to is said");
+    };
+    assert_eq!(
+        words,
+        "Your earlier edit was saved \u{00B7} encrypted \u{00B7} version 4"
+    );
+    assert!(!source.saving());
+}
+
+/// The engine could not confirm the save (the lock landed while it ran: it may have been stored before that): the
+/// window says it is not confirmed, never "not saved"; another account hears nothing of it.
+#[test]
+fn a_save_on_its_way_at_a_lock_that_was_not_confirmed_says_so_and_another_account_hears_nothing() {
+    let fake = Fake::new();
+    fake.s().save_answer = Err(EditRefused::NotSignedIn);
+    let (mut source, file, _) = opened(&fake, NOTE);
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    fake.new_session("a@example.eu");
+    drop(door);
+    let Settled::Said(words) = settled(&mut source, NOTE) else {
+        panic!("the earlier save's end is said");
+    };
+    assert_eq!(words, super::super::change::NOT_CONFIRMED_AT_LOCK);
+
+    let (mut source, file, _) = opened(&fake, NOTE);
+    let door = fake.door.lock().unwrap();
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    fake.new_session("b@example.eu");
+    drop(door);
+    until("the save ended", || fake.s().saves.len() >= 2);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(source.settled(NOTE).is_none(), "another account hears nothing");
+}

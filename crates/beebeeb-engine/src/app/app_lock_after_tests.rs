@@ -225,8 +225,11 @@ fn an_idle_time_measured_for_an_earlier_turn_locks_nothing() {
     assert_eq!(engine.session_turn(), now);
 }
 
+/// Review of #452 (P3-4): what cannot be read as one of the choices counts as the strictest, never the default: an
+/// "Immediately" that reads back as something else must not become five minutes, and no change from it skips the
+/// proof a longer delay needs.
 #[test]
-fn an_entry_that_is_not_a_choice_is_not_known_and_never_locks_later_than_the_default() {
+fn an_entry_that_is_not_a_choice_is_not_known_and_counts_as_the_strictest() {
     let _serial = serial();
     let api = server();
     let (engine, credentials) = open_engine(&api.base);
@@ -236,7 +239,31 @@ fn an_entry_that_is_not_a_choice_is_not_known_and_never_locks_later_than_the_def
         .unwrap();
     let turn = engine.session_turn();
     assert_eq!(engine.lock_after_for(turn), Ok(None));
-    assert_eq!(engine.away_for(turn, idle(300)).state, LockState::ScreenLocked);
+    assert_eq!(
+        engine.set_lock_after_for_at(turn, LockAfter::Minutes5, None, T0),
+        Err(AppLockRefused::ProofNeeded),
+        "five minutes is longer than the strictest"
+    );
+    assert_eq!(
+        engine.away_for(turn, idle(LockAfter::SHORTEST_AWAY.as_secs())).state,
+        LockState::ScreenLocked
+    );
+}
+
+#[test]
+fn a_delay_that_cannot_be_read_counts_as_the_strictest() {
+    let _serial = serial();
+    let api = server();
+    let (engine, credentials) = open_engine(&api.base);
+    let turn = engine.session_turn();
+    engine
+        .set_lock_after_for_at(turn, LockAfter::Immediately, None, T0)
+        .unwrap();
+    // The credential store stops answering: a minute without input still locks.
+    credentials.fail_lock_flags(true);
+    let answer = engine.away_for(turn, idle(LockAfter::SHORTEST_AWAY.as_secs()));
+    credentials.fail_lock_flags(false);
+    assert_eq!(answer.state, LockState::ScreenLocked);
 }
 
 #[test]

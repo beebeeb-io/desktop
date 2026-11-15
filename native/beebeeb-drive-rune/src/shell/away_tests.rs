@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use beebeeb_engine::app::lock_api::LockState;
 use beebeeb_engine::app::lock_password_api::{AppLockProof, LockAfter};
 use beebeeb_engine::app::{Engine, EngineConfig};
+use beebeeb_engine::config::CONFIG_DIR_OVERRIDE;
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
@@ -20,6 +21,7 @@ use super::*;
 use crate::engine_host::LiveEngine;
 use crate::engine_host::open::Opened;
 use crate::shell::actions::HostActions;
+use crate::shell::app::GateState;
 use crate::shell::host::{self, Shell, Wiring};
 use crate::shell::platform::TrayEvent;
 use crate::shell::platform::fake::FakePlatform;
@@ -39,6 +41,16 @@ struct Live {
 
 /// A signed-in, open engine behind the real shell, on the fake platform.
 fn live() -> Live {
+    let mut live = live_with(false);
+    // The first poll that sees the session open looks once (no input for no time): its answer first.
+    answers(&mut live, 1);
+    assert_eq!(live.rt.state.shell.away.looks, 1);
+    live
+}
+
+/// [`live`], and with `first_run` this PC has not had its first run: the shell shows its steps (the gate is
+/// `FirstRun`), with the engine signed in and open. No look is waited for.
+fn live_with(first_run: bool) -> Live {
     let (account, phrase) = FakeAccount::register(EMAIL, PASSWORD, TEST_PHRASE);
     let api = FakeApi::start(account_handler(Arc::new(account)));
     let (engine_host, messages) = ChannelHost::new(|| {});
@@ -61,10 +73,15 @@ fn live() -> Live {
         identity: &TEST,
         gate: engine.gate(),
     };
-    let live = Arc::new(LiveEngine::new(&opened, messages));
+    let live_engine = Arc::new(LiveEngine::new(&opened, messages));
+    if first_run {
+        // Fresh settings, read once, as the app's start reads them.
+        let settings = tempfile::tempdir().expect("a folder for the settings file");
+        CONFIG_DIR_OVERRIDE.sync_scope(settings.path().to_path_buf(), || live_engine.wire_first_run());
+    }
     let platform = Arc::new(FakePlatform::default());
     let shell = Shell::new(
-        Arc::new(HostActions::new(live, platform.clone())),
+        Arc::new(HostActions::new(live_engine, platform.clone())),
         platform.clone(),
         Wiring::default(),
     );
@@ -79,16 +96,12 @@ fn live() -> Live {
     );
     rt.poll = Some(host::poll);
     rt.frame(0.0);
-    let mut live = Live {
+    Live {
         engine,
         platform,
         rt,
         _api: api,
-    };
-    // The first poll that sees the session open looks once (no input for no time): its answer first.
-    answers(&mut live, 1);
-    assert_eq!(live.rt.state.shell.away.looks, 1);
-    live
+    }
 }
 
 fn away(rt: &mut Runtime<State>) -> &mut AwayLock {
@@ -273,4 +286,49 @@ fn a_wake_that_lands_just_before_its_time_arms_again() {
     let lock = away(&mut live.rt);
     assert_eq!(lock.looks, looks, "not due yet: no look");
     assert!(lock.arms > arms, "the early wake's poll arms the look again");
+}
+
+/// Review of #452 (P1-1, the lead's ruling): no first-run exception. The idle count runs while the ENGINE is open,
+/// whatever the shell shows: during the first-run steps the key is in memory, and idle past the delay locks.
+#[test]
+fn idle_past_the_delay_locks_during_the_first_run_too() {
+    let mut live = live_with(true);
+    until(&mut live, "the first-run steps did not show", |live| {
+        live.rt.state.shell.app.gate() == GateState::FirstRun
+    });
+    idle_for(&mut live, Duration::from_secs(300));
+    until(&mut live, "the first run did not lock", |live| {
+        live.engine.lock_state() == LockState::ScreenLocked
+    });
+}
+
+/// Review of #452 (P2-1): a sleep is time away. The PC's time without input before it slept and the sleep itself,
+/// past the delay, lock at the wake (before the wake's own key press could count as input); short of it, nothing.
+#[test]
+fn a_wake_after_a_sleep_past_the_delay_locks_and_a_short_one_does_not() {
+    let mut live = live();
+    let before = away(&mut live.rt).answered;
+    live.rt.update(|s, tx| {
+        host::on_tray(
+            s,
+            TrayEvent::Resumed {
+                away: Duration::from_secs(299),
+            },
+            tx,
+        )
+    });
+    answers(&mut live, before + 1);
+    assert_eq!(live.engine.lock_state(), LockState::Open, "away short of five minutes");
+    live.rt.update(|s, tx| {
+        host::on_tray(
+            s,
+            TrayEvent::Resumed {
+                away: Duration::from_secs(300),
+            },
+            tx,
+        )
+    });
+    until(&mut live, "the wake did not lock", |live| {
+        live.engine.lock_state() == LockState::ScreenLocked
+    });
 }

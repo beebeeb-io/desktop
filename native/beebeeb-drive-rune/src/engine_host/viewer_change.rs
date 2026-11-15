@@ -25,6 +25,13 @@ pub(super) const NEWER_EVERY: Duration = Duration::from_millis(1500);
 pub(super) const EARLIER_NOT_SENT: &str =
     "Not saved: an earlier change to this file on this PC has not been sent yet. Your edit stays open.";
 
+/// What the window says of a save that was on its way when the screen locked and that the engine could not confirm
+/// (the lock landed while it ran: it may have been stored just before). Never "not saved": that is not known. Saving
+/// again tells: an earlier change still unsent refuses the save and says so; one that landed is the two-versions
+/// question.
+pub(super) const NOT_CONFIRMED_AT_LOCK: &str =
+    "The save on its way when Beebeeb locked was not confirmed. Your edit stays open: save it again.";
+
 /// One answer on its way back: for which file, under which session and account, for which opening.
 pub(super) struct Message {
     file_id: String,

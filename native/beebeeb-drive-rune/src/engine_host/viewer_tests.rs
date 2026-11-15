@@ -80,6 +80,8 @@ struct Inner {
     /// Every save asked of the engine (file, text, base), the opening each was made under, and what it answers.
     saves: Vec<(String, String, i64)>,
     save_openings: Vec<u64>,
+    /// The session each save was asked for.
+    save_turns: Vec<SessionGeneration>,
     save_answer: Result<SaveEnd, EditRefused>,
     /// Every Keep both asked of the engine.
     copies: Vec<(String, String)>,
@@ -147,6 +149,7 @@ impl Fake {
                 kept_refused: false,
                 saves: Vec::new(),
                 save_openings: Vec::new(),
+                save_turns: Vec::new(),
                 save_answer: Ok(SaveEnd::Saved { version: 4 }),
                 copies: Vec::new(),
                 change_waits: false,
@@ -367,7 +370,7 @@ impl ViewerEngine for Fake {
 
     fn save_text(
         &self,
-        _: SessionGeneration,
+        session: SessionGeneration,
         file_id: &str,
         text: &str,
         base: i64,
@@ -377,6 +380,7 @@ impl ViewerEngine for Fake {
         let mut s = self.s();
         s.saves.push((file_id.to_string(), text.to_string(), base));
         s.save_openings.push(opening);
+        s.save_turns.push(session);
         // As the engine: a Queued answer names the base it saved from, and is remembered until it lands; a saved
         // version is the viewer's own. Both only for the opening the record is of (checked when the save ends).
         let this_opening = opening == s.epoch;

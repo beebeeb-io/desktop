@@ -852,6 +852,7 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
                 .away
                 .event(Away::SessionLocked, &shell.actions, shell.wiring.main.as_ref());
         }
+        TrayEvent::Resumed { .. } => {}
     }
 }
 

@@ -69,6 +69,9 @@ pub enum TrayEvent {
     CloseRequested,
     /// The operating system's session was locked (Win+L, or Windows' own lock): the away lock's event.
     SessionLocked,
+    /// The PC woke from sleep or hibernation: how long it was away, its time without input before it slept and the
+    /// sleep itself (the away lock's event; a wake's own key press is input, so the idle count alone would miss it).
+    Resumed { away: std::time::Duration },
 }
 
 pub type TrayHandler = Arc<dyn Fn(TrayEvent) + Send + Sync>;

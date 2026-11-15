@@ -906,3 +906,6 @@ fn a_picture_is_shown_and_no_action_claims_a_state_that_was_not_read() {
     w.settle();
     w.assert_nothing_of_the_file("locked, the picture was shown");
 }
+
+#[path = "viewer_edit_lock_tests.rs"]
+mod edit_lock;
