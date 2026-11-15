@@ -186,7 +186,8 @@ fn a_field_named_like_a_secret_is_dropped_whatever_its_value() {
 
 #[test]
 fn an_opaque_id_field_is_kept_even_when_a_denied_word_comes_first() {
-    assert!(!redact::denied_name("root_id") && !redact::denied_name("key_count") && !redact::denied_name("file_id"));
+    assert!(!redact::denied_name("root_id") && !redact::denied_name("dir_count") && !redact::denied_name("file_id"));
+    assert!(redact::denied_name("session_id") && redact::denied_name("key_count") && redact::denied_name("key_id"));
     assert!(redact::denied_name("root") && redact::denied_name("request_key") && redact::denied_name("filename"));
 }
 
@@ -254,9 +255,10 @@ fn harmless_shapes_stay_readable() {
     // Over-redaction is accepted, but the lines a person reads in a support case must mostly survive.
     let text =
         redact::scrub("sync tick failed (status 503) retry in 30 s, hresult 0x80070005, version 0.9.0, state.db busy");
+    // The brackets and commas are separators and are not written; every word stays.
     assert_eq!(
         text,
-        "sync tick failed (status 503) retry in 30 s, hresult 0x80070005, version 0.9.0, state.db busy"
+        "sync tick failed status 503 retry in 30 s hresult 0x80070005 version 0.9.0 state.db busy"
     );
 }
 

@@ -6,7 +6,8 @@
 //!    `phrase`, `code`, `body`, `url` and the like is never written, whatever its value; the file shows
 //!    `<redacted>`. A field that ends in `id`, `kind`, `count`, `reason` and the like is an opaque value by
 //!    construction and goes to the shape check instead.
-//! 2. **By shape** ([`scrub`]): every remaining string (the message too) is read word by word; a word that is a
+//! 2. **By shape** ([`scrub`]): every remaining string (the message too) is read word by word (quotes, commas and
+//!    brackets count as spaces and are not written); a word that is a
 //!    URL, an email address, a path, a file name, a long token or hex string, a 6 to 8 digit code, or part of a run of
 //!    12 plain lowercase words (the shape of a recovery phrase) is replaced by a marker. A value that looks like a
 //!    server body (JSON or HTML) is replaced whole. Control characters are blanked, so one event is one line.
@@ -263,8 +264,13 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
         let token = tokens[i];
         i += 1;
         if redact_next {
-            redact_next = false;
-            out.push(REDACTED.to_string());
+            // `Authorization: Bearer x`: the scheme word is shown, the credential after it is not.
+            if ALWAYS_LABELS.contains(&token.to_ascii_lowercase().as_str()) {
+                out.push(token.to_string());
+            } else {
+                redact_next = false;
+                out.push(REDACTED.to_string());
+            }
             continue;
         }
         // `password: x`, `Authorization: Bearer x`: the label decides, and the word after it is its value.
