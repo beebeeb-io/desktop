@@ -18,7 +18,7 @@ unsafe extern "system" fn s6_serve_whole(info: *const CF_CALLBACK_INFO, params: 
     }
 }
 
-/// S6 (R4): the batch's production fetch hydrates a kept, dehydrated placeholder (one file at a time, blocking until
+/// S6 (R4): the batch's production fetch hydrates a kept (in the database), dehydrated placeholder (one file at a time, blocking until
 /// the bytes are on disk); a path with nothing there reads as not there. Red on the mutant "the production fetch
 /// returns `Done` without fetching".
 #[test]
@@ -28,8 +28,9 @@ fn s6_kept_native_the_production_fetch_brings_a_kept_placeholder_down() {
     qa.connect(s6_serve_whole);
     let len = 300_000;
     assert!(placeholders::create_placeholder(&qa.root, "qa-s6-kept", "kept.bin", len, 1_700_000_000, false).unwrap());
+    // No OS pin: pinning a cloud-only placeholder on a connected root makes Windows fetch it itself (measured,
+    // `ld0105_w1_native_…`), so the batch would meet it on disk. "Kept" is the database's state, which the plan reads.
     let kept = qa.path("kept.bin");
-    placeholders::set_pin_state(&kept, true, false).unwrap();
     let before = placeholders::fully_on_disk(&kept);
     let dir = tempfile::tempdir().unwrap();
     let db = std::sync::Arc::new(crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap());
