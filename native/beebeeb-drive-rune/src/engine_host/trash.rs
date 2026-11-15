@@ -13,8 +13,11 @@
 //!   (counting by listing would decrypt the whole Trash for a badge); none until Beebeeb has said it.
 //! - `restore`: [`Engine::restore_items_for`], one item, for the session of the press.
 //! - `purge` (Empty Trash, Delete permanently): [`Engine::purge_trash_for`] after the account PASSWORD is proven for
-//!   each item (`purge.rs`). Not bound: Details and Preview (nothing in the window takes them up yet; the view says
-//!   "not available yet").
+//!   each item (`purge.rs`).
+//! - Details and Preview (`actions_available`: while a list of the session in memory is here): Details is drawn from
+//!   the listing's own row (`frames::item`), with nothing read from the local state. Preview is read from Beebeeb
+//!   only, in memory (`engine_host::item_preview`: the reader never asks for this PC's copy or the local state's
+//!   facts), with no file written to disk and no editor.
 //!
 //! When it reads: when the Trash section opens and the list is missing or older than [`FRESH_FOR`], and after a
 //! restore was answered. Never from a draw call: `items`, `totals`, `loaded` and `count` only read what is here.
@@ -518,9 +521,9 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         self.badge()
     }
 
-    /// Details and Preview have no engine call yet.
+    /// Details and Preview: while a list of the session in memory is here (an item is looked up in it).
     fn actions_available(&self) -> bool {
-        false
+        self.current().is_some()
     }
 
     /// Empty Trash and Delete permanently: the engine's permanent delete, after the account password is proven.

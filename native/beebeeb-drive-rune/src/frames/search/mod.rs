@@ -228,9 +228,14 @@ pub fn holds_back(s: &State) -> bool {
         && !files_busy(s)
 }
 
+/// Whether Search's window is what the Files window shows now ([`over_files`]).
+pub fn shows_over_files(s: &State) -> bool {
+    is_open(s) && !files_busy(s)
+}
+
 /// The Files window's view while search is open (the registry's Files line asks first).
 pub fn over_files(s: &State, cx: &mut rune::Cx<State>) -> Option<El> {
-    (is_open(s) && !files_busy(s)).then(|| view::window(s, cx))
+    shows_over_files(s).then(|| view::window(s, cx))
 }
 
 /// The Files window's keys while search is open: `Some` takes the key (no key reaches the list
@@ -238,6 +243,10 @@ pub fn over_files(s: &State, cx: &mut rune::Cx<State>) -> Option<El> {
 pub fn files_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
     if files_busy(s) {
         return None;
+    }
+    // An item's Details over the results takes the keys while it shows (`frames::item`).
+    if let Some(took) = crate::frames::shared::dialogs::section_keys(s, ev, tx, Section::Files) {
+        return Some(took);
     }
     if !is_open(s) {
         if ev.is_command('f') {
@@ -302,6 +311,27 @@ fn hits(s: &State) -> Vec<Hit> {
     }
 }
 
+/// The result of `id` among the results shown now (`frames::item`'s Details over Search).
+pub fn hit(s: &State, id: &str) -> Option<Hit> {
+    hits(s).into_iter().find(|hit| hit.id == id)
+}
+
+/// The result of `id` is no longer among results that are all here: the field changed, or the search answered
+/// without it. While results still load, or the query is still being answered, it is not gone.
+pub fn hit_gone(s: &State, id: &str) -> bool {
+    match s.frames.find.shows(&s.search.text) {
+        Shows::Results { hits, loading } => loading.is_none() && !hits.iter().any(|hit| hit.id == id),
+        Shows::Searching | Shows::Nothing { loading: Some(_) } => false,
+        _ => true,
+    }
+}
+
+/// The selected result's row key, where focus goes back after a dialog over the results.
+pub fn selected_row_key(s: &State) -> Option<String> {
+    let hits = hits(s);
+    s.frames.find.selected_index(&hits).map(row_key)
+}
+
 /// The key of result `i` in the list: focus goes where the selection goes.
 fn row_key(i: usize) -> String {
     format!("row-{i}")
@@ -340,6 +370,10 @@ fn open_result(s: &mut State, hits: &[Hit], i: usize) -> bool {
 /// nowhere): the arrows, Home and End select, Enter opens, the Menu key asks for the file menu,
 /// Alt+Enter for Details. In the recent searches: the arrows move, Enter runs one.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // An item's Details over the results: its keys first, and none reaches the results behind it.
+    if let Some(took) = crate::frames::shared::dialogs::section_keys(s, ev, tx, Section::Files) {
+        return took;
+    }
     s.frames.find.pictured = false;
     if ev.key == Key::Escape && frames::plain(ev) {
         close(s, tx);
