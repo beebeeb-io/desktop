@@ -144,8 +144,18 @@ fn the_signed_in_owner_frees_as_before() {
     let f = fixture();
     signed_in(&f.engine, "user-a", "a@example.eu");
     assert_eq!(state_of(owner(&f.engine)), CommandState::Enabled);
+    // A copy written a moment ago is kept (task 2526): let the fixture's file settle first.
+    #[cfg(target_os = "linux")]
+    std::thread::sleep(std::time::Duration::from_millis(2_200));
     let invoked = invoke(owner(&f.engine));
-    #[cfg(not(target_os = "windows"))]
+    // Off Linux nothing can show that no other program has the copy open, so a sync folder copy is kept.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        assert_eq!(invoked, Invoked::Freed(0));
+        assert!(f.file.exists(), "the copy stays where no lease can be taken");
+        assert_eq!(status(&f), FileStatus::Local);
+    }
+    #[cfg(target_os = "linux")]
     {
         assert_eq!(invoked, Invoked::Freed(HELD));
         assert!(!f.file.exists(), "the downloaded copy left this computer");
