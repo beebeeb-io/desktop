@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SessionToken(String);
 
 impl SessionToken {
@@ -28,11 +28,5 @@ impl zeroize::Zeroize for SessionToken {
 impl Drop for SessionToken {
     fn drop(&mut self) {
         zeroize::Zeroize::zeroize(self);
-    }
-}
-
-impl fmt::Debug for SessionToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SessionToken(<redacted>)")
     }
 }
