@@ -120,9 +120,10 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
-/// Delta review P2-1 of desktop #225: an upload of the file on the board (in flight, or failed and still shown) is the
-/// person's change being sent; discarding would throw it away. No board shared with the host: an upload could not be
-/// ruled out, so nothing is discarded either.
+/// Delta review P2-1 of desktop #225: an upload of the file the board still holds ([`TransferBoard::get`]: its guard is
+/// alive) is the person's change being sent; discarding would throw it away. An upload that ended (a failed one is then
+/// only shown, for its time to live) is no longer sent and does not refuse. No board shared with the host: an upload
+/// could not be ruled out, so nothing is discarded either.
 fn refuse_an_upload(board: Option<&TransferBoard>, file_id: &str) -> Result<(), DiscardRefusal> {
     let board = board.ok_or(DiscardRefusal::NoBoard)?;
     if board.get(file_id).is_some_and(|row| row.direction == Direction::Up) {
