@@ -651,14 +651,18 @@ fn settings_is_unwired_on_a_live_engine() {
     assert!(s.settings.source.wired(Pane::General) && s.settings.source.wired(Pane::StorageLocation));
     assert!(s.settings.source.wired(Pane::Notifications) && s.settings.source.wired(Pane::Recent));
     assert!(s.settings.source.wired(Pane::About));
-    // Drive's panes (`engine_host::drive_settings`): Storage insights, Sync, Bandwidth and Diagnostics answer; the
-    // rest is the shell's frame.
-    for pane in [Pane::Insights, Pane::Sync, Pane::Bandwidth, Pane::Diagnostics] {
+    // Drive's panes (`engine_host::drive_settings`): Storage insights, Sync, Bandwidth, Diagnostics and Thumbnails and
+    // previews (`engine_host::drive_previews`) answer; Storage is the shell's frame.
+    for pane in [
+        Pane::Insights,
+        Pane::Sync,
+        Pane::Bandwidth,
+        Pane::Diagnostics,
+        Pane::Previews,
+    ] {
         assert!(s.settings.drive.wired(pane), "{pane:?}");
     }
-    for pane in [Pane::Storage, Pane::Previews] {
-        assert!(!s.settings.drive.wired(pane), "{pane:?}");
-    }
+    assert!(!s.settings.drive.wired(Pane::Storage));
     assert!(!s.settings.source.sample());
 }
 

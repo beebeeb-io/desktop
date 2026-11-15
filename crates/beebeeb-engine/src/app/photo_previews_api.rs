@@ -214,12 +214,10 @@ impl<C: CredentialStores> Engine<C> {
             stopped: Some(why),
             ..RunEnd::default()
         };
-        // The token and the key of the session asked for: copied under the session's lock, only while it is that one.
-        if self.acct.session.is_poisoned() {
-            return moved;
-        }
-        let Some((token, key)) = self.acct.while_session_is(&self.writes, session, |current| {
-            (current.token.clone(), Zeroizing::new(current.master_key))
+        // The token and the key of the session asked for: copied through the one way a call reaches the session in
+        // memory (the lock asked and the copy made in one hold), and only while it is that very session.
+        let Ok(Some((token, key))) = self.person_session(|current, generation| {
+            (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
         }) else {
             return moved;
         };
