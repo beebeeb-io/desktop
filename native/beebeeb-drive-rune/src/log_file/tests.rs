@@ -519,17 +519,17 @@ fn a_custom_backup_folder_key_never_prints_its_name() {
 fn the_path_cut_off_also_holds_after_a_redacted_label_or_key() {
     assert_never_written(
         "label then path",
-        "Rome",
+        "Records",
         "path has no file name: C:\\Users\\a\\Beebeeb\\Medical Records 2026 Rome\\x",
     );
     assert_never_written(
         "key= then path",
-        "Rome",
+        "Records",
         "failed error=C:\\Users\\a\\Beebeeb\\Medical Records 2026 Rome\\x",
     );
     assert_never_written(
         "key= then unix path",
-        "Rome",
+        "Records",
         "failed error=/home/a/Medical Records 2026 Rome/x",
     );
 }
