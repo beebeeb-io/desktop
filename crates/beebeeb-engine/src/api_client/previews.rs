@@ -39,15 +39,6 @@ impl std::error::Error for PreviewPutError {}
 struct SummaryWire {
     count: i64,
     total_bytes: i64,
-    #[serde(default)]
-    by_setting: Vec<SettingCountWire>,
-}
-
-#[derive(Deserialize)]
-struct SettingCountWire {
-    count: i64,
-    format: Option<String>,
-    px: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -87,22 +78,13 @@ impl ApiClient {
         Ok(())
     }
 
-    /// What the account's stored previews take, and how many at each setting.
+    /// What the account's stored previews take: how many, and their bytes.
     pub async fn previews_summary(&self) -> ApiResult<PreviewsSummary> {
         let wire: SummaryWire = self.get_typed("/api/v1/files/previews/summary").await?;
         let positive = |n: i64| u64::try_from(n).unwrap_or(0);
         Ok(PreviewsSummary {
             count: positive(wire.count),
             total_bytes: positive(wire.total_bytes),
-            by_setting: wire
-                .by_setting
-                .into_iter()
-                .filter_map(|row| {
-                    let format = PreviewFormat::from_wire(row.format.as_deref()?)?;
-                    let px = u32::try_from(row.px?).ok()?;
-                    Some(((format, px), positive(row.count)))
-                })
-                .collect(),
         })
     }
 
@@ -124,40 +106,42 @@ impl ApiClient {
     }
 
     /// Store one sealed JPEG preview of the file `file_id` at the long edge `px` (one PUT replaces the file's old
-    /// preview). `sealed` goes as it is: the caller sealed it.
+    /// preview). `sealed` goes as it is: the caller sealed it. A 429 is waited out and sent again within the client's
+    /// bounded budget; the PUT may take a minute plus the time the slowest allowed link needs for its body.
     pub async fn upload_preview(&self, file_id: &str, px: u32, sealed: &[u8]) -> Result<(), PreviewPutError> {
         let url = format!(
             "{}/api/v1/files/{}/thumbnail/preview?format=jpeg&px={px}",
             self.base_url,
             encode(file_id)
         );
-        let response = self
-            .client
-            .put(url)
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/octet-stream")
-            .body(sealed.to_vec())
-            .send()
-            .await
+        let timeout = super::direct::storage_timeout(sealed.len() as u64);
+        let sent = self
+            .send_with_retry(|| {
+                self.client
+                    .put(&url)
+                    .timeout(timeout)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(sealed.to_vec())
+            })
+            .await;
+        match sent {
+            Ok(_) => Ok(()),
+            Err(DesktopApiError::HttpStatus { status, snippet }) => {
+                if status != reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+                    return Err(PreviewPutError::Status(status.as_u16()));
+                }
+                // Only the body's code is read, never its words.
+                let code = serde_json::from_str::<serde_json::Value>(&snippet)
+                    .ok()
+                    .and_then(|body| body.get("error").and_then(|code| code.as_str()).map(str::to_string));
+                Err(if code.as_deref() == Some("quota_exceeded") {
+                    PreviewPutError::QuotaExceeded
+                } else {
+                    PreviewPutError::TooLarge
+                })
+            }
             // The transport error names the URL (the file's id): only its kind leaves.
-            .map_err(|_| PreviewPutError::Offline)?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(());
+            Err(_) => Err(PreviewPutError::Offline),
         }
-        if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-            // Only the body's code is read, never its words.
-            let code = response
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|body| body.get("error").and_then(|code| code.as_str()).map(str::to_string));
-            return Err(if code.as_deref() == Some("quota_exceeded") {
-                PreviewPutError::QuotaExceeded
-            } else {
-                PreviewPutError::TooLarge
-            });
-        }
-        Err(PreviewPutError::Status(status.as_u16()))
     }
 }

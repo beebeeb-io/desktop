@@ -22,8 +22,9 @@
 //! account), drops what it held, and takes in only answers of the current generation. Nothing is handed out while
 //! the vault is not open for the account the window holds things for.
 //!
-//! When it reads: when the pane opens (and once more when a run ends), and while a run is making previews at most
-//! every [`READ_EVERY_WHILE_MAKING`] (on the run's own progress, never a timer). Never at launch.
+//! When it reads: when the pane opens (and once more when a run ends), and while a run is making previews the summary
+//! alone (not the per-file list the averages come from) at most every [`READ_EVERY_WHILE_MAKING`] (on the run's own
+//! progress, never a timer). Never at launch.
 //!
 //! Must not: log a name, a path, an id or a byte value; keep the person's pictures past a change of account.
 
@@ -36,14 +37,14 @@ use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::photo_previews_api::{PreviewsFacts, PreviewsRefused, SampleFacts};
 use beebeeb_engine::app::{CredentialStores, Engine};
 use beebeeb_engine::photo_previews::runner::{PreviewRun, RunEnd, RunState, Stopped};
-use beebeeb_engine::photo_previews::{PreviewFormat as Wire, PreviewSetting};
+use beebeeb_engine::photo_previews::{PreviewFormat as Wire, PreviewSetting, PreviewsSummary};
 use beebeeb_engine::signin::gate::GateState;
 
 use super::log;
 use crate::frames::settings::previews::{
     NOT_MEASURED, PhotoPreviews, PreviewFormat, PreviewSize, Previews, REBUILDING,
 };
-use crate::frames::signin::setup::source::Sample;
+use crate::frames::signin::setup::source::{Sample, wipe_if_last};
 
 #[cfg(test)]
 #[path = "drive_previews_tests.rs"]
@@ -74,6 +75,8 @@ pub trait PreviewsEngine: Send + Sync + 'static {
     /// Wake the window: an answer or a run's progress is in.
     fn wake(&self);
     fn facts(&self, session: SessionGeneration) -> Result<PreviewsFacts, PreviewsRefused>;
+    /// What the stored previews take, alone.
+    fn summary(&self, session: SessionGeneration) -> Result<PreviewsSummary, PreviewsRefused>;
     fn setting(&self, session: SessionGeneration) -> Result<PreviewSetting, PreviewsRefused>;
     fn set_setting(&self, session: SessionGeneration, setting: PreviewSetting) -> Result<(), PreviewsRefused>;
     fn make(&self, session: SessionGeneration, force: bool, stop: &AtomicBool, progress: &dyn Fn(u32, u32)) -> RunEnd;
@@ -95,6 +98,9 @@ impl<C: CredentialStores> PreviewsEngine for Engine<C> {
     }
     fn facts(&self, session: SessionGeneration) -> Result<PreviewsFacts, PreviewsRefused> {
         self.photo_previews_for(session)
+    }
+    fn summary(&self, session: SessionGeneration) -> Result<PreviewsSummary, PreviewsRefused> {
+        self.photo_previews_summary_for(session)
     }
     fn setting(&self, session: SessionGeneration) -> Result<PreviewSetting, PreviewsRefused> {
         self.photo_previews_setting_for(session)
@@ -191,6 +197,16 @@ pub struct Measured {
     pub previews_png: Vec<(u32, Arc<[u8]>)>,
 }
 
+/// The pictures are the person's photo: whoever lets go of them last wipes them (a window's [`Sample`] does too).
+impl Drop for Measured {
+    fn drop(&mut self) {
+        wipe_if_last(&mut self.original_png);
+        for (_, png) in &mut self.previews_png {
+            wipe_if_last(png);
+        }
+    }
+}
+
 impl std::fmt::Debug for Measured {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Measured")
@@ -243,6 +259,8 @@ impl Measured {
 enum Ask {
     /// The setting, the summary and the averages.
     Facts,
+    /// The summary alone (while a run makes previews).
+    Summary,
     /// The sample, measured on this PC.
     Sample,
     /// Write the setting; then start a run (`Some(force)`) or stop nothing more (`None`).
@@ -261,6 +279,7 @@ struct Job {
 
 enum Answer {
     Facts(Result<PreviewsFacts, PreviewsRefused>),
+    Summary(Result<PreviewsSummary, PreviewsRefused>),
     Sample(Option<Measured>),
     /// A change was answered (`Err`: it was not made).
     Set(Result<(), PreviewsRefused>),
@@ -397,6 +416,12 @@ impl PreviewsHost {
         }
     }
 
+    fn read_summary(&mut self) {
+        if !self.reading {
+            self.reading = self.send(Ask::Summary);
+        }
+    }
+
     /// The pane opened: read what it shows (and the sample, once per generation).
     pub fn opened(&mut self) {
         self.open = true;
@@ -464,6 +489,14 @@ impl PreviewsHost {
                         Err(PreviewsRefused::Failed) => self.failed = Some(READ_FAILED),
                     }
                 }
+                Answer::Summary(read) => {
+                    self.reading = false;
+                    // Asked again only after the same wait, answered or not: a failed one keeps what is shown.
+                    self.read_at = Some(Instant::now());
+                    if let (Ok(summary), Some(facts)) = (read, self.facts.as_mut()) {
+                        facts.summary = summary;
+                    }
+                }
                 Answer::Sample(sample) => self.sample = sample,
                 Answer::Set(done) => {
                     self.changing = false;
@@ -489,7 +522,7 @@ impl PreviewsHost {
             && self.open
             && self.read_at.is_some_and(|at| at.elapsed() >= READ_EVERY_WHILE_MAKING)
         {
-            self.read();
+            self.read_summary();
         }
         changed
     }
@@ -643,6 +676,7 @@ fn work(engine: &Arc<dyn PreviewsEngine>, run: &PreviewRun, job: Job) -> Option<
     let session = job.session;
     match job.ask {
         Ask::Facts => Some(Answer::Facts(engine.facts(session))),
+        Ask::Summary => Some(Answer::Summary(engine.summary(session))),
         Ask::Sample => Some(Answer::Sample(match engine.measure(session, None) {
             Ok(facts) => Measured::of(facts),
             Err(why) => {

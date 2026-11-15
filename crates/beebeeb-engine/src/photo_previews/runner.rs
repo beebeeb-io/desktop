@@ -60,6 +60,9 @@ struct Inner {
     stop: AtomicBool,
     /// Told whenever the state moves (a window wakes to draw it).
     on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// A test holds the thread here: it found no work and still says it runs.
+    #[cfg(test)]
+    before_idle: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// One preview run at a time. Cheap to clone: every clone is the same run.
@@ -83,6 +86,8 @@ impl PreviewRun {
                 running: AtomicBool::new(false),
                 stop: AtomicBool::new(false),
                 on_change: Mutex::new(None),
+                #[cfg(test)]
+                before_idle: Mutex::new(None),
             }),
         }
     }
@@ -90,6 +95,12 @@ impl PreviewRun {
     /// Told whenever the state moves (the window's wake). Replaces an earlier one.
     pub fn on_change(&self, wake: Arc<dyn Fn() + Send + Sync>) {
         *self.inner.on_change.lock().unwrap_or_else(PoisonError::into_inner) = Some(wake);
+    }
+
+    /// Test only: `hook` runs on the thread each time it found no work, before it says it no longer runs.
+    #[cfg(test)]
+    pub(crate) fn before_idle(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.inner.before_idle.lock().unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
     /// Where the run of `session` stands; `Idle` for a run of any other session.
@@ -105,20 +116,28 @@ impl PreviewRun {
         self.inner.running.load(Ordering::SeqCst)
     }
 
-    /// Start `work` for `session`. While a run is on its way it is stopped, and `work` runs after it ended. `false`:
-    /// no thread could be started (nothing runs).
+    /// Start `work` for `session`. While a run is on its way it is stopped, and `work` runs after it ended (a later
+    /// start replaces a waiting one). `false`: no thread could be started (nothing runs).
     pub fn start(&self, session: SessionGeneration, work: Work) -> bool {
         let inner = &self.inner;
-        if inner.running.swap(true, Ordering::SeqCst) {
-            *inner.waiting.lock().unwrap_or_else(PoisonError::into_inner) = Some((session, work));
+        {
+            let mut waiting = inner.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+            *waiting = Some((session, work));
+            // Under the queue's lock: the thread takes a work and clears the flag under it too, so this stops the
+            // run on its way and never the work just queued.
             inner.stop.store(true, Ordering::SeqCst);
+        }
+        if inner.running.swap(true, Ordering::SeqCst) {
+            // A thread is on its way: it takes the work. It looks for one again after it said it no longer runs, so
+            // a work queued as it ends is not left behind.
             return true;
         }
         let run = self.clone();
         let started = std::thread::Builder::new()
             .name("photo-previews".into())
-            .spawn(move || run.go(session, work));
+            .spawn(move || run.go());
         if started.is_err() {
+            inner.waiting.lock().unwrap_or_else(PoisonError::into_inner).take();
             inner.running.store(false, Ordering::SeqCst);
             return false;
         }
@@ -127,7 +146,8 @@ impl PreviewRun {
 
     /// End the run on its way (after the photo in hand; nothing more is uploaded) and drop a start that waits.
     pub fn stop(&self) {
-        self.inner.waiting.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let mut waiting = self.inner.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        waiting.take();
         self.inner.stop.store(true, Ordering::SeqCst);
     }
 
@@ -144,10 +164,44 @@ impl PreviewRun {
         }
     }
 
-    /// The thread: this run, then any that waits, until none does.
-    fn go(&self, mut session: SessionGeneration, mut work: Work) {
+    /// The thread: every work that waits, one after the other, until none does.
+    fn go(&self) {
         loop {
-            self.inner.stop.store(false, Ordering::SeqCst);
+            let next = {
+                let mut waiting = self.inner.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+                let next = waiting.take();
+                if next.is_some() {
+                    self.inner.stop.store(false, Ordering::SeqCst);
+                }
+                next
+            };
+            let Some((session, work)) = next else {
+                #[cfg(test)]
+                {
+                    let hook = self
+                        .inner
+                        .before_idle
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+                self.inner.running.store(false, Ordering::SeqCst);
+                // A start that queued after the take saw this thread still running and left the work to it: take
+                // it, unless a new thread already did.
+                let queued = self
+                    .inner
+                    .waiting
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_some();
+                if queued && !self.inner.running.swap(true, Ordering::SeqCst) {
+                    continue;
+                }
+                return;
+            };
             self.set(RunState::Making { done: 0, total: 0 }, session);
             let progress = |done: u32, total: u32| self.set(RunState::Making { done, total }, session);
             let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&self.inner.stop, &progress)))
@@ -156,29 +210,6 @@ impl PreviewRun {
                     ..RunEnd::default()
                 });
             self.set(ended.stopped.map_or(RunState::Idle, RunState::Stopped), session);
-            let next = self.inner.waiting.lock().unwrap_or_else(PoisonError::into_inner).take();
-            match next {
-                Some((next_session, next_work)) => {
-                    session = next_session;
-                    work = next_work;
-                }
-                None => {
-                    self.inner.running.store(false, Ordering::SeqCst);
-                    // A start that came in between the take and the store: run it too.
-                    let late = self.inner.waiting.lock().unwrap_or_else(PoisonError::into_inner).take();
-                    match late {
-                        Some((late_session, late_work)) if !self.inner.running.swap(true, Ordering::SeqCst) => {
-                            session = late_session;
-                            work = late_work;
-                        }
-                        Some(other) => {
-                            *self.inner.waiting.lock().unwrap_or_else(PoisonError::into_inner) = Some(other);
-                            return;
-                        }
-                        None => return,
-                    }
-                }
-            }
         }
     }
 }

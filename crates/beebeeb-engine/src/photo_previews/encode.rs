@@ -4,7 +4,8 @@
 //! EXIF orientation, scaled so the long edge is `min(px, its own long edge)` (never upscaled, Lanczos3), then encoded
 //! as JPEG at quality 85, or 70 when that does not fit the server's cap. The output carries no EXIF or other APP1
 //! metadata: the encoder writes none. Every buffer this module owns holding pixels or encoded bytes is wiped when it
-//! is dropped; the decoder's and the scaler's own scratch memory is freed, not overwritten.
+//! is dropped, and an encoded output that grows wipes the smaller buffer it leaves ([`Wiping`]); the decoder's, the
+//! scaler's and the encoders' own scratch memory is freed, not overwritten.
 //!
 //! Decodable here: jpg, jpeg, png, webp, gif (its first frame), bmp. Not a source: heic, heif, raw, tif and tiff,
 //! and videos (this PC has no decoder for them).
@@ -129,27 +130,59 @@ pub fn scaled(upright: &Upright, long: u32) -> Upright {
     Upright { rgb }
 }
 
+/// An encoder's output that grows without leaving a copy behind: a `Vec` that grows frees its old block as it is,
+/// so this one moves to a larger buffer itself and wipes the one it leaves.
+struct Wiping(Zeroizing<Vec<u8>>);
+
+impl Wiping {
+    fn new() -> Self {
+        Self(Zeroizing::new(Vec::with_capacity(64 * 1024)))
+    }
+}
+
+impl std::io::Write for Wiping {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let needed = self.0.len().saturating_add(data.len());
+        if needed > self.0.capacity() {
+            let mut larger = Zeroizing::new(Vec::with_capacity(needed.max(self.0.capacity().saturating_mul(2))));
+            larger.extend_from_slice(&self.0);
+            // The smaller buffer is dropped here: wiped, its spare room too.
+            self.0 = larger;
+        }
+        self.0.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// JPEG at `quality`, no metadata.
 fn jpeg(picture: &Upright, quality: u8) -> Result<Zeroizing<Vec<u8>>, EncodeRefused> {
-    let mut out = Zeroizing::new(Vec::new());
+    let mut out = Wiping::new();
     let (w, h) = picture.size();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut *out, quality)
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
         .encode(picture.rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
         .map_err(|_| EncodeRefused::Failed)?;
-    Ok(out)
+    Ok(out.0)
 }
 
 /// A JPEG preview of `upright` with its long edge at `min(px, own)`: quality 85, or 70 once when 85 is over the
 /// server's cap; over that, refused.
 pub fn preview_jpeg(upright: &Upright, px: u32) -> Result<(Zeroizing<Vec<u8>>, (u32, u32)), EncodeRefused> {
-    let picture = scaled(upright, px);
+    jpeg_fitting(&scaled(upright, px))
+}
+
+/// `picture` as it is, as JPEG: quality 85, or 70 once when 85 is over the server's cap; over that, refused.
+pub fn jpeg_fitting(picture: &Upright) -> Result<(Zeroizing<Vec<u8>>, (u32, u32)), EncodeRefused> {
     let size = picture.size();
-    let first = jpeg(&picture, QUALITY)?;
+    let first = jpeg(picture, QUALITY)?;
     if first.len() <= MAX_PLAINTEXT {
         return Ok((first, size));
     }
     drop(first);
-    let second = jpeg(&picture, QUALITY_SMALLER)?;
+    let second = jpeg(picture, QUALITY_SMALLER)?;
     if second.len() <= MAX_PLAINTEXT {
         return Ok((second, size));
     }
@@ -166,9 +199,9 @@ pub fn encode_preview(original: &[u8], px: u32) -> Result<(Zeroizing<Vec<u8>>, (
 pub fn shown_png(picture: &Upright) -> Result<Zeroizing<Vec<u8>>, EncodeRefused> {
     let shown = scaled(picture, SHOWN_LONG_EDGE);
     let (w, h) = shown.size();
-    let mut out = Zeroizing::new(Vec::new());
-    image::codecs::png::PngEncoder::new(&mut *out)
+    let mut out = Wiping::new();
+    image::codecs::png::PngEncoder::new(&mut out)
         .write_image(shown.rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
         .map_err(|_| EncodeRefused::Failed)?;
-    Ok(out)
+    Ok(out.0)
 }

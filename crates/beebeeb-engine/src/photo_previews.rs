@@ -116,13 +116,12 @@ impl PreviewState {
     }
 }
 
-/// What the account's previews take (`GET /api/v1/files/previews/summary`): how many, their bytes, and how many at
-/// each setting. The server gives no bytes per setting: an average per setting comes from [`averages`].
+/// What the account's previews take (`GET /api/v1/files/previews/summary`): how many and their bytes. The server's
+/// count per setting is not read: an average per setting, and how many it was measured on, come from [`averages`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreviewsSummary {
     pub count: u64,
     pub total_bytes: u64,
-    pub by_setting: Vec<((PreviewFormat, u32), u64)>,
 }
 
 /// The average bytes of a stored preview at each (format, px), and how many it was measured on, from the per-file

@@ -2,7 +2,7 @@
 //! answers, every change it was sent, a read held until the test lets it go), and once against a real handle on the
 //! fake API with the preview routes. Every name is invented.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use beebeeb_engine::photo_previews::PreviewsSummary;
@@ -32,6 +32,13 @@ pub(crate) struct FakePreviews {
     pub(crate) wakes: AtomicUsize,
     /// What a sample measure answers (`true`: one photo, measured).
     pub(crate) has_photo: AtomicBool,
+    /// How many whole reads (with the per-file list) and summary reads were asked.
+    pub(crate) facts_reads: AtomicUsize,
+    pub(crate) summary_reads: AtomicUsize,
+    /// Added to the previews' count (more were made).
+    pub(crate) extra: AtomicU64,
+    /// A run's work waits while this is set (at most 10 s).
+    pub(crate) hold_make: AtomicBool,
 }
 
 pub(crate) fn fake() -> Arc<FakePreviews> {
@@ -53,6 +60,10 @@ pub(crate) fn fake() -> Arc<FakePreviews> {
         moved: Condvar::new(),
         wakes: AtomicUsize::new(0),
         has_photo: AtomicBool::new(false),
+        facts_reads: AtomicUsize::new(0),
+        summary_reads: AtomicUsize::new(0),
+        extra: AtomicU64::new(0),
+        hold_make: AtomicBool::new(false),
     })
 }
 
@@ -82,14 +93,13 @@ impl FakePreviews {
             2
         } else {
             7
-        };
+        } + self.extra.load(Ordering::SeqCst);
         PreviewsFacts {
             session,
             setting,
             summary: PreviewsSummary {
                 count,
                 total_bytes: 2_400_000_000,
-                by_setting: vec![((setting.format, setting.px), count)],
             },
             averages: vec![((Wire::Jpeg, 1920), 400_000, count)],
         }
@@ -110,12 +120,20 @@ impl PreviewsEngine for FakePreviews {
         self.wakes.fetch_add(1, Ordering::SeqCst);
     }
     fn facts(&self, session: SessionGeneration) -> Result<PreviewsFacts, PreviewsRefused> {
+        self.facts_reads.fetch_add(1, Ordering::SeqCst);
         // The answer is the account's as the read began.
         let facts = self.facts_now(session);
         self.wait_for_permit();
         match *self.read_fails.lock().unwrap() {
             Some(why) => Err(why),
             None => Ok(facts),
+        }
+    }
+    fn summary(&self, session: SessionGeneration) -> Result<PreviewsSummary, PreviewsRefused> {
+        self.summary_reads.fetch_add(1, Ordering::SeqCst);
+        match *self.read_fails.lock().unwrap() {
+            Some(why) => Err(why),
+            None => Ok(self.facts_now(session).summary),
         }
     }
     fn setting(&self, _session: SessionGeneration) -> Result<PreviewSetting, PreviewsRefused> {
@@ -135,6 +153,10 @@ impl PreviewsEngine for FakePreviews {
     fn make(&self, session: SessionGeneration, force: bool, _stop: &AtomicBool, progress: &dyn Fn(u32, u32)) -> RunEnd {
         self.makes.lock().unwrap().push((session, force));
         progress(1, 1);
+        let began = Instant::now();
+        while self.hold_make.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         RunEnd {
             made: 1,
             ..RunEnd::default()
@@ -486,4 +508,43 @@ fn the_engine_glue_reads_and_writes_the_accounts_setting() {
         PreviewsRefused::NotSignedIn
     );
     assert!(routes.puts() == 0);
+}
+
+#[test]
+fn while_making_only_the_summary_is_read_again() {
+    let fake = fake();
+    fake.hold_make.store(true, Ordering::SeqCst);
+    let mut host = opened(&fake);
+    pump_until(&mut host, "the session's run makes previews", |host| {
+        matches!(host.run_state(), RunState::Making { .. })
+    });
+    let whole_reads = fake.facts_reads.load(Ordering::SeqCst);
+    fake.extra.store(1, Ordering::SeqCst);
+    // The read is due again.
+    host.read_at = Instant::now().checked_sub(READ_EVERY_WHILE_MAKING);
+    pump_until(&mut host, "the count follows the summary", |host| {
+        ready(host).is_some_and(|previews| previews.photos == "3")
+    });
+    assert!(fake.summary_reads.load(Ordering::SeqCst) >= 1);
+    assert_eq!(
+        fake.facts_reads.load(Ordering::SeqCst),
+        whole_reads,
+        "the whole read (the per-file list) is not asked while the run makes previews"
+    );
+    fake.hold_make.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn a_picture_is_wiped_by_whoever_lets_go_of_it_last() {
+    let mut held: Arc<[u8]> = Arc::from(&[1u8, 2, 3][..]);
+    let other = held.clone();
+    wipe_if_last(&mut held);
+    assert_eq!(&held[..], &[1, 2, 3], "another holder still draws it");
+    drop(other);
+    wipe_if_last(&mut held);
+    assert_eq!(&held[..], &[0, 0, 0]);
+    // The picture that ships inside the app is never wiped.
+    let bundled = Sample::bundled();
+    drop(Sample::bundled());
+    assert_ne!(bundled.original_png.iter().filter(|b| **b != 0).count(), 0);
 }

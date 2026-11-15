@@ -204,6 +204,22 @@ impl std::fmt::Debug for Sample {
     }
 }
 
+/// The person's photo is wiped by whoever lets go of it last; the picture that ships inside the app is never the
+/// last (its holder lives as long as the app).
+impl Drop for Sample {
+    fn drop(&mut self) {
+        wipe_if_last(&mut self.original_png);
+        wipe_if_last(&mut self.preview_png);
+    }
+}
+
+/// Wipe `bytes` when nothing else holds them (a picture of the person's photo, let go of).
+pub fn wipe_if_last(bytes: &mut std::sync::Arc<[u8]>) {
+    if let Some(bytes) = std::sync::Arc::get_mut(bytes) {
+        zeroize::Zeroize::zeroize(bytes);
+    }
+}
+
 impl Sample {
     /// The picture that ships inside the app, said as that.
     pub fn bundled() -> Self {

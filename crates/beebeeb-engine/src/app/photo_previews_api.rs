@@ -108,12 +108,18 @@ impl std::fmt::Debug for SampleFacts {
 }
 
 /// Read `path` into memory (wiped when dropped), at most [`MAX_ORIGINAL`] bytes. Only a file [`plan::ready_to_read`]
-/// let through is ever opened.
+/// let through is ever opened. The buffer has room for every byte before the first is read, so it is never moved
+/// (a move would free a copy that is not wiped); a file that is not the size it said while read is not read.
 fn read_original(path: &Path) -> Option<Zeroizing<Vec<u8>>> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut bytes = Zeroizing::new(Vec::new());
-    file.take(MAX_ORIGINAL + 1).read_to_end(&mut bytes).ok()?;
-    (bytes.len() as u64 <= MAX_ORIGINAL).then_some(bytes)
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size > MAX_ORIGINAL {
+        return None;
+    }
+    let mut bytes = Zeroizing::new(vec![0u8; usize::try_from(size).ok()?]);
+    file.read_exact(&mut bytes).ok()?;
+    let mut more = Zeroizing::new([0u8; 1]);
+    (file.read(&mut *more).ok()? == 0).then_some(bytes)
 }
 
 /// What opens an original: the disk, or a test's counter.
@@ -155,6 +161,15 @@ impl<C: CredentialStores> Engine<C> {
             summary,
             averages: averages(&states),
         })
+    }
+
+    /// What the stored previews take, alone, for `session` (a window reads it again while a run makes previews).
+    pub fn photo_previews_summary_for(&self, session: SessionGeneration) -> Result<PreviewsSummary, PreviewsRefused> {
+        let summary = self
+            .account_call_for(session, |api| async move { Ok(api.previews_summary().await?) })
+            .map_err(from_call)?;
+        self.previews_handed_over(session)?;
+        Ok(summary)
     }
 
     /// WRITES the account's setting (every device reads it), for `session` and no other. Nothing else: turning
@@ -396,20 +411,28 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
-/// The weights and pictures of one sample, encoded on this PC.
+/// The weights and pictures of one sample, encoded on this PC. The largest size is scaled from the original and each
+/// smaller one from the size above it (one full-size scale, not four): a JPEG of the same photo at that size, not
+/// byte for byte the one the maker would make from the original.
 fn measure(original_bytes: u64, upright: &encode::Upright) -> Result<SamplePhoto, PreviewsRefused> {
     let original_png = encode::shown_png(upright).map_err(|_| PreviewsRefused::Failed)?;
     let mut weights = Vec::with_capacity(PX_CHOICES.len());
     let mut previews_png = Vec::with_capacity(PX_CHOICES.len());
-    for px in PX_CHOICES {
-        let Ok((jpeg, _)) = encode::preview_jpeg(upright, px) else {
-            continue;
-        };
-        weights.push((px, jpeg.len() as u64));
-        if let Ok(shown) = encode::decode(&jpeg).and_then(|preview| encode::shown_png(&preview)) {
-            previews_png.push((px, shown));
+    let mut largest_first = PX_CHOICES;
+    largest_first.sort_unstable_by(|a, b| b.cmp(a));
+    let mut above: Option<encode::Upright> = None;
+    for px in largest_first {
+        let picture = encode::scaled(above.as_ref().unwrap_or(upright), px);
+        if let Ok((jpeg, _)) = encode::jpeg_fitting(&picture) {
+            weights.push((px, jpeg.len() as u64));
+            if let Ok(shown) = encode::decode(&jpeg).and_then(|preview| encode::shown_png(&preview)) {
+                previews_png.push((px, shown));
+            }
         }
+        above = Some(picture);
     }
+    weights.reverse();
+    previews_png.reverse();
     Ok(SamplePhoto {
         original_bytes,
         weights,

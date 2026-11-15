@@ -286,6 +286,21 @@ fn run_stops_once_on_quota() {
     assert_eq!((end.made, world.previews.puts()), (0, 1));
 }
 
+/// A 429 is waited out (its `Retry-After`) and the same preview sent again: stored, never counted as failed.
+#[test]
+fn run_waits_out_a_429_and_sends_again() {
+    let world = world(
+        "rate",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200))],
+    );
+    world.previews.set_setting(JPEG_1920);
+    world.previews.rate_limit_next(1);
+    let end = world.make(false);
+    assert_eq!((end.made, end.failed, end.stopped), (1, 0, None));
+    assert_eq!(world.previews.puts(), 2, "the 429, then the same preview again");
+    assert!(world.previews.stored(ONE).is_some());
+}
+
 #[test]
 fn off_never_deletes_previews() {
     let world = world("off", &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200))]);
@@ -346,12 +361,17 @@ fn facts_are_the_setting_the_summary_and_the_averages() {
     let facts = world.engine.photo_previews_for(session).unwrap();
     assert_eq!(facts.setting, JPEG_1920);
     assert_eq!((facts.summary.count, facts.summary.total_bytes), (2, 800));
-    assert_eq!(facts.summary.by_setting, [((PreviewFormat::Jpeg, 1920), 2)]);
     assert_eq!(facts.averages, [((PreviewFormat::Jpeg, 1920), 400, 2)]);
+    // The summary alone (what a window reads again while a run makes previews).
+    assert_eq!(world.engine.photo_previews_summary_for(session).unwrap(), facts.summary);
     // Another session's question answers nothing.
     lock_and_unlock(&world.engine);
     assert_eq!(
         world.engine.photo_previews_for(session).unwrap_err(),
+        PreviewsRefused::NotSignedIn
+    );
+    assert_eq!(
+        world.engine.photo_previews_summary_for(session).unwrap_err(),
         PreviewsRefused::NotSignedIn
     );
 }

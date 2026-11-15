@@ -67,10 +67,12 @@ pub fn local_photos(db: &StateDb) -> Option<Vec<LocalPhoto>> {
     });
     let mut photos = Vec::with_capacity(rows.len());
     for (row, name) in rows {
-        let held_write = db
-            .item_presentation(&row.file_id)
-            .ok()?
-            .is_some_and(|presentation| presentation.held_write_queued);
+        // Only a `Local` row can be a source: the others are never asked. A row whose state does not read is taken
+        // as held (skipped), not as a reason to plan nothing.
+        let held_write = row.status == FileStatus::Local
+            && db.item_presentation(&row.file_id).map_or(true, |presentation| {
+                presentation.is_some_and(|presentation| presentation.held_write_queued)
+            });
         photos.push(LocalPhoto {
             id: row.file_id,
             rel_path: row.path,

@@ -424,3 +424,111 @@ fn the_setting_reads_leniently_and_round_trips() {
     let odd = serde_json::json!({ "enabled": "yes", "format": "png", "px": 1000 });
     assert_eq!(PreviewSetting::from_value(&odd), PreviewSetting::default());
 }
+
+/// A start that lands as the run's thread found no more work, while it still says it runs, leaves its work to that
+/// thread: the thread looks at the queue again after it said it no longer runs, and runs it.
+#[test]
+fn a_start_as_the_thread_goes_idle_is_run() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::{Duration, Instant};
+
+    use super::runner::{PreviewRun, RunEnd};
+    use crate::account::SessionGeneration;
+
+    let run = PreviewRun::new();
+    let (at_idle_tx, at_idle) = mpsc::channel::<()>();
+    let (go_on_tx, go_on) = mpsc::channel::<()>();
+    let go_on = Mutex::new(go_on);
+    let first = AtomicBool::new(true);
+    run.before_idle(Arc::new(move || {
+        if first.swap(false, Ordering::SeqCst) {
+            at_idle_tx.send(()).unwrap();
+            go_on
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the test let the thread go");
+        }
+    }));
+    let ran = Arc::new(AtomicU32::new(0));
+    let work = |ran: &Arc<AtomicU32>| {
+        let ran = ran.clone();
+        Box::new(move |_: &AtomicBool, _: &dyn Fn(u32, u32)| {
+            ran.fetch_add(1, Ordering::SeqCst);
+            RunEnd::default()
+        })
+    };
+    assert!(run.start(SessionGeneration::for_test(1), work(&ran)));
+    at_idle
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the thread found no more work");
+    assert!(run.running(), "the thread still says it runs");
+    assert!(run.start(SessionGeneration::for_test(1), work(&ran)));
+    go_on_tx.send(()).unwrap();
+    let began = Instant::now();
+    while ran.load(Ordering::SeqCst) < 2 || run.running() {
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "the start that came as the thread went idle never ran ({} ran)",
+            ran.load(Ordering::SeqCst)
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(ran.load(Ordering::SeqCst), 2);
+}
+
+/// A start stops the run on its way, never the work it queued: that work runs to its end.
+#[test]
+fn a_start_stops_the_run_before_it_and_not_itself() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    use super::runner::{PreviewRun, RunEnd};
+    use crate::account::SessionGeneration;
+
+    let run = PreviewRun::new();
+    let (began_tx, began) = mpsc::channel();
+    let first_saw_stop = Arc::new(AtomicBool::new(false));
+    let saw = first_saw_stop.clone();
+    assert!(run.start(
+        SessionGeneration::for_test(1),
+        Box::new(move |stop: &AtomicBool, _: &dyn Fn(u32, u32)| {
+            began_tx.send(()).unwrap();
+            for _ in 0..1_000 {
+                if stop.load(Ordering::SeqCst) {
+                    saw.store(true, Ordering::SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            RunEnd::default()
+        })
+    ));
+    began.recv_timeout(Duration::from_secs(5)).expect("the first run began");
+    let (done_tx, done) = mpsc::channel();
+    let polls = Arc::new(AtomicU32::new(0));
+    let counted = polls.clone();
+    assert!(run.start(
+        SessionGeneration::for_test(1),
+        Box::new(move |stop: &AtomicBool, _: &dyn Fn(u32, u32)| {
+            for _ in 0..20 {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            done_tx.send(()).unwrap();
+            RunEnd::default()
+        })
+    ));
+    done.recv_timeout(Duration::from_secs(10)).expect("the second run ran");
+    assert!(first_saw_stop.load(Ordering::SeqCst), "the first run was asked to stop");
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        20,
+        "the second run was never told to stop"
+    );
+}

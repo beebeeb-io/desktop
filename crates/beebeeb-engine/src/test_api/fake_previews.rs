@@ -36,6 +36,8 @@ pub struct PreviewRoutes {
     /// The media read lists these ids instead of the account's live files.
     media: Mutex<Option<Vec<String>>>,
     quota_full: AtomicBool,
+    /// The next this many preview PUTs are answered `429` with `Retry-After: 0`.
+    rate_limited: AtomicUsize,
     preference_fails: AtomicBool,
     puts: AtomicUsize,
     deletes: AtomicUsize,
@@ -52,6 +54,7 @@ impl PreviewRoutes {
             stored: Mutex::new(HashMap::new()),
             media: Mutex::new(None),
             quota_full: AtomicBool::new(false),
+            rate_limited: AtomicUsize::new(0),
             preference_fails: AtomicBool::new(false),
             puts: AtomicUsize::new(0),
             deletes: AtomicUsize::new(0),
@@ -108,6 +111,11 @@ impl PreviewRoutes {
     /// Answer every preview PUT `413 quota_exceeded`, or no longer.
     pub fn fill_storage(&self, full: bool) {
         self.quota_full.store(full, Ordering::SeqCst);
+    }
+
+    /// Answer the next `puts` preview PUTs `429` with `Retry-After: 0` (counted as PUTs that reached the routes).
+    pub fn rate_limit_next(&self, puts: usize) {
+        self.rate_limited.store(puts, Ordering::SeqCst);
     }
 
     /// Answer the preference read `500`, or no longer.
@@ -217,6 +225,13 @@ impl PreviewRoutes {
             _ => {
                 self.puts.fetch_add(1, Ordering::SeqCst);
                 let id = preview_id.unwrap_or_default();
+                if self
+                    .rate_limited
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    return Some(Reply::error(429, "rate_limited").retry_after(0));
+                }
                 if self.quota_full.load(Ordering::SeqCst) {
                     return Some(Reply::json(
                         413,

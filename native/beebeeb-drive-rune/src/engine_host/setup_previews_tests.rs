@@ -15,7 +15,6 @@ fn facts(enabled: bool, format: Wire, px: u32, count: u64) -> PreviewsFacts {
         summary: PreviewsSummary {
             count,
             total_bytes: count * 400_000,
-            by_setting: Vec::new(),
         },
         averages: if count > 0 {
             vec![((Wire::Heic, 2560), 300_000, count)]
