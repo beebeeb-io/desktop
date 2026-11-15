@@ -595,7 +595,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
                 Answer::Searching
             } else if self.not_this_accounts() {
                 // This PC's local state is another account's: Search says why; nothing of it was read.
-                Answer::Unavailable
+                Answer::NotThisAccounts
             } else {
                 Answer::Unavailable
             };

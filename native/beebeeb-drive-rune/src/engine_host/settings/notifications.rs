@@ -988,7 +988,11 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     fn read_unjudged(&mut self) {
         if self.recheck && self.marking == 0 && !self.switching && self.engine.has_session() {
             let turn = self.engine.session_turn();
-            {
+            if self.ended_told == Some(turn) {
+                // A write of this session was told the session ended: nothing of it is kept, never "possibly out
+                // of date", whichever answer landed first. The read asked for now is judged as any.
+                self.forget();
+            } else {
                 // What was kept while the write was out stays if this read fails too, said to be possibly out of
                 // date: a failure that was not judged then is not a reason to drop what a write has just confirmed.
                 self.unconfirmed = Some(turn);
