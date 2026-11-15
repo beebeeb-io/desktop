@@ -76,6 +76,9 @@ use crate::frames::settings::source::{Alert, AlertKind, AlertTarget, Notificatio
 #[cfg(test)]
 mod tests;
 
+#[cfg(any())]
+const MUTANT_P8: &str = "io.beebeeb.app";
+
 /// What this part holds is not read again, when its pane opens, for this long.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
 
