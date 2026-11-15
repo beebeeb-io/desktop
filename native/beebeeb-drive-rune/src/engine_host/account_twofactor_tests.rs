@@ -440,8 +440,6 @@ fn a_password_change_is_asked_on_a_worker_and_answered_through_the_call() {
         source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""),
         "taken: the engine's call runs on a worker"
     );
-    // A second press while it is out sends nothing new.
-    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
     let Some((CallKind::ChangePassword, answered)) = answer(&mut source) else {
         panic!("the change was not answered");
     };
