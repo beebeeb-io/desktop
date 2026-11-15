@@ -192,13 +192,13 @@ impl<C: CredentialStores> Engine<C> {
                 FolderStep::Done(_) => return Err(FolderLinkError::Refused),
             };
             // L7d: remembered before any key from the record is used. A write that fails: this request is not sent.
+            let resp = self.link_send(&run, request)?;
             if let Some(folder) = mark_custody_seen {
                 state
                     .with(|db| remember_custody(db, &folder, revision))
                     .map_err(state_refusal)?
                     .map_err(|_| FolderLinkError::Refused)?;
             }
-            let resp = self.link_send(&run, request)?;
             step = flow.on_response(resp).map_err(flow_refusal)?;
         };
         self.hand_over(&run, link)
@@ -419,6 +419,9 @@ fn live_folder_links<'a>(links: &'a [Value], id: &str) -> Vec<&'a Value> {
 /// on it (core can check a password link only with the password) and its stored wrapped folder key present, so core
 /// opens it under the link's key. `None` otherwise.
 fn rebuilt_folder_link(app_url: &str, master: &MasterKey, row: &Value) -> Option<Zeroizing<String>> {
+    if row.get("passphrase_protected").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
     let wrapped = text(row, "wrapped_folder_key").filter(|w| !w.is_empty())?;
     rebuild_folder_link(
         app_url,
