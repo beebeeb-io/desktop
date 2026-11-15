@@ -54,6 +54,11 @@ impl State {
             Action::NewFolder => {
                 self.begin_new_folder();
             }
+            // New file opens again on the folder shown: the name is typed again (the dialog keeps none it was not
+            // asked to).
+            Action::NewFile => {
+                self.intent(super::Intent::Frame("DW-1521"));
+            }
             Action::Move => {
                 self.begin_move(tx);
             }
