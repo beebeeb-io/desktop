@@ -168,7 +168,11 @@ pub fn scene_opening(s: &mut State) {
 
 /// DW-1564: the pages are shown, one quiet line in the status bar.
 pub fn scene_quiet(s: &mut State) {
-    scene_of(s, StateBody::new(OfficeState::ContentMissing, true));
+    if viewers::open_doc(s, super::docs::docs_fixture::file(false))
+        && let Some(doc) = viewers::doc_mut(s)
+    {
+        doc.quiet = OfficeState::ContentMissing.quiet_line();
+    }
 }
 
 /// The group's board frames and the scene that shows each (`frames::scenes`).
