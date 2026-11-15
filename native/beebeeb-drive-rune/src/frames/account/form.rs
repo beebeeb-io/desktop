@@ -53,6 +53,8 @@ pub struct Form {
     pub current: TextEdit,
     pub new: TextEdit,
     pub again: TextEdit,
+    /// Where the typing of a frozen password page goes (a change is out): thrown away, never a password field.
+    pub sink: TextEdit,
     /// The digits of a code (secure, shown): the email's 8, the authenticator's 6, a backup code's 8.
     pub code: TextEdit,
     /// A passkey's new name, while it is renamed.
@@ -102,6 +104,7 @@ impl Default for Form {
             current: secure(),
             new: secure(),
             again: secure(),
+            sink: secure(),
             code: code_edit(),
             rename: TextEdit::new(""),
             problem: None,
@@ -195,6 +198,7 @@ pub fn arrive(ui: &mut AccountUi) {
         (f.new, f.again) = (secure(), secure());
     }
     f.code = code_edit();
+    f.sink = secure();
     if let Some(dialog) = &ui.dialog {
         if matches!(dialog, Dialog::Code(_)) {
             focus(f, Some(CODE_KEY));

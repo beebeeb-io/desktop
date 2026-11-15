@@ -387,7 +387,13 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
                 input_key: form::NEW_KEY,
             },
             &f.new,
-            |s: &mut State| &mut s.account.form.new,
+            move |s: &mut State| {
+                if out {
+                    &mut s.account.form.sink
+                } else {
+                    &mut s.account.form.new
+                }
+            },
             t,
         )));
     if !f.new.text.is_empty() {
@@ -409,7 +415,13 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
                     input_key: form::CURRENT_KEY,
                 },
                 &f.current,
-                |s: &mut State| &mut s.account.form.current,
+                move |s: &mut State| {
+                    if out {
+                        &mut s.account.form.sink
+                    } else {
+                        &mut s.account.form.current
+                    }
+                },
                 t,
             )),
             new,
@@ -423,7 +435,13 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
                     input_key: form::AGAIN_KEY,
                 },
                 &f.again,
-                |s: &mut State| &mut s.account.form.again,
+                move |s: &mut State| {
+                    if out {
+                        &mut s.account.form.sink
+                    } else {
+                        &mut s.account.form.again
+                    }
+                },
                 t,
             )),
             au::banner(
