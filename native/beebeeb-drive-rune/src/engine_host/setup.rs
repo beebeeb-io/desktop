@@ -319,6 +319,19 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn binds_app_lock(&self) -> bool {
         false
     }
+    /// `Engine::set_lock_after_for` ("Lock again after", step 2). BLOCKS. A fake that does not bind it stores nothing.
+    fn set_lock_after_for(
+        &self,
+        _session: SessionGeneration,
+        _after: app_lock::EngineLockAfter,
+        _proof: Option<app_lock::AppLockProof>,
+    ) -> Result<(), app_lock::AppLockRefused> {
+        Err(app_lock::AppLockRefused::NotSaved)
+    }
+    /// Whether this engine stores "Lock again after" (step 2 draws the row): the real one does.
+    fn binds_lock_after(&self) -> bool {
+        false
+    }
 }
 
 /// One folder step 3 offers: the engine's key, its name, whether it starts on, and a bounded count of its files.
@@ -408,6 +421,17 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     fn binds_app_lock(&self) -> bool {
         true
     }
+    fn set_lock_after_for(
+        &self,
+        session: SessionGeneration,
+        after: app_lock::EngineLockAfter,
+        proof: Option<app_lock::AppLockProof>,
+    ) -> Result<(), app_lock::AppLockRefused> {
+        Engine::set_lock_after_for(self, session, after, proof)
+    }
+    fn binds_lock_after(&self) -> bool {
+        true
+    }
 }
 
 /// What the adapter asks of the shell around it.
@@ -451,6 +475,10 @@ enum Answer {
     Backups(Option<Vec<BackupChoice>>),
     /// How Windows Hello's prompt for turning app lock off ended (`setup_app_lock.rs`).
     LockProved(crate::engine_host::hello::HelloResult),
+    /// How Windows Hello's prompt for a longer "Lock again after" ended (`setup_app_lock.rs`).
+    AfterProved(app_lock::EngineLockAfter, crate::engine_host::hello::HelloResult),
+    /// The engine wants a proof for this delay (longer than what it stored): the prompt comes (`setup_app_lock.rs`).
+    AfterNeedsProof(app_lock::EngineLockAfter),
 }
 
 /// The first run on the real engine. See the module's doc.
@@ -893,6 +921,8 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                     self.backups_fresh = true;
                 }
                 Answer::LockProved(result) => self.app_lock_proved(result),
+                Answer::AfterProved(after, result) => self.lock_after_proved(after, result),
+                Answer::AfterNeedsProof(after) => self.prove_lock_after(after),
             }
         }
         let unsaved = self.folder_unsaved();
@@ -986,12 +1016,13 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     fn add_passkey(&mut self) -> bool {
         false
     }
-    /// The app lock (step 2), through core's rule (`setup_app_lock.rs`). The delay is not set in this version
-    /// ([`SetupSource::sets_lock_after`]): the step draws no such row.
-    fn set_app_lock(&mut self, on: bool, _after: LockAfter) {
-        self.ask_app_lock(on);
+    /// The app lock (step 2) and, while it is on, "Lock again after", through the engine's rules
+    /// (`setup_app_lock.rs`).
+    fn set_app_lock(&mut self, on: bool, after: LockAfter) {
+        self.ask_app_lock(on, after);
     }
+    /// The step draws "Lock again after" when the engine stores it (the real one does).
     fn sets_lock_after(&self) -> bool {
-        false
+        self.engine.binds_lock_after()
     }
 }

@@ -67,6 +67,11 @@ pub enum TrayEvent {
     ShutdownCancelled,
     /// Something outside asked the app to close (`taskkill` without /F, Restart Manager).
     CloseRequested,
+    /// The operating system's session was locked (Win+L, or Windows' own lock): the away lock's event.
+    SessionLocked,
+    /// The PC woke from sleep or hibernation: how long it was away, its time without input before it slept and the
+    /// sleep itself (the away lock's event; a wake's own key press is input, so the idle count alone would miss it).
+    Resumed { away: std::time::Duration },
 }
 
 pub type TrayHandler = Arc<dyn Fn(TrayEvent) + Send + Sync>;
@@ -133,6 +138,11 @@ pub trait Platform: Send + Sync {
     /// without a folder. The folder is the person's own: shown to them, never logged.
     fn pick_folder(&self, _title: &str, _start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
         Err(PlatformError::NotBuilt("the folder picker"))
+    }
+    /// How long this PC has had no input from the person (keys, pointer, touch), in any app: the away lock's
+    /// clock. `None`: this platform cannot say; the shell then counts from its own windows' last input.
+    fn idle_for(&self) -> Option<Duration> {
+        None
     }
     /// Sets or clears the window's capture-exclusion. When set, the window region appears black
     /// (or absent) in screenshots, screen recordings and screen-sharing; clearing restores it.

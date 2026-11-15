@@ -43,6 +43,7 @@ use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary
 
 pub mod account;
 mod app_lock;
+mod away;
 pub mod backups;
 // Backups' "Other devices" and "Delete this backup" (`backups::EngineBackupsSource` delegates to it).
 pub mod backups_devices;
@@ -495,6 +496,15 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
 
     fn resume_after_cancelled_quit(&self) {
         log("NotWired(resume_after_cancelled_quit)");
+    }
+
+    /// The away lock: the engine compares and locks (`engine_host/away.rs`).
+    fn away_job(&self, seen: actions::Away) -> Option<actions::AwayJob> {
+        Some(away::job(&self.engine, seen))
+    }
+
+    fn screen_open(&self) -> bool {
+        away::screen_open(&self.engine)
     }
 }
 

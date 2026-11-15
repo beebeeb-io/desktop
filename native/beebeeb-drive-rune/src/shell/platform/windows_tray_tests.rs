@@ -339,6 +339,48 @@ fn wm_close_asks_the_app_to_quit_and_the_window_stays() {
     assert!(h.is_present());
 }
 
+/// A lock of the Windows session is the away lock's event; an unlock is not.
+#[test]
+fn a_session_lock_is_said_to_the_app_and_an_unlock_is_not() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::WTS_SESSION_UNLOCK;
+    let h = Harness::new("session", syncing());
+    send(h.hwnd, WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK as WPARAM, 0);
+    assert!(!h.events().contains(&TrayEvent::SessionLocked));
+    send(h.hwnd, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK as WPARAM, 0);
+    assert_eq!(h.events().last(), Some(&TrayEvent::SessionLocked));
+    assert_eq!(h.faults(), 0);
+}
+
+/// Review of #452 (P2-1): a sleep is time away. The suspend is noted; the resume says how long the PC was away (its
+/// time without input at the suspend, and the sleep), once per sleep; a resume with no suspend seen says nothing.
+#[test]
+fn a_resume_says_how_long_the_pc_was_away_once_and_only_after_a_suspend() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WM_POWERBROADCAST,
+    };
+    let h = Harness::new("power", syncing());
+    let resumes = |h: &Harness| -> Vec<std::time::Duration> {
+        h.events()
+            .iter()
+            .filter_map(|event| match event {
+                TrayEvent::Resumed { away } => Some(*away),
+                _ => None,
+            })
+            .collect()
+    };
+    send(h.hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC as WPARAM, 0);
+    assert!(resumes(&h).is_empty(), "no suspend was seen: its length is not known");
+    send(h.hwnd, WM_POWERBROADCAST, PBT_APMSUSPEND as WPARAM, 0);
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    send(h.hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC as WPARAM, 0);
+    // The resume a person's input adds after the automatic one is the same wake.
+    send(h.hwnd, WM_POWERBROADCAST, PBT_APMRESUMESUSPEND as WPARAM, 0);
+    let away = resumes(&h);
+    assert_eq!(away.len(), 1, "{away:?}");
+    assert!(away[0] >= std::time::Duration::from_millis(80), "{away:?}");
+    assert_eq!(h.faults(), 0);
+}
+
 /// Enter on the focused b sends NIN_KEYSELECT twice: one toggle.
 #[test]
 fn a_key_select_and_its_repeat_are_one_activation() {

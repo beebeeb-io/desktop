@@ -136,15 +136,17 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
     ] {
         assert!(!says_anywhere(&rt, sample), "a sample or a guess shows: {sample}");
     }
-    // Nothing that is not bound can be pressed. App lock's switch is bound: it is drawn only once the engine answered
-    // for this session (the row says "Not known yet" before; `app_lock_tests` pins that at the source), so the test
-    // waits on that answer, then reads the engine's value (on: "Windows Hello"), never a sample's.
+    // Nothing that is not bound can be pressed. App lock's switch and its delay are bound: drawn only once the engine
+    // answered for this session (the row says "Not known yet" before; `app_lock_tests` pins that at the source), so
+    // the test waits on that answer, then reads the engine's values (on, and the delay with nothing stored: five
+    // minutes, decision 2519), never a sample's.
     wait_for(&mut rt, "app lock's answer", |rt| has(rt, "item-1-0-switch"));
-    assert_eq!(text(&rt, "item-1-0-sub"), "Windows Hello");
+    assert_eq!(text(&rt, "item-1-0-sub"), "Windows Hello · locks again after");
     assert!(!says_anywhere(&rt, "anyone using this PC"));
+    assert!(has(&rt, "item-1-0-pop"), "the time choice: the away lock acts on it");
     assert!(
-        !has(&rt, "item-1-0-pop"),
-        "no time choice: nothing acts on one in this version"
+        shows(&rt, "Locks again after, 5 min"),
+        "the pop-up button says the engine's delay"
     );
     // Devices and sessions is bound: its row opens it.
     click(&mut rt, "item-1-1");

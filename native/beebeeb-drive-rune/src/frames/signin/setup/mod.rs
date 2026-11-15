@@ -389,7 +389,7 @@ impl Ui {
                 Switch::Notifications => self.results.notifications = now,
                 Switch::OpenAtLogin => self.results.open_at_login = now,
                 Switch::AppLock => self.results.app_lock = now,
-                Switch::Backup => {}
+                Switch::Backup | Switch::LockAfter => {}
             }
         }
         match (outcome.done, outcome.now) {
@@ -454,6 +454,10 @@ impl Ui {
                 self.source.set_app_lock(self.lock_on, self.lock_after);
                 self.results.app_lock = self.lock_on;
                 self.asked(Switch::AppLock);
+                // The delay goes with the switch on only (off never locks).
+                if self.lock_on && self.sets_lock_after() {
+                    self.asked(Switch::LockAfter);
+                }
             }
             Step::Backup => {
                 let on: Vec<String> = self.folders.iter().filter(|f| f.on).map(|f| f.name.clone()).collect();

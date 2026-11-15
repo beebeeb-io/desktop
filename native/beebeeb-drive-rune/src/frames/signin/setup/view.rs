@@ -208,8 +208,9 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let on = ui.lock_on;
     let chosen = LockAfter::ALL.iter().position(|a| *a == ui.lock_after).unwrap_or(1);
     let labels: Vec<&str> = LockAfter::ALL.iter().map(|a| a.label()).collect();
-    // A source that sets no delay draws no "Lock again after" (never a choice nothing acts on).
-    let delay = ui.sets_lock_after();
+    // A source that sets no delay draws no "Lock again after" (never a choice nothing acts on), and neither does
+    // the switch off (off never locks).
+    let delay = ui.sets_lock_after() && on;
     let mut rows = vec![setup::item(
         k,
         Some(&icons::FACE),
@@ -845,6 +846,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         (Switch::OpenAtLogin, "open at login"),
         (Switch::Backup, "backup"),
         (Switch::AppLock, "app lock"),
+        (Switch::LockAfter, "lock delay"),
     ]
     .into_iter()
     .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))

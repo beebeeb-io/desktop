@@ -700,8 +700,9 @@ pub trait AccountSource {
     fn plan_details(&self) -> Option<PlanDetails> {
         None
     }
-    /// Engine: how soon the app locks again (`settings.app_lock_after`), one of
-    /// `app_lock::DELAYS`. Windows Hello is asked first, as for `set_app_lock`.
+    /// Engine: how soon the app locks again (the engine's `lock.after`), one of
+    /// `app_lock::DELAYS`. A longer delay asks Windows Hello first, as turning app lock off does;
+    /// a shorter one asks nothing.
     fn set_lock_after(&mut self, _delay: &str) {}
     /// Engine: `DELETE /api/v1/account/sessions?device=<id>`: ends all of that device's
     /// Beebeeb sessions. `false`: no such device, or it is this one.

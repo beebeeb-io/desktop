@@ -92,6 +92,8 @@ pub enum Switch {
     Backup,
     /// Step 2: app lock.
     AppLock,
+    /// Step 2: "Lock again after", asked with app lock on (no row of "You're set up": said only when not changed).
+    LockAfter,
 }
 
 /// How a change asked through the source ended.
@@ -245,7 +247,7 @@ pub trait SetupSource {
         false
     }
     /// `false`: "Lock again after" is not set by this source, and step 2 draws no such row (never a choice
-    /// nothing acts on). The fixture draws the board's.
+    /// nothing acts on). The fixture draws the board's; the engine's sets it. Drawn only while the switch is on.
     fn sets_lock_after(&self) -> bool {
         true
     }
