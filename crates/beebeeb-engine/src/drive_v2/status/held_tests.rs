@@ -31,6 +31,25 @@ fn hold(db: &StateDb, file_id: &str, path: &str, reason: &str, at: i64) {
     db.hold_unsent_edit(file_id, reason, "fp", at).unwrap();
 }
 
+/// `count` unchecked files `Invented/File 0000.txt`.. found at 1_800_000_000 + n, in two statements (a row at a time
+/// is one fsync each).
+fn hold_many(db: &StateDb, count: i64) {
+    let rows = format!(
+        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < {})",
+        count - 1
+    );
+    db.test_execute(&format!(
+        "INSERT INTO files (file_id, path, status) {rows}
+         SELECT printf('f-%04d', i), printf('Invented/File %04d.txt', i), 'local' FROM n"
+    ))
+    .unwrap();
+    db.test_execute(&format!(
+        "INSERT INTO held_edits (file_id, reason, fingerprint, detected_at) {rows}
+         SELECT printf('f-%04d', i), 'content_unknown', 'fp', 1800000000 + i FROM n"
+    ))
+    .unwrap();
+}
+
 fn problems(db: &StateDb) -> Vec<SyncProblem> {
     held_edit_problems(&db.held_edit_overview(LIMIT).unwrap())
 }
@@ -54,15 +73,7 @@ fn an_edit_whose_base_is_unknown_is_one_row_with_its_words_and_no_action() {
 #[test]
 fn five_thousand_unchecked_files_are_one_row_with_the_count_and_the_first_names() {
     let (_dir, db) = db();
-    for n in 0..5_000 {
-        hold(
-            &db,
-            &format!("f-{n:04}"),
-            &format!("Invented/File {n:04}.txt"),
-            "content_unknown",
-            1_800_000_000 + n,
-        );
-    }
+    hold_many(&db, 5_000);
     let problems = problems(&db);
     assert_eq!(problems.len(), 1, "never a row per file");
     let p = &problems[0];
