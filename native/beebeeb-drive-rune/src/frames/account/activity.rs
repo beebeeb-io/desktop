@@ -31,8 +31,8 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     let periods = source.activity();
     let on = periods.is_some();
     let confirm = match dialog {
-        // Owner ruling 2026-11-14: a risky action proves the PASSWORD. A source that asks it gets the password dialog
-        // (a known deviation from the board's DW-A78, which asks a code); the board's own source keeps the code.
+        // Owner ruling 2026-11-14: a risky action proves the PASSWORD (the board's DW-A78 asks it too). A source that
+        // asks it gets the password dialog; one that does not keeps the code dialog.
         Some(Dialog::Code(CodeFor::StopActivity)) if source.stop_activity_needs_password() => {
             Some(stop_with_password(f, t))
         }
@@ -133,21 +133,19 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     (set::pane(children, t), confirm)
 }
 
-/// "Turn off security logging?" asking the account password (DW-A78 with the password instead of a code).
+/// "Turn off security logging?" asking the account password (DW-A78, drawn as the board's frame).
 fn stop_with_password(f: &Form, t: &Theme) -> El {
     let wrong = f.problem == Some(Problem::WrongPassword);
     let (turn_off, turn_off_b) = button(0, "Turn off", Look::Danger, false, t);
     let (cancel, cancel_b) = button(1, "Cancel", Look::Plain, false, t);
+    // The board's field (DW-A78, owner ruling 2026-11-14: the password): "Account password", no icon, no words under
+    // it; the red state and its sentence come only after a refusal.
     let field = fm::field(
         0,
         &Field {
-            label: "Password",
-            icon: Some(&icons::PADLOCK),
-            message: Some(if wrong {
-                "Enter your password to confirm it's you."
-            } else {
-                "To confirm it's you."
-            }),
+            label: "Account password",
+            icon: None,
+            message: wrong.then_some("Enter your password to confirm it's you."),
             error: wrong,
             input_key: form::CURRENT_KEY,
         },

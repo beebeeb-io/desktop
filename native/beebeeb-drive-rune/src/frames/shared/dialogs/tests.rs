@@ -137,11 +137,22 @@ fn each_dialog_and_its_controls_are_named_as_the_board_names_them() {
     assert_eq!(info(&rt, "first-share").role, "note");
 
     // Empty Trash?: the password field is named without what is typed; the button is on once something is.
-    let rt = runtime(scenes::dw_0749);
+    let mut rt = runtime(scenes::dw_0749);
     assert_eq!(
         info(&rt, super::PASSWORD_INPUT).label.as_deref(),
         Some("Your account password")
     );
+    assert!(
+        !info(&rt, "btn-empty-trash-2").focusable,
+        "Empty Trash is off: nothing is typed (the board's frame)"
+    );
+    rt.state
+        .frames
+        .shared
+        .fields
+        .password
+        .replace_text("sample".to_string());
+    settle(&mut rt);
     assert!(
         info(&rt, "btn-empty-trash-2").focusable,
         "Empty Trash is on: a password is typed"
@@ -375,7 +386,16 @@ fn poll(rt: &mut Runtime<State>) {
 #[test]
 fn the_password_shows_to_no_reader_is_sent_once_and_wiped_and_empty_trash_waits_for_one() {
     let mut rt = runtime(scenes::dw_0749);
-    assert_eq!(rt.state.frames.shared.fields.password.text, "sample");
+    assert_eq!(
+        rt.state.frames.shared.fields.password.text, "",
+        "the board's frame opens on an empty field"
+    );
+    rt.state
+        .frames
+        .shared
+        .fields
+        .password
+        .replace_text("sample".to_string());
     let debug = format!("{:?}", rt.state.frames.shared.fields);
     assert!(!debug.contains("sample"), "the password is in the fields' Debug");
     // Nothing typed: the button is off and nothing is sent.
