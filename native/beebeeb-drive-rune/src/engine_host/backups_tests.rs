@@ -108,6 +108,38 @@ impl BackupsEngine for Fake {
     }
 }
 
+/// Other devices are `backups_devices_tests`'s: this fake has none, and deletes nothing.
+impl DevicesEngine for Fake {
+    fn stamp(&self) -> (beebeeb_engine::account::SessionGeneration, Option<String>) {
+        (beebeeb_engine::account::SessionGeneration::for_test(1), self.account())
+    }
+    fn has_session(&self) -> bool {
+        self.unlocked()
+    }
+    fn devices_for(
+        &self,
+        session: beebeeb_engine::account::SessionGeneration,
+    ) -> Result<
+        beebeeb_engine::app::backup_devices_api::BackupDevices,
+        beebeeb_engine::app::backup_devices_api::DevicesRefused,
+    > {
+        Ok(beebeeb_engine::app::backup_devices_api::BackupDevices {
+            session,
+            devices: Vec::new(),
+            complete: true,
+        })
+    }
+    fn delete_for(
+        &self,
+        _session: beebeeb_engine::account::SessionGeneration,
+        _folder_id: &str,
+        _password: &[u8],
+    ) -> Result<(), beebeeb_engine::backup_delete::DeleteBackupError> {
+        Err(beebeeb_engine::backup_delete::DeleteBackupError::SignedOut)
+    }
+    fn wake(&self) {}
+}
+
 fn row(key: &'static str, name: &'static str, on: bool, state: FolderState) -> BackupFolderRow {
     BackupFolderRow {
         key,
@@ -190,15 +222,11 @@ fn the_root_and_the_folders_come_from_the_engines_answer() {
     ] {
         assert!(source.wired(part), "{part:?} is bound");
     }
-    for part in [
-        Part::Devices,
-        Part::MailBackup,
-        Part::AddFolder,
-        Part::RemoveFolder,
-        Part::DeleteDevice,
-    ] {
+    for part in [Part::MailBackup, Part::AddFolder, Part::RemoveFolder, Part::OpenDevice] {
         assert!(!source.wired(part), "{part:?} is not bound");
     }
+    // Other devices and Delete this backup are `backups_devices`'s.
+    assert!(source.wired(Part::Devices) && source.wired(Part::DeleteDevice));
 }
 
 #[test]
