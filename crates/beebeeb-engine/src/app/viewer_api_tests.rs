@@ -1119,7 +1119,7 @@ fn a_trashed_file_this_computer_never_synced_opens_in_memory_and_nothing_about_i
     let engine = engine_at(&api.base);
     signed_in(&engine, &owner);
     // A local state of this account's that has no row for the trashed file.
-    let (_dir, db) = local_state(&engine, &owner);
+    let (dir, db) = local_state(&engine, &owner);
     assert!(db.get_file(TRASHED).unwrap().is_none());
 
     let opened = open(&engine, TRASHED, NO_LIMIT).expect("the trashed file opens in memory");
@@ -1131,7 +1131,21 @@ fn a_trashed_file_this_computer_never_synced_opens_in_memory_and_nothing_about_i
         "its chunks were downloaded"
     );
 
-    // Nothing about it was recorded here: no row, no contract, nothing kept.
+    // Nothing about it was recorded here: no row, no contract, nothing kept; and the id is in no table of the local
+    // state at all (every file of its directory, the database and its write-ahead log, read as bytes).
+    let mentioned: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            let bytes = std::fs::read(path).unwrap_or_default();
+            bytes.windows(TRASHED.len()).any(|w| w == TRASHED.as_bytes())
+        })
+        .map(|path| path.display().to_string())
+        .collect();
+    assert!(
+        mentioned.is_empty(),
+        "the trashed file's id was written to {mentioned:?}"
+    );
     assert!(db.get_file(TRASHED).unwrap().is_none(), "no row for the trashed file");
     assert!(
         db.get_file_contract_state(TRASHED).unwrap().is_none(),
