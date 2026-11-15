@@ -578,7 +578,10 @@ impl<C: CredentialStores> Engine<C> {
             }
         };
         let screen_check = self.take_pending_screen_check(&typed_email);
-        let email = typed_email;
+        let email = match profile.email.trim() {
+            "" => typed_email,
+            named => named.to_string(),
+        };
         // A stored session this sign-in replaces (the strong unlock): it must be this account's, and the key and
         // the engine of the old session leave first (`lock_api`).
         let (turn, replaced) = match self.prepare_replacement(turn, &profile).await {
@@ -1035,9 +1038,6 @@ impl<C: CredentialStores> Engine<C> {
                 .map_err(|e| store::keychain_error("clear the stored session", e))?;
             if let Ok(mut email) = self.acct.auth_email.lock() {
                 *email = None;
-            }
-            if let Ok(mut profile) = self.acct.cached_profile.lock() {
-                *profile = None;
             }
             self.remember_session_user_id(None);
             self.acct.auth_health.note_result(None);
