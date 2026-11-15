@@ -374,8 +374,9 @@ fn a_gap_of_hours_after_an_idle_locks_without_a_resume() {
     });
 }
 
-/// Fifteen minutes without input, then ten in which the app did not run: said at once (not a minute later), and short
-/// of thirty minutes it locks nothing; the engine says when the rest could be reached.
+/// Fifteen minutes without input, then twenty in which the app did not run: said at once (not a minute later), and the
+/// gap alone is short of thirty minutes, so it locks nothing (the brief's rule: a gap under the delay does not lock);
+/// the engine says when the rest could be reached.
 #[test]
 fn a_gap_short_of_the_delay_is_said_at_once_and_does_not_lock() {
     let mut live = live();
@@ -383,12 +384,12 @@ fn a_gap_short_of_the_delay_is_said_at_once_and_does_not_lock() {
     idle_for(&mut live, Duration::from_secs(15 * 60));
     looked(&mut live);
     let before = away(&mut live.rt).answered;
-    slept(&mut live, Duration::from_secs(10 * 60));
+    slept(&mut live, Duration::from_secs(20 * 60));
     answers(&mut live, before + 1);
     assert_eq!(
         live.engine.lock_state(),
         LockState::Open,
-        "twenty-five minutes away, of thirty"
+        "a gap of twenty minutes, of thirty"
     );
     assert!(away(&mut live.rt).away.is_none(), "said once");
     let due = away(&mut live.rt).due.expect("a look is due");

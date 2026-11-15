@@ -16,9 +16,10 @@
 //!   the tray at the suspend and the resume, so the wake's own key press cannot hide it.
 //! - **A gap.** Windows may not send the suspend broadcast (a Modern Standby PC sends it only to a window that
 //!   registered for it: the tray registers, `RegisterSuspendResumeNotification`; review of #452, P2-A). So the poll also
-//!   notes when it last ran, on two clocks, and the time without input it saw then. A gap between two polls far past
-//!   the look interval ([`AWAY_GAP`]) means the app did not run: the time without input seen before it, plus the gap,
-//!   is said to the engine as idle time at once (the wake's own key press cannot hide it). No broadcast is needed.
+//!   notes when it last ran, on two clocks. A gap between two polls far past the look interval ([`AWAY_GAP`]) means
+//!   the app did not run: the gap is said to the engine as idle time at once (the wake's own key press cannot hide
+//!   it). No broadcast is needed. The gap alone: where the broadcast did come too, it never locks sooner than the PC's
+//!   own measure (at most the minute between the last poll and the sleep more).
 //! - The engine's look reads the credential store and waits for the lock's write hold: it runs on a worker, one idle
 //!   look at a time. The job is made on the window's thread, so it holds the session it was measured for.
 //!
@@ -47,13 +48,11 @@ pub const LOOK_AT_MOST_EVERY: Duration = Duration::from_secs(60);
 /// sooner, never later).
 pub const AWAY_GAP: Duration = Duration::from_secs(120);
 
-/// What the poll saw the last time it ran while the engine was open.
+/// When the poll last ran while the engine was open, on two clocks.
 #[derive(Clone, Copy, Debug)]
 struct Seen {
     at: Instant,
     wall: SystemTime,
-    /// The time without input it measured then.
-    idle: Duration,
 }
 
 impl Seen {
@@ -157,13 +156,12 @@ impl AwayLock {
         let idle = pc_idle
             .unwrap_or(Duration::MAX)
             .min(now.saturating_duration_since(opened_at));
-        // A gap far past the look interval: the app did not run. What it saw without input before, and the gap, is
-        // time away; it is held until a look carries it (one may be out now), and it does not wait for the next due.
-        if let Some(seen) = self.seen.replace(Seen { at: now, wall, idle }) {
+        // A gap far past the look interval: the app did not run, and the gap is time away. It is held until a look
+        // carries it (one may be out now), and it does not wait for the next due.
+        if let Some(seen) = self.seen.replace(Seen { at: now, wall }) {
             let gap = seen.gap(now, wall);
             if gap > AWAY_GAP {
-                let away = seen.idle.saturating_add(gap);
-                self.away = Some(self.away.map_or(away, |held| held.max(away)));
+                self.away = Some(self.away.map_or(gap, |held| held.max(gap)));
             }
         }
         if self.without || self.looking {
