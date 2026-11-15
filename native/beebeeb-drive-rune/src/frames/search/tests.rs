@@ -708,6 +708,9 @@ fn search_alt_enter_opens_details_over_search() {
     let place = super::hit(&rt.state, &id).expect("the hit").place;
     let facts = crate::frames::item::tests::facts(&rt, 1);
     assert!(facts.contains(&("Where".to_string(), place)), "{facts:?}");
+    // A click on the card's words keeps the keyboard in the dialog (its layer), never on the results behind it.
+    click(&mut rt, "dlg-file-name");
+    assert_eq!(focused(&rt).as_deref(), Some("dialog-details"));
     press(&mut rt, Key::Escape, Mods::default());
     assert_eq!(rt.state.frames.shared.dialog, None, "Esc closes Details");
     assert!(super::is_open(&rt.state), "search stays open");
@@ -717,4 +720,25 @@ fn search_alt_enter_opens_details_over_search() {
         rt.state.frames.find.selected, before,
         "the next key reaches the results"
     );
+}
+
+/// A Details over Search whose result is not among the results drawn (they re-answer) draws nothing, and never keeps
+/// the keys: the next key closes it and reaches the results (Search's own key handler asks the dialog layer first).
+#[test]
+fn an_undrawn_details_over_search_is_closed_by_the_next_key() {
+    use crate::frames::item::Origin;
+    use crate::frames::shared::dialogs::Dialog;
+    let mut rt = scene(dw_0802);
+    rt.update(|s, _| {
+        s.frames.shared.open_dialog(Dialog::Details {
+            origin: Origin::Search,
+            id: "not-among-the-results".into(),
+        })
+    });
+    settle(&mut rt);
+    assert!(!has(&rt, "dialog-details"), "nothing is drawn of it");
+    let before = rt.state.frames.find.selected.clone();
+    press(&mut rt, Key::Down, Mods::default());
+    assert_eq!(rt.state.frames.shared.dialog, None, "the key closed it");
+    assert_ne!(rt.state.frames.find.selected, before, "and reached the results");
 }
