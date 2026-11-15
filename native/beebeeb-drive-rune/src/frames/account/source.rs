@@ -128,6 +128,8 @@ pub struct Security {
 pub struct SecurityFacts {
     /// App lock on this PC: on, and how soon it locks again. `None`: this build cannot set it yet.
     pub app_lock: Option<(bool, String)>,
+    /// "Use your password" on App lock's row (no board frame: D-2). `None`: not offered.
+    pub app_lock_password: Option<super::app_lock_password::PasswordOffer>,
     /// "3 weeks ago".
     pub password_changed: Option<String>,
     pub two_factor: Option<bool>,
@@ -194,6 +196,7 @@ impl SecurityFacts {
     pub fn unknown() -> Self {
         SecurityFacts {
             app_lock: None,
+            app_lock_password: None,
             password_changed: None,
             two_factor: None,
             backup_codes: None,
@@ -704,6 +707,11 @@ pub trait AccountSource {
     /// `app_lock::DELAYS`. A longer delay asks Windows Hello first, as turning app lock off does;
     /// a shorter one asks nothing.
     fn set_lock_after(&mut self, _delay: &str) {}
+    /// Engine: app lock's change that Windows Hello did not confirm, with the account password instead (offered in
+    /// `security_facts().app_lock_password`). The engine checks it, counted as the screen unlock's tries are, and
+    /// makes the change; how it ended comes back through `security_facts` and the toast. A source that cannot do it
+    /// offers nothing; given one anyway, it does nothing (the buffer is wiped as it is dropped).
+    fn app_lock_with_password(&mut self, _password: super::app_lock_password::LockPassword) {}
     /// Engine: `DELETE /api/v1/account/sessions?device=<id>`: ends all of that device's
     /// Beebeeb sessions. `false`: no such device, or it is this one.
     fn sign_out_device(&mut self, id: &str) -> bool;

@@ -738,12 +738,77 @@ fn leaving_with_changes_asks_first_and_each_answer_does_what_it_says() {
 fn a_refused_save_keeps_the_edit_and_says_why() {
     let (mut rt, _) = note(false, false);
     edit_and_type(&mut rt);
-    let ui = rt.state.viewer.ui.as_mut().expect("a file is open");
-    ui.settle(super::source::Settled::Refused("Not saved: an invented reason".into()));
+    refuse(&mut rt);
     let ui = viewer(&rt);
     assert!(ui.editor.is_some() && ui.dirty(), "the edit stays, unsaved");
     assert_eq!(ui.dialog, None);
-    assert_eq!(ui.toast.as_deref(), Some("Not saved: an invented reason"));
+    assert_eq!(ui.toast, None, "said once, in the banner");
+    assert_eq!(
+        info(&rt, "banner-text").text.as_deref(),
+        Some("Not saved: an invented reason")
+    );
+    assert_eq!(ui.file.version, 3);
+}
+
+/// The engine refused the save (an earlier change to the file is not sent yet), as `pump` hands it over.
+fn refuse(rt: &mut Runtime<State>) {
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.settle(super::source::Settled::Refused("Not saved: an invented reason".into()));
+    });
+    rt.frame(0.0);
+}
+
+/// Press the control keyed `key` with the pointer, at its middle, once what enters has settled (as `media_tests`).
+fn click(rt: &mut Runtime<State>, key: &str) {
+    rt.settle_all();
+    rt.frame(0.0);
+    let r = info(rt, key).rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    rt.settle_all();
+}
+
+/// Task 2530, item 1: the refusal offers Save a copy, the two-versions question's Keep both. Pressing it asks for ONE
+/// copy with the editor's text; the note itself is not saved again, and the view then shows the copy as Keep both does.
+#[test]
+fn the_refusal_offers_save_a_copy() {
+    let (mut rt, calls) = note(false, false);
+    edit_and_type(&mut rt);
+    let typed = viewer(&rt).editor.as_ref().expect("the editor").edit.text.clone();
+    refuse(&mut rt);
+    assert_eq!(info(&rt, "banner-btn").label.as_deref(), Some("Save a copy"));
+    let before = calls.borrow().len();
+    click(&mut rt, "banner-btn");
+    assert_eq!(
+        calls.borrow()[before..],
+        ["resolve meeting-notes-4-nov.md Both".to_string()],
+        "one copy asked for, nothing else"
+    );
+    let ui = viewer(&rt);
+    assert!(ui.editor.is_none(), "as Keep both: the copy is shown");
+    assert_eq!(ui.file.name, "Meeting notes 4 Nov (Anna-Laptop).md");
+    let Body::Markdown(doc) = &ui.file.body else {
+        panic!("the copy is shown as the note it is");
+    };
+    assert_eq!(doc.source, typed, "the edit's text, unchanged");
+    assert!(!has(&rt, "banner-btn"), "the refusal went with the edit");
+}
+
+/// R5: a refusal of the copy itself keeps the edit open and says it was not saved (the words Keep both has for it).
+#[test]
+fn a_refused_copy_keeps_the_edit_and_says_not_saved() {
+    let (mut rt, _) = note(false, false);
+    edit_and_type(&mut rt);
+    let ui = rt.state.viewer.ui.as_mut().expect("a file is open");
+    ui.settle(super::source::Settled::Refused("Not saved: an invented reason".into()));
+    ui.settle(super::source::Settled::Failed);
+    let ui = viewer(&rt);
+    assert!(ui.editor.is_some() && ui.dirty(), "the edit stays, unsaved");
+    assert_eq!(ui.toast.as_deref(), Some("Not saved"));
     assert_eq!(ui.file.version, 3);
 }
 

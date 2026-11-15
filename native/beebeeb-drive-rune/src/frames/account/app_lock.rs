@@ -4,6 +4,8 @@
 //! Nothing here is a secret: the menu holds four lengths of time. Turning the lock off or
 //! choosing a longer delay asks for Windows Hello first; that question is the source's
 //! (`AccountSource::set_app_lock`, `set_lock_after`), asked by the engine, never drawn here.
+//! When Windows Hello does not confirm it, the row offers the account password instead
+//! (`app_lock_password`, no board frame: D-2).
 
 use crate::State;
 use crate::theme::tokens::Theme;

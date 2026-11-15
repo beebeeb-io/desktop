@@ -118,6 +118,8 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 ("account_password_api.rs", 1),
                 ("conflicts_api.rs", 2),
                 ("share_link_api.rs", 1),
+                // 2530: then local_state_for_changes() (refuses a locked screen) + a session re-check, as conflicts.
+                ("parked_exit_api.rs", 1),
             ],
         ),
         ("call_may_run(", &[("lock_api.rs", 2), ("owned_state.rs", 1)]),

@@ -39,6 +39,9 @@ fn change(id: &str, file_id: Option<&str>, kind: &'static str, group: &str) -> U
         parked: false,
         retryable: group == "gave_up",
         blocked: None,
+        park: None,
+        exits: Vec::new(),
+        version: None,
     }
 }
 

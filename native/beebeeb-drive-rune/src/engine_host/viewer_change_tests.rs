@@ -900,3 +900,100 @@ fn a_second_lock_after_a_resumed_save_opens_the_file_again_once_more() {
         "for the session after the second lock"
     );
 }
+
+/// Task 2530, item 1: the earlier change is held back (parked, or a held edit): the refusal says so, and never that it
+/// is on its way.
+#[test]
+fn a_held_refusal_shows_the_held_words() {
+    let fake = Fake::new();
+    fake.s().save_answer = Err(EditRefused::EarlierChangeHeld);
+    let (mut source, file, _) = opened(&fake, NOTE);
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    let Settled::Refused(words) = settled(&mut source, NOTE) else {
+        panic!("refused, and why");
+    };
+    assert_eq!(words, super::super::change::EARLIER_HELD);
+    assert!(!source.saving());
+}
+
+/// Save a copy after a refusal, answered after the session moved to another account: dropped, nothing applied (the
+/// stamp rule every change follows). The edit stays with the window.
+#[test]
+fn a_late_copy_answer_after_a_session_change_is_dropped() {
+    let fake = Fake::new();
+    fake.s().save_answer = Err(EditRefused::EarlierChangeNotSent);
+    let (mut source, file, _) = opened(&fake, NOTE);
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Refused(_)));
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert_eq!(source.resolve(NOTE, "mine\n", Keep::Both), SaveOutcome::Working);
+    fake.new_session("b@example.eu");
+    drop(door);
+    until("the copy was asked for", || fake.s().copies.len() == 1);
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        source.settled(NOTE).is_none(),
+        "another session's copy answer is never applied, nor said"
+    );
+    assert!(
+        fake.s().saves.len() == 1,
+        "nothing was written to the note after the refusal"
+    );
+}
+
+/// R5: a refusal of the copy itself is said as the two-versions Keep both says it (not saved); nothing moves.
+#[test]
+fn a_refused_copy_is_said_and_moves_nothing() {
+    let fake = Fake::new();
+    fake.s().save_answer = Err(EditRefused::EarlierChangeNotSent);
+    fake.s().copy_refused = Some(EditRefused::ReadOnly);
+    let (mut source, file, _) = opened(&fake, NOTE);
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Refused(_)));
+    assert_eq!(source.resolve(NOTE, "mine\n", Keep::Both), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Failed));
+    assert_eq!(
+        fake.s().copies,
+        [(NOTE.to_string(), "mine\n".to_string())],
+        "the edit's text, unchanged"
+    );
+}
+
+/// Review of #452 (P2-B): the open file ended at a lock; after the unlock the first press could not read the file's
+/// facts. That opening is not taken up: the next press opens the file again and the save goes out.
+#[test]
+fn a_resume_whose_facts_were_not_read_is_tried_again_at_the_next_press() {
+    let fake = Fake::new();
+    let (mut source, file, _) = opened(&fake, NOTE);
+    fake.new_session("a@example.eu");
+    assert_eq!(source.poll(NOTE), Some(Body::Stopped(Stopped::SessionChanged)));
+    let facts = fake.s().edit.take();
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Failed);
+    fake.s().edit = facts;
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Saved { version: 4, .. }));
+    assert_eq!(
+        fake.s().save_turns.last(),
+        Some(&SessionGeneration::for_test(2)),
+        "for the session after the lock"
+    );
+}
+
+/// Review of #452 (P2-B): a press that reaches the view while Beebeeb is locked (the lock landed, the screen not
+/// redrawn yet) opens nothing again and saves nothing; after the unlock, the save goes out.
+#[test]
+fn a_press_while_beebeeb_is_locked_opens_nothing_again() {
+    let fake = Fake::new();
+    let (mut source, file, _) = opened(&fake, NOTE);
+    fake.new_session("a@example.eu");
+    assert_eq!(source.poll(NOTE), Some(Body::Stopped(Stopped::SessionChanged)));
+    fake.s().locked = true;
+    let forgets = fake.s().forgets;
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Failed);
+    assert_eq!(fake.s().forgets, forgets, "no new opening while locked");
+    assert!(fake.s().saves.is_empty(), "nothing saved while locked");
+    fake.s().locked = false;
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Saved { version: 4, .. }));
+}

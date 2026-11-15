@@ -201,7 +201,7 @@ pub fn reason_for(change: &UnsentChange) -> Option<&'static str> {
         });
     }
     if change.parked {
-        return Some("Beebeeb couldn’t apply this change. Nothing was lost.");
+        return Some(parked_words(change.park, &change.exits));
     }
     Some(match change.group.as_str() {
         "gave_up" => "Stopped after 5 tries.",
@@ -212,6 +212,41 @@ pub fn reason_for(change: &UnsentChange) -> Option<&'static str> {
         "waiting" if change.retry_at.is_some() => "Couldn’t reach Beebeeb. Trying again soon.",
         _ => return None,
     })
+}
+
+/// Task 2530: a way out a problem row may offer (the engine's list, `state_db::parked_exit`).
+pub use crate::state_db::ParkExit as Exit;
+
+/// Task 2530: why a parked change is not sent, by why it parked, in words that say what the row's ways out do. A
+/// change with no way out never promises one.
+fn parked_words(park: Option<&str>, exits: &[Exit]) -> &'static str {
+    match park {
+        Some("stale_base") if !exits.is_empty() => {
+            "Not sent: this file changed in Beebeeb before this change reached it. Choose which version to keep. Nothing was lost."
+        }
+        Some("stale_base") => {
+            "Not sent: this file changed in Beebeeb before this change reached it. Your copy stays on this PC. Nothing was lost."
+        }
+        Some("permission_denied") => {
+            "Not sent: this account can no longer change this file in Beebeeb. Your change stays on this PC. Nothing was lost."
+        }
+        Some("predecessor_lost") => {
+            "Not sent: Beebeeb lost track of the change made before this one. Your change stays on this PC. Nothing was lost."
+        }
+        Some("predecessor_parked") => {
+            "Waiting: an earlier change to this file on this PC has to be sent first. Nothing was lost."
+        }
+        Some("rekey_failed") => {
+            "Not sent: Beebeeb couldn’t prepare this change after the file was created. Nothing was lost."
+        }
+        Some("payload_missing") => {
+            "This PC no longer has the bytes of this change, so it can’t be sent. The file on Beebeeb is as it was."
+        }
+        Some("base_unknown") => {
+            "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on this PC. Nothing was lost."
+        }
+        _ => "Beebeeb couldn’t apply this change. Nothing was lost.",
+    }
 }
 
 /// A change counts as a problem when it stopped, is blocked or parked, or was uploaded but not marked as synced.
@@ -275,7 +310,12 @@ pub fn transfer_rows(board: &[ActiveTransferDto], queue: &[UnsentChange]) -> Vec
             },
             bytes: 0,
             total: None,
-            reason: if problem { reason_for(change) } else { None },
+            // Task 2530: the Uploads panel offers no way out of a parked change, so its words promise none.
+            reason: match (problem, change.parked) {
+                (true, true) => Some(parked_words(change.park, &[])),
+                (true, false) => reason_for(change),
+                (false, _) => None,
+            },
             retryable: change.retryable,
         });
     }
@@ -293,11 +333,30 @@ pub struct SyncProblem {
     pub name: String,
     pub folder: String,
     pub reason: &'static str,
+    /// Try again applies: true exactly where [`Self::exits`] holds [`Exit::TryAgain`].
     pub retryable: bool,
     pub backup: bool,
     /// When it was queued (ISO 8601); absent when not recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
+    /// Task 2530: the ways out the row offers, and only these (a window never draws one the engine did not list).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exits: Vec<Exit>,
+    /// Task 2530: the file's version a Keep choice is made against (the read's); absent without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
+}
+
+/// Task 2530: a queue row's ways out: a parked change's from the engine's read; any other change's Try again where the
+/// queue's own rule allows it.
+fn exits_of(change: &UnsentChange) -> Vec<Exit> {
+    if change.parked {
+        change.exits.clone()
+    } else if change.retryable {
+        vec![Exit::TryAgain]
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn sync_problems(queue: &[UnsentChange]) -> Vec<SyncProblem> {
@@ -306,15 +365,18 @@ pub fn sync_problems(queue: &[UnsentChange]) -> Vec<SyncProblem> {
         .filter(|c| is_problem(c))
         .map(|c| {
             let (name, folder) = leaf(&c.path);
+            let exits = exits_of(c);
             SyncProblem {
                 id: c.id.clone(),
                 file_id: c.file_id.clone(),
                 name,
                 folder: if c.backup { String::new() } else { folder },
                 reason: reason_for(c).unwrap_or("It didn’t sync. Nothing was lost."),
-                retryable: c.retryable,
+                retryable: exits.contains(&Exit::TryAgain),
                 backup: c.backup,
                 at: (c.queued_at > 0).then(|| super::model::iso(c.queued_at)),
+                version: c.version.filter(|_| !exits.is_empty()),
+                exits,
             }
         })
         .collect()
@@ -352,6 +414,9 @@ pub fn held_edit_problems(held: &HeldEdits) -> Vec<SyncProblem> {
                 retryable: false,
                 backup: false,
                 at: at(*detected_at),
+                // Task 2530 (step 0): no engine path sends a held edit as a new file yet, so the row has words only.
+                exits: Vec::new(),
+                version: None,
             }
         })
         .collect();
@@ -377,6 +442,8 @@ pub fn held_edit_problems(held: &HeldEdits) -> Vec<SyncProblem> {
             retryable: false,
             backup: false,
             at: at(held.unchecked_first.first().map_or(0, |f| f.2)),
+            exits: Vec::new(),
+            version: None,
         });
     }
     out
@@ -439,3 +506,6 @@ pub fn offline_entries(rows: &[(FileEntry, bool, DriveItem)]) -> Vec<OfflineEntr
 
 #[cfg(test)]
 mod held_tests;
+
+#[cfg(test)]
+mod exits_tests;

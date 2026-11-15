@@ -69,6 +69,29 @@ a stored value the menu does not have is drawn as "Not known". "Immediately" loc
 tray and after one minute without input while it stays (no time at all cannot be told from reading). The shell
 measures (Windows' whole-PC idle, its session lock); the engine compares and locks through core's `lock_after_away`.
 
+### App lock with the account password: not on the board (D-2)
+
+The board's rule (DW-0716, Rules) is "The Windows app's password works when Windows Hello doesn't"; its Actions say
+turning app lock off or changing the delay asks Windows Hello first. No board frame draws the password step: decision
+D-2 of wave 2 (lead, 2026-11-15) has it drawn from the kit until the board gets the frame in the next designs PR.
+`app_lock_password.rs`, bound in `engine_host/app_lock.rs`, tests in `engine_host/app_lock_password_tests.rs`.
+
+- When Windows Hello cancels, fails or is not set up on this PC for turning app lock off or a longer delay, the Lock
+  Beebeeb row offers "Use your password" (a link, the lock screen's words) while Sign-in and security shows.
+- The step is the account kit's password confirm (DW-A78's): "Confirm it's you", one line for the change ("Turning off
+  app lock needs your account password." / "A longer lock delay needs your account password."), "Account password",
+  Continue and Cancel. While the password is checked, Continue says "Checking…" and nothing closes the step.
+- The sentence under the field after an answer that keeps the step open is the lock screen's for the same outcome
+  ("Screen lock: password" in `frames/signin/FRAMES.md`), without a prefix; an answer that ends the step is a toast
+  that starts "App lock is still on: " or "The lock delay was not changed: ".
+
+| Scene (no board id, no golden, not gated) | What it is |
+| --- | --- |
+| `APPLOCK-password-offered` | The page after Windows Hello did not confirm: "Use your password" in the Lock Beebeeb row. |
+| `APPLOCK-password` | The step for turning app lock off, a password typed. |
+| `APPLOCK-password-wrong` | After a wrong password: the field empty, "That password isn't right." under it. |
+| `APPLOCK-password-checking` | The password is being checked: Continue says "Checking…", the field is frozen. |
+
 Decision (lane, 2026-11-13): DW-A52, DW-A84, DW-A84a, DW-A57, DW-A57a, DW-0716 and DW-0716b are retired by the
 owner's ruling of 2026-11-13 (option C of three rendered options: one page), because the two screens listed the
 same subjects twice and the pane was a menu that said nothing about the account's state. The ruling wins over the

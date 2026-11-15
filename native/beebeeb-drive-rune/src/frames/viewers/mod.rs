@@ -54,10 +54,7 @@ use crate::shell::app::{Event, Screen};
 use crate::shell::host;
 use crate::shell::registry::FrameGroup;
 use crate::theme::tokens;
-use source::{
-    Body, Conflict, Elsewhere, FixtureViewerSource, Keep, OpenError, OpenFile, SaveOutcome, TextDoc, ViewerSource,
-    board,
-};
+use source::{Body, Conflict, Elsewhere, FixtureViewerSource, Keep, OpenError, OpenFile, TextDoc, ViewerSource, board};
 
 /// Where the person goes when an action leaves this group. The shell opens it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +150,9 @@ impl Intent {
 pub struct Editor {
     pub edit: rune::TextEdit,
     base: String,
+    /// Why the last save was refused behind an earlier change to the file on this PC (the engine's words), while it
+    /// is the last answer: its banner offers Save a copy (task 2530, item 1). It goes with the edit.
+    refused: Option<String>,
 }
 
 impl Editor {
@@ -404,7 +404,11 @@ impl Ui {
         }
         let mut edit = rune::TextEdit::new(text.clone());
         edit.set_caret(text.len());
-        self.editor = Some(Editor { edit, base: text });
+        self.editor = Some(Editor {
+            edit,
+            base: text,
+            refused: None,
+        });
         self.toast = None;
         self.focus = Some(EDITOR_KEY);
     }
@@ -419,25 +423,6 @@ impl Ui {
         match &self.editor {
             Some(editor) => self.source.colours(&self.file, &editor.edit.text),
             None => Vec::new(),
-        }
-    }
-
-    fn outcome(&mut self, outcome: SaveOutcome) {
-        match outcome {
-            SaveOutcome::Saved { file, at } => {
-                self.toast = Some(format!("Saved \u{00B7} encrypted \u{00B7} version {}", file.version));
-                self.saved_at = Some(at);
-                self.show(file);
-            }
-            SaveOutcome::Opened(file) => self.show(file),
-            SaveOutcome::Conflict(other) => self.ask(Dialog::Conflict(other)),
-            // Not saved: the edit stays as it is, and so does what the status line says.
-            SaveOutcome::Failed => self.dialog = None,
-            // On its way: the edit stays as it is until the engine answers.
-            SaveOutcome::Working => {
-                self.dialog = None;
-                self.toast = Some("Saving\u{2026}".to_string());
-            }
         }
     }
 
@@ -917,7 +902,8 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             unsaved: dirty,
         };
         let body = text::editor(editor, &ui.editor_lines(), &t);
-        return chrome::window(s, cx, ui, head, text::editor_tools(&t), None, body, &status, &t);
+        let refused = text::refused_banner(editor.refused.as_deref(), &t);
+        return chrome::window(s, cx, ui, head, text::editor_tools(&t), refused, body, &status, &t);
     }
     let head = chrome::Head::default();
     let reading = |doc_truncated: Option<source::Truncated>| match &ui.saved_at {

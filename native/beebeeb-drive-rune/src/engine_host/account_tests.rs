@@ -81,6 +81,8 @@ struct Server {
     change_mode: Arc<AtomicU8>,
     read_delay_ms: Arc<AtomicU64>,
     change_delay_ms: Arc<AtomicU64>,
+    /// How long a password proof's last leg waits before the accounts' handler answers it (app lock's password step).
+    proof_delay_ms: Arc<AtomicU64>,
     /// Every session id a DELETE named, in order, and how many times "all others" was asked.
     deleted: Arc<Mutex<Vec<String>>>,
     revoked_all: Arc<AtomicU64>,
@@ -153,6 +155,8 @@ fn server() -> Server {
     let refused_ids: Arc<Mutex<Vec<&'static str>>> = Arc::default();
     let (mock_in, refused_in) = (plan_mock.clone(), refused_ids.clone());
     let (deleted, revoked_all) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicU64::new(0)));
+    let proof_delay_ms = Arc::new(AtomicU64::new(0));
+    let proof_delay_in = proof_delay_ms.clone();
     let (people_in, read_in, plan_in, change_in, read_delay_in, change_delay_in, deleted_in, revoked_in) = (
         people.clone(),
         read_mode.clone(),
@@ -280,7 +284,12 @@ fn server() -> Server {
                     Reply::ok(json!({ "revoked": true }))
                 })
             }
-            _ => rest[who](req),
+            _ => {
+                if route.ends_with("/password-proof/finish") {
+                    std::thread::sleep(Duration::from_millis(proof_delay_in.load(Ordering::SeqCst)));
+                }
+                rest[who](req)
+            }
         }
     }));
     Server {
@@ -295,6 +304,7 @@ fn server() -> Server {
         change_mode,
         read_delay_ms,
         change_delay_ms,
+        proof_delay_ms,
         deleted,
         revoked_all,
         during_read,
