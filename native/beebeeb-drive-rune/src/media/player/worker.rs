@@ -899,9 +899,10 @@ fn log_played(codec: Codec, frames_1s: u32, rms_1s: f64, confined: bool) {
 }
 
 /// The words the view shows for a helper's error code.
-fn refusal_of(code: ErrorCode) -> Refusal {
+pub(super) fn refusal_of(code: ErrorCode) -> Refusal {
     match code {
         ErrorCode::NoSystemDecoder(codec) => Refusal::NoSystemDecoder(codec),
+        ErrorCode::NoSystemMedia(codec) => Refusal::NoSystemMedia(codec),
         ErrorCode::Unsupported(codec) => Refusal::NoDecoder(codec.name().unwrap_or_default().to_string()),
         ErrorCode::NoDecoder => Refusal::NoDecoder(String::new()),
         ErrorCode::Corrupt | ErrorCode::TooLarge | ErrorCode::ReadFailed | ErrorCode::Timeout | ErrorCode::Internal => {

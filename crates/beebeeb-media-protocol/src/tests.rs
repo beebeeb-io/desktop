@@ -142,6 +142,7 @@ fn from_helper_messages() -> Vec<FromHelper> {
         }));
         all.push(FromHelper::Error(ErrorCode::Unsupported(codec)));
         all.push(FromHelper::Error(ErrorCode::NoSystemDecoder(codec)));
+        all.push(FromHelper::Error(ErrorCode::NoSystemMedia(codec)));
     }
     all
 }

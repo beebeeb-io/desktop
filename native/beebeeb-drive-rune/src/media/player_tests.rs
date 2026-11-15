@@ -12,11 +12,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use beebeeb_media_protocol::{
-    AudioInfo, Codec, FromHelper, KindHint, MAX_READ, Opened, Tags, ToHelper, VideoInfo, read_to_helper, write_msg,
+    AudioInfo, Codec, ErrorCode, FromHelper, KindHint, MAX_READ, Opened, Tags, ToHelper, VideoInfo, read_to_helper,
+    write_msg,
 };
 use zeroize::Zeroizing;
 
-use super::worker::writes_played_line;
+use super::worker::{refusal_of, writes_played_line};
 use super::{
     AudioFactory, AudioSink, Clock, Link, LinkFactory, MediaBytes, MediaItem, MediaOpener, NowPlayingSink, Phase,
     PlayerHandle, Refusal, lock,
@@ -768,4 +769,36 @@ fn played_line_only_in_test_builds() {
         between.starts_with("return;}tracing::info!("),
         "nothing stands between the question and the call: {between}"
     );
+}
+
+#[test]
+fn helper_error_codes_map_to_refusals() {
+    // The system's decoder missing, or no media codecs on this edition of Windows: the honest state names the codec.
+    assert_eq!(
+        refusal_of(ErrorCode::NoSystemDecoder(Codec::Hevc)),
+        Refusal::NoSystemDecoder(Codec::Hevc)
+    );
+    assert_eq!(
+        refusal_of(ErrorCode::NoSystemMedia(Codec::Aac)),
+        Refusal::NoSystemMedia(Codec::Aac)
+    );
+    // No decoder for the format: the format's name, never the file's; a format without a name says none.
+    assert_eq!(
+        refusal_of(ErrorCode::Unsupported(Codec::Hevc)),
+        Refusal::NoDecoder("HEVC".to_owned())
+    );
+    assert_eq!(
+        refusal_of(ErrorCode::Unsupported(Codec::Other)),
+        Refusal::NoDecoder(String::new())
+    );
+    assert_eq!(refusal_of(ErrorCode::NoDecoder), Refusal::NoDecoder(String::new()));
+    for code in [
+        ErrorCode::Corrupt,
+        ErrorCode::TooLarge,
+        ErrorCode::ReadFailed,
+        ErrorCode::Timeout,
+        ErrorCode::Internal,
+    ] {
+        assert_eq!(refusal_of(code), Refusal::CouldNotPlay);
+    }
 }
