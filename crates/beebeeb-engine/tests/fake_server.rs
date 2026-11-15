@@ -543,7 +543,10 @@ mod versions {
         assert_eq!(status, 200, "{made}");
         assert_eq!(made["version_number"], 2);
         let after = account.item_state(SEEDED).unwrap();
-        assert_eq!((after.0, after.2), (2, 35));
+        assert_eq!(
+            (after.0, after.2),
+            (2, "version two, saved on another device".len() as u64)
+        );
         assert!(after.1 > before.1, "updated_at moved: {} -> {}", before.1, after.1);
         let (plain, meta) = open(&account, SEEDED);
         assert_eq!(plain, b"version two, saved on another device");
