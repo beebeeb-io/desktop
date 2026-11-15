@@ -805,3 +805,86 @@ fn the_sidebar_foot_draws_the_account_and_the_storage_the_window_read() {
     assert!(info(&rt, "meter-fill-0").rect[2] > 0.0);
     assert_eq!(info(&rt, "meter-fill-1").rect[2], 0.0);
 }
+
+/// Task 2524: a source whose problems are the given changes (the history holds them too, as the engine's does).
+struct Problems(Vec<Change>);
+
+impl ThisPcSource for Problems {
+    fn today(&self) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+    }
+    fn history(&self) -> Vec<Change> {
+        self.0.clone()
+    }
+    fn problems(&self) -> Vec<Change> {
+        self.0.clone()
+    }
+    fn retry(&mut self, _: &str) {}
+    fn retry_all(&mut self) {}
+    fn kept(&self) -> Vec<Kept> {
+        Vec::new()
+    }
+    fn remove_from_pc(&mut self, _: &str) {}
+    fn remove_all_from_pc(&mut self) {}
+}
+
+fn problem_row(id: &str, name: &str, reason: super::source::Reason) -> Change {
+    Change {
+        id: id.into(),
+        name: name.into(),
+        kind: super::source::Kind::Document,
+        what: super::source::What::Failed {
+            problem: id.into(),
+            reason,
+        },
+        origin: super::source::Origin::ThisPc,
+        date: chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+        time: "09:39".into(),
+    }
+}
+
+const HELD_WORDS: &str = "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on this PC. Nothing was lost.";
+
+fn on_problems(rows: Vec<Change>) -> Runtime<State> {
+    with_state(super::Section::SyncHistory, Box::new(Problems(rows)), |s| {
+        s.this_pc.filter = Filter::Problems;
+    })
+}
+
+/// A held edit is drawn as a problem with its words, and with no Try again (the engine has no action for it); a
+/// problem the queue can try again keeps its button next to it.
+#[test]
+fn a_held_edit_is_drawn_with_its_words_and_no_try_again() {
+    use super::source::Reason;
+    let rt = on_problems(vec![
+        problem_row("op-1", "Rates.xlsx", Reason::Said("Stopped after 5 tries.")),
+        problem_row("held:f-1", "Plan.txt", Reason::Held(HELD_WORDS)),
+    ]);
+    assert_eq!(text(&rt, "change-0-sub"), "Stopped after 5 tries.");
+    assert_eq!(text(&rt, "change-1-name"), "Plan.txt");
+    assert_eq!(text(&rt, "change-1-sub"), HELD_WORDS);
+    let buttons = rt
+        .elements()
+        .iter()
+        .filter(|e| {
+            e.key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("btn-try-again") && !k.ends_with("-icon") && !k.ends_with("-label"))
+        })
+        .count();
+    assert_eq!(buttons, 1, "one Try again, for the queue's problem only");
+    assert!(has(&rt, "btn-try-all-again"));
+}
+
+/// Only held edits: the Can't sync bar is there, and nothing offers an action that does nothing.
+#[test]
+fn only_held_edits_offer_no_try_again_at_all() {
+    use super::source::Reason;
+    let rt = on_problems(vec![problem_row("held:f-1", "Plan.txt", Reason::Held(HELD_WORDS))]);
+    assert!(has(&rt, "problems-bar"));
+    assert_eq!(text(&rt, "change-0-sub"), HELD_WORDS);
+    assert!(!has(&rt, "btn-try-again"));
+    assert!(!has(&rt, "btn-try-all-again"));
+    assert_eq!(rt.state.this_pc.problem_count(), 1);
+    assert_eq!(rt.state.this_pc.retryable_problem_count(), 0);
+}

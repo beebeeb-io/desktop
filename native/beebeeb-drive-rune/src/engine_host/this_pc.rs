@@ -463,12 +463,15 @@ pub(crate) fn read(db: &StateDb, now: i64) -> Result<Snapshot, String> {
     let since = now - HISTORY_DAYS * 86_400;
 
     let queue = db.unsent_changes(0, QUEUE_LIMIT, now).map_err(|_| "queue")?.items;
-    let found = status::sync_problems(&queue);
+    let mut found = status::sync_problems(&queue);
+    // Task 2524: a held sync-folder edit is not in the queue; it is a problem all the same (never looks synced).
+    let held = db.held_edit_overview(QUEUE_LIMIT).map_err(|_| "held")?;
+    found.extend(status::held_edit_problems(&held));
     let retryable = found.iter().filter(|p| p.retryable).map(|p| p.id.clone()).collect();
     let mut problems: Vec<(i64, Change)> = found
         .iter()
         .map(|p| {
-            let at = queued_at(&queue, &p.id);
+            let at = queued_at(&queue, &held, &p.id);
             (at, problem(p, at))
         })
         .collect();
@@ -517,7 +520,15 @@ pub(crate) fn read(db: &StateDb, now: i64) -> Result<Snapshot, String> {
     })
 }
 
-fn queued_at(queue: &[beebeeb_engine::state_db::UnsentChange], id: &str) -> i64 {
+fn queued_at(
+    queue: &[beebeeb_engine::state_db::UnsentChange],
+    held: &beebeeb_engine::state_db::HeldEdits,
+    id: &str,
+) -> i64 {
+    if id.starts_with("held:") {
+        // A held edit: when the scan first found it.
+        return held.detected_at(id);
+    }
     queue.iter().find(|c| c.id == id).map_or(0, |c| c.queued_at)
 }
 
@@ -530,7 +541,11 @@ fn problem(p: &SyncProblem, at: i64) -> Change {
         kind: kind_of(&p.name, false),
         what: What::Failed {
             problem: p.id.clone(),
-            reason: Reason::Said(p.reason),
+            reason: if p.id.starts_with("held:") {
+                Reason::Held(p.reason)
+            } else {
+                Reason::Said(p.reason)
+            },
         },
         origin: Origin::ThisPc,
         date,
