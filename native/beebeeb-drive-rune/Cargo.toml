@@ -33,6 +33,9 @@ url = "2"
 beebeeb-updater = { path = "../../crates/beebeeb-updater" }
 
 serde_json = "1"
+# The local log file's subscriber (`log_file.rs`): the `tracing` the engine already logs through; already in the lock
+# through the engine, so no new crate is built (no `tracing-subscriber`: the subscriber is this crate's own).
+tracing = "0.1"
 # Parses Markdown for the viewer (`frames/viewers/markdown.rs`): MIT, pure Rust, no network, no HTML output.
 pulldown-cmark = { version = "0.13", default-features = false }
 # Renders a PDF's pages for the viewer (`engine_host/viewer_pdf.rs`): pure Rust (no C or C++ is compiled, no `-sys`

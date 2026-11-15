@@ -75,11 +75,10 @@ fn every_refusal_reaches_the_start_refusal_box_with_its_line_and_ends_with_2() {
 }
 
 #[test]
-fn no_box_at_login_for_the_installer_or_in_a_tooling_run_and_still_2() {
+fn no_box_for_the_installer_or_in_a_tooling_run_and_still_2() {
     let mut tooling = launch(&[]);
     tooling.tooling = true;
     for (start, launch) in [
-        ("at login", launch(&["--autostart"])),
         ("the installer's call", launch(&["--quit-for-update"])),
         ("a tooling run", tooling),
     ] {
@@ -89,6 +88,22 @@ fn no_box_at_login_for_the_installer_or_in_a_tooling_run_and_still_2() {
             assert_eq!(code, 2, "{start}, {kind}");
             assert!(platform.refusals.lock().unwrap().is_empty(), "{start}, {kind}: no box");
         }
+    }
+}
+
+/// R1: a start at login stops until a person acts, so the box is shown there too, once.
+#[test]
+fn refuse_start_shows_the_box_at_login() {
+    for (kind, why) in refusals() {
+        let platform = FakePlatform::default();
+        let (code, line) = stop(&platform, &launch(&["--autostart"]), &why);
+        assert_eq!(code, 2, "{kind}");
+        let shown = platform.refusals.lock().unwrap().clone();
+        assert_eq!(
+            shown,
+            [(AppIdentity::CURRENT.product_name().to_owned(), line)],
+            "{kind}: one box at login"
+        );
     }
 }
 

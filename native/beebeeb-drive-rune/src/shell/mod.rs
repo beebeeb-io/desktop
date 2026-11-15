@@ -504,12 +504,12 @@ pub(crate) fn local_data_of(dirs: &rune::dirs::AppDirs, os: &str) -> std::path::
 
 /// Ends a start that stops for a reason the person must read (decision 2462: a refused `--api-base`, the test
 /// build's data on this computer not for this run's server, stored credentials without local data). `line` names no
-/// value. It goes to stderr, and into the start-refusal box unless this start shows none (`instance::refusal_is_shown`:
-/// not at login, not the installer's call, not a tooling run): a release build has no console, so without the box such
+/// value. It goes to stderr, and into the start-refusal box unless this start shows none (`instance::start_refusal_is_shown`:
+/// not the installer's call, not a tooling run; at login it is shown): a release build has no console, so without the box such
 /// a start would stop without a word. Returns 2, the exit code `run` ends with.
 fn refuse_start(platform: &dyn Platform, launch: &instance::Launch, identity: AppIdentity, line: &str) -> i32 {
     eprintln!("beebeeb-drive: {line}");
-    if instance::refusal_is_shown(launch) {
+    if instance::start_refusal_is_shown(launch) {
         platform.show_start_refusal(identity.product_name(), line);
     }
     2
@@ -550,6 +550,8 @@ fn open_engine(
         .ok_or_else(|| "The folder for app data could not be found.".to_string())?;
     // Never a reason not to start: a closed or broken stdout loses the line, it does not stop the app.
     let _ = writeln!(std::io::stdout(), "{}", api_base.start_line());
+    // The local log file (`log_file.rs`), before the engine starts so its first warning is kept. Best effort.
+    let _ = crate::log_file::install(&local_data_of(&dirs, std::env::consts::OS));
     let (opened, messages) = crate::engine_host::open::open(
         &local_data_of(&dirs, std::env::consts::OS),
         api_base,

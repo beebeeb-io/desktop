@@ -94,7 +94,8 @@ pub(super) fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_
             );
         }
         Err(e) => {
-            tracing::warn!(reason, error = %e, "signaling the File Provider working set failed (best-effort)");
+            // `redacted()`: the OS message can name a file or a folder, and `tracing` is a file now.
+            tracing::warn!(reason, error = %e.redacted(), "signaling the File Provider working set failed (best-effort)");
         }
     }
     // Best-effort log hygiene: the replica can only have consumed changes
