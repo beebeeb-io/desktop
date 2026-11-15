@@ -6,7 +6,7 @@ use super::*;
 /// The board's sample account: Anna Visser, anna@northwind.studio.
 pub struct BoardAccount {
     #[cfg(test)]
-    held: Option<HeldChange>,
+    held: Option<HeldCalls>,
     /// `true`: the plan's details are not known (a test's state).
     plan_unknown: bool,
     security: Security,
@@ -74,21 +74,23 @@ fn board_codes() -> Vec<Secret> {
     BOARD_CODES.iter().map(|c| Secret::new(*c)).collect()
 }
 
-/// A test's control over a password change that the fixture holds as out (a worker's call that has not answered).
+/// A test's control over the calls the fixture holds as out (a worker's call that has not answered): every
+/// `start_call` is taken, and its answer comes only when the test sets one.
 #[cfg(test)]
 #[derive(Clone, Default)]
-pub struct HeldChange {
-    /// The answer may come now.
-    pub release: std::rc::Rc<std::cell::Cell<bool>>,
-    /// How many changes were started.
-    pub started: std::rc::Rc<std::cell::Cell<u64>>,
-    out: bool,
+pub struct HeldCalls {
+    /// The answer to deliver to the call that is out.
+    pub answer: std::rc::Rc<std::cell::RefCell<Option<Answered>>>,
+    /// Every call that was started, in order.
+    pub started: std::rc::Rc<std::cell::RefCell<Vec<CallKind>>>,
+    out: Option<CallKind>,
+    marks: Vec<(CallKind, u64)>,
 }
 
 impl BoardAccount {
-    /// Change password is asked through `start_call` and answers only when `held.release` is set.
+    /// Every account call is asked through `start_call` and answers only when `held.answer` is set.
     #[cfg(test)]
-    pub fn holding_change(mut self, held: HeldChange) -> Self {
+    pub fn holding_calls(mut self, held: HeldCalls) -> Self {
         self.held = Some(held);
         self
     }
@@ -520,9 +522,12 @@ impl AccountSource for BoardAccount {
     #[cfg(test)]
     fn start_call(&mut self, kind: CallKind, _input: &str, _password: &str) -> bool {
         match self.held.as_mut() {
-            Some(held) if kind == CallKind::ChangePassword && !held.out => {
-                held.out = true;
-                held.started.set(held.started.get() + 1);
+            Some(held) if held.out.is_none() => {
+                held.out = Some(kind);
+                held.started.borrow_mut().push(kind);
+                let serial = held.started.borrow().len() as u64;
+                held.marks.retain(|(k, _)| *k != kind);
+                held.marks.push((kind, serial));
                 true
             }
             _ => false,
@@ -531,18 +536,18 @@ impl AccountSource for BoardAccount {
     #[cfg(test)]
     fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
         let held = self.held.as_mut()?;
-        if held.out && held.release.get() {
-            held.out = false;
-            return Some((CallKind::ChangePassword, Answered::Done));
-        }
-        None
+        let kind = held.out?;
+        let answered = held.answer.borrow_mut().take()?;
+        held.out = None;
+        Some((kind, answered))
     }
     #[cfg(test)]
     fn call_mark(&self, kind: CallKind) -> Option<CallMark> {
-        let held = self.held.as_ref().filter(|_| kind == CallKind::ChangePassword)?;
-        (held.started.get() > 0).then(|| CallMark {
-            serial: held.started.get(),
-            out: held.out,
+        let held = self.held.as_ref()?;
+        let (_, serial) = held.marks.iter().find(|(k, _)| *k == kind)?;
+        Some(CallMark {
+            serial: *serial,
+            out: held.out == Some(kind),
         })
     }
     fn change_password(&mut self, confirmation: StepUp, new: Password<'_>) -> Result<(), Refused> {

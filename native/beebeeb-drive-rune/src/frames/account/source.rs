@@ -962,7 +962,7 @@ pub fn score(factors: &[Factor]) -> (usize, usize) {
 mod board;
 // Every public item of the fixture keeps its path here; `BOARD_BACKUP_CODE` has no reader outside it yet.
 #[cfg(test)]
-pub use board::HeldChange;
+pub use board::HeldCalls;
 #[allow(unused_imports)]
 pub use board::{
     BOARD_BACKUP_CODE, BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, BOARD_SIGN_OUT_REFUSED, BoardAccount, SignOutMode,
