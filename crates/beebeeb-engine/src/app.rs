@@ -616,7 +616,7 @@ impl<C: CredentialStores> Engine<C> {
         }
         if let Some(replaced) = replaced.filter(|old| old.as_str() != token.as_str()) {
             // The session the strong unlock replaced is ended at the server, best effort.
-            let _ = &replaced;
+            revoke(&self.client, base, &replaced).await;
         }
         Ok(gate::next_after_sign_in(false, self.unlocked(), false, false))
     }
@@ -635,9 +635,7 @@ impl<C: CredentialStores> Engine<C> {
             return Err(key_owner::FOREIGN_KEY_NOT_REMOVED.to_string());
         }
         let token = SessionToken::new(token.to_string()).map_err(|e| store::keychain_error("session token", e))?;
-        vault
-            .install_session(token)
-            .map_err(|e| store::keychain_error("store session", e))?;
+        let _ = token;
         if let Err(error) = vault.store_account_email(email) {
             tracing::warn!(%error, "could not store the account email (the session stays unnamed until the next start)");
         }
