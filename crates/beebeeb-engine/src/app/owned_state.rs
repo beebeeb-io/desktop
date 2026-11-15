@@ -314,7 +314,7 @@ impl<C: CredentialStores> Engine<C> {
             .user_id
             .ok_or(LocalStateRefused::IdentityUnknown)?;
         let deleted = self
-            .owned_state_as(Mode::Change, Call::Work, Ended::OwnSearchesWipe)
+            .owned_state_as(Mode::Change, Call::Work, Ended::Refused)
             .and_then(|state| {
                 // The handle's session is the one the step named, not a later one that opened in between; the turn only
                 // moves on, so the user id read above is that session's too.
