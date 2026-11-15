@@ -341,7 +341,11 @@ fn a_held_edit_is_a_problem_with_the_engines_words_and_no_try_again() {
     let problems = source.problems();
     assert_eq!(
         names(&problems),
-        ["Old sheet.xlsx", "Held plan.txt", "Loose note.md"],
+        [
+            "1 file not checked yet (Old sheet.xlsx)",
+            "Held plan.txt",
+            "Loose note.md"
+        ],
         "newest first, with the queue's own problem"
     );
     for (i, word) in [(0, "can’t tell"), (1, "which version")] {
@@ -365,10 +369,33 @@ fn a_held_edit_is_a_problem_with_the_engines_words_and_no_try_again() {
     let left = source.problems();
     assert_eq!(
         names(&left),
-        ["Old sheet.xlsx", "Held plan.txt"],
+        ["1 file not checked yet (Old sheet.xlsx)", "Held plan.txt"],
         "only the queue's problem went"
     );
     assert_eq!(fake.db().list_held_edits().unwrap().len(), 2, "both still held");
+}
+
+/// Task 2524: many unchecked files are ONE problem, counted once; the Can't sync count never follows their number.
+#[test]
+fn many_unchecked_files_are_one_problem_counted_once() {
+    let fake = Fake::new();
+    let db = fake.db();
+    for n in 0..60 {
+        let path = format!("Invented/Old {n:02}.txt");
+        file(&db, &format!("u-{n}"), &path, FileStatus::Local, 10, false);
+        db.hold_unsent_edit(&format!("u-{n}"), "content_unknown", "fp", now() - 100 + n)
+            .unwrap();
+    }
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    let problems = source.problems();
+    assert_eq!(problems.len(), 1, "one summary row, not 60");
+    assert!(
+        problems[0].name.starts_with("60 files not checked yet (Old 00.txt"),
+        "{}",
+        problems[0].name
+    );
+    assert!(!problems[0].can_retry());
 }
 
 /// Try again on every problem reaches every one of them.
