@@ -10,7 +10,7 @@
 //! Wiring (the integration lane applies it, see this lane's BRANCH-NOTES): `Body::Sheet(SheetView)` in
 //! `viewers::source`, one arm in `viewers::view` that calls [`window`], one `scene_file` arm for DW-1508.
 //!
-//! Keys: the window's own (caption, sidebar, toolbar), then `sh-cellbox`, `sh-fx`, `sh-formula` (the formula bar),
+//! Keys: the window's own (caption, sidebar, toolbar), then `sh-cellbox`, `sh-formula` (the formula bar),
 //! `sh-corner`, `sh-col-<C>` and `sh-row-<R>` (the headers), `sh-cell-<R>-<C>` and its text `sh-cell-<R>-<C>-t`
 //! (zero-based), `sh-tab-<I>`, `vbar` (zoom, Open in another app…), and `st-<N>` (the status line's parts, numbered as the other Office frames').
 
@@ -243,7 +243,7 @@ fn fitted(key: impl Into<String>, words: &str, style: TextStyle, color: rune::Co
     kit::label(key, words, style, color).w(rune::text::advance(words, style))
 }
 
-/// The formula bar, read-only: the cell's name as text, "fx", the formula as text. No box around either.
+/// The formula bar, read-only: the cell's name as text, then the formula as text (no "fx" mark: the board draws none). No box around either.
 fn formula_bar(view: &SheetView, t: &Theme) -> El {
     let name = a1(view.current);
     let cellbox = row()
@@ -266,7 +266,6 @@ fn formula_bar(view: &SheetView, t: &Theme) -> El {
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
         .child(cellbox)
-        .child(fitted("sh-fx", "fx", CELL_BOLD, t.text_tertiary))
         .child(
             kit::label("sh-formula", view.formula.clone(), MONO, t.text)
                 .truncate()
@@ -401,28 +400,26 @@ fn grid(view: &SheetView, t: &Theme) -> El {
     );
     for (c, w) in view.col_widths.iter().enumerate() {
         let c = c as u32;
-        let on = selected.is_some_and(|(_, _, c0, c1)| c >= c0 && c <= c1);
         head = head.child(
             row()
                 .key(format!("sh-col-{}", col_letters(c)))
                 .w(*w)
                 .h(HEADER_H)
                 .center()
-                .fill(if on { t.selection } else { t.surface })
+                .fill(t.surface)
                 .border_sides([0.0, kit::HAIR, kit::HAIR, 0.0], t.separator)
                 .border_layout()
                 .child(fitted(
                     format!("sh-col-{}-t", col_letters(c)),
                     &col_letters(c),
                     HEADER,
-                    if on { t.text } else { t.text_tertiary },
+                    t.text_tertiary,
                 )),
         );
     }
     let mut body = col().key("sh-body");
     for (r, h) in view.row_heights.iter().enumerate() {
         let r = r as u32;
-        let on = selected.is_some_and(|(r0, r1, _, _)| r >= r0 && r <= r1);
         // A frozen boundary is a heavier line under the last frozen row.
         let under = if view.frozen.0 > 0 && r + 1 == view.frozen.0 {
             1.0
@@ -435,15 +432,10 @@ fn grid(view: &SheetView, t: &Theme) -> El {
                 .key(format!("sh-row-{r}"))
                 .size(ROW_HEAD_W, *h)
                 .center()
-                .fill(if on { t.selection } else { t.surface })
+                .fill(t.surface)
                 .border_sides([0.0, kit::HAIR, kit::HAIR, 0.0], t.separator)
                 .border_layout()
-                .child(fitted(
-                    format!("sh-row-{r}-t"),
-                    &number,
-                    ROW_NUMBER,
-                    if on { t.text } else { t.text_tertiary },
-                )),
+                .child(fitted(format!("sh-row-{r}-t"), &number, ROW_NUMBER, t.text_tertiary)),
         );
         let mut c = 0u32;
         while (c as usize) < view.col_widths.len() {
@@ -793,8 +785,29 @@ mod tests {
         assert_eq!(status_words(sheet_of(&mut state)), ["Sheet 1 of 3"]);
         let rt = runtime_of(state, false);
         assert_eq!(words(&rt, "st-0"), "Sheet 1 of 3");
-        assert!(find(&rt, "st-2").is_none(), "no Sum without a selection");
+        // st-1 is Encrypted and st-2 the dot after it: no figure took the place of either.
         assert_eq!(words(&rt, "st-1"), "Encrypted");
+        assert_eq!(words(&rt, "st-2"), "\u{00B7}");
+        assert!(
+            rt.elements()
+                .iter()
+                .all(|e| !e.text.as_deref().is_some_and(|w| w.starts_with("Sum "))),
+            "no Sum without a selection"
+        );
+    }
+
+    /// DW-1508: the selection (B2:B9) lights no header: every column letter and row number keeps the plain fill.
+    #[test]
+    fn office_sheets_headers_are_not_highlighted() {
+        for dark in [false, true] {
+            let rt = runtime_of(scene_state(), dark);
+            let plain = tokens::theme(dark).surface.hex();
+            for k in [
+                "sh-col-A", "sh-col-B", "sh-col-C", "sh-row-0", "sh-row-1", "sh-row-5", "sh-row-8", "sh-row-9",
+            ] {
+                assert_eq!(find(&rt, k).expect(k).fill.hex(), plain, "{k} is highlighted");
+            }
+        }
     }
 
     #[test]
@@ -804,7 +817,7 @@ mod tests {
             assert_eq!(words(&rt, &format!("sh-tab-{i}-t")), *tab);
         }
         assert!(find(&rt, "sh-tab-3").is_none(), "no fourth tab, no plus");
-        assert_eq!(words(&rt, "sh-fx"), "fx");
+        assert!(find(&rt, "sh-fx").is_none(), "the board draws no fx");
         for (c, letter) in ["A", "B", "C"].iter().enumerate() {
             assert_eq!(words(&rt, &format!("sh-col-{}-t", col_letters(c as u32))), *letter);
         }
