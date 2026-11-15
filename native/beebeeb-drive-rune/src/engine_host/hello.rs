@@ -15,14 +15,26 @@ const REASON: &str = "Unlock Beebeeb";
 /// The line for the proof that turns app lock off (Sign-in and security).
 pub const TURN_APP_LOCK_OFF: &str = "Turn off app lock for Beebeeb";
 
-/// Runs once with how the prompt ended, on the prompt's own thread.
+/// Runs at most once with how the prompt ended, on the prompt's own thread (see [`HelloCancel`] for when it does not).
 pub type HelloDone = Box<dyn FnOnce(HelloResult) + Send>;
-/// Takes a prompt that is up away. Never called from inside its [`HelloDone`].
+
+/// Takes a prompt that is up away: the owner left the screen that asked.
+///
+/// The cancel contract, the one place it is written (`shell::platform::windows_hello` and every owner follow it):
+/// - After the cancel returns, no answer of that prompt is decided any more: its [`HelloDone`] is dropped unrun,
+///   whatever the person does in the prompt from then on.
+/// - An answer decided BEFORE the cancel may still be on its way (its `done` may be running on the prompt's thread
+///   while the cancel returns). The owner drops it with its own check (the attempt, the stamp or the prompt's
+///   number it asked under), never by trusting the cancel alone.
+/// - It never blocks, it may be called from inside the prompt's own [`HelloDone`], and on a prompt that is over it
+///   changes nothing.
 pub type HelloCancel = Box<dyn FnOnce() + Send>;
 
 pub trait HelloPrompter: Send {
-    /// Ask for the prompt; call it on the window's thread. `Ok`: `done` runs exactly once, later, never inside
-    /// this call. `Err`: no prompt can be shown here (no window yet, no thread), and `done` was dropped unrun.
+    /// Ask for the prompt; call it on the window's thread. `Ok`: `done` runs once, later, never inside this call,
+    /// unless the returned [`HelloCancel`] was called first. One prompt is up at a time, app-wide: a prompt that is
+    /// up for another owner is taken away, and that owner's `done` gets [`HelloResult::Cancelled`]. `Err`: no prompt
+    /// can be shown here (no window yet, no thread), and `done` was dropped unrun.
     fn start(&self, done: HelloDone) -> Result<HelloCancel, ()>;
 }
 
