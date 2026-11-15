@@ -431,9 +431,9 @@ fn account_draws_who_is_signed_in_and_the_plan() {
 fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
     let server = server();
     let source = Source::new(signed_in(&server));
-    for pane in [Pane::ApproveCode, Pane::ApproveReview] {
-        assert_eq!(source.pane_state(pane), PaneState::Unwired, "{pane:?}");
-    }
+    // Approving a sign-in answers too (`account_approve.rs`).
+    assert_ne!(source.pane_state(Pane::ApproveCode), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::ApproveReview), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Account), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Security), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Sessions), PaneState::Unwired);

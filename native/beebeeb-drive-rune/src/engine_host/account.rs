@@ -680,6 +680,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         if let Some(state) = self.wired_pane(pane) {
             return state;
         }
+        if let Some(state) = self.account_approve_pane_state(pane) {
+            return state;
+        }
         if let Some(state) = self.account_deletion_pane_state(pane) {
             return state;
         }
@@ -1166,26 +1169,26 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn undo_deletion(&mut self, confirmation: StepUp) -> Result<Deletion, Refused> {
         self.account_deletion_undo_deletion(confirmation)
     }
-    // Approving a sign-in from another device (slice A5, `account_approve.rs`): not bound yet.
+    // Approving a sign-in from another device (slice A5, `account_approve.rs`).
     fn find_sign_in_request(&mut self, code: &str) -> Lookup {
-        not_wired(self.account_approve_find_sign_in_request(code))
+        self.account_approve_find_sign_in_request(code)
     }
     fn waiting_sign_in_request(&self, request: &str) -> Option<SignInRequest> {
-        not_wired(self.account_approve_waiting_sign_in_request(request))
+        self.account_approve_waiting_sign_in_request(request)
     }
     fn begin_approval(&mut self, request: &str, code: &str, password: Password<'_>) {
-        not_wired(self.account_approve_begin_approval(request, code, password))
+        self.account_approve_begin_approval(request, code, password)
     }
     fn approval_answer(&mut self) -> Option<(String, Approval)> {
-        not_wired(self.account_approve_approval_answer())
+        self.account_approve_approval_answer()
     }
     fn cancel_approval(&mut self, request: &str) {
-        not_wired(self.account_approve_cancel_approval(request))
+        self.account_approve_cancel_approval(request)
     }
     fn deny_sign_in(&mut self, request: &str) -> Denial {
-        not_wired(self.account_approve_deny_sign_in(request))
+        self.account_approve_deny_sign_in(request)
     }
     fn sign_in_request_gone(&mut self, request: &str) -> Option<Denial> {
-        not_wired(self.account_approve_sign_in_request_gone(request))
+        self.account_approve_sign_in_request_gone(request)
     }
 }

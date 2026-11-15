@@ -3,7 +3,7 @@
 
 use super::approve::{
     self, BOARD_REQUEST_CODE, CANCELLED_REQUEST_CODE, CODE_KEY, DROPPED_REQUEST_CODE, EXPIRED_REQUEST_CODE,
-    FOUND_LATER_REQUEST_CODE, HANDLED_REQUEST_CODE, Lookup, OFFLINE_REQUEST_CODE, UNKNOWN_REQUEST_CODE,
+    FOUND_LATER_REQUEST_CODE, HANDLED_REQUEST_CODE, Lookup, OFFLINE_REQUEST_CODE, PASSWORD_KEY, UNKNOWN_REQUEST_CODE,
     UNUSUAL_REQUEST_CODE,
 };
 use super::source::{AccountSource, BoardAccount};
@@ -384,8 +384,14 @@ fn the_review_is_modal_tab_stays_inside_and_the_pane_behind_takes_no_press() {
     stops.sort();
     assert_eq!(
         stops,
-        vec![CODE_KEY.to_string(), "btn-0".into(), "btn-1".into(), "list-1".into()],
-        "the code, Approve, Deny, and the facts (where the keyboard starts)"
+        vec![
+            CODE_KEY.to_string(),
+            PASSWORD_KEY.into(),
+            "btn-0".into(),
+            "btn-1".into(),
+            "list-1".into()
+        ],
+        "the code, the password (D-P40-10), Approve, Deny, and the facts (where the keyboard starts)"
     );
     // The row behind the dialog, where it shows beside it.
     let row = info(&rt, "item-0-0").rect;
