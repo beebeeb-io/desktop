@@ -1021,3 +1021,16 @@ written
 wrong
 yet
 —
+# b2-another-device
+account_mismatch
+approved
+connection_lost
+denied
+expired
+expires_in
+keys_not_received
+not_stored
+offline
+other
+overtaken
+waiting
