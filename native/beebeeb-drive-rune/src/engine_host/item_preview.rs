@@ -94,21 +94,7 @@ pub struct Readers<E: ViewerEngine> {
 
 /// A display item for the reader: the id and the name (its kind decides what is read); nothing else is known.
 fn asked_item(id: &str, name: &str) -> DriveItem {
-    DriveItem {
-        id: id.to_string(),
-        parent_id: None,
-        name: name.to_string(),
-        is_folder: false,
-        size: None,
-        child_count: None,
-        modified_at: String::new(),
-        mime: None,
-        has_thumbnail: false,
-        shared_type: None,
-        shared_badges: Vec::new(),
-        pc_status: None,
-        is_protected: false,
-    }
+    crate::frames::item::display_item(id, name, false, None)
 }
 
 impl<E: ViewerEngine> Readers<E> {
@@ -155,25 +141,22 @@ impl<E: ViewerEngine> Readers<E> {
 
 /// See the module's doc.
 pub struct EngineItemPreview<C: CredentialStores + 'static> {
-    engine: Arc<Engine<C>>,
     readers: Readers<LiveViewerEngine<C>>,
 }
 
 impl<C: CredentialStores + 'static> EngineItemPreview<C> {
     /// Starts no thread and reads nothing.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
-        let readers = Readers::new(Arc::new(LiveViewerEngine::new(engine.clone())));
-        Self { engine, readers }
+        Self {
+            readers: Readers::new(Arc::new(LiveViewerEngine::new(engine))),
+        }
     }
 }
 
 impl<C: CredentialStores + 'static> ItemPreviewSource for EngineItemPreview<C> {
-    /// With no session in memory nothing is asked (the panel then says it could not show a preview).
+    /// With no session in memory nothing is downloaded: the reader answers by the kind first (a PDF "not available in
+    /// this version yet", as Files' panel says it), else that it could not show a preview.
     fn start(&mut self, ask: &PreviewAsk) {
-        self.readers.cancel();
-        if !self.engine.has_session() {
-            return;
-        }
         self.readers.start(ask);
     }
 

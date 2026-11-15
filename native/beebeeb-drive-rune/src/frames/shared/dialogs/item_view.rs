@@ -58,14 +58,9 @@ pub(super) fn details(s: &State, origin: Origin, id: &str, t: &Theme) -> Option<
 /// not listed now.
 pub(super) fn preview(s: &State, origin: Origin, id: &str, t: &Theme) -> Option<El> {
     let found = found(s, origin, id)?;
-    let state = s
-        .frames
-        .shared
-        .fields
-        .preview
-        .state()
-        .cloned()
-        .unwrap_or(Previewed::Loading);
+    // Borrowed, never copied: the page's only copy outside the drawn labels is the one the fields hold and wipe.
+    let loading = Previewed::Loading;
+    let state = s.frames.shared.fields.preview.state().unwrap_or(&loading);
     let (w, h, _) = if matches!(state, Previewed::Shown(_)) {
         PAGE_CARD
     } else {
@@ -83,7 +78,7 @@ pub(super) fn preview(s: &State, origin: Origin, id: &str, t: &Theme) -> Option<
         close,
         size: found.size.clone(),
     };
-    Some(card(&found.item, &state, &mode, (w, h), t))
+    Some(card(&found.item, state, &mode, (w, h), t))
 }
 
 /// The panel's keys: Space closes it (when focus is not on one of its controls, which Space presses); Left and Right

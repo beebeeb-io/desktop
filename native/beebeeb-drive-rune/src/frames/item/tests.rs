@@ -290,3 +290,81 @@ fn nothing_of_the_page_or_the_account_is_in_a_debug_print() {
     };
     assert!(!format!("{ask:?}").contains("secret"));
 }
+
+/// Trash rows and how far the list got, changed by a test between polls.
+struct Moving(
+    Rc<
+        RefCell<(
+            Vec<crate::frames::shared::parts::table::Row>,
+            crate::frames::trash::source::Loaded,
+        )>,
+    >,
+);
+
+impl crate::frames::trash::source::TrashSource for Moving {
+    fn items(&self) -> Vec<crate::frames::shared::parts::table::Row> {
+        self.0.borrow().0.clone()
+    }
+    fn totals(&self) -> crate::frames::trash::source::TrashTotals {
+        crate::frames::trash::source::TrashTotals {
+            items: self.0.borrow().0.len(),
+            size: "1 KB".into(),
+        }
+    }
+    fn emptying(&self) -> Option<crate::frames::trash::source::Emptying> {
+        None
+    }
+    fn restore(&mut self, _id: &str) -> bool {
+        false
+    }
+    fn loaded(&self) -> crate::frames::trash::source::Loaded {
+        self.0.borrow().1
+    }
+}
+
+fn trash_row(id: &str, name: &str) -> crate::frames::shared::parts::table::Row {
+    crate::frames::shared::parts::table::Row {
+        id: id.into(),
+        name: name.into(),
+        kind: crate::frames::shared::parts::table::Kind::Document,
+        date: "2 Nov 2026".into(),
+        size: "1 KB".into(),
+        extra: crate::frames::shared::parts::table::Extra::Words(String::new()),
+        pc: None,
+    }
+}
+
+/// A row that left a list still on its way does not close the dialog (R2(c)), and nothing of it is drawn then; the
+/// dialog that is not drawn never keeps the keys: the next key closes it and reaches the list.
+#[test]
+fn an_item_dialog_that_is_not_drawn_never_keeps_the_keys() {
+    use crate::frames::trash::source::Loaded;
+    let held = Rc::new(RefCell::new((
+        vec![trash_row("a", "Alpha.txt"), trash_row("b", "Bravo.txt")],
+        Loaded::Ready,
+    )));
+    let mut rt = polled(crate::frames::trash::scenes::dw_0747);
+    let source = Moving(held.clone());
+    rt.update(move |s, _| s.frames.trash = crate::frames::trash::TrashUi::on(Box::new(source)));
+    settle(&mut rt);
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Down);
+    crate::frames::shared::tests::press_with(&mut rt, Key::Enter, crate::frames::shared::tests::alt());
+    assert!(matches!(
+        rt.state.frames.shared.dialog,
+        Some(Dialog::Details { ref id, .. }) if id == "b"
+    ));
+    assert!(rt.find("dialog-details").is_some());
+    // The list re-reads and its first answer is on its way without the row: the dialog stays, undrawn.
+    *held.borrow_mut() = (vec![trash_row("a", "Alpha.txt")], Loaded::Loading);
+    settle(&mut rt);
+    assert!(
+        rt.state.frames.shared.dialog.is_some(),
+        "a list on its way closes nothing"
+    );
+    assert!(rt.find("dialog-details").is_none(), "nothing of the row is drawn");
+    // The next key closes it and reaches the list.
+    press(&mut rt, Key::Up);
+    assert_eq!(rt.state.frames.shared.dialog, None);
+    assert_eq!(rt.state.frames.trash.selected, Some(0), "the key reached the list");
+}

@@ -101,7 +101,7 @@ pub struct Found {
 const ENCRYPTED: &str = "Yes, end to end";
 
 /// A display item for a row: its name, whether it is a folder, the kind its name says. Nothing else is known here.
-fn display_item(id: &str, name: &str, is_folder: bool, pc: Option<PcState>) -> DriveItem {
+pub(crate) fn display_item(id: &str, name: &str, is_folder: bool, pc: Option<PcState>) -> DriveItem {
     DriveItem {
         id: id.to_string(),
         parent_id: None,

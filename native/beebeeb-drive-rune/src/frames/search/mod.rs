@@ -244,10 +244,6 @@ pub fn files_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
     if files_busy(s) {
         return None;
     }
-    // An item's Details over the results takes the keys while it shows (`frames::item`).
-    if let Some(took) = crate::frames::shared::dialogs::section_keys(s, ev, tx, Section::Files) {
-        return Some(took);
-    }
     if !is_open(s) {
         if ev.is_command('f') {
             open(s, tx);
@@ -370,7 +366,8 @@ fn open_result(s: &mut State, hits: &[Hit], i: usize) -> bool {
 /// nowhere): the arrows, Home and End select, Enter opens, the Menu key asks for the file menu,
 /// Alt+Enter for Details. In the recent searches: the arrows move, Enter runs one.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    // An item's Details over the results: its keys first, and none reaches the results behind it.
+    // An item's Details over the results: its keys first, and none reaches the results behind it. (The one place:
+    // `files_key` hands its keys here once search is open, so a Files key with search closed never touches it.)
     if let Some(took) = crate::frames::shared::dialogs::section_keys(s, ev, tx, Section::Files) {
         return took;
     }
