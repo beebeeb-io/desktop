@@ -18,11 +18,13 @@
 //! the `Ui` window arm calling [`window`] or [`present`], and the key route calling [`DeckBody::on_key`].
 
 use rune::tok::Family;
-use rune::{Color, Cx, El, Icon, Key, Mods, Pixels, SurfaceFit, TextStyle, col, el, row};
+use rune::{Color, Cx, El, Icon, Key, Mods, Pixels, Span, SurfaceFit, TextStyle, col, el, row};
 
+use super::docs::{ABOUT, KEEP_FIRST, OPEN_ELSEWHERE};
 use crate::State;
 use crate::frames::placeholder;
-use crate::frames::viewers::{self, Ui};
+use crate::frames::signin::icons::EYE;
+use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::{caption, kit, sidebar};
@@ -71,6 +73,8 @@ pub struct DeckView {
     /// The slide on the stage, 1-based.
     pub current: u32,
     pub count: u32,
+    /// The stage's zoom in per cent (the bar's "- 100% +").
+    pub zoom: u16,
 }
 
 impl DeckView {
@@ -80,6 +84,7 @@ impl DeckView {
             slides: (1..=count).map(|n| SlideThumb { n }).collect(),
             current: 1,
             count,
+            zoom: 100,
         }
     }
 }
@@ -96,6 +101,8 @@ pub struct SlidePage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlideWords {
     pub title: String,
+    /// The line under the title ("" when the slide has none).
+    pub sub: String,
     pub points: Vec<String>,
     pub picture: bool,
 }
@@ -126,6 +133,14 @@ impl DeckBody {
 
     pub fn previous(&mut self) {
         self.go(self.view.current.saturating_sub(1));
+    }
+
+    pub fn zoom_in(&mut self) {
+        self.view.zoom = (self.view.zoom + ZOOM_STEP).min(ZOOM_MAX);
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.view.zoom = self.view.zoom.saturating_sub(ZOOM_STEP).max(ZOOM_MIN);
     }
 
     /// Present Ctrl+Enter / F5: the slide takes the screen.
@@ -171,23 +186,60 @@ const BAR_HINT: TextStyle = TextStyle::new(10.0, 500.0).family(Family::Mono).lh(
 const NUM: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
 const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
 
-/// A play triangle: Present's glyph.
-static PLAY: Icon = Icon {
-    name: "present-play",
+static LESS: Icon = Icon {
+    name: "slides-less",
     view: 24.0,
     body: concat!(
         r#"<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">"#,
-        r#"<path d="M7 4l13 8-13 8V4z"></path>"#,
-        "</g>"
+        r#"<path d="M5 12h14"></path></g>"#
     ),
 };
 
-/// The filmstrip's width, a thumbnail's, and the stage's slide at 16:9.
-const FILMSTRIP_W: f32 = 168.0;
-const THUMB_W: f32 = 120.0;
-const THUMB_H: f32 = 67.5;
-const SLIDE_W: f32 = 760.0;
-const SLIDE_H: f32 = 427.5;
+static MORE: Icon = Icon {
+    name: "slides-more",
+    view: 24.0,
+    body: concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">"#,
+        r#"<path d="M12 5v14M5 12h14"></path></g>"#
+    ),
+};
+
+const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
+const PANE_LABEL: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.7);
+const THUMB_TITLE: TextStyle = TextStyle::new(8.5, 700.0).lh(10.0);
+const THUMB_TEXT: TextStyle = TextStyle::new(5.5, 400.0).lh(7.0);
+const ZOOM_STEP: u16 = 25;
+const ZOOM_MIN: u16 = 50;
+const ZOOM_MAX: u16 = 125;
+
+/// The filmstrip (board: 190 wide, thumbnails 140 x 79 beside their number) and the stage's slide at 100 %
+/// (the board's `SlideCanvas`: 640 x 360).
+const FILMSTRIP_W: f32 = 190.0;
+const THUMB_W: f32 = 140.0;
+const THUMB_H: f32 = 79.0;
+const SLIDE_W: f32 = 640.0;
+const SLIDE_H: f32 = 360.0;
+
+/// The board's `.mk-ph5`: a sunset, three stops at 180 degrees.
+const SUNSET: [(f32, &str); 3] = [(0.0, "#f3d9a8"), (0.5, "#d58c6a"), (1.0, "#3f3a58")];
+
+fn sunset(block: El) -> El {
+    let stop = |hex: &str| rune::color::hex(hex).unwrap_or(Color::BLACK);
+    block.linear_gradient(
+        180.0_f32.to_radians(),
+        [
+            (SUNSET[0].0, stop(SUNSET[0].1)),
+            (SUNSET[1].0, stop(SUNSET[1].1)),
+            (SUNSET[2].0, stop(SUNSET[2].1)),
+        ],
+    )
+}
+
+/// Present's glyph on the bar: the eye (the board's `Btn icon="eye"`), and its border's width.
+fn present_icon() -> &'static Icon {
+    &EYE
+}
+const PRESENT_BORDER_W: f32 = 1.0;
 
 fn with_deck(act: impl Fn(&mut DeckBody) + 'static) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
@@ -197,8 +249,36 @@ fn with_deck(act: impl Fn(&mut DeckBody) + 'static) -> impl Fn(&mut State) + 'st
     }
 }
 
-/// The bar under the window's toolbar: Present, the one thing the deck offers beyond reading it.
-fn bar(t: &Theme) -> El {
+fn step_button(key: &'static str, label: &'static str, icon: &'static Icon, act: fn(&mut DeckBody), t: &Theme) -> El {
+    row()
+        .key(key)
+        .role("button")
+        .label(label)
+        .size(24.0, 24.0)
+        .center()
+        .radius(6.0)
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .on_press(with_deck(act))
+        .child(kit::glyph(format!("{key}-icon"), icon, 13.0, t.text_secondary))
+}
+
+/// Open in another app...: the file must be kept on this PC; if it is not, the press says so and does nothing else.
+fn open_elsewhere(s: &mut State) {
+    if let Some(ui) = viewers::ui(s) {
+        if ui.file.details.offline {
+            ui.intent(Intent::OpenInAnotherApp);
+        } else {
+            ui.toast = Some(KEEP_FIRST.to_string());
+        }
+    }
+}
+
+/// The bar under the window's toolbar (the board's `OvBar present`): zoom, then Present (bordered, the eye and its
+/// key) and the way to another app.
+fn bar(deck: &DeckBody, t: &Theme) -> El {
+    let zoom = format!("{}%", deck.view.zoom);
     row()
         .key("vbar")
         .role("toolbar")
@@ -206,10 +286,26 @@ fn bar(t: &Theme) -> El {
         .w_full()
         .h(38.0)
         .px(12.0)
+        .gap(12.0)
         .center_y()
         .fill(t.card)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
+        .child(
+            row()
+                .key("vbar-zoom")
+                .role("group")
+                .label(format!("Zoom, {} per cent", deck.view.zoom))
+                .gap(4.0)
+                .center_y()
+                .child(step_button("zoom-less", "Zoom out", &LESS, DeckBody::zoom_out, t))
+                .child(
+                    kit::label("zoom", zoom.clone(), BAR_MONO, t.text_secondary)
+                        .w(rune::text::advance(&zoom, BAR_MONO)),
+                )
+                .child(step_button("zoom-more", "Zoom in", &MORE, DeckBody::zoom_in, t)),
+        )
+        .child(el().key("vbar-gap").grow(1.0))
         .child(
             row()
                 .key("present")
@@ -217,17 +313,39 @@ fn bar(t: &Theme) -> El {
                 .label(PRESENT_LABEL)
                 .shortcut_hint("F5")
                 .h(28.0)
-                .px(8.0)
+                .px(10.0)
                 .gap(6.0)
+                .center_y()
+                .radius(7.0)
+                .border(PRESENT_BORDER_W, t.card_border)
+                .border_layout()
+                .hover(t.hover)
+                .press(t.press)
+                .focusable(true)
+                .on_press(with_deck(DeckBody::present))
+                .child(kit::glyph("present-icon", present_icon(), 14.0, t.text_secondary))
+                .child(kit::label("present-label", PRESENT_LABEL, BAR_LABEL, t.text_secondary))
+                .child(kit::label("present-hint", PRESENT_HINT, BAR_HINT, t.text_quaternary).ml(4.0)),
+        )
+        .child(
+            row()
+                .key("elsewhere")
+                .role("button")
+                .label(OPEN_ELSEWHERE)
+                .h(28.0)
+                .px(10.0)
                 .center_y()
                 .radius(7.0)
                 .hover(t.hover)
                 .press(t.press)
                 .focusable(true)
-                .on_press(with_deck(DeckBody::present))
-                .child(kit::glyph("present-icon", &PLAY, 15.0, t.text_secondary))
-                .child(kit::label("present-label", PRESENT_LABEL, BAR_LABEL, t.text_secondary))
-                .child(kit::label("present-hint", PRESENT_HINT, BAR_HINT, t.text_quaternary)),
+                .on_press(open_elsewhere)
+                .child(kit::label(
+                    "elsewhere-label",
+                    OPEN_ELSEWHERE,
+                    BAR_LABEL,
+                    t.text_secondary,
+                )),
         )
 }
 
@@ -235,19 +353,66 @@ fn pixels_of(page: Option<SlidePage>) -> Option<Pixels> {
     page.and_then(|p| p.pixels)
 }
 
-/// One slide's picture frame: white, with the source's pixels when it has them.
+/// The stage's slide: white, with the source's pixels when it has them.
 fn picture(key: String, label: String, w: f32, h: f32, pixels: Option<Pixels>) -> El {
     let frame = el()
         .key(key)
         .role("image")
         .label(label)
         .size(w, h)
-        .radius(2.0)
+        .radius(4.0)
         .fill(Color::WHITE);
     match pixels {
         Some(p) => frame.pixels_fit(&p, SurfaceFit::Fill),
         None => frame,
     }
+}
+
+/// A filmstrip thumbnail: the slide itself, small (board: its title, sub, points and the picture strip, white,
+/// radius 4, padding 8). A slide with no words yet is the source's pixels, or a blank slide while it renders.
+fn thumbnail(i: usize, n: u32, page: Option<SlidePage>, current: bool, t: &Theme) -> El {
+    let frame = col()
+        .key(format!("fs-{i}-slide"))
+        .role("image")
+        .label(format!("Slide {n}"))
+        .size(THUMB_W, THUMB_H)
+        .padding(8.0)
+        .gap(2.0)
+        .radius(4.0)
+        .clip_rounded(4.0)
+        .fill(Color::WHITE);
+    let frame = if current {
+        frame.box_shadow(kit::ring(2.0, t.text))
+    } else {
+        frame.box_shadow(kit::drop(1.0, 4.0, Color::BLACK.alpha(0.14)))
+    };
+    let page = page.unwrap_or_default();
+    let Some(words) = page.words else {
+        return match page.pixels {
+            Some(p) => frame.pixels_fit(&p, SurfaceFit::Fill),
+            None => frame,
+        };
+    };
+    let mut frame = frame.child(kit::label(format!("fs-{i}-title"), words.title.clone(), THUMB_TITLE, ink()).w_full());
+    if !words.sub.is_empty() {
+        frame =
+            frame.child(kit::label(format!("fs-{i}-sub"), words.sub.clone(), THUMB_TEXT, ink().alpha(0.65)).w_full());
+    }
+    for (k, point) in words.points.iter().enumerate() {
+        frame =
+            frame.child(kit::label(format!("fs-{i}-li-{k}"), format!("\u{2022} {point}"), THUMB_TEXT, ink()).w_full());
+    }
+    if words.picture {
+        frame = frame.child(sunset(
+            el().key(format!("fs-{i}-image"))
+                .w_full()
+                .grow(1.0)
+                .min_h(14.0)
+                .mt(2.0)
+                .radius(2.0),
+        ));
+    }
+    frame
 }
 
 fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) -> El {
@@ -258,40 +423,38 @@ fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme
         .w(FILMSTRIP_W)
         .h_full()
         .min_h(0.0)
-        .py(16.0)
-        .gap(12.0)
-        .items_center()
+        .py(12.0)
+        .px(12.0)
+        .gap(10.0)
         .fill(t.sidebar_bg)
         .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
-        .border_layout();
+        .border_layout()
+        .child(row().key("fs-head").w_full().px(4.0).center_y().child(kit::label(
+            "fs-title",
+            "SLIDES",
+            PANE_LABEL,
+            t.text_tertiary,
+        )));
     for (i, thumb) in deck.view.slides.iter().enumerate() {
         let n = thumb.n;
         let current = n == deck.view.current;
-        let slide = picture(
-            format!("fs-{i}-slide"),
-            format!("Slide {n}"),
-            THUMB_W,
-            THUMB_H,
-            pixels_of(page(n)),
-        );
-        let slide = if current {
-            slide.box_shadow(kit::ring(2.0, t.text))
-        } else {
-            slide.box_shadow(kit::drop(1.0, 4.0, Color::BLACK.alpha(0.14)))
-        };
         list = list.child(
-            col()
+            row()
                 .key(format!("fs-{i}"))
                 .role("button")
                 .label(format!("Slide {n}"))
                 .checked(current)
-                .items_center()
-                .gap(4.0)
+                .gap(8.0)
+                .items_start()
                 .focusable(true)
                 .cursor(rune::Cursor::Pointer)
                 .on_press(with_deck(move |d| d.go(n)))
-                .child(slide)
-                .child(kit::label(format!("fs-{i}-num"), n.to_string(), NUM, t.text_tertiary)),
+                .child(
+                    el().key(format!("fs-{i}-num-box"))
+                        .pt(1.0)
+                        .child(kit::label(format!("fs-{i}-num"), n.to_string(), NUM, t.text_tertiary).w(12.0)),
+                )
+                .child(thumbnail(i, n, page(n), current, t)),
         );
     }
     list
@@ -302,8 +465,8 @@ fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) ->
     let slide = picture(
         "slide".into(),
         format!("Slide {n}"),
-        SLIDE_W,
-        SLIDE_H,
+        SLIDE_W * f32::from(deck.view.zoom) / 100.0,
+        SLIDE_H * f32::from(deck.view.zoom) / 100.0,
         pixels_of(page(n)),
     )
     .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)));
@@ -319,7 +482,7 @@ fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) ->
         .child(slide)
 }
 
-/// The status line: "Slide 2 of 3" at the left; Encrypted at the right.
+/// The status line: "Slide 2 of 3" at the left; Encrypted, a dot and About (a link to the viewer's About) at the right.
 fn status(deck: &DeckBody, t: &Theme) -> El {
     let words = format!("Slide {} of {}", deck.view.current, deck.view.count);
     row()
@@ -350,6 +513,23 @@ fn status(deck: &DeckBody, t: &Theme) -> El {
                         .w(rune::text::advance(ENCRYPTED, STATUS_ENC)),
                 ),
         )
+        .child(kit::label("st-2", "\u{00B7}", type_::STATUS, t.text_tertiary))
+        .child(
+            el().key("st-3-box")
+                .role("link")
+                .label("About this viewer")
+                .focusable(true)
+                .on_press(|s: &mut State| {
+                    if let Some(ui) = viewers::ui(s) {
+                        ui.office_about();
+                    }
+                })
+                .child(
+                    kit::label("st-3", ABOUT, type_::STATUS, t.text_tertiary)
+                        .w(rune::text::advance(ABOUT, type_::STATUS))
+                        .spans(vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)]),
+                ),
+        )
 }
 
 /// The window of DW-1509: the caption, the sidebar, and the deck beside it. `page(n)`: the source's answer for
@@ -364,7 +544,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, deck: &DeckBody, page: &dy
         .h_full()
         .fill(t.bg)
         .child(viewers::office::toolbar(s, ui, false, &t))
-        .child(bar(&t))
+        .child(bar(deck, &t))
         .child(
             row()
                 .key("viewer-row")
@@ -430,23 +610,22 @@ fn slide_of_words(words: Option<&SlideWords>) -> El {
                 .child(
                     el().key(format!("pres-li-{i}-mark"))
                         .size(24.2, 33.0)
-                        .child(el().absolute(6.0, 14.0).size(5.0, 5.0).radius(2.5).fill(ink())),
+                        .child(el().absolute(9.0, 13.0).size(7.0, 7.0).radius(3.5).fill(ink())),
                 )
                 .child(kit::label(format!("pres-li-{i}"), point.clone(), PRES_POINT, ink()).grow(1.0)),
         );
     }
     slide = slide.child(points);
     if words.picture {
-        slide = slide.child(
+        slide = slide.child(sunset(
             el().key("pres-image")
                 .role("img")
                 .label("Picture on the slide")
                 .w_full()
                 .grow(1.0)
                 .mt(26.0)
-                .radius(6.0)
-                .fill(Color::BLACK.alpha(0.06)),
-        );
+                .radius(4.0),
+        ));
     }
     slide
 }
@@ -697,5 +876,63 @@ mod tests {
         d.previous();
         d.previous();
         assert_eq!(d.view.current, 1);
+    }
+
+    /// The filmstrip draws every slide: 1 and 3 hold their own title (never a blank white box), with the picture strip
+    /// where the board has one.
+    #[test]
+    fn office_slides_thumbnails_draw_their_slides() {
+        let rt = scene(scene_deck, false);
+        assert_eq!(words(&rt, "fs-0-title"), "Lisbon trip recap");
+        assert_eq!(words(&rt, "fs-1-title"), "What we shot");
+        assert_eq!(words(&rt, "fs-2-title"), "Next steps");
+        assert!(find(&rt, "fs-0-image").is_some() && find(&rt, "fs-1-image").is_some());
+        assert!(find(&rt, "fs-2-image").is_none(), "slide 3 has no picture strip");
+        assert_eq!(words(&rt, "fs-title"), "SLIDES");
+    }
+
+    /// The status line ends "Encrypted", a dot, "About".
+    #[test]
+    fn office_slides_status_bar_ends_with_about() {
+        for dark in [false, true] {
+            let rt = scene(scene_deck, dark);
+            assert_eq!(words(&rt, "st-1"), "Encrypted");
+            assert_eq!(words(&rt, "st-2"), "\u{00B7}");
+            assert_eq!(words(&rt, "st-3"), "About");
+            let (enc, dot, about) = (
+                find(&rt, "st-1").unwrap(),
+                find(&rt, "st-2").unwrap(),
+                find(&rt, "st-3").unwrap(),
+            );
+            assert!(
+                enc.rect[0] < dot.rect[0] && dot.rect[0] < about.rect[0],
+                "left to right"
+            );
+        }
+    }
+
+    /// Present on the bar is a bordered button with the eye (not the play triangle) and its key.
+    #[test]
+    fn office_slides_present_button_is_bordered_with_the_eye() {
+        assert_eq!(present_icon().name, "eye");
+        assert!(PRESENT_BORDER_W > 0.0);
+        let rt = scene(scene_deck, false);
+        let button = find(&rt, "present").expect("the Present button");
+        assert_eq!(button.rect[3], 28.0);
+        assert!(find(&rt, "present-icon").is_some());
+        assert_eq!(words(&rt, "present-hint"), "F5");
+        assert!(find(&rt, "elsewhere").is_some() && find(&rt, "zoom").is_some());
+    }
+
+    /// DW-1561's picture is the board's sunset (three stops, 180 degrees): the element carries a gradient, not a fill.
+    #[test]
+    fn office_slides_present_picture_is_a_gradient() {
+        assert_eq!(SUNSET.len(), 3);
+        assert_eq!(SUNSET[0].1, "#f3d9a8");
+        for dark in [false, true] {
+            let rt = scene(scene_present, dark);
+            let image = find(&rt, "pres-image").expect("the picture on the slide");
+            assert_eq!(image.fill.a, 0.0, "a gradient, not a flat fill");
+        }
     }
 }

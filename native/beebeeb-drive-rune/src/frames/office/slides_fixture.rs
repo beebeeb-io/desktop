@@ -1,6 +1,6 @@
 //! The board's deck for DW-1509 and DW-1561, "Lisbon trip recap.pptx": three slides, slide 2 on the stage. The
 //! picture of slide 2 is the board's own canvas, exported by the goldens lane (`tests/fixtures/office/`); the other
-//! two slides have none yet and draw blank (a fixture never invents a slide). Nothing here is a document of the
+//! two slides are drawn from their words (the board's own). Nothing here is a document of the
 //! account: the fixture is the stand-in for the live host's answer at O-CP3.
 
 use std::sync::OnceLock;
@@ -42,19 +42,42 @@ fn canvas() -> Pixels {
     DECODED.get_or_init(|| decode(CANVAS)).clone()
 }
 
-/// The source's answer for slide `n` (1-based): slide 2 is the board's; 1 and 3 are not drawn yet.
+/// The board's `SLIDES` and `SLIDE_POINTS`: each slide's words (slides 1 and 2 carry the picture strip).
+fn words(n: u32) -> Option<SlideWords> {
+    let shot = [
+        "212 photos over two days \u{00B7} Alfama, Bel\u{00E9}m, the harbour",
+        "60 edited selects for the hotel",
+        "A 90-second film",
+    ];
+    let (title, sub, points, picture): (&str, &str, Vec<&str>, bool) = match n {
+        1 => (
+            "Lisbon trip recap",
+            "Northwind Studio \u{00B7} October 2026",
+            vec![],
+            true,
+        ),
+        2 => ("What we shot", "", shot.to_vec(), true),
+        3 => (
+            "Next steps",
+            "",
+            vec!["Deliver selects by 26 October", "Hotel review call on 29 October"],
+            false,
+        ),
+        _ => return None,
+    };
+    Some(SlideWords {
+        title: title.into(),
+        sub: sub.into(),
+        points: points.into_iter().map(String::from).collect(),
+        picture,
+    })
+}
+
+/// The source's answer for slide `n` (1-based): every slide has its words; only slide 2 has the board's picture.
 pub fn page(n: u32) -> Option<SlidePage> {
-    (n == BOARD_SLIDE).then(|| SlidePage {
-        pixels: Some(canvas()),
-        words: Some(SlideWords {
-            title: "What we shot".into(),
-            points: vec![
-                "212 photos over two days \u{00B7} Alfama, Bel\u{00E9}m, the harbour".into(),
-                "60 edited selects for the hotel".into(),
-                "A 90-second film".into(),
-            ],
-            picture: true,
-        }),
+    Some(SlidePage {
+        pixels: (n == BOARD_SLIDE).then(canvas),
+        words: words(n),
     })
 }
 
