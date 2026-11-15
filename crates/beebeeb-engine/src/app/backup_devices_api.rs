@@ -516,7 +516,10 @@ impl<C: CredentialStores> Engine<C> {
             (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
         }) {
             Ok(Some(held)) => held,
-            Err(PersonRefused::ScreenLocked) => return Err(DevicesRefused::Local(LocalStateRefused::Locked)),
+            // A closed vault is locked too (core refuses a person's calls there): never "not signed in".
+            Err(PersonRefused::ScreenLocked | PersonRefused::VaultClosed) => {
+                return Err(DevicesRefused::Local(LocalStateRefused::Locked));
+            }
             Ok(None) | Err(PersonRefused::NoSession) => return Err(DevicesRefused::NotSignedIn),
         };
         let state = self.local_state().map_err(DevicesRefused::Local)?;
