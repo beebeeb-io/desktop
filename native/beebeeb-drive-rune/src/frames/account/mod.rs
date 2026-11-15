@@ -322,7 +322,9 @@ pub fn sync(s: &mut State) {
     let section = routed(s);
     if section != Some(s.account.pane.section()) {
         s.account.show(section.and_then(Pane::root).unwrap_or(Pane::Account));
-        // What was typed, and every secret a page held, goes with the page.
+        // What was typed, and every secret a page held, goes with the page. Backup codes on screen go back to the
+        // source, which keeps them for after a screen lock of the same account and wipes them otherwise.
+        hand_back_codes(&mut s.account);
         s.account.form = form::Form::default();
         approve::leave(&mut s.account);
     }
@@ -335,10 +337,40 @@ pub fn sync(s: &mut State) {
 pub fn end_flows(s: &mut State) {
     let ui = &mut s.account;
     approve::leave(ui);
+    // Backup codes on screen: the source keeps them through a screen lock of the same account (review of
+    // desktop#424), and wipes them for a sign-out, a closed vault or another account.
+    hand_back_codes(ui);
     ui.form = form::Form::default();
     // A sign-out that waited for its answer: the session it was for is over, its late answer is the source's to drop.
     ui.signing_out = security_overview::SigningOut::default();
     ui.show(Pane::root(ui.pane.section()).unwrap_or(Pane::Account));
+}
+
+/// Backup codes a page held go back to the source when the page ends ([`AccountSource::keep_codes`]).
+fn hand_back_codes(ui: &mut AccountUi) {
+    if let Some(codes) = ui.form.codes.take()
+        && let Some(source) = ui.source.as_deref_mut()
+    {
+        source.keep_codes(codes);
+    }
+}
+
+/// Backup codes a screen lock kept from the page, once the window is open again (the gate is Ready): the Backup
+/// codes page shows them, as it does for an answer the page waited for.
+fn show_late_codes(s: &mut State) -> bool {
+    if s.shell.app.gate() != crate::shell::app::GateState::Ready {
+        return false;
+    }
+    let Some((kind, codes)) = s.account.source.as_deref_mut().and_then(|source| source.late_codes()) else {
+        return false;
+    };
+    if s.account.form.waiting == Some(kind) {
+        s.account.form.waiting = None;
+    }
+    s.account.form.codes = Some(codes);
+    s.account.pane = Pane::BackupCodes;
+    go(s, "DW-A70");
+    true
 }
 
 /// The pane the window shows now, when the route is on one of this lane's sections.
@@ -402,6 +434,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     if let Some(frame) = named {
         go(s, frame);
+        return true;
+    }
+    // Last: everything taken from the source above is settled first.
+    if show_late_codes(s) {
         return true;
     }
     pumped.changed

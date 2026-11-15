@@ -164,3 +164,57 @@ fn a_gateway_error_after_the_delete_left_is_not_confirmed() {
     let (api, _, _) = server();
     assert_eq!(run(&api, SESSION, ONE, PASSWORD), Ok(()));
 }
+
+/// A real handle signed in to the engine's fake account, then screen-locked: the turn is read under the lock, as a
+/// press drawn over the lock screen would read it (an unlock does not move the turn).
+fn screen_locked_engine(
+    tag: &str,
+) -> (
+    crate::app::Engine<crate::signin::memory_store::MemoryCredentials>,
+    FakeApi,
+    crate::account::SessionGeneration,
+) {
+    use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
+    let (account, phrase) = FakeAccount::register(&format!("{tag}@example.eu"), PASSWORD, TEST_PHRASE);
+    let account = Arc::new(account);
+    let api = FakeApi::start(account_handler(account.clone()));
+    let (host, _messages) = crate::host::ChannelHost::new(|| {});
+    let config = crate::app::EngineConfig {
+        account_id: format!("{tag}-slot"),
+        state_dir: crate::state_paths::init_for_test(),
+        api_base: api.base.clone(),
+    };
+    let engine = crate::app::Engine::open(
+        &crate::identity::REAL,
+        config,
+        host,
+        crate::signin::memory_store::MemoryCredentials::default(),
+    )
+    .expect("the engine opens");
+    engine.restore();
+    engine
+        .sign_in_password(&account.email, zeroize::Zeroizing::new(PASSWORD.into()))
+        .expect("the fake accepts the password");
+    engine
+        .unlock_with_phrase(zeroize::Zeroizing::new(phrase))
+        .expect("the phrase unlocks");
+    engine.lock_screen().expect("an open lock can lock the screen");
+    let session = engine.session_turn();
+    (engine, api, session)
+}
+
+/// Review of desktop#424 (engine P2-1, crypto P2-2): a locked screen refuses a permanent delete before anything is
+/// sent, also for a turn read while it was locked.
+#[test]
+fn a_locked_screen_deletes_nothing_and_sends_nothing() {
+    let (engine, api, session) = screen_locked_engine("purge-locked");
+    let before = api.routes().len();
+    let purged = engine.purge_trash_for(session, &[ONE.to_string()], PASSWORD.as_bytes(), |_| {});
+    assert_eq!(purged.done, 0);
+    assert_eq!(purged.error, Some(PurgeError::NotSignedIn));
+    assert_eq!(
+        api.routes()[before..].to_vec(),
+        Vec::<String>::new(),
+        "nothing is sent under a locked screen"
+    );
+}

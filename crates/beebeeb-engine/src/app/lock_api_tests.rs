@@ -109,14 +109,15 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 ("versions_api.rs", 2),
                 ("viewer_api.rs", 2),
                 // The same re-checks in the files of the binding run and Wave B/C: each is asked after, or beside, a
-                // call that `person_session` / `account_call_for` already refuses under a lock.
+                // call that `person_session` / `account_call_for` / `local_state()` already refuses under a lock
+                // (account_actions and account_password: the 401 run's note and an in-memory check after the call;
+                // conflicts and share_link: a token copy whose `local_state*()` read, before anything is sent,
+                // refuses a locked screen). Passkeys and the Trash deletes copy their token through `person_session`
+                // itself (review of desktop#424): no admission here.
                 ("account_actions_api.rs", 2),
                 ("account_password_api.rs", 1),
                 ("conflicts_api.rs", 2),
-                ("passkeys_api.rs", 1),
                 ("share_link_api.rs", 1),
-                ("trash_bulk_api.rs", 1),
-                ("trash_purge_api.rs", 1),
             ],
         ),
         ("call_may_run(", &[("lock_api.rs", 2), ("owned_state.rs", 1)]),

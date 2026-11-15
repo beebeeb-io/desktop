@@ -752,6 +752,15 @@ pub trait AccountSource {
     fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
         None
     }
+    /// Backup codes Beebeeb made that a screen lock kept from the page (review of desktop#424): handed over once,
+    /// after the unlock, for the same account; never while the screen is locked, never after a sign-out, a closed
+    /// vault or another account.
+    fn late_codes(&mut self) -> Option<(CallKind, Vec<Secret>)> {
+        None
+    }
+    /// The page that showed `codes` ends (a lock, a sign-out, another account, a page that was left): the source
+    /// keeps them for after the unlock when a screen lock of the same account ended it, else they are wiped.
+    fn keep_codes(&mut self, _codes: Vec<Secret>) {}
 
     /// Whether "Send again" is offered for the email's code: `false` when Beebeeb has no route that sends it again.
     fn can_send_again(&self) -> bool {
@@ -776,11 +785,16 @@ pub trait AccountSource {
     /// older than 5 minutes, or a current code's proof when moving to a new authenticator.
     fn begin_two_factor(&mut self, confirmation: Option<StepUp>) -> Result<Setup, Refused>;
     /// Engine: `POST /api/v1/account/two-factor/enable` with the 6 digits: turns it on (or
-    /// replaces the secret) and returns the 8 new backup codes, shown once.
-    fn turn_on_two_factor(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused>;
+    /// replaces the secret) and returns the 8 new backup codes, shown once. A source that answers it
+    /// through [`Self::start_call`] (the engine) never gets here.
+    fn turn_on_two_factor(&mut self, _code: &str) -> Result<Vec<Secret>, CodeRefused> {
+        Err(CodeRefused::Offline)
+    }
     /// Engine: `POST /api/v1/account/two-factor/backup-codes` with a current code: 8 new codes;
-    /// the old ones stop working.
-    fn new_backup_codes(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused>;
+    /// the old ones stop working. A source that answers it through [`Self::start_call`] never gets here.
+    fn new_backup_codes(&mut self, _code: &str) -> Result<Vec<Secret>, CodeRefused> {
+        Err(CodeRefused::Offline)
+    }
     /// Engine: `POST /api/v1/account/two-factor/verify` with a current code, before the set-up
     /// screen is shown again (moving to a new authenticator).
     fn check_code(&mut self, code: &str) -> Result<(), CodeRefused>;

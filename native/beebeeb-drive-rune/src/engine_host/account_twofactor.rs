@@ -15,6 +15,13 @@
 //! Session rule: a worker is stamped with the session and account of the press; an answer, and a held key, that is
 //! not the engine's session and account now is dropped (a held key is wiped). A press while the same call is out
 //! sends nothing new. Must not: log a code, a key, a backup code or an address.
+//!
+//! Backup codes across a screen lock (review of desktop#424): codes Beebeeb made (the old ones stopped working) are
+//! never wiped unseen while the same account stays signed in. Codes whose answer lands after the session's turn moved
+//! (a screen lock moves it), and codes a page was showing when a lock ended it ([`EngineAccountSource::a_keep_codes`]),
+//! are kept here, outside the page, until the screen is unlocked; then the window shows them once
+//! ([`EngineAccountSource::a_late_codes`]). A sign-out, a closed vault, a session Beebeeb no longer accepts or another
+//! account drops (wipes) them. They are never handed over while the screen is locked.
 
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -40,6 +47,13 @@ type Pending = Arc<Mutex<Option<(Stamp, String)>>>;
 /// One call's answer, with the session and account it was made for.
 type Done = (Stamp, CallKind, Answered);
 
+/// Backup codes kept for after a screen lock, with the session and account they were made for (wiped on drop).
+struct Unseen {
+    made_for: Stamp,
+    kind: CallKind,
+    codes: Vec<Secret>,
+}
+
 pub(super) struct Calls {
     /// The calls that are out: a second press of the same call sends nothing.
     out: Vec<CallKind>,
@@ -49,6 +63,10 @@ pub(super) struct Calls {
     resend: super::email::Waiting,
     answers: mpsc::Sender<Done>,
     inbox: mpsc::Receiver<Done>,
+    /// Codes a screen lock kept from the page, until the unlock.
+    unseen: Option<Unseen>,
+    /// The last codes handed to the page: what they were made for, so a lock that ends the page can keep them.
+    handed: Option<(Stamp, CallKind)>,
 }
 
 impl Calls {
@@ -61,6 +79,8 @@ impl Calls {
             resend: super::email::Waiting::default(),
             answers,
             inbox,
+            unseen: None,
+            handed: None,
         }
     }
 
@@ -266,8 +286,71 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         started
     }
 
+    /// Whether the engine's screen is locked now (the session stays in memory under it).
+    fn screen_locked(&self) -> bool {
+        self.engine.gate() == beebeeb_engine::signin::gate::GateState::ScreenLocked
+    }
+
+    /// Codes kept for after a lock stay only while their account is signed in with a session Beebeeb accepts;
+    /// otherwise they are wiped here.
+    fn forget_unseen_of_another_session(&mut self) {
+        let account_now = stamp(&self.engine).1;
+        let still = self.open();
+        let keep = |made_for: &Stamp| still && made_for.1.is_some() && made_for.1 == account_now;
+        if self.calls.unseen.as_ref().is_some_and(|unseen| !keep(&unseen.made_for)) {
+            self.calls.unseen = None;
+        }
+        if self.calls.handed.as_ref().is_some_and(|(made_for, _)| !keep(made_for)) {
+            self.calls.handed = None;
+        }
+    }
+
+    /// What changed on the account is read again once its answer reaches the page, so the pages say Beebeeb's.
+    fn read_again_after(&mut self, kind: CallKind, answered: &Answered) {
+        let changed = match (&kind, answered) {
+            (CallKind::ConfirmEmail, Answered::Done) | (CallKind::TurnOffTwoFactor, Answered::Done) => true,
+            (CallKind::TurnOnTwoFactor, Answered::Codes(_)) => true,
+            _ => false,
+        };
+        if changed {
+            crate::frames::account::source::AccountSource::reload(self, Pane::Account);
+            if !matches!(kind, CallKind::ConfirmEmail) {
+                // Two-factor was changed: what the status holds is out of date.
+                self.two_factor_status.stale();
+            }
+        }
+    }
+
+    /// See [`crate::frames::account::source::AccountSource::late_codes`].
+    pub(super) fn a_late_codes(&mut self) -> Option<(CallKind, Vec<Secret>)> {
+        self.forget_unseen_of_another_session();
+        if self.calls.unseen.is_none() || self.screen_locked() {
+            return None;
+        }
+        let Unseen { made_for, kind, codes } = self.calls.unseen.take()?;
+        let answered = Answered::Codes(codes);
+        self.read_again_after(kind, &answered);
+        let Answered::Codes(codes) = answered else {
+            return None;
+        };
+        self.calls.handed = Some((made_for, kind));
+        Some((kind, codes))
+    }
+
+    /// See [`crate::frames::account::source::AccountSource::keep_codes`].
+    pub(super) fn a_keep_codes(&mut self, codes: Vec<Secret>) {
+        self.forget_unseen_of_another_session();
+        let Some((made_for, kind)) = self.calls.handed.take() else {
+            return;
+        };
+        if self.screen_locked() && self.calls.unseen.is_none() {
+            self.calls.unseen = Some(Unseen { made_for, kind, codes });
+        }
+    }
+
     /// See [`crate::frames::account::source::AccountSource::call_answer`].
     pub(super) fn a_call_answer(&mut self) -> Option<(CallKind, Answered)> {
+        self.forget_unseen_of_another_session();
         while let Ok((made_for, kind, answered)) = self.calls.inbox.try_recv() {
             self.calls.out.retain(|k| *k != kind);
             // The turn may have moved since the press (a screen lock moves it) while the request was out and Beebeeb
@@ -281,6 +364,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             if now != made_for {
                 // What is held under the old turn (a key that waits) is the old turn's: wiped. The answer stays.
                 self.calls.drop_held();
+                // Codes Beebeeb made while the turn moved (a screen lock moves it): the page that asked may have been
+                // ended by the lock. They are kept here and handed over after the unlock (`late_codes`).
+                if let Answered::Codes(codes) = answered {
+                    self.calls.unseen = Some(Unseen { made_for, kind, codes });
+                    continue;
+                }
             }
             // A wait Beebeeb asked for counts down from now; a new change or a confirmed one starts clean.
             match (&kind, &answered) {
@@ -306,17 +395,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 }
             }
             // What changed on the account is read again, so what the pages say is Beebeeb's.
-            let changed = match (&kind, &answered) {
-                (CallKind::ConfirmEmail, Answered::Done) | (CallKind::TurnOffTwoFactor, Answered::Done) => true,
-                (CallKind::TurnOnTwoFactor, Answered::Codes(_)) => true,
-                _ => false,
-            };
-            if changed {
-                crate::frames::account::source::AccountSource::reload(self, Pane::Account);
-                if !matches!(kind, CallKind::ConfirmEmail) {
-                    // Two-factor was changed: what the status holds is out of date.
-                    self.two_factor_status.stale();
-                }
+            self.read_again_after(kind, &answered);
+            if matches!(answered, Answered::Codes(_)) {
+                self.calls.handed = Some((made_for, kind));
             }
             return Some((kind, answered));
         }

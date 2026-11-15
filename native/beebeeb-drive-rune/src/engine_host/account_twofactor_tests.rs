@@ -381,8 +381,9 @@ fn a_confirmed_email_change_replaces_the_mirrored_address_and_the_answer_is_not_
 }
 
 /// Review of desktop#424, delta: new backup codes Beebeeb already made reach the pane when the screen locks while the
-/// request is out (the session's turn moves, the account is the same); the codes are shown once and then wiped. The
-/// first test's other half: another account's, or an ended session's, answer is still dropped (the test above).
+/// request is out (the session's turn moves, the account is the same): kept by the source while the screen is locked,
+/// handed over once after the unlock (`late_codes`), then wiped. Another account's, or an ended session's, answer is
+/// still dropped (the test above); the window's side is `account_twofactor_tests_window.rs`.
 #[test]
 fn new_backup_codes_reach_the_pane_when_the_screen_locks_while_the_request_is_out() {
     let fake = fake();
@@ -392,14 +393,27 @@ fn new_backup_codes_reach_the_pane_when_the_screen_locks_while_the_request_is_ou
     assert!(source.start_call(CallKind::NewBackupCodes, "123456", ""));
     std::thread::sleep(Duration::from_millis(150));
     engine.lock_screen().expect("an open lock locks the screen");
-    let (kind, answered) = answer(&mut source).expect("the codes Beebeeb made are answered, not wiped unseen");
+    // The answer lands under the lock: kept, never handed over while the screen is locked.
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_millis(1_200) {
+        source.pump();
+        assert!(source.call_answer().is_none(), "not answered under the lock");
+        assert!(source.late_codes().is_none(), "never handed over under the lock");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the platform's yes unlocks the screen");
+    let (kind, codes) = source
+        .late_codes()
+        .expect("the codes Beebeeb made are handed over after the unlock, not wiped unseen");
     assert_eq!(kind, CallKind::NewBackupCodes);
-    let Answered::Codes(codes) = answered else {
-        panic!("the codes reach the pane");
-    };
     assert_eq!(codes.len(), 2);
     assert!(
-        source.call_answer().is_none(),
+        source.late_codes().is_none() && source.call_answer().is_none(),
         "shown once: nothing is held for a second look"
     );
 }
+
+#[path = "account_twofactor_tests_window.rs"]
+mod window;

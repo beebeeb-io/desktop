@@ -5,9 +5,10 @@
 //! this module never holds it as a string.
 //!
 //! Session rule (as [`Engine::restore_items_for`]): bound to the session of the press. Before EACH item the session's
-//! token is copied only while the session in memory is still that one, asked under its session-write lock
-//! (`AccountRuntime::while_session_is`); a session that moved on since (a lock, a sign-out, another sign-in) is
-//! [`PurgeError::NotSignedIn`], and nothing (more) is sent. Stops at the first item that fails: the ones before it are
+//! token is copied only while the session in memory is still that one and the screen is not locked, asked as a
+//! person's call (`person_session`, under the session-write lock); a session that moved on since (a lock, a sign-out,
+//! another sign-in), or a locked screen (also for a turn read while it was locked), is [`PurgeError::NotSignedIn`],
+//! and nothing (more) is sent. Stops at the first item that fails: the ones before it are
 //! gone for good, and [`Purged::done`] says how many.
 //!
 //! [`Engine::purge_trash_for`] BLOCKS on the handle's runtime: call it from a worker thread, never the UI thread.
@@ -21,6 +22,7 @@ use beebeeb_core::auth_flow::{AuthFlowError, HttpRequest, Method};
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::auth_transport;
+use zeroize::Zeroizing;
 
 /// Why an item was not deleted for good. Fixed words: never a server's body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,8 +141,11 @@ impl<C: CredentialStores> Engine<C> {
             let token = if self.acct.session.is_poisoned() {
                 None
             } else {
-                self.acct
-                    .while_session_is(&self.writes, session, |current| current.token.clone())
+                self.person_session(|current, generation| {
+                    (generation == session).then(|| Zeroizing::new(current.token.clone()))
+                })
+                .ok()
+                .flatten()
             };
             let Some(token) = token else {
                 return self.purged(done, Some(PurgeError::NotSignedIn));

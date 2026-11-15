@@ -176,6 +176,28 @@ pub(super) mod flows {
     }
 }
 
+/// A call's transport that, for a session whose owner is not recorded (stored before the owner tag), has Beebeeb name
+/// the owner (`session_owner_api`) just before the call's first request leaves: a call refused before it sends
+/// anything (a code that is not one) asks nothing.
+struct OwnerFirst<'t, 'e, C: CredentialStores> {
+    engine: &'e Engine<C>,
+    inner: &'t mut dyn AccountTransport,
+    asked: bool,
+    /// The owner Beebeeb named for this session, before the call's first request.
+    named: Option<String>,
+}
+
+impl<C: CredentialStores> AccountTransport for OwnerFirst<'_, '_, C> {
+    fn send(&mut self, request: &ApiRequest) -> Result<ApiResponse, AccountFlowError> {
+        if !self.asked {
+            self.asked = true;
+            let _ = self.engine.settle_session_owner_now();
+            self.named = self.engine.account_id_now();
+        }
+        self.inner.send(request)
+    }
+}
+
 impl<C: CredentialStores> Engine<C> {
     /// The signed-in account's id: the one the session was made with, else the one the server named.
     fn account_id_now(&self) -> Option<String> {
@@ -201,7 +223,8 @@ impl<C: CredentialStores> Engine<C> {
             return Err(AccountFlowFailure::NotSignedIn);
         }
         // Who this call is for, by the account's ID (never its email: an address can be another account's), to tell a
-        // turn that moved for the same account from another account's.
+        // turn that moved for the same account from another account's. A session stored before the owner tag has
+        // none yet: Beebeeb names it just before the call's first request leaves (`OwnerFirst`).
         let account = self.account_id_now();
         let mut transport = FlowTransport {
             runtime: &self.runtime,
@@ -209,19 +232,24 @@ impl<C: CredentialStores> Engine<C> {
             token: token.as_str(),
             offline: false,
         };
-        let answer = work(&mut transport);
+        let mut owner_first = OwnerFirst {
+            engine: self,
+            inner: &mut transport,
+            asked: account.is_some(),
+            named: None,
+        };
+        let answer = work(&mut owner_first);
+        let account = account.or(owner_first.named);
         let offline = transport.offline;
         if !self.account_session_is_still(session) {
             // The request has gone out and Beebeeb may have changed the account (new backup codes, two-factor on):
             // a turn that moved for the SAME account (a screen lock, a session write) must not wipe what Beebeeb
             // made unseen (review of desktop#424). The answer is dropped only when the session ended or another
             // account is signed in: its secrets are wiped here.
-            // `person_session` says whether a session is still in memory: a locked screen keeps it (the case this
-            // exists for), a session that was forgotten or never there does not.
-            let still_held = !matches!(
-                self.person_session(|_, _| ()),
-                Err(super::lock_api::PersonRefused::NoSession)
-            );
+            // Whether a session is still in memory, asked directly (this is a worker: it may wait): a locked screen
+            // keeps it (the case this exists for), a session that was forgotten or never there does not. Not
+            // `person_session`, which answers "no session" while a session change (the unlock itself) is under way.
+            let still_held = self.has_session();
             let same_account =
                 account.is_some() && self.account_id_now() == account && !self.account_session_refused() && still_held;
             if !same_account {

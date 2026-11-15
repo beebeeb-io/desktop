@@ -10,8 +10,9 @@
 //! of items inside) and everything else in the call is deleted. [`BulkPurged::deleted`] is what the server reports
 //! deleted, never what was asked.
 //!
-//! Session rule (as [`Engine::purge_trash_for`]): bound to the session of the press, asked under its session-write
-//! lock; a session that moved on sends nothing. BLOCKS on the handle's runtime: call it from a worker thread.
+//! Session rule (as [`Engine::purge_trash_for`]): bound to the session of the press, asked as a person's call under its
+//! session-write lock; a session that moved on, or a locked screen, sends nothing. BLOCKS on the handle's runtime:
+//! call it from a worker thread.
 //!
 //! Must not: log the password, a token, an id or a server's words; retry with the same token; call without it.
 
@@ -21,6 +22,7 @@ use super::trash_purge_api::{PurgeError, is_file_id, prove};
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::auth_transport;
+use zeroize::Zeroizing;
 
 /// The server's cap on ids per call (`MAX_BULK_TRASH_IDS`).
 pub const MAX_BULK_IDS: usize = 500;
@@ -142,11 +144,15 @@ impl<C: CredentialStores> Engine<C> {
         let unique: Vec<String> = file_ids.iter().filter(|id| seen.insert(id.as_str())).cloned().collect();
         let sent = &unique[..unique.len().min(MAX_BULK_IDS)];
         let left_out = unique.len() - sent.len();
+        // A person's call (`person_session`): a locked screen refuses it, also for a turn read while it was locked.
         let token = if self.acct.session.is_poisoned() {
             None
         } else {
-            self.acct
-                .while_session_is(&self.writes, session, |current| current.token.clone())
+            self.person_session(|current, generation| {
+                (generation == session).then(|| Zeroizing::new(current.token.clone()))
+            })
+            .ok()
+            .flatten()
         };
         let Some(token) = token else {
             return BulkPurged {
