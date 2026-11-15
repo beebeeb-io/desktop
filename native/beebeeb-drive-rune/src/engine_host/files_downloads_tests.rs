@@ -59,6 +59,15 @@ impl DownloadsEngine for Double {
     fn wake(&self) {}
 }
 
+/// `take` for at most `within` (less than the age gate), until `done`.
+fn take_within(calls: &mut DownloadCalls<Double>, within: Duration, done: impl Fn(&DownloadCalls<Double>) -> bool) {
+    let start = Instant::now();
+    while !done(calls) && start.elapsed() < within {
+        calls.take();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn take_until(calls: &mut DownloadCalls<Double>, done: impl Fn(&DownloadCalls<Double>) -> bool) {
     let start = Instant::now();
     loop {
@@ -189,7 +198,7 @@ fn a_copy_that_ended_leaves_the_row_at_the_engines_next_pulse_whatever_the_reads
     // The copy lands; the engine's own word moves to Idle in the same pulse. The held read is a moment old.
     *engine.read.lock().unwrap() = Ok(Vec::new());
     *engine.word.lock().unwrap() = Some(words::UP_TO_DATE);
-    take_until(&mut calls, |c| c.downloads().is_empty());
+    take_within(&mut calls, Duration::from_millis(600), |c| c.downloads().is_empty());
     assert!(calls.downloads().is_empty(), "the row left");
     assert!(
         engine.reads.load(Ordering::SeqCst) > first,

@@ -359,7 +359,14 @@ fn an_upload_that_finished_leaves_the_panel_at_the_engines_next_pulse_whatever_t
     // Everything went; the engine's word moves to Idle. The held read is a moment old.
     *engine.read.lock().unwrap() = Ok(read_of(1, Vec::new(), false));
     *engine.word.lock().unwrap() = Some(crate::ui::status_line::UP_TO_DATE);
-    take_until(&mut calls, |c| c.uploads().is_none());
-    assert!(calls.uploads().is_none());
+    let start = Instant::now();
+    while calls.uploads().is_some() && start.elapsed() < Duration::from_millis(600) {
+        calls.take();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        calls.uploads().is_none(),
+        "gone within the age gate, by the word's move"
+    );
     assert!(engine.reads.load(Ordering::SeqCst) > first);
 }
