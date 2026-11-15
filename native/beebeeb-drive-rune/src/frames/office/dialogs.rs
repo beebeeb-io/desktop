@@ -142,8 +142,8 @@ mod tests {
         };
         let (a, b) = (find("lic-link-0-text"), find("lic-link-1-text"));
         for e in [&a, &b] {
-            assert_ne!(e.color, Some(t.accent), "a link is never Amber");
-            assert_ne!(e.color, Some(t.accent_deep), "a link is never Amber");
+            assert_ne!(e.text_color, Some(t.accent), "a link is never Amber");
+            assert_ne!(e.text_color, Some(t.accent_deep), "a link is never Amber");
         }
         assert!(b.rect[1] - a.rect[1] >= 14.0, "the links are on two lines");
     }
