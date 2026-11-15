@@ -65,7 +65,6 @@ impl<C: CredentialStores> Engine<C> {
     ) -> Result<Vec<String>, LocalStateRefused> {
         let state = self.local_state_for_changes()?;
         let user_id = self.recent_searches_key(&state, session)?;
-        self.recent_searches_not_due(&user_id)?;
         state
             .with(|db| db.remember_search(&user_id, query, SEARCHES_KEPT))?
             .map_err(|_| LocalStateRefused::Unreadable)

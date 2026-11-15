@@ -473,7 +473,9 @@ impl<C: CredentialStores> Engine<C> {
         if mode == Mode::Change
             && ended == Ended::Refused
             && let Some(user_id) = session.user_id.as_deref()
-        {}
+        {
+            self.make_due_recent_searches_delete(&state, user_id);
+        }
         Ok(state)
     }
 }
