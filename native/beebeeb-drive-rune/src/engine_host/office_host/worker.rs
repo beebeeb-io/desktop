@@ -16,9 +16,10 @@ use beebeeb_office_sandbox as sandbox;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    CannotOpen, CellData, Command, DocKind, Event, HANDLE_SLACK, HELPER_EXE, Helper, Input, Link, MAX_IN_FLIGHT,
-    MAX_SPLIT_OUTSTANDING, MAX_SPLIT_REQUESTS, NoPreview, OfficeState, Out, OutlineEntry, PageSize, Received,
-    RenderAsk, RequestId, Shared, Starter, Stop, Timeouts, lock, wipe_cells, wipe_entries, wipe_message,
+    Anchor, AnchorAsk, CannotOpen, CellData, Command, DocKind, Event, HANDLE_SLACK, HELPER_EXE, Helper, Input, Link,
+    MAX_IN_FLIGHT, MAX_KNOWN_ANCHORS, MAX_SPLIT_OUTSTANDING, MAX_SPLIT_REQUESTS, NoPreview, OfficeState, Out,
+    OutlineEntry, PageSize, Received, RenderAsk, RequestId, Shared, Starter, Stop, Timeouts, lock, wipe_cells,
+    wipe_entries, wipe_message,
 };
 
 /// Starts the worker of one document on a thread of its own. `false` when no thread could be made: the worker, and
@@ -78,8 +79,8 @@ struct Run<S: Starter> {
     oldest_since: Instant,
     /// The requests out, oldest first: the helper answers them in this order.
     sent: VecDeque<Sent<S::Section>>,
-    /// Renders not sent yet (more than [`MAX_IN_FLIGHT`] asked).
-    waiting: VecDeque<RenderAsk>,
+    /// Pages and anchors not sent yet (more than [`MAX_IN_FLIGHT`] asked).
+    waiting: VecDeque<Ask>,
     /// The outline's entries so far, while it is being asked.
     outline: Option<Vec<OutlineEntry>>,
     /// When the outline's first page was asked: its budget counts from here.
@@ -102,6 +103,21 @@ struct Split {
     since: Instant,
 }
 
+/// A page or a chart or picture the window asked: they share [`MAX_IN_FLIGHT`] and the waiting queue.
+enum Ask {
+    Page(RenderAsk),
+    Anchor(AnchorAsk),
+}
+
+impl Ask {
+    fn id(&self) -> RequestId {
+        match self {
+            Ask::Page(ask) => ask.id,
+            Ask::Anchor(ask) => ask.id,
+        }
+    }
+}
+
 struct Sent<T> {
     wire: u32,
     asked: Asked<T>,
@@ -113,6 +129,11 @@ enum Asked<T> {
     Render {
         ask: RenderAsk,
         request: office::Render,
+        section: T,
+    },
+    Anchor {
+        ask: AnchorAsk,
+        request: office::RenderAnchor,
         section: T,
     },
     Outline(office::Outline),
@@ -337,11 +358,12 @@ impl<S: Starter> Worker<S> {
         }
     }
 
-    /// Kills the running helper and drops its sections.
+    /// Kills the running helper and drops its sections. The anchors it named go with it.
     fn kill_run(&mut self) {
         if let Some(run) = self.run.take() {
             run.helper.end();
             self.shared.disown();
+            lock(&self.shared.inner).anchors.clear();
             wipe_run(run);
         }
     }
@@ -386,7 +408,17 @@ impl<S: Starter> Worker<S> {
                 let Some(run) = self.run.as_mut() else {
                     return;
                 };
-                run.waiting.push_back(ask);
+                run.waiting.push_back(Ask::Page(ask));
+                self.pump_renders();
+            }
+            Command::RenderAnchor(ask) => {
+                if !matches!(self.phase, Phase::Sheets) {
+                    return;
+                }
+                let Some(run) = self.run.as_mut() else {
+                    return;
+                };
+                run.waiting.push_back(Ask::Anchor(ask));
                 self.pump_renders();
             }
             Command::Cancel(id) => self.cancel(id),
@@ -444,7 +476,8 @@ impl<S: Starter> Worker<S> {
         true
     }
 
-    /// Sends waiting renders while fewer than [`MAX_IN_FLIGHT`] are out (a cancelled one counts until answered).
+    /// Sends waiting pages and anchors while fewer than [`MAX_IN_FLIGHT`] are out (a cancelled one counts until
+    /// answered).
     fn pump_renders(&mut self) {
         loop {
             let Some(run) = self.run.as_mut() else {
@@ -453,7 +486,7 @@ impl<S: Starter> Worker<S> {
             let out = run
                 .sent
                 .iter()
-                .filter(|sent| matches!(sent.asked, Asked::Render { .. }))
+                .filter(|sent| matches!(sent.asked, Asked::Render { .. } | Asked::Anchor { .. }))
                 .count();
             if out >= MAX_IN_FLIGHT {
                 return;
@@ -461,10 +494,44 @@ impl<S: Starter> Worker<S> {
             let Some(ask) = run.waiting.pop_front() else {
                 return;
             };
-            if !self.send_render(ask) {
+            let sent = match ask {
+                Ask::Page(ask) => self.send_render(ask),
+                Ask::Anchor(ask) => self.send_anchor(ask),
+            };
+            if !sent {
                 return;
             }
         }
+    }
+
+    /// A section of exactly the asked `w * h * 4` bytes, granted read-write, and the `RenderAnchor` at the asked scale.
+    fn send_anchor(&mut self, ask: AnchorAsk) -> bool {
+        let len = ask.w as usize * ask.h as usize * 4;
+        let section = match self.starter.section(len) {
+            Ok(section) => section,
+            Err(_) => {
+                self.stopped(Stop::Failed);
+                return false;
+            }
+        };
+        let granted = self
+            .run
+            .as_ref()
+            .map(|run| self.starter.grant(&run.helper, &section, sandbox::Access::ReadWrite));
+        let Some(Ok(granted)) = granted else {
+            self.stopped(Stop::Failed);
+            return false;
+        };
+        let request = office::RenderAnchor {
+            sheet: ask.sheet,
+            anchor: ask.anchor.id,
+            scale: ask.scale,
+            out: office::GrantRef {
+                wire: granted.wire,
+                len: granted.len,
+            },
+        };
+        self.ask(Message::RenderAnchor(request), Asked::Anchor { ask, request, section })
     }
 
     /// A section of exactly the asked `w * h * 4` bytes, granted read-write, and the `Render` at the asked scale.
@@ -501,14 +568,18 @@ impl<S: Starter> Worker<S> {
         let Some(run) = self.run.as_mut() else {
             return;
         };
-        if let Some(at) = run.waiting.iter().position(|ask| ask.id == id) {
+        if let Some(at) = run.waiting.iter().position(|ask| ask.id() == id) {
             let _ = run.waiting.remove(at);
             return;
         }
-        let sent = run
-            .sent
-            .iter_mut()
-            .find(|sent| !sent.cancelled && matches!(&sent.asked, Asked::Render { ask, .. } if ask.id == id));
+        let sent = run.sent.iter_mut().find(|sent| {
+            !sent.cancelled
+                && match &sent.asked {
+                    Asked::Render { ask, .. } => ask.id == id,
+                    Asked::Anchor { ask, .. } => ask.id == id,
+                    _ => false,
+                }
+        });
         let Some(sent) = sent else {
             return;
         };
@@ -621,11 +692,14 @@ impl<S: Starter> Worker<S> {
             (Asked::Open, Message::OpenedSheets(opened)) if !pages => self.opened_sheets(opened),
             (Asked::Open, Message::Error(error)) => self.open_refused(error.code),
             // Cancelled: its answer is checked for id, order and kind (above), then discarded with its section.
-            (Asked::Render { .. }, Message::Rendered(_) | Message::Error(_)) if cancelled => {
+            (Asked::Render { .. } | Asked::Anchor { .. }, Message::Rendered(_) | Message::Error(_)) if cancelled => {
                 let _ = self.handles_ok(false);
             }
             (Asked::Render { ask, request, section }, Message::Rendered(got)) => {
                 self.rendered(ask, request, section, got)
+            }
+            (Asked::Anchor { ask, request, section }, Message::Rendered(got)) => {
+                self.rendered_anchor(ask, request, section, got)
             }
             (Asked::Outline(asked), Message::OutlineData(got)) => self.outline_page(asked, got),
             (Asked::Stats, Message::StatsData(got)) => {
@@ -635,7 +709,7 @@ impl<S: Starter> Worker<S> {
             }
             (Asked::Cells { asked, split }, Message::CellData(got)) => self.cells(asked, split, got),
             (Asked::Cells { asked, split }, Message::Error(error)) => self.cells_refused(asked, split, error.code),
-            (Asked::Render { .. } | Asked::Outline(_) | Asked::Stats, Message::Error(error)) => {
+            (Asked::Render { .. } | Asked::Anchor { .. } | Asked::Outline(_) | Asked::Stats, Message::Error(error)) => {
                 self.request_refused(error.code)
             }
             // Any other kind of answer: not what was asked.
@@ -725,6 +799,39 @@ impl<S: Starter> Worker<S> {
         }));
     }
 
+    /// A chart or picture: checked against the anchor it was asked for (exactly the asked size), then copied out.
+    fn rendered_anchor(
+        &mut self,
+        ask: AnchorAsk,
+        request: office::RenderAnchor,
+        section: S::Section,
+        got: office::Rendered,
+    ) {
+        let len = self.starter.section_len(&section);
+        if check::check_rendered_anchor(&request, &ask.anchor, len as u64, &got, &check::Limits::CONTRACT).is_err() {
+            return self.stopped(Stop::Protocol);
+        }
+        if !self.handles_ok(true) {
+            return;
+        }
+        let mut rgba = vec![0u8; len];
+        if !self.starter.copy_out(&section, &mut rgba) {
+            rgba.zeroize();
+            return self.stopped(Stop::Failed);
+        }
+        drop(section);
+        self.shared.push(Out::Event(Event::Anchor {
+            id: ask.id,
+            sheet: ask.sheet,
+            anchor: ask.anchor.id,
+            scale: ask.scale,
+            w: got.w,
+            h: got.h,
+            rgba,
+            missing_content: got.missing_content,
+        }));
+    }
+
     /// One page of the outline: checked (it must move forward and stay under the limit), then the next page is asked,
     /// or the whole outline goes to the window.
     fn outline_page(&mut self, asked: office::Outline, mut got: office::OutlineData) {
@@ -771,6 +878,7 @@ impl<S: Starter> Worker<S> {
             return;
         }
         self.split_answered(split);
+        self.remember_anchors(asked.sheet, &got.anchors);
         self.shared.push(Out::Event(Event::Cells {
             sheet: asked.sheet,
             range: asked.range,
@@ -804,6 +912,21 @@ impl<S: Starter> Worker<S> {
         for half in halves {
             if !self.ask(Message::Cells(half), Asked::Cells { asked: half, split }) {
                 return;
+            }
+        }
+    }
+
+    /// The charts and pictures of checked cells of `sheet`, as the window may ask them: up to [`MAX_KNOWN_ANCHORS`]
+    /// (one already known is updated).
+    fn remember_anchors(&self, sheet: u32, anchors: &[Anchor]) {
+        let mut inner = lock(&self.shared.inner);
+        if inner.closed.is_some() {
+            return;
+        }
+        for anchor in anchors {
+            let key = (sheet, anchor.id);
+            if inner.anchors.len() < MAX_KNOWN_ANCHORS || inner.anchors.contains_key(&key) {
+                inner.anchors.insert(key, anchor.clone());
             }
         }
     }

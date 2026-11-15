@@ -38,7 +38,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,7 +52,9 @@ use beebeeb_office_protocol::office::{self, Message};
 use beebeeb_office_sandbox as sandbox;
 use zeroize::{Zeroize, Zeroizing};
 
-pub use beebeeb_office_protocol::office::{CellData, CellRange, DocKind, OutlineEntry, PageSize, Rect, SheetInfo};
+pub use beebeeb_office_protocol::office::{
+    Anchor, AnchorKind, CellData, CellRange, CellText, DocKind, OutlineEntry, PageSize, Rect, SheetInfo,
+};
 
 // Windows Error Reporting keeps no copy of the helper's memory (the lead's answer 4, 2026-11-15 19:03).
 #[path = "office_host/crash_reports.rs"]
@@ -96,6 +98,11 @@ pub const SPLIT_BUDGET: Duration = Duration::from_secs(30);
 
 /// One outline: from `Outline { from: 0 }` to its last page. Past it, the helper is stopped.
 pub const OUTLINE_BUDGET: Duration = Duration::from_secs(60);
+
+/// Charts and pictures a document's host remembers from checked cells, to be asked by [`OfficeHost::request_anchor`].
+/// Past it, a new one is not remembered (and cannot be asked) until another helper starts: a helper cannot grow this
+/// without end by naming new ones in every answer.
+pub const MAX_KNOWN_ANCHORS: usize = 4_096;
 
 /// Open handles a helper may hold beyond its count at its first page and one per request out
 /// ([`MAX_IN_FLIGHT`]). A helper that keeps the sections it was handed is over it soon, and is stopped.
@@ -215,6 +222,17 @@ pub enum Event {
         range: CellRange,
         data: CellData,
     },
+    /// Chart or picture `anchor` of `sheet` at `scale`: `w` x `h` RGBA8, exactly the size asked.
+    Anchor {
+        id: RequestId,
+        sheet: u32,
+        anchor: u32,
+        scale: f32,
+        w: u32,
+        h: u32,
+        rgba: Vec<u8>,
+        missing_content: bool,
+    },
 }
 
 /// Pixels and text are document content: lengths only.
@@ -249,6 +267,27 @@ impl std::fmt::Debug for Event {
                 .field("sheet", sheet)
                 .field("range", range)
                 .field("cells", &data.cells.len())
+                .field("anchors", &data.anchors.len())
+                .finish(),
+            Event::Anchor {
+                id,
+                sheet,
+                anchor,
+                scale,
+                w,
+                h,
+                rgba,
+                missing_content,
+            } => f
+                .debug_struct("Anchor")
+                .field("id", id)
+                .field("sheet", sheet)
+                .field("anchor", anchor)
+                .field("scale", scale)
+                .field("w", w)
+                .field("h", h)
+                .field("rgba_len", &rgba.len())
+                .field("missing_content", missing_content)
                 .finish(),
         }
     }
@@ -485,6 +524,9 @@ struct Inner {
     state: OfficeState,
     outs: VecDeque<Out>,
     worker_ended: bool,
+    /// The charts and pictures of checked cells from the running helper, by (sheet, id): what
+    /// [`OfficeHost::request_anchor`] may ask. Emptied when that helper goes, and at a close.
+    anchors: HashMap<(u32, u32), Anchor>,
 }
 
 /// What the worker queues for the window.
@@ -504,6 +546,7 @@ impl Shared {
             }
             inner.closed = Some(why);
             let state = std::mem::replace(&mut inner.state, OfficeState::Closed(why));
+            inner.anchors = HashMap::new();
             (inner.helper.take(), std::mem::take(&mut inner.outs), state)
         };
         if let Some(helper) = helper {
@@ -598,6 +641,7 @@ struct Received {
 
 enum Command {
     Render(RenderAsk),
+    RenderAnchor(AnchorAsk),
     Cancel(RequestId),
     Outline,
     Stats,
@@ -606,6 +650,17 @@ enum Command {
 }
 
 /// A page asked by the window; `w` x `h` from `check::asked_size`.
+/// A chart or picture asked by the window, as seen in checked cells; `w` x `h` from `check::asked_anchor_size`.
+#[derive(Clone, Debug)]
+struct AnchorAsk {
+    id: RequestId,
+    sheet: u32,
+    anchor: Anchor,
+    scale: f32,
+    w: u32,
+    h: u32,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RenderAsk {
     id: RequestId,
@@ -702,7 +757,43 @@ impl OfficeHost {
         Some(id)
     }
 
-    /// Cancels a page: still waiting here, it is never asked; already asked, its answer is checked and discarded.
+    /// Asks for chart or picture `anchor` of sheet `sheet` at `scale` (from `check::render_scale(zoom, dpi)`), drawn
+    /// into a section of exactly its size. `None` unless the sheets are open, the anchor was in a checked
+    /// [`Event::Cells`] of that sheet from the running helper, and its size (`check::asked_anchor_size`, at most 4,096
+    /// px a side) is within [`MAX_PAGE_SIDE_PX`]. It counts toward [`MAX_IN_FLIGHT`] with the pages, and
+    /// [`OfficeHost::cancel`] works on it.
+    pub fn request_anchor(&mut self, sheet: u32, anchor: u32, scale: f32) -> Option<RequestId> {
+        let seen = {
+            let inner = lock(&self.shared.inner);
+            if !matches!(inner.state, OfficeState::Sheets { .. }) {
+                return None;
+            }
+            inner.anchors.get(&(sheet, anchor)).cloned()?
+        };
+        let probe = office::RenderAnchor {
+            sheet,
+            anchor,
+            scale,
+            out: office::GrantRef { wire: 0, len: 0 },
+        };
+        let (w, h) = check::asked_anchor_size(&probe, &seen, &check::Limits::CONTRACT).ok()?;
+        if w > MAX_PAGE_SIDE_PX || h > MAX_PAGE_SIDE_PX {
+            return None;
+        }
+        let id = self.next_id();
+        self.command(Command::RenderAnchor(AnchorAsk {
+            id,
+            sheet,
+            anchor: seen,
+            scale,
+            w,
+            h,
+        }));
+        Some(id)
+    }
+
+    /// Cancels a page or an anchor: still waiting here, it is never asked; already asked, its answer is checked and
+    /// discarded.
     pub fn cancel(&mut self, id: RequestId) {
         if self.is_open() {
             self.command(Command::Cancel(id));
@@ -862,6 +953,7 @@ pub(crate) fn open_with<S: Starter>(
             state: refused.map_or(OfficeState::Opening, OfficeState::CannotOpen),
             outs: VecDeque::new(),
             worker_ended: false,
+            anchors: HashMap::new(),
         }),
         commands,
         wake,
@@ -914,7 +1006,7 @@ fn wipe_state(state: &mut OfficeState) -> usize {
 
 fn wipe_event(event: &mut Event) -> usize {
     match event {
-        Event::Page { rgba, .. } => {
+        Event::Page { rgba, .. } | Event::Anchor { rgba, .. } => {
             let n = rgba.len();
             rgba.zeroize();
             n
@@ -936,12 +1028,21 @@ fn wipe_entries(entries: &mut [OutlineEntry]) -> usize {
         .sum()
 }
 
+/// The cells' text and formulas (counted) and their values.
 fn wipe_cells(data: &mut CellData) -> usize {
     data.cells
         .iter_mut()
         .map(|cell| {
-            let n = cell.text.len();
+            let mut n = cell.text.len();
             cell.text.zeroize();
+            if let Some(formula) = cell.formula.as_mut() {
+                n += formula.len();
+                formula.zeroize();
+            }
+            if let Some(value) = cell.value.as_mut() {
+                value.zeroize();
+            }
+            cell.value = None;
             n
         })
         .sum()

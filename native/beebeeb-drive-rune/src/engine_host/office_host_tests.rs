@@ -20,6 +20,9 @@ use fake_helper_tests::*;
 // The rows of the two security reviews after O-CP2 (budgets, handles, wipes, the lock, a worker panic).
 #[path = "office_host_tests/hardening_tests.rs"]
 mod hardening_tests;
+// Charts and pictures of a sheet: asked once seen, sized by the protocol.
+#[path = "office_host_tests/anchor_tests.rs"]
+mod anchor_tests;
 
 /// 100 % on a 96 DPI screen: a Letter page is 816 x 1056.
 fn scale_100() -> f32 {
@@ -51,6 +54,8 @@ fn no_cells(range: CellRange) -> CellData {
         row_heights: vec![15.0; range.rows as usize],
         merges: Vec::new(),
         frozen: office::Frozen { rows: 0, cols: 0 },
+        anchors: Vec::new(),
+        missing_content: false,
     }
 }
 
