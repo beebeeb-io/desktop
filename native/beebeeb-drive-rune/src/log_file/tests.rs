@@ -337,3 +337,19 @@ fn a_yes_or_no_and_a_count_named_like_a_word_are_kept() {
         "{text}"
     );
 }
+
+#[test]
+fn pass_is_a_credential_word_in_a_field_name_and_as_a_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = logged(dir.path(), MAX_FILE_BYTES, || {
+        tracing::warn!(
+            pass = "hunter2",
+            db_pass = "hunter3",
+            pass_count = 7_u64,
+            "login pass: hunter4 refused"
+        );
+    });
+    for secret in ["hunter2", "hunter3", "hunter4"] {
+        assert!(!text.contains(secret), "{secret} reached the file: {text}");
+    }
+}
