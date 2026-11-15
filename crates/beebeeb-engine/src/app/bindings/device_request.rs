@@ -257,7 +257,6 @@ impl<C: CredentialStores> Engine<C> {
         let profile = match crate::app::fetch_profile(&self.client, &self.config.api_base, &token).await {
             Ok(profile) => profile,
             Err(_) => {
-                self.end_unstored(&token).await;
                 return Err(DeviceRequestRefused::NotStored);
             }
         };

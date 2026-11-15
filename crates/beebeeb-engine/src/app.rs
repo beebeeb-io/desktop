@@ -704,6 +704,9 @@ impl<C: CredentialStores> Engine<C> {
                     .store_wrapped_master_key(SecretBytes::new_master_key(&key))
                     .map_err(|_| words("failed"))?;
                 // The key takes the recorded owner of the session it was proven for; an unknown one leaves it untagged.
+                if let Err(error) = key_owner::bind_key_to_session_owner(&vault) {
+                    tracing::warn!(%error, "could not record the vault key's owner in the credential store");
+                }
                 let mut guard = self.acct.session.lock().map_err(|_| words("failed"))?;
                 *guard = Some(Session {
                     // Moved out of the wiped buffer, not copied: the session holds the one copy from here on.
