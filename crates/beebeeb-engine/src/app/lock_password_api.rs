@@ -31,6 +31,10 @@ use beebeeb_core::screen_lock::{
 };
 use zeroize::Zeroizing;
 
+#[path = "app_lock_api.rs"]
+mod app_lock;
+pub use app_lock::{AppLockProof, AppLockRefused};
+
 use super::lock_api::{LockRefused, LockState};
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
@@ -73,8 +77,9 @@ pub enum StartSettingRefused {
     NotOpen,
     /// Turning it off needs the password.
     PasswordNeeded,
-    /// A wrong password (counted).
-    Wrong,
+    /// A wrong password, counted (core's `AuthError::PasswordWrong`): `wait_ms` before the next try (0: none), and
+    /// whether this tenth wrong try turned the offline check off.
+    Wrong { wait_ms: u64, local_check_off: bool },
     /// Nothing was checked: a wait after wrong tries is still running.
     Wait { wait_ms: u64 },
     /// The server's own limit on password checks. `None`: it named no wait.
@@ -301,7 +306,14 @@ impl<C: CredentialStores> Engine<C> {
         match judged {
             Judgement::Accepted if !self.acct.session_unchanged_since(turn) => Err(StartSettingRefused::NotOpen),
             Judgement::Accepted => Ok(()),
-            Judgement::Wrong { .. } => Err(StartSettingRefused::Wrong),
+            Judgement::Wrong { failures } => Err(StartSettingRefused::Wrong {
+                wait_ms: if failures == LOCAL_CHECK_OFF_AT {
+                    0
+                } else {
+                    wait_after_ms(failures)
+                },
+                local_check_off: failures == LOCAL_CHECK_OFF_AT,
+            }),
             Judgement::Wait { wait_ms } => Err(StartSettingRefused::Wait { wait_ms }),
             Judgement::ServerLimit { wait_ms } => Err(StartSettingRefused::ServerLimit { wait_ms }),
             Judgement::OfflineNoRecord => Err(StartSettingRefused::Offline),

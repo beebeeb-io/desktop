@@ -227,7 +227,9 @@ impl<C: CredentialStores> Engine<C> {
         }) {
             Ok(Some(held)) => Some(held),
             Ok(None) => return Err(PasswordChangeError::NotSignedIn),
-            Err(super::lock_api::PersonRefused::ScreenLocked) => return Err(PasswordChangeError::Locked),
+            Err(super::lock_api::PersonRefused::ScreenLocked | super::lock_api::PersonRefused::VaultClosed) => {
+                return Err(PasswordChangeError::Locked);
+            }
             Err(super::lock_api::PersonRefused::NoSession) => None,
         };
         match held {

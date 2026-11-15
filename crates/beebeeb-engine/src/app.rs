@@ -1102,7 +1102,7 @@ impl<C: CredentialStores> Engine<C> {
     fn session_token(&self) -> Result<String, String> {
         self.person_session(|session, _| session.token.clone())
             .map_err(|refused| match refused {
-                lock_api::PersonRefused::ScreenLocked => "locked".to_string(),
+                lock_api::PersonRefused::ScreenLocked | lock_api::PersonRefused::VaultClosed => "locked".to_string(),
                 lock_api::PersonRefused::NoSession => "not signed in".to_string(),
             })
     }

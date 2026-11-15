@@ -42,6 +42,7 @@ use crate::shell::tray::TrayInputs;
 use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary};
 
 pub mod account;
+mod app_lock;
 pub mod backups;
 #[cfg(test)]
 mod binding_tests;

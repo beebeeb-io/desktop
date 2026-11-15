@@ -51,8 +51,9 @@ use beebeeb_engine::app::settings_api::AccountCallError;
 use beebeeb_engine::app::{CredentialStores, Engine};
 use chrono::Utc;
 
-use super::log;
 use super::passkeys::PasskeyCalls;
+use super::stamp::{Stamp, account_of, stamp};
+use super::{app_lock::AppLockPart, log};
 use crate::frames::account::Pane;
 use crate::frames::account::approve::{Approval, Denial, Lookup, SignInRequest};
 use crate::frames::account::source::{
@@ -95,9 +96,6 @@ struct Held<T> {
     account: Option<String>,
     value: T,
 }
-
-/// The session and account a call is made for.
-type Stamp = (SessionGeneration, Option<String>);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -160,15 +158,6 @@ enum Answer {
     },
 }
 
-/// Whose account a call is for: the stored email, else the user id (as `settings::account_of`).
-fn account_of<C: CredentialStores>(engine: &Engine<C>) -> Option<String> {
-    engine.account_email().or_else(|| engine.user_id())
-}
-
-fn stamp<C: CredentialStores>(engine: &Engine<C>) -> Stamp {
-    (engine.session_turn(), account_of(engine))
-}
-
 /// The stamp, when it is still the engine's after the call: else `None` (the answer is dropped).
 fn still<C: CredentialStores>(engine: &Engine<C>, before: Stamp) -> Option<Stamp> {
     (stamp(engine) == before).then_some(before)
@@ -225,6 +214,7 @@ pub struct EngineAccountSource<C: CredentialStores> {
     activity: activity::ActivityPart<C>,
     two_factor_status: twofactor_status::StatusPart<C>,
     passkeys: PasskeyCalls<C>,
+    pub(super) app_lock: AppLockPart<C>,
     notices: Line,
     /// How sign-outs ended that the person has not been told: answered after they left Devices and sessions,
     /// or still waiting in the line when they left. Only what was not done: said when that pane shows again (a
@@ -256,6 +246,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             activity: activity::ActivityPart::new(engine.clone()),
             two_factor_status: twofactor_status::StatusPart::new(engine.clone()),
             passkeys: PasskeyCalls::new(engine.clone()),
+            app_lock: AppLockPart::new(engine.clone()),
             engine,
             overview: None,
             sessions: None,
@@ -712,6 +703,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         self.two_factor_status.opened(pane);
         self.password.forget();
         self.passkeys.opened(pane);
+        self.app_lock.opened(pane);
         self.showing = Kind::of(pane);
         self.counting_devices = pane == Pane::Security;
         let Some(kind) = self.showing else {
@@ -749,6 +741,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         self.two_factor_status.closed();
         self.password.forget();
         self.passkeys.closed();
+        self.app_lock.closed();
         self.showing = None;
         self.counting_devices = false;
         self.calls.drop_held();
@@ -848,7 +841,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         changed |= resend_tick.is_some();
         let wake_in = [wake_in, resend_tick].into_iter().flatten().min();
         self.dirty = false;
-        let (passkeys_changed, passkeys_busy, passkeys_wake) = self.passkeys.pump();
+        let (passkeys_changed, passkeys_busy, passkeys_wake) = self.app_lock.pump_with(self.passkeys.pump());
         let (changed, wake_in) = (
             changed || passkeys_changed,
             [wake_in, passkeys_wake].into_iter().flatten().min(),
@@ -869,7 +862,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn notice(&self) -> Option<&'static str> {
-        if let Some((words, _)) = self.passkeys.notice() {
+        if let Some((words, _)) = self.app_lock.notice_over(self.passkeys.notice()) {
             return Some(words);
         }
         match self.said() {
@@ -881,7 +874,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn notice_failed(&self) -> bool {
-        if let Some((_, failed)) = self.passkeys.notice() {
+        if let Some((_, failed)) = self.app_lock.notice_over(self.passkeys.notice()) {
             return failed;
         }
         match self.said() {
@@ -891,7 +884,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn notice_action(&self) -> Option<&'static str> {
-        if self.passkeys.notice().is_some() {
+        if self.app_lock.notice_over(self.passkeys.notice()).is_some() {
             return None;
         }
         match self.said() {
@@ -927,6 +920,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn clear_notice(&mut self) {
         self.activity.clear();
         self.passkeys.clear_notice();
+        self.app_lock.clear_notice();
         self.dirty |= !self.notices.is_empty();
         leave(&mut self.notices, &mut self.later);
     }
@@ -992,7 +986,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     /// The Security page: two-factor as THIS session's profile marks it, how many sessions are signed in when
-    /// this session's list is held (Beebeeb names no device per session), and nothing else.
+    /// this session's list is held (Beebeeb names no device per session), app lock (`app_lock.rs`), nothing else.
     fn security_facts(&self) -> SecurityFacts {
         SecurityFacts {
             two_factor: self.current(&self.overview).and_then(|overview| overview.two_factor),
@@ -1004,8 +998,13 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
             // Signing this app out is bound; "all apps" has nothing to mean here (Drive is the one app).
             can_sign_out: self.open(),
             activity: self.activity.facts(),
+            app_lock: self.app_lock.facts(),
             ..SecurityFacts::unknown()
         }
+    }
+
+    fn set_app_lock(&mut self, on: bool) {
+        self.app_lock.set(on);
     }
 
     fn sign_out_this_app(&mut self) -> SignOutAnswer {
@@ -1070,8 +1069,6 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn factors(&self) -> Vec<Factor> {
         Vec::new()
     }
-    /// App lock: a lane of its own (Windows Hello).
-    fn set_app_lock(&mut self, _on: bool) {}
     /// "All apps": Drive is the only Beebeeb app on this PC in this version, so the row is not drawn
     /// (`can_sign_out_all` is false); never reached from a drawn control.
     fn sign_out_all_apps(&mut self) -> SignOutAnswer {
