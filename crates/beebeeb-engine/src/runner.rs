@@ -651,18 +651,21 @@ async fn run(
                 // signal and so it wakes up promptly when resumed.
                 let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));
                 if mode.is_paused() {
-                    // Task 2521 (review P1-2): a paused tick pulls nothing, so with no heartbeat running (its
-                    // registration failed) nothing would count an ended session's refusals. One small check of who
-                    // is signed in stands in for the pull: a 401 adds one to the run, an answer clears it.
-                    if heartbeat.is_none() {
-                        let check = api.account_profile().await;
-                        auth_health.note_api_answer(check.as_ref().err());
-                    }
                     emit_payload(&app, tracker.paused());
                     set_telemetry_state(&telemetry, "paused");
                     // Windows breadcrumb flyout: reflect the paused state.
                     #[cfg(target_os = "windows")]
                     refresh_status_ui_snapshot(&db, mode, false);
+                    // Task 2521 (review P1-2): a paused tick pulls nothing, so with no heartbeat running (its
+                    // registration failed, or its task ended) nothing would count an ended session's refusals. One
+                    // small check of the session stands in for the pull: a 401 adds one to the run, an answer clears
+                    // it. Bounded well under the stop's graceful wait, so a stop is never held up by it; a check
+                    // that does not answer in time proves nothing and leaves the run.
+                    if heartbeat.as_ref().is_none_or(|(_, beating, _)| beating.is_finished())
+                        && let Ok(check) = tokio::time::timeout(PAUSED_SESSION_CHECK_TIMEOUT, api.session_check()).await
+                    {
+                        auth_health.note_api_answer(check.as_ref().err());
+                    }
                     continue;
                 }
 

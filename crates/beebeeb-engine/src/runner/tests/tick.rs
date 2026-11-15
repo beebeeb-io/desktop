@@ -383,6 +383,46 @@ async fn the_real_pulse_reports_a_pause_the_moment_it_happens() {
     pulse.abort();
 }
 
+/// Task 2521, review P3-3: a tick or a beat that ran long (a large upload, a slow answer, a PC that slept) is not
+/// followed by a burst of the periods it missed. With tokio's default (`Burst`) those fire back to back, and an ended
+/// session's refusals would then arrive milliseconds apart: one moment counted as the whole run. `Delay` starts the
+/// next period when the late one ends. Both feeds of the run are pinned: the runner's tick and the heartbeat's beat.
+#[test]
+fn a_late_tick_or_beat_delays_the_next_one_instead_of_a_burst() {
+    for (file, source, interval, set) in [
+        (
+            "runner.rs",
+            include_str!("../../runner.rs"),
+            "let mut tick = tokio::time::interval(TICK_INTERVAL);\n",
+            "tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);",
+        ),
+        (
+            "runner/telemetry.rs",
+            include_str!("../telemetry.rs"),
+            "let mut ticker = tokio::time::interval(interval);\n",
+            "ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);",
+        ),
+    ] {
+        let source = source.replace("\r\n", "\n");
+        let source = &source[..source.find("#[cfg(test)]\nmod tests").unwrap_or(source.len())];
+        assert_eq!(
+            source.matches("tokio::time::interval(").count(),
+            1,
+            "{file}: one interval"
+        );
+        let at = source.find(interval).unwrap_or_else(|| panic!("{file}: the interval"));
+        let after: String = source[at + interval.len()..]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .take(1)
+            .collect();
+        assert_eq!(after, set, "{file}: the interval delays a missed period");
+    }
+    // The paused tick's check of the session is bounded well under the stop's graceful wait.
+    assert!(PAUSED_SESSION_CHECK_TIMEOUT < GRACEFUL_ABORT_TIMEOUT);
+}
+
 // ── AbortOutcome per-stage classification (Bug A) ───────────────────────
 //
 // The old `abort() -> bool` conflated "the engine task is gone" with "the
@@ -390,26 +430,3 @@ async fn the_real_pulse_reports_a_pause_the_moment_it_happens() {
 // failure (Explorer-held handles, 3s drain timeout) was reported as
 // "could not stop the sync engine". The classification must attribute the
 // failure to the stage that actually failed.
-
-/// Task 2521, review P3-3: a tick that ran long (a large upload) is not followed by a burst of the ticks it missed.
-/// With tokio's default (`Burst`) those fire back to back, and an ended session's refused pulls would then arrive
-/// milliseconds apart: one moment counted as the whole run. `Delay` starts the next period when the late tick ends.
-#[test]
-fn a_late_tick_delays_the_next_one_instead_of_a_burst() {
-    let source = include_str!("../../runner.rs").replace("\r\n", "\n");
-    let source = &source[..source.find("#[cfg(test)]\nmod tests").expect("runner's tests")];
-    let interval = "let mut tick = tokio::time::interval(TICK_INTERVAL);\n";
-    let at = source.find(interval).expect("the tick interval");
-    assert!(
-        source[at + interval.len()..]
-            .trim_start()
-            .starts_with("tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);"),
-        "the tick interval delays a missed tick: {}",
-        &source[at..at + 200]
-    );
-    assert_eq!(
-        source.matches("tokio::time::interval(TICK_INTERVAL)").count(),
-        1,
-        "one tick interval"
-    );
-}
