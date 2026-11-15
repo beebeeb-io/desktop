@@ -321,9 +321,7 @@ pub fn live_rows(db: &StateDb) -> Result<Vec<FileEntry>, DriveError> {
 fn prefer(a: &FileEntry, b: &FileEntry) -> bool {
     let known = |e: &FileEntry| e.remote_updated_at > 0;
     let not_local = |e: &FileEntry| e.status != FileStatus::Local;
-    let _ = (known(a), not_local(a), std::cmp::Reverse(&a.file_id))
-        > (known(b), not_local(b), std::cmp::Reverse(&b.file_id));
-    false
+    (known(a), not_local(a), std::cmp::Reverse(&a.file_id)) > (known(b), not_local(b), std::cmp::Reverse(&b.file_id))
 }
 
 /// Drop the rows a freshly applied snapshot no longer has. `prune_absent` keeps a row whose
