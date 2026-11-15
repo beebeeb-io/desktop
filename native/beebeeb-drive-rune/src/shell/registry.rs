@@ -354,6 +354,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         return flyout;
     }
     let group = group_for(&s.shell.app);
+    // After a wake Windows may not have announced, the content is covered at once, drawn as the lock screen, until the
+    // engine said whether the wake locks (`shell::away`, the owner's ruling D-B2-3): no frame, tip or dialog shows.
+    if s.shell.away.covers() && !matches!(group, FrameGroup::Locked | FrameGroup::SignIn) {
+        return crate::frames::signin::before_files::cover(s, cx);
+    }
     let behind = match frame(group) {
         Some(frame) => (frame.view)(s, cx),
         None => placeholder::window(s, cx, group),

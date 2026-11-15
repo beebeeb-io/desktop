@@ -29,6 +29,8 @@ use crate::shell::{registry, state};
 
 const EMAIL: &str = "away-lock@example.eu";
 const PASSWORD: &str = "an invented password for the away lock";
+/// A file in the account's root, so a frame that shows the Files window holds its name.
+const FILE_NAME: &str = "Harbour plan.txt";
 
 type TestEngine = Arc<Engine<MemoryCredentials>>;
 
@@ -52,6 +54,7 @@ fn live() -> Live {
 /// `FirstRun`), with the engine signed in and open. No look is waited for.
 fn live_with(first_run: bool) -> Live {
     let (account, phrase) = FakeAccount::register(EMAIL, PASSWORD, TEST_PHRASE);
+    account.add_item("away-lock-file", None, FILE_NAME, false, 2_048);
     let api = FakeApi::start(account_handler(Arc::new(account)));
     let (engine_host, messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
@@ -141,6 +144,50 @@ fn answers(live: &mut Live, count: usize) {
 fn looked(live: &mut Live) {
     let before = live.rt.state.shell.away.answered;
     answers(live, before + 1);
+}
+
+/// Every text and label the window holds, leaving elements too (a row on its way out still shows its name).
+fn words(live: &Live) -> String {
+    live.rt
+        .elements()
+        .into_iter()
+        .flat_map(|e| [e.text, e.label])
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Frames until the window holds `what` (at most 10 s).
+fn until_drawn(live: &mut Live, what: &str) {
+    let began = Instant::now();
+    loop {
+        live.rt.frame(0.016);
+        live.rt.settle_all();
+        live.rt.frame(0.016);
+        if words(live).contains(what) {
+            return;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{what:?} was never drawn; the window holds:\n{}",
+            words(live)
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The main window's poll of the away lock alone, as `host::poll` makes it: whether it said the window changed.
+fn poll_said(live: &mut Live) -> bool {
+    let idle = *live.platform.idle.lock().unwrap();
+    let mut said = false;
+    live.rt.update_if(|s, tx| {
+        let shell = &mut s.shell;
+        said = shell
+            .away
+            .poll(shell.actions.screen_open(), idle, &shell.actions, None, tx);
+        said
+    });
+    said
 }
 
 #[test]
@@ -541,4 +588,195 @@ fn polls_a_minute_and_a_half_apart_are_not_time_away() {
     }
     assert_eq!(away(&mut live.rt).looks, looks, "no look before it is due");
     assert_eq!(live.engine.lock_state(), LockState::Open);
+}
+
+/// D-B2-3 (privacy): after a wake Windows did not announce, the window's content is covered at once, drawn as the lock
+/// screen; the grace only decides which look says the wake. Twenty-nine minutes and three, of thirty: no frame from the
+/// poll that found the gap to the lock holds the file's name, and after the unlock the files come back.
+#[test]
+fn a_frame_during_the_grace_holds_no_file_name_and_the_lock_follows() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(29 * 60));
+    looked(&mut live);
+    slept(&mut live, Duration::from_secs(3 * 60));
+    assert!(poll_said(&mut live), "the poll that covers says the window changed");
+    assert!(
+        away(&mut live.rt).covers(),
+        "the poll that found the gap covers at once"
+    );
+    live.rt.frame(0.016);
+    let drawn = words(&live);
+    assert!(
+        !drawn.contains(FILE_NAME),
+        "the first frame after the wake holds no file name:\n{drawn}"
+    );
+    assert!(
+        drawn.contains("Beebeeb is locked"),
+        "it is drawn as the lock screen:\n{drawn}"
+    );
+    // Every frame through the grace and the gap's look, until the window shows the lock itself.
+    let began = Instant::now();
+    while live.rt.state.shell.app.gate() != GateState::Locked {
+        live.rt.frame(0.016);
+        let drawn = words(&live);
+        assert!(
+            !drawn.contains(FILE_NAME),
+            "a frame {:?} after the wake holds the file name:\n{drawn}",
+            began.elapsed()
+        );
+        assert!(began.elapsed() < Duration::from_secs(10), "the gap did not lock");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(live.engine.lock_state(), LockState::ScreenLocked);
+    for _ in 0..5 {
+        live.rt.frame(0.016);
+        assert!(!words(&live).contains(FILE_NAME), "the lock screen holds no file name");
+    }
+    // Opened again (Windows Hello's face check): the cover was the lock's, and goes with it.
+    live.engine
+        .unlock_screen_platform_verified(live.engine.session_turn())
+        .unwrap();
+    until(&mut live, "the cover outlived the unlock", |live| {
+        live.rt.state.shell.app.gate() == GateState::Ready && !live.rt.state.shell.away.covers()
+    });
+    until_drawn(&mut live, FILE_NAME);
+}
+
+/// D-B2-3: a wake that locks nothing (five minutes and twenty, of thirty) stays covered until the gap's look answered,
+/// then the files come back: the cover never outlives the engine's answer. Another look's answer (leaving the app, which
+/// a thirty minute delay does not lock) is not the wake's and lifts nothing.
+#[test]
+fn a_wake_that_locks_nothing_is_covered_until_its_answer_then_the_files_return() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(5 * 60));
+    looked(&mut live);
+    let (before, looks) = (away(&mut live.rt).answered, away(&mut live.rt).looks);
+    slept(&mut live, Duration::from_secs(20 * 60));
+    live.rt.frame(0.016);
+    let began = Instant::now();
+    assert!(away(&mut live.rt).covers(), "covered at once");
+    let actions = live.rt.state.shell.actions.clone();
+    away(&mut live.rt).event(Away::LeftTheApp, &actions, None);
+    loop {
+        let drawn = words(&live);
+        assert!(
+            !drawn.contains(FILE_NAME),
+            "a frame {:?} after the wake holds the file name:\n{drawn}",
+            began.elapsed()
+        );
+        live.rt.frame(0.016);
+        if !away(&mut live.rt).covers() {
+            break;
+        }
+        assert!(began.elapsed() < Duration::from_secs(10), "the cover was never lifted");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let lock = away(&mut live.rt);
+    assert_eq!(
+        lock.answered,
+        before + 2,
+        "lifted by the gap's answer, not by leaving's (which came first)"
+    );
+    assert_eq!(
+        lock.looks,
+        looks + 2,
+        "leaving's look and the gap's own, after the grace"
+    );
+    assert_eq!(
+        live.engine.lock_state(),
+        LockState::Open,
+        "twenty-five minutes of thirty"
+    );
+    until_drawn(&mut live, FILE_NAME);
+}
+
+/// D-B2-3: the tray's resume for the same wake, within the grace, says the wake: its answer lifts the cover, and the gap's
+/// look is never made.
+#[test]
+fn a_resume_within_the_grace_lifts_the_cover_at_its_answer() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(29 * 60));
+    looked(&mut live);
+    slept(&mut live, Duration::from_secs(3 * 60));
+    live.rt.frame(0.016);
+    assert!(away(&mut live.rt).covers(), "covered at once");
+    assert!(!words(&live).contains(FILE_NAME));
+    let (before, looks) = (away(&mut live.rt).answered, away(&mut live.rt).looks);
+    live.rt.update(|s, tx| {
+        host::on_tray(
+            s,
+            TrayEvent::Resumed {
+                away: Duration::from_secs(3 * 60),
+            },
+            tx,
+        )
+    });
+    assert!(
+        away(&mut live.rt).covers(),
+        "still covered until the resume's look answered"
+    );
+    until(&mut live, "the resume's answer did not lift the cover", |live| {
+        !live.rt.state.shell.away.covers()
+    });
+    let lock = away(&mut live.rt);
+    assert_eq!(lock.answered, before + 1, "lifted by the resume's answer");
+    assert_eq!(lock.looks, looks + 1, "the resume's look only");
+    assert_eq!(live.engine.lock_state(), LockState::Open, "three minutes of thirty");
+    until_drawn(&mut live, FILE_NAME);
+}
+
+/// App lock off never locks (the owner's ruling of 2026-11-14), so it never shows the lock screen either: a gap covers
+/// nothing.
+#[test]
+fn with_app_lock_off_a_wake_covers_nothing() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    live.engine
+        .set_app_lock_for(live.engine.session_turn(), false, Some(AppLockProof::PlatformVerified))
+        .unwrap();
+    idle_for(&mut live, Duration::from_secs(29 * 60));
+    looked(&mut live);
+    slept(&mut live, Duration::from_secs(3 * 3_600));
+    live.rt.frame(0.016);
+    assert!(
+        away(&mut live.rt).away.is_some(),
+        "the gap is found (and said to an engine that locks nothing)"
+    );
+    assert!(!away(&mut live.rt).covers(), "app lock off: nothing is covered");
+    assert!(words(&live).contains(FILE_NAME), "the files stay on screen");
+}
+
+/// An engine with no automatic lock (the fixture, the frame gate's scenes) asks nothing and locks nothing, so a gap
+/// covers nothing: no answer would ever lift it.
+#[test]
+fn an_engine_without_the_automatic_lock_never_covers() {
+    let mut rt = Runtime::new(
+        state::init(),
+        registry::view,
+        (1280.0, 800.0),
+        Env {
+            system_dark: false,
+            scale: 1.0,
+        },
+    );
+    let poll = |rt: &mut Runtime<State>| {
+        rt.update(|s, tx| {
+            let actions = s.shell.actions.clone();
+            s.shell
+                .away
+                .poll(true, Some(Duration::from_secs(1)), &actions, None, tx);
+        })
+    };
+    poll(&mut rt);
+    assert!(rt.state.shell.away.without, "the fixture has no away look");
+    rt.state.shell.away.seen.as_mut().expect("the poll ran").wall -= Duration::from_secs(3 * 3_600);
+    poll(&mut rt);
+    assert!(rt.state.shell.away.away.is_some(), "the gap is found");
+    assert!(!rt.state.shell.away.covers(), "and covers nothing");
 }
