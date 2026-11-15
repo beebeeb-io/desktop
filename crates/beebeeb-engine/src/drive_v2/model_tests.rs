@@ -336,15 +336,15 @@ fn per_path_merge_folds_two_unsent_rows_and_never_mixes_kinds() {
     );
 }
 
-/// Ported from `per_path_merge_keeps_two_server_items_and_never_mixes_kinds`, the part the engine does NOT keep: the
-/// Tauri tree kept two rows the server confirmed at one path (two server items); `model::live_rows` keys on (kind,
-/// path) and keeps the smaller id only. FINDING, see BRANCH-NOTES: the rule is the engine's to decide.
+/// Ported from `per_path_merge_keeps_two_server_items_and_never_mixes_kinds` (D-T-15, match 0.8.x): two rows the
+/// server confirmed at one path are two server items, each by its own id, and never hidden; an unsent row at that
+/// path still folds into them.
 #[test]
-#[ignore = "finding: live_rows folds two server-confirmed rows at one path, the Tauri tree kept both (BRANCH-NOTES)"]
 fn two_server_confirmed_rows_at_one_path_both_stay() {
     let f = fixture();
     at(&f.db, "srv-a", "Photos", None, true, true);
     at(&f.db, "srv-b", "Photos", None, true, true);
+    at(&f.db, "unsent", "Photos", None, true, false);
     assert_eq!(live_ids(&f.db), ["srv-a", "srv-b"]);
 }
 
