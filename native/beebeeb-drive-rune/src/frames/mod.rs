@@ -13,7 +13,9 @@ pub mod backups;
 pub mod files;
 pub mod global;
 pub mod item;
+pub mod office;
 pub mod photos;
+pub mod placeholder;
 pub mod search;
 pub mod settings;
 pub mod shared;
@@ -64,6 +66,11 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
             tray::FRAMES,
             viewers::FRAMES,
             shared::scenes::FRAMES,
+            office::sheets::FRAMES,
+            office::slides::FRAMES,
+            office::dialogs::FRAMES,
+            office::docs::FRAMES,
+            office::states::FRAMES,
         ]
         .concat()
     })

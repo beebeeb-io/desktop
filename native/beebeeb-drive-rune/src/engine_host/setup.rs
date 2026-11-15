@@ -55,6 +55,8 @@ use beebeeb_engine::sync_folder_rule::SyncFolderRefused;
 use beebeeb_engine::sync_view::{Explorer as EngineExplorer, Start, SyncView};
 
 use super::log;
+use super::scaffold::not_wired;
+use crate::frames::account::source::Password;
 use crate::frames::signin::setup::Step;
 use crate::frames::signin::setup::source::{
     Explorer, Folder, FolderAsk, LockAfter, Outcome, PreviewFormat, PreviewSize, Sample, SetupSource, Switch,
@@ -67,6 +69,9 @@ mod app_lock;
 mod folder;
 #[path = "setup_previews.rs"]
 mod previews;
+// plan40 batch 1: step 1, "Add a passkey", with the password (slice A10).
+#[path = "setup_passkey.rs"]
+mod setup_passkey;
 #[cfg(test)]
 #[path = "setup_tests.rs"]
 mod tests;
@@ -622,6 +627,8 @@ pub struct EngineSetupSource<E: SetupEngine> {
     hello: Box<dyn crate::engine_host::hello::HelloPrompter>,
     /// Step 4 (`setup_previews.rs`).
     previews: previews::StepFour,
+    /// Slice A10 (`setup_passkey.rs`): what it keeps between a press and its answer. Empty until it binds.
+    setup_passkey: setup_passkey::SetupPasskeyCalls,
 }
 
 /// The engine's view as the step draws it. A start the engine refused is not "adding": nothing is being added.
@@ -679,6 +686,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             inbox,
             hello: Box::new(crate::engine_host::hello::NoHello),
             previews: previews::StepFour::default(),
+            setup_passkey: Default::default(),
         };
         source.look_after_the_grace();
         source.read_folder();
@@ -1125,11 +1133,11 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
         self.pick_previews_photo();
     }
 
-    /// A passkey (step 1): not offered (`available`). The engine adds one ([`beebeeb_engine::app::Engine::add_passkey`]),
-    /// but core's flow needs the account password for its step-up, and this step has no password to hand over and
-    /// no field to ask it in: it stays Settings > Passkeys, where the pane asks.
-    fn add_passkey(&mut self) -> bool {
-        false
+    /// A passkey (step 1): not bound (slice A10, `setup_passkey.rs`) and not offered (`available`). The engine adds
+    /// one ([`beebeeb_engine::app::Engine::add_passkey`]) with the account password for core's step-up; until A10
+    /// draws the step's password field it stays Settings > Passkeys, where the pane asks.
+    fn add_passkey(&mut self, password: Password<'_>) -> bool {
+        not_wired(self.setup_passkey_add_passkey(password))
     }
     /// The app lock (step 2) and, while it is on, "Lock again after", through the engine's rules
     /// (`setup_app_lock.rs`).
