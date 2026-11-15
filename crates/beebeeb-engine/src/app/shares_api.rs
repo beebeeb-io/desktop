@@ -261,7 +261,7 @@ impl<C: CredentialStores> Engine<C> {
                 401 => return Err(ShareChangeError::SessionEnded),
                 // Beebeeb refusing this account the change (a frozen account, sharing paused): never a session that
                 // ended, which only a 401 is.
-                403 => return Err(ShareChangeError::SessionEnded),
+                403 => return Err(ShareChangeError::Refused),
                 _ => return Err(ShareChangeError::Refused),
             }
         }

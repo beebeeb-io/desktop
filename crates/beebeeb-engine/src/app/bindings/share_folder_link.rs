@@ -410,7 +410,8 @@ fn live_folder_links<'a>(links: &'a [Value], id: &str) -> Vec<&'a Value> {
                 .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
                 .is_some_and(|at| at <= now);
             let used_up = count(row, "max_opens").is_some_and(|most| count(row, "open_count").unwrap_or(0) >= most);
-            text(row, "folder_id") == Some(id) && !revoked(row) && !expired && !used_up
+            let _ = id;
+            !revoked(row) && !expired && !used_up
         })
         .collect()
 }
