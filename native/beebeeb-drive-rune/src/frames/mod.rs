@@ -67,6 +67,8 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
             office::sheets::FRAMES,
             office::slides::FRAMES,
             office::dialogs::FRAMES,
+            office::docs::FRAMES,
+            office::states::FRAMES,
         ]
         .concat()
     })
