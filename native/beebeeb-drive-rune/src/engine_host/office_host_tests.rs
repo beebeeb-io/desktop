@@ -17,6 +17,9 @@ use super::office_host::*;
 #[path = "office_host_tests/fake_helper_tests.rs"]
 mod fake_helper_tests;
 use fake_helper_tests::*;
+// The rows of the two security reviews after O-CP2 (budgets, handles, wipes, the lock, a worker panic).
+#[path = "office_host_tests/hardening_tests.rs"]
+mod hardening_tests;
 
 /// 100 % on a 96 DPI screen: a Letter page is 816 x 1056.
 fn scale_100() -> f32 {
@@ -67,14 +70,14 @@ fn opening_becomes_pages_on_a_checked_answer() {
     let sizes = [LETTER, LETTER, A4];
     let (mut host, _, _) = open_fake(Fake::new(move |link| serve(link, &sizes)), &registry, DocKind::Docx);
     assert_eq!(
-        host.state(),
+        &host.state(),
         &OfficeState::Opening,
         "nothing is shown as open before the helper answered"
     );
     let mut events = Vec::new();
     assert!(until_open(&mut host, &mut events), "no answer within 2 s");
     assert_eq!(
-        host.state(),
+        &host.state(),
         &OfficeState::Pages {
             pages: 3,
             sizes: sizes.to_vec()
@@ -100,7 +103,7 @@ fn opening_becomes_pages_on_a_checked_answer() {
         why: Stop::Protocol,
         can_retry: true,
     };
-    assert_eq!(host.state(), &refused);
+    assert_eq!(&host.state(), &refused);
     assert_eq!(log.kills(), 1, "the helper is killed");
 }
 
@@ -273,7 +276,7 @@ fn error_codes_become_their_states() {
         let (mut host, log, _) = open_fake(fake, &registry, DocKind::Docx);
         let mut events = Vec::new();
         assert!(until_open(&mut host, &mut events), "{code:?}: no state within 2 s");
-        assert_eq!(host.state(), &want, "{code:?}");
+        assert_eq!(&host.state(), &want, "{code:?}");
         assert!(wait_for(|| log.kills() == 1), "{code:?}: the helper is killed");
         if !matches!(want, OfficeState::Stopped { .. }) {
             assert!(!host.retry(), "{code:?}: no Try again for this state");
@@ -476,7 +479,7 @@ fn the_open_timer_ends_a_silent_helper() {
         why: Stop::TimedOut,
         can_retry: true,
     };
-    assert_eq!(host.state(), &timed_out);
+    assert_eq!(&host.state(), &timed_out);
     assert!(
         started.elapsed() >= Duration::from_millis(290),
         "not before the 300 ms timer: {:?}",
@@ -675,7 +678,7 @@ fn close_kills_and_wipes() {
     // The page is queued for the window (the worker woke it), and nobody polls.
     assert!(wait_for(|| wakes.load(SeqCst) > before), "the page arrived");
     host.close(CloseWhy::Closed);
-    assert_eq!(host.state(), &OfficeState::Closed(CloseWhy::Closed));
+    assert_eq!(&host.state(), &OfficeState::Closed(CloseWhy::Closed));
     assert_eq!(log.kills(), 1, "close itself killed the helper");
     assert!(wait_for(|| log.live() == 0), "every section dropped within 2 s");
     assert_eq!(host.wiped_bytes(), 816 * 1056 * 4, "the page nobody took was wiped");
@@ -699,7 +702,7 @@ fn close_while_starting_kills_the_late_helper() {
     assert_eq!(log.starts(), 1);
     assert!(wait_for(|| host.worker_ended()), "the worker ends");
     assert!(host.poll().is_empty());
-    assert_eq!(host.state(), &OfficeState::Closed(CloseWhy::Closed));
+    assert_eq!(&host.state(), &OfficeState::Closed(CloseWhy::Closed));
     let opens = lock(&log.sent)
         .iter()
         .filter(|(kind, _)| *kind == office::KIND_OPEN)
@@ -730,7 +733,7 @@ fn kill_all_ends_every_helper_of_its_registry() {
     ];
     for (name, host, log) in hosts {
         let mut events = Vec::new();
-        let locked = |host: &OfficeHost, _: &[Event]| host.state() == &OfficeState::Closed(CloseWhy::Locked);
+        let locked = |host: &OfficeHost, _: &[Event]| host.state() == OfficeState::Closed(CloseWhy::Locked);
         assert!(pump(host, &mut events, locked), "{name}: {:?}", host.state());
         assert!(wait_for(|| log.kills() == 1), "{name}: its helper is killed");
     }
@@ -763,9 +766,9 @@ fn try_again_starts_one_new_helper_once() {
         why: Stop::Exited,
         can_retry: true,
     };
-    assert_eq!(host.state(), &first);
+    assert_eq!(&host.state(), &first);
     assert!(host.retry(), "Try again starts a new helper");
-    assert_eq!(host.state(), &OfficeState::Opening);
+    assert_eq!(&host.state(), &OfficeState::Opening);
     assert!(
         pump(&mut host, &mut events, |host, _| stopped(host)),
         "{:?}",
@@ -775,7 +778,7 @@ fn try_again_starts_one_new_helper_once() {
         why: Stop::Exited,
         can_retry: false,
     };
-    assert_eq!(host.state(), &second);
+    assert_eq!(&host.state(), &second);
     assert!(!host.retry(), "once per open");
     thread::sleep(Duration::from_millis(100));
     assert_eq!(log.starts(), 2, "the starter was called exactly twice");
@@ -908,7 +911,7 @@ fn over_100_mib_or_empty_starts_nothing() {
     let big_log = big.log.clone();
     let too_large = Zeroizing::new(vec![0u8; check::MAX_INPUT_BYTES as usize + 1]);
     let host = open_with(big, &registry, TEST_TIMEOUTS, DocKind::Docx, too_large, noop_wake());
-    assert_eq!(host.state(), &OfficeState::CannotOpen(CannotOpen::TooLarge));
+    assert_eq!(&host.state(), &OfficeState::CannotOpen(CannotOpen::TooLarge));
 
     let empty = Fake::new(|link| serve(link, &[LETTER]));
     let empty_log = empty.log.clone();
@@ -920,7 +923,7 @@ fn over_100_mib_or_empty_starts_nothing() {
         Zeroizing::new(Vec::new()),
         noop_wake(),
     );
-    assert_eq!(nothing.state(), &OfficeState::CannotOpen(CannotOpen::Damaged));
+    assert_eq!(&nothing.state(), &OfficeState::CannotOpen(CannotOpen::Damaged));
 
     thread::sleep(Duration::from_millis(100));
     for (case, log) in [("over 100 MiB", &big_log), ("empty", &empty_log)] {
@@ -939,21 +942,22 @@ fn a_missing_helper_says_not_installed() {
     let mut events = Vec::new();
     let ended = |host: &OfficeHost, _: &[Event]| host.worker_ended() && !matches!(host.state(), OfficeState::Opening);
     assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());
-    assert_eq!(host.state(), &OfficeState::NoPreview(NoPreview::NotInstalled));
+    assert_eq!(&host.state(), &OfficeState::NoPreview(NoPreview::NotInstalled));
     assert_eq!(host.helper_pid(), None, "no helper");
 }
 
 #[cfg(not(windows))]
 #[test]
 fn no_sandbox_no_helper() {
-    // An existing, runnable file: were there an unconfined way, this would start it.
-    let exe = std::env::current_exe().expect("the test binary");
+    // An existing, runnable file of the helper's name: were there an unconfined way, this would start it.
+    let exe = runnable_helper("no-sandbox");
     let mut host = OfficeHost::open(&exe, DocKind::Docx, Zeroizing::new(doc()), noop_wake());
     let mut events = Vec::new();
     let ended = |host: &OfficeHost, _: &[Event]| host.worker_ended() && !matches!(host.state(), OfficeState::Opening);
     assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());
-    assert_eq!(host.state(), &OfficeState::NoPreview(NoPreview::NoSandbox));
+    assert_eq!(&host.state(), &OfficeState::NoPreview(NoPreview::NoSandbox));
     assert_eq!(host.helper_pid(), None);
+    remove_runnable_helper(&exe);
 }
 
 /// The lead's answer 4 (2026-11-15 19:03): Windows Error Reporting is told to keep no dump of the helper BEFORE the
@@ -1109,7 +1113,7 @@ fn a_real_confined_helper_renders_page_one() {
         "{:?}",
         host.state()
     );
-    assert_eq!(host.state(), &exited);
+    assert_eq!(&host.state(), &exited);
     assert!(host.retry(), "Try again");
     assert!(pump_for(&mut host, &mut events, real, |host, _| !matches!(
         host.state(),
