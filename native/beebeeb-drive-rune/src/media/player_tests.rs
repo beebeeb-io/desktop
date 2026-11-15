@@ -221,6 +221,8 @@ struct SoundProbe {
     pushed: AtomicUsize,
     /// The FIRST device opened fails for good after this many pushes; 0: none ever fails.
     fail_first_after: AtomicUsize,
+    /// Every open fails: this PC has no output device.
+    no_device: AtomicBool,
 }
 
 struct FakeSound {
@@ -265,6 +267,9 @@ struct Sounds(Arc<SoundProbe>);
 
 impl AudioFactory for Sounds {
     fn start(&self, _rate_hint: u32) -> Result<Box<dyn AudioSink>, AudioError> {
+        if self.0.no_device.load(SeqCst) {
+            return Err(AudioError::NoDevice);
+        }
         self.0.started.fetch_add(1, SeqCst);
         Ok(Box::new(FakeSound {
             probe: Arc::clone(&self.0),
@@ -968,14 +973,31 @@ fn audio_device_lost_says_so() {
         Some(1_500),
         "no silent clock runs on"
     );
-    // Play asks for a device again: there is one, and it plays on from where it paused.
+    // Play asks for a device again. Still none: it stays paused, and still says why.
+    a.sound.no_device.store(true, SeqCst);
+    a.handle.play();
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!((a.handle.phase(), a.no_sound()), (Phase::Paused, Some(NoSound::Device)));
+    // One is there again: it plays on from where it paused.
+    a.sound.no_device.store(false, SeqCst);
     a.handle.play();
     wait_until("it plays again", || {
         a.sound.started.load(SeqCst) == 2 && a.handle.phase() == Phase::Playing
     });
     assert_eq!(a.no_sound(), None);
-    assert!(a.seen().contains(&ToHelper::Seek { at_ms: 1_500 }));
+    wait_until("the seek to where it paused", || {
+        a.seen().contains(&ToHelper::Seek { at_ms: 1_500 })
+    });
     a.handle.stop(StopReason::Closed);
+    // A video on a PC with no device at all: its frames play on the wall clock, and it says why.
+    let n = rig(1_000, || plays_video(None));
+    n.sound.no_device.store(true, SeqCst);
+    n.handle.set_view_size(2, 2);
+    n.open("v", KindHint::Video);
+    wait_until("no device said", || n.no_sound() == Some(NoSound::Device));
+    frames_keep_coming(&n, 3);
+    assert_eq!((n.refused(), n.handle.phase()), (None, Phase::Playing));
+    n.handle.stop(StopReason::Closed);
     // A video whose device fails for good after 2 pushes: its frames go on on the wall clock, and it says why.
     let v = rig(1_000, || plays_video(None));
     v.sound.fail_first_after.store(2, SeqCst);
