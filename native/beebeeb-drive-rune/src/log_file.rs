@@ -60,7 +60,7 @@ pub struct AppLog {
 impl AppLog {
     /// Opens (appending to) the current log file in `dir`, creating `dir`. `None` when that is not possible.
     pub fn open(dir: &Path, max_bytes: u64) -> Option<Self> {
-        Self::open_with(dir, max_bytes, FileOps::REAL)
+        Self::open_with(dir, max_bytes, FileOps::OS)
     }
 
     /// [`open`](Self::open) with the two file operations a rotation uses (a test seam: see [`FileOps`]).
@@ -193,7 +193,7 @@ struct FileOps {
 }
 
 impl FileOps {
-    const REAL: Self = Self {
+    const OS: Self = Self {
         rename: |from, to| fs::rename(from, to),
         remove: |path| fs::remove_file(path),
     };
@@ -237,13 +237,14 @@ impl Sink {
         let len = line.len() as u64;
         if self.size > 0 && self.size + len > self.max_bytes {
             self.rotate();
-            // The rotation could neither move nor delete the file (another program holds it): the file is still
-            // over the cap. The line is dropped, and the next line tries the rotation again, so the cap holds.
-            if self.size > 0 && self.size + len > self.max_bytes {
-                return;
-            }
         }
         if self.file.is_none() && self.start_file().is_none() {
+            return;
+        }
+        // Checked with the size of the file as it is now it is open (a rotation that could neither move nor delete a
+        // held file, or a reopen that failed once, leaves it over the cap): the line is dropped, and the next line
+        // tries the rotation again, so the cap holds in every case.
+        if self.size > 0 && self.size + len > self.max_bytes {
             return;
         }
         if let Some(file) = self.file.as_mut() {

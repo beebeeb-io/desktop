@@ -380,7 +380,7 @@ fn a_quoted_name_is_one_name_and_never_reaches_the_file() {
     // A quoted path with spaces (the closing quote used to hide where it ended), and the other quote styles.
     assert_never_written(
         "quoted path",
-        "Rome",
+        "Records",
         "could not read \u{201c}C:\\Users\\a\\Beebeeb\\Medical Records 2026 Rome\\x\u{201d} now",
     );
     assert_never_written(
@@ -415,7 +415,10 @@ fn an_http_status_keeps_its_prefix_and_never_its_body() {
             tracing::warn!("{text}");
         });
         assert!(
-            !file.contains("acme-secret-host") && !file.contains("upstream") && !file.contains("nginx"),
+            !file.contains("acme-secret-host")
+                && !file.contains("upstream")
+                && !file.contains("nginx")
+                && !file.contains("head title"),
             "{what}: {file}"
         );
         assert!(file.contains("<body omitted>"), "{what}: {file}");
@@ -552,5 +555,179 @@ fn the_host_of_the_lock_held_sentence_is_replaced() {
     assert!(
         text.contains("<host>") && text.contains("pid 4242") && text.contains("since"),
         "{text}"
+    );
+}
+
+// ---- Round 3 (delta review of #442) ----
+
+#[test]
+fn an_http_status_with_no_plain_reason_still_drops_its_body() {
+    for (what, text, kept) in [
+        (
+            "unknown status code",
+            "HTTP 520 <unknown status code>: <html><head><title>Medical Records origin error</title></head><body>",
+            "HTTP 520 unknown status code: <body omitted>",
+        ),
+        (
+            "unknown status code, plain text",
+            "HTTP 509 <unknown status code>: Bandwidth exceeded for anna smith account",
+            "HTTP 509 unknown status code: <body omitted>",
+        ),
+        (
+            "apostrophe in the reason",
+            "HTTP 418 I'm a teapot: Medical Records body text here",
+            "HTTP 418 I m a teapot: <body omitted>",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = logged(dir.path(), MAX_FILE_BYTES, || tracing::warn!(error = %text, "{text}"));
+        for secret in ["Medical", "Records", "anna", "Bandwidth", "head title"] {
+            assert!(!file.contains(secret), "{what}: `{secret}` reached the file: {file}");
+        }
+        assert!(
+            file.contains(kept),
+            "{what}: the status stays, the body does not: {file}"
+        );
+    }
+}
+
+#[test]
+fn a_quote_inside_a_quoted_name_does_not_end_it() {
+    // The two sentences of `sync_root_owner::refusal`, for a folder whose own name holds a closing quote.
+    assert_never_written(
+        "closing quote in the name",
+        "Reports",
+        "The folder \u{201c}Q3 \u{201d}Final\u{201d} Reports\u{201d} is already the sync folder of OneDrive. Nothing was changed. Choose another folder.",
+    );
+    assert_never_written(
+        "opening quote in the name",
+        "Files",
+        "Windows could not say whose sync folder \u{201c}Anna \u{201c}Work\u{201d} Files\u{201d} is. Nothing was changed. Try again, or choose another folder.",
+    );
+    // `\u{2019}` is also the apostrophe.
+    assert_never_written(
+        "apostrophe in single quotes",
+        "Notes",
+        "could not open \u{2018}Anna\u{2019}s Notes\u{2019} today",
+    );
+    let text = assert_never_written(
+        "apostrophe inside double quotes",
+        "Files",
+        "The folder \u{201c}Anna\u{2019}s Files\u{201d} is busy.",
+    );
+    assert!(text.contains("<name>") && text.contains("is busy"), "{text}");
+}
+
+#[test]
+fn a_custom_key_is_caught_after_an_equals_sign_and_in_a_debug_value() {
+    assert_never_written(
+        "category= in a text",
+        "Medical",
+        "backup pass done category=custom:Medical Records",
+    );
+    assert_never_written(
+        "category= in a text, 2",
+        "Records",
+        "backup pass done category=custom:Medical Records",
+    );
+    assert_never_written(
+        "Debug Custom",
+        "Medical",
+        "category Custom(\"Medical Records\") was refused",
+    );
+    assert_never_written(
+        "Debug Custom, 2",
+        "Records",
+        "category Custom(\"Medical Records\") was refused",
+    );
+    // The word "custom" in prose is not the key.
+    assert_eq!(redact::scrub("a custom folder was added"), "a custom folder was added");
+}
+
+static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn held_rename(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    if HELD.load(std::sync::atomic::Ordering::SeqCst) {
+        Err(std::io::Error::other("held"))
+    } else {
+        fs::rename(from, to)
+    }
+}
+fn held_remove(path: &std::path::Path) -> std::io::Result<()> {
+    if HELD.load(std::sync::atomic::Ordering::SeqCst) {
+        Err(std::io::Error::other("held"))
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+#[test]
+fn the_cap_holds_while_the_file_is_held_and_the_log_recovers_in_the_same_run() {
+    // One run: the file is held (rename and delete refused) for 300 lines, then released. The seam is a switch the test
+    // flips; a real share-mode hold is not possible on the Linux build VM.
+    let dir = tempfile::tempdir().unwrap();
+    let cap = 4 * 1024;
+    let ops = super::FileOps {
+        rename: held_rename,
+        remove: held_remove,
+    };
+    let log = AppLog::open_with(dir.path(), cap, ops).unwrap();
+    tracing::subscriber::with_default(log, || {
+        for i in 0..40_u64 {
+            tracing::warn!(
+                n = i,
+                "a line before the hold, long enough to fill the file in a few dozen events"
+            );
+        }
+        HELD.store(true, std::sync::atomic::Ordering::SeqCst);
+        for i in 40..340_u64 {
+            tracing::warn!(
+                n = i,
+                "a line during the hold, long enough to fill the file in a few dozen events"
+            );
+        }
+        let held = fs::metadata(dir.path().join(FILE_NAME)).unwrap().len();
+        assert!(held <= cap, "the file passed its cap while held: {held} bytes");
+        HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+        for i in 0..20_u64 {
+            tracing::warn!(
+                n = i,
+                "after the hold, a line long enough to fill the file in a few dozen events"
+            );
+        }
+    });
+    let current = fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
+    assert!(
+        current.contains("after the hold") && current.contains("n=19\n"),
+        "the log recovers when the hold ends: {current}"
+    );
+    assert!(
+        dir.path().join(OLD_FILE_NAME).exists(),
+        "the full file was rotated once it could be"
+    );
+    assert!(current.len() as u64 <= cap);
+}
+
+#[test]
+fn a_reopen_that_finds_the_file_over_the_cap_drops_the_line() {
+    // `rotate`'s reopen failed once (size 0, no handle) and the file is over the cap: the next line must not be written.
+    let dir = tempfile::tempdir().unwrap();
+    let cap = 1024;
+    fs::write(dir.path().join(FILE_NAME), vec![b'x'; 4096]).unwrap();
+    let mut sink = super::Sink {
+        dir: dir.path().to_path_buf(),
+        max_bytes: cap,
+        ops: super::FileOps {
+            rename: refuse,
+            remove: refuse_one,
+        },
+        file: None,
+        size: 0,
+    };
+    sink.write_line("one more line\n");
+    assert_eq!(
+        fs::metadata(dir.path().join(FILE_NAME)).unwrap().len(),
+        4096,
+        "a line was written past the cap"
     );
 }

@@ -13,16 +13,16 @@
 //!    server body (JSON or HTML) is replaced whole. Control characters are blanked, so one event is one line.
 //!
 //! Also by shape of the sentence: text between “…”, ‘…’, «…» or backticks is one name (`<name>`: the engine quotes the
-//! names it prints); behind `HTTP <status> <reason>: ` the rest is `<body omitted>` (an error text keeps the first 300
-//! characters of a server's answer); `custom:<name>` is a backup folder the person picked; `on <host>` of the
+//! names it prints); behind `HTTP <status> <reason>: ` (any reason up to 40 characters: `<unknown status code>` and `I'm a teapot` too) the
+//! rest is `<body omitted>` (an error text keeps the first 300 characters of a server's answer); `custom:<name>` is a backup folder the person picked; `on <host>` of the
 //! lock-held sentence is `on <host>`; after an absolute path (also after a redacted label or `key=`) the rest of the
 //! text is dropped, because a name can hold spaces.
 //!
 //! Over-redaction is the accepted failure: a harmless word that looks like a path becomes `<path>`. A name that has
 //! no shape and no quotes (a folder called "Holiday" in free text) cannot be found. The audit of the engine's calls
 //! (PR #442) found three such texts and closed them: the refused sync folder's sentence (quoted, so `<name>`), a relative
-//! `sync_root` (the call no longer prints it) and the lock-held host. Of the 414 calls, 6 format a value into the
-//! message text. A new call that prints a name outside quotes is a review finding.
+//! `sync_root` (the call no longer prints it) and the lock-held host. Of the 414 calls, 6 formatted a value into the
+//! message text at the first head, 5 do now. A new call that prints a name outside quotes is a review finding.
 
 /// Words of a field name (split on `_` and `.`) that make the whole field unwritable.
 const DENIED_WORDS: &[&str] = &[
@@ -254,6 +254,15 @@ pub fn scrub(raw: &str) -> String {
 
 fn scrub_with(raw: &str, allow_uuid: bool) -> String {
     // `HTTP 502 Bad Gateway: <the first 300 characters of the answer>`: the status stays, the answer never does.
+    // `Custom("Medical Records")`: the Debug shape of a backup folder the person picked.
+    if let Some(at) = raw.find("Custom(\"") {
+        let head = scrub_with(&raw[..at], allow_uuid);
+        return if head.is_empty() {
+            "custom:<name>".to_string()
+        } else {
+            format!("{head} custom:<name>")
+        };
+    }
     if let Some((before, status)) = http_status_prefix(raw) {
         let head = scrub_with(before, allow_uuid);
         return if head.is_empty() {
@@ -302,6 +311,13 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
         if token == HOST_MARK.to_string() {
             out.push("<host>".to_string());
             continue;
+        }
+        // `category=custom:<name>` inside a text: the same, after the `=`.
+        if let Some((key, value)) = token.split_once('=')
+            && value.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("custom:"))
+        {
+            out.push(format!("{key}=custom:<name>"));
+            break;
         }
         // `custom:<name>`: a backup folder the person picked; its name can hold spaces, so the rest goes too.
         if token.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("custom:")) {
@@ -354,14 +370,14 @@ fn http_status_prefix(raw: &str) -> Option<(&str, String)> {
             continue;
         }
         let Some(colon) = rest.find(": ") else { continue };
+        // Any reason up to the first `": "`: `reqwest::StatusCode` prints `<unknown status code>` for a code it has
+        // no phrase for, and a phrase can hold an apostrophe (`418 I'm a teapot`).
         let reason = rest[3..colon].trim();
-        let plain = reason.len() <= 40
-            && reason
-                .bytes()
-                .all(|b| b.is_ascii_alphabetic() || b == b' ' || b == b'-');
-        if colon < 3 || !plain || rest[colon + 2..].trim().is_empty() {
+        if colon < 3 || reason.len() > 40 || rest[colon + 2..].trim().is_empty() {
             continue;
         }
+        // The reason is read like any other text: the brackets and the apostrophe are separators, a word with a shape goes.
+        let reason = scrub_with(reason, false);
         let status = if reason.is_empty() {
             format!("HTTP {digits}")
         } else {
@@ -384,36 +400,34 @@ fn mark_host(raw: &str) -> String {
     raw.to_string()
 }
 
-/// Text between “…”, ‘…’, «…» or backticks is a name (the engine quotes the names it prints): it becomes one mark. An
-/// opening quote with no closing one marks the rest of the text.
+/// Text between “…”, ‘…’, «…» or backticks is a name (the engine quotes the names it prints): it becomes one mark. The
+/// name ends at the LAST matching closing quote of the text, not the first: a name can hold a closing quote of its own
+/// (`“Anna “Work” Files”`), and `’` is also the apostrophe. Two quoted names become one mark, an over-redaction the
+/// module accepts. An opening quote with no closing one marks the rest of the text.
 fn mark_quoted(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
     let mut out = String::with_capacity(raw.len());
-    let mut closing: Option<char> = None;
-    for c in raw.chars() {
-        match closing {
-            Some(close) => {
-                if c == close {
-                    closing = None;
-                }
-            }
-            None => {
-                let close = match c {
-                    '\u{201c}' => Some('\u{201d}'),
-                    '\u{2018}' => Some('\u{2019}'),
-                    '\u{ab}' => Some('\u{bb}'),
-                    '`' => Some('`'),
-                    _ => None,
-                };
-                if let Some(close) = close {
-                    closing = Some(close);
-                    out.push(' ');
-                    out.push(NAME_MARK);
-                    out.push(' ');
-                } else {
-                    out.push(c);
-                }
-            }
-        }
+    let mut i = 0;
+    while i < chars.len() {
+        let close = match chars[i] {
+            '\u{201c}' => Some('\u{201d}'),
+            '\u{2018}' => Some('\u{2019}'),
+            '\u{ab}' => Some('\u{bb}'),
+            '`' => Some('`'),
+            _ => None,
+        };
+        let Some(close) = close else {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        };
+        out.push(' ');
+        out.push(NAME_MARK);
+        out.push(' ');
+        i = match chars[i + 1..].iter().rposition(|c| *c == close) {
+            Some(last) => i + 1 + last + 1,
+            None => chars.len(),
+        };
     }
     out
 }
