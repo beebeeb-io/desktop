@@ -2,7 +2,7 @@
 //! cells, sized by the protocol's rule, answered only by the kind that request takes.
 
 use beebeeb_office_protocol::check;
-use beebeeb_office_protocol::office::{self, Message};
+use beebeeb_office_protocol::office::{self, AnchorKind, Message};
 
 use super::fake_helper_tests::*;
 use super::{no_cells, stopped};

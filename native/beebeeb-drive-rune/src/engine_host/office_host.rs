@@ -32,9 +32,9 @@
 //! text and sheet names in events and states are plaintext too: wiped here when nobody took them. Nothing of it is
 //! written to a file, a log or an error.
 //!
-//! This file is included by `examples/office_page.rs` as well (`#[path]`): it uses only `std`, `zeroize`, the two
-//! Office crates and (for the crash-report exclusion on Windows) `windows-sys`; no item of the app, no `rune`, no
-//! engine and no log call.
+//! This file is included by the window proof `native/beebeeb-office-page` as well (`#[path]`, with its submodules): it
+//! uses only `std`, `zeroize`, the two Office crates and (for the crash-report exclusion on Windows) `windows-sys`; no
+//! item of the app (`crate::`), no `rune`, no engine and no log call.
 
 #![allow(dead_code)]
 
@@ -53,7 +53,7 @@ use beebeeb_office_sandbox as sandbox;
 use zeroize::{Zeroize, Zeroizing};
 
 pub use beebeeb_office_protocol::office::{
-    Anchor, AnchorKind, CellData, CellRange, CellText, DocKind, OutlineEntry, PageSize, Rect, SheetInfo,
+    Anchor, CellData, CellRange, DocKind, OutlineEntry, PageSize, Rect, SheetInfo,
 };
 
 // Windows Error Reporting keeps no copy of the helper's memory (the lead's answer 4, 2026-11-15 19:03).
