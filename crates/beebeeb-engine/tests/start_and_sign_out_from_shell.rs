@@ -504,9 +504,7 @@ fn a_start_refuses_while_an_earlier_stop_is_unconfirmed_before_it_binds() {
 
 /// `signout_teardown_tests.rs:clear_session_retry_after_unconfirmed_engine_stop_cannot_skip_the_stop_gate`, its first
 /// half: a sign-out whose engine stop is not confirmed is refused, and the session stays (all five entries, no logout).
-/// The engine's task here never stops in time (a blocking task the abort cannot end).
-/// Its second half (the RETRY, with the slot now empty, must be refused too) is NOT in the engine: FINDING F3 in the
-/// branch notes; not ported, because the test would be red.
+/// The engine's task here never stops in time (a blocking task the abort cannot end). This test pins the first attempt.
 /// Mutant: answer `SyncStop::Unconfirmed` like `WasNotRunning` in `sign_out_holding_step` (`app.rs`): the sign-out
 /// clears the store: red.
 #[cfg(not(target_os = "macos"))]
@@ -639,7 +637,8 @@ fn a_database_the_engine_start_creates_never_opens_the_adoption_window() {
 
 /// `part_2.rs:an_engine_start_shuts_an_open_adoption_window_on_an_existing_database`: a `state.db` the startup did not
 /// see (it turned up after the app opened) still has its window open; the next start shuts it, whatever it decides
-/// about the data, so the data is never adopted later.
+/// about the data, so the data is never adopted later. The start's refusal is asserted only as a refusal: which one
+/// (another account's data, or the ownership proof Windows asks for) depends on the OS, and this test is about the mark.
 /// Mutant: delete `data.db.close_adoption_window()…?;` in the start (`app/own_data_start.rs`): the mark stays 0 and
 /// the adoption takes the data: red.
 #[cfg(not(target_os = "macos"))]
@@ -936,8 +935,8 @@ fn an_owner_answer_is_dropped_when_the_session_moved_while_beebeeb_answered() {
 
 /// `part_3.rs:an_unidentified_sign_in_removes_the_previous_accounts_email_from_the_keychain`,
 /// `part_3.rs:an_identified_sign_in_stores_its_own_email_in_place_of_the_previous_accounts`, and the half of
-/// `part_2.rs:the_session_email_is_the_servers_spelling_and_nothing_else` that holds in the engine (its blank-email
-/// half is CONTRADICTION C1 in the branch notes). An earlier account's email was left in the store (no token).
+/// `part_2.rs:the_session_email_is_the_servers_spelling_and_nothing_else` for a server email that differs from the
+/// typed one. An earlier account's email was left in the store (no token).
 /// A sign-in whose account Beebeeb cannot name stores nothing and ends the new session. The next sign-in, named by
 /// Beebeeb, stores the server's spelling of the email in place of the earlier one.
 /// Mutants (`app.rs`): replace the `fetch_profile` error arm of `finish_sign_in` with a default profile (the first
@@ -1096,7 +1095,7 @@ fn a_start_with_the_server_down_or_failing_keeps_the_stored_session() {
 /// `startup_session_tests.rs:the_account_profile_cache_is_written_only_in_its_turn` (the half the engine keeps) and the
 /// engine half of `signout_teardown_tests.rs:sign_out_clears_the_storage_summary`: after a sign-out nothing of the
 /// account is named or counted: no user id, no email, and the storage figure cannot be read (no request is made for
-/// it). The window's own copy of the figure is FINDING F4 in the branch notes (native, not engine).
+/// it). This is the engine's side; the window's display of the figure is the native shell's.
 /// Mutant: delete `*profile = None;` in `sign_out_holding_step` (`app.rs`): `user_id()` still names the account: red.
 #[cfg(not(target_os = "macos"))]
 #[test]
