@@ -68,6 +68,7 @@ auto_resolve_keep_both
 away
 back
 backed-up
+backend
 backup
 backup_unknown_kept
 backups
@@ -410,6 +411,7 @@ inspect
 interval
 into
 invalid_identifier
+invalid_secret
 invite
 invite_id
 invoked
@@ -525,6 +527,7 @@ non-utf8
 none
 not
 not-in-sync
+not_found
 not_here
 not_in_sync
 nothing
@@ -955,6 +958,7 @@ unreadable
 unregistered
 unresolved
 unsafe
+unsupported
 unsynced
 until
 untracked
