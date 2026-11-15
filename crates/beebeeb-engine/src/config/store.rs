@@ -114,7 +114,7 @@ impl DesktopConfig {
     /// writes the new keys, so the carry happens once.
     pub(super) fn carry_old_notification_choices(&mut self, raw: &toml::Table) {
         let held = |key: &str| raw.contains_key(key);
-        if held("notify_conflicts") {
+        if !held("notify_needs_decision") && held("notify_conflicts") {
             self.notify_needs_decision = self.notify_conflicts;
         }
         if !held("notify_local_space") && held("notify_quota_warnings") {

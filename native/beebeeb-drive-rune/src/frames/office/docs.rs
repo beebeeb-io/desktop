@@ -506,7 +506,7 @@ fn stage(doc: &DocBody, page: &dyn Fn(u32) -> Option<Pixels>, t: &Theme) -> El {
         .h_full()
         .justify_center()
         .clip_rounded(0.0)
-        .fill(t.field)
+        .fill(super::states::stage_fill(t))
         .child(pages)
 }
 

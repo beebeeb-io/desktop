@@ -582,6 +582,8 @@ name = "beebeeb-drive-rune"
 version = "0.0.1"
 dependencies = [
  "beebeeb-engine",
+ "beebeeb-office-protocol",
+ "beebeeb-office-sandbox",
  "beebeeb-updater",
  "chrono",
  "hayro",
@@ -646,6 +648,17 @@ dependencies = [
  "windows 0.58.0",
  "windows-core 0.58.0",
  "zeroize",
+]
+
+[[package]]
+name = "beebeeb-office-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "beebeeb-office-sandbox"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

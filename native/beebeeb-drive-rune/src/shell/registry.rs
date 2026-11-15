@@ -346,6 +346,19 @@ pub fn dialog_frame(group: FrameGroup) -> Option<&'static DialogFrame> {
     DIALOGS.iter().find(|dialog| dialog.group == group)
 }
 
+/// The main window is drawn as the lock screen over its content: after a wake Windows may not have announced, at once,
+/// until the engine said whether the wake locks (`shell::away`, the owner's ruling D-B2-3). Keys then reach only the
+/// lock screen (`host::shell_keys`) and the flyout shows the lock's state (`frames::tray::Ui::cover`). Only over the
+/// gates of an open engine: a closed one's own screen (the lock, sign-in, the recovery phrase, an unreadable key store)
+/// holds nothing of the account's and is never hidden by a lock screen that cannot unlock.
+pub fn covered(s: &State) -> bool {
+    s.shell.away.covers()
+        && matches!(
+            s.shell.app.gate(),
+            GateState::Ready | GateState::FirstRun | GateState::NoPlan
+        )
+}
+
 /// The main window's view: the registered frame for the state (or the placeholder), and over
 /// it the open dialog on its scrim.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
@@ -354,6 +367,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         return flyout;
     }
     let group = group_for(&s.shell.app);
+    // The away lock's cover: no frame, tip or dialog shows ([`covered`]).
+    if covered(s) {
+        return crate::frames::signin::before_files::cover(s, cx);
+    }
     let behind = match frame(group) {
         Some(frame) => (frame.view)(s, cx),
         None => placeholder::window(s, cx, group),

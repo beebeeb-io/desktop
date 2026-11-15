@@ -90,6 +90,8 @@ struct HeldFolders {
     started: u64,
     /// The number of the list held: an older list never replaces a newer one.
     taken: u64,
+    /// A change of this stamp was refused by the engine and the window has not been told yet.
+    refused: bool,
 }
 
 impl HeldFolders {
@@ -103,6 +105,11 @@ impl HeldFolders {
                 ..HeldFolders::default()
             };
         }
+    }
+
+    /// The window asks whether a change was refused since it last asked: said once.
+    fn take_refusal(&mut self) -> bool {
+        std::mem::take(&mut self.refused)
     }
 
     /// A read starts under `asked`: its number. `None`: the held state is for another stamp, and nothing starts.
@@ -238,6 +245,15 @@ impl<C: CredentialStores> EnginePhotos<C> {
         held.list.as_deref().unwrap_or_default().iter().map(folder_of).collect()
     }
 
+    /// A folder change (add, remove, switch) was refused by the engine since the last call: `true` once.
+    pub(super) fn photos_folders_refused(&mut self) -> bool {
+        self.photos_folders
+            .folders
+            .lock()
+            .map(|mut held| held.take_refusal())
+            .unwrap_or(false)
+    }
+
     /// No session: no folder name of the earlier account stays in memory. The numbers keep growing, so a read on its
     /// way is not taken later. (`EnginePhotos::forget` does not reach this state; the accessors empty it instead.)
     fn forget_folders(&self) {
@@ -325,6 +341,12 @@ impl<C: CredentialStores> EnginePhotos<C> {
                     log("photos: the answer of an earlier session was dropped");
                 } else if done.is_err() {
                     log("photos: a folder change was refused");
+                    // The window says so (`PhotosSource::folder_refused`), not only the log.
+                    if let Ok(mut held) = shared.lock()
+                        && held.stamp.as_ref() == Some(&asked)
+                    {
+                        held.refused = true;
+                    }
                 }
                 // The folders as the engine has them now, also after a refusal: the window shows what is true. The
                 // number is taken after the write, so a read that began before it never replaces this list.

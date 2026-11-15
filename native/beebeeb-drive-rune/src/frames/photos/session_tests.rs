@@ -34,6 +34,15 @@ struct Script {
     opened: usize,
     forgot: usize,
     refreshed: usize,
+    /// The folders of Files that Add a folder… handed over, and the rows Remove was pressed on.
+    folders_added: Vec<String>,
+    folders_removed: Vec<SourceRef>,
+    /// The source refuses to add a folder (`add_folder` answers `false`).
+    refuse_folder: bool,
+    /// The engine refused a folder change after the press: told once.
+    folder_refused: bool,
+    /// The files behind the photos for Move…; none: the source holds no file for them.
+    items: Vec<crate::source::DriveItem>,
 }
 
 struct Later {
@@ -111,6 +120,24 @@ impl PhotosSource for Later {
     }
     fn set_shown(&mut self, source: SourceRef, shown: bool) {
         self.library.set_shown(source, shown);
+    }
+    fn add_folder(&mut self, folder_id: &str) -> bool {
+        let mut script = self.script.lock().unwrap();
+        if script.refuse_folder {
+            return false;
+        }
+        script.folders_added.push(folder_id.to_string());
+        true
+    }
+    fn folder_refused(&mut self) -> bool {
+        std::mem::take(&mut self.script.lock().unwrap().folder_refused)
+    }
+    fn remove_folder(&mut self, source: SourceRef) {
+        self.script.lock().unwrap().folders_removed.push(source);
+    }
+    fn file_items(&self, _ids: &[PhotoId]) -> Option<Vec<crate::source::DriveItem>> {
+        let items = self.script.lock().unwrap().items.clone();
+        (!items.is_empty()).then_some(items)
     }
     fn totals(&self, device: Option<usize>) -> Totals {
         self.library.totals(device)
@@ -657,6 +684,8 @@ fn keep_several_failures_are_one_message_with_the_count() {
     rt.state.photos.check_tile(0, 3);
     rt.frame(0.0);
     click(&mut rt, "ph-bulk-btn-1");
+    // The press is dispatched in the click's last frame; the window's poll takes the intent in the next one.
+    rt.frame(0.0);
     assert_eq!(asked(&script), [("keep", vec![a]), ("keep", vec![b])]);
     assert!(rt.state.photos.toast.is_none(), "asked, not answered: nothing is said");
 
@@ -680,4 +709,134 @@ fn keep_several_failures_are_one_message_with_the_count() {
         })
     );
     assert_eq!(text(&rt, "ph-toast-text"), "Couldn\u{2019}t keep 2 on this PC");
+}
+
+// ---- Add a folder… and Move… (CP2 8.1), Remove (8.2) ----
+
+fn folder_item(id: &str, name: &str) -> crate::source::DriveItem {
+    crate::source::DriveItem {
+        id: id.to_string(),
+        parent_id: None,
+        name: name.to_string(),
+        is_folder: true,
+        size: None,
+        child_count: Some(3),
+        modified_at: String::new(),
+        mime: None,
+        has_thumbnail: false,
+        shared_type: None,
+        shared_badges: Vec::new(),
+        pc_status: None,
+        is_protected: false,
+    }
+}
+
+/// The folder dialog of Files as Photos opened it, with `docs` offered and chosen.
+fn picker(rt: &mut Runtime<State>) -> Option<super::super::super::files::dialogs::Purpose> {
+    use super::super::super::files::dialogs::Dialog as Files;
+    rt.frame(0.0);
+    rt.frame(0.0);
+    match &mut rt.state.actions.dialog {
+        Some(Files::Move(m)) => {
+            m.choices = vec![folder_item("docs-id", "Documents")];
+            m.picked = Some(0);
+            Some(m.purpose)
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn add_a_folder_opens_the_folder_dialog_and_hands_the_chosen_folder_to_the_source() {
+    use super::super::super::files::dialogs::Purpose;
+    let (mut rt, script) = window();
+    rt.state.photos.open_sources();
+    rt.state.photos.ask(super::super::Intent::AddFolder);
+    assert_eq!(picker(&mut rt), Some(Purpose::PhotosFolder));
+    assert!(
+        rt.state.photos.toast.is_none(),
+        "no \"not available\" for a control that works"
+    );
+    click(&mut rt, "btn-0");
+    assert_eq!(script.lock().unwrap().folders_added, ["docs-id"]);
+    assert!(rt.state.actions.dialog.is_none(), "the folder dialog closed");
+}
+
+#[test]
+fn add_a_folder_does_not_add_the_root_of_files() {
+    let (mut rt, script) = window();
+    rt.state.photos.ask(super::super::Intent::AddFolder);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(rt.state.actions.dialog.is_some(), "the dialog is open");
+    // Nothing chosen: the dialog shows the root, and "Add" is not offered there.
+    if let Some(super::super::super::files::dialogs::Dialog::Move(m)) = &mut rt.state.actions.dialog {
+        m.picked = None;
+    }
+    click(&mut rt, "btn-0");
+    assert_eq!(script.lock().unwrap().folders_added, Vec::<String>::new());
+}
+
+#[test]
+fn add_a_folder_the_source_refuses_is_said() {
+    let (mut rt, script) = window();
+    script.lock().unwrap().refuse_folder = true;
+    rt.state.photos.ask(super::super::Intent::AddFolder);
+    picker(&mut rt);
+    click(&mut rt, "btn-0");
+    assert!(matches!(rt.state.photos.toast, Some(Toast::Words(_))));
+    assert!(text(&rt, "ph-toast-text").starts_with("Couldn\u{2019}t add that folder"));
+}
+
+#[test]
+fn move_from_photos_opens_the_folder_dialog_with_the_files_of_the_photos() {
+    use super::super::super::files::dialogs::{Dialog as Files, Purpose};
+    let (mut rt, script) = window();
+    script.lock().unwrap().items = vec![folder_item("photo-file", "Harbour.jpg")];
+    rt.state.photos.check_tile(0, 0);
+    rt.frame(0.0);
+    click(&mut rt, "ph-bulk-btn-2");
+    assert_eq!(picker(&mut rt), Some(Purpose::PhotosMove));
+    assert!(rt.state.photos.toast.is_none());
+    match &rt.state.actions.dialog {
+        Some(Files::Move(m)) => assert_eq!(m.items.len(), 1),
+        _ => panic!("no Move dialog"),
+    }
+}
+
+#[test]
+fn move_from_photos_with_no_file_behind_the_photos_says_so() {
+    let (mut rt, _script) = window();
+    rt.state.photos.check_tile(0, 0);
+    rt.frame(0.0);
+    click(&mut rt, "ph-bulk-btn-2");
+    rt.frame(0.0);
+    assert!(rt.state.actions.dialog.is_none());
+    assert!(matches!(rt.state.photos.toast, Some(Toast::Words(_))));
+    assert!(text(&rt, "ph-toast-text").starts_with("Couldn\u{2019}t move"));
+}
+
+#[test]
+fn remove_on_a_folder_row_takes_the_folder_out_of_the_sources() {
+    let (mut rt, script) = window();
+    rt.state.photos.open_sources();
+    rt.settle_all();
+    rt.frame(0.0);
+    assert!(has(&rt, "ph-item-1-0-remove"), "a folder row has Remove");
+    click(&mut rt, "ph-item-1-0-remove");
+    assert_eq!(script.lock().unwrap().folders_removed, [SourceRef::Folder(0)]);
+}
+
+#[test]
+fn a_folder_change_the_engine_refused_later_is_said_once() {
+    let (mut rt, script) = window();
+    assert!(rt.state.photos.toast.is_none());
+    script.lock().unwrap().folder_refused = true;
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(
+        rt.state.photos.toast,
+        Some(Toast::Words("Couldn\u{2019}t change that folder"))
+    );
+    assert_eq!(text(&rt, "ph-toast-text"), "Couldn\u{2019}t change that folder");
 }
