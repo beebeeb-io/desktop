@@ -87,6 +87,7 @@ D-2 of wave 2 (lead, 2026-11-15) has it drawn from the kit until the board gets 
 
 | Scene (no board id, no golden, not gated) | What it is |
 | --- | --- |
+| `APPLOCK-password-offered` | The page after Windows Hello did not confirm: "Use your password" in the Lock Beebeeb row. |
 | `APPLOCK-password` | The step for turning app lock off, a password typed. |
 | `APPLOCK-password-wrong` | After a wrong password: the field empty, "That password isn't right." under it. |
 | `APPLOCK-password-checking` | The password is being checked: Continue says "Checking…", the field is frozen. |

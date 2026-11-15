@@ -327,8 +327,9 @@ fn click(rt: &mut Runtime<State>, key: &str) {
     rt.frame(0.4);
 }
 
-/// The running app's window, on a PC where Windows Hello cannot be asked: the switch, the link, the step, the
-/// password, Continue. App lock turns off, the step closes, and the field is empty.
+/// The running app's window, on a PC where Windows Hello cannot be asked: the switch, the link, the step, a wrong
+/// password (said under the field, which is empty and focused again), the right one, Continue. App lock turns off,
+/// the step closes, and the field is empty.
 #[test]
 fn in_the_window_the_password_step_turns_app_lock_off() {
     let server = server();
@@ -341,6 +342,17 @@ fn in_the_window_the_password_step_turns_app_lock_off() {
     click(&mut rt, LINK_KEY);
     wait_for(&mut rt, "the step", |rt| shows(rt, TITLE));
     assert!(rt.state.account.dialog.as_ref().is_some_and(|d| d.shows_secret()));
+    // A wrong one: said under the field, the field empty and ready for the next try, app lock still on.
+    rt.update(|s, _| s.account.form.current.text.push_str(WRONG));
+    rt.frame(0.016);
+    click(&mut rt, "btn-0");
+    wait_for(&mut rt, "the wrong password's words", |rt| {
+        shows(rt, "That password isn't right.")
+    });
+    assert!(shows(&rt, TITLE), "the step stays open");
+    let field = &rt.state.account.form.current;
+    assert!(field.text.is_empty() && field.focused, "empty and focused again");
+    assert!(stored(&engine));
     rt.update(|s, _| s.account.form.current.text.push_str(PASSWORD));
     rt.frame(0.016);
     click(&mut rt, "btn-0");

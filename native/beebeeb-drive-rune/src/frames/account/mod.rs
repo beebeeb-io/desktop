@@ -186,8 +186,11 @@ pub enum Dialog {
     Plan,
     /// The menu of App lock's delays (DW-0716): the item under the pointer or the keys.
     LockDelay(Option<usize>),
-    /// App lock's change with the account password (no board frame: D-2; `app_lock_password`).
-    LockPassword,
+    /// App lock's change with the account password (no board frame: D-2; `app_lock_password`). `sent`: the password
+    /// went to the engine and its answer has not come (the field is not focused meanwhile).
+    LockPassword {
+        sent: bool,
+    },
     /// Approving a sign-in: the review with its code field (DW-A13), Windows Hello asking
     /// (DW-A14), and the three ends (DW-A15, DW-A16, DW-A17; `handled`: "Already handled").
     ApproveReview,
@@ -220,7 +223,7 @@ impl std::fmt::Debug for Dialog {
             Dialog::LeaveCodes => f.write_str("LeaveCodes"),
             Dialog::Plan => f.write_str("Plan"),
             Dialog::LockDelay(hot) => write!(f, "LockDelay({hot:?})"),
-            Dialog::LockPassword => f.write_str("LockPassword"),
+            Dialog::LockPassword { sent } => write!(f, "LockPassword {{ sent: {sent} }}"),
             Dialog::ApproveReview => f.write_str("ApproveReview"),
             Dialog::ApproveHello => f.write_str("ApproveHello"),
             Dialog::ApproveApproved => f.write_str("ApproveApproved"),
@@ -260,7 +263,7 @@ impl Dialog {
             // DW-0716: four lengths of time. No key material.
             Dialog::LockDelay(_) => false,
             // D-2: takes the account password.
-            Dialog::LockPassword => true,
+            Dialog::LockPassword { .. } => true,
         }
     }
 }

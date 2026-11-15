@@ -99,12 +99,12 @@ pub fn open(s: &mut State) {
         return;
     }
     s.account.form.current = form::secure();
-    super::ask(s, Dialog::LockPassword);
+    super::ask(s, Dialog::LockPassword { sent: false });
 }
 
 /// The step over the Security page, when it is open and offered.
 pub fn over(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &Theme) -> Option<El> {
-    if dialog != Some(&Dialog::LockPassword) {
+    if !matches!(dialog, Some(Dialog::LockPassword { .. })) {
         return None;
     }
     Some(step(&source.security_facts().app_lock_password?, f, t))
@@ -186,7 +186,9 @@ fn submit(ui: &mut AccountUi) -> Option<&'static str> {
     let typed = Zeroizing::new(std::mem::take(&mut ui.form.current.text));
     ui.form.current = form::secure();
     ui.form.problem = None;
-    form::focus(&mut ui.form, Some(form::CURRENT_KEY));
+    // No caret in a field nothing can be typed in while the password is checked (`follow` gives it back).
+    form::focus(&mut ui.form, None);
+    ui.dialog = Some(Dialog::LockPassword { sent: true });
     ui.source
         .as_deref_mut()?
         .app_lock_with_password(LockPassword::new(typed));
@@ -200,19 +202,27 @@ fn close(ui: &mut AccountUi) {
 }
 
 /// The window's poll: the step closes once the source no longer offers it (the change was made, an answer ended it,
-/// the session moved on). `true`: it closed.
+/// the session moved on); when an answer keeps it open (a wrong password, a wait), the field takes the keys again,
+/// once. `true`: what the step shows changed.
 pub fn follow(ui: &mut AccountUi) -> bool {
-    if ui.dialog != Some(Dialog::LockPassword) || offer(ui.source.as_deref()).is_some() {
+    let Some(Dialog::LockPassword { sent }) = ui.dialog else {
         return false;
+    };
+    match offer(ui.source.as_deref()) {
+        None => close(ui),
+        Some(offer) if sent && !offer.checking => {
+            ui.dialog = Some(Dialog::LockPassword { sent: false });
+            form::focus(&mut ui.form, Some(form::CURRENT_KEY));
+        }
+        Some(_) => return false,
     }
-    close(ui);
     true
 }
 
 /// Escape, or a press outside the step: it closes with nothing changed, except while the password is checked (the
 /// check cannot be called back). `true`: the step was open and took the key.
 pub fn on_escape(s: &mut State) -> bool {
-    if s.account.dialog != Some(Dialog::LockPassword) {
+    if !matches!(s.account.dialog, Some(Dialog::LockPassword { .. })) {
         return false;
     }
     if !offer(s.account.source.as_deref()).is_some_and(|offer| offer.checking) {
@@ -224,9 +234,17 @@ pub fn on_escape(s: &mut State) -> bool {
 /// The step's states for a render to look at (`--scene APPLOCK-...`): no board frame (D-2), so no golden and no gate.
 /// Ids outside the board's pattern on purpose. Fixture data only.
 pub const SCENES: &[(&str, fn(&mut State))] = &[
+    ("APPLOCK-password-offered", |s| {
+        s.account.source = Some(Box::new(BoardAccount::new().knowing(asked)));
+        super::go(s, "DW-A52");
+    }),
     ("APPLOCK-password", |s| scene(s, asked, true)),
     ("APPLOCK-password-wrong", |s| scene(s, wrong, false)),
-    ("APPLOCK-password-checking", |s| scene(s, checking, false)),
+    ("APPLOCK-password-checking", |s| {
+        scene(s, checking, false);
+        s.account.dialog = Some(Dialog::LockPassword { sent: true });
+        form::focus(&mut s.account.form, None);
+    }),
 ];
 
 fn asked(all: SecurityFacts) -> SecurityFacts {
