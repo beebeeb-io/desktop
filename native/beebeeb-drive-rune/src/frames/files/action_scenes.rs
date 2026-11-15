@@ -119,7 +119,7 @@ pub fn uploading(s: &mut State) {
     // The folder as DW-0420 draws it (its rows, thumbnails and order), over the fixture that takes uploads.
     s.source = Box::new(crate::frames::global::samples::TripByDate::new());
     (s.listing, s.list_error) = crate::load(s.source.as_ref(), None);
-    s.actions = super::Actions::new(Box::new(FilesFixture::default()));
+    s.actions = super::Actions::new(Box::new(crate::frames::global::samples::TripByDate::files().files));
     s.open_folder(Some("f-lisbon".to_string()));
     s.clear_selection();
     s.actions.sort = super::Sort::default();
