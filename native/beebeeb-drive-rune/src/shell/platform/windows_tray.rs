@@ -201,9 +201,7 @@ impl Suspended {
     /// With no idle reading at the suspend the time away is unknown: the longest there is, so it locks (fail closed;
     /// counted as none, the resume would carry the sleep alone and replace the poll's better count of the gap).
     fn away_until_now(self) -> Duration {
-        let Some(idle) = self.idle else {
-            return Duration::MAX;
-        };
+        let idle = self.idle.unwrap_or_default();
         // SAFETY: takes nothing, returns the tick count.
         let ticks = Duration::from_millis(unsafe { GetTickCount64() }.saturating_sub(self.tick_ms));
         let wall = self.wall.elapsed().unwrap_or_default();
