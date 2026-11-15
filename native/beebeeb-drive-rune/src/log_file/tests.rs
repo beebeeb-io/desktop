@@ -228,7 +228,7 @@ fn the_cap_holds_two_files_and_the_oldest_lines_go() {
     assert_eq!(files.len(), 2, "exactly two files: {files:?}");
     assert!(current.contains("n=399"), "the newest line is kept");
     assert!(
-        !old.contains("n=0 ") && !current.contains("n=0 "),
+        !old.contains("n=0\n") && !current.contains("n=0\n"),
         "the oldest line is dropped"
     );
 }
@@ -464,7 +464,7 @@ fn the_cap_holds_when_the_file_can_be_neither_renamed_nor_deleted() {
         text.len()
     );
     assert!(
-        text.contains("n=0 ") && !text.contains("n=599"),
+        text.contains("n=0\n") && !text.contains("n=599"),
         "lines are dropped, not the file grown: {} lines",
         text.lines().count()
     );
