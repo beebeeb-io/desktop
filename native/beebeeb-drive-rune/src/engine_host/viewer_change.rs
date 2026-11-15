@@ -31,9 +31,9 @@ pub(super) struct Changes {
     /// A change is with a worker: one at a time.
     busy: bool,
     /// A read of the open file's version is with a worker (it never blocks a change).
-    checking: Arc<AtomicBool>,
+    pub(super) checking: Arc<AtomicBool>,
     /// When the version was last asked for.
-    checked: Option<Instant>,
+    pub(super) checked: Option<Instant>,
     /// How long between two reads of the version.
     pub(super) every: Duration,
 }
