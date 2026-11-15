@@ -444,7 +444,7 @@ impl Default for DesktopConfig {
             notify_allow: true,
             notify_shared: true,
             notify_sync_stopped: true,
-            notify_needs_decision: true,
+            notify_needs_decision: false,
             notify_local_space: true,
             notify_backup_finished: true,
             notify_backup_attention: true,

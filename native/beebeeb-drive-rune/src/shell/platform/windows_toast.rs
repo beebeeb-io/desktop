@@ -241,16 +241,8 @@ pub(crate) fn show(notice: &Notice) {
         tracing::warn!("toast not shown");
         return;
     };
-    let switches = match DesktopConfig::load_for(crate::shell::identity::engine_identity()) {
-        Ok(config) => Switches::from_config(&config),
-        Err(_) => Switches {
-            allow: false,
-            sync_finished: false,
-            needs_decision: false,
-            local_space: false,
-            backup_attention: false,
-        },
-    };
+    let switches =
+        Switches::from_config(&DesktopConfig::load_for(crate::shell::identity::engine_identity()).unwrap_or_default());
     let kind = kind_of(notice);
     if !wanted(kind, &switches) {
         return;
