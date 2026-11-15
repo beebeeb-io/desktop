@@ -108,7 +108,7 @@ fn the_cap_holds_when_the_file_can_be_neither_renamed_nor_deleted() {
     // share-mode hold is not possible on the Linux build VM, so this is the seam, not the OS.
     let dir = tempfile::tempdir().unwrap();
     let cap = 4 * 1024;
-    let ops = super::FileOps {
+    let ops = super::super::FileOps {
         rename: refuse,
         remove: refuse_one,
     };
@@ -137,7 +137,7 @@ fn a_rotation_that_works_again_resumes_the_log() {
     let dir = tempfile::tempdir().unwrap();
     let cap = 4 * 1024;
     {
-        let ops = super::FileOps {
+        let ops = super::super::FileOps {
             rename: refuse,
             remove: refuse_one,
         };
@@ -341,7 +341,7 @@ fn the_cap_holds_while_the_file_is_held_and_the_log_recovers_in_the_same_run() {
     // flips; a real share-mode hold is not possible on the Linux build VM.
     let dir = tempfile::tempdir().unwrap();
     let cap = 4 * 1024;
-    let ops = super::FileOps {
+    let ops = super::super::FileOps {
         rename: held_rename,
         remove: held_remove,
     };
@@ -382,10 +382,10 @@ fn a_reopen_that_finds_the_file_over_the_cap_drops_the_line() {
     let dir = tempfile::tempdir().unwrap();
     let cap = 1024;
     fs::write(dir.path().join(FILE_NAME), vec![b'x'; 4096]).unwrap();
-    let mut sink = super::Sink {
+    let mut sink = super::super::Sink {
         dir: dir.path().to_path_buf(),
         max_bytes: cap,
-        ops: super::FileOps {
+        ops: super::super::FileOps {
             rename: refuse,
             remove: refuse_one,
         },
