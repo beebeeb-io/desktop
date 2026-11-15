@@ -640,7 +640,7 @@ impl<C: CredentialStores> Engine<C> {
         profile: &AccountProfile,
     ) -> Result<(), String> {
         let _write = self.claim(turn)?;
-        let mut vault = self.vault();
+        let mut vault = self.vault_for_install(&profile.user_id, email)?;
         if let Err(error) = key_owner::remove_foreign_key(&mut vault, &profile.user_id, email) {
             tracing::warn!(%error, "sign-in refused: a stored vault key that is not this account's could not be removed");
             return Err(key_owner::FOREIGN_KEY_NOT_REMOVED.to_string());

@@ -250,6 +250,34 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
+    /// The credential store for a sign-in's install (`store_first_sign_in`, which a sign-in and a sign-up both pass),
+    /// with every lock entry of another account removed first. An account's first install on this computer, or one
+    /// after another account's, carries nothing of a lock setting (core's first `Session::save` and its account
+    /// change), so a sign-out cut short never hands its `lock.app_lock = 0` to the next account. The entries stay
+    /// when the stored identity is this account's (a strong unlock, a token the server rejected at a start): the
+    /// session's owner tag, else the key's, else (no tag at all) the stored email. A store that cannot say refuses.
+    pub(super) fn vault_for_install(&self, user_id: &str, email: &str) -> Result<AuthVault<C::Store>, String> {
+        const UNREAD: &str = "the lock settings stored on this computer could not be read";
+        let vault = self.vault();
+        let owner = match vault.session_owner().map_err(|_| UNREAD.to_string())? {
+            Some(owner) => Some(owner),
+            None => vault.vault_key_owner().map_err(|_| UNREAD.to_string())?,
+        };
+        let ours = match owner {
+            Some(owner) => owner.trim() == user_id.trim(),
+            None => vault
+                .account_email()
+                .map_err(|_| UNREAD.to_string())?
+                .is_some_and(|stored| stored.trim().eq_ignore_ascii_case(email.trim())),
+        };
+        if !ours {
+            vault
+                .clear_lock_entries()
+                .map_err(|_| "the lock settings of an earlier account could not be removed".to_string())?;
+        }
+        Ok(vault)
+    }
+
     /// Is the vault marked closed (or can the mark not be read)? Then the key entry is not read, also not to ask
     /// whether a key is there.
     pub(super) fn marked_closed(&self, vault: &AuthVault<C::Store>) -> bool {
@@ -447,14 +475,6 @@ impl<C: CredentialStores> Engine<C> {
         const REFUSED: &str = "the stored session is another account's, or it changed";
         let vault = self.vault();
         let Some(old) = vault.session_token().map_err(|_| REFUSED.to_string())? else {
-            // No account at all on this computer (no email either: a token the server rejected keeps it): this
-            // account's first sign-in here carries nothing of a lock setting (core's first `Session::save`), so a
-            // sign-out cut short never hands its `lock.app_lock = 0` to the next account. Refused when it cannot.
-            if vault.account_email().map_err(|_| REFUSED.to_string())?.is_none() {
-                vault
-                    .clear_lock_entries()
-                    .map_err(|_| "the lock settings of an earlier account could not be removed".to_string())?;
-            }
             return Ok((turn, None));
         };
         let old = Zeroizing::new(old.expose_for_request().to_string());

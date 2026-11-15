@@ -279,6 +279,19 @@ fn app_lock_turns_by_keyboard_and_without_it_there_is_no_time_choice() {
     assert!(source(&rt).security().app_lock);
 }
 
+/// The real app's row: a source that gives no delay (nothing in this version acts on one) draws the switch and no
+/// time choice, and says no "locks again after".
+#[test]
+fn app_lock_with_no_delay_draws_no_time_choice() {
+    let mut state = init();
+    assert!(super::scene("DW-S01", &mut state));
+    state.account.source.as_mut().expect("the fixture").set_lock_after("");
+    let rt = window(state);
+    assert_eq!(info(&rt, "item-1-0-switch").label.as_deref(), Some("Lock Beebeeb"));
+    assert!(find(&rt, "item-1-0-pop").is_none(), "no delay: no time choice");
+    assert_eq!(says(&rt, "item-1-0-sub"), "Windows Hello");
+}
+
 #[test]
 fn a_device_is_signed_out_after_its_confirm_and_this_pc_has_no_button() {
     let mut rt = runtime("DW-A55");

@@ -693,6 +693,8 @@ fn another_accounts_stored_key_is_refused_and_removed() {
         vault
             .bind_vault_key_owner("99999999-9999-4999-8999-999999999999")
             .unwrap();
+        // And that account's app lock turned off: it never reaches this one.
+        store.save_lock_flag(LockFlag::AppLock, b"0").unwrap();
     }
     let host = open(&credentials);
     assert_eq!(host.engine.restore(), GateState::SignedOut);
@@ -704,6 +706,7 @@ fn another_accounts_stored_key_is_refused_and_removed() {
         store.load_wrapped_master_key().unwrap().is_none(),
         "the foreign key is gone"
     );
+    assert_eq!(flag(&credentials, LockFlag::AppLock), None, "and its lock setting");
     assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
     assert_eq!(gate::problem_from(FOREIGN_KEY_NOT_REMOVED, 0), SignInProblem::StaleKey);
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
