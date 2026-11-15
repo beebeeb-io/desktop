@@ -63,13 +63,6 @@ impl FakeAccount {
         beebeeb_core::kdf::derive_file_key(&master, id.as_bytes())
     }
 
-    /// Log one op under the next sequence number (the cursor a client advances by).
-    fn record_op(&self, op_type: &'static str, payload: Value) -> i64 {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        self.uploads.ops.lock().expect("ops").push((seq, op_type, payload));
-        seq
-    }
-
     /// The ops after `since`, as `GET /sync/ops` lists them.
     pub(super) fn ops_since(&self, since: i64) -> Vec<Value> {
         self.uploads
