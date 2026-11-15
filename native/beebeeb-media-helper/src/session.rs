@@ -39,6 +39,12 @@ pub const MAX_WHOLE: u64 = 384 << 20;
 /// filmcraft-media's `reader.rs`: "… and it is too large to read whole here"). It has no typed error for it, so the
 /// text is matched; `whole_file_formats_over_the_cap_answer_too_large` holds the match to FilmCraft's words.
 const TOO_LARGE_WORDS: &str = "too large to read whole";
+/// How FilmCraft's words for a stream its H.264 decoder refuses begin (`h264_error` in filmcraft-codecs `video.rs`:
+/// "H.264: interlaced (field / MBAFF) coding", "H.264: bit depth luma 10 …"; no other message starts so). MPEG-TS and
+/// MPEG-PS decode their first picture while the container opens, so there the refusal is the open's own error. It has
+/// no typed error, so the words are matched: `an_h264_refusal_at_open_is_known_by_filmcrafts_words` holds this side,
+/// the fixture row `h264-interlaced.ts` (`fixture_h264_interlaced`) FilmCraft's.
+const H264_REFUSED: &str = "H.264: ";
 /// The decoded-frame cache of FilmCraft's GOP decoder.
 pub const FRAME_BUDGET: usize = 256 << 20;
 
@@ -188,7 +194,13 @@ fn open(
             Decision::Error(code) => return Err(code),
         }
     }
-    let source = filmcraft_source(reader, bare, flags)?;
+    let source = match filmcraft_source(reader, bare) {
+        Ok(source) => source,
+        Err(e) if h264_refused(&e) && map_error(&e, flags) != ErrorCode::ReadFailed => {
+            return Err(refused_at_open(table, system_on));
+        }
+        Err(e) => return Err(map_error(&e, flags)),
+    };
     let info = source.info().clone();
 
     let video_track = match &info.video {
@@ -286,7 +298,7 @@ fn open(
 
 /// FilmCraft's source over the app's ranges. A sniffed bare stream gets the name its whole-file opener picks a
 /// decoder by ([`Bare::name`]); every other file keeps the name "" (the helper has none). The name goes nowhere else.
-fn filmcraft_source(reader: SharedReader, bare: Option<Bare>, flags: &ReadFlags) -> Result<SharedSource, ErrorCode> {
+fn filmcraft_source(reader: SharedReader, bare: Option<Bare>) -> Result<SharedSource, MediaError> {
     let name = bare.and_then(Bare::name).unwrap_or("");
     filmcraft_media::reader::open_reader_within(
         name,
@@ -295,13 +307,34 @@ fn filmcraft_source(reader: SharedReader, bare: Option<Bare>, flags: &ReadFlags)
         &filmcraft_codecs::openers(),
         MAX_WHOLE,
     )
-    .map_err(|e| map_error(&e, flags))
+}
+
+/// Whether FilmCraft's error is its H.264 decoder refusing the stream ([`H264_REFUSED`]).
+fn h264_refused(e: &MediaError) -> bool {
+    matches!(e, MediaError::Unsupported(s) if s.starts_with(H264_REFUSED))
+}
+
+/// The answer for a container whose H.264 video FilmCraft refused while it opened (MPEG-TS/PS: interlaced, 10-bit).
+/// The video decides first, so the audio (unknown here) does not change it: a refused H.264 track needs the system's
+/// decoder (row 19), and without it here the answer names H.264. Where the system's decoder runs, Windows' reader
+/// over a file FilmCraft could not describe is not wired: the same honest `NoSystemDecoder(H264)`.
+fn refused_at_open(table: &[(Codec, Route)], system_on: bool) -> ErrorCode {
+    let video = Some(Track {
+        refused: true,
+        ..Track::of(table, Codec::H264)
+    });
+    let state = state_for(video, None, system_on, || system::availability(Codec::H264));
+    match decide(video, None, state) {
+        Decision::Error(code) => code,
+        Decision::Ours(_) | Decision::System(_) => ErrorCode::NoSystemDecoder(Codec::H264),
+    }
 }
 
 /// The file's video track for the decision. FilmCraft's H.264 decoder checks the stream's parameters (interlaced,
-/// 10-bit) only when it decodes, so a codec that falls back to the system's decoder ([`SYSTEM_FALLBACK`]) has its
-/// first frame decoded here: refused, it is a track that needs the system's decoder (row 19). The frame stays in
-/// FilmCraft's cache for the first `WantVideo`.
+/// 10-bit) only when it decodes, and MP4, Matroska and AVI open without decoding, so a codec that falls back to the
+/// system's decoder ([`SYSTEM_FALLBACK`]) has its first frame decoded here: refused, it is a track that needs the
+/// system's decoder (row 19). The frame stays in FilmCraft's cache for the first `WantVideo`. A size outside the
+/// protocol's limits is not decoded at all: `open` refuses it as before.
 fn track_of_video(
     table: &[(Codec, Route)],
     source: &SharedSource,
@@ -309,7 +342,8 @@ fn track_of_video(
     flags: &ReadFlags,
 ) -> Result<Track, ErrorCode> {
     let mut track = Track::of_label(table, &v.codec);
-    if track.route != Route::Rust || !SYSTEM_FALLBACK.contains(&track.codec) {
+    let sized = (1..=MAX_SOURCE_SIDE).contains(&v.width) && (1..=MAX_SOURCE_SIDE).contains(&v.height);
+    if track.route != Route::Rust || !SYSTEM_FALLBACK.contains(&track.codec) || !sized {
         return Ok(track);
     }
     match source.video_frame(FrameRequest::full(v.frame_rate.sane().tick_of(0))) {
@@ -468,9 +502,44 @@ mod tests {
         let head = read_range(&*shared, 0, HEAD_LEN).expect("the head reads");
         let bare = sniff(&head);
         assert_eq!(bare, Some(Bare::Flac));
-        let answer = filmcraft_source(shared, bare, &ReadFlags::default()).err();
+        let answer = filmcraft_source(shared, bare)
+            .err()
+            .map(|e| map_error(&e, &ReadFlags::default()));
         assert_eq!(answer, Some(ErrorCode::TooLarge));
         let largest = reader.largest.load(Ordering::Relaxed);
         assert!(largest <= HEAD_LEN, "a read of {largest} bytes: more than the head");
+    }
+
+    /// Row 19 in MPEG-TS/PS: FilmCraft's own words for an H.264 stream its decoder refuses (as `h264_error` writes
+    /// them) are a refused H.264 track, and the answer names H.264 by the system state; any other refusal is not.
+    #[test]
+    fn an_h264_refusal_at_open_is_known_by_filmcrafts_words() {
+        for words in [
+            "H.264: interlaced (field / MBAFF) coding",
+            "H.264: bit depth luma 10 chroma 10 (only 8-bit is implemented)",
+        ] {
+            assert!(h264_refused(&MediaError::Unsupported(words.into())), "{words}");
+        }
+        for other in [
+            "H264 video is not in this build",
+            ": unrecognised format",
+            "HEVC: interlaced",
+            "no decoder for H.264: video",
+        ] {
+            assert!(!h264_refused(&MediaError::Unsupported(other.into())), "{other}");
+        }
+        assert!(!h264_refused(&MediaError::Decode("H.264: bad slice".into())));
+
+        // H.264 is FilmCraft's and falls back: with the switch off the refusal names it (M9's interlaced row).
+        assert_eq!(refused_at_open(ROUTES, false), ErrorCode::NoSystemDecoder(Codec::H264));
+        assert_eq!(
+            refused_at_open(&[(Codec::H264, Route::Rust)], false),
+            ErrorCode::NoSystemDecoder(Codec::H264)
+        );
+        // An H.264 row that is off answers as any video that is not played here.
+        assert_eq!(
+            refused_at_open(&[(Codec::H264, Route::Unavailable)], false),
+            ErrorCode::Unsupported(Codec::H264)
+        );
     }
 }
