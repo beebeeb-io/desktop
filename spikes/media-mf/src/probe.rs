@@ -984,6 +984,12 @@ fn main() {
         return;
     }
     let parts: Vec<&str> = header.split_whitespace().collect();
+    if parts.as_slice() == ["X"] {
+        // Registry reads need neither COM nor Media Foundation: answered also where those fail to start.
+        registry_reads();
+        out(&format!("END {}", started.elapsed().as_millis()));
+        return;
+    }
 
     unsafe {
         let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -1004,7 +1010,6 @@ fn main() {
 
     match parts.as_slice() {
         ["E"] => enumerate(),
-        ["X"] => registry_reads(),
         ["F", ext, accel, want, len] => {
             let Ok(len) = len.parse::<usize>() else {
                 out("R error length");

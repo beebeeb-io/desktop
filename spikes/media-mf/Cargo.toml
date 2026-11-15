@@ -58,6 +58,11 @@ path = "src/probe.rs"
 name = "media-mf-loadcheck"
 path = "src/loadcheck.rs"
 
+# Writes WMV 9, VC-1, WMA Pro and WMA Lossless test files with Windows' own encoders (ffmpeg has none for them).
+[[bin]]
+name = "media-mf-make"
+path = "src/make.rs"
+
 [[bin]]
 name = "media-mf-run"
 path = "src/run.rs"
