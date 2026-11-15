@@ -1287,7 +1287,7 @@ const FILETIME_UNIX_EPOCH_OFFSET_SECS: i64 = 11_644_473_600;
 /// millisecond values: anything implausibly large to be seconds (beyond
 /// ~year 5000) is treated as milliseconds. A non-positive or zero input
 /// yields 0, which Windows renders as "no date".
-fn unix_to_filetime(modified_at: i64) -> i64 {
+pub(super) fn unix_to_filetime(modified_at: i64) -> i64 {
     if modified_at <= 0 {
         return 0;
     }

@@ -681,7 +681,16 @@ impl EngineBridge {
                 } else {
                     return Err(anyhow::anyhow!("hydrate operation target missing from state").into());
                 };
-                self.hydrate_file(file_id, &dest, &[sync_root]).await?;
+                match self.hydrate_file(file_id, &dest, &[sync_root]).await {
+                    Ok(()) => {}
+                    // Task 2523: a re-download of a copy behind the current version met a change made since its
+                    // pass checked the bytes. The change keeps its bytes; the re-download is dropped, never retried
+                    // over it (the pass does not queue it again while the bytes differ from the agreed content).
+                    Err(error) if super::stale_copies::refresh_met_a_change(op, &error) => {
+                        tracing::info!(file_id = %file_id, "stale copy: changed since it was checked; kept as it is");
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 Ok(OpDone::Remove { release: None })
             }
             OperationKind::CreateFolder => {

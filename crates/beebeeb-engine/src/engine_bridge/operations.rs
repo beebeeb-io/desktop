@@ -181,7 +181,13 @@ impl EngineBridge {
     }
 
     #[cfg(not(target_os = "windows"))]
-    pub(super) fn enqueue_hydrate_operation(&self, entry: &FileEntry, now: i64) -> Result<(), EngineError> {
+    /// `reason`: `recursive_pin` (a pin), or task 2523's `newer_version` (a copy behind the current version).
+    pub(super) fn enqueue_hydrate_operation(
+        &self,
+        entry: &FileEntry,
+        now: i64,
+        reason: &'static str,
+    ) -> Result<(), EngineError> {
         let op = PendingOperation {
             op_id: uuid::Uuid::new_v4().to_string(),
             kind: OperationKind::HydrateFile,
@@ -191,7 +197,7 @@ impl EngineBridge {
             metadata_json: Some(
                 serde_json::json!({
                     "operation": Op::HydrateFile.as_str(),
-                    "reason": "recursive_pin",
+                    "reason": reason,
                 })
                 .to_string(),
             ),
@@ -201,7 +207,7 @@ impl EngineBridge {
             attempts: 0,
             max_attempts: 25,
             next_retry_at: now,
-            last_error: Some("queued pinned content hydration; transfer worker not yet attached".to_string()),
+            last_error: Some("queued content hydration; transfer worker not yet attached".to_string()),
             backup_source_key: None,
             created_at: now,
             updated_at: now,

@@ -117,6 +117,9 @@ mod local_classify;
 mod local_layout;
 mod operations;
 mod shared_roots;
+// Task 2523: another device's version reaches the copy on this PC.
+mod stale_copies;
+pub use stale_copies::{REFRESH_ORDER, RefreshStep, STALE_COPIES_PER_PASS, STALE_COPIES_READ_PER_PASS, StaleCopyPass};
 // LD-0105 W2: a Windows range session's preparation and its "whole" record.
 mod range_fetch;
 pub use backup_tree::{BackupChild, BackupFolderState, tighter_clock};
