@@ -14,6 +14,8 @@ beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
 sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
+# `#[implement]` expands to paths under `windows_core`, so the crate is named directly.
+windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",

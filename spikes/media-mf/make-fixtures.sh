@@ -50,8 +50,16 @@ ff "${VIN[@]}" -c:v libx265 "${X265[@]}" -pix_fmt yuv422p10le -tag:v hvc1 hevc-4
 ff "${VIN[@]}" -c:v libvpx-vp9 -b:v 300k -deadline good -cpu-used 4 vp9.webm
 
 frames() { "$FFPROBE" -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$1" | head -1; }
-ref8() { "$FFMPEG" -hide_banner -loglevel error -i "$1" -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt yuv420p - | head -c $((320 * 180)) | sha256sum | cut -d' ' -f1; }
-ref10() { "$FFMPEG" -hide_banner -loglevel error -i "$1" -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt p010le - | head -c $((320 * 180 * 2)) | sha256sum | cut -d' ' -f1; }
+# frame 0's luma: decode one frame to a file first (a pipe cut short by `head` fails the run under pipefail).
+luma() { # file pix_fmt bytes
+  local raw
+  raw=$(mktemp)
+  "$FFMPEG" -hide_banner -loglevel error -y -i "$1" -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt "$2" "$raw"
+  if [ "$(stat -c %s "$raw")" -lt "$3" ]; then echo short; else head -c "$3" "$raw" | sha256sum | cut -d' ' -f1; fi
+  rm -f "$raw"
+}
+ref8() { luma "$1" yuv420p $((320 * 180)); }
+ref10() { luma "$1" p010le $((320 * 180 * 2)); }
 row() { # file kind codec want note
   local f=$1 kind=$2 codec=$3 want=$4 note=$5 n=- r=-
   if [ "$kind" != a ]; then
