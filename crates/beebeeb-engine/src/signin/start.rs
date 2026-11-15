@@ -43,7 +43,6 @@ impl std::fmt::Display for EngineStartBlocked {
 pub fn keys_for_engine_start(
     acct: &account::AccountRuntime,
 ) -> Result<(EngineKeys, account_binding::Identity), EngineStartBlocked> {
-    engine_start_refusal(acct).map_err(EngineStartBlocked::Refused)?;
     let (keys, email) = acct
         .session
         .lock()
