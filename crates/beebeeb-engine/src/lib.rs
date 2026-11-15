@@ -123,8 +123,6 @@ pub use path_safety::{is_contained, reject_unsafe_rel_path};
 // LD-0105 D2 (W3): the one player allowlist. It lives under `windows_cf/` but is pure and compiled everywhere.
 pub mod finder_show;
 #[cfg(any(test, feature = "test-support"))]
-pub mod root_source;
-#[cfg(any(test, feature = "test-support"))]
 pub mod source_census;
 pub mod status_views;
 #[path = "windows_cf/stream_players.rs"]
