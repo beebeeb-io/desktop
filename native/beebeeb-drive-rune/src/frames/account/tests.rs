@@ -279,6 +279,19 @@ fn app_lock_turns_by_keyboard_and_without_it_there_is_no_time_choice() {
     assert!(source(&rt).security().app_lock);
 }
 
+/// The real app's row: a source that gives no delay (nothing in this version acts on one) draws the switch and no
+/// time choice, and says no "locks again after".
+#[test]
+fn app_lock_with_no_delay_draws_no_time_choice() {
+    let mut state = init();
+    assert!(super::scene("DW-S01", &mut state));
+    state.account.source.as_mut().expect("the fixture").set_lock_after("");
+    let rt = window(state);
+    assert_eq!(info(&rt, "item-1-0-switch").label.as_deref(), Some("Lock Beebeeb"));
+    assert!(find(&rt, "item-1-0-pop").is_none(), "no delay: no time choice");
+    assert_eq!(says(&rt, "item-1-0-sub"), "Windows Hello");
+}
+
 #[test]
 fn a_device_is_signed_out_after_its_confirm_and_this_pc_has_no_button() {
     let mut rt = runtime("DW-A55");
@@ -762,10 +775,10 @@ fn the_confirm_names_the_apps_the_source_gives_for_that_device() {
     );
 }
 
-/// Sign-in activity (DW-A77 to DW-A79): turning it off asks for a current code first (DW-A78),
-/// Esc and a wrong code stop nothing, the right code stops it, and turning it on asks nothing.
+/// Sign-in activity (DW-A77 to DW-A79): turning it off asks the account password first (DW-A78), Esc and a wrong
+/// password stop nothing, the right password stops it, and turning it on asks nothing.
 #[test]
-fn sign_in_activity_stops_only_after_a_current_code() {
+fn sign_in_activity_stops_only_after_the_password() {
     let mut rt = runtime("DW-A77");
     assert_eq!(info(&rt, "item-0-0-switch").role, "switch");
     assert!(source(&rt).activity().is_some());
@@ -776,7 +789,7 @@ fn sign_in_activity_stops_only_after_a_current_code() {
         Some(Dialog::Code(super::CodeFor::StopActivity)),
         "the switch opens the confirm (DW-A78)"
     );
-    assert!(source(&rt).activity().is_some(), "nothing stops before the code");
+    assert!(source(&rt).activity().is_some(), "nothing stops before the password");
     assert_eq!(info(&rt, "dlg").role, "dialog");
     key(&mut rt, Key::Escape);
     assert_eq!(rt.state.account.dialog, None, "Esc cancels");
@@ -784,12 +797,12 @@ fn sign_in_activity_stops_only_after_a_current_code() {
     assert_eq!(section(&rt), Some(SettingsPane::Security), "and settings stays open");
 
     click(&mut rt, "item-0-0-switch");
-    rt.update(|s, _| form::type_in(&mut s.account.form.code, "000000"));
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, "not the password"));
     settle(&mut rt);
-    click(&mut rt, "btn-0");
-    assert_eq!(says(&rt, "code-msg"), "Incorrect code. Try again.");
-    assert!(source(&rt).activity().is_some(), "a wrong code stops nothing");
-    rt.update(|s, _| form::type_in(&mut s.account.form.code, BOARD_CODE));
+    key(&mut rt, Key::Enter);
+    assert!(source(&rt).activity().is_some(), "a wrong password stops nothing");
+    click(&mut rt, "item-0-0-switch");
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, BOARD_PASSWORD));
     settle(&mut rt);
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.account.dialog, None);

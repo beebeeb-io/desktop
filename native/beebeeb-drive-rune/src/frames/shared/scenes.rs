@@ -146,11 +146,10 @@ pub fn dw_0515(s: &mut State) {
     });
 }
 
-/// Empty Trash? over Trash, the first characters of the account password typed.
+/// Empty Trash? over Trash: the password field empty and in focus, the button off (the board's DW-0749).
 pub fn dw_0749(s: &mut State) {
     crate::frames::trash::scenes::dw_0747(s);
     s.frames.shared.open_dialog(Dialog::EmptyTrash);
-    s.frames.shared.fields.password.replace_text("sample");
 }
 
 /// The lane's dialogs, by frame id (`frames::scenes`).

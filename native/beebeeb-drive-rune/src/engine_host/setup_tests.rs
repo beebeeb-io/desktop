@@ -16,6 +16,8 @@ use crate::shell::app::GateState as ShellGate;
 use crate::shell::host::{self, Shell};
 use crate::shell::platform::fake::FakePlatform;
 
+#[path = "setup_app_lock_tests.rs"]
+mod app_lock;
 #[path = "setup_folder_tests.rs"]
 mod folder_tests;
 #[path = "setup_glue_tests.rs"]
@@ -63,6 +65,8 @@ struct Fake {
     choices_held: Mutex<()>,
     /// The read of them fails.
     choices_fail: AtomicBool,
+    /// Every app lock write: its session, its value, and whether a proof came with it.
+    app_lock: Mutex<Vec<(SessionGeneration, bool, bool)>>,
 }
 
 fn session(number: u64) -> SessionGeneration {
@@ -97,6 +101,7 @@ fn fake() -> Arc<Fake> {
         choices: Mutex::default(),
         choices_held: Mutex::new(()),
         choices_fail: AtomicBool::new(false),
+        app_lock: Mutex::default(),
     })
 }
 
@@ -109,6 +114,23 @@ impl Fake {
 }
 
 impl SetupEngine for Fake {
+    // As the engine: a write for a session that is not the one in memory writes nothing, and off needs a proof.
+    fn set_app_lock_for(
+        &self,
+        session: SessionGeneration,
+        on: bool,
+        proof: Option<beebeeb_engine::app::lock_password_api::AppLockProof>,
+    ) -> Result<(), beebeeb_engine::app::lock_password_api::AppLockRefused> {
+        use beebeeb_engine::app::lock_password_api::AppLockRefused;
+        if session != self.stamp().0 {
+            return Err(AppLockRefused::Overtaken);
+        }
+        if !on && proof.is_none() {
+            return Err(AppLockRefused::ProofNeeded);
+        }
+        self.app_lock.lock().unwrap().push((session, on, proof.is_some()));
+        Ok(())
+    }
     fn view(&self) -> SyncView {
         *self.view.lock().unwrap()
     }

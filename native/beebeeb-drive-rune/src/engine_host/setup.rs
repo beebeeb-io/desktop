@@ -59,6 +59,8 @@ use crate::frames::signin::setup::source::{
 };
 use crate::shell::platform::Platform;
 
+#[path = "setup_app_lock.rs"]
+mod app_lock;
 #[path = "setup_folder.rs"]
 mod folder;
 #[cfg(test)]
@@ -304,6 +306,19 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn reads_backup_choices(&self) -> bool {
         false
     }
+    /// `Engine::set_app_lock_for`. BLOCKS. A fake that does not bind app lock stores nothing.
+    fn set_app_lock_for(
+        &self,
+        _session: SessionGeneration,
+        _on: bool,
+        _proof: Option<app_lock::AppLockProof>,
+    ) -> Result<(), app_lock::AppLockRefused> {
+        Err(app_lock::AppLockRefused::NotSaved)
+    }
+    /// Whether this engine binds app lock (step 2): the real one does.
+    fn binds_app_lock(&self) -> bool {
+        false
+    }
 }
 
 /// One folder step 3 offers: the engine's key, its name, whether it starts on, and a bounded count of its files.
@@ -382,6 +397,17 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     fn reads_backup_choices(&self) -> bool {
         true
     }
+    fn set_app_lock_for(
+        &self,
+        session: SessionGeneration,
+        on: bool,
+        proof: Option<app_lock::AppLockProof>,
+    ) -> Result<(), app_lock::AppLockRefused> {
+        Engine::set_app_lock_for(self, session, on, proof)
+    }
+    fn binds_app_lock(&self) -> bool {
+        true
+    }
 }
 
 /// What the adapter asks of the shell around it.
@@ -423,6 +449,8 @@ enum Answer {
     /// The folders step 3 offers, read on a worker.
     /// `None`: the read failed.
     Backups(Option<Vec<BackupChoice>>),
+    /// How Windows Hello's prompt for turning app lock off ended (`setup_app_lock.rs`).
+    LockProved(crate::engine_host::hello::HelloResult),
 }
 
 /// The first run on the real engine. See the module's doc.
@@ -468,6 +496,8 @@ pub struct EngineSetupSource<E: SetupEngine> {
     changed: bool,
     answers: mpsc::Sender<(Stamp, Answer)>,
     inbox: mpsc::Receiver<(Stamp, Answer)>,
+    /// The main window's Windows Hello prompt: turning app lock off asks it first.
+    hello: Box<dyn crate::engine_host::hello::HelloPrompter>,
 }
 
 /// The engine's view as the step draws it. A start the engine refused is not "adding": nothing is being added.
@@ -523,6 +553,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             changed: false,
             answers,
             inbox,
+            hello: Box::new(crate::engine_host::hello::NoHello),
         };
         source.look_after_the_grace();
         source.read_folder();
@@ -623,7 +654,8 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             // Where this first run reads the folders the step is always there: loading, the folders, "none found" or
             // "couldn't read them" (`loading`, `failed`); never "not in this version" while Backups is on.
             Step::Backup => super::backups::TURNED_ON && self.backups_asked,
-            Step::Passkey | Step::Lock | Step::Previews | Step::Done => false,
+            Step::Lock => self.engine.binds_app_lock(),
+            Step::Passkey | Step::Previews | Step::Done => false,
         }
     }
 
@@ -860,6 +892,7 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                     self.backups = choices.unwrap_or_default();
                     self.backups_fresh = true;
                 }
+                Answer::LockProved(result) => self.app_lock_proved(result),
             }
         }
         let unsaved = self.folder_unsaved();
@@ -953,6 +986,12 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     fn add_passkey(&mut self) -> bool {
         false
     }
-    /// The app lock (step 2): a lane of its own (Windows Hello); nothing is switched on here.
-    fn set_app_lock(&mut self, _on: bool, _after: LockAfter) {}
+    /// The app lock (step 2), through core's rule (`setup_app_lock.rs`). The delay is not set in this version
+    /// ([`SetupSource::sets_lock_after`]): the step draws no such row.
+    fn set_app_lock(&mut self, on: bool, _after: LockAfter) {
+        self.ask_app_lock(on);
+    }
+    fn sets_lock_after(&self) -> bool {
+        false
+    }
 }

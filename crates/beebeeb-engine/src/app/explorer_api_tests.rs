@@ -404,6 +404,7 @@ fn explorers_question_is_answered_while_the_state_is_being_written() {
         session_stored: true,
         ask_password_at_start: Some(false),
         vault_closed: Some(false),
+        app_lock: Some(true),
     });
     assert_eq!(f.engine.lock_state(), super::super::lock_api::LockState::ScreenLocked);
     assert_eq!(ReclaimOwner::refusal(&*f.engine), None);

@@ -395,9 +395,10 @@ fn an_upload_shows_in_its_row_with_its_bar_or_that_it_waits() {
         "Uploading, 2.1 of 3.6 MB"
     );
     assert_eq!(info(&rt, &format!("row-{moving}-bar")).role, "progressbar");
-    assert!(
-        find(&rt, &format!("row-{moving}-date")).is_none(),
-        "the bar stands where the date was"
+    assert_eq!(
+        text_of(&rt, &format!("row-{moving}-date")),
+        "",
+        "the bar stands where the date was; the board's export keeps its cell, empty"
     );
     assert_eq!(text_of(&rt, &format!("row-{waiting}-date")), "Just now");
     assert!(find(&rt, &format!("row-{waiting}-bar")).is_none());

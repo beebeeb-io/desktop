@@ -219,7 +219,12 @@ pub fn arrive(ui: &mut AccountUi) {
     f.code = code_edit();
     f.sink = secure();
     if let Some(dialog) = &ui.dialog {
-        if matches!(dialog, Dialog::Code(_)) {
+        if matches!(dialog, Dialog::Code(super::CodeFor::StopActivity))
+            && ui.source.as_deref().is_some_and(|s| s.stop_activity_needs_password())
+        {
+            // Stopping the recording asks the password (the board's DW-A78).
+            focus(f, Some(CURRENT_KEY));
+        } else if matches!(dialog, Dialog::Code(_)) {
             focus(f, Some(CODE_KEY));
         }
         // Removing a passkey asks the password in its confirm (a source that needs it).

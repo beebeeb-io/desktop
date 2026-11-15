@@ -90,6 +90,8 @@ pub enum Switch {
     OpenAtLogin,
     /// Step 3: the folders chosen to back up (done when every one was switched on).
     Backup,
+    /// Step 2: app lock.
+    AppLock,
 }
 
 /// How a change asked through the source ended.
@@ -241,6 +243,11 @@ pub trait SetupSource {
     /// "You're set up" draws its value only then. The fixture's changes are made at once.
     fn answers_later(&self) -> bool {
         false
+    }
+    /// `false`: "Lock again after" is not set by this source, and step 2 draws no such row (never a choice
+    /// nothing acts on). The fixture draws the board's.
+    fn sets_lock_after(&self) -> bool {
+        true
     }
     /// The changes that were answered since the last call, oldest first.
     fn take_outcomes(&mut self) -> Vec<Outcome> {

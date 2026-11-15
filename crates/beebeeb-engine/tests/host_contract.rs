@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use beebeeb_engine::app::lock_api::{Call, CallRefused, LockRefused, LockState, LockedAction};
+use beebeeb_engine::app::lock_password_api::AppLockProof;
 use beebeeb_engine::app::owned_state::guide_mark::GuideMark;
 use beebeeb_engine::app::{Engine, EngineConfig, LocalStateRefused, SyncStart, SyncStop};
 use beebeeb_engine::backup_actions::BackupMark;
@@ -692,6 +693,8 @@ fn another_accounts_stored_key_is_refused_and_removed() {
         vault
             .bind_vault_key_owner("99999999-9999-4999-8999-999999999999")
             .unwrap();
+        // And that account's app lock turned off: it never reaches this one.
+        store.save_lock_flag(LockFlag::AppLock, b"0").unwrap();
     }
     let host = open(&credentials);
     assert_eq!(host.engine.restore(), GateState::SignedOut);
@@ -703,6 +706,7 @@ fn another_accounts_stored_key_is_refused_and_removed() {
         store.load_wrapped_master_key().unwrap().is_none(),
         "the foreign key is gone"
     );
+    assert_eq!(flag(&credentials, LockFlag::AppLock), None, "and its lock setting");
     assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
     assert_eq!(gate::problem_from(FOREIGN_KEY_NOT_REMOVED, 0), SignInProblem::StaleKey);
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
@@ -1216,4 +1220,76 @@ fn a_locked_screen_refuses_the_guide_mark_read_and_write() {
         GuideMark::NotDone
     );
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+/// App lock (core #117): off, the next start opens directly, the window included; on, it is screen-locked.
+#[test]
+fn app_lock_off_opens_the_next_start_directly_and_on_opens_it_screen_locked() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    let host = open_vault(&credentials, EMAIL);
+    let turn = host.engine.session_turn();
+    assert_eq!(host.engine.app_lock_for(turn), Ok(true), "on by default");
+    assert_eq!(
+        host.engine
+            .set_app_lock_for(turn, false, Some(AppLockProof::PlatformVerified)),
+        Ok(())
+    );
+    assert_eq!(flag(&credentials, LockFlag::AppLock).as_deref(), Some(&b"0"[..]));
+    drop(host);
+
+    // A restart with app lock off: open, nothing asked, and a person's call runs.
+    let again = open(&credentials);
+    assert_eq!(again.engine.restore(), GateState::Ready);
+    assert_eq!(again.engine.lock_state(), LockState::Open);
+    assert_eq!(again.engine.view().gate, GateState::Ready, "the window opens directly");
+    assert_eq!(again.engine.check_call(Call::Person(LockedAction::ViewFiles)), Ok(()));
+    assert_eq!(again.engine.app_lock_for(again.engine.session_turn()), Ok(false));
+    // "Lock now" still locks with it off.
+    assert_eq!(again.engine.lock_screen(), Ok(()));
+    assert_eq!(again.engine.view().gate, GateState::ScreenLocked);
+    let asked = again.engine.session_turn();
+    assert_eq!(again.engine.unlock_screen_platform_verified(asked), Ok(()));
+
+    // On again (asks nothing): the next start is screen-locked.
+    let turn = again.engine.session_turn();
+    assert_eq!(again.engine.set_app_lock_for(turn, true, None), Ok(()));
+    drop(again);
+    let third = open(&credentials);
+    assert_eq!(third.engine.restore(), GateState::ScreenLocked);
+    assert_eq!(third.engine.lock_state(), LockState::ScreenLocked);
+    assert_eq!(third.engine.view().gate, GateState::ScreenLocked);
+    let asked = third.engine.session_turn();
+    assert_eq!(third.engine.unlock_screen_platform_verified(asked), Ok(()));
+    assert_eq!(third.engine.sign_out_keeping_local_data(), Ok(()));
+    assert!(
+        credentials.is_empty(),
+        "the sign-out removes the setting with the session"
+    );
+}
+
+/// A sign-out cut short may leave `lock.app_lock = 0` behind; an account's first sign-in on this computer carries
+/// nothing of a lock setting, so the next start is screen-locked again.
+#[test]
+fn a_leftover_app_lock_off_never_reaches_the_next_accounts_first_sign_in() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    credentials
+        .store_for("acct-host-contract")
+        .save_lock_flag(LockFlag::AppLock, b"0")
+        .unwrap();
+    let host = open_vault(&credentials, EMAIL);
+    assert_eq!(
+        flag(&credentials, LockFlag::AppLock),
+        None,
+        "cleared by the first sign-in"
+    );
+    assert_eq!(host.engine.app_lock_for(host.engine.session_turn()), Ok(true));
+    drop(host);
+    let again = open(&credentials);
+    assert_eq!(again.engine.restore(), GateState::ScreenLocked);
+    let asked = again.engine.session_turn();
+    assert_eq!(again.engine.unlock_screen_platform_verified(asked), Ok(()));
+    assert_eq!(again.engine.sign_out_keeping_local_data(), Ok(()));
+    assert!(credentials.is_empty());
 }

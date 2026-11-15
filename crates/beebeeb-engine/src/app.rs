@@ -52,6 +52,9 @@ pub mod account_email_api;
 pub mod account_email_resend_api;
 pub mod account_password_api;
 pub mod account_twofactor_api;
+pub mod backup_devices_api;
+mod session_revoke;
+use session_revoke::revoke;
 pub mod account_twofactor_status_api;
 pub mod backups_api;
 // Files in two versions and the answer to one, for the native Files window.
@@ -640,7 +643,7 @@ impl<C: CredentialStores> Engine<C> {
         profile: &AccountProfile,
     ) -> Result<(), String> {
         let _write = self.claim(turn)?;
-        let mut vault = self.vault();
+        let mut vault = self.vault_for_install(&profile.user_id, email)?;
         if let Err(error) = key_owner::remove_foreign_key(&mut vault, &profile.user_id, email) {
             tracing::warn!(%error, "sign-in refused: a stored vault key that is not this account's could not be removed");
             return Err(key_owner::FOREIGN_KEY_NOT_REMOVED.to_string());
@@ -1101,10 +1104,7 @@ impl<C: CredentialStores> Engine<C> {
     /// The session token (cloned for a person's single API call). `Err` when locked (either level) or signed out.
     fn session_token(&self) -> Result<String, String> {
         self.person_session(|session, _| session.token.clone())
-            .map_err(|refused| match refused {
-                lock_api::PersonRefused::ScreenLocked => "locked".to_string(),
-                lock_api::PersonRefused::NoSession => "not signed in".to_string(),
-            })
+            .map_err(|refused| refused.said_as("locked".to_string(), "not signed in".to_string()))
     }
 }
 
@@ -1123,15 +1123,6 @@ async fn fetch_profile(client: &reqwest::Client, base: &str, token: &str) -> Res
         .json::<AccountProfile>()
         .await
         .map_err(|_| "session_not_verified".to_string())
-}
-
-/// End `token`'s session on the server. Best effort; never logs.
-async fn revoke(client: &reqwest::Client, base: &str, token: &str) {
-    let _ = client
-        .post(format!("{base}/api/v1/auth/logout"))
-        .bearer_auth(token)
-        .send()
-        .await;
 }
 
 /// The binding's view of this computer's local data, for a start from this handle. It never resets: the binding

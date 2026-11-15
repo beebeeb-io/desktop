@@ -388,6 +388,7 @@ impl Ui {
             match outcome.switch {
                 Switch::Notifications => self.results.notifications = now,
                 Switch::OpenAtLogin => self.results.open_at_login = now,
+                Switch::AppLock => self.results.app_lock = now,
                 Switch::Backup => {}
             }
         }
@@ -452,6 +453,7 @@ impl Ui {
             Step::Lock => {
                 self.source.set_app_lock(self.lock_on, self.lock_after);
                 self.results.app_lock = self.lock_on;
+                self.asked(Switch::AppLock);
             }
             Step::Backup => {
                 let on: Vec<String> = self.folders.iter().filter(|f| f.on).map(|f| f.name.clone()).collect();
@@ -534,6 +536,11 @@ impl Ui {
 
     pub fn toggle_lock(&mut self) {
         self.lock_on = !self.lock_on;
+    }
+
+    /// Whether step 2 draws "Lock again after" (`SetupSource::sets_lock_after`).
+    pub fn sets_lock_after(&self) -> bool {
+        self.source.sets_lock_after()
     }
 
     pub fn set_lock_after(&mut self, after: LockAfter) {
@@ -767,7 +774,7 @@ pub fn scene(frame: &str) -> Option<Ui> {
 }
 
 /// The steps the running app has no answer for yet, as its source says them (`engine_host::setup`).
-const NOT_IN_THIS_VERSION: &[Step] = &[Step::Passkey, Step::Lock, Step::Backup, Step::Previews];
+const NOT_IN_THIS_VERSION: &[Step] = &[Step::Passkey, Step::Backup, Step::Previews];
 
 /// The states of the first run the board has no frame for, by a name of their own, for a headless render
 /// (`--scene first-run-folder`): no frame gate, the lane looks at the render. `None`: not one of them.
