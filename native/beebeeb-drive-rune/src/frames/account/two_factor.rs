@@ -39,10 +39,15 @@ pub fn pane(pane: Pane, source: &dyn AccountSource, f: &Form, dialog: Option<&Di
 /// Two-factor authentication (DW-A69): the QR code, the key, the first code.
 fn setup(f: &Form, t: &Theme) -> El {
     let Some(setup) = &f.setup else {
-        // Not made yet: nothing of a key is drawn. When Beebeeb did not make one, the page says so.
-        let said = f.problem.map(|_| {
+        // Not made yet: nothing of a key is drawn. A key still on its way (an earlier request) is waited for; when
+        // Beebeeb did not make one, the page says so.
+        let said = f.problem.map(|problem| {
             code_error(
-                "Could not start the set-up. Check your connection, go back and try again.",
+                if problem == Problem::StillOut {
+                    super::forms::STILL_OUT
+                } else {
+                    "Could not start the set-up. Check your connection, go back and try again."
+                },
                 t,
             )
         });

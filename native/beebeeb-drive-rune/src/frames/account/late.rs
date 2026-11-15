@@ -3,7 +3,7 @@
 //! page), one toast line above a toast's own place, and in full on the Change password page, which its button
 //! opens. Said once: the page takes it.
 //!
-//! It is the press's: kept only while the call's mark is current (the session and the account of the press, per
+//! It can be dismissed (it then goes, and nothing of it is said later). It is the press's: kept only while the call's mark is current (the session and the account of the press, per
 //! kind), dropped by `end_flows` (a lock, a sign-out, another account), never drawn while the gate is not Ready, and
 //! held outside the form so that leaving the account's sections does not lose it.
 
@@ -14,6 +14,7 @@ use super::source::{Answered, CallKind, CallMark, Refused};
 use crate::State;
 use crate::theme::{icons_files, tokens};
 use crate::ui::toast::{self, ToastAction, Tone};
+use crate::ui::{global_icons, kit};
 
 /// The answer of one password press, with that press's serial.
 pub struct Late {
@@ -97,13 +98,27 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
             .pb(84.0)
             .justify_center()
             .items_end()
-            .child(toast::toast_keyed(
-                "late-change",
-                icon,
-                tone,
-                notice(&late.answer),
-                Some(show),
-                &t,
-            )),
+            .child(
+                toast::toast_keyed("late-change", icon, tone, notice(&late.answer), Some(show), &t).child(
+                    // Dismiss: the notice goes, and nothing of it is said later (#440 review, P3).
+                    el().key("late-change-close")
+                        .role("button")
+                        .label("Dismiss")
+                        .size(24.0, 24.0)
+                        .mr(5.0)
+                        .radius(12.0)
+                        .hover(t.hover)
+                        .press(t.press)
+                        .focusable(true)
+                        .center()
+                        .on_press(|s: &mut State| s.account.late_change = None)
+                        .child(kit::glyph(
+                            "late-change-close-icon",
+                            &global_icons::CLOSE,
+                            12.0,
+                            t.text_secondary,
+                        )),
+                ),
+            ),
     )
 }

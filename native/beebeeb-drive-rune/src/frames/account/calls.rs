@@ -2,7 +2,8 @@
 //! starts one on the source's worker ([`AccountSource::start_call`]), the page waits, and the window settles the
 //! answer ([`settle`]). A press while the same call is out starts nothing and says so; the page waits for that call.
 //! A page that was left drops the wait: its answer is then dropped, except a password change's, which is said
-//! wherever the person is (`late`). An answer is only ever settled for the press and the session that asked for it.
+//! wherever the person is (`late`). An answer is only ever settled for the press and the turn that asked for it (the
+//! call's mark is current), whatever the kind.
 
 use super::form::{self, Problem};
 use super::source::{Answered, CallKind, CodeRefused, EmailRefused, Resend};
@@ -41,6 +42,13 @@ pub(super) fn start(ui: &mut AccountUi, kind: CallKind, input: &str, password: &
     }
 }
 
+/// The set-up page asks Beebeeb for a key; with no open session it says the set-up could not start.
+pub(super) fn ask_for_a_key(ui: &mut AccountUi) {
+    if start(ui, CallKind::BeginTwoFactor, "", "") == Start::NotStarted {
+        ui.form.problem = Some(Problem::Offline);
+    }
+}
+
 fn code_problem(why: CodeRefused) -> Problem {
     if why == CodeRefused::Offline {
         Problem::Offline
@@ -66,9 +74,13 @@ pub fn settle(ui: &mut AccountUi, kind: CallKind, answered: Answered) -> Option<
     ui.form.waiting = None;
     // What the page said while it waited ("still being sent") goes with the wait.
     ui.form.problem = None;
-    // A wait a page adopted on its return (a change of password or of email made on an earlier visit) can belong to
-    // a press of another session of the same account: its answer is not this session's to say. The page is live.
-    if matches!(kind, CallKind::ChangePassword | CallKind::StartEmail) && mark.is_some_and(|mark| !mark.current) {
+    // A wait a page adopted (on its return, or through `AlreadyOut`) can belong to a press of another turn of the
+    // same account (a lock and an unlock, a sign-in again): its answer is not this turn's to say, for every kind (#440
+    // review). The page is live again; the set-up page asks for a key of its own (the earlier one was wiped).
+    if mark.is_some_and(|mark| !mark.current) {
+        if kind == CallKind::BeginTwoFactor && ui.pane == Pane::TwoFactorSetup && ui.form.setup.is_none() {
+            ask_for_a_key(ui);
+        }
         return None;
     }
     let f = &mut ui.form;

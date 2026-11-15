@@ -224,9 +224,15 @@ fn a_changed_password_stores_the_new_session_and_keeps_the_key() {
         .set_lock_entry(crate::keychain::LockFlag::ScreenCheck, b"a record of the old password")
         .unwrap();
 
-    engine
+    let moved_to = engine
         .change_password_for(turn, secret(PASSWORD), secret(NEW_PASSWORD))
         .expect("the change goes through");
+    assert_ne!(moved_to, turn, "the change's own write moved the generation on");
+    assert_eq!(
+        moved_to,
+        engine.session_turn(),
+        "and it hands back the generation it moved to"
+    );
     assert_eq!(
         engine
             .vault()

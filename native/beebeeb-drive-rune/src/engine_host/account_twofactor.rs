@@ -26,12 +26,13 @@
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::account_email_resend_api::EmailResendError;
 use beebeeb_engine::app::account_twofactor_api::{AccountFlowFailure, PendingEnrollment};
 use beebeeb_engine::app::{CredentialStores, Engine};
 use zeroize::Zeroizing;
 
-use super::{EngineAccountSource, Stamp, stamp};
+use super::{EngineAccountSource, Stamp, account_of, stamp};
 use crate::frames::account::Pane;
 use crate::frames::account::source::{
     Answered, CallKind, CallMark, CodeRefused, EmailRefused, PaneState, Refused, Resend, Secret, Setup, TwoFactor,
@@ -44,9 +45,9 @@ type Held = Arc<Mutex<Option<(Stamp, PendingEnrollment)>>>;
 /// for.
 type Pending = Arc<Mutex<Option<(Stamp, String)>>>;
 
-/// One call's answer: the session and account it was made for, and the ones right after the engine answered (a
-/// changed password stores its new session token, which moves the session's turn on: the engine's own write).
-type Done = (Stamp, Stamp, CallKind, Answered);
+/// One call's answer: the session and account it was made for, the turn the call's OWN write moved to (a changed
+/// password stores its new session token: the generation the engine's claim produced, handed back), and the answer.
+type Done = (Stamp, Option<Stamp>, CallKind, Answered);
 
 /// Backup codes kept for after a screen lock, with the session and account they were made for (wiped on drop).
 struct Unseen {
@@ -61,8 +62,9 @@ pub(super) struct Calls {
     /// How many calls were started.
     counter: u64,
     /// The latest call of each kind: its serial, the session and account its press was made under (set at the
-    /// start), and, once it answered with a success, the session and account right after the engine's answer. A late
-    /// answer is current only while the engine's session and account are still one of those two.
+    /// start), and the turn the call's own write moved to (a changed password; a confirmed email's address at the
+    /// drain), never a turn a lock or a sign-in moved to. A late answer is current only while the engine's session and
+    /// account are still one of those two.
     latest: Vec<(CallKind, u64, Stamp, Option<Stamp>)>,
     held: Held,
     pending_email: Pending,
@@ -164,7 +166,8 @@ fn remember(pending: &Pending, made_for: Stamp, address: String) {
     }
 }
 
-/// The work of one call, on its worker.
+/// The work of one call, on its worker: its answer, and the generation its own write moved to (a changed password
+/// only: the engine hands back what its claim produced).
 fn work<C: CredentialStores>(
     engine: &Engine<C>,
     held: &Held,
@@ -173,10 +176,12 @@ fn work<C: CredentialStores>(
     kind: CallKind,
     input: Zeroizing<String>,
     password: Zeroizing<String>,
-) -> Answered {
+) -> (Answered, Option<SessionGeneration>) {
     let session = made_for.0;
     let code = input.as_str();
-    match kind {
+    // The generation the call's own write moved to: a changed password's only.
+    let mut own = None;
+    let answered = match kind {
         CallKind::StartEmail => match engine.email_change_start(session, code, password.as_str()) {
             Ok(address) => {
                 remember(pending_email, made_for, address);
@@ -202,7 +207,10 @@ fn work<C: CredentialStores>(
         },
         // The current password is the one the step-up kept, handed in as `password` by `start_a_call`.
         CallKind::ChangePassword => match engine.change_password_for(session, password, input) {
-            Ok(()) => Answered::Done,
+            Ok(moved_to) => {
+                own = Some(moved_to);
+                Answered::Done
+            }
             Err(why) => Answered::Refused(super::password_change::refusal(why)),
         },
         CallKind::ConfirmEmail => match engine.email_change_confirm(session, code) {
@@ -217,7 +225,7 @@ fn work<C: CredentialStores>(
                     .and_then(|(_, pending)| setup_of(pending))
             });
             if let Some(setup) = waiting {
-                return Answered::Setup(setup);
+                return (Answered::Setup(setup), None);
             }
             match engine.two_factor_begin(session, None) {
                 Ok(pending) => {
@@ -243,7 +251,7 @@ fn work<C: CredentialStores>(
                 _ => None,
             });
             let Some(pending) = pending else {
-                return Answered::Code(CodeRefused::Wrong);
+                return (Answered::Code(CodeRefused::Wrong), None);
             };
             match engine.two_factor_turn_on(session, pending, code) {
                 Ok(codes) => Answered::Codes(secrets(codes)),
@@ -267,7 +275,8 @@ fn work<C: CredentialStores>(
             Ok(codes) => Answered::Codes(secrets(codes)),
             Err(why) => Answered::Code(code_why(why)),
         },
-    }
+    };
+    (answered, own)
 }
 
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
@@ -280,10 +289,22 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             serial: *serial,
             out,
             // Per kind and per press (desktop#427, the lead's follow-up): one slot for every kind let another kind's
-            // answer make this one current again, and the turn of the drain let a same-account sign-in say it. A
-            // success is current under the turn its own write moved to too (a changed password moves it on).
+            // answer make this one current again, and the turn of the drain let a same-account sign-in say it. Only
+            // the call's OWN write extends it (#440 review): the generation the engine's claim handed back.
             current: out || (self.open() && (*made_for == now || answered_under.as_ref() == Some(&now))),
         })
+    }
+
+    /// The turn `kind`'s call made by its own write: its press is current there too.
+    fn restamp(&mut self, kind: CallKind, made_for: &Stamp, own: Stamp) {
+        if let Some(entry) = self
+            .calls
+            .latest
+            .iter_mut()
+            .find(|(k, _, made, _)| *k == kind && made == made_for)
+        {
+            entry.3 = Some(own);
+        }
     }
 
     /// See [`crate::frames::account::source::AccountSource::start_call`].
@@ -318,13 +339,14 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         let started = std::thread::Builder::new()
             .name("account-call".into())
             .spawn(move || {
-                let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let (answered, own) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     work(&engine, &held, &pending, made_for.clone(), kind, input, password)
                 }))
-                .unwrap_or(Answered::Refused(Refused::Offline));
-                // The turn right after the answer: a success's own write (a new session token) has moved it.
-                let after = stamp(&engine);
-                let _ = answers.send((made_for, after, kind, answered));
+                .unwrap_or((Answered::Refused(Refused::Offline), None));
+                // The turn the call's own write moved to (never one read afterwards: a lock or a sign-in in between
+                // would pass for it), for the same account as the press.
+                let own = own.map(|moved_to| (moved_to, made_for.1.clone()));
+                let _ = answers.send((made_for, own, kind, answered));
                 engine.wake_host();
             })
             .is_ok();
@@ -402,7 +424,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// See [`crate::frames::account::source::AccountSource::call_answer`].
     pub(super) fn a_call_answer(&mut self) -> Option<(CallKind, Answered)> {
         self.forget_unseen_of_another_session();
-        while let Ok((made_for, after, kind, answered)) = self.calls.inbox.try_recv() {
+        while let Ok((made_for, own, kind, answered)) = self.calls.inbox.try_recv() {
             self.calls.out.retain(|k| *k != kind);
             // The turn may have moved since the press (a screen lock moves it) while the request was out and Beebeeb
             // may already have changed the account: an answer for the SAME account still reaches the pane, once (new
@@ -412,18 +434,10 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 self.calls.drop_held();
                 continue;
             }
-            // A success that moved the turn by its own write is still that press's: its mark says so. A refusal
-            // never moved it, so a refusal answered under a later session is not (a moved session refuses).
-            if matches!(
-                answered,
-                Answered::Done | Answered::Setup(_) | Answered::NewKey(_) | Answered::Codes(_)
-            ) && let Some(entry) = self
-                .calls
-                .latest
-                .iter_mut()
-                .find(|(k, _, made, _)| *k == kind && *made == made_for)
-            {
-                entry.3 = Some(after);
+            // A call whose own write moved the turn (a changed password) is still that press's under exactly that
+            // turn; nothing else extends the mark (a lock and an unlock, or a sign-in, during the call never do).
+            if let Some(own) = own {
+                self.restamp(kind, &made_for, own);
             }
             if now != made_for {
                 // What is held under the old turn (a key that waits) is the old turn's: wiped. The answer stays.
@@ -454,8 +468,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     .and_then(|mut held| held.take())
                     .filter(|(held_for, _)| *held_for == made_for)
                     .map(|(_, address)| address);
-                if let Some(address) = address {
-                    self.engine.email_changed_for(made_for.0, &address);
+                if let Some(address) = address
+                    && let Some(moved_to) = self.engine.email_changed_for(made_for.0, &address)
+                {
+                    // The drain's own write moved the turn (and the address the stamp names): the answer is still
+                    // this press's under exactly that turn.
+                    self.restamp(kind, &made_for, (moved_to, account_of(&self.engine)));
                 }
             }
             // What changed on the account is read again, so what the pages say is Beebeeb's.

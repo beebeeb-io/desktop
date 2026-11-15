@@ -264,11 +264,9 @@ pub fn arrive(ui: &mut AccountUi) {
         }
         Pane::TwoFactorSetup => {
             ui.form.current = secure();
-            if ui.form.setup.is_none()
-                && super::calls::start(ui, CallKind::BeginTwoFactor, "", "") == super::calls::Start::NotStarted
-            {
+            if ui.form.setup.is_none() {
                 // No open session: no key is asked for, and the page says the set-up could not start.
-                ui.form.problem = Some(Problem::Offline);
+                super::calls::ask_for_a_key(ui);
             }
             focus(&mut ui.form, Some(CODE_KEY));
         }
