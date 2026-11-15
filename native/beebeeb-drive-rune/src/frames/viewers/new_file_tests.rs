@@ -409,16 +409,14 @@ fn a_second_ask_in_the_same_frame_keeps_the_dialog_as_it_is() {
     rt.state.actions.intents.push(FilesIntent::Frame("DW-1521"));
     rt.frame(0.0);
     assert_eq!(dialog_step(&rt), Some(Step::Pick));
-    for _ in 0..3 {
-        press(&mut rt, Key::Right);
-    }
-    assert_eq!(picked(&rt), Some(Kind::Excel));
+    press(&mut rt, Key::Right);
+    assert_eq!(picked(&rt), Some(Kind::ALL[1]));
     rt.frame(0.0);
-    assert_eq!(picked(&rt), Some(Kind::Excel), "the second ask reset the dialog");
+    assert_eq!(picked(&rt), Some(Kind::ALL[1]), "the second ask reset the dialog");
     // And an ask that arrives while it is open changes nothing in it either.
     rt.state.actions.intents.push(FilesIntent::Frame("DW-1521"));
     rt.frame(0.0);
-    assert_eq!(picked(&rt), Some(Kind::Excel), "an ask while open reset the dialog");
+    assert_eq!(picked(&rt), Some(Kind::ALL[1]), "an ask while open reset the dialog");
     assert!(
         !rt.state.actions.intents.contains(&FilesIntent::Frame("DW-1521")),
         "every ask was taken"

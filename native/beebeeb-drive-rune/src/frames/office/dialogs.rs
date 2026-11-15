@@ -11,9 +11,9 @@ use rune::{El, TextStyle, col, el, row};
 use crate::State;
 use crate::frames::placeholder;
 use crate::frames::viewers;
-use crate::theme::tokens::Theme;
+use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
-use crate::ui::settings_dialog::{BUTTON_MD, DIALOG_TITLE};
+use crate::ui::settings_dialog::DIALOG_TITLE;
 
 /// 12px on 15px (`.t-sub`).
 const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
@@ -21,19 +21,44 @@ const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 /// The notice, as the board's DW-1557 words it (viewer contract section 6.2). One text node.
 pub const NOTICE: &str = "This viewer is built on WordCraft, GridCraft and DeckCraft, open-source projects \
 (MIT OR Apache-2.0), with fonts under the SIL Open Font License 1.1. It runs entirely on this device.";
-pub const TITLE: &str = "Open-source licences";
-/// The two links, opened in the browser.
-pub const LINKS: [&str; 2] = ["Source: the Office engine's public repository", "Third-party licences"];
+pub const TITLE: &str = "About this viewer";
+/// The two links, opened in the browser. The first is a label and an address (the address is in the machine font).
+pub const LINKS: [&str; 2] = [
+    "Source code github.com/beebeeb-io/desktop-office",
+    "Third-party licences",
+];
+/// The first link's label, and the address after it.
+const SOURCE_LABEL: &str = "Source code ";
+const SOURCE_ADDRESS: &str = "github.com/beebeeb-io/desktop-office";
+/// 11px mono: the address (`.t-cap` in the machine font).
+const ADDRESS: TextStyle = TextStyle::new(11.0, 400.0).family(rune::tok::Family::Mono).lh(14.0);
 
+/// A neutral, underlined link on its own row (never Amber: Amber is for encryption state and primary actions).
 fn link(index: usize, words: &str, t: &Theme) -> El {
     let key = format!("lic-link-{index}");
+    let ink = t.text_tertiary;
+    let text = if index == 0 {
+        row()
+            .key(format!("{key}-line"))
+            .child(kit::label(format!("{key}-text"), SOURCE_LABEL, type_::CAPTION, ink))
+            .child(kit::label(format!("{key}-address"), SOURCE_ADDRESS, ADDRESS, ink))
+    } else {
+        row()
+            .key(format!("{key}-line"))
+            .child(kit::label(format!("{key}-text"), words, type_::CAPTION, ink))
+    };
     row()
         .key(key.clone())
         .role("link")
         .label(words)
         .focusable(true)
         .cursor(rune::Cursor::Pointer)
-        .child(kit::label(format!("{key}-text"), words, BUTTON_MD, t.accent_deep))
+        .child(
+            col()
+                .key(format!("{key}-col"))
+                .child(text)
+                .child(el().key(format!("{key}-rule")).w_full().h(1.0).fill(ink)),
+        )
 }
 
 /// The panel: a title, the notice, the two links. No image and no mark: names appear only inside the notice text.
@@ -42,11 +67,11 @@ pub fn licence_panel(t: &Theme) -> El {
         .key("lic-panel")
         .role("dialog")
         .label(TITLE)
-        .w(380.0)
-        .p(20.0)
-        .gap(10.0)
+        .w(360.0)
+        .padding(16.0)
+        .gap(8.0)
         .fill(t.card)
-        .radius(8.0)
+        .radius(12.0)
         .box_shadow(kit::drop(24.0, 60.0, rune::Color::BLACK.alpha(0.28)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         .child(
@@ -57,8 +82,10 @@ pub fn licence_panel(t: &Theme) -> El {
         )
         .child(kit::label("lic-notice", NOTICE, SUB, t.text_tertiary).wrap().w_full())
         .child(
-            el().key("lic-links")
+            col()
+                .key("lic-links")
                 .w_full()
+                .gap(4.0)
                 .child(link(0, LINKS[0], t))
                 .child(link(1, LINKS[1], t)),
         )
@@ -84,6 +111,41 @@ mod tests {
         for banned in ["LibreOffice", "Qt", "MPL"] {
             assert!(!w.contains(banned), "{banned} must not appear");
         }
+    }
+
+    #[test]
+    fn office_licence_title_is_the_boards() {
+        assert_eq!(TITLE, "About this viewer");
+    }
+
+    #[test]
+    fn office_licence_links_are_neutral_and_on_their_own_lines() {
+        use rune::{Env, Runtime};
+        let t = crate::theme::tokens::theme(false);
+        let mut state = crate::init();
+        (FRAMES[0].1)(&mut state);
+        let mut rt = Runtime::new(
+            state,
+            crate::view,
+            (1278.0, 798.0),
+            Env {
+                system_dark: false,
+                scale: 2.0,
+            },
+        );
+        rt.frame(0.0);
+        let find = |key: &str| {
+            rt.elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(key))
+                .unwrap_or_else(|| panic!("{key} is drawn"))
+        };
+        let (a, b) = (find("lic-link-0-text"), find("lic-link-1-text"));
+        for e in [&a, &b] {
+            assert_ne!(e.color, Some(t.accent), "a link is never Amber");
+            assert_ne!(e.color, Some(t.accent_deep), "a link is never Amber");
+        }
+        assert!(b.rect[1] - a.rect[1] >= 14.0, "the links are on two lines");
     }
 
     #[test]

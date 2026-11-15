@@ -8,7 +8,7 @@ use rune::{Cx, El, KeyEvent};
 
 use super::Ui;
 use super::office_over::Over;
-use super::source::{Body, FixtureViewerSource, OpenFile, board};
+use super::source::{Body, FixtureViewerSource, OpenFile};
 use crate::State;
 use crate::frames::office::docs::{self, DocBody};
 use crate::frames::office::slides::{self, DeckBody};
@@ -76,9 +76,9 @@ pub fn leave_present(s: &mut State) -> bool {
     }
 }
 
-/// DW-1557: a document of the editor's frame, with the licence panel open over it (the status bar's About).
+/// DW-1557: the viewer's document, with the "About this viewer" card open over it (the status bar's About).
 pub fn scene_licence(s: &mut State) {
-    if super::open_from(s, Box::new(FixtureViewerSource::new()), board::DOCX)
+    if open_doc(s, docs::docs_fixture::file(false))
         && let Some(ui) = super::ui(s)
     {
         ui.office_about();
@@ -176,6 +176,30 @@ mod tests {
         assert!(
             super::super::ui(&mut rt.state).is_some(),
             "Esc closes the panel, not the file"
+        );
+    }
+
+    /// DW-1557 is the viewer's document under a card at the bottom right, not the editor.
+    #[test]
+    fn office_glue_licence_scene_draws_the_viewer_not_the_editor() {
+        let mut state = init();
+        (dialogs::FRAMES[0].1)(&mut state);
+        assert!(doc_mut(&mut state).is_some(), "the body is a viewer document");
+        let rt = runtime_of(state);
+        assert!(
+            !rt.elements()
+                .into_iter()
+                .any(|e| e.key.as_deref().is_some_and(|k| k.starts_with("rib"))),
+            "no ribbon is drawn"
+        );
+        let panel = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("lic-panel"))
+            .expect("the card is drawn");
+        assert!(
+            (1278.0 - (panel.rect[0] + panel.rect[2]) - 16.0).abs() < 0.6,
+            "16 px from the right edge"
         );
     }
 
