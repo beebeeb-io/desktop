@@ -962,6 +962,10 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.copies.backups_root()
     }
 
+    fn look_for_backups(&mut self) {
+        self.copies.look_for_backups();
+    }
+
     fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
         self.local(|db, sync_root| {
             let parent_entry = file_ops::resolve_folder(db, parent).map_err(map_drive_err)?;

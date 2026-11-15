@@ -9,8 +9,8 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
 | Frame | What it is | Status |
 | --- | --- | --- |
 | `DW-0701` | Where Ctrl+, lands: the suite's settings sidebar and the General section. | built (light and dark: 0 failing on all six lines) |
-| `DW-0781` | A new version is available: General says so with Download update. | built; light and dark (compare.sh at `fa38d6c6`): geometry, icons and fills 0 failing; text 1 failing (`banner-0-text`: the caption, design note below), pixels 3 failing (`banner-0`, `banner-0-text`, `set-main`: the caption's two lines), frame tiles 130 light / 126 dark (the same lines) |
-| `DW-0751` | Versions to quote in a problem report, and where the code is. | built; light and dark (compare.sh at `fa38d6c6`): 0 failing on five lines; pixels 2 failing (`item-3-0`, `list-3-body`: the More list without About audits, design note below) |
+| `DW-0781` | A new version is available: General says so with Restart to update, one press. | built; light and dark (compare.sh at `35bce8f7`): geometry, icons and fills 0 failing; text 1 failing (`banner-0-text`: the caption, design note below), pixels 3 failing (`banner-0`, `banner-0-text`, `set-main`: the caption's two lines), frame tiles 130 light / 126 dark (the same lines) |
+| `DW-0751` | Versions to quote in a problem report, and where the code is. | built; light and dark (compare.sh at `27bd664c`): 0 failing on all six lines |
 | `DW-0782` | Report a problem the way the desktop app does: a support bundle the person can read first, and an email they send themselves. | built (light and dark: 0 failing on all six lines) |
 | `DW-0708` | The plan, read only. | built on the account pane (`frames/account/plan.rs`, over DW-A51); the board draws them in the Drive settings kit: board follow-up task 2480 (`frames/account/FRAMES.md` has the counts) |
 | `DW-0712` | What uses the account's space, and what Beebeeb keeps on this PC. | built (light and dark: 0 failing on all six lines) |
@@ -63,8 +63,8 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
 | `DW-0788b` | A country is chosen; decide what happens if it can't take a file. | built (light and dark: 0 failing on all six lines) |
 | `DW-0788c` | The chosen country can't take files right now: say where new files go meanwhile. | built (light and dark: 0 failing on all six lines) |
 | `DW-0788d` | The locations couldn't load. | built (light and dark: 0 failing on all six lines) |
-| `DW-0789` | Choose which releases this PC is offered. | built; light and dark (compare.sh at `fa38d6c6`), every red line the More list without About audits (design note below): geometry 5 failing (`item-3-1` with its title and icon missing, `list-3-body` height, `list-3-foot` place), pixels 8, text 2 (`item-3-0-title` says beebeeb.io where the board has About audits; `item-3-1-title` missing), icons 1 (`item-3-1-ext` missing), fills 0, frame tiles 105 light / 103 dark. The channel menu is at the board's place (702, 345, 130 x 98 in both themes' exports) |
-| `DW-0789b` | What a version changes, before downloading it. | built; light and dark (compare.sh at `fa38d6c6`): geometry 5, icons 1, text 2 of 3 and pixels 9 of 14 are the More list without About audits (as DW-0789); text `dlg-text-0` and pixels `dlg`, `dlg-text-0`, `list-1-body`, `item-1-2`, `item-1-2-sub` are the caption over those rows (design note below); dark: `item-1-1` (under the dialog, `edge 10 > 9`) in place of light's `list-3-foot`; frame tiles 139 light / 43 dark |
+| `DW-0789` | Choose which releases this PC is offered. | built; light and dark (compare.sh at `27bd664c`), every red line the golden's "About audits" row (a golden from before the board dropped it: design note below): geometry 5 failing (`item-3-1` with its title and icon missing, `list-3-body` height, `list-3-foot` place), pixels 8, text 2 (`item-3-0-title` says beebeeb.io where the golden has About audits; `item-3-1-title` missing), icons 1 (`item-3-1-ext` missing), fills 0, frame tiles 105 light / 103 dark. The channel menu is at the board's place (702, 345, 130 x 98 in both themes' exports) |
+| `DW-0789b` | What a version changes, before downloading it. | built; light and dark (compare.sh at `27bd664c`): geometry 5, icons 1, text 2 of 3 and pixels 9 of 14 are the golden's "About audits" row (as DW-0789); text `dlg-text-0` and pixels `dlg`, `dlg-text-0`, `list-1-body`, `item-1-2`, `item-1-2-sub` are the caption over those rows (design note below); dark: `item-1-1` (under the dialog, `edge 10 > 9`) in place of light's `list-3-foot`; frame tiles 139 light / 43 dark |
 | `DW-0790` | See what Beebeeb is doing on this PC, and save a support bundle you can read before you send it. | built (light and dark: 0 failing on all six lines) |
 | `DW-0790b` | The bundle is saved: say where, and what happens next. | built (light and dark: 0 failing on all six lines) |
 | `DW-0746c` | When File Explorer stops showing Beebeeb's files or their state, put Beebeeb back in File Explorer without losing anything. | built (light and dark: 0 failing on all six lines) |
@@ -73,18 +73,36 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
 
 ## Design notes
 
-- **DW-0751, DW-0789, DW-0789b: "About audits" is not drawn** (lead ruling, 2026-11-15). The board draws an "About
-  audits" row under More; the site has no audits page, and a link to nothing is a dead control (`about.rs`, dropped in
-  `00d54e32`). The More list is one row shorter than the board's, so the gate's lines for these three frames are not
-  all 0: the counts in the tables above are measured (compare.sh, both themes), and each red line is this row or what
-  sits below it. Board follow-up: take the row off the board, or put the page on the site first.
-- **DW-0781, DW-0789b: the caption follows the spec's update flow, not the board's words** (lead ruling,
-  2026-11-15; spec `docs/superpowers/specs/2026-11-11-native-installer-updater.md` §4, "Apply"). The board says
-  "Download it, then open it to install. Beebeeb never installs an update by itself.", the 0.8 flow (an installer in
-  Downloads, opened by the person). 0.9.0 downloads the installer, checks its signature, and installs it only when the
-  person chooses Restart to update, so the app says `source::UPDATE_CAPTION`: "Its signature is checked first. It
-  installs only when you choose Restart to update." One text line differs from the golden on each of the two frames,
-  in both themes. The button follows the step: "Download update" (the board's own word in its notes) while the
-  version is not downloaded, "Restart to update" once it is verified (the board's drawing, and the board sample's
-  state). Board follow-up: the same caption on the board (DW-1210's notes quote the old words too; its drawing, and
-  the app's tray, show no caption).
+- **DW-0751, DW-0789, DW-0789b: "About audits" is not drawn** (lead ruling, 2026-11-15). The site has no audits
+  page, and a link to nothing is a dead control (`about.rs`, dropped in `00d54e32`). The board dropped the row too:
+  DW-0751's golden was recaptured without it (`4063ba22`), and with "beebeeb.io" as the first row of More drawn
+  without a rule above it (U3; until then the native drew that rule, which was DW-0751's 2 pixel reds, `item-3-0`
+  and `list-3-body`, measured in the side-by-side) DW-0751 is 0 failing on all six lines. DW-0789's and DW-0789b's
+  goldens are from before the board dropped the row (both still export `item-3-1`, "About audits"): every red line
+  of theirs counted in the table above as that row is the stale golden, not the app. Follow-up: recapture DW-0789
+  and DW-0789b from the current board (`scripts/capture-golden.mjs`; the goldens are outside the U3 lane's files).
+- **DW-0781, DW-0789b, DW-1210: ONE press, "Restart to update"** (owner ruling, Guus 2026-11-15 08:16: one press:
+  download, then restart by itself the moment the file is verified, not two presses; it replaces the two steps of
+  #441). The press downloads the newer version, checks its signature, and, only on the file that its own download
+  verified, for the version pressed, hands it off: verified again, sync stops, the installer starts, the app closes
+  (`engine_host/settings/updates_worker.rs`, `one_press`). The spec's rule stands
+  (`docs/superpowers/specs/2026-11-11-native-installer-updater.md` §4, "Apply"): nothing installs without
+  `Event::Apply`, only the press's order sends it, and the hand-off is the only way to the installer; a background
+  check never downloads nor hands off. The board's
+  button, "Restart to update", now says what the press does at every step, so the button keeps the board's words; it
+  differs only where the board draws no state: disabled while the press runs (the caption's place says the step:
+  downloading, checking the signature, stopping sync and starting the installer, restarting), "Try again" after a
+  step failed (the caption's place says what failed; nothing was installed), and disabled after a stop of sync that
+  was not confirmed (the words say to restart Beebeeb). The board's caption, "Download it, then open it to install.
+  Beebeeb never installs an update by itself.", is the 0.8 two-step flow (an installer in Downloads, opened by the
+  person) and no longer applies: the app says `source::UPDATE_CAPTION`, "Its signature is checked first. It installs
+  only when you choose Restart to update." (lead ruling 2026-11-15, kept: the one press keeps it true). Board words
+  changed: that caption alone, one text line on DW-0781 and on DW-0789b, both themes. DW-1210 (the b's flyout, which
+  0.9.0 does not wire to the updater: `frames/tray/FRAMES.md`) draws "Restart to apply the update." and "Restart to
+  update", which fit the one press: unchanged. Board follow-up: the caption on the board.
+- **DW-0751, DW-0789: no row points to release notes that do not open** (review of #441). In the app the release
+  notes (DW-0789b) open only while a newer version is on offer (`EngineSettingsSource::opens`). Otherwise About draws
+  no "Release notes" row, and the older channel's row (DW-0789, Rules) says "This PC runs 0.9.1, from the Beta
+  channel." without "Read the release notes before you go back to an older version." and opens nothing: an older
+  version's notes are never shown (DW-0789b's button would offer it), and a link that opens nothing is a dead
+  control. The board sample opens the notes, so the frames as compared draw both rows as the board does.

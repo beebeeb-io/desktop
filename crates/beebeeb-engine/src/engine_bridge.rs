@@ -94,6 +94,9 @@ pub struct EngineBridge {
     /// LD-0113 (spec Amendment 8): `api` for the backup pass, built on first use; every request it makes carries
     /// `X-Beebeeb-Origin: backup` ([`ApiClient::for_backup_pass`]).
     backup_api: std::sync::OnceLock<Arc<ApiClient>>,
+    /// Which queued write of a file a content modify may be queued after ([`Self::chained_after`]): any, unless the
+    /// caller says otherwise (the viewer's save: its own opening's only).
+    chain_after: crate::write_token::ChainAfter,
     #[cfg(any(test, feature = "test-support"))]
     pub seams: Seams,
 }
@@ -473,8 +476,9 @@ pub(crate) use upload_v2::RestoreSent;
 mod errors;
 use errors::*;
 pub use errors::{
-    AcceptsClosed, EngineError, ItemInTrash, ParkNow, QueueStateMoved, QueuedCopyMissing, StagedCopyGone,
-    ThumbnailNotYet, UnknownItem, UnsentLocalChange, engine_cause, error_category, error_http_status, loggable_id,
+    AcceptsClosed, BehindAnotherWrite, EngineError, ItemInTrash, ParkNow, QueueStateMoved, QueuedCopyMissing,
+    StagedCopyGone, ThumbnailNotYet, UnknownItem, UnsentLocalChange, engine_cause, error_category, error_http_status,
+    loggable_id,
 };
 pub use errors::{OperationFailureClass, classify_operation_error, retry_delay_seconds};
 

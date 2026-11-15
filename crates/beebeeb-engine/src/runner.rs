@@ -705,11 +705,10 @@ async fn run(
                 }
                 match sync_tick_outcome(&*bridge, &sync_root).await {
                     Ok(tick) => {
-                        // A successful tick is a real, authenticated API round
-                        // trip — clears the auth-failure streak (task 1546
-                        // finding 5) alongside every other post-tick bookkeeping
-                        // step below.
-                        auth_health.note_result(None);
+                        // `Ok` is not proof the session works: a refused pull also returns `Ok` (task 2521). Only a
+                        // pull that came back clears the auth-failure streak (task 1546 finding 5); a 401 pull adds
+                        // one; offline or a 5xx leaves it.
+                        auth_health.note_tick(&tick);
                         // Task 10 — surface freshly detected conflicts.
                         // The engine bridge already flipped status to
                         // Conflict; we own the UI side: open a window

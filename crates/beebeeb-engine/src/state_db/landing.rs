@@ -175,6 +175,20 @@ impl StateDb {
         accept: &FinderAccept<'_>,
         legacy_identifiers: &dyn Fn(&FileEntry, &FileContractState) -> Vec<String>,
     ) -> Result<AcceptOutcome> {
+        self.accept_finder_write_after(accept, legacy_identifiers, &crate::write_token::ChainAfter::Any)
+    }
+
+    /// [`Self::accept_finder_write`], for a modify that may be queued only after the queued write `chain` allows
+    /// (review of desktop#432, delta 3). Any other is refused inside this same transaction
+    /// ([`AcceptOutcome::BehindAnotherWrite`]), before anything is written: a write queued between the caller's look
+    /// and this transaction cannot slip in.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn accept_finder_write_after(
+        &self,
+        accept: &FinderAccept<'_>,
+        legacy_identifiers: &dyn Fn(&FileEntry, &FileContractState) -> Vec<String>,
+        chain: &crate::write_token::ChainAfter,
+    ) -> Result<AcceptOutcome> {
         use crate::write_token::{BaseDecision, WriteToken, decide_base, mint_write_id};
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -242,6 +256,13 @@ impl StateDb {
                 }
                 let facts = base_facts_conn(&tx, accept.file_id, &contract, legacy_identifiers(&entry, &contract))?;
                 let decision = decide_base(&facts, *incoming_base);
+                // Delta 3 of desktop#432: never after a queued write this save may not follow. Refused before the
+                // first write of this transaction, so nothing of it stays.
+                if let BaseDecision::After { write_id, .. } = &decision
+                    && !chain.allows(write_id)
+                {
+                    return Ok(AcceptOutcome::BehindAnotherWrite);
+                }
                 record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
                 let moved = entry.parent_id != parent_id;
                 if moved {

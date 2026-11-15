@@ -12,11 +12,15 @@ use super::super::{Engine, EngineConfig};
 use super::*;
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
+use crate::app::viewer_edit_api::SaveEnd;
 use crate::host::ChannelHost;
 use crate::identity::REAL;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
-use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+use crate::state_db::{
+    AcceptOutcome, ClaimOutcome, FileEntry, FileStatus, FinderAccept, FinderAcceptKind, ItemKind, LandingInput,
+    PendingOperation, StateDb, StateDbError,
+};
 use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use crate::test_api::{FakeApi, Handler, Reply, Request};
 
@@ -490,8 +494,280 @@ fn local(engine: &TestEngine, id: &str, max: u64) -> Result<LocalCopy, OpenFileE
 fn opened(result: Result<LocalCopy, OpenFileError>) -> OpenedLocalCopy {
     match result.expect("the copy is read") {
         LocalCopy::Opened(copy) => copy,
-        LocalCopy::NotHere => panic!("the copy on this computer was not read"),
+        LocalCopy::NotHere | LocalCopy::Behind => panic!("the copy on this computer was not read"),
     }
+}
+
+/// Set the version the local state holds for `id`, keeping the agreed content and its base.
+fn set_current_version(db: &StateDb, id: &str, version: i64) {
+    let mut contract = db.get_file_contract_state(id).unwrap().unwrap();
+    contract.current_version = version;
+    db.set_file_contract_state(&contract).unwrap();
+}
+
+/// Review of desktop#432 (P1-2): another device's version was pulled (the row's version raised, the copy here not
+/// replaced: nothing re-fetches a `Local` file's bytes on that raise). The copy is never read as that version: the
+/// viewer labels what it shows with the version the local state holds, and an edit saved from older bytes under it
+/// would replace the newer version.
+#[test]
+fn a_copy_of_a_version_older_than_the_one_beebeeb_has_now_is_not_read() {
+    let fake = fake("behind");
+    // A closed loopback port: nothing can be downloaded, so every answer is the copy's own.
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let (_dir, _root, db) = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    // The copy is version 4's (a hydrate recorded it as agreed), and 4 is the version the local state holds.
+    set_current_version(&db, NOTE, 4);
+    db.record_local_baseline(NOTE, 4, "invented-agreed-hash").unwrap();
+    assert_eq!(
+        opened(local(&engine, NOTE, NO_LIMIT)).copy,
+        OnThisPc::InSync,
+        "the control: a copy of the version Beebeeb has is read"
+    );
+    // The pull raises the version to another device's 5; the base and the bytes stay version 4's.
+    set_current_version(&db, NOTE, 5);
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)));
+    // A change not sent yet, made on the older base: not read either, and not "unreadable" (Beebeeb's newer
+    // version is shown, said as not this PC's).
+    db.set_status(NOTE, FileStatus::Uploading).unwrap();
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)));
+    db.set_status(NOTE, FileStatus::Local).unwrap();
+    // Caught up (a hydrate wrote version 5's bytes): read again.
+    db.record_local_baseline(NOTE, 5, "invented-agreed-hash-5").unwrap();
+    assert_eq!(opened(local(&engine, NOTE, NO_LIMIT)).copy, OnThisPc::InSync);
+    // Which version the copy is, is not known (no agreed content, nothing fetched): not provably Beebeeb's.
+    db.mark_content_unknown(NOTE).unwrap();
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)));
+}
+
+/// Review of desktop#432 (P1-2), the viewer's own save: it lands as the version it became, but nothing writes its
+/// bytes into the account's folder on this computer. A write-keyed landing records no agreed content
+/// (`EngineBridge` upload: "A Finder write's copy is not read again"), and the Windows finalization is a create's
+/// only. The copy there is still the version before the save, so it is never read as the new one.
+#[test]
+fn after_the_viewers_own_save_landed_the_older_copy_here_is_not_read_as_it() {
+    let fake = fake("own-landed");
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let (_dir, _root, db) = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    set_current_version(&db, NOTE, 4);
+    db.record_local_baseline(NOTE, 4, "invented-agreed-hash").unwrap();
+    assert_eq!(
+        opened(local(&engine, NOTE, NO_LIMIT)).copy,
+        OnThisPc::InSync,
+        "the control"
+    );
+    // The viewer's save, as `save_text_for` queues it: a write-keyed modify from 4, claimed, landed as 5, with no
+    // hash of what was sent (as the upload passes for a write-keyed op).
+    db.track_staged_payload("/staged/viewer", None, false).unwrap();
+    let accepted = db
+        .accept_finder_write(
+            &FinderAccept {
+                retire_parked: None,
+                op_id: "viewer-op",
+                file_id: NOTE,
+                kind: FinderAcceptKind::Modify {
+                    incoming_base: Some("4"),
+                },
+                parent_id: None,
+                target_path: Some("Invented folder/Deeper/Invented note.txt"),
+                metadata_json: "{}",
+                payload_path: "/staged/viewer",
+                size_bytes: 3,
+                modified_at: 20,
+                backup_source_key: None,
+                now: 20,
+            },
+            &|_, _| Vec::new(),
+        )
+        .unwrap();
+    assert!(matches!(accepted, AcceptOutcome::Queued { .. }), "the save is queued");
+    let ClaimOutcome::Claimed(claimed) = db.claim_operation("viewer-op", 21).unwrap() else {
+        panic!("the save is claimed")
+    };
+    let write_id = claimed.write.as_ref().map(|write| write.write_id.clone());
+    assert!(write_id.is_some(), "a write-keyed save");
+    let input = LandingInput {
+        op_id: "viewer-op",
+        claim_id: Some(&claimed.claim_id),
+        write_id: write_id.as_deref(),
+        local_file_id: NOTE,
+        server_file_id: NOTE,
+        target_path: Some("Invented folder/Deeper/Invented note.txt"),
+        parent_id: None,
+        landed_base: Some(4),
+        produced_version: 5,
+        produced_object_version_id: "object-5",
+        size_bytes: 3_500,
+        content_type: None,
+        mime_type: None,
+        completed_payload: Some("/staged/viewer"),
+        completed_payload_hash: None,
+        finalization: None,
+        now: 22,
+    };
+    let rekey = |op: &PendingOperation, _: &str| -> std::result::Result<Option<String>, StateDbError> {
+        Ok(op.metadata_json.clone())
+    };
+    assert!(db.apply_landing(&input, &rekey).unwrap().is_some(), "it lands");
+    db.set_status(NOTE, FileStatus::Local).unwrap();
+    let contract = db.get_file_contract_state(NOTE).unwrap().unwrap();
+    assert_eq!(
+        (
+            contract.current_version,
+            contract.local_base_version,
+            contract.local_hash.as_deref()
+        ),
+        (5, 5, None),
+        "the landing names 5 and records no agreed content"
+    );
+    assert!(
+        matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)),
+        "the bytes here are version 4's: not read as 5"
+    );
+}
+
+/// The viewer's queued save `op_id`, from `base`, claimed and landed as `version` (as the upload lands a write-keyed
+/// modify: no hash of what was sent).
+fn land_viewer_save(db: &StateDb, op_id: &str, base: i64, version: i64) {
+    let ClaimOutcome::Claimed(claimed) = db.claim_operation(op_id, 21).unwrap() else {
+        panic!("the save is claimed")
+    };
+    let write_id = claimed.write.as_ref().map(|write| write.write_id.clone());
+    let payload = claimed.op.payload_path.clone();
+    let input = LandingInput {
+        op_id,
+        claim_id: Some(&claimed.claim_id),
+        write_id: write_id.as_deref(),
+        local_file_id: NOTE,
+        server_file_id: NOTE,
+        target_path: Some("Invented folder/Deeper/Invented note.txt"),
+        parent_id: None,
+        landed_base: Some(base),
+        produced_version: version,
+        produced_object_version_id: "object-landed",
+        size_bytes: 3_500,
+        content_type: None,
+        mime_type: None,
+        completed_payload: payload.as_deref(),
+        completed_payload_hash: None,
+        finalization: None,
+        now: 22,
+    };
+    let rekey = |op: &PendingOperation, _: &str| -> std::result::Result<Option<String>, StateDbError> {
+        Ok(op.metadata_json.clone())
+    };
+    assert!(db.apply_landing(&input, &rekey).unwrap().is_some(), "it lands");
+}
+
+/// Delta check of desktop#432, round 3: the viewer's own save is stored here (Queued from 4) and lands as 5. The next
+/// save of the SAME opening, from the 4 on screen, continues from 5: it goes out from 5 and its Queued answer names
+/// 5 (the label of the text on screen). A new opening of the file holds none of it: a save from 4 answers Conflict.
+#[test]
+fn a_save_after_the_own_landed_one_goes_out_from_it_and_a_new_opening_answers_conflict() {
+    let fake = fake("adopted");
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let (_dir, _root, db) = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    set_current_version(&db, NOTE, 4);
+    // The account may write the note (the rows of this harness are read-only by default).
+    let mut contract = db.get_file_contract_state(NOTE).unwrap().unwrap();
+    contract.permission_bits |= crate::state_db::PERMISSION_READ | crate::state_db::PERMISSION_WRITE;
+    db.set_file_contract_state(&contract).unwrap();
+    let session = engine.acct.session_generation();
+    let opening = engine.viewer_opening(session, NOTE);
+    // Sync does not run here: the save is stored and answers at once.
+    let first = engine.save_text_for(session, NOTE, "first invented edit\n", 4, opening);
+    assert!(
+        matches!(first, Ok(SaveEnd::Queued { base: 4 })),
+        "{:?}",
+        first.map(|_| ())
+    );
+    let op = db
+        .list_operations_for_file(NOTE)
+        .unwrap()
+        .pop()
+        .expect("the save is queued");
+    assert_eq!(op.base_version, Some(4));
+    land_viewer_save(&db, &op.op_id, 4, 5);
+    let second = engine.save_text_for(session, NOTE, "second invented edit\n", 4, opening);
+    assert!(
+        matches!(second, Ok(SaveEnd::Queued { base: 5 })),
+        "continued from the own landed 5, and labelled with it: {:?}",
+        second.map(|_| ())
+    );
+    let ops = db.list_operations_for_file(NOTE).unwrap();
+    assert_eq!(
+        ops.iter().map(|op| op.base_version).collect::<Vec<_>>(),
+        [Some(5)],
+        "sent from 5"
+    );
+    // Opened again (Files, Try again, Show it): the earlier saves are not this opening's.
+    let again = engine.viewer_opening(session, NOTE);
+    let third = engine.save_text_for(session, NOTE, "an edit of 4\n", 4, again);
+    assert!(
+        matches!(third, Ok(SaveEnd::Conflict { theirs: 5 })),
+        "the person decides: {:?}",
+        third.map(|_| ())
+    );
+}
+
+/// Delta check of desktop#432: no agreed content, but the fetches served bytes. One version's bytes, equal to the
+/// version the local state holds: read. Below it: declined. Bytes of more than one version (mixed): declined, they
+/// are none of them.
+#[test]
+fn a_copy_known_from_its_fetches_is_read_only_when_they_served_this_version_alone() {
+    let fake = fake("fetched");
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let (_dir, _root, db) = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    set_current_version(&db, NOTE, 4);
+    // Version 4's bytes, fetched (the agreed content folds into the candidate: no `local_hash` from here on).
+    db.record_local_baseline(NOTE, 4, "invented-hash-4").unwrap();
+    db.record_fetched_version(NOTE, 4, "invented-hash-4").unwrap();
+    assert_eq!(
+        db.fetched_content(NOTE).unwrap(),
+        Some((4, Some("invented-hash-4".to_string())))
+    );
+    assert!(db.get_file_contract_state(NOTE).unwrap().unwrap().local_hash.is_none());
+    assert_eq!(
+        opened(local(&engine, NOTE, NO_LIMIT)).copy,
+        OnThisPc::InSync,
+        "fetched as version 4 alone: read"
+    );
+    // Another fetch served other bytes of 4: mixed.
+    db.record_fetched_version(NOTE, 4, "invented-other-hash").unwrap();
+    assert_eq!(db.fetched_content(NOTE).unwrap(), Some((4, None)));
+    assert!(
+        matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)),
+        "mixed: declined"
+    );
+    // Version 3's bytes alone, with 4 the version now: below, declined.
+    db.record_local_baseline(NOTE, 3, "invented-hash-3").unwrap();
+    db.record_fetched_version(NOTE, 3, "invented-hash-3").unwrap();
+    assert_eq!(
+        db.fetched_content(NOTE).unwrap(),
+        Some((3, Some("invented-hash-3".to_string())))
+    );
+    assert!(
+        matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)),
+        "below: declined"
+    );
+}
+
+/// A file that never landed in Beebeeb (version 0, a new file on this PC) has no newer version to be behind.
+#[test]
+fn a_copy_of_a_file_not_in_beebeeb_yet_is_read() {
+    let fake = fake("new-here");
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let _kept = with_folder(
+        &engine,
+        &fake.first,
+        FileStatus::Uploading,
+        Some(b"a new invented note"),
+    );
+    assert_eq!(opened(local(&engine, NOTE, NO_LIMIT)).copy, OnThisPc::NotSentYet);
 }
 
 #[test]
@@ -811,3 +1087,6 @@ fn while_a_session_change_is_under_way_nothing_is_copied_opened_or_asked() {
     // The change over, the same session opens the file.
     assert_eq!(open(&engine, NOTE, NO_LIMIT).unwrap().bytes.len(), 3_500);
 }
+
+#[path = "viewer_chain_tests.rs"]
+mod chain;

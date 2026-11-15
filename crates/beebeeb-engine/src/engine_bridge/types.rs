@@ -783,6 +783,11 @@ pub struct SyncTickOutcome {
     /// pass and the resume wait for a tick where this is true.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub reached_server: bool,
+    /// Task 2521: why the pull did not come back, when it was the server's answer or the network that said so (the
+    /// `GET /sync/ops` error itself). `None` when the pull came back. The runner feeds it to the session's refusal
+    /// run (`AuthHealth::note_tick`): a 401 here is one refusal, so a run of refused ticks closes the
+    /// vault, where an `Ok` tick used to clear the run.
+    pub pull_refusal: Option<anyhow::Error>,
 }
 
 /// Drop duplicate ids from one tick's applied batch (an item can be applied

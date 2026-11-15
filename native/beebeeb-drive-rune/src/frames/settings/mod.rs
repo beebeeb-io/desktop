@@ -161,11 +161,9 @@ pub enum Intent {
     Open(&'static str),
     /// Open a web page in the browser: the page's NAME (the shell holds the addresses).
     Web(&'static str),
-    /// "Download update" (DW-0781, DW-0789b): the settings source's updater downloads the newer version and checks
-    /// its signature (`SettingsSource::download_update`). Recorded for the shell; nothing is installed.
-    DownloadUpdate,
-    /// "Restart to update" (DW-0781, DW-0789b): the settings source's updater stops sync and starts the verified
-    /// installer (`SettingsSource::restart_to_update`); the quit that follows comes through [`poll`].
+    /// "Restart to update" or "Try again" (DW-0781, DW-0789b), ONE press: the settings source's updater downloads
+    /// the newer version, checks its signature, stops sync and starts the verified installer
+    /// (`SettingsSource::restart_to_update`); the quit that follows comes through [`poll`]. Recorded for the shell.
     RestartToUpdate,
     /// Save the support bundle and open an email to support in the person's email app (DW-0782).
     SaveBundleAndWriteEmail,
@@ -272,14 +270,11 @@ impl SettingsUi {
         self.ask(Intent::CheckForUpdates);
     }
 
-    /// The update's button (General's banner, the release notes): what it does now ([`source::Press`]).
+    /// The update's button (General's banner, the release notes): what it does now ([`source::Press`]). One press:
+    /// "Restart to update", and "Try again" after a step of it failed, run the same thing.
     pub fn press_update(&mut self, press: source::Press) {
         match press {
-            source::Press::Download => {
-                self.source.download_update();
-                self.ask(Intent::DownloadUpdate);
-            }
-            source::Press::Restart => {
+            source::Press::Restart | source::Press::Retry => {
                 self.source.restart_to_update();
                 self.ask(Intent::RestartToUpdate);
             }
