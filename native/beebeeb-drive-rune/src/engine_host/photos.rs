@@ -719,7 +719,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             .collect()
     }
 
-    /// Not bound (slice B1, `photos_folders.rs`).
+    /// Not bound (slice B1, `photos_folders.rs`): the engine keeps no chosen folders yet.
     fn folders(&self) -> Vec<Folder> {
         not_wired(self.photos_folders_folders())
     }
@@ -754,9 +754,9 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         totals
     }
 
-    /// Not bound (slice B1, `photos_folders.rs`).
+    /// The newest backup pass of the other devices (slice B1, `photos_folders.rs`).
     fn backup_status(&self) -> Option<BackupStatus> {
-        not_wired(self.photos_folders_backup_status())
+        self.photos_folders_backup_status()
     }
 
     fn origin(&self) -> String {
