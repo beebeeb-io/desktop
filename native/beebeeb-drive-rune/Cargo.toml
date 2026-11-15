@@ -67,7 +67,9 @@ raw-window-handle = "0.6"
 # Windows Hello's prompt is a WinRT API (`shell/platform/windows_hello.rs`), which windows-sys does not have. The
 # same `windows` the engine already builds: no new crate is compiled.
 # The first run's folder picker is a COM dialog (`shell/platform/windows_folder.rs`): three more features of it.
-windows = { version = "0.58", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+# Toasts are WinRT (`shell/platform/windows_toast.rs`: UI_Notifications, Data_Xml_Dom, the shortcut's app id through
+# Win32_UI_Shell_PropertiesSystem); File Explorer's menu items are registry keys (`shell/platform/windows_verbs.rs`).
+windows = { version = "0.58", features = ["Data_Xml_Dom", "Foundation", "Security_Credentials_UI", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem"] }
 # The updater's https client (`net`): Windows only (see `beebeeb-updater` above).
 beebeeb-updater = { path = "../../crates/beebeeb-updater", features = ["net"] }
 

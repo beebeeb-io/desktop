@@ -31,8 +31,13 @@ mod windows_photo;
 // The lock screen's prompt (`engine_host::hello`). Compiled on every platform (a stub off Windows).
 #[allow(dead_code)]
 pub mod windows_hello;
+// plan40 batch 1: toasts (slice B5) and File Explorer's menu items (slice B6).
+#[cfg(windows)]
+pub(crate) mod windows_toast;
 #[cfg(windows)]
 mod windows_tray;
+#[cfg(windows)]
+pub(crate) mod windows_verbs;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlatformError {

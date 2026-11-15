@@ -6,7 +6,8 @@
 //! call the engine through [`source::SetupSource`]. What leaves the group (the main window, a
 //! settings pane) is an [`Intent`] the shell takes with [`Ui::take_intents`].
 //!
-//! Nothing here is a secret: no password, code or phrase is shown or typed in these steps.
+//! Nothing here is a secret: no password, code or phrase is shown or typed in these steps. One will be: step 1's
+//! account password ([`Ui::passkey_password`], not drawn yet), once slice A10 draws its field.
 
 mod folder;
 pub mod guide;
@@ -23,6 +24,7 @@ mod tests;
 use rune::{Cx, El, Key, KeyEvent, Pixels, Tx};
 
 use crate::State;
+use crate::frames::account::source::Password;
 use crate::shell::app::{Event, GateState};
 use crate::shell::host;
 use source::{
@@ -221,6 +223,9 @@ pub struct Ui {
     asked: Vec<Switch>,
     /// A size or format was chosen on step 4: the stored one no longer moves it.
     previews_chosen: bool,
+    /// The account password step 1 hands to "Add a passkey" (owner ruling: a passkey change proves the password).
+    /// Secure. Not drawn yet: slice A10 draws its field (`view.rs`) and clears it when the step is left.
+    pub passkey_password: rune::TextEdit,
 }
 
 /// Decode a PNG into pixels Rune draws. A file that does not decode draws nothing.
@@ -282,6 +287,7 @@ impl Ui {
             intents: Vec::new(),
             finished: false,
             previews_chosen: false,
+            passkey_password: rune::TextEdit::new("").secure(),
         };
         ui.start_on_stored_previews();
         ui
@@ -445,7 +451,8 @@ impl Ui {
             // Nothing answers for a passkey: the step is left, and nothing is claimed.
             return self.advance();
         }
-        if self.source.add_passkey() {
+        let password = Password::from_field(&self.passkey_password.text);
+        if self.source.add_passkey(password) {
             self.results.passkey = true;
             self.advance();
         }

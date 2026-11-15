@@ -75,7 +75,10 @@ mod ld0113_protect_native_tests;
 mod sync_root_owner_native_tests; // a folder registered to another provider is read and refused // LD-0113 Amendment 9: a folder OneDrive moved, on a QA sync root.
 // LD-0113 Amendments 7 and 8a: files under Backups are read-only; the "Read-only" badge on the root.
 pub mod read_only;
+// plan40 batch 1: refusing a service folder's move or delete (slice A9), "Show sync status on files" (slice B3).
+pub mod refuse_service_folders;
 pub mod signout;
+pub mod status_on_files;
 pub mod status_ui;
 pub mod thumbnail_provider;
 

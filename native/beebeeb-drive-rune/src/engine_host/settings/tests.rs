@@ -937,7 +937,11 @@ fn the_running_apps_settings_show_no_sample_value() {
         }
     };
     let check = |rt: &Runtime<State>, place: &str| check_but(rt, place, &[]);
-    check(&rt, "General");
+    // General's "About Beebeeb" row names this build's commit: a sample made of hex digits can stand in it by chance
+    // (a commit `…311…` did), so only those that do are not looked for there, as on About below.
+    let build = super::build_about().build;
+    let in_build: Vec<&str> = samples.iter().copied().filter(|s| build.contains(s)).collect();
+    check_but(&rt, "General", &in_build);
     // Notifications is the engine's (`settings::notifications`): drawn, with no sample value in it.
     rt.update(|s, _| crate::frames::settings::go(s, "DW-0750"));
     rt.frame(0.016);

@@ -5,6 +5,9 @@
 //! asked of the source when it is drawn ([`Picture`]), and a source that has none answers `None`;
 //! the frame then draws its plain tile, never a sample.
 
+/// Office files open in the viewer only when O-CP3 is green; flipped by the integration lane.
+pub const OFFICE_VIEWER_ON: bool = false;
+
 /// A photo (DW-1501). The camera's own preview of a RAW says so in the pill.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhotoDoc {

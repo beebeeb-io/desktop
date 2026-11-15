@@ -52,6 +52,7 @@ use beebeeb_engine::app::{CredentialStores, Engine};
 use chrono::Utc;
 
 use super::passkeys::PasskeyCalls;
+use super::scaffold::not_wired;
 use super::stamp::{Stamp, account_of, stamp};
 use super::{app_lock::AppLockPart, log};
 use crate::frames::account::Pane;
@@ -66,6 +67,11 @@ use crate::frames::account::source::{
 mod actions;
 #[path = "account_activity.rs"]
 mod activity;
+// plan40 batch 1: the approval (A5) and the deletion (A6), each in its own file.
+#[path = "account_approve.rs"]
+mod account_approve;
+#[path = "account_deletion.rs"]
+mod account_deletion;
 #[path = "account_email.rs"]
 mod email;
 #[path = "account_password.rs"]
@@ -234,6 +240,10 @@ pub struct EngineAccountSource<C: CredentialStores> {
     answers: mpsc::Sender<Answer>,
     inbox: mpsc::Receiver<Answer>,
     calls: twofactor::Calls,
+    /// Slice A5 (`account_approve.rs`): what it keeps between a press and its answer. Empty until it binds.
+    account_approve: account_approve::ApproveCalls,
+    /// Slice A6 (`account_deletion.rs`): what it keeps between a press and its answer. Empty until it binds.
+    account_deletion: account_deletion::DeletionCalls,
 }
 
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
@@ -273,6 +283,8 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             answers,
             inbox,
             calls: twofactor::Calls::new(),
+            account_approve: Default::default(),
+            account_deletion: Default::default(),
         }
     }
 
@@ -1132,34 +1144,42 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn stop_activity_confirmed(&mut self, password: Password<'_>) -> bool {
         super::passkeys::wiping(&password).is_some_and(|password| self.activity.stop(password))
     }
+    // Deleting the account (slice A6, `account_deletion.rs`): not bound yet.
     fn deletion(&self) -> Deletion {
-        Deletion::None
+        not_wired(self.account_deletion_deletion())
     }
-    fn request_deletion(&mut self, confirmation: StepUp, _code: &str) -> Result<(), DeletionRefused> {
-        Err(DeletionRefused {
-            why: CodeRefused::Offline,
-            confirmation: Some(confirmation),
-        })
+    fn request_deletion(&mut self, confirmation: StepUp, code: &str) -> Result<(), DeletionRefused> {
+        not_wired(self.account_deletion_request_deletion(confirmation, code))
     }
-    fn cancel_deletion_request(&mut self) {}
+    fn cancel_deletion_request(&mut self) {
+        not_wired(self.account_deletion_cancel_deletion_request())
+    }
     fn deletion_link_used(&mut self) -> bool {
-        false
+        not_wired(self.account_deletion_deletion_link_used())
     }
     fn undo_deletion(&mut self) -> bool {
-        false
+        not_wired(self.account_deletion_undo_deletion())
     }
-    // Approving a sign-in from another device: the trait's own "nothing waits" bodies, named here so a reader
-    // sees they are not bound.
-    fn find_sign_in_request(&mut self, _code: &str) -> Lookup {
-        Lookup::NotFound
+    // Approving a sign-in from another device (slice A5, `account_approve.rs`): not bound yet.
+    fn find_sign_in_request(&mut self, code: &str) -> Lookup {
+        not_wired(self.account_approve_find_sign_in_request(code))
     }
-    fn waiting_sign_in_request(&self, _request: &str) -> Option<SignInRequest> {
-        None
+    fn waiting_sign_in_request(&self, request: &str) -> Option<SignInRequest> {
+        not_wired(self.account_approve_waiting_sign_in_request(request))
+    }
+    fn begin_approval(&mut self, request: &str, code: &str, password: Password<'_>) {
+        not_wired(self.account_approve_begin_approval(request, code, password))
     }
     fn approval_answer(&mut self) -> Option<(String, Approval)> {
-        None
+        not_wired(self.account_approve_approval_answer())
     }
-    fn deny_sign_in(&mut self, _request: &str) -> Denial {
-        Denial::Expired
+    fn cancel_approval(&mut self, request: &str) {
+        not_wired(self.account_approve_cancel_approval(request))
+    }
+    fn deny_sign_in(&mut self, request: &str) -> Denial {
+        not_wired(self.account_approve_deny_sign_in(request))
+    }
+    fn sign_in_request_gone(&mut self, request: &str) -> Option<Denial> {
+        not_wired(self.account_approve_sign_in_request_gone(request))
     }
 }

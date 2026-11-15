@@ -552,6 +552,9 @@ fn open_engine(
     let _ = writeln!(std::io::stdout(), "{}", api_base.start_line());
     // The local log file (`log_file.rs`), before the engine starts so its first warning is kept. Best effort.
     let _ = crate::log_file::install(&local_data_of(&dirs, std::env::consts::OS));
+    // Slice B5: what Windows needs to show this app's toasts (`platform::windows_toast`). Nothing yet.
+    #[cfg(windows)]
+    platform::windows_toast::start(identity);
     let (opened, messages) = crate::engine_host::open::open(
         &local_data_of(&dirs, std::env::consts::OS),
         api_base,
@@ -566,6 +569,9 @@ fn open_engine(
     // The real app only (never in `engine_host::open::open`, which tests use): a session the server ended closes
     // the vault by itself, as core says.
     opened.engine.watch_session();
+    // Slice B6: File Explorer's menu items for this app's files (`platform::windows_verbs`). Nothing yet.
+    #[cfg(windows)]
+    platform::windows_verbs::register(identity, &opened.engine);
     let live = Arc::new(crate::engine_host::LiveEngine::new(&opened, messages));
     Ok((opened, live))
 }
