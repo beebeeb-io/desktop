@@ -101,6 +101,8 @@ pub struct EngineSharedSource<C: CredentialStores> {
     inviting: HashSet<String>,
     /// The invitations' answers of the current session and account, in order, for the view.
     invite_answers: VecDeque<(String, InviteResult)>,
+    /// Slice B4 (`shared_offline.rs`): what it keeps between a press and its answer. Empty until it binds.
+    shared_offline: shared_offline::SharedOfflineCalls,
 }
 
 /// The lists as the view draws them.
@@ -145,6 +147,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             dirty: false,
             inviting: HashSet::new(),
             invite_answers: VecDeque::new(),
+            shared_offline: Default::default(),
         }
     }
 

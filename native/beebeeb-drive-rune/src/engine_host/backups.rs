@@ -192,6 +192,8 @@ pub struct EngineBackupsSource<E: BackupsEngine> {
     run_out: bool,
     /// Other devices and Delete this backup (`engine_host::backups_devices`).
     devices: DeviceCalls<E>,
+    /// Slice A7 (`backup_folders.rs`): what it keeps between a press and its answer. Empty until it binds.
+    backup_folders: backup_folders::BackupFolderCalls,
 }
 
 impl<E: BackupsEngine> EngineBackupsSource<E> {
@@ -214,6 +216,7 @@ impl<E: BackupsEngine> EngineBackupsSource<E> {
             switching: BTreeMap::new(),
             was_running: false,
             run_out: false,
+            backup_folders: Default::default(),
         }
     }
 

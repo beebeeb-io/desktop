@@ -387,6 +387,11 @@ impl<C: CredentialStores> LiveEngine<C> {
         let mut count = 0;
         for message in messages.try_iter() {
             fold(&mut status, &message);
+            // Slice B5: a notice of the engine as a Windows toast (`windows_toast::show`, nothing yet).
+            #[cfg(windows)]
+            if let HostMessage::Notice(notice) = &message {
+                crate::shell::platform::windows_toast::show(notice);
+            }
             count += 1;
         }
         count

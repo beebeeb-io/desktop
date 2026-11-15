@@ -627,6 +627,8 @@ pub struct EngineSetupSource<E: SetupEngine> {
     hello: Box<dyn crate::engine_host::hello::HelloPrompter>,
     /// Step 4 (`setup_previews.rs`).
     previews: previews::StepFour,
+    /// Slice A10 (`setup_passkey.rs`): what it keeps between a press and its answer. Empty until it binds.
+    setup_passkey: setup_passkey::SetupPasskeyCalls,
 }
 
 /// The engine's view as the step draws it. A start the engine refused is not "adding": nothing is being added.
@@ -684,6 +686,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             inbox,
             hello: Box::new(crate::engine_host::hello::NoHello),
             previews: previews::StepFour::default(),
+            setup_passkey: Default::default(),
         };
         source.look_after_the_grace();
         source.read_folder();

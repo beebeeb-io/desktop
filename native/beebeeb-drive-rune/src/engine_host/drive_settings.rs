@@ -331,6 +331,8 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     local_reading: bool,
     /// Thumbnails and previews (`drive_previews`): off until the app's start hands it the engine.
     previews: super::drive_previews::PreviewsHost,
+    /// Slice B3 (`status_on_files.rs`): what it keeps between a press and its answer. Empty until it binds.
+    status_on_files: status_on_files::StatusOnFilesCalls,
 }
 
 impl<E: DriveEngine> EngineDriveSettings<E> {
@@ -367,6 +369,7 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             local_at: None,
             local_reading: false,
             previews: super::drive_previews::PreviewsHost::off(),
+            status_on_files: Default::default(),
         };
         // Nothing is read at launch: a pane reads when it opens (`opened`), never before (module doc).
         source

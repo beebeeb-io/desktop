@@ -9,6 +9,11 @@
 
 use super::*;
 
+/// What slice A6 keeps between a press and its answer: its worker's inbox, what it holds for one session and
+/// account. The adapter holds one (`EngineAccountSource::account_deletion`). Empty until A6 binds.
+#[derive(Default)]
+pub(super) struct DeletionCalls {}
+
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     pub(super) fn account_deletion_deletion(&self) -> Deletion {
         Deletion::None

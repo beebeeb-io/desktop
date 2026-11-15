@@ -8,6 +8,11 @@
 
 use super::*;
 
+/// What slice A5 keeps between a press and its answer: its worker's inbox, what it holds for one session and
+/// account. The adapter holds one (`EngineAccountSource::account_approve`). Empty until A5 binds.
+#[derive(Default)]
+pub(super) struct ApproveCalls {}
+
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     pub(super) fn account_approve_find_sign_in_request(&mut self, _code: &str) -> Lookup {
         Lookup::NotFound

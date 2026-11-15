@@ -8,6 +8,11 @@
 
 use super::*;
 
+/// What slice A10 keeps between a press and its answer: its worker's inbox, what it holds for one session and
+/// account. The adapter holds one (`EngineSetupSource::setup_passkey`). Empty until A10 binds.
+#[derive(Default)]
+pub(super) struct SetupPasskeyCalls {}
+
 impl<E: SetupEngine> EngineSetupSource<E> {
     /// The password is borrowed for the call; it is never logged and never kept.
     pub(super) fn setup_passkey_add_passkey(&mut self, _password: Password<'_>) -> bool {

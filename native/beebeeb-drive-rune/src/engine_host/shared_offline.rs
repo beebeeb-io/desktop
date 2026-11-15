@@ -6,6 +6,11 @@
 
 use super::*;
 
+/// What slice B4 keeps between a press and its answer: its worker's inbox, what it holds for one session and
+/// account. The adapter holds one (`EngineSharedSource::shared_offline`). Empty until B4 binds.
+#[derive(Default)]
+pub(super) struct SharedOfflineCalls {}
+
 impl<C: CredentialStores> EngineSharedSource<C> {
     pub(super) fn shared_offline_keep_offline(&mut self, _id: &str) -> bool {
         self.refuse(Notice::NotAvailable)

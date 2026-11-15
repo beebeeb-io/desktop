@@ -240,6 +240,10 @@ pub struct EngineAccountSource<C: CredentialStores> {
     answers: mpsc::Sender<Answer>,
     inbox: mpsc::Receiver<Answer>,
     calls: twofactor::Calls,
+    /// Slice A5 (`account_approve.rs`): what it keeps between a press and its answer. Empty until it binds.
+    account_approve: account_approve::ApproveCalls,
+    /// Slice A6 (`account_deletion.rs`): what it keeps between a press and its answer. Empty until it binds.
+    account_deletion: account_deletion::DeletionCalls,
 }
 
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
@@ -279,6 +283,8 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             answers,
             inbox,
             calls: twofactor::Calls::new(),
+            account_approve: Default::default(),
+            account_deletion: Default::default(),
         }
     }
 

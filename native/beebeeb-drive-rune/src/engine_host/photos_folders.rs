@@ -7,6 +7,11 @@
 
 use super::*;
 
+/// What slice B1 keeps between a press and its answer: its worker's inbox, what it holds for one session and
+/// account. The adapter holds one (`EnginePhotos::photos_folders`). Empty until B1 binds.
+#[derive(Default)]
+pub(super) struct PhotoFolderCalls {}
+
 impl<C: CredentialStores> EnginePhotos<C> {
     pub(super) fn photos_folders_folders(&self) -> Vec<Folder> {
         Vec::new()

@@ -8,6 +8,11 @@
 
 use super::*;
 
+/// What slice A7 keeps between a press and its answer: its worker's inbox, what it holds for one session and
+/// account. The adapter holds one (`EngineBackupsSource::backup_folders`). Empty until A7 binds.
+#[derive(Default)]
+pub(super) struct BackupFolderCalls {}
+
 impl<E: BackupsEngine> EngineBackupsSource<E> {
     pub(super) fn backup_folders_add_folder(&mut self, _path: &str) -> bool {
         false

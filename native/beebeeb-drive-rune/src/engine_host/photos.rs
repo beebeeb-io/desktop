@@ -158,6 +158,8 @@ pub struct EnginePhotos<C: CredentialStores> {
     /// Tests only: what the next Keep answers in the engine's place (this PC's sync folder is not a test's to set).
     #[cfg(test)]
     keep_says: Option<Result<(), ()>>,
+    /// Slice B1 (`photos_folders.rs`): what it keeps between a press and its answer. Empty until it binds.
+    photos_folders: photos_folders::PhotoFolderCalls,
 }
 
 impl<C: CredentialStores> EnginePhotos<C> {
@@ -190,6 +192,7 @@ impl<C: CredentialStores> EnginePhotos<C> {
             dirty: false,
             #[cfg(test)]
             keep_says: None,
+            photos_folders: Default::default(),
         }
     }
 

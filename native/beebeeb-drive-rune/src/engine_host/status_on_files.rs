@@ -6,6 +6,11 @@
 
 use super::*;
 
+/// What slice B3 keeps between a press and its answer: its worker's inbox, what it holds for one session and
+/// account. The adapter holds one (`EngineDriveSettings::status_on_files`). Empty until B3 binds.
+#[derive(Default)]
+pub(super) struct StatusOnFilesCalls {}
+
 impl<E: DriveEngine> EngineDriveSettings<E> {
     pub(super) fn status_on_files_set_status_on_files(&mut self, _on: bool) {}
 }
