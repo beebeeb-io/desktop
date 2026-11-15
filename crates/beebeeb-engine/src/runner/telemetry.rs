@@ -14,7 +14,10 @@ pub(super) const AUTH_EXPIRED_THRESHOLD: u32 = 3;
 /// Shared, per-account auth-health tracker (task 1546 Codex round 2, finding
 /// 5). Fed by BOTH the heartbeat producer's `post_heartbeat` calls and the
 /// main tick loop's `sync_tick` calls — whichever one talks to the server
-/// next advances or resets the streak. Lives on `AccountRuntime` (`Arc`'d,
+/// next advances or resets the streak. While sync is paused and no heartbeat
+/// runs, the paused tick's check of who is signed in feeds it instead (task
+/// 2521). The engine's own calls are decided on the HTTP status
+/// ([`AuthHealth::note_api_answer`]). Lives on `AccountRuntime` (`Arc`'d,
 /// same pattern as `sync_paused`) so `sync_status` can read [`Self::is_expired`]
 /// without touching the engine task, and is cloned into [`EngineRunner::spawn`]
 /// / [`run`] the same way `sync_paused` already is.
@@ -86,7 +89,7 @@ impl AuthHealth {
         if tick.reached_server {
             self.note_result(None);
         } else if let Some(why) = &tick.pull_failure {
-            self.note_result(Some(why));
+            self.note_api_answer(Some(why));
         }
     }
 }
@@ -494,13 +497,13 @@ pub(super) fn spawn_heartbeat_producer(
                     last_beat_secs = now;
 
                     match api.post_heartbeat(&session_id, &body).await {
-                        Ok(()) => auth_health.note_result(None),
+                        Ok(()) => auth_health.note_api_answer(None),
                         Err(e) => {
                             // Fire-and-forget: a missed beat is non-fatal (the next
                             // beat refreshes the row). Network blips + token-rotation
                             // 401s are expected; log at debug to avoid noise.
                             tracing::debug!(error = %e, "heartbeat post failed; will retry next beat");
-                            auth_health.note_result(Some(&e));
+                            auth_health.note_api_answer(Some(&e));
                         }
                     }
                 }
