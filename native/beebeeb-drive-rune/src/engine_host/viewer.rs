@@ -33,7 +33,7 @@
 //! - a newer version: while a file is open the local state's version is read (on a worker, about every 1.5 s,
 //!   `viewer_change::check_for_newer`); a version past the one the view holds raises "A newer version arrived, 09:14."
 //!   (no device name in 0.9.0, decision 2505). Show it opens the file again (`ViewerSource::newer`).
-//! - not bound: find, play, a photo's strip.
+//! - audio and video play through the shell's player (`viewer_media`); not bound: a photo's strip.
 //!
 //! Where the decrypted bytes are: in the engine's `Zeroizing` buffer until the worker made of them what the view
 //! draws (lines of text, or pixels), then wiped. The text is overwritten when the view lets go of it
@@ -67,6 +67,7 @@ use zeroize::Zeroize;
 
 use super::log;
 use crate::frames::viewers::kinds::{self, PdfDoc, PhotoDoc, Picture, Viewer};
+#[allow(unused_imports)] // the text readers moved to `viewer_text.rs`; tests reach them through `super::*`.
 use crate::frames::viewers::source::{
     Body, Cut, Details, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
     Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
@@ -74,6 +75,11 @@ use crate::frames::viewers::source::{
 
 #[path = "viewer_find.rs"]
 mod viewer_find;
+#[path = "viewer_media.rs"]
+pub(crate) mod viewer_media;
+#[path = "viewer_text.rs"]
+mod viewer_text;
+use viewer_text::text_body;
 #[path = "viewer_pdf.rs"]
 pub(crate) mod viewer_pdf;
 #[path = "viewer_picture.rs"]
@@ -142,6 +148,20 @@ pub trait ViewerEngine: Send + Sync + 'static {
     fn wake(&self);
     /// [`Engine::edit_facts_for`], for the engine's opening `opening` ([`ViewerEngine::begin_opening`]). `None`: not
     /// read (the switch and the editor are not offered).
+    /// Playback is available here (the helper is installed and the platform has a sandbox). Default: no.
+    fn media_ready(&self) -> bool {
+        false
+    }
+    /// The shell's player. Default: none.
+    fn media_player(&self) -> Option<crate::media::player::PlayerHandle> {
+        None
+    }
+    /// The audio files of the folder the file is in, for the session. Default: not read.
+    fn media_queue(&self, _session: SessionGeneration, _file_id: &str) -> Option<viewer_media::MediaQueue> {
+        None
+    }
+    /// The press that opens the player: the session the engine must open the file's bytes for. Default: none.
+    fn media_press(&self, _session: SessionGeneration) {}
     fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, _opening: u64) -> Option<EditFacts> {
         None
     }
@@ -250,6 +270,22 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 
     fn wake(&self) {
         self.engine.wake_host();
+    }
+
+    fn media_ready(&self) -> bool {
+        viewer_media::playback_ready()
+    }
+
+    fn media_player(&self) -> Option<crate::media::player::PlayerHandle> {
+        crate::media::shell_player()
+    }
+
+    fn media_queue(&self, session: SessionGeneration, file_id: &str) -> Option<viewer_media::MediaQueue> {
+        viewer_media::queue_of(&self.engine, session, file_id)
+    }
+
+    fn media_press(&self, session: SessionGeneration) {
+        super::media::stamp_press(session);
     }
 
     fn edit_facts(&self, session: SessionGeneration, file_id: &str, opening: u64) -> Option<EditFacts> {
@@ -424,6 +460,8 @@ pub struct EngineViewerSource<E: ViewerEngine> {
     open: Option<Opening>,
     /// A change handed to a worker (Available offline, a save) and the answers that come back.
     changes: change::Changes,
+    /// The recording or video on screen and its queue (`viewer_media`).
+    media: viewer_media::Media,
 }
 
 impl<C: CredentialStores + 'static> EngineViewerSource<LiveViewerEngine<C>> {
@@ -470,80 +508,9 @@ pub(super) fn kind_word(name: &str) -> &'static str {
         Some(Viewer::Pdf) => "PDF",
         Some(Viewer::Audio) => "Audio",
         Some(Viewer::Archive) => "Archive",
-        Some(Viewer::Video) | None => "File",
+        Some(Viewer::Video) => "Video",
+        None => "File",
     }
-}
-
-/// The decrypted bytes as text the view draws, or `None` when they are not text (not UTF-8, or a NUL in them).
-/// A text the reader cannot hold whole (over [`READ_WHOLE_MAX`], more than [`WHOLE_LINES_MAX`] lines, or a line
-/// over [`LINE_BYTES_MAX`]) is its first lines, read-only: at most [`SHOWN_LINES`] and [`SHOWN_BYTES`].
-fn text_body(bytes: &[u8], markdown: bool) -> Option<Body> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-    if text.contains('\0') {
-        return None;
-    }
-    let (mut total, mut longest) = (0usize, 0usize);
-    for line in text.lines() {
-        total += 1;
-        longest = longest.max(line.len());
-    }
-    let why = if bytes.len() > READ_WHOLE_MAX {
-        Some(Cut::OverTwoMb)
-    } else if total > WHOLE_LINES_MAX || longest > LINE_BYTES_MAX {
-        Some(Cut::TooLong)
-    } else {
-        None
-    };
-    if let Some(why) = why {
-        let lines = first_lines(text);
-        return Some(Body::Text(TextDoc {
-            truncated: Some(Truncated {
-                shown: u32::try_from(lines.len()).unwrap_or(u32::MAX),
-                total: u32::try_from(total).unwrap_or(u32::MAX),
-                why,
-            }),
-            lines,
-        }));
-    }
-    Some(if markdown && bytes.len() <= MARKDOWN_RENDER_MAX {
-        Body::Markdown(MdDoc {
-            source: text.to_string(),
-        })
-    } else {
-        Body::Text(TextDoc {
-            lines: plain_lines(text),
-            truncated: None,
-        })
-    })
-}
-
-/// The first lines of a text shown in part: at most [`SHOWN_LINES`] of them, each cut at [`LINE_BYTES_MAX`]
-/// (on a character), and at most [`SHOWN_BYTES`] in all. No line the reader is handed is longer than the limit
-/// it is said to hold.
-fn first_lines(text: &str) -> Vec<Vec<crate::frames::viewers::source::Run>> {
-    let cut = |line: &str, at_most: usize| {
-        let mut end = line.len().min(at_most);
-        while !line.is_char_boundary(end) {
-            end -= 1;
-        }
-        end
-    };
-    // Sized once: a buffer that grew would leave its earlier copies of the text behind, not overwritten.
-    let mut shown = String::with_capacity(SHOWN_BYTES);
-    for (i, line) in text.lines().take(SHOWN_LINES).enumerate() {
-        let room = SHOWN_BYTES.saturating_sub(shown.len() + usize::from(i > 0));
-        if room == 0 && i > 0 {
-            break;
-        }
-        if i > 0 {
-            shown.push('\n');
-        }
-        shown.push_str(&line[..cut(line, LINE_BYTES_MAX.min(room))]);
-    }
-    let lines = plain_lines(&shown);
-    shown.zeroize();
-    lines
 }
 
 /// The toolkit's decoders, one set for the app (started with the first picture). Its waker does nothing: the
@@ -729,6 +696,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             engine,
             open: None,
             changes: change::Changes::default(),
+            media: viewer_media::Media::default(),
         }
     }
 
@@ -815,7 +783,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         if let Some(edit) = opening.edit {
             opening.seen = edit.version;
         }
-        let body = if shows == Shows::Nothing {
+        let media = self.media_body(session, opening.account.clone(), file_id, &facts.name, &facts.folders);
+        let body = if let Some(media) = media {
+            media
+        } else if shows == Shows::Nothing {
             Body::NotPreviewable(NoPreview::NoViewer)
         } else if facts.size > IN_MEMORY_MAX {
             Body::NotPreviewable(NoPreview::TooBig {
@@ -976,6 +947,9 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn poll(&mut self, file_id: &str) -> Option<Body> {
+        if let Some(body) = self.media_poll(file_id) {
+            return Some(body);
+        }
         let opening = self.open.as_mut().filter(|opening| opening.file_id == file_id)?;
         let same_account = self.engine.has_session() && self.engine.account() == opening.account;
         // Whose session it is, also while a lock keeps the key closed away (the account stays signed in).
@@ -1103,7 +1077,24 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn previews(&self, name: &str) -> bool {
-        shows(name) != Shows::Nothing
+        shows(name) != Shows::Nothing || self.media_previews(name)
+    }
+
+    /// An audio or a video file kept on this PC still opens in the player when playback is available (D-MED-13).
+    fn opens_here_when_kept(&self, name: &str) -> bool {
+        self.media_previews(name)
+    }
+
+    fn can_play(&self) -> bool {
+        self.media_can_play()
+    }
+
+    fn play(&mut self, file_id: &str, on: bool) -> bool {
+        self.media_play(file_id, on)
+    }
+
+    fn player(&self) -> Option<crate::media::player::PlayerHandle> {
+        self.media_handle()
     }
 
     /// The local state says the file's bytes are on this PC, and sync runs for the folder they are in (so the
@@ -1196,5 +1187,6 @@ impl<E: ViewerEngine> Drop for EngineViewerSource<E> {
         if let Some(opening) = self.open.as_mut() {
             opening.end();
         }
+        self.media_closed();
     }
 }
