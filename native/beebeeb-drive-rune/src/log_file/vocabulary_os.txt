@@ -98,7 +98,6 @@ The directory is not empty.
 The filename, directory name, or volume label syntax is incorrect.
 There is not enough space on the disk.
 # ERROR_HANDLE_DISK_FULL (39): its text in Microsoft Learn, "System Error Codes (0-499)"
-The disk is full.
 The network path was not found.
 The network name cannot be found.
 The specified network name is no longer available.
