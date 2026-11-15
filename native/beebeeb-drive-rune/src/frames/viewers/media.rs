@@ -382,6 +382,14 @@ pub fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
             ui.toggle_play();
             true
         }
+        // Space plays and pauses a video (not while a text field has the keys: this view has none). Esc is the
+        // viewer's own: it closes the viewer, and closing stops the video (`closing_a_video_stops_it`).
+        (Body::Video(_), Key::Text(key)) if plain && key == " " && super::video::space_toggles(false) => {
+            if let Some(handle) = ui.source.player() {
+                super::video::toggle(&handle);
+            }
+            true
+        }
         (Body::Pdf(_), Key::Command('f')) if !m.alt && !m.shift => {
             ui.open_find();
             true

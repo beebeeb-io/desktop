@@ -293,14 +293,10 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
         .child(scrubber)
         .child(transport)
         .child(caption);
-    // Decision D-MED-7: the line the details panel carries, said here too where it is in sight.
-    if live.is_some_and(|l| l.state.reduced_quality) {
-        shown = shown.child(kit::label(
-            "audio-reduced",
-            "Reduced quality on this PC",
-            CAP,
-            t.text_tertiary,
-        ));
+    // The file's sound is not available on this PC: the line, with "Open in another app" one press away. The
+    // stage keeps playing. ("Reduced quality on this PC", D-MED-7, is the details panel's line.)
+    if let Some(why) = live.and_then(|l| l.state.no_sound) {
+        shown = shown.child(video::no_sound_line("audio", why, t.text_tertiary, t));
     }
     shown
 }

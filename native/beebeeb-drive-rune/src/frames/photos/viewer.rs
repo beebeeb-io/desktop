@@ -164,6 +164,20 @@ fn player(ui: &Ui, viewing: &Viewing, seconds: u32, t: &Theme) -> El {
         .child(kit::label("ph-player-text-1", length(seconds), style::CAP_MONO, white))
 }
 
+/// The player's handle when the stage shows the video the window holds: `held` is the item this window started and
+/// its player, `shown` the item on the stage. Any other item draws its own controls (the board's fixture or the still
+/// with the status line), never another item's player.
+pub fn live_for(
+    shown: super::source::PhotoId,
+    held: Option<&(super::source::PhotoId, crate::media::player::PlayerHandle)>,
+) -> Option<crate::media::player::PlayerHandle> {
+    held.filter(|(id, _)| *id == shown).map(|(_, handle)| handle.clone())
+}
+
+#[cfg(test)]
+#[path = "live_tests.rs"]
+mod live_tests;
+
 /// The stage's picture of a video the player plays: the player's frame, scaled to fit, and the player's bar on it
 /// (the drawing of `viewers::video::bar`, shared with a video opened from Files).
 fn live_stage(photo: El, handle: &crate::media::player::PlayerHandle, t: &Theme) -> El {
@@ -194,6 +208,16 @@ fn live_stage(photo: El, handle: &crate::media::player::PlayerHandle, t: &Theme)
             video::bar("ph-live", handle, times, ink, ink.alpha(0.3), t)
         }
     };
+    // The file's sound is not available here: the line above the bar, "Open in another app\u{2026}" one press away.
+    // The stage keeps playing.
+    if let Some(why) = state.as_ref().and_then(|s| s.no_sound) {
+        photo = photo.child(
+            row()
+                .key("ph-no-sound")
+                .pin(Some(24.0), None, Some(24.0), Some(72.0))
+                .child(video::no_sound_line("ph", why, ink, t)),
+        );
+    }
     photo.child(
         row()
             .key("ph-player")
@@ -254,8 +278,9 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
     };
     // A video the shell's player is playing: its frames on the stage, the bar working (Space and the button
     // play and pause), a refusal in the bar's place.
+    // Only the video this window started (`Ui::playing`) shows live: never the process-wide player.
     let live = match shown.kind {
-        Kind::Video(_) => crate::media::shell_player(),
+        Kind::Video(_) => live_for(shown.id, ui.playing.as_ref()),
         Kind::Photo => None,
     };
     if let Some(handle) = live {

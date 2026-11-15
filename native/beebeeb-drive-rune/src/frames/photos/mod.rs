@@ -169,6 +169,9 @@ pub struct Ui {
     pub menu: Option<OpenMenu>,
     pub dialog: Option<Dialog>,
     pub viewer: Option<Viewer>,
+    /// The video this window started in the shell's player, and its handle (`PhotosSource::play_video`). The stage
+    /// is live only for this item (`viewer::live_for`); it is stopped when the item is left.
+    pub(crate) playing: Option<(PhotoId, crate::media::player::PlayerHandle)>,
     pub toast: Option<Toast>,
     intents: Vec<Intent>,
     /// What is kept for a source that answers later (`session.rs`).
@@ -191,6 +194,7 @@ impl Ui {
             menu: None,
             dialog: None,
             viewer: None,
+            playing: None,
             toast: None,
             intents: Vec::new(),
             later: session::Later::default(),
@@ -517,6 +521,7 @@ impl Ui {
     }
 
     pub fn close_viewer(&mut self) {
+        self.stop_playing();
         if let Some(viewer) = self.viewer.take()
             && matches!(viewer.original, Original::Downloading { .. })
         {
@@ -557,6 +562,10 @@ impl Ui {
             return;
         }
         // A download carries on in the background (DW-0605b); the next photo shows its preview.
+        // A video this window started stops when another item is shown.
+        if let Some((_, handle)) = self.playing.take() {
+            handle.stop(crate::media::StopReason::Closed);
+        }
         viewer.id = id;
         viewer.original = Original::Preview;
         viewer.playing = true;
@@ -597,7 +606,30 @@ impl Ui {
         }
     }
 
+    /// Stops the video this window started, if one is held (Esc, close, another item).
+    pub fn stop_playing(&mut self) {
+        if let Some((_, handle)) = self.playing.take() {
+            handle.stop(crate::media::StopReason::Closed);
+        }
+    }
+
+    /// Space and the bar's button on a video. The held video toggles; a video not yet held is asked of the source
+    /// (`play_video`) and held; a source with no player (`None`: the board's fixture, no session, no playback on
+    /// this PC) leaves the fixture's own toggle, unchanged.
     pub fn play_pause(&mut self) {
+        let Some(id) = self.viewer.as_ref().map(|v| v.id) else {
+            return;
+        };
+        if let Some((held, handle)) = &self.playing
+            && *held == id
+        {
+            crate::frames::viewers::video::toggle(handle);
+            return;
+        }
+        if let Some(handle) = self.source.play_video(id) {
+            self.playing = Some((id, handle));
+            return;
+        }
         if let Some(viewer) = &mut self.viewer {
             viewer.playing = !viewer.playing;
             let id = viewer.id;

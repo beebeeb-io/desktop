@@ -16,7 +16,7 @@ use super::kinds::clock;
 use super::source::{Body, NoPreview};
 use super::{Intent, Ui, media_icons, states, style};
 use crate::State;
-use crate::media::player::{PlayState, PlayerHandle, Refusal};
+use crate::media::player::{NoSound, PlayState, PlayerHandle, Refusal};
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -31,20 +31,58 @@ const ASK_SCALE: f32 = 1.5;
 /// One step of the scrubber with the arrow keys, in milliseconds.
 const SEEK_STEP_MS: u64 = 5_000;
 /// The elapsed / remaining times: 12px mono.
+/// The no-sound line: 11px, the caption's size.
+const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
 const TIME: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(16.0);
 
 /// The words of a refusal. `NoDecoder` names the FORMAT, never the file.
 pub fn refusal_words(why: &Refusal) -> String {
     match why {
         Refusal::NoDecoder(name) => format!("This PC can't play {name} files here."),
-        Refusal::NoSystemDecoder(codec) => format!(
-            "This PC can't play {name} video without Microsoft's {name} extension.",
-            name = codec_name(*codec)
+        Refusal::NoSystemDecoder(Codec::Hevc) => {
+            "This PC can't play HEVC video without Microsoft's HEVC extension.".into()
+        }
+        Refusal::NoSystemDecoder(codec) => format!("This PC can't play {} files here.", codec_name(*codec)),
+        Refusal::NoSystemMedia(codec) => format!(
+            "This PC can't play {} files: this edition of Windows has no media codecs.",
+            codec_name(*codec)
         ),
         Refusal::CouldNotPlay => "This file could not be played.".into(),
         Refusal::NotSignedIn => "Sign in to play this file.".into(),
         Refusal::NotInstalled | Refusal::NoSandbox => "Playback isn't available on this PC.".into(),
     }
+}
+
+/// The line for a file whose sound this PC cannot play (decision of 2026-11-15 19:50): the video keeps playing.
+/// The name is the FORMAT's (`Codec::name`), never the file's.
+pub fn no_sound_words(why: NoSound) -> String {
+    match why {
+        NoSound::Codec(codec) => format!("Sound isn't available on this PC ({})", codec_name(codec)),
+        NoSound::Device => "Sound isn't available on this PC".into(),
+    }
+}
+
+/// The no-sound line with "Open in another app\u{2026}" one press away (the press of [`refused`]). `prefix` keys it.
+pub fn no_sound_line(prefix: &'static str, why: NoSound, ink: Color, t: &Theme) -> El {
+    row()
+        .key(format!("{prefix}-no-sound"))
+        .gap(12.0)
+        .center_y()
+        .child(kit::label(
+            format!("{prefix}-no-sound-words"),
+            no_sound_words(why),
+            CAP,
+            ink,
+        ))
+        .child(
+            super::text::tool_action("no-sound-open", "Open in another app\u{2026}", None, None, t).on_press(
+                |s: &mut State| {
+                    if let Some(ui) = super::ui(s) {
+                        ui.intent(Intent::OpenInAnotherApp);
+                    }
+                },
+            ),
+        )
 }
 
 fn codec_name(codec: Codec) -> &'static str {
@@ -258,14 +296,18 @@ pub fn view(ui: &Ui, t: &Theme) -> El {
             },
             Times::of,
         );
-        return col()
+        let mut body = col()
             .key("viewer-body")
             .grow(1.0)
             .min_w(0.0)
             .h_full()
             .fill(Color::BLACK)
-            .child(stage(&handle))
-            .child(bar("video", &handle, times, Color::WHITE, Color::WHITE.alpha(0.3), t));
+            .child(stage(&handle));
+        // The stage keeps playing; the line sits where "Reduced quality on this PC" sits in the bar's words.
+        if let Some(why) = state.as_ref().and_then(|s| s.no_sound) {
+            body = body.child(no_sound_line("video", why, Color::WHITE, t));
+        }
+        return body.child(bar("video", &handle, times, Color::WHITE, Color::WHITE.alpha(0.3), t));
     }
     // No player: the state of a kind without a viewer, for this file. The copy's name is overwritten when it is drawn.
     let mut shown = ui.file.clone();
