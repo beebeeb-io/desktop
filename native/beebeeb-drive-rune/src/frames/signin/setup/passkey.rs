@@ -29,11 +29,9 @@ pub(super) fn refused_words(why: PasskeyRefused) -> Option<&'static str> {
 /// Step 1 with the account password (owner ruling D-P40-5: a passkey change proves the password; the board draws no
 /// field). While Windows' dialog is open "Add a passkey" is busy; a refusal is one line, and "Not now" stays.
 pub(super) fn step(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
-    let (asks, wrong) = match ui.passkey_step {
-        PasskeyStep::Refused(PasskeyRefused::NoPassword) => (true, true),
-        PasskeyStep::Refused(PasskeyRefused::WrongPassword) => (false, true),
-        _ => (false, false),
-    };
+    // A missing password is said by the field (in error); a wrong one by the refusal line alone, so the step says it
+    // once (focus goes to the field either way).
+    let asks = ui.passkey_step == PasskeyStep::Refused(PasskeyRefused::NoPassword);
     let refused = match ui.passkey_step {
         PasskeyStep::Refused(why) => refused_words(why),
         _ => None,
@@ -49,7 +47,7 @@ pub(super) fn step(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         FieldSpec {
             label: "Password",
             icon: Some(&icons::PADLOCK),
-            state: if wrong { FieldState::Error } else { FieldState::Rest },
+            state: if asks { FieldState::Error } else { FieldState::Rest },
             message: Some(if asks {
                 "Enter your password to confirm it's you."
             } else {

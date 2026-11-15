@@ -620,6 +620,11 @@ fn setup_add_passkey_each_refusal_says_its_line_and_step_one_stays_skippable() {
             click(&mut rt, "btn-0");
             assert_eq!(ui_step(&mut rt), Step::Passkey, "{why:?}: step 1 stays");
             assert_eq!(info(&rt, "passkey-refused").role, "alert", "{why:?}");
+            assert_eq!(
+                rt.elements().iter().filter(|e| !e.exiting && e.role == "alert").count(),
+                1,
+                "{why:?}: said once (the field is not in error as well)"
+            );
             assert!(
                 rt.elements()
                     .iter()
