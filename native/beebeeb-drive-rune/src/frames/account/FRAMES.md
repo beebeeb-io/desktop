@@ -165,11 +165,22 @@ The board draws none of these; each sentence is this app's, and says only what i
 
 | Frame | What it is | Status |
 | --- | --- | --- |
-| `DW-A58` | Step 1 of 4: what goes, the 72 hours to undo, the password. | built (light and dark: 0 failing on all six lines) |
+| `DW-A58` | Step 1 of 4: what goes, the time to undo, the password. | built (light and dark: 0 failing on all six lines) |
 | `DW-A80` | Step 2 of 4: the second factor. | built (light and dark: 0 failing on all six lines) |
 | `DW-A81` | Step 3 of 4: confirm by an email link. | built (light and dark: 0 failing on all six lines) |
 | `DW-A82` | Step 4 of 4: the deletion is scheduled, when, and how to undo it. | built (light and dark: 0 failing on all six lines) |
 | `DW-A83` | The undo worked: nothing was deleted. | built (light and dark: 0 failing on all six lines) |
+
+Flagged deviations (lane p40-delete-account, 2026-11-15, lead rulings 16:35 and 17:30):
+- D-P40-11: core and the server require the step-up for a signed-in cancel; board update after 0.9.0. Cancel deletion
+  (DW-A81) and Undo deletion (DW-A82) open a password dialog over the page (`Dialog::DeletionPassword`), which the
+  board does not draw.
+- Board says 72 hours; the server keeps the account for 30 days; board update after 0.9.0. The copy names no length of
+  time: DW-A58 and the Security page's Delete row say it can be undone "until a date we show you" / "for a time", and
+  DW-A82 names Beebeeb's own `cancel_until` ("Your account will be deleted after {date}."; the note under it drops "72
+  hours" and "within 30 days").
+- DW-A82's banner: the board says "We sent a second email … with a link to undo it"; Beebeeb sends no email at the
+  confirm (the first link undoes it too), so it says "The link in the email we sent to {email} undoes it too."
 
 ## Drive's own on these panes (3, lane settings-rest, 2026-11-12)
 

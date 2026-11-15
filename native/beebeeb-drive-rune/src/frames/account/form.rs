@@ -228,10 +228,10 @@ pub fn arrive(ui: &mut AccountUi) {
     if let Some(dialog) = &ui.dialog {
         if matches!(
             dialog,
-            Dialog::Code(super::CodeFor::StopActivity) | Dialog::LockPassword { .. }
+            Dialog::Code(super::CodeFor::StopActivity) | Dialog::LockPassword { .. } | Dialog::DeletionPassword(_)
         ) {
-            // Stopping the recording asks the password (owner ruling 2026-11-14; the board's DW-A78), and so does App
-            // lock's change Windows Hello did not confirm (D-2).
+            // Stopping the recording asks the password (owner ruling 2026-11-14; the board's DW-A78), and so do App
+            // lock's change Windows Hello did not confirm (D-2) and a cancel and an undo of a deletion (D-P40-11).
             focus(f, Some(CURRENT_KEY));
         } else if matches!(dialog, Dialog::Code(_)) {
             focus(f, Some(CODE_KEY));
