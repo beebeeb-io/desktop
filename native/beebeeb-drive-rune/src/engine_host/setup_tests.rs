@@ -68,7 +68,13 @@ struct Fake {
     /// Every app lock write: its session, its value, and whether a proof came with it.
     app_lock: Mutex<Vec<(SessionGeneration, bool, bool)>>,
     /// Every "Lock again after" write: its session, its value, and whether a proof came with it.
-    lock_after: Mutex<Vec<(SessionGeneration, app_lock::EngineLockAfter, bool)>>,
+    lock_after: Mutex<
+        Vec<(
+            SessionGeneration,
+            beebeeb_engine::app::lock_password_api::LockAfter,
+            bool,
+        )>,
+    >,
 }
 
 fn session(number: u64) -> SessionGeneration {
@@ -138,14 +144,14 @@ impl SetupEngine for Fake {
     fn set_lock_after_for(
         &self,
         session: SessionGeneration,
-        after: app_lock::EngineLockAfter,
-        proof: Option<app_lock::AppLockProof>,
-    ) -> Result<(), app_lock::AppLockRefused> {
+        after: beebeeb_engine::app::lock_password_api::LockAfter,
+        proof: Option<beebeeb_engine::app::lock_password_api::AppLockProof>,
+    ) -> Result<(), beebeeb_engine::app::lock_password_api::AppLockRefused> {
         if session != self.stamp().0 {
-            return Err(app_lock::AppLockRefused::Overtaken);
+            return Err(beebeeb_engine::app::lock_password_api::AppLockRefused::Overtaken);
         }
-        if after > app_lock::EngineLockAfter::DEFAULT && proof.is_none() {
-            return Err(app_lock::AppLockRefused::ProofNeeded);
+        if after > beebeeb_engine::app::lock_password_api::LockAfter::DEFAULT && proof.is_none() {
+            return Err(beebeeb_engine::app::lock_password_api::AppLockRefused::ProofNeeded);
         }
         self.lock_after.lock().unwrap().push((session, after, proof.is_some()));
         Ok(())

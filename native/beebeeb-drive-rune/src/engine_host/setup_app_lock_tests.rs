@@ -65,7 +65,11 @@ fn continue_with_app_lock_on_writes_it_and_the_delay_for_the_session_and_says_it
     assert_eq!(set.engine.app_lock.lock().unwrap().clone(), [(session(1), true, false)]);
     assert_eq!(
         set.engine.lock_after.lock().unwrap().clone(),
-        [(session(1), app_lock::EngineLockAfter::Immediately, false)],
+        [(
+            session(1),
+            beebeeb_engine::app::lock_password_api::LockAfter::Immediately,
+            false
+        )],
         "up to five minutes asks nothing"
     );
     let mut said = set.source.take_outcomes();
@@ -106,7 +110,11 @@ fn a_longer_delay_asks_windows_hello_first_and_is_written_only_with_its_yes() {
     settle(&mut set, 5);
     assert_eq!(
         set.engine.lock_after.lock().unwrap().clone(),
-        [(session(1), app_lock::EngineLockAfter::Minutes60, true)]
+        [(
+            session(1),
+            beebeeb_engine::app::lock_password_api::LockAfter::Minutes60,
+            true
+        )]
     );
 }
 
