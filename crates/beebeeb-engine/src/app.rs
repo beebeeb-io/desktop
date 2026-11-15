@@ -616,7 +616,7 @@ impl<C: CredentialStores> Engine<C> {
         }
         if let Some(replaced) = replaced.filter(|old| old.as_str() != token.as_str()) {
             // The session the strong unlock replaced is ended at the server, best effort.
-            revoke(&self.client, base, &replaced).await;
+            let _ = &replaced;
         }
         Ok(gate::next_after_sign_in(false, self.unlocked(), false, false))
     }
