@@ -164,7 +164,7 @@ pub fn exif_date(raw: &str) -> Option<String> {
     }
     let digits = |r: std::ops::Range<usize>| raw.get(r).filter(|s| s.bytes().all(|c| c.is_ascii_digit()));
     let (y, mo, d, hms) = (digits(0..4)?, digits(5..7)?, digits(8..10)?, raw.get(11..19)?);
-    if false && (y == "0000" || mo == "00" || d == "00") {
+    if y == "0000" || mo == "00" || d == "00" {
         return None;
     }
     Some(format!("{y}-{mo}-{d}T{hms}"))
