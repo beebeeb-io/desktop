@@ -1001,3 +1001,57 @@ fn about_is_the_builds_own_and_names_the_core_the_engine_pins() {
     assert!(!source.updates_available());
     assert!(!source.opens("DW-0789") && !source.opens("DW-0789b"));
 }
+
+/// The running window on an updater (a test one: the crate's doubles, no network): About draws Check now and the
+/// Release channel with what the updater answered; a click on Check now says Checking… and then the new answer.
+#[test]
+fn about_draws_the_updaters_answer_and_check_now_asks_again() {
+    let account = account("settings-updates@example.eu");
+    let engine = signed_in(&account);
+    let mut rt = window_on(engine.clone());
+    let rig = super::updates::tests::rig_up_to_date("0.9.1");
+    let seen = rig.seen.clone();
+    let source = EngineSettingsSource::for_identity(engine, &TEST).with_updates(Some(rig.part));
+    rt.update(move |s, _| {
+        s.settings.source = Box::new(source);
+        crate::frames::settings::go(s, "DW-0751");
+    });
+    rt.frame(0.016);
+    let answered = |rt: &Runtime<State>| {
+        rt.elements().iter().any(|e| {
+            !e.exiting
+                && e.text
+                    .as_deref()
+                    .is_some_and(|t| t.starts_with("0.9.1 is the newest version · checked "))
+        })
+    };
+    let wait = |rt: &mut Runtime<State>, what: &dyn Fn(&Runtime<State>) -> bool| {
+        let began = Instant::now();
+        while !what(rt) {
+            assert!(began.elapsed() < Duration::from_secs(10), "never drawn");
+            std::thread::sleep(Duration::from_millis(10));
+            rt.frame(0.05);
+        }
+    };
+    wait(&mut rt, &answered);
+    assert!(shows(&rt, "Release channel") && shows(&rt, "Stable"), "the channel row");
+    assert_eq!(seen.lock().unwrap().len(), 2, "the launch check");
+
+    rt.settle_all();
+    rt.frame(0.016);
+    let button = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.text.as_deref() == Some("Check now"))
+        .expect("Check now is drawn");
+    let (x, y) = (
+        button.rect[0] + button.rect[2] / 2.0,
+        button.rect[1] + button.rect[3] / 2.0,
+    );
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.016);
+    assert!(shows(&rt, "Checking…"), "the row says Checking… until it answers");
+    wait(&mut rt, &answered);
+    assert_eq!(seen.lock().unwrap().len(), 4, "Check now asked once more");
+}

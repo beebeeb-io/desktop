@@ -15,8 +15,8 @@ use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_updater::testkit::{self, FakeClock, FakeHttp, MemStore, Publish, TestKey};
 use beebeeb_updater::{
-    Apply, Channel as Line, Config, EngineStopped, Event, Failure, Freshness, Http, Offer, Refusal, Response, State,
-    Unreachable, Updater, VerifiedInstaller,
+    Apply, Channel as Line, Config, EngineStopped, Event, Failure, Freshness, Http, Offer, Persisted, Refusal,
+    Response, State, Unreachable, Updater, VerifiedInstaller,
 };
 
 use super::*;
@@ -24,7 +24,7 @@ use crate::engine_host::settings::{EngineSettingsSource, build_about};
 use crate::frames::settings::source::SettingsSource;
 
 /// Every address the fake release server was asked for, in order.
-type Seen = Arc<Mutex<Vec<String>>>;
+pub(crate) type Seen = Arc<Mutex<Vec<String>>>;
 
 /// The testkit's server, with every request written down where the test can read it (the updater lives on the
 /// part's worker thread).
@@ -61,9 +61,9 @@ impl Apply for Recording {
     }
 }
 
-struct Rig {
-    part: UpdatesPart,
-    seen: Seen,
+pub(crate) struct Rig {
+    pub(crate) part: UpdatesPart,
+    pub(crate) seen: Seen,
     did: Did,
     staging: tempfile::TempDir,
 }
@@ -88,8 +88,16 @@ impl Rig {
     }
 }
 
-/// A part on a test updater that trusts `key`, runs `installed`, and asks the base `base`.
-fn rig_at(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, base: &str) -> Rig {
+/// A part on a test updater that trusts `key`, runs `installed`, and asks the base `base`. Its record holds a check
+/// that passed an hour ago (an install that checks), unless `verified` is `None` (one that never did).
+fn rig_with(
+    key: &TestKey,
+    installed: &str,
+    channel: Channel,
+    http: FakeHttp,
+    base: &str,
+    verified: Option<u64>,
+) -> Rig {
     let staging = tempfile::tempdir().expect("a temp dir");
     let (seen, did) = (Seen::default(), Did::default());
     let config = Config {
@@ -107,7 +115,14 @@ fn rig_at(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, base
     );
     let make: MakeDrive = Box::new(move || {
         let clock = FakeClock(Cell::new(testkit::NOW));
-        Box::new(Updater::new(config, logged, clock, MemStore::default(), recording)) as Box<dyn Drive>
+        let store = MemStore {
+            persisted: Persisted {
+                last_check: verified,
+                ..Persisted::default()
+            },
+            refuse_writes: false,
+        };
+        Box::new(Updater::new(config, logged, clock, store, recording)) as Box<dyn Drive>
     });
     let part = UpdatesPart::live(make, &TEST, channel, channel, installed.to_string());
     Rig {
@@ -118,8 +133,22 @@ fn rig_at(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, base
     }
 }
 
+fn rig_at(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, base: &str) -> Rig {
+    rig_with(key, installed, channel, http, base, Some(testkit::NOW - 3_600))
+}
+
 fn rig(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp) -> Rig {
     rig_at(key, installed, channel, http, testkit::BASE)
+}
+
+/// A rig whose Stable channel is at `installed` (for the window's test in `settings::tests`).
+pub(crate) fn rig_up_to_date(installed: &str) -> Rig {
+    let key = TestKey::generate();
+    let http = serving(
+        &key,
+        &[Publish::new(Line::Stable, installed, testkit::artifact_bytes(64))],
+    );
+    rig(&key, installed, Channel::Stable, http)
 }
 
 /// A server with `publish` on it, signed by `key`.
@@ -300,6 +329,28 @@ fn a_manifest_another_key_signed_downloads_nothing() {
     assert_eq!(words(&rig.part), NOT_VERIFIED);
     assert!(!rig.seen().contains(&artifact));
     assert!(rig.did().is_empty() && rig.staged().is_empty());
+}
+
+/// No check has passed for two weeks or more (here: none since this build was made, 65 days ago): a refusal says so
+/// too, so "up to date" is never the only thing a blocked install hears.
+#[test]
+fn a_refusal_with_nothing_verified_for_two_weeks_says_so() {
+    let (key, stranger) = (TestKey::generate(), TestKey::generate());
+    let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(64));
+    let mut rig = rig_with(
+        &key,
+        "0.9.1",
+        Channel::Stable,
+        serving(&stranger, &[release]),
+        testkit::BASE,
+        None,
+    );
+    settle(&mut rig.part);
+    let days = (testkit::NOW - beebeeb_updater::V2_KEY_CREATED) / 86_400;
+    assert_eq!(
+        words(&rig.part),
+        format!("{NOT_VERIFIED} No update has been verified for {days} days.")
+    );
 }
 
 #[test]

@@ -734,4 +734,4 @@ impl UpdatesPart {
 
 #[cfg(test)]
 #[path = "updates_tests.rs"]
-mod tests;
+pub(super) mod tests;
