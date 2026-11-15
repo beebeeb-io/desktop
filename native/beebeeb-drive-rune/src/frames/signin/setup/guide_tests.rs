@@ -446,7 +446,8 @@ fn the_guide_ends_when_the_account_locks_signs_out_or_changes() {
             guide::poll(s, tx);
         });
         assert_eq!(rt.state.guide.step, None, "{gate:?}");
-        // Back in: no tip resumes.
+        // Back in, with no poll to ask the mark: no tip shows by itself. (After a lock of the same account the
+        // poll asks, and a "not done" resumes it: `resume_after_lock_goes_to_files_and_shows_the_card`.)
         rt.update(|s, _| {
             host::dispatch(s, Event::Gate(GateState::Ready));
         });
@@ -465,6 +466,48 @@ fn the_guide_ends_when_the_account_locks_signs_out_or_changes() {
         guide::poll(s, tx);
     });
     assert_eq!(rt.state.guide.step, None);
+}
+
+/// Review L335: a lock in the middle of the guide, and the same account back: the guide resumes on the step it was
+/// on (not the first one), with the window put on that step's place and its card shown, also when the person had
+/// left the window on another place.
+#[test]
+fn resume_after_lock_goes_to_files_and_shows_the_card() {
+    let (engine, mut rt) = on_engine();
+    assert!(a_first_run_ends(&mut rt), "a first run starts the guide");
+    tick(&mut rt);
+    click(&mut rt, NEXT_KEY);
+    tick(&mut rt);
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)));
+    assert_eq!(section(&rt), Some(Section::Files));
+
+    // The person goes to Shared while tip 1 waits (it is not drawn there), and the account locks.
+    rt.update(|s, _| crate::frames::go(s, Section::Shared));
+    tick(&mut rt);
+    assert_eq!(section(&rt), Some(Section::Shared));
+    assert!(rect(&rt, COACH_KEY).is_none(), "tip 1 is not drawn over Shared");
+    engine.set_gate(GateState::Locked);
+    tick(&mut rt);
+    assert_eq!(rt.state.guide.step, None, "the lock ended it");
+
+    // Unlocked, and the guide was not done: tip 1 again, on Files, with its card.
+    engine.set_gate(GateState::Ready);
+    tick(&mut rt);
+    tick(&mut rt);
+    assert_eq!(
+        rt.state.guide.step,
+        Some(Step::Tip(1)),
+        "the step it was on, not the first one"
+    );
+    assert_eq!(
+        section(&rt),
+        Some(Section::Files),
+        "the window is put on the step's place"
+    );
+    rt.settle_all();
+    rt.frame(0.0);
+    assert!(rect(&rt, COACH_KEY).is_some(), "its card shows");
+    assert_eq!(text(&rt, "coach-counter").as_deref(), Some("1 of 5"));
 }
 
 /// What `shell::host::poll` does at the start of a frame, then the frame.

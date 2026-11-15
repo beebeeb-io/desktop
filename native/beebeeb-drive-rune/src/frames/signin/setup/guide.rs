@@ -15,9 +15,13 @@
 //! Skip and Next, Enter presses the focused one, Esc is Skip.
 //!
 //! The guide ends when the account signs out, locks or changes: another account never resumes it,
-//! and nothing is kept. Finished ("Done") or skipped (Skip, Esc), it is done for that ACCOUNT on this
-//! PC and does not start by itself again (`guide_marks`; owner ruling 2026-11-13, a deviation from
-//! the board's "Shown once per PC", recorded in `FRAMES.md`).
+//! and nothing is kept. A lock of the same account leaves a place to come back to: when that account
+//! is unlocked and its mark still says "not done", the guide resumes on the step it was on, with the
+//! window put on that step's place and its card shown (review L335: it restarted at the first step
+//! and did not move the window, so on Shared or Photos no card showed). Finished ("Done") or skipped
+//! (Skip, Esc), it is done for that ACCOUNT on this PC and does not start by itself again
+//! (`guide_marks`; owner ruling 2026-11-13, a deviation from the board's "Shown once per PC",
+//! recorded in `FRAMES.md`).
 //!
 //! Nothing here is a secret.
 
@@ -113,6 +117,9 @@ pub struct Guide {
     /// A lock ended the guide for this account before it was finished or skipped: when the same account is
     /// back, the mark is asked for again (it was not done, so the guide starts again).
     pub(super) resume_for: Option<String>,
+    /// Where that guide was, for its account: the step, and the row tip 2 points at. Kept until the mark's
+    /// answer is taken in (a "not done" resumes there) or the account is gone; never another account's.
+    resume_at: Option<(String, Step, Option<usize>)>,
 }
 
 /// The row tip 2 points at: the file that was selected when the guide started (the board points
@@ -252,13 +259,15 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         let gone = matches!(s.shell.app.gate(), GateState::SignedOut | GateState::Locked)
             || s.shell.app.account() != s.guide.account.as_deref();
         if gone {
-            // Only a lock of the same account leaves something to come back to; a sign-out or another account
-            // ends it for good (nothing was kept: the next first run asks again).
+            // Only a lock of the same account leaves something to come back to (the step it was on, and the row
+            // tip 2 points at); a sign-out or another account ends it for good (nothing was kept: the next first
+            // run asks again).
             let locked = s.shell.app.gate() == GateState::Locked && s.shell.app.account() == s.guide.account.as_deref();
-            s.guide = Guide {
-                resume_for: if locked { s.guide.account.take() } else { None },
-                ..Guide::default()
-            };
+            let was = std::mem::take(&mut s.guide);
+            if locked && let (Some(account), Some(step)) = (was.account, was.step) {
+                s.guide.resume_for = Some(account.clone());
+                s.guide.resume_at = Some((account, step, was.row));
+            }
             changed = true;
         }
     }
@@ -266,27 +275,74 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let open = s.shell.app.gate() == GateState::Ready;
     // The first run's own flag, not its `Intent::OpenDrive`: that intent stays for the shell.
     let mut ask = s.setup.as_mut().is_some_and(super::Ui::just_finished);
-    // The account a lock interrupted is back; any other way out of the lock forgets it.
+    // Locked again before the mark's answer came (an answer made under the session before is never taken in): the
+    // next unlock of the same account asks again.
+    if s.shell.app.gate() == GateState::Locked && s.guide.resume_for.is_none() {
+        s.guide.resume_for = s
+            .guide
+            .resume_at
+            .as_ref()
+            .filter(|(owner, ..)| Some(owner.as_str()) == account.as_deref())
+            .map(|(owner, ..)| owner.clone());
+    }
+    // The account a lock interrupted is back; any other way out of the lock forgets it, and where it was.
     if s.guide.resume_for.is_some() && s.shell.app.gate() != GateState::Locked {
-        ask |= open && s.guide.resume_for == account;
+        let back = open && s.guide.resume_for == account;
+        ask |= back;
         s.guide.resume_for = None;
+        if !back {
+            s.guide.resume_at = None;
+        }
+    }
+    // Where a guide was is its own account's only: it goes once another account, or none, is here.
+    if s.guide
+        .resume_at
+        .as_ref()
+        .is_some_and(|(owner, ..)| Some(owner.as_str()) != account.as_deref())
+    {
+        s.guide.resume_at = None;
     }
     if ask {
         s.guide_marks.ask(account.as_deref());
     }
     // Also the source's poll. Only "not done", said of the account that is signed in now, starts the guide.
-    if s.guide_marks.answer(account.as_deref()) == Some(guide_marks::Known::NotDone)
-        && account.is_some()
-        && s.guide.step.is_none()
-    {
-        s.guide = Guide {
-            step: Some(Step::Tray),
-            row: None,
-            account,
-            focus: true,
-            shown: false,
-            resume_for: None,
-        };
+    let known = s.guide_marks.answer(account.as_deref());
+    // Any answer settles a resume: "done" or "not known" starts nothing, "not done" resumes where it was.
+    let resume = if known.is_some() {
+        s.guide.resume_at.take()
+    } else {
+        None
+    };
+    if known == Some(guide_marks::Known::NotDone) && account.is_some() && s.guide.step.is_none() {
+        match resume {
+            // Back after a lock: the step it was on, on that step's place, with its card (review L335). An answer
+            // that lands while the window is not open (a source that answers across a lock) only sets the step: the
+            // next poll holds it for the lock again, as above.
+            Some((_, step, row)) => {
+                s.guide = Guide {
+                    row,
+                    account,
+                    ..Guide::default()
+                };
+                if open {
+                    show(s, step);
+                } else {
+                    s.guide.step = Some(step);
+                    s.guide.focus = true;
+                }
+            }
+            None => {
+                s.guide = Guide {
+                    step: Some(Step::Tray),
+                    row: None,
+                    account,
+                    focus: true,
+                    shown: false,
+                    resume_for: None,
+                    resume_at: None,
+                };
+            }
+        }
         changed = true;
     }
     let shows = showing(s).is_some();
