@@ -18,6 +18,13 @@ use crate::frames::viewers::source::{Conflict, Newer};
 /// How often the open file's version is read from the local state.
 pub(super) const NEWER_EVERY: Duration = Duration::from_millis(1500);
 
+/// What a save says when an earlier change to the file on this PC (another opening's save, or one made in another app)
+/// has not been sent yet: nothing was stored, and the edit stays open (delta 3 of desktop#432). True offline and for a
+/// change held back alike; once that change lands, the banner offers it and a save from here asks the two-versions
+/// question.
+pub(super) const EARLIER_NOT_SENT: &str =
+    "Not saved: an earlier change to this file on this PC has not been sent yet. Your edit stays open.";
+
 /// One answer on its way back: for which file, under which session and account, for which opening.
 pub(super) struct Message {
     file_id: String,
@@ -388,8 +395,9 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         }
     }
 
-    /// What a read found, on the window's thread: a version past the one the view holds is another device's, once
-    /// (it is then held, so one banner per version), unless it is the version the view's own queued save became.
+    /// What a read found, on the window's thread: a version past the one the view holds is one this opening did not
+    /// make (another device's, or an earlier opening's on this PC), said once (it is then held, so one banner per
+    /// version), unless it is the version the view's own queued save became.
     fn weigh(&mut self, message: Message, file_id: &str) -> Option<Newer> {
         let current = self.answers_for(&message, file_id);
         let Answer::Read { version, own, at } = message.answer else {
@@ -536,6 +544,9 @@ fn settle_save(
             }),
             None,
         ),
+        // Delta 3 of desktop#432: an earlier change to this file on this PC has not been sent yet; queued after it,
+        // this save would replace it unasked. Nothing was stored: the edit stays, and the person is told why.
+        Err(EditRefused::EarlierChangeNotSent) => (Settled::Refused(EARLIER_NOT_SENT.to_string()), None),
         Err(_) => (Settled::Failed, None),
     }
 }
@@ -563,7 +574,7 @@ fn earlier(settled: Settled, file_id: &str) -> Option<Settled> {
             "Your earlier edit was saved on this PC \u{00B7} sends when Beebeeb can be reached".to_string()
         }
         Settled::Conflict(_) => "Your earlier edit was not saved: the file changed since you opened it".to_string(),
-        Settled::Failed => "Your earlier edit was not saved".to_string(),
+        Settled::Failed | Settled::Refused(_) => "Your earlier edit was not saved".to_string(),
         Settled::Opened { .. } | Settled::Newer(_) | Settled::Said(_) => String::new(),
     };
     wipe(settled);

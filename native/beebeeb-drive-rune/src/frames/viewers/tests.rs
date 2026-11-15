@@ -732,6 +732,21 @@ fn leaving_with_changes_asks_first_and_each_answer_does_what_it_says() {
     assert!(!on_a_file(&rt));
 }
 
+/// Delta 3 of desktop#432: a save refused because an earlier change to the file has not been sent yet keeps the edit
+/// open and unsaved, and says why.
+#[test]
+fn a_refused_save_keeps_the_edit_and_says_why() {
+    let (mut rt, _) = note(false, false);
+    edit_and_type(&mut rt);
+    let ui = rt.state.viewer.ui.as_mut().expect("a file is open");
+    ui.settle(super::source::Settled::Refused("Not saved: an invented reason".into()));
+    let ui = viewer(&rt);
+    assert!(ui.editor.is_some() && ui.dirty(), "the edit stays, unsaved");
+    assert_eq!(ui.dialog, None);
+    assert_eq!(ui.toast.as_deref(), Some("Not saved: an invented reason"));
+    assert_eq!(ui.file.version, 3);
+}
+
 /// Delta check of desktop#432, round 3: the engine cannot say who saved the other version (another device, or an
 /// earlier opening of this file on this PC). The question then names nobody: changed since you opened it, the other
 /// version.

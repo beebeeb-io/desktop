@@ -39,6 +39,7 @@ impl EngineBridge {
             newly_held: Default::default(),
             resume: crate::runner::ResumeTicket::default(),
             backup_api: std::sync::OnceLock::new(),
+            chain_after: crate::write_token::ChainAfter::Any,
             #[cfg(any(test, feature = "test-support"))]
             seams: Seams::default(),
         }
@@ -123,6 +124,14 @@ impl EngineBridge {
         // rows, with their file names, that an earlier engine left on the shared board.
         board.forget_failed();
         self.transfers = board;
+        self
+    }
+
+    /// Queue a content modify only after the queued write `chain` allows (review of desktop#432, delta 3): the
+    /// viewer's save follows its own opening's latest queued save alone. Any other is refused, nothing queued
+    /// ([`BehindAnotherWrite`]).
+    pub(crate) fn with_chain_after(mut self, chain: crate::write_token::ChainAfter) -> Self {
+        self.chain_after = chain;
         self
     }
 

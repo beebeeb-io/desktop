@@ -8,7 +8,48 @@ use std::path::PathBuf;
 #[derive(Debug, serde::Serialize)]
 pub struct FreeUpSpaceResult {
     pub bytes_freed: u64,
+    /// Copies the reclaim left on this computer because their bytes could not be shown to equal the synced
+    /// content (non-Windows: [`free_up_space_unix`]); each with its plain words. Empty on Windows.
+    pub not_freed: Vec<NotFreed>,
 }
+
+/// One copy [`free_up_space_unix`] kept, and why (words fit to show a person).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct NotFreed {
+    pub file_id: String,
+    pub reason: &'static str,
+}
+
+/// The copy's bytes are not the synced content: it was edited here after the sync.
+pub const KEPT_EDITED: &str = "This copy was changed on this computer after it was last synced, so it was left here.";
+/// The row holds no synced content to compare the copy with.
+pub const KEPT_NO_AGREED: &str =
+    "Beebeeb cannot confirm that this copy matches the synced version, so it was left here.";
+/// A change of the file is waiting to be sent.
+pub const KEPT_UPLOAD_QUEUED: &str = "A change to this file is waiting to be sent, so it was left here.";
+/// The copy could not be opened or read.
+pub const KEPT_UNREADABLE: &str = "Beebeeb could not read this copy to check it, so it was left here.";
+/// The state database could not answer, so the copy was never opened.
+pub const KEPT_CHECK_FAILED: &str = "Beebeeb could not check this copy, so it was left here.";
+/// The copy is a link or a special file, not a plain file.
+pub const KEPT_NOT_A_FILE: &str = "This is not a plain file (a link or a special file), so it was left here.";
+/// The copy was written, or replaced, while Free up space was running.
+pub const KEPT_CHANGED: &str = "This copy changed while Free up space was running, so it was left here.";
+/// The file was kept, or changed state, while Free up space was running.
+pub const KEPT_NOW_KEPT: &str =
+    "This file was kept on this computer while Free up space was running, so it was left here.";
+/// The copy was written moments ago, so a later write could not be told from it.
+pub const KEPT_JUST_WRITTEN: &str = "This copy was written a moment ago, so it was left here.";
+/// The file's row left the state it was in (not a local copy any more, or gone) while Free up space was running.
+pub const KEPT_STATE_CHANGED: &str = "This file changed while Free up space was running, so it was left here.";
+/// Free up space was stopped (locked or signed out) before this copy was removed.
+pub const KEPT_STOPPED: &str = "Free up space was stopped before this copy was removed, so it was left here.";
+/// Another program has this copy open.
+pub const KEPT_OPEN_ELSEWHERE: &str = "Another program has this copy open, so it was left here.";
+/// Beebeeb cannot tell whether another program has this copy open.
+pub const KEPT_NO_LEASE: &str = "Beebeeb cannot check that no other program has this copy open, so it was left here.";
+/// The operating system refused to remove the copy.
+pub const KEPT_REMOVE_FAILED: &str = "Beebeeb could not remove this copy, so it was left here.";
 
 /// Allowed roots a cache file may live under for `free_up_space` to delete it.
 /// The engine writes hydrated cache copies under the sync root (Windows
@@ -80,11 +121,17 @@ pub fn remove_linux_freedesktop_thumbnails_for_evicted_files(
 pub fn free_up_space_blocking(identity: &'static crate::identity::EngineIdentity) -> Result<FreeUpSpaceResult, String> {
     let cfg = crate::config::DesktopConfig::load_for(identity)?;
     let Some(sync_root) = cfg.sync_root.clone() else {
-        return Ok(FreeUpSpaceResult { bytes_freed: 0 });
+        return Ok(FreeUpSpaceResult {
+            bytes_freed: 0,
+            not_freed: Vec::new(),
+        });
     };
     let db_path = crate::state_paths::beebeeb_state_dir_for(identity)?.join(crate::state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
-        return Ok(FreeUpSpaceResult { bytes_freed: 0 });
+        return Ok(FreeUpSpaceResult {
+            bytes_freed: 0,
+            not_freed: Vec::new(),
+        });
     }
     let db = crate::state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
     free_up_space_in(identity, &db, &sync_root, &|| true)
@@ -124,17 +171,9 @@ pub(crate) fn free_up_space_in(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // The whole choice of what leaves this computer is ONE query here (`free_up_space_unix`), made right after
-        // the handle's own check; the loop after it only removes the copies of rows that query already made online
-        // only, and is not cut short (a copy left behind would be a file no row knows of).
-        let _ = go_on;
-        // Snapshot the on-disk cache paths of every UNPINNED, LOCAL file BEFORE
-        // any DB transition (eviction nulls `cache_path`). Pinned files are
-        // excluded by the query, so they are always kept.
-        let paths = db
-            .disposable_unpinned_cache_paths()
-            .map_err(|e| format!("list cache paths: {e}"))?;
-        free_up_space_unix(identity, db, sync_root, paths)
+        // Each file is decided and removed together in `free_up_space_unix`, which asks `go_on` before each one:
+        // a lock or sign-out ends it there, and what was freed until then is the answer.
+        free_up_space_unix(identity, db, sync_root, go_on)
     }
 }
 
@@ -459,58 +498,13 @@ fn dehydrate_these(
     }
 
     tracing::info!(bytes_freed, "free_up_space dehydrated unpinned placeholders");
-    (FreeUpSpaceResult { bytes_freed }, dehydrated_ids)
-}
-
-/// Unix reclaim path (macOS File Provider / Linux FUSE). Unchanged from the
-/// original: the engine stores hydrated copies as separate cache files, so a
-/// `remove_file` genuinely reclaims the bytes. The DB eviction flips rows to
-/// cloud_only and the on-disk cache copies are unlinked.
-#[cfg(not(target_os = "windows"))]
-pub fn free_up_space_unix(
-    identity: &crate::identity::EngineIdentity,
-    db: &crate::state_db::StateDb,
-    sync_root: &std::path::Path,
-    paths: Vec<String>,
-) -> Result<FreeUpSpaceResult, String> {
-    // Flip every unpinned local file to cloud_only in the DB. A budget of 0
-    // means "evict everything unpinned."
-    let now = now_unix_seconds();
-    let evicted_ids = db
-        .evict_unpinned_cache_until_under(0, now)
-        .map_err(|e| format!("evict unpinned cache: {e}"))?;
-    #[cfg(target_os = "linux")]
-    remove_linux_freedesktop_thumbnails_for_evicted_files(db, sync_root, &evicted_ids);
-
-    // Delete the actual cache files, bounded to paths under one of the allowed
-    // engine cache roots so a bad cache_path can't delete outside the vault.
-    // Sum the real file sizes we remove so `bytes_freed` is an exact count, not
-    // an estimate. A missing file contributes 0 (already gone — nothing
-    // reclaimed by us).
-    let allowed_roots = free_up_space_allowed_roots(identity, sync_root);
-    let mut bytes_freed: u64 = 0;
-    for path in paths {
-        let path_buf = PathBuf::from(&path);
-        let Ok(canonical) = path_buf.canonicalize() else {
-            // Unresolvable path — never delete.
-            continue;
-        };
-        if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
-            // Outside every allowed cache root — never delete.
-            continue;
-        }
-        let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
-        match std::fs::remove_file(&canonical) {
-            Ok(()) => bytes_freed = bytes_freed.saturating_add(size),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!(error = %error, path = %canonical.display(), "free_up_space: could not remove cache file");
-            }
-        }
-    }
-
-    tracing::info!(bytes_freed, "free_up_space evicted unpinned cache");
-    Ok(FreeUpSpaceResult { bytes_freed })
+    (
+        FreeUpSpaceResult {
+            bytes_freed,
+            not_freed: Vec::new(),
+        },
+        dehydrated_ids,
+    )
 }
 
 fn now_unix_seconds() -> i64 {
@@ -519,3 +513,12 @@ fn now_unix_seconds() -> i64 {
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default()
 }
+
+#[cfg(not(target_os = "windows"))]
+mod unix;
+#[cfg(not(target_os = "windows"))]
+pub use unix::free_up_space_unix;
+#[cfg(not(target_os = "windows"))]
+pub(crate) use unix::{Seams, reclaim_unix};
+#[cfg(all(test, unix))]
+mod unix_tests;

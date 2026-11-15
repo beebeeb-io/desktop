@@ -365,7 +365,7 @@ impl EngineBridge {
         let metadata_json = serde_json::to_string(&prepared.payload)?;
         let backup_source_key = crate::known_folder::backup_source_key_for_this_device(&target.filename);
         self.seam("accept:before_tx");
-        let accepted = self.db.accept_finder_write(
+        let accepted = self.db.accept_finder_write_after(
             &crate::state_db::FinderAccept {
                 retire_parked: None,
                 op_id: &op_id,
@@ -383,6 +383,7 @@ impl EngineBridge {
                 now: now_secs(),
             },
             &|entry, contract| legacy_item_identifiers(entry, contract).to_vec(),
+            &self.chain_after,
         )?;
         let token = match accepted {
             crate::state_db::AcceptOutcome::Queued { token, .. } => token,
@@ -403,6 +404,10 @@ impl EngineBridge {
             crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed).into()),
             // §7.2: refused; the staged copy is dropped with `prepared`, and nothing was queued.
             crate::state_db::AcceptOutcome::InTrash => return Err(anyhow::Error::new(ItemInTrash).into()),
+            // Delta 3 of desktop#432: after a queued write it may not follow; nothing was queued.
+            crate::state_db::AcceptOutcome::BehindAnotherWrite => {
+                return Err(anyhow::Error::new(BehindAnotherWrite).into());
+            }
             // A modify retires no parked write (task 2190's "Keep both" is a create).
             crate::state_db::AcceptOutcome::ParkedMoved | crate::state_db::AcceptOutcome::QueuedRetiring { .. } => {
                 return Err(anyhow::anyhow!("a modify retires no parked write").into());

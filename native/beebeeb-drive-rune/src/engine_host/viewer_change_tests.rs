@@ -762,3 +762,18 @@ fn an_earlier_openings_conflict_is_said_without_naming_a_device() {
         "Your earlier edit was not saved: the file changed since you opened it"
     );
 }
+
+/// Delta 3 of desktop#432: the engine refused the save because an earlier change to the file on this PC has not been
+/// sent yet. Nothing was stored; the answer says why (not a bare "Not saved"), and the change is over.
+#[test]
+fn a_save_refused_behind_an_unsent_change_says_why() {
+    let fake = Fake::new();
+    fake.s().save_answer = Err(EditRefused::EarlierChangeNotSent);
+    let (mut source, file, _) = opened(&fake, NOTE);
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    let Settled::Refused(words) = settled(&mut source, NOTE) else {
+        panic!("refused, and why");
+    };
+    assert_eq!(words, super::super::change::EARLIER_NOT_SENT);
+    assert!(!source.saving());
+}

@@ -302,6 +302,9 @@ impl EngineBridge {
             crate::state_db::AcceptOutcome::InTrash => {
                 return Err(anyhow::anyhow!("a create is never refused as in the trash").into());
             }
+            crate::state_db::AcceptOutcome::BehindAnotherWrite => {
+                return Err(anyhow::anyhow!("a create follows no queued write").into());
+            }
             crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone).into()),
             crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed).into()),
         };
