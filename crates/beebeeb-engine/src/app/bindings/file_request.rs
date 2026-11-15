@@ -198,6 +198,9 @@ impl<C: CredentialStores> Engine<C> {
     /// The hand-over: only while the session in memory is the very one the token and the key were copied from. The
     /// link goes over as core made it, its key after `#` and nowhere else.
     fn request_hand_over(&self, run: &Run<'_>, link: Zeroizing<String>) -> Result<MadeLink, ShareLinkError> {
+        if !self.session_is_still(run.session, &run.key) {
+            return Err(ShareLinkError::NotSignedIn);
+        }
         Ok(MadeLink {
             session: run.session,
             link,

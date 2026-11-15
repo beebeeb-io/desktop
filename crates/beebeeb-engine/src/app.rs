@@ -399,8 +399,9 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
-            let vault = self.vault();
+            let mut vault = self.vault();
             let present = matches!(vault.session_token(), Ok(Some(_)));
+            let present = self.s11_probe(&mut vault, present).await;
             self.set_auth_present(present);
             if present {
                 // Whose the stored session is, as its sign-in recorded it (unknown stays unknown).

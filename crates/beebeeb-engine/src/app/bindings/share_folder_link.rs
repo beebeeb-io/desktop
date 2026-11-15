@@ -332,6 +332,9 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The hand-over: only while the session in memory is the very one the token and the key were copied from.
     fn hand_over(&self, run: &Run<'_>, link: Zeroizing<String>) -> Result<MadeLink, FolderLinkError> {
+        if !self.session_is_still(run.session, &run.key) {
+            return Err(FolderLinkError::NotSignedIn);
+        }
         Ok(MadeLink {
             session: run.session,
             link,

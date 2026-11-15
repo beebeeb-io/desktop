@@ -46,6 +46,26 @@ pub enum OwnerSettled {
 }
 
 impl<C: CredentialStores> Engine<C> {
+    pub(super) async fn s11_probe(&self, vault: &mut crate::keychain::AuthVault<C::Store>, present: bool) -> bool {
+        if !present {
+            return false;
+        }
+        let probe = vault
+            .session_token()
+            .ok()
+            .flatten()
+            .map(|t| t.expose_for_request().to_string())
+            .unwrap_or_default();
+        if super::fetch_profile(&self.client, &self.config.api_base, &probe)
+            .await
+            .is_err()
+        {
+            let _ = vault.clear_session();
+            return false;
+        }
+        true
+    }
+
     fn owner_known(&self) -> bool {
         self.session_user_id
             .lock()
