@@ -178,6 +178,7 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
     // The player's scrubber is a slider: "1:12 of 4:02", and the arrows seek.
     if let Some(l) = live {
         let handle = l.handle.clone();
+        let drag_with = l.handle.clone();
         track = track
             .role("slider")
             .a11y_value(video::Times::of(&l.state).spoken())
@@ -190,6 +191,7 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
                     now.saturating_add(step)
                 });
             })
+            .on_drag(video::scrub_drag(drag_with))
             .focusable(true)
             .focus_ring(2.0, 2.0, t.accent_deep);
     }
