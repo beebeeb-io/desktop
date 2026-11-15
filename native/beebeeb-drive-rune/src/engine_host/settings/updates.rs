@@ -865,6 +865,8 @@ pub(crate) type StartInstaller = Box<dyn FnMut(&VerifiedInstaller, EngineStopped
 /// Windows: the crate's passive NSIS start (`VerifiedInstaller::start_nsis`, the only way to start one). Elsewhere
 /// nothing is started.
 #[cfg(any(windows, test))]
+// A Windows test build never calls it: no test there may start a real installer.
+#[cfg_attr(all(windows, test), allow(dead_code))]
 fn start_installer(installer: &VerifiedInstaller, stopped: EngineStopped) -> bool {
     #[cfg(windows)]
     {
@@ -888,11 +890,16 @@ pub(crate) struct EngineApply<C: CredentialStores> {
     /// This hand-off's stop ended a running sync: a failed start asks for it back. A sync that was not running is
     /// not started by an update that did not happen.
     stopped_running: bool,
+    /// A stop was not confirmed in this process: the engine slot is empty since, so a later stop would say
+    /// `WasNotRunning` about a task that may still run. No proof is minted again until Beebeeb restarts.
+    unconfirmed: bool,
     start: StartInstaller,
 }
 
 #[cfg(any(windows, test))]
 impl<C: CredentialStores> EngineApply<C> {
+    /// The release's hand-off, with the real installer start ([`start_installer`]).
+    #[cfg_attr(all(windows, test), allow(dead_code))]
     pub(crate) fn new(engine: Arc<Engine<C>>, identity: &'static EngineIdentity, sync_back: SyncBack) -> Self {
         Self::starting_with(engine, identity, sync_back, Box::new(start_installer))
     }
@@ -908,6 +915,7 @@ impl<C: CredentialStores> EngineApply<C> {
             identity,
             sync_back,
             stopped_running: false,
+            unconfirmed: false,
             start,
         }
     }
@@ -921,11 +929,16 @@ impl<C: CredentialStores> Apply for EngineApply<C> {
     /// the engine also says `Unconfirmed` when its task ended and File Explorer's connection did not let go; the two
     /// are one answer here, so the words say only that the stop was not confirmed: `SYNC_UNCONFIRMED`.)
     fn stop_engine(&mut self) -> Option<EngineStopped> {
+        if self.unconfirmed {
+            log("settings: an earlier stop of sync was not confirmed; the update waits for a restart of Beebeeb");
+            return None;
+        }
         let stopped = match self.engine.stop() {
             SyncStop::Stopped => true,
             SyncStop::WasNotRunning => false,
             SyncStop::Unconfirmed => {
                 log("settings: sync did not confirm it stopped; the update was not started");
+                self.unconfirmed = true;
                 return None;
             }
         };

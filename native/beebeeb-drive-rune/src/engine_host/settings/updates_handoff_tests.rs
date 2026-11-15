@@ -82,6 +82,9 @@ fn a_stop_that_is_not_confirmed_starts_no_installer() {
     assert!(apply.stop_engine().is_none(), "Unconfirmed mints no proof");
     apply.resume_engine();
     assert!(!sync_back.take());
+    // The slot is empty now, so the engine would say `WasNotRunning`: a second Restart to update still mints no
+    // proof in this process (the task that did not confirm may still run).
+    assert!(apply.stop_engine().is_none(), "not until Beebeeb restarts");
 }
 
 /// The words for a stop that was not confirmed say only what is known: never that sync runs ("did not stop"), never
@@ -189,7 +192,7 @@ fn a_started_installer_quits_the_app_once() {
 #[test]
 fn the_window_quits_for_a_started_installer_and_starts_sync_after_a_failed_one() {
     use crate::shell::actions::{FixtureCall, FixtureEngine};
-    fn window(starts: bool) -> (rune::Runtime<crate::State>, Arc<FixtureEngine>) {
+    fn window(starts: bool) -> (rune::Runtime<crate::State>, Arc<FixtureEngine>, tempfile::TempDir) {
         let key = TestKey::generate();
         let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
         let options = Options {
@@ -209,9 +212,8 @@ fn the_window_quits_for_a_started_installer_and_starts_sync_after_a_failed_one()
         rt.poll = Some(|s: &mut crate::State, _: f64, tx: &mut rune::Tx| crate::frames::settings::poll(s, tx));
         let source = EngineSettingsSource::for_identity(engine, &TEST).with_updates(Some(rig.part));
         rt.update(move |s, _| s.settings.source = Box::new(source));
-        // Keeps the rig's staging folder for the whole test.
-        std::mem::forget(rig.staging);
-        (rt, fixture)
+        // The rig's staging folder lives as long as the window.
+        (rt, fixture, rig.staging)
     }
     fn press_when(rt: &mut rune::Runtime<crate::State>, press: Press) {
         let began = Instant::now();
@@ -238,7 +240,7 @@ fn the_window_quits_for_a_started_installer_and_starts_sync_after_a_failed_one()
         }
     }
 
-    let (mut rt, fixture) = window(true);
+    let (mut rt, fixture, _staging) = window(true);
     press_when(&mut rt, Press::Download);
     press_when(&mut rt, Press::Restart);
     wait(&mut rt, "the app quits", |rt| {
@@ -246,7 +248,7 @@ fn the_window_quits_for_a_started_installer_and_starts_sync_after_a_failed_one()
     });
     assert!(!fixture.calls().contains(&FixtureCall::StartSync));
 
-    let (mut rt, fixture) = window(false);
+    let (mut rt, fixture, _staging) = window(false);
     press_when(&mut rt, Press::Download);
     press_when(&mut rt, Press::Restart);
     wait(&mut rt, "sync is started again", |_| {
