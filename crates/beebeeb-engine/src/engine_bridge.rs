@@ -253,6 +253,8 @@ mod tests {
     mod review_t3;
     mod scan;
     mod shared_2;
+    // Task 2523: another device's version reaches the copy on this PC; a held edit is never hydrated over.
+    mod stale_2523;
     mod sync;
     mod sync_2;
     mod sync_3;
