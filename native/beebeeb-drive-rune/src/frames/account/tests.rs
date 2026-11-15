@@ -124,7 +124,7 @@ pub(super) fn asked(rt: &Runtime<State>) -> Vec<Intent> {
 
 #[test]
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
-    assert_eq!(super::FRAMES.len(), 39, "the frames this lane built");
+    assert_eq!(super::FRAMES.len(), 44, "the frames this lane built");
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
         assert!(find(&rt, "caption-bar").is_some(), "{frame}: the same window");

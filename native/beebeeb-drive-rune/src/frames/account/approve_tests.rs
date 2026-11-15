@@ -842,20 +842,19 @@ fn the_page_under_the_review_draws_no_count_that_was_not_read() {
     }
 }
 
-/// DW-A13 as the board draws it: the Password field holds a typed password, twelve masked characters, and the
-/// text of the password itself is never in the tree.
+/// DW-A13 as the board draws it: the Password field holds a typed password of twelve characters, drawn masked
+/// (the gate's `field-1-value` is the bullets, which only a gate export records), and no field holds the keyboard.
 #[test]
 fn the_review_scene_shows_a_typed_password_masked() {
     let mut state = init();
     assert!(super::scene("DW-A13", &mut state));
     let rt = window(state);
-    assert_eq!(
-        says(&rt, "field-1-value"),
-        "\u{2022}".repeat(12),
-        "twelve masked characters"
-    );
+    let password = &rt.state.account.approve.password;
+    assert_eq!(password.text.chars().count(), 12, "twelve characters");
+    assert!(password.is_secure() && !password.is_revealed(), "drawn as bullets");
+    assert!(!password.focused, "no field holds the keyboard in the board's frame");
     assert!(
-        !rt.state.account.approve.password.focused,
-        "no field holds the keyboard in the board's frame"
+        find(&rt, "field-1-msg").is_some(),
+        "the review still draws the password field"
     );
 }
