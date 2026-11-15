@@ -62,7 +62,50 @@ const DENIED_WORDS: &[&str] = &[
     "signature",
     "nonce",
     "salt",
+    "auth",
+    "authorization",
+    "bearer",
+    "credential",
+    "credentials",
+    "jwt",
+    "apikey",
+    "cred",
+    "private",
+    "seed",
 ];
+
+/// Words that name a credential: a field with one of them is denied even when it ends in `id` or `count`
+/// (`session_id`, `key_id`), because the value of such a field can be the credential itself.
+const CREDENTIAL_WORDS: &[&str] = &[
+    "key",
+    "keys",
+    "token",
+    "secret",
+    "session",
+    "cookie",
+    "nonce",
+    "salt",
+    "pass",
+    "password",
+    "passphrase",
+    "phrase",
+    "mnemonic",
+    "signature",
+    "auth",
+    "authorization",
+    "bearer",
+    "credential",
+    "credentials",
+    "jwt",
+    "apikey",
+    "seed",
+    "otp",
+    "pin",
+    "code",
+];
+
+/// A word in a message that is followed by its credential, whether or not a colon comes between.
+const ALWAYS_LABELS: &[&str] = &["bearer", "authorization", "basic"];
 
 /// A last word that marks an opaque or numeric value: such a field is not denied by an earlier word
 /// (`root_id`, `file_kind`, `key_count`), but its value still goes through [`scrub`].
@@ -91,7 +134,21 @@ const OPAQUE_LAST_WORDS: &[&str] = &[
 
 /// Parts of a field name that deny it even inside a longer word (`syncpath`, `filename`).
 const DENIED_PARTS: &[&str] = &[
-    "path", "email", "token", "passw", "phrase", "mnemonic", "secret", "filename", "dirname",
+    "path",
+    "email",
+    "token",
+    "passw",
+    "phrase",
+    "mnemonic",
+    "secret",
+    "filename",
+    "dirname",
+    "auth",
+    "bearer",
+    "credential",
+    "jwt",
+    "apikey",
+    "cookie",
 ];
 
 /// File names the engine's own fixed messages print: not a person's name.
@@ -108,6 +165,9 @@ pub fn denied_name(name: &str) -> bool {
         return true;
     }
     let words: Vec<&str> = lower.split(['_', '.']).filter(|w| !w.is_empty()).collect();
+    if words.iter().any(|word| CREDENTIAL_WORDS.contains(word)) {
+        return true;
+    }
     if let Some(last) = words.last()
         && words.len() > 1
         && OPAQUE_LAST_WORDS.contains(last)
@@ -122,9 +182,42 @@ pub fn message(raw: &str) -> String {
     cap(scrub(raw), MESSAGE_MAX)
 }
 
-/// A field value, scrubbed and capped.
-pub fn value(raw: &str) -> String {
-    cap(scrub(raw), VALUE_MAX)
+/// A field value, scrubbed and capped. A UUID-shaped word survives only in a field whose name ends in `id`/`ids`
+/// (the engine's opaque `file_id`, `op_id`): anywhere else it could be a credential.
+pub fn value(name: &str, raw: &str) -> String {
+    cap(scrub_with(raw, is_id_name(name)), VALUE_MAX)
+}
+
+/// A number: kept, except a 6 to 8 digit value of a field that is not a plain metric (the shape of a one-time code).
+pub fn number(name: &str, shown: String) -> String {
+    let lower = name.to_ascii_lowercase();
+    let last = lower.rsplit(['_', '.']).next().unwrap_or("");
+    let metric = [
+        "count",
+        "len",
+        "bytes",
+        "secs",
+        "ms",
+        "version",
+        "seq",
+        "size",
+        "offset",
+        "length",
+        "attempt",
+        "generation",
+        "step",
+        "id",
+        "ids",
+    ];
+    if (6..=8).contains(&shown.len()) && shown.bytes().all(|b| b.is_ascii_digit()) && !metric.contains(&last) {
+        return "<code>".to_string();
+    }
+    shown
+}
+
+fn is_id_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.rsplit(['_', '.']).next(), Some("id" | "ids"))
 }
 
 fn cap(mut text: String, max: usize) -> String {
@@ -136,24 +229,71 @@ fn cap(mut text: String, max: usize) -> String {
 
 /// Replaces every word of `raw` that has a forbidden shape; see the module docs.
 pub fn scrub(raw: &str) -> String {
+    scrub_with(raw, false)
+}
+
+fn scrub_with(raw: &str, allow_uuid: bool) -> String {
     if looks_like_body(raw) {
         return "<body omitted>".to_string();
     }
-    let blanked: String = raw.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    // Quotes, commas and brackets are word separators (a Debug value has them between every word); control characters
+    // too, so one event is one line.
+    let blanked: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || "\"'()[]{}<>,;".contains(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
     let tokens: Vec<&str> = blanked.split_whitespace().collect();
     let mut out: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut redact_next = false;
     let mut i = 0;
     while i < tokens.len() {
         let run = tokens[i..].iter().take_while(|t| is_plain_word(t)).count();
         if run >= 12 {
             out.push("<phrase>".to_string());
             i += run;
+            redact_next = false;
             continue;
         }
-        out.push(scrub_token(tokens[i]));
+        let token = tokens[i];
         i += 1;
+        if redact_next {
+            redact_next = false;
+            out.push(REDACTED.to_string());
+            continue;
+        }
+        // `password: x`, `Authorization: Bearer x`: the label decides, and the word after it is its value.
+        let label = token.trim_end_matches(':').to_ascii_lowercase();
+        if token.ends_with(':') && !token.contains('=') && denied_name(&label)
+            || ALWAYS_LABELS.contains(&label.as_str())
+        {
+            redact_next = true;
+            out.push(token.to_string());
+            continue;
+        }
+        let shown = scrub_token(token, allow_uuid);
+        // A path that starts at a root can hold spaces (`C:\Users\Anna Smith\x`): nothing after it is trusted.
+        if shown == "<path>" && absolute_start(token) {
+            out.push(shown);
+            break;
+        }
+        out.push(shown);
     }
     out.join(" ")
+}
+
+fn absolute_start(token: &str) -> bool {
+    let b = token.as_bytes();
+    token.starts_with('/')
+        || token.starts_with('\\')
+        || token.starts_with('~')
+        || token.starts_with('%')
+        || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
 }
 
 fn is_plain_word(token: &str) -> bool {
@@ -171,7 +311,7 @@ fn looks_like_body(raw: &str) -> bool {
         || raw.to_ascii_lowercase().contains("</html")
 }
 
-fn scrub_token(token: &str) -> String {
+fn scrub_token(token: &str, allow_uuid: bool) -> String {
     let start = token.find(|c: char| !"\"'([{<".contains(c)).unwrap_or(token.len());
     let end = token
         .rfind(|c: char| !"\"')]}>,;.:!?".contains(c))
@@ -188,17 +328,17 @@ fn scrub_token(token: &str) -> String {
         let shown = if denied_name(key) {
             REDACTED.to_string()
         } else {
-            scrub_token(val)
+            scrub_token(val, allow_uuid)
         };
         return format!("{prefix}{key}={shown}{suffix}");
     }
-    match classify(core) {
+    match classify(core, allow_uuid) {
         Some(marker) => format!("{prefix}{marker}{suffix}"),
         None => token.to_string(),
     }
 }
 
-fn classify(core: &str) -> Option<&'static str> {
+fn classify(core: &str, allow_uuid: bool) -> Option<&'static str> {
     if core.contains("://") || core.starts_with("mailto:") {
         return Some("<url>");
     }
@@ -214,7 +354,10 @@ fn classify(core: &str) -> Option<&'static str> {
         return Some("<path>");
     }
     if is_uuid(core) {
-        return None;
+        return if allow_uuid { None } else { Some("<secret>") };
+    }
+    if is_jwt(core) {
+        return Some("<secret>");
     }
     if is_file_name(core) {
         return Some("<name>");
@@ -259,4 +402,12 @@ fn is_secret(core: &str) -> bool {
         && core.bytes().any(|b| b.is_ascii_digit())
         && core.bytes().any(|b| b.is_ascii_alphabetic());
     hex || tokenish
+}
+
+/// Three or more dot-separated base64url parts: the shape of a JWT.
+fn is_jwt(core: &str) -> bool {
+    core.len() >= 20
+        && core.matches('.').count() >= 2
+        && core.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-=".contains(&b))
+        && core.split('.').all(|part| !part.is_empty())
 }

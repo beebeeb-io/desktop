@@ -259,3 +259,60 @@ fn harmless_shapes_stay_readable() {
         "sync tick failed (status 503) retry in 30 s, hresult 0x80070005, version 0.9.0, state.db busy"
     );
 }
+
+#[test]
+fn credential_labels_and_shapes_the_first_round_missed_never_reach_the_file() {
+    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbm5hIn0.c2lnbmF0dXJl";
+    let cases: Vec<(&str, &str, String)> = vec![
+        ("jwt", "eyJhbGciOiJIUzI1NiJ9", format!("refused {jwt}")),
+        ("authorization header", "s3cr3t-value", "sent Authorization: Bearer s3cr3t-value to the server".into()),
+        ("bearer without a colon", "s3cr3t-value", "sent Bearer s3cr3t-value to the server".into()),
+        ("password label", "hunter2", "login failed, password: hunter2 was refused".into()),
+        ("token label", "abc", "token: abc was refused".into()),
+        ("path with spaces", "Smith", r"could not read C:\Users\Anna Smith\Taxes 2026\file for sync".into()),
+        ("unix path with spaces", "Smith", "could not read /home/anna/Anna Smith/Taxes for sync".into()),
+        ("uuid-shaped secret in a message", "0f8fad5b-d9cb-469f-a165-70867728950e", "refused 0f8fad5b-d9cb-469f-a165-70867728950e today".into()),
+        ("quoted phrase from a debug value", "abandon", r#"["abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract", "absurd", "accident", "account", "accuse"]"#.into()),
+        ("debug struct with a path", "Anna", r#"Os { code: 5, kind: NotFound, message: "C:\Users\Anna\x" }"#.into()),
+    ];
+    for (what, secret, message) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let text = logged(dir.path(), MAX_FILE_BYTES, || {
+            tracing::warn!(error = ?message, detail = %message, "{message}");
+        });
+        assert!(!text.contains(secret), "{what}: `{secret}` reached the file: {text}");
+    }
+}
+
+#[test]
+fn a_uuid_survives_only_in_an_id_field_and_a_credential_word_beats_an_id_suffix() {
+    let id = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let dir = tempfile::tempdir().unwrap();
+    let text = logged(dir.path(), MAX_FILE_BYTES, || {
+        tracing::warn!(file_id = %id, session_id = %id, key_id = %id, error = %id, "ids");
+    });
+    assert_eq!(text.matches(id).count(), 1, "only file_id keeps its value: {text}");
+    assert!(
+        text.contains("session_id=<redacted>") && text.contains("key_id=<redacted>"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_number_shaped_like_a_code_is_blanked_unless_it_is_a_plain_metric() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = logged(dir.path(), MAX_FILE_BYTES, || {
+        tracing::warn!(
+            value = 493817_u64,
+            bytes = 1234567_u64,
+            otp = 123456_u64,
+            count = 3_u64,
+            "numbers"
+        );
+    });
+    assert!(
+        text.contains("value=<code>") && text.contains("otp=<redacted>"),
+        "{text}"
+    );
+    assert!(text.contains("bytes=1234567") && text.contains("count=3"), "{text}");
+}

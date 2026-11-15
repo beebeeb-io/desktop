@@ -128,7 +128,7 @@ impl Fields {
             let shown = if redact::denied_name(field.name()) {
                 redact::REDACTED.to_string()
             } else {
-                redact::value(&text)
+                redact::value(field.name(), &text)
             };
             self.fields.push((field.name().to_string(), shown));
         }
@@ -140,7 +140,7 @@ impl Fields {
         let shown = if redact::denied_name(field.name()) {
             redact::REDACTED.to_string()
         } else {
-            shown
+            redact::number(field.name(), shown)
         };
         self.fields.push((field.name().to_string(), shown));
     }
