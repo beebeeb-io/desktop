@@ -153,3 +153,18 @@ fn a_row_with_a_way_out_carries_the_version_read() {
     assert_eq!(version("op-stale"), Some(7));
     assert_eq!(version("op-waits"), None, "no way out, no version");
 }
+
+/// The Uploads panel offers no way out of a parked change: its words never promise a choice.
+#[test]
+fn the_uploads_panel_never_promises_a_choice() {
+    let (dir, db) = db();
+    let here = dir.path().join("staged-here");
+    std::fs::write(&here, b"this PC's bytes").unwrap();
+    file(&db, "stale", 2);
+    park(&db, "stale", "stale_base", Some("w-stale"), &here.to_string_lossy());
+    let queue = db.unsent_changes(0, 500, 10).unwrap().items;
+    let rows = transfer_rows(&[], &queue);
+    let reason = rows.iter().find(|r| r.id == "op-stale").and_then(|r| r.reason).unwrap();
+    assert!(!reason.contains("Choose"), "{reason}");
+    assert!(sync_problems(&queue)[0].reason.contains("Choose which version to keep"));
+}

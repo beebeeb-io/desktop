@@ -310,7 +310,12 @@ pub fn transfer_rows(board: &[ActiveTransferDto], queue: &[UnsentChange]) -> Vec
             },
             bytes: 0,
             total: None,
-            reason: if problem { reason_for(change) } else { None },
+            // Task 2530: the Uploads panel offers no way out of a parked change, so its words promise none.
+            reason: match (problem, change.parked) {
+                (true, true) => Some(parked_words(change.park, &[])),
+                (true, false) => reason_for(change),
+                (false, _) => None,
+            },
             retryable: change.retryable,
         });
     }
