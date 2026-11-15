@@ -812,12 +812,6 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// The shell's own shortcuts, then the frame's keys. While the window is covered (`registry::covered`), only the lock
 /// screen's: no shortcut of the shell and no key of the frame behind the cover, which the person does not see.
 fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    if registry::covered(s) {
-        if let Some(keys) = registry::frame(registry::FrameGroup::Locked).and_then(|frame| frame.on_key) {
-            keys(s, ev, tx);
-        }
-        return true;
-    }
     let plain_alt = ev.mods.alt && !ev.mods.cmd && !ev.mods.shift;
     let plain_cmd = !ev.mods.alt && !ev.mods.shift;
     // "/" is a shifted key on many layouts (Shift+7 on German): Shift is part of typing it.

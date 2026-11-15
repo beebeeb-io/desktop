@@ -352,7 +352,11 @@ pub fn dialog_frame(group: FrameGroup) -> Option<&'static DialogFrame> {
 /// gates of an open engine: a closed one's own screen (the lock, sign-in, the recovery phrase, an unreadable key store)
 /// holds nothing of the account's and is never hidden by a lock screen that cannot unlock.
 pub fn covered(s: &State) -> bool {
-    s.shell.away.covers() && !matches!(group_for(&s.shell.app), FrameGroup::Locked | FrameGroup::SignIn)
+    s.shell.away.covers()
+        && matches!(
+            s.shell.app.gate(),
+            GateState::Ready | GateState::FirstRun | GateState::NoPlan
+        )
 }
 
 /// The main window's view: the registered frame for the state (or the placeholder), and over
