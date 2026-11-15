@@ -484,6 +484,7 @@ fn trust(mark: Option<(&str, MarkKind)>, share_fp: &str, accepted_for_share: Opt
             MarkKind::NotMatched => ShareTrust::Mismatch,
             MarkKind::Accepted => ShareTrust::NotCompared,
         },
+        Some(_) if accepted_for_share == Some(share_fp) => ShareTrust::NotCompared,
         Some(_) => ShareTrust::KeyChanged,
     }
 }
@@ -617,7 +618,7 @@ fn share_trust_in(
     marks
         .iter()
         .map(|(mark, kind)| trust(Some((mark.as_str(), *kind)), &fp, accepted.as_deref()))
-        .max()
+        .min()
 }
 
 /// The refused invite `member` the changed-key answer named, checked against my sent list: a claimed invite of `item`
