@@ -1150,6 +1150,7 @@ fn a_percentage_is_still_a_number() {
 fn a_number_next_to_a_masked_word_is_masked() {
     let text = redact::scrub("room Annastraat 12");
     assert!(!text.contains("Annastraat") && !text.contains("12"), "{text}");
+    assert!(!redact::scrub("room Annastraat 12 13").contains("13"));
     let text = redact::scrub("room 12 Annastraat");
     assert!(!text.contains("Annastraat") && !text.contains("12"), "{text}");
     assert_eq!(redact::scrub("HTTP 404"), "HTTP 404 Not Found: <body omitted>");

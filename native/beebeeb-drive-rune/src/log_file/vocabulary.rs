@@ -310,19 +310,26 @@ pub(crate) fn allow_listed(text: &str) -> String {
         at = stop;
     }
 
-    // Rule 2: a number next to a masked word (never a marker) is masked too, decided on the words as they stand.
-    let unknown: Vec<bool> = pieces
-        .iter()
-        .map(|(_, p)| matches!(p, Piece::Word { known: false, .. }))
+    // Rule 2: a number next to a masked word (never a marker) is masked too, and so is every number linked to it
+    // through other numbers (`Annastraat 12 13`): one pass forward, one backward, each seeing the last one's result.
+    let unmasked_number = |piece: &Piece| {
+        matches!(
+            piece,
+            Piece::Word {
+                number: true,
+                known: true,
+                ..
+            }
+        )
+    };
+    let masked_word = |piece: &Piece| matches!(piece, Piece::Word { known: false, .. });
+    let order: Vec<usize> = (1..pieces.len())
+        .chain((0..pieces.len().saturating_sub(1)).rev())
         .collect();
-    for (i, (_, piece)) in pieces.iter_mut().enumerate() {
-        if let Piece::Word {
-            known, number: true, ..
-        } = piece
-        {
-            let before = i > 0 && unknown[i - 1];
-            let after = unknown.get(i + 1).copied().unwrap_or(false);
-            if before || after {
+    for (pass, i) in order.into_iter().enumerate() {
+        let next_to = if pass < pieces.len() - 1 { i - 1 } else { i + 1 };
+        if unmasked_number(&pieces[i].1) && masked_word(&pieces[next_to].1) {
+            if let Piece::Word { known, .. } = &mut pieces[i].1 {
                 *known = false;
             }
         }
