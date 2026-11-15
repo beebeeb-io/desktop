@@ -1039,6 +1039,9 @@ impl<C: CredentialStores> Engine<C> {
             if let Ok(mut email) = self.acct.auth_email.lock() {
                 *email = None;
             }
+            if let Ok(mut profile) = self.acct.cached_profile.lock() {
+                *profile = None;
+            }
             self.remember_session_user_id(None);
             self.acct.auth_health.note_result(None);
             self.set_auth_present(false);
