@@ -248,7 +248,7 @@ fn protocol_refuses_oversize_frame_before_allocating() {
     assert_eq!(r.taken, 5);
 
     // A frame wider than MAX_FRAME_W whose length says exactly its pixels: refused on its header, before the pixels.
-    let (w, h) = (MAX_FRAME_W + 1, 1);
+    let (w, h) = (MAX_FRAME_W + 1, 1u32);
     let mut bytes = ((1 + 16 + w as usize * 4) as u32).to_le_bytes().to_vec();
     bytes.push(T_FRAME);
     bytes.extend_from_slice(&0u64.to_le_bytes());
