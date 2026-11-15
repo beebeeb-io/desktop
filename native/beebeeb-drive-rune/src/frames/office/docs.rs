@@ -609,6 +609,9 @@ mod tests {
         fn cancel(&mut self, id: &str) {
             self.inner.cancel(id)
         }
+        fn retry(&mut self, id: &str) -> Result<File, OpenError> {
+            self.inner.retry(id)
+        }
         fn save(&mut self, id: &str, _text: &str, base: u32) -> SaveOutcome {
             self.calls.borrow_mut().push(format!("save {id} {base}"));
             SaveOutcome::Failed
