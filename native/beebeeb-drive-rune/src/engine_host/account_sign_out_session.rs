@@ -124,11 +124,6 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     for id in ids.by_ref() {
                         // Past the deadline: this one and the rest are not sent, and the outcome is not known
                         // (one sent before may have landed whatever it was answered): the list says which.
-                        if called && began.elapsed() >= deadline {
-                            left.push(id.clone());
-                            first = Some(AccountCallError::Offline);
-                            break;
-                        }
                         called = true;
                         match engine.end_account_session(session, id) {
                             Ok(SessionEnd::Ended) => ended += 1,

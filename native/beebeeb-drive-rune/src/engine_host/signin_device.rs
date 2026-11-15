@@ -107,6 +107,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
     /// The person left the request (Cancel, Back, "Get a new code", a gate that moved). From this call on no answer of
     /// it reaches the screen, and the engine ends its wait at its next look at the stop.
     pub(super) fn device_cancel(&mut self) {
+        self.next_attempt(Wait::Device);
         if let Some(running) = lock(&self.device.0).take() {
             running.stop.store(true, Ordering::SeqCst);
         }

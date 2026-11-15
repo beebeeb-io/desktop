@@ -186,7 +186,7 @@ impl AwayLock {
         if let Some(seen) = self.seen.replace(Seen { at: now, wall, idle }) {
             let gap = seen.gap(now, wall);
             if gap > AWAY_GAP && !self.resumed {
-                let away = gap;
+                let away = seen.idle.saturating_add(gap);
                 self.away = Some(self.away.map_or(away, |held| held.max(away)));
                 self.gap_found_at = Some(now);
             }

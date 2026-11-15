@@ -257,8 +257,8 @@ impl<H: SearchHost> EngineSearchSource<H> {
     /// The index, while the session it was built in is the current one. Asked on every reader: an index of a
     /// session that ended is never handed out, even before the next `pump` drops it.
     fn current(&self) -> Option<&Held<H::Turn>> {
-        let _now = session_of(&*self.host)?;
-        self.held.as_ref()
+        let now = session_of(&*self.host)?;
+        self.held.as_ref().filter(|held| held.of == now)
     }
 
     /// The current session's last build was refused because this PC's local state is not provably this account's
@@ -287,7 +287,6 @@ impl<H: SearchHost> EngineSearchSource<H> {
             || self.asked.is_some()
             || self.recent.is_some()
             || self.recent_out.is_some();
-        self.forget();
         self.of = now;
         held
     }
