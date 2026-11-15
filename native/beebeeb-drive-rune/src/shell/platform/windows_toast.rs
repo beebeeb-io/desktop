@@ -33,8 +33,11 @@ pub(crate) enum Kind {
     /// "Space on this PC" (Sync on this PC).
     LocalSpace,
     /// "Backup needs attention" (Backups on this PC).
+    // Nothing raises one through a `Notice` yet: a refused move of Backups is DW-1182 ([`Kind::ServiceFolder`]).
+    #[allow(dead_code)]
     BackupAttention,
-    /// DW-1182: File Explorer was refused a move, rename or delete. No row of its own: the person did it a moment
+    /// DW-1182: File Explorer was refused a move, rename or delete, of a service folder or of Backups (a refused
+    /// Backups move, [`Notice::BackupRefusal`], is DW-1182 too). No row of its own: the person did it a moment
     /// ago, so only "Allow notifications" decides.
     ServiceFolder,
 }
@@ -67,7 +70,7 @@ pub(crate) fn kind_of(notice: &Notice) -> Kind {
         Notice::SyncComplete => Kind::SyncFinished,
         Notice::QuotaWarning { .. } => Kind::LocalSpace,
         Notice::Conflict { .. } => Kind::NeedsDecision,
-        Notice::BackupRefusal { .. } => Kind::BackupAttention,
+        Notice::BackupRefusal { .. } => Kind::ServiceFolder,
         Notice::ServiceFolderRefused => Kind::ServiceFolder,
     }
 }
@@ -119,7 +122,7 @@ pub(crate) fn words(kind: Kind) -> Words {
         },
         Kind::ServiceFolder => Words {
             title: "Beebeeb manages this folder",
-            body: "Beebeeb manages this folder. You can open and download its files.",
+            body: "Backups and the folders Beebeeb services keep can't be moved, renamed or deleted. You can open and download what's inside.",
         },
     }
 }

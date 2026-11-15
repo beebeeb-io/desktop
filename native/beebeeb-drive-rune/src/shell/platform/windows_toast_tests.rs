@@ -129,8 +129,33 @@ fn the_service_folder_toast_says_the_boards_words() {
     assert_eq!(words.title, "Beebeeb manages this folder");
     assert_eq!(
         words.body,
-        "Beebeeb manages this folder. You can open and download its files."
+        "Backups and the folders Beebeeb services keep can't be moved, renamed or deleted. You can open and download what's inside."
     );
+}
+
+#[test]
+fn a_refused_backups_move_says_the_boards_dw1182_words() {
+    let words = words_of(&Notice::BackupRefusal {
+        message: "C:\\Users\\anna\\Backups was not deleted".into(),
+    });
+    assert_eq!(words.title, "Beebeeb manages this folder");
+    assert_eq!(
+        words.body,
+        "Backups and the folders Beebeeb services keep can't be moved, renamed or deleted. You can open and download what's inside."
+    );
+}
+
+#[test]
+fn a_refused_backups_move_ignores_the_backup_attention_switch() {
+    let refusal = Notice::BackupRefusal {
+        message: "C:\\Users\\anna\\Backups was not deleted".into(),
+    };
+    let mut no_backup = all(true);
+    no_backup.backup_attention = false;
+    assert!(wanted(kind_of(&refusal), &no_backup));
+    let mut no_allow = no_backup;
+    no_allow.allow = false;
+    assert!(!wanted(kind_of(&refusal), &no_allow));
 }
 
 #[test]
