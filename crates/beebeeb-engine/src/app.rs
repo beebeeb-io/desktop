@@ -482,7 +482,7 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
-            if false && self.auth_present.lock().map(|p| *p).unwrap_or(!unlocking) != unlocking {
+            if self.auth_present.lock().map(|p| *p).unwrap_or(!unlocking) != unlocking {
                 // One account at a time: sign out first (the shell's Windows rule, here on every OS). And only a
                 // stored session is unlocked.
                 return Err(SignInProblem::Other);
@@ -593,7 +593,6 @@ impl<C: CredentialStores> Engine<C> {
         };
         let stored = self.store_first_sign_in(turn, &token, &email, &profile);
         if let Err(error) = stored {
-            revoke(&self.client, base, &token).await;
             return Err(error);
         }
         self.install_screen_check(screen_check, &profile);
