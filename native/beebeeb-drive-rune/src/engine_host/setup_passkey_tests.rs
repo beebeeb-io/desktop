@@ -171,8 +171,9 @@ fn setup_add_passkey_a_refusal_is_said_and_step_one_stays_skippable() {
             ui.skip();
         }
     });
-    wait_for(&mut rt, "the last page", |rt| says(rt, "You're set up"));
-    assert!(says(&rt, "Passkey, Not added") && !says(&rt, "Passkey, Added"));
+    // The second refusal may land after the step was left: the row waits for it, then says Not added.
+    wait_for(&mut rt, "the last page", |rt| says(rt, "Passkey, Not added"));
+    assert!(!says(&rt, "Passkey, Added"));
 }
 
 /// No password: refused at once, and nothing is asked of Beebeeb or of Windows.
