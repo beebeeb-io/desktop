@@ -109,6 +109,14 @@ mod tests {
         // HEVC never has FilmCraft's decoder, whatever is built.
         assert_eq!(route(Codec::Hevc), Route::System);
         assert!(!SYSTEM_FALLBACK.contains(&Codec::Hevc));
+        // M3: no row says `Rust` for a codec whose feature is off (the feature builds the decoder in; the row follows it).
+        assert_eq!(route(Codec::H264) == Route::Rust, cfg!(feature = "h264"));
+        assert_eq!(route(Codec::Aac) == Route::Rust, cfg!(feature = "aac"));
+        assert_eq!(route(Codec::Ac3) == Route::Rust, cfg!(feature = "ac3"));
+        assert_eq!(route(Codec::Eac3) == Route::Rust, cfg!(feature = "eac3"));
+        assert_eq!(route(Codec::Mpeg2) == Route::Rust, cfg!(feature = "mpeg2"));
+        assert_eq!(route(Codec::ProRes) == Route::Rust, cfg!(feature = "prores"));
+        assert_eq!(route(Codec::Dnx) == Route::Rust, cfg!(feature = "dnx"));
     }
 
     /// The rulings as they ship (the default features): H.264 ours, the other pool codecs compiled out (AAC and E-AC-3
