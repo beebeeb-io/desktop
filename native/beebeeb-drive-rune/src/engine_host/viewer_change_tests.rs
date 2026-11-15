@@ -166,3 +166,104 @@ fn the_three_keeps() {
     assert_eq!((words(&body).as_str(), version), (NOTE_TEXT, 5));
     assert_eq!(file.version, 3);
 }
+
+/// Poll `settled` until the version read on its worker is over and its answer (if any) was taken.
+fn newer_answer(source: &mut Source, id: &str) -> Option<Settled> {
+    let began = Instant::now();
+    loop {
+        if let Some(settled) = source.settled(id) {
+            return Some(settled);
+        }
+        if !source.changes.checking.load(Ordering::SeqCst) && source.changes.checked.is_some() {
+            // One more look: the answer may have been sent just before the worker let go of its flag.
+            return source.settled(id);
+        }
+        assert!(began.elapsed() < Duration::from_secs(10), "the read did not end");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn bump(fake: &Fake, version: i64) {
+    fake.s().edit = Some(EditFacts {
+        version,
+        kept: false,
+        can_write: true,
+    });
+}
+
+#[test]
+fn a_version_past_the_one_on_screen_raises_the_banner_without_a_device_name() {
+    let fake = Fake::new();
+    let (mut source, file, _) = opened(&fake, NOTE);
+    assert_eq!(file.version, 3);
+    assert!(file.newer.is_none(), "nothing newer at the open");
+    source.changes.every = Duration::ZERO;
+    // Nothing changed: nothing is said, however often it is read.
+    for _ in 0..3 {
+        assert!(newer_answer(&mut source, NOTE).is_none());
+    }
+    // The sync engine raised the file's version in the local state.
+    bump(&fake, 5);
+    let Some(Settled::Newer(newer)) = newer_answer(&mut source, NOTE) else {
+        panic!("a newer version is announced");
+    };
+    assert!(newer.from.is_empty(), "no device name in 0.9.0");
+    let at = newer.at.as_bytes();
+    assert!(at.len() == 5 && at[2] == b':', "a time as HH:MM: {}", newer.at);
+    // Once per version: the same version is not announced again, the next one is.
+    assert!(newer_answer(&mut source, NOTE).is_none());
+    bump(&fake, 6);
+    assert!(matches!(newer_answer(&mut source, NOTE), Some(Settled::Newer(_))));
+}
+
+#[test]
+fn the_views_own_save_is_not_a_newer_version() {
+    let fake = Fake::new();
+    let (mut source, _, _) = opened(&fake, NOTE);
+    assert_eq!(source.save(NOTE, "mine", 3), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Saved { version: 4, .. }));
+    // The local state now holds the version the save became.
+    bump(&fake, 4);
+    source.changes.every = Duration::ZERO;
+    for _ in 0..3 {
+        assert!(
+            newer_answer(&mut source, NOTE).is_none(),
+            "the save's own version is not another device's"
+        );
+    }
+    bump(&fake, 5);
+    assert!(matches!(newer_answer(&mut source, NOTE), Some(Settled::Newer(_))));
+}
+
+#[test]
+fn a_banner_for_a_session_that_moved_on_is_dropped() {
+    let fake = Fake::new();
+    let (mut source, _, _) = opened(&fake, NOTE);
+    source.changes.every = Duration::ZERO;
+    bump(&fake, 5);
+    // The read starts; the account is another one before its answer is taken.
+    assert!(source.settled(NOTE).is_none());
+    let began = Instant::now();
+    while source.changes.checking.load(Ordering::SeqCst) {
+        assert!(began.elapsed() < Duration::from_secs(10), "the read did not end");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    fake.new_session("b@example.eu");
+    assert!(source.settled(NOTE).is_none(), "another session's answer is dropped");
+}
+
+#[test]
+fn show_it_reads_the_file_again_as_beebeeb_has_it() {
+    let fake = Fake::new();
+    let (mut source, file, _) = opened(&fake, NOTE);
+    assert_eq!(file.version, 3);
+    bump(&fake, 5);
+    let again = source.newer(NOTE).expect("the file opens again");
+    assert_eq!(again.version, 5, "the version Beebeeb holds now");
+    assert!(again.newer.is_none());
+    assert!(
+        matches!(again.body, Body::Decrypting { .. }),
+        "the content comes on the poll"
+    );
+    assert_eq!(words(&answered(&mut source, NOTE)), NOTE_TEXT);
+}

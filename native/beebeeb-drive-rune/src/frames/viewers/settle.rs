@@ -50,6 +50,8 @@ impl Ui {
                 self.outcome(SaveOutcome::Opened(file));
             }
             Settled::Conflict(other) => self.outcome(SaveOutcome::Conflict(other)),
+            // The version on screen stays until Show it; a second one replaces the first banner's time.
+            Settled::Newer(newer) => self.file.newer = Some(newer),
             Settled::Failed => {
                 self.dialog = None;
                 self.toast = Some("Not saved".to_string());

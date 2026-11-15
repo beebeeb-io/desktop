@@ -4,11 +4,15 @@
 //! still the open file's session and account. Nothing is drawn as done before the engine answered.
 
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::frames::viewers::source::Conflict;
+use crate::frames::viewers::source::{Conflict, Newer};
+
+/// How often the open file's version is read from the local state.
+pub(super) const NEWER_EVERY: Duration = Duration::from_millis(1500);
 
 /// What the other side of a conflict is called: the engine does not say which device saved.
 const OTHER_SIDE: &str = "Another device";
@@ -26,12 +30,25 @@ pub(super) struct Changes {
     rx: mpsc::Receiver<Message>,
     /// A change is with a worker: one at a time.
     busy: bool,
+    /// A read of the open file's version is with a worker (it never blocks a change).
+    checking: Arc<AtomicBool>,
+    /// When the version was last asked for.
+    checked: Option<Instant>,
+    /// How long between two reads of the version.
+    pub(super) every: Duration,
 }
 
 impl Default for Changes {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { tx, rx, busy: false }
+        Self {
+            tx,
+            rx,
+            busy: false,
+            checking: Arc::default(),
+            checked: None,
+            every: NEWER_EVERY,
+        }
     }
 }
 
@@ -218,12 +235,19 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// text overwritten with it).
     pub(super) fn take_settled(&mut self, file_id: &str) -> Option<Settled> {
         let mut found = None;
+        let mut newer = None;
         while let Ok(message) = self.changes.rx.try_recv() {
-            self.changes.busy = false;
+            let is_newer = matches!(message.settled, Settled::Newer(_));
+            if !is_newer {
+                self.changes.busy = false;
+            }
             let current = self.engine.has_session()
                 && self.engine.session_turn() == message.session
                 && self.engine.account() == message.account;
-            if current && message.file_id == file_id && found.is_none() {
+            if current && message.file_id == file_id && is_newer {
+                newer = Some(message.settled);
+            } else if current && message.file_id == file_id && found.is_none() && !is_newer {
+                self.rebase(&message.settled);
                 found = Some(message.settled);
             } else if let Settled::Saved { mut body, .. }
             | Settled::Queued { mut body }
@@ -232,7 +256,71 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 body.wipe();
             }
         }
-        found
+        // A change's answer first: it is what the person pressed. The banner waits one pump.
+        if found.is_none() && newer.is_none() {
+            self.check_for_newer(file_id);
+        }
+        found.or(newer)
+    }
+
+    /// What the view holds after `settled` is the version of that answer: it is not another device's.
+    fn rebase(&self, settled: &Settled) {
+        let Some(opening) = self.open.as_ref() else { return };
+        let version = match settled {
+            Settled::Saved { version, .. } | Settled::Opened { version, .. } => i64::from(*version),
+            Settled::Conflict(conflict) => i64::from(conflict.version),
+            // Stored on this PC; the version it becomes is not known. The next read learns it (a newer version that
+            // lands in the same moment goes unsaid, and the next save still finds it as a conflict).
+            Settled::Queued { .. } => SEEN_UNSET,
+            _ => return,
+        };
+        opening.seen.store(version, Ordering::SeqCst);
+    }
+
+    /// On a worker: read the version the local state holds for the open file. A version past the one the view
+    /// holds comes back as `Settled::Newer`; the version is then the one held, so one banner per version.
+    fn check_for_newer(&mut self, file_id: &str) {
+        let due = self.changes.checked.is_none_or(|at| at.elapsed() >= self.changes.every);
+        if self.changes.checking.load(Ordering::SeqCst) || !due {
+            return;
+        }
+        let Some((opening, _)) = self.change_facts().filter(|(opening, _)| opening.file_id == file_id) else {
+            return;
+        };
+        let (session, account, seen) = (opening.session, opening.account.clone(), opening.seen.clone());
+        let (engine, tx, id) = (self.engine.clone(), self.changes.tx.clone(), file_id.to_string());
+        let checking = self.changes.checking.clone();
+        checking.store(true, Ordering::SeqCst);
+        let started = std::thread::Builder::new().name("viewer-newer".into()).spawn(move || {
+            let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let now = engine.edit_facts(session, &id)?.version;
+                let before = seen.swap(now, Ordering::SeqCst);
+                (before != SEEN_UNSET && now > before).then(|| {
+                    Settled::Newer(Newer {
+                        from: String::new(),
+                        at: hhmm(),
+                    })
+                })
+            }))
+            .ok()
+            .flatten();
+            // Sent before the flag is let go: the next read starts after this answer is on its way.
+            if let Some(settled) = settled {
+                let _ = tx.send(Message {
+                    file_id: id,
+                    session,
+                    account,
+                    settled,
+                });
+                engine.wake();
+            }
+            checking.store(false, Ordering::SeqCst);
+        });
+        self.changes.checked = Some(Instant::now());
+        if started.is_err() {
+            log("viewer: could not start the worker for a version read");
+            self.changes.checking.store(false, Ordering::SeqCst);
+        }
     }
 }
 

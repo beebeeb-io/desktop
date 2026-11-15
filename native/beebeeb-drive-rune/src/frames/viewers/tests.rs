@@ -549,6 +549,27 @@ fn a_newer_version_waits_for_show_it() {
 }
 
 #[test]
+fn a_newer_version_the_engine_noticed_is_said_without_a_device_name() {
+    let (mut rt, _) = note(false, false);
+    assert!(!has(&rt, "banner"), "nothing newer, no banner");
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.settle(super::source::Settled::Newer(super::source::Newer {
+            from: String::new(),
+            at: "09:14".into(),
+        }));
+    });
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(info(&rt, "banner").role, "status");
+    assert_eq!(
+        info(&rt, "banner-text").text.as_deref(),
+        Some("A newer version arrived, 09:14.")
+    );
+    assert_eq!(viewer(&rt).file.version, 3, "the version on screen stays until Show it");
+}
+
+#[test]
 fn typing_marks_the_edit_unsaved_and_ctrl_s_saves_a_new_version() {
     let (mut rt, calls) = note(false, false);
     edit_and_type(&mut rt);

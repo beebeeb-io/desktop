@@ -30,7 +30,10 @@
 //!   (asked again on Try again), never one catch-all.
 //! - "Open in another app…": the system opens the file from the account's folder on this PC, where the engine
 //!   already puts opened files. No copy is made here.
-//! - not bound: saving an edit, Available offline, a newer version's banner, find, play, a photo's strip.
+//! - a newer version: while a file is open the local state's version is read (on a worker, about every 1.5 s,
+//!   `viewer_change::check_for_newer`); a version past the one the view holds raises "A newer version arrived, 09:14."
+//!   (no device name in 0.9.0, decision 2505). Show it opens the file again (`ViewerSource::newer`).
+//! - not bound: find, play, a photo's strip.
 //!
 //! Where the decrypted bytes are: in the engine's `Zeroizing` buffer until the worker made of them what the view
 //! draws (lines of text, or pixels), then wiped. The text is overwritten when the view lets go of it
@@ -52,7 +55,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 
 use beebeeb_engine::account::SessionGeneration;
@@ -296,6 +299,9 @@ struct Progress {
     woken_at: AtomicU64,
 }
 
+/// `Opening::seen` when the version the view holds is not known: the next read only learns it.
+const SEEN_UNSET: i64 = i64::MIN;
+
 /// The file this source has open, and the session it was opened for.
 struct Opening {
     file_id: String,
@@ -320,6 +326,8 @@ struct Opening {
     /// What the local state said at the open: the version, whether the file is kept, whether it may be changed.
     /// `None`: not read.
     edit: Option<EditFacts>,
+    /// The version the view holds, for the newer-version check: [`SEEN_UNSET`] until the next read says which.
+    seen: Arc<AtomicI64>,
     /// How the file is shown, and its name (a Keep both names the copy after it).
     shows: Shows,
     name: String,
@@ -808,9 +816,15 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             ended: false,
             // Read for the session of this open, from the local state alone.
             edit: self.engine.edit_facts(session, file_id),
+            seen: Arc::new(AtomicI64::new(SEEN_UNSET)),
             shows,
             name: facts.name.clone(),
         };
+        // The first read of the version is one interval after the open, not at it.
+        self.changes.checked = Some(std::time::Instant::now());
+        if let Some(edit) = opening.edit {
+            opening.seen.store(edit.version, Ordering::SeqCst);
+        }
         let body = if shows == Shows::Nothing {
             Body::NotPreviewable(NoPreview::NoViewer)
         } else if facts.size > IN_MEMORY_MAX {
@@ -1051,6 +1065,11 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
+        self.begin(file_id)
+    }
+
+    /// Show it: the file is read again as Beebeeb has it now (its content comes on the poll, as at an open).
+    fn newer(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
         self.begin(file_id)
     }
 

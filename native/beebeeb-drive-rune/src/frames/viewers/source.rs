@@ -90,7 +90,7 @@ impl fmt::Debug for Details {
 /// A newer version saved elsewhere.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Newer {
-    /// "Anna's iPhone".
+    /// "Anna's iPhone". Empty: no device is named (the engine does not say which device saved: decision 2505).
     pub from: String,
     /// "09:14".
     pub at: String,
@@ -326,6 +326,9 @@ pub enum Settled {
     Opened { body: Body, version: u32 },
     /// Another device saved the file meanwhile; nothing was written.
     Conflict(Conflict),
+    /// The local state holds a version of the open file that this view does not (DW-1519). Nothing on screen
+    /// changed: the banner offers it.
+    Newer(Newer),
     /// Not done, nothing changed.
     Failed,
 }
