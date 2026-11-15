@@ -487,7 +487,8 @@ fn a_real_workbook_answers_its_cells() {
     assert_eq!(data.frozen, Frozen { rows: 1, cols: 0 });
     assert!(!data.missing_content, "everything in the range is shown");
 
-    // The picture: over D2:F8, drawn at the size the app asks, in its colours.
+    // The picture: over D2:F7 (its far corner lies on the top edge of row 8, which it does not cover; `to` is
+    // inclusive), drawn at the size the app asks, in its colours.
     assert_eq!(data.anchors.len(), 1, "one picture touches the range");
     let picture = data.anchors[0].clone();
     assert_eq!(
@@ -498,7 +499,7 @@ fn a_real_workbook_answers_its_cells() {
             picture.to_row,
             picture.to_col
         ),
-        (AnchorKind::Picture, 1, 3, 7, 5)
+        (AnchorKind::Picture, 1, 3, 6, 5)
     );
     let mut ask = draw_into(picture.id, NO_GRANT);
     ask.scale = render_scale(1.0, 96.0);

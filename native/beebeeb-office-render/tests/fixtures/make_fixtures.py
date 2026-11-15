@@ -8,7 +8,7 @@
                     does not bundle (its bundled fallback is a sans), and one line in the default face. A handwritten
                     heading in the rendered page can only have come from the system's font folder.
   sheets-3.xlsx     three sheets: "Budget" (bold headers, amounts in #,##0.00, a share in 0.0 %, a SUM with its cached
-                    value, the first row frozen, one 8 x 8 picture of 16 colours over D2:F8), "Notes" (text, a merge
+                    value, the first row frozen, one 8 x 8 picture of 16 colours over D2:F7), "Notes" (text, a merge
                     A3:C3) and "Empty".
   deck-3.pptx       three 16:9 slides (960 x 540 pt) titled "Q3 plan", (no title), "Thanks", each with a filled box.
   latency/grid-2000.xlsx  one sheet "Grid": 2,000 rows x 20 columns (a label, then amounts, shares and counts in
@@ -233,7 +233,8 @@ budget = {
     4: [text_cell(st, 4, 0, "Total", BOLD), num_cell(4, 1, "4361.75", AMOUNT, "SUM(B2:B4)")],
 }
 notes = {0: [text_cell(st, 0, 0, "Plain text")], 2: [text_cell(st, 2, 0, "Merged")]}
-# The picture: 120 x 90 pt from D2 (col 3, row 1) to F8 (col 5 + 24 pt, row 7), over 48 pt columns and 15 pt rows.
+# The picture: 120 x 90 pt from D2 (col 3, row 1), its far corner at col 5 + 24 pt and on the top edge of row 7 (F8):
+# over 48 pt columns and 15 pt rows it covers D2:F7.
 pic = ('<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="Picture 1"/><xdr:cNvPicPr/></xdr:nvPicPr>'
        '<xdr:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
        f'<xdr:spPr><a:xfrm><a:off x="{144 * EMU}" y="{15 * EMU}"/><a:ext cx="{120 * EMU}" cy="{90 * EMU}"/></a:xfrm>'

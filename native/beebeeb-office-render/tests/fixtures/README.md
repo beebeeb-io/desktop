@@ -26,7 +26,7 @@ keeps its own files in `latency/`; they are not listed here.
 - **`sheets-3.xlsx`** is the workbook the helper reads end to end (`a_real_workbook_answers_its_cells`):
   - "Budget": bold headers (row 1, frozen); "Rent" 1234.5, "Costs" 2765.25, "Fees" 362 in `#,##0.00`; a share of 0.125 in
     `0.0%` (C2); "Total" `=SUM(B2:B4)` with its cached value 4361.75; one 8 x 8 picture of 16 colours, 120 x 90 pt, over
-    D2:F8.
+    D2:F7 (its far corner on the top edge of F8, so row 8 is not covered).
   - "Notes": text in A1, "Merged" over A3:C3. "Empty": no cells.
   - Excel shows the amounts as "1,234.50", "2,765.25", "362.00", "4,361.75" and the share as "12.5%".
 - **`deck-3.pptx`** is the deck the helper renders (`a_real_deck_renders_slide_one`): 3 slides of 960 x 540 pt,
