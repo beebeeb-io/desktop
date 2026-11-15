@@ -1193,9 +1193,9 @@
    "h": 15.0,
    "kind": "text",
    "size": 12.0,
-   "text": "Let another device sign in",
+   "text": "Not available in this version yet. Approve on the web.",
    "tracking": 0.0,
-   "w": 352.0,
+   "w": 462.0,
    "weight": 400,
    "x": 302.0,
    "y": 475.5
@@ -1203,7 +1203,7 @@
   "item-1-2-text": {
    "h": 33.0,
    "kind": "box",
-   "w": 352.0,
+   "w": 462.0,
    "x": 302.0,
    "y": 457.5
   },
@@ -1220,28 +1220,10 @@
    "size": 13.0,
    "text": "Approve a sign-in",
    "tracking": -0.06,
-   "w": 352.0,
+   "w": 462.0,
    "weight": 500,
    "x": 302.0,
    "y": 457.5
-  },
-  "item-1-2-value": {
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "family": "sans",
-   "h": 17.0,
-   "kind": "text",
-   "size": 13.0,
-   "text": "Not available yet",
-   "tracking": 0.0,
-   "w": 102.0,
-   "weight": 400,
-   "x": 662.0,
-   "y": 465.5
   },
   "item-2-0": {
    "h": 40.0,

@@ -224,3 +224,9 @@ engine's wait. While a wait runs, Unlock is disabled and the sentence counts dow
 | the press could not be checked | "Beebeeb couldn't check that password. Nothing was unlocked." |
 
 The typed password is wiped when it is sent, on Back, and when the lock level changes.
+
+Decision (lead, 2026-11-15 02:05, PR #428): **DW-0009 is out of the 0-failing set, on purpose.** The board draws
+Windows' own "Windows Security / Making sure it's you" prompt over the locked window, with sample sidebar counts and
+an account row. Windows draws that prompt, not the app, and the app's locked window shows no sample data: a fixture
+that faked either would be a lie. The frame stays red in `compare.sh` (geometry 19 failing, measured 2026-11-15). It is
+verified on the native rung: a person looking at the real Hello prompt at the first open of the app lock.

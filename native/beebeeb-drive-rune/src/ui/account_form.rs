@@ -140,7 +140,10 @@ pub fn field(
         well = well.child(kit::glyph(format!("{key}-icon"), icon, 16.0, t.text_tertiary));
     }
     // The typed text's own box, for the gate: as wide as the text Rune draws in the input.
-    let width = shown.as_deref().map_or(0.0, |shown| rune::text::advance(shown, style));
+    let width = shown
+        .as_deref()
+        .filter(|shown| !shown.is_empty())
+        .map_or(0.0, |shown| rune::text::advance(shown, style));
     let mut inner = row().grow(1.0).min_w(0.0).h_full().center_y().child(input).child(
         el().key(format!("{key}-value-box"))
             .a11y_hidden()
@@ -153,7 +156,7 @@ pub fn field(
         // follows), where the model says it stands. Rune's own caret is 2 pt wide and touches
         // the text, so it is left unseen (see the PR's Rune notes); this one does not blink.
         let before = edit.text[..edit.focus.min(edit.text.len())].chars().count();
-        let x = match shown.as_deref() {
+        let x = match shown.as_deref().filter(|shown| !shown.is_empty()) {
             Some(shown) => {
                 let end = shown.char_indices().nth(before).map_or(shown.len(), |(at, _)| at);
                 rune::text::advance(&shown[..end], style)
@@ -166,7 +169,15 @@ pub fn field(
                     .a11y_hidden()
                     // 5 pt under the field's top (measured: the caret at 143 in a field at 138,
                     // DW-A64 and DW-A65), which is 4 under the well's 1 pt border.
-                    .absolute(x + 1.0, 4.0)
+                    // An empty field's caret stands 2 pt lower on the board (DW-A78: 7 under the field's top).
+                    .absolute(
+                        x + 1.0,
+                        if shown.as_deref().is_some_and(str::is_empty) {
+                            6.0
+                        } else {
+                            4.0
+                        },
+                    )
                     .size(1.5, 17.0)
                     .radius(1.0)
                     .fill(t.accent_deep),
