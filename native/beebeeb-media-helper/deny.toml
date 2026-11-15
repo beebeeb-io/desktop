@@ -1,0 +1,93 @@
+# The cargo-deny policy of the media helper: the Office engine repository's `deny.toml` (its allow-list of permissive
+# licences and its ban on network clients, TLS stacks, sockets and async runtimes), plus exactly two things:
+#   - 13 licence exceptions: the `symphonia` 0.5.5 crates FilmCraft brings, MPL-2.0, unmodified (decision D-MED-10:
+#     the owner's "use rust libs" of 2026-11-15 covers them; their notice goes in the licence list a release carries);
+#   - the Office engine repository as the one allowed git source (decision D-MED-11: FilmCraft is vendored there).
+# Run here: `cargo deny check licenses bans sources`. Expected: the 13 exceptions used, 0 errors.
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "warn"
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Permissive only. MPL-2.0, LGPL and anything else is REPORTED, so a person decides.
+allow = [
+    "MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+    "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "BSL-1.0", "0BSD", "OFL-1.1", "Unlicense",
+]
+
+# D-MED-10: the 13 symphonia 0.5.5 crates (MPL-2.0, file-level copyleft; used unmodified). Pinned to the version, so a
+# FilmCraft bump that moves them is reported again.
+[[licenses.exceptions]]
+crate = "symphonia@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-bundle-flac@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-bundle-mp3@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-codec-aac@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-codec-alac@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-codec-pcm@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-codec-vorbis@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-core@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-format-isomp4@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-format-ogg@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-format-riff@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-metadata@0.5.5"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "symphonia-utils-xiph@0.5.5"
+allow = ["MPL-2.0"]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+# Network clients, TLS stacks, socket layers and async runtimes: none may be in the helper's graph.
+deny = [
+    { crate = "reqwest" }, { crate = "ureq" }, { crate = "hyper" }, { crate = "h2" }, { crate = "curl" },
+    { crate = "isahc" }, { crate = "attohttpc" }, { crate = "tiny_http" }, { crate = "tungstenite" },
+    { crate = "rustls" }, { crate = "native-tls" }, { crate = "openssl" }, { crate = "quinn" },
+    { crate = "socket2" }, { crate = "mio" },
+    { crate = "tokio" }, { crate = "async-std" }, { crate = "smol" }, { crate = "async-io" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# D-MED-11: FilmCraft's vendored crates, at the pin in `Cargo.toml`'s `[patch.crates-io]`.
+allow-git = ["https://github.com/beebeeb-io/desktop-office"]
