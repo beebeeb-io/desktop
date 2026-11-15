@@ -284,7 +284,9 @@ fn share_opens_the_dialog_and_shares_nothing_by_itself() {
 }
 
 /// Show in Beebeeb: Files, the file selected, nothing open. Version history…: DW-0413 on the file. An id the account's
-/// state holds that is not in the folder's rows (a row the listing leaves out): selected nothing, opened nothing.
+/// state holds that is not in its folder's rows (a row the listing leaves out): the window is left as it was, the
+/// selection and the open dialog with it. Mutant: in `open`, drop the early `return` when the folder's listing has no
+/// such row → `close_dialogs` and `open_folder` run, the Version history dialog closes and the selection goes.
 #[test]
 fn show_selects_the_file_and_version_history_opens_its_versions() {
     let (mut rt, calls, _) = window();
@@ -304,7 +306,7 @@ fn show_selects_the_file_and_version_history_opens_its_versions() {
     );
     assert_eq!(row_id(&rt), Some("budget".to_string()));
 
-    // The engine holds it, the folder's rows do not: nothing selected or opened beyond what was.
+    // The engine holds it, the folder's rows do not: the window stays as it was.
     let hidden = Items {
         account: ACCOUNT,
         held: &[("not-a-row", None)],
@@ -314,10 +316,12 @@ fn show_selects_the_file_and_version_history_opens_its_versions() {
     rt.update(|s, tx| handle_with(s, ExplorerVerb::Share, "not-a-row", Some(&hidden), tx));
     settle(&mut rt);
     assert_eq!(row_id(&rt), before);
+    assert_eq!(before, Some("budget".to_string()));
     assert!(
-        !matches!(rt.state.actions.dialog, Some(Dialog::Share(_))),
-        "no Share dialog for a row that is not there"
+        matches!(&rt.state.actions.dialog, Some(Dialog::Versions(item)) if item.id == "budget"),
+        "the open dialog stays: no Share dialog for a row that is not there"
     );
+    assert_eq!(hidden.asked.get(), 1);
     let asked = calls.lock().unwrap().clone();
     assert!(
         !asked

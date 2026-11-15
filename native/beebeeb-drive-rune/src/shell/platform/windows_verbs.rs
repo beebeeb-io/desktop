@@ -345,17 +345,26 @@ fn row_of(s: &State, id: &str) -> Option<usize> {
     s.listing.items.iter().position(|row| row.id == id)
 }
 
-/// Files, in the item's folder, with the item selected; then the verb's own surface. Whatever the Files window had
-/// open closes first, through its wiping path (a Share dialog's password with it).
+/// Files, in the item's folder, with the item selected; then the verb's own surface. The row is looked for first, in
+/// the folder the engine names: a row that folder's listing does not hold leaves the window as it was (it only came
+/// forward). Otherwise whatever the Files window had open closes, through its wiping path (a Share dialog's password
+/// with it), before the folder is shown.
 fn open(s: &mut State, verb: ExplorerVerb, folder: Option<String>, item: &str, tx: &mut Tx) {
+    let shown = s.listing.folder.id == folder && row_of(s, item).is_some();
+    if !shown {
+        let (listing, _) = crate::shell::state::load(s.source.as_ref(), folder.as_deref());
+        if !listing.items.iter().any(|row| row.id == item) {
+            host::log("a File Explorer verb found no row");
+            return;
+        }
+    }
     host::request(s, Intent::Go(Route::section(Section::Files)));
     if !matches!(s.shell.app.screen(), Screen::Drive(route) if route.section == Section::Files) {
         host::log("a File Explorer verb did not reach Files");
         return;
     }
     crate::frames::files::reset::close_dialogs(s);
-    // The folder the window already shows is read again only when the row is not in it (a file that just came).
-    if s.listing.folder.id != folder || row_of(s, item).is_none() {
+    if !shown {
         s.open_folder(folder);
     }
     let Some(row) = row_of(s, item) else {
