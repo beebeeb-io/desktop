@@ -317,6 +317,60 @@ fn problems_carry_the_engines_words_and_try_again_reaches_the_queue() {
     assert!(source.history().iter().all(|c| c.problem().is_none()));
 }
 
+/// Task 2524: a held sync-folder edit is a problem row of its own, with the engine's words; it is in the history too, it
+/// has no Try again (the engine has no action for it), and Try again on every problem leaves it untouched.
+#[test]
+fn a_held_edit_is_a_problem_with_the_engines_words_and_no_try_again() {
+    let fake = busy_pc();
+    let db = fake.db();
+    file(&db, "f-held", "Invented/Held plan.txt", FileStatus::Local, 100, false);
+    file(
+        &db,
+        "f-unknown",
+        "Invented/Old sheet.xlsx",
+        FileStatus::Local,
+        100,
+        false,
+    );
+    db.hold_unsent_edit("f-held", "base_unknown", "fp-1", now() - 50)
+        .unwrap();
+    db.hold_unsent_edit("f-unknown", "content_unknown", "fp-2", now() - 40)
+        .unwrap();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    let problems = source.problems();
+    assert_eq!(
+        names(&problems),
+        ["Old sheet.xlsx", "Held plan.txt", "Loose note.md"],
+        "newest first, with the queue's own problem"
+    );
+    for (i, word) in [(0, "can’t tell"), (1, "which version")] {
+        let What::Failed { problem, reason } = &problems[i].what else {
+            panic!("a held edit is Failed");
+        };
+        assert!(problem.starts_with("held:"), "{problem}");
+        assert!(reason.line().contains(word), "{}", reason.line());
+        assert!(!reason.line().contains("0.8.13"), "{}", reason.line());
+    }
+    assert_eq!(
+        source.history().iter().filter(|c| c.problem().is_some()).count(),
+        3,
+        "listed in the history too"
+    );
+    source.retry("held:f-held");
+    settle(&mut source);
+    assert_eq!(source.problems().len(), 3, "no Try again for a held edit");
+    source.retry_all();
+    settle(&mut source);
+    let left = source.problems();
+    assert_eq!(
+        names(&left),
+        ["Old sheet.xlsx", "Held plan.txt"],
+        "only the queue's problem went"
+    );
+    assert_eq!(fake.db().list_held_edits().unwrap().len(), 2, "both still held");
+}
+
 /// Try again on every problem reaches every one of them.
 #[test]
 fn retry_all_reaches_every_problem() {

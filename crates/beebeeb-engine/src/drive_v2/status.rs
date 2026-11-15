@@ -320,6 +320,13 @@ pub fn sync_problems(queue: &[UnsentChange]) -> Vec<SyncProblem> {
         .collect()
 }
 
+/// Task 2524: the sync-folder edits the engine holds and does not send (`held_edits`: [`StateDb::list_held_edits`]'s
+/// `(file_id, path, reason, detected_at)`), one problem each, so a held edit never looks synced.
+pub fn held_edit_problems(held: &[(String, String, String, i64)]) -> Vec<SyncProblem> {
+    let _ = held;
+    Vec::new()
+}
+
 /// One Available-offline row (DW-0715): a kept item that no kept folder holds, with a folder's file count and bytes.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -374,3 +381,6 @@ pub fn offline_entries(rows: &[(FileEntry, bool, DriveItem)]) -> Vec<OfflineEntr
     });
     out
 }
+
+#[cfg(test)]
+mod held_tests;
