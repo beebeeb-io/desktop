@@ -403,8 +403,10 @@ impl<C: CredentialStores> Engine<C> {
                 return None;
             }
             // A proof stops wherever a session ends, before the engine, as at a lock and a sign-out.
+            self.stop_proofs().await;
             // The account's recent searches leave this computer while the session is still in memory, as at a
             // sign-out. The handle refuses once the refusal run marked the session ended: then they stay.
+            let _ = self.delete_recent_searches_at_sign_out(self.acct.session_generation());
             let vault = self.vault();
             // Core: the check record and the wrong-try count are deleted with the key, and the mark is written.
             let _ = vault.clear_lock_flag(LockFlag::ScreenCheck);

@@ -1093,7 +1093,7 @@ impl<C: CredentialStores> Engine<C> {
             .engine
             .try_lock()
             .is_ok_and(|slot| slot.as_ref().is_some_and(crate::runner::EngineRunner::is_running));
-        if false && let Some(root) = self.running_root() {
+        if running && let Some(root) = self.running_root() {
             return Ok(root);
         }
         let config = crate::config::DesktopConfig::load_for(self.identity)?;
