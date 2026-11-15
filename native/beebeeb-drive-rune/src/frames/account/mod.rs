@@ -753,7 +753,8 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A77", |s| open_on(s, "DW-A77")),
     ("DW-A78", |s| {
         open_on(s, "DW-A78");
-        form::type_in(&mut s.account.form.code, "51");
+        // The board draws the password field empty and in focus.
+        form::focus(&mut s.account.form, Some(form::CURRENT_KEY));
     }),
     ("DW-A79", |s| {
         open_on(s, "DW-A79");

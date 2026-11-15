@@ -631,8 +631,8 @@ fn purge(s: &State, target: Option<&str>, t: &Theme) -> Option<El> {
         |input| input.on_submit(submit_purge),
         t,
     );
-    // The password field keeps the room the board's code field had (14 pt taller), so the buttons stay where the board has them.
-    let password = col().key("purge-password-room").w_full().pb(14.0).child(password);
+    // The password field keeps the room the board's code field had (7 pt taller), so the buttons stay where the board has them.
+    let password = col().key("purge-password-room").w_full().pb(7.0).child(password);
     let mut body = vec![paragraph, password];
     if let Some(problem) = ui.fields.problem {
         body.push(
