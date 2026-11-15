@@ -8,9 +8,11 @@
 //! has synced yet has no state database: the folders are still read from the settings file (they are this
 //! computer's), there is no Backups root yet, and a switch writes the settings file alone, as the 0.8 app does.
 //!
+//! The folders a person chose beside the six (DW-0737 "chosen by you") are rows too, after the six: added and removed
+//! in `app/bindings/backup_folders.rs`, switched like a known folder ("Back up again" after a stop).
+//!
 //! Not here (no engine function for them yet): other devices' backups, the items that could not back up, the
-//! running pass's progress, a "back up now" trigger (the scheduler is the runner's own), and folders a person
-//! chooses beyond Windows' six known folders (the settings file holds known-folder keys only).
+//! running pass's progress, and a "back up now" trigger (the scheduler is the runner's own).
 //!
 //! Must not: log a folder's path or a name; walk a folder on the caller's thread for the switch; hold the state
 //! database while a folder is counted.
@@ -20,6 +22,7 @@ use std::path::Path;
 
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::backup::kfm::{self, KnownFolderPaths, SourceResolution};
+use crate::backup::sources::ChosenFolder;
 use crate::config::{DesktopConfig, KnownFolderSource};
 use crate::known_folder::{KNOWN_FOLDERS, known_folder_by_key};
 use crate::state_db::StateDb;
@@ -47,12 +50,12 @@ pub enum FolderState {
     Unavailable,
 }
 
-/// One of Windows' six known folders.
+/// One of Windows' six known folders, or a folder the person chose (its key `custom:<name>`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupFolderRow {
-    /// The settings file's key (`documents`): a catalog id, never a path.
-    pub key: &'static str,
-    pub name: &'static str,
+    /// The settings file's key (`documents`, `custom:Projects`): a catalog id or core's custom key, never a path.
+    pub key: String,
+    pub name: String,
     /// In the backup set (`known_folder_backup`).
     pub on: bool,
     pub state: FolderState,
@@ -63,6 +66,16 @@ pub struct BackupFolderRow {
     pub last_pass_at_ms: Option<i64>,
     /// Why the backup turned itself off, in core's words (`backup_stop_words`); `Some` only while it is stopped.
     pub stop_words: Option<String>,
+}
+
+impl BackupFolderRow {
+    /// A folder the person chose (DW-0737 "chosen by you"): removed, never switched off.
+    pub fn chosen_by_you(&self) -> bool {
+        matches!(
+            beebeeb_types::backup::Category::from_key(&self.key),
+            Some(beebeeb_types::backup::Category::Custom(_))
+        )
+    }
 }
 
 /// What the Backups section reads about this computer.
@@ -78,7 +91,7 @@ pub struct BackupsOverview {
 pub enum BackupsError {
     /// The local state is not handed out (signed out, locked, another account's, the session changed, ...).
     Refused(LocalStateRefused),
-    /// Not one of the six known folders.
+    /// Not one of the six known folders, nor a folder the person chose.
     UnknownFolder,
     /// The settings file could not be read or written.
     Settings,
@@ -174,8 +187,8 @@ pub fn overview_from(
             };
             let reads_default = read_from.is_some() && read_from == both.default;
             BackupFolderRow {
-                key: folder.key,
-                name: folder.display_name,
+                key: folder.key.to_string(),
+                name: folder.display_name.to_string(),
                 on,
                 state: folder_state,
                 items: read_from.as_deref().filter(|_| reads_default).and_then(&count),
@@ -190,6 +203,58 @@ pub fn overview_from(
         root: state.root.clone(),
         folders,
     }
+}
+
+/// [`read_state`], and the last pass of each folder the person chose.
+pub fn read_state_with(db: &StateDb, chosen: &[ChosenFolder]) -> Result<StateRead, BackupsError> {
+    let mut state = read_state(db)?;
+    for folder in chosen {
+        let key = folder.key();
+        let mark = db.backup_pass_mark(&key).map_err(|_| BackupsError::State)?;
+        if let Some(at) = mark.last_pass_at_ms {
+            state.last_pass.insert(key, at);
+        }
+    }
+    Ok(state)
+}
+
+/// The rows of the folders the person chose, after the six, in the order they were added. On while its key is in the
+/// backup set and it is still a folder on this PC; stopped (core's words) when its backup turned itself off; a folder
+/// gone from this PC is `Unavailable` and not on (it backs up nothing), and stays listed so it can be removed. Counted
+/// (`count`) only while on: the pass walks it then anyway.
+pub fn chosen_rows(
+    chosen: &[ChosenFolder],
+    enabled: &[String],
+    state: &StateRead,
+    count: impl Fn(&Path) -> Option<u64>,
+) -> Vec<BackupFolderRow> {
+    chosen
+        .iter()
+        .map(|folder| {
+            let key = folder.key();
+            let switched_on = enabled.iter().any(|k| *k == key);
+            let present = folder.path.is_absolute() && folder.path.is_dir();
+            let stopped = state.stopped.iter().any(|k| *k == key);
+            let folder_state = match (present, switched_on, stopped) {
+                (false, _, _) => FolderState::Unavailable,
+                (true, true, _) => FolderState::On,
+                (true, false, true) => FolderState::Stopped,
+                (true, false, false) => FolderState::Off,
+            };
+            let on = folder_state == FolderState::On;
+            BackupFolderRow {
+                items: on.then(|| count(&folder.path)).flatten(),
+                last_pass_at_ms: state.last_pass.get(&key).copied(),
+                stop_words: (folder_state == FolderState::Stopped)
+                    .then(|| crate::backup::stop::stop_view(&state.stops, &key, &folder.name, false))
+                    .and_then(|view| view.stop_words),
+                key,
+                name: folder.name.clone(),
+                on,
+                state: folder_state,
+            }
+        })
+        .collect()
 }
 
 /// The switch's work in the state database: protection follows the switch at once; off purges the folder's
@@ -229,26 +294,46 @@ impl<C: CredentialStores> Engine<C> {
     /// first; the folders are counted after it (a disk walk: BLOCKS, a worker's). Nothing has synced yet: the
     /// folders without a root. Any other refusal: nothing.
     pub fn backups_overview(&self) -> Result<BackupsOverview, BackupsError> {
-        let state = match self.local_state() {
-            Ok(handle) => handle.with(read_state).map_err(BackupsError::Refused)??,
-            Err(LocalStateRefused::NothingSynced) => StateRead::default(),
+        // The refusal first: nothing is read, not even the settings file, for a state that is not handed out.
+        let handle = match self.local_state() {
+            Ok(handle) => Some(handle),
+            Err(LocalStateRefused::NothingSynced) => None,
             Err(refused) => return Err(BackupsError::Refused(refused)),
         };
         let config = DesktopConfig::load_for(self.identity).map_err(|_| BackupsError::Settings)?;
-        Ok(overview_from(
+        // The handle goes before anything is counted.
+        let state = match handle {
+            Some(handle) => handle
+                .with(|db| read_state_with(db, &config.backup_chosen_folders))
+                .map_err(BackupsError::Refused)??,
+            None => StateRead::default(),
+        };
+        let mut overview = overview_from(
             &config.known_folder_backup,
             &config.known_folder_source,
             &state,
             kfm::known_folder_paths,
             count,
-        ))
+        );
+        overview.folders.extend(chosen_rows(
+            &config.backup_chosen_folders,
+            &config.known_folder_backup,
+            &state,
+            count,
+        ));
+        Ok(overview)
     }
 
-    /// Start or stop backing up one known folder. Never runs a pass here: the runner's scheduler sees the change
-    /// on its next tick. Switching off deletes nothing in Beebeeb. Refused, with nothing written, unless the local
-    /// state is the signed-in account's or nothing has synced on this computer yet. BLOCKS: a worker's.
+    /// Start or stop backing up one known folder, or a folder the person chose ("Back up again" after its stop).
+    /// Never runs a pass here: the runner's scheduler sees the change on its next tick. Switching off deletes nothing
+    /// in Beebeeb. Refused, with nothing written, unless the local state is the signed-in account's or nothing has
+    /// synced on this computer yet. BLOCKS: a worker's.
     pub fn set_backup_folder(&self, key: &str, on: bool) -> Result<(), BackupsError> {
-        if known_folder_by_key(key).is_none() {
+        let chosen = || {
+            DesktopConfig::load_for(self.identity)
+                .is_ok_and(|config| config.backup_chosen_folders.iter().any(|folder| folder.key() == key))
+        };
+        if known_folder_by_key(key).is_none() && !chosen() {
             return Err(BackupsError::UnknownFolder);
         }
         let handle = match self.local_state_for_changes() {

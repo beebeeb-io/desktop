@@ -23,6 +23,8 @@ ack
 acknowledged
 acquire
 activity
+add
+added
 adopted
 after
 again
@@ -68,6 +70,7 @@ auto_resolve_keep_both
 away
 back
 backed-up
+backing
 backup
 backup_unknown_kept
 backups
@@ -134,6 +137,7 @@ chart
 check
 checked
 child
+chosen
 chunk
 chunk_count
 claims
@@ -895,6 +899,7 @@ sync_tick
 synced
 system
 t
+taken
 task
 telemetry
 tell
