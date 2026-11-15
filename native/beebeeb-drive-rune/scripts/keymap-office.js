@@ -134,6 +134,9 @@
       icon('pal-foot-icon', q(':scope > svg', foot));
       api.textNode('pal-foot-text', foot);
     }
+    // DW-1557: the "About this viewer" card, bottom right over the document (a keyed box, so its place is gated).
+    const lic = qa('.absolute[class*="z-[8]"]', win).find((e) => shown(e) && /About this viewer/.test(e.textContent));
+    if (lic) box('lic-panel', lic);
     // The status line: what the document is, then how it is kept, zoom, About.
     const foot = main && q(':scope > .mk-foot', main);
     if (foot) {

@@ -201,6 +201,11 @@ mod tests {
             (1278.0 - (panel.rect[0] + panel.rect[2]) - 16.0).abs() < 0.6,
             "16 px from the right edge"
         );
+        assert!(
+            (798.0 - (panel.rect[1] + panel.rect[3]) - 36.0).abs() < 0.6,
+            "36 px from the bottom edge, not the top: the card is at {:?}",
+            panel.rect
+        );
     }
 
     /// The editor stays unreachable: the viewer has no route to DW-1558, DW-1559 or DW-1560, which are placeholders.
