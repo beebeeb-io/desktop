@@ -208,7 +208,7 @@ fn handler(server: Arc<Mutex<Server>>, probe: Arc<StateDb>) -> Handler {
                 Some(record) => Reply::ok(json!({ "owner_wrapped_folder_key": record, "key_version": 1 })),
                 None => Reply::error(404, "not_found"),
             },
-            "PUT" if route.starts_with(CUSTODY) && route.ends_with("/key") => {
+            "PUT" if path.starts_with("/api/v1/shared-folders/") && path.ends_with("/key") => {
                 let folder = path
                     .trim_end_matches("/key")
                     .rsplit('/')
