@@ -392,7 +392,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
         match account_of(&self.engine) {
             // Another account is here: never said to it, and nothing of the earlier account is kept through its
             // session.
-            Some(here) if here != owed.account => false,
+            here if here.as_ref() != Some(&owed.account) => false,
             Some(_) if self.shown && self.current().is_some() => {
                 if notice.is_some() {
                     self.not_done = Some(owed);

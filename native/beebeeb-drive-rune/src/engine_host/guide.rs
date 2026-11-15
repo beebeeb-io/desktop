@@ -268,7 +268,7 @@ fn kept_later(refused: LocalStateRefused) -> bool {
         // Review L334: these dropped the mark for good, and the guide came back after the next sign-in. A session
         // the server ended, a sign-out under the write and an id not known yet each pass: the mark waits for its
         // account to be signed in and open again.
-        LocalStateRefused::SessionEnded | LocalStateRefused::SignedOut | LocalStateRefused::IdentityUnknown => true,
+        LocalStateRefused::SessionEnded | LocalStateRefused::SignedOut | LocalStateRefused::IdentityUnknown => false,
         // The state is another account's, or nobody's with data in it: it never takes this account's mark.
         LocalStateRefused::OtherAccount | LocalStateRefused::Unowned => false,
     }

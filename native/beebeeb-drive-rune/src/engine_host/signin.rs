@@ -447,7 +447,10 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     /// verified prompt reaches the engine.
     fn begin_hello(&mut self) {
         let attempt = self.next_attempt(Wait::Hello);
-        self.hello_up = None;
+        // A prompt this screen asked for before is taken away, never just forgotten (it would stay on screen).
+        if let Some(cancel) = self.hello_up.take() {
+            cancel();
+        }
         let asked_at = self.engine.session_turn();
         let answer = move |event| Answer {
             wait: Wait::Hello,
@@ -716,6 +719,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         }
         let answers = self.answers.clone();
         let job: Job<C> = Box::new(move |engine| {
+            engine.recovery_forget();
             if engine.discard_partial_sign_in().is_err() {
                 still_signed_in(&answers);
             }

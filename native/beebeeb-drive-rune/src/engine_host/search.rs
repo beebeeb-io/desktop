@@ -277,7 +277,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
     /// goes now. `true`: something a draw reads went.
     fn follow(&mut self) -> bool {
         let now = session_of(&*self.host);
-        if self.of == now {
+        if self.of.as_ref().map(|s| &s.account) == now.as_ref().map(|s| &s.account) {
             return false;
         }
         let held = self.held.is_some()
@@ -287,6 +287,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
             || self.asked.is_some()
             || self.recent.is_some()
             || self.recent_out.is_some();
+        self.forget();
         self.of = now;
         held
     }
