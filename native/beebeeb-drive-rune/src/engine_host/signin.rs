@@ -9,11 +9,13 @@
 //!   session's turn AS READ AT THE PRESS, and the account's password for a closed vault or a locked screen
 //!   ([`Engine::unlock_vault_with_password`]: proven to the server in a new sign-in, the code step after it
 //!   when the account has one);
-//! - the wait after "too many tries" (DW-A21): counted down here, once a second, from the seconds the server named.
+//! - the wait after "too many tries" (DW-A21): counted down here, once a second, from the seconds the server named;
+//! - "Sign in with another device" (`signin_device.rs`: the engine's device request, on a thread of its own), the
+//!   passkey sign-in (`passkeys.rs`: the system's dialog, on a thread of its own), and "Forgot password?" with the
+//!   twelve words and a new password (`signin_recovery.rs`: core's phrase recovery through the engine).
 //!
 //! What it does not bind answers AT ONCE with the refusal its screen draws, never with silence: the Continue-as
-//! card (no shared session store exists for this app yet, so Windows Hello is asked for the lock screen only), a
-//! device request, a passkey and "Forgot password?" with the phrase (core's `recovery_flow` has no engine step yet).
+//! card (no shared session store exists for this app yet, so Windows Hello is asked for the lock screen only).
 //! Creating an account is bound in `signup.rs` (owner ruling 2026-11-14: sign-up in any app).
 //!
 //! Threads: nothing here waits for Beebeeb on the window's thread. Every step is a job on ONE worker, run in the

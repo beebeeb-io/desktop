@@ -4,7 +4,7 @@
 
 use rune::{El, col, el, row};
 
-use super::source::{PhraseProblem, SignInProblem};
+use super::source::{NewPasswordProblem, PhraseProblem};
 use super::steps::{CONFIRM_KEY, Pictured};
 use super::view::{GENERIC_FAILURE, actions};
 use super::view_steps::{escape_first, open, primary, then, word_grid};
@@ -14,6 +14,19 @@ use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, FieldSpec, FieldState, Keys, Tone};
 use crate::ui::au_entry::{self, FocusedSpec};
 use crate::ui::kit;
+
+/// What the new password's step says for each of its answers (DW-A49 draws none: these are the rule's words). Past
+/// the registration the window cannot tell whether the password changed, so those words are true either way.
+const TOO_SHORT: &str = "Too short for your account. Nothing was changed: choose a longer password.";
+const BREACHED: &str = "This password appears in known data breaches. Nothing was changed: choose a different one.";
+// The engine's `Offline` is also a breach check that could not be made: words true for both.
+const SET_OFFLINE: &str = "Beebeeb couldn't be reached, or couldn't check this password against known breaches. Try \
+     again. If your new password was already set, sign in with it.";
+const SET_RATE_LIMITED: &str = "Too many tries. Wait a moment, then try again.";
+const SET_ENDED: &str =
+    "If your new password was set, sign in with it. If not, go back and enter your recovery phrase again.";
+const SET_OTHER: &str =
+    "That didn't finish, and nothing was signed in. Try again. If your new password was already set, sign in with it.";
 
 /// The banner when the phrase did not verify. DW-A48 draws the wrong phrase; the hourly limit's
 /// words are the board's rule for it.
@@ -148,9 +161,39 @@ fn strength(key: &str, ui: &Ui, t: &Theme) -> El {
     meter
 }
 
+/// The words under the new password, for a problem with the password itself.
+fn password_words(problem: NewPasswordProblem) -> Option<&'static str> {
+    match problem {
+        NewPasswordProblem::TooShort => Some(TOO_SHORT),
+        NewPasswordProblem::Breached => Some(BREACHED),
+        NewPasswordProblem::Offline
+        | NewPasswordProblem::RateLimited { .. }
+        | NewPasswordProblem::Ended
+        | NewPasswordProblem::SignInRequired
+        | NewPasswordProblem::Other => None,
+    }
+}
+
+/// The banner above the fields, for a problem that is not the password's (as recovery's first step draws its own).
+/// `SignInRequired` is never drawn here: the window shows the password updated instead (`Screen::PasswordChanged`).
+fn set_banner(k: &mut Keys, problem: NewPasswordProblem, t: &Theme) -> Option<El> {
+    let (tone, icon, title, words) = match problem {
+        NewPasswordProblem::TooShort | NewPasswordProblem::Breached | NewPasswordProblem::SignInRequired => {
+            return None;
+        }
+        NewPasswordProblem::Offline => (Tone::Neutral, &icons::INFO, None, SET_OFFLINE),
+        NewPasswordProblem::RateLimited { .. } => (Tone::Red, &icons::INFO, None, SET_RATE_LIMITED),
+        NewPasswordProblem::Ended => (Tone::Red, &icons::INFO, Some("This recovery has ended"), SET_ENDED),
+        NewPasswordProblem::Other => (Tone::Red, &icons::INFO, None, SET_OTHER),
+    };
+    Some(au::banner(k, tone, icon, title, Some(words), true, t))
+}
+
 pub fn new_password(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
-    // The board gives this step no error of its own: the sign-in form's general words.
-    let message = ui.set_problem().map(|_: SignInProblem| GENERIC_FAILURE);
+    // The board gives this step no error of its own: each answer's words (`password_words`, `set_banner`).
+    let problem = ui.set_problem();
+    let message = problem.and_then(password_words);
+    let banner = problem.and_then(|problem| set_banner(k, problem, t));
     let eye = au::field_action(
         "field-0",
         if ui.password.is_revealed() {
@@ -202,16 +245,63 @@ pub fn new_password(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     } else {
         ButtonState::Disabled
     };
-    au::column()
+    let mut c = au::column()
         .child(au::back_link("Back", &icons::BACK, t).on_press_tx(act(Ui::recover_with_phrase)))
         .child(au::heading(
             "Set a new password",
             Some("Your phrase was verified. Choose a strong password for your account."),
             false,
             t,
+        ));
+    if let Some(banner) = banner {
+        c = c.child(banner);
+    }
+    let mut foot = actions(6.0).child(primary(k, "Set new password", None, state, Ui::set_password, t));
+    // An ended recovery sets nothing (the button is off): the way on is to sign in, or Back to the words.
+    if problem == Some(NewPasswordProblem::Ended) {
+        foot = foot.child(
+            au::button(
+                k,
+                "Sign in",
+                None,
+                ButtonKind::Ghost,
+                ButtonSize::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press_tx(act(Ui::sign_in_with_new_password)),
+        );
+    }
+    c.child(col().w_full().gap(11.0).child(new).child(confirm)).child(foot)
+}
+
+/// The new password was set and the account asks for a normal sign-in with it (two-factor, or an older server): DW-A50's
+/// layout with the words that are true here. Nothing was unlocked, so the button signs in, not "Continue to Drive". No
+/// board frame (`FRAMES.md`, flagged deviations).
+pub fn password_changed(k: &mut Keys, t: &Theme) -> El {
+    au::column()
+        .child(au::hero_tile(&icons::CHECK, Tone::Green, 0.0, t))
+        .child(au::heading(
+            "Password updated",
+            Some("Your password was changed. Sign in with your new password to open your vault. Your files are unchanged."),
+            true,
+            t,
         ))
-        .child(col().w_full().gap(11.0).child(new).child(confirm))
-        .child(actions(6.0).child(primary(k, "Set new password", None, state, Ui::set_password, t)))
+        .child(
+            actions(6.0).child(
+                au::button(
+                    k,
+                    "Sign in",
+                    None,
+                    ButtonKind::Primary,
+                    ButtonSize::Lg,
+                    ButtonState::Enabled,
+                    t,
+                )
+                .on_press_tx(act(Ui::sign_in_with_new_password))
+                .default_button(),
+            ),
+        )
 }
 
 pub fn password_updated(k: &mut Keys, t: &Theme) -> El {

@@ -33,6 +33,7 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         Screen::Device { expired } => device(ui, *expired, &mut k, &t),
         Screen::Approved { by } => approved(by, &mut k, &t),
         Screen::KeysNotReceived => keys_not_received(&mut k, &t),
+        Screen::NotSignedIn { other_account } => not_signed_in(*other_account, &mut k, &t),
         Screen::Denied { by } => denied(by, &mut k, &t),
         Screen::TwoFactor { backup } => view_steps::two_factor(ui, *backup, &mut k, &t),
         Screen::Phrase => view_steps::phrase(ui, &mut k, &t),
@@ -43,6 +44,7 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         Screen::Recover => view_recover::recover(ui, &mut k, &t),
         Screen::NewPassword => view_recover::new_password(ui, &mut k, &t),
         Screen::PasswordUpdated => view_recover::password_updated(&mut k, &t),
+        Screen::PasswordChanged => view_recover::password_changed(&mut k, &t),
         Screen::Create(step) => super::view_create::view(ui, *step, &mut k, &t),
     };
     au::page(
@@ -495,11 +497,18 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
         t,
     ));
     if expired {
+        // A request that was lost (its connection dropped, or Beebeeb ended it) has its code spent too: DW-A10's
+        // layout, with the words of what happened (no board frame: `FRAMES.md`, flagged deviations).
+        let title = if ui.lost() {
+            "This request was lost"
+        } else {
+            "This code expired"
+        };
         c = c.child(au::banner(
             k,
             Tone::Red,
             &icons::INFO,
-            Some("This code expired"),
+            Some(title),
             Some("Nothing was signed in. Ask for a new code."),
             true,
             t,
@@ -527,7 +536,8 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
             ));
     }
     let status = if expired {
-        row().child(au::pill("status-pill", "Expired", Tone::Neutral, false, t))
+        let words = if ui.lost() { "Lost" } else { "Expired" };
+        row().child(au::pill("status-pill", words, Tone::Neutral, false, t))
     } else {
         row()
             .gap(10.0)
@@ -661,6 +671,52 @@ fn denied(by: &str, k: &mut Keys, t: &Theme) -> El {
             Some(&format!(
                 "{by} said no. Nothing was signed in on this PC, and no keys were shared."
             )),
+            true,
+            t,
+        ))
+        .child(
+            actions(6.0)
+                .child(
+                    au::button(
+                        k,
+                        "Ask again",
+                        Some(&icons::RETRY),
+                        ButtonKind::Primary,
+                        ButtonSize::Lg,
+                        ButtonState::Enabled,
+                        t,
+                    )
+                    .on_press_tx(act(Ui::ask_other_device)),
+                )
+                .child(use_password_instead(k, "Use email and password instead", t)),
+        )
+}
+
+/// The other device approved and this PC did not sign in (no board frame: `FRAMES.md`, flagged deviations). Laid out
+/// as DW-A08's error state, with DW-A07 to DW-A10's words for what is true: `other_account`, this PC holds another
+/// account (its stored session or its local files); else it moved on while it waited (a sign-in, a lock or a sign-out
+/// here), or it could not store the session. No account is named.
+fn not_signed_in(other_account: bool, k: &mut Keys, t: &Theme) -> El {
+    let (title, words) = if other_account {
+        (
+            "Approved, but this PC holds another account",
+            "Nothing was signed in on this PC, and no keys were kept.",
+        )
+    } else {
+        (
+            "Approved, but this PC did not sign in",
+            "Nothing was signed in. Ask again.",
+        )
+    };
+    au::column()
+        .child(back(t))
+        .child(au::heading("Sign in with another device", None, false, t))
+        .child(au::banner(
+            k,
+            Tone::Red,
+            &icons::INFO,
+            Some(title),
+            Some(words),
             true,
             t,
         ))

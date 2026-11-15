@@ -389,7 +389,7 @@ impl<C: CredentialStores> Engine<C> {
                 Err(_) => return Err(PasskeyProblem::Refused),
             };
             if let VaultOutcome::Unlocked(key) = vault {
-                self.keep_passkey_key(&token, key);
+                self.keep_handed_over_key(&token, &key.to_bytes());
                 return Ok(crate::signin::gate::next_after_sign_in(
                     false,
                     self.unlocked(),
@@ -401,17 +401,20 @@ impl<C: CredentialStores> Engine<C> {
         })
     }
 
-    /// The vault key a passkey's PRF opened, stored for the session that was just made, as the twelve words' key
-    /// is (`unlock_with_phrase`). Nothing is stored when the vault is already open (a key of this computer was
-    /// loaded) or the session moved on; the key is then simply dropped.
-    fn keep_passkey_key(&self, token: &str, key: MasterKey) {
+    /// The ONE place a vault key handed over at sign-in is stored for the session that was just made: a passkey's
+    /// PRF key and the key another device sent (`bindings::device_request`), as the twelve words' key is
+    /// (`unlock_with_phrase`). Nothing is stored when the vault is already open (a key of this computer was loaded:
+    /// a re-sign-in) or when the stored session is not `token`'s any more; the key is then simply dropped. Both ways
+    /// are a strong proof (a PRF passkey: lead decision 2026-11-14, review of desktop#424; keys handed over by a
+    /// device the account's owner approved with a fresh step-up), so the lock opens in the same hold as the key's
+    /// install. `true`: the vault is open.
+    pub(super) fn keep_handed_over_key(&self, token: &str, key: &Zeroizing<[u8; 32]>) -> bool {
         if self.unlocked() {
-            return;
+            return true;
         }
-        let key = Zeroizing::new(key.to_bytes());
         let turn = self.acct.session_generation();
         let Ok(_write) = self.claim(turn) else {
-            return;
+            return false;
         };
         let vault = self.vault();
         let still = vault
@@ -420,32 +423,32 @@ impl<C: CredentialStores> Engine<C> {
             .flatten()
             .is_some_and(|stored| stored.expose_for_request() == token);
         if !still {
-            return;
+            return false;
         }
         if vault
-            .store_wrapped_master_key(SecretBytes::new_master_key(&key))
+            .store_wrapped_master_key(SecretBytes::new_master_key(key))
             .is_err()
         {
-            return;
+            return false;
         }
         if let Err(error) = key_owner::bind_key_to_session_owner(&vault) {
             tracing::warn!(%error, "could not record the vault key's owner in the credential store");
         }
         let email = self.account_email();
-        if let Ok(mut guard) = self.acct.session.lock() {
-            *guard = Some(Session {
-                token: token.to_string(),
-                master_key: **key,
-                email,
-            });
-            drop(guard);
-            self.acct
-                .auth_resume_asked
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            // A PRF passkey that opened the vault key is the strong proof, as the twelve words are (lead decision
-            // 2026-11-14, review of desktop#424): the lock opens in the same hold as the key's install.
-            self.lock_follows(super::lock_api::SessionMoved::StrongProof);
-        }
+        let Ok(mut guard) = self.acct.session.lock() else {
+            return false;
+        };
+        *guard = Some(Session {
+            token: token.to_string(),
+            master_key: **key,
+            email,
+        });
+        drop(guard);
+        self.acct
+            .auth_resume_asked
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.lock_follows(super::lock_api::SessionMoved::StrongProof);
+        true
     }
 
     /// Whether this computer can show the system's passkey dialog at all (Windows with the WebAuthn API that does

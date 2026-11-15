@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::EngineConfig;
+use beebeeb_engine::app::bindings::device_request::ANOTHER_DEVICE;
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
@@ -214,18 +215,21 @@ fn signin_device_endings_are_drawn_as_the_screen_reads_them() {
         ending(Err(Refused::KeysNotReceived { by: by() }), true),
         device(DeviceStatus::KeysNotReceived { by: by() })
     );
-    for spent in [Refused::Expired, Refused::ConnectionLost, Refused::Failed] {
-        assert_eq!(
-            ending(Err(spent.clone()), true),
-            device(DeviceStatus::Expired),
-            "{spent:?}"
-        );
+    // Row 3.4 of checkpoint 2: a lost request is not an expired code, and an approval this PC did not take is not keys
+    // that did not arrive. Mutant: `AccountMismatch` drawn as `KeysNotReceived` again.
+    assert_eq!(ending(Err(Refused::Expired), true), device(DeviceStatus::Expired));
+    for lost in [Refused::ConnectionLost, Refused::Failed, Refused::Offline] {
+        assert_eq!(ending(Err(lost.clone()), true), device(DeviceStatus::Lost), "{lost:?}");
     }
-    for not_installed in [Refused::AccountMismatch, Refused::Overtaken, Refused::NotStored] {
+    assert_eq!(
+        ending(Err(Refused::AccountMismatch), true),
+        device(DeviceStatus::OtherAccount)
+    );
+    for not_taken in [Refused::Overtaken, Refused::NotStored] {
         assert_eq!(
-            ending(Err(not_installed.clone()), true),
-            device(DeviceStatus::KeysNotReceived { by: by() }),
-            "{not_installed:?}"
+            ending(Err(not_taken.clone()), true),
+            device(DeviceStatus::NotSignedIn),
+            "{not_taken:?}"
         );
     }
     assert_eq!(
