@@ -24,17 +24,23 @@ fn without_a_sandbox_module_the_probe_is_not_started() {
 
 #[cfg(windows)]
 mod windows {
+    use std::ffi::c_void;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
-    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Mutex, MutexGuard, mpsc};
     use std::time::{Duration, Instant};
 
-    use beebeeb_office_sandbox::{Child, Limits, Sandbox, SandboxError, helper_environment_names};
-    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0};
+    use beebeeb_office_sandbox::{
+        Access, Child, Granted, Limits, Profile, Sandbox, SandboxError, Section, helper_environment_names,
+    };
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE};
     use windows_sys::Win32::System::Threading::{
         CreateEventW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
         ResetEvent, TerminateProcess, WaitForSingleObject,
@@ -83,10 +89,18 @@ mod windows {
         }
 
         fn confined_with(limits: Limits) -> Self {
-            let mut child = Sandbox::new(limits)
-                .unwrap()
+            Self::started(Sandbox::new(limits).unwrap())
+        }
+
+        fn confined_as(profile: Profile) -> Self {
+            Self::started(Sandbox::with_profile(Limits::default(), profile).unwrap())
+        }
+
+        fn started(sandbox: Sandbox) -> Self {
+            let profile = sandbox.profile();
+            let mut child = sandbox
                 .spawn(Path::new(PROBE))
-                .unwrap_or_else(|error| panic!("the sandbox did not start the probe: {error}"));
+                .unwrap_or_else(|error| panic!("the sandbox did not start the probe ({profile:?}): {error}"));
             let pipes = child.take_pipes().expect("pipes, once");
             assert!(child.take_pipes().is_none(), "pipes are handed out once");
             Self {
@@ -759,5 +773,517 @@ mod windows {
             sandbox.spawn(&std::env::temp_dir()).unwrap_err(),
             SandboxError::HelperPath("not a file")
         );
+    }
+    // ── 8. memory the app shares with the helper ────────────────────────────────────────────────────────────
+
+    /// Not a multiple of the page size, so a lost tail shows.
+    const SECTION_BYTES: usize = 200_003;
+    /// What the app puts in a section before the helper reads it.
+    const DOCUMENT_BYTE: u8 = 0x42;
+    /// The byte the probe's `map-handle` writes into the first byte of a section it could map.
+    const MAPPED_MARK: u8 = 0x5A;
+    /// The privileges the helper's token keeps: the restricted token removes every other one.
+    const KEPT_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
+
+    /// The probe's `write-granted` pattern: byte `i` is `i % 251`.
+    fn pattern(index: usize) -> u8 {
+        (index % 251) as u8
+    }
+
+    fn count_equal(section: &Section, wanted: u8) -> usize {
+        section.as_slice().iter().filter(|&&byte| byte == wanted).count()
+    }
+
+    fn count_pattern(section: &Section) -> usize {
+        let bytes = section.as_slice().iter().enumerate();
+        bytes.filter(|&(index, &byte)| byte == pattern(index)).count()
+    }
+
+    fn document_section() -> Section {
+        let mut section = Section::new(SECTION_BYTES).expect("a section");
+        section.as_mut_slice().fill(DOCUMENT_BYTE);
+        section
+    }
+
+    fn with_grant(request: &str, granted: Granted) -> String {
+        format!("{request} {} {}", granted.wire, granted.len)
+    }
+
+    fn make_inheritable(handle: RawHandle) {
+        // SAFETY: `handle` is an open handle this test holds.
+        assert_ne!(
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) },
+            0
+        );
+    }
+
+    #[test]
+    fn a_read_grant_reads_and_refuses_a_write() {
+        let _serial = serial();
+        let section = document_section();
+        let mut probe = Probe::confined();
+
+        let read = probe.child().grant(&section, Access::Read).expect("a grant");
+        assert_eq!(read.len, SECTION_BYTES as u64);
+        assert_eq!(
+            probe.attempt(&format!("{} {DOCUMENT_BYTE}", with_grant("read-granted", read))),
+            format!("ok {SECTION_BYTES}"),
+            "every byte arrived"
+        );
+
+        // A grant maps once (the helper closes its handle with the mapping), so the write gets a grant of its own.
+        let refused = probe.child().grant(&section, Access::Read).expect("a grant");
+        assert_eq!(probe.attempt(&with_grant("write-granted", refused)), ACCESS_DENIED);
+        assert_eq!(
+            count_equal(&section, DOCUMENT_BYTE),
+            SECTION_BYTES,
+            "not one byte changed"
+        );
+
+        // The instrument can fail: the same request through a read-write grant writes.
+        let writable = probe.child().grant(&section, Access::ReadWrite).expect("a grant");
+        assert_eq!(
+            probe.attempt(&with_grant("write-granted", writable)),
+            format!("ok {SECTION_BYTES}")
+        );
+        assert_eq!(count_pattern(&section), SECTION_BYTES);
+    }
+
+    #[test]
+    fn a_read_write_grant_carries_the_rendered_bytes() {
+        let _serial = serial();
+        let section = Section::new(SECTION_BYTES).expect("a section");
+        let before = count_pattern(&section);
+        assert!(
+            before < SECTION_BYTES / 100,
+            "the instrument can fail: a new section is not the pattern ({before} bytes match)"
+        );
+
+        let mut probe = Probe::confined();
+        let granted = probe.child().grant(&section, Access::ReadWrite).expect("a grant");
+        assert_eq!(
+            probe.attempt(&with_grant("write-granted", granted)),
+            format!("ok {SECTION_BYTES}")
+        );
+        assert_eq!(
+            count_pattern(&section),
+            SECTION_BYTES,
+            "the app reads back every byte the helper wrote"
+        );
+    }
+
+    #[test]
+    fn an_ungranted_section_is_out_of_reach() {
+        let _serial = serial();
+        // The instrument can fail: a plain probe that inherits a section the app holds maps it and writes to it.
+        let control = document_section();
+        make_inheritable(control.as_raw_handle());
+        let mut plain = Probe::plain();
+        assert_eq!(
+            plain.attempt(&format!("map-handle {:x}", control.as_raw_handle() as usize)),
+            format!("ok {DOCUMENT_BYTE}")
+        );
+        assert_eq!(
+            control.as_slice()[0],
+            MAPPED_MARK,
+            "a plain child reached the section and wrote to it"
+        );
+        drop(plain);
+        drop(control);
+
+        // Made before the helper starts (so a handle the crate let it inherit would be there), held, never granted.
+        let kept = document_section();
+        let mut confined = Probe::confined();
+        // The value means nothing in the confined helper; the system ends a container process that uses a handle it
+        // does not hold. That exact ending is the pinned result, as for the event handle above.
+        assert_eq!(confined.ask("ping"), "pong");
+        confined.send(&format!("map-handle {:x}", kept.as_raw_handle() as usize));
+        let mut line = String::new();
+        let read = confined.from.as_mut().unwrap().read_line(&mut line).unwrap();
+        assert_eq!((read, line.trim()), (0, ""), "no answer: the helper was ended");
+        let status = confined
+            .child()
+            .wait_timeout(BOUND)
+            .unwrap()
+            .expect("ended within the bound");
+        assert_eq!(
+            status.code(),
+            ENDED_FOR_INVALID_HANDLE,
+            "ended for an invalid handle, code {:#x}",
+            status.code()
+        );
+        assert_eq!(
+            count_equal(&kept, DOCUMENT_BYTE),
+            SECTION_BYTES,
+            "the section's bytes are unchanged"
+        );
+    }
+
+    /// The length in bytes of an object's name, as the system's object query reads it; 0 is "no name".
+    fn object_name_length(handle: RawHandle) -> u16 {
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtQueryObject(handle: RawHandle, class: u32, out: *mut c_void, length: u32, returned: *mut u32) -> i32;
+        }
+        const OBJECT_NAME_INFORMATION: u32 = 1;
+        // A counted text (its length in bytes first, as a u16) and then the text itself. Aligned for the pointer in it.
+        let mut buffer = [0u64; 256];
+        let mut returned = 0u32;
+        // SAFETY: `handle` is an open handle this test holds; the buffer is writable for the length passed.
+        let status = unsafe {
+            NtQueryObject(
+                handle,
+                OBJECT_NAME_INFORMATION,
+                buffer.as_mut_ptr().cast(),
+                size_of_val(&buffer) as u32,
+                &mut returned,
+            )
+        };
+        assert_eq!(status, 0, "the name query answered, status {status:#x}");
+        (buffer[0] & 0xFFFF) as u16
+    }
+
+    #[test]
+    fn a_section_has_no_name() {
+        let _serial = serial();
+        // The instrument can fail: a section made with a name reads back a name through the same query.
+        let name: Vec<u16> = format!("Local\\beebeeb-sandbox-test-{}", std::process::id())
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        // SAFETY: no file, default security, read-write pages, one page, a terminated name.
+        let raw = unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                PAGE_READWRITE,
+                0,
+                4096,
+                name.as_ptr(),
+            )
+        };
+        assert!(!raw.is_null(), "the named control section was made");
+        // SAFETY: `raw` is a new open handle that nothing else owns.
+        let named = unsafe { OwnedHandle::from_raw_handle(raw) };
+        assert!(
+            object_name_length(named.as_raw_handle()) > 0,
+            "the query reads a name where there is one"
+        );
+
+        let section = Section::new(4096).expect("a section");
+        assert_eq!(
+            object_name_length(section.as_raw_handle()),
+            0,
+            "the section has no name"
+        );
+    }
+
+    /// The names in a `privileges` answer; their count is checked against the one the probe gives.
+    fn privilege_names(answer: &str) -> Vec<String> {
+        let mut words = answer.split(' ');
+        assert_eq!(words.next(), Some("privileges"), "a privileges answer: {answer}");
+        let count: usize = words.next().and_then(|count| count.parse().ok()).expect("a count");
+        let names: Vec<String> = words
+            .next()
+            .unwrap_or("")
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(String::from)
+            .collect();
+        assert_eq!(names.len(), count, "one name per privilege");
+        names
+    }
+
+    #[test]
+    fn the_helper_holds_no_privileges() {
+        let _serial = serial();
+        let mut plain = Probe::plain();
+        let parents = privilege_names(&plain.attempt("privileges"));
+        let mut confined = Probe::confined();
+        let helpers = privilege_names(&confined.attempt("privileges"));
+        println!(
+            "privileges: plain {} confined {} ({})",
+            parents.len(),
+            helpers.len(),
+            helpers.join(",")
+        );
+        assert!(
+            helpers.iter().all(|name| parents.contains(name)),
+            "the helper holds nothing a plain child does not"
+        );
+        assert!(
+            helpers.len() < parents.len(),
+            "the instrument can fail: a plain child holds more ({} against {})",
+            parents.len(),
+            helpers.len()
+        );
+        assert_eq!(helpers, KEPT_PRIVILEGES, "only what Windows does not remove");
+    }
+
+    /// A measurement: whether the confined helper can open the socket driver at all, both ways it is opened (the
+    /// device itself, and a name under it, which is how socket libraries open it). If an open succeeds here, the
+    /// network layer stays "not proven" at this level: the connect tests above remain its proof.
+    #[test]
+    fn the_helper_cannot_open_the_socket_driver() {
+        let _serial = serial();
+        let requests = ["open-afd", "open-afd Endpoint"];
+        let mut plain = Probe::plain();
+        let controls = requests.map(|request| plain.attempt(request));
+        let mut confined = Probe::confined();
+        let answers = requests.map(|request| confined.attempt(request));
+        println!("open-afd: plain {controls:?} confined {answers:?}");
+        assert_eq!(
+            controls,
+            ["ok", "ok"],
+            "the instrument can fail: a plain child opens the socket driver"
+        );
+        assert!(
+            answers.iter().all(|answer| answer.starts_with("err ")),
+            "the confined helper opened the socket driver: {answers:?}"
+        );
+    }
+
+    /// A measurement the viewer's design needs: the helper draws text with the system's fonts.
+    #[test]
+    fn the_helper_reads_the_font_folder() {
+        let _serial = serial();
+        let mut plain = Probe::plain();
+        assert_eq!(
+            plain.attempt("read-font"),
+            "ok",
+            "the instrument: the font file is there"
+        );
+        let mut confined = Probe::confined();
+        assert_eq!(
+            confined.attempt("read-font"),
+            "ok",
+            "the confined helper reads the system font folder"
+        );
+    }
+
+    // ── profiles (decision 2541): the system-decoder profile adds registry reads and nothing else ─────────────
+
+    const EVERY_PROFILE: [Profile; 3] = [
+        Profile::NoCapabilities,
+        Profile::SystemDecoder { hevc: false },
+        Profile::SystemDecoder { hevc: true },
+    ];
+
+    /// A loopback connection refused: before any socket exists (no capability, measured), or by the system at the
+    /// connection (`registryRead` with `lpacCom`, and the five HEVC capabilities: 10013, measured by the media spike).
+    /// `registryRead` alone was not measured on the network: one of the two, and the listener counts nothing.
+    const SYSTEM_DECODER_LOOPBACK_REFUSED: [&str; 2] = [NETWORK_REFUSED, "err 10013"];
+
+    /// Keys every Windows has: the machine's, the classes' and the user's environment (the spike opened these too).
+    const REGISTRY_KEYS: [(&str, &str); 3] = [
+        ("hklm", r"SOFTWARE\Microsoft\Windows\CurrentVersion"),
+        ("hkcr", "CLSID"),
+        ("hkcu", "Environment"),
+    ];
+
+    /// The attack probe against every profile: reading a file of the user, writing anywhere the user can, a
+    /// loopback connection and starting a process are refused in each, exactly as in the default profile.
+    #[test]
+    fn every_profile_denies_file_read_write_loopback_and_process_start() {
+        let _serial = serial();
+        let places = user_places();
+        assert!(
+            places.len() >= 4,
+            "temp, the profile and at least two more: {}",
+            places.len()
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let loopback = listener.local_addr().unwrap();
+        let system_root = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"));
+        let shell = system_root.join("System32").join("cmd.exe");
+        let shell = shell.to_str().unwrap();
+
+        // The instruments can fail: the plain probe reads, writes, connects and starts a program.
+        let mut plain = Probe::plain();
+        for place in &places {
+            let canary = Scratch::in_dir(place);
+            std::fs::write(&canary.0, b"canary").unwrap();
+            assert_eq!(plain.attempt(&format!("read {}", canary.text())), "ok 6");
+            let control = Scratch::in_dir(place);
+            assert_eq!(plain.attempt(&format!("write {}", control.text())), "ok");
+            assert!(control.0.exists(), "the plain probe created its file");
+        }
+        assert_eq!(plain.attempt(&format!("connect {loopback}")), "ok");
+        assert_eq!(accepted(&listener), 1, "the listener counts a connection");
+        assert_eq!(plain.attempt(&format!("spawn {shell}")), "ok");
+        drop(plain);
+
+        let mut refused = 0;
+        for profile in EVERY_PROFILE {
+            let mut confined = Probe::confined_as(profile);
+            for place in &places {
+                let canary = Scratch::in_dir(place);
+                std::fs::write(&canary.0, b"canary").unwrap();
+                assert_eq!(
+                    confined.attempt(&format!("read {}", canary.text())),
+                    ACCESS_DENIED,
+                    "{profile:?}: read a file of the user"
+                );
+                let target = Scratch::in_dir(place);
+                assert_eq!(
+                    confined.attempt(&format!("write {}", target.text())),
+                    ACCESS_DENIED,
+                    "{profile:?}: write"
+                );
+                assert!(!target.0.exists(), "{profile:?}: nothing was created");
+                refused += 2;
+            }
+            let answer = confined.attempt(&format!("connect {loopback}"));
+            let refusals: &[&str] = if profile == Profile::NoCapabilities {
+                &[NETWORK_REFUSED]
+            } else {
+                &SYSTEM_DECODER_LOOPBACK_REFUSED
+            };
+            assert!(
+                refusals.contains(&answer.as_str()),
+                "{profile:?}: loopback answered {answer}"
+            );
+            assert_eq!(accepted(&listener), 0, "{profile:?}: the listener counts no connection");
+            assert_eq!(
+                confined.attempt(&format!("spawn {shell}")),
+                PROCESS_QUOTA,
+                "{profile:?}: start a program"
+            );
+            assert_eq!(
+                confined.attempt(&format!("spawn {PROBE}")),
+                ACCESS_DENIED,
+                "{profile:?}: start its own program"
+            );
+            refused += 3;
+        }
+        assert_eq!(
+            refused,
+            EVERY_PROFILE.len() * (2 * places.len() + 3),
+            "every attempt of every profile was made"
+        );
+    }
+
+    /// The one thing the system-decoder profile adds: reading the registry. The default profile cannot.
+    #[test]
+    fn only_the_system_decoder_profile_reads_the_registry() {
+        let _serial = serial();
+        let mut plain = Probe::plain();
+        for (hive, key) in REGISTRY_KEYS {
+            assert_eq!(
+                plain.attempt(&format!("read-registry {hive} {key}")),
+                "ok",
+                "the instrument can fail: the plain probe opens the key ({hive})"
+            );
+        }
+        drop(plain);
+
+        let mut counted = 0;
+        for profile in EVERY_PROFILE {
+            let expected = if profile == Profile::NoCapabilities {
+                ACCESS_DENIED
+            } else {
+                "ok"
+            };
+            let mut confined = Probe::confined_as(profile);
+            for (hive, key) in REGISTRY_KEYS {
+                assert_eq!(
+                    confined.attempt(&format!("read-registry {hive} {key}")),
+                    expected,
+                    "{profile:?}: {hive}"
+                );
+                counted += 1;
+            }
+        }
+        assert_eq!(counted, EVERY_PROFILE.len() * REGISTRY_KEYS.len());
+    }
+
+    /// A security identifier as text, the same way the probe writes it: `S-<revision>-<authority>-<part>...`.
+    fn identifier_text(sid: *mut c_void) -> String {
+        // SAFETY: `sid` is a valid identifier the system derived: an 8-byte head (its byte 1 is the part count),
+        // then 4 bytes per part.
+        let bytes = unsafe {
+            let parts = usize::from(*sid.cast::<u8>().add(1));
+            std::slice::from_raw_parts(sid.cast::<u8>(), 8 + 4 * parts)
+        };
+        let authority = bytes[2..8]
+            .iter()
+            .fold(0u64, |value, &byte| (value << 8) | u64::from(byte));
+        let mut text = format!("S-{}-{authority}", bytes[0]);
+        for part in bytes[8..].chunks_exact(4) {
+            text.push_str(&format!(
+                "-{}",
+                u32::from_le_bytes([part[0], part[1], part[2], part[3]])
+            ));
+        }
+        text
+    }
+
+    /// The identifiers Windows derives from capability names, sorted: what a token of that profile must hold.
+    fn derived_identifiers(names: &[&str]) -> Vec<String> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::{DeriveCapabilitySidsFromName, PSID};
+        let mut identifiers = Vec::new();
+        for name in names {
+            let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+            let mut groups: *mut PSID = std::ptr::null_mut();
+            let mut group_count = 0u32;
+            let mut capabilities: *mut PSID = std::ptr::null_mut();
+            let mut capability_count = 0u32;
+            // SAFETY: a terminated UTF-16 name; the four out-pointers are valid places for the answers.
+            let ok = unsafe {
+                DeriveCapabilitySidsFromName(
+                    wide.as_ptr(),
+                    &mut groups,
+                    &mut group_count,
+                    &mut capabilities,
+                    &mut capability_count,
+                )
+            };
+            assert!(ok != 0 && capability_count >= 1, "{name} gives an identifier");
+            // SAFETY: the system returned arrays of these lengths; the first capability identifier is the one the
+            // crate grants; every allocation is freed once afterwards.
+            unsafe {
+                identifiers.push(identifier_text(*capabilities));
+                for index in 0..group_count as usize {
+                    LocalFree(*groups.add(index));
+                }
+                for index in 0..capability_count as usize {
+                    LocalFree(*capabilities.add(index));
+                }
+                LocalFree(groups.cast());
+                LocalFree(capabilities.cast());
+            }
+        }
+        identifiers.sort();
+        identifiers
+    }
+
+    /// The helper's token, as the helper itself reads it, holds exactly the identifiers of its profile's names: no
+    /// more (an extra capability is red), no fewer, none twice.
+    #[test]
+    fn the_token_holds_exactly_the_profiles_capabilities() {
+        let _serial = serial();
+        let mut counts = Vec::new();
+        for profile in EVERY_PROFILE {
+            let wanted = derived_identifiers(profile.capabilities());
+            let mut distinct = wanted.clone();
+            distinct.dedup();
+            assert_eq!(
+                distinct.len(),
+                profile.capabilities().len(),
+                "{profile:?}: each name has an identifier of its own"
+            );
+            let mut confined = Probe::confined_as(profile);
+            assert_eq!(
+                confined.attempt("capabilities"),
+                // The probe's line ends in a space when the list is empty; answers are read trimmed.
+                format!("capabilities {} {}", wanted.len(), wanted.join(",")).trim_end(),
+                "{profile:?}"
+            );
+            counts.push(wanted.len());
+        }
+        // The instrument tells the three profiles apart.
+        assert_eq!(counts, [0, 1, 5]);
     }
 }

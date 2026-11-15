@@ -256,3 +256,40 @@ fn helper_closes_on_close() {
     assert_eq!(read_to_app(&mut app.from_helper).unwrap_err(), WireError::Closed);
     app.join.take().expect("running").join().expect("the helper returned");
 }
+
+/// An AC-3 or E-AC-3 elementary stream: its bit stream id says which, and FilmCraft has no opener for either. The
+/// answer comes from the route table before FilmCraft reads it: AC-3 compiled out is `Unsupported(Ac3)`; E-AC-3, on
+/// the system's route with the switch off, is `NoSystemDecoder(Eac3)`.
+fn bare_ac3(bsid: u8) -> Vec<u8> {
+    let mut file = vec![0x0B, 0x77, 0x00, 0x00, 0x14, bsid << 3];
+    file.resize(4096, 0);
+    file
+}
+
+#[test]
+fn helper_answers_a_bare_ac3_stream_from_the_route_table() {
+    const POOL_OFF: &[(Codec, Route)] = &[(Codec::Ac3, Route::Unavailable), (Codec::Eac3, Route::System)];
+    let mut app = App::start(bare_ac3(8), POOL_OFF);
+    assert_eq!(
+        app.open(KindHint::Audio),
+        FromHelper::Error(ErrorCode::Unsupported(Codec::Ac3))
+    );
+    app.send(&ToHelper::Close);
+
+    let mut app = App::start(bare_ac3(16), POOL_OFF);
+    assert_eq!(
+        app.open(KindHint::Audio),
+        FromHelper::Error(ErrorCode::NoSystemDecoder(Codec::Eac3))
+    );
+    app.send(&ToHelper::Close);
+}
+
+/// A bare stream whose codec is FilmCraft's goes on to FilmCraft (with the made-up name): it is not answered from the
+/// table. AC-3 with its decoder built in (a test table) has no FilmCraft opener, so FilmCraft's own refusal comes back.
+#[test]
+fn helper_hands_a_bare_stream_of_ours_to_filmcraft() {
+    const AC3_OURS: &[(Codec, Route)] = &[(Codec::Ac3, Route::Rust)];
+    let mut app = App::start(bare_ac3(8), AC3_OURS);
+    assert_eq!(app.open(KindHint::Audio), FromHelper::Error(ErrorCode::NoDecoder));
+    app.send(&ToHelper::Close);
+}

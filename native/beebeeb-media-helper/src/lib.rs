@@ -13,26 +13,18 @@
 #![deny(unsafe_code)]
 
 pub mod decode;
+pub mod mf;
 pub mod read;
 pub mod routes;
 pub mod session;
+pub mod sniff;
 pub mod system;
 
 use beebeeb_media_protocol::Codec;
 
-/// How the helper decodes a codec: three kinds (decision D-MED-2, the owner's ruling of 2026-11-15 17:30).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Route {
-    /// FilmCraft's Rust decoder, in this process.
-    Rust,
-    /// The operating system's decoder, inside this (confined) process: Media Foundation on Windows, Apple's on
-    /// macOS ([`system`]). A PC without one answers `ErrorCode::NoSystemDecoder(codec)` ("This PC can't play HEVC
-    /// video without Microsoft's HEVC extension", with "Open in another app…"). NEVER this crate's own decoder in
-    /// its place: not as a fallback, not silently.
-    System,
-    /// Not played here: `ErrorCode::Unsupported(codec)`, and the app offers "Open in another app…".
-    Unavailable,
-}
+/// How the helper decodes a codec (`Rust`, `System`, `Unavailable`; decision D-MED-2). Defined in the protocol crate
+/// so the app can name it too: it picks the sandbox profile by it (`beebeeb_media_protocol::profile_for`).
+pub use beebeeb_media_protocol::Route;
 
 /// The route each codec ships with: one row per codec (a test holds every codec to exactly one row). A row is a
 /// `const`, settled when the helper is built, and follows the codec's Cargo feature: a codec whose feature is off has no
