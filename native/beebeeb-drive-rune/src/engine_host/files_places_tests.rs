@@ -524,10 +524,10 @@ fn an_account_with_no_backups_folder_draws_no_backups_yet_and_never_the_dev_card
     sign_in(&world.engine, &world.first, TEST_PHRASE);
     settle(&mut rt);
     rt.update(|s, _| {
-        crate::shell::host::dispatch(
+        let _ = crate::shell::host::dispatch(
             s,
             crate::shell::app::Event::Navigate(crate::shell::app::Route::section(Section::Backups)),
-        )
+        );
     });
     until_drawn(&mut rt, "No backups yet");
     let now = drawn(&rt);
