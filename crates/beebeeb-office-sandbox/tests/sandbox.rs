@@ -1207,6 +1207,20 @@ mod windows {
         }
     }
 
+    /// The most lines `cached(name)` showed, sampled from now until `within` passed, on the same schedule as
+    /// [`cached_within`]: an entry that was in the cache for a moment and left again still counts.
+    fn cached_most_within(name: &str, within: Duration) -> usize {
+        let until = Instant::now() + within;
+        let mut most = 0;
+        loop {
+            most = most.max(cached(name));
+            if Instant::now() >= until {
+                return most;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
     /// No name lookup is made on the confined helper's behalf: neither through the system resolver's interface (the
     /// DNS client service makes that lookup, in its own process) nor by opening a share path whose host is a NAME
     /// (the system resolves it before it can refuse the open). A document can carry such a path in a linked
@@ -1244,8 +1258,7 @@ mod windows {
         let confined_seen = cases.map(|(case, request)| {
             let name = fresh_name(&domain);
             let answer = confined.attempt(&request(&name));
-            std::thread::sleep(within);
-            (case, answer, cached(&name))
+            (case, answer, cached_most_within(&name, within))
         });
         println!("lookups (case, answer, lines in the cache): plain {plain_seen:?}; confined {confined_seen:?}");
 
