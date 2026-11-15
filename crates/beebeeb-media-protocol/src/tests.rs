@@ -122,7 +122,6 @@ fn from_helper_messages() -> Vec<FromHelper> {
         FromHelper::Error(ErrorCode::ReadFailed),
         FromHelper::Error(ErrorCode::Timeout),
         FromHelper::Error(ErrorCode::Internal),
-        FromHelper::Error(ErrorCode::NoMediaFeaturePack),
     ];
     // Every codec, in the file's video, its audio, and both codes that name one.
     for codec in Codec::ALL {
@@ -143,6 +142,7 @@ fn from_helper_messages() -> Vec<FromHelper> {
         }));
         all.push(FromHelper::Error(ErrorCode::Unsupported(codec)));
         all.push(FromHelper::Error(ErrorCode::NoSystemDecoder(codec)));
+        all.push(FromHelper::Error(ErrorCode::NoSystemMedia(codec)));
     }
     all
 }
