@@ -880,14 +880,15 @@ fn a_first_startup_without_a_key_fixes_no_candidate_and_shuts_the_window() {
 fn the_startup_makes_no_state_db() {
     let pc = Pc::new();
     pc.sign_in(&owner());
+    let before = listing(&pc.engine.config.state_dir);
 
     pc.engine.fix_upgrade_candidate_at_startup();
 
     assert!(!pc.state_db().exists(), "no state.db");
     assert_eq!(
         listing(&pc.engine.config.state_dir),
-        Vec::<String>::new(),
-        "nothing in the state folder"
+        before,
+        "nothing made in the state folder"
     );
     assert_eq!(
         pc.startup_candidate(),
