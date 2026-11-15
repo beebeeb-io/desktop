@@ -273,3 +273,65 @@ fn the_late_notice_keeps_the_window_behind_it_working() {
     assert_eq!(r.pane(), Pane::TwoFactor, "the press reached the page behind");
     assert!(super::tests::find(&r.rt, "late-change-text").is_some(), "still said");
 }
+
+/// #440 review, P2 and P3: the set-up page that adopts a key request of an earlier turn says it waits (never that the
+/// set-up could not start), and the key that comes for that turn is not drawn (the engine wiped it: a QR code that can
+/// never be turned on). The page asks for a key of its own.
+#[test]
+fn the_set_up_page_never_draws_a_key_of_an_earlier_turn() {
+    let mut r = rig("DW-A69", like_the_engine());
+    assert_eq!(r.started(), [CallKind::BeginTwoFactor]);
+    r.go("DW-A71");
+    // A lock and an unlock (or a sign-in again to the same account) while the key request is out.
+    r.held.moved.set(true);
+    r.go("DW-A69");
+    assert_eq!(r.started(), [CallKind::BeginTwoFactor], "nothing new while it is out");
+    let said = r.text();
+    assert!(said.contains("still being made"), "it says it waits: {said}");
+    assert!(
+        !said.contains("Could not start the set-up"),
+        "never that it failed while it waits"
+    );
+    r.answer(Answered::Setup(super::source::Setup {
+        modules: vec![vec![true; 21]; 21],
+        key: Secret::new("JBSW Y3DP EHPK 3PXP"),
+    }));
+    assert!(
+        r.rt.state.account.form.setup.is_none(),
+        "the earlier turn's key is not drawn"
+    );
+    assert_eq!(
+        r.started(),
+        [CallKind::BeginTwoFactor, CallKind::BeginTwoFactor],
+        "the page asks for a key of its own"
+    );
+}
+
+/// #440 review, P1 (the window's side): a change of email adopted after a lock and an unlock, whose Done comes for the
+/// earlier turn, never takes the page to DW-A66 in the new one.
+#[test]
+fn an_adopted_email_wait_never_goes_to_the_code_page_for_another_turn() {
+    let mut r = rig("DW-A65", like_the_engine());
+    send_code(&mut r, FIRST);
+    click(&mut r.rt, "btn-0");
+    r.held.moved.set(true);
+    r.go("DW-A65");
+    assert!(r.waiting(), "the wait is adopted");
+    r.answer(Answered::Done);
+    assert_ne!(r.pane(), Pane::EmailCode, "no DW-A66 for another turn's press");
+    assert!(!r.waiting(), "the page is live again");
+}
+
+/// #440 review, P3: the late notice can be dismissed; it is then gone, and the Change password page says nothing of it.
+#[test]
+fn the_late_notice_can_be_dismissed() {
+    let mut r = change_password(HeldCalls::default());
+    click(&mut r.rt, "btn-0");
+    r.answer(Answered::Done);
+    assert_eq!(says(&r.rt, "late-change-text"), "Your password was changed");
+    click(&mut r.rt, "late-change-close");
+    assert!(super::tests::find(&r.rt, "late-change-text").is_none(), "gone");
+    assert!(r.rt.state.account.late_change.is_none(), "and not kept");
+    r.go("DW-A67");
+    assert_eq!(r.rt.state.account.form.problem, None, "nothing said of it later");
+}

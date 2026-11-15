@@ -12,6 +12,7 @@ use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
+use beebeeb_engine::test_api::password_change::PasswordChangeRoutes;
 use beebeeb_engine::test_api::{FakeApi, Handler, Reply};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -35,6 +36,8 @@ struct Fake {
     verify_ok: Arc<AtomicBool>,
     account: Arc<FakeAccount>,
     phrase: String,
+    /// Beebeeb takes a password change (the step-up and the new registration, `PasswordChangeRoutes`); off: no route.
+    password_changes: Arc<AtomicBool>,
 }
 
 fn fake() -> Fake {
@@ -47,9 +50,17 @@ fn fake() -> Fake {
     let (wrong, delay, log) = (wrong_code.clone(), disable_delay_ms.clone(), asked.clone());
     let (resend_status, verify_ok) = (Arc::new(AtomicU16::new(200)), Arc::new(AtomicBool::new(false)));
     let (resend_in, verify_in) = (resend_status.clone(), verify_ok.clone());
+    let password_changes = Arc::new(AtomicBool::new(false));
+    let (changes_in, changing) = (password_changes.clone(), account.clone());
+    let routes = PasswordChangeRoutes::new(&account.email);
     let api = FakeApi::start(Arc::new(move |req| {
         let route = format!("{} {}", req.method, req.path);
         log.lock().unwrap().push(route.clone());
+        if changes_in.load(Ordering::SeqCst)
+            && let Some(reply) = routes.answer(req, &changing.opaque)
+        {
+            return reply;
+        }
         match route.as_str() {
             "POST /api/v1/auth/2fa/setup" => Reply::ok(serde_json::from_str::<Value>(SETUP).unwrap()),
             "POST /api/v1/auth/2fa/enable" if wrong.load(Ordering::SeqCst) => Reply::json(401, json!({})),
@@ -92,6 +103,7 @@ fn fake() -> Fake {
         verify_ok,
         account,
         phrase,
+        password_changes,
     }
 }
 
@@ -364,6 +376,10 @@ fn a_confirmed_email_change_replaces_the_mirrored_address_and_the_answer_is_not_
         "the answer is not dropped by the address it changed"
     );
     assert_eq!(engine.account_email().as_deref(), Some("new.address@example.eu"));
+    assert!(
+        source.call_mark(CallKind::ConfirmEmail).unwrap().current,
+        "the drain's own write of the address re-stamps the call (#440 review, P2)"
+    );
     // A refused code changes nothing.
     fake.verify_ok.store(false, Ordering::SeqCst);
     assert!(source.start_call(CallKind::ResendEmail, "", ""));
@@ -623,28 +639,55 @@ fn a_password_answer_stays_not_current_after_another_kind_is_taken_under_a_moved
     );
 }
 
-/// An engine write moves the session's turn on (`claim`: a changed password stores its new session token that way).
-/// A success answered across such a write is still its press's answer: current, so the page says it.
+/// A changed password stores its new session token, and that write moves the session's turn on (`claim`). The change's
+/// own answer is still its press's: current under the turn its own write made, which the engine hands back (#440
+/// review, P1: only the call's own write extends the mark).
 #[test]
-fn a_success_answered_across_an_engine_write_stays_current() {
+fn a_password_change_that_moves_the_turn_by_its_own_write_stays_current() {
+    let fake = fake();
+    fake.password_changes.store(true, Ordering::SeqCst);
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    let before = engine.session_turn();
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    let Some((CallKind::ChangePassword, answered)) = answer(&mut source) else {
+        panic!("the change was not answered");
+    };
+    assert!(matches!(answered, Answered::Done), "the fake takes the change");
+    assert_ne!(
+        engine.session_turn(),
+        before,
+        "the change's own write moved the turn on"
+    );
+    assert!(
+        source.call_mark(CallKind::ChangePassword).unwrap().current,
+        "the change's own answer, under the turn its own write made"
+    );
+}
+
+/// #440 review, P1: a success whose call was out across a lock and an unlock was made for the earlier turn. The engine
+/// lets a same-account answer through; only the call's own write extends its mark, so it is not current after the
+/// unlock and no page says it in the new turn.
+#[test]
+fn a_success_answered_after_a_lock_and_an_unlock_is_not_current() {
     let fake = fake();
     let engine = signed_in(&fake);
     let mut source = Source::new(engine.clone());
-    fake.disable_delay_ms.store(400, Ordering::SeqCst);
+    fake.disable_delay_ms.store(600, Ordering::SeqCst);
     assert!(source.start_call(CallKind::TurnOffTwoFactor, "123456", ""));
     std::thread::sleep(Duration::from_millis(100));
-    let before = engine.session_turn();
+    engine.lock_screen().expect("an open lock locks the screen");
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the platform's yes unlocks the screen");
+    let Some((CallKind::TurnOffTwoFactor, Answered::Done)) = answer(&mut source) else {
+        panic!("the same account: Beebeeb's answer is handed over");
+    };
     assert!(
-        engine.email_changed_for(before, &fake.account.email),
-        "a write the engine claims"
-    );
-    assert_ne!(engine.session_turn(), before, "the write moved the turn on");
-    assert!(matches!(
-        answer(&mut source),
-        Some((CallKind::TurnOffTwoFactor, Answered::Done))
-    ));
-    assert!(
-        source.call_mark(CallKind::TurnOffTwoFactor).unwrap().current,
-        "the same session's success, answered across the engine's own write"
+        !source.call_mark(CallKind::TurnOffTwoFactor).unwrap().current,
+        "made for the turn before the lock: not current after the unlock"
     );
 }
