@@ -381,6 +381,27 @@ fn a_resume_says_how_long_the_pc_was_away_once_and_only_after_a_suspend() {
     assert_eq!(h.faults(), 0);
 }
 
+/// CP2 row 7.2 (security): with no idle reading at the suspend, the time away is unknown, and unknown locks. The resume
+/// says the longest time there is, never the sleep alone (which would replace the poll's count of the idle before it).
+#[test]
+fn a_resume_with_no_idle_reading_at_the_suspend_says_the_longest_time_away() {
+    use std::time::Duration;
+    let unknown = Suspended {
+        idle: None,
+        ..Suspended::now()
+    };
+    assert_eq!(unknown.away_until_now(), Duration::MAX, "unknown is not none");
+    let known = Suspended {
+        idle: Some(Duration::from_secs(60)),
+        ..Suspended::now()
+    };
+    let away = known.away_until_now();
+    assert!(
+        away >= Duration::from_secs(60) && away < Duration::from_secs(3_600),
+        "a reading counts as itself and the sleep: {away:?}"
+    );
+}
+
 /// Review of #452 (P2-A): the tray's window registers for the power broadcast (a Modern Standby PC sends the suspend
 /// only to a window that registered), and the registration ends with the window.
 #[test]

@@ -36,7 +36,7 @@ use crate::shell::app::{Intent as Go, Route, Section, SettingsPane};
 use crate::shell::flyout_window::FlyoutState;
 use crate::shell::host;
 use crate::shell::tray::{EngineState, TrayInputs};
-use source::{Action, BoardFixture, Change, Changes, Snapshot, TraySource};
+use source::{Action, BoardFixture, Change, Changes, Hidden, Snapshot, Status, TraySource};
 
 /// Something the flyout asks for that it cannot do itself: the window moves, a file is shown,
 /// sync pauses. [`Host::after`] carries them out.
@@ -80,6 +80,9 @@ pub struct Ui {
     /// The scroll thumb: how far down its track it is, and whether it shows.
     thumb_at: Live<[f32; 2]>,
     thumb_shown: Live<f32>,
+    /// The main window is covered (the away lock's cover, `shell::registry::covered`): `Some(sync runs)`. The flyout
+    /// then shows the lock's state ([`Ui::cover`]).
+    covered: Option<bool>,
 }
 
 impl Ui {
@@ -94,6 +97,7 @@ impl Ui {
             followed: None,
             thumb_at: Live::new([0.0, 0.0]),
             thumb_shown: Live::new(0.0),
+            covered: None,
         }
     }
 
@@ -133,8 +137,20 @@ impl Ui {
     /// Reads the source again. A selection past the end of a shorter list goes.
     pub fn refresh(&mut self) {
         self.snapshot = self.source.snapshot();
+        if let Some(running) = self.covered {
+            self.snapshot = covered(&self.snapshot, running);
+        }
         let rows = self.rows().len();
         self.selected = self.selected.filter(|&row| row < rows);
+    }
+
+    /// The main window is covered (`Some(sync runs)`) or no longer (`None`): while it is, the flyout shows the lock's
+    /// state (DW-1211), whatever the engine says: no file name, no activity, and no button (the running app's locked
+    /// flyout offers none: `live::offered`). The
+    /// owner's ruling D-B2-3 and the lead's of 2026-11-15 22:56: nothing of the account's shows while the window does not.
+    pub fn cover(&mut self, covered: Option<bool>) {
+        self.covered = covered;
+        self.refresh();
     }
 
     /// The shell's tray state changed (the b's menu paused sync, the session locked): the
@@ -471,5 +487,17 @@ pub(crate) fn frame_for(shell: &TrayInputs) -> &'static str {
         "DW-1203"
     } else {
         "DW-1202"
+    }
+}
+
+/// What the flyout shows while the main window is covered: the lock's status and its hidden list, as the engine's
+/// locked state draws them (`live::snapshot`: no button), with the engine's word on File Explorer kept.
+fn covered(snapshot: &Snapshot, running: bool) -> Snapshot {
+    let status = if running { Status::Locked } else { Status::LockedSyncOff };
+    Snapshot {
+        button: None,
+        status,
+        changes: Changes::Hidden(Hidden::Locked),
+        explorer_ready: snapshot.explorer_ready,
     }
 }

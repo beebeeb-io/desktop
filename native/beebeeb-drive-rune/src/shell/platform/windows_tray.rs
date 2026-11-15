@@ -180,7 +180,8 @@ struct Suspended {
     tick_ms: u64,
     /// This PC's clock then.
     wall: std::time::SystemTime,
-    /// The session's time without input then (`None`: Windows did not say; counted as none).
+    /// The session's time without input then (`None`: Windows did not say; unknown, so the resume says the longest
+    /// time away and app lock locks: fail closed).
     idle: Option<Duration>,
 }
 
@@ -197,11 +198,16 @@ impl Suspended {
     /// How long the PC was away at a resume: its time without input at the suspend, and the sleep, by whichever of
     /// the two clocks saw more of it. Microsoft's pages do not say that the tick count counts a sleep; the wall clock
     /// does, and can be set back: the longer of the two never makes the lock come later than one that saw the sleep.
+    /// With no idle reading at the suspend the time away is unknown: the longest there is, so it locks (fail closed;
+    /// counted as none, the resume would carry the sleep alone and replace the poll's better count of the gap).
     fn away_until_now(self) -> Duration {
+        let Some(idle) = self.idle else {
+            return Duration::MAX;
+        };
         // SAFETY: takes nothing, returns the tick count.
         let ticks = Duration::from_millis(unsafe { GetTickCount64() }.saturating_sub(self.tick_ms));
         let wall = self.wall.elapsed().unwrap_or_default();
-        self.idle.unwrap_or_default().saturating_add(ticks.max(wall))
+        idle.saturating_add(ticks.max(wall))
     }
 }
 

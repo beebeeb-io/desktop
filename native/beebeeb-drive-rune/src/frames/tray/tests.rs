@@ -605,6 +605,67 @@ fn a_locked_flyout_shows_no_file_name_anywhere_in_its_tree() {
     assert_eq!(text(&rt, "empty-title"), "Recent changes are hidden");
 }
 
+/// The away lock's cover (the owner's ruling D-B2-3, the lead's of 2026-11-15 22:56): while the main window is covered,
+/// the flyout shows the lock's state whatever the engine says: no file name, no activity (DW-1203's "Syncing 12 files"),
+/// no row to select. Lifted, the engine's state again.
+#[test]
+fn a_covered_windows_flyout_shows_no_file_name_and_no_activity() {
+    let names: Vec<String> = match BoardFixture::frame("DW-1203").expect("a frame").snapshot().changes {
+        Changes::Rows { rows, .. } => rows.into_iter().map(|row| row.name).collect(),
+        _ => panic!("DW-1203 has rows"),
+    };
+    assert!(!names.is_empty());
+    // Every text and label, leaving elements too.
+    let shown = |rt: &Runtime<State>| {
+        rt.elements()
+            .into_iter()
+            .flat_map(|e| [e.text, e.label])
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let cover = |rt: &mut Runtime<State>, covered: Option<bool>| {
+        // As the shell tells it (`host::Shell::tell_flyout_covered`): one commit, no exit fade.
+        rt.update(|s, tx| {
+            s.tray.as_mut().expect("the flyout is the scene").cover(covered);
+            tx.instant();
+        });
+        rt.frame(0.0);
+    };
+    let mut rt = runtime("DW-1203");
+    // The check can fail: uncovered, the flyout shows the names and the activity.
+    let before = shown(&rt);
+    assert!(names.iter().all(|name| before.contains(name.as_str())), "{before}");
+    assert!(before.contains("Syncing 12 files"));
+    assert_eq!(ui(&mut rt).move_selection(1), Some(0));
+    cover(&mut rt, Some(true));
+    let covered = shown(&rt);
+    for name in &names {
+        assert!(
+            !covered.contains(name.as_str()),
+            "a covered flyout shows {name:?}:\n{covered}"
+        );
+    }
+    assert!(!covered.contains("Syncing"), "no activity:\n{covered}");
+    assert_eq!(text(&rt, "empty-title"), "Recent changes are hidden");
+    assert_eq!(ui(&mut rt).snapshot().status, Status::Locked);
+    assert_eq!(
+        ui(&mut rt).snapshot().button,
+        None,
+        "the running app's locked flyout offers no button"
+    );
+    assert_eq!(ui(&mut rt).selected(), None, "the selected row went with the list");
+    assert_eq!(ui(&mut rt).move_selection(1), None, "and there is none to select");
+    // Sync not running: the lock's other sentence.
+    cover(&mut rt, Some(false));
+    assert_eq!(ui(&mut rt).snapshot().status, Status::LockedSyncOff);
+    cover(&mut rt, None);
+    assert!(
+        shown(&rt).contains("Syncing 12 files"),
+        "lifted: the engine's state again"
+    );
+}
+
 /// Which frame says what the shell's tray state says, in DW-1201's order.
 #[test]
 fn the_fixture_follows_the_shells_tray_state_in_the_boards_order() {
