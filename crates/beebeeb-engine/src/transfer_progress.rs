@@ -131,6 +131,7 @@ pub fn needs_attention(db: &crate::state_db::StateDb) -> Option<Vec<NeedsAttenti
     let rows = db.poisoned().ok()?;
     Some(
         rows.into_iter()
+            .filter(|r| r.needs_attention)
             .filter_map(|r| match db.get_file(&r.file_id) {
                 Ok(Some(entry)) => Some(Ok(NeedsAttention {
                     file_id: r.file_id,
