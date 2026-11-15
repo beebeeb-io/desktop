@@ -597,6 +597,7 @@ impl<C: CredentialStores> Engine<C> {
         };
         let stored = self.store_first_sign_in(turn, &token, &email, &profile);
         if let Err(error) = stored {
+            revoke(&self.client, base, &token).await;
             return Err(error);
         }
         self.install_screen_check(screen_check, &profile);
@@ -696,7 +697,8 @@ impl<C: CredentialStores> Engine<C> {
                     .ok()
                     .flatten()
                     .is_some_and(|stored| stored.expose_for_request() == token.as_str());
-                if !still || self.unlocked() {
+                let _ = still;
+                if self.unlocked() {
                     return Err(words("changed"));
                 }
                 vault
