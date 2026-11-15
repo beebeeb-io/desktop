@@ -108,7 +108,7 @@ fn hhmm() -> String {
 }
 
 /// What this PC is called in the name of a Keep both copy (also This PC's Keep both, task 2530).
-pub(super) fn this_pc() -> String {
+pub(crate) fn this_pc() -> String {
     ["COMPUTERNAME", "HOSTNAME"]
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))

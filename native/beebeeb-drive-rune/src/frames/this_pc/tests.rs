@@ -613,6 +613,7 @@ fn going_from_one_section_to_the_other_asks_the_source_again() {
         }
         fn retry(&mut self, _: &str) {}
         fn retry_all(&mut self) {}
+        fn settle(&mut self, _: &str, _: Exit) {}
         fn kept(&self) -> Vec<Kept> {
             Vec::new()
         }
@@ -668,6 +669,7 @@ impl ThisPcSource for NoLists {
     }
     fn retry(&mut self, _: &str) {}
     fn retry_all(&mut self) {}
+    fn settle(&mut self, _: &str, _: Exit) {}
     fn kept(&self) -> Vec<Kept> {
         Vec::new()
     }

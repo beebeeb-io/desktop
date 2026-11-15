@@ -82,6 +82,8 @@ pub const PAGES_KEPT: usize = 6;
 
 #[path = "viewer_change.rs"]
 mod change;
+// Task 2530: This PC's Keep both names this PC as the viewer's does.
+pub(super) use change::this_pc;
 #[path = "viewer_read.rs"]
 mod where_from;
 use where_from::{Recorded, read};

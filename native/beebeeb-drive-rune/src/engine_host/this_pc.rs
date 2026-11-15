@@ -478,7 +478,7 @@ fn settle<E: ThisPcEngine>(
     if !still_for(engine, whose) {
         return None;
     }
-    let device = super::viewer_change::this_pc();
+    let device = super::viewer::this_pc();
     Some(
         match engine.settle_parked_for(whose.session, problem, pick, version, &device) {
             Ok(Settled::KeptOther { .. }) => Ok(SETTLED_KEPT_OTHER),

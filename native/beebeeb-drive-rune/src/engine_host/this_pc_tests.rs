@@ -785,6 +785,7 @@ fn a_read_refused_for_the_session_keeps_what_is_held_and_is_asked_again() {
         generation: source.generation,
         whose: source.seen.clone(),
         refused: None,
+        done: None,
         read: Err(NoRead::NotNow),
     });
     source.pump();
@@ -805,6 +806,7 @@ fn a_first_read_answered_not_now_is_asked_again() {
         generation: source.generation,
         whose: source.seen.clone(),
         refused: None,
+        done: None,
         read: Err(NoRead::NotNow),
     });
     let pumped = source.pump();
