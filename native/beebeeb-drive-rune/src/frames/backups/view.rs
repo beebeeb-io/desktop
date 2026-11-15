@@ -607,18 +607,82 @@ fn stop_folder(folder: &Folder, first_button: usize, t: &Theme) -> El {
             .on_press(|s: &mut State| s.backups.close_dialog()),
     ];
     let title = format!("Stop backing up {}?", folder.name);
+    // The engine has no size of a backed-up folder: the sentence then says what without a number, never a blank.
+    let kept = if folder.size.is_empty() {
+        "What is already backed up".to_string()
+    } else {
+        format!("The {} already backed up", folder.size)
+    };
     bk::alert(
         &title,
         bk::tile(1, TileTone::Neutral, &ic::FOLDER, 36.0, t),
         &title,
         &format!(
-            "New changes in {} stop backing up. The {} already backed up can stay in Backups or go to Trash.",
-            folder.name, folder.size
+            "New changes in {} stop backing up. {kept} can stay in Backups or go to Trash.",
+            folder.name
         ),
         buttons,
         t,
     )
     .modal(false, |s: &mut State| s.backups.close_dialog())
+}
+
+/// The password field of DW-1410's second step (focus, tests).
+pub(super) const STOP_PASSWORD_KEY: &str = "stop-password";
+
+/// DW-1410's second step (NOT ON THE BOARD, flagged in `frames/this_pc/FRAMES.md`; lead ruling 2026-11-15): moving a
+/// chosen folder's backup to Trash proves the ACCOUNT PASSWORD first, drawn as "Delete this backup?" (DW-0742) draws
+/// it. Only where the source proves it (`BackupsSource::trash_needs_password`); the board's scene never opens it.
+fn stop_folder_password(ui: &BackupsUi, folder: &Folder, first_button: usize, t: &Theme) -> El {
+    let rest = " will be moved to Trash. It leaves every device and is deleted for good when Trash empties. \
+                Nothing on this PC is touched.";
+    let (words, mono) = if folder.size.is_empty() {
+        (format!("What is backed up from {}{rest}", folder.name), Vec::new())
+    } else {
+        let at = "The ".len();
+        (
+            format!("The {} backed up from {}{rest}", folder.size, folder.name),
+            vec![at..at + folder.size.len()],
+        )
+    };
+    // While the move is on its way the button is off (one at a time) and says so.
+    let moving = ui.stopping();
+    let ready = ui.code_len() > 0 && !moving;
+    let refusal = ui.stop_refusal();
+    let body = vec![
+        bk::para(0, &words, &mono, t),
+        col()
+            .key("stop-password-room")
+            .w_full()
+            .pb(14.0)
+            .child(crate::ui::account_form::field(
+                0,
+                &crate::ui::account_form::Field {
+                    label: "Account password",
+                    input_key: STOP_PASSWORD_KEY,
+                    message: refusal,
+                    error: refusal.is_some(),
+                    ..Default::default()
+                },
+                &ui.code,
+                |s: &mut State| &mut s.backups.code,
+                t,
+            )),
+    ];
+    let label = if moving { "Moving\u{2026}" } else { "Move to Trash" };
+    let mut trash = bk::button_md(first_button, label, None, Md::Danger(ready), t);
+    if ready {
+        trash = trash.on_press(|s: &mut State| {
+            s.backups.stop_folder_to_trash();
+        });
+    }
+    let foot = vec![
+        trash,
+        bk::button_md(first_button + 1, "Cancel", None, Md::Plain, t)
+            .on_press(|s: &mut State| s.backups.close_dialog()),
+    ];
+    let title = format!("Move the backup of {} to Trash?", folder.name);
+    dialogs::dialog(&title, 420.0, &title, None, body, foot, t).modal(false, |s: &mut State| s.backups.close_dialog())
 }
 
 /// The password field of "Delete this backup?" (focus, tests).
@@ -739,7 +803,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             .folders()
             .iter()
             .find(|f| &f.id == id && f.chosen_by_you)
-            .map(|f| stop_folder(f, buttons, &t)),
+            .map(|f| {
+                if ui.stop_asks_password() {
+                    stop_folder_password(ui, f, buttons, &t)
+                } else {
+                    stop_folder(f, buttons, &t)
+                }
+            }),
         Some(Dialog::DeleteDevice(id)) => device(id).map(|d| delete_device(ui, d, buttons, &t)),
         None => None,
     };

@@ -142,8 +142,8 @@ impl DevicesEngine for Fake {
 
 fn row(key: &'static str, name: &'static str, on: bool, state: FolderState) -> BackupFolderRow {
     BackupFolderRow {
-        key,
-        name,
+        key: key.into(),
+        name: name.into(),
         on,
         state,
         items: Some(214),
@@ -219,10 +219,13 @@ fn the_root_and_the_folders_come_from_the_engines_answer() {
         Part::NotBackedUp,
         Part::BackUpNow,
         Part::Retry,
+        // Slice A7 (`backup_folders.rs`, its own tests).
+        Part::AddFolder,
+        Part::RemoveFolder,
     ] {
         assert!(source.wired(part), "{part:?} is bound");
     }
-    for part in [Part::MailBackup, Part::AddFolder, Part::RemoveFolder, Part::OpenDevice] {
+    for part in [Part::MailBackup, Part::OpenDevice] {
         assert!(!source.wired(part), "{part:?} is not bound");
     }
     // Other devices and Delete this backup are `backups_devices`'s.
@@ -384,7 +387,9 @@ fn the_unbound_parts_answer_nothing_and_send_nothing() {
         !source.mail_backup_offered(),
         "no Mail Backup entry where no mail engine runs"
     );
-    assert!(!source.add_folder("/invented/Projects"));
+    // Slice A7: an add is sent and this fake's engine (the trait's default) refuses it; a move to Trash without the
+    // password, and of a folder that is not chosen, sends nothing.
+    assert!(source.add_folder("/invented/Projects"));
     assert!(!source.delete_device_backup("invented-device", "a password"));
     source.remove_folder("documents", true);
     settle(&mut source);

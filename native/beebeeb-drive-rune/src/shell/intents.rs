@@ -2,10 +2,18 @@
 //! Every variant has an arm; one this build does not do is logged as `NotWired(<variant>)`, never dropped.
 //! And what the frames of Trash, Shared and Search asked for (`frames::Intent`): an item's Details and its
 //! read-only Preview (`frames::item`); every other intent is taken and logged by its fixed words only.
+//! And Backups' (`frames::backups::Intent`): Add a folder… opens Windows' own folder picker (DW-0738) through the
+//! generic [`pick_folder_for`], whose answer goes back to the section that asked ([`FolderFor`]); the rest are logged.
+
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use rune::Tx;
 
 use super::host::log;
+use super::platform::{Platform, PlatformError};
 use super::web_pages;
 use crate::State;
 use crate::frames::settings::Intent;
@@ -39,7 +47,137 @@ pub fn drain_in_poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     let settings = drain_settings_intents(s, tx);
     let frames = drain_frame_intents(s, tx);
-    settings | frames
+    let backups = drain_backups_intents(s);
+    let picked = take_picked_folder(s, tx);
+    settings | frames | backups | picked
+}
+
+/// Which section asked for Windows' folder picker, and gets the folder: one variant per section. A later section
+/// (Photos' folders, say) adds its variant, its title and its arm in [`hand_folder`]; the picker itself is shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderFor {
+    /// Backups' Add a folder… (DW-0738): the folder goes to `BackupsUi::folder_picked`.
+    Backups,
+}
+
+impl FolderFor {
+    /// The picker's title, in the section's words.
+    fn title(self) -> &'static str {
+        match self {
+            Self::Backups => "Choose a folder to back up",
+        }
+    }
+}
+
+/// A picker that is open: who asked, and where its answer will come.
+struct Picking {
+    asker: FolderFor,
+    answer: mpsc::Receiver<Result<Option<PathBuf>, PlatformError>>,
+}
+
+thread_local! {
+    /// The one picker open from this window's thread (the window's loop runs on one thread).
+    static PICKING: RefCell<Option<Picking>> = const { RefCell::new(None) };
+}
+
+/// How often the poll looks for the picker's answer while it is open.
+const PICKER_POLL: Duration = Duration::from_millis(250);
+
+/// Opens `platform`'s folder picker for `asker` on a worker of its own (it BLOCKS until the person closes it), showing
+/// where `start` is. One at a time: while one is open another ask is not opened (`false`). Its answer is handed over by
+/// [`take_picked_folder`] on the shell's poll.
+pub fn pick_folder_for(asker: FolderFor, platform: Arc<dyn Platform>, start: PathBuf) -> bool {
+    PICKING.with(|picking| {
+        let mut picking = picking.borrow_mut();
+        if picking.is_some() {
+            return false;
+        }
+        let (answers, answer) = mpsc::channel();
+        let title = asker.title();
+        let started = std::thread::Builder::new().name("folder-picker".into()).spawn(move || {
+            let _ = answers.send(platform.pick_folder(title, &start));
+        });
+        if started.is_err() {
+            log("the folder picker could not start");
+            return false;
+        }
+        *picking = Some(Picking { asker, answer });
+        true
+    })
+}
+
+/// The open picker's answer, once it came: the folder goes to the section that asked; closed without one, nothing
+/// changes; a picker that did not open is logged in the platform's own words (no path is in them). While it is still
+/// open the poll looks again soon. `true`: an answer was taken. The folder itself is never logged.
+pub fn take_picked_folder(s: &mut State, tx: &mut Tx) -> bool {
+    let answered = PICKING.with(|picking| {
+        let mut picking = picking.borrow_mut();
+        let got = picking.as_ref().map(|open| open.answer.try_recv());
+        match got {
+            None => None,
+            Some(Err(mpsc::TryRecvError::Empty)) => {
+                tx.wake_after(PICKER_POLL);
+                None
+            }
+            Some(Ok(answer)) => picking.take().map(|open| (open.asker, Some(answer))),
+            Some(Err(mpsc::TryRecvError::Disconnected)) => picking.take().map(|open| (open.asker, None)),
+        }
+    });
+    let Some((asker, answer)) = answered else {
+        return false;
+    };
+    match answer {
+        Some(Ok(Some(folder))) => hand_folder(s, asker, &folder),
+        Some(Ok(None)) => {}
+        Some(Err(error)) => log(format!("the folder picker did not open ({error})")),
+        None => log("the folder picker ended early"),
+    }
+    true
+}
+
+/// Hands a picked folder to the section that asked.
+fn hand_folder(s: &mut State, asker: FolderFor, folder: &Path) {
+    match asker {
+        FolderFor::Backups => match folder.to_str() {
+            // `false`: nothing was asked of the engine (signed out, the vault closed): logged by fixed words.
+            Some(path) => {
+                if !s.backups.folder_picked(path) {
+                    log("Backups did not take the picked folder");
+                }
+            }
+            None => log("the picked folder's name is not text this app can pass on"),
+        },
+    }
+}
+
+/// Where the picker opens: this PC's user folder (the person's own folders are in it); without one, where Windows
+/// opens it.
+fn picker_start() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// Takes every intent Backups queued: Add a folder… opens the folder picker for Backups; every other intent is logged
+/// as `NotWired(<variant>)` (no id in the line). `true`: something was taken.
+pub fn drain_backups_intents(s: &mut State) -> bool {
+    use crate::frames::backups::Intent as Backups;
+    let intents = s.backups.take_intents();
+    for intent in &intents {
+        match intent {
+            Backups::PickFolder => {
+                if !pick_folder_for(FolderFor::Backups, super::platform::current(), picker_start()) {
+                    log("a folder picker is open already");
+                }
+            }
+            Backups::OpenInPhotos(_) => log("NotWired(OpenInPhotos)"),
+            Backups::OpenInFiles(_) => log("NotWired(OpenInFiles)"),
+            Backups::MailBackup => log("NotWired(MailBackup)"),
+            Backups::OpenMailFolder => log("NotWired(OpenMailFolder)"),
+        }
+    }
+    !intents.is_empty()
 }
 
 /// Takes every intent the frames of Trash, Shared and Search queued. Details (`About("DW-0411", id)`) and Preview
