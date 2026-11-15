@@ -46,7 +46,6 @@ use rune::Pixels;
 
 use super::files_trash::TrashCalls;
 use super::log;
-use super::scaffold::not_wired;
 use super::stamp::{Stamp, stamp};
 use super::thumbs::EngineThumbStore;
 use crate::frames::files::source::{Action, ActionError, Change};
@@ -719,14 +718,24 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             .collect()
     }
 
-    /// Not bound (slice B1, `photos_folders.rs`): the engine keeps no chosen folders yet.
+    /// The folders from Files the account added, as the engine last answered (slice K4, `photos_folders.rs`).
     fn folders(&self) -> Vec<Folder> {
-        not_wired(self.photos_folders_folders())
+        self.photos_folders_folders()
+    }
+
+    fn add_folder(&mut self, folder_id: &str) -> bool {
+        self.photos_folders_add(folder_id)
+    }
+
+    fn remove_folder(&mut self, source: SourceRef) {
+        self.photos_folders_remove(source)
     }
 
     fn set_shown(&mut self, source: SourceRef, shown: bool) {
-        let SourceRef::Device(place) = source else {
-            return;
+        let place = match source {
+            SourceRef::Device(place) => place,
+            // A folder from Files: asked of the engine (slice K4, `photos_folders.rs`).
+            SourceRef::Folder(index) => return self.photos_folders_set_shown(index, shown),
         };
         if self.current().is_none() {
             return;
