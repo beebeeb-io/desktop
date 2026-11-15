@@ -285,7 +285,7 @@ impl StateDb {
         )?;
         let mut stmt = conn.prepare(&format!(
             "SELECT paused_reason, COUNT(*), MIN(created_at), MAX(created_at)
-             FROM operation_queue
+             FROM operation_queue NOT INDEXED
              WHERE paused_reason IS NOT NULL AND {UNSENT_KINDS_SQL}
              GROUP BY paused_reason"
         ))?;
