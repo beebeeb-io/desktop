@@ -627,6 +627,13 @@ impl Ui {
                         self.focus = Some(TITLE_KEY);
                     }
                     // The password WAS changed and nothing was signed in: the account asks for a normal sign-in.
+                    Err(NewPasswordProblem::SignInRequired) => {
+                        self.password.clear();
+                        self.confirm.clear();
+                        self.set_problem = None;
+                        self.screen = Screen::PasswordChanged;
+                        self.focus = Some(TITLE_KEY);
+                    }
                     Err(problem) => {
                         self.set_problem = Some(problem);
                         self.focus = Some(PASSWORD_KEY);
