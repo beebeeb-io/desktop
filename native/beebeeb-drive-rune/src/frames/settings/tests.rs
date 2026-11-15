@@ -369,7 +369,7 @@ fn an_available_update_is_said_once_with_one_primary_action() {
     assert_eq!(rt.state.settings.intents, vec![Intent::RestartToUpdate]);
     assert_eq!(rt.state.settings.pane, Pane::General);
     assert_eq!(
-        info(&rt, "banner-0-words").text.as_deref(),
+        info(&rt, "banner-0-text").text.as_deref(),
         Some(source::UPDATE_CAPTION),
         "the caption follows the spec's flow"
     );
