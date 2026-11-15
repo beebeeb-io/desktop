@@ -4,7 +4,7 @@
 //! Every name is invented.
 
 use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::{Duration, Instant};
 
 use rune::{Env, Runtime, Tx};
@@ -77,6 +77,8 @@ struct Fake {
     previews_held: Mutex<()>,
     previews_sets: Mutex<Vec<(SessionGeneration, PreviewSetting)>>,
     previews_photo: AtomicBool,
+    /// The space limit this double reports, in bytes (0: none).
+    space_limit: AtomicU64,
     /// Every "Lock again after" write: its session, its value, and whether a proof came with it.
     lock_after: Mutex<
         Vec<(
@@ -124,6 +126,7 @@ fn fake() -> Arc<Fake> {
         previews_held: Mutex::new(()),
         previews_sets: Mutex::default(),
         previews_photo: AtomicBool::new(false),
+        space_limit: AtomicU64::new(0),
         lock_after: Mutex::default(),
     })
 }
@@ -139,6 +142,9 @@ impl Fake {
 impl SetupEngine for Fake {
     fn binds_previews(&self) -> bool {
         self.previews.lock().unwrap().is_some()
+    }
+    fn preview_limit_bytes(&self) -> Option<u64> {
+        Some(self.space_limit.load(Ordering::SeqCst)).filter(|bytes| *bytes > 0)
     }
     fn previews_facts_for(&self, _session: SessionGeneration) -> Result<PreviewsFacts, PreviewsRefused> {
         previews_tests::fake_read(self)
