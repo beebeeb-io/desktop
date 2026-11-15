@@ -142,11 +142,12 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
     }
 }
 
-/// Search on the engine (`engine_host::search`) in the running app. ON since task 2488 (the owner's go, 2026-11-15):
-/// the index and the recent searches are read only through the engine's account-bound handle, so a local state a
-/// sign-out kept for the previous account answers nothing to another one. False hands Search the `Unwired` source
-/// and no part of the adapter runs (no index, no worker).
-pub(crate) const SEARCH_ON_ENGINE: bool = true;
+/// Search on the engine (`engine_host::search`) in the running app. Task 2488's code is in (the owner's go,
+/// 2026-11-15): the index and the recent searches are read only through the engine's account-bound handle, so a local
+/// state a sign-out kept for the previous account answers nothing to another one. The switch stays OFF until the
+/// search gates of the next batch are green (lead ruling L214). False hands Search the `Unwired` source and no part
+/// of the adapter runs (no index, no worker).
+pub(crate) const SEARCH_ON_ENGINE: bool = false;
 
 /// Makes a first-run source for the session that is signed in when it is called.
 pub type SetupMaker = Box<dyn Fn() -> Box<dyn crate::frames::signin::setup::source::SetupSource>>;
