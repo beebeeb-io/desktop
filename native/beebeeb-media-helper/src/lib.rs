@@ -17,6 +17,7 @@ pub mod mf;
 pub mod read;
 pub mod routes;
 pub mod session;
+pub mod sniff;
 pub mod system;
 
 use beebeeb_media_protocol::Codec;

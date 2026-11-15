@@ -3,7 +3,8 @@
 //! (`tests/fixtures/`, written by `scripts/media-fixtures.sh` at the checkpoint). A missing fixture is a failure.
 //!
 //! What the sandbox's system-decoder profile allows is the sandbox crate's tests; that the decode works inside it is
-//! the VM rung's.
+//! the VM rung's. The switch is given as on (`run_with_system(…, true)`, contract C6), so these tests keep their
+//! meaning while the shipped switch `MEDIA_SYSTEM_DECODER_ON` is off.
 #![cfg(windows)]
 
 use std::io::{self, Read, Write};
@@ -11,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use beebeeb_media_helper::session::run_with;
+use beebeeb_media_helper::session::run_with_system;
 use beebeeb_media_helper::{ROUTES, Route, route};
 use beebeeb_media_protocol::{Codec, FromHelper, KindHint, ToHelper, read_to_app, write_msg};
 
@@ -69,7 +70,7 @@ impl App {
             buf: Vec::new(),
             pos: 0,
         };
-        let join = std::thread::spawn(move || run_with(input, ChanWrite(helper_out), ROUTES));
+        let join = std::thread::spawn(move || run_with_system(input, ChanWrite(helper_out), ROUTES, true));
         App {
             to_helper,
             from_helper: ChanRead {

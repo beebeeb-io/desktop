@@ -44,13 +44,14 @@ pub struct SystemOpen<'a> {
     pub flags: &'a Arc<ReadFlags>,
     /// FilmCraft's name for the container (a hint for Windows' reader; the helper has no file name).
     pub container: &'a str,
-    /// The video stream's codec when its route is `System`.
+    /// The video stream's codec, when the file has a video that plays.
     pub video: Option<Codec>,
-    /// The audio stream's codec when its route is `System`.
+    /// The audio stream's codec, when the file has audio that plays.
     pub audio: Option<Codec>,
 }
 
-/// The streams of one file that the operating system decodes; the others stay with FilmCraft.
+/// The streams of one file that the operating system decodes: every track that plays, once the file is on the
+/// system's route (one route per file, [`crate::routes::decide`]).
 pub struct SystemStreams {
     #[cfg(windows)]
     video: Option<crate::mf::SystemVideo>,
@@ -59,7 +60,7 @@ pub struct SystemStreams {
 }
 
 impl SystemStreams {
-    /// Opens each `System` stream (the video first). Off Windows nothing opens: `NoSystemDecoder`.
+    /// Opens each stream (the video first). Off Windows nothing opens: `NoSystemDecoder`.
     pub fn open(what: SystemOpen<'_>) -> Result<SystemStreams, ErrorCode> {
         #[cfg(windows)]
         {

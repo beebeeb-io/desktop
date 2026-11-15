@@ -1,10 +1,15 @@
 //! One playback: `Open` → the container's reader-based opener over [`crate::read::PipeReader`] → `Opened`; then
 //! `WantVideo` / `WantAudio` / `Seek` answered in presentation order until the end (`Ended`) or `Close`.
-//! Before a stream's decoder opens, its codec's route ([`crate::routes::streams`], the video first) decides: `Rust`
-//! decodes with FilmCraft, `System` with the operating system's decoder over the same ranges
-//! ([`crate::system::SystemStreams`]; where it does not start: `NoSystemDecoder` / `NoSystemMedia`), `Unavailable` is
-//! `Unsupported`. While a message is answered the [`Gate`] is open, so the system decoder's own threads read only
-//! then.
+//!
+//! Before any decoder runs, one route is chosen for the whole file ([`crate::routes::decide`], the owner's ruling of
+//! 2026-11-15 19:50): FilmCraft decodes every track that plays, or the operating system's decoder does
+//! ([`crate::system::SystemStreams`], over the same ranges), or the file is refused with a code. An audio track that
+//! does not play beside a video that does is named in `Opened::no_sound`, and the video plays without it.
+//!
+//! A bare audio stream (FLAC, MP3, ADTS, AIFF; [`crate::sniff`]) is known by its first bytes: its codec's route is
+//! checked first, and only then does FilmCraft's whole-file opener get the made-up name it picks a decoder by. AC-3
+//! has no such opener; its answer is the route table's. While a message is answered the [`Gate`] is open, so the
+//! system decoder's own threads read only then.
 //!
 //! Never logs, never writes anything but protocol messages, holds no key, no name and no path.
 
@@ -14,20 +19,26 @@ use std::sync::{Arc, Mutex};
 
 use beebeeb_media_protocol::{
     AudioInfo, Codec, ErrorCode, FromHelper, MAX_AUDIO_FRAMES, MAX_CHANNELS, MAX_FRAME_H, MAX_FRAME_W, MAX_RATE,
-    MAX_SOURCE_SIDE, Opened, ToHelper, VideoInfo,
+    MAX_SOURCE_SIDE, MEDIA_SYSTEM_DECODER_ON, Opened, ToHelper, VideoInfo,
 };
 use filmcraft_codecs::{CodecError, Mp4Source};
+use filmcraft_media::reader::{HEAD_LEN, read_range};
 use filmcraft_media::{FrameRequest, MediaError, SharedReader, SharedSource, VideoStreamInfo};
 
 use crate::decode::{display_size, mix_channels, scale_letterbox};
 use crate::mf::gate::Gate;
 use crate::read::{PipeReader, ReadFlags, SharedWire, Wire, lock};
-use crate::routes::{Decoder, is_reduced_quality, streams};
+use crate::routes::{Decision, Track, decide, is_reduced_quality, state_for};
+use crate::sniff::{Bare, sniff};
 use crate::system::{SystemOpen, SystemStreams};
-use crate::{ROUTES, Route};
+use crate::{ROUTES, Route, SYSTEM_FALLBACK, system};
 
 /// A file no streaming opener takes is read whole only up to this many bytes; a larger one is `TooLarge`.
 pub const MAX_WHOLE: u64 = 384 << 20;
+/// FilmCraft's only words for a file over [`MAX_WHOLE`] that no streaming opener takes (`open_reader_within`, in
+/// filmcraft-media's `reader.rs`: "… and it is too large to read whole here"). It has no typed error for it, so the
+/// text is matched; `whole_file_formats_over_the_cap_answer_too_large` holds the match to FilmCraft's words.
+const TOO_LARGE_WORDS: &str = "too large to read whole";
 /// The decoded-frame cache of FilmCraft's GOP decoder.
 pub const FRAME_BUDGET: usize = 256 << 20;
 
@@ -51,7 +62,7 @@ struct Playing {
     audio_origin_ms: u64,
     audio_done: u64,
     flags: Arc<ReadFlags>,
-    /// The streams the operating system decodes (route `System`); the others are FilmCraft's.
+    /// The operating system's decoder, when the whole file is on the system's route; FilmCraft's otherwise.
     system: Option<SystemStreams>,
 }
 
@@ -60,14 +71,26 @@ pub fn run(input: impl Read + Send + 'static, output: impl Write + Send + 'stati
     run_with(input, output, ROUTES);
 }
 
-/// Serve one app with `table` as the routes (a test hands its own). Returns when the app closes, the pipe ends or
-/// a message is not one this protocol reads.
+/// Serve one app with `table` as the routes (a test hands its own) and the shipped switch for the system's decoders
+/// (`MEDIA_SYSTEM_DECODER_ON`). Returns when the app closes, the pipe ends or a message is not one this protocol
+/// reads.
 pub fn run_with(input: impl Read + Send + 'static, output: impl Write + Send + 'static, table: &[(Codec, Route)]) {
+    run_with_system(input, output, table, MEDIA_SYSTEM_DECODER_ON);
+}
+
+/// [`run_with`] with the switch given: `system_on` false never starts the operating system's decoders, whatever
+/// this process could do (contract C6; the Windows tests of the system route pass `true`).
+pub fn run_with_system(
+    input: impl Read + Send + 'static,
+    output: impl Write + Send + 'static,
+    table: &[(Codec, Route)],
+    system_on: bool,
+) {
     let wire: SharedWire = Arc::new(Mutex::new(Wire::new(input, output)));
     let flags = Arc::new(ReadFlags::default());
     let gate = Arc::new(Gate::new());
     let mut playing: Option<Playing> = None;
-    serve(&wire, &flags, &gate, &mut playing, table);
+    serve(&wire, &flags, &gate, &mut playing, table, system_on);
     // The system decoder's threads may still wait to read: from now on their reads fail at once, so releasing the
     // decoders does not wait on them.
     gate.shut();
@@ -80,6 +103,7 @@ fn serve(
     gate: &Arc<Gate>,
     playing: &mut Option<Playing>,
     table: &[(Codec, Route)],
+    system_on: bool,
 ) {
     loop {
         let msg = lock(wire).recv();
@@ -91,7 +115,7 @@ fn serve(
                 if playing.is_some() {
                     vec![FromHelper::Error(ErrorCode::Internal)]
                 } else {
-                    match open(wire, flags, gate, len, table) {
+                    match open(wire, flags, gate, len, table, system_on) {
                         Ok((p, opened)) => {
                             *playing = Some(p);
                             vec![FromHelper::Opened(opened)]
@@ -137,6 +161,7 @@ fn open(
     gate: &Arc<Gate>,
     len: u64,
     table: &[(Codec, Route)],
+    system_on: bool,
 ) -> Result<(Playing, Opened), ErrorCode> {
     if len == 0 {
         return Err(ErrorCode::Corrupt);
@@ -146,24 +171,47 @@ fn open(
     // One reader of the app's ranges for FilmCraft and the system's decoder alike.
     let pipe = Arc::new(PipeReader::new(wire.clone(), len, flags.clone()));
     let reader: SharedReader = pipe.clone();
-    let source = filmcraft_media::reader::open_reader_within(
-        "",
-        reader,
-        &filmcraft_codecs::reader_openers(),
-        &filmcraft_codecs::openers(),
-        MAX_WHOLE,
-    )
-    .map_err(|e| map_error(&e, flags))?;
-    let info = source.info().clone();
-    let (video_decoder, audio_decoder) = streams(
-        table,
-        info.video.as_ref().map(|v| v.codec.as_str()),
-        info.audio().map(|a| a.codec.as_str()),
-    )?;
 
-    let video = match (&info.video, video_decoder) {
-        (Some(v), Some(decoder)) => {
-            let codec = decoder.codec();
+    // The same first bytes FilmCraft sniffs (its read is then the cache's): a bare stream's route comes first, before
+    // FilmCraft reads it whole and decodes it.
+    let head = read_range(&*reader, 0, HEAD_LEN).map_err(|_| ErrorCode::ReadFailed)?;
+    let bare = sniff(&head);
+    drop(head);
+    if let Some(bare) = bare {
+        let track = Some(Track::of(table, bare.codec()));
+        let state = state_for(None, track, system_on, || system::availability(bare.codec()));
+        match decide(None, track, state) {
+            Decision::Ours(_) => {}
+            // Windows' reader over a bare elementary stream is not wired, and FilmCraft cannot describe one it has
+            // no decoder for: the honest answer for this helper.
+            Decision::System(_) => return Err(ErrorCode::NoSystemDecoder(bare.codec())),
+            Decision::Error(code) => return Err(code),
+        }
+    }
+    let source = filmcraft_source(reader, bare, flags)?;
+    let info = source.info().clone();
+
+    let video_track = match &info.video {
+        Some(v) => Some(track_of_video(table, &source, v, flags)?),
+        None => None,
+    };
+    let audio_track = info.audio().map(|a| Track::of_label(table, &a.codec));
+    let needs_codec = [video_track, audio_track]
+        .into_iter()
+        .flatten()
+        .find(|t| t.needs_system())
+        .map_or(Codec::Other, |t| t.codec);
+    let state = state_for(video_track, audio_track, system_on, || {
+        system::availability(needs_codec)
+    });
+    let (plan, on_system) = match decide(video_track, audio_track, state) {
+        Decision::Ours(plan) => (plan, false),
+        Decision::System(plan) => (plan, true),
+        Decision::Error(code) => return Err(code),
+    };
+
+    let video = match (&info.video, plan.video) {
+        (Some(v), Some(codec)) => {
             if v.width == 0 || v.height == 0 {
                 return Err(ErrorCode::Corrupt);
             }
@@ -185,14 +233,12 @@ fn open(
         }
         _ => None,
     };
-    let system_audio = matches!(audio_decoder, Some(Decoder::System(_)));
-    let (audio, reduced_quality) = match (info.audio(), audio_decoder) {
-        (Some(a), Some(decoder)) => {
-            let codec = decoder.codec();
+    let (audio, reduced_quality) = match (info.audio(), plan.audio) {
+        (Some(a), Some(codec)) => {
             let channels = a.channels.clamp(1, u32::from(MAX_CHANNELS)) as u16;
             let rate = a.sample_rate.clamp(1, MAX_RATE);
             // Windows decodes HE-AAC in full; only FilmCraft plays it at its AAC-LC core.
-            let reduced = is_reduced_quality(&a.codec) && !system_audio;
+            let reduced = is_reduced_quality(&a.codec) && !on_system;
             (Some(AudioInfo { rate, channels, codec }), reduced)
         }
         _ => (None, false),
@@ -200,20 +246,17 @@ fn open(
     if video.is_none() && audio.is_none() {
         return Err(ErrorCode::NoDecoder);
     }
+    // The wire takes a silent track only beside a video that plays and without audio; the decision gives no other.
+    let no_sound = plan.no_sound.filter(|_| video.is_some() && audio.is_none());
     let duration_ms = (info.duration.seconds() * 1000.0).round().max(0.0) as u64;
-    let on_system = |decoder: Option<Decoder>| match decoder {
-        Some(Decoder::System(codec)) => Some(codec),
-        _ => None,
-    };
-    let (system_video_codec, system_audio_codec) = (on_system(video_decoder), on_system(audio_decoder));
-    let system = if system_video_codec.is_some() || system_audio_codec.is_some() {
+    let system = if on_system {
         Some(SystemStreams::open(SystemOpen {
             pipe: &pipe,
             gate,
             flags,
             container: &info.container,
-            video: system_video_codec,
-            audio: system_audio_codec,
+            video: plan.video.filter(|_| video.is_some()),
+            audio: plan.audio.filter(|_| audio.is_some()),
         })?)
     } else {
         None
@@ -223,10 +266,12 @@ fn open(
         video: video.as_ref().map(|(v, _)| *v),
         audio,
         reduced_quality,
+        no_sound,
     };
     let playing = Playing {
         source,
         video: video.map(|(_, stream)| stream),
+        // No audio stream at all when the file's sound does not play here.
         has_audio: audio.is_some(),
         duration_ms,
         video_index: 0,
@@ -237,6 +282,45 @@ fn open(
         system,
     };
     Ok((playing, opened))
+}
+
+/// FilmCraft's source over the app's ranges. A sniffed bare stream gets the name its whole-file opener picks a
+/// decoder by ([`Bare::name`]); every other file keeps the name "" (the helper has none). The name goes nowhere else.
+fn filmcraft_source(reader: SharedReader, bare: Option<Bare>, flags: &ReadFlags) -> Result<SharedSource, ErrorCode> {
+    let name = bare.and_then(Bare::name).unwrap_or("");
+    filmcraft_media::reader::open_reader_within(
+        name,
+        reader,
+        &filmcraft_codecs::reader_openers(),
+        &filmcraft_codecs::openers(),
+        MAX_WHOLE,
+    )
+    .map_err(|e| map_error(&e, flags))
+}
+
+/// The file's video track for the decision. FilmCraft's H.264 decoder checks the stream's parameters (interlaced,
+/// 10-bit) only when it decodes, so a codec that falls back to the system's decoder ([`SYSTEM_FALLBACK`]) has its
+/// first frame decoded here: refused, it is a track that needs the system's decoder (row 19). The frame stays in
+/// FilmCraft's cache for the first `WantVideo`.
+fn track_of_video(
+    table: &[(Codec, Route)],
+    source: &SharedSource,
+    v: &VideoStreamInfo,
+    flags: &ReadFlags,
+) -> Result<Track, ErrorCode> {
+    let mut track = Track::of_label(table, &v.codec);
+    if track.route != Route::Rust || !SYSTEM_FALLBACK.contains(&track.codec) {
+        return Ok(track);
+    }
+    match source.video_frame(FrameRequest::full(v.frame_rate.sane().tick_of(0))) {
+        Ok(_) => {}
+        Err(e) => match map_error(&e, flags) {
+            ErrorCode::ReadFailed => return Err(ErrorCode::ReadFailed),
+            // A damaged first frame is answered where it always was: at the first `WantVideo`.
+            _ => track.refused = matches!(e, MediaError::Unsupported(_)),
+        },
+    }
+    Ok(track)
 }
 
 fn want_video(p: &mut Playing, w: u32, h: u32) -> Result<FromHelper, ErrorCode> {
@@ -330,8 +414,63 @@ fn map_error(e: &MediaError, flags: &ReadFlags) -> ErrorCode {
     match e {
         MediaError::Io(_) | MediaError::Offline(_) => ErrorCode::ReadFailed,
         MediaError::Decode(_) => ErrorCode::Corrupt,
-        MediaError::Unsupported(s) if s.contains("too large") => ErrorCode::TooLarge,
+        MediaError::Unsupported(s) if s.contains(TOO_LARGE_WORDS) => ErrorCode::TooLarge,
         MediaError::Unsupported(_) | MediaError::NoStream(_) => ErrorCode::NoDecoder,
         MediaError::Cancelled => ErrorCode::Internal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use super::*;
+
+    /// A file of `MAX_WHOLE + 1` bytes whose first bytes are a FLAC stream's (`fLaC`, then zeros): every read is
+    /// answered, and the largest one is kept.
+    struct HugeFlac {
+        largest: AtomicUsize,
+    }
+
+    impl filmcraft_media::ByteReader for HugeFlac {
+        fn len(&self) -> u64 {
+            MAX_WHOLE + 1
+        }
+
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            let end = offset
+                .checked_add(buf.len() as u64)
+                .ok_or(std::io::ErrorKind::InvalidInput)?;
+            if end > self.len() {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            self.largest.fetch_max(buf.len(), Ordering::Relaxed);
+            buf.fill(0);
+            let magic = b"fLaC";
+            if let Ok(start) = usize::try_from(offset)
+                && start < magic.len()
+            {
+                let n = (magic.len() - start).min(buf.len());
+                buf[..n].copy_from_slice(&magic[start..start + n]);
+            }
+            Ok(())
+        }
+    }
+
+    /// Row 39: a bare FLAC stream over the whole-file cap is `TooLarge` (FilmCraft refuses before it reads the file
+    /// whole: `reader.rs:242`), never `NoDecoder`; FilmCraft's words are what the match holds to.
+    #[test]
+    fn whole_file_formats_over_the_cap_answer_too_large() {
+        let reader = Arc::new(HugeFlac {
+            largest: AtomicUsize::new(0),
+        });
+        let shared: SharedReader = reader.clone();
+        let head = read_range(&*shared, 0, HEAD_LEN).expect("the head reads");
+        let bare = sniff(&head);
+        assert_eq!(bare, Some(Bare::Flac));
+        let answer = filmcraft_source(shared, bare, &ReadFlags::default()).err();
+        assert_eq!(answer, Some(ErrorCode::TooLarge));
+        let largest = reader.largest.load(Ordering::Relaxed);
+        assert!(largest <= HEAD_LEN, "a read of {largest} bytes: more than the head");
     }
 }
