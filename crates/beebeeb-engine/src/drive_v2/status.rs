@@ -320,11 +320,42 @@ pub fn sync_problems(queue: &[UnsentChange]) -> Vec<SyncProblem> {
         .collect()
 }
 
+/// Task 2524: why a held edit is not sent, in words that are true for every file that carries the reason. The engine
+/// holds an edit in two cases (`held_edits.reason`, task 2190): its base version is not known, or the content this PC
+/// last agreed with Beebeeb is not recorded, so a changed file cannot be told from an untouched one. How the record came
+/// to be missing varies (a copy placed by an older build, a copy a viewer's save left behind), so no cause is named.
+/// The engine has no action for a held edit; the reasons say what is true and nothing is offered.
+fn held_reason(reason: &str) -> &'static str {
+    match reason {
+        "base_unknown" => {
+            "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on this PC. Nothing was lost."
+        }
+        "content_unknown" => {
+            "Not sent: this PC has no record of what this file held when it last synced, so it can’t tell whether you changed it. The file stays as it is. Nothing was lost."
+        }
+        _ => "Not sent: this PC is holding this change back. Your copy stays on this PC. Nothing was lost.",
+    }
+}
+
 /// Task 2524: the sync-folder edits the engine holds and does not send (`held_edits`: [`StateDb::list_held_edits`]'s
-/// `(file_id, path, reason, detected_at)`), one problem each, so a held edit never looks synced.
+/// `(file_id, path, reason, detected_at)`), one problem each, so a held edit never looks synced. None can be tried
+/// again: `retryable` is false and the id (`held:<file id>`) is no queue change's.
 pub fn held_edit_problems(held: &[(String, String, String, i64)]) -> Vec<SyncProblem> {
-    let _ = held;
-    Vec::new()
+    held.iter()
+        .map(|(file_id, path, reason, detected_at)| {
+            let (name, folder) = leaf(path);
+            SyncProblem {
+                id: format!("held:{file_id}"),
+                file_id: Some(file_id.clone()),
+                name,
+                folder,
+                reason: held_reason(reason),
+                retryable: false,
+                backup: false,
+                at: (*detected_at > 0).then(|| super::model::iso(*detected_at)),
+            }
+        })
+        .collect()
 }
 
 /// One Available-offline row (DW-0715): a kept item that no kept folder holds, with a folder's file count and bytes.
