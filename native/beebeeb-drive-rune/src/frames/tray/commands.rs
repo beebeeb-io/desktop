@@ -113,66 +113,22 @@ pub const WINDOW: &[List] = &[
     },
 ];
 
-/// DW-1234: the editor's Edit, View, Format, Insert, while a document is open.
+/// DW-1234: the viewer's Edit and View, while a document is open (0.9.0 only reads: the editor's Format and Insert
+/// come back with the editor in 0.9.1, owner 2026-11-15, decision 2539). Only what the viewer has.
 pub const EDITOR: &[List] = &[
     List {
         name: "Edit",
-        commands: &[
-            ("Undo Typing", "Ctrl+Z"),
-            ("Redo", "Ctrl+Y"),
-            ("Cut", "Ctrl+X"),
-            ("Copy", "Ctrl+C"),
-            ("Paste", "Ctrl+V"),
-            ("Paste and match style", "Ctrl+Shift+V"),
-            ("Select all", "Ctrl+A"),
-            ("Find\u{2026}", "Ctrl+F"),
-            ("Find next", "F3"),
-            ("Search Drive", "Ctrl+Shift+F"),
-            ("Commands\u{2026}", "Ctrl+K"),
-        ],
+        commands: &[("Copy", "Ctrl+C")],
     },
     List {
         name: "View",
         commands: &[
             ("Zoom in", "Ctrl+Plus"),
-            ("Zoom out", "Ctrl\u{2212}"),
+            ("Zoom out", "Ctrl+Minus"),
             ("Actual size", "Ctrl+0"),
-            ("Show outline", "ribbon: Layout"),
-            ("Show ribbon", "Ctrl+F1"),
-            ("Present", "F5"),
-            ("Enter full screen", "F11"),
-        ],
-    },
-    List {
-        name: "Format",
-        commands: &[
-            ("Bold", "Ctrl+B"),
-            ("Italic", "Ctrl+I"),
-            ("Underline", "Ctrl+U"),
-            ("Strikethrough", "ribbon: Home"),
-            ("Normal text", "ribbon: Home"),
-            ("Heading 1", "ribbon: Home"),
-            ("Heading 2", "ribbon: Home"),
-            ("Heading 3", "ribbon: Home"),
-            ("Align left", "Ctrl+L"),
-            ("Align center", "Ctrl+E"),
-            ("Align right", "Ctrl+R"),
-            ("Justify", "Ctrl+J"),
-            ("Bulleted list", "ribbon: Home"),
-            ("Numbered list", "ribbon: Home"),
-            ("Increase indent", "ribbon: Home"),
-            ("Decrease indent", "ribbon: Home"),
-        ],
-    },
-    List {
-        name: "Insert",
-        commands: &[
-            ("Table\u{2026}", "ribbon: Insert"),
-            ("Image\u{2026}", "ribbon: Insert"),
-            ("Link\u{2026}", "ribbon: Insert"),
-            ("Page break", "ribbon: Insert"),
-            ("New slide", "Ctrl+M"),
-            ("Duplicate slide", "right-click on a slide"),
+            ("Show outline", "the pane's button"),
+            ("Present (Slides)", "F5"),
+            ("Full screen", "F11"),
         ],
     },
 ];

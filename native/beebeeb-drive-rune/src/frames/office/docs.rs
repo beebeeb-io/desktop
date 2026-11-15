@@ -123,7 +123,7 @@ impl DocBody {
         self.language.zeroize();
     }
 
-    /// The viewer's keys: Ctrl+Plus and Ctrl+Minus zoom, Page Down and Page Up move the stage by a page. Every other
+    /// The viewer's keys: Ctrl+Plus and Ctrl+Minus zoom, Ctrl+0 is the actual size, Page Down and Page Up move the stage by a page. Every other
     /// key is not taken here: there is no editor behind a key (Ctrl+S, Ctrl+K and the rest reach nothing).
     /// `true`: taken.
     pub fn on_key(&mut self, key: &Key, m: &Mods) -> bool {
@@ -131,6 +131,7 @@ impl DocBody {
         match key {
             Key::Command('+') | Key::Command('=') if command => self.zoom_in(),
             Key::Command('-') if command => self.zoom_out(),
+            Key::Command('0') if command => self.view.zoom = 100,
             Key::PageDown if !command && !m.alt && !m.shift => self.go_to_page(self.page.saturating_add(1)),
             Key::PageUp if !command && !m.alt && !m.shift => self.go_to_page(self.page.saturating_sub(1)),
             _ => return false,
@@ -157,7 +158,7 @@ const PANE_LABEL: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.7)
 const OUTLINE: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 const OUTLINE_TOP: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
 const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
-const BANNER: TextStyle = TextStyle::new(12.5, 400.0).lh(18.0);
+const BANNER: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
 
 static LESS: Icon = Icon {
     name: "docs-less",
@@ -272,22 +273,30 @@ fn bar(doc: &DocBody, t: &Theme) -> El {
         )
 }
 
-/// The note of an older file, under the toolbar.
+/// The editor's banner fill (`viewers::style::banner`): ink at 6 %, light ink on dark.
+fn banner_fill(t: &Theme) -> Color {
+    let ink = rune::color::hex(if t.dark { "#EEDDDD" } else { "#111111" }).unwrap_or(Color::BLACK);
+    Color { a: 15.0 / 255.0, ..ink }
+}
+
+/// The note of an older file, under the toolbar: the editor's banner (`viewers::text::banner_el`), same margins,
+/// padding, radius and text style.
 fn note(t: &Theme) -> El {
     row()
         .key("banner")
-        .role("note")
+        .role("status")
         .label(OLDER_FORMAT)
-        .w_full()
-        .px(16.0)
-        .py(8.0)
-        .gap(8.0)
+        .mx(14.0)
+        .mt(10.0)
+        .pl(12.0)
+        .pr(10.0)
+        .py(9.0)
+        .gap(10.0)
         .center_y()
-        .fill(t.card)
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .child(kit::glyph("banner-icon", &viewers::icons::INFO, 15.0, t.text_tertiary))
-        .child(kit::label("banner-text", OLDER_FORMAT, BANNER, t.text_secondary))
+        .radius(10.0)
+        .fill(banner_fill(t))
+        .child(kit::glyph("banner-icon", &viewers::icons::INFO, 16.0, t.text_secondary))
+        .child(kit::label("banner-text", OLDER_FORMAT, BANNER, t.text_secondary).grow(1.0))
 }
 
 fn outline(doc: &DocBody, t: &Theme) -> El {
@@ -639,7 +648,7 @@ mod tests {
         assert!(find(&rt, "banner").is_none() && find(&rt, "ol").is_some() && find(&rt, "pg-1").is_some());
         let mut rt = scene(scene_older, false);
         let d = doc(&mut rt);
-        assert_eq!((d.view.pages, d.view.older_format), (1, true));
+        assert_eq!((d.view.pages, d.view.older_format, d.at), (1, true, 1));
         assert_eq!(
             find(&rt, "banner-text").and_then(|e| e.text),
             Some(OLDER_FORMAT.to_string())
@@ -663,8 +672,10 @@ mod tests {
                 let label = e.label.clone().unwrap_or_default().to_lowercase();
                 let text = e.text.clone().unwrap_or_default().to_lowercase();
                 let key = e.key.clone().unwrap_or_default();
+                // Whole words: "Preview" and "Overview" are not the Review tab.
                 for banned in ["save", "undo", "redo", "bold", "insert", "layout", "review", "floating"] {
-                    assert!(!label.contains(banned) && !text.contains(banned), "{banned} on {key}");
+                    let word = |s: &str| s.split(|c: char| !c.is_alphanumeric()).any(|w| w == banned);
+                    assert!(!word(&label) && !word(&text), "{banned} on {key}");
                 }
                 assert!(
                     !key.starts_with("rib") && !key.starts_with("rt-") && !key.starts_with("float"),
@@ -718,6 +729,9 @@ mod tests {
         );
         press_with(&mut rt, Key::Command('+'), ctrl());
         assert_eq!(doc(&mut rt).view.zoom, 110);
+        press_with(&mut rt, Key::Command('0'), ctrl());
+        assert_eq!(doc(&mut rt).view.zoom, 100, "Ctrl+0 is the actual size");
+        press_with(&mut rt, Key::Command('+'), ctrl());
         for _ in 0..20 {
             press_with(&mut rt, Key::Command('-'), ctrl());
         }

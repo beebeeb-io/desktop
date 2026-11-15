@@ -97,6 +97,13 @@ pub fn view_older() -> DocView {
     }
 }
 
+/// The body the scenes open: the board marks the first section ("1. Scope of work"; "Who we are") in Outline.
+fn body_of(view: DocView) -> DocBody {
+    let mut body = DocBody::new(view, "English (UK)");
+    body.at = 1;
+    body
+}
+
 /// The file the scenes open (`older`: the .doc of DW-1511).
 pub fn file(older: bool) -> OpenFile {
     if older {
@@ -106,7 +113,7 @@ pub fn file(older: bool) -> OpenFile {
             name: "Proposal 2012.doc".into(),
             facts: "Word 97\u{2013}2004 document \u{00B7} 220 KB".into(),
             version: 2,
-            body: Body::Doc(DocBody::new(view_older(), "English (UK)")),
+            body: Body::Doc(body_of(view_older())),
             details: Details::default(),
             newer: None,
         }
@@ -117,7 +124,7 @@ pub fn file(older: bool) -> OpenFile {
             name: "Service agreement.docx".into(),
             facts: "Word document \u{00B7} 38 KB".into(),
             version: 7,
-            body: Body::Doc(DocBody::new(view(), "English (UK)")),
+            body: Body::Doc(body_of(view())),
             details: Details::default(),
             newer: None,
         }
