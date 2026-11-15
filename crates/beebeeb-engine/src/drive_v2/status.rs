@@ -326,7 +326,7 @@ fn held_reason(reason: &str) -> &'static str {
         "base_unknown" => {
             "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on this PC. Nothing was lost."
         }
-        _ => "Not sent: this PC is holding this change back. Nothing was lost.",
+        _ => "Not sent: this PC is holding this change back.",
     }
 }
 
@@ -355,7 +355,7 @@ pub fn held_edit_problems(held: &HeldEdits) -> Vec<SyncProblem> {
             }
         })
         .collect();
-    if false && held.unchecked > 0 {
+    if held.unchecked > 0 {
         let names: Vec<String> = held.unchecked_first.iter().map(|f| leaf(&f.1).0).collect();
         let more = held.unchecked - i64::try_from(names.len()).unwrap_or(0);
         let files = if held.unchecked == 1 {
