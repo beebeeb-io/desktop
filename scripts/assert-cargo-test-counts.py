@@ -50,7 +50,7 @@ def normalize_binary_header(header):
     return re.sub(r"build/[^/]+/[0-9a-f]+/out/", "deps/", header)
 
 
-def check(log, cargo_exit_code, floors=(), expected=(), retried_ok=False):
+def check(log, cargo_exit_code, floors=(), expected=(), retried_ok=False, allow_skip=()):
     seen_expected = set()
     all_headers = []
     current = None
@@ -59,8 +59,12 @@ def check(log, cargo_exit_code, floors=(), expected=(), retried_ok=False):
     binaries = 0
     total = 0
     library_seen = False
+    filtered_total = 0
     for raw in log.splitlines():
         line = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
+        ran = re.match(r"test (\S+) \.\.\. ", line)
+        if ran and ran.group(1) in allow_skip:
+            raise ValueError(f"{ran.group(1)} ran although it was named in --allow-skip")
         if line.startswith(("Running ", "Doc-tests ")):
             if current is not None:
                 raise ValueError(f"missing result for {current}")
@@ -91,7 +95,10 @@ def check(log, cargo_exit_code, floors=(), expected=(), retried_ok=False):
                 if not retried_ok:
                     raise ValueError(f"failed tests in {current}")
                 print(f"  (retried-ok: {failed} failure(s) accepted — retried and passed)")
-            if announced != executed + ignored + measured or filtered:
+            if filtered and not allow_skip:
+                raise ValueError(f"inconsistent or filtered count in {current}")
+            filtered_total += filtered
+            if announced != executed + ignored + measured:
                 raise ValueError(f"inconsistent or filtered count in {current}")
             named = [part for part in expected if part in current_normalized]
             seen_expected.update(named)
@@ -128,6 +135,13 @@ def check(log, cargo_exit_code, floors=(), expected=(), retried_ok=False):
                 f"floor '{part}' did not match any binary, but '{stem}' appeared in a header "
                 f"(a cargo test-binary layout change?); headers: "
                 + "; ".join(h for h in all_headers if stem in h))
+    if allow_skip:
+        # Each named skip filters exactly one test (it lives in one binary), so the filtered total must equal
+        # the number of names: more = an unnamed skip, fewer = a named skip filtered nothing.
+        if filtered_total > len(allow_skip):
+            raise ValueError(f"{filtered_total} tests filtered out but only {len(allow_skip)} named in --allow-skip: unnamed skip")
+        if filtered_total < len(allow_skip):
+            raise ValueError(f"only {filtered_total} tests filtered out for {len(allow_skip)} --allow-skip names: a named skip filtered nothing")
     if cargo_exit_code != 0:
         if not retried_ok:
             raise ValueError(f"cargo exited {cargo_exit_code}")
@@ -186,6 +200,20 @@ def self_test():
         ("new layout: engine floor catches a drop", engine_good_new,
          "linux 2000 deps/beebeeb_engine-\n", ["deps/beebeeb_engine-"], "below the floor of 2000"),
     ]
+    # task 2536: --allow-skip accepts exactly the named, documented testrig skips, nothing else.
+    skip_a, skip_b = "link_health::tests::an_unresolvable_host_is_offline", "staged_and_kept_copies_go_under_the_identitys_folder"
+    allow2 = ["--allow-skip", skip_a, "--allow-skip", skip_b]
+    skipped = (fixture(lib, 3).replace("0 filtered", "1 filtered") + fixture(main, 0)
+               + fixture(integration, 2).replace("0 filtered", "1 filtered") + fixture("Doc-tests beebeeb_desktop_lib", 0))
+    skip_cases = [
+        # (name, log, extra args, expected error)
+        ("allow-skip: the two named skips, one filtered each", skipped, allow2, None),
+        ("allow-skip: filtered without the flag still fails", skipped, [], "inconsistent or filtered count"),
+        ("allow-skip: a third, unnamed filter fails", skipped.replace("0 filtered", "1 filtered", 1), allow2, "unnamed skip"),
+        ("allow-skip: two filtered, only one named", skipped, allow2[:2], "unnamed skip"),
+        ("allow-skip: a named skip that filtered nothing", good, allow2, "filtered nothing"),
+        ("allow-skip: a named test that ran anyway", skipped + f"test {skip_a} ... ok\n", allow2, "ran although"),
+    ]
     cases = [
         ("positive per-binary counts", good, 0, None),
         ("Windows CRLF, paths and ANSI", good.replace("/", "\\").replace("\n", "\r\n").replace("Running", "\x1b[32mRunning\x1b[0m"), 0, None),
@@ -221,6 +249,17 @@ def self_test():
             if error is None and "4 harnesses; 5 executed tests" not in run.stdout:
                 raise AssertionError(f"{name}: per-binary aggregation failed: {run.stdout}")
             print(f"PASS {name}: guard exit {run.returncode}" + (f"; {run.stderr.strip()}" if error else ""))
+        for name, log, extra, error in skip_cases:
+            path.write_text(log, encoding="utf-8")
+            run = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), str(path), "--cargo-exit-code", "0",
+                 "--floors", str(no_floors)] + extra, capture_output=True, text=True,
+            )
+            expected = 1 if error else 0
+            if run.returncode != expected or (error and error not in run.stderr):
+                raise AssertionError(f"{name}: expected exit {expected} / {error!r}, "
+                                     f"got {run.returncode}\n{run.stdout}\n{run.stderr}")
+            print(f"PASS {name}: guard exit {run.returncode}" + (f"; {run.stderr.strip()}" if error else ""))
         floors_path = Path(directory) / "floors.txt"
         for name, log, floors, expects, error in floor_cases:
             path.write_text(log, encoding="utf-8")
@@ -235,7 +274,7 @@ def self_test():
                 raise AssertionError(f"{name}: expected exit {expected} / {error!r}, "
                                      f"got {run.returncode}\n{run.stdout}\n{run.stderr}")
             print(f"PASS {name}: guard exit {run.returncode}" + (f"; {run.stderr.strip()}" if error else ""))
-    print(f"Self-test: {len(cases) + len(floor_cases)} passed; 0 failed")
+    print(f"Self-test: {len(cases) + len(floor_cases) + len(skip_cases)} passed; 0 failed")
 
 
 def main():
@@ -251,6 +290,9 @@ def main():
     parser.add_argument("--retried-ok", action="store_true",
                         help="accept failures and a non-zero cargo exit (task 2448: the CI retry script already "
                              "confirmed they pass); the binary, floor and count checks still apply")
+    parser.add_argument("--allow-skip", action="append", default=[], metavar="TEST",
+                        help="task 2536: a documented testrig skip (repeatable). With it, a filtered log passes only if "
+                             "the filtered total equals the number of names and none of the named tests ran")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -260,7 +302,7 @@ def main():
         try:
             floors = read_floors(args.floors, args.os) if args.floors.exists() else []
             check(args.log.read_text(encoding="utf-8"), args.cargo_exit_code, floors, args.expect,
-                  retried_ok=args.retried_ok)
+                  retried_ok=args.retried_ok, allow_skip=tuple(args.allow_skip))
         except (ValueError, OSError) as error:
             print(f"FAIL: {error}", file=sys.stderr)
             return 1
