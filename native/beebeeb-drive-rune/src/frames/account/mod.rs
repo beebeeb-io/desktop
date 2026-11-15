@@ -41,6 +41,8 @@ mod tests_late;
 mod tests_offline;
 #[cfg(test)]
 mod tests_security;
+#[cfg(test)]
+mod tests_wipe;
 mod two_factor;
 
 use crate::State;
