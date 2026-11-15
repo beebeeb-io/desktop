@@ -36,7 +36,7 @@ impl State {
         match self.actions.source.new_file(folder, name) {
             // The engine sees the new file in the sync folder and lists and uploads it as any other.
             Ok(()) => self.forget_undo(),
-            Err(_) => {}
+            Err(why) => self.failed(Action::NewFile, why, tx),
         }
     }
 }
