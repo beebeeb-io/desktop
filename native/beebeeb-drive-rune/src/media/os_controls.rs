@@ -24,6 +24,24 @@ pub struct NowPlaying {
     pub playing: bool,
     pub at_ms: u64,
     pub length_ms: u64,
+    /// A video shows as a video in Quick Settings, not as music.
+    pub video: bool,
+}
+
+/// What Windows is told the item is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackKind {
+    Music,
+    Video,
+}
+
+/// The kind the OS's controls show for this item.
+pub fn playback_kind(now: &NowPlaying) -> PlaybackKind {
+    if now.video {
+        PlaybackKind::Video
+    } else {
+        PlaybackKind::Music
+    }
 }
 
 impl NowPlaying {
@@ -37,6 +55,7 @@ impl NowPlaying {
         playing: bool,
         at_ms: u64,
         length_ms: u64,
+        video: bool,
     ) -> NowPlaying {
         NowPlaying {
             title: title_for(tag_title, file_name),
@@ -45,6 +64,7 @@ impl NowPlaying {
             playing,
             at_ms,
             length_ms,
+            video,
         }
     }
 }
@@ -213,14 +233,12 @@ mod imp {
         MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls, SystemMediaTransportControlsButton,
         SystemMediaTransportControlsButtonPressedEventArgs, SystemMediaTransportControlsTimelineProperties,
     };
-    use windows::Storage::Streams::{
-        DataWriter, IRandomAccessStreamReference, InMemoryRandomAccessStream, RandomAccessStreamReference,
-    };
+    use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream, RandomAccessStreamReference};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::WinRT::ISystemMediaTransportControlsInterop;
-    use windows::core::{HSTRING, Interface};
+    use windows::core::HSTRING;
 
-    use super::{ButtonQueue, NowPlaying, OsButton, OsControls, encode_art_png};
+    use super::{ButtonQueue, NowPlaying, OsButton, OsControls, PlaybackKind, encode_art_png, playback_kind};
 
     /// Windows counts time in 100 ns steps.
     fn span(ms: u64) -> TimeSpan {
@@ -291,14 +309,23 @@ mod imp {
             MediaPlaybackStatus::Paused
         })?;
         let updater = smtc.DisplayUpdater()?;
-        // `NowPlaying` carries no kind: every item shows as music (title and artist). See the branch notes.
-        updater.SetType(MediaPlaybackType::Music)?;
-        let music = updater.MusicProperties()?;
-        music.SetTitle(&HSTRING::from(now.title.as_str()))?;
-        music.SetArtist(&HSTRING::from(now.artist.as_str()))?;
+        match playback_kind(now) {
+            PlaybackKind::Music => {
+                updater.SetType(MediaPlaybackType::Music)?;
+                let music = updater.MusicProperties()?;
+                music.SetTitle(&HSTRING::from(now.title.as_str()))?;
+                music.SetArtist(&HSTRING::from(now.artist.as_str()))?;
+            }
+            PlaybackKind::Video => {
+                updater.SetType(MediaPlaybackType::Video)?;
+                let video = updater.VideoProperties()?;
+                video.SetTitle(&HSTRING::from(now.title.as_str()))?;
+                video.SetSubtitle(&HSTRING::from(now.artist.as_str()))?;
+            }
+        }
         match now.art.as_ref().and_then(|(w, h, rgba)| encode_art_png(*w, *h, rgba)) {
             Some(png) => updater.SetThumbnail(&reference_from_memory(&png)?)?,
-            None => updater.SetThumbnail(None::<&IRandomAccessStreamReference>)?,
+            None => updater.SetThumbnail(None::<&RandomAccessStreamReference>)?,
         }
         updater.Update()?;
         let timeline = SystemMediaTransportControlsTimelineProperties::new()?;
@@ -312,7 +339,7 @@ mod imp {
     }
 
     /// The picture goes to Windows from this process's memory: an in-memory stream, never a file or an address.
-    fn reference_from_memory(png: &[u8]) -> windows::core::Result<IRandomAccessStreamReference> {
+    fn reference_from_memory(png: &[u8]) -> windows::core::Result<RandomAccessStreamReference> {
         let stream = InMemoryRandomAccessStream::new()?;
         let writer = DataWriter::CreateDataWriter(&stream)?;
         writer.WriteBytes(png)?;
@@ -320,7 +347,7 @@ mod imp {
         // The writer would close the stream with itself: let go of it first.
         let _ = writer.DetachStream();
         stream.Seek(0)?;
-        RandomAccessStreamReference::CreateFromStream(&stream)?.cast::<IRandomAccessStreamReference>()
+        RandomAccessStreamReference::CreateFromStream(&stream)
     }
 
     pub(super) fn clear(controls: &mut OsControls) {
