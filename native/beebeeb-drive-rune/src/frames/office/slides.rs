@@ -336,7 +336,6 @@ fn bar(deck: &DeckBody, t: &Theme) -> El {
                 .px(10.0)
                 .center_y()
                 .radius(7.0)
-                .fill(t.paper)
                 .border(1.0, t.card_border)
                 .border_layout()
                 .hover(t.hover)
