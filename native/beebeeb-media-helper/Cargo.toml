@@ -69,34 +69,34 @@ dnx = ["filmcraft-codecs/dnx"]
 # Decision D-MED-11 (supply chain): FilmCraft's 26 crates are taken from the Office engine's repository, where they are
 # vendored at the pin as the unmodified crates.io tarballs (the rule of its subtrees), never from crates.io. A bump is
 # its own pull request there, with the diff of every crate this helper links, and then a new `rev` here.
-# `rev`: the commit with the vendored tarballs and the feature patch (the Office engine's `filmcraft/PATCHES.md`).
+# `rev`: the commit with the vendored tarballs and the patches on them (the Office engine's `filmcraft/PATCHES.md`).
 [patch.crates-io]
-filmcraft-aac = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-ac3 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-apv = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-av1 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-avi = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-bitstream = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-codecs = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-color = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-dng = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-dnx = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-frame = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-h264 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-hevc = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-isobmff = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-matroska = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-media = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-mpa = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-mpeg2v = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-mpegts = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-mxf = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-ogg = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-opus = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-prores = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-time = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-vp8 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
-filmcraft-vp9 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "410b98b637c2d808135de6706d9b25f98ddf6b9b" }
+filmcraft-aac = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-ac3 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-apv = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-av1 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-avi = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-bitstream = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-codecs = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-color = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-dng = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-dnx = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-frame = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-h264 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-hevc = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-isobmff = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-matroska = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-media = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-mpa = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-mpeg2v = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-mpegts = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-mxf = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-ogg = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-opus = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-prores = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-time = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-vp8 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
+filmcraft-vp9 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0d7a58368f3af07b918eedb42e81ed22dc117f86" }
 
 [profile.release]
 panic = "abort"
