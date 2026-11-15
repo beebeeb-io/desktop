@@ -89,6 +89,8 @@ type Did = Arc<Mutex<Vec<&'static str>>>;
 
 struct Recording {
     did: Did,
+    /// The stop waits here while closed (a sync that takes its time to stop).
+    stop_gate: Gate,
     /// Whether the installer "starts".
     starts: bool,
     /// Asked at `resume_engine`, as `EngineApply` asks after a stop that ended a running sync.
@@ -97,6 +99,7 @@ struct Recording {
 
 impl Apply for Recording {
     fn stop_engine(&mut self) -> Option<EngineStopped> {
+        self.stop_gate.pass();
         self.did.lock().unwrap().push("stop");
         Some(EngineStopped::engine_stopped_and_uploads_parked())
     }
@@ -123,12 +126,17 @@ enum Hand {
         starts: bool,
         syncing_at_start: Arc<Mutex<Vec<bool>>>,
     },
+    /// The real `EngineApply` on `engine`, whose installer start panics: the worker ends in the middle of the
+    /// hand-off, after the stop.
+    EnginePanicsAtStart { engine: Arc<Engine<MemoryCredentials>> },
 }
 
 pub(crate) struct Rig {
     pub(crate) part: UpdatesPart,
     pub(crate) seen: Seen,
     pub(crate) gate: Gate,
+    /// Holds a recording hand-off's stop while closed.
+    stop_gate: Gate,
     offline: Arc<AtomicBool>,
     clock: Arc<AtomicU64>,
     did: Did,
@@ -183,6 +191,8 @@ impl Default for Options {
 fn rig_with(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, options: Options) -> Rig {
     let staging = tempfile::tempdir().expect("a temp dir");
     let (seen, did, gate) = (Seen::default(), Did::default(), Gate::default());
+    let stop_gate = Gate::default();
+    let held_stop = stop_gate.clone();
     if options.held {
         gate.close();
     }
@@ -216,10 +226,17 @@ fn rig_with(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, op
                 store,
                 Recording {
                     did: recorded,
+                    stop_gate: held_stop,
                     starts,
                     sync_back: Some(sync_back),
                 },
             )) as Box<dyn Drive>,
+            Hand::EnginePanicsAtStart { engine } => {
+                let start: StartInstaller =
+                    Box::new(|_installer, _stopped| panic!("an installer start that fails (test)"));
+                let apply = EngineApply::starting_with(engine, &TEST, sync_back, start);
+                Box::new(Watching::new(config, logged, moving, store, apply)) as Box<dyn Drive>
+            }
             Hand::Engine {
                 engine,
                 starts,
@@ -244,6 +261,7 @@ fn rig_with(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, op
         part,
         seen,
         gate,
+        stop_gate,
         offline,
         clock,
         did,
@@ -423,15 +441,13 @@ fn a_file_that_is_not_the_signed_one_is_deleted_and_never_handed_off() {
 
     let mut honest = rig(&key, "0.9.1", Channel::Stable, serving(&key, &[release]));
     settle(&mut honest.part);
-    honest.part.download_update();
+    honest.part.restart_to_update();
     settle(&mut honest.part);
     assert!(
-        matches!(honest.part.state_for_test(), Some(State::ReadyToRestart { .. })),
+        matches!(honest.part.state_for_test(), Some(State::Restarting { .. })),
         "{:?}",
         honest.part.state_for_test()
     );
-    honest.part.restart_to_update();
-    settle(&mut honest.part);
     assert_eq!(honest.did(), ["stop", "launch"], "the honest file is handed off");
 
     let mut http = serving(
@@ -443,7 +459,7 @@ fn a_file_that_is_not_the_signed_one_is_deleted_and_never_handed_off() {
     http.files.insert(artifact.clone(), other);
     let mut rig = rig(&key, "0.9.1", Channel::Stable, http);
     settle(&mut rig.part);
-    rig.part.download_update();
+    rig.part.restart_to_update();
     settle(&mut rig.part);
     assert_eq!(
         rig.part.state_for_test(),
@@ -453,15 +469,29 @@ fn a_file_that_is_not_the_signed_one_is_deleted_and_never_handed_off() {
         })
     );
     assert_eq!(words(&rig.part), NOT_SIGNED_FILE);
-    assert!(rig.seen().contains(&artifact), "it was downloaded");
+    let fetched = |rig: &Rig| rig.seen().iter().filter(|url| **url == artifact).count();
+    assert_eq!(fetched(&rig), 1, "it was downloaded");
     assert!(
         !rig.staged().iter().any(|file| file.starts_with(&name)),
         "deleted, never staged: {:?}",
         rig.staged()
     );
-    rig.part.send_for_test(Event::Apply);
-    settle(&mut rig.part);
+    assert!(rig.did().is_empty(), "never handed off: {:?}", rig.did());
+    // The machine dropped the offer, and the banner stays: what failed, and "Try again".
+    let banner = |press, says: &str| crate::frames::settings::source::Update::Available {
+        version: "0.9.2".into(),
+        press,
+        says: Some(says.into()),
+    };
+    assert_eq!(rig.part.update(), banner(Press::Retry, NOT_SIGNED_FILE));
+    // Try again: checked again, downloaded again, refused again; never handed off.
     rig.part.restart_to_update();
+    settle(&mut rig.part);
+    assert_eq!(fetched(&rig), 2, "the press ran again");
+    assert_eq!(rig.part.update(), banner(Press::Retry, NOT_SIGNED_FILE));
+    assert!(rig.did().is_empty(), "never handed off: {:?}", rig.did());
+    // Another order since: the press's failure is not what the window shows any more.
+    rig.part.send_for_test(Event::Apply);
     settle(&mut rig.part);
     assert!(rig.did().is_empty(), "never handed off: {:?}", rig.did());
     assert_eq!(rig.part.update(), crate::frames::settings::source::Update::Current);
@@ -599,9 +629,8 @@ fn an_older_version_on_the_chosen_channel_is_said_and_never_offered() {
     );
     assert_eq!(rig.part.update(), crate::frames::settings::source::Update::Current);
     assert!(!rig.part.has_notes());
-    rig.part.download_update();
-    settle(&mut rig.part);
     rig.part.restart_to_update();
+    assert!(!rig.part.pump().busy, "the press sends nothing for an older version");
     settle(&mut rig.part);
     rig.part.send_for_test(Event::Download);
     settle(&mut rig.part);
@@ -639,7 +668,9 @@ fn a_second_channel_while_one_is_saving_waits_and_says_so() {
 #[test]
 fn the_release_config_is_the_pinned_key_and_the_one_host() {
     let folder = tempfile::tempdir().expect("a temp dir");
-    let built = beebeeb_updater::V2_KEY_CREATED;
+    // A build made a day after the key: a config that put the key's creation time in place of the build's would
+    // show here (review of #441).
+    let built = beebeeb_updater::V2_KEY_CREATED + 86_400;
     assert!(
         release_config(None, Some("0.9.1"), folder.path()).is_none(),
         "no build time"
@@ -837,14 +868,14 @@ fn the_settings_source_answers_from_its_updater() {
         source.general().update,
         crate::frames::settings::source::Update::Available {
             version: "0.9.2".into(),
-            press: Press::Download,
+            press: Press::Restart,
             says: None,
         },
-        "General offers the download first"
+        "General offers the one press"
     );
     assert!(source.opens("DW-0789b"), "the notes of the version on offer");
     assert_eq!(source.about().notes.version, "0.9.2");
-    assert_eq!(source.about().notes.press, Press::Download);
+    assert_eq!(source.about().notes.press, Press::Restart);
     source.set_channel(Channel::Beta);
     pump(&mut source);
     assert_eq!(source.about().channel, Channel::Beta);

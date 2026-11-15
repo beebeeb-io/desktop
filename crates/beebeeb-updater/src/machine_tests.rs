@@ -773,6 +773,145 @@ fn nothing_else_is_in_the_folder_when_the_installer_starts() {
     assert_eq!(world.staged(), [artifact_name("0.9.1")]);
 }
 
+/// A hand-off whose stop gives another program time to write beside the installer (here: it writes during the stop
+/// itself), and that writes down what the folder holds at the moment the installer is started.
+struct WritesDuringStop {
+    dir: std::path::PathBuf,
+    plant: fn(&std::path::Path),
+    at_launch: Vec<Vec<String>>,
+    did: Vec<Did>,
+}
+
+impl WritesDuringStop {
+    fn listing(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("staging dir")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+impl crate::Apply for WritesDuringStop {
+    fn stop_engine(&mut self) -> Option<crate::EngineStopped> {
+        (self.plant)(&self.dir);
+        self.did.push(Did::StoppedEngine);
+        Some(crate::EngineStopped::engine_stopped_and_uploads_parked())
+    }
+    fn launch(&mut self, installer: &crate::VerifiedInstaller, offer: &crate::Offer, _: crate::EngineStopped) -> bool {
+        self.at_launch.push(Self::listing(&self.dir));
+        self.did
+            .push(Did::Launched(installer.path().to_path_buf(), offer.version));
+        true
+    }
+    fn resume_engine(&mut self) {
+        self.did.push(Did::ResumedEngine);
+    }
+}
+
+fn writing_during_stop(
+    world: &World,
+    plant: fn(&std::path::Path),
+) -> crate::Updater<FakeHttp, crate::testkit::FakeClock, MemStore, WritesDuringStop> {
+    let mut http = FakeHttp::default();
+    Publish::new(Channel::Stable, "0.9.1", artifact_bytes(SIZE)).serve(&mut http, &world.key);
+    let config = crate::Config {
+        trust: crate::testkit::trust(&world.key),
+        base_url: crate::testkit::BASE.to_string(),
+        installed: version("0.9.0"),
+        staging_dir: world.dir.path().to_path_buf(),
+    };
+    let apply = WritesDuringStop {
+        dir: world.dir.path().to_path_buf(),
+        plant,
+        at_launch: Vec::new(),
+        did: Vec::new(),
+    };
+    let clock = crate::testkit::FakeClock(std::cell::Cell::new(NOW));
+    crate::Updater::new(config, http, clock, MemStore::default(), apply)
+}
+
+/// Review of #441 (P3): the folder check runs again AFTER the stop (which can take seconds), right before the start:
+/// a file written beside the installer during the stop is gone when the installer is started.
+#[test]
+fn a_file_written_during_the_stop_is_gone_before_the_installer_starts() {
+    let world = World::new();
+    let mut updater = writing_during_stop(&world, |dir| {
+        fs::write(dir.join("version.dll"), b"planted during the stop").expect("plant a file");
+    });
+    let mut settle_on = |event| {
+        let mut state = updater.step(event).clone();
+        while matches!(
+            state,
+            State::Checking { .. } | State::Downloading { .. } | State::Verifying { .. }
+        ) {
+            state = updater.step(Event::Tick).clone();
+        }
+        state
+    };
+    settle_on(CHECK);
+    assert!(matches!(settle_on(Event::Download), State::ReadyToRestart { .. }));
+    assert!(matches!(settle_on(Event::Apply), State::Restarting { .. }));
+    assert_eq!(
+        updater.apply.at_launch,
+        [vec![artifact_name("0.9.1")]],
+        "only the installer at its start"
+    );
+}
+
+/// The folder cannot be cleared after the stop (a folder another program made, that this user cannot empty): no
+/// installer starts, the engine is resumed, and the staged update is kept for a later press. Unix only: the folder is
+/// made read-only with its mode; a run as root can empty it anyway and is said, not counted as a pass.
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_cleared_after_the_stop_starts_nothing_and_resumes_the_engine() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    let mut updater = writing_during_stop(&world, |dir| {
+        let locked = dir.join("planted");
+        fs::create_dir(&locked).expect("plant a folder");
+        fs::write(locked.join("inner.dll"), b"planted").expect("plant a file in it");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).expect("make it read-only");
+    });
+    let mut settle_on = |event| {
+        let mut state = updater.step(event).clone();
+        while matches!(
+            state,
+            State::Checking { .. } | State::Downloading { .. } | State::Verifying { .. }
+        ) {
+            state = updater.step(Event::Tick).clone();
+        }
+        state
+    };
+    settle_on(CHECK);
+    assert!(matches!(settle_on(Event::Download), State::ReadyToRestart { .. }));
+    let state = settle_on(Event::Apply);
+    let locked = world.dir.path().join("planted");
+    let root = fs::write(locked.join("probe"), b"").is_ok();
+    let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o755));
+    assert!(
+        !root,
+        "this test needs a user that cannot write a read-only folder (not root)"
+    );
+    assert!(
+        matches!(
+            state,
+            State::Failed {
+                failure: Failure::Disk,
+                resume: Some(_)
+            }
+        ),
+        "nothing started, the staged update kept: {state:?}"
+    );
+    assert_eq!(
+        updater.apply.did,
+        [Did::StoppedEngine, Did::ResumedEngine],
+        "nothing started; the engine resumed"
+    );
+    assert!(updater.apply.at_launch.is_empty());
+}
+
 /// Review test 5, Windows only (the lead's native run): between the check and the start no other program can
 /// replace the staged file. The hook runs inside `launch`, where the real shell creates the installer process.
 #[cfg(windows)]

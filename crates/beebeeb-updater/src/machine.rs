@@ -738,6 +738,14 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
         let Some(stopped) = self.apply.stop_engine() else {
             return kept(Failure::EngineStillRunning, offer);
         };
+        // The stop can take seconds (a running sync gets its graceful wait): the folder is cleared and checked again
+        // right before the start, so nothing written beside the installer meanwhile is there when it loads. Not
+        // alone: nothing starts, and the engine is resumed.
+        if !self.staged_installer_is_alone(&installer) {
+            drop(held);
+            self.apply.resume_engine();
+            return kept(Failure::Disk, offer);
+        }
         let verified = VerifiedInstaller {
             path: installer,
             _held: held,
