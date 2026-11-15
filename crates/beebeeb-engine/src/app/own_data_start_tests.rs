@@ -1043,3 +1043,107 @@ fn the_r_up_owner_statements_work_on_a_0_8_25_state_db() {
     );
     assert!(!db.adopt_owner_once(Some(&owner())).unwrap(), "the window is shut");
 }
+
+/// The lock as a restored session with its key leaves it (core's start rule, app lock off): Open, so the close of a
+/// session the server ended has something to close.
+fn open_lock(engine: &TestEngine) {
+    *engine.lock_flow.lock().unwrap() = beebeeb_api::flows::LockFlow::at_start(beebeeb_api::flows::StartFacts {
+        session_stored: true,
+        ask_password_at_start: Some(false),
+        vault_closed: Some(false),
+        app_lock: Some(false),
+    });
+}
+
+/// Batch 3 row S4 (mutant S4-M1: no `stop_proofs` in `close_session_the_server_refused`): a session the server ended
+/// (a 401 a second question confirmed) stops a running proof, and its client is released before the close returns,
+/// as the Lock's is.
+#[test]
+fn a_session_the_server_ended_stops_a_running_proof_and_its_client_is_released() {
+    let pc = Pc::new();
+    synced_rows(&pc.db());
+    pc.sign_in(&owner());
+    let (asked, listing_asked) = mpsc::channel();
+    pc.seams(|seams| seams.listing = Some(hanging(asked)));
+    pc.engine.serve_own_data_proofs();
+    assert_eq!(pc.start(), Err(SyncStartRefused::OtherAccountsData));
+    listing_asked.recv_timeout(WAIT).expect("the proof is listing");
+    let clients = pc.seams(|seams| seams.clients.clone());
+    assert_eq!(clients.len(), 1);
+    assert!(clients[0].strong_count() > 0, "the premise: the proof holds its client");
+    open_lock(&pc.engine);
+    let turn = pc.engine.acct.session_generation();
+
+    let closed = pc.engine.close_session_the_server_refused(Some(turn));
+
+    assert!(closed.is_some(), "the premise: the server's word closed the vault");
+    assert_eq!(
+        clients[0].strong_count(),
+        0,
+        "the close of the ended session released the proof's client before it returned"
+    );
+    pc.wait_for_outcomes(1);
+    assert_eq!(pc.outcomes(), vec!["stopped"]);
+    assert_eq!(pc.db().owner().unwrap(), None);
+}
+
+/// Batch 3 row S4 (mutant S4-M2: no `stop_proofs` in `prepare_replacement`): the strong unlock that replaces this
+/// account's session while its key is in memory stops a running proof, and its client is released before the old
+/// session leaves memory.
+#[test]
+fn a_replaced_session_stops_a_running_proof_and_its_client_is_released() {
+    let pc = Pc::new();
+    synced_rows(&pc.db());
+    pc.sign_in(&owner());
+    let (asked, listing_asked) = mpsc::channel();
+    pc.seams(|seams| seams.listing = Some(hanging(asked)));
+    pc.engine.serve_own_data_proofs();
+    assert_eq!(pc.start(), Err(SyncStartRefused::OtherAccountsData));
+    listing_asked.recv_timeout(WAIT).expect("the proof is listing");
+    let clients = pc.seams(|seams| seams.clients.clone());
+    assert_eq!(clients.len(), 1);
+    assert!(clients[0].strong_count() > 0, "the premise: the proof holds its client");
+    // The stored session the strong unlock replaces: this account's (its owner tag), as a sign-in stored it.
+    {
+        let vault = pc.engine.vault();
+        vault
+            .install_session(crate::keychain::SessionToken::new("an-invented-stored-token").unwrap())
+            .unwrap();
+        vault.bind_session_owner("user-owner").unwrap();
+    }
+    let profile = crate::account_dto::AccountProfile {
+        user_id: "user-owner".into(),
+        email: "owner@example.eu".into(),
+        email_verified: true,
+        created_at: "2026-11-15T00:00:00Z".into(),
+        frozen_at: None,
+        role: None,
+        totp_enabled: None,
+        is_impersonation: None,
+        admin_user_id: None,
+        password_counter: None,
+    };
+    let turn = pc.engine.acct.session_generation();
+
+    let prepared = pc
+        .engine
+        .runtime
+        .block_on(pc.engine.prepare_replacement(turn, &profile));
+
+    let (next, replaced) = prepared.expect("the premise: this account's stored session is replaced");
+    assert!(
+        replaced.is_some(),
+        "the premise: the old token is handed back to be ended"
+    );
+    assert_ne!(
+        next, turn,
+        "the premise: the unlocked path (the key left memory, the turn moved)"
+    );
+    assert_eq!(
+        clients[0].strong_count(),
+        0,
+        "the replacement released the proof's client before the old session left memory"
+    );
+    pc.wait_for_outcomes(1);
+    assert_eq!(pc.outcomes(), vec!["stopped"]);
+}

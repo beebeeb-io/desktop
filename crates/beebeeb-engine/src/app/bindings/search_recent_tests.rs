@@ -293,3 +293,96 @@ fn nothing_is_kept_where_nothing_has_synced() {
     assert_eq!(engine.recent_searches_for(a), Err(LocalStateRefused::NothingSynced));
     assert!(!path.exists(), "no database was made");
 }
+
+/// The lock as a restored session with its key leaves it (core's start rule, app lock off): Open.
+fn open_lock(engine: &TestEngine) {
+    *engine.lock_flow.lock().unwrap() = beebeeb_api::flows::LockFlow::at_start(beebeeb_api::flows::StartFacts {
+        session_stored: true,
+        ask_password_at_start: Some(false),
+        vault_closed: Some(false),
+        app_lock: Some(false),
+    });
+}
+
+/// Batch 3 row S7 (mutant S7-M1: no delete in `close_session_the_server_refused`): a session the server ended leaves
+/// none of the account's recent searches on this computer, as a sign-out. Through the CONFIRMED close (a 401 that a
+/// second question confirmed, `confirmed_at`). Not covered, and not deleted: the close after the refusal run (the
+/// session watcher's `close_ended_session`), where the account-bound handle refuses as `SessionEnded`.
+#[test]
+fn a_session_the_server_ended_leaves_no_recent_searches() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    engine.use_local_state_for_test(path.clone());
+    let a = signed_in(&engine, A);
+    engine.remember_search_for(a, "contract").unwrap();
+    engine.remember_search_for(a, "invoice 2026").unwrap();
+    assert_eq!(
+        on_disk(&path, A.0),
+        (true, words(&["invoice 2026", "contract"])),
+        "the control: kept"
+    );
+    open_lock(&engine);
+
+    let closed = engine.close_session_the_server_refused(Some(a));
+
+    assert!(closed.is_some(), "the premise: the server's word closed the vault");
+    assert_eq!(
+        on_disk(&path, A.0),
+        (false, Vec::new()),
+        "the session the server ended deleted the row"
+    );
+}
+
+/// Batch 3 row S7 (mutant S7-M2: no delete in `sign_out_keeping_local_data_step`): the sign-out that keeps the local
+/// files and the local state deletes the account's recent searches all the same.
+#[test]
+fn the_sign_out_that_keeps_local_data_deletes_the_recent_searches() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    engine.use_local_state_for_test(path.clone());
+    let a = signed_in(&engine, A);
+    engine.remember_search_for(a, "contract").unwrap();
+    engine.remember_search_for(a, "invoice 2026").unwrap();
+    assert_eq!(
+        on_disk(&path, A.0),
+        (true, words(&["invoice 2026", "contract"])),
+        "the control: kept"
+    );
+
+    assert!(engine.sign_out_keeping_local_data().is_ok(), "the sign-out");
+
+    assert_eq!(on_disk(&path, A.0), (false, Vec::new()), "the sign-out deleted the row");
+    assert!(path.exists(), "the local state itself stays");
+}
+
+/// The control for S7: a screen lock keeps the recent searches (the same person unlocks), and so does the vault lock.
+#[test]
+fn a_screen_lock_keeps_the_recent_searches() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    engine.use_local_state_for_test(path.clone());
+    let a = signed_in(&engine, A);
+    engine.remember_search_for(a, "contract").unwrap();
+    engine.remember_search_for(a, "invoice 2026").unwrap();
+    open_lock(&engine);
+    let kept = (true, words(&["invoice 2026", "contract"]));
+
+    engine.lock_screen().expect("an open lock locks the screen");
+    assert_eq!(on_disk(&path, A.0), kept, "the screen lock kept them");
+    let asked = engine.session_turn();
+    engine
+        .unlock_screen_platform_verified(asked)
+        .expect("the person at the keyboard opens the screen lock");
+    let back = engine.session_turn();
+    assert_eq!(
+        engine.recent_searches_for(back),
+        Ok(words(&["invoice 2026", "contract"])),
+        "the same person reads them after the unlock"
+    );
+
+    let _ = engine.lock();
+    assert_eq!(on_disk(&path, A.0), kept, "the vault lock kept them");
+}

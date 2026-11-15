@@ -10,8 +10,13 @@
 //! is kept, and the host shows none.
 //!
 //! When they go (lead ruling 2026-11-15 17:25, privacy): DELETED at sign-out, not only dropped from memory:
-//! [`Engine::sign_out_for`] calls [`Engine::delete_recent_searches_at_sign_out`] while the session is still in
-//! memory. The purge of an account's rows (`StateDb::clear_account_data`) wipes them as well; Clear deletes the row.
+//! [`Engine::sign_out_for`], the sign-out that keeps the local data and the close of a session the server ended
+//! (a 401 a second question confirmed) call [`Engine::delete_recent_searches_at_sign_out`] while the session is still
+//! in memory. A screen lock and a vault lock keep them (the same person unlocks). The purge of an account's rows
+//! (`StateDb::clear_account_data`) wipes them as well; Clear deletes the row. Not deleted: after a crash, and when the
+//! session ended by the refusal run (the session watcher, or a sign-out pressed after it), because the account-bound
+//! handle then refuses as `SessionEnded`; the row stays until that account's next sign-out, Clear or purge, and
+//! another account never reads it (the row is keyed by user id).
 //!
 //! BLOCKS on the state database: a worker's call. Must not: log a search, a user id, an email or a path.
 

@@ -282,9 +282,10 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// The Lock and the sign-out, first: every proof of this handle stops, and each is waited for (at most
-    /// [`STOP_WAIT`]) until it let go of its client, so the session's token and key are gone before the next engine
-    /// waits for every credential to be released (`runner.rs`). Both callers hold the step lock, which a proof never
+    /// The Lock, the sign-out, the close of a session the server ended and the strong unlock's replacement of a session
+    /// in memory, first: every proof of this handle stops, and each is waited for (at most [`STOP_WAIT`]) until it let
+    /// go of its client, so the session's token and key are gone before the next engine waits for every credential to
+    /// be released (`runner.rs`). Every caller holds the step lock, which a proof never
     /// takes (the start after an adoption takes it as any start does, so it is never cut half way). A proof stopped
     /// after it recorded the owner has recorded this same account's data; one stopped before it recorded nothing.
     pub(in crate::app) async fn stop_proofs(&self) {

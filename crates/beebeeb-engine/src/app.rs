@@ -997,7 +997,8 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Sign out and KEEP the local files and the local state: the engine stops, the session is ended on the server
     /// (best effort), the token, the key and their owners leave the credential store, memory is cleared. Nothing
-    /// on disk is deleted; the state stays bound to this account, so another account cannot sync into it.
+    /// on disk is deleted but the account's recent searches; the state stays bound to this account, so another
+    /// account cannot sync into it.
     /// `Err`: the engine did not confirm its stop, or the credential store could not be cleared; still signed in.
     pub fn sign_out_keeping_local_data(&self) -> Result<(), String> {
         let result = self.sign_out_keeping_local_data_step();
@@ -1008,6 +1009,8 @@ impl<C: CredentialStores> Engine<C> {
     fn sign_out_keeping_local_data_step(&self) -> Result<(), String> {
         self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
+            // The account's recent searches leave this computer while its session is still in memory (`sign_out_for`).
+            let _ = self.delete_recent_searches_at_sign_out(self.acct.session_generation());
             self.sign_out_holding_step().await
         })
     }
@@ -1079,8 +1082,18 @@ impl<C: CredentialStores> Engine<C> {
 
     // ── File operations (the native shell's engine_host wires these) ──────────────────────────
 
-    /// The sync root path: where the settings name, else the identity's own suggestion.
+    /// The sync root path: the folder sync RUNS in while an engine runs (the one its start noted), else where the
+    /// settings name, else the identity's own suggestion. A slot that a start or a stop holds right now counts as not
+    /// running, so this never waits behind one; a noted folder whose engine ended by itself is not used.
     pub fn sync_root(&self) -> Result<PathBuf, String> {
+        let running = self
+            .acct
+            .engine
+            .try_lock()
+            .is_ok_and(|slot| slot.as_ref().is_some_and(crate::runner::EngineRunner::is_running));
+        if running && let Some(root) = self.running_root() {
+            return Ok(root);
+        }
         let config = crate::config::DesktopConfig::load_for(self.identity)?;
         Ok(config
             .sync_root
