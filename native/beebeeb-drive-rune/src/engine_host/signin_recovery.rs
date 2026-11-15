@@ -49,7 +49,7 @@ fn password_set(done: Result<RecoveryDone, RecoveryRefused>) -> Result<(), NewPa
         Ok(RecoveryDone::SignedIn) => Ok(()),
         // The password WAS changed and nothing was signed in (two-factor: the server wants a normal sign-in). `Ok` would
         // draw "Your vault is unlocked", which is not true: the window shows the password updated and the way to sign in.
-        Ok(RecoveryDone::SignInRequired) => Err(NewPasswordProblem::Other),
+        Ok(RecoveryDone::SignInRequired) => Err(NewPasswordProblem::SignInRequired),
         Err(RecoveryRefused::Weak) => Err(NewPasswordProblem::TooShort),
         Err(RecoveryRefused::Breached) => Err(NewPasswordProblem::Breached),
         Err(RecoveryRefused::Offline) => Err(NewPasswordProblem::Offline),
