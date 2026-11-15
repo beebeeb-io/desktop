@@ -499,7 +499,9 @@ impl Fixture {
     pub fn expire(&self, account: &str) {
         self.state.lock().unwrap().accounts.get_mut(account).unwrap().expired = true;
     }
-    pub fn revoke_share(&self) {}
+    pub fn revoke_share(&self) {
+        self.state.lock().unwrap().share_active = false;
+    }
     pub fn remote_edit(&self) {
         let mut state = self.state.lock().unwrap();
         state.objects[6].active = 2;
