@@ -8,8 +8,9 @@ use rune::{Align, Color, El, Icon, TextStyle, col, el, row};
 use super::chrome::{Dot, Status};
 use super::kinds::clock;
 use super::source::{AudioDoc, Picture};
-use super::{Intent, Ui, details, media, media_icons, style};
+use super::{Intent, Ui, details, media, media_icons, style, video};
 use crate::State;
+use crate::media::player::{PlayState, PlayerHandle};
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 use crate::ui::toolbar::{ToolState, tool_button};
@@ -96,11 +97,40 @@ fn skip(key: &'static str, name: &'static str, icon: &'static Icon, delta: isize
         .child(kit::glyph(format!("{key}-icon-2"), icon, 20.0, ink))
 }
 
-fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
+/// What the player says of the recording, when the source hands one that has opened it.
+struct Live {
+    handle: PlayerHandle,
+    state: PlayState,
+    art: Option<rune::Pixels>,
+}
+
+impl Live {
+    fn of(ui: &Ui) -> Option<Live> {
+        let handle = ui.source.player()?;
+        let state = handle.state()?;
+        let art = handle.art();
+        Some(Live { handle, state, art })
+    }
+}
+
+fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
+    // The tags' title and artist once the player has read them; until then (and with no player) the file's.
+    let title = live
+        .map(|l| l.state.title.as_str())
+        .filter(|w| !w.is_empty())
+        .unwrap_or(&doc.title);
+    let artist = live.map_or(doc.artist.as_str(), |l| l.state.artist.as_str());
+    let (at, length, playing) = match live {
+        Some(l) => {
+            let times = video::Times::of(&l.state);
+            (secs(times.at_ms), secs(times.length_ms), times.playing)
+        }
+        None => (doc.at, doc.length, doc.playing),
+    };
     let artwork = el()
         .key("artwork")
         .role("image")
-        .label(format!("Artwork of {}", doc.title))
+        .label(format!("Artwork of {title}"))
         .size(260.0, 260.0)
         .radius(14.0)
         .box_shadow(rune::Shadow {
@@ -111,51 +141,70 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
             color: Color::BLACK.alpha(0.2),
             inset: false,
         });
-    let artwork = match ui.source.picture(&ui.file.id, Picture::Artwork) {
+    let tags_art = match live {
+        Some(l) => l.art.clone(),
+        None => ui.source.picture(&ui.file.id, Picture::Artwork),
+    };
+    let artwork = match tags_art {
         Some(pixels) => artwork.pixels(&pixels),
         // No artwork in the tags: a plain tile.
         None => artwork.fill(style::tile_neutral(t)),
     };
     // The artist's line is as wide as the title's (one centred block).
-    let title_w = rune::text::advance(&doc.title, style::TITLE);
+    let title_w = rune::text::advance(title, style::TITLE);
     let mut names =
         col()
             .key("audio-names")
             .items_center()
-            .child(style::fitted("audio-title", &doc.title, style::TITLE, t.text));
-    if !doc.artist.is_empty() {
+            .child(style::fitted("audio-title", title, style::TITLE, t.text));
+    if !artist.is_empty() {
         names = names.child(
-            kit::label("audio-artist", doc.artist.clone(), style::SUB, t.text_tertiary)
+            kit::label("audio-artist", artist.to_string(), style::SUB, t.text_tertiary)
                 .w(title_w)
                 .align(Align::Center),
         );
     }
-    let part = if doc.length == 0 {
+    let part = if length == 0 {
         0.0
     } else {
-        (doc.at as f32 / doc.length as f32).clamp(0.0, 1.0)
+        (at as f32 / length as f32).clamp(0.0, 1.0)
     };
-    let left = doc.length.saturating_sub(doc.at);
+    let left = length.saturating_sub(at);
+    let mut track = el()
+        .key("scrub-track")
+        .role("progressbar")
+        .label("Position")
+        .range_value(f64::from(part), 0.0, 1.0);
+    // The player's scrubber is a slider: "1:12 of 4:02", and the arrows seek.
+    if let Some(l) = live {
+        let handle = l.handle.clone();
+        track = track
+            .role("slider")
+            .a11y_value(video::Times::of(&l.state).spoken())
+            .on_step(move |_: &mut State, delta: i32, _: &mut rune::Tx| {
+                let now = handle.state().map_or(0, |s| s.at_ms);
+                let step = 5_000u64.saturating_mul(u64::from(delta.unsigned_abs()));
+                handle.seek(if delta < 0 {
+                    now.saturating_sub(step)
+                } else {
+                    now.saturating_add(step)
+                });
+            })
+            .focusable(true)
+            .focus_ring(2.0, 2.0, t.accent_deep);
+    }
     let scrubber = col()
         .key("scrubber")
         .w_full()
         .gap(4.0)
         .child(
-            el().key("scrub-track")
-                .role("progressbar")
-                .label("Position")
-                .range_value(f64::from(part), 0.0, 1.0)
-                .w_full()
-                .h(4.0)
-                .radius(2.0)
-                .fill(style::bar_track(t))
-                .child(
-                    el().key("scrub-fill")
-                        .w_frac(part)
-                        .h_full()
-                        .radius(2.0)
-                        .fill(t.text_secondary),
-                ),
+            track.w_full().h(4.0).radius(2.0).fill(style::bar_track(t)).child(
+                el().key("scrub-fill")
+                    .w_frac(part)
+                    .h_full()
+                    .radius(2.0)
+                    .fill(t.text_secondary),
+            ),
         )
         .child(
             row()
@@ -164,7 +213,7 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
                 .justify_between()
                 .child(style::fitted(
                     "time-elapsed",
-                    &clock(doc.at),
+                    &clock(at),
                     style::CAP_MONO,
                     t.text_tertiary,
                 ))
@@ -186,11 +235,12 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
         t,
     ));
     // No Play where the source cannot play: a button that does nothing is not drawn.
+    let toggle_with = live.map(|l| l.handle.clone());
     if ui.can_play() {
         transport = transport.child(
             el().key("pause")
                 .role("button")
-                .label(if doc.playing { "Pause" } else { "Play" })
+                .label(if playing { "Pause" } else { "Play" })
                 .shortcut_hint("Space")
                 .size(48.0, 48.0)
                 .radius(24.0)
@@ -199,14 +249,17 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
                 .focusable(true)
                 .focus_ring(2.0, 2.0, t.accent_deep)
                 .cursor(rune::Cursor::Pointer)
-                .on_press(|s: &mut State| {
-                    if let Some(ui) = super::ui(s) {
-                        ui.toggle_play();
+                .on_press(move |s: &mut State| match &toggle_with {
+                    Some(handle) => video::toggle(handle),
+                    None => {
+                        if let Some(ui) = super::ui(s) {
+                            ui.toggle_play();
+                        }
                     }
                 })
                 .child(kit::glyph(
                     "pause-icon",
-                    if doc.playing {
+                    if playing {
                         &media_icons::PAUSE
                     } else {
                         &media_icons::PLAY
@@ -217,7 +270,20 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
         );
     }
     let transport = transport.child(skip("next", "Next", &media_icons::FWD, 1, !last, t));
-    col()
+    let caption = kit::label(
+        "audio-caption",
+        if ui.can_play() {
+            "Decrypted on this PC \u{00B7} keeps playing when you leave this view \u{00B7} the media keys work"
+        } else {
+            "Decrypted on this PC \u{00B7} playing needs another app: use Open in another app"
+        },
+        CAP,
+        t.text_tertiary,
+    )
+    .wrap()
+    .w(360.0)
+    .align(Align::Center);
+    let mut shown = col()
         .key("player")
         .w(360.0)
         .items_center()
@@ -226,21 +292,17 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
         .child(names)
         .child(scrubber)
         .child(transport)
-        .child(
-            kit::label(
-                "audio-caption",
-                if ui.can_play() {
-                    "Decrypted on this PC \u{00B7} keeps playing when you leave this view \u{00B7} the media keys work"
-                } else {
-                    "Decrypted on this PC \u{00B7} playing needs another app: use Open in another app"
-                },
-                CAP,
-                t.text_tertiary,
-            )
-            .wrap()
-            .w(360.0)
-            .align(Align::Center),
-        )
+        .child(caption);
+    // Decision D-MED-7: the line the details panel carries, said here too where it is in sight.
+    if live.is_some_and(|l| l.state.reduced_quality) {
+        shown = shown.child(kit::label(
+            "audio-reduced",
+            "Reduced quality on this PC",
+            CAP,
+            t.text_tertiary,
+        ));
+    }
+    shown
 }
 
 fn queue(doc: &AudioDoc, t: &Theme) -> El {
@@ -327,7 +389,16 @@ fn queue(doc: &AudioDoc, t: &Theme) -> El {
     list.child(rows)
 }
 
+fn secs(ms: u64) -> u32 {
+    u32::try_from(ms / 1000).unwrap_or(u32::MAX)
+}
+
 pub fn body(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
+    let live = Live::of(ui);
+    // A refusal: the words, and "Open in another app\u{2026}" one press away.
+    if let Some(why) = live.as_ref().and_then(|l| l.state.refused.as_ref()) {
+        return video::refused(&video::refusal_words(why), t);
+    }
     row()
         .key("viewer-body")
         .grow(1.0)
@@ -338,6 +409,6 @@ pub fn body(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
         .gap(32.0)
         .items_start()
         .fill(t.bg)
-        .child(player(ui, doc, t))
+        .child(player(ui, doc, live.as_ref(), t))
         .child(queue(doc, t))
 }

@@ -164,6 +164,49 @@ fn player(ui: &Ui, viewing: &Viewing, seconds: u32, t: &Theme) -> El {
         .child(kit::label("ph-player-text-1", length(seconds), style::CAP_MONO, white))
 }
 
+/// The stage's picture of a video the player plays: the player's frame, scaled to fit, and the player's bar on it
+/// (the drawing of `viewers::video::bar`, shared with a video opened from Files).
+fn live_stage(photo: El, handle: &crate::media::player::PlayerHandle, t: &Theme) -> El {
+    use crate::frames::viewers::video::{self, Times};
+    let ask = handle.clone();
+    // The picture takes the whole stage (the fixture's 600 x 400 is the board's drawing): its size is what the
+    // player is asked for.
+    let mut photo = photo.w_full().h_full().on_layout(move |_: &mut State, [_, _, w, h]| {
+        let (w, h) = video::ask_size(w, h);
+        ask.set_view_size(w, h);
+    });
+    if let Some(frame) = handle.frame() {
+        photo = photo.pixels_fit(&frame, SurfaceFit::Fit);
+    }
+    let state = handle.state();
+    let ink = Color::WHITE;
+    let inner = match state.as_ref().and_then(|s| s.refused.as_ref()) {
+        Some(why) => kit::label("ph-player-refused", video::refusal_words(why), style::CAP, ink),
+        None => {
+            let times = state.as_ref().map_or(
+                Times {
+                    playing: false,
+                    at_ms: 0,
+                    length_ms: 0,
+                },
+                Times::of,
+            );
+            video::bar("ph-live", handle, times, ink, ink.alpha(0.3), t)
+        }
+    };
+    photo.child(
+        row()
+            .key("ph-player")
+            .pin(Some(24.0), None, Some(24.0), Some(20.0))
+            .h(46.0)
+            .radius(12.0)
+            .center_y()
+            .fill(Color::BLACK.alpha(0.45))
+            .backdrop_blur(16.0)
+            .child(inner),
+    )
+}
+
 pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
     let white = Color::WHITE;
     let Some(viewer) = &ui.viewer else {
@@ -209,11 +252,19 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fit),
         None => photo.fill(white.alpha(0.07)),
     };
-    // The player's controls are drawn only where playing is connected: a source that answers in the call (the
-    // board's). On the engine's source the stored picture of a video shows, and the status line says why.
-    if let Kind::Video(seconds) = shown.kind
+    // A video the shell's player is playing: its frames on the stage, the bar working (Space and the button
+    // play and pause), a refusal in the bar's place.
+    let live = match shown.kind {
+        Kind::Video(_) => crate::media::shell_player(),
+        Kind::Photo => None,
+    };
+    if let Some(handle) = live {
+        photo = live_stage(photo, &handle, t);
+    } else if let Kind::Video(seconds) = shown.kind
         && !ui.source.answers_later()
     {
+        // The player's controls of the board's fixture, which answers in the call. On the engine's source with no
+        // player the stored picture of a video shows, and the status line says why.
         photo = photo.child(player(ui, shown, seconds, t));
     }
     stage = stage.child(
