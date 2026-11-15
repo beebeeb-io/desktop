@@ -76,6 +76,15 @@ use crate::frames::settings::source::{Alert, AlertKind, AlertTarget, Notificatio
 #[cfg(test)]
 mod tests;
 
+#[cfg(any())]
+fn mutant_p11(identity: &'static EngineIdentity) {
+    let held = DesktopConfig::load().unwrap();
+    let _ = DesktopConfig::update_for(identity, |c| {
+        c.pause_sync = !held.pause_sync;
+        (true, ())
+    });
+}
+
 /// What this part holds is not read again, when its pane opens, for this long.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
 
