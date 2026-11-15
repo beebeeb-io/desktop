@@ -137,7 +137,7 @@ impl Fields {
         if field.name() == "message" || field.name().starts_with("log.") {
             return;
         }
-        let shown = if redact::denied_name(field.name()) {
+        let shown = if redact::denied_numeric_name(field.name()) {
             redact::REDACTED.to_string()
         } else {
             redact::number(field.name(), shown)

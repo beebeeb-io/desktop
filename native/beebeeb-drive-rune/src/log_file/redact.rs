@@ -27,6 +27,8 @@ const DENIED_WORDS: &[&str] = &[
     "src",
     "dest",
     "dst",
+    "pass",
+    "content",
     "name",
     "names",
     "email",
@@ -173,6 +175,14 @@ pub fn denied_name(name: &str) -> bool {
         return false;
     }
     words.iter().any(|word| DENIED_WORDS.contains(word))
+}
+
+/// True when a NUMBER field of this name is never written: only a credential word or part denies it (a number holds
+/// no name, path or body, so `content_unknown = 2` is a count and stays).
+pub fn denied_numeric_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    DENIED_PARTS.iter().any(|part| lower.contains(part))
+        || lower.split(['_', '.']).any(|word| CREDENTIAL_WORDS.contains(&word))
 }
 
 /// The message of an event, scrubbed and capped.
