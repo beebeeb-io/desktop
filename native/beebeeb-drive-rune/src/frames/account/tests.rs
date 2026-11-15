@@ -1067,9 +1067,6 @@ fn a_change_that_is_still_out_is_shown_as_out_when_the_page_comes_back_and_its_a
 
     // A's answer lands: it is A's result (its normal path), and nothing says B was saved.
     held.release.set(true);
-    rt.update(|s, tx| {
-        host::poll(s, tx);
-    });
     settle(&mut rt);
     assert_eq!(rt.state.account.pane, Pane::Security, "A's Done takes the normal path");
     assert!(rt.state.account.form.waiting.is_none(), "the form is live again");
