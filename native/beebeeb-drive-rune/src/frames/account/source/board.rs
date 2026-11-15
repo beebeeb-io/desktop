@@ -647,6 +647,17 @@ impl AccountSource for BoardAccount {
         self.wire.push("PUT account/activity-tracking off code".into());
         Ok(())
     }
+    fn stop_activity_needs_password(&self) -> bool {
+        true
+    }
+    fn stop_activity_confirmed(&mut self, password: Password<'_>) -> bool {
+        if password.for_opaque() != self.accepts.as_bytes() {
+            return false;
+        }
+        self.activity = false;
+        self.wire.push("PUT account/activity-tracking off password".into());
+        true
+    }
     fn deletion(&self) -> Deletion {
         self.deletion.clone()
     }

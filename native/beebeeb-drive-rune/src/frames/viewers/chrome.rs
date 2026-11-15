@@ -159,6 +159,19 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
         }
     });
 
+    // Open in File Explorer (board b4ffef881): the last icon button, never dimmed; the viewer shows no folder of its
+    // own, so it opens the Beebeeb location.
+    let explorer_btn = tool_button(
+        "open-explorer",
+        "Open in File Explorer",
+        &crate::theme::icons_settings::FOLDER,
+        16.0,
+        ToolState::Idle,
+        t,
+    )
+    .help("Open in File Explorer")
+    .on_press_tx(crate::ui::toolbar::open_beebeeb_location);
+
     let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
 
     let new_btn = row()
@@ -237,6 +250,7 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
         .child(view_toggle)
         .child(sort_btn)
         .child(panel_btn)
+        .child(explorer_btn)
         .child(sep)
         .child(new_btn)
         .child(search_field)
