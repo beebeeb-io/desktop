@@ -37,7 +37,7 @@ fdk() { if [ -n "${FDK_LIB:-}" ]; then LD_LIBRARY_PATH="$FDK_LIB" "$FDKAAC" "$@"
 fdk --silent -p 5 -b 64 -o he-aac.m4a tones.wav
 fdk --silent -p 29 -b 32 -o he-aac-v2.m4a tones.wav
 rm -f tones.wav
-# --- HEVC, required path (Guus 2026-11-15 17:30: HEVC on the system decoder) ---
+# --- HEVC, required path (the owner's ruling of 2026-11-15 17:30: HEVC on the system decoder) ---
 # As an iPhone writes it: hvc1 sample entry, AAC audio, MOV (and MP4); Main (SDR) and Main 10 (HDR, HLG tags).
 ff "${VIN[@]}" "${AIN[@]}" "${AV[@]}" -c:v libx265 "${X265[@]}" -pix_fmt yuv420p -tag:v hvc1 -c:a aac -b:a 128k hevc-main.mp4
 ff "${VIN[@]}" "${AIN[@]}" "${AV[@]}" -c:v libx265 "${X265[@]}" -pix_fmt yuv420p -tag:v hvc1 -c:a aac -b:a 128k -f mov hevc-main.mov

@@ -50,7 +50,7 @@ fn main() {
                 4,
                 &mut returned,
             );
-            let mut capabilities = [0u64; 64];
+            let mut capabilities = [0u64; 512];
             let _ = GetTokenInformation(
                 token,
                 TokenCapabilities,

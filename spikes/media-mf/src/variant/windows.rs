@@ -579,9 +579,9 @@ fn confirm_confined(process: &OwnedHandle, job: &OwnedHandle, expected_caps: u32
         return Err(SandboxError::NotConfined("not an AppContainer"));
     }
 
-    // The answer is a count followed by that many entries; with no capability it is a count of zero. 512 bytes,
+    // The answer is a count followed by that many entries; with no capability it is a count of zero. 4 KiB (SPIKE: was 512 bytes, which holds about 8 capabilities),
     // pointer-aligned.
-    let mut capabilities = [0u64; 64];
+    let mut capabilities = [0u64; 512];
     // SAFETY: the buffer is writable for the length passed and aligned for the structure.
     let ok = unsafe {
         GetTokenInformation(

@@ -238,7 +238,7 @@ fn token_line() -> String {
         )
         .map(|_| is_lpac.to_string())
         .unwrap_or_else(|e| format!("err{}", ex(&e)));
-        let mut capabilities = [0u64; 64];
+        let mut capabilities = [0u64; 512];
         let caps = GetTokenInformation(
             token,
             TokenCapabilities,
