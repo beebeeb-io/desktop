@@ -894,6 +894,24 @@ fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
     let _ = std::fs::remove_dir_all(&sync_root);
 }
 
+/// R4: the menu's and the tray's Open in File Explorer (the shell-side action) ask for the sync root and refuse as
+/// the Files source does while sync is not running: `NotAvailable`, never `NotBuilt`.
+#[test]
+fn the_menu_opens_the_sync_root() {
+    use crate::shell::actions::EngineActions;
+    let started = started();
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let live = LiveEngine::new(&started.opened, rx);
+    let mut files = EngineFilesSource::new(started.opened.engine.clone());
+    let from_files = files.open_in_file_explorer(None);
+    assert_eq!(from_files, Err(ActionError::Unavailable));
+    assert_eq!(
+        live.open_in_file_explorer(),
+        Err(actions::ActionError::NotAvailable("sync is not running")),
+        "not the NotBuilt of before"
+    );
+}
+
 /// The sync guard is the `is_syncing()` check in `local()`. Dropping the guard (mutant: removing
 /// the `if !self.engine.is_syncing()` check) would let the operations through despite sync not
 /// running, hitting the state_db/sync_root errors instead of the clear `Unavailable`. The source
