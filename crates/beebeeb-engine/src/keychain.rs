@@ -921,6 +921,9 @@ mod windows_credentials {
     }
 }
 
+#[cfg(test)]
+#[path = "../src/keychain/debug_tests.rs"]
+mod debug_tests;
 #[path = "../src/keychain/tests.rs"]
 mod tests;
 
