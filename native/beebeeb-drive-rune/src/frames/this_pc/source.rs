@@ -533,6 +533,46 @@ impl FixtureSource {
         ]
     }
 
+    /// Task 2530, render-only (no board frame): the board's PC with two parked changes in Problems, one a viewer save
+    /// another device overtook (Keep both, Keep the other, Keep this PC's), one whose staged copy is gone (Remove from
+    /// the list). The words are the engine's (`drive_v2::status::parked_words`); the names are invented.
+    pub fn parked() -> FixtureSource {
+        let board = Self::board();
+        let today = day(BOARD_TODAY.0, BOARD_TODAY.1);
+        let parked = |id: &str, time: &str, name: &str, words: &'static str, exits: Vec<Exit>| {
+            change(
+                id,
+                today,
+                time,
+                name,
+                Kind::Document,
+                What::Failed {
+                    problem: id.into(),
+                    reason: Reason::Said(words),
+                    exits,
+                },
+                Origin::ThisPc,
+            )
+        };
+        let problems = vec![
+            parked(
+                "p-plan",
+                "10:02",
+                "Plan.txt",
+                "Not sent: this file changed in Beebeeb before this change reached it. Choose which version to keep. Nothing was lost.",
+                vec![Exit::KeepBoth, Exit::KeepOther, Exit::KeepThisPcs],
+            ),
+            parked(
+                "p-notes",
+                "09:50",
+                "Notes.md",
+                "This PC no longer has the bytes of this change, so it can\u{2019}t be sent. The file on Beebeeb is as it was.",
+                vec![Exit::RemoveFromList],
+            ),
+        ];
+        FixtureSource { problems, ..board }
+    }
+
     /// DW-0715 and DW-1306: everything synced, three items kept.
     pub fn synced() -> FixtureSource {
         FixtureSource {
