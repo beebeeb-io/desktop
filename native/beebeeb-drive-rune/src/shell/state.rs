@@ -219,14 +219,15 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     // the identity or a dev flag.
     // Account and Devices and sessions read the engine; every other account pane is the shell's frame
     // (`engine_host::account`).
-    // Turning app lock off asks the main window's Windows Hello prompt first.
+    // Turning app lock off asks the main window's Windows Hello prompt first; so does approving another device's
+    // sign-in, with its own line ("Approve a sign-in on another device").
     s.account.source = Some(Box::new(
-        crate::engine_host::account::EngineAccountSource::new(engine.clone()).with_hello(Box::new(
-            crate::engine_host::hello::WindowHello::for_reason(
+        crate::engine_host::account::EngineAccountSource::new(engine.clone())
+            .with_hello(Box::new(crate::engine_host::hello::WindowHello::for_reason(
                 s.shell.main_window_slot(),
                 crate::engine_host::hello::TURN_APP_LOCK_OFF,
-            ),
-        )),
+            )))
+            .with_approval_window(s.shell.main_window_slot()),
     ));
     s.storage_split = None;
     // The first-time guide's "done", once per account: the engine keeps it in the account's own local state.
