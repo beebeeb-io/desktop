@@ -16,7 +16,7 @@ use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use beebeeb_engine::test_api::FakeApi;
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
-use rune::{Env, Runtime};
+use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use zeroize::Zeroizing;
 
 use super::*;
@@ -124,6 +124,7 @@ fn live_with(first_run: bool) -> Live {
         },
     );
     rt.poll = Some(host::poll);
+    rt.on_key = Some(host::on_key);
     rt.frame(0.0);
     Live {
         engine,
@@ -686,6 +687,10 @@ fn a_wake_that_locks_nothing_is_covered_until_its_answer_then_the_files_return()
     live.rt.frame(0.016);
     let began = Instant::now();
     assert!(away(&mut live.rt).covers(), "covered at once");
+    assert!(
+        live.rt.state.shell.flyout_covered.is_some(),
+        "the flyout is told: it shows the lock's state"
+    );
     let actions = live.rt.state.shell.actions.clone();
     away(&mut live.rt).event(Away::LeftTheApp, &actions, None);
     loop {
@@ -712,6 +717,10 @@ fn a_wake_that_locks_nothing_is_covered_until_its_answer_then_the_files_return()
         lock.looks,
         looks + 2,
         "leaving's look and the gap's own, after the grace"
+    );
+    assert_eq!(
+        live.rt.state.shell.flyout_covered, None,
+        "the flyout is told the cover lifted"
     );
     assert_eq!(
         live.engine.lock_state(),
@@ -852,4 +861,140 @@ fn the_cover_never_hides_the_screen_of_a_closed_engine() {
         lock_screen(&rt),
         "over an open engine's Files window the held cover is drawn"
     );
+}
+
+/// Ctrl+A, Enter, Delete (the Files window's keys) and Ctrl+, (the shell's), the full key path.
+fn keys_behind_a_cover() -> [KeyEvent; 4] {
+    let ctrl = Mods {
+        cmd: true,
+        ctrl: true,
+        ..Mods::default()
+    };
+    [
+        KeyEvent {
+            key: Key::Command('a'),
+            mods: ctrl,
+        },
+        KeyEvent {
+            key: Key::Enter,
+            mods: Mods::default(),
+        },
+        KeyEvent {
+            key: Key::Delete,
+            mods: Mods::default(),
+        },
+        KeyEvent {
+            key: Key::Command(','),
+            mods: ctrl,
+        },
+    ]
+}
+
+/// The lead's ruling of 2026-11-15 22:56 (privacy): while the window is covered, keys reach only the lock screen. Ctrl+A,
+/// Enter, Delete and Ctrl+, change nothing in the Files window behind the cover (no selection, nothing opened, nothing
+/// moved to Trash, no Settings); lifted, the Files window has its keys again.
+#[test]
+fn keys_while_covered_reach_only_the_lock_screen() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(5 * 60));
+    looked(&mut live);
+    slept(&mut live, Duration::from_secs(20 * 60));
+    live.rt.frame(0.016);
+    assert!(away(&mut live.rt).covers(), "covered at once");
+    for ev in keys_behind_a_cover() {
+        live.rt.key(ev);
+        live.rt.frame(0.016);
+    }
+    // A key that reaches the shell's handler is taken there, by the lock screen, and goes no further.
+    let mut taken = false;
+    live.rt.update(|s, tx| {
+        taken = host::on_key(
+            s,
+            &KeyEvent {
+                key: Key::Delete,
+                mods: Mods::default(),
+            },
+            tx,
+        );
+    });
+    assert!(taken, "the lock screen takes the key");
+    assert!(
+        away(&mut live.rt).covers(),
+        "the keys came while the window was covered"
+    );
+    let s = &live.rt.state;
+    assert!(
+        s.selected.is_none() && s.actions.selection.is_empty(),
+        "Ctrl+A selected nothing behind the cover"
+    );
+    assert!(s.shell.app.route().item.is_none(), "Enter opened nothing");
+    assert!(!s.shell.app.in_settings(), "Ctrl+, opened no Settings");
+    assert!(!words(&live).contains(FILE_NAME));
+    // Five minutes and twenty, of thirty: lifted. The file is still listed (Delete moved nothing), and Ctrl+A reaches
+    // the Files window again.
+    until(&mut live, "the cover was never lifted", |live| {
+        !live.rt.state.shell.away.covers()
+    });
+    until_drawn(&mut live, FILE_NAME);
+    live.rt.settle_all();
+    live.rt.key(KeyEvent {
+        key: Key::Command('a'),
+        mods: Mods {
+            cmd: true,
+            ctrl: true,
+            ..Mods::default()
+        },
+    });
+    live.rt.frame(0.016);
+    assert_eq!(
+        live.rt.state.actions.selection.len(),
+        1,
+        "lifted, Ctrl+A reaches the Files window"
+    );
+}
+
+/// M4, the race the cover's `Locked` state is for: the engine locks after this frame's window read the gate, and the away
+/// poll sees the session closed in that same frame. A view drawn then, with the window's gate still `Ready`, shows the
+/// lock screen, never the files. (No `host::poll` runs between the lock and the view, so nothing reads the gate.)
+#[test]
+fn a_lock_the_poll_sees_before_the_window_reads_it_keeps_the_cover() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(29 * 60));
+    looked(&mut live);
+    slept(&mut live, Duration::from_secs(3 * 60));
+    live.rt.frame(0.016);
+    assert!(away(&mut live.rt).covers(), "covered at once");
+    live.rt.poll = None;
+    live.engine.lock_screen().expect("the screen locks");
+    poll_said(&mut live);
+    assert_eq!(
+        live.rt.state.shell.app.gate(),
+        GateState::Ready,
+        "the window has not read the lock yet"
+    );
+    assert!(away(&mut live.rt).covers(), "the cover holds through the lock");
+    live.rt.invalidate();
+    live.rt.frame(0.016);
+    let drawn = words(&live);
+    assert!(
+        !drawn.contains(FILE_NAME),
+        "the frame between the lock and the window's read of it holds the file name:\n{drawn}"
+    );
+    assert!(drawn.contains("Beebeeb is locked"), "{drawn}");
+    // The window reads the lock (its own lock screen), and after the unlock the files come back.
+    live.rt.poll = Some(host::poll);
+    until(&mut live, "the window did not show the lock", |live| {
+        live.rt.state.shell.app.gate() == GateState::Locked
+    });
+    live.engine
+        .unlock_screen_platform_verified(live.engine.session_turn())
+        .unwrap();
+    until(&mut live, "the cover outlived the unlock", |live| {
+        live.rt.state.shell.app.gate() == GateState::Ready && !live.rt.state.shell.away.covers()
+    });
+    until_drawn(&mut live, FILE_NAME);
 }
