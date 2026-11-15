@@ -157,6 +157,7 @@ pub fn toast_layer(toast: &Toast, bottom: f32, over_photos: bool, t: &Theme) -> 
         Toast::Kept => (&icons::OFFLINE, "Keeping the original on this PC"),
         Toast::Trashed(_) => (&icons::TRASH, "Moved to Trash"),
         Toast::NotYet => (&icons::MORE, "Not available in this version yet"),
+        Toast::Words(words) => (&icons::MORE, words),
         Toast::Left { what, why, count, .. } => {
             left_words = Toast::left_words(*what, *why, *count);
             let ic = match what {
@@ -437,6 +438,13 @@ fn sources(ui: &Ui, draft: &SourcesDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
                 &f.name,
                 Some(&f.detail),
                 vec![
+                    // Takes the folder out of Photo sources (nothing is moved or deleted); the switch only hides it.
+                    kit::label(format!("ph-item-1-{m}-remove"), "Remove", style::BULK, t.text_secondary)
+                        .spans(vec![rune::Span::new(0, "Remove".len()).underline(t.text_secondary)])
+                        .role("button")
+                        .label(format!("Remove {}", f.name))
+                        .focusable(true)
+                        .on_press(move |s: &mut State| s.photos.remove_folder(m)),
                     switch(&key, &f.name, on, t)
                         .on_press(move |s: &mut State| s.photos.toggle_source(SourceRef::Folder(m))),
                 ],

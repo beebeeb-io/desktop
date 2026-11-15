@@ -195,6 +195,16 @@ fn photo_folders_come_from_the_engine() {
         "every photo shows while the folder is switched on"
     );
 
+    // Move… reads the files behind the photos: the id and the name; a photo that is not held gives none.
+    let first = source.photo(None, 0, 0).expect("a photo shows").id;
+    let items = source.file_items(&[first]).expect("the photo is held");
+    assert!(!items[0].id.is_empty() && !items[0].name.is_empty());
+    assert!(
+        source
+            .file_items(&[first, crate::frames::photos::source::PhotoId(u64::MAX)])
+            .is_none()
+    );
+
     // Done hands every folder over, changed or not: a switch that is as the engine has it sends nothing.
     let reads = source.reads;
     source.set_shown(SourceRef::Folder(0), true);
@@ -217,6 +227,8 @@ fn photo_folders_come_from_the_engine() {
     assert!(source.add_folder(HARBOUR), "asked");
     pump_until(&mut source, |source| !source.pump().busy);
     assert_eq!(source.folders().len(), 1);
+    assert!(source.folder_refused(), "the refusal is told to the window");
+    assert!(!source.folder_refused(), "once");
 
     // Removed: its photos show again, and the row is gone.
     source.remove_folder(SourceRef::Folder(0));
