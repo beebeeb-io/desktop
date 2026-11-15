@@ -140,6 +140,35 @@ impl Shared {
     }
 }
 
+/// A device sample format the callback writes. On Windows and macOS every cpal format qualifies; on Linux (no cpal) the
+/// tests give `f32` and `i16`.
+trait DeviceSample: Copy {
+    fn from_f32(s: f32) -> Self;
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl<T: cpal::FromSample<f32>> DeviceSample for T {
+    fn from_f32(s: f32) -> T {
+        <T as cpal::Sample>::from_sample(s)
+    }
+}
+
+/// The per-buffer step of the output callback: the ring's sound in the device's format, silence when the ring is empty
+/// or busy (never wait on the player's thread). `scratch` is reused between calls.
+#[cfg(any(windows, target_os = "macos", test))]
+fn fill_device<T: DeviceSample>(shared: &Shared, scratch: &mut Vec<f32>, data: &mut [T]) {
+    scratch.resize(data.len(), 0.0);
+    match shared.ring.try_lock() {
+        Ok(mut ring) => {
+            ring.fill(scratch);
+        }
+        Err(_) => scratch.iter_mut().for_each(|s| *s = 0.0),
+    }
+    for (out, s) in data.iter_mut().zip(scratch.iter()) {
+        *out = T::from_f32(*s);
+    }
+}
+
 /// The open output stream.
 pub struct AudioOut {
     #[cfg(any(windows, target_os = "macos"))]
@@ -341,7 +370,7 @@ impl AudioFactory for DefaultAudio {
 /// `cpal`: WASAPI in shared mode on Windows, CoreAudio on macOS.
 #[cfg(any(windows, target_os = "macos"))]
 mod device {
-    use super::{AudioError, Ordering, Shared};
+    use super::{AudioError, Ordering, Shared, fill_device};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use std::sync::Arc;
 
@@ -386,22 +415,12 @@ mod device {
         device.build_output_stream::<T, _, _>(
             config,
             move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
-                scratch.resize(data.len(), 0.0);
                 let ts = info.timestamp();
                 let latency = ts.playback.saturating_duration_since(ts.callback);
                 data_shared
                     .latency_frames
                     .store((latency.as_secs_f64() * rate as f64) as u64, Ordering::Relaxed);
-                // Never wait on the player's thread: a busy ring is silence for this buffer.
-                match data_shared.ring.try_lock() {
-                    Ok(mut ring) => {
-                        ring.fill(&mut scratch);
-                    }
-                    Err(_) => scratch.iter_mut().for_each(|s| *s = 0.0),
-                }
-                for (out, s) in data.iter_mut().zip(scratch.iter()) {
-                    *out = <T as cpal::Sample>::from_sample(*s);
-                }
+                fill_device(&data_shared, &mut scratch, data);
             },
             move |err: cpal::Error| {
                 // The backend rerouted to the new default device by itself: nothing to do.
