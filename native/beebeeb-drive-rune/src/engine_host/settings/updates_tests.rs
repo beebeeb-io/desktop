@@ -669,6 +669,8 @@ fn the_release_config_is_the_pinned_key_and_the_one_host() {
     let http = Logged {
         inner: serving(&other, &[release]),
         seen: seen.clone(),
+        gate: Gate::default(),
+        offline: Arc::new(AtomicBool::new(false)),
     };
     let clock = FakeClock(Cell::new(testkit::NOW));
     let mut updater = Updater::new(
