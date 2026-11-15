@@ -1,5 +1,8 @@
 //! Starts the Office helper process confined.
 //!
+//! Any helper of ours starts through this crate in the same way: the Office helper now, the media helper next. Each
+//! kind is an executable of its own; the confinement and the four promises below are the same for every one.
+//!
 //! The helper parses files nobody trusts. This crate starts it so that it
 //!
 //! 1. cannot open a network connection,
@@ -7,9 +10,11 @@
 //! 3. cannot start another process,
 //! 4. is gone when its parent is gone, and can be killed by the parent at any time.
 //!
-//! The only things handed to the helper are two unnamed pipes (its standard input and output). It gets no
-//! arguments, no inherited environment and no other handle. Document bytes travel over the pipes (or, later, over
-//! memory the parent shares); they are never written to a file for it.
+//! At its start the helper is handed two unnamed pipes (its standard input and output) and nothing else: no
+//! arguments, no inherited environment, no other handle. Bulk bytes (a document, a rendered page) travel over memory
+//! the parent shares with it afterwards: an unnamed [`Section`] the parent makes and hands over with
+//! [`Child::grant`], one handle at a time, read-only or read-write as the parent decides. Nothing is ever written
+//! to a file for it.
 //!
 //! **Fail closed.** There is no unconfined way to start the helper through this crate. On an operating system
 //! without a sandbox module here (everything but Windows today) [`Sandbox::spawn`] returns
@@ -43,7 +48,14 @@ pub const DEFAULT_MEMORY_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 /// The exit code a helper has after [`Child::kill`] (or after its `Child` was dropped).
 pub const KILLED_EXIT_CODE: u32 = 0xBEEB_DEAD;
 
+/// The largest [`Section`]: 4 GiB.
+pub const MAX_SECTION_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Resource limits of one helper.
+///
+/// There is no time limit here on purpose: a job's CPU limit would be cumulative over the helper's whole life, so the
+/// time one request may take is the caller's own timer (the viewer's 15 s wall clock, media's 5 s), followed by
+/// [`Child::kill`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Committed memory the helper may hold, in bytes. An allocation beyond it fails inside the helper.
@@ -65,7 +77,7 @@ pub enum SandboxError {
     Unsupported,
     /// The helper path was refused before anything was started (the reason is a fixed text, never the path).
     HelperPath(&'static str),
-    /// A limit was refused before anything was started.
+    /// A limit was refused before anything was started (also: a section or grant length out of range).
     Limits(&'static str),
     /// An operating-system call failed. `step` is a fixed name of ours, `code` the system's error code.
     Os {
@@ -202,6 +214,153 @@ impl Child {
     pub fn kill(&self) -> Result<(), SandboxError> {
         self.inner.kill()
     }
+
+    /// Hands `section` to the helper with exactly `access`: the section's handle is duplicated into the helper's
+    /// process with those rights only, and not inheritable. Send the returned [`Granted`] to the helper over the
+    /// pipe; it maps the section with [`helper::map`], which closes that handle again when the mapping ends.
+    ///
+    /// A grant cannot be taken back: the helper can use it until it drops the mapping or ends. Each call places a
+    /// new handle in the helper. The two pipe ends of [`Sandbox::spawn`] stay the only handles a helper inherits.
+    pub fn grant(&self, section: &Section, access: Access) -> Result<Granted, SandboxError> {
+        self.inner.grant(&section.inner, access)
+    }
+}
+
+/// Memory the app shares with a helper: an unnamed section backed by the paging file, mapped read-write in the app.
+///
+/// Nothing can open it by name, its handle is not inheritable, and a helper reaches it only through
+/// [`Child::grant`]. Dropping it overwrites every byte with zero before the memory is released, so a helper that
+/// still holds a grant then sees zeros, never the old bytes.
+///
+/// While a helper holds a read-write grant it can change these bytes at any moment: read them once the helper has
+/// said it is done.
+pub struct Section {
+    inner: platform::SectionInner,
+}
+
+impl Section {
+    /// A section of `len` bytes, all zero. Refuses 0 bytes and more than [`MAX_SECTION_BYTES`].
+    ///
+    /// Off Windows: [`SandboxError::Unsupported`].
+    pub fn new(len: usize) -> Result<Self, SandboxError> {
+        let len = section_length(len as u64)?;
+        Ok(Self {
+            inner: platform::SectionInner::new(len)?,
+        })
+    }
+
+    /// The bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        self.inner.as_slice()
+    }
+
+    /// The bytes, to write.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.inner.as_mut_slice()
+    }
+
+    /// The length in bytes.
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    /// Always false: a section holds at least one byte.
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+}
+
+impl fmt::Debug for Section {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The length only, never the bytes.
+        f.debug_struct("Section")
+            .field("len", &self.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawHandle for Section {
+    /// The app's own handle, for checks. It is not inheritable and must stay so: a helper gets the section through
+    /// [`Child::grant`], never by inheritance.
+    fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+        self.inner.raw_handle()
+    }
+}
+
+/// A length the crate accepts for a section or a grant: 1 byte to [`MAX_SECTION_BYTES`].
+fn section_length(len: u64) -> Result<usize, SandboxError> {
+    if len == 0 {
+        return Err(SandboxError::Limits("a section of zero bytes"));
+    }
+    if len > MAX_SECTION_BYTES {
+        return Err(SandboxError::Limits("a section over 4 GiB"));
+    }
+    usize::try_from(len).map_err(|_| SandboxError::Limits("a section that does not fit this platform"))
+}
+
+/// What a helper may do with a granted [`Section`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Read only (a document's bytes).
+    Read,
+    /// Read and write (a page the helper renders into).
+    ReadWrite,
+}
+
+/// A section handed to a helper: what the caller sends to the helper over the pipe, for [`helper::map`] there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Granted {
+    /// The handle's value as the helper sees it. It means nothing in the app.
+    pub wire: u64,
+    /// The section's length in bytes.
+    pub len: u64,
+}
+
+/// The helper's side of a grant. Compiled into helpers too; it starts nothing.
+pub mod helper {
+    use std::fmt;
+
+    use crate::{Access, Granted, SandboxError, platform, section_length};
+
+    /// A granted section, mapped into the helper. Unmapped, and the grant's handle closed, when dropped.
+    pub struct Mapped {
+        inner: platform::MappedInner,
+    }
+
+    impl Mapped {
+        /// The section's bytes.
+        pub fn as_slice(&self) -> &[u8] {
+            self.inner.as_slice()
+        }
+
+        /// The section's bytes to write, for a read-write mapping; `None` for a read-only one.
+        pub fn as_mut_slice(&mut self) -> Option<&mut [u8]> {
+            self.inner.as_mut_slice()
+        }
+    }
+
+    impl fmt::Debug for Mapped {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            // The length only, never the bytes.
+            f.debug_struct("Mapped")
+                .field("len", &self.as_slice().len())
+                .finish_non_exhaustive()
+        }
+    }
+
+    /// Maps a section the app granted to this process. `access` is what this side wants; asking for more than the
+    /// grant carries is refused by the system ([`SandboxError::Os`] with code 5). The grant's handle belongs to
+    /// this call: it is closed when the returned value is dropped, or at once when mapping fails, so a grant maps
+    /// once.
+    ///
+    /// Off Windows: [`SandboxError::Unsupported`].
+    pub fn map(granted: Granted, access: Access) -> Result<Mapped, SandboxError> {
+        let len = section_length(granted.len)?;
+        Ok(Mapped {
+            inner: platform::map(granted.wire, len, access)?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -272,6 +431,26 @@ mod tests {
             }
         }
         assert_eq!(checked, 32);
+    }
+
+    /// Both lengths are refused before any system call, on every operating system.
+    #[test]
+    fn a_section_of_zero_bytes_or_over_four_gibibytes_is_refused() {
+        assert_eq!(
+            Section::new(0).unwrap_err(),
+            SandboxError::Limits("a section of zero bytes")
+        );
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            Section::new(MAX_SECTION_BYTES as usize + 1).unwrap_err(),
+            SandboxError::Limits("a section over 4 GiB")
+        );
+        let refused = |len| helper::map(Granted { wire: 0, len }, Access::Read).unwrap_err();
+        assert_eq!(refused(0), SandboxError::Limits("a section of zero bytes"));
+        assert_eq!(
+            refused(MAX_SECTION_BYTES + 1),
+            SandboxError::Limits("a section over 4 GiB")
+        );
     }
 
     #[cfg(not(windows))]

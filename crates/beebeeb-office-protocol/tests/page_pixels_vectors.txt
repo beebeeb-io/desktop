@@ -1,0 +1,31 @@
+# Page pixels: the size in pixels of a page side, one rule for the app and the Office engine.
+# Both repos' tests read this file; it must stay byte for byte the same in both.
+#
+# scale = device pixels per point (the app asks at zoom x DPI / 72, so 100 % on a 96 DPI screen is 4/3).
+# px    = ceil(pt x scale), at least 1, with the product taken in f32 (single precision).
+#         In f64 the Letter rows at 4/3 would be 817 and 1057, not 816 and 1056.
+#
+# Columns, separated by spaces: label, pt, pt as f32 bits, scale, scale as f32 bits, px.
+# The bits are the values; the decimals are for people, and each must parse to its bits.
+# Rows: Letter (612 x 792 pt) and A4 as a document states it (595.3 x 841.9 pt), each side at
+# the scales 1.0, 1.25, 1.5, 2.0 and 4/3. 20 rows.
+letter-w  612    0x44190000  1.0        0x3f800000  612
+letter-w  612    0x44190000  1.25       0x3fa00000  765
+letter-w  612    0x44190000  1.5        0x3fc00000  918
+letter-w  612    0x44190000  2.0        0x40000000  1224
+letter-w  612    0x44190000  1.3333334  0x3faaaaab  816
+letter-h  792    0x44460000  1.0        0x3f800000  792
+letter-h  792    0x44460000  1.25       0x3fa00000  990
+letter-h  792    0x44460000  1.5        0x3fc00000  1188
+letter-h  792    0x44460000  2.0        0x40000000  1584
+letter-h  792    0x44460000  1.3333334  0x3faaaaab  1056
+a4-w      595.3  0x4414d333  1.0        0x3f800000  596
+a4-w      595.3  0x4414d333  1.25       0x3fa00000  745
+a4-w      595.3  0x4414d333  1.5        0x3fc00000  893
+a4-w      595.3  0x4414d333  2.0        0x40000000  1191
+a4-w      595.3  0x4414d333  1.3333334  0x3faaaaab  794
+a4-h      841.9  0x4452799a  1.0        0x3f800000  842
+a4-h      841.9  0x4452799a  1.25       0x3fa00000  1053
+a4-h      841.9  0x4452799a  1.5        0x3fc00000  1263
+a4-h      841.9  0x4452799a  2.0        0x40000000  1684
+a4-h      841.9  0x4452799a  1.3333334  0x3faaaaab  1123
