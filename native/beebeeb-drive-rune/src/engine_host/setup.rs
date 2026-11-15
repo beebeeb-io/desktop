@@ -477,6 +477,8 @@ enum Answer {
     LockProved(crate::engine_host::hello::HelloResult),
     /// How Windows Hello's prompt for a longer "Lock again after" ended (`setup_app_lock.rs`).
     AfterProved(app_lock::EngineLockAfter, crate::engine_host::hello::HelloResult),
+    /// The engine wants a proof for this delay (longer than what it stored): the prompt comes (`setup_app_lock.rs`).
+    AfterNeedsProof(app_lock::EngineLockAfter),
 }
 
 /// The first run on the real engine. See the module's doc.
@@ -920,6 +922,7 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                 }
                 Answer::LockProved(result) => self.app_lock_proved(result),
                 Answer::AfterProved(after, result) => self.lock_after_proved(after, result),
+                Answer::AfterNeedsProof(after) => self.prove_lock_after(after),
             }
         }
         let unsaved = self.folder_unsaved();

@@ -31,6 +31,10 @@ use crate::State;
 /// is followed within this.
 pub const LOOK_AT_MOST_EVERY: Duration = Duration::from_secs(60);
 
+/// A wake counts from the frame's clock, read before this poll measures: it can come this much before the time it was
+/// armed for. A poll within it takes the wake as spent and arms again (never a look left waiting for no poll).
+const WAKE_SLACK: Duration = Duration::from_millis(250);
+
 /// One look's answer, from its worker.
 struct Looked {
     /// An idle look (an event's answer schedules nothing).
@@ -97,7 +101,7 @@ impl AwayLock {
                 self.due = Some(now + next.min(LOOK_AT_MOST_EVERY));
             }
         }
-        if self.armed.is_some_and(|armed| armed <= now) {
+        if self.armed.is_some_and(|armed| armed <= now + WAKE_SLACK) {
             self.armed = None;
         }
         if !open {

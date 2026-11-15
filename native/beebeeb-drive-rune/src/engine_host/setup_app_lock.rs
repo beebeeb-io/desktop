@@ -83,11 +83,18 @@ impl<E: SetupEngine> EngineSetupSource<E> {
         }
     }
 
-    /// The delay: up to the default it asks nothing; longer, Windows Hello first.
+    /// The delay: up to the default it asks nothing; longer, Windows Hello first. (Step 2 again, from "You're set
+    /// up", may find a shorter delay stored: the engine then refuses a write without a proof, and the prompt comes
+    /// after all, `prove_lock_after`.)
     fn ask_lock_after(&mut self, after: EngineLockAfter) {
         if after <= EngineLockAfter::DEFAULT {
             return self.write_lock_after(after, None);
         }
+        self.prove_lock_after(after);
+    }
+
+    /// Windows Hello for a delay the engine counts as longer; its answer comes through the channel.
+    pub(super) fn prove_lock_after(&mut self, after: EngineLockAfter) {
         if !self.mine() {
             return;
         }
@@ -115,6 +122,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
     }
 
     fn write_lock_after(&mut self, after: EngineLockAfter, proof: Option<AppLockProof>) {
+        let proved = proof.is_some();
         self.ask(
             "first-run-lock-after",
             move |engine, session| match engine.set_lock_after_for(session, after, proof) {
@@ -122,6 +130,8 @@ impl<E: SetupEngine> EngineSetupSource<E> {
                     done: true,
                     ..AFTER_NOT_DONE
                 }),
+                // Longer than what the engine has stored, and asked without a proof: the prompt, once.
+                Err(AppLockRefused::ProofNeeded) if !proved => Answer::AfterNeedsProof(after),
                 Err(refused) => {
                     log(format!("first run: the lock delay was not changed ({refused:?})"));
                     Answer::Switched(AFTER_NOT_DONE)
