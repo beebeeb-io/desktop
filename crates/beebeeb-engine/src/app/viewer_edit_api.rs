@@ -7,7 +7,8 @@
 //! - [`Engine::save_text_for`]: the text as the file's next version, bound to the version it was edited from. It
 //!   goes through the one write path every local edit takes (`EngineBridge::queue_file_provider_modify_from`: the staged
 //!   copy, the queued upload, the sync's own conflict handling). A file whose version here is already past the
-//!   base is [`SaveEnd::Conflict`] and nothing is written.
+//!   base is [`SaveEnd::Conflict`] and nothing is written. A save that would be queued after an unsent write of the
+//!   file that is not its own opening's is [`EditRefused::EarlierChangeNotSent`], and nothing is written.
 //! - [`Engine::save_text_copy_for`]: Keep both: the text as a new file next to the first, under the
 //!   Keep-both name every conflict copy takes.
 //!
@@ -26,8 +27,11 @@ use zeroize::Zeroizing;
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
-use crate::engine_bridge::{EngineBridge, FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, keep_both_name};
+use crate::engine_bridge::{
+    BehindAnotherWrite, EngineBridge, FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, keep_both_name,
+};
 use crate::state_db::PinState;
+use crate::write_token::ChainAfter;
 
 /// How long a save waits for the upload to land before it says "stored here, sent later".
 pub const LAND_WAIT: Duration = Duration::from_secs(20);
@@ -238,6 +242,10 @@ pub enum EditRefused {
     ReadOnly,
     /// The write was refused or failed; nothing is stored.
     Failed,
+    /// An earlier change to this file on this PC that is not this opening's own (an earlier opening's save, a File
+    /// Provider save) has not been sent yet. Queued after it, this save would replace it unasked once both land
+    /// (review of desktop#432, delta 3). Nothing is stored; the edit stays with the viewer.
+    EarlierChangeNotSent,
 }
 
 /// What a save came to.
@@ -298,9 +306,11 @@ impl<C: CredentialStores> Engine<C> {
 
     /// A new opening of `file_id` in the viewer (open, Try again, Show it), for `session`: its epoch, which it passes
     /// with every save and every read of the version. It holds none of the earlier openings' saves, so none of them is
-    /// its own (delta checks of desktop#432): a version they become is announced as a newer version, and a save from
-    /// the new opening's version answers Conflict, never continued from it. No write of an earlier opening reaches
-    /// its record, whenever it runs.
+    /// its own (delta checks of desktop#432). While an earlier opening's save is still unsent (queued, or held back),
+    /// a save of the new opening is refused ([`EditRefused::EarlierChangeNotSent`]), never queued after it. Once that
+    /// save has landed, the version it became is announced as a newer version, and a save from the new opening's
+    /// version answers Conflict, never continued from it. No write of an earlier opening reaches its record, whenever
+    /// it runs.
     pub fn viewer_opening(&self, session: SessionGeneration, file_id: &str) -> u64 {
         open_saves(&self.acct.viewer_saves, file_id, session)
     }
@@ -369,15 +379,36 @@ impl<C: CredentialStores> Engine<C> {
             base_version_identifier: Some(base.to_string()),
         };
         let held = anonymous_file(text).ok_or(EditRefused::Failed)?;
+        // Delta 3 of desktop#432: queued after this opening's own latest unsent save alone. Another unsent write of
+        // the file (an earlier opening's save, a File Provider save) is not what the text on screen is based on:
+        // after it, both would land one after the other and nobody would be asked. The accept checks it inside its
+        // own transaction, so a write queued after this look cannot slip in.
+        let own_write = record_of(saves, file_id, session, opening, |saves| {
+            saves
+                .queued
+                .as_ref()
+                .and_then(|queued| queued.token.as_deref())
+                .and_then(crate::write_token::parse_token)
+                .map(|token| token.write_id)
+        })
+        .flatten();
+        let chain = own_write.map_or(ChainAfter::Nothing, ChainAfter::Only);
         let (outcome, write_token) = state
             .with_shared(|db| {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
                 EngineBridge::new(self.identity, db, api)
+                    .with_chain_after(chain)
                     .queue_file_provider_modify_from(target, Some(&held))
                     .map(|write| (write.outcome, write.token))
             })
             .map_err(|_| EditRefused::NotSignedIn)?
-            .map_err(|_| EditRefused::Failed)?;
+            .map_err(|error| {
+                if error.downcast_ref::<BehindAnotherWrite>().is_some() {
+                    EditRefused::EarlierChangeNotSent
+                } else {
+                    EditRefused::Failed
+                }
+            })?;
         let FinderWriteOutcome::Queued { op_id, .. } = outcome else {
             return Err(EditRefused::Failed);
         };

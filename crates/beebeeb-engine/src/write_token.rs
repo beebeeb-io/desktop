@@ -125,6 +125,33 @@ impl BaseDecision {
     }
 }
 
+/// Which queued write of the file a new write may be queued after ([`BaseDecision::After`]). Review of desktop#432,
+/// delta 3: the viewer's save of one opening never follows a write the text on its screen is not based on (another
+/// opening's unsent save, a File Provider save), else both land one after the other and nobody is asked. It may
+/// follow only its own opening's latest queued save. The File Provider's own writes follow any (the system keeps
+/// that chain).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ChainAfter {
+    /// After any queued write of the file.
+    #[default]
+    Any,
+    /// After none: the save's opening has no queued save of its own.
+    Nothing,
+    /// After this write alone (its write id): the opening's own latest queued save.
+    Only(String),
+}
+
+impl ChainAfter {
+    /// Whether a write may be queued after the queued write `write_id`.
+    pub fn allows(&self, write_id: &str) -> bool {
+        match self {
+            ChainAfter::Any => true,
+            ChainAfter::Nothing => false,
+            ChainAfter::Only(own) => own == write_id,
+        }
+    }
+}
+
 /// `{v}` or `{v}:{hash}` with `v > 0`; never a token or a three-segment identifier (rule 3).
 fn content_version_number(identifier: &str) -> Option<i64> {
     if parse_token(identifier).is_some() {
@@ -300,6 +327,19 @@ mod tests {
             "m-3: the held NULL never matches"
         );
         assert_eq!(held_token(None, true, 2, Some("o2")), None, "no held write");
+    }
+
+    #[test]
+    fn a_write_follows_only_the_queued_write_it_may_follow() {
+        assert!(ChainAfter::Any.allows("w1"));
+        assert!(!ChainAfter::Nothing.allows("w1"));
+        assert!(ChainAfter::Only("w1".into()).allows("w1"));
+        assert!(!ChainAfter::Only("w1".into()).allows("w2"));
+        assert_eq!(
+            ChainAfter::default(),
+            ChainAfter::Any,
+            "the File Provider's writes, as before"
+        );
     }
 }
 

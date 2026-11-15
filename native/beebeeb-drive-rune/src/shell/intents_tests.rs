@@ -58,7 +58,7 @@ fn drain_empties_the_queue_and_every_unwired_variant_is_taken_not_dropped() {
         for intent in [
             Intent::Show("DW-A51"),
             Intent::Open("x"),
-            Intent::DownloadUpdate,
+            Intent::RestartToUpdate,
             Intent::SaveBundleAndWriteEmail,
             Intent::CheckForUpdates,
             Intent::ShowInFiles("a".into()),

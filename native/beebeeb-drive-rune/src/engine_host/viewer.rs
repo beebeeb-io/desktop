@@ -338,8 +338,9 @@ struct Opening {
     /// What the local state said at the open: the version, whether the file is kept, whether it may be changed.
     /// `None`: not read.
     edit: Option<EditFacts>,
-    /// The version the view holds, or was told of by a banner: a read past it is another device's. Only the
-    /// window's thread writes it (`viewer_change::weigh`); it never goes down.
+    /// The version the view holds, or was told of by a banner: a read past it is a version this opening did not make
+    /// (another device's, or an earlier opening's on this PC). Only the window's thread writes it
+    /// (`viewer_change::weigh`); it never goes down.
     seen: i64,
     /// Which opening this is (`Changes::openings`): an answer begun under another one is not this one's.
     serial: u64,

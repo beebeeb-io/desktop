@@ -61,6 +61,11 @@ impl Ui {
                 self.dialog = None;
                 self.toast = Some("Not saved".to_string());
             }
+            // Not saved, and why: the edit stays as it is.
+            Settled::Refused(words) => {
+                self.dialog = None;
+                self.toast = Some(words);
+            }
         }
     }
 }

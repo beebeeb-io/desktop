@@ -1161,3 +1161,6 @@ fn a_trashed_file_this_computer_never_synced_opens_in_memory_and_nothing_about_i
     );
     assert_eq!(db.kept_rows().unwrap().len(), 0);
 }
+
+#[path = "viewer_chain_tests.rs"]
+mod chain;

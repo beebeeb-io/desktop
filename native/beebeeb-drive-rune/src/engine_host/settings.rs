@@ -3,8 +3,8 @@
 //! What it answers, and from where:
 //! - General (DW-0701) and its Theme menu (DW-0787): the theme from this PC's settings file, read when the window
 //!   starts (the first paint is local) and written merge-only; where new files are stored from Beebeeb
-//!   ([`Engine::storage_region`]); the version this binary was built as; a newer version on offer, with Download
-//!   update and then Restart to update, where this build has an updater ([`updates`]; never an older version).
+//!   ([`Engine::storage_region`]); the version this binary was built as; a newer version on offer, with ONE press,
+//!   Restart to update (download, check, install), where this build has an updater ([`updates`]; never an older version).
 //! - General › Storage location (DW-0788, b, c, d): the account's choice and the list, by country, from Beebeeb. A
 //!   choice and "only store in this country" are sent once ([`Engine::set_storage_region_for`], the one call here
 //!   that writes account state) and shown only after Beebeeb took them; a refusal leaves the old choice and says so.
@@ -13,7 +13,7 @@
 //! - About (DW-0751): the versions of this build ([`build_about`]) and, where this build has an updater (a Windows
 //!   release), Check now and the Release channel (DW-0789) on it: [`updates`], its own part. Elsewhere About draws
 //!   the versions only. The release notes (DW-0789b) open while a newer version is on offer (its notes, and the
-//!   same button as General's); otherwise they stay the shell's frame (the updater has no notes to show).
+//!   same button as General's); otherwise About draws no row that points to them (the updater has no notes to show).
 //! - Not wired here (the shell's "not built yet" frame in their place): Report a problem (no support bundle is built here yet).
 //!
 //! Thread rule (task 2470 W5): nothing here waits for Beebeeb or for the settings file's write lock on the window's
@@ -200,7 +200,7 @@ pub fn build_about() -> About {
             channel: Channel::Stable,
             released: String::new(),
             lines: Vec::new(),
-            press: Press::Download,
+            press: Press::Wait,
         },
         company: "Initlabs B.V.".into(),
     }
@@ -650,13 +650,7 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
             updates.check_now();
         }
     }
-    /// "Download update": the updater downloads the newer version and checks its signature, on its worker.
-    fn download_update(&mut self) {
-        if let Some(updates) = self.updates.as_mut() {
-            updates.download_update();
-        }
-    }
-    /// "Restart to update", once the download is verified: the updater stops sync and starts the installer.
+    /// "Restart to update", one press: the updater downloads, checks and hands off on its worker.
     fn restart_to_update(&mut self) {
         if let Some(updates) = self.updates.as_mut() {
             updates.restart_to_update();

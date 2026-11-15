@@ -83,12 +83,11 @@ pub fn drain_settings_intents(s: &mut State, tx: &mut Tx) -> bool {
             Intent::OpenWindowsNotificationSettings => open(s, web_pages::WINDOWS_NOTIFICATIONS),
             Intent::Show(_) => log("NotWired(Show)"),
             Intent::Open(_) => log("NotWired(Open)"),
-            // Taken by the settings source's updater (`SettingsSource::download_update`, `restart_to_update`): the
+            // Taken by the settings source's updater (`SettingsSource::check_for_updates`, `restart_to_update`): the
             // shell's part of the hand-off (quit once the installer started, start sync again after a failed start)
             // comes through `frames::settings::poll`.
-            Intent::DownloadUpdate | Intent::RestartToUpdate => {}
+            Intent::CheckForUpdates | Intent::RestartToUpdate => {}
             Intent::SaveBundleAndWriteEmail => log("NotWired(SaveBundleAndWriteEmail)"),
-            Intent::CheckForUpdates => log("NotWired(CheckForUpdates)"),
             Intent::ShowInFiles(_) => log("NotWired(ShowInFiles)"),
         }
     }
