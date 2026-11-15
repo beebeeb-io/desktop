@@ -275,6 +275,16 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let open = s.shell.app.gate() == GateState::Ready;
     // The first run's own flag, not its `Intent::OpenDrive`: that intent stays for the shell.
     let mut ask = s.setup.as_mut().is_some_and(super::Ui::just_finished);
+    // Locked again before the mark's answer came (an answer made under the session before is never taken in): the
+    // next unlock of the same account asks again.
+    if s.shell.app.gate() == GateState::Locked && s.guide.resume_for.is_none() {
+        s.guide.resume_for = s
+            .guide
+            .resume_at
+            .as_ref()
+            .filter(|(owner, ..)| Some(owner.as_str()) == account.as_deref())
+            .map(|(owner, ..)| owner.clone());
+    }
     // The account a lock interrupted is back; any other way out of the lock forgets it, and where it was.
     if s.guide.resume_for.is_some() && s.shell.app.gate() != GateState::Locked {
         let back = open && s.guide.resume_for == account;
@@ -305,9 +315,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     };
     if known == Some(guide_marks::Known::NotDone) && account.is_some() && s.guide.step.is_none() {
         match resume {
-            // Back after a lock: the step it was on, on that step's place, with its card (review L335). While the
-            // window is not open (locked again before the answer came) only the step is set: the next poll keeps
-            // it for the lock again, as above.
+            // Back after a lock: the step it was on, on that step's place, with its card (review L335). An answer
+            // that lands while the window is not open (a source that answers across a lock) only sets the step: the
+            // next poll holds it for the lock again, as above.
             Some((_, step, row)) => {
                 s.guide = Guide {
                     row,

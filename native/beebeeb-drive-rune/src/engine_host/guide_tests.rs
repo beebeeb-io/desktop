@@ -336,11 +336,13 @@ fn transient_read_refusal_is_asked_again() {
     let fake = fake("guide-again");
     let engine = engine_at(&fake.fake.base);
     let dir = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(dir.path().join("state.db"));
+    let mut marks = Marks::new(engine.clone());
+    sign_in(&engine, &fake.first, &fake.phrases[0]);
+    // Signed in with nothing synced (as the other tests); then the state is there and cannot be read yet.
     let not_yet = dir.path().join("not-yet.db");
     std::fs::write(&not_yet, b"an invented file that is not a database yet").unwrap();
     engine.use_local_state_for_test(not_yet);
-    let mut marks = Marks::new(engine.clone());
-    sign_in(&engine, &fake.first, &fake.phrases[0]);
 
     // The read is refused: no answer, and a read again is planned (at most 10 s).
     marks.ask(None);
