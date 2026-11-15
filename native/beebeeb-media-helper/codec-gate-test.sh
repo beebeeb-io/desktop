@@ -7,7 +7,7 @@
 # Truth line: `codec-gate-test: <n> passed, 0 failed` with n = EXPECTED. Exit 0 only then.
 set -uo pipefail
 
-EXPECTED=20
+EXPECTED=21
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 gate="${CODEC_GATE_SUT:-$here/codec-gate.sh}"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
@@ -76,6 +76,17 @@ run "clean build, record absent: licence red"       1 1 "$work/tree.clean"      
 run "mutant tree: aac on (2 crates x 2 targets)"    1 4 "$work/tree.aac"        --exe "$work/clean.exe" --licences "$work/lic-yes"
 run "mutant tree: hevc linked"                      1 2 "$work/tree.hevc"       --exe "$work/clean.exe" --licences "$work/lic-yes"
 run "mutant tree: dng linked (today's real state)"  1 2 "$work/tree.dng"        --exe "$work/clean.exe" --licences "$work/lic-yes"
+# A red row prints its reason as written: shell syntax inside a reason (a backquoted word once ran as a command,
+# "dng: command not found", and dropped the word from the row) fails here.
+FAKE_TREE="$work/tree.dng" FAKE_ARGS_LOG="$work/args.log" PATH="$work/bin:$PATH" \
+  bash "$gate" --exe "$work/clean.exe" --licences "$work/lic-yes" > "$work/out.reason" 2>&1
+n_reason=$(grep -c "^RED   tree .*: filmcraft-dng 1 (must be 0) - .* its 'dng' feature, see " "$work/out.reason")
+if ! grep -q 'command not found' "$work/out.reason" && [ "$n_reason" -eq 2 ]; then
+  passed=$((passed + 1)); echo "pass  a red row's reason prints as written (dng row x 2 targets)"
+else
+  failed=$((failed + 1)); echo "FAIL  a red row's reason: $n_reason dng rows with the whole reason (want 2):"
+  sed 's/^/      /' "$work/out.reason"
+fi
 run "mutant binary: hevc source path"               1 1 "$work/tree.clean"      --exe "$work/hevc.exe" --licences "$work/lic-yes"
 run "mutant binary: aac symbol name"                1 1 "$work/tree.clean"      --exe "$work/aac-symbol.bin" --licences "$work/lic-yes"
 run "blind binary: control red"                     1 1 "$work/tree.clean"      --exe "$work/stripped.exe" --licences "$work/lic-yes"

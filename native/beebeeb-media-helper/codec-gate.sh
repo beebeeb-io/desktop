@@ -43,7 +43,7 @@ OFF_CRATES=(
   "filmcraft-dnx|DNxHD / DNxHR: compiled out until counsel clears it"
   "filmcraft-apv|APV: not needed, compiled out"
   "filmcraft-mxf|MXF: not needed, compiled out"
-  "filmcraft-dng|DNG: not needed (the brief: compiled out); filmcraft-media takes it only with its `dng` feature, see the Office engine's filmcraft/PATCHES.md"
+  "filmcraft-dng|DNG: not needed (the brief: compiled out); filmcraft-media takes it only with its 'dng' feature, see the Office engine's filmcraft/PATCHES.md"
 )
 CONTROL_CRATE="filmcraft-codecs"
 # A codec that may ship only with its signed licence record: crate|record file|what.
