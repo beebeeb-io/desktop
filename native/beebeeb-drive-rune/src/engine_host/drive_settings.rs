@@ -69,6 +69,7 @@ use beebeeb_engine::state_db::{BandwidthSample, FileEntry, PinState, StateDb};
 use beebeeb_engine::sync_view::{Explorer, SyncView};
 
 use super::log;
+use super::scaffold::not_wired;
 use crate::frames::settings::Pane;
 use crate::frames::settings::bandwidth_data::{Bandwidth, Direction, History, SpeedTest, Step};
 use crate::frames::settings::diagnostics::{Bundle, Diagnostics};
@@ -83,6 +84,9 @@ use crate::shell::platform::Platform;
 mod reads;
 #[path = "drive_settings_tools.rs"]
 pub(crate) mod tools;
+// plan40 batch 1: "Show sync status on files" (slice B3).
+#[path = "status_on_files.rs"]
+mod status_on_files;
 pub(crate) use reads::*;
 use tools::Os;
 pub use tools::SPEED_TEST_ON;
@@ -893,8 +897,10 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         }
     }
 
-    /// Not bound: the engine stores the setting and nothing honours it yet (PR body).
-    fn set_status_on_files(&mut self, _on: bool) {}
+    /// Not bound (slice B3, `status_on_files.rs`).
+    fn set_status_on_files(&mut self, on: bool) {
+        not_wired(self.status_on_files_set_status_on_files(on))
+    }
 
     fn set_open_at_login(&mut self, on: bool) {
         self.change(Ask::OpenAtLogin(on));

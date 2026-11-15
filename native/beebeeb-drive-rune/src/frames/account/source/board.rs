@@ -897,7 +897,7 @@ impl AccountSource for BoardAccount {
     fn waiting_sign_in_request(&self, request: &str) -> Option<SignInRequest> {
         super::super::request::BoardApprovals::waiting(request)
     }
-    fn begin_approval(&mut self, request: &str, _code: &str) {
+    fn begin_approval(&mut self, request: &str, _code: &str, _password: Password<'_>) {
         self.wire.push(format!("POST /cli-auth/approve {request}"));
         self.approvals.begin(request);
     }

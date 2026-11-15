@@ -863,8 +863,10 @@ pub trait AccountSource {
     }
     /// Engine: ask Windows Hello (a confirmation minted for this approval, this code and this
     /// session only), then claim the code and relay the keys, encrypted to the other device.
+    /// Core takes the approval's step-up from the account `password` (it requires the password
+    /// step-up regardless of Windows Hello), borrowed for the call, never logged and never kept.
     /// The answer comes through `approval_answer`.
-    fn begin_approval(&mut self, _request: &str, _code: &str) {}
+    fn begin_approval(&mut self, _request: &str, _code: &str, _password: Password<'_>) {}
     /// Engine: how an approval that was begun ended, once, with the id of the request it is
     /// for; `None` while Windows Hello is up. The screen applies an answer only to the request
     /// it shows and drops every other.

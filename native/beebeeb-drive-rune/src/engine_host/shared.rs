@@ -48,6 +48,7 @@ use beebeeb_engine::drive_v2::model::mime_for_name;
 use chrono::{DateTime, Local};
 
 use super::log;
+use super::scaffold::not_wired;
 use super::stamp::{Stamp, stamp};
 use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
@@ -62,6 +63,9 @@ use crate::frames::shared::parts::table::Kind;
 #[cfg(test)]
 #[path = "shared_tests.rs"]
 mod tests;
+// plan40 batch 1: Make available offline on someone else's file (slice B4).
+#[path = "shared_offline.rs"]
+mod shared_offline;
 
 /// Lists this recent are not read again when the Shared section opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -406,9 +410,9 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.change(session, id, ShareChange::Decline { invite_id: id.into() })
     }
 
-    // Not bound (the module's doc says why): nothing is sent, and the view says so.
-    fn keep_offline(&mut self, _id: &str) -> bool {
-        self.refuse(Notice::NotAvailable)
+    // Not bound (slice B4, `shared_offline.rs`; the module's doc says why): nothing is sent, and the view says so.
+    fn keep_offline(&mut self, id: &str) -> bool {
+        not_wired(self.shared_offline_keep_offline(id))
     }
 
     /// Sent once per press: a share with people (cancels every invite of it) or a link (revokes every live link of

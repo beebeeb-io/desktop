@@ -76,6 +76,8 @@ pub mod item_preview;
 pub mod open;
 pub mod passkeys;
 pub mod photos;
+// plan40: `not_wired`, around every batch-1 method not bound yet.
+mod scaffold;
 pub mod search;
 pub mod settings;
 pub mod shared;

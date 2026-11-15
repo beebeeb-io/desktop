@@ -50,6 +50,7 @@ use beebeeb_engine::signin::gate::GateState;
 
 use super::backups_devices::{DeviceCalls, DevicesEngine};
 use super::log;
+use super::scaffold::not_wired;
 use crate::frames::backups::source::{
     BackupsRoot, BackupsSource, Device, FileKind, Folder, NotBackedUp, Part, Pumped, Status,
 };
@@ -57,6 +58,9 @@ use crate::frames::backups::source::{
 #[cfg(test)]
 #[path = "backups_tests.rs"]
 mod tests;
+// plan40 batch 1: Add a folder and Stop backing up (slice A7).
+#[path = "backup_folders.rs"]
+mod backup_folders;
 
 /// Whether Backups answers in a real build. On: the view draws a loading state, a refusal and only the parts a
 /// source binds (`BackupsSource::wired`), and the two ledger items of the Backups switch (2468: the settings file
@@ -656,13 +660,15 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         }
     }
 
-    /// Not bound: the settings file holds Windows' six known folders only; a chosen folder is never added.
-    fn add_folder(&mut self, _path: &str) -> bool {
-        false
+    /// Not bound (slice A7, `backup_folders.rs`).
+    fn add_folder(&mut self, path: &str) -> bool {
+        not_wired(self.backup_folders_add_folder(path))
     }
 
-    /// Not bound: no folder is chosen by the person here (`add_folder`), so there is none to remove.
-    fn remove_folder(&mut self, _id: &str, _move_copy_to_trash: bool) {}
+    /// Not bound (slice A7, `backup_folders.rs`).
+    fn remove_folder(&mut self, id: &str, move_copy_to_trash: bool) {
+        not_wired(self.backup_folders_remove_folder(id, move_copy_to_trash))
+    }
 
     /// "Back up again" for a folder that turned itself off: switched on, which clears its stop and starts it over
     /// (`Engine::set_backup_folder`). Only a folder the list shows as stopped.

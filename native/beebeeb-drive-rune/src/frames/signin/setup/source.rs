@@ -9,6 +9,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::frames::account::source::Password;
+
 /// What Windows is doing with Beebeeb's folder in File Explorer (the status at the left).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Explorer {
@@ -330,9 +332,10 @@ pub trait SetupSource {
         None
     }
 
-    /// "Add a passkey". Engine: Windows' passkey dialog (WebAuthn create), then
-    /// `auth_v2::passkey_register`. `true`: a passkey was added.
-    fn add_passkey(&mut self) -> bool;
+    /// "Add a passkey". Engine: core's step-up from the account `password` (owner ruling: a passkey change proves
+    /// the password), then Windows' passkey dialog (WebAuthn create), then `auth_v2::passkey_register`. The password is
+    /// borrowed for the call, never logged and never kept. `true`: a passkey was added.
+    fn add_passkey(&mut self, password: Password<'_>) -> bool;
     /// "Continue" on step 2. Engine: `app_lock::set(on, after)`.
     fn set_app_lock(&mut self, on: bool, after: LockAfter);
     /// "Turn on backup". Engine: `backup::start(folders)`: the first backup runs in the background.
@@ -492,7 +495,7 @@ impl SetupSource for FixtureSetupSource {
         Sample::bundled()
     }
 
-    fn add_passkey(&mut self) -> bool {
+    fn add_passkey(&mut self, _password: Password<'_>) -> bool {
         self.note("add_passkey".into());
         self.script.passkey_added
     }

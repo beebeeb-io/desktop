@@ -72,6 +72,8 @@ use crate::frames::viewers::source::{
     Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
 };
 
+#[path = "viewer_find.rs"]
+mod viewer_find;
 #[path = "viewer_pdf.rs"]
 pub(crate) mod viewer_pdf;
 #[path = "viewer_picture.rs"]
@@ -1133,10 +1135,11 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
         }
     }
 
-    /// The text of a PDF is not searched here.
     fn finds(&self) -> bool {
-        false
+        super::scaffold::not_wired(self.viewer_find_finds())
     }
+    #[rustfmt::skip]
+    fn find(&mut self, file_id: &str, words: &str) -> Vec<kinds::Match> { super::scaffold::not_wired(self.viewer_find_find(file_id, words)) }
 
     /// "Save a copy…" has nowhere to go yet: the button is not drawn.
     fn saves_copies(&self) -> bool {
