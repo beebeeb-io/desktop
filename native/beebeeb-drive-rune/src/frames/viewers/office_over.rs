@@ -138,6 +138,7 @@ impl Ui {
                 self.replace(file);
             }
             SaveOutcome::Conflict(other) => self.office.over = Some(Over::Conflict(other)),
+            SaveOutcome::Working => todo!("probe only: the integration lane decides nothing here"),
             // Not saved: the edit and the question stay as they are, and the person is told.
             SaveOutcome::Failed => self.toast = Some(NOT_SAVED.to_string()),
         }

@@ -43,7 +43,7 @@ pub fn licence_panel(t: &Theme) -> El {
         .role("dialog")
         .label(TITLE)
         .w(380.0)
-        .p(20.0)
+        .padding(20.0)
         .gap(10.0)
         .fill(t.card)
         .radius(8.0)
