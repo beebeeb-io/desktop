@@ -14,6 +14,13 @@ use crate::state_db::StateDb;
 #[path = "state_owner_tests.rs"]
 mod tests;
 
+/// Task 2267 and R10 ruling 8 in the engine (plan wave 3, slice S2a): whose this PC's local data is when no owner is
+/// recorded. The upgrade's candidate, fixed at the first startup and adopted in the start; the ownership proof a
+/// refused Windows start runs in the background; an interrupted keep settled before an engine exists; the card's
+/// decisions about the changes found while sync was paused.
+#[path = "own_data_start.rs"]
+pub mod own_data_start;
+
 /// For a known `session`: the owner is recorded, and the binding's rule says it is the same account. The engine
 /// handle itself decides through `owned_state` (`Engine::local_state`); this is the same rule for a test double
 /// that stands in for the handle.

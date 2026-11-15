@@ -411,6 +411,7 @@ impl<C: CredentialStores> Engine<C> {
                 }
                 self.lock_started(flow);
             }
+            self.fix_upgrade_candidate_at_startup();
         });
         self.publish();
         self.view.read().gate
@@ -745,6 +746,7 @@ impl<C: CredentialStores> Engine<C> {
                 view.attempt += 1;
                 view.explorer = Explorer::Unknown;
             });
+            self.wake_own_data_proofs();
         } else if outcome == Ok(SyncStart::NoSession) {
             self.view.write(|view| view.start = Start::NotAsked);
         }
@@ -821,11 +823,10 @@ impl<C: CredentialStores> Engine<C> {
                 return Err(SyncStartRefused::FolderMissing);
             }
             // (7) The local data is bound to the session's account (another account's data refuses, nothing reset).
-            let data = LocalState::for_engine_start(&self.config.state_dir, &sync_root)
-                .map_err(|_| SyncStartRefused::Other)?;
+            let data = self.local_data_for_start(&sync_root, &identity)?;
             account_binding::bind_before_engine_start(&data, &identity, false)
-                .map_err(|error| SyncStartRefused::of_binding(&error))?;
-            drop(data);
+                .map_err(|error| self.proof_owed_on(SyncStartRefused::of_binding(&error), &sync_root))?;
+            self.settle_an_interrupted_keep(data, &sync_root, &slot);
             // (8) The folder exists.
             crate::config::ensure_directory(&sync_root).map_err(|_| SyncStartRefused::Other)?;
             // (9) Registered as this app's sync root (Windows; nothing to do elsewhere), with Windows' code if not.
@@ -1015,6 +1016,7 @@ impl<C: CredentialStores> Engine<C> {
     /// out and does it in the same hold (`signin_api::discard_partial_sign_in`).
     async fn sign_out_holding_step(&self) -> Result<(), String> {
         {
+            self.stop_proofs().await;
             if self.stop_holding_step().await == SyncStop::Unconfirmed {
                 return Err(account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
             }
@@ -1137,7 +1139,6 @@ impl LocalState {
             state_paths::prepare_beebeeb_state_dir_at(sync_root, state_dir)?;
         }
         let db = StateDb::open(&path).map_err(|e| format!("open state.db: {e}"))?;
-        db.close_adoption_window().map_err(|e| format!("mark state.db: {e}"))?;
         Ok(Self { db })
     }
 }

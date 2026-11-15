@@ -343,6 +343,7 @@ impl<C: CredentialStores> Engine<C> {
     pub fn lock_vault(&self) -> VaultLocked {
         let locked = self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
+            self.stop_proofs().await;
             let vault = self.vault();
             let signed_in = self.lock_state() != LockState::SignedOut;
             let mut survives_restart = signed_in && vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();

@@ -24,6 +24,7 @@ acknowledged
 acquire
 activity
 adopted
+adoption
 after
 again
 against
@@ -193,6 +194,7 @@ corrupt
 could
 count
 counter
+crash
 crashed
 create
 create_calls
@@ -279,6 +281,7 @@ emptied
 empty
 encoded
 encrypted
+end
 ended
 ends
 engine
@@ -378,6 +381,7 @@ heartbeat
 heic
 held
 held_back
+held_for_review
 held_key_replaced
 hit
 holds
@@ -410,6 +414,7 @@ init
 initialized
 inside
 inspect
+interrupted
 interval
 into
 invalid_identifier
@@ -508,6 +513,8 @@ mixed
 modifier
 move
 moved
+moved_files
+moved_items
 moved_legacy_device_identity
 moved_legacy_lock
 name
@@ -515,6 +522,7 @@ name_check_errors
 name_conflicts
 names
 nested
+neutral
 never
 new
 new_version
@@ -533,6 +541,7 @@ not-in-sync
 not_found
 not_here
 not_in_sync
+not_moved
 not_there
 nothing
 notices
@@ -587,6 +596,7 @@ owed
 own
 own-tree
 owner
+ownership
 page
 panic
 panicked
@@ -656,8 +666,12 @@ progress
 progressive
 promoted
 promotion
+proof
 protected
 protection
+prove
+proven
+proven_changes
 provider
 provisional
 provisional_id
@@ -776,6 +790,7 @@ row
 rows
 run
 running
+runs
 runtime
 s
 safe
@@ -802,6 +817,7 @@ seq_id
 served
 server
 server_seq
+service
 session
 session_id
 session_moved
@@ -831,6 +847,7 @@ signaled
 signaling
 signature
 signed
+signed_out
 since
 size
 size-resolve
@@ -873,6 +890,7 @@ status-ui
 statusuisourcefactory
 stay
 stays
+stays_held
 step
 still
 still_on
@@ -952,6 +970,7 @@ unaffected
 unavailable
 unchanged
 under
+undone
 unfinished
 unjournalled
 unknown
@@ -961,6 +980,7 @@ unlocked
 unnamed
 unpin
 unpinned
+unproven
 unreadable
 unregistered
 unresolved
@@ -973,6 +993,7 @@ unwrap
 up
 updated
 updates
+upgrade
 upload
 upload-staging
 upload-time
