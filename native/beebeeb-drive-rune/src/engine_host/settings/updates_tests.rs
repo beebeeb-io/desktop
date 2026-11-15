@@ -2,20 +2,26 @@
 //! test, a scripted release server that is a map in memory (no socket, no network), a clock and a store. What is
 //! checked: the words of each answer; that a check asks for the channel's manifest and nothing else, with nothing of
 //! the person in it; that a file which is not the signed one is never handed off; that another host is refused (with
-//! no request at all when it is the base); that an older build on a channel is said and never offered; that a build
-//! which is not a release asks nothing; and the source's methods on the part.
+//! no request at all when it is the base); that an older build on a channel is said and never offered (its notes are
+//! never the dialog's, neither press acts on it); the two presses and the hand-off (on a running engine: sync stops
+//! before the installer starts; a stop that is not confirmed starts nothing; a failed start asks for sync back);
+//! "checked <time>" as the last verified check; the worker's cadence; the release glue; and the source's methods on
+//! the part.
 
 use std::cell::Cell;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::{Engine, EngineConfig};
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
+use beebeeb_engine::runner::EngineRunner;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
+use beebeeb_engine::sync_view::Start;
 use beebeeb_updater::testkit::{self, FakeClock, FakeHttp, MemStore, Publish, TestKey};
 use beebeeb_updater::{
-    Apply, Channel as Line, Config, EngineStopped, Event, Failure, Freshness, Http, Offer, Persisted, Refusal,
+    Apply, Channel as Line, Clock, Config, EngineStopped, Event, Failure, Freshness, Http, Offer, Persisted, Refusal,
     Response, State, Unreachable, Updater, VerifiedInstaller,
 };
 
@@ -26,17 +32,55 @@ use crate::frames::settings::source::SettingsSource;
 /// Every address the fake release server was asked for, in order.
 pub(crate) type Seen = Arc<Mutex<Vec<String>>>;
 
+/// Holds the fake server's answers while closed, so that a test sees what the window says BEFORE the answer, whatever
+/// the load on the machine (an open gate lets every request through at once).
+#[derive(Clone, Default)]
+pub(crate) struct Gate(Arc<(Mutex<bool>, Condvar)>);
+
+impl Gate {
+    pub(crate) fn close(&self) {
+        *self.0.0.lock().unwrap() = true;
+    }
+    pub(crate) fn open(&self) {
+        *self.0.0.lock().unwrap() = false;
+        self.0.1.notify_all();
+    }
+    fn pass(&self) {
+        let (closed, changed) = &*self.0;
+        let mut closed = closed.lock().unwrap();
+        while *closed {
+            closed = changed.wait(closed).unwrap();
+        }
+    }
+}
+
 /// The testkit's server, with every request written down where the test can read it (the updater lives on the
-/// part's worker thread).
+/// part's worker thread); held at the gate; offline while `offline` is set.
 struct Logged {
     inner: FakeHttp,
     seen: Seen,
+    gate: Gate,
+    offline: Arc<AtomicBool>,
 }
 
 impl Http for Logged {
     fn get(&mut self, url: &str, from: u64) -> Result<Response, Unreachable> {
+        self.gate.pass();
         self.seen.lock().unwrap().push(url.to_string());
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(Unreachable);
+        }
         self.inner.get(url, from)
+    }
+}
+
+/// A clock the test moves (the updater's own `FakeClock` lives on the worker's thread).
+#[derive(Clone)]
+struct MovingClock(Arc<AtomicU64>);
+
+impl Clock for MovingClock {
+    fn now(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -45,6 +89,10 @@ type Did = Arc<Mutex<Vec<&'static str>>>;
 
 struct Recording {
     did: Did,
+    /// Whether the installer "starts".
+    starts: bool,
+    /// Asked at `resume_engine`, as `EngineApply` asks after a stop that ended a running sync.
+    sync_back: Option<SyncBack>,
 }
 
 impl Apply for Recording {
@@ -54,16 +102,35 @@ impl Apply for Recording {
     }
     fn launch(&mut self, _installer: &VerifiedInstaller, _offer: &Offer, _stopped: EngineStopped) -> bool {
         self.did.lock().unwrap().push("launch");
-        true
+        self.starts
     }
     fn resume_engine(&mut self) {
         self.did.lock().unwrap().push("resume");
+        if let Some(sync_back) = &self.sync_back {
+            sync_back.ask();
+        }
     }
+}
+
+/// Who takes the hand-off in a rig.
+enum Hand {
+    /// A recording double whose installer starts, or not.
+    Recording { starts: bool },
+    /// The real `EngineApply` on `engine`, with an installer start that writes down whether sync was running at that
+    /// moment and starts, or not (no test starts a real installer).
+    Engine {
+        engine: Arc<Engine<MemoryCredentials>>,
+        starts: bool,
+        syncing_at_start: Arc<Mutex<Vec<bool>>>,
+    },
 }
 
 pub(crate) struct Rig {
     pub(crate) part: UpdatesPart,
     pub(crate) seen: Seen,
+    pub(crate) gate: Gate,
+    offline: Arc<AtomicBool>,
+    clock: Arc<AtomicU64>,
     did: Did,
     staging: tempfile::TempDir,
 }
@@ -88,33 +155,52 @@ impl Rig {
     }
 }
 
-/// A part on a test updater that trusts `key`, runs `installed`, and asks the base `base`. Its record holds a check
-/// that passed an hour ago (an install that checks), unless `verified` is `None` (one that never did).
-fn rig_with(
-    key: &TestKey,
-    installed: &str,
-    channel: Channel,
-    http: FakeHttp,
-    base: &str,
+/// How a rig is built beyond its key, version, channel and server.
+struct Options {
+    base: String,
+    /// The record's last verified check (`None`: this install never verified one).
     verified: Option<u64>,
-) -> Rig {
+    hand: Hand,
+    look_every: Duration,
+    /// The gate starts closed: the launch check waits for the test.
+    held: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            base: testkit::BASE.to_string(),
+            verified: Some(testkit::NOW - 3_600),
+            hand: Hand::Recording { starts: true },
+            look_every: Duration::from_secs(60),
+            held: false,
+        }
+    }
+}
+
+/// A part on a test updater that trusts `key`, runs `installed`, and asks `options.base`. Its record holds a check
+/// that passed an hour ago (an install that checks), unless `options.verified` says otherwise.
+fn rig_with(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, options: Options) -> Rig {
     let staging = tempfile::tempdir().expect("a temp dir");
-    let (seen, did) = (Seen::default(), Did::default());
+    let (seen, did, gate) = (Seen::default(), Did::default(), Gate::default());
+    if options.held {
+        gate.close();
+    }
+    let (offline, clock) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(testkit::NOW)));
     let config = Config {
         trust: testkit::trust(key),
-        base_url: base.to_string(),
+        base_url: options.base.clone(),
         installed: testkit::version(installed),
         staging_dir: staging.path().join("updates"),
     };
-    let (logged, recording) = (
-        Logged {
-            inner: http,
-            seen: seen.clone(),
-        },
-        Recording { did: did.clone() },
-    );
-    let make: MakeDrive = Box::new(move || {
-        let clock = FakeClock(Cell::new(testkit::NOW));
+    let logged = Logged {
+        inner: http,
+        seen: seen.clone(),
+        gate: gate.clone(),
+        offline: offline.clone(),
+    };
+    let (moving, verified, hand, recorded) = (MovingClock(clock.clone()), options.verified, options.hand, did.clone());
+    let make: MakeDrive = Box::new(move |sync_back| {
         let store = MemStore {
             persisted: Persisted {
                 last_check: verified,
@@ -122,19 +208,55 @@ fn rig_with(
             },
             refuse_writes: false,
         };
-        Box::new(Updater::new(config, logged, clock, store, recording)) as Box<dyn Drive>
+        match hand {
+            Hand::Recording { starts } => Box::new(Watching::new(
+                config,
+                logged,
+                moving,
+                store,
+                Recording {
+                    did: recorded,
+                    starts,
+                    sync_back: Some(sync_back),
+                },
+            )) as Box<dyn Drive>,
+            Hand::Engine {
+                engine,
+                starts,
+                syncing_at_start,
+            } => {
+                let watched = engine.clone();
+                let start: StartInstaller = Box::new(move |_installer, _stopped| {
+                    syncing_at_start.lock().unwrap().push(watched.is_syncing());
+                    starts
+                });
+                let apply = EngineApply::starting_with(engine, &TEST, sync_back, start);
+                Box::new(Watching::new(config, logged, moving, store, apply)) as Box<dyn Drive>
+            }
+        }
     });
-    let part = UpdatesPart::live(make, &TEST, channel, channel, installed.to_string());
+    let tuning = Tuning {
+        look_every: options.look_every,
+        wake: Box::new(|| {}),
+    };
+    let part = UpdatesPart::live_tuned(make, &TEST, channel, channel, installed.to_string(), tuning);
     Rig {
         part,
         seen,
+        gate,
+        offline,
+        clock,
         did,
         staging,
     }
 }
 
 fn rig_at(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp, base: &str) -> Rig {
-    rig_with(key, installed, channel, http, base, Some(testkit::NOW - 3_600))
+    let options = Options {
+        base: base.to_string(),
+        ..Options::default()
+    };
+    rig_with(key, installed, channel, http, options)
 }
 
 fn rig(key: &TestKey, installed: &str, channel: Channel, http: FakeHttp) -> Rig {
@@ -166,13 +288,39 @@ fn settle(part: &mut UpdatesPart) -> Vec<&'static str> {
     let began = Instant::now();
     let mut toasts = Vec::new();
     loop {
-        let (_, toast, busy) = part.pump();
-        toasts.extend(toast);
-        if !busy && part.state_for_test().is_some() {
+        let pumped = part.pump();
+        toasts.extend(pumped.toast);
+        if !pumped.busy && part.state_for_test().is_some() {
             return toasts;
         }
         assert!(began.elapsed() < Duration::from_secs(10), "the updater did not settle");
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Pumps until nothing is out (at most 10 s), counting the quits and the asks for sync back on the way.
+fn settle_counting(part: &mut UpdatesPart) -> (usize, usize) {
+    let began = Instant::now();
+    let (mut restarts, mut starts) = (0, 0);
+    loop {
+        let pumped = part.pump();
+        restarts += usize::from(pumped.restart);
+        starts += usize::from(pumped.start_sync);
+        if !pumped.busy && part.state_for_test().is_some() {
+            return (restarts, starts);
+        }
+        assert!(began.elapsed() < Duration::from_secs(10), "the updater did not settle");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Waits (at most 10 s) until `done` holds, pumping `part` on the way.
+fn until(part: &mut UpdatesPart, what: &str, done: impl Fn(&UpdatesPart) -> bool) {
+    let began = Instant::now();
+    while !done(part) {
+        assert!(began.elapsed() < Duration::from_secs(10), "{what}");
+        part.pump();
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -212,13 +360,17 @@ fn check_now_says_the_newest_version_and_asks_for_the_channels_manifest_only() {
     let launch = rig.seen().len();
     assert_eq!(launch, 2, "the launch check: the manifest and its signature");
 
+    // The answer is held until the test has seen Checking…: never a race with the worker.
+    rig.gate.close();
     rig.part.check_now();
     assert_eq!(
         about(&rig.part).check,
         UpdateCheck::Checking,
         "Checking… until it answers"
     );
-    assert!(rig.part.pump().2, "busy: the window keeps looking");
+    assert!(rig.part.pump().busy, "busy: the window keeps looking");
+    assert_eq!(about(&rig.part).check, UpdateCheck::Checking);
+    rig.gate.open();
     settle(&mut rig.part);
     assert!(words(&rig.part).starts_with("0.9.1 is the newest version · checked "));
 
@@ -271,14 +423,14 @@ fn a_file_that_is_not_the_signed_one_is_deleted_and_never_handed_off() {
 
     let mut honest = rig(&key, "0.9.1", Channel::Stable, serving(&key, &[release]));
     settle(&mut honest.part);
-    honest.part.send_for_test(Event::Download);
+    honest.part.download_update();
     settle(&mut honest.part);
     assert!(
         matches!(honest.part.state_for_test(), Some(State::ReadyToRestart { .. })),
         "{:?}",
         honest.part.state_for_test()
     );
-    honest.part.send_for_test(Event::Apply);
+    honest.part.restart_to_update();
     settle(&mut honest.part);
     assert_eq!(honest.did(), ["stop", "launch"], "the honest file is handed off");
 
@@ -291,7 +443,7 @@ fn a_file_that_is_not_the_signed_one_is_deleted_and_never_handed_off() {
     http.files.insert(artifact.clone(), other);
     let mut rig = rig(&key, "0.9.1", Channel::Stable, http);
     settle(&mut rig.part);
-    rig.part.send_for_test(Event::Download);
+    rig.part.download_update();
     settle(&mut rig.part);
     assert_eq!(
         rig.part.state_for_test(),
@@ -309,7 +461,10 @@ fn a_file_that_is_not_the_signed_one_is_deleted_and_never_handed_off() {
     );
     rig.part.send_for_test(Event::Apply);
     settle(&mut rig.part);
+    rig.part.restart_to_update();
+    settle(&mut rig.part);
     assert!(rig.did().is_empty(), "never handed off: {:?}", rig.did());
+    assert_eq!(rig.part.update(), crate::frames::settings::source::Update::Current);
 }
 
 #[test]
@@ -337,14 +492,11 @@ fn a_manifest_another_key_signed_downloads_nothing() {
 fn a_refusal_with_nothing_verified_for_two_weeks_says_so() {
     let (key, stranger) = (TestKey::generate(), TestKey::generate());
     let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(64));
-    let mut rig = rig_with(
-        &key,
-        "0.9.1",
-        Channel::Stable,
-        serving(&stranger, &[release]),
-        testkit::BASE,
-        None,
-    );
+    let options = Options {
+        verified: None,
+        ..Options::default()
+    };
+    let mut rig = rig_with(&key, "0.9.1", Channel::Stable, serving(&stranger, &[release]), options);
     settle(&mut rig.part);
     let days = (testkit::NOW - beebeeb_updater::V2_KEY_CREATED) / 86_400;
     assert_eq!(
@@ -439,6 +591,18 @@ fn an_older_version_on_the_chosen_channel_is_said_and_never_offered() {
         "the new channel was asked"
     );
 
+    // Never offered: its notes are not the dialog's, General offers nothing, the dialog does not open, and neither
+    // press acts on it.
+    assert_ne!(
+        shown.notes.version, "0.9.0",
+        "an older version's notes are never the dialog's"
+    );
+    assert_eq!(rig.part.update(), crate::frames::settings::source::Update::Current);
+    assert!(!rig.part.has_notes());
+    rig.part.download_update();
+    settle(&mut rig.part);
+    rig.part.restart_to_update();
+    settle(&mut rig.part);
     rig.part.send_for_test(Event::Download);
     settle(&mut rig.part);
     assert!(!rig.seen().contains(&artifact), "never downloaded");
@@ -512,7 +676,11 @@ fn the_release_config_is_the_pinned_key_and_the_one_host() {
         http,
         clock,
         MemStore::default(),
-        Recording { did: Did::default() },
+        Recording {
+            did: Did::default(),
+            starts: true,
+            sync_back: None,
+        },
     );
     let mut state = updater
         .step(Event::Check {
@@ -549,8 +717,11 @@ fn a_worker_that_ends_says_so_and_is_not_left_checking() {
         fn freshness(&self) -> Freshness {
             Freshness::Verified
         }
+        fn last_verified(&self) -> Option<u64> {
+            None
+        }
     }
-    let make: MakeDrive = Box::new(|| Box::new(Panics) as Box<dyn Drive>);
+    let make: MakeDrive = Box::new(|_| Box::new(Panics) as Box<dyn Drive>);
     let mut part = UpdatesPart::live(make, &TEST, Channel::Stable, Channel::Stable, "0.9.1".into());
     let began = Instant::now();
     while words(&part) != NO_UPDATER {
@@ -559,8 +730,7 @@ fn a_worker_that_ends_says_so_and_is_not_left_checking() {
         std::thread::sleep(Duration::from_millis(5));
     }
     part.check_now();
-    let (_, _, busy) = part.pump();
-    assert!(!busy, "nothing is out");
+    assert!(!part.pump().busy, "nothing is out");
     assert_eq!(words(&part), NO_UPDATER);
 }
 
@@ -644,10 +814,6 @@ fn the_settings_source_answers_from_its_updater() {
     let mut source = EngineSettingsSource::for_identity(engine, &TEST).with_updates(Some(part));
     assert!(source.updates_available());
     assert!(source.opens("DW-0789"), "the channel menu");
-    assert!(
-        !source.opens("DW-0789b"),
-        "the notes' Restart to update has no route yet"
-    );
     let pump = |source: &mut EngineSettingsSource<MemoryCredentials>| {
         let began = Instant::now();
         while source.pump().busy || seen.lock().unwrap().len() < 2 {
@@ -667,23 +833,22 @@ fn the_settings_source_answers_from_its_updater() {
     assert_eq!(seen.lock().unwrap().len(), 4, "the launch check and Check now");
     assert_eq!(
         source.general().update,
-        crate::frames::settings::source::Update::Current,
-        "General offers no download: no press sends one yet"
+        crate::frames::settings::source::Update::Available {
+            version: "0.9.2".into(),
+            press: Press::Download,
+            says: None,
+        },
+        "General offers the download first"
     );
+    assert!(source.opens("DW-0789b"), "the notes of the version on offer");
+    assert_eq!(source.about().notes.version, "0.9.2");
+    assert_eq!(source.about().notes.press, Press::Download);
     source.set_channel(Channel::Beta);
     pump(&mut source);
     assert_eq!(source.about().channel, Channel::Beta);
     assert!(seen.lock().unwrap().contains(&testkit::manifest_url(Line::Beta)));
     source.set_channel(Channel::Stable);
     pump(&mut source);
-}
-
-/// The real hand-off's first step on every platform: sync stops before anything is started (an engine with no sync
-/// running counts as stopped, and mints the proof).
-#[test]
-fn the_hand_off_stops_sync_first() {
-    let mut apply = EngineApply::new(engine(), &TEST);
-    assert!(apply.stop_engine().is_some(), "no sync running: stopped");
 }
 
 /// Outside Windows no installer is ever started: the machine says so and keeps the staged file. Not run on Windows:
@@ -708,7 +873,7 @@ fn the_hand_off_starts_nothing_outside_windows() {
         http,
         clock,
         MemStore::default(),
-        EngineApply::new(engine, &TEST),
+        EngineApply::new(engine, &TEST, SyncBack::default()),
     );
     let mut settle = |event| {
         let mut state = updater.step(event).clone();
@@ -744,3 +909,6 @@ fn the_saved_channel_and_the_one_the_build_came_from() {
     config.installed_release_channel = None;
     assert_eq!(channels(Some(&config)), (Channel::Alpha, Channel::Alpha));
 }
+
+#[path = "updates_handoff_tests.rs"]
+mod handoff;

@@ -40,9 +40,43 @@ impl ThemeChoice {
 pub enum Update {
     /// This is the newest version known.
     Current,
-    /// A newer one can be downloaded.
-    Available { version: String },
+    /// A newer one is known. `press` is what its button does now; `says`, when set, takes the caption's place
+    /// while a press is worked on or after one did not go through (the updater's own fixed words).
+    Available {
+        version: String,
+        press: Press,
+        says: Option<String>,
+    },
 }
+
+/// What the update's one button does now (DW-0781, DW-0789b). The spec's flow
+/// (`docs/superpowers/specs/2026-11-11-native-installer-updater.md` §4, "Apply"): the installer is downloaded and
+/// its signature checked first, and it is installed only when the person chooses "Restart to update".
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Press {
+    /// Downloaded and its signature checked: "Restart to update" stops sync and hands the file to the installer,
+    /// and Beebeeb closes. The board's own drawing.
+    #[default]
+    Restart,
+    /// On offer, not downloaded yet: "Download update" downloads it and checks its signature. Nothing is installed.
+    Download,
+    /// A press is being worked on (downloading, checking the signature, restarting): the button waits.
+    Wait,
+}
+
+impl Press {
+    /// The button's words.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Download => "Download update",
+            Self::Restart | Self::Wait => "Restart to update",
+        }
+    }
+}
+
+/// The caption beside the update's button (DW-0781's banner, DW-0789b's dialog). It follows the spec's flow, not the
+/// board's "Download it, then open it to install." (lead ruling 2026-11-15; the design note is in `FRAMES.md`).
+pub const UPDATE_CAPTION: &str = "Its signature is checked first. It installs only when you choose Restart to update.";
 
 /// The General pane's values.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -94,6 +128,9 @@ pub struct ReleaseNotes {
     pub released: String,
     /// The release's own notes, a line each. Empty: the release came without notes.
     pub lines: Vec<String>,
+    /// What the dialog's button does now. Only a newer version's notes are ever here: an older one is never
+    /// offered (DW-0789, Rules).
+    pub press: Press,
 }
 
 /// The About pane's values (DW-0751).
@@ -277,6 +314,12 @@ pub struct Pumped {
     pub toast: Option<&'static str>,
     /// An answer is still out: the window looks again soon.
     pub busy: bool,
+    /// "Restart to update" started the verified installer: the app quits now (the installer waits for that, puts
+    /// the new version in place and starts it).
+    pub restart: bool,
+    /// The installer did not start after the hand-off stopped a running sync: the shell starts sync again, so no
+    /// "sync is off" is left behind by an update that did not happen.
+    pub start_sync: bool,
 }
 
 pub trait SettingsSource {
@@ -343,6 +386,12 @@ pub trait SettingsSource {
     /// Engine: ask the updater whether a newer version exists, now. The check stands at
     /// `UpdateCheck::Checking` until it answers.
     fn check_for_updates(&mut self);
+    /// Engine: "Download update": download the newer version on offer and check its signature; it then waits for
+    /// "Restart to update". Never an older version; nothing is installed.
+    fn download_update(&mut self);
+    /// Engine: "Restart to update", once the download is verified: stop sync, start the verified installer, and
+    /// quit (`Pumped::restart`). Before the download is verified it does nothing.
+    fn restart_to_update(&mut self);
     /// Engine: the account's notifications, newest first, grouped by day ("Today",
     /// "Yesterday", "3 Nov"). Empty: nothing to show.
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)>;
@@ -413,6 +462,7 @@ impl BoardSettings {
                         "Sync history keeps 30 days on every PC.".into(),
                         "A file badge no longer stays on Uploading after the upload finished.".into(),
                     ],
+                    press: Press::Restart,
                 },
                 company: "Initlabs B.V.".into(),
             },
@@ -447,6 +497,8 @@ impl BoardSettings {
     pub fn with_update_available(mut self) -> Self {
         self.general.update = Update::Available {
             version: "0.9.2".into(),
+            press: Press::Restart,
+            says: None,
         };
         self
     }
@@ -647,6 +699,9 @@ impl SettingsSource for BoardSettings {
     fn check_for_updates(&mut self) {
         self.about.check = UpdateCheck::Checking;
     }
+    // The sample does not move: a press is recorded in `SettingsUi::intents`.
+    fn download_update(&mut self) {}
+    fn restart_to_update(&mut self) {}
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
         self.recent.clone()
     }
@@ -730,6 +785,8 @@ impl SettingsSource for Unwired {
     }
     fn mark_recent_seen(&mut self) {}
     fn check_for_updates(&mut self) {}
+    fn download_update(&mut self) {}
+    fn restart_to_update(&mut self) {}
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
         Vec::new()
     }
@@ -766,6 +823,7 @@ impl SettingsSource for Unwired {
                 channel: Channel::Stable,
                 released: String::new(),
                 lines: Vec::new(),
+                press: Press::Restart,
             },
             company: String::new(),
         }

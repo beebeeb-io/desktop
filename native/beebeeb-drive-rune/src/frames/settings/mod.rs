@@ -159,8 +159,12 @@ pub enum Intent {
     Open(&'static str),
     /// Open a web page in the browser: the page's NAME (the shell holds the addresses).
     Web(&'static str),
-    /// Download the new version's installer and show it in File Explorer (DW-0781, DW-0789b).
+    /// "Download update" (DW-0781, DW-0789b): the settings source's updater downloads the newer version and checks
+    /// its signature (`SettingsSource::download_update`). Recorded for the shell; nothing is installed.
     DownloadUpdate,
+    /// "Restart to update" (DW-0781, DW-0789b): the settings source's updater stops sync and starts the verified
+    /// installer (`SettingsSource::restart_to_update`); the quit that follows comes through [`poll`].
+    RestartToUpdate,
     /// Save the support bundle and open an email to support in the person's email app (DW-0782).
     SaveBundleAndWriteEmail,
     /// Put this text on the clipboard (About › Copy: the version lines).
@@ -264,6 +268,21 @@ impl SettingsUi {
     pub fn check_for_updates(&mut self) {
         self.source.check_for_updates();
         self.ask(Intent::CheckForUpdates);
+    }
+
+    /// The update's button (General's banner, the release notes): what it does now ([`source::Press`]).
+    pub fn press_update(&mut self, press: source::Press) {
+        match press {
+            source::Press::Download => {
+                self.source.download_update();
+                self.ask(Intent::DownloadUpdate);
+            }
+            source::Press::Restart => {
+                self.source.restart_to_update();
+                self.ask(Intent::RestartToUpdate);
+            }
+            source::Press::Wait => {}
+        }
     }
 
     /// The theme the window draws in: the person's choice, or the system's.
@@ -605,7 +624,15 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
-    pumped.changed || toast.is_some() || checked
+    // The update's hand-off (`engine_host::settings::updates`): the installer did not start after sync was stopped
+    // for it, so sync starts again; or it started, so the app quits (the installer waits for that).
+    if pumped.start_sync {
+        s.shell.start_sync();
+    }
+    if pumped.restart {
+        tx.quit();
+    }
+    pumped.changed || toast.is_some() || checked || pumped.start_sync || pumped.restart
 }
 
 /// The frame a recent alert leads to.

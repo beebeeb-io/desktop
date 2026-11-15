@@ -29,6 +29,8 @@ struct Server {
     port: u16,
     certificate_pem: String,
     log: RequestLog,
+    /// Every request's whole head, as it arrived (request line and headers).
+    heads: Arc<Mutex<Vec<String>>>,
 }
 
 fn respond(status: &str, headers: &[(&str, String)], body: &[u8]) -> Vec<u8> {
@@ -82,6 +84,8 @@ impl Server {
         let port = listener.local_addr().expect("address").port();
         let log: RequestLog = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&log);
+        let heads = Arc::new(Mutex::new(Vec::new()));
+        let heads_seen = Arc::clone(&heads);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let Ok(connection) = rustls::ServerConnection::new(Arc::clone(&config)) else {
@@ -98,6 +102,7 @@ impl Server {
                     continue;
                 }
                 let head = String::from_utf8_lossy(&head).into_owned();
+                heads_seen.lock().expect("heads").push(head.clone());
                 let path = head.split(' ').nth(1).unwrap_or_default().to_string();
                 let range = head
                     .lines()
@@ -117,6 +122,7 @@ impl Server {
             port,
             certificate_pem,
             log,
+            heads,
         }
     }
 
@@ -419,4 +425,72 @@ fn plain_http_is_never_spoken() {
         answer.starts_with("HTTP/1.1 200 OK") && answer.ends_with("plain"),
         "{answer:?}"
     );
+}
+
+/// A request head's headers: names lower-cased, values trimmed, sorted by name.
+fn headers(head: &str) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = head
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (name, value) = line.split_once(':').unwrap_or((line, ""));
+            (name.trim().to_ascii_lowercase(), value.trim().to_string())
+        })
+        .collect();
+    headers.sort();
+    headers
+}
+
+/// Review P2 (#437): what the real client sends, pinned. The local server records each request's whole head; for a
+/// check (the manifest and its signature) and a resumed download the headers are exactly these: what reqwest itself
+/// sends (`accept`, `host`), the fixed user agent, and `range` only on the resume. Nothing about the person: no
+/// cookie, no authorization, no install id, no version but the updater's own.
+#[test]
+fn the_client_sends_exactly_the_fixed_headers_and_nothing_about_the_person() {
+    let key = TestKey::generate();
+    let server = serve(&key, honest);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut updater = server.updater(&key, dir.path());
+    assert!(matches!(settle(&mut updater, CHECK), State::Available { .. }));
+    fs::write(
+        dir.path().join(format!("{}.part", artifact_name("0.9.1"))),
+        &artifact_bytes(SIZE)[..5_000],
+    )
+    .expect("part");
+    assert!(matches!(
+        settle(&mut updater, Event::Download),
+        State::ReadyToRestart { .. }
+    ));
+    let heads = server.heads.lock().expect("heads").clone();
+    assert_eq!(
+        heads.len(),
+        3,
+        "the manifest, its signature, the rest of the file: {heads:?}"
+    );
+    let named = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect()
+    };
+    let (host, agent) = (
+        format!("localhost:{}", server.port),
+        concat!("beebeeb-updater/", env!("CARGO_PKG_VERSION")),
+    );
+    let fresh = named(&[("accept", "*/*"), ("host", &host), ("user-agent", agent)]);
+    assert!(
+        heads[0].starts_with("GET /desktop/v2/stable.json HTTP/1.1"),
+        "{}",
+        heads[0]
+    );
+    assert_eq!(headers(&heads[0]), fresh, "the manifest");
+    assert_eq!(headers(&heads[1]), fresh, "its signature");
+    let resumed = named(&[
+        ("accept", "*/*"),
+        ("host", &host),
+        ("range", "bytes=5000-"),
+        ("user-agent", agent),
+    ]);
+    assert_eq!(headers(&heads[2]), resumed, "the resumed download");
 }

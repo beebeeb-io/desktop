@@ -364,8 +364,15 @@ fn an_available_update_is_said_once_with_one_primary_action() {
     assert_eq!(info(&rt, "btn-0").role, "button");
     tab_to(&mut rt, "btn-0");
     key(&mut rt, Key::Enter);
-    assert_eq!(rt.state.settings.intents, vec![Intent::DownloadUpdate]);
+    // The board's sample is an update downloaded and verified: its button restarts to update (spec §4, "Apply").
+    assert_eq!(info(&rt, "btn-0").text.as_deref(), Some("Restart to update"));
+    assert_eq!(rt.state.settings.intents, vec![Intent::RestartToUpdate]);
     assert_eq!(rt.state.settings.pane, Pane::General);
+    assert_eq!(
+        info(&rt, "banner-0-words").text.as_deref(),
+        Some(source::UPDATE_CAPTION),
+        "the caption follows the spec's flow"
+    );
 }
 
 /// Every frame of the table renders settings in the window, with a title, and says nothing
@@ -839,6 +846,8 @@ fn a_list_of_locations_without_choices_never_panics_and_says_it_could_not_load()
         }
         fn mark_recent_seen(&mut self) {}
         fn check_for_updates(&mut self) {}
+        fn download_update(&mut self) {}
+        fn restart_to_update(&mut self) {}
         fn recent_alerts(&self) -> Vec<(String, Vec<source::RecentAlert>)> {
             self.0.recent_alerts()
         }
@@ -947,7 +956,8 @@ fn another_channel_checks_again_and_an_older_channel_says_so() {
         "it links the notes"
     );
     assert!(
-        !rt.state.settings.intents.contains(&Intent::DownloadUpdate),
+        !rt.state.settings.intents.contains(&Intent::DownloadUpdate)
+            && !rt.state.settings.intents.contains(&Intent::RestartToUpdate),
         "nothing is installed or downloaded"
     );
 }
