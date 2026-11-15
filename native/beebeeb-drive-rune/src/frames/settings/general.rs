@@ -8,7 +8,7 @@ use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_shell as shell;
 use rune::El;
 
-use super::source::Update;
+use super::source::{Press, UPDATE_CAPTION, Update};
 use super::{Dialog, Intent, MenuKind, SettingsUi};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 
@@ -130,15 +130,21 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     );
 
     let mut children = vec![shell::heading("General", None, t), appearance];
-    if let Update::Available { version } = &g.update {
-        // The one primary action of this view: Amber.
-        let action = controls::button(0, "Restart to update", None, Emphasis::Primary, t)
-            .on_press(|s: &mut State| s.settings.ask(Intent::DownloadUpdate));
+    if let Update::Available { version, press, says } = &g.update {
+        // The one primary action of this view: Amber. One press, Restart to update: download, check, install (owner
+        // ruling 2026-11-15); while it is worked on the button waits and the banner says the step it is at.
+        let press = *press;
+        let mut action = controls::button(0, press.label(), None, Emphasis::Primary, t);
+        action = if press == Press::Wait {
+            action.disabled(true).focusable(false)
+        } else {
+            action.on_press(move |s: &mut State| s.settings.press_update(press))
+        };
         children.push(controls::banner(
             0,
             &ic::DOWNLOAD_TRAY,
             &format!("Version {version} is available"),
-            "Download it, then open it to install. Beebeeb never installs an update by itself.",
+            says.as_deref().unwrap_or(UPDATE_CAPTION),
             Some(action),
             t,
         ));

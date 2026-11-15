@@ -124,17 +124,20 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// The change of the sign-in email was confirmed: `new_email` (the address the SERVER named) replaces the one
-    /// the session, the credential store and the engine's account label hold. `false`: not done (another session,
+    /// the session, the credential store and the engine's account label hold. `None`: not done (another session,
     /// or nothing to store); the old address then stays and follows at the next sign-in. Moves the session
     /// generation on, as every write of the session does: whatever the host holds for the old one is read again.
-    pub fn email_changed_for(&self, session: SessionGeneration, new_email: &str) -> bool {
+    /// `Some` is the generation this write moved to, so a host can tell its own write from a lock or a sign-in.
+    pub fn email_changed_for(&self, session: SessionGeneration, new_email: &str) -> Option<SessionGeneration> {
         let email = new_email.trim();
         if email.is_empty() {
-            return false;
+            return None;
         }
         let Ok(_write) = self.claim(session) else {
-            return false;
+            return None;
         };
+        // The generation the claim moved to, read under its write lock: no other transition is between.
+        let moved_to = self.acct.session_generation();
         if let Err(error) = self.vault().store_account_email(email) {
             tracing::warn!(%error, "could not store the new account email (it follows at the next sign-in)");
         }
@@ -146,7 +149,7 @@ impl<C: CredentialStores> Engine<C> {
                 held.email = Some(email.to_string());
             }
         }
-        true
+        Some(moved_to)
     }
 }
 

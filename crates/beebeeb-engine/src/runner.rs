@@ -534,6 +534,7 @@ async fn run(
     emit_payload(&app, tracker.running());
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut sync_complete_notifications = SyncCompleteNotificationState::default();
     let mut quota_warning_notifications = QuotaWarningNotificationState::default();
     // Working-set signals a busy bridge gate dropped (Task 9 fix round 1, item B): owed to the next tick.
@@ -655,6 +656,16 @@ async fn run(
                     // Windows breadcrumb flyout: reflect the paused state.
                     #[cfg(target_os = "windows")]
                     refresh_status_ui_snapshot(&db, mode, false);
+                    // Task 2521 (review P1-2): a paused tick pulls nothing, so with no heartbeat running (its
+                    // registration failed, or its task ended) nothing would count an ended session's refusals. One
+                    // small check of the session stands in for the pull: a 401 adds one to the run, an answer clears
+                    // it. Bounded well under the stop's graceful wait, so a stop is never held up by it; a check
+                    // that does not answer in time proves nothing and leaves the run.
+                    if heartbeat.as_ref().is_none_or(|(_, beating, _)| beating.is_finished())
+                        && let Ok(check) = tokio::time::timeout(PAUSED_SESSION_CHECK_TIMEOUT, api.session_check()).await
+                    {
+                        auth_health.note_api_answer(check.as_ref().err());
+                    }
                     continue;
                 }
 
@@ -705,11 +716,10 @@ async fn run(
                 }
                 match sync_tick_outcome(&*bridge, &sync_root).await {
                     Ok(tick) => {
-                        // A successful tick is a real, authenticated API round
-                        // trip — clears the auth-failure streak (task 1546
-                        // finding 5) alongside every other post-tick bookkeeping
-                        // step below.
-                        auth_health.note_result(None);
+                        // `Ok` is not proof the session works: a refused pull also returns `Ok` (task 2521). Only a
+                        // pull that came back clears the auth-failure streak (task 1546 finding 5); a 401 pull adds
+                        // one; offline or a 5xx leaves it.
+                        auth_health.note_tick(&tick);
                         // Task 10 — surface freshly detected conflicts.
                         // The engine bridge already flipped status to
                         // Conflict; we own the UI side: open a window
@@ -741,6 +751,43 @@ async fn run(
                                 %error,
                                 "the reconcile pass did not complete; held changes stay paused, next tick retries"
                             );
+                        }
+                        // Task 2523 (F1): another device's version reaches the copy on this PC. Only at a tick whose
+                        // pull came back (the rows the pass reads are fresh), before the queue step (on Linux that
+                        // step sends the re-downloads it queues). Off the async workers: it may hash files. Windows:
+                        // freeing work, so it waits for the start-up guard's pass, as the stamp pass does (spec U4).
+                        #[cfg(target_os = "windows")]
+                        let stale_copies_allowed = crate::unknown_check::STARTUP_GUARD.allows_freeing();
+                        // macOS: the File Provider fetches on the working-set signal; the pass has nothing to do.
+                        #[cfg(not(target_os = "windows"))]
+                        let stale_copies_allowed = cfg!(not(target_os = "macos"));
+                        if tick.reached_server && stale_copies_allowed {
+                            let (pass_bridge, pass_root) = (bridge.clone(), sync_root.clone());
+                            match tokio::task::spawn_blocking(move || pass_bridge.refresh_stale_copies(&pass_root))
+                                .await
+                            {
+                                // A kept file is fetched again now, off the tick, as a pin does.
+                                #[cfg(target_os = "windows")]
+                                Ok(Ok(pass)) => {
+                                    for place in pass.refetch {
+                                        tokio::task::spawn_blocking(move || {
+                                            if let Err(error) =
+                                                crate::windows_cf::placeholders::hydrate_placeholder(&place)
+                                            {
+                                                tracing::warn!(%error, "stale copy: a kept file was not fetched again; the next open fetches it");
+                                            }
+                                        });
+                                    }
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                Ok(Ok(_)) => {}
+                                Ok(Err(error)) => {
+                                    tracing::warn!(%error, "stale copies: the pass did not complete; next tick retries")
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "stale copies: the pass panicked; next tick retries")
+                                }
+                            }
                         }
                         let completed_sync_work = queue_step(
                             &bridge,
@@ -858,7 +905,7 @@ async fn run(
                         // Task 1546 finding 5: a run of these that classify as
                         // auth failures (not network blips) is what flips
                         // `auth_health` and surfaces the persistent banner.
-                        auth_health.note_result(Some(&e));
+                        auth_health.note_api_answer(Some(&e));
                         emit_payload(
                             &app,
                             finish_tick_payload(&tracker, Err(&e), &link, tick_started_at, &db, &transfers),
@@ -962,25 +1009,31 @@ async fn run(
             tracing::debug!("heartbeat producer did not stop within 1s; abandoning");
         }
 
-        let final_beat = HeartbeatBody {
-            status: "stopped".to_string(),
-            // Report the last known counts so the row's progress numbers don't
-            // reset to null on the terminal beat; zero speed, no current file.
-            files_synced: db.count_by_status(FileStatus::Local).ok().map(i64::from),
-            current_file: None,
-            speed_bps: Some(0),
-            ..Default::default()
-        };
-        // Best-effort + hard-bounded: swallow any error, never exceed ~1.5s.
-        match tokio::time::timeout(
-            Duration::from_millis(1500),
-            api.post_heartbeat(&session_id, &final_beat),
-        )
-        .await
-        {
-            Ok(Ok(())) => tracing::debug!(session_id = %session_id, "final 'stopped' heartbeat sent"),
-            Ok(Err(e)) => tracing::debug!(error = %e, "final 'stopped' heartbeat failed (best-effort)"),
-            Err(_) => tracing::debug!("final 'stopped' heartbeat timed out (best-effort)"),
+        // Task 2521 (review P3-1): no last beat for a session Beebeeb no longer accepts. The stop that closes the
+        // vault after its refusals sends nothing more with the refused token.
+        if auth_health.is_expired() {
+            tracing::debug!("no final 'stopped' heartbeat: the server no longer accepts this session");
+        } else {
+            let final_beat = HeartbeatBody {
+                status: "stopped".to_string(),
+                // Report the last known counts so the row's progress numbers don't
+                // reset to null on the terminal beat; zero speed, no current file.
+                files_synced: db.count_by_status(FileStatus::Local).ok().map(i64::from),
+                current_file: None,
+                speed_bps: Some(0),
+                ..Default::default()
+            };
+            // Best-effort + hard-bounded: swallow any error, never exceed ~1.5s.
+            match tokio::time::timeout(
+                Duration::from_millis(1500),
+                api.post_heartbeat(&session_id, &final_beat),
+            )
+            .await
+            {
+                Ok(Ok(())) => tracing::debug!(session_id = %session_id, "final 'stopped' heartbeat sent"),
+                Ok(Err(e)) => tracing::debug!(error = %e, "final 'stopped' heartbeat failed (best-effort)"),
+                Err(_) => tracing::debug!("final 'stopped' heartbeat timed out (best-effort)"),
+            }
         }
     }
 
@@ -1103,6 +1156,7 @@ pub use telemetry::AuthHealth;
 pub use telemetry::device_name;
 #[cfg(target_os = "macos")]
 pub use telemetry::hostname_or_unknown;
+pub(crate) use telemetry::is_session_refusal;
 use telemetry::*;
 
 mod lifecycle;

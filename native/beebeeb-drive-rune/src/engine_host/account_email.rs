@@ -15,11 +15,6 @@ use std::time::{Duration, Instant};
 
 use super::Stamp;
 
-/// Whether the page may offer "Send again" for the email's code: yes (Beebeeb has the route).
-pub(super) fn can_send_again() -> bool {
-    true
-}
-
 /// A wait Beebeeb asked for, for the session and account it was said to.
 #[derive(Default)]
 pub(super) struct Waiting(Option<(Stamp, Instant)>);

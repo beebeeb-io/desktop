@@ -472,6 +472,9 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= drain_signin_intents(s);
     // What Settings asked for: web pages, the clipboard, Windows Settings.
     changed |= super::intents::drain_in_poll(s, tx);
+    // An item's Details or Preview over Trash, Shared or Search: closed when its section, session or row went;
+    // a Preview's answer (`frames::item::poll`).
+    changed |= crate::frames::item::poll(s, tx);
     // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
     changed |= crate::frames::signin::setup::guide::poll(s, tx);
     // The first run's answers (File Explorer finished, a switch was set, the first run ended).
@@ -524,6 +527,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             crate::frames::files::reset::end_session(s, now.1 != account);
             // An open file: its decrypted content goes with the account that leaves.
             crate::frames::viewers::end_session(s, now.1 != account);
+            // An item's Details or Preview: the page and what its read decrypted go too.
+            crate::frames::item::end_session(s);
             changed = true;
         }
         // The rows are the session's too. `on_gate_change` reads them again when THIS poll's
@@ -541,6 +546,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     let open_now = super::session_gate::open(s);
     if std::mem::replace(&mut s.shell.gate_open_seen, open_now) && !open_now {
         crate::frames::files::reset::session_closed(s);
+        crate::frames::item::end_session(s);
         changed = true;
     }
     // Windows Hello's answer to an approval of another device's sign-in (DW-A14). Read after the

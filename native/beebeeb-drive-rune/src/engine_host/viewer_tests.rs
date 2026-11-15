@@ -77,13 +77,30 @@ struct Inner {
     /// Every Available offline change asked of the engine, and whether the engine refuses them.
     kept_calls: Vec<(String, bool)>,
     kept_refused: bool,
-    /// Every save asked of the engine (file, text, base) and what it answers.
+    /// Every save asked of the engine (file, text, base), the opening each was made under, and what it answers.
     saves: Vec<(String, String, i64)>,
+    save_openings: Vec<u64>,
     save_answer: Result<SaveEnd, EditRefused>,
     /// Every Keep both asked of the engine.
     copies: Vec<(String, String)>,
     /// The next change waits here until the test lets it go (a change "on its way").
     change_waits: bool,
+    /// How many times the version was read (`edit_facts`).
+    edit_reads: usize,
+    /// A version that lands while a download runs: the local state holds it from then on.
+    lands_during_fetch: Option<i64>,
+    /// The engine says the copy on this PC is behind the version Beebeeb has (`LocalCopy::Behind`).
+    local_behind: bool,
+    /// The engine's record of the viewer's saves, as the engine keeps it: for ONE opening (`epoch`, the last one
+    /// `begin_opening` handed out), the versions its saves became, and its save answered Queued whose landing is still
+    /// to come (`land`). A new opening starts an empty one, and counts it (`forgets`). A save of another opening never
+    /// writes it, however late it ends.
+    own_versions: Vec<i64>,
+    queued_save: Option<u64>,
+    epoch: u64,
+    forgets: usize,
+    /// A read of the version waits at the door too.
+    edit_waits: bool,
 }
 
 struct Fake {
@@ -124,13 +141,23 @@ impl Fake {
                     version: 3,
                     kept: false,
                     can_write: true,
+                    own: false,
                 }),
                 kept_calls: Vec::new(),
                 kept_refused: false,
                 saves: Vec::new(),
+                save_openings: Vec::new(),
                 save_answer: Ok(SaveEnd::Saved { version: 4 }),
                 copies: Vec::new(),
                 change_waits: false,
+                edit_reads: 0,
+                lands_during_fetch: None,
+                local_behind: false,
+                own_versions: Vec::new(),
+                queued_save: None,
+                epoch: 0,
+                forgets: 0,
+                edit_waits: false,
             }),
             door: Mutex::new(()),
         };
@@ -230,6 +257,9 @@ impl ViewerEngine for Fake {
             return Err(OpenFileError::Cancelled);
         }
         let turn = s.answers_for.unwrap_or(s.turn);
+        if s.local_behind {
+            return Ok(LocalCopy::Behind);
+        }
         let stored = s.files.get(file_id).ok_or(OpenFileError::NotFound)?;
         let (Some(here), Some(copy)) = (stored.here, stored.copy.clone()) else {
             return Ok(LocalCopy::NotHere);
@@ -262,6 +292,9 @@ impl ViewerEngine for Fake {
             s.fetches.push(file_id.to_string());
             s.limits.push(max_bytes);
             assert!(!s.panics, "an invented panic in the download");
+            if let (Some(version), Some(edit)) = (s.lands_during_fetch.take(), s.edit.as_mut()) {
+                edit.version = version;
+            }
             (s.files.get(file_id).map(|stored| stored.bytes.clone()), s.turn)
         };
         let bytes = bytes.ok_or(OpenFileError::NotFound)?;
@@ -302,8 +335,24 @@ impl ViewerEngine for Fake {
         self.s().wakes += 1;
     }
 
-    fn edit_facts(&self, _session: SessionGeneration, _file_id: &str) -> Option<EditFacts> {
-        self.s().edit
+    fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, opening: u64) -> Option<EditFacts> {
+        if self.s().edit_waits {
+            drop(self.door.lock().unwrap());
+        }
+        let mut s = self.s();
+        s.edit_reads += 1;
+        // As the engine: only a version a save of THIS opening became is its own.
+        let own = opening == s.epoch && s.edit.is_some_and(|edit| s.own_versions.contains(&edit.version));
+        s.edit.map(|edit| EditFacts { own, ..edit })
+    }
+
+    fn begin_opening(&self, _session: SessionGeneration, _file_id: &str) -> u64 {
+        let mut s = self.s();
+        s.epoch += 1;
+        s.own_versions.clear();
+        s.queued_save = None;
+        s.forgets += 1;
+        s.epoch
     }
 
     fn set_kept(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), ()> {
@@ -316,11 +365,36 @@ impl ViewerEngine for Fake {
         Ok(())
     }
 
-    fn save_text(&self, _: SessionGeneration, file_id: &str, text: &str, base: i64) -> Result<SaveEnd, EditRefused> {
+    fn save_text(
+        &self,
+        _: SessionGeneration,
+        file_id: &str,
+        text: &str,
+        base: i64,
+        opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
         self.hold();
         let mut s = self.s();
         s.saves.push((file_id.to_string(), text.to_string(), base));
-        s.save_answer
+        s.save_openings.push(opening);
+        // As the engine: a Queued answer names the base it saved from, and is remembered until it lands; a saved
+        // version is the viewer's own. Both only for the opening the record is of (checked when the save ends).
+        let this_opening = opening == s.epoch;
+        match s.save_answer {
+            Ok(SaveEnd::Queued { .. }) => {
+                if this_opening {
+                    s.queued_save = Some(opening);
+                }
+                Ok(SaveEnd::Queued { base })
+            }
+            Ok(SaveEnd::Saved { version }) => {
+                if this_opening {
+                    s.own_versions.push(version);
+                }
+                Ok(SaveEnd::Saved { version })
+            }
+            answer => answer,
+        }
     }
 
     fn save_copy(
@@ -1078,54 +1152,6 @@ fn try_again_that_cannot_even_start_says_so() {
     assert_eq!(retries.get(), 1);
     assert_eq!(ui.toast.as_deref(), Some(crate::frames::viewers::NOT_REOPENED));
     assert_eq!(ui.file.body, Body::Failed, "what was on screen stays");
-}
-
-#[test]
-fn a_source_that_cannot_save_or_keep_offline_says_so_on_the_press() {
-    // The default source (the board's) can: the editor opens.
-    struct CannotSave(InState);
-    impl ViewerSource for CannotSave {
-        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
-            self.0.open(id)
-        }
-        fn poll(&mut self, id: &str) -> Option<Body> {
-            self.0.poll(id)
-        }
-        fn cancel(&mut self, _: &str) {}
-        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
-            self.0.retry(id)
-        }
-        fn can_save(&self) -> bool {
-            false
-        }
-        fn knows_offline(&self) -> bool {
-            false
-        }
-    }
-    let text = Body::Text(TextDoc {
-        lines: plain_lines("an invented line"),
-        truncated: None,
-    });
-    let (mut can, _) = ui_in(text.clone(), true);
-    can.edit();
-    assert!(can.editor.is_some(), "a source that saves opens the editor");
-
-    let inner = InState {
-        body: text,
-        retries: Default::default(),
-        there: true,
-    };
-    let mut cannot = crate::frames::viewers::Ui::open(Box::new(CannotSave(inner)), "f-state").expect("it opened");
-    cannot.edit();
-    assert!(cannot.editor.is_none());
-    assert_eq!(cannot.toast.as_deref(), Some("Not built yet: Edit and save from here"));
-    cannot.toggle_offline();
-    assert!(!cannot.file.details.offline, "nothing was switched");
-    assert_eq!(
-        cannot.toast.as_deref(),
-        Some("Not built yet: Available offline from here")
-    );
-    assert!(!cannot.knows_offline());
 }
 
 #[path = "viewer_round2_tests.rs"]

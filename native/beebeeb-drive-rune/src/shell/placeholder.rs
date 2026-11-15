@@ -59,6 +59,12 @@ fn notice(t: &Theme, group: FrameGroup, extra: Option<String>, narrow: bool) -> 
 /// The main window with the placeholder where `group`'s frame will be.
 pub fn window(s: &State, cx: &mut Cx<State>, group: FrameGroup) -> El {
     let t = tokens::theme(cx.system_dark());
+    around(s, cx, notice(&t, group, None, false))
+}
+
+/// The window's real chrome (the caption, and the sidebar inside Drive) around `content`.
+pub fn around(s: &State, cx: &mut Cx<State>, content: El) -> El {
+    let t = tokens::theme(cx.system_dark());
     let hairline = 1.0 / cx.env().scale;
     let in_drive = matches!(s.shell.app.screen(), Screen::Drive(_));
     let content = col()
@@ -67,7 +73,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, group: FrameGroup) -> El {
         .h_full()
         .fill(t.bg)
         .center()
-        .child(notice(&t, group, None, false));
+        .child(content);
     let mut body = row().key("body").grow(1.0).w_full();
     // Inside Drive the caption and the sidebar are the real ones and stay. The gate and
     // settings have their own left side (the brand panel, the settings sidebar), so there the

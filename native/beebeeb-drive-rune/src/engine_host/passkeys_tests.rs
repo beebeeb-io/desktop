@@ -302,8 +302,8 @@ fn the_account_source_asks_for_the_password_to_add_and_remove_but_not_to_rename(
     assert!(source.passkeys_need_password());
     assert!(source.can_rename_passkey());
     // The calls with no password are not a way in: they claim nothing.
-    assert_eq!(source.add_passkey(), Err(Refused::NotConfirmed));
-    assert!(!source.remove_passkey(ONE));
+    assert_eq!(source.add_passkey(None), Err(Refused::NotConfirmed));
+    assert!(!source.remove_passkey(ONE, None));
     assert_eq!(server.asked("POST /api/v1/auth/confirm-opaque-start"), 0);
     source.opened(Pane::Passkeys);
     let began = Instant::now();
@@ -313,7 +313,7 @@ fn the_account_source_asks_for_the_password_to_add_and_remove_but_not_to_rename(
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(source.passkeys().len(), 2);
-    assert!(source.remove_passkey_confirmed(ONE, Password::from_field(PASSWORD)));
+    assert!(source.remove_passkey(ONE, Some(Password::from_field(PASSWORD))));
     let began = Instant::now();
     while source.notice().is_none() {
         source.pump();

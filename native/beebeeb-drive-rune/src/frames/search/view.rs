@@ -109,6 +109,18 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.bg)
         .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(crate::frames::global::fit(s, body, &t))
+        .children(dialogs(s, &t, cx))
+}
+
+/// An item's Details over the results (`frames::item`), drawn by the one dialog layer of Shared and Trash.
+fn dialogs(s: &State, t: &Theme, cx: &mut Cx<State>) -> Vec<El> {
+    let dialogs = crate::frames::shared::dialogs::layers(s, t);
+    if !dialogs.is_empty() {
+        // Keyboard as Windows has it in a dialog (`shared::parts::chrome`): Tab visits every control, Space and
+        // Enter press the focused one.
+        cx.web_focus();
+    }
+    dialogs
 }
 
 /// The status line: the PC's sync state and the Files window's summary, as in Files (DW-0401).

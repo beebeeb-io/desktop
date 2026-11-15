@@ -84,16 +84,20 @@ fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     // A window whose source knows no Backups folder (`FilesSource::backups_root` is `None`).
     rt.update(|s, _| s.actions = crate::frames::files::Actions::default());
     go(&mut rt, Section::Backups);
-    assert!(rt.find("not-built").is_some());
+    // Backups has its frame: with no folder known it is the honest empty state, never the dev card.
+    assert!(rt.find("not-built").is_none(), "the dev card in Backups");
+    assert!(rt.find("backups-none").is_some());
     assert!(
         rt.find("file-list").is_none(),
         "no Files rows under another section's name"
     );
     assert!(rt.find("detail-pane").is_none());
     let texts = texts(&rt);
-    assert!(texts.iter().any(|t| t == "NOT BUILT YET"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "No backups yet"), "{texts:?}");
     assert!(
-        texts.iter().any(|t| t == "Board: Backups on Windows (DW-0737)"),
+        texts
+            .iter()
+            .any(|t| t == "Turn on backups in Settings \u{203A} Backups."),
         "{texts:?}"
     );
     // The window's real chrome stays: caption and sidebar.
@@ -146,8 +150,8 @@ fn the_placeholder_never_shows_fixture_rows() {
     rt.update(|s, _| s.actions = crate::frames::files::Actions::default());
     go(&mut rt, Section::Backups);
     assert!(
-        rt.find("not-built").is_some(),
-        "Backups without a source that knows its folder"
+        rt.find("backups-none").is_some() && rt.find("not-built").is_none(),
+        "Backups without a source that knows its folder is the empty state"
     );
     let texts = texts(&rt);
     for name in ["Contract draft.pdf", "Lisbon trip", "Budget 2026.xlsx"] {
@@ -331,7 +335,7 @@ fn a_sidebar_selection_becomes_a_navigation() {
     rt.frame(0.016);
     assert_eq!(rt.state.shell.app.route(), &Route::section(Section::Backups));
     assert!(rt.state.shell.app.can_go_back());
-    assert!(rt.find("not-built").is_some());
+    assert!(rt.find("backups-none").is_some());
 }
 
 #[test]

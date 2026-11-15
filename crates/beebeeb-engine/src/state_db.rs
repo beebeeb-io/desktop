@@ -616,6 +616,9 @@ mod removals;
 mod schema;
 mod share_marks;
 pub use share_marks::{MarkKind, is_unreadable_mark, normalized_email};
+// Task 2523: copies on this PC whose agreed content is behind the current version.
+mod stale_copies;
+pub use stale_copies::StaleCopy;
 mod signout;
 mod sync;
 // LD-0113: the server's `system_role` of a row (the Backups root).
@@ -623,6 +626,9 @@ mod system_role;
 mod test_hooks;
 // Task 2409: the changes "Not sent" counts, one row each.
 mod unsent;
+// Task 2524: the held edits as This PC lists them.
+mod held_overview;
+pub use held_overview::{HELD_UNCHECKED_NAMES, HeldEdits, HeldRow};
 // What the Uploads panel cancels: a NEW file never in Beebeeb (its change, its row), and the sizes it shows.
 mod unsent_cancel;
 use unsent::{NOT_DOWNLOADED_SQL, UNSENT_KINDS_SQL};

@@ -317,6 +317,7 @@ pub async fn sync_tick_outcome(
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: true,
+                pull_failure: None,
             });
         }
         Some(c) if needs_resnapshot => {
@@ -339,6 +340,7 @@ pub async fn sync_tick_outcome(
                         conflicts,
                         applied_item_ids: dedupe(applied_item_ids),
                         reached_server: true,
+                        pull_failure: None,
                     });
                 }
                 Err(e) => after_failed_snapshot(bridge, c, e.into())?,
@@ -355,11 +357,13 @@ pub async fn sync_tick_outcome(
             // snapshot — just skip this tick and retry next time. The cursor is
             // unchanged, so no op is missed.
             tracing::warn!(error = %e, cursor, "sync_tick: /sync/ops failed; retrying next tick");
-            // The pull did not come back: `Ok`, but not a tick that reached the server (spec D11, review P1).
+            // The pull did not come back: `Ok`, but not a tick that reached the server (spec D11, review P1). It
+            // carries why (task 2521): a 401 here is a refusal of the session, which the runner counts.
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: false,
+                pull_failure: Some(e),
             });
         }
     };
@@ -374,6 +378,7 @@ pub async fn sync_tick_outcome(
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: true,
+                pull_failure: None,
             });
         }
         // `now_secs` (captured at tick start) is the prune freshness cutoff: it
@@ -405,6 +410,7 @@ pub async fn sync_tick_outcome(
             conflicts,
             applied_item_ids: dedupe(applied_item_ids),
             reached_server: true,
+            pull_failure: None,
         });
     }
 
@@ -432,6 +438,7 @@ pub async fn sync_tick_outcome(
         conflicts,
         applied_item_ids: dedupe(applied_item_ids),
         reached_server: true,
+        pull_failure: None,
     })
 }
 

@@ -46,6 +46,8 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
         .role("window")
         .label(s.identity.main_window_title())
         .on_key(crate::frames::on_key_root)
+        // The window's size, for a dialog that fits itself to it (an item's Preview), as the Files window records it.
+        .on_layout(|s: &mut State, [_, _, w, h]| s.actions.window = (w, h))
         .w_full()
         .h_full()
         .fill(t.bg)

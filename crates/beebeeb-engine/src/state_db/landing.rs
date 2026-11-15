@@ -175,6 +175,20 @@ impl StateDb {
         accept: &FinderAccept<'_>,
         legacy_identifiers: &dyn Fn(&FileEntry, &FileContractState) -> Vec<String>,
     ) -> Result<AcceptOutcome> {
+        self.accept_finder_write_after(accept, legacy_identifiers, &crate::write_token::ChainAfter::Any)
+    }
+
+    /// [`Self::accept_finder_write`], for a modify that may be queued only after the queued write `chain` allows
+    /// (review of desktop#432, delta 3). Any other is refused inside this same transaction
+    /// ([`AcceptOutcome::BehindAnotherWrite`]), before anything is written: a write queued between the caller's look
+    /// and this transaction cannot slip in.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn accept_finder_write_after(
+        &self,
+        accept: &FinderAccept<'_>,
+        legacy_identifiers: &dyn Fn(&FileEntry, &FileContractState) -> Vec<String>,
+        chain: &crate::write_token::ChainAfter,
+    ) -> Result<AcceptOutcome> {
         use crate::write_token::{BaseDecision, WriteToken, decide_base, mint_write_id};
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -242,6 +256,13 @@ impl StateDb {
                 }
                 let facts = base_facts_conn(&tx, accept.file_id, &contract, legacy_identifiers(&entry, &contract))?;
                 let decision = decide_base(&facts, *incoming_base);
+                // Delta 3 of desktop#432: never after a queued write this save may not follow. Refused before the
+                // first write of this transaction, so nothing of it stays.
+                if let BaseDecision::After { write_id, .. } = &decision
+                    && !chain.allows(write_id)
+                {
+                    return Ok(AcceptOutcome::BehindAnotherWrite);
+                }
                 record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
                 let moved = entry.parent_id != parent_id;
                 if moved {
@@ -482,11 +503,19 @@ impl StateDb {
             contract.parent_id = input.parent_id.map(str::to_string);
         }
         contract.current_version = input.produced_version;
-        contract.local_base_version = input.produced_version;
-        // Task 1640 (review-151d P3-6): a landing that could not hash what it sent records no agreed
-        // content: the previous hash would pair the new version with the old bytes (a revert to them
-        // would read as agreed). For a sync-folder upload the content is mixed at that version below.
-        contract.local_hash = input.completed_payload_hash.map(str::to_string);
+        // Task 2523 (F2): a save that did not write the file's place (the viewer on Windows and Linux) leaves the
+        // place's agreed content as it was, at its own version: those bytes ARE that version, so they read as behind
+        // the version that landed (the stale-copy pass brings them to it; an edit made first is sent on its own
+        // version and parks as the two-versions question). Before, the place was recorded at the new version with no
+        // content, and an edit there was held as "content unknown" and never sent.
+        let place_keeps_its_content = !input.place_written && contract.local_hash.is_some();
+        if !place_keeps_its_content {
+            contract.local_base_version = input.produced_version;
+            // Task 1640 (review-151d P3-6): a landing that could not hash what it sent records no agreed
+            // content: the previous hash would pair the new version with the old bytes (a revert to them
+            // would read as agreed). For a sync-folder upload the content is mixed at that version below.
+            contract.local_hash = input.completed_payload_hash.map(str::to_string);
+        }
         contract.current_object_version_id = Some(produced_version_id.as_str().to_string());
         contract.last_sync_at = input.now;
         set_file_contract_state_conn(&tx, &contract)?;

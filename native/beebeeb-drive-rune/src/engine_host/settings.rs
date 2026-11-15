@@ -3,8 +3,8 @@
 //! What it answers, and from where:
 //! - General (DW-0701) and its Theme menu (DW-0787): the theme from this PC's settings file, read when the window
 //!   starts (the first paint is local) and written merge-only; where new files are stored from Beebeeb
-//!   ([`Engine::storage_region`]); the version this binary was built as. General never says a download is waiting:
-//!   no press sends one yet ([`updates`]).
+//!   ([`Engine::storage_region`]); the version this binary was built as; a newer version on offer, with ONE press,
+//!   Restart to update (download, check, install), where this build has an updater ([`updates`]; never an older version).
 //! - General › Storage location (DW-0788, b, c, d): the account's choice and the list, by country, from Beebeeb. A
 //!   choice and "only store in this country" are sent once ([`Engine::set_storage_region_for`], the one call here
 //!   that writes account state) and shown only after Beebeeb took them; a refusal leaves the old choice and says so.
@@ -12,7 +12,8 @@
 //!   alert switches and notifications from Beebeeb, this PC's switches from its settings file).
 //! - About (DW-0751): the versions of this build ([`build_about`]) and, where this build has an updater (a Windows
 //!   release), Check now and the Release channel (DW-0789) on it: [`updates`], its own part. Elsewhere About draws
-//!   the versions only. The release notes (DW-0789b) stay the shell's frame: their "Restart to update" has no route.
+//!   the versions only. The release notes (DW-0789b) open while a newer version is on offer (its notes, and the
+//!   same button as General's); otherwise About draws no row that points to them (the updater has no notes to show).
 //! - Not wired here (the shell's "not built yet" frame in their place): Report a problem (no support bundle is built here yet).
 //!
 //! Thread rule (task 2470 W5): nothing here waits for Beebeeb or for the settings file's write lock on the window's
@@ -39,7 +40,7 @@ use beebeeb_engine::identity::EngineIdentity;
 use super::log;
 use crate::frames::settings::Pane;
 use crate::frames::settings::source::{
-    About, Channel, General, Location, Locations, Notifications, Pumped, ReadState, RecentAlert, ReleaseNotes,
+    About, Channel, General, Location, Locations, Notifications, Press, Pumped, ReadState, RecentAlert, ReleaseNotes,
     SettingsSource, ThemeChoice, Update, UpdateCheck,
 };
 
@@ -199,6 +200,7 @@ pub fn build_about() -> About {
             channel: Channel::Stable,
             released: String::new(),
             lines: Vec::new(),
+            press: Press::Wait,
         },
         company: "Initlabs B.V.".into(),
     }
@@ -466,12 +468,13 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
     }
 
     /// Report a problem (DW-0782) is a dialog over General with no support bundle behind it yet. The channel menu
-    /// (DW-0789) needs an updater; the release notes (DW-0789b) also need a route for their "Restart to update",
-    /// which no press has yet.
+    /// (DW-0789) needs an updater; the release notes (DW-0789b) need a newer version on offer (an older one is never
+    /// offered, and the updater has no other notes).
     fn opens(&self, frame: &str) -> bool {
         match frame {
-            "DW-0782" | "DW-0789b" => false,
+            "DW-0782" => false,
             "DW-0789" => self.updates.is_some(),
+            "DW-0789b" => self.updates.as_ref().is_some_and(updates::UpdatesPart::has_notes),
             _ => true,
         }
     }
@@ -617,10 +620,16 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
         let (changed, toast, busy) = self.alerts.pump();
         pumped.changed |= changed;
         pumped.toast = pumped.toast.or(toast);
-        let (updated, update_toast, updating) = self.updates.as_mut().map_or((false, None, false), |u| u.pump());
-        pumped.changed |= updated;
-        pumped.toast = pumped.toast.or(update_toast);
-        pumped.busy = self.reading || self.writing || self.saving > 0 || waiting_to_say || busy || updating;
+        let updates = self
+            .updates
+            .as_mut()
+            .map(updates::UpdatesPart::pump)
+            .unwrap_or_default();
+        pumped.changed |= updates.changed;
+        pumped.toast = pumped.toast.or(updates.toast);
+        pumped.busy = self.reading || self.writing || self.saving > 0 || waiting_to_say || busy || updates.busy;
+        pumped.restart = updates.restart;
+        pumped.start_sync = updates.start_sync;
         pumped
     }
 
@@ -639,6 +648,12 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
     fn check_for_updates(&mut self) {
         if let Some(updates) = self.updates.as_mut() {
             updates.check_now();
+        }
+    }
+    /// "Restart to update", one press: the updater downloads, checks and hands off on its worker.
+    fn restart_to_update(&mut self) {
+        if let Some(updates) = self.updates.as_mut() {
+            updates.restart_to_update();
         }
     }
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
@@ -735,7 +750,10 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
             theme: self.theme,
             storage_location,
             version: self.version.clone(),
-            update: Update::Current,
+            update: self
+                .updates
+                .as_ref()
+                .map_or(Update::Current, updates::UpdatesPart::update),
         }
     }
 

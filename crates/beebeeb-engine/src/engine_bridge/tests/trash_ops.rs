@@ -479,3 +479,39 @@ fn shared_invite_id_match_does_not_match_same_root_wrong_invite() {
     assert!(!shared_invite_id_matches(&wrong_invite_same_root, "invite-target"));
     assert!(shared_invite_id_matches(&right_invite_different_root, "invite-target"));
 }
+
+/// Task 2526 (declared Verification): the automatic per-tick budget path flips rows and drops thumbnails, and
+/// deletes no file: an un-kept sync-folder copy over the budget is still on disk afterwards.
+#[test]
+fn test_smart_cache_cleanup_deletes_no_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    let copy = dir.path().join("Unkept.txt");
+    std::fs::write(&copy, b"an edit nobody detected").unwrap();
+    seed_bridge_row(
+        &bridge,
+        "5b0a3c1e-7a1d-5f0e-9a55-2d6f3f5c0a11",
+        "/Unkept.txt",
+        None,
+        FileStatus::Local,
+        23,
+    );
+    bridge
+        .db
+        .mark_cached("5b0a3c1e-7a1d-5f0e-9a55-2d6f3f5c0a11", &copy.to_string_lossy(), 23, 10)
+        .unwrap();
+
+    let outcome = bridge
+        .enforce_smart_cache(CachePolicy {
+            max_unpinned_cache_bytes: 0,
+            disk_pressure_min_free_bytes: 0,
+        })
+        .unwrap();
+
+    assert_eq!(outcome.evicted_file_ids.len(), 1, "the row was over budget and flipped");
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        b"an edit nobody detected",
+        "the file stays"
+    );
+}

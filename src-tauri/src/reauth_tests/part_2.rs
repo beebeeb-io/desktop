@@ -61,9 +61,10 @@ fn the_engine_reconciles_then_resumes_in_the_successful_tick_before_its_queue_st
                      && let Err(error) = bridge.reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run).await {",
             ))
             .unwrap_or_else(|| panic!("the pass, off macOS, in the arm, only when the pull came back:\n{tick}"));
+    // Task 2521: the tick is recorded (a pull that came back clears the refusal run) before the pass.
     assert!(
-        tick.find("auth_health.note_result(None);").unwrap() < pass,
-        "after the pull succeeded"
+        tick.find("auth_health.note_tick(&tick);").unwrap() < pass,
+        "after the tick fed the refusal run"
     );
     assert!(
         pass < tick.find("queue_step(").unwrap(),

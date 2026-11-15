@@ -144,11 +144,17 @@ impl<E: ViewerEngine> Previews<E> {
         let pressed = stamp_of(&*self.engine);
         self.look(&pressed);
         self.cancel();
-        let size = item.size.unwrap_or(0);
+        // A size not known (an item that is not in Files' list) is not said, and not held to the limit before the
+        // download: the engine refuses an over-limit file by its stated size before a chunk is asked for.
+        let size = item.size;
+        let byline = match size {
+            Some(size) => format!("{} \u{00B7} {}", kind_word(&item.name), format_size(size)),
+            None => kind_word(&item.name).to_string(),
+        };
         let mut ask = Ask {
             id: item.id.clone(),
             title: item.name.clone(),
-            byline: format!("{} \u{00B7} {}", kind_word(&item.name), format_size(size)),
+            byline,
             cancel: Arc::new(AtomicBool::new(false)),
             held: Held::Loading,
         };
@@ -156,7 +162,9 @@ impl<E: ViewerEngine> Previews<E> {
         let settled = match shows(&item.name) {
             Shows::Nothing => Some(Previewed::NoPreview),
             Shows::Picture | Shows::Pdf => Some(Previewed::NotYet),
-            Shows::Text | Shows::Markdown if u64::try_from(size).is_ok_and(|size| size > READ_WHOLE_MAX as u64) => {
+            Shows::Text | Shows::Markdown
+                if size.is_some_and(|size| u64::try_from(size).is_ok_and(|size| size > READ_WHOLE_MAX as u64)) =>
+            {
                 Some(Previewed::TooLarge)
             }
             Shows::Text | Shows::Markdown => None,
@@ -289,8 +297,9 @@ impl<E: ViewerEngine> Drop for Previews<E> {
 fn first_lines_of<E: ViewerEngine>(engine: &E, id: &str, cancel: &AtomicBool) -> (Option<SessionGeneration>, Outcome) {
     let (session, bytes) = match engine.local(id, READ_WHOLE_MAX as u64, cancel) {
         Ok(LocalCopy::Opened(copy)) => (copy.session, copy.bytes),
-        // Not wholly on this PC: the download is the way.
-        Ok(LocalCopy::NotHere) => match engine.fetch(id, READ_WHOLE_MAX as u64, &|_, _| {}, cancel) {
+        // Not wholly on this PC, or behind the version Beebeeb has now: the download is the way.
+        Ok(LocalCopy::NotHere | LocalCopy::Behind) => match engine.fetch(id, READ_WHOLE_MAX as u64, &|_, _| {}, cancel)
+        {
             Ok(opened) => (opened.session, opened.bytes),
             Err(why) => return (None, Outcome::Failed(why)),
         },

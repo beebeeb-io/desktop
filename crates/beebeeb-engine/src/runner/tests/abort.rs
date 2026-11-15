@@ -165,6 +165,129 @@ fn auth_health_any_success_resets_the_streak_and_clears_expired() {
     );
 }
 
+// ── Task 2521: one sync tick is one sample of the refusal run ──
+
+/// Beebeeb's answer `status` with `body` as the API client returns it (`DesktopApiError::HttpStatus` in the chain).
+fn answered(status: u16, body: &str) -> anyhow::Error {
+    anyhow::Error::from(crate::api_client::DesktopApiError::HttpStatus {
+        status: reqwest::StatusCode::from_u16(status).unwrap(),
+        snippet: body.to_string(),
+    })
+}
+
+/// The server refused the session: a 401 answer.
+fn refused() -> anyhow::Error {
+    answered(401, "{\"error\":\"unauthorized\"}")
+}
+
+/// A tick whose pull came back from the server.
+fn reached_tick() -> crate::engine_bridge::SyncTickOutcome {
+    crate::engine_bridge::SyncTickOutcome {
+        reached_server: true,
+        ..Default::default()
+    }
+}
+
+/// A tick whose pull did not come back, for `why`.
+fn failed_tick(why: anyhow::Error) -> crate::engine_bridge::SyncTickOutcome {
+    crate::engine_bridge::SyncTickOutcome {
+        reached_server: false,
+        pull_failure: Some(why),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_refused_pull_counts_once_per_tick_between_heartbeats() {
+    // What a running engine sees after the server ended its session: a refused beat, a tick whose pull was
+    // refused, another refused beat. Three in a row: the session is held as ended.
+    let health = AuthHealth::new();
+    health.note_api_answer(Some(&refused()));
+    health.note_tick(&failed_tick(refused()));
+    assert!(!health.is_expired(), "two refusals are not yet the run");
+    health.note_api_answer(Some(&refused()));
+    assert!(
+        health.is_expired(),
+        "beat, refused tick, beat: the refused tick counted, it did not clear the run"
+    );
+
+    // Without a heartbeat (it never started): three refused ticks alone.
+    let health = AuthHealth::new();
+    for _ in 0..2 {
+        health.note_tick(&failed_tick(refused()));
+    }
+    assert!(!health.is_expired());
+    health.note_tick(&failed_tick(refused()));
+    assert!(health.is_expired(), "the third refused tick in a row");
+}
+
+#[test]
+fn a_tick_whose_pull_came_back_clears_the_run() {
+    let health = AuthHealth::new();
+    for _ in 0..3 {
+        health.note_tick(&failed_tick(refused()));
+    }
+    assert!(health.is_expired());
+    health.note_tick(&reached_tick());
+    assert!(!health.is_expired(), "an answer that came back clears the run");
+    health.note_tick(&failed_tick(refused()));
+    health.note_tick(&failed_tick(refused()));
+    assert!(!health.is_expired(), "back to 0, not left at 3");
+}
+
+#[test]
+fn an_offline_or_5xx_tick_keeps_the_count() {
+    let health = AuthHealth::new();
+    health.note_tick(&failed_tick(refused()));
+    health.note_tick(&failed_tick(refused()));
+    health.note_tick(&failed_tick(answered(503, "unavailable")));
+    health.note_tick(&failed_tick(anyhow::anyhow!(
+        "error sending request: connection refused"
+    )));
+    // Not reached and no reason carried: proves nothing either way.
+    health.note_tick(&crate::engine_bridge::SyncTickOutcome::default());
+    assert!(!health.is_expired(), "none of these is a refusal");
+    health.note_tick(&failed_tick(refused()));
+    assert!(
+        health.is_expired(),
+        "and none of them cleared the two refusals before them"
+    );
+}
+
+#[test]
+fn a_5xx_whose_body_mentions_401_is_not_a_refusal() {
+    // Task 2521, review P3-2: the status decides, never the text. A gateway page in front of the API during an outage
+    // can carry "401", "unauthorized" or "invalid token" in its body; three of those must not close the vault.
+    let health = AuthHealth::new();
+    for _ in 0..3 {
+        health.note_tick(&failed_tick(answered(
+            503,
+            "upstream 401 Unauthorized: invalid token (request id 401-401)",
+        )));
+    }
+    assert!(!health.is_expired(), "a 5xx is not a refusal, whatever its body says");
+    for _ in 0..3 {
+        health.note_api_answer(Some(&answered(502, "401 unauthorized")));
+    }
+    assert!(!health.is_expired(), "nor for the heartbeat's own answers");
+    // The same text without a status (a network error that quotes it) is not a refusal either.
+    health.note_api_answer(Some(&anyhow::anyhow!("HTTP 401 Unauthorized: invalid token")));
+    assert!(!health.is_expired());
+}
+
+#[test]
+fn the_engines_own_calls_count_a_401_answer_and_clear_on_a_working_call() {
+    let health = AuthHealth::new();
+    health.note_api_answer(Some(&refused()));
+    health.note_api_answer(Some(&answered(503, "unavailable")));
+    health.note_api_answer(Some(&refused()));
+    assert!(!health.is_expired(), "two refusals, a 5xx between them");
+    health.note_api_answer(Some(&refused()));
+    assert!(health.is_expired(), "the 5xx neither counted nor cleared");
+    health.note_api_answer(None);
+    assert!(!health.is_expired(), "a call that worked clears the run");
+}
+
 #[test]
 fn classify_abort_maps_full_success_to_stopped() {
     assert_eq!(
