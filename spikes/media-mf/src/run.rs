@@ -173,14 +173,45 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 
 /// The probe sees the bytes only; the sandbox gives it no arguments. The path must be `X:\…` (no `\\?\`).
 fn probe_path() -> PathBuf {
+    sibling("media-mf-probe.exe")
+}
+
+fn sibling(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("own path");
-    let probe = exe.with_file_name("media-mf-probe.exe");
-    let text = probe.to_string_lossy().to_string();
+    let path = exe.with_file_name(name);
+    let text = path.to_string_lossy().to_string();
     PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
+}
+
+/// `media-mf-run --load <columns>`: starts `media-mf-loadcheck` in each column and prints what it said.
+fn load_check(columns: &str) {
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let exe = sibling("media-mf-loadcheck.exe");
+    println!("RUN load exe-exists={}", exe.is_file());
+    for column in columns.split(',') {
+        let o = match column {
+            "plain" => run_plain(&exe, b"", false, &windir),
+            "plainenv" => run_plain(&exe, b"", true, &windir),
+            "confined" => run_confined(&exe, b""),
+            other => Outcome {
+                lines: vec![format!("RUNNER unknown column {other}")],
+                exit: "not-started".into(),
+                ms: 0,
+            },
+        };
+        println!("== load {column} exit={} ms={}", o.exit, o.ms);
+        for l in &o.lines {
+            println!("  {l}");
+        }
+    }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--load") {
+        load_check(args.get(2).map(String::as_str).unwrap_or("plain,plainenv,confined"));
+        return;
+    }
     let Some(dir) = args.get(1).map(PathBuf::from) else {
         eprintln!("usage: media-mf-run <fixtures-dir> [columns] [files] [hw]");
         std::process::exit(2);

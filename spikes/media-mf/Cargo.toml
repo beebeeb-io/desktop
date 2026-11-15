@@ -39,6 +39,11 @@ path = "src/probe.rs"
 
 # The driver: starts the probe per file and per column (unconfined, unconfined with the sandbox's environment,
 # confined) and prints what each run said.
+# Loads the libraries Media Foundation needs one at a time and names the one whose start-up fails.
+[[bin]]
+name = "media-mf-loadcheck"
+path = "src/loadcheck.rs"
+
 [[bin]]
 name = "media-mf-run"
 path = "src/run.rs"
