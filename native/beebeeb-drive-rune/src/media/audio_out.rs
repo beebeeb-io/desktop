@@ -147,7 +147,7 @@ trait DeviceSample: Copy {
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-impl<T: cpal::FromSample<f32>> DeviceSample for T {
+impl<T: cpal::Sample + cpal::FromSample<f32>> DeviceSample for T {
     fn from_f32(s: f32) -> T {
         <T as cpal::Sample>::from_sample(s)
     }
