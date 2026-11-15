@@ -317,6 +317,7 @@ pub async fn sync_tick_outcome(
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: true,
+                pull_refusal: None,
             });
         }
         Some(c) if needs_resnapshot => {
@@ -339,6 +340,7 @@ pub async fn sync_tick_outcome(
                         conflicts,
                         applied_item_ids: dedupe(applied_item_ids),
                         reached_server: true,
+                        pull_refusal: None,
                     });
                 }
                 Err(e) => after_failed_snapshot(bridge, c, e.into())?,
@@ -360,6 +362,7 @@ pub async fn sync_tick_outcome(
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: false,
+                pull_refusal: None,
             });
         }
     };
@@ -374,6 +377,7 @@ pub async fn sync_tick_outcome(
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: true,
+                pull_refusal: None,
             });
         }
         // `now_secs` (captured at tick start) is the prune freshness cutoff: it
@@ -405,6 +409,7 @@ pub async fn sync_tick_outcome(
             conflicts,
             applied_item_ids: dedupe(applied_item_ids),
             reached_server: true,
+            pull_refusal: None,
         });
     }
 
@@ -432,6 +437,7 @@ pub async fn sync_tick_outcome(
         conflicts,
         applied_item_ids: dedupe(applied_item_ids),
         reached_server: true,
+        pull_refusal: None,
     })
 }
 

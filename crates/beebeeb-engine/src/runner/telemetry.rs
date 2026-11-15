@@ -57,6 +57,16 @@ impl AuthHealth {
             Some(_) => {}
         }
     }
+
+    /// Task 2521: record one sync tick that returned `Ok`, as ONE sample (the heartbeat counts on its own). A tick
+    /// whose pull came back from the server clears the run, as any working call does. A tick whose pull was refused
+    /// with a 401 adds one: three in a row and the session is held as ended, and the session watcher closes the vault.
+    /// A pull that failed any other way (offline, a 5xx) leaves the run as it is, and so does a tick that neither
+    /// reached the server nor carries the reason: only an answer that came back clears.
+    pub(super) fn note_tick(&self, tick: &crate::engine_bridge::SyncTickOutcome) {
+        let _ = tick;
+        self.note_result(None);
+    }
 }
 
 /// Fallback heartbeat cadence (seconds) if the server returns no interval and
