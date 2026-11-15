@@ -18,7 +18,7 @@
 pub mod scenes;
 pub mod source;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::time::Duration;
 

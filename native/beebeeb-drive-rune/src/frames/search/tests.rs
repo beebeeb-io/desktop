@@ -676,3 +676,45 @@ fn the_toolbars_open_in_file_explorer_asks_the_shell() {
     click(&mut rt, "open-explorer");
     assert_eq!(&engine.calls()[before..], [FixtureCall::OpenInFileExplorer]);
 }
+
+/// Alt+Enter on a result: Details over Search's own window, its Where the result's place; Esc closes it, search
+/// stays, and the next key reaches the results.
+#[test]
+fn search_alt_enter_opens_details_over_search() {
+    use crate::frames::item::Origin;
+    use crate::frames::shared::dialogs::Dialog;
+    crate::shell::intents::poll_drains_for_this_test();
+    let mut state = init();
+    dw_0802(&mut state);
+    let mut rt = window(state);
+    rt.poll = Some(crate::shell::host::poll);
+    settle(&mut rt);
+    press(&mut rt, Key::Down, Mods::default());
+    let selected = rt.state.frames.find.selected.clone();
+    assert!(selected.is_some(), "a result is selected");
+    press(
+        &mut rt,
+        Key::Enter,
+        Mods {
+            alt: true,
+            ..Mods::default()
+        },
+    );
+    let Some(Dialog::Details { origin, id }) = rt.state.frames.shared.dialog.clone() else {
+        panic!("no Details: {:?}", rt.state.frames.shared.dialog)
+    };
+    assert_eq!((origin, Some(id.clone())), (Origin::Search, selected.clone()));
+    assert!(has(&rt, "dialog-details"), "drawn over Search's window");
+    let place = super::hit(&rt.state, &id).expect("the hit").place;
+    let facts = crate::frames::item::tests::facts(&rt, 1);
+    assert!(facts.contains(&("Where".to_string(), place)), "{facts:?}");
+    press(&mut rt, Key::Escape, Mods::default());
+    assert_eq!(rt.state.frames.shared.dialog, None, "Esc closes Details");
+    assert!(super::is_open(&rt.state), "search stays open");
+    let before = rt.state.frames.find.selected.clone();
+    press(&mut rt, Key::Down, Mods::default());
+    assert_ne!(
+        rt.state.frames.find.selected, before,
+        "the next key reaches the results"
+    );
+}

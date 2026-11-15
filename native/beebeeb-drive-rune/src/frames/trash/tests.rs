@@ -180,3 +180,33 @@ fn alt_enter_asks_for_details_and_space_previews() {
         ]
     );
 }
+
+/// Details from the menu (DW-0748), taken by the shell's poll: the dialog over Trash, drawn from the listing's row.
+#[test]
+fn trash_details_opens_for_the_row() {
+    use crate::frames::item::Origin;
+    use crate::frames::item::tests::{facts, polled};
+    let mut rt = polled(super::scenes::dw_0748);
+    click(&mut rt, "mi-details");
+    assert_eq!(
+        rt.state.frames.shared.dialog,
+        Some(Dialog::Details {
+            origin: Origin::Trash,
+            id: "t-contract-old".into()
+        })
+    );
+    assert!(rt.state.frames.intents.is_empty(), "the shell took it");
+    assert!(rt.find("dialog-details").is_some());
+    assert_eq!(info(&rt, "dlg-file-name").text.as_deref(), Some("Contract old.pdf"));
+    assert_eq!(info(&rt, "dlg-file-sub").text.as_deref(), Some("PDF document"));
+    let drawn = facts(&rt, 0);
+    let titles: Vec<&str> = drawn.iter().map(|(title, _)| title.as_str()).collect();
+    assert_eq!(titles, ["Size", "Deleted", "Encrypted"], "{drawn:?}");
+    assert_eq!(drawn[0].1, "1.1 MB");
+    assert_eq!(drawn[1].1, "30 Oct 2026");
+    assert_eq!(focused(&rt).as_deref(), Some("btn-0"), "Enter presses Done");
+    // Done closes it, and the keyboard is back on the row.
+    press(&mut rt, Key::Enter);
+    assert_eq!(rt.state.frames.shared.dialog, None);
+    assert_eq!(focused(&rt).as_deref(), Some("row-1"));
+}
