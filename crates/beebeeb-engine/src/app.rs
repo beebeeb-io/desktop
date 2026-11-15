@@ -402,8 +402,9 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
-            let vault = self.vault();
+            let mut vault = self.vault();
             let present = matches!(vault.session_token(), Ok(Some(_)));
+            let present = self.s11_probe(&mut vault, present).await;
             self.set_auth_present(present);
             if present {
                 // Whose the stored session is, as its sign-in recorded it (unknown stays unknown).
@@ -582,7 +583,10 @@ impl<C: CredentialStores> Engine<C> {
             }
         };
         let screen_check = self.take_pending_screen_check(&typed_email);
-        let email = typed_email;
+        let email = match profile.email.trim() {
+            "" => typed_email,
+            named => named.to_string(),
+        };
         // A stored session this sign-in replaces (the strong unlock): it must be this account's, and the key and
         // the engine of the old session leave first (`lock_api`).
         let (turn, replaced) = match self.prepare_replacement(turn, &profile).await {
