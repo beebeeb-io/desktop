@@ -41,7 +41,8 @@ pub enum HelloAvailability {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HelloResult {
     Verified,
-    /// The person closed the prompt, or the app took it away ([`HelloRequest::cancel`]).
+    /// The person closed the prompt, or a newer prompt took its place ([`start`]). The owner's own
+    /// [`HelloRequest::cancel`] is answered with nothing at all.
     Cancelled,
     /// Not recognised after Windows' own retries, the sensor is in use, or Windows refused the request.
     Failed,
@@ -231,9 +232,9 @@ impl Control {
             let progress = lock(&self.progress);
             (!progress.cancel_asked).then(|| settle(seen, progress.superseded))
         };
-        match result {
-            Some(result) => on_done(result),
-            None => drop(on_done),
+        // `None`: `on_done` is dropped unrun when this returns, with the lock already released.
+        if let Some(result) = result {
+            on_done(result);
         }
     }
 }
