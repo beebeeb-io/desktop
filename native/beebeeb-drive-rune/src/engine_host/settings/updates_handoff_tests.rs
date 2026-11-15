@@ -1,15 +1,17 @@
-//! The two presses and the hand-off (Download update, then Restart to update), on the part and on the real
-//! `EngineApply` with a RUNNING sync: sync stops before the installer starts; a stop that is not confirmed starts
-//! nothing and says only what is known; a failed start asks for sync back, a started one quits the window (through
-//! `frames::settings::poll`, as the shell runs it). Also: the window keeps looking before the first report, "checked
-//! <time>" is the last verified check, the worker's cadence, and the release glue.
+//! The one press (Restart to update: download, verify, hand off, owner ruling 2026-11-15) and the hand-off, on the
+//! part and on the real `EngineApply` with a RUNNING sync: sync stops before the installer starts; a stop that is not
+//! confirmed (this one's, or any earlier one in this process) starts nothing and says only what is known; a failed
+//! start asks for sync back, and so does a worker that ends in the middle of the hand-off; a started one quits the
+//! window (through `frames::settings::poll`, as the shell runs it); the caption says each step; a background check
+//! never downloads nor hands off. Also: the window keeps looking before the first report, "checked <time>" is the last
+//! verified check, the worker's cadence, and the release glue.
 
 use super::*;
 
 /// A task in the engine's slot that runs until it is aborted, on a runtime that runs it: `Engine::is_syncing` says
 /// true, as while sync runs, and a stop ends it (after the graceful wait, by the forced abort) and is CONFIRMED:
 /// `SyncStop::Stopped`. Nothing syncs, so nothing is written in the process's state folder.
-fn hold_running_stoppable(engine: &Engine<MemoryCredentials>) -> tokio::runtime::Runtime {
+pub(super) fn hold_running_stoppable(engine: &Engine<MemoryCredentials>) -> tokio::runtime::Runtime {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -46,7 +48,7 @@ fn the_hand_off_stops_a_running_sync_and_only_then_mints_the_proof() {
     assert!(engine.is_syncing(), "the slot's task runs");
     let sync_back = SyncBack::default();
     let never: fn() -> StartInstaller = || Box::new(|_, _| panic!("no installer starts here"));
-    let mut apply = EngineApply::starting_with(engine.clone(), &TEST, sync_back.clone(), never());
+    let mut apply = EngineApply::starting_with(engine.clone(), &TEST, sync_back.clone(), pressed(), never());
     assert!(apply.stop_engine().is_some(), "a confirmed stop mints the proof");
     assert!(!engine.is_syncing(), "sync stopped");
     apply.resume_engine();
@@ -54,7 +56,7 @@ fn the_hand_off_stops_a_running_sync_and_only_then_mints_the_proof() {
     apply.resume_engine();
     assert!(!sync_back.take(), "once");
 
-    let mut idle = EngineApply::starting_with(engine, &TEST, sync_back.clone(), never());
+    let mut idle = EngineApply::starting_with(engine, &TEST, sync_back.clone(), pressed(), never());
     assert!(idle.stop_engine().is_some(), "no sync running: stopped, and the proof");
     idle.resume_engine();
     assert!(
@@ -77,6 +79,7 @@ fn a_stop_that_is_not_confirmed_starts_no_installer() {
         engine,
         &TEST,
         sync_back.clone(),
+        pressed(),
         Box::new(|_, _| panic!("no installer starts")),
     );
     assert!(apply.stop_engine().is_none(), "Unconfirmed mints no proof");
@@ -99,10 +102,9 @@ fn an_unconfirmed_stop_says_only_what_is_known() {
     }
 }
 
-/// The press path on a RUNNING sync with the real hand-off. Restart to update before the download does nothing;
-/// Download update downloads and verifies and leaves sync running; Restart to update then stops sync BEFORE the
-/// installer starts; the installer did not start, so the part says so, keeps the download, and asks the shell for
-/// sync back, once (no quit).
+/// The one press on a RUNNING sync with the real hand-off: Restart to update downloads, verifies, and stops sync
+/// BEFORE the installer starts, by itself; the installer did not start, so the part says so, keeps the download, asks
+/// the shell for sync back, once (no quit), and the button says "Try again", which runs it again.
 #[test]
 fn restart_to_update_stops_a_running_sync_first_and_a_failed_start_asks_for_sync_back() {
     use crate::frames::settings::source::Update;
@@ -126,28 +128,15 @@ fn restart_to_update_stops_a_running_sync_first_and_a_failed_start_asks_for_sync
         press,
         says: says.map(str::to_string),
     };
-    assert_eq!(rig.part.update(), offered(Press::Download, None));
-
-    rig.part.restart_to_update();
-    assert_eq!(settle_counting(&mut rig.part), (0, 0));
-    assert!(
-        syncing_at_start.lock().unwrap().is_empty() && engine.is_syncing(),
-        "nothing before the download"
-    );
-    assert!(rig.staged().is_empty());
-
-    rig.part.download_update();
-    assert_eq!(
-        rig.part.update(),
-        offered(Press::Wait, Some(UpdateCheck::Checking.says()))
-    );
-    assert_eq!(settle_counting(&mut rig.part), (0, 0));
-    assert!(matches!(rig.part.state_for_test(), Some(State::ReadyToRestart { .. })));
-    assert!(engine.is_syncing(), "a download leaves sync running");
     assert_eq!(rig.part.update(), offered(Press::Restart, None));
     assert_eq!(about(&rig.part).notes.press, Press::Restart);
+    assert!(
+        engine.is_syncing() && rig.staged().is_empty(),
+        "a check leaves sync running and stages nothing"
+    );
 
     rig.part.restart_to_update();
+    assert_eq!(rig.part.update(), offered(Press::Wait, Some(STARTING)));
     let (restarts, starts) = settle_counting(&mut rig.part);
     assert_eq!(
         *syncing_at_start.lock().unwrap(),
@@ -164,9 +153,17 @@ fn restart_to_update_stops_a_running_sync_first_and_a_failed_start_asks_for_sync
     ));
     assert_eq!(words(&rig.part), INSTALLER_DID_NOT_START);
     assert_eq!((restarts, starts), (0, 1), "no quit; sync asked back once");
+    assert_eq!(rig.part.update(), offered(Press::Retry, Some(INSTALLER_DID_NOT_START)));
+    assert_eq!(about(&rig.part).notes.press, Press::Retry);
+
+    // Try again: the kept file is verified again and handed off again (sync is not running now: nothing to stop,
+    // nothing asked back).
+    rig.part.restart_to_update();
+    assert_eq!(settle_counting(&mut rig.part), (0, 0));
     assert_eq!(
-        rig.part.update(),
-        offered(Press::Download, Some(INSTALLER_DID_NOT_START))
+        *syncing_at_start.lock().unwrap(),
+        [false, false],
+        "a second start, of the file verified again"
     );
 }
 
@@ -177,14 +174,15 @@ fn a_started_installer_quits_the_app_once() {
     let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
     let mut rig = rig(&key, "0.9.1", Channel::Stable, serving(&key, &[release]));
     settle(&mut rig.part);
-    rig.part.download_update();
-    settle(&mut rig.part);
-    assert!(rig.did().is_empty(), "a download hands nothing off");
+    assert!(rig.did().is_empty(), "a check hands nothing off");
     rig.part.restart_to_update();
     assert_eq!(settle_counting(&mut rig.part), (1, 0));
     assert_eq!(rig.did(), ["stop", "launch"]);
     assert_eq!(words(&rig.part), RESTARTING);
     assert!(!rig.part.pump().restart, "once");
+    rig.part.restart_to_update();
+    assert!(!rig.part.pump().busy, "no second press once the installer started");
+    assert_eq!(rig.did(), ["stop", "launch"]);
 }
 
 /// The shell's part, through `frames::settings::poll` as the shell runs it: a started installer quits the app; an
@@ -241,7 +239,6 @@ fn the_window_quits_for_a_started_installer_and_starts_sync_after_a_failed_one()
     }
 
     let (mut rt, fixture, _staging) = window(true);
-    press_when(&mut rt, Press::Download);
     press_when(&mut rt, Press::Restart);
     wait(&mut rt, "the app quits", |rt| {
         rt.shell_request == Some(rune::Shell::Quit)
@@ -249,7 +246,6 @@ fn the_window_quits_for_a_started_installer_and_starts_sync_after_a_failed_one()
     assert!(!fixture.calls().contains(&FixtureCall::StartSync));
 
     let (mut rt, fixture, _staging) = window(false);
-    press_when(&mut rt, Press::Download);
     press_when(&mut rt, Press::Restart);
     wait(&mut rt, "sync is started again", |_| {
         fixture.calls().contains(&FixtureCall::StartSync)
@@ -362,7 +358,15 @@ fn a_background_check_runs_only_when_the_updater_says_one_is_due() {
         look_every: Duration::from_millis(1),
         wake: Box::new(|| {}),
     };
-    let mut part = UpdatesPart::live_tuned(make, &TEST, Channel::Stable, Channel::Stable, "0.9.1".into(), tuning);
+    let mut part = UpdatesPart::live_tuned(
+        make,
+        &TEST,
+        Channel::Stable,
+        Channel::Stable,
+        "0.9.1".into(),
+        tuning,
+        Presence::open(),
+    );
     let looked = |n: usize| {
         let looks = looks.clone();
         move |_: &UpdatesPart| looks.load(Ordering::SeqCst) >= n
@@ -392,7 +396,9 @@ fn a_background_check_runs_only_when_the_updater_says_one_is_due() {
 fn the_release_glue_builds_the_pinned_updater_or_says_why_not() {
     let folder = tempfile::tempdir().expect("a temp dir");
     let place = || Some(folder.path().to_path_buf());
-    let built = beebeeb_updater::V2_KEY_CREATED;
+    // A build made a day after the key: `release_setup` passing the key's creation time in place of the build's
+    // would show here (review of #441).
+    let built = beebeeb_updater::V2_KEY_CREATED + 86_400;
     assert!(matches!(
         release_setup(None, Some("0.9.1"), place()),
         ReleaseSetup::NotARelease
@@ -424,7 +430,7 @@ fn the_release_glue_builds_the_pinned_updater_or_says_why_not() {
 }
 
 /// A download the release server did not send (here a 404 for the file): the words say the update did not come,
-/// never that a check failed or that the channel has no update information; the button offers the download again.
+/// never that a check failed or that the channel has no update information; the button offers "Try again".
 #[test]
 fn a_download_the_server_did_not_send_says_so() {
     use crate::frames::settings::source::Update;
@@ -435,7 +441,7 @@ fn a_download_the_server_did_not_send_says_so() {
     http.files.remove(&artifact);
     let mut rig = rig(&key, "0.9.1", Channel::Stable, http);
     settle(&mut rig.part);
-    rig.part.download_update();
+    rig.part.restart_to_update();
     settle(&mut rig.part);
     assert!(
         matches!(
@@ -453,9 +459,209 @@ fn a_download_the_server_did_not_send_says_so() {
         rig.part.update(),
         Update::Available {
             version: "0.9.2".into(),
-            press: Press::Download,
+            press: Press::Retry,
             says: Some(NOT_SENT.into()),
         }
     );
     assert!(rig.did().is_empty());
+}
+
+/// The caption says each step of the press while it runs, never "Checking…" for the whole of it: the download (held at
+/// the release server), then the hand-off (held in the stop: the verified file is reported before the stop runs), then
+/// the restart. Meanwhile the button waits, Check now asks nothing (About's button waits on `Working`), and a channel
+/// is refused with words: neither could come after the press and blank what it ends on.
+#[test]
+fn the_press_says_each_step_and_takes_no_other_order_meanwhile() {
+    use crate::frames::settings::source::Update;
+    let key = TestKey::generate();
+    let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
+    let artifact = release.url.clone();
+    let mut rig = rig(&key, "0.9.1", Channel::Stable, serving(&key, &[release]));
+    settle(&mut rig.part);
+    let asked = rig.seen().len();
+    let waiting = |rig: &Rig| match rig.part.update() {
+        Update::Available { press, says, .. } => (press, says.unwrap_or_default()),
+        Update::Current => panic!("the offer is gone"),
+    };
+
+    rig.gate.close();
+    rig.part.restart_to_update();
+    until(&mut rig.part, "the download is said", |part| {
+        words(part).starts_with("Downloading version 0.9.2: ")
+    });
+    assert_eq!(waiting(&rig).0, Press::Wait);
+    assert!(
+        matches!(about(&rig.part).check, UpdateCheck::Working(_)),
+        "Check now waits"
+    );
+    rig.part.check_now();
+    rig.part.set_channel(Channel::Beta);
+    assert_eq!(rig.part.pump().toast, Some(UPDATE_UNDER_WAY));
+    assert_eq!(about(&rig.part).channel, Channel::Stable);
+
+    rig.stop_gate.close();
+    rig.gate.open();
+    until(&mut rig.part, "the hand-off is said", |part| words(part) == HANDING_OFF);
+    assert_eq!(waiting(&rig), (Press::Wait, HANDING_OFF.to_string()));
+    assert!(rig.did().is_empty(), "held in the stop");
+    rig.stop_gate.open();
+    assert_eq!(settle_counting(&mut rig.part), (1, 0));
+    assert_eq!(words(&rig.part), RESTARTING);
+    assert_eq!(rig.did(), ["stop", "launch"]);
+    let after: Vec<String> = rig.seen()[asked..].to_vec();
+    assert_eq!(
+        after,
+        [artifact],
+        "the file alone: no check, no channel came in between"
+    );
+}
+
+/// Only the press downloads and hands off: background checks (due every few milliseconds here, five hours on) find the
+/// newer version and say it, and never ask for the file nor stop sync; after a press that failed at the start of the
+/// installer, a background check keeps the kept download in sight and does not run the press again.
+#[test]
+fn a_background_check_never_downloads_nor_hands_off() {
+    let key = TestKey::generate();
+    let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
+    let artifact = release.url.clone();
+    let options = Options {
+        hand: Hand::Recording { starts: false },
+        look_every: Duration::from_millis(2),
+        ..Options::default()
+    };
+    let mut rig = rig_with(&key, "0.9.1", Channel::Stable, serving(&key, &[release]), options);
+    settle(&mut rig.part);
+    // One background check each: five hours on, it is due (the last verified check is four hours old), and once it
+    // ran it is not due again until the clock moves on.
+    let background = |rig: &mut Rig, what: &str| {
+        let asked = rig.seen().len();
+        rig.clock.fetch_add(5 * 3_600, Ordering::SeqCst);
+        until(&mut rig.part, what, |_| rig.seen.lock().unwrap().len() >= asked + 2);
+        settle(&mut rig.part);
+    };
+    background(&mut rig, "a background check");
+    background(&mut rig, "a second background check");
+    assert!(!rig.seen().contains(&artifact), "never downloaded by a check");
+    assert!(rig.did().is_empty() && rig.staged().is_empty());
+    assert!(words(&rig.part).starts_with("Version 0.9.2 is available"));
+
+    rig.part.restart_to_update();
+    settle(&mut rig.part);
+    assert_eq!(rig.did(), ["stop", "launch", "resume"], "the press, once");
+    let fetched = rig.seen().iter().filter(|url| **url == artifact).count();
+    background(&mut rig, "a background check after the press");
+    background(&mut rig, "another background check after the press");
+    assert_eq!(rig.did(), ["stop", "launch", "resume"], "no hand-off by a check");
+    assert_eq!(
+        rig.seen().iter().filter(|url| **url == artifact).count(),
+        fetched,
+        "no download by a check"
+    );
+    assert_eq!(
+        words(&rig.part),
+        INSTALLER_DID_NOT_START,
+        "the kept download stays in sight"
+    );
+}
+
+/// A stop of sync that was not confirmed EARLIER in this process (a vault lock's sets the account's
+/// `engine_stop_unconfirmed`, and leaves the engine slot empty): the hand-off mints no proof, stops nothing and starts
+/// nothing, and the words say only what is known. The press then waits, also after a check that offers the version
+/// again: no press can install until Beebeeb restarts.
+#[test]
+fn any_unconfirmed_stop_in_this_process_refuses_the_hand_off() {
+    use crate::frames::settings::source::Update;
+    let engine = engine();
+    let account = engine.accounts().active_account().expect("the account");
+    let _running = hold_running_stoppable(&engine);
+    account.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+
+    let sync_back = SyncBack::default();
+    let never: StartInstaller = Box::new(|_, _| panic!("no installer starts here"));
+    let mut apply = EngineApply::starting_with(engine.clone(), &TEST, sync_back.clone(), pressed(), never);
+    assert!(apply.stop_engine().is_none(), "no proof after an unconfirmed stop");
+    assert!(engine.is_syncing(), "nothing was stopped");
+    apply.resume_engine();
+    drop(apply);
+    assert!(!sync_back.take(), "nothing asked back");
+
+    // The press asks the same (review of #444, P3): Wait and the words before anything is downloaded.
+    let syncing_at_start = Arc::new(Mutex::new(Vec::new()));
+    let key = TestKey::generate();
+    let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
+    let artifact = release.url.clone();
+    let asked = engine.clone();
+    let options = Options {
+        hand: Hand::Engine {
+            engine: engine.clone(),
+            starts: true,
+            syncing_at_start: syncing_at_start.clone(),
+        },
+        presence: Presence::from_fns(
+            || (Some(SessionGeneration::for_test(1)), true),
+            move || crate::engine_host::settings::updates::presence::any_stop_unconfirmed(&asked),
+        ),
+        ..Options::default()
+    };
+    let mut rig = rig_with(&key, "0.9.1", Channel::Stable, serving(&key, &[release]), options);
+    settle(&mut rig.part);
+    let waits = Update::Available {
+        version: "0.9.2".into(),
+        press: Press::Wait,
+        says: Some(SYNC_UNCONFIRMED.into()),
+    };
+    rig.part.restart_to_update();
+    assert_eq!(rig.part.update(), waits, "said at the press");
+    assert!(!rig.part.pump().busy, "the press sends nothing");
+    assert_eq!(settle_counting(&mut rig.part), (0, 0), "no quit, nothing asked back");
+    assert!(!rig.seen().contains(&artifact), "nothing downloaded");
+    assert!(syncing_at_start.lock().unwrap().is_empty(), "no installer started");
+    assert!(engine.is_syncing());
+
+    rig.part.check_now();
+    settle(&mut rig.part);
+    assert!(words(&rig.part).starts_with("Version 0.9.2 is available"));
+    assert_eq!(
+        rig.part.update(),
+        waits,
+        "a check does not make the press possible again"
+    );
+    rig.part.restart_to_update();
+    assert!(!rig.part.pump().busy, "the press sends nothing");
+    assert!(!rig.seen().contains(&artifact), "nothing downloaded");
+    account.engine_stop_unconfirmed.store(false, Ordering::SeqCst);
+}
+
+/// The worker ends in the middle of the hand-off (the installer's start panics, after sync was stopped for it): the
+/// sync it stopped is asked back, once, and About says the updater did not start; no quit.
+#[test]
+fn a_worker_that_ends_in_the_hand_off_asks_for_sync_back() {
+    let engine = engine();
+    let _running = hold_running_stoppable(&engine);
+    let key = TestKey::generate();
+    let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
+    let options = Options {
+        hand: Hand::EnginePanicsAtStart { engine: engine.clone() },
+        ..Options::default()
+    };
+    let mut rig = rig_with(&key, "0.9.1", Channel::Stable, serving(&key, &[release]), options);
+    settle(&mut rig.part);
+    rig.part.restart_to_update();
+    let (mut restarts, mut starts) = (0, 0);
+    let began = Instant::now();
+    while words(&rig.part) != NO_UPDATER || rig.part.pump().busy {
+        assert!(began.elapsed() < Duration::from_secs(10), "{}", words(&rig.part));
+        let pumped = rig.part.pump();
+        restarts += usize::from(pumped.restart);
+        starts += usize::from(pumped.start_sync);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let pumped = rig.part.pump();
+    starts += usize::from(pumped.start_sync);
+    assert_eq!(
+        (restarts, starts),
+        (0, 1),
+        "no quit; the sync it stopped asked back once"
+    );
+    assert!(!engine.is_syncing(), "it had been stopped");
 }
