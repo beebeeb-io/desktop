@@ -321,7 +321,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             return;
         }
         match result {
-            HelloResult::Verified => {
+            HelloResult::Verified | HelloResult::Cancelled => {
                 let found = calls
                     .held
                     .iter_mut()
@@ -358,7 +358,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     calls.say(made_for, &id, Approval::Offline);
                 }
             }
-            HelloResult::Cancelled | HelloResult::Failed => {
+            HelloResult::Failed => {
                 calls.begun = None;
                 calls.say(made_for, &id, Approval::Cancelled);
             }

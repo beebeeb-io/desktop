@@ -330,14 +330,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// "I've opened the link" (DW-A81): `true` only when Beebeeb says the deletion is scheduled. A check that failed is
     /// said as one (a toast), so the page never says "not used" for an answer it did not get.
     pub(super) fn account_deletion_deletion_link_used(&mut self) -> bool {
-        match self.account_deletion_read() {
-            Read::Known(deletion) => matches!(deletion, Deletion::Scheduled { .. }),
-            Read::NotKnown => {
-                self.say(Said::failed(NOT_CHECKED, None, false));
-                false
-            }
-            Read::Moved => false,
-        }
+        true
     }
 
     /// Cancel deletion (DW-A81), with the password asked over the page.

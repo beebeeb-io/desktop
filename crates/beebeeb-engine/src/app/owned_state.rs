@@ -295,7 +295,7 @@ impl<C: CredentialStores> Engine<C> {
         // The binding's own rule (R10), with data assumed: an owner is recorded.
         match account_binding::decide(Some(&owner), &session, BindingKind::LocalData) {
             Binding::Proceed => {}
-            Binding::Reset => {}
+            Binding::Reset => return Err(LocalStateRefused::OtherAccount),
             Binding::Refuse => return Err(LocalStateRefused::IdentityUnknown),
         }
         let db = match mode {
