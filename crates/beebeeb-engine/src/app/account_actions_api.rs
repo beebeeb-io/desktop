@@ -118,7 +118,7 @@ impl<C: CredentialStores> Engine<C> {
     /// still signed in.
     pub fn sign_out_for(&self, session: SessionGeneration) -> Result<(), ActionError> {
         let result = self.runtime.block_on(async {
-            let _step = self.transition.lock().await;
+            let _step = self.session_ending_step().await;
             if !self.session_is_in_memory(session) {
                 return Err(ActionError::NotSignedIn);
             }

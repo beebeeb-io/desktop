@@ -4,6 +4,11 @@
 //! hand-off's own stop starts no installer and asks the sync it ended back. Also the review's P3 items: a stop of
 //! another account left unconfirmed DURING this stop, a second press while the order runs, and "Try again" pinned to
 //! the version pressed. On a real engine signed in and unlocked against the engine's fake API; every name invented.
+//!
+//! Wave 2 (the fix round's review, window (c)): a sign-out or a vault lock that STARTS during the hand-off's stop
+//! waits for the engine's step lock that stop holds, and moves the turn only once it runs; it is counted before it
+//! waits, so no installer starts. A hand-off refused that way says the update waits for the person and offers the
+//! press; an installer that really did not start says so, with "Try again".
 
 use beebeeb_engine::app::lock_api::LockState;
 use beebeeb_engine::test_api::FakeApi;
@@ -133,12 +138,26 @@ fn a_sign_out_while_the_press_downloads_installs_nothing() {
     assert!(!rig.part.pump().busy, "the press sends nothing");
 }
 
-/// A lock DURING the hand-off's stop (a running sync's stop takes seconds): no installer starts, and the sync the
-/// stop ended is asked back, once; no quit.
-#[test]
-fn a_lock_during_the_stop_starts_no_installer_and_asks_sync_back() {
-    let (engine, _api) = signed_in();
-    let _running = hold_running_stoppable(&engine);
+/// What a press whose hand-off ran on the real engine left: the quits and the asks for sync back, whether sync ran at
+/// each installer start, what the step `during` answered, and how long it took from the moment the hand-off's stop
+/// began.
+struct DuringTheStop<T> {
+    rig: Rig,
+    restarts: usize,
+    starts: usize,
+    syncing_at_start: Vec<bool>,
+    answer: T,
+    took: Duration,
+}
+
+/// A press on a running sync (its stop takes seconds) whose hand-off is the real one on `engine`, its installer
+/// starting; `during` runs on a thread of its own the moment the hand-off's stop began (never the window's thread:
+/// it blocks on the engine's runtime).
+fn press_with_during_the_stop<T: Send + 'static>(
+    engine: &Arc<Engine<MemoryCredentials>>,
+    during: impl FnOnce(&Engine<MemoryCredentials>) -> T + Send + 'static,
+) -> DuringTheStop<T> {
+    let running = hold_running_stoppable(engine);
     let syncing_at_start = Arc::new(Mutex::new(Vec::new()));
     let key = TestKey::generate();
     let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
@@ -153,25 +172,191 @@ fn a_lock_during_the_stop_starts_no_installer_and_asks_sync_back() {
     };
     let mut rig = rig_with(&key, "0.9.1", Channel::Stable, serving(&key, &[release]), options);
     settle(&mut rig.part);
-    let locker = engine.clone();
-    let lock = std::thread::spawn(move || {
+    let asker = engine.clone();
+    let step = std::thread::spawn(move || {
         let began = Instant::now();
-        while matches!(locker.view().start, Start::Running) {
+        while matches!(asker.view().start, Start::Running) {
             assert!(began.elapsed() < Duration::from_secs(10), "the stop never began");
             std::thread::sleep(Duration::from_millis(2));
         }
-        locker.lock_screen().expect("the screen locks during the stop");
+        let began = Instant::now();
+        let answer = during(&asker);
+        (answer, began.elapsed())
     });
     rig.part.restart_to_update();
     let (restarts, starts) = settle_counting(&mut rig.part);
-    lock.join().expect("the lock thread");
+    let (answer, took) = step.join().expect("the step's thread");
+    drop(running);
+    let syncing_at_start = syncing_at_start.lock().unwrap().clone();
+    DuringTheStop {
+        rig,
+        restarts,
+        starts,
+        syncing_at_start,
+        answer,
+        took,
+    }
+}
+
+/// A screen lock DURING the hand-off's stop (a running sync's stop takes seconds): no installer starts, and the sync
+/// the stop ended is asked back, once; no quit. The row says the update waits for the person, and once the lock is
+/// open again the press is offered ("Restart to update"), not "Try again".
+#[test]
+fn a_lock_during_the_stop_starts_no_installer_and_asks_sync_back() {
+    use crate::frames::settings::source::Update;
+    let (engine, _api) = signed_in();
+    let done = press_with_during_the_stop(&engine, |engine| {
+        engine.lock_screen().expect("the screen locks during the stop");
+    });
     assert_eq!(
-        (restarts, starts),
+        (done.restarts, done.starts),
         (0, 1),
         "no quit; the sync the stop ended asked back once"
     );
-    assert!(syncing_at_start.lock().unwrap().is_empty(), "no installer started");
-    assert_eq!(words(&rig.part), INSTALLER_DID_NOT_START);
+    assert!(done.syncing_at_start.is_empty(), "no installer started");
+    let waits = format!("Version 0.9.2 is downloaded and verified. {WAITS_FOR_YOU}");
+    assert_eq!(words(&done.rig.part), waits);
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the screen opens");
+    assert_eq!(
+        done.rig.part.update(),
+        Update::Available {
+            version: "0.9.2".into(),
+            press: Press::Restart,
+            says: Some(waits),
+        },
+        "the press is offered with the words it promises"
+    );
+}
+
+/// A sign-out pressed DURING the hand-off's stop waits for the step lock that stop holds: it is counted before it
+/// waits, so no installer starts and there is no quit; the sync the stop ended is asked back once, and the sign-out
+/// finishes after the stop.
+#[test]
+fn a_sign_out_during_the_stop_starts_no_installer_and_the_sign_out_finishes() {
+    let (engine, _api) = signed_in();
+    let turn = engine.session_turn();
+    let done = press_with_during_the_stop(&engine, move |engine| engine.sign_out_for(turn));
+    eprintln!(
+        "wave2-s1 stop: the sign-out returned {:?} after the stop began",
+        done.took
+    );
+    assert_eq!(
+        (done.restarts, done.starts),
+        (0, 1),
+        "no quit; the sync the stop ended asked back once"
+    );
+    assert!(done.syncing_at_start.is_empty(), "no installer started");
+    assert_eq!(done.answer, Ok(()), "the sign-out finished");
+    assert_eq!(engine.lock_state(), LockState::SignedOut);
+}
+
+/// A vault lock DURING the hand-off's stop: as the sign-out, and the closed mark it writes stays.
+#[test]
+fn a_vault_lock_during_the_stop_starts_no_installer_and_the_lock_finishes() {
+    let (engine, _api) = signed_in();
+    let ask_at_start = engine.ask_password_at_start();
+    let done = press_with_during_the_stop(&engine, |engine| engine.lock_vault().survives_restart);
+    eprintln!(
+        "wave2-s1 stop: the vault lock returned {:?} after the stop began",
+        done.took
+    );
+    assert_eq!(
+        (done.restarts, done.starts),
+        (0, 1),
+        "no quit; the sync the stop ended asked back once"
+    );
+    assert!(done.syncing_at_start.is_empty(), "no installer started");
+    assert!(done.answer, "the closed mark is stored");
+    assert_eq!(engine.lock_state(), LockState::VaultClosed);
+    assert_eq!(engine.ask_password_at_start(), ask_at_start, "the setting is untouched");
+}
+
+/// The count of session-ending steps refuses the hand-off by itself: the turn and the lock as at the press, one step
+/// asked since.
+#[test]
+fn presence_refuses_once_a_session_step_was_asked() {
+    let steps = Arc::new(AtomicU64::new(5));
+    let asked = steps.clone();
+    let presence = Presence::from_fns(
+        || (Some(SessionGeneration::for_test(1)), true),
+        move || asked.load(Ordering::SeqCst),
+        || false,
+    );
+    assert!(presence.press());
+    assert!(presence.holds(), "nothing moved since the press");
+    steps.store(6, Ordering::SeqCst);
+    assert!(!presence.holds(), "a session-ending step was asked since the press");
+}
+
+/// On the real engine, deterministically: a sign-out that waits for the step lock (held here, as the hand-off's
+/// stop holds it) has not moved the turn yet, and the hand-off is refused all the same. The sign-out then finishes.
+#[test]
+fn a_sign_out_asked_while_the_step_is_held_refuses_the_hand_off() {
+    let (engine, _api) = signed_in();
+    let presence = Presence::of_engine(engine.clone());
+    assert!(presence.press());
+    assert!(presence.holds());
+    let (turn, before) = (engine.session_turn(), engine.session_steps_asked());
+    let hold = engine.hold_session_step_for_test();
+    let signer = engine.clone();
+    let sign_out = std::thread::spawn(move || signer.sign_out_for(turn));
+    let began = Instant::now();
+    while engine.session_steps_asked() == before {
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "the sign-out was not counted while it waited"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        engine.session_turn(),
+        turn,
+        "the sign-out still waits: the turn did not move"
+    );
+    assert_eq!(engine.lock_state(), LockState::Open, "and the lock is open");
+    assert!(!presence.holds(), "the hand-off is refused");
+    drop(hold);
+    assert_eq!(sign_out.join().expect("the sign-out's thread"), Ok(()));
+    assert_eq!(engine.lock_state(), LockState::SignedOut);
+}
+
+/// An installer that does not start while the person is there (nothing locked, nothing signed out): the row says so,
+/// and the press is "Try again".
+#[test]
+fn an_installer_that_fails_with_the_person_present_says_it_did_not_start() {
+    use crate::frames::settings::source::Update;
+    let (engine, _api) = signed_in();
+    let key = TestKey::generate();
+    let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
+    let syncing_at_start = Arc::new(Mutex::new(Vec::new()));
+    let options = Options {
+        hand: Hand::Engine {
+            engine: engine.clone(),
+            starts: false,
+            syncing_at_start: syncing_at_start.clone(),
+        },
+        presence: Presence::of_engine(engine.clone()),
+        ..Options::default()
+    };
+    let mut rig = rig_with(&key, "0.9.1", Channel::Stable, serving(&key, &[release]), options);
+    settle(&mut rig.part);
+    rig.part.restart_to_update();
+    assert_eq!(settle_counting(&mut rig.part), (0, 0), "no quit; no sync was running");
+    assert_eq!(
+        syncing_at_start.lock().unwrap().len(),
+        1,
+        "the installer was asked to start"
+    );
+    assert_eq!(
+        rig.part.update(),
+        Update::Available {
+            version: "0.9.2".into(),
+            press: Press::Retry,
+            says: Some(INSTALLER_DID_NOT_START.into()),
+        }
+    );
 }
 
 /// Another account's stop left unconfirmed DURING this hand-off's stop (the flag is set once the stop began): no

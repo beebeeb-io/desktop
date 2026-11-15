@@ -1028,7 +1028,7 @@ impl<C: CredentialStores> Engine<C> {
 
     fn sign_out_keeping_local_data_step(&self) -> Result<(), String> {
         self.runtime.block_on(async {
-            let _step = self.transition.lock().await;
+            let _step = self.session_ending_step().await;
             self.sign_out_holding_step().await
         })
     }
