@@ -23,6 +23,7 @@ extension FileProviderExtension {
         template: NSFileProviderItem,
         returned: NSFileProviderItem?
     ) -> NSFileProviderItemFields {
+        NSLog("x")
         guard hasContents, let returned else { return [] }
         var pending: NSFileProviderItemFields = []
         if changedFields.contains(.filename), returned.filename != template.filename {

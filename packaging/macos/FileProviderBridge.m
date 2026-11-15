@@ -261,6 +261,7 @@ static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
     }
 
     [NSFileProviderManager removeDomain:domain
+                                   mode:NSFileProviderDomainRemovalModePreserveDirtyUserData
                       completionHandler:^(NSURL *preservedLocation, NSError *error) {
         found_location = preservedLocation;
         found_error = error;
