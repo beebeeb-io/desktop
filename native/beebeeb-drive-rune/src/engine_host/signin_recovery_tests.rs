@@ -204,3 +204,45 @@ fn signin_recovery_strength_is_local() {
     assert_eq!(steps_asked(&source), asked, "the meter gave the worker nothing");
     assert_eq!(source.poll(), None);
 }
+
+#[test]
+fn signin_recovery_discard_forgets_the_words() {
+    let fake = fake("discard");
+    let mut source = source(&fake);
+    let words: Vec<&str> = PHRASE.split(' ').collect();
+    source.begin_recovery_verify(&fake.account.email, &words);
+    assert_eq!(next(&mut source), SignInEvent::RecoveryPhraseVerified(Ok(())));
+
+    // The person leaves a half-done sign-in: the engine forgets the recovery it held (the key the words derived and
+    // the server's recovery token), so the next step has nothing to go on and sends nothing.
+    source.discard_partial_sign_in();
+    source.begin_set_password("An invented new password, 2026");
+    assert_eq!(next(&mut source), SignInEvent::PasswordSet(Err(SignInProblem::Other)));
+    assert_eq!(
+        requests(&fake, REGISTER),
+        0,
+        "the forgotten recovery sent nothing: {:?}",
+        fake.fake.routes()
+    );
+}
+
+#[test]
+fn signin_recovery_marks_the_box_of_an_unknown_word() {
+    let fake = fake("box");
+    let mut source = source(&fake);
+    let mut words: Vec<&str> = PHRASE.split(' ').collect();
+    // A box typed with a space after its word (as a person moving on to the next box might), and a word that is not
+    // in the list four boxes later: the mark is on that box, not one further.
+    words[2] = "thank ";
+    words[6] = "notaword";
+    source.begin_recovery_verify(&fake.account.email, &words);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::RecoveryPhraseVerified(Err(PhraseProblem::WrongPhrase { bad_word: Some(6) }))
+    );
+    assert!(
+        fake.fake.requests().is_empty(),
+        "nothing is sent: {:?}",
+        fake.fake.routes()
+    );
+}

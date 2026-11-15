@@ -710,6 +710,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         }
         let answers = self.answers.clone();
         let job: Job<C> = Box::new(move |engine| {
+            engine.recovery_forget();
             if engine.discard_partial_sign_in().is_err() {
                 still_signed_in(&answers);
             }

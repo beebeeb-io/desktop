@@ -10,7 +10,8 @@
 //! The answers belong to the twelve-word wait (`Wait::Restore`): the recovery's screens and the twelve-word unlock
 //! are never on screen together, and a newer press (or leaving the twelve words) makes an older answer stale, so
 //! `poll` drops it. A press whose session turn moved before the engine answered is refused by the engine
-//! (`Overtaken`), which stores nothing.
+//! (`Overtaken`), which stores nothing. Leaving a half-done sign-in (`discard_partial_sign_in`) has the engine forget
+//! the recovery it holds, after any step already on the worker.
 //!
 //! Secrets: the twelve words and the password arrive as `&str` borrowed from the window's fields; each is copied ONCE
 //! into a wiping buffer made at its full size, which moves to the worker and into the engine, and is wiped there.
@@ -71,7 +72,10 @@ impl<C: CredentialStores> EngineSignInSource<C> {
     /// "Verify phrase" (DW-A47): the email and the twelve words, for the session turn of this press.
     pub(super) fn recovery_begin_verify(&mut self, email: &str, words: &[&str]) {
         let turn = self.engine.session_turn();
-        let (email, phrase) = (email.to_string(), phrase_of(words));
+        // Each box's word without the spaces around it, so the joined words split back into the boxes one to one and
+        // a position the engine marks is the box's (a box typed as "word " would shift every later mark by one).
+        let words: Vec<&str> = words.iter().map(|word| word.trim()).collect();
+        let (email, phrase) = (email.to_string(), phrase_of(&words));
         self.ask(
             RECOVERY,
             SignInEvent::RecoveryPhraseVerified(Err(PhraseProblem::Other)),
