@@ -112,6 +112,12 @@ impl ContentFingerprint {
     pub(super) fn last_touched(&self) -> std::time::SystemTime {
         self.modified.max(self.changed)
     }
+
+    /// Is `now` at least [`HASH_CACHE_SETTLED`] past the file's last change? A hash of a file that is not settled
+    /// may have missed a write in the same timer tick (task 2526: the reclaim keeps such a copy).
+    pub(crate) fn settled_at(&self, now: std::time::SystemTime) -> bool {
+        now >= self.last_touched() + HASH_CACHE_SETTLED
+    }
 }
 
 /// Task 1640 (review P2-5): [`sha256_file_hex`] of `file_id`'s file at `path`, read again only
