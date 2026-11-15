@@ -529,6 +529,19 @@ impl std::fmt::Display for ItemInTrash {
 
 impl std::error::Error for ItemInTrash {}
 
+/// A content save that would follow a queued write of the file it may not follow (review of desktop#432, delta 3:
+/// [`crate::write_token::ChainAfter`]). Nothing was queued. Path-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BehindAnotherWrite;
+
+impl std::fmt::Display for BehindAnotherWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("An earlier change to this file has not been sent yet.")
+    }
+}
+
+impl std::error::Error for BehindAnotherWrite {}
+
 /// What the failed attempt had already done when it failed: a completion it
 /// recorded, a plain upload, or a File Provider write whose refusal either looks
 /// transient (the network, a 5xx, a lock) or does not.

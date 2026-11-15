@@ -953,6 +953,9 @@ pub enum AcceptOutcome {
     /// A modify of an item in the trash: its row is `Trashing`, or the system names the trash
     /// container as its parent (spec §7.2). Nothing was written; the save is refused.
     InTrash,
+    /// A modify that would be queued after a queued write it may not follow
+    /// ([`crate::write_token::ChainAfter`]). Nothing was written; the save is refused.
+    BehindAnotherWrite,
 }
 
 /// Why a File Provider upload parked with its bytes kept (spec §11, "Parked").

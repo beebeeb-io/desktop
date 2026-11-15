@@ -3,6 +3,7 @@
 //! does not run: every save is stored here and answers at once). Every name and byte is invented.
 
 use super::*;
+use crate::app::viewer_edit_api::EditRefused;
 
 /// The note at version 4 on this PC, writable by the account.
 fn writable_note_at_4(engine: &TestEngine, fake: &Fake) -> (tempfile::TempDir, tempfile::TempDir, StateDb) {
@@ -37,6 +38,7 @@ fn a_new_openings_save_never_queues_behind_an_earlier_openings_unsent_save() {
     let again = engine.viewer_opening(session, NOTE);
     let second = engine.save_text_for(session, NOTE, "another invented edit, of version 4\n", 4, again);
     assert!(second.is_err(), "nothing queued behind it: {:?}", second.map(|_| ()));
+    assert_eq!(second.err(), Some(EditRefused::EarlierChangeNotSent), "said why");
     assert_eq!(
         db.list_operations_for_file(NOTE).unwrap().len(),
         1,
@@ -75,6 +77,7 @@ fn a_new_openings_save_never_queues_behind_an_earlier_openings_parked_save() {
     let again = engine.viewer_opening(session, NOTE);
     let second = engine.save_text_for(session, NOTE, "another invented edit, of version 4\n", 4, again);
     assert!(second.is_err(), "nothing queued behind it: {:?}", second.map(|_| ()));
+    assert_eq!(second.err(), Some(EditRefused::EarlierChangeNotSent), "said why");
     assert_eq!(
         db.list_operations_for_file(NOTE).unwrap().len(),
         1,

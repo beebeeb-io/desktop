@@ -328,13 +328,17 @@ pub enum Settled {
     Queued { body: Body, version: u32 },
     /// Keep theirs: the edit is dropped and the file as Beebeeb has it is shown.
     Opened { body: Body, version: u32 },
-    /// Another device saved the file meanwhile; nothing was written.
+    /// The file is at a version past the one the edit began from (saved on another device, or by an earlier opening
+    /// on this PC: who is not known); nothing was written.
     Conflict(Conflict),
     /// The local state holds a version of the open file that this view does not (DW-1519). Nothing on screen
     /// changed: the banner offers it.
     Newer(Newer),
     /// Not done, nothing changed.
     Failed,
+    /// Not saved, and why (the words): nothing changed, the edit stays as it is (delta 3 of desktop#432: an earlier
+    /// change to the file on this PC has not been sent yet).
+    Refused(String),
     /// A change begun before the file was opened again (Show it, Try again): what it came to, said. Nothing on
     /// screen changes.
     Said(String),
