@@ -230,7 +230,7 @@ impl AwayLock {
                 // The engine locked: this frame's gate may have been read before it.
                 self.cover = Cover::Locked;
                 lift_if_open = false;
-            } else if self.cover != Cover::Locked {
+            } else if self.cover == Cover::Asked(looked.number) {
                 // The look that says the wake locked nothing.
                 self.cover = Cover::Off;
             }
@@ -247,9 +247,7 @@ impl AwayLock {
             self.gap_found_at = None;
             self.resumed = false;
             self.could_lock = true;
-            if self.cover != Cover::Off {
-                self.cover = Cover::Locked;
-            }
+            self.cover = Cover::Off;
             return came;
         }
         if lift_if_open {
