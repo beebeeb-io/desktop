@@ -626,6 +626,20 @@ fn fixtures_manifest_has_every_row() {
         .collect();
     have.sort_unstable();
     assert_eq!(have, want, "ref/ holds exactly one <file>.y per picture row");
+    // Three different pictures per reference: the test source changes every frame, so a repeated one is a reference
+    // that ffmpeg padded (AVI has no pts: its default output repeats picture 0).
+    for name in &have {
+        let planes = read_file(&format!("ref/{name}"));
+        let mut frames: Vec<&[u8]> = planes.chunks_exact(planes.len() / 3).collect();
+        assert_eq!(frames.len(), 3, "{name}: three frames of Y planes");
+        frames.sort_unstable();
+        frames.dedup();
+        assert_eq!(
+            frames.len(),
+            3,
+            "{name}: its 3 reference frames are not 3 distinct pictures"
+        );
+    }
 }
 
 /// One test per row: the shipped route table, the shipped switch (OFF).

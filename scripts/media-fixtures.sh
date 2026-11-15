@@ -53,12 +53,16 @@ printf '#file\tkind\tcodec\texpect\tsha256\tref\n' >"$manifest"
 ref_video() {
   local file="$1" raw frame=$((W * H * 3 / 2)) ysize=$((W * H))
   raw="$(mktemp)"
-  ffmpeg "${FFQ[@]}" -i "$file" -frames:v 3 -f rawvideo -pix_fmt yuv420p "$raw"
+  ffmpeg "${FFQ[@]}" -i "$file" -fps_mode passthrough -frames:v 3 -f rawvideo -pix_fmt yuv420p "$raw"
   : >"ref/$file.y"
   for i in 0 1 2; do
     dd if="$raw" bs="$frame" skip="$i" count=1 status=none | head -c "$ysize" >>"ref/$file.y"
   done
   command rm -f "$raw"
+  # Three different pictures, not one repeated: a container without pts (AVI) makes ffmpeg's default CFR output repeat
+  # picture 0. The test source changes every frame, so a repeat is a wrong reference.
+  [ "$(for i in 0 1 2; do dd if="ref/$file.y" bs="$ysize" skip="$i" count=1 status=none | sha256sum; done | sort -u | wc -l)" -eq 3 ] ||
+    { echo "$file: the first 3 reference frames are not 3 distinct pictures" >&2; exit 1; }
   [ "$(stat -c %s "ref/$file.y")" -eq $((ysize * 3)) ] || { echo "$file: fewer than 3 frames decoded" >&2; exit 1; }
   sha256sum "ref/$file.y" | cut -d' ' -f1
 }
