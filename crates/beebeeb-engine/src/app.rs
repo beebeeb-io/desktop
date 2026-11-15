@@ -18,7 +18,7 @@
 //! the local state by any way but the account-bound handle (`owned_state`, task 2488).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroizing;
@@ -271,6 +271,8 @@ pub struct Engine<C: CredentialStores> {
     failures: AtomicU32,
     /// [`Engine::watch_session`] ran on this handle.
     session_watch_started: AtomicBool,
+    /// Items moved to or from Trash through this handle (`trash_api`), for a window that keeps a Trash count.
+    trash_moves: AtomicU64,
     /// The two-level lock: core's state machine, moved only by `lock_api`.
     lock_flow: Mutex<beebeeb_api::flows::LockFlow>,
     /// What a window reads without waiting ([`Engine::view`]); `host` writes the engine's reports into it.
@@ -335,6 +337,7 @@ impl<C: CredentialStores> Engine<C> {
             lock_password: lock_password_api::LockPassword::default(),
             failures: AtomicU32::new(0),
             session_watch_started: AtomicBool::new(false),
+            trash_moves: AtomicU64::new(0),
             lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
             view,
             session_user_id: Mutex::new(None),

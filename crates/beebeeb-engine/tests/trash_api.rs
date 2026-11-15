@@ -34,6 +34,9 @@ const SESSION_ENDED: u8 = 2;
 const PROTECTED: u8 = 3;
 /// A move to Trash is made and answered 204 with no body.
 const NO_BODY: u8 = 4;
+/// The file counters answer without the trashed count, or with it null.
+const COUNT_MISSING: u8 = 5;
+const COUNT_NULL: u8 = 6;
 
 const DOCS: &str = "a0000000-0000-4000-8000-000000000101";
 const CONTRACT: &str = "a0000000-0000-4000-8000-000000000102";
@@ -81,6 +84,10 @@ fn account(email: &str) -> Account {
                 SERVER_ERROR => Reply::json(500, json!({ "error": BODY_MARKER })),
                 SESSION_ENDED => Reply::json(401, json!({ "error": BODY_MARKER })),
                 _ if req.bearer() != Some(token.as_str()) => Reply::json(401, json!({ "error": "unauthorized" })),
+                COUNT_MISSING => {
+                    Reply::ok(json!({ "total_files": 9, "total_folders": 1, "total_bytes": 1, "trashed_bytes": 1 }))
+                }
+                COUNT_NULL => Reply::ok(json!({ "trashed_files": null, "trashed_bytes": 1 })),
                 // The server's shape: the whole counter row, of which the engine reads `trashed_files`.
                 _ => Reply::ok(json!({
                     "total_files": 9, "total_folders": 1, "total_bytes": 1,
@@ -813,4 +820,62 @@ fn the_trash_count_is_the_servers_number_for_the_session_of_the_press() {
         Err(AccountCallError::NotSignedIn)
     );
     assert_eq!(counts(&account.fake), before, "nothing is asked without a session");
+}
+
+/// A counter row without the number (missing, or null) is an error of its own kind, never a zero.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_count_without_the_number_is_unreadable_never_zero() {
+    let account = account("trash-count-body@example.eu");
+    let engine = signed_in(&account);
+    let now = engine.session_turn();
+    for mode in [COUNT_MISSING, COUNT_NULL] {
+        account.mode.store(mode, Ordering::SeqCst);
+        assert_eq!(
+            engine.trash_count_for(now),
+            Err(AccountCallError::Unreadable),
+            "mode {mode}: no number is no answer"
+        );
+    }
+}
+
+/// Every move to or from Trash that moved an item is counted on the handle (a window that keeps the Trash count
+/// reads it); one that moved nothing is not.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn moves_to_and_from_trash_are_counted_on_the_handle() {
+    let account = account("trash-moves@example.eu");
+    account.vault.add_item(DOCS, None, "An invented name", false, 1);
+    let engine = signed_in(&account);
+    let now = engine.session_turn();
+    assert_eq!(engine.trash_moves(), 0);
+    engine.trash_items_for(now, &[DOCS]).expect("moved");
+    assert_eq!(engine.trash_moves(), 1);
+    engine.restore_items_for(now, &[DOCS]).expect("restored");
+    assert_eq!(engine.trash_moves(), 2);
+    engine.trash_items_for(now, &[]).expect("nothing to do");
+    assert_eq!(engine.trash_moves(), 2, "no item, no move");
+    account.mode.store(SERVER_ERROR, Ordering::SeqCst);
+    let _ = engine.trash_items_for(now, &[DOCS]);
+    assert_eq!(engine.trash_moves(), 2, "a refused move is not counted");
+}
+
+/// A locked screen keeps the session but refuses a person's call: the handle says so without sending anything.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_person_call_is_not_allowed_behind_a_locked_vault() {
+    let account = account("trash-allowed@example.eu");
+    let engine = signed_in(&account);
+    assert!(engine.person_calls_allowed());
+    engine.lock_screen().expect("the screen locks");
+    assert!(
+        !engine.person_calls_allowed(),
+        "a locked screen refuses a person's call"
+    );
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the screen opens");
+    assert!(engine.person_calls_allowed());
+    let _ = engine.lock();
+    assert!(!engine.person_calls_allowed(), "a closed vault too");
 }

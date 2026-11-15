@@ -34,6 +34,8 @@ const PASSWORD: &str = "an invented password for trash";
 const ANSWER: u8 = 0;
 const SERVER_ERROR: u8 = 1;
 const SESSION_ENDED: u8 = 2;
+const COUNT_MISSING: u8 = 5;
+const COUNT_NULL: u8 = 6;
 
 const DOCS: &str = "a0000000-0000-4000-8000-000000000201";
 const CONTRACT: &str = "a0000000-0000-4000-8000-000000000202";
@@ -112,6 +114,9 @@ fn fake(tag: &str) -> Fake {
             match count_in.load(Ordering::SeqCst) {
                 SERVER_ERROR => return Reply::json(500, json!({ "error": "a server body" })),
                 SESSION_ENDED => return Reply::json(401, json!({ "error": "a server body" })),
+                // The counter row without the number, or with it null.
+                COUNT_MISSING => return Reply::ok(json!({ "total_files": 40, "trashed_bytes": 1 })),
+                COUNT_NULL => return Reply::ok(json!({ "trashed_files": null })),
                 _ => {}
             }
             // The server counts the same set its Trash listing returns, for the account whose token this is.

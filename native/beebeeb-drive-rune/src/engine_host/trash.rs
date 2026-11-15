@@ -495,6 +495,7 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
                 || self.counted.busy(),
             notice,
             purge,
+            wake_in: self.count_due_in(),
         }
     }
 

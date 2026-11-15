@@ -93,6 +93,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let ui = &mut s.frames.trash;
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
+    } else if let Some(after) = pumped.wake_in {
+        tx.wake_after(after);
     }
     changed |= pumped.changed;
     if pumped.changed {

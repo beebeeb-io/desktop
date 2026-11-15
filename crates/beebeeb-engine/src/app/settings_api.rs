@@ -219,6 +219,7 @@ pub(super) fn kind_of(error: &anyhow::Error) -> AccountCallError {
                 DesktopApiError::HttpStatus { status, .. } if status.as_u16() == 401 => AccountCallError::SessionEnded,
                 DesktopApiError::HttpStatus { .. } => AccountCallError::ServerError,
                 DesktopApiError::Transport(error) => transport_kind(error),
+                DesktopApiError::InvalidCountResponse => AccountCallError::Unreadable,
                 _ => AccountCallError::ServerError,
             };
         }
