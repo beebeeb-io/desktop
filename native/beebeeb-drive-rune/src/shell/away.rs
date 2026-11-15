@@ -271,7 +271,7 @@ impl AwayLock {
                 self.away = Some(self.away.map_or(away, |held| held.max(away)));
                 self.gap_found_at = Some(now);
                 // D-B2-3: the content is covered from this frame, until a look said this wake.
-                if !self.without {
+                if self.could_lock {
                     self.cover = Cover::Held;
                 }
             }
