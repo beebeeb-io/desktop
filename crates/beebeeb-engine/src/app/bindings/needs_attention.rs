@@ -102,7 +102,7 @@ impl<C: CredentialStores> Engine<C> {
             .with(|db| {
                 match db.poison(file_id) {
                     Ok(Some(_)) => {}
-                    Ok(None) => return Err(DiscardRefusal::NotPoisoned),
+                    Ok(None) => {}
                     Err(_) => return Err(DiscardRefusal::LocalState(LocalStateRefused::Unreadable)),
                 }
                 refuse_an_upload(board.as_deref(), file_id)?;
@@ -112,7 +112,9 @@ impl<C: CredentialStores> Engine<C> {
         if done.is_ok() {
             // Review P3-6 of desktop #225: the row leaves the kept rows, and no read already running brings it back.
             let next = ATTENTION_READS.load(std::sync::atomic::Ordering::SeqCst);
-            let _ = next;
+            if let Ok(mut cache) = ATTENTION_CACHE.lock() {
+                cache.forget(file_id, next);
+            }
         }
         done
     }
