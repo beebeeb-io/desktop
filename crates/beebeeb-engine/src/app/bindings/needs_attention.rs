@@ -102,7 +102,7 @@ impl<C: CredentialStores> Engine<C> {
             .with(|db| {
                 match db.poison(file_id) {
                     Ok(Some(_)) => {}
-                    Ok(None) => {}
+                    Ok(None) => return Err(DiscardRefusal::NotPoisoned),
                     Err(_) => return Err(DiscardRefusal::LocalState(LocalStateRefused::Unreadable)),
                 }
                 refuse_an_upload(board.as_deref(), file_id)?;
