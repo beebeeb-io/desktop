@@ -243,6 +243,15 @@ fn approve_sends_the_master_key_only_sealed() {
     assert_eq!(relays.len(), 1, "one relay");
     let body: Value = serde_json::from_slice(&relays[0].body).expect("the relay is JSON");
     let field = |name: &str| b64().decode(body[name].as_str().expect(name)).expect(name);
+    // Decoded, no field of the relay holds the key either (a plain payload in base64 would).
+    for name in ["encrypted_payload_b64", "nonce_b64", "browser_ecdh_public_b64"] {
+        let decoded = field(name);
+        assert!(!contains(&decoded, &master_key), "the key's bytes inside {name}");
+        assert!(
+            !contains(&decoded, key_b64.as_bytes()),
+            "the key's base64 inside {name}"
+        );
+    }
     let plain = fake
         .requester
         .decrypt_browser_payload(
