@@ -152,3 +152,31 @@
     }
   }
 }
+// Present mode (DW-1561): the whole screen is the slide on black. No window, no ribbon, so the keys above find nothing.
+// The stage, the slide and its lines in order, the Esc hint, and the count of slides.
+{
+  const pFrame = (win.closest('[id^="DW-"]') || {}).id || '';
+  if (pFrame === 'DW-1561') {
+    const shown = (el) => !!el && el.getClientRects().length > 0;
+    const stage = win.querySelector('.kit-body > .relative.grid');
+    if (shown(stage)) {
+      api.box('pres-stage', stage);
+      const slide = stage.querySelector(':scope > .flex.flex-col');
+      if (shown(slide)) {
+        api.box('pres-slide', slide);
+        let n = 0;
+        for (const line of slide.children) {
+          if (!shown(line)) continue;
+          if (line.tagName === 'UL') {
+            line.querySelectorAll(':scope > li').forEach((li, i) => api.text(`pres-li-${i}`, li));
+          } else if (line.classList.contains('mk-ph')) api.box('pres-image', line);
+          else if (line.textContent.trim()) api.text(`pres-${n++}`, line);
+        }
+      }
+      const esc = stage.querySelector('kbd');
+      if (shown(esc)) { api.box('pres-esc-box', esc); api.textNode('pres-esc', esc); }
+      const count = [...stage.querySelectorAll(':scope > span.font-mono')].find(shown);
+      if (count) api.text('pres-count', count);
+    }
+  }
+}
