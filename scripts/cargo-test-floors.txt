@@ -30,3 +30,6 @@ windows 13 deps/beebeeb_office_sandbox-
 linux 13 deps/beebeeb_office_sandbox-
 windows 16 deps/sandbox-
 linux 1 deps/sandbox-
+# The Office protocol crate (2026-11-15, the Office viewer's first checkpoint, Linux build VM): library 48. CI runs it on
+# Linux only. Floor = 48 minus about 5 %, rounded down to a ten; re-check against the first CI count.
+linux 40 deps/beebeeb_office_protocol-

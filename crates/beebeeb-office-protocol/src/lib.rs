@@ -7,6 +7,8 @@
 //!
 //! - every length is read first and refused before anything of that size is allocated ([`frame::read_frame`],
 //!   [`office::Message::decode`]);
+//! - every message fits one frame: `encode` refuses one that does not, with the check `write_frame` holds
+//!   ([`frame::fits_one_frame`]);
 //! - every answer is checked against what the app asked before it is used ([`check`]): sizes equal the ask and stay
 //!   under the limits, counts and text lengths are capped, an error is a code from a fixed list, never the helper's
 //!   own words;

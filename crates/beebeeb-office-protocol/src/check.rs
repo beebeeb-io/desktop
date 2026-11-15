@@ -8,7 +8,9 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::frame::Side;
-use crate::office::{CellData, Cells, Opened, OpenedSheets, OutlineData, PageSize, Render, Rendered};
+use crate::office::{
+    CellData, CellRange, Cells, Opened, OpenedSheets, Outline, OutlineData, PageSize, Render, Rendered,
+};
 
 // The viewer contract §5.2, one constant per number. MB and GB are binary here, as in the sandbox crate's 1 GiB.
 
@@ -43,7 +45,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The longest text of one cell: 32 KiB (a spreadsheet cell holds at most 32,767 characters).
 pub const MAX_CELL_TEXT_BYTES: usize = 32 * 1024;
-/// The most entries of one outline: 10,000.
+/// The most entries of one outline, over all its pages: 10,000.
 pub const MAX_OUTLINE_ENTRIES: usize = 10_000;
 /// The longest text of one outline entry: 1 KiB.
 pub const MAX_OUTLINE_TEXT_BYTES: usize = 1024;
@@ -51,11 +53,16 @@ pub const MAX_OUTLINE_TEXT_BYTES: usize = 1024;
 pub const MAX_SHEET_ROWS: u32 = 1_048_576;
 /// The most columns of one sheet: the .xlsx format's own maximum, 16,384.
 pub const MAX_SHEET_COLS: u32 = 16_384;
-/// The longest sheet name: 256 bytes (a spreadsheet allows 31 characters, at most 124 bytes of UTF-8).
-pub const MAX_SHEET_NAME_BYTES: usize = 256;
+/// The longest sheet name: 255 characters (Unicode scalar values, not bytes). A spreadsheet allows 31; the helper
+/// cuts a longer name to this before it answers.
+pub const MAX_SHEET_NAME_CHARS: usize = 255;
 
-/// Pixels per point at scale 1.0: 100 % zoom on a 96 DPI monitor.
-pub const PX_PER_PT: f64 = 96.0 / 72.0;
+/// Points per inch. A `scale` is device pixels per point: zoom x DPI / 72 ([`render_scale`]).
+pub const POINTS_PER_INCH: f32 = 72.0;
+
+/// The tallest page height the Office engine sizes: it clamps a page's height to this before it multiplies by the
+/// scale, and so does [`page_pixels`].
+pub const MAX_PAGE_HEIGHT_PT: f32 = 1e6;
 
 /// The limits the checks hold. [`Limits::CONTRACT`] is the only value the app uses; tests may tighten it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +72,7 @@ pub struct Limits {
     pub max_sheets: usize,
     pub max_sheet_rows: u32,
     pub max_sheet_cols: u32,
-    pub max_sheet_name_bytes: usize,
+    pub max_sheet_name_chars: usize,
     pub max_cell_text_bytes: usize,
     pub max_outline_entries: usize,
     pub max_outline_text_bytes: usize,
@@ -79,7 +86,7 @@ impl Limits {
         max_sheets: MAX_SHEETS,
         max_sheet_rows: MAX_SHEET_ROWS,
         max_sheet_cols: MAX_SHEET_COLS,
-        max_sheet_name_bytes: MAX_SHEET_NAME_BYTES,
+        max_sheet_name_chars: MAX_SHEET_NAME_CHARS,
         max_cell_text_bytes: MAX_CELL_TEXT_BYTES,
         max_outline_entries: MAX_OUTLINE_ENTRIES,
         max_outline_text_bytes: MAX_OUTLINE_TEXT_BYTES,
@@ -95,8 +102,9 @@ impl Default for Limits {
 /// Why an answer (or the app's own ask) was refused. Fixed reasons only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
-    /// The app's `Render` cannot be sized: a scale or page size that is not finite and positive, or a region that is
-    /// empty or not inside the page at that scale.
+    /// The app's own ask cannot be sized or split: a `Render` scale or page size that is not finite and positive, a
+    /// region that is empty or not inside the page at that scale, or a cell range whose half would lie past the
+    /// last row or column a `u32` can name.
     BadAsk,
     /// The rendered width or height is not what was asked (beyond ±1 px of rounding), or is 0.
     WrongSize,
@@ -110,11 +118,11 @@ pub enum Refused {
     PageCountMismatch,
     /// A page size that is not finite and positive.
     BadPageSize,
-    /// More sheets than the limit.
+    /// More sheets than the limit, the named ones and those counted in `more` together.
     TooManySheets,
     /// A sheet with more rows or columns than the format allows.
     SheetTooLarge,
-    /// A sheet name over the limit.
+    /// A sheet name over the limit of characters.
     NameTooLong,
     /// More cells than the asked range holds.
     TooManyCells,
@@ -130,10 +138,14 @@ pub enum Refused {
     BadCellSize,
     /// Frozen panes larger than a sheet can be.
     FrozenTooLarge,
-    /// More outline entries than the limit.
+    /// More outline entries than the limit, over all the pages so far or announced by `next`.
     TooManyEntries,
+    /// An outline page whose `next` does not follow it: no entries, or not `from` plus the entries sent.
+    BadNext,
     /// An outline entry on a page the document does not have.
     PagePastEnd,
+    /// `RangeTooLarge` for a range of at most one cell, which always fits one frame: there is nothing to halve.
+    CannotHalve,
     /// An odd id: a request the helper opened, never an answer to the app.
     NotAnAnswer,
     /// An answer to an id the app has no request out for.
@@ -144,7 +156,7 @@ impl Refused {
     /// The fixed reason, for a log line.
     pub fn reason(self) -> &'static str {
         match self {
-            Refused::BadAsk => "the render ask cannot be sized",
+            Refused::BadAsk => "the ask cannot be sized or split",
             Refused::WrongSize => "rendered size differs from the ask",
             Refused::TooLarge => "rendered side over the limit",
             Refused::LengthMismatch => "rendered size does not fill the section",
@@ -162,7 +174,9 @@ impl Refused {
             Refused::BadCellSize => "a column width or row height that is not finite or is negative",
             Refused::FrozenTooLarge => "frozen panes larger than a sheet",
             Refused::TooManyEntries => "too many outline entries",
+            Refused::BadNext => "an outline page whose next entry does not follow it",
             Refused::PagePastEnd => "an outline entry past the last page",
+            Refused::CannotHalve => "a range too large to send that cannot be halved",
             Refused::NotAnAnswer => "a helper request where an answer was due",
             Refused::UnsentId => "an answer to a request never sent",
         }
@@ -181,18 +195,28 @@ fn finite_positive(v: f32) -> bool {
     v.is_finite() && v > 0.0
 }
 
-/// The pixel size of a whole page at `scale`: `round(pt * scale * 96 / 72)` a side. `None` when the scale or the page
-/// size is not finite and positive, or a side rounds below 1 px. The helper renders at exactly this size.
+/// The `scale` the app asks a page at: device pixels per point, `zoom * dpi / 72`. 100 % zoom on a 96 DPI monitor is
+/// 4/3; on a 144 DPI monitor, 2.
+pub fn render_scale(zoom: f32, dpi: f32) -> f32 {
+    zoom * dpi / POINTS_PER_INCH
+}
+
+/// The pixel size of a whole page at `scale` (device pixels per point): `ceil(pt * scale)` a side, at least 1 px, the
+/// product taken in `f32`. This is the Office engine's own rule (the expressions its renderer sizes a raster with),
+/// so the app and the helper size the same raster; the height is first clamped to [`MAX_PAGE_HEIGHT_PT`], as the
+/// engine does. `None` when the scale or the page size is not finite and positive, or a side does not fit a `u32`.
+/// The helper renders at exactly this size; `tests/page_pixels_vectors.txt` pins it, the same file in both repos.
 pub fn page_pixels(page: &PageSize, scale: f32) -> Option<(u32, u32)> {
     if !finite_positive(scale) || !finite_positive(page.w_pt) || !finite_positive(page.h_pt) {
         return None;
     }
+    // In f32, as the engine: in f64 a Letter page at 4/3 would be 817 px wide instead of the engine's 816.
     let side = |pt: f32| -> Option<u32> {
-        let px = (f64::from(pt) * f64::from(scale) * PX_PER_PT).round();
-        // In range, so the cast is exact.
-        (1.0..=f64::from(u32::MAX)).contains(&px).then_some(px as u32)
+        let px = (pt * scale).ceil().max(1.0);
+        // Below 2^32 and a whole number, so the cast is exact.
+        (px.is_finite() && px < 4_294_967_296.0).then_some(px as u32)
     };
-    Some((side(page.w_pt)?, side(page.h_pt)?))
+    Some((side(page.w_pt)?, side(page.h_pt.min(MAX_PAGE_HEIGHT_PT))?))
 }
 
 /// The pixel size a `Render` asks for: its region, or the whole page at its scale. The app sizes the section `out`
@@ -264,13 +288,14 @@ pub fn check_opened(got: &Opened, limits: &Limits) -> Result<(), Refused> {
     Ok(())
 }
 
-/// An `OpenedSheets` answer: at most the sheet limit, every name under its cap, rows and columns under the format's.
+/// An `OpenedSheets` answer: at most the sheet limit, the named sheets and those counted in `more` together; every
+/// name at most its cap in characters; rows and columns under the format's.
 pub fn check_sheets(got: &OpenedSheets, limits: &Limits) -> Result<(), Refused> {
-    if got.sheets.len() > limits.max_sheets {
+    if got.sheets.len() as u64 + u64::from(got.more) > limits.max_sheets as u64 {
         return Err(Refused::TooManySheets);
     }
     for sheet in &got.sheets {
-        if sheet.name.len() > limits.max_sheet_name_bytes {
+        if sheet.name.chars().count() > limits.max_sheet_name_chars {
             return Err(Refused::NameTooLong);
         }
         if sheet.rows > limits.max_sheet_rows || sheet.cols > limits.max_sheet_cols {
@@ -315,11 +340,28 @@ pub fn check_cells(asked: &Cells, got: &CellData, limits: &Limits) -> Result<(),
     Ok(())
 }
 
-/// An `OutlineData` answer for a document of `pages` pages (from the checked `Opened`): at most the entry limit,
-/// every text under its cap, every page one the document has.
-pub fn check_outline(got: &OutlineData, pages: u32, limits: &Limits) -> Result<(), Refused> {
-    if got.entries.len() > limits.max_outline_entries {
+/// One page of the outline, the answer to `asked`, for a document of `pages` pages (from the checked `Opened`).
+///
+/// The entries up to the end of this page (`asked.from` plus the entries here) stay within the entry limit. When
+/// there is more (`next` is `Some`), the page holds at least one entry, `next` is the entry right after it, and the
+/// limit leaves room for that entry: so every page moves the app forward, and its asking ends. Every text is under its
+/// cap and every page one the document has.
+pub fn check_outline(asked: &Outline, got: &OutlineData, pages: u32, limits: &Limits) -> Result<(), Refused> {
+    let end = u64::from(asked.from) + got.entries.len() as u64;
+    let cap = limits.max_outline_entries as u64;
+    if end > cap {
         return Err(Refused::TooManyEntries);
+    }
+    if let Some(next) = got.next {
+        if end >= cap {
+            return Err(Refused::TooManyEntries);
+        }
+        if got.entries.is_empty() {
+            return Err(Refused::BadNext);
+        }
+        if u64::from(next) != end {
+            return Err(Refused::BadNext);
+        }
     }
     for entry in &got.entries {
         if entry.text.len() > limits.max_outline_text_bytes {
@@ -330,6 +372,52 @@ pub fn check_outline(got: &OutlineData, pages: u32, limits: &Limits) -> Result<(
         }
     }
     Ok(())
+}
+
+/// The app's answer to [`RangeTooLarge`](crate::office::ErrorCode::RangeTooLarge) for `asked`: the two halves to ask
+/// instead, split across the longer side (rows when there are at least as many rows as columns), the first half the
+/// smaller one when that side is odd. Each half is smaller than the range, so halving again ends.
+///
+/// Refused ([`Refused::CannotHalve`]) for a range of at most one cell: one cell always fits a frame (its text is
+/// capped at [`MAX_CELL_TEXT_BYTES`], half a frame), so that answer is the helper's error.
+pub fn halve_range(asked: &Cells) -> Result<[Cells; 2], Refused> {
+    let r = asked.range;
+    if r.area() <= 1 {
+        return Err(Refused::CannotHalve);
+    }
+    let (first, second) = if r.rows >= r.cols {
+        let top = r.rows / 2;
+        let row = r.row.checked_add(top).ok_or(Refused::BadAsk)?;
+        (
+            CellRange { rows: top, ..r },
+            CellRange {
+                row,
+                rows: r.rows - top,
+                ..r
+            },
+        )
+    } else {
+        let left = r.cols / 2;
+        let col = r.col.checked_add(left).ok_or(Refused::BadAsk)?;
+        (
+            CellRange { cols: left, ..r },
+            CellRange {
+                col,
+                cols: r.cols - left,
+                ..r
+            },
+        )
+    };
+    Ok([
+        Cells {
+            sheet: asked.sheet,
+            range: first,
+        },
+        Cells {
+            sheet: asked.sheet,
+            range: second,
+        },
+    ])
 }
 
 /// A frame the app reads as an answer: its id must be an app id (even) that `was_sent` reports outstanding.

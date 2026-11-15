@@ -7,17 +7,19 @@ use super::*;
 use crate::office::{Align, CellRange, CellText, Frozen, GrantRef, OutlineEntry, Rect, SheetInfo};
 
 const OUT: GrantRef = GrantRef { wire: 9, len: 0 };
-/// A4 in points: 794 x 1123 px at scale 1.0.
+/// 100 % zoom on a 96 DPI monitor: 4/3 device pixels per point (`0x3faaaaab` as f32, the shared vector's 4/3).
+const S100: f32 = 4.0 / 3.0;
+/// A4 as a document states it, in points: 794 x 1123 px at [`S100`].
 const A4: PageSize = PageSize {
     w_pt: 595.3,
     h_pt: 841.9,
 };
-/// 4,267 x 133 px at scale 1.0: wider than one tile.
+/// 4,267 x 134 px at [`S100`]: wider than one tile.
 const WIDE: PageSize = PageSize {
     w_pt: 3200.0,
     h_pt: 100.0,
 };
-/// 133 x 4,267 px at scale 1.0: taller than one tile.
+/// 134 x 4,267 px at [`S100`]: taller than one tile.
 const TALL: PageSize = PageSize {
     w_pt: 100.0,
     h_pt: 3200.0,
@@ -33,10 +35,11 @@ fn whole(scale: f32) -> Render {
     }
 }
 
+/// A tile of the page at [`S100`].
 fn tile(x: u32, y: u32, w: u32, h: u32) -> Render {
     Render {
         page: 0,
-        scale: 1.0,
+        scale: S100,
         region: Some(Rect { x, y, w, h }),
         out: OUT,
     }
@@ -56,24 +59,24 @@ fn len(w: u32, h: u32) -> u64 {
 
 #[test]
 fn rendered_exact_ask_is_accepted() {
-    assert_eq!(page_pixels(&A4, 1.0), Some((794, 1123)));
-    assert_eq!(page_pixels(&A4, 2.0), Some((1587, 2245)));
+    assert_eq!(page_pixels(&A4, S100), Some((794, 1123)));
+    assert_eq!(page_pixels(&A4, 2.0 * S100), Some((1588, 2246)));
 
     assert_eq!(
-        check_rendered(&whole(1.0), &A4, len(794, 1123), &rendered(794, 1123), &L),
+        check_rendered(&whole(S100), &A4, len(794, 1123), &rendered(794, 1123), &L),
         Ok(())
     );
     assert_eq!(
-        check_rendered(&whole(2.0), &A4, len(1587, 2245), &rendered(1587, 2245), &L),
+        check_rendered(&whole(2.0 * S100), &A4, len(1588, 2246), &rendered(1588, 2246), &L),
         Ok(())
     );
     // ±1 px of rounding on either side.
     assert_eq!(
-        check_rendered(&whole(1.0), &A4, len(793, 1122), &rendered(793, 1122), &L),
+        check_rendered(&whole(S100), &A4, len(793, 1122), &rendered(793, 1122), &L),
         Ok(())
     );
     assert_eq!(
-        check_rendered(&whole(1.0), &A4, len(795, 1124), &rendered(795, 1124), &L),
+        check_rendered(&whole(S100), &A4, len(795, 1124), &rendered(795, 1124), &L),
         Ok(())
     );
     // A tile inside the page, and one that ends exactly at its corner.
@@ -117,7 +120,7 @@ fn rendered_with_another_size_is_refused() {
     );
     // A whole page answered with the sides swapped.
     assert_eq!(
-        check_rendered(&whole(1.0), &A4, len(1123, 794), &rendered(1123, 794), &L),
+        check_rendered(&whole(S100), &A4, len(1123, 794), &rendered(1123, 794), &L),
         Err(Refused::WrongSize)
     );
     // Nothing at all, for an ask of one pixel.
@@ -143,7 +146,7 @@ fn rendered_over_4096_is_refused() {
     );
     let ask = Render {
         page: 0,
-        scale: 1.0,
+        scale: S100,
         region: Some(Rect {
             x: 0,
             y: 0,
@@ -157,11 +160,11 @@ fn rendered_over_4096_is_refused() {
         Err(Refused::TooLarge)
     );
     // The ask itself is refused over the limit, whole page or tile.
-    assert_eq!(asked_size(&whole(1.0), &WIDE, &L), Err(Refused::TooLarge));
+    assert_eq!(asked_size(&whole(S100), &WIDE, &L), Err(Refused::TooLarge));
     assert_eq!(asked_size(&whole(6.0), &A4, &L), Err(Refused::TooLarge));
     assert_eq!(asked_size(&tile(0, 0, 4097, 10), &WIDE, &L), Err(Refused::TooLarge));
     assert_eq!(
-        check_rendered(&whole(1.0), &WIDE, len(4267, 133), &rendered(4267, 133), &L),
+        check_rendered(&whole(S100), &WIDE, len(4267, 134), &rendered(4267, 134), &L),
         Err(Refused::TooLarge)
     );
 }
@@ -180,7 +183,8 @@ fn rendered_len_mismatch_is_refused() {
 
 #[test]
 fn render_ask_that_cannot_be_sized_is_refused() {
-    for scale in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0, -1.0, 1e-9] {
+    // f32::MAX: the side overflows to infinity. (A tiny scale is not here: it sizes 1 px, as the engine does.)
+    for scale in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0, -1.0, f32::MAX] {
         assert_eq!(
             asked_size(&whole(scale), &A4, &L),
             Err(Refused::BadAsk),
@@ -215,6 +219,74 @@ fn render_ask_that_cannot_be_sized_is_refused() {
         check_rendered(&whole(f32::NAN), &A4, 4, &rendered(1, 1), &L),
         Err(Refused::BadAsk)
     );
+}
+
+/// The page-pixel vector, the same file in the Office engine's tests.
+const PAGE_PIXELS_VECTORS: &str = include_str!("../../tests/page_pixels_vectors.txt");
+
+/// A `0x`-prefixed f32 bit pattern from the vector.
+fn f32_from_bits(field: &str) -> f32 {
+    let hex = field.strip_prefix("0x").expect("bits start with 0x");
+    f32::from_bits(u32::from_str_radix(hex, 16).expect("bits are hex"))
+}
+
+#[test]
+fn page_pixels_follow_the_shared_vector() {
+    let mut rows = 0;
+    for line in PAGE_PIXELS_VECTORS.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields.len(), 6, "label, pt, bits, scale, bits, px: {line}");
+        let pt = f32_from_bits(fields[2]);
+        let scale = f32_from_bits(fields[4]);
+        // The decimals people read are the values the bits hold.
+        let pt_dec: f32 = fields[1].parse().expect("pt is a number");
+        let scale_dec: f32 = fields[3].parse().expect("scale is a number");
+        assert_eq!(pt_dec.to_bits(), pt.to_bits(), "pt: {line}");
+        assert_eq!(scale_dec.to_bits(), scale.to_bits(), "scale: {line}");
+        let px: u32 = fields[5].parse().expect("px is a whole number");
+        // The row's side as both sides of a square page, so each row checks the width and the height rule.
+        let square = PageSize { w_pt: pt, h_pt: pt };
+        assert_eq!(page_pixels(&square, scale), Some((px, px)), "{line}");
+        rows += 1;
+    }
+    assert_eq!(rows, 20, "every row of the vector was read");
+    // The vector's 4/3 is this file's 100 %.
+    assert_eq!(S100.to_bits(), 0x3faa_aaab);
+}
+
+#[test]
+fn page_pixels_keep_the_engines_floor_and_height_clamp() {
+    // A product that underflows to 0 in f32 still sizes 1 px, as the engine's floor of 1.
+    let tiny = PageSize {
+        w_pt: 1e-30,
+        h_pt: 1e-30,
+    };
+    assert_eq!(page_pixels(&tiny, 1e-30), Some((1, 1)));
+    // Any positive product rounds up, so a very small scale sizes 1 px instead of being refused.
+    assert_eq!(page_pixels(&A4, 1e-9), Some((1, 1)));
+    // A page taller than 1,000,000 pt is sized at that height, as the engine clamps it: 2,001 px at 0.002, not 4,001.
+    let tall = PageSize { w_pt: 10.0, h_pt: 2e6 };
+    assert_eq!(page_pixels(&tall, 0.002), Some((1, 2001)));
+    // A side of 2^32 px or more does not fit a u32: refused, never saturated.
+    assert_eq!(page_pixels(&A4, 1e7), None);
+    assert_eq!(page_pixels(&A4, f32::MAX), None);
+}
+
+#[test]
+fn render_scale_is_zoom_times_dpi_over_72() {
+    assert_eq!(
+        render_scale(1.0, 96.0).to_bits(),
+        S100.to_bits(),
+        "100 % at 96 DPI is 4/3"
+    );
+    assert_eq!(render_scale(1.5, 144.0).to_bits(), 3.0f32.to_bits(), "150 % at 144 DPI");
+    assert_eq!(render_scale(1.0, 72.0).to_bits(), 1.0f32.to_bits(), "100 % at 72 DPI");
+    // 100 % at 96 DPI sizes A4 at 794 x 1123 px.
+    assert_eq!(page_pixels(&A4, render_scale(1.0, 96.0)), Some((794, 1123)));
 }
 
 fn pages(n: u32) -> Opened {
@@ -310,49 +382,75 @@ fn sheet(name_len: usize, rows: u32, cols: u32) -> SheetInfo {
     }
 }
 
+fn named(sheets: Vec<SheetInfo>) -> OpenedSheets {
+    OpenedSheets { sheets, more: 0 }
+}
+
 #[test]
 fn sheets_exact_is_accepted() {
-    let most = OpenedSheets {
-        sheets: vec![sheet(256, MAX_SHEET_ROWS, MAX_SHEET_COLS); 256],
-    };
+    let most = named(vec![sheet(255, MAX_SHEET_ROWS, MAX_SHEET_COLS); 256]);
     assert_eq!(check_sheets(&most, &L), Ok(()));
-    assert_eq!(check_sheets(&OpenedSheets { sheets: Vec::new() }, &L), Ok(()));
-    assert_eq!(
-        check_sheets(
-            &OpenedSheets {
-                sheets: vec![sheet(0, 0, 0)]
-            },
-            &L
-        ),
-        Ok(())
-    );
+    assert_eq!(check_sheets(&named(Vec::new()), &L), Ok(()));
+    assert_eq!(check_sheets(&named(vec![sheet(0, 0, 0)]), &L), Ok(()));
+    // 255 characters of three bytes each (765 bytes): the cap counts characters, not bytes.
+    let euros = named(vec![SheetInfo {
+        name: "€".repeat(255),
+        rows: 1,
+        cols: 1,
+    }]);
+    assert_eq!(check_sheets(&euros, &L), Ok(()));
+    // The sheets named here and those counted in `more`: 256 together.
+    let split = OpenedSheets {
+        sheets: vec![sheet(6, 10, 10); 200],
+        more: 56,
+    };
+    assert_eq!(check_sheets(&split, &L), Ok(()));
+    let unnamed = OpenedSheets {
+        sheets: Vec::new(),
+        more: 256,
+    };
+    assert_eq!(check_sheets(&unnamed, &L), Ok(()));
 }
 
 #[test]
 fn sheets_over_256_are_refused() {
-    let many = OpenedSheets {
-        sheets: vec![sheet(6, 10, 10); 257],
-    };
+    let many = named(vec![sheet(6, 10, 10); 257]);
     assert_eq!(check_sheets(&many, &L), Err(Refused::TooManySheets));
 }
 
 #[test]
+fn sheets_counted_in_more_are_held_to_256() {
+    // One over, however the count is split between named sheets and `more`.
+    for (named_count, more) in [(200usize, 57u32), (0, 257), (256, 1), (1, u32::MAX)] {
+        let got = OpenedSheets {
+            sheets: vec![sheet(6, 10, 10); named_count],
+            more,
+        };
+        assert_eq!(
+            check_sheets(&got, &L),
+            Err(Refused::TooManySheets),
+            "{named_count} named, {more} more"
+        );
+    }
+}
+
+#[test]
 fn sheets_with_a_long_name_are_refused() {
-    let long = OpenedSheets {
-        sheets: vec![sheet(6, 10, 10), sheet(257, 10, 10)],
-    };
+    let long = named(vec![sheet(6, 10, 10), sheet(256, 10, 10)]);
     assert_eq!(check_sheets(&long, &L), Err(Refused::NameTooLong));
+    let euros = named(vec![SheetInfo {
+        name: "€".repeat(256),
+        rows: 1,
+        cols: 1,
+    }]);
+    assert_eq!(check_sheets(&euros, &L), Err(Refused::NameTooLong));
 }
 
 #[test]
 fn sheets_larger_than_the_format_are_refused() {
-    let rows = OpenedSheets {
-        sheets: vec![sheet(6, MAX_SHEET_ROWS + 1, 10)],
-    };
+    let rows = named(vec![sheet(6, MAX_SHEET_ROWS + 1, 10)]);
     assert_eq!(check_sheets(&rows, &L), Err(Refused::SheetTooLarge));
-    let cols = OpenedSheets {
-        sheets: vec![sheet(6, 10, MAX_SHEET_COLS + 1)],
-    };
+    let cols = named(vec![sheet(6, 10, MAX_SHEET_COLS + 1)]);
     assert_eq!(check_sheets(&cols, &L), Err(Refused::SheetTooLarge));
 }
 
@@ -556,6 +654,87 @@ fn cells_frozen_past_a_sheet_is_refused() {
     assert_eq!(check_cells(&ask(), &d, &L), Err(Refused::FrozenTooLarge));
 }
 
+fn range(row: u32, col: u32, rows: u32, cols: u32) -> CellRange {
+    CellRange { row, col, rows, cols }
+}
+
+#[test]
+fn cells_range_too_large_is_halved() {
+    // 10 rows x 4 columns: split across the rows, 5 and 5, on the same sheet.
+    let [a, b] = halve_range(&ask()).expect("40 cells halve");
+    assert_eq!(a.range, range(5, 5, 5, 4));
+    assert_eq!(b.range, range(10, 5, 5, 4));
+    assert_eq!((a.sheet, b.sheet), (1, 1));
+    // 1 row x 7 columns: across the columns, the first half the smaller.
+    let wide = Cells {
+        sheet: 0,
+        range: range(2, 0, 1, 7),
+    };
+    let [a, b] = halve_range(&wide).expect("7 cells halve");
+    assert_eq!(a.range, range(2, 0, 1, 3));
+    assert_eq!(b.range, range(2, 3, 1, 4));
+
+    // Halving again and again ends in single cells, each cell of the range exactly once: 40 cells, 39 splits.
+    let mut todo = vec![ask()];
+    let mut seen = BTreeSet::new();
+    let mut splits = 0;
+    while let Some(c) = todo.pop() {
+        match halve_range(&c) {
+            Ok([a, b]) => {
+                splits += 1;
+                todo.push(a);
+                todo.push(b);
+            }
+            Err(refused) => {
+                assert_eq!(refused, Refused::CannotHalve);
+                assert_eq!(c.range.area(), 1, "{:?}", c.range);
+                assert!(seen.insert((c.range.row, c.range.col)), "{:?} twice", c.range);
+            }
+        }
+    }
+    assert_eq!(splits, 39);
+    assert_eq!(seen.len(), 40);
+    assert!(seen.iter().all(|&(r, c)| ask().range.contains(r, c)));
+}
+
+#[test]
+fn cells_that_cannot_be_halved_are_refused() {
+    for (rows, cols) in [(1, 1), (0, 0), (0, 9), (9, 0)] {
+        let c = Cells {
+            sheet: 0,
+            range: range(3, 3, rows, cols),
+        };
+        assert_eq!(halve_range(&c), Err(Refused::CannotHalve), "{rows} x {cols}");
+    }
+    // A half past the last row a u32 can name is the app's own bad ask, never a wrap to row 0.
+    let edge = Cells {
+        sheet: 0,
+        range: range(u32::MAX - 1, 0, 4, 1),
+    };
+    assert_eq!(halve_range(&edge), Err(Refused::BadAsk));
+
+    // Why one cell never needs halving: one cell with text at the cap, its width, its height and a merge fits one
+    // frame with room to spare.
+    let one = Cells {
+        sheet: 0,
+        range: range(0, 0, 1, 1),
+    };
+    let mut d = data(vec![cell(0, 0)]);
+    d.cells[0].text = "x".repeat(MAX_CELL_TEXT_BYTES);
+    d.col_widths = vec![48.0];
+    d.row_heights = vec![15.0];
+    d.merges = vec![one.range];
+    d.frozen = Frozen {
+        rows: MAX_SHEET_ROWS,
+        cols: MAX_SHEET_COLS,
+    };
+    assert_eq!(check_cells(&one, &d, &L), Ok(()));
+    let payload = d.encode().expect("one cell fits one frame");
+    // Counts 4, the cell 14 + its text, widths 8, heights 8, merges 20, frozen 8: half a frame and 62 bytes.
+    assert_eq!(payload.len(), MAX_CELL_TEXT_BYTES + 62);
+    assert!(payload.len() < crate::frame::MAX_PAYLOAD);
+}
+
 fn entry(text_len: usize, page: u32) -> OutlineEntry {
     OutlineEntry {
         level: 1,
@@ -564,49 +743,112 @@ fn entry(text_len: usize, page: u32) -> OutlineEntry {
     }
 }
 
+/// The first page of the outline.
+const FIRST: Outline = Outline { from: 0 };
+
+/// A page with no more to come.
+fn last(entries: Vec<OutlineEntry>) -> OutlineData {
+    OutlineData { entries, next: None }
+}
+
 #[test]
 fn outline_exact_is_accepted() {
-    let o = OutlineData {
-        entries: vec![entry(0, 0), entry(MAX_OUTLINE_TEXT_BYTES, 2)],
+    let o = last(vec![entry(0, 0), entry(MAX_OUTLINE_TEXT_BYTES, 2)]);
+    assert_eq!(check_outline(&FIRST, &o, 3, &L), Ok(()));
+    let most = last(vec![entry(10, 1999); MAX_OUTLINE_ENTRIES]);
+    assert_eq!(check_outline(&FIRST, &most, 2000, &L), Ok(()));
+    assert_eq!(check_outline(&FIRST, &last(Vec::new()), 0, &L), Ok(()));
+}
+
+#[test]
+fn outline_pages_are_accepted_in_turn() {
+    // The app's loop: ask from 0, then from each `next`, until it is `None`.
+    let first = OutlineData {
+        entries: vec![entry(5, 0), entry(5, 1)],
+        next: Some(2),
     };
-    assert_eq!(check_outline(&o, 3, &L), Ok(()));
-    let most = OutlineData {
-        entries: vec![entry(10, 1999); MAX_OUTLINE_ENTRIES],
+    assert_eq!(check_outline(&FIRST, &first, 3, &L), Ok(()));
+    assert_eq!(
+        check_outline(&Outline { from: 2 }, &last(vec![entry(5, 2)]), 3, &L),
+        Ok(())
+    );
+    // The last page may end exactly at the entry limit, and the page before it may say there is one more.
+    let before = OutlineData {
+        entries: vec![entry(5, 0)],
+        next: Some(9_999),
     };
-    assert_eq!(check_outline(&most, 2000, &L), Ok(()));
-    assert_eq!(check_outline(&OutlineData { entries: Vec::new() }, 0, &L), Ok(()));
+    assert_eq!(check_outline(&Outline { from: 9_998 }, &before, 1, &L), Ok(()));
+    assert_eq!(
+        check_outline(&Outline { from: 9_999 }, &last(vec![entry(5, 0)]), 1, &L),
+        Ok(())
+    );
+    // An ask past the end is answered with nothing more.
+    assert_eq!(check_outline(&Outline { from: 40 }, &last(Vec::new()), 1, &L), Ok(()));
+}
+
+#[test]
+fn outline_page_that_does_not_advance_is_refused() {
+    let from = Outline { from: 4 };
+    // No entries, yet more to come: the app would ask from 4 again for ever.
+    let stuck = OutlineData {
+        entries: Vec::new(),
+        next: Some(4),
+    };
+    assert_eq!(check_outline(&from, &stuck, 10, &L), Err(Refused::BadNext));
+    // Two entries from 4, so the next is 6: back to the start, the same page, one short, one past.
+    for next in [0, 4, 5, 7, u32::MAX] {
+        let page = OutlineData {
+            entries: vec![entry(5, 0), entry(5, 1)],
+            next: Some(next),
+        };
+        assert_eq!(
+            check_outline(&from, &page, 10, &L),
+            Err(Refused::BadNext),
+            "next {next}"
+        );
+    }
 }
 
 #[test]
 fn outline_page_past_the_end_is_refused() {
-    let at_end = OutlineData {
-        entries: vec![entry(5, 0), entry(5, 3)],
-    };
-    assert_eq!(check_outline(&at_end, 3, &L), Err(Refused::PagePastEnd));
-    let far = OutlineData {
-        entries: vec![entry(5, u32::MAX)],
-    };
-    assert_eq!(check_outline(&far, 3, &L), Err(Refused::PagePastEnd));
-    let no_pages = OutlineData {
-        entries: vec![entry(5, 0)],
-    };
-    assert_eq!(check_outline(&no_pages, 0, &L), Err(Refused::PagePastEnd));
+    let at_end = last(vec![entry(5, 0), entry(5, 3)]);
+    assert_eq!(check_outline(&FIRST, &at_end, 3, &L), Err(Refused::PagePastEnd));
+    let far = last(vec![entry(5, u32::MAX)]);
+    assert_eq!(check_outline(&FIRST, &far, 3, &L), Err(Refused::PagePastEnd));
+    let no_pages = last(vec![entry(5, 0)]);
+    assert_eq!(check_outline(&FIRST, &no_pages, 0, &L), Err(Refused::PagePastEnd));
 }
 
 #[test]
 fn outline_with_too_many_entries_is_refused() {
-    let many = OutlineData {
-        entries: vec![entry(1, 0); MAX_OUTLINE_ENTRIES + 1],
+    let many = last(vec![entry(1, 0); MAX_OUTLINE_ENTRIES + 1]);
+    assert_eq!(check_outline(&FIRST, &many, 1, &L), Err(Refused::TooManyEntries));
+    // Over all the pages: two entries from 9,999 end past the limit, and so does any entry from u32::MAX.
+    let two = last(vec![entry(1, 0), entry(1, 0)]);
+    assert_eq!(
+        check_outline(&Outline { from: 9_999 }, &two, 1, &L),
+        Err(Refused::TooManyEntries)
+    );
+    let one = last(vec![entry(1, 0)]);
+    assert_eq!(
+        check_outline(&Outline { from: u32::MAX }, &one, 1, &L),
+        Err(Refused::TooManyEntries)
+    );
+    // A page that ends at the limit and still says there is more.
+    let more = OutlineData {
+        entries: vec![entry(1, 0)],
+        next: Some(10_000),
     };
-    assert_eq!(check_outline(&many, 1, &L), Err(Refused::TooManyEntries));
+    assert_eq!(
+        check_outline(&Outline { from: 9_999 }, &more, 1, &L),
+        Err(Refused::TooManyEntries)
+    );
 }
 
 #[test]
 fn outline_text_over_the_cap_is_refused() {
-    let long = OutlineData {
-        entries: vec![entry(4, 0), entry(MAX_OUTLINE_TEXT_BYTES + 1, 0)],
-    };
-    assert_eq!(check_outline(&long, 1, &L), Err(Refused::TextTooLong));
+    let long = last(vec![entry(4, 0), entry(MAX_OUTLINE_TEXT_BYTES + 1, 0)]);
+    assert_eq!(check_outline(&FIRST, &long, 1, &L), Err(Refused::TextTooLong));
 }
 
 #[test]
@@ -660,7 +902,7 @@ fn limits_are_the_contracts() {
     assert_eq!(MAX_OUTLINE_TEXT_BYTES, 1_024);
     assert_eq!(MAX_SHEET_ROWS, 1_048_576);
     assert_eq!(MAX_SHEET_COLS, 16_384);
-    assert_eq!(MAX_SHEET_NAME_BYTES, 256);
+    assert_eq!(MAX_SHEET_NAME_CHARS, 255);
     assert_eq!(
         Limits::CONTRACT,
         Limits {
@@ -669,7 +911,7 @@ fn limits_are_the_contracts() {
             max_sheets: 256,
             max_sheet_rows: 1_048_576,
             max_sheet_cols: 16_384,
-            max_sheet_name_bytes: 256,
+            max_sheet_name_chars: 255,
             max_cell_text_bytes: 32_768,
             max_outline_entries: 10_000,
             max_outline_text_bytes: 1_024,
@@ -699,7 +941,9 @@ fn refused_reasons_are_fixed_and_distinct() {
         Refused::BadCellSize,
         Refused::FrozenTooLarge,
         Refused::TooManyEntries,
+        Refused::BadNext,
         Refused::PagePastEnd,
+        Refused::CannotHalve,
         Refused::NotAnAnswer,
         Refused::UnsentId,
     ];

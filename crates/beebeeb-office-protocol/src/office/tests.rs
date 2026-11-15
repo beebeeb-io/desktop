@@ -1,6 +1,7 @@
 //! Round trips and refusals of every Office message.
 
 use super::*;
+use crate::frame::MAX_PAYLOAD;
 
 const GRANT: GrantRef = GrantRef {
     wire: 0x0000_0000_0000_01A4,
@@ -65,6 +66,15 @@ fn every_message() -> Vec<Message> {
                     cols: 16_384,
                 },
             ],
+            more: 0,
+        }),
+        Message::OpenedSheets(OpenedSheets {
+            sheets: vec![SheetInfo {
+                name: "Blad1".to_owned(),
+                rows: 3,
+                cols: 2,
+            }],
+            more: 255,
         }),
         Message::Render(Render {
             page: 3,
@@ -146,7 +156,8 @@ fn every_message() -> Vec<Message> {
             merges: Vec::new(),
             frozen: Frozen { rows: 0, cols: 0 },
         }),
-        Message::Outline(Outline),
+        Message::Outline(Outline { from: 0 }),
+        Message::Outline(Outline { from: 40 }),
         Message::OutlineData(OutlineData {
             entries: vec![
                 OutlineEntry {
@@ -165,6 +176,15 @@ fn every_message() -> Vec<Message> {
                     page: 41,
                 },
             ],
+            next: Some(3),
+        }),
+        Message::OutlineData(OutlineData {
+            entries: vec![OutlineEntry {
+                level: 1,
+                text: "Bijlagen".to_owned(),
+                page: 7,
+            }],
+            next: None,
         }),
         Message::Stats(Stats),
         Message::StatsData(StatsData { words: 12_345 }),
@@ -183,6 +203,9 @@ fn every_message() -> Vec<Message> {
         }),
         Message::Error(Error {
             code: ErrorCode::Internal,
+        }),
+        Message::Error(Error {
+            code: ErrorCode::RangeTooLarge,
         }),
     ]
 }
@@ -207,7 +230,7 @@ const ALL_KINDS: [u16; 13] = [
 fn office_messages_round_trip() {
     let table = every_message();
     for m in &table {
-        let payload = m.encode();
+        let payload = m.encode().expect("under one frame");
         assert_eq!(Message::decode(m.kind(), &payload).as_ref(), Ok(m), "{m:?}");
     }
 
@@ -229,13 +252,13 @@ fn office_messages_round_trip() {
         kind: DocKind::Pptx,
         doc: GRANT,
     };
-    assert_eq!(Open::decode(&open.encode()), Ok(open));
+    assert_eq!(Open::decode(&open.encode().expect("under one frame")), Ok(open));
     let got = Rendered {
         w: 3,
         h: 2,
         missing_content: true,
     };
-    assert_eq!(Rendered::decode(&got.encode()), Ok(got));
+    assert_eq!(Rendered::decode(&got.encode().expect("under one frame")), Ok(got));
 }
 
 #[test]
@@ -243,7 +266,8 @@ fn office_messages_travel_in_frames() {
     let mut stream = Vec::new();
     let table = every_message();
     for (n, m) in table.iter().enumerate() {
-        crate::frame::write_frame(&mut stream, m.kind(), n as u32 * 2, &m.encode()).expect("under the cap");
+        let payload = m.encode().expect("under one frame");
+        crate::frame::write_frame(&mut stream, m.kind(), n as u32 * 2, &payload).expect("under the cap");
     }
     let mut r = std::io::Cursor::new(stream);
     for (n, m) in table.iter().enumerate() {
@@ -254,10 +278,79 @@ fn office_messages_travel_in_frames() {
     assert_eq!(crate::frame::read_frame(&mut r), Err(crate::frame::FrameError::Closed));
 }
 
+/// `make(pad)` is a message whose payload grows by one byte per unit of `pad`. At the pad that makes it exactly one
+/// frame it encodes, decodes and is written; one byte more is refused by `encode`.
+fn at_the_limit_and_one_byte_over(name: &str, make: impl Fn(usize) -> Message) {
+    let base = make(0).encode().expect("an empty pad fits").len();
+    let pad = MAX_PAYLOAD - base;
+    let at = make(pad);
+    let payload = at.encode().expect("exactly one frame is encoded");
+    assert_eq!(payload.len(), MAX_PAYLOAD, "{name}");
+    assert_eq!(Message::decode(at.kind(), &payload).as_ref(), Ok(&at), "{name}");
+    let mut stream = Vec::new();
+    crate::frame::write_frame(&mut stream, at.kind(), 2, &payload).expect("a payload of one frame is written");
+    assert_eq!(make(pad + 1).encode(), Err(EncodeError::OverFrame), "{name}");
+}
+
+#[test]
+fn office_encode_refuses_a_message_over_one_frame() {
+    // Each answer that can grow, padded by the text of one item.
+    at_the_limit_and_one_byte_over("sheets", |pad| {
+        Message::OpenedSheets(OpenedSheets {
+            sheets: vec![SheetInfo {
+                name: "s".repeat(pad),
+                rows: 1,
+                cols: 1,
+            }],
+            more: 0,
+        })
+    });
+    at_the_limit_and_one_byte_over("cells", |pad| {
+        Message::CellData(CellData {
+            cells: vec![CellText {
+                row: 0,
+                col: 0,
+                text: "x".repeat(pad),
+                align: Align::Left,
+                bold: false,
+            }],
+            col_widths: vec![48.0],
+            row_heights: vec![15.0],
+            merges: Vec::new(),
+            frozen: Frozen { rows: 0, cols: 0 },
+        })
+    });
+    at_the_limit_and_one_byte_over("outline", |pad| {
+        Message::OutlineData(OutlineData {
+            entries: vec![OutlineEntry {
+                level: 1,
+                text: "h".repeat(pad),
+                page: 0,
+            }],
+            next: Some(1),
+        })
+    });
+
+    // Page sizes take 8 bytes each: the two counts and 8,191 sizes are exactly one frame, 8,192 sizes are not.
+    let sizes = |n: usize| Opened {
+        pages: n as u32,
+        sizes: vec![
+            PageSize {
+                w_pt: 595.3,
+                h_pt: 841.9,
+            };
+            n
+        ],
+    };
+    assert_eq!(sizes(8_191).encode().map(|p| p.len()), Ok(MAX_PAYLOAD));
+    assert_eq!(sizes(8_192).encode(), Err(EncodeError::OverFrame));
+    assert_eq!(Message::Opened(sizes(8_192)).encode(), Err(EncodeError::OverFrame));
+}
+
 #[test]
 fn office_decode_refuses_truncated_payloads() {
     for m in every_message() {
-        let payload = m.encode();
+        let payload = m.encode().expect("under one frame");
         for cut in 0..payload.len() {
             let got = Message::decode(m.kind(), &payload[..cut]);
             assert!(
@@ -271,7 +364,7 @@ fn office_decode_refuses_truncated_payloads() {
 #[test]
 fn office_decode_refuses_trailing_bytes() {
     for m in every_message() {
-        let mut payload = m.encode();
+        let mut payload = m.encode().expect("under one frame");
         payload.push(0);
         assert_eq!(
             Message::decode(m.kind(), &payload),
@@ -371,7 +464,7 @@ fn office_decode_refuses_a_declared_length_past_the_end() {
 
 #[test]
 fn office_error_code_off_the_list_is_refused() {
-    for code in [0u16, 6, 7, 0x00FF, 0x0100, u16::MAX] {
+    for code in [0u16, 7, 8, 0x00FF, 0x0100, u16::MAX] {
         assert_eq!(
             Error::decode(&code.to_le_bytes()),
             Err(DecodeError::BadCode),
@@ -389,6 +482,7 @@ fn office_error_code_off_the_list_is_refused() {
         (3, ErrorCode::Unsupported),
         (4, ErrorCode::Password),
         (5, ErrorCode::Internal),
+        (6, ErrorCode::RangeTooLarge),
     ] {
         assert_eq!(Error::decode(&code.to_le_bytes()), Ok(Error { code: want }));
     }
@@ -423,7 +517,8 @@ fn office_decode_refuses_numbers_that_are_not_finite() {
             pages: 1,
             sizes: vec![PageSize { w_pt: bad, h_pt: 842.0 }],
         };
-        assert_eq!(Opened::decode(&opened.encode()), Err(DecodeError::NotFinite));
+        let payload = opened.encode().expect("under one frame");
+        assert_eq!(Opened::decode(&payload), Err(DecodeError::NotFinite));
 
         let render = Render {
             page: 0,
@@ -431,7 +526,8 @@ fn office_decode_refuses_numbers_that_are_not_finite() {
             region: None,
             out: GRANT,
         };
-        assert_eq!(Render::decode(&render.encode()), Err(DecodeError::NotFinite));
+        let payload = render.encode().expect("under one frame");
+        assert_eq!(Render::decode(&payload), Err(DecodeError::NotFinite));
 
         let cells = CellData {
             cells: Vec::new(),
@@ -440,7 +536,8 @@ fn office_decode_refuses_numbers_that_are_not_finite() {
             merges: Vec::new(),
             frozen: Frozen { rows: 0, cols: 0 },
         };
-        assert_eq!(CellData::decode(&cells.encode()), Err(DecodeError::NotFinite));
+        let payload = cells.encode().expect("under one frame");
+        assert_eq!(CellData::decode(&payload), Err(DecodeError::NotFinite));
     }
 }
 
@@ -459,6 +556,12 @@ fn office_decode_refuses_tags_off_their_list() {
     p.push(2);
     p.extend_from_slice(&[0; 16]);
     assert_eq!(Render::decode(&p), Err(DecodeError::BadTag));
+
+    // The `next` flag of an outline page.
+    let mut p = le32(0).to_vec();
+    p.push(2);
+    p.extend_from_slice(&le32(0));
+    assert_eq!(OutlineData::decode(&p), Err(DecodeError::BadTag));
 
     // A bool that is neither 0 nor 1.
     let mut p = le32(10).to_vec();
@@ -507,6 +610,7 @@ fn office_debug_shows_no_document_text() {
             rows: 1,
             cols: 1,
         }],
+        more: 0,
     };
     let cells = CellData {
         cells: vec![CellText {
@@ -527,6 +631,7 @@ fn office_debug_shows_no_document_text() {
             text: "Overname".to_owned(),
             page: 0,
         }],
+        next: None,
     };
     let shown = format!("{sheets:?} {cells:?} {outline:?}");
     for secret in ["Salarissen", "geheim", "Overname"] {
