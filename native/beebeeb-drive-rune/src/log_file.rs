@@ -60,8 +60,13 @@ pub struct AppLog {
 impl AppLog {
     /// Opens (appending to) the current log file in `dir`, creating `dir`. `None` when that is not possible.
     pub fn open(dir: &Path, max_bytes: u64) -> Option<Self> {
+        Self::open_with(dir, max_bytes, FileOps::REAL)
+    }
+
+    /// [`open`](Self::open) with the two file operations a rotation uses (a test seam: see [`FileOps`]).
+    fn open_with(dir: &Path, max_bytes: u64, ops: FileOps) -> Option<Self> {
         fs::create_dir_all(dir).ok()?;
-        let sink = Sink::open(dir.to_path_buf(), max_bytes)?;
+        let sink = Sink::open(dir.to_path_buf(), max_bytes, ops)?;
         Some(Self {
             sink: Mutex::new(sink),
             next_span: AtomicU64::new(1),
@@ -179,19 +184,36 @@ impl Visit for Fields {
     }
 }
 
+/// The two operations a rotation needs. Real ones in the app; a test swaps in ones that fail, to stand for a log file
+/// another program holds open (on Windows, a handle without delete sharing refuses both).
+#[derive(Clone, Copy)]
+struct FileOps {
+    rename: fn(&Path, &Path) -> std::io::Result<()>,
+    remove: fn(&Path) -> std::io::Result<()>,
+}
+
+impl FileOps {
+    const REAL: Self = Self {
+        rename: |from, to| fs::rename(from, to),
+        remove: |path| fs::remove_file(path),
+    };
+}
+
 /// The current file and the one rotation.
 struct Sink {
     dir: PathBuf,
     max_bytes: u64,
+    ops: FileOps,
     file: Option<File>,
     size: u64,
 }
 
 impl Sink {
-    fn open(dir: PathBuf, max_bytes: u64) -> Option<Self> {
+    fn open(dir: PathBuf, max_bytes: u64, ops: FileOps) -> Option<Self> {
         let mut sink = Self {
             dir,
             max_bytes,
+            ops,
             file: None,
             size: 0,
         };
@@ -215,6 +237,11 @@ impl Sink {
         let len = line.len() as u64;
         if self.size > 0 && self.size + len > self.max_bytes {
             self.rotate();
+            // The rotation could neither move nor delete the file (another program holds it): the file is still
+            // over the cap. The line is dropped, and the next line tries the rotation again, so the cap holds.
+            if self.size > 0 && self.size + len > self.max_bytes {
+                return;
+            }
         }
         if self.file.is_none() && self.start_file().is_none() {
             return;
@@ -234,10 +261,11 @@ impl Sink {
         self.file = None;
         let current = self.dir.join(FILE_NAME);
         let old = self.dir.join(OLD_FILE_NAME);
-        let _ = fs::remove_file(&old);
-        if fs::rename(&current, &old).is_err() {
-            // Could not move it aside (a held handle on Windows): start the cap over rather than grow without end.
-            let _ = fs::remove_file(&current);
+        let _ = (self.ops.remove)(&old);
+        if (self.ops.rename)(&current, &old).is_err() {
+            // Could not move it aside (a held handle on Windows): try to delete it. If that fails too, the file keeps
+            // its size, `start_file` reads it, and `write_line` drops lines until a rotation works.
+            let _ = (self.ops.remove)(&current);
         }
         self.size = 0;
         let _ = self.start_file();

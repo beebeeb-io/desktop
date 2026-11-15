@@ -12,9 +12,17 @@
 //!    12 plain lowercase words (the shape of a recovery phrase) is replaced by a marker. A value that looks like a
 //!    server body (JSON or HTML) is replaced whole. Control characters are blanked, so one event is one line.
 //!
+//! Also by shape of the sentence: text between “…”, ‘…’, «…» or backticks is one name (`<name>`: the engine quotes the
+//! names it prints); behind `HTTP <status> <reason>: ` the rest is `<body omitted>` (an error text keeps the first 300
+//! characters of a server's answer); `custom:<name>` is a backup folder the person picked; `on <host>` of the
+//! lock-held sentence is `on <host>`; after an absolute path (also after a redacted label or `key=`) the rest of the
+//! text is dropped, because a name can hold spaces.
+//!
 //! Over-redaction is the accepted failure: a harmless word that looks like a path becomes `<path>`. A name that has
-//! no shape (a folder called "Holiday" inside a free-text message) cannot be found by shape; no engine call formats
-//! one into its message (audited in the PR that added this file), and a new one is a review finding.
+//! no shape and no quotes (a folder called "Holiday" in free text) cannot be found. The audit of the engine's calls
+//! (PR #442) found three such texts and closed them: the refused sync folder's sentence (quoted, so `<name>`), a relative
+//! `sync_root` (the call no longer prints it) and the lock-held host. Of the 414 calls, 6 format a value into the
+//! message text. A new call that prints a name outside quotes is a review finding.
 
 /// Words of a field name (split on `_` and `.`) that make the whole field unwritable.
 const DENIED_WORDS: &[&str] = &[
@@ -156,6 +164,9 @@ const DENIED_PARTS: &[&str] = &[
 const KNOWN_NAMES: &[&str] = &["beebeeb-sync.lock", "desktop.toml", "state.db"];
 
 pub const REDACTED: &str = "<redacted>";
+/// Stand-ins for a quoted name and a host while the text is split into words (`<` and `>` are separators there).
+const NAME_MARK: char = '\u{E000}';
+const HOST_MARK: char = '\u{E001}';
 const VALUE_MAX: usize = 240;
 const MESSAGE_MAX: usize = 400;
 
@@ -242,9 +253,21 @@ pub fn scrub(raw: &str) -> String {
 }
 
 fn scrub_with(raw: &str, allow_uuid: bool) -> String {
+    // `HTTP 502 Bad Gateway: <the first 300 characters of the answer>`: the status stays, the answer never does.
+    if let Some((before, status)) = http_status_prefix(raw) {
+        let head = scrub_with(before, allow_uuid);
+        return if head.is_empty() {
+            format!("{status}: <body omitted>")
+        } else {
+            format!("{head} {status}: <body omitted>")
+        };
+    }
     if looks_like_body(raw) {
         return "<body omitted>".to_string();
     }
+    let marked = mark_host(raw);
+    let raw = mark_quoted(&marked);
+    let raw = raw.as_str();
     // Quotes, commas and brackets are word separators (a Debug value has them between every word); control characters
     // too, so one event is one line.
     let blanked: String = raw
@@ -271,6 +294,20 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
         }
         let token = tokens[i];
         i += 1;
+        if token == NAME_MARK.to_string() {
+            out.push(if redact_next { REDACTED } else { "<name>" }.to_string());
+            redact_next = false;
+            continue;
+        }
+        if token == HOST_MARK.to_string() {
+            out.push("<host>".to_string());
+            continue;
+        }
+        // `custom:<name>`: a backup folder the person picked; its name can hold spaces, so the rest goes too.
+        if token.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("custom:")) {
+            out.push("custom:<name>".to_string());
+            break;
+        }
         if redact_next {
             // `Authorization: Bearer x`: the scheme word is shown, the credential after it is not.
             if ALWAYS_LABELS.contains(&token.to_ascii_lowercase().as_str()) {
@@ -278,6 +315,10 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
             } else {
                 redact_next = false;
                 out.push(REDACTED.to_string());
+                // A redacted value that starts a path: its name can hold spaces, nothing after it is trusted.
+                if absolute_start(token) {
+                    break;
+                }
             }
             continue;
         }
@@ -292,13 +333,89 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
         }
         let shown = scrub_token(token, allow_uuid);
         // A path that starts at a root can hold spaces (`C:\Users\Anna Smith\x`): nothing after it is trusted.
-        if shown == "<path>" && absolute_start(token) {
+        let value_starts_a_path = token.split_once('=').is_some_and(|(_, value)| absolute_start(value));
+        if (shown == "<path>" && absolute_start(token)) || value_starts_a_path {
             out.push(shown);
             break;
         }
         out.push(shown);
     }
     out.join(" ")
+}
+
+/// Splits `raw` at `HTTP <3 digits><reason>: ` (the shape of `DesktopApiError::HttpStatus`, whose text ends in the first
+/// 300 characters of the server's answer): the text before it, and the status with its reason phrase. `None` when
+/// there is no such prefix or nothing follows it.
+fn http_status_prefix(raw: &str) -> Option<(&str, String)> {
+    for (at, _) in raw.match_indices("HTTP ") {
+        let rest = &raw[at + 5..];
+        let digits = rest.get(..3)?;
+        if !digits.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Some(colon) = rest.find(": ") else { continue };
+        let reason = rest[3..colon].trim();
+        let plain = reason.len() <= 40
+            && reason
+                .bytes()
+                .all(|b| b.is_ascii_alphabetic() || b == b' ' || b == b'-');
+        if colon < 3 || !plain || rest[colon + 2..].trim().is_empty() {
+            continue;
+        }
+        let status = if reason.is_empty() {
+            format!("HTTP {digits}")
+        } else {
+            format!("HTTP {digits} {reason}")
+        };
+        return Some((raw[..at].trim(), status));
+    }
+    None
+}
+
+/// The host of the lock-held sentence (`... (pid 12 on Annas-PC, since ...)`): often a person's first name.
+fn mark_host(raw: &str) -> String {
+    if let Some(pid) = raw.find("(pid ")
+        && let Some(on) = raw[pid..].find(" on ")
+        && let Some(since) = raw[pid + on..].find(", since")
+    {
+        let from = pid + on + 4;
+        return format!("{} {HOST_MARK} {}", &raw[..from], &raw[pid + on + since..]);
+    }
+    raw.to_string()
+}
+
+/// Text between “…”, ‘…’, «…» or backticks is a name (the engine quotes the names it prints): it becomes one mark. An
+/// opening quote with no closing one marks the rest of the text.
+fn mark_quoted(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut closing: Option<char> = None;
+    for c in raw.chars() {
+        match closing {
+            Some(close) => {
+                if c == close {
+                    closing = None;
+                }
+            }
+            None => {
+                let close = match c {
+                    '\u{201c}' => Some('\u{201d}'),
+                    '\u{2018}' => Some('\u{2019}'),
+                    '\u{ab}' => Some('\u{bb}'),
+                    '`' => Some('`'),
+                    _ => None,
+                };
+                if let Some(close) = close {
+                    closing = Some(close);
+                    out.push(' ');
+                    out.push(NAME_MARK);
+                    out.push(' ');
+                } else {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn absolute_start(token: &str) -> bool {
@@ -397,7 +514,7 @@ fn is_uuid(s: &str) -> bool {
 fn is_file_name(core: &str) -> bool {
     let Some(dot) = core.rfind('.') else { return false };
     let (stem, ext) = (&core[..dot], &core[dot + 1..]);
-    if stem.is_empty() || ext.is_empty() || ext.len() > 5 {
+    if stem.is_empty() || ext.is_empty() || ext.len() > 8 {
         return false;
     }
     if KNOWN_NAMES.contains(&core.trim_start_matches('.')) {

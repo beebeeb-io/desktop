@@ -347,3 +347,210 @@ fn pass_is_a_credential_word_in_a_field_name_and_as_a_label() {
         assert!(!text.contains(secret), "{secret} reached the file: {text}");
     }
 }
+
+// ---- Delta round (review of #442): quoted names, HTTP bodies, a held file, `custom:`, cut-offs, the lock host ----
+
+/// Feeds `message` through the file log as a message and as a field value; the file must never hold `secret`.
+fn assert_never_written(what: &str, secret: &str, message: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let text = logged(dir.path(), MAX_FILE_BYTES, || {
+        tracing::warn!(error = %message, "{message}");
+    });
+    assert!(!text.contains(secret), "{what}: `{secret}` reached the file: {text}");
+    text
+}
+
+#[test]
+fn a_quoted_name_is_one_name_and_never_reaches_the_file() {
+    // Both sentences of `sync_root_owner::refusal`, as `runner.rs:194` logs them.
+    assert_never_written(
+        "sync folder owned by another provider",
+        "Medical",
+        "The folder \u{201c}Medical Records\u{201d} is already the sync folder of OneDrive. Choose another folder.",
+    );
+    let text = assert_never_written(
+        "registration unreadable",
+        "Medical",
+        "Windows could not say whose sync folder \u{201c}Medical Records\u{201d} is.",
+    );
+    assert!(
+        text.contains("<name>") && text.contains("sync folder"),
+        "the sentence stays readable: {text}"
+    );
+    // A quoted path with spaces (the closing quote used to hide where it ended), and the other quote styles.
+    assert_never_written(
+        "quoted path",
+        "Rome",
+        "could not read \u{201c}C:\\Users\\a\\Beebeeb\\Medical Records 2026 Rome\\x\u{201d} now",
+    );
+    assert_never_written(
+        "single quotes",
+        "Holiday",
+        "the folder \u{2018}Holiday Photos\u{2019} is busy",
+    );
+    assert_never_written("guillemets", "Holiday", "the folder \u{ab}Holiday Photos\u{bb} is busy");
+    assert_never_written("backticks", "Holiday", "the folder `Holiday Photos` is busy");
+    assert_never_written("unclosed quote", "Holiday", "the folder \u{201c}Holiday Photos is busy");
+    // An apostrophe is not an opening quote.
+    let text = assert_never_written(
+        "macOS prose",
+        "Holiday",
+        "The file \u{201c}Holiday.pdf\u{201d} couldn\u{2019}t be opened. NSCocoaErrorDomain 260",
+    );
+    assert!(
+        text.contains("couldn\u{2019}t be opened") || text.contains("couldn"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_http_status_keeps_its_prefix_and_never_its_body() {
+    let html = "HTTP 502 Bad Gateway: <html><head><title>502 Bad Gateway</title></head><body><center>nginx for acme-secret-host</center>";
+    let plain =
+        "HTTP 503 Service Unavailable: upstream connect error or disconnect/reset before headers for acme-secret-host";
+    for (what, text) in [("html", html), ("plain text", plain)] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = logged(dir.path(), MAX_FILE_BYTES, || {
+            tracing::warn!(error = %text, "sync_tick: /sync/ops failed; retrying next tick");
+            tracing::warn!("{text}");
+        });
+        assert!(
+            !file.contains("acme-secret-host") && !file.contains("upstream") && !file.contains("nginx"),
+            "{what}: {file}"
+        );
+        assert!(file.contains("<body omitted>"), "{what}: {file}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = logged(dir.path(), MAX_FILE_BYTES, || tracing::warn!(error = %plain, "failed"));
+    assert!(
+        file.contains("error=HTTP 503 Service Unavailable: <body omitted>"),
+        "the status and its reason stay: {file}"
+    );
+    // A bare status, or "HTTP" in prose, is not a prefix.
+    assert_eq!(redact::scrub("HTTP 404"), "HTTP 404");
+    assert_eq!(redact::scrub("the HTTP client was built"), "the HTTP client was built");
+}
+
+fn refuse(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("held by another program"))
+}
+fn refuse_one(_: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("held by another program"))
+}
+
+#[test]
+fn the_cap_holds_when_the_file_can_be_neither_renamed_nor_deleted() {
+    // A seam stands for a log file another program holds open without delete sharing (on Windows both refuse); a real
+    // share-mode hold is not possible on the Linux build VM, so this is the seam, not the OS.
+    let dir = tempfile::tempdir().unwrap();
+    let cap = 4 * 1024;
+    let ops = super::FileOps {
+        rename: refuse,
+        remove: refuse_one,
+    };
+    let log = AppLog::open_with(dir.path(), cap, ops).unwrap();
+    tracing::subscriber::with_default(log, || {
+        for i in 0..600_u64 {
+            tracing::warn!(
+                n = i,
+                "a line of the held-file test, long enough to pass the cap in a few dozen events"
+            );
+        }
+    });
+    let text = fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
+    assert!(
+        text.len() as u64 <= cap,
+        "the file passed its cap: {} bytes",
+        text.len()
+    );
+    assert!(
+        text.contains("n=0 ") && !text.contains("n=599"),
+        "lines are dropped, not the file grown: {} lines",
+        text.lines().count()
+    );
+    assert!(!dir.path().join(OLD_FILE_NAME).exists());
+}
+
+#[test]
+fn a_rotation_that_works_again_resumes_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let cap = 4 * 1024;
+    {
+        let ops = super::FileOps {
+            rename: refuse,
+            remove: refuse_one,
+        };
+        let log = AppLog::open_with(dir.path(), cap, ops).unwrap();
+        tracing::subscriber::with_default(log, || {
+            for i in 0..300_u64 {
+                tracing::warn!(
+                    n = i,
+                    "a line of the held-file test, long enough to pass the cap in a few dozen events"
+                );
+            }
+        });
+    }
+    // The next run (the hold is gone): the full file rotates and the new line is kept.
+    let text = logged(dir.path(), cap, || tracing::warn!("after the hold"));
+    assert!(text.contains("after the hold"), "{text}");
+    assert!(dir.path().join(OLD_FILE_NAME).exists());
+}
+
+#[test]
+fn a_custom_backup_folder_key_never_prints_its_name() {
+    for key in [
+        "custom:Medical Records",
+        "custom:Holiday",
+        "Custom:Medical Records 2026",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let text = logged(dir.path(), MAX_FILE_BYTES, || {
+            tracing::info!(category = %key, "backup: pass done");
+        });
+        assert!(
+            !text.contains("Medical") && !text.contains("Holiday") && !text.contains("Records"),
+            "{key}: {text}"
+        );
+        assert!(text.contains("custom:<name>"), "{key}: {text}");
+    }
+}
+
+#[test]
+fn the_path_cut_off_also_holds_after_a_redacted_label_or_key() {
+    assert_never_written(
+        "label then path",
+        "Rome",
+        "path has no file name: C:\\Users\\a\\Beebeeb\\Medical Records 2026 Rome\\x",
+    );
+    assert_never_written(
+        "key= then path",
+        "Rome",
+        "failed error=C:\\Users\\a\\Beebeeb\\Medical Records 2026 Rome\\x",
+    );
+    assert_never_written(
+        "key= then unix path",
+        "Rome",
+        "failed error=/home/a/Medical Records 2026 Rome/x",
+    );
+}
+
+#[test]
+fn a_file_name_with_a_long_extension_is_a_name() {
+    for name in ["Budget.numbers", "cache.sqlite3", "README.markdown", "Notes.mdownwrk"] {
+        let text = redact::scrub(&format!("could not read {name} today"));
+        assert!(!text.contains(name.split('.').next().unwrap()), "{name}: {text}");
+    }
+}
+
+#[test]
+fn the_host_of_the_lock_held_sentence_is_replaced() {
+    let text = assert_never_written(
+        "lock host",
+        "Annas",
+        "another Beebeeb agent is already syncing this folder: beebeeb-desktop (pid 4242 on Annas-PC, since 2026-11-15T07:00:00+00:00)",
+    );
+    assert!(
+        text.contains("<host>") && text.contains("pid 4242") && text.contains("since"),
+        "{text}"
+    );
+}
