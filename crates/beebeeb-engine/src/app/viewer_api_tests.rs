@@ -16,7 +16,10 @@ use crate::host::ChannelHost;
 use crate::identity::REAL;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
-use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+use crate::state_db::{
+    AcceptOutcome, ClaimOutcome, FileEntry, FileStatus, FinderAccept, FinderAcceptKind, ItemKind, LandingInput,
+    PendingOperation, StateDb, StateDbError,
+};
 use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use crate::test_api::{FakeApi, Handler, Reply, Request};
 
@@ -534,6 +537,93 @@ fn a_copy_of_a_version_older_than_the_one_beebeeb_has_now_is_not_read() {
     // Which version the copy is, is not known (no agreed content, nothing fetched): not provably Beebeeb's.
     db.mark_content_unknown(NOTE).unwrap();
     assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)));
+}
+
+/// Review of desktop#432 (P1-2), the viewer's own save: it lands as the version it became, but nothing writes its
+/// bytes into the account's folder on this computer. A write-keyed landing records no agreed content
+/// (`EngineBridge` upload: "A Finder write's copy is not read again"), and the Windows finalization is a create's
+/// only. The copy there is still the version before the save, so it is never read as the new one.
+#[test]
+fn after_the_viewers_own_save_landed_the_older_copy_here_is_not_read_as_it() {
+    let fake = fake("own-landed");
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let (_dir, _root, db) = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    set_current_version(&db, NOTE, 4);
+    db.record_local_baseline(NOTE, 4, "invented-agreed-hash").unwrap();
+    assert_eq!(
+        opened(local(&engine, NOTE, NO_LIMIT)).copy,
+        OnThisPc::InSync,
+        "the control"
+    );
+    // The viewer's save, as `save_text_for` queues it: a write-keyed modify from 4, claimed, landed as 5, with no
+    // hash of what was sent (as the upload passes for a write-keyed op).
+    db.track_staged_payload("/staged/viewer", None, false).unwrap();
+    let accepted = db
+        .accept_finder_write(
+            &FinderAccept {
+                retire_parked: None,
+                op_id: "viewer-op",
+                file_id: NOTE,
+                kind: FinderAcceptKind::Modify {
+                    incoming_base: Some("4"),
+                },
+                parent_id: None,
+                target_path: Some("Invented folder/Deeper/Invented note.txt"),
+                metadata_json: "{}",
+                payload_path: "/staged/viewer",
+                size_bytes: 3,
+                modified_at: 20,
+                backup_source_key: None,
+                now: 20,
+            },
+            &|_, _| Vec::new(),
+        )
+        .unwrap();
+    assert!(matches!(accepted, AcceptOutcome::Queued { .. }), "the save is queued");
+    let ClaimOutcome::Claimed(claimed) = db.claim_operation("viewer-op", 21).unwrap() else {
+        panic!("the save is claimed")
+    };
+    let write_id = claimed.write.as_ref().map(|write| write.write_id.clone());
+    assert!(write_id.is_some(), "a write-keyed save");
+    let input = LandingInput {
+        op_id: "viewer-op",
+        claim_id: Some(&claimed.claim_id),
+        write_id: write_id.as_deref(),
+        local_file_id: NOTE,
+        server_file_id: NOTE,
+        target_path: Some("Invented folder/Deeper/Invented note.txt"),
+        parent_id: None,
+        landed_base: Some(4),
+        produced_version: 5,
+        produced_object_version_id: "object-5",
+        size_bytes: 3_500,
+        content_type: None,
+        mime_type: None,
+        completed_payload: Some("/staged/viewer"),
+        completed_payload_hash: None,
+        finalization: None,
+        now: 22,
+    };
+    let rekey = |op: &PendingOperation, _: &str| -> std::result::Result<Option<String>, StateDbError> {
+        Ok(op.metadata_json.clone())
+    };
+    assert!(db.apply_landing(&input, &rekey).unwrap().is_some(), "it lands");
+    db.set_status(NOTE, FileStatus::Local).unwrap();
+    let contract = db.get_file_contract_state(NOTE).unwrap().unwrap();
+    assert_eq!(
+        (
+            contract.current_version,
+            contract.local_base_version,
+            contract.local_hash.as_deref()
+        ),
+        (5, 5, None),
+        "the landing names 5 and records no agreed content"
+    );
+    assert!(
+        matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)),
+        "the bytes here are version 4's: not read as 5"
+    );
 }
 
 /// A file that never landed in Beebeeb (version 0, a new file on this PC) has no newer version to be behind.

@@ -264,6 +264,10 @@ impl<C: CredentialStores> Engine<C> {
             op_id,
             token: write_token,
         };
+        // Remembered before the wait (review of desktop#432): a landing at any moment from here on is told apart as
+        // this viewer's own by its read of the version (`EditFacts::own_landed`), also one between the last look
+        // below and the Queued answer.
+        remember_queued(file_id, queued.clone());
         // Wait, bounded, for the upload to land: the op leaves the queue, and the version it became is the one the
         // landing recorded for this save's write (never a version read off the row, which may be another device's).
         let deadline = Instant::now() + LAND_WAIT;
@@ -277,7 +281,6 @@ impl<C: CredentialStores> Engine<C> {
                 Ok(_) => std::thread::sleep(LAND_POLL),
             }
         }
-        remember_queued(file_id, queued);
         Ok(SaveEnd::Queued)
     }
 
