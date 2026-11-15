@@ -463,7 +463,7 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
                     .map(|row| BackupChoice {
                         key: row.key.to_string(),
                         name: row.name.to_string(),
-                        on: row.on || BACKUP_DEFAULT_ON.contains(&row.key),
+                        on: row.on || BACKUP_DEFAULT_ON.contains(&row.key.as_str()),
                         items: row.items,
                     })
                     .collect()
