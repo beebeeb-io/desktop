@@ -21,6 +21,8 @@ fn bridge_in(dir: &Path) -> EngineBridge {
     EngineBridge::new(&crate::identity::REAL, db, api)
 }
 
+/// The name as a server row carries it, sealed as `tests/sync.rs`'s `enc_name` seals it (a fixture, never a write).
+#[allow(deprecated)]
 fn sealed_name(file_id: &str, name: &str) -> String {
     let master = beebeeb_core::kdf::MasterKey::from_bytes(MASTER_KEY);
     beebeeb_core::encrypt::encrypt_name(&master, file_id, name, None).unwrap()
@@ -419,10 +421,10 @@ fn keep_there_replaces_an_edited_file_with_an_agreed_hash() {
 /// every hydrate that is not the person's resolution (the queue). Keep there's relief stops at agreed content: an
 /// edited file whose content is known only from fetches (no agreed content recorded) still refuses under Keep there.
 /// Unknown content under Keep there itself is not refused, today as before (S6, task 2191: the person's to resolve, its
-/// copy kept first); the spec's "refuses unknown content" is read as these two cases (see the lane's notes).
+/// copy kept first), so the test covers these two cases (lead ruling 2026-11-15: renamed from the spec's name).
 /// Mutant M3b (the `has_agreed_content` condition dropped): red.
 #[test]
-fn keep_there_still_refuses_unknown_content() {
+fn keep_there_relief_stops_at_agreed_content() {
     let dir = tempfile::tempdir().unwrap();
     let sync_root = dir.path().join("Beebeeb");
     std::fs::create_dir_all(&sync_root).unwrap();
@@ -554,4 +556,165 @@ async fn keep_there_without_a_kept_copy_still_refuses_an_edited_file() {
     assert!(refused_as_unsent(&result), "refused before the hydrate: {result:?}");
     assert_eq!(status, FileStatus::Conflict);
     assert_eq!(std::fs::read(&place).unwrap(), b"edited on this PC");
+}
+
+/// A row in conflict whose agreed content (`agreed`, at version 1) is recorded, as the hydrate's guard reads it. The
+/// name is the place's: the row is written directly, never decrypted.
+fn put_conflict_row(bridge: &EngineBridge, file_id: &str, name: &str, agreed: &[u8]) {
+    let entry = FileEntry {
+        file_id: file_id.to_string(),
+        path: name.to_string(),
+        status: FileStatus::Conflict,
+        size_bytes: agreed.len() as i64,
+        modified_at: SEEDED_AT,
+        content_hash: None,
+        remote_updated_at: SEEDED_AT,
+        parent_id: None,
+        item_kind: ItemKind::File,
+    };
+    bridge
+        .db()
+        .upsert_file_with_contract(&entry, |contract| contract.item_kind = ItemKind::File)
+        .unwrap();
+    bridge
+        .db()
+        .record_local_baseline(file_id, 1, &sha256_hex(agreed))
+        .unwrap();
+}
+
+/// The agreed content at the place when Keep there looks, and a save of the same length made during its download.
+const AGREED_AT_THE_LOOK: &[u8] = b"the agreed content.";
+const SAVED_DURING_IT: &[u8] = b"saved during it!!!!";
+
+/// Lead ruling on L409 (2026-11-15): the relief lets the pre-write hash check pass for an edit against agreed content on
+/// Keep there's path, so a save made DURING the download, over a file that was agreed at the look, is caught only by
+/// the start-look compare (S6 R8). It must still be refused, and the save kept. Driven on the native Keep there's entry
+/// (`resolve_theirs_seen`) against the fake account, which serves the file's real chunks, so the download completes
+/// and the hydrate reaches its checks before the write. Two saves: in place (the same file; its times move, 20 ms after
+/// the write, as `tests/start_look_s6.rs` saves), and another file renamed over the place (another inode). Mutant M8
+/// (the start-look compare in `hydrate_from`'s `place_unchanged` always `true`): red, the save is replaced.
+#[tokio::test]
+async fn keep_there_refuses_a_save_made_during_the_download() {
+    assert_eq!(
+        AGREED_AT_THE_LOOK.len(),
+        SAVED_DURING_IT.len(),
+        "a save of the same size"
+    );
+    let (account, _phrase) = crate::test_api::fake_account::FakeAccount::register(
+        "restore-elsewhere@example.eu",
+        "an invented password",
+        crate::test_api::fake_account::TEST_PHRASE,
+    );
+    let account = Arc::new(account);
+    let fake = crate::test_api::fake_account::start_fake(account.clone());
+    for (n, inode_change) in [(1u8, false), (2, true)] {
+        let file = format!("25380000-0000-4000-8000-00000000002{n}");
+        account.add_file_with_content(&file, None, "report.docx", b"the server's version");
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(
+            fake.base.clone(),
+            account.session_token.clone(),
+            account.master_key,
+        ));
+        let bridge = EngineBridge::new(&crate::identity::REAL, db, api);
+        let place = sync_root.join("report.docx");
+        std::fs::write(&place, AGREED_AT_THE_LOOK).unwrap();
+        put_conflict_row(&bridge, &file, "report.docx", AGREED_AT_THE_LOOK);
+        assert_eq!(
+            sync_folder_content(bridge.db(), &file, &place, None).unwrap(),
+            SyncFolderContent::Agreed,
+            "the case: agreed content at the look"
+        );
+        let seen = seen_settled(&place);
+        let at = place.clone();
+        bridge.seams.arm("hydrate:before_write", move || {
+            if inode_change {
+                let staged = at.with_extension("save-tmp");
+                std::fs::write(&staged, SAVED_DURING_IT).unwrap();
+                std::fs::rename(&staged, &at).unwrap();
+            } else {
+                std::thread::sleep(Duration::from_millis(20));
+                std::fs::write(&at, SAVED_DURING_IT).unwrap();
+            }
+        });
+        // Which check caught it: the compare runs only once the hash check before the write let the hydrate through.
+        let reached_compare = Arc::new(AtomicBool::new(false));
+        let reached = reached_compare.clone();
+        bridge
+            .seams
+            .arm("hydrate:before_replace", move || reached.store(true, Ordering::SeqCst));
+
+        let result = bridge.resolve_theirs_seen(&file, &sync_root, seen).await;
+        let status = bridge.db().get_file(&file).unwrap().unwrap().status;
+        println!(
+            "keep_there save during the download (inode change {inode_change}): refused_as_unsent={} \
+             caught_by_the_start_look_compare={} status={status:?} result={result:?}",
+            refused_as_unsent(&result),
+            reached_compare.load(Ordering::SeqCst)
+        );
+        assert!(refused_as_unsent(&result), "the save is never replaced");
+        assert_eq!(std::fs::read(&place).unwrap(), SAVED_DURING_IT, "the save is kept");
+        assert_eq!(status, FileStatus::Conflict, "the row is back where it was");
+    }
+    drop(fake);
+}
+
+/// Lead ruling (2026-11-15) on the lane's decision: a snapshot node whose upload is still running and that names a
+/// later version is left to the time rule (as macOS's §6.3.2 snapshot fill skips such a node): at an older server time
+/// it is skipped, at a later one it is applied as before. Mutant M9 (the `is_uploading` condition of the `Greater` arm
+/// dropped): red, the older node re-anchors the row.
+#[test]
+fn an_uploading_snapshot_node_keeps_the_time_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("Beebeeb");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = bridge_in(dir.path());
+    let file = "25380000-0000-4000-8000-000000000015";
+    seed_synced_copy(&bridge, file, "notes.txt", 2, 5_000, VERSION_TWO);
+    let mut conflicts = Vec::new();
+
+    let mut older = node(file, "notes.txt", 3, 14, 4_000);
+    older["is_uploading"] = serde_json::json!(true);
+    apply_snapshot(
+        &bridge,
+        &sync_root,
+        &snapshot_of(vec![older]),
+        6_000,
+        6_000,
+        &mut conflicts,
+    )
+    .unwrap();
+    let after_older = (
+        bridge
+            .db()
+            .get_file_contract_state(file)
+            .unwrap()
+            .unwrap()
+            .current_version,
+        bridge.db().get_file(file).unwrap().unwrap().remote_updated_at,
+    );
+
+    let mut later = node(file, "notes.txt", 3, 14, 7_000);
+    later["is_uploading"] = serde_json::json!(true);
+    apply_snapshot(
+        &bridge,
+        &sync_root,
+        &snapshot_of(vec![later]),
+        8_000,
+        8_000,
+        &mut conflicts,
+    )
+    .unwrap();
+    let after_later = bridge.db().get_file(file).unwrap().unwrap().remote_updated_at;
+    println!(
+        "restore_elsewhere uploading node: after the older (version, time)={after_older:?}, after the later time={after_later}"
+    );
+    assert_eq!(after_older, (2, 5_000), "an uploading node at an older time is skipped");
+    assert_eq!(
+        after_later, 7_000,
+        "at a later time the time rule applies it, as before"
+    );
 }
