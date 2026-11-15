@@ -46,7 +46,7 @@ pub enum OwnerSettled {
 }
 
 impl<C: CredentialStores> Engine<C> {
-    pub(super) async fn s11_probe(&self, vault: &mut crate::keychain::AuthVault<C::Store>, present: bool) -> bool {
+    pub(crate) async fn s11_probe(&self, vault: &mut crate::keychain::AuthVault<C::Store>, present: bool) -> bool {
         if !present {
             return false;
         }
@@ -56,7 +56,7 @@ impl<C: CredentialStores> Engine<C> {
             .flatten()
             .map(|t| t.expose_for_request().to_string())
             .unwrap_or_default();
-        if super::fetch_profile(&self.client, &self.config.api_base, &probe)
+        if crate::app::fetch_profile(&self.client, &self.config.api_base, &probe)
             .await
             .is_err()
         {
