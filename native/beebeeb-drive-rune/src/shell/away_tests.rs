@@ -335,3 +335,79 @@ fn a_wake_after_a_sleep_past_the_delay_locks_and_a_short_one_does_not() {
         live.engine.lock_state() == LockState::ScreenLocked
     });
 }
+
+/// A thirty minute delay (a longer one: Windows Hello's yes, as the page asks).
+fn thirty_minutes(live: &Live) {
+    live.engine
+        .set_lock_after_for(
+            live.engine.session_turn(),
+            LockAfter::Minutes30,
+            Some(AppLockProof::PlatformVerified),
+        )
+        .unwrap();
+}
+
+/// The poll did not run for `gap` and Windows said nothing of it (review of #452, P2-A: a Modern Standby PC sends the
+/// suspend only to a window that registered): the poll's last run moves back on the wall clock (which counts a
+/// sleep), the wake's key press leaves the PC's idle near zero, no resume is said, and the next look stays a minute
+/// off (as the monotonic clock of a PC that slept may say).
+fn slept(live: &mut Live, gap: Duration) {
+    *live.platform.idle.lock().unwrap() = Some(Duration::from_secs(1));
+    let lock = away(&mut live.rt);
+    let seen = lock.seen.as_mut().expect("the poll ran while the engine was open");
+    seen.wall -= gap;
+    lock.due = Some(Instant::now() + LOOK_AT_MOST_EVERY);
+}
+
+/// Fifteen minutes without input, then three hours in which the app did not run: time away past thirty minutes locks
+/// at the wake, with no broadcast and a key press already counted as input.
+#[test]
+fn a_gap_of_hours_after_an_idle_locks_without_a_resume() {
+    let mut live = live();
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(15 * 60));
+    looked(&mut live);
+    assert_eq!(live.engine.lock_state(), LockState::Open, "fifteen minutes of thirty");
+    slept(&mut live, Duration::from_secs(3 * 3_600));
+    until(&mut live, "the gap did not lock", |live| {
+        live.engine.lock_state() == LockState::ScreenLocked
+    });
+}
+
+/// Fifteen minutes without input, then ten in which the app did not run: said at once (not a minute later), and short
+/// of thirty minutes it locks nothing; the engine says when the rest could be reached.
+#[test]
+fn a_gap_short_of_the_delay_is_said_at_once_and_does_not_lock() {
+    let mut live = live();
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(15 * 60));
+    looked(&mut live);
+    let before = away(&mut live.rt).answered;
+    slept(&mut live, Duration::from_secs(10 * 60));
+    answers(&mut live, before + 1);
+    assert_eq!(
+        live.engine.lock_state(),
+        LockState::Open,
+        "twenty-five minutes away, of thirty"
+    );
+    assert!(away(&mut live.rt).away.is_none(), "said once");
+    let due = away(&mut live.rt).due.expect("a look is due");
+    assert!(due <= Instant::now() + LOOK_AT_MOST_EVERY);
+}
+
+/// Two polls a minute and a half apart are the look interval, not time away: nothing is asked before it is due and
+/// nothing locks, also one minute short of the delay.
+#[test]
+fn polls_a_minute_and_a_half_apart_are_not_time_away() {
+    let mut live = live();
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(29 * 60));
+    looked(&mut live);
+    slept(&mut live, Duration::from_secs(90));
+    let looks = away(&mut live.rt).looks;
+    for _ in 0..20 {
+        live.rt.frame(0.016);
+    }
+    assert_eq!(away(&mut live.rt).looks, looks, "no look before it is due");
+    assert_eq!(live.engine.lock_state(), LockState::Open);
+}

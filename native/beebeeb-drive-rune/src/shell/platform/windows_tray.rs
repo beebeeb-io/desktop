@@ -14,7 +14,11 @@
 //! the Windows session (Win+L, or Windows' own lock) is the away lock's event
 //! ([`TrayEvent::SessionLocked`]), whether the app's window is open or not. A sleep is too: the
 //! power broadcast's suspend and resume (`WM_POWERBROADCAST`) say how long the PC was away
-//! ([`TrayEvent::Resumed`]).
+//! ([`TrayEvent::Resumed`]). The window registers for that broadcast too
+//! (`RegisterSuspendResumeNotification`): on a Modern Standby PC the suspend goes only to a
+//! window that registered (review of #452, P2-A); where it is sent to every top-level window the
+//! registration changes nothing. Where neither comes, the away lock's poll sees the gap
+//! (`shell/away.rs`).
 //!
 //! # The aliasing rule of this file
 //!
@@ -49,6 +53,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromRect,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Power::{
+    HPOWERNOTIFY, RegisterSuspendResumeNotification, UnregisterSuspendResumeNotification,
+};
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
@@ -69,7 +76,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_POPUP, WTS_SESSION_LOCK,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WM_POWERBROADCAST,
+    DEVICE_NOTIFY_WINDOW_HANDLE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WM_POWERBROADCAST,
 };
 
 use super::windows::{os_error, read_taskbar_theme, wide};
@@ -161,6 +168,9 @@ struct Context {
     /// The PC is going to sleep or hibernate: when (two clocks) and how long it had been without input then. Taken
     /// at the resume, which says how long it was away ([`TrayEvent::Resumed`]).
     suspended: Cell<Option<Suspended>>,
+    /// The registration for the power broadcast (`RegisterSuspendResumeNotification`), ended at `WM_DESTROY`. `0`:
+    /// none (refused, or the harness's window, which never registers).
+    power: Cell<HPOWERNOTIFY>,
 }
 
 /// What the tray noted at a suspend.
@@ -627,6 +637,11 @@ fn handle(hwnd: HWND, context: &Context, message: u32, w: WPARAM, l: LPARAM) -> 
                 KillTimer(hwnd, TIMER_RETRY);
                 WTSUnRegisterSessionNotification(hwnd);
             }
+            let power = context.power.replace(0);
+            if power != 0 {
+                // SAFETY: the handle RegisterSuspendResumeNotification gave for this window, ended once.
+                unsafe { UnregisterSuspendResumeNotification(power) };
+            }
             context.shell.notify(NIM_DELETE, &icon_data(hwnd, 0));
             context.update(|state| state.added = false);
             context.present.store(false, Ordering::SeqCst);
@@ -780,9 +795,24 @@ fn build(
         refresh_again: Cell::new(false),
         faults,
         suspended: Cell::new(None),
+        power: Cell::new(0),
     });
     let hwnd = create_window(&context, class_name)?;
     Ok((hwnd, context))
+}
+
+/// The away lock's other event: a sleep. On a Modern Standby PC the suspend broadcast goes only to a window that
+/// registered for it; registered, this window gets it wherever Windows sends it. Refused, the poll's gap still counts
+/// the sleep (`shell/away.rs`); it is said in the log, without anything of the person.
+fn register_for_power(hwnd: HWND, context: &Context) {
+    // SAFETY: this thread's own live window; the handle is kept and ended at WM_DESTROY.
+    let power = unsafe { RegisterSuspendResumeNotification(hwnd, DEVICE_NOTIFY_WINDOW_HANDLE) };
+    if power == 0 {
+        let error = os_error("registering for suspend and resume");
+        crate::shell::host::log(format!("the away lock will not hear of a sleep from Windows ({error})"));
+        return;
+    }
+    context.power.set(power);
 }
 
 /// Frees the last icon. After the window is gone.
@@ -824,6 +854,7 @@ fn tray_thread(
         let error = os_error("registering for session changes");
         crate::shell::host::log(format!("the away lock will not see a Windows lock ({error})"));
     }
+    register_for_power(hwnd, &context);
     // The first add happens before the app is told the tray exists, so `present()` is the
     // truth by the time `create` returns.
     refresh(hwnd, &context);

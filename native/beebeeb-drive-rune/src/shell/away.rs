@@ -14,6 +14,11 @@
 //!   tray are said to the engine at once; it decides whether they lock. So is a wake from sleep
 //!   ([`TrayEvent::Resumed`]), as idle time: the PC's time without input before it slept plus the sleep, measured by
 //!   the tray at the suspend and the resume, so the wake's own key press cannot hide it.
+//! - **A gap.** Windows may not send the suspend broadcast (a Modern Standby PC sends it only to a window that
+//!   registered for it: the tray registers, `RegisterSuspendResumeNotification`; review of #452, P2-A). So the poll also
+//!   notes when it last ran, on two clocks, and the time without input it saw then. A gap between two polls far past
+//!   the look interval ([`AWAY_GAP`]) means the app did not run: the time without input seen before it, plus the gap,
+//!   is said to the engine as idle time at once (the wake's own key press cannot hide it). No broadcast is needed.
 //! - The engine's look reads the credential store and waits for the lock's write hold: it runs on a worker, one idle
 //!   look at a time. The job is made on the window's thread, so it holds the session it was measured for.
 //!
@@ -25,7 +30,7 @@
 //! [`ShellActions::screen_open`]: super::actions::ShellActions::screen_open
 
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rune::{AppHandle, Tx};
 
@@ -35,6 +40,30 @@ use crate::State;
 /// The longest the poll waits between two looks while the session is open: a shorter delay, or app lock turned on,
 /// is followed within this.
 pub const LOOK_AT_MOST_EVERY: Duration = Duration::from_secs(60);
+
+/// The longest gap between two polls that is not time away: twice the longest wait between two looks (while the
+/// engine is open a poll comes at least that often). A longer one means the app did not run: the PC slept without the
+/// broadcast, or the process was stopped (also a blocked window or a wall clock set forward reads as one: it locks
+/// sooner, never later).
+pub const AWAY_GAP: Duration = Duration::from_secs(120);
+
+/// What the poll saw the last time it ran while the engine was open.
+#[derive(Clone, Copy, Debug)]
+struct Seen {
+    at: Instant,
+    wall: SystemTime,
+    /// The time without input it measured then.
+    idle: Duration,
+}
+
+impl Seen {
+    /// The time since, by whichever of the two clocks saw more of it: the monotonic clock may not count a sleep (on
+    /// Linux it does not), the wall clock does and can be set back (the tray's resume measures the same way).
+    fn gap(&self, now: Instant, wall: SystemTime) -> Duration {
+        now.saturating_duration_since(self.at)
+            .max(wall.duration_since(self.wall).unwrap_or_default())
+    }
+}
 
 /// A wake counts from the frame's clock, read before this poll measures: it can come this much before the time it was
 /// armed for. A poll within it takes the wake as spent and arms again (never a look left waiting for no poll).
@@ -58,6 +87,10 @@ pub struct AwayLock {
     looking: bool,
     /// This engine has no automatic lock (the fixture): nothing more is asked.
     without: bool,
+    /// The poll's last run while the engine was open (`None`: closed since).
+    seen: Option<Seen>,
+    /// Time away found in a gap and not yet said: the next look carries it, whenever it is due.
+    away: Option<Duration>,
     /// Looks made, answers taken in (idle and events) and wakes armed, for a test.
     pub(crate) looks: usize,
     pub(crate) answered: usize,
@@ -75,6 +108,8 @@ impl Default for AwayLock {
             armed: None,
             looking: false,
             without: false,
+            seen: None,
+            away: None,
             looks: 0,
             answered: 0,
             arms: 0,
@@ -95,7 +130,7 @@ impl AwayLock {
         wake: Option<&AppHandle<State>>,
         tx: &mut Tx,
     ) -> bool {
-        let now = Instant::now();
+        let (now, wall) = (Instant::now(), SystemTime::now());
         let mut came = false;
         while let Ok(looked) = self.rx.try_recv() {
             came = true;
@@ -110,25 +145,40 @@ impl AwayLock {
             self.armed = None;
         }
         if !open {
-            // Locked, signed out, or not yet in: no count runs, and the next opening starts a new one.
+            // Locked, signed out, or not yet in: no count runs, and the next opening starts a new one (a gap too).
             self.opened_at = None;
             self.due = None;
+            self.seen = None;
+            self.away = None;
             return came;
         }
         let opened_at = *self.opened_at.get_or_insert(now);
-        if self.without || self.looking {
-            return came;
-        }
-        if let Some(due) = self.due.filter(|due| *due > now) {
-            self.arm(due, now, tx);
-            return came;
-        }
         let pc_idle = pc_idle.or_else(|| rune::last_input().map(|at| now.saturating_duration_since(at)));
         let idle = pc_idle
             .unwrap_or(Duration::MAX)
             .min(now.saturating_duration_since(opened_at));
+        // A gap far past the look interval: the app did not run. What it saw without input before, and the gap, is
+        // time away; it is held until a look carries it (one may be out now), and it does not wait for the next due.
+        if let Some(seen) = self.seen.replace(Seen { at: now, wall, idle }) {
+            let gap = seen.gap(now, wall);
+            if gap > AWAY_GAP {
+                let away = seen.idle.saturating_add(gap);
+                self.away = Some(self.away.map_or(away, |held| held.max(away)));
+            }
+        }
+        if self.without || self.looking {
+            return came;
+        }
+        if self.away.is_none()
+            && let Some(due) = self.due.filter(|due| *due > now)
+        {
+            self.arm(due, now, tx);
+            return came;
+        }
+        let idle = idle.max(self.away.unwrap_or_default());
         if self.ask(Away::Idle(idle), true, actions, wake) {
             self.looking = true;
+            self.away = None;
         } else if !self.without {
             // The worker could not start: try again after the longest wait.
             let due = now + LOOK_AT_MOST_EVERY;
