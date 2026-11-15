@@ -153,6 +153,32 @@ pub enum PasskeyOutcome {
     Unavailable,
 }
 
+/// Why the recovery's new password did not end signed in (DW-A49). The engine's set-password step answers from three
+/// places: before anything is sent (the minimum, the breach check), at the registration (the recovery stays held and
+/// the password can be tried again) and at the last request (the recovery is over whatever the answer, and the password
+/// may have changed). The window cannot tell the last two apart for a wait, an outage or a refusal it cannot read, so
+/// their words are true for both: try again, and a password that was set already works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewPasswordProblem {
+    /// Shorter than the account's minimum. Nothing was sent; the words stay verified.
+    TooShort,
+    /// In a list of leaked passwords. Nothing was changed; the words stay verified.
+    Breached,
+    /// No answer from Beebeeb (or the breach check could not be made).
+    Offline,
+    /// Too many tries: the server's wait. No countdown runs for it.
+    RateLimited {
+        seconds: u32,
+    },
+    /// This recovery is over: it was left, the server ended it, or the session here moved. A password that was set
+    /// works; otherwise the recovery starts again from the words.
+    Ended,
+    /// The password WAS changed, and nothing was signed in here: the account asks for a normal sign-in with it
+    /// (two-factor). Not a failure: the window shows the password updated and the way to sign in.
+    SignInRequired,
+    Other,
+}
+
 /// What the strength meter under a new password shows (`.kit-strength`): how many of its four
 /// bars are lit and the engine's words for it ("Strong."). The rules are the engine's.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,7 +224,7 @@ pub enum SignInEvent {
     /// Recovery, step 1 (DW-A47): the phrase re-derived this account's key.
     RecoveryPhraseVerified(Result<(), PhraseProblem>),
     /// Recovery, last step (DW-A49).
-    PasswordSet(Result<(), SignInProblem>),
+    PasswordSet(Result<(), NewPasswordProblem>),
     /// Added by lane signin-create: an answer of sign-up (DW-A31 to DW-A44).
     SignUp(SignUpEvent),
     /// Added by lane bind-signin: the person left a step (`discard_partial_sign_in`) and the session that step

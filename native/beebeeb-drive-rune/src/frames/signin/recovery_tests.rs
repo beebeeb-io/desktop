@@ -8,8 +8,9 @@ use std::rc::Rc;
 
 use rune::Runtime;
 
-use super::source::{FixtureSignInSource, Script, SignInEvent, SignInSource, board};
+use super::source::{FixtureSignInSource, NewPasswordProblem, Script, SignInEvent, SignInSource, board};
 use super::tests::{click, runtime_of, ui};
+use super::view::GENERIC_FAILURE;
 use super::{Screen, Ui};
 use crate::State;
 
@@ -99,4 +100,125 @@ fn an_answer_of_the_recovery_after_leaving_it_is_never_handed_out() {
     control.begin_set_password("an invented new password");
     assert_eq!(control.poll(), Some(SignInEvent::RecoveryPhraseVerified(Ok(()))));
     assert_eq!(control.poll(), Some(SignInEvent::PasswordSet(Ok(()))));
+}
+
+/// The new password's screen (DW-A49) after the words verified, both fields filled in, and the call list.
+fn at_new_password() -> (Runtime<State>, Calls) {
+    let (mut rt, calls) = at_recover(Script::default());
+    ui(&mut rt).verify_phrase();
+    rt.frame(0.0);
+    assert_eq!(ui(&mut rt).screen, Screen::NewPassword);
+    let new = "x".repeat(board::PASSWORD_LEN);
+    ui(&mut rt).password.replace_text(&new);
+    ui(&mut rt).confirm.replace_text(&new);
+    rt.frame(0.0);
+    (rt, calls)
+}
+
+/// The engine answered the new password with `problem` (as `poll` hands it over while the step runs).
+fn answered(rt: &mut Runtime<State>, problem: NewPasswordProblem) {
+    let ui_ = ui(rt);
+    ui_.setting = true;
+    ui_.apply(SignInEvent::PasswordSet(Err(problem)));
+    rt.frame(0.0);
+}
+
+fn tree(rt: &Runtime<State>) -> String {
+    rt.accessibility_json().to_string()
+}
+
+/// Press the control whose accessible name is `label`.
+fn press_labelled(rt: &mut Runtime<State>, label: &str) {
+    rt.settle_all();
+    rt.frame(0.0);
+    let r = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.label.as_deref() == Some(label) && !e.exiting)
+        .unwrap_or_else(|| panic!("no control named {label}"))
+        .rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+}
+
+/// Row 3.5. Each answer of the new password is said in its own words, never the sign-in form's "We couldn't sign you
+/// in. Nothing was unlocked." Mutant: `password_words` answers `None` for `TooShort` (its words are gone).
+#[test]
+fn every_answer_of_the_new_password_is_said_in_its_own_words() {
+    let cases = [
+        (
+            NewPasswordProblem::TooShort,
+            "Too short for your account. Nothing was changed",
+        ),
+        (
+            NewPasswordProblem::Breached,
+            "appears in known data breaches. Nothing was changed",
+        ),
+        (
+            NewPasswordProblem::Offline,
+            "Connect, then try again. If your new password was already set",
+        ),
+        (
+            NewPasswordProblem::RateLimited { seconds: 30 },
+            "Too many tries. Wait a moment",
+        ),
+        (NewPasswordProblem::Ended, "This recovery has ended"),
+        (
+            NewPasswordProblem::Other,
+            "That didn't finish, and nothing was signed in",
+        ),
+    ];
+    for (problem, words) in cases {
+        let (mut rt, _calls) = at_new_password();
+        answered(&mut rt, problem);
+        assert_eq!(ui(&mut rt).screen, Screen::NewPassword, "{problem:?}: the screen stays");
+        let tree = tree(&rt);
+        assert!(tree.contains(words), "{problem:?}: {words:?} is not said");
+        assert!(!tree.contains(GENERIC_FAILURE), "{problem:?}: the sign-in form's words");
+        let retry = problem != NewPasswordProblem::Ended;
+        assert_eq!(ui(&mut rt).can_set_password(), retry, "{problem:?}: Set new password");
+    }
+}
+
+/// An ended recovery sets nothing: "Set new password" is off, and "Sign in" leads to the form with the address kept.
+#[test]
+fn an_ended_recovery_offers_the_sign_in_and_sets_nothing() {
+    let (mut rt, calls) = at_new_password();
+    answered(&mut rt, NewPasswordProblem::Ended);
+    ui(&mut rt).set_password();
+    assert_eq!(
+        calls.borrow().iter().filter(|call| **call == "set_password").count(),
+        0,
+        "nothing is sent for an ended recovery"
+    );
+    press_labelled(&mut rt, "Sign in");
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn);
+    assert_eq!(ui(&mut rt).email.text, board::EMAIL);
+    assert!(
+        ui(&mut rt).password.text.is_empty(),
+        "the new password is not the form's"
+    );
+}
+
+/// Row 3.5: the two-factor account after recovery. The password WAS changed and nothing was signed in: the window says
+/// so (never "Your vault is unlocked", never the form's failure) and its one button leads to the form. Mutant: the
+/// `SignInRequired` arm in `apply_step` removed (it then stays on the new password as a problem).
+#[test]
+fn a_changed_password_with_a_sign_in_to_do_is_said_and_leads_to_the_form() {
+    let (mut rt, _calls) = at_new_password();
+    answered(&mut rt, NewPasswordProblem::SignInRequired);
+    assert_eq!(ui(&mut rt).screen, Screen::PasswordChanged);
+    assert!(ui(&mut rt).password.text.is_empty() && ui(&mut rt).confirm.text.is_empty());
+    let tree = tree(&rt);
+    assert!(tree.contains("Your password was changed. Sign in with your new password"));
+    assert!(!tree.contains("Your vault is unlocked"), "nothing was unlocked");
+    assert!(!tree.contains(GENERIC_FAILURE));
+    assert!(!ui(&mut rt).can_set_password());
+
+    press_labelled(&mut rt, "Sign in");
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn);
+    assert_eq!(ui(&mut rt).email.text, board::EMAIL, "the address stays");
+    assert!(ui(&mut rt).password.text.is_empty());
 }

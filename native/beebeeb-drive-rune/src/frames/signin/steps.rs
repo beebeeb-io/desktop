@@ -9,7 +9,8 @@
 use rune::TextEdit;
 
 use super::source::{
-    CodeKind, NextAfterSignIn, PasskeyOutcome, PhraseProblem, SignInEvent, SignInProblem, TwoFactorProblem,
+    CodeKind, NewPasswordProblem, NextAfterSignIn, PasskeyOutcome, PhraseProblem, SignInEvent, SignInProblem,
+    TwoFactorProblem,
 };
 use super::{Intent, PASSWORD_KEY, Screen, TITLE_KEY, Ui};
 
@@ -440,7 +441,7 @@ impl Ui {
         self.setting
     }
 
-    pub fn set_problem(&self) -> Option<SignInProblem> {
+    pub fn set_problem(&self) -> Option<NewPasswordProblem> {
         self.set_problem
     }
 
@@ -457,6 +458,8 @@ impl Ui {
     pub fn can_set_password(&self) -> bool {
         self.screen == Screen::NewPassword
             && !self.setting
+            // An ended recovery has nothing to set a password on: Back starts again from the words.
+            && self.set_problem != Some(NewPasswordProblem::Ended)
             && !self.password.text.is_empty()
             && self.password.text == self.confirm.text
     }
@@ -470,6 +473,19 @@ impl Ui {
         self.set_problem = None;
         self.source.begin_set_password(&self.password.text);
         self.pump();
+    }
+
+    /// "Sign in" once the recovery is over: after the password changed with a sign-in still to do
+    /// (`Screen::PasswordChanged`), or on a recovery that ended. The form, with the address kept and
+    /// the password field empty and focused.
+    pub fn sign_in_with_new_password(&mut self) {
+        let over = self.screen == Screen::PasswordChanged
+            || (self.screen == Screen::NewPassword && self.set_problem == Some(NewPasswordProblem::Ended));
+        if !over {
+            return;
+        }
+        self.open_sign_in();
+        self.focus = Some(PASSWORD_KEY);
     }
 
     /// "Continue to Drive" (DW-A50).
@@ -608,6 +624,14 @@ impl Ui {
                         self.confirm.clear();
                         self.screen = Screen::PasswordUpdated;
                         // "Success is announced": focus moves to the heading.
+                        self.focus = Some(TITLE_KEY);
+                    }
+                    // The password WAS changed and nothing was signed in: the account asks for a normal sign-in.
+                    Err(NewPasswordProblem::SignInRequired) => {
+                        self.password.clear();
+                        self.confirm.clear();
+                        self.set_problem = None;
+                        self.screen = Screen::PasswordChanged;
                         self.focus = Some(TITLE_KEY);
                     }
                     Err(problem) => {

@@ -54,8 +54,8 @@ use crate::State;
 use crate::shell::app::{Event, GateState};
 use crate::shell::host;
 use source::{
-    DeviceRequest, DeviceStatus, FixtureSignInSource, HelloOutcome, NextAfterSignIn, PhraseProblem, Script,
-    SharedSession, SignInAnswer, SignInEvent, SignInProblem, SignInSource, TwoFactorProblem, board,
+    DeviceRequest, DeviceStatus, FixtureSignInSource, HelloOutcome, NewPasswordProblem, NextAfterSignIn, PhraseProblem,
+    Script, SharedSession, SignInAnswer, SignInEvent, SignInProblem, SignInSource, TwoFactorProblem, board,
 };
 use steps::Pictured;
 
@@ -110,6 +110,9 @@ pub enum Screen {
     NewPassword,
     /// DW-A50.
     PasswordUpdated,
+    /// The new password was set, and the account asks for a normal sign-in with it (two-factor): nothing was signed
+    /// in. DW-A50's layout and words for what is true here (no board frame: `FRAMES.md`, flagged deviations).
+    PasswordChanged,
     /// DW-A31 to DW-A44: create an account, at one of its steps (`create.rs`).
     Create(create::Step),
 }
@@ -194,7 +197,7 @@ pub struct Ui {
     /// typed into `password`, the one password field.
     pub confirm: TextEdit,
     setting: bool,
-    set_problem: Option<SignInProblem>,
+    set_problem: Option<NewPasswordProblem>,
     /// Sign-up's own state (DW-A31 to DW-A44), made ONCE here with its secure fields.
     pub(super) create: create::Create,
     /// The session's gate as the last poll saw it (`follow_gate`).
