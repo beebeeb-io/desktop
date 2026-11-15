@@ -91,7 +91,9 @@ impl DesktopConfig {
         if let Some(p) = &cfg.sync_root
             && !p.is_absolute()
         {
-            tracing::warn!("ignoring non-absolute sync_root in desktop.toml: {}", p.display());
+            // A fixed text: the value is not an absolute path, so it is not a shape a log file can recognise (and a
+            // relative folder name is a name).
+            tracing::warn!("ignoring a non-absolute sync_root in desktop.toml");
             cfg.sync_root = None;
         }
         if let Some(raw) = cfg.sync_mode.as_deref() {
