@@ -293,7 +293,12 @@ fn a_stale_delay_on_the_page_asks_windows_hello_when_the_engine_wants_a_proof() 
         .set_lock_after_for(engine.session_turn(), LockAfter::Immediately, None)
         .unwrap();
     source.set_lock_after("30 min");
-    settle(&mut source);
+    // The engine's answer comes on a worker; Windows Hello is asked when it is taken in.
+    let began = Instant::now();
+    while prompts.asked() == 0 && source.pump().busy {
+        assert!(began.elapsed() < Duration::from_secs(10), "an answer did not come back");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(
         prompts.asked(),
         1,

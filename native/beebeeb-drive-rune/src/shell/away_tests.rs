@@ -296,6 +296,9 @@ fn idle_past_the_delay_locks_during_the_first_run_too() {
     until(&mut live, "the first-run steps did not show", |live| {
         live.rt.state.shell.app.gate() == GateState::FirstRun
     });
+    // The engine is open: the count runs during the first run, and its first look answers (before the idle below,
+    // so that answer does not put the next look a minute off).
+    answers(&mut live, 1);
     idle_for(&mut live, Duration::from_secs(300));
     until(&mut live, "the first run did not lock", |live| {
         live.engine.lock_state() == LockState::ScreenLocked
