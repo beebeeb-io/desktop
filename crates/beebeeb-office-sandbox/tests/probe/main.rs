@@ -35,6 +35,9 @@
 //!   raw-connect <ip:port> -> ok | err <step> <status>   (Windows: a TCP connect through the socket driver alone,
 //!                                                         no socket library: open, bind, connect; a connect that
 //!                                                         has not finished after 5 s answers `err connect timeout`)
+//!   dns <name>           -> ok | err <status>           (Windows: a name lookup through the system resolver's
+//!                                                         interface, which the DNS client service answers; no
+//!                                                         socket library in this process)
 //!   read-font            -> ok | err <system code>      (opens the system's Segoe UI font file, reads 4 bytes)
 //!   hang                 -> hanging, then sleeps for ever
 //!   spin                 -> spinning, then burns one core for ever
@@ -867,6 +870,62 @@ fn raw_connect(_target: &str) -> String {
     "err unsupported".into()
 }
 
+/// A name lookup through the system resolver's interface (`DnsQuery_W`, an A record, standard options). The lookup
+/// itself is made by the DNS client service, not by this process, so a lookup made on the helper's behalf shows in
+/// that service's cache, which the test reads. The answer is the call's own status (9003: the name does not exist).
+#[cfg(windows)]
+fn dns(name: &str) -> String {
+    use std::ffi::c_void;
+
+    #[link(name = "dnsapi")]
+    unsafe extern "system" {
+        fn DnsQuery_W(
+            name: *const u16,
+            record_type: u16,
+            options: u32,
+            extra: *const c_void,
+            results: *mut *mut c_void,
+            reserved: *mut c_void,
+        ) -> i32;
+        fn DnsRecordListFree(records: *mut c_void, free_type: i32);
+    }
+    const TYPE_A: u16 = 1;
+    const STANDARD: u32 = 0;
+    const FREE_RECORD_LIST: i32 = 1;
+
+    if name.is_empty() {
+        return "err parse".into();
+    }
+    let units: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut records: *mut c_void = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated name that lives past the call; `records` is a writable pointer the call fills in or
+    // leaves null; no extra parameters; the reserved pointer is null as documented.
+    let status = unsafe {
+        DnsQuery_W(
+            units.as_ptr(),
+            TYPE_A,
+            STANDARD,
+            std::ptr::null(),
+            &mut records,
+            std::ptr::null_mut(),
+        )
+    };
+    if !records.is_null() {
+        // SAFETY: the list the call returned, freed once with the documented free type.
+        unsafe { DnsRecordListFree(records, FREE_RECORD_LIST) };
+    }
+    if status == 0 {
+        "ok".into()
+    } else {
+        format!("err {status}")
+    }
+}
+
+#[cfg(not(windows))]
+fn dns(_name: &str) -> String {
+    "err unsupported".into()
+}
+
 /// Opens the system's Segoe UI font file and reads its first 4 bytes: the helper draws text with the system's fonts.
 fn read_font() -> String {
     let Some(system_root) = std::env::var_os("SystemRoot") else {
@@ -1008,6 +1067,7 @@ fn main() {
             "privileges" => privileges(),
             "open-afd" => open_afd(rest),
             "raw-connect" => raw_connect(rest),
+            "dns" => dns(rest),
             "read-font" => read_font(),
             "hang" | "spin" => {
                 let _ = writeln!(stdout, "{}", if request == "hang" { "hanging" } else { "spinning" });

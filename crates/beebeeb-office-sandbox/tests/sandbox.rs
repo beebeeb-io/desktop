@@ -1162,6 +1162,102 @@ mod windows {
         );
     }
 
+    /// A fresh host name under `domain`, never asked before: `ocp-<time><pid><n>.<domain>`.
+    fn fresh_name(domain: &str) -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        format!(
+            "ocp-{nanos:x}{:x}{}.{domain}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    /// How many lines of the DNS client service's cache name `name` (`ipconfig /displaydns`; a name that does not
+    /// exist is cached too). The cache is the machine's, so it counts a lookup whoever asked the service for it.
+    fn cached(name: &str) -> usize {
+        let shown = Command::new("ipconfig")
+            .arg("/displaydns")
+            .output()
+            .expect("ipconfig runs");
+        String::from_utf8_lossy(&shown.stdout)
+            .to_ascii_lowercase()
+            .lines()
+            .filter(|line| line.contains(name))
+            .count()
+    }
+
+    /// `cached(name)` once it is non-zero, or after `within`.
+    fn cached_within(name: &str, within: Duration) -> usize {
+        let until = Instant::now() + within;
+        loop {
+            let seen = cached(name);
+            if seen > 0 || Instant::now() >= until {
+                return seen;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// No name lookup is made on the confined helper's behalf: neither through the system resolver's interface (the
+    /// DNS client service makes that lookup, in its own process) nor by opening a share path whose host is a NAME
+    /// (the system resolves it before it can refuse the open). A document can carry such a path in a linked
+    /// picture, and a lookup of a crafted name would carry text off the machine even if no connection follows.
+    ///
+    /// **Counted machine-wide**, in the DNS client service's cache, never per process: the lookups happen in system
+    /// services, not in the helper. Each case uses a fresh name and is first shown to land in the cache for a plain
+    /// probe. A web-folder share path (`\\<name>@SSL\DavWWWRoot\x`) is printed as a measurement only: whether the
+    /// plain probe's lookup shows depends on the web-folder service running. `BB_OFFICE_LOOKUP_DOMAIN` names a
+    /// domain whose fresh names do not exist (for example `example.com`); asked for without it is a red.
+    #[test]
+    #[ignore = "needs BB_OFFICE_LOOKUP_DOMAIN: a domain whose fresh names do not exist; sends DNS queries"]
+    fn no_name_lookup_is_made_on_the_confined_helpers_behalf() {
+        let _serial = serial();
+        let domain = std::env::var("BB_OFFICE_LOOKUP_DOMAIN")
+            .expect("BB_OFFICE_LOOKUP_DOMAIN is not set: this measurement was asked to run and could not")
+            .to_ascii_lowercase();
+        let within = Duration::from_secs(5);
+        // (the case, the request it makes for a host name)
+        type Case = (&'static str, fn(&str) -> String);
+        let cases: [Case; 3] = [
+            ("resolver", |name| format!("dns {name}")),
+            ("share-name", |name| format!(r"read \\{name}\s\x")),
+            ("web-folder", |name| format!(r"read \\{name}@SSL\DavWWWRoot\x")),
+        ];
+
+        let mut plain = Probe::plain();
+        let plain_seen = cases.map(|(case, request)| {
+            let name = fresh_name(&domain);
+            let answer = plain.attempt(&request(&name));
+            (case, answer, cached_within(&name, within))
+        });
+        drop(plain);
+        let mut confined = Probe::confined();
+        let confined_seen = cases.map(|(case, request)| {
+            let name = fresh_name(&domain);
+            let answer = confined.attempt(&request(&name));
+            std::thread::sleep(within);
+            (case, answer, cached(&name))
+        });
+        println!("lookups (case, answer, lines in the cache): plain {plain_seen:?}; confined {confined_seen:?}");
+
+        for index in 0..2 {
+            let (case, _, seen) = &plain_seen[index];
+            assert!(
+                *seen > 0,
+                "{case}: the plain probe's lookup is seen in the cache (the instrument can count)"
+            );
+            let (case, answer, seen) = &confined_seen[index];
+            assert_eq!(
+                *seen, 0,
+                "{case}: lookups made for the confined helper (it answered {answer})"
+            );
+        }
+    }
+
     /// A file on a network share, opened by its share path, is out of reach of the confined helper: on Windows the
     /// sandbox is what stands between the helper and the file-sharing client (the Office engine's own refusal of
     /// such paths is tested in the Office engine).
