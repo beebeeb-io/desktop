@@ -592,16 +592,20 @@ fn the_settings_source_answers_from_its_updater() {
     pump(&mut source);
 }
 
-/// The real hand-off: sync stops first (an engine with no sync running counts as stopped), and outside Windows no
-/// installer is ever started, so the machine says so and keeps the staged file. Not run on Windows: there it would
-/// start the staged test bytes.
+/// The real hand-off's first step on every platform: sync stops before anything is started (an engine with no sync
+/// running counts as stopped, and mints the proof).
+#[test]
+fn the_hand_off_stops_sync_first() {
+    let mut apply = EngineApply::new(engine(), &TEST);
+    assert!(apply.stop_engine().is_some(), "no sync running: stopped");
+}
+
+/// Outside Windows no installer is ever started: the machine says so and keeps the staged file. Not run on Windows:
+/// there it would start the staged test bytes.
 #[cfg(not(windows))]
 #[test]
-fn the_hand_off_stops_sync_first_and_starts_nothing_outside_windows() {
+fn the_hand_off_starts_nothing_outside_windows() {
     let engine = engine();
-    let mut apply = EngineApply::new(engine.clone(), &TEST);
-    assert!(apply.stop_engine().is_some(), "no sync running: stopped");
-
     let key = TestKey::generate();
     let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
     let http = serving(&key, &[release]);
