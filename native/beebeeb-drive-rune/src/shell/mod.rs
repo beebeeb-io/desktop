@@ -504,12 +504,12 @@ pub(crate) fn local_data_of(dirs: &rune::dirs::AppDirs, os: &str) -> std::path::
 
 /// Ends a start that stops for a reason the person must read (decision 2462: a refused `--api-base`, the test
 /// build's data on this computer not for this run's server, stored credentials without local data). `line` names no
-/// value. It goes to stderr, and into the start-refusal box unless this start shows none (`instance::refusal_is_shown`:
-/// not at login, not the installer's call, not a tooling run): a release build has no console, so without the box such
+/// value. It goes to stderr, and into the start-refusal box unless this start shows none (`instance::start_refusal_is_shown`:
+/// not the installer's call, not a tooling run; at login it is shown): a release build has no console, so without the box such
 /// a start would stop without a word. Returns 2, the exit code `run` ends with.
 fn refuse_start(platform: &dyn Platform, launch: &instance::Launch, identity: AppIdentity, line: &str) -> i32 {
     eprintln!("beebeeb-drive: {line}");
-    if instance::refusal_is_shown(launch) {
+    if instance::start_refusal_is_shown(launch) {
         platform.show_start_refusal(identity.product_name(), line);
     }
     2

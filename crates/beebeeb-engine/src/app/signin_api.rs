@@ -22,7 +22,7 @@ impl<C: CredentialStores> Engine<C> {
     /// `Err`: the sign-out did not finish (`Engine::sign_out_keeping_local_data`); still signed in.
     pub fn discard_partial_sign_in(&self) -> Result<(), String> {
         let result = self.runtime.block_on(async {
-            let _step = self.transition.lock().await;
+            let _step = self.session_ending_step().await;
             if let Ok(mut pending) = self.pending_2fa.lock() {
                 *pending = None;
             }

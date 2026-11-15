@@ -282,7 +282,7 @@ fn the_refusal_names_the_two_servers_kinds_and_nothing_else() {
         Server::Custom("https://staging.example".to_string()),
     );
     let line = |made_for: Option<Server>, asked: Server| OtherServer { made_for, asked }.to_string();
-    let start = "this test build's data on this computer was made for ";
+    let start = "This test build's data on this computer was made for ";
     for (text, made, asked) in [
         (
             line(Some(Server::Default), a.clone()),
@@ -316,9 +316,20 @@ fn the_refusal_names_the_two_servers_kinds_and_nothing_else() {
     }
     assert_eq!(
         CredentialsWithoutData.to_string(),
-        "this test build has stored credentials without local data on this computer: nothing says which server they \
+        "This test build has stored credentials without local data on this computer: nothing says which server they \
          were made for, so no server gets them. The app did not start."
     );
+}
+
+/// R3: both test-build refusal texts start with a capital.
+#[test]
+fn the_test_build_refusals_start_with_a_capital() {
+    let other = OtherServer {
+        made_for: Some(Server::Default),
+        asked: Server::Custom("http://x".into()),
+    };
+    assert!(other.to_string().starts_with("This test build"), "{other}");
+    assert!(CredentialsWithoutData.to_string().starts_with("This test build"));
 }
 
 /// The start path binds the test build's data: the shared start (`started`, a stored session and the default) left

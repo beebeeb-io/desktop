@@ -599,6 +599,7 @@ fn any_unconfirmed_stop_in_this_process_refuses_the_hand_off() {
         },
         presence: Presence::from_fns(
             || (Some(SessionGeneration::for_test(1)), true),
+            || 0,
             move || crate::engine_host::settings::updates::presence::any_stop_unconfirmed(&asked),
         ),
         ..Options::default()
