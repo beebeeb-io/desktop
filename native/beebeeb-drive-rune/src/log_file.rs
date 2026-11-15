@@ -169,7 +169,10 @@ impl Visit for Fields {
         self.number(field, value.to_string());
     }
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.number(field, value.to_string());
+        // A yes or no holds no name, path or secret: kept whatever the field is called.
+        if field.name() != "message" && !field.name().starts_with("log.") {
+            self.fields.push((field.name().to_string(), value.to_string()));
+        }
     }
     fn record_f64(&mut self, field: &Field, value: f64) {
         self.number(field, value.to_string());

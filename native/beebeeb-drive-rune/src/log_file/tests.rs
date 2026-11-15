@@ -318,3 +318,22 @@ fn a_number_shaped_like_a_code_is_blanked_unless_it_is_a_plain_metric() {
     );
     assert!(text.contains("bytes=1234567") && text.contains("count=3"), "{text}");
 }
+
+#[test]
+fn a_yes_or_no_and_a_count_named_like_a_word_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = logged(dir.path(), MAX_FILE_BYTES, || {
+        // The held-edit warning's own fields (`watcher.rs`): counts named `content_unknown` and a bool `held_key_replaced`.
+        tracing::warn!(
+            held = 3_u64,
+            content_unknown = 2_u64,
+            held_key_replaced = true,
+            pass = "due",
+            "held"
+        );
+    });
+    assert!(
+        text.contains("content_unknown=2") && text.contains("held_key_replaced=true") && text.contains("pass=due"),
+        "{text}"
+    );
+}
