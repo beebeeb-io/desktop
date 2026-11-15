@@ -201,7 +201,9 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let session = shown.session;
         self.engine.media_press(session);
         let opened = player.open(item, queue).is_ok();
-        // The answer came back under another session or account than the press's: nothing of it plays.
+        // A cheap early exit for a session that ended BEFORE the press returned. This is NOT the guarantee: the
+        // player opens on its worker thread, later, and the opener there opens only for the stamped session (see
+        // `engine_host/media.rs`); a refusal reaches the view through the player's state.
         let still = self.media.on.as_ref().is_some_and(|shown| self.media_is_current(shown));
         if !still {
             player.stop(StopReason::AccountChanged);
