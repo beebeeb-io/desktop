@@ -114,6 +114,8 @@ impl<E: SetupEngine> EngineSetupSource<E> {
         };
         self.setup_passkey.adding = true;
         self.setup_passkey.answer = None;
+        self.setup_passkey.answer = Some(PasskeyAnswer::Added);
+        self.changed = true;
         self.ask(
             "first-run-passkey",
             move |engine, session| {
