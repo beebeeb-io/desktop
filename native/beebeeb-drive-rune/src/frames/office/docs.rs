@@ -9,7 +9,9 @@
 //!
 //! Keys: the window's caption, sidebar and toolbar keep the keys every window has. This file's are `vbar` (and
 //! `zoom-less`, `zoom`, `zoom-more`, `vbar-page`, `elsewhere`), `banner` / `banner-text` (the .doc's note), `ol` (the
-//! outline), `ol-<N>` (a heading), `stage`, `pg-<N>` (page N, 1-based), and `st-<N>` (the status line).
+//! outline), `ol-close` (its fold control), `ol-<N>-row` (a heading's row) and `ol-<N>` (its words), `stage`, `page` (page 1) and
+//! `page-<N>` (a later page), and `st-<N>` (the status line). `pg-<N>` is the board's key of a LINE of text on the page; a
+//! picture of a page has none (D-B3-7), so no page is ever keyed `pg-`.
 //!
 //! Wiring this file needs from `viewers` (listed in BRANCH-NOTES.md for the checkpoint): `Body::Doc(DocBody)`, the
 //! `viewers::doc_mut(&mut State) -> Option<&mut DocBody>` and `viewers::open_doc(&mut State, OpenFile) -> bool` calls,
@@ -70,6 +72,10 @@ pub struct DocBody {
     /// The outline entry that was last gone to (or the first).
     pub at: usize,
     pub language: String,
+    /// The one quiet line the status bar holds after its left words (DW-1564); `None`: no line.
+    pub quiet: Option<&'static str>,
+    /// The outline pane is open (the board draws it open; its close control folds it to a strip).
+    pub outline_open: bool,
 }
 
 /// Counts only, never a heading or a word.
@@ -90,6 +96,8 @@ impl DocBody {
             page: 1,
             at: 0,
             language: language.into(),
+            quiet: None,
+            outline_open: true,
         }
     }
 
@@ -105,6 +113,11 @@ impl DocBody {
             self.at = i;
             self.go_to_page(page);
         }
+    }
+
+    /// The outline's close control: fold the pane to a strip, or open it again.
+    pub fn toggle_outline(&mut self) {
+        self.outline_open = !self.outline_open;
     }
 
     pub fn zoom_in(&mut self) {
@@ -178,9 +191,31 @@ static MORE: Icon = Icon {
     ),
 };
 
+static CHEVRON_LEFT: Icon = Icon {
+    name: "docs-chevron-left",
+    view: 24.0,
+    body: concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">"#,
+        r#"<path d="M15 5l-7 7 7 7"></path></g>"#
+    ),
+};
+
+static CHEVRON_RIGHT: Icon = Icon {
+    name: "docs-chevron-right",
+    view: 24.0,
+    body: concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">"#,
+        r#"<path d="M9 5l7 7-7 7"></path></g>"#
+    ),
+};
+
 /// The outline pane's width and the page's width at 100 %.
 const OUTLINE_W: f32 = 210.0;
 const PAGE_W: f32 = 520.0;
+/// The board's page is at least this tall at 100 %.
+const PAGE_MIN_H: f32 = 700.0;
+/// The folded outline's strip.
+const STRIP_W: f32 = 44.0;
 
 fn with_doc(act: impl Fn(&mut DocBody) + 'static) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
@@ -260,6 +295,8 @@ fn bar(doc: &DocBody, t: &Theme) -> El {
                 .px(10.0)
                 .center_y()
                 .radius(7.0)
+                .fill(t.paper)
+                .border(1.0, t.card_border)
                 .hover(t.hover)
                 .press(t.press)
                 .focusable(true)
@@ -299,7 +336,49 @@ fn note(t: &Theme) -> El {
         .child(kit::label("banner-text", OLDER_FORMAT, BANNER, t.text_secondary).grow(1.0))
 }
 
+/// The current heading's row fill: the board's ink at 9 % (`color-mix(ink 9%, ground)`), light ink on dark.
+fn here_fill(t: &Theme) -> Color {
+    let ink = rune::color::hex(if t.dark { "#E9E9DE" } else { "#16160B" }).unwrap_or(Color::BLACK);
+    Color { a: 23.0 / 255.0, ..ink }
+}
+
+/// The outline's fold control: a 28 px square with a chevron (left while open, right while folded).
+fn outline_close(open: bool, t: &Theme) -> El {
+    row()
+        .key("ol-close")
+        .role("button")
+        .label(if open { "Close the outline" } else { "Open the outline" })
+        .size(28.0, 28.0)
+        .center()
+        .radius(6.0)
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .on_press(with_doc(DocBody::toggle_outline))
+        .child(kit::glyph(
+            "ol-close-icon",
+            if open { &CHEVRON_LEFT } else { &CHEVRON_RIGHT },
+            13.0,
+            t.text_secondary,
+        ))
+}
+
 fn outline(doc: &DocBody, t: &Theme) -> El {
+    if !doc.outline_open {
+        return col()
+            .key("ol")
+            .role("navigation")
+            .label("Outline, closed")
+            .w(STRIP_W)
+            .h_full()
+            .py(12.0)
+            .px(8.0)
+            .fill(t.surface)
+            .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
+            .border_layout()
+            .clip_rounded(0.0)
+            .child(outline_close(false, t));
+    }
     let mut pane = col()
         .key("ol")
         .role("navigation")
@@ -320,7 +399,9 @@ fn outline(doc: &DocBody, t: &Theme) -> El {
                 .px(8.0)
                 .pb(4.0)
                 .center_y()
-                .child(kit::label("ol-title", "OUTLINE", PANE_LABEL, t.text_tertiary)),
+                .child(kit::label("ol-title", "OUTLINE", PANE_LABEL, t.text_tertiary))
+                .child(el().key("ol-head-gap").grow(1.0))
+                .child(outline_close(true, t)),
         );
     for (i, (level, title, page)) in doc.view.outline.iter().enumerate() {
         let here = i == doc.at;
@@ -330,32 +411,37 @@ fn outline(doc: &DocBody, t: &Theme) -> El {
             (_, false) => (OUTLINE, t.text_secondary, 20.0),
         };
         let at = i;
-        pane = pane.child(
-            row()
-                .key(format!("ol-{i}"))
-                .role("link")
-                .label(format!("{title}, page {page}"))
-                .w_full()
-                .h(23.0)
-                .pl(indent)
-                .center_y()
-                .radius(5.0)
-                .hover(t.hover)
-                .press(t.press)
-                .focusable(true)
-                .on_press(with_doc(move |d| d.go_to_heading(at)))
-                .child(
-                    kit::label(format!("ol-{i}-text"), title.clone(), style, ink)
-                        .truncate()
-                        .min_w(0.0),
-                ),
-        );
+        let mut line = row()
+            .key(format!("ol-{i}-row"))
+            .role("link")
+            .label(format!("{title}, page {page}"))
+            .w_full()
+            .h(23.0)
+            .pl(indent)
+            .center_y()
+            .radius(5.0)
+            .hover(t.hover)
+            .press(t.press)
+            .focusable(true)
+            .on_press(with_doc(move |d| d.go_to_heading(at)))
+            .child(
+                kit::label(format!("ol-{i}"), title.clone(), style, ink)
+                    .w(rune::text::advance(title, style))
+                    .truncate()
+                    .min_w(0.0),
+            );
+        if here {
+            line = line.fill(here_fill(t));
+        }
+        pane = pane.child(line);
     }
     pane
 }
 
-/// One page of paper: white, the source's pixels when it has them. Its size follows the page's own (points) at the
-/// stage's zoom.
+/// One page of paper: white, the source's picture drawn whole at its own aspect (never cropped) from the top of the
+/// page. The page is the board's width at the stage's zoom and at least the board's height; with no picture it is
+/// blank paper in the page's own proportions. Page 1 is keyed `page`, a later page `page-{n}` (the board's `pg-` is
+/// a line of text, which a picture has none of).
 fn paper(n: u32, doc: &DocBody, pixels: Option<Pixels>) -> El {
     let (w_pt, h_pt) = doc
         .view
@@ -364,19 +450,38 @@ fn paper(n: u32, doc: &DocBody, pixels: Option<Pixels>) -> El {
         .copied()
         .filter(|(w, h)| *w > 0.0 && *h > 0.0)
         .unwrap_or((595.0, 842.0));
-    let w = PAGE_W * f32::from(doc.view.zoom) / 100.0;
-    let h = w * h_pt / w_pt;
-    let page = el()
-        .key(format!("pg-{n}"))
+    let scale = f32::from(doc.view.zoom) / 100.0;
+    let w = PAGE_W * scale;
+    let key = if n == 1 {
+        "page".to_string()
+    } else {
+        format!("page-{n}")
+    };
+    let page = col()
+        .key(key)
         .role("image")
         .label(format!("Page {n}"))
-        .size(w, h)
+        .w(w)
+        .items_start()
         .radius(2.0)
+        .clip_rounded(2.0)
         .fill(Color::WHITE)
         .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)));
     match pixels {
-        Some(p) => page.pixels_fit(&p, SurfaceFit::Fill),
-        None => page,
+        Some(p) => {
+            let (pw, ph) = p.size();
+            let pic_h = if pw > 0 {
+                w * ph as f32 / pw as f32
+            } else {
+                w * h_pt / w_pt
+            };
+            page.h(pic_h.max(PAGE_MIN_H * scale)).child(
+                el().key(format!("page-picture-{n}"))
+                    .size(w, pic_h)
+                    .pixels_fit(&p, SurfaceFit::Fill),
+            )
+        }
+        None => page.h(w * h_pt / w_pt),
     }
 }
 
@@ -425,11 +530,9 @@ fn status(doc: &DocBody, t: &Theme) -> El {
         format!("{} words", thousands(doc.view.words)),
         doc.language.clone(),
     ];
-    let said = format!("{}. {ENCRYPTED}", parts.join(", "));
     let mut bar = row()
         .key("status-bar")
         .role("status")
-        .label(said)
         .w_full()
         .h(28.0)
         .px(16.0)
@@ -439,6 +542,7 @@ fn status(doc: &DocBody, t: &Theme) -> El {
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
         .border_layout();
     let mut n = 0;
+    let mut said_quiet = String::new();
     for (i, part) in parts.iter().enumerate() {
         if i > 0 {
             bar = bar.child(kit::label(
@@ -455,8 +559,25 @@ fn status(doc: &DocBody, t: &Theme) -> El {
         );
         n += 1;
     }
+    // The board's OvStatus: after the left words, `·` and the one quiet line.
+    if let Some(quiet) = doc.quiet {
+        bar = bar
+            .child(kit::label(
+                format!("st-{n}"),
+                "\u{00B7}",
+                type_::STATUS,
+                t.text_tertiary,
+            ))
+            .child(
+                kit::label(format!("st-{}", n + 1), quiet, type_::STATUS, t.text_tertiary)
+                    .w(rune::text::advance(quiet, type_::STATUS)),
+            );
+        n += 2;
+        said_quiet = format!(". {quiet}");
+    }
     let about_key = format!("st-{}", n + 2);
-    bar.child(el().key("st-gap").grow(1.0))
+    bar.label(format!("{}{said_quiet}. {ENCRYPTED}", parts.join(", ")))
+        .child(el().key("st-gap").grow(1.0))
         .child(
             row()
                 .key(format!("st-{n}-box"))
@@ -485,8 +606,22 @@ fn status(doc: &DocBody, t: &Theme) -> El {
                     }
                 })
                 .child(
-                    kit::label(about_key, ABOUT, type_::STATUS, t.text_tertiary)
-                        .w(rune::text::advance(ABOUT, type_::STATUS)),
+                    // The board underlines "About" (offset 2 px): the line is a bar under the words; the top pad
+                    // keeps the words where the board has them.
+                    col()
+                        .key(format!("{about_key}-under"))
+                        .pt(2.0)
+                        .child(
+                            kit::label(about_key, ABOUT, type_::STATUS, t.text_tertiary)
+                                .w(rune::text::advance(ABOUT, type_::STATUS)),
+                        )
+                        .child(
+                            el().key("st-about-line")
+                                .mt(1.0)
+                                .w(rune::text::advance(ABOUT, type_::STATUS))
+                                .h(1.0)
+                                .fill(t.text_tertiary),
+                        ),
                 ),
         )
 }
@@ -609,6 +744,9 @@ mod tests {
         fn cancel(&mut self, id: &str) {
             self.inner.cancel(id)
         }
+        fn retry(&mut self, id: &str) -> Result<File, OpenError> {
+            self.inner.retry(id)
+        }
         fn save(&mut self, id: &str, _text: &str, base: u32) -> SaveOutcome {
             self.calls.borrow_mut().push(format!("save {id} {base}"));
             SaveOutcome::Failed
@@ -645,7 +783,7 @@ mod tests {
             (d.page, d.view.pages, d.view.zoom, d.view.older_format),
             (1, 4, 100, false)
         );
-        assert!(find(&rt, "banner").is_none() && find(&rt, "ol").is_some() && find(&rt, "pg-1").is_some());
+        assert!(find(&rt, "banner").is_none() && find(&rt, "ol").is_some() && find(&rt, "page").is_some());
         let mut rt = scene(scene_older, false);
         let d = doc(&mut rt);
         assert_eq!((d.view.pages, d.view.older_format, d.at), (1, true, 1));
@@ -716,13 +854,13 @@ mod tests {
         let last = doc(&mut rt).view.outline.len() - 1;
         let want = doc(&mut rt).view.outline[last].2;
         assert!(want > 1, "the fixture's last heading is past page 1");
-        let [x, y, w, h] = find(&rt, &format!("ol-{last}")).expect("the heading is drawn").rect;
+        let [x, y, w, h] = find(&rt, &format!("ol-{last}-row")).expect("the heading is drawn").rect;
         rt.pointer_down(x + w / 2.0, y + h / 2.0);
         rt.pointer_up(x + w / 2.0, y + h / 2.0);
         rt.frame(0.0);
         let d = doc(&mut rt);
         assert_eq!((d.page, d.at), (want, last));
-        assert!(find(&rt, &format!("pg-{want}")).is_some() && find(&rt, "pg-1").is_none());
+        assert!(find(&rt, &format!("page-{want}")).is_some() && find(&rt, "page").is_none());
         assert_eq!(
             find(&rt, "vbar-page").and_then(|e| e.text),
             Some(format!("Page {want} of 4"))
@@ -809,5 +947,81 @@ mod tests {
         d.go_to_heading(99);
         assert_eq!(d.page, 4, "a heading that is not there goes nowhere");
         assert!(!d.on_key(&Key::Command('s'), &ctrl()) && !d.on_key(&Key::Command('k'), &ctrl()));
+    }
+
+    /// The window as the board draws it: the outline folds with `ol-close` (and its chevron), and "Open in another
+    /// app…" is a bordered small button.
+    #[test]
+    fn office_docs_window_has_the_outline_close_and_a_bordered_open_elsewhere() {
+        for f in [scene_docx as fn(&mut State), scene_older] {
+            let rt = scene(f, false);
+            assert!(find(&rt, "ol-close").is_some(), "the outline's close control is drawn");
+            assert!(find(&rt, "ol-close-icon").is_some(), "its chevron is drawn");
+            let t = tokens::theme(false);
+            let e = find(&rt, "elsewhere").expect("the button is drawn");
+            // The element info has no border; the outlined button's paper fill is set with its border, in one place.
+            assert_eq!(
+                e.fill, t.paper,
+                "the button is the outlined kind (paper fill with a border)"
+            );
+        }
+    }
+
+    /// The row of the heading last gone to (`body.at`) has a fill; no other row has one.
+    #[test]
+    fn office_docs_marks_the_current_heading() {
+        for f in [scene_docx as fn(&mut State), scene_older] {
+            let mut rt = scene(f, false);
+            let d = doc(&mut rt);
+            for i in 0..d.view.outline.len() {
+                let row = find(&rt, &format!("ol-{i}-row")).expect("the row is drawn");
+                let filled = row.fill.a > 0.0;
+                assert_eq!(filled, i == d.at, "row {i} (current: {})", d.at);
+            }
+        }
+    }
+
+    /// The page's picture is drawn whole: the first page is keyed `page`, 520 wide, as tall as the canvas's
+    /// proportions say (or the board's 700, if taller), and the picture inside it is never cropped; no page is
+    /// keyed `pg-`.
+    #[test]
+    fn office_docs_page_picture_is_never_cropped() {
+        for (f, ratio) in [
+            (scene_older as fn(&mut State), 1170.0 / 1040.0),
+            (scene_docx, 1260.0 / 1040.0),
+        ] {
+            let rt = scene(f, false);
+            let [_, _, w, h] = find(&rt, "page").expect("the first page is keyed page").rect;
+            assert!((w - 520.0).abs() < 1.0, "the page is the board's width: {w}");
+            assert!(h >= 700.0 - 1.0, "the page is at least the board's height: {h}");
+            let [_, _, pw, ph] = find(&rt, "page-picture-1").expect("the picture is drawn").rect;
+            assert!(
+                (pw - 520.0).abs() < 1.0 && (ph / pw - ratio).abs() * pw < 1.0,
+                "{pw} x {ph}, ratio {ratio}"
+            );
+            assert!(
+                rt.elements()
+                    .iter()
+                    .all(|e| !e.key.clone().unwrap_or_default().starts_with("pg-"))
+            );
+        }
+    }
+
+    /// DW-1564 is the document with one quiet line in its status bar.
+    #[test]
+    fn office_docs_quiet_scene_draws_the_document_and_one_quiet_line() {
+        let rt = scene(super::super::states::scene_quiet, false);
+        assert!(
+            find(&rt, "page").is_some() && find(&rt, "ol").is_some(),
+            "the document is drawn"
+        );
+        let quiet = rt
+            .elements()
+            .iter()
+            .filter(|e| e.text.as_deref() == Some("Some content isn't shown."))
+            .count();
+        assert_eq!(quiet, 1, "the quiet line is in the status bar once");
+        let bar = find(&rt, "status-bar").and_then(|e| e.label).unwrap_or_default();
+        assert!(bar.contains("Some content isn't shown."));
     }
 }
