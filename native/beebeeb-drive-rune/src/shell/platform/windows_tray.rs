@@ -9,7 +9,10 @@
 //!
 //! The tray lives on its own thread with a hidden top-level window (never shown), so it gets
 //! `TaskbarCreated`, `WM_SETTINGCHANGE` (the taskbar's light or dark mode), `WM_DISPLAYCHANGE`
-//! (a scale change) and `WM_ENDSESSION`, and answers while the app's window is closed.
+//! (a scale change) and `WM_ENDSESSION`, and answers while the app's window is closed. The same
+//! window is registered for this session's changes (`WTSRegisterSessionNotification`): a lock of
+//! the Windows session (Win+L, or Windows' own lock) is the away lock's event
+//! ([`TrayEvent::SessionLocked`]), whether the app's window is open or not.
 //!
 //! # The aliasing rule of this file
 //!
@@ -44,6 +47,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromRect,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::RemoteDesktop::{
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4,
@@ -56,7 +62,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SPI_GETCLIENTAREAANIMATION, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SystemParametersInfoW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTALIGN,
     TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION,
-    WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW,
+    WS_POPUP, WTS_SESSION_LOCK,
 };
 
 use super::windows::{os_error, read_taskbar_theme, wide};
@@ -534,6 +541,14 @@ fn handle(hwnd: HWND, context: &Context, message: u32, w: WPARAM, l: LPARAM) -> 
             unsafe { DestroyWindow(hwnd) };
             Some(0)
         }
+        // This Windows session was locked: the away lock's event. Every other change (an unlock,
+        // a remote connection) is Windows' own.
+        WM_WTSSESSION_CHANGE => {
+            if w == WTS_SESSION_LOCK as WPARAM {
+                context.send(TrayEvent::SessionLocked);
+            }
+            Some(0)
+        }
         // Something outside asks the app to close (`taskkill` without /F, Restart Manager, an
         // installer). The window stays (only the app ends the tray); the app is asked to quit.
         WM_CLOSE => {
@@ -541,10 +556,13 @@ fn handle(hwnd: HWND, context: &Context, message: u32, w: WPARAM, l: LPARAM) -> 
             Some(0)
         }
         WM_DESTROY => {
-            // SAFETY: timers on this thread's own window, which is being destroyed.
+            // SAFETY: timers on this thread's own window, which is being destroyed; the session
+            // notifications it was registered for end before it goes (a window never registered,
+            // the harness's, is refused and nothing changes).
             unsafe {
                 KillTimer(hwnd, TIMER_ANIMATE);
                 KillTimer(hwnd, TIMER_RETRY);
+                WTSUnRegisterSessionNotification(hwnd);
             }
             context.shell.notify(NIM_DELETE, &icon_data(hwnd, 0));
             context.update(|state| state.added = false);
@@ -735,6 +753,13 @@ fn tray_thread(
             return;
         }
     };
+    // The away lock's event: this session's lock. Refused (no session service), the idle count
+    // still locks; it is said in the log, without anything of the person.
+    // SAFETY: this thread's own live window.
+    if unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) } == 0 {
+        let error = os_error("registering for session changes");
+        crate::shell::host::log(format!("the away lock will not see a Windows lock ({error})"));
+    }
     // The first add happens before the app is told the tray exists, so `present()` is the
     // truth by the time `create` returns.
     refresh(hwnd, &context);

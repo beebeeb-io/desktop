@@ -33,7 +33,7 @@ use zeroize::Zeroizing;
 
 #[path = "app_lock_api.rs"]
 mod app_lock;
-pub use app_lock::{AppLockProof, AppLockRefused};
+pub use app_lock::{AppLockProof, AppLockRefused, Away, AwayAnswer, LockAfter};
 
 use super::lock_api::{LockRefused, LockState};
 use super::{CredentialStores, Engine};

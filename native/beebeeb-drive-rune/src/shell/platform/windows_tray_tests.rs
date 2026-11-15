@@ -339,6 +339,18 @@ fn wm_close_asks_the_app_to_quit_and_the_window_stays() {
     assert!(h.is_present());
 }
 
+/// A lock of the Windows session is the away lock's event; an unlock is not.
+#[test]
+fn a_session_lock_is_said_to_the_app_and_an_unlock_is_not() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::WTS_SESSION_UNLOCK;
+    let h = Harness::new("session", syncing());
+    send(h.hwnd, WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK as WPARAM, 0);
+    assert!(!h.events().contains(&TrayEvent::SessionLocked));
+    send(h.hwnd, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK as WPARAM, 0);
+    assert_eq!(h.events().last(), Some(&TrayEvent::SessionLocked));
+    assert_eq!(h.faults(), 0);
+}
+
 /// Enter on the focused b sends NIN_KEYSELECT twice: one toggle.
 #[test]
 fn a_key_select_and_its_repeat_are_one_activation() {

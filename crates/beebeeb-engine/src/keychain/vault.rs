@@ -20,17 +20,24 @@ pub enum LockFlag {
     /// [`AuthVault::lock_setting`]`(.., true)`, never [`AuthVault::lock_flag`]; bytes that are neither value, or a
     /// failed read, count as on.
     AppLock,
+    /// Not a flag: "Locks again after", how long the person may be away before an open app locks its screen by
+    /// itself while app lock is on (decision 2519: an engine entry beside `lock.app_lock`, `lock.after`). The bytes
+    /// are the delay in seconds, one of a closed set (`app::lock_password_api::LockAfter`); read and written only as
+    /// bytes ([`AuthVault::lock_entry`]). Absent is the default; bytes that are not one of the set never lock later
+    /// than the default. Not a secret.
+    LockAfter,
 }
 
 impl LockFlag {
     /// App lock first: a removal of every entry that stops part way must never leave `lock.app_lock = 0` behind
     /// (it would open the next account's start without a proof); every other entry left behind fails closed.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::AppLock,
         Self::AskPasswordAtStart,
         Self::VaultClosed,
         Self::Attempts,
         Self::ScreenCheck,
+        Self::LockAfter,
     ];
 
     pub const fn leaf(self) -> &'static str {
@@ -40,6 +47,7 @@ impl LockFlag {
             Self::Attempts => "lock.attempts",
             Self::ScreenCheck => "lock.screen_check",
             Self::AppLock => "lock.app_lock",
+            Self::LockAfter => "lock.after",
         }
     }
 }
@@ -331,7 +339,8 @@ impl<S: AuthSecretStore> AuthVault<S> {
             .fold(Ok(()), |done, flag| done.and(self.store.delete_lock_flag(flag)))
     }
 
-    /// The raw bytes of a lock entry that is not a 1/0 flag ([`LockFlag::Attempts`], [`LockFlag::ScreenCheck`]).
+    /// The raw bytes of a lock entry that is not a 1/0 flag ([`LockFlag::Attempts`], [`LockFlag::ScreenCheck`],
+    /// [`LockFlag::LockAfter`]).
     pub fn lock_entry(&self, entry: LockFlag) -> AuthResult<Option<Vec<u8>>> {
         self.store.load_lock_flag(entry)
     }

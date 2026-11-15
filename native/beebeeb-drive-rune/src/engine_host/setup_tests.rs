@@ -67,6 +67,8 @@ struct Fake {
     choices_fail: AtomicBool,
     /// Every app lock write: its session, its value, and whether a proof came with it.
     app_lock: Mutex<Vec<(SessionGeneration, bool, bool)>>,
+    /// Every "Lock again after" write: its session, its value, and whether a proof came with it.
+    lock_after: Mutex<Vec<(SessionGeneration, app_lock::EngineLockAfter, bool)>>,
 }
 
 fn session(number: u64) -> SessionGeneration {
@@ -102,6 +104,7 @@ fn fake() -> Arc<Fake> {
         choices_held: Mutex::new(()),
         choices_fail: AtomicBool::new(false),
         app_lock: Mutex::default(),
+        lock_after: Mutex::default(),
     })
 }
 
@@ -130,6 +133,25 @@ impl SetupEngine for Fake {
         }
         self.app_lock.lock().unwrap().push((session, on, proof.is_some()));
         Ok(())
+    }
+    // As the engine: another session writes nothing, and longer than the default needs a proof.
+    fn set_lock_after_for(
+        &self,
+        session: SessionGeneration,
+        after: app_lock::EngineLockAfter,
+        proof: Option<app_lock::AppLockProof>,
+    ) -> Result<(), app_lock::AppLockRefused> {
+        if session != self.stamp().0 {
+            return Err(app_lock::AppLockRefused::Overtaken);
+        }
+        if after > app_lock::EngineLockAfter::DEFAULT && proof.is_none() {
+            return Err(app_lock::AppLockRefused::ProofNeeded);
+        }
+        self.lock_after.lock().unwrap().push((session, after, proof.is_some()));
+        Ok(())
+    }
+    fn binds_lock_after(&self) -> bool {
+        true
     }
     fn view(&self) -> SyncView {
         *self.view.lock().unwrap()

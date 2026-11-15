@@ -4,7 +4,8 @@
 
 use std::sync::atomic::AtomicUsize;
 
-use beebeeb_engine::app::lock_password_api::AppLockProof;
+use beebeeb_engine::app::lock_password_api::{AppLockProof, LockAfter};
+use beebeeb_engine::keychain::{AuthSecretStore, LockFlag};
 
 use super::*;
 use crate::engine_host::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult};
@@ -63,8 +64,8 @@ fn the_switch_says_the_engines_value_and_nothing_before_it_answered() {
         "not known before the engine answered"
     );
     opened(&mut source, Pane::Security);
-    // On (the default), and no delay: nothing in this version acts on one, so none is drawn.
-    assert_eq!(source.security_facts().app_lock, Some((true, String::new())));
+    // On (the default), and the delay with no entry stored: five minutes (decision 2519), in the menu's words.
+    assert_eq!(source.security_facts().app_lock, Some((true, "5 min".to_string())));
     engine
         .set_app_lock_for(engine.session_turn(), false, Some(AppLockProof::PlatformVerified))
         .unwrap();
@@ -159,4 +160,113 @@ fn a_late_answer_after_a_session_change_is_dropped() {
     prompts.answer(HelloResult::Verified);
     settle(&mut source);
     assert!(!stored(&engine));
+}
+
+fn delay(source: &Source) -> Option<String> {
+    source.security_facts().app_lock.map(|(_, after)| after)
+}
+
+fn stored_after(engine: &TestEngine) -> Option<LockAfter> {
+    engine.lock_after_for(engine.session_turn()).unwrap()
+}
+
+#[test]
+fn the_menu_writes_lock_after_and_the_row_shows_it() {
+    let server = server();
+    let (engine, mut source, prompts) = with_prompts(&server);
+    // Shorter than five minutes: written at once, nothing asked.
+    source.set_lock_after("Immediately");
+    assert_eq!(
+        delay(&source).as_deref(),
+        Some("5 min"),
+        "never drawn before the engine answered"
+    );
+    settle(&mut source);
+    assert_eq!(prompts.asked(), 0, "a shorter delay needs no proof");
+    assert_eq!(stored_after(&engine), Some(LockAfter::Immediately));
+    assert_eq!(delay(&source).as_deref(), Some("Immediately"));
+    // Longer: Windows Hello first. Cancelled: nothing written, and said.
+    source.set_lock_after("30 min");
+    assert_eq!(prompts.asked(), 1);
+    prompts.answer(HelloResult::Cancelled);
+    settle(&mut source);
+    assert_eq!(stored_after(&engine), Some(LockAfter::Immediately));
+    assert_eq!(delay(&source).as_deref(), Some("Immediately"));
+    assert_eq!(
+        source.notice(),
+        Some("The lock delay was not changed: Windows Hello did not confirm it's you.")
+    );
+    // Verified: the engine writes it, and the row follows the engine's answer.
+    source.set_lock_after("30 min");
+    prompts.answer(HelloResult::Verified);
+    settle(&mut source);
+    assert_eq!(stored_after(&engine), Some(LockAfter::Minutes30));
+    assert_eq!(delay(&source).as_deref(), Some("30 min"));
+    // Words the menu does not have choose nothing.
+    source.set_lock_after("2 hours");
+    settle(&mut source);
+    assert_eq!(prompts.asked(), 2);
+    assert_eq!(stored_after(&engine), Some(LockAfter::Minutes30));
+}
+
+#[test]
+fn with_app_lock_off_no_delay_is_set() {
+    let server = server();
+    let (engine, mut source, prompts) = with_prompts(&server);
+    engine
+        .set_app_lock_for(engine.session_turn(), false, Some(AppLockProof::PlatformVerified))
+        .unwrap();
+    source.closed();
+    opened(&mut source, Pane::Security);
+    assert_eq!(switch(&source), Some(false));
+    source.set_lock_after("Immediately");
+    source.set_lock_after("60 min");
+    settle(&mut source);
+    assert_eq!(prompts.asked(), 0);
+    assert_eq!(
+        stored_after(&engine),
+        Some(LockAfter::Minutes5),
+        "nothing stored: the default"
+    );
+}
+
+#[test]
+fn a_longer_delay_on_a_pc_without_a_prompt_is_not_changed_and_says_why() {
+    let server = server();
+    let engine = signed_in(&server);
+    let mut source = Source::new(engine.clone());
+    opened(&mut source, Pane::Security);
+    source.set_lock_after("60 min");
+    settle(&mut source);
+    assert_eq!(stored_after(&engine), Some(LockAfter::Minutes5));
+    assert_eq!(
+        source.notice(),
+        Some("The lock delay was not changed: a longer delay needs Windows Hello, which is not set up on this PC.")
+    );
+    // A shorter one still works without it.
+    source.set_lock_after("Immediately");
+    settle(&mut source);
+    assert_eq!(stored_after(&engine), Some(LockAfter::Immediately));
+}
+
+#[test]
+fn a_stored_delay_the_menu_does_not_have_is_drawn_as_not_known() {
+    let server = server();
+    let credentials = MemoryCredentials::default();
+    let (host, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "account-test-slot".into(),
+        state_dir: crate::engine_host::tests::process_state_dir(),
+        api_base: server.fake.base.clone(),
+    };
+    let engine = Arc::new(Engine::open(&TEST, config, host, credentials.clone()).expect("the engine opens"));
+    engine.restore();
+    sign_in(&engine, &server.people[0]);
+    credentials
+        .store_for("account-test-slot")
+        .save_lock_flag(LockFlag::LockAfter, b"86400")
+        .unwrap();
+    let mut source = Source::new(engine.clone());
+    opened(&mut source, Pane::Security);
+    assert_eq!(source.security_facts().app_lock, Some((true, "Not known".to_string())));
 }

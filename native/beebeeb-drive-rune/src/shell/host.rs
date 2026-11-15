@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use rune::{AppHandle, Key, KeyEvent, Tx, WindowHandle};
 
-use super::actions::{FixtureEngine, HostActions, ShellActions};
+use super::actions::{Away, FixtureEngine, HostActions, ShellActions};
 use super::app::{AppMachine, Dialog, Event, Intent, Outcome, Route, Section, SettingsPane};
 use super::control::Request;
 use super::flyout::{self, Toggle};
@@ -89,6 +89,8 @@ pub struct Shell {
     /// How often the refusal modal opened, for the tests.
     #[cfg(test)]
     sync_off_opened: u32,
+    /// The away lock's host half (`away.rs`): what it measured, and the one wake it armed.
+    pub(crate) away: super::away::AwayLock,
     /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle): a list that showed
     /// an error or nothing is read again then ([`read_again_after_a_check`]).
     check_finished: bool,
@@ -131,6 +133,7 @@ impl Shell {
             #[cfg(test)]
             sync_off_opened: 0,
             check_finished: false,
+            away: super::away::AwayLock::default(),
         }
     }
 
@@ -546,6 +549,17 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // Windows Hello's answer to an approval of another device's sign-in (DW-A14). Read after the
     // session: an answer that comes with a lock or a sign-out finds its wait already ended.
     changed |= crate::frames::account::approve::poll(s);
+    // The away lock: how long this PC had no input, to the engine, while the session is open
+    // (`away.rs`). Read after this poll's refresh, so the gate is the one the window shows.
+    let open = super::session_gate::open(s);
+    let shell = &mut s.shell;
+    changed |= shell.away.poll(
+        open,
+        shell.platform.idle_for(),
+        &shell.actions,
+        shell.wiring.main.as_ref(),
+        tx,
+    );
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
@@ -831,6 +845,13 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
         }
         // `taskkill` without /F, Restart Manager: quit cleanly instead of ignoring it.
         TrayEvent::CloseRequested => tx.quit(),
+        // Windows locked this session: the engine decides whether the app locks (app lock on).
+        TrayEvent::SessionLocked => {
+            let shell = &mut s.shell;
+            shell
+                .away
+                .event(Away::SessionLocked, &shell.actions, shell.wiring.main.as_ref());
+        }
     }
 }
 
@@ -883,7 +904,13 @@ pub fn on_close(s: &mut State, tx: &mut Tx) {
     s.shell.save_window_place();
     if s.shell.close_quits() {
         tx.quit();
+        return;
     }
+    // The window went to the tray: the person left Beebeeb ("Locks again after: Immediately" locks).
+    let shell = &mut s.shell;
+    shell
+        .away
+        .event(Away::LeftTheApp, &shell.actions, shell.wiring.main.as_ref());
 }
 
 /// The quit hook: every quit comes through here (the b's menu, the installer's
