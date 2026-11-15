@@ -172,7 +172,7 @@ impl Refusal {
     pub fn of(error: &str) -> Option<Self> {
         [Self::IdentityUnknown, Self::OtherAccountOnWindows]
             .into_iter()
-            .find(|refusal| refusal.sentence() == error)
+            .find(|refusal| error.starts_with(refusal.sentence()))
     }
 }
 
