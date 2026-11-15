@@ -3,7 +3,7 @@
 
 use rune::{Cx, El, col, row};
 
-use super::source::{BackupsSource, Device, DeviceKind, FileKind, Folder, NotBackedUp, Part, Status};
+use super::source::{Backed, BackupsSource, Device, DeviceKind, FileKind, Folder, NotBackedUp, Part, Status};
 use super::{BackupsUi, Dialog, Page, mail_view};
 use crate::State;
 use crate::frames::settings;
@@ -189,18 +189,50 @@ fn folder_row(index: usize, folder: &Folder, button: usize, t: &Theme) -> El {
     lists::item_with(0, index, &item, vec![control], t)
 }
 
-fn device_row(index: usize, device: &Device, t: &Theme) -> El {
-    let icon = match device.kind {
+/// What a device row and page say for a device whose status file this PC cannot read.
+pub(super) const CANT_READ: &str = "Can't read this device's backup.";
+/// Why a device that may be this PC's own backup has no "Delete this backup" (the engine refuses it too).
+pub(super) const MAY_BE_THIS_PC: &str = "This may be this PC's own backup, so it can't be deleted from this PC.";
+
+fn device_icon(kind: DeviceKind) -> &'static rune::Icon {
+    match kind {
         DeviceKind::Phone => &ic::PHONE,
         DeviceKind::Tablet => &ic::TABLET,
-    };
+        DeviceKind::Computer | DeviceKind::Unknown => &ic::LAPTOP,
+    }
+}
+
+/// "12,418 photos", "2 folders", or that it cannot be read.
+fn backed_words(backed: Backed) -> String {
+    match backed {
+        Backed::Photos(n) => format!("{} photos", thousands(n)),
+        Backed::Folders(1) => "1 folder".to_string(),
+        Backed::Folders(n) => format!("{} folders", thousands(n)),
+        Backed::Unreadable => CANT_READ.to_string(),
+    }
+}
+
+/// What may put a deleted backup back: the device itself, while its backup is on.
+fn backs_up_again(device: &Device) -> String {
+    match device.kind {
+        DeviceKind::Phone | DeviceKind::Tablet => format!(
+            "Photos still on the {} may back up again unless backup is off there.",
+            device.model
+        ),
+        DeviceKind::Computer => format!("{} may back it up again unless backup is off there.", device.name),
+        DeviceKind::Unknown => "The device may back it up again unless backup is off there.".to_string(),
+    }
+}
+
+fn device_row(index: usize, device: &Device, t: &Theme) -> El {
+    let icon = device_icon(device.kind);
     let when = match (&device.last_backup, device.signed_in) {
-        (_, false) => "Not signed in".to_string(),
-        (Some(last), true) => last.clone(),
-        (None, true) => String::new(),
+        (_, Some(false)) => "Not signed in".to_string(),
+        (Some(last), _) => last.clone(),
+        (None, _) => String::new(),
     };
-    let mut sub = format!("{} photos", thousands(device.photos));
-    if !when.is_empty() {
+    let mut sub = backed_words(device.backed);
+    if !when.is_empty() && device.backed != Backed::Unreadable {
         sub = format!("{sub} \u{00B7} {when}");
     }
     let id = device.id.clone();
@@ -298,16 +330,25 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
         ));
     }
 
-    let devices = if source.wired(Part::Devices) {
-        source.devices()
+    let (devices, note) = if source.wired(Part::Devices) {
+        (source.devices(), source.devices_note())
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
     if !devices.is_empty() {
         children.push(lists::list(
             1,
             Some("Other devices"),
             devices.iter().enumerate().map(|(i, d)| device_row(i, d, t)).collect(),
+            note,
+            t,
+        ));
+    } else if let Some(note) = note {
+        // Still reading, or why there is no list: said in the list's place, never an empty card.
+        children.push(lists::list(
+            1,
+            Some("Other devices"),
+            vec![lists::item(1, 0, &Item::new(None, note), t)],
             None,
             t,
         ));
@@ -338,11 +379,11 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
     (children, buttons)
 }
 
-/// DW-0739: another device's backup.
-fn device_page(device: &Device, t: &Theme) -> Vec<El> {
+/// DW-0739: another device's backup. `links`: the source answers for "Open in Photos" and "Open in Files".
+fn device_page(device: &Device, links: bool, t: &Theme) -> Vec<El> {
     let backed_up = match &device.size {
-        Some(size) => format!("{} photos \u{00B7} {size}", thousands(device.photos)),
-        None => format!("{} photos", thousands(device.photos)),
+        Some(size) => format!("{} \u{00B7} {size}", backed_words(device.backed)),
+        None => backed_words(device.backed),
     };
     let mut facts = vec![lists::item(
         0,
@@ -360,22 +401,30 @@ fn device_page(device: &Device, t: &Theme) -> Vec<El> {
             t,
         ));
     }
-    facts.push(lists::item(
-        0,
-        facts.len(),
-        &Item::new(None, "Status")
-            .trailing(Trailing::Value(
-                if device.signed_in { "Signed in" } else { "Not signed in" }.into(),
-            ))
-            .ruled(),
-        t,
-    ));
+    // Whether another device is signed in is not known on this PC (no server part says it): no Status then.
+    if let Some(signed_in) = device.signed_in {
+        facts.push(lists::item(
+            0,
+            facts.len(),
+            &Item::new(None, "Status")
+                .trailing(Trailing::Value(
+                    if signed_in { "Signed in" } else { "Not signed in" }.into(),
+                ))
+                .ruled(),
+            t,
+        ));
+    }
     let (photos, files, delete) = (device.id.clone(), device.id.clone(), device.id.clone());
-    vec![
+    let unreadable = device.backed == Backed::Unreadable;
+    let mut page = vec![
         shell::crumb("Backups", t, |s: &mut State| s.backups.show(Page::Section)),
-        shell::heading(&device.name, None, t),
-        lists::list(0, None, facts, None, t),
-        lists::list(
+        shell::heading(&device.name, unreadable.then_some(CANT_READ), t),
+    ];
+    if !unreadable {
+        page.push(lists::list(0, None, facts, None, t));
+    }
+    if links {
+        page.push(lists::list(
             1,
             Some("See it"),
             vec![
@@ -386,34 +435,59 @@ fn device_page(device: &Device, t: &Theme) -> Vec<El> {
             ],
             None,
             t,
-        ),
-        lists::list(
+        ));
+    }
+    // A folder that may be this PC's own (no layout names this PC's yet): never offered for delete, and said why.
+    if !device.deletable {
+        page.push(lists::list(
             2,
             Some("Remove"),
-            vec![
-                bk::row_item(
-                    2,
-                    0,
-                    RowItem {
-                        leading: Leading::Icon(&ic::TRASH),
-                        title: "Delete this backup".into(),
-                        title_color: Some(bk::red_text(t)),
-                        sub: None,
-                        ruled: false,
-                        link: true,
-                        trailing: Vec::new(),
-                    },
-                    t,
-                )
-                .on_press(move |s: &mut State| s.backups.ask_delete_device(&delete)),
-            ],
-            Some(&format!(
-                "Moves these copies to Trash for all your devices. Photos still on the {} may back up again unless backup is off there.",
-                device.model
-            )),
+            vec![bk::row_item(
+                2,
+                0,
+                RowItem {
+                    leading: Leading::Icon(&ic::TRASH),
+                    title: "Can't delete this backup here".into(),
+                    title_color: None,
+                    sub: None,
+                    ruled: false,
+                    link: false,
+                    trailing: Vec::new(),
+                },
+                t,
+            )],
+            Some(MAY_BE_THIS_PC),
             t,
-        ),
-    ]
+        ));
+        return page;
+    }
+    page.push(lists::list(
+        2,
+        Some("Remove"),
+        vec![
+            bk::row_item(
+                2,
+                0,
+                RowItem {
+                    leading: Leading::Icon(&ic::TRASH),
+                    title: "Delete this backup".into(),
+                    title_color: Some(bk::red_text(t)),
+                    sub: None,
+                    ruled: false,
+                    link: true,
+                    trailing: Vec::new(),
+                },
+                t,
+            )
+            .on_press(move |s: &mut State| s.backups.ask_delete_device(&delete)),
+        ],
+        Some(&format!(
+            "Moves these copies to Trash for all your devices. {}",
+            backs_up_again(device)
+        )),
+        t,
+    ));
+    page
 }
 
 fn file_glyph(kind: FileKind) -> &'static rune::Icon {
@@ -552,19 +626,28 @@ pub(super) const PASSWORD_KEY: &str = "delete-password";
 
 /// DW-0742: deleting a device's backup is a risky action, the account password first (owner ruling Q4).
 fn delete_device(ui: &BackupsUi, device: &Device, first_button: usize, t: &Theme) -> El {
-    let photos = format!("{} photos", thousands(device.photos));
-    let rest = format!(
-        " will be moved to Trash. They leave every device and are deleted for good when Trash empties. Photos still on the {} may back up again unless backup is off there.",
-        device.model
-    );
+    let (what, rest) = match device.backed {
+        Backed::Unreadable => (
+            "This device's backup".to_string(),
+            " will be moved to Trash. It leaves every device and is deleted for good when Trash empties. ",
+        ),
+        backed => (
+            backed_words(backed),
+            " will be moved to Trash. They leave every device and are deleted for good when Trash empties. ",
+        ),
+    };
+    let rest = format!("{rest}{}", backs_up_again(device));
     let (words, mono) = match &device.size {
         Some(size) => {
-            let at = photos.len() + " and ".len();
-            (format!("{photos} and {size}{rest}"), vec![at..at + size.len()])
+            let at = what.len() + " and ".len();
+            (format!("{what} and {size}{rest}"), vec![at..at + size.len()])
         }
-        None => (format!("{photos}{rest}"), Vec::new()),
+        None => (format!("{what}{rest}"), Vec::new()),
     };
-    let ready = ui.code_len() > 0;
+    // While a delete is on its way the button is off (one at a time) and, in its own device's dialog, says so.
+    let deleting = ui.deleting_for(&device.id);
+    let ready = ui.code_len() > 0 && !ui.deleting();
+    let refusal = ui.delete_refusal();
     let body = vec![
         bk::para(0, &words, &mono, t),
         // The password field keeps the room the board's code field had (14 pt taller), so the buttons stay where the board has them.
@@ -577,6 +660,8 @@ fn delete_device(ui: &BackupsUi, device: &Device, first_button: usize, t: &Theme
                 &crate::ui::account_form::Field {
                     label: "Account password",
                     input_key: PASSWORD_KEY,
+                    message: refusal,
+                    error: refusal.is_some(),
                     ..Default::default()
                 },
                 &ui.code,
@@ -584,7 +669,8 @@ fn delete_device(ui: &BackupsUi, device: &Device, first_button: usize, t: &Theme
                 t,
             )),
     ];
-    let mut delete = bk::button_md(first_button, "Delete backup", None, Md::Danger(ready), t);
+    let label = if deleting { "Deleting\u{2026}" } else { "Delete backup" };
+    let mut delete = bk::button_md(first_button, label, None, Md::Danger(ready), t);
     if ready {
         delete = delete.on_press(|s: &mut State| {
             s.backups.delete_device();
@@ -616,7 +702,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let mut mail_lists = 0;
     let (children, buttons) = match &ui.page {
         Page::Device(id) => match device(id) {
-            Some(d) => (device_page(d, &t), 0),
+            Some(d) => (device_page(d, source.wired(Part::OpenDevice), &t), 0),
             None => section(source, &t),
         },
         Page::Failures => failures_page(source, &t),
@@ -631,11 +717,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Page::Section => section(source, &t),
     };
     let mut children = children;
-    if let (Page::Section, Some(words)) = (&ui.page, ui.notice()) {
-        // What the source refused to do (a folder that did not switch): said in the section, for a few seconds.
+    if let (Page::Section, Some((words, sub))) = (&ui.page, ui.notice()) {
+        // What the source refused to do (a folder that did not switch, a delete that was not done): said in the
+        // section, for a few seconds.
         children.insert(
             1,
-            controls::banner_toned(1, true, &ic::WARN_CIRCLE, words, "Nothing was changed.", None, &t),
+            controls::banner_toned(1, true, &ic::WARN_CIRCLE, words, sub, None, &t),
         );
     }
     let overlay = match &ui.dialog {

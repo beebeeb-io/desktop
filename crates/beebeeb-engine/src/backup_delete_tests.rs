@@ -225,3 +225,27 @@ fn a_server_that_refuses_the_delete_is_an_error_not_a_success() {
         Err(DeleteBackupError::Failed("server"))
     );
 }
+
+#[test]
+fn a_session_the_server_no_longer_accepts_is_signed_out_not_a_wrong_password() {
+    let (api, deleted) = server();
+    let (_dir, db, own) = fixture();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let client = auth_transport::client().unwrap();
+    // The fake answers 401 to any other session on the start leg, before any proof of the password.
+    let ended = runtime.block_on(delete_backup(
+        &api.base,
+        &client,
+        "a-session-the-server-ended",
+        &db,
+        &own,
+        DEV_MAC,
+        PASSWORD.as_bytes(),
+    ));
+    assert_eq!(ended, Err(DeleteBackupError::SignedOut));
+    assert_eq!(api.routes(), ["POST /api/v1/auth/confirm-opaque-start"]);
+    assert!(deleted.lock().unwrap().is_empty());
+}

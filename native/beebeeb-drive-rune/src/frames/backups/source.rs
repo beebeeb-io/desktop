@@ -69,6 +69,23 @@ pub struct Folder {
 pub enum DeviceKind {
     Phone,
     Tablet,
+    /// A Windows PC, a Mac, a Linux computer.
+    Computer,
+    /// Its status file names no platform, or this PC could not read it.
+    Unknown,
+}
+
+/// What a device's backup holds, as far as this PC can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backed {
+    /// "12,418 photos" (the board's phones and tablets).
+    Photos(u32),
+    /// "2 folders": the backed-up folders listed in the device's folder (what an engine can count without reading
+    /// every file).
+    Folders(u32),
+    /// Its status file could not be read on this PC: the row says so ("Can't read this device's backup."), never a
+    /// guess.
+    Unreadable,
 }
 
 /// Another device's backup, seen from this PC.
@@ -79,12 +96,17 @@ pub struct Device {
     /// What the device is called in a sentence ("iPad": "Photos still on the iPad …").
     pub model: String,
     pub kind: DeviceKind,
-    pub photos: u32,
+    pub backed: Backed,
     /// "38 GB" (DW-0739); the list (DW-0737) shows the count only.
     pub size: Option<String>,
-    /// "Today", "19 Oct"; `None` for a device that is not signed in (the board shows only that).
+    /// "Today", "19 Oct"; `None` for a device that is not signed in (the board shows only that), or one whose
+    /// status file names no time.
     pub last_backup: Option<String>,
-    pub signed_in: bool,
+    /// `None`: this PC cannot know (no server part says whether another device is signed in); no Status is drawn.
+    pub signed_in: Option<bool>,
+    /// `false`: it may be this PC's own backup (the engine says so, and refuses its delete): no "Delete this backup",
+    /// its page says why.
+    pub deletable: bool,
 }
 
 /// An item Beebeeb stopped trying, or one it never backs up (DW-0741). Never a raw error code.
@@ -124,6 +146,8 @@ pub enum Part {
     RemoveFolder,
     Retry,
     DeleteDevice,
+    /// A device page's "Open in Photos" and "Open in Files" (the shell must take Backups' intents).
+    OpenDevice,
 }
 
 /// What [`BackupsSource::pump`] found.
@@ -136,6 +160,9 @@ pub struct Pumped {
     pub busy: bool,
     /// A change the person asked for was refused: the window says so (a fixed sentence).
     pub refusal: Option<&'static str>,
+    /// The answer to "Delete this backup" (a source that answers late): done, or refused with a fixed sentence.
+    /// Nothing was deleted in a refusal.
+    pub deleted: Option<Result<(), &'static str>>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))] // the defaulted methods are for the view lane's poll (PR body)
@@ -160,6 +187,15 @@ pub trait BackupsSource {
     fn refusal(&self) -> Option<&'static str> {
         None
     }
+    /// What the "Other devices" list says beside (or instead of) its rows: still reading, could not be read, not
+    /// every device listed. A fixed sentence; `None`: nothing to say.
+    fn devices_note(&self) -> Option<&'static str> {
+        None
+    }
+    /// A "Delete this backup" is on its way (a source that answers late): the dialog says so and sends nothing more.
+    fn deleting(&self) -> bool {
+        false
+    }
     fn root(&self) -> BackupsRoot;
     fn status(&self) -> Status;
     fn folders(&self) -> Vec<Folder>;
@@ -181,7 +217,9 @@ pub trait BackupsSource {
     fn retry(&mut self, id: &str);
     fn retry_all(&mut self);
     /// Move another device's backup to Trash. It is a risky action: the engine proves the ACCOUNT PASSWORD
-    /// (`code` carries it; owner ruling Q4). `false`: it was not accepted, nothing changed.
+    /// (`code` carries it; owner ruling Q4). `false`: it was not accepted, nothing changed. A source that answers
+    /// late returns `true` for "sent" and says so with [`BackupsSource::deleting`]; its answer comes through
+    /// [`Pumped::deleted`].
     fn delete_device_backup(&mut self, id: &str, code: &str) -> bool;
 
     // Mail Backup (the board's proposal, DW-0740 to DW-0743b). Every default is the answer of a
@@ -269,10 +307,11 @@ impl FixtureSource {
             name: name.into(),
             model: if kind == DeviceKind::Tablet { "iPad" } else { "iPhone" }.into(),
             kind,
-            photos,
+            backed: Backed::Photos(photos),
             size: size.map(str::to_string),
             last_backup: last.map(str::to_string),
-            signed_in,
+            signed_in: Some(signed_in),
+            deletable: true,
         };
         let devices = vec![
             device(

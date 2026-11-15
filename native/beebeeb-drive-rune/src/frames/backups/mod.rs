@@ -108,8 +108,13 @@ pub struct BackupsUi {
     intents: Vec<Intent>,
     /// The section was open at the last poll (it reads again when it opens).
     was_open: bool,
-    /// What the source refused to do, said in the section for a few seconds.
-    notice: Option<(&'static str, std::time::Instant)>,
+    /// What the source refused to do, said in the section for a few seconds: the words and the line under them.
+    notice: Option<(&'static str, &'static str, std::time::Instant)>,
+    /// Why the last "Delete this backup" was not done, under the password field while the dialog is open.
+    delete_refusal: Option<&'static str>,
+    /// The device a "Delete this backup" was sent for and not answered yet (a source that answers late): its answer
+    /// goes to that device's dialog only.
+    delete_sent: Option<String>,
 }
 
 impl BackupsUi {
@@ -130,6 +135,8 @@ impl BackupsUi {
             intents: Vec::new(),
             was_open: false,
             notice: None,
+            delete_refusal: None,
+            delete_sent: None,
         }
     }
 
@@ -177,6 +184,7 @@ impl BackupsUi {
         }
         self.dialog = None;
         self.code.clear();
+        self.delete_refusal = None;
     }
 
     /// What Backups asked of the shell since the last call, oldest first. (The shell lane
@@ -486,6 +494,10 @@ impl BackupsUi {
     /// "Delete backup": off until a password is typed. Deleting a backup proves the ACCOUNT PASSWORD (owner ruling
     /// Q4: the engine's `backup_delete::delete_backup` steps up with the password, there is no authenticator
     /// code here). One the engine does not accept empties the field and the dialog stays.
+    ///
+    /// A source that answers late takes the press as "sent": the dialog stays, says it is deleting and sends nothing
+    /// more, until the answer comes through [`poll`] (done: closed; refused: the words under the field). Nothing is
+    /// removed from the list before the answer.
     pub fn delete_device(&mut self) -> bool {
         let Some(Dialog::DeleteDevice(id)) = self.dialog.clone() else {
             return false;
@@ -493,16 +505,58 @@ impl BackupsUi {
         if self.code_len() == 0 {
             return false;
         }
-        let accepted = self
-            .source
-            .as_mut()
-            .is_some_and(|source| source.delete_device_backup(&id, &self.code.text));
+        let Some(source) = self.source.as_mut() else {
+            return false;
+        };
+        if source.deleting() {
+            return false;
+        }
+        let accepted = source.delete_device_backup(&id, &self.code.text);
+        let late = source.deleting();
         self.code.clear();
-        if accepted {
+        self.delete_refusal = None;
+        if accepted && late {
+            self.delete_sent = Some(id);
+        } else if accepted {
             self.dialog = None;
             self.page = Page::Section;
         }
         accepted
+    }
+
+    /// A "Delete this backup" of this device is on its way.
+    pub(crate) fn deleting_for(&self, id: &str) -> bool {
+        self.deleting() && self.delete_sent.as_deref() == Some(id)
+    }
+
+    /// A "Delete this backup" is on its way.
+    pub(crate) fn deleting(&self) -> bool {
+        self.source().is_some_and(|source| source.deleting())
+    }
+
+    /// Why the last "Delete this backup" was not done, while its dialog is open.
+    pub(crate) fn delete_refusal(&self) -> Option<&'static str> {
+        self.delete_refusal
+            .filter(|_| matches!(self.dialog, Some(Dialog::DeleteDevice(_))))
+    }
+
+    /// The answer to a "Delete this backup" that was sent. Done: the dialog closes (the source reads the list again).
+    /// Refused: the words under the password field, or in the section when the dialog was closed meanwhile.
+    fn delete_answered(&mut self, answer: Result<(), &'static str>) {
+        // Only the dialog of the device it was sent for: another device's dialog opened meanwhile is not its.
+        let sent = self.delete_sent.take();
+        let open = matches!(&self.dialog, Some(Dialog::DeleteDevice(id)) if sent.as_deref() == Some(id.as_str()));
+        match answer {
+            Ok(()) if open => {
+                self.close_dialog();
+                self.page = Page::Section;
+            }
+            Ok(()) => {}
+            Err(words) if open => self.delete_refusal = Some(words),
+            Err(words) => {
+                self.notice = Some((words, DELETE_NOTICE_SUB, std::time::Instant::now()));
+            }
+        }
     }
 
     pub fn retry(&mut self, id: &str) {
@@ -532,6 +586,11 @@ pub fn sync(s: &mut State) {
     s.backups.mail_answered();
 }
 
+/// The line under a delete's refusal said in the section (its words say whether anything was deleted).
+const DELETE_NOTICE_SUB: &str = "Other devices shows what Beebeeb has.";
+/// The line under a refused change of a folder.
+const NOTHING_CHANGED: &str = "Nothing was changed.";
+
 /// How long a refusal stays in the section.
 const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
 /// How often the section looks at the engine while it is open (a pass that ends, a switch that was answered).
@@ -539,10 +598,10 @@ const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl BackupsUi {
     /// What the source refused to do and has not yet been said for long enough.
-    pub(crate) fn notice(&self) -> Option<&'static str> {
+    pub(crate) fn notice(&self) -> Option<(&'static str, &'static str)> {
         self.notice
-            .filter(|(_, at)| at.elapsed() < NOTICE_FOR)
-            .map(|(words, _)| words)
+            .filter(|(_, _, at)| at.elapsed() < NOTICE_FOR)
+            .map(|(words, sub, _)| (words, sub))
     }
 }
 
@@ -566,10 +625,14 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let pumped = source.pump();
     let mut changed = pumped.changed;
     if let Some(words) = pumped.refusal {
-        ui.notice = Some((words, std::time::Instant::now()));
+        ui.notice = Some((words, NOTHING_CHANGED, std::time::Instant::now()));
         changed = true;
     }
-    if ui.notice.is_some_and(|(_, at)| at.elapsed() >= NOTICE_FOR) {
+    if let Some(answer) = pumped.deleted {
+        ui.delete_answered(answer);
+        changed = true;
+    }
+    if ui.notice.is_some_and(|(_, _, at)| at.elapsed() >= NOTICE_FOR) {
         ui.notice = None;
         changed = true;
     }

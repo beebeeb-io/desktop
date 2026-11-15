@@ -16,9 +16,11 @@
 //! - "Back up now": `scheduler::request_pass_now`, which the runner's next tick honours; only while a folder is on.
 //! - What could not back up: the folders that turned themselves off, with core's words for why (the engine keeps no
 //!   list of single files it gave up on). "Try again" switches the folder on again (clears the stop).
-//! - Not bound (`wired(part)` is `false`): other devices (the engine has no session-bound read of the device
-//!   manifests; PR body), Mail Backup (a proposal), a chosen folder (the settings file holds known-folder keys only:
-//!   no "Add a folder", no "Remove") and Delete this backup (its list is empty; it proves the account password).
+//! - Other devices and Delete this backup: `engine_host::backups_devices` (`DeviceCalls`: the engine's session-bound
+//!   read of the device manifests, and the delete behind the account password).
+//! - Not bound (`wired(part)` is `false`): Mail Backup (a proposal), a chosen folder (the settings file holds
+//!   known-folder keys only: no "Add a folder", no "Remove"), and a device page's "Open in Photos" / "Open in Files"
+//!   (the shell does not take Backups' intents yet).
 //!
 //! Thread rule: nothing here waits on the window's thread. One worker per source does every read and every switch,
 //! in the order asked, and sends each answer down one channel, which [`BackupsSource::pump`] drains.
@@ -46,6 +48,7 @@ use beebeeb_engine::app::{CredentialStores, Engine};
 use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_engine::signin::gate::GateState;
 
+use super::backups_devices::{DeviceCalls, DevicesEngine};
 use super::log;
 use crate::frames::backups::source::{
     BackupsRoot, BackupsSource, Device, FileKind, Folder, NotBackedUp, Part, Pumped, Status,
@@ -78,7 +81,7 @@ pub const NOT_READ: &str = "Couldn't read this PC's backup. Try again in a momen
 pub const NOT_SWITCHED: &str = "Couldn't change this folder's backup.";
 
 /// The engine handle as the adapter uses it. The real one is [`Engine`]; tests pass a fake.
-pub trait BackupsEngine: Send + Sync + 'static {
+pub trait BackupsEngine: DevicesEngine + Send + Sync + 'static {
     /// Someone is signed in and the vault is open. Never waits.
     fn unlocked(&self) -> bool;
     /// Whose account is signed in (the stored email, else the user id the server named). Never waits.
@@ -183,6 +186,8 @@ pub struct EngineBackupsSource<E: BackupsEngine> {
     was_running: bool,
     /// A "Back up now" was sent and its read has not come back: no second one is sent.
     run_out: bool,
+    /// Other devices and Delete this backup (`engine_host::backups_devices`).
+    devices: DeviceCalls<E>,
 }
 
 impl<E: BackupsEngine> EngineBackupsSource<E> {
@@ -190,6 +195,7 @@ impl<E: BackupsEngine> EngineBackupsSource<E> {
     pub fn new(engine: Arc<E>) -> Self {
         let (answers, inbox) = mpsc::channel();
         Self {
+            devices: DeviceCalls::new(engine.clone()),
             engine,
             jobs: None,
             answers,
@@ -210,7 +216,7 @@ impl<E: BackupsEngine> EngineBackupsSource<E> {
     /// No job is waiting or running (tests wait on it).
     #[cfg(test)]
     pub(crate) fn idle(&self) -> bool {
-        self.pending.load(Ordering::SeqCst) == 0
+        self.pending.load(Ordering::SeqCst) == 0 && self.devices.idle()
     }
 
     /// Send `ask` for the account the window sees now. Nothing is sent while no one is signed in with the vault open.
@@ -377,12 +383,18 @@ fn folder_of(row: &BackupFolderRow, today: chrono::NaiveDate) -> Folder {
 
 impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
     fn wired(&self, part: Part) -> bool {
-        // Not bound: other devices (the engine has no session-bound read of the device manifests), Mail Backup (a
-        // proposal), a chosen folder (Add / Remove) and Delete this backup (the device list is empty, so it is never
-        // reached).
+        // Not bound: Mail Backup (a proposal), a chosen folder (Add / Remove) and a device page's links (the shell
+        // does not take Backups' intents yet).
         matches!(
             part,
-            Part::Root | Part::Folders | Part::Status | Part::NotBackedUp | Part::BackUpNow | Part::Retry
+            Part::Root
+                | Part::Folders
+                | Part::Status
+                | Part::NotBackedUp
+                | Part::BackUpNow
+                | Part::Retry
+                | Part::Devices
+                | Part::DeleteDevice
         )
     }
 
@@ -471,6 +483,10 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
             }
         }
         pumped.busy |= self.pending.load(Ordering::SeqCst) > 0;
+        let devices = self.devices.pump();
+        pumped.changed |= devices.changed;
+        pumped.busy |= devices.busy;
+        pumped.deleted = devices.deleted;
         pumped
     }
 
@@ -480,6 +496,15 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         if !fresh {
             self.ask_read();
         }
+        self.devices.opened();
+    }
+
+    fn devices_note(&self) -> Option<&'static str> {
+        self.devices.note()
+    }
+
+    fn deleting(&self) -> bool {
+        self.devices.deleting()
     }
 
     fn loading(&self) -> bool {
@@ -579,9 +604,9 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
             .collect()
     }
 
-    /// Not bound: other devices' backups (their logic is still in the 0.8 app).
+    /// The account's other devices, from their manifests (`engine_host::backups_devices`).
     fn devices(&self) -> Vec<Device> {
-        Vec::new()
+        self.devices.devices()
     }
 
     /// What the engine knows could not back up: a folder that turned itself off, with core's words for why (the
@@ -661,10 +686,10 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         }
     }
 
-    /// Not bound: the frame collects an authenticator code; the engine's delete (`backup_delete::delete_backup`)
-    /// proves the account password. Nothing is sent (PR body).
-    fn delete_device_backup(&mut self, _id: &str, _code: &str) -> bool {
-        false
+    /// The account password proven, then one move to Trash (`engine_host::backups_devices`). `true`: sent; the
+    /// answer comes through `pump`.
+    fn delete_device_backup(&mut self, id: &str, code: &str) -> bool {
+        self.devices.delete(id, code)
     }
 }
 
