@@ -8,7 +8,7 @@
 //! the engine's own 30 s period, so this test takes about two minutes of wall clock.
 //!
 //! Mutants: the tick clears the run whatever its pull did (`note_result(None)` in the runner's `Ok` arm), or the tick
-//! drops why its pull failed (`pull_refusal: None`): either way the vault stays open and this test fails.
+//! drops why its pull failed (`pull_failure: None`): either way the vault stays open and this test fails.
 
 mod common;
 

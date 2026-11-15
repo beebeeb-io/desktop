@@ -1102,6 +1102,7 @@ pub use telemetry::AuthHealth;
 pub use telemetry::device_name;
 #[cfg(target_os = "macos")]
 pub use telemetry::hostname_or_unknown;
+pub(crate) use telemetry::is_session_refusal;
 use telemetry::*;
 
 mod lifecycle;
