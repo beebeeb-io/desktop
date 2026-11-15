@@ -365,7 +365,7 @@ fn an_available_update_is_said_once_with_one_primary_action() {
     tab_to(&mut rt, "btn-0");
     key(&mut rt, Key::Enter);
     // The board's sample is an update downloaded and verified: its button restarts to update (spec §4, "Apply").
-    assert_eq!(info(&rt, "btn-0").text.as_deref(), Some("Restart to update"));
+    assert_eq!(info(&rt, "btn-0-label").text.as_deref(), Some("Restart to update"));
     assert_eq!(rt.state.settings.intents, vec![Intent::RestartToUpdate]);
     assert_eq!(rt.state.settings.pane, Pane::General);
     assert_eq!(
