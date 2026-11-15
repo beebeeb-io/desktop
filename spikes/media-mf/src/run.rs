@@ -263,8 +263,80 @@ fn load_check(columns: &str) {
     }
 }
 
+/// `media-mf-run --req <columns> <exe> <request|@file>`: sends one multi-line request to `exe` (a sibling exe name or an
+/// absolute path) in each column. Placeholders: `{port}` a loopback listener of this runner (its accepted connections
+/// are counted), `{userfile}` a file of the user's made for this run (in Documents, removed after), `{w1}`/`{w2}`
+/// two places the user can write (removed after each column), `\n` a line break.
+fn requests(columns: &str, exe: &str, text: &str) {
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let exe_path = if exe.contains('\\') {
+        PathBuf::from(exe)
+    } else {
+        sibling(exe)
+    };
+    let text = match text.strip_prefix('@') {
+        Some(file) => std::fs::read_to_string(file).unwrap_or_default(),
+        None => text.replace("\\n", "\n"),
+    };
+    let profile = std::env::var("USERPROFILE").unwrap_or_default();
+    let temp = std::env::var("TEMP").unwrap_or_default();
+    let user_file = format!("{profile}\\Documents\\mfspike-user-file.txt");
+    let w1 = format!("{temp}\\mfspike-w1.tmp");
+    let w2 = r"C:\Users\Public\mfspike-w2.tmp".to_string();
+    let made = std::fs::write(&user_file, b"spike").is_ok();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").ok();
+    if let Some(l) = &listener {
+        let _ = l.set_nonblocking(true);
+    }
+    let port = listener
+        .as_ref()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port())
+        .unwrap_or(1);
+    let mut request = text
+        .replace("{port}", &port.to_string())
+        .replace("{userfile}", &user_file)
+        .replace("{w1}", &w1)
+        .replace("{w2}", &w2);
+    if !request.ends_with('\n') {
+        request.push('\n');
+    }
+    println!(
+        "RUN req exe-exists={} userfile-made={made} listener={} lines={}",
+        exe_path.is_file(),
+        listener.is_some(),
+        request.lines().count()
+    );
+    for column in columns.split(',') {
+        let o = run_column(column, &exe_path, request.as_bytes(), &windir);
+        let mut accepted = 0;
+        if let Some(l) = &listener {
+            while l.accept().is_ok() {
+                accepted += 1;
+            }
+        }
+        let left = [&w1, &w2].iter().filter(|p| std::fs::remove_file(p).is_ok()).count();
+        println!(
+            "== req {column} exit={} ms={} loopback-accepted={accepted} writes-left-and-removed={left}",
+            o.exit, o.ms
+        );
+        for l in &o.lines {
+            println!("  {l}");
+        }
+    }
+    let _ = std::fs::remove_file(&user_file);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--req") {
+        let (Some(columns), Some(exe), Some(text)) = (args.get(2), args.get(3), args.get(4)) else {
+            eprintln!("usage: media-mf-run --req <columns> <exe> <request|@file>");
+            std::process::exit(2);
+        };
+        requests(columns, exe, text);
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("--load") {
         load_check(args.get(2).map(String::as_str).unwrap_or("plain,plainenv,confined"));
         return;

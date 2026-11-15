@@ -808,6 +808,51 @@ fn d3d_manager() -> Result<IMFDXGIDeviceManager, String> {
     }
 }
 
+/// `X`: which registry keys this process can open for reading (an AppContainer that is a member of the "all
+/// application packages" group can read much of the machine's registry; a less privileged one cannot).
+fn registry_reads() {
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW,
+    };
+    let keys: [(&str, HKEY, &str); 6] = [
+        (
+            "hklm-currentversion",
+            HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+        ),
+        (
+            "hklm-mf",
+            HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows Media Foundation",
+        ),
+        (
+            "hklm-uninstall",
+            HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        ),
+        ("hkcr-clsid", HKEY_CLASSES_ROOT, "CLSID"),
+        (
+            "hkcu-explorer",
+            HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer",
+        ),
+        ("hkcu-environment", HKEY_CURRENT_USER, "Environment"),
+    ];
+    for (label, root, path) in keys {
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut key = HKEY(null_mut());
+        let code = unsafe { RegOpenKeyExW(root, PCWSTR(wide.as_ptr()), Some(0), KEY_READ, &mut key) };
+        if code.0 == 0 {
+            unsafe {
+                let _ = RegCloseKey(key);
+            }
+            out(&format!("X {label} ok"));
+        } else {
+            out(&format!("X {label} err {}", code.0));
+        }
+    }
+}
+
 /// A video or audio subtype GUID from its four-character code (the standard media subtype base).
 fn subtype_from_fourcc(code: &[u8; 4]) -> GUID {
     GUID::from_values(
@@ -959,6 +1004,7 @@ fn main() {
 
     match parts.as_slice() {
         ["E"] => enumerate(),
+        ["X"] => registry_reads(),
         ["F", ext, accel, want, len] => {
             let Ok(len) = len.parse::<usize>() else {
                 out("R error length");
