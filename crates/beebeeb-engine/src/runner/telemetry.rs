@@ -443,6 +443,9 @@ pub(super) fn spawn_heartbeat_producer(
     tokio::spawn(async move {
         let interval = Duration::from_secs(interval_secs.max(MIN_HEARTBEAT_INTERVAL_SECS) as u64);
         let mut ticker = tokio::time::interval(interval);
+        // Task 2521: a beat that ran late (a slow answer, a PC that slept) delays the next one instead of a burst of the
+        // missed beats, whose refusals would otherwise land milliseconds apart and count as the whole run.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Track the WALL-CLOCK time of the last beat so the speed denominator is
         // the real elapsed interval, not the configured one.
         let mut last_beat_secs = now_secs();

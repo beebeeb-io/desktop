@@ -202,10 +202,10 @@ fn a_refused_pull_counts_once_per_tick_between_heartbeats() {
     // What a running engine sees after the server ended its session: a refused beat, a tick whose pull was
     // refused, another refused beat. Three in a row: the session is held as ended.
     let health = AuthHealth::new();
-    health.note_result(Some(&auth_error()));
+    health.note_api_answer(Some(&refused()));
     health.note_tick(&failed_tick(refused()));
     assert!(!health.is_expired(), "two refusals are not yet the run");
-    health.note_result(Some(&auth_error()));
+    health.note_api_answer(Some(&refused()));
     assert!(
         health.is_expired(),
         "beat, refused tick, beat: the refused tick counted, it did not clear the run"

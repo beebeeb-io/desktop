@@ -30,6 +30,11 @@ impl RunMode {
 /// event-driven and this fixed poll goes away.
 pub(super) const TICK_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Task 2521: how long a paused tick waits for its check of the session (`ApiClient::session_check`). Well under the
+/// runner stop's graceful wait (`GRACEFUL_ABORT_TIMEOUT`, 3 s), so a stop that comes during the check still lands
+/// inside it.
+pub(super) const PAUSED_SESSION_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub(super) const LOCAL_CACHE_WARNING_THRESHOLD_NUMERATOR: i128 = 9;
 
 pub(super) const LOCAL_CACHE_WARNING_THRESHOLD_DENOMINATOR: i128 = 10;
