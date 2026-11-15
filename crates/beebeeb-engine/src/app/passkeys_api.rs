@@ -440,7 +440,7 @@ impl<C: CredentialStores> Engine<C> {
         };
         *guard = Some(Session {
             token: token.to_string(),
-            master_key: **key,
+            master_key: [0u8; 32],
             email,
         });
         drop(guard);
