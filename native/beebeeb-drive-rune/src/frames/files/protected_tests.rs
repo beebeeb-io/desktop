@@ -732,3 +732,39 @@ fn a_folder_that_cannot_be_read_at_the_start_is_asked_for_once() {
     assert_eq!(reads.load(Ordering::SeqCst), 1, "the first poll reads nothing again");
     assert!(!rt.state.can_go_back(), "and leaves no Back entry");
 }
+
+/// Is the entry with this id drawn dimmed in the open entries? `None`: no such entry.
+fn dimmed_entry(entries: &[crate::ui::menu::Entry], wanted: &str) -> Option<bool> {
+    entries.iter().find_map(|entry| match entry {
+        crate::ui::menu::Entry::Item { id, off, .. } if *id == wanted => Some(*off),
+        _ => None,
+    })
+}
+
+#[test]
+fn the_background_menu_dims_new_folder_upload_and_sort_in_the_backups_tree_only() {
+    let (mut rt, _) = app(false);
+    let outside = rt.state.menu_entries(super::MenuKind::Background);
+    for id in ["new-folder", "upload-files", "sort-by"] {
+        assert_eq!(
+            dimmed_entry(&outside, id),
+            Some(false),
+            "{id} is dimmed outside the tree"
+        );
+    }
+    press(&mut rt, Key::Command('4'), CTRL);
+    settle(&mut rt);
+    let inside = rt.state.menu_entries(super::MenuKind::Background);
+    for id in ["new-folder", "upload-files", "sort-by"] {
+        assert_eq!(dimmed_entry(&inside, id), Some(true), "{id} is not dimmed in the tree");
+    }
+    // The view and the details panel are not the tree's business.
+    assert_eq!(dimmed_entry(&inside, "view-grid"), Some(false));
+    let choices = super::background_menu::sort_entries(&rt.state);
+    assert!(
+        choices
+            .iter()
+            .all(|entry| entry.id().is_none() || dimmed_entry(&choices, entry.id().unwrap()) == Some(true)),
+        "a Sort by choice is not dimmed in the tree"
+    );
+}

@@ -65,6 +65,12 @@ pub fn setup() -> Setup {
 /// [`setup`] with the fake's handler from `wrap`: it gets the account's own handler, the credential stores the engine
 /// uses and the account slot id, and returns the handler the fake serves.
 pub fn setup_with(wrap: impl FnOnce(Handler, MemoryCredentials, String) -> Handler) -> Setup {
+    setup_with_account(|account, stores, account_id| wrap(account_handler(account), stores, account_id))
+}
+
+/// [`setup_with`], where `wrap` gets the account itself: a test that serves it the way `bb-fake-server` does
+/// (`test_api::server::fixture_handler`, its switches and its access lines).
+pub fn setup_with_account(wrap: impl FnOnce(Arc<FakeAccount>, MemoryCredentials, String) -> Handler) -> Setup {
     let (account, phrase, first) = test_account();
     drop(first);
     let home = tempfile::tempdir().expect("a temp folder").keep();
@@ -72,11 +78,7 @@ pub fn setup_with(wrap: impl FnOnce(Handler, MemoryCredentials, String) -> Handl
     let state_dir = state_paths::beebeeb_state_dir_for(&TEST).expect("the state folder");
     let account_id = DesktopConfig::ensure_account_id_for(&TEST).expect("the sandboxed settings file");
     let stores = MemoryCredentials::default();
-    let fake = FakeApi::start(wrap(
-        account_handler(account.clone()),
-        stores.clone(),
-        account_id.clone(),
-    ));
+    let fake = FakeApi::start(wrap(account.clone(), stores.clone(), account_id.clone()));
     let (host, messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
         account_id: account_id.clone(),

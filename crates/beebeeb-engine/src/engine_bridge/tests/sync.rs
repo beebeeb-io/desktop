@@ -863,6 +863,7 @@ async fn a_tick_reaches_the_server_only_when_its_pull_came_back() {
     let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
     server.finish();
     assert!(tick.reached_server, "a snapshot bootstrap reached the server");
+    assert!(tick.pull_refusal.is_none(), "and carries no refusal");
 
     // Cursor set, the session refused: `/sync/ops` answers 401 and the tick is still Ok.
     let refused = serde_json::json!({ "error": "unauthorized" });
@@ -871,14 +872,25 @@ async fn a_tick_reaches_the_server_only_when_its_pull_came_back() {
     let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
     assert_eq!(server.finish().len(), 1);
     assert!(!tick.reached_server, "a refused pull did not reach the server");
+    // Task 2521: the tick carries the refusal, and it reads as the session's (a 401), so the runner counts it.
+    let refusal = tick.pull_refusal.as_ref().expect("a refused pull carries why");
+    assert_eq!(
+        crate::operation_failure::classify_operation_error(&refusal.to_string()),
+        crate::operation_failure::OperationFailureClass::Auth,
+        "a 401 pull is a refusal of the session: {refusal}"
+    );
 
-    // A server error: the same.
+    // A server error: the same, but it is not a refusal of the session.
     let failed = serde_json::json!({ "error": "unavailable" });
     let server = SyncMockServer::start(vec![("503 Service Unavailable".into(), failed)]);
     let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
-    assert!(
-        !sync_tick_outcome(&bridge, dir.path()).await.unwrap().reached_server,
-        "a 5xx pull"
+    let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+    assert!(!tick.reached_server, "a 5xx pull");
+    let failure = tick.pull_refusal.as_ref().expect("a failed pull carries why");
+    assert_ne!(
+        crate::operation_failure::classify_operation_error(&failure.to_string()),
+        crate::operation_failure::OperationFailureClass::Auth,
+        "a 5xx is not a refusal of the session: {failure}"
     );
     server.finish();
     let failed = serde_json::json!({ "error": "unavailable" });
@@ -893,6 +905,10 @@ async fn a_tick_reaches_the_server_only_when_its_pull_came_back() {
     let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
     server.finish();
     assert!(tick.reached_server, "the delta came back, empty");
+    assert!(
+        tick.pull_refusal.is_none(),
+        "a failed freshness probe is not a refused pull"
+    );
 
     // A delta with ops came back.
     let ops = serde_json::json!({ "since": 4, "ops": [ {
@@ -903,6 +919,7 @@ async fn a_tick_reaches_the_server_only_when_its_pull_came_back() {
     let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
     server.finish();
     assert!(tick.reached_server, "the delta came back");
+    assert!(tick.pull_refusal.is_none());
     assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(5), "and was applied");
 }
 

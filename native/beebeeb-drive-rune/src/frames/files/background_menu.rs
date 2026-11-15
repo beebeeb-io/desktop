@@ -20,14 +20,17 @@ pub const SORT_BY: usize = 6;
 /// The menu's entries; the view and Folders first read from the folder shown.
 pub fn entries(s: &State) -> Vec<Entry> {
     let grid = crate::frames::global::grid::on(s);
+    // A protected folder takes no new folder, no upload and keeps its owner's order: the entries are shown, dimmed
+    // (DW-0414), as the toolbar's Sort menu does.
+    let fixed = s.in_protected_folder();
     vec![
-        Entry::keyed("new-folder", "New folder", "Ctrl+Shift+N"),
-        Entry::keyed("upload-files", "Upload files\u{2026}", "Ctrl+O"),
+        Entry::keyed("new-folder", "New folder", "Ctrl+Shift+N").dimmed(fixed),
+        Entry::keyed("upload-files", "Upload files\u{2026}", "Ctrl+O").dimmed(fixed),
         Entry::Sep,
         Entry::check("view-list", "as List", !grid),
         Entry::check("view-grid", "as Grid", grid),
         Entry::Sep,
-        Entry::keyed("sort-by", "Sort by", crate::ui::menu::SUBMENU),
+        Entry::keyed("sort-by", "Sort by", crate::ui::menu::SUBMENU).dimmed(fixed),
         Entry::check("folders-first", "Folders first", s.actions.sort.folders_first),
         Entry::Sep,
         Entry::keyed("details-panel", "Show details panel", "Alt+Shift+P"),
@@ -48,6 +51,7 @@ pub fn sort_entries(s: &State) -> Vec<Entry> {
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
+        .map(|entry| entry.dimmed(s.in_protected_folder()))
         .collect()
 }
 

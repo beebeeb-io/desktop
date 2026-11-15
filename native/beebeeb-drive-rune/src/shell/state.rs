@@ -235,6 +235,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.frames.shared.source = Box::new(crate::engine_host::shared::EngineSharedSource::new(engine.clone()));
     // Trash reads the engine (`engine_host::trash`); Search only when `SEARCH_ON_ENGINE` (task 2488).
     s.frames.trash.source = Box::new(crate::engine_host::trash::EngineTrashSource::new(engine.clone()));
+    // An item's read-only Preview over Trash (Beebeeb only) and Shared (`engine_host::item_preview`).
+    s.frames.item_preview = Box::new(crate::engine_host::item_preview::EngineItemPreview::new(engine.clone()));
     s.frames.find = crate::frames::search::SearchUi::default();
     if SEARCH_ON_ENGINE {
         s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine.clone()));

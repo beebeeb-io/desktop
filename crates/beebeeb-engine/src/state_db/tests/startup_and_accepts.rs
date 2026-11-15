@@ -635,7 +635,28 @@ fn a_finder_change_waiting_behind_the_close_queues_nothing() {
 #[test]
 fn the_fence_is_read_first_inside_the_transaction_that_queues() {
     let source: Vec<&str> = include_str!("../../state_db/landing.rs").lines().collect();
-    for definition in ["pub fn accept_finder_write(", "pub fn enqueue_finder_change("] {
+    // Delta 3 of desktop#432: the accept's transaction is `accept_finder_write_after` (the queued write a modify may
+    // follow is checked in it); `accept_finder_write` is that same call for any, and nothing else.
+    let start = source
+        .iter()
+        .position(|line| line.trim_start().starts_with("pub fn accept_finder_write("))
+        .expect("pub fn accept_finder_write( not found");
+    let end = start
+        + source[start..]
+            .iter()
+            .position(|line| *line == "    }")
+            .expect("the body's end");
+    let calls: Vec<&str> = source[start..end]
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| line.starts_with("self.") || line.contains(".transaction"))
+        .collect();
+    assert_eq!(
+        calls,
+        ["self.accept_finder_write_after(accept, legacy_identifiers, &crate::write_token::ChainAfter::Any)"],
+        "accept_finder_write only hands over to the fenced transaction"
+    );
+    for definition in ["pub fn accept_finder_write_after(", "pub fn enqueue_finder_change("] {
         let start = source
             .iter()
             .position(|line| line.trim_start().starts_with(definition))

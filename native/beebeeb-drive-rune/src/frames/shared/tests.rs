@@ -590,3 +590,53 @@ fn back_is_live_after_files_and_goes_back() {
         "Back went to Files"
     );
 }
+
+/// With me: Details and the read-only Preview of a file shared with the person, taken by the shell's poll and drawn
+/// from Shared's own row; its preview reads this PC's copy first.
+#[test]
+fn shared_with_me_details_and_preview() {
+    use crate::frames::files::actions_data::Previewed;
+    use crate::frames::item::Origin;
+    use crate::frames::item::source::ReadFrom;
+    use crate::frames::item::tests::{facts, polled, previews};
+    let mut rt = polled(super::scenes::dw_0505);
+    let counts = previews(&mut rt, Previewed::NotYet);
+    click(&mut rt, "mi-details");
+    assert_eq!(
+        rt.state.frames.shared.dialog,
+        Some(super::dialogs::Dialog::Details {
+            origin: Origin::Shared,
+            id: "s-brand-review".into()
+        })
+    );
+    assert_eq!(info(&rt, "dlg-file-name").text.as_deref(), Some("Brand review.pdf"));
+    let drawn = facts(&rt, 0);
+    assert_eq!(
+        drawn,
+        [
+            ("Size".to_string(), "2.4 MB".to_string()),
+            ("Shared on".to_string(), "27 Oct 2026".to_string()),
+            ("From".to_string(), "Priya Shah".to_string()),
+            ("On this PC".to_string(), "Yes".to_string()),
+            ("Encrypted".to_string(), "Yes, end to end".to_string()),
+        ]
+    );
+    press(&mut rt, Key::Escape);
+    assert_eq!(rt.state.frames.shared.dialog, None);
+    // Space on the row: Preview, read from this PC first.
+    assert_eq!(focused(&rt).as_deref(), Some("row-1"));
+    press(&mut rt, space());
+    assert_eq!(
+        rt.state.frames.shared.dialog,
+        Some(super::dialogs::Dialog::Preview {
+            origin: Origin::Shared,
+            id: "s-brand-review".into()
+        })
+    );
+    assert_eq!(counts.borrow().last_from, Some(ReadFrom::ThisPcFirst));
+    // Shared's Open is not taken up yet: its words point nowhere.
+    assert_eq!(
+        info(&rt, "pv-blank-text").text.as_deref(),
+        Some("Brand review.pdf \u{00B7} 2.4 MB")
+    );
+}

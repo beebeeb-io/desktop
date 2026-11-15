@@ -317,9 +317,12 @@ A Search, Photos or Backups frame falls into `files` today: wrong as soon as one
 
 ## 4. Requests to the shell lane (`src/shell/**`)
 
-- Drain the intent queues; nothing reads them today: `State::frames.intents` (shared, trash: 16 controls),
-  `SettingsUi::take_intents()` (21 controls, at most 32 kept), `Actions::intents` of files (all but DW-0701,
-  DW-1301, DW-0715), sign-in's `Intent`s (5 controls).
+- Drain the intent queues. `State::frames.intents` (shared, trash, search) is drained by the shell's poll
+  (`shell::intents::drain_frame_intents`): Details (`About("DW-0411")`) and Preview (`Do("preview")`) open
+  `frames::item`'s dialogs; every other intent is logged as `NotWired(<fixed words>)`. Settings' queue
+  (`SettingsUi::take_intents()`) and sign-in's `Intent`s are drained by the same poll
+  (`drain_settings_intents`, `drain_signin_intents`). Still listed as not read (not re-checked by the W3b lane):
+  `Actions::intents` of files (all but DW-0701, DW-1301, DW-0715).
 - `shell/host.rs` `poll`: `changed |= crate::frames::signin::poll(s, tx);` (an engine answer that arrives between
   presses is applied only at the next press).
 - `shell/mod.rs` `main_app`: `.on_focus(|s, focused, _| crate::frames::signin::on_window_focus(s, focused))` (a

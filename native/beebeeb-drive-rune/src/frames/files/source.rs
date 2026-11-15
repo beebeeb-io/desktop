@@ -397,6 +397,9 @@ pub trait FilesSource: Send + 'static {
     fn backups_root(&self) -> Option<String> {
         None
     }
+    /// The sidebar's Backups has no folder to show (`backups_root` is `None`): the source may look again, now and
+    /// then, in case the folder came to be. Called on the window's thread: it must not wait.
+    fn look_for_backups(&mut self) {}
     /// The window now shows this folder (`None`: the top of Files): read what the source needs for it.
     fn folder_shown(&mut self, _folder: Option<&str>) {}
     /// Why `item` (with no item: anything in `folder`) cannot be moved, renamed or deleted, with

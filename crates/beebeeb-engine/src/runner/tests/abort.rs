@@ -165,6 +165,82 @@ fn auth_health_any_success_resets_the_streak_and_clears_expired() {
     );
 }
 
+// ── Task 2521: one sync tick is one sample of the refusal run ──
+
+/// A tick whose pull came back from the server.
+fn reached_tick() -> crate::engine_bridge::SyncTickOutcome {
+    crate::engine_bridge::SyncTickOutcome {
+        reached_server: true,
+        ..Default::default()
+    }
+}
+
+/// A tick whose pull did not come back, for `why`.
+fn failed_tick(why: anyhow::Error) -> crate::engine_bridge::SyncTickOutcome {
+    crate::engine_bridge::SyncTickOutcome {
+        reached_server: false,
+        pull_refusal: Some(why),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_refused_pull_counts_once_per_tick_between_heartbeats() {
+    // What a running engine sees after the server ended its session: a refused beat, a tick whose pull was
+    // refused, another refused beat. Three in a row: the session is held as ended.
+    let health = AuthHealth::new();
+    health.note_result(Some(&auth_error()));
+    health.note_tick(&failed_tick(auth_error()));
+    assert!(!health.is_expired(), "two refusals are not yet the run");
+    health.note_result(Some(&auth_error()));
+    assert!(
+        health.is_expired(),
+        "beat, refused tick, beat: the refused tick counted, it did not clear the run"
+    );
+
+    // Without a heartbeat (it never started): three refused ticks alone.
+    let health = AuthHealth::new();
+    for _ in 0..2 {
+        health.note_tick(&failed_tick(auth_error()));
+    }
+    assert!(!health.is_expired());
+    health.note_tick(&failed_tick(auth_error()));
+    assert!(health.is_expired(), "the third refused tick in a row");
+}
+
+#[test]
+fn a_tick_whose_pull_came_back_clears_the_run() {
+    let health = AuthHealth::new();
+    for _ in 0..3 {
+        health.note_tick(&failed_tick(auth_error()));
+    }
+    assert!(health.is_expired());
+    health.note_tick(&reached_tick());
+    assert!(!health.is_expired(), "an answer that came back clears the run");
+    health.note_tick(&failed_tick(auth_error()));
+    health.note_tick(&failed_tick(auth_error()));
+    assert!(!health.is_expired(), "back to 0, not left at 3");
+}
+
+#[test]
+fn an_offline_or_5xx_tick_keeps_the_count() {
+    let health = AuthHealth::new();
+    health.note_tick(&failed_tick(auth_error()));
+    health.note_tick(&failed_tick(auth_error()));
+    health.note_tick(&failed_tick(other_error()));
+    health.note_tick(&failed_tick(anyhow::anyhow!(
+        "error sending request: connection refused"
+    )));
+    // Not reached and no reason carried: proves nothing either way.
+    health.note_tick(&crate::engine_bridge::SyncTickOutcome::default());
+    assert!(!health.is_expired(), "none of these is a refusal");
+    health.note_tick(&failed_tick(auth_error()));
+    assert!(
+        health.is_expired(),
+        "and none of them cleared the two refusals before them"
+    );
+}
+
 #[test]
 fn classify_abort_maps_full_success_to_stopped() {
     assert_eq!(

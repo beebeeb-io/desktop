@@ -160,7 +160,8 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
   only for its own number and session, under one lock. A save of an earlier opening (or of an earlier source: a file
   opened again from Files is a new source) that ends late never makes, extends or changes a later opening's record:
   its landing is announced as a newer version, and a save from the new opening's version answers the two-versions
-  question. The records are the account's (`AccountRuntime::viewer_saves`): a lock, a sign-out or a sign-in empties
+  question. *(Corrected, delta 3 of #432: this held only once the earlier save had landed. Before that, the new
+  opening's save was queued after it and both landed unasked; see the next section.)* The records are the account's (`AccountRuntime::viewer_saves`): a lock, a sign-out or a sign-in empties
   them, a new opening drops other sessions', and each file keeps only its latest save still to land.
 - **One change at a time, honestly.** Only the answer of the change in flight ends it; a press refused at once (the
   switch while a save is on its way) never does, so Show it still waits and no second save starts. A second answer
@@ -172,3 +173,17 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
   it". Show it during any change on its way says **"Newer version not opened yet: your last change is still on its
   way"**.
 - **A copy here not settled with Beebeeb says so first:** "not in sync" wins over "couldn't confirm" when both hold.
+
+## A save behind an unsent change: delta 3 of #432 (lane fix432, 2026-11-15)
+
+- **A save of one opening is never queued after a change it is not based on.** While an earlier change to the file
+  on this PC has not been sent yet, the engine refuses a new opening's save (`EditRefused::EarlierChangeNotSent`).
+  That change can be an earlier opening's save, stored here or held back, or on macOS a save from another app.
+  Before, the write queue put the new save after that change, and both landed one after the other without the
+  two-versions question. The check runs inside the accept's own transaction (`ChainAfter`), so no write slips in
+  between. A save of the SAME opening still follows its own unsent save: the text on screen is that save's text.
+- **What the person sees:** **"Not saved: an earlier change to this file on this PC has not been sent yet. Your edit
+  stays open."** (`Settled::Refused`). The editor keeps the edit, unsaved. Once that change lands, the banner offers
+  its version, and a save from here asks the two-versions question. No board draws this toast.
+- **The cost:** until that change is sent, the edit cannot be saved from this opening. Offline, or with the change
+  held back, that can last a long time. The edit stays open but is kept nowhere else.

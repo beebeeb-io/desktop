@@ -20,6 +20,21 @@ use crate::ui::settings_shell::SUB;
 use crate::ui::{button, kit};
 use rune::{Color, El, Key, KeyEvent, Span, TextStyle, Tx, col, el, row};
 
+/// What the card offers. Files' panel: Share, Open in its app, Open in another app…, Make available offline. The
+/// read-only panel of an item that is not in Files' list (`frames::item`: a file in Trash, one shared with the
+/// person): none of them, only Close, and what it says after why there is no page is `tail`.
+pub(crate) enum Mode {
+    Files,
+    ReadOnly {
+        /// After why there is no page (" Restore it to open it."), or nothing.
+        tail: &'static str,
+        /// What Close (and Space on it) does.
+        close: fn(&mut State, &mut Tx),
+        /// The size in words, as the item's list shows it ("" when not known).
+        size: String,
+    },
+}
+
 /// The open preview: the file, and what there is to show of it.
 #[derive(Clone, Debug)]
 pub struct Panel {
@@ -29,8 +44,8 @@ pub struct Panel {
 }
 
 /// The card with a page: 640 x 700, 28 pt under the caption. Without one: 540 x 420, 120 pt under.
-const PAGE_CARD: (f32, f32, f32) = (640.0, 700.0, 28.0);
-const BLANK_CARD: (f32, f32, f32) = (540.0, 420.0, 120.0);
+pub(crate) const PAGE_CARD: (f32, f32, f32) = (640.0, 700.0, 28.0);
+pub(crate) const BLANK_CARD: (f32, f32, f32) = (540.0, 420.0, 120.0);
 /// The board puts both cards 11 pt right of the window's middle.
 const OFF_CENTRE: f32 = 11.0;
 
@@ -168,15 +183,15 @@ fn tool(key: &str, name: &str, icon: &'static rune::Icon, size: f32, t: &Theme) 
         .child(kit::glyph(format!("{key}-icon"), icon, size, t.text_secondary))
 }
 
-/// The card's head: close, the file's name and where the preview is, Share, Open in its app.
-fn head(panel: &Panel, t: &Theme) -> El {
+/// The card's head: close, the file's name and where the preview is, Share, Open in its app (Files' panel only).
+fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
     let mut title = col().key("pv-title").grow(1.0).min_w(0.0).px(4.0).child(
-        kit::label("pv-name", panel.item.name.clone(), type_::TITLE, t.text)
+        kit::label("pv-name", item.name.clone(), type_::TITLE, t.text)
             .role("heading")
             .level(2)
             .truncate(),
     );
-    if let Previewed::Shown(shown) = &panel.state {
+    if let Previewed::Shown(shown) = state {
         title = title.child(kit::label(
             "pv-place",
             shown.place.clone(),
@@ -184,7 +199,12 @@ fn head(panel: &Panel, t: &Theme) -> El {
             t.text_tertiary,
         ));
     }
-    let mut head = row()
+    let close = tool("pv-close", "Close preview", &icons_files::CLOSE, 14.0, t);
+    let close = match mode {
+        Mode::Files => close.on_press_tx(|s: &mut State, tx: &mut Tx| s.close_dialog(tx)),
+        Mode::ReadOnly { close: press, .. } => close.on_press_tx(*press),
+    };
+    let head = row()
         .key("pv-head")
         .w_full()
         .h(44.0)
@@ -193,15 +213,16 @@ fn head(panel: &Panel, t: &Theme) -> El {
         .center_y()
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
-        .child(
-            tool("pv-close", "Close preview", &icons_files::CLOSE, 14.0, t)
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.close_dialog(tx)),
-        )
-        .child(title)
-        .child(
-            tool("pv-share", "Share\u{2026}", &icons::SHARE, 15.0, t).on_press(|s: &mut State| s.share_from_preview()),
-        );
-    if matches!(panel.state, Previewed::Shown(_)) {
+        .child(close)
+        .child(title);
+    // Nothing of a read-only panel shares or opens the file.
+    if matches!(mode, Mode::ReadOnly { .. }) {
+        return head;
+    }
+    let mut head = head.child(
+        tool("pv-share", "Share\u{2026}", &icons::SHARE, 15.0, t).on_press(|s: &mut State| s.share_from_preview()),
+    );
+    if matches!(state, Previewed::Shown(_)) {
         head = head.child(
             crate::ui::settings_controls::button(
                 0,
@@ -250,10 +271,13 @@ fn page(p: &Page) -> El {
     sheet
 }
 
-/// What the panel says of a file it cannot show, and the two ways on (DW-0408b).
-fn blank(panel: &Panel, t: &Theme) -> El {
-    let size = panel.item.size.map(format_size).unwrap_or_default();
-    let (title, tail) = match &panel.state {
+/// What the panel says of a file it cannot show, and the two ways on (DW-0408b; none on a read-only panel).
+fn blank(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
+    let size = match mode {
+        Mode::Files => item.size.map(format_size).unwrap_or_default(),
+        Mode::ReadOnly { size, .. } => size.clone(),
+    };
+    let (title, tail) = match state {
         Previewed::Loading => ("Getting the preview\u{2026}", ""),
         Previewed::NotYet => (
             "Preview isn't available for this kind of file in this version yet",
@@ -277,15 +301,23 @@ fn blank(panel: &Panel, t: &Theme) -> El {
             " Open it in another app, or keep it on this PC to open it offline.",
         ),
     };
-    let words = if size.is_empty() {
-        format!("{}.{tail}", panel.item.name)
+    // A read-only panel says its own words after why (none while it waits).
+    let tail = match mode {
+        Mode::ReadOnly { tail: own, .. } if !tail.is_empty() => own,
+        _ => tail,
+    };
+    let read_only = matches!(mode, Mode::ReadOnly { .. });
+    let words = if size.is_empty() && tail.is_empty() && read_only {
+        item.name.clone()
+    } else if size.is_empty() {
+        format!("{}.{tail}", item.name)
     } else if tail.is_empty() {
-        format!("{} \u{00B7} {size}", panel.item.name)
+        format!("{} \u{00B7} {size}", item.name)
     } else {
-        format!("{} \u{00B7} {size}.{tail}", panel.item.name)
+        format!("{} \u{00B7} {size}.{tail}", item.name)
     };
     // The size is a figure: JetBrains Mono inside the Inter line.
-    let at = panel.item.name.len() + " \u{00B7} ".len();
+    let at = item.name.len() + " \u{00B7} ".len();
     let spans = if size.is_empty() {
         Vec::new()
     } else {
@@ -296,15 +328,7 @@ fn blank(panel: &Panel, t: &Theme) -> El {
             ..Span::default()
         }]
     };
-    let kept = panel.item.pc_status.as_deref() == Some("available_offline");
-    let mut keep = button::outline_button("pv-keep", "Make available offline", Some(&icons::AVAILABLE_OFFLINE), t);
-    keep = if kept {
-        // It is kept already: the button has nothing to do.
-        keep.opacity(0.4).disabled(true)
-    } else {
-        keep.on_press_tx(|s: &mut State, tx: &mut Tx| s.keep_from_preview(tx))
-    };
-    col()
+    let blank = col()
         .key("pv-blank")
         .grow(1.0)
         .w_full()
@@ -332,30 +356,35 @@ fn blank(panel: &Panel, t: &Theme) -> El {
                 .align(rune::Align::Center)
                 // `max-width: 36ch` of the 12.5 px line.
                 .max_w(248.0),
-        )
-        .child(
-            row()
-                .key("pv-blank-actions")
-                .gap(8.0)
-                .mt(12.0)
-                .child(
-                    button::outline_button("pv-open-with", "Open in another app\u{2026}", None, t)
-                        .on_press_tx(|s: &mut State, tx: &mut Tx| s.open_with(tx)),
-                )
-                .child(keep),
-        )
+        );
+    if read_only {
+        return blank;
+    }
+    let kept = item.pc_status.as_deref() == Some("available_offline");
+    let mut keep = button::outline_button("pv-keep", "Make available offline", Some(&icons::AVAILABLE_OFFLINE), t);
+    keep = if kept {
+        // It is kept already: the button has nothing to do.
+        keep.opacity(0.4).disabled(true)
+    } else {
+        keep.on_press_tx(|s: &mut State, tx: &mut Tx| s.keep_from_preview(tx))
+    };
+    blank.child(
+        row()
+            .key("pv-blank-actions")
+            .gap(8.0)
+            .mt(12.0)
+            .child(
+                button::outline_button("pv-open-with", "Open in another app\u{2026}", None, t)
+                    .on_press_tx(|s: &mut State, tx: &mut Tx| s.open_with(tx)),
+            )
+            .child(keep),
+    )
 }
 
-pub fn view(s: &State, panel: &Panel, t: &Theme) -> El {
-    let shown = matches!(panel.state, Previewed::Shown(_));
-    let (w, h, top) = if shown { PAGE_CARD } else { BLANK_CARD };
-    let (win_w, win_h) = s.actions.window;
-    // A window smaller than the board's: the card stays inside it.
-    let area_h = (win_h - crate::TITLEBAR_H).max(0.0);
-    let top = top.min((area_h - h).max(0.0) / 2.0);
-    let h = h.min((area_h - top - 8.0).max(120.0));
-    let left = ((win_w - w) / 2.0 + OFF_CENTRE).max(8.0);
-    let body = match &panel.state {
+/// The card (`pv-card`), `size` (w, h), placed by its caller.
+pub(crate) fn card(item: &DriveItem, state: &Previewed, mode: &Mode, size: (f32, f32), t: &Theme) -> El {
+    let (w, h) = size;
+    let body = match state {
         Previewed::Shown(shown) => row()
             .key("pv-body")
             .grow(1.0)
@@ -366,13 +395,12 @@ pub fn view(s: &State, panel: &Panel, t: &Theme) -> El {
             .fill(t.text.alpha(0.05))
             .clip_rounded(0.0)
             .child(page(&shown.page)),
-        _ => blank(panel, t),
+        _ => blank(item, state, mode, t),
     };
     let card = col()
         .key("pv-card")
         .role("dialog")
-        .label(format!("Preview of {}", panel.item.name))
-        .absolute(left, top)
+        .label(format!("Preview of {}", item.name))
         .size(w, h)
         .radius(12.0)
         .fill(t.card)
@@ -384,9 +412,25 @@ pub fn view(s: &State, panel: &Panel, t: &Theme) -> El {
                 .w_full()
                 .h_full()
                 .clip_rounded(12.0)
-                .child(head(panel, t))
+                .child(head(item, state, mode, t))
                 .child(body),
         );
+    match mode {
+        Mode::Files => card,
+        Mode::ReadOnly { .. } => card.description("Read only"),
+    }
+}
+
+pub fn view(s: &State, panel: &Panel, t: &Theme) -> El {
+    let shown = matches!(panel.state, Previewed::Shown(_));
+    let (w, h, top) = if shown { PAGE_CARD } else { BLANK_CARD };
+    let (win_w, win_h) = s.actions.window;
+    // A window smaller than the board's: the card stays inside it.
+    let area_h = (win_h - crate::TITLEBAR_H).max(0.0);
+    let top = top.min((area_h - h).max(0.0) / 2.0);
+    let h = h.min((area_h - top - 8.0).max(120.0));
+    let left = ((win_w - w) / 2.0 + OFF_CENTRE).max(8.0);
+    let card = card(&panel.item, &panel.state, &Mode::Files, (w, h), t).absolute(left, top);
     let scrim = el()
         .key("scrim")
         .pin(Some(0.0), Some(crate::TITLEBAR_H), Some(0.0), Some(0.0))
