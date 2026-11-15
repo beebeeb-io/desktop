@@ -670,6 +670,10 @@ fn a_save_after_the_own_landed_one_goes_out_from_it_and_a_new_opening_answers_co
     signed_in(&engine, &fake.first);
     let (_dir, _root, db) = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
     set_current_version(&db, NOTE, 4);
+    // The account may write the note (the rows of this harness are read-only by default).
+    let mut contract = db.get_file_contract_state(NOTE).unwrap().unwrap();
+    contract.permission_bits |= crate::state_db::PERMISSION_READ | crate::state_db::PERMISSION_WRITE;
+    db.set_file_contract_state(&contract).unwrap();
     let session = engine.acct.session_generation();
     let opening = engine.viewer_opening(session, NOTE);
     // Sync does not run here: the save is stored and answers at once.
