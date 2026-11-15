@@ -314,7 +314,13 @@ impl<E: UploadsEngine> UploadCalls<E> {
                         self.reading = false;
                         match result {
                             Ok(read) => self.held = Some((now.clone(), read, Instant::now())),
-                            Err(_) => log("files: the uploads could not be read"),
+                            // Held as "tried now": the rows stay and the next wake does not ask again at once.
+                            Err(_) => {
+                                log("files: the uploads could not be read");
+                                if let Some((_, _, at)) = self.held.as_mut() {
+                                    *at = Instant::now();
+                                }
+                            }
                         }
                     }
                 }

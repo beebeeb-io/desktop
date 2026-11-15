@@ -34,6 +34,15 @@ pub struct DownloadRow {
     pub kept: bool,
 }
 
+/// The host's window learns of a download row beginning, failing or leaving the board by a wake: the pulse that
+/// would say so is not sent while the engine is paused, offline or stopped. Called once, when the handle opens.
+pub(super) fn wake_the_host_for_downloads(host: &std::sync::Arc<dyn crate::host::EngineHost>) {
+    if let Some(board) = host.transfer_board() {
+        let host = host.clone();
+        board.set_wake(move || host.wake());
+    }
+}
+
 impl<C: CredentialStores> Engine<C> {
     /// See the module's doc. One read of the board, one query to keep this account's files.
     pub fn downloads_for(&self, session: SessionGeneration) -> Result<Vec<DownloadRow>, LocalStateRefused> {

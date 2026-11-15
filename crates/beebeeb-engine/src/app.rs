@@ -318,6 +318,7 @@ impl<C: CredentialStores> Engine<C> {
         // Every engine started from here reports through the view's host, which goes on to the host given here.
         let view = Arc::new(ViewCell::default());
         let host: Arc<dyn EngineHost> = Arc::new(ViewHost::new(host, view.clone()));
+        downloads_api::wake_the_host_for_downloads(&host);
         Ok(Self {
             identity,
             config,

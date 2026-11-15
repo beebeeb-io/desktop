@@ -275,3 +275,68 @@ fn the_files_source_wires_the_downloads_in() {
     assert!(body("fn forget_downloads(&mut self)").contains("self.downloads.forget()"));
     assert!(body("fn downloads(&self)").contains("self.downloads.downloads()"));
 }
+
+/// Paused (and Offline, Sync stopped) send no pulse: the engine wakes the host when a row leaves the board, and one
+/// take after that wake clears the row.
+#[test]
+fn while_paused_a_row_that_ended_leaves_at_the_next_take_after_the_wake() {
+    let engine = Double::new(Ok(one()));
+    *engine.word.lock().unwrap() = Some(words::PAUSED);
+    let mut calls = DownloadCalls::new(engine.clone());
+    calls.ask();
+    take_until(&mut calls, |c| !c.downloads().is_empty());
+    // The rows end; the word stays Paused throughout. The held read is older than the age gate by the wake.
+    *engine.read.lock().unwrap() = Ok(Vec::new());
+    std::thread::sleep(STALE + Duration::from_millis(100));
+    take_within(&mut calls, Duration::from_millis(600), |c| c.downloads().is_empty());
+    assert!(calls.downloads().is_empty());
+}
+
+/// And a fetch that starts while Paused gets its bar at the wake of its row beginning.
+#[test]
+fn while_paused_a_fetch_that_starts_gets_its_bar_at_the_wake() {
+    let engine = Double::new(Ok(Vec::new()));
+    *engine.word.lock().unwrap() = Some(words::PAUSED);
+    let mut calls = DownloadCalls::new(engine.clone()).with_watch(Duration::ZERO);
+    calls.ask();
+    take_until(&mut calls, |_| engine.reads.load(Ordering::SeqCst) > 0);
+    std::thread::sleep(STALE + Duration::from_millis(100));
+    *engine.read.lock().unwrap() = Ok(one());
+    take_until(&mut calls, |c| !c.downloads().is_empty());
+    assert_eq!(calls.downloads().len(), 1);
+}
+
+#[test]
+fn a_steady_syncing_word_with_rows_held_does_not_read_again_inside_the_age_gate() {
+    let engine = Double::new(Ok(one()));
+    let mut calls = DownloadCalls::new(engine.clone());
+    calls.ask();
+    take_until(&mut calls, |c| !c.downloads().is_empty());
+    // Let any read the first sighting asked for land, then count.
+    std::thread::sleep(Duration::from_millis(50));
+    calls.take();
+    std::thread::sleep(Duration::from_millis(50));
+    let reads = engine.reads.load(Ordering::SeqCst);
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(600) {
+        calls.take();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(engine.reads.load(Ordering::SeqCst), reads, "no read per wake");
+}
+
+/// The engine's word is Syncing from the very start: no move of the word is what starts the read, the wake is.
+#[test]
+fn a_wake_reads_for_a_download_that_starts_after_the_watch_with_the_word_at_syncing_throughout() {
+    let engine = Double::new(Ok(Vec::new()));
+    let mut calls = DownloadCalls::new(engine.clone()).with_watch(Duration::ZERO);
+    calls.ask();
+    take_until(&mut calls, |_| engine.reads.load(Ordering::SeqCst) > 0);
+    std::thread::sleep(Duration::from_millis(50));
+    calls.take();
+    assert!(calls.downloads().is_empty());
+    *engine.read.lock().unwrap() = Ok(one());
+    std::thread::sleep(STALE + Duration::from_millis(100));
+    take_until(&mut calls, |c| !c.downloads().is_empty());
+    assert_eq!(calls.downloads().len(), 1);
+}
