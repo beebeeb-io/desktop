@@ -4,7 +4,7 @@
 //! nothing; a page that was left drops the wait and the answer with it.
 
 use super::form::{self, Problem};
-use super::source::{Answered, CallKind, CodeRefused, EmailRefused, Resend};
+use super::source::{Answered, CallKind, CodeRefused, EmailRefused, Refused, Resend};
 use super::{AccountUi, Pane};
 
 /// Starts `kind`. `true`: it is out (the page waits for its answer); `false`: the source answers the sync methods.
@@ -33,6 +33,15 @@ fn code_problem(why: CodeRefused) -> Problem {
 /// answer for a call the page no longer waits for is dropped.
 pub fn settle(ui: &mut AccountUi, kind: CallKind, answered: Answered) -> Option<&'static str> {
     if ui.form.waiting != Some(kind) {
+        // A password change that was answered while its page was not open is kept, and said when the page is
+        // opened again (`form::arrive`): never dropped, Unconfirmed included.
+        if kind == CallKind::ChangePassword {
+            ui.form.late_change = Some(match answered {
+                Answered::Done => Ok(()),
+                Answered::Refused(why) => Err(why),
+                _ => Err(Refused::Offline),
+            });
+        }
         return None;
     }
     // An answer belongs to its own press: one for an earlier call never completes a later one.

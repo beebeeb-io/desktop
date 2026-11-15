@@ -194,21 +194,23 @@ pub fn email(f: &Form, t: &Theme) -> El {
 }
 
 fn send_code(ui: &mut AccountUi) -> Option<&'static str> {
+    ui.source.as_deref()?;
+    let address = ui.form.email.text.trim().to_string();
+    if !address.contains('@') {
+        ui.form.problem = Some(Problem::NotAnAddress);
+        form::focus(&mut ui.form, Some(form::EMAIL_KEY));
+        return None;
+    }
+    if ui.form.waiting.is_some() {
+        return None;
+    }
+    // Every call starts through `calls::start`, which records the press the answer belongs to.
+    let typed = zeroize::Zeroizing::new(ui.form.current.text.clone());
+    if super::calls::start(ui, CallKind::StartEmail, &address, &typed) {
+        return None;
+    }
     let source = ui.source.as_deref_mut()?;
     let f = &mut ui.form;
-    let address = f.email.text.trim().to_string();
-    if !address.contains('@') {
-        f.problem = Some(Problem::NotAnAddress);
-        form::focus(f, Some(form::EMAIL_KEY));
-        return None;
-    }
-    if f.waiting.is_some() {
-        return None;
-    }
-    if source.start_call(CallKind::StartEmail, &address, &f.current.text) {
-        f.waiting = Some(CallKind::StartEmail);
-        return None;
-    }
     let confirmation = match source.step_up(Password::from_field(&f.current.text), Purpose::ChangeEmail) {
         Ok(confirmation) => confirmation,
         Err(why) => {
@@ -343,6 +345,10 @@ fn confirm_email(ui: &mut AccountUi) -> Option<&'static str> {
 /// What the Change password page says while a change is out (from this visit or an earlier one).
 pub(super) const CHANGING: &str = "A password change is still being made. Wait for it to finish.";
 
+/// A change that finished while the person was on another page.
+pub(super) const CHANGED_AWAY: &str =
+    "Your password was changed while you were away. Use the new one the next time you sign in.";
+
 pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
     let out = f.waiting == Some(CallKind::ChangePassword);
     let current = match f.problem {
@@ -351,6 +357,7 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
         Some(Problem::Locked) => Some("Unlock first, then change your password."),
         Some(Problem::Offline) => Some(OFFLINE),
         Some(Problem::Unconfirmed) => Some(UNCONFIRMED),
+        Some(Problem::Changed) => Some(CHANGED_AWAY),
         _ => None,
     };
     let weak = f.problem == Some(Problem::Weak);
@@ -359,7 +366,8 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
     // before Beebeeb answered, and its answer finds the page it is for.
     // The fields are not editable and Change is off; Cancel stays, as the way out (the answer is settled when the
     // page is opened again).
-    let (cancel, cancel_b) = button(0, "Cancel", Look::Plain, false, t);
+    // While a change is out the button leaves the page and says so: it does not cancel the change.
+    let (cancel, cancel_b) = button(0, if out { "Leave this page" } else { "Cancel" }, Look::Plain, false, t);
     let (mut change, change_b) = button(1, "Change password", Look::Primary, out, t);
     let cancel = cancel.on_press(|s: &mut State| super::go(s, "DW-A52"));
     if !out {
@@ -411,7 +419,7 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
                     label: "Current password",
                     icon: lock,
                     message: current,
-                    error: current.is_some() && !out,
+                    error: current.is_some() && !out && f.problem != Some(Problem::Changed),
                     input_key: form::CURRENT_KEY,
                 },
                 &f.current,

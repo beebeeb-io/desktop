@@ -44,6 +44,8 @@ pub enum Problem {
     NameRefused,
     /// A password change whose end is not known: it may have been made.
     Unconfirmed,
+    /// A password change that finished while the person was on another page: said when the page is opened again.
+    Changed,
 }
 
 pub struct Form {
@@ -80,6 +82,8 @@ pub struct Form {
     pub waiting: Option<CallKind>,
     /// The serial of the call `waiting` is for (`AccountSource::call_mark`): only its answer settles the page.
     pub waiting_serial: u64,
+    /// A password change answered while its page was not open: said when the page opens again, never dropped.
+    pub late_change: Option<Result<(), super::source::Refused>>,
     /// The first code was wrong and the key it belonged to was replaced: the page says to scan again.
     pub key_replaced: bool,
 }
@@ -118,6 +122,7 @@ impl Default for Form {
             saving_name: false,
             waiting: None,
             waiting_serial: 0,
+            late_change: None,
             key_replaced: false,
         }
     }
@@ -182,6 +187,20 @@ pub fn arrive(ui: &mut AccountUi) {
     f.renaming = None;
     f.saved = None;
     focus(f, None);
+    if ui.pane == Pane::Password && change_out.is_none() {
+        // The answer of a change that landed while another page was open: said here, now.
+        match f.late_change.take() {
+            Some(Ok(())) => {
+                (f.current, f.new, f.again) = (secure(), secure(), secure());
+                f.problem = Some(Problem::Changed);
+            }
+            Some(Err(why)) => {
+                f.current = secure();
+                f.problem = Some(super::forms::refused(why));
+            }
+            None => {}
+        }
+    }
     if ui.pane != Pane::TwoFactorSetup {
         f.setup = None;
     }

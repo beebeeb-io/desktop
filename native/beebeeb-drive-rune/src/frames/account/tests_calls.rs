@@ -19,10 +19,13 @@ struct Rig {
 
 fn rig(frame: &str) -> Rig {
     let held = HeldCalls::default();
-    // The source is in place before the scene opens, so a page that starts a call on arrival starts it here.
     let mut state = init();
-    state.account.source = Some(Box::new(BoardAccount::new().holding_calls(held.clone())));
     assert!(super::scene(frame, &mut state), "{frame} is a built frame");
+    // The scene starts on its own source: the holding one replaces it and the page is opened again, so a page that
+    // starts a call on arrival (the set-up's key) starts it here.
+    state.account.source = Some(Box::new(BoardAccount::new().holding_calls(held.clone())));
+    state.account.form.setup = None;
+    form::arrive(&mut state.account);
     let mut rt = window(state);
     settle(&mut rt);
     Rig { rt, held }
@@ -267,4 +270,37 @@ fn every_account_call_settles_and_draws_its_result_for_a_done_and_for_a_refusal(
             | CallKind::NewBackupCodes => {}
         }
     }
+}
+
+/// Review of desktop#427 (delta 3, P2): while a change is out the page's first button leaves the page and says so,
+/// and an answer that lands while another page is open is said when the page is opened again, never dropped.
+#[test]
+fn a_password_answer_that_lands_on_another_page_is_said_when_the_page_opens_again() {
+    for (answer, words) in [
+        (Answered::Done, super::forms::CHANGED_AWAY),
+        (Answered::Refused(Refused::Unconfirmed), super::forms::UNCONFIRMED),
+        (
+            Answered::Refused(Refused::WrongPassword),
+            "Current password is incorrect. Nothing was changed.",
+        ),
+    ] {
+        let mut r = change_password();
+        assert_eq!(r.started(), [CallKind::ChangePassword]);
+        assert!(
+            r.rt.accessibility_json().to_string().contains("Leave this page"),
+            "the first button says what it does while the change is out"
+        );
+        click(&mut r.rt, "btn-0");
+        assert_ne!(r.pane(), Pane::Password, "left the page");
+        // The answer lands on the other page: nothing is drawn there, and nothing is lost.
+        r.answer(answer);
+        r.rt.update(|s, _| super::go(s, "DW-A67"));
+        settle(&mut r.rt);
+        assert_eq!(r.pane(), Pane::Password);
+        assert_eq!(says(&r.rt, "field-0-msg"), words, "said on return");
+        assert!(!r.waiting(), "the form is live again");
+    }
+    // With nothing out the same button is Cancel.
+    let r = rig("DW-A67");
+    assert!(r.rt.accessibility_json().to_string().contains("Cancel"));
 }
