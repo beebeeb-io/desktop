@@ -57,7 +57,7 @@ fn create_file_with(
     write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
 ) -> Result<String, DriveError> {
     let name = validate_name(name)?;
-    if bytes.len() as u64 >= limit {
+    if bytes.len() as u64 > limit {
         return Err(DriveError::TooLarge);
     }
     refuse_if_shared_read_only(db, parent)?;
@@ -88,7 +88,8 @@ fn write_new(
 ) -> Result<(), DriveError> {
     let mut file = OpenOptions::new()
         .write(true)
-        .create_new(true)
+        .create(true)
+        .truncate(true)
         .open(path)
         .map_err(DriveError::io)?;
     if let Err(error) = write(&mut file, bytes) {
