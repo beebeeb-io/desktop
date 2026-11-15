@@ -88,3 +88,87 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
   Available offline is not read (`knows_offline`): the details panel draws no switch and the photo no action for it.
 - **Leaving a file** overwrites the decrypted text it held (`OpenFile::wipe`, `Ui`'s drop); a `{:?}` of an open
   file prints kinds and counts, never a name or a word of it.
+
+## A newer version, on the engine (lane w4, 2026-11-15)
+
+- **Design note, board vs decision 2505 (honesty trigger 2).** DW-1519's board draws "A newer version arrived from
+  Anna's iPhone, 09:14." The engine does not know which device saved, and device names come after 0.9.0 (decision
+  2505). On the engine the banner says **"A newer version arrived, 09:14."**: no device, the time this PC noticed
+  it. The board's words stay as drawn (`Newer::from` set); an empty `from` drops the clause (`text::newer_banner`).
+  The golden of DW-1519 is unchanged.
+- **How it is noticed:** while a file is open, `viewer_change::check_for_newer` reads the local state's version
+  (`Engine::edit_facts_for`) on a worker about every 1.5 s, one read at a time. A version past the one the view
+  holds comes back as `Settled::Newer`; one banner per version. The view's own save moves what the view holds
+  (`rebase`), so it never announces itself. An answer for another session or account is dropped.
+- **Show it** opens the file again (`ViewerSource::newer` = `begin`): the version and content as Beebeeb has them
+  now, arriving on the poll. With the editor open nothing is read again (the frame refuses).
+- **Not traced:** that the sync engine raises `current_version` in the local state when another device's save lands
+  while a file is open. The tests move it in the fake engine; whether it moves in a real sync is for the native rung.
+
+## A newer version: fix round of #432 (lane fix432, 2026-11-15)
+
+- **What a read found is weighed on the window's thread** (`viewer_change::take_settled` → `weigh`): the worker only
+  reads (`Engine::edit_facts_for`) and sends the version, the opening it began under, and the time. `Opening::seen`
+  is written by the window's thread alone and never goes down. A read for an earlier opening (before Show it, Try
+  again or a reopen) is dropped. Reads run only for a text or a note (the kinds that draw the banner), and the
+  window is woken for the next one (`ViewerSource::next_check`), so the banner comes without a press.
+- **The view's own save is never "a newer version":** Saved moves the view to the version it became; a save
+  stored here only ("Saved on this PC · sends when Beebeeb can be reached") keeps the view at the save's base, and
+  the version it becomes once it lands is the engine's to tell (`EditFacts::own`, read without forgetting
+  the queued save). A version past that one is another device's and is announced. The two-versions question does
+  not move the view: after Cancel and Discard changes the next read still announces the newer version. A read that
+  comes back in the same drain as a change's answer is weighed on the next pump. A save stored here keeps a newer
+  version noticed while it waited (its banner shows once the editor closes).
+- **Show it never labels older bytes with a newer version.** The label is read before the content (an open, Show
+  it, Keep theirs). The engine does not read a copy on this PC whose version is behind the one it holds now, or is
+  not known (`LocalCopy::Behind`): Beebeeb's version is downloaded, and the status line says **"The version in
+  Beebeeb, decrypted on this PC · couldn't confirm the copy on this PC is this version"** (`Origin::BeebeebUnconfirmedHere`;
+  delta check of #432: "not in sync" claimed more than is known for a copy of a version not known).
+- **Why such a file does not open offline, though kept on this PC:** its copy here could not be confirmed as the
+  version Beebeeb has, so it is never shown as that version, and the download is the only way to it; offline it says
+  "Can't reach Beebeeb". Which copies: one older than the version pulled since (nothing replaces a kept file's bytes
+  on that pull, Windows or Linux), one written by a save from this viewer (its landing records no agreed content:
+  the bytes in the folder are the version before the save), one whose fetches served more than one version, and rows
+  synced before agreed content was recorded. How many such rows an upgraded PC has is to be counted before 0.9.0.
+- **Show it refused** (the file is gone, the session ended, it could not be read now): the version on screen stays
+  open, its banner too, and the toast says why: **"Newer version not opened: the file is gone"** (also "the
+  session ended", "nothing has synced on this PC yet", "this PC's data couldn't be confirmed as this account's",
+  "Beebeeb is locked or signed out", "couldn't read it right now"). No board draws this toast: the words follow
+  the status line's "Not opened: …".
+
+## A newer version: fix round 2 of #432 (lane fix432, 2026-11-15)
+
+- **"The view's own" belongs to the opening that saved.** The engine keeps, per file, the versions this session's
+  viewer saves became (with the base each was saved from) and the saves still to land; a new opening (open, Try
+  again, Show it) forgets them all (`Engine::forget_viewer_saves`). A version an earlier opening's save becomes is
+  then announced as newer, and a save from the new opening's version is never continued from it (it answers the
+  two-versions question).
+- **A change's answer belongs to the opening that asked.** Show it and Try again wait while a change is on its way
+  (`ViewerSource::saving`); Show it then says **"Newer version not opened yet: your change is still being saved"**.
+  An answer for an earlier opening never replaces what is on screen: it is said (`Settled::Said`: "Your earlier
+  edit was saved on this PC · sends when Beebeeb can be reached", "… saved · encrypted · version N", "… saved as a
+  copy next to this file", "… not saved: another device saved this file meanwhile", "… not saved"), and its text is
+  overwritten. No board draws these toasts. (Round 3 below replaces the record's forget with epochs and changes these words.)
+- **A save stored here is labelled with the version it was saved from** (`Settled::Queued::version`, the base the
+  engine used): the label is always the base of the text on screen.
+
+## A newer version: fix round 3 of #432 (lane fix432, 2026-11-15)
+
+- **Every opening has its own number in the engine (an epoch).** `begin` (open from Files, Try again, Show it) asks
+  `Engine::viewer_opening`, which hands out a number never used before and starts an empty record of the file's
+  viewer saves for it. Every read of the version and every save carries that number; the engine writes the record
+  only for its own number and session, under one lock. A save of an earlier opening (or of an earlier source: a file
+  opened again from Files is a new source) that ends late never makes, extends or changes a later opening's record:
+  its landing is announced as a newer version, and a save from the new opening's version answers the two-versions
+  question. The records are the account's (`AccountRuntime::viewer_saves`): a lock, a sign-out or a sign-in empties
+  them, a new opening drops other sessions', and each file keeps only its latest save still to land.
+- **One change at a time, honestly.** Only the answer of the change in flight ends it; a press refused at once (the
+  switch while a save is on its way) never does, so Show it still waits and no second save starts. A second answer
+  that comes back in the same pump as another is kept for the next one (woken at once), never wiped unread.
+- **The two-versions question names nobody while nobody is known.** The engine cannot tell another device from this
+  PC's earlier opening, so the question says **"{file} · changed since you opened it"**, the other side is **"The
+  other version"** and its button **"Keep the other version"** (the board's device name stays for a source that
+  knows it). An earlier opening's conflict says "Your earlier edit was not saved: the file changed since you opened
+  it". Show it during any change on its way says **"Newer version not opened yet: your last change is still on its
+  way"**.
+- **A copy here not settled with Beebeeb says so first:** "not in sync" wins over "couldn't confirm" when both hold.

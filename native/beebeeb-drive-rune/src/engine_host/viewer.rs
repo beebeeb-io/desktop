@@ -30,7 +30,10 @@
 //!   (asked again on Try again), never one catch-all.
 //! - "Open in another app…": the system opens the file from the account's folder on this PC, where the engine
 //!   already puts opened files. No copy is made here.
-//! - not bound: saving an edit, Available offline, a newer version's banner, find, play, a photo's strip.
+//! - a newer version: while a file is open the local state's version is read (on a worker, about every 1.5 s,
+//!   `viewer_change::check_for_newer`); a version past the one the view holds raises "A newer version arrived, 09:14."
+//!   (no device name in 0.9.0, decision 2505). Show it opens the file again (`ViewerSource::newer`).
+//! - not bound: find, play, a photo's strip.
 //!
 //! Where the decrypted bytes are: in the engine's `Zeroizing` buffer until the worker made of them what the view
 //! draws (lines of text, or pixels), then wiped. The text is overwritten when the view lets go of it
@@ -79,6 +82,9 @@ pub const PAGES_KEPT: usize = 6;
 
 #[path = "viewer_change.rs"]
 mod change;
+#[path = "viewer_read.rs"]
+mod where_from;
+use where_from::{Recorded, read};
 
 #[cfg(test)]
 #[path = "viewer_tests.rs"]
@@ -132,23 +138,30 @@ pub trait ViewerEngine: Send + Sync + 'static {
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere;
     /// Wake the window's loop: an answer or progress is waiting.
     fn wake(&self);
-    /// [`Engine::edit_facts_for`]. `None`: not read (the switch and the editor are not offered).
-    fn edit_facts(&self, _session: SessionGeneration, _file_id: &str) -> Option<EditFacts> {
+    /// [`Engine::edit_facts_for`], for the engine's opening `opening` ([`ViewerEngine::begin_opening`]). `None`: not
+    /// read (the switch and the editor are not offered).
+    fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, _opening: u64) -> Option<EditFacts> {
         None
     }
     /// [`Engine::set_kept_for`]. A worker's.
     fn set_kept(&self, _session: SessionGeneration, _file_id: &str, _kept: bool) -> Result<(), ()> {
         Err(())
     }
-    /// [`Engine::save_text_for`]. A worker's.
+    /// [`Engine::save_text_for`], under the engine's opening `opening`. A worker's.
     fn save_text(
         &self,
         _session: SessionGeneration,
         _file_id: &str,
         _text: &str,
         _base: i64,
+        _opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
         Err(EditRefused::Failed)
+    }
+    /// [`Engine::viewer_opening`]: a new opening of `file_id`, which holds none of the viewer's earlier saves of it.
+    /// Its number is handed to every read and save of this opening; a save of an earlier one is never its own.
+    fn begin_opening(&self, _session: SessionGeneration, _file_id: &str) -> u64 {
+        0
     }
     /// [`Engine::save_text_copy_for`]. A worker's.
     fn save_copy(
@@ -237,8 +250,8 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         self.engine.wake_host();
     }
 
-    fn edit_facts(&self, session: SessionGeneration, file_id: &str) -> Option<EditFacts> {
-        self.engine.edit_facts_for(session, file_id).ok()
+    fn edit_facts(&self, session: SessionGeneration, file_id: &str, opening: u64) -> Option<EditFacts> {
+        self.engine.edit_facts_for(session, file_id, opening).ok()
     }
 
     fn set_kept(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), ()> {
@@ -251,8 +264,9 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         file_id: &str,
         text: &str,
         base: i64,
+        opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
-        self.engine.save_text_for(session, file_id, text, base)
+        self.engine.save_text_for(session, file_id, text, base, opening)
     }
 
     fn save_copy(
@@ -264,6 +278,10 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         hhmm: &str,
     ) -> Result<NewCopy, EditRefused> {
         self.engine.save_text_copy_for(session, file_id, text, device, hhmm)
+    }
+
+    fn begin_opening(&self, session: SessionGeneration, file_id: &str) -> u64 {
+        self.engine.viewer_opening(session, file_id)
     }
 }
 
@@ -320,6 +338,13 @@ struct Opening {
     /// What the local state said at the open: the version, whether the file is kept, whether it may be changed.
     /// `None`: not read.
     edit: Option<EditFacts>,
+    /// The version the view holds, or was told of by a banner: a read past it is another device's. Only the
+    /// window's thread writes it (`viewer_change::weigh`); it never goes down.
+    seen: i64,
+    /// Which opening this is (`Changes::openings`): an answer begun under another one is not this one's.
+    serial: u64,
+    /// The engine's number for this opening ([`ViewerEngine::begin_opening`]): only saves made under it are its own.
+    epoch: u64,
     /// How the file is shown, and its name (a Keep both names the copy after it).
     shows: Shows,
     name: String,
@@ -608,52 +633,6 @@ fn content_of(shows: Shows, bytes: &[u8], cancel: &AtomicBool) -> Content {
     }
 }
 
-/// What the local state said of the file's copy on this PC when the file was opened.
-#[derive(Clone, Copy)]
-struct Recorded {
-    /// Its bytes are here (`OpenFileFacts::on_this_pc`).
-    here: bool,
-    /// The copy here is not settled with Beebeeb's version (`OpenFileFacts::unsettled_here`).
-    unsettled: bool,
-}
-
-/// The file's bytes: the copy on this PC when the local state says it is here and it really is (no network at
-/// all), else the download. The answer says which, and the session the bytes were read for. The buffer is the
-/// engine's own, wiped when it is dropped.
-///
-/// The origin never says more than is known: a copy in sync by the local state is only that while sync runs
-/// (with sync off nothing has compared it with Beebeeb since), and Beebeeb's version of a file whose copy here
-/// is not settled with it may not be what is on this PC.
-fn read<E: ViewerEngine>(
-    engine: &E,
-    file_id: &str,
-    recorded: Recorded,
-    progress: &(dyn Fn(u64, u64) + Send + Sync + 'static),
-    cancel: &AtomicBool,
-) -> Result<(SessionGeneration, zeroize::Zeroizing<Vec<u8>>, Origin), OpenFileError> {
-    if recorded.here {
-        match engine.local(file_id, IN_MEMORY_MAX, cancel)? {
-            LocalCopy::Opened(copy) => {
-                let origin = match copy.copy {
-                    OnThisPc::NotSentYet => Origin::ThisPc { unsent: true },
-                    OnThisPc::InSync if engine.is_syncing() => Origin::ThisPc { unsent: false },
-                    OnThisPc::InSync => Origin::ThisPcSyncOff,
-                };
-                return Ok((copy.session, copy.bytes, origin));
-            }
-            // Not wholly on this PC after all, and in sync: the download is the way.
-            LocalCopy::NotHere => {}
-        }
-    }
-    let opened = engine.fetch(file_id, IN_MEMORY_MAX, progress, cancel)?;
-    let origin = if recorded.unsettled {
-        Origin::BeebeebNotThisPcs
-    } else {
-        Origin::Beebeeb
-    };
-    Ok((opened.session, opened.bytes, origin))
-}
-
 /// Open the PDF in `bytes` (taken: the document reads the engine's buffer and wipes it when it is dropped). The
 /// view's body, and the document for its pages when it opened.
 fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str) -> (Body, Option<viewer_pdf::Document>) {
@@ -761,11 +740,18 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// Open `file_id` for the session in memory: its facts now, its content on a worker.
     fn begin(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
-        // What was open before is over (a retry, or the source asked again).
+        // Its facts first: a refusal leaves what is open as it is (Show it keeps the version on screen open, and the
+        // window says why). Then what was open before is over (a retry, Show it, or the source asked again). Never
+        // while a change is on its way: its answer belongs to the opening that asked (delta check of #432).
+        if self.changes.busy {
+            return Err(OpenError::NotNow);
+        }
+        let (session, account, facts) = self.facts_now(file_id)?;
+        // The new opening holds none of the viewer's earlier saves: none of them is its own, however late it lands.
+        let epoch = self.engine.begin_opening(session, file_id);
         if let Some(mut before) = self.open.take() {
             before.end();
         }
-        let (session, account, facts) = self.facts_now(file_id)?;
         let recorded = Recorded {
             here: facts.on_this_pc.is_some(),
             unsettled: facts.unsettled_here,
@@ -792,6 +778,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         } else {
             (None, None)
         };
+        self.changes.openings += 1;
         let mut opening = Opening {
             file_id: file_id.to_string(),
             session,
@@ -806,11 +793,20 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             pages,
             origin: Origin::Beebeeb,
             ended: false,
-            // Read for the session of this open, from the local state alone.
-            edit: self.engine.edit_facts(session, file_id),
+            // Read for the session of this open, from the local state alone, BEFORE the content: the version the
+            // view is labelled with is never newer than its bytes.
+            edit: self.engine.edit_facts(session, file_id, epoch),
+            seen: 0,
+            serial: self.changes.openings,
+            epoch,
             shows,
             name: facts.name.clone(),
         };
+        // The first read of the version is one interval after the open, not at it.
+        self.changes.checked = Some(std::time::Instant::now());
+        if let Some(edit) = opening.edit {
+            opening.seen = edit.version;
+        }
         let body = if shows == Shows::Nothing {
             Body::NotPreviewable(NoPreview::NoViewer)
         } else if facts.size > IN_MEMORY_MAX {
@@ -1054,6 +1050,12 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
         self.begin(file_id)
     }
 
+    /// Show it: the file is read again as Beebeeb has it now (its content comes on the poll, as at an open). A
+    /// refusal leaves the open file as it is (its reads, its editor), and the window says why.
+    fn newer(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
+        self.begin(file_id)
+    }
+
     fn picture(&self, file_id: &str, which: Picture) -> Option<rune::Pixels> {
         match which {
             Picture::Photo => self.current(file_id)?.picture.clone(),
@@ -1161,6 +1163,14 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
 
     fn answers_later(&self) -> bool {
         true
+    }
+
+    fn next_check(&self) -> Option<std::time::Duration> {
+        self.next_check_due()
+    }
+
+    fn saving(&self) -> bool {
+        self.changes.busy
     }
 }
 

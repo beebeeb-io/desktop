@@ -353,7 +353,12 @@ pub fn editor_tools(t: &Theme) -> Vec<El> {
 /// screen stays until Show it.
 pub fn newer_banner(file: &OpenFile, t: &Theme) -> Option<El> {
     let newer = file.newer.as_ref()?;
-    let words = format!("A newer version arrived from {}, {}.", newer.from, newer.at);
+    // No device name in 0.9.0 (decision 2505): "A newer version arrived, 09:14."
+    let words = if newer.from.is_empty() {
+        format!("A newer version arrived, {}.", newer.at)
+    } else {
+        format!("A newer version arrived from {}, {}.", newer.from, newer.at)
+    };
     // The time is a figure: mono.
     let time = words.len() - newer.at.len() - 1;
     let show = super::chrome::button("banner-btn", "Show it", super::chrome::ButtonKind::Outline, true, t).on_press(
