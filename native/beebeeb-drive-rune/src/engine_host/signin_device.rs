@@ -7,8 +7,13 @@
 //! the code's five minutes; the sign-in worker keeps serving the other steps), for the session's turn AS READ AT THE
 //! PRESS. Its answers carry the attempt of `Wait::Device`: `cancel_device_request` moves that attempt on AND sets the
 //! request's stop, so no answer of it reaches the screen after that call (`poll` drops an older attempt, and the thread
-//! queues nothing once it sees the move), and the engine ends its wait within its stop poll. A request that was left and
-//! finished anyway (its install was under way) is signed out again, as a passkey's is: Back wins.
+//! queues nothing once it sees the move), and the engine ends its wait within its stop poll.
+//!
+//! A cancel stops what has not been written: the engine looks at the stop under its step lock, right before the
+//! install, and after that point a cancel is too late. A request whose install went ahead is NOT signed out again. The
+//! screen cancels by itself whenever the gate moves while the request is up (`follow_gate`), and a sign-in that just
+//! installed moves it to Ready before its own answer is read; undoing a request that was left would sign out every
+//! approval that won that race. The gate then leads the window on (to Files), so DW-A08's screen may not be seen.
 //!
 //! The countdown is the engine's (`DeviceTick` comes from its `Tick`): no clock of the window's own counts it.
 //!
@@ -34,7 +39,7 @@ use beebeeb_engine::app::bindings::device_request::{
 };
 use beebeeb_engine::app::{CredentialStores, Engine};
 
-use super::{Answer, EngineSignInSource, WAITS, Wait, lock, log, still_signed_in};
+use super::{Answer, EngineSignInSource, WAITS, Wait, lock, log};
 use crate::frames::signin::source::{DeviceRequest, DeviceStatus, SignInEvent, SignInProblem};
 
 /// This PC's name on the screen when the machine has none (the first frame then carries no name either).
@@ -139,10 +144,8 @@ fn run_request<C: CredentialStores>(
     let result = std::panic::catch_unwind(AssertUnwindSafe(move || engine.device_request_for(turn, tell, stop)))
         .unwrap_or(Err(DeviceRequestRefused::Failed));
     if attempts[Wait::Device as usize].load(Ordering::SeqCst) != attempt {
-        // Left while it ran, and it finished anyway (the install was under way): undone, as a left passkey sign-in is.
-        if result.is_ok() && engine.sign_out_keeping_local_data().is_err() {
-            still_signed_in(answers);
-        }
+        // Left while it ran: its ending is not said. An install that went ahead stays (the module's doc): the gate
+        // already says signed in, and it leads the window on.
         engine.wake_host();
         return;
     }

@@ -20,8 +20,8 @@
 //! Every way out before the install stores nothing, and a session the server made for a request that is not installed
 //! is ended at the server (best effort).
 //!
-//! The server's answers (its private `cli_auth` module, read only): `{"error":"denied"}` when the account's owner said
-//! no, `{"error":"timeout"}` at the code's end, else the sealed payload. It names no approving device, so `by` is
+//! The server's answers on the socket: `{"error":"denied"}` when the account's owner said no, `{"error":"timeout"}` at
+//! the code's end, else the sealed payload. It names no approving device, so `by` is
 //! [`ANOTHER_DEVICE`]. A socket that drops cannot be joined again (a new socket is a new code): the request ends.
 //!
 //! Threads: [`Engine::device_request_for`] BLOCKS until the request ends (up to the code's five minutes). Call it from a
@@ -70,7 +70,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// must not hold the screen either (`browser_login::DEVICE_CODE_TIMEOUT`).
 const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The code's life when the server names none (the server's own `SESSION_TTL`).
+/// The code's life when the server names none (five minutes, what it names today).
 const DEFAULT_EXPIRES_IN: u64 = 300;
 
 /// The longest wait this PC keeps a request open, whatever the server says.
