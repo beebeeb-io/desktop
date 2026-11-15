@@ -387,6 +387,21 @@ mod tests {
         assert!(!refusal_is_shown(&parse(&["--autostart"], false)));
     }
 
+    /// R1 and R2: a start refusal is shown at login too; "held by another instance" still is not.
+    #[test]
+    fn a_start_refusal_is_shown_at_login() {
+        assert!(start_refusal_is_shown(&parse(&["--autostart"], false)));
+        assert!(start_refusal_is_shown(&parse(&[], false)));
+        assert!(!start_refusal_is_shown(&parse(&["--quit-for-update"], false)));
+        let mut tooling = parse(&[], false);
+        tooling.tooling = true;
+        assert!(!start_refusal_is_shown(&tooling));
+        assert!(
+            !refusal_is_shown(&parse(&["--autostart"], false)),
+            "already running stays silent at login"
+        );
+    }
+
     /// A dev build, or the real app's shipped build: `--api-base` is read exactly when `dev` is.
     fn parse(list: &[&str], dev: bool) -> Launch {
         parse_as(list, dev, dev)
