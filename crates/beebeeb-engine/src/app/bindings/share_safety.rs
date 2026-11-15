@@ -274,12 +274,13 @@ impl<C: CredentialStores> Engine<C> {
             };
         }
 
-        let carried = state
-            .with(|db| db.share_offered_key(&own, &invite))
-            .map_err(state_refusal)?
-            .map_err(|_| SafetyRefused::Failed)?
-            .as_deref()
-            .and_then(hexfmt::decode32)
+        let carried: [u8; 32] = invite_of(&sent, &invite)
+            .and_then(|row| text(row, "recipient_public_key"))
+            .and_then(|k| {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.decode(k).ok()
+            })
+            .and_then(|v| v.try_into().ok())
             .ok_or(SafetyRefused::NotFound)?;
         let master = MasterKey::from_bytes(*asked.key);
         let file_key = state
