@@ -553,7 +553,7 @@ fn a_pdf_opens_and_its_pages_are_rendered_when_the_view_asks_for_them() {
         PageState::Ready,
         "not this source's to wait for"
     );
-    assert!(!source.finds(), "the text is not searched here");
+    assert!(source.finds(), "a PDF's text is searched here");
 }
 
 #[test]
