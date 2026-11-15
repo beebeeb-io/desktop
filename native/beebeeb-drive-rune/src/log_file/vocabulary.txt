@@ -146,6 +146,7 @@ cleanup
 clear
 cleared
 client
+clock
 clock_margin_ms
 clock_offset_ms
 closed
@@ -208,6 +209,7 @@ daemon_uid
 daily
 data
 database
+dated
 db
 db_ms
 decision
@@ -463,6 +465,7 @@ locally-renamed
 lock
 locked
 longer
+looked
 lookup
 loop
 machine
@@ -524,6 +527,7 @@ none
 not
 not-in-sync
 not_in_sync
+not_there
 nothing
 notices
 notification
@@ -611,6 +615,7 @@ placeholders
 plain
 plaintext
 plaintext_len
+plan
 planner
 plans
 platform
@@ -922,6 +927,7 @@ trash
 trashed
 trashing
 tree
+tries
 true_size_bytes
 trying
 ttl
