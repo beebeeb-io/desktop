@@ -164,7 +164,7 @@ fn strength(key: &str, ui: &Ui, t: &Theme) -> El {
 /// The words under the new password, for a problem with the password itself.
 fn password_words(problem: NewPasswordProblem) -> Option<&'static str> {
     match problem {
-        NewPasswordProblem::TooShort => None,
+        NewPasswordProblem::TooShort => Some(TOO_SHORT),
         NewPasswordProblem::Breached => Some(BREACHED),
         NewPasswordProblem::Offline
         | NewPasswordProblem::RateLimited { .. }

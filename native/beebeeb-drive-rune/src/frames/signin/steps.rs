@@ -99,12 +99,7 @@ impl Ui {
         // server's recovery token until the new password is set. Leaving either has the engine forget them at once.
         let partial = matches!(
             self.screen,
-            Screen::TwoFactor { .. }
-                | Screen::Phrase
-                | Screen::NoPhrase
-                | Screen::UnlockVault
-                | Screen::Recover
-                | Screen::NewPassword
+            Screen::TwoFactor { .. } | Screen::Phrase | Screen::NoPhrase | Screen::UnlockVault
         );
         if partial {
             // "Back to sign-in; the partial session is discarded" (DW-A26).
