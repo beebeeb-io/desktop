@@ -447,11 +447,10 @@ pub(crate) fn may_be_this_pcs(
     }
 }
 
-/// This PC's computer name for [`may_be_this_pcs`]: `me`'s, else the OS's (with the identity's suffix, as
-/// `device_self` names it).
+/// This PC's computer name for [`may_be_this_pcs`]: `me`'s, else the OS's as `device_self` names it.
 pub(crate) fn this_pc_name(identity: &crate::identity::EngineIdentity, me: Option<&DeviceSelf>) -> Option<String> {
     me.map(|me| me.name.clone())
-        .or_else(|| crate::runner::device_name().map(|name| format!("{name}{}", identity.backup_device_name_suffix())))
+        .or_else(|| crate::backup::device::device_name_for(identity))
 }
 
 /// Two server ids for the same item (as UUIDs when both are).
