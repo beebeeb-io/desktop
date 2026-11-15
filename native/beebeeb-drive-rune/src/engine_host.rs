@@ -73,6 +73,11 @@ mod open_folder;
 pub mod hello;
 // An item's read-only Preview over Trash (from Beebeeb only) and Shared (`item_preview`).
 pub mod item_preview;
+// An Office document's confined renderer: one helper per document, every answer checked (`office_host`).
+pub mod office_host;
+#[cfg(test)]
+#[path = "engine_host/office_host_tests.rs"]
+mod office_host_tests;
 pub mod open;
 pub mod passkeys;
 pub mod photos;
