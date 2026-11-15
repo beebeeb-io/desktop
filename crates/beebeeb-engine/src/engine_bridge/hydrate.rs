@@ -115,7 +115,13 @@ impl EngineBridge {
         // read BEFORE the download: at most the version the bytes are, so a later change can only
         // be refused as stale, never accepted over a newer one.
         let legacy_version = self.legacy_download_version(file_id)?;
-        if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path)? {
+        // A conflict or an error is the person's to resolve (Keep there keeps a copy first): read once, here, before
+        // the row becomes `Downloading`, for both checks below.
+        let persons_resolution = self
+            .db
+            .get_file(file_id)?
+            .is_some_and(|entry| matches!(entry.status, FileStatus::Conflict | FileStatus::Error));
+        if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution)? {
             tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
             return Err(anyhow::Error::new(UnsentLocalChange).into());
         }
@@ -203,7 +209,7 @@ impl EngineBridge {
                 // nothing would ever notice it): asked again right before the place is replaced. A change keeps
                 // its bytes; the row goes back to what it was.
                 self.seam("hydrate:before_write");
-                if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path)? {
+                if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution)? {
                     buf.zeroize();
                     if let Some(guard) = &downloading_guard {
                         let _ = self
@@ -286,9 +292,15 @@ impl EngineBridge {
     /// only copy of a change, so a hydrate never writes over them: bytes that differ from the content this device last
     /// agreed with the server on, a queued upload, or bytes of unknown content (no agreed content and nothing fetched
     /// recorded) while the place holds any. Every row, wherever its content came from (task 2523, F3: before, the
-    /// unknown case covered only files hydrated before 0.8.13, and a held edit after a viewer save was not one); a
-    /// conflict or an error is excepted, its resolution is the person's (Keep there keeps a copy first).
-    pub(super) fn place_holds_an_unsent_change(&self, file_id: &str, place: &Path) -> Result<bool, EngineError> {
+    /// unknown case covered only files hydrated before 0.8.13, and a held edit after a viewer save was not one).
+    /// `persons_resolution`: the row was a conflict or an error when the hydrate began; its unknown bytes are then the
+    /// person's to resolve (Keep there keeps a copy first), and only a change against agreed content refuses.
+    pub(super) fn place_holds_an_unsent_change(
+        &self,
+        file_id: &str,
+        place: &Path,
+        persons_resolution: bool,
+    ) -> Result<bool, EngineError> {
         if !place.exists() {
             return Ok(false);
         }
@@ -299,10 +311,6 @@ impl EngineBridge {
         if !matches!(content, SyncFolderContent::Unknown) {
             return Ok(false);
         }
-        let persons_resolution = self
-            .db
-            .get_file(file_id)?
-            .is_some_and(|entry| matches!(entry.status, FileStatus::Conflict | FileStatus::Error));
         Ok(!persons_resolution && place_holds_bytes(place))
     }
 
