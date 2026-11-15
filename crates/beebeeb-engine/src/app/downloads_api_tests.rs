@@ -17,8 +17,12 @@ use crate::transfer_progress::TransferBoard;
 type TestEngine = Engine<MemoryCredentials>;
 
 fn engine(slot: &str) -> (Arc<TestEngine>, Arc<TransferBoard>) {
+    engine_waking(slot, || {})
+}
+
+fn engine_waking(slot: &str, wake: impl Fn() + Send + Sync + 'static) -> (Arc<TestEngine>, Arc<TransferBoard>) {
     let state_dir = crate::state_paths::init_for_test();
-    let (host, _messages) = ChannelHost::new(|| {});
+    let (host, _messages) = ChannelHost::new(wake);
     let board = host.transfers();
     let config = EngineConfig {
         account_id: slot.into(),
@@ -180,4 +184,51 @@ fn the_read_goes_through_the_persons_door() {
     let body = &source[source.find("pub fn downloads_for").unwrap()..];
     assert!(body.contains("self.local_state()?"));
     assert!(!body.contains("local_state_for_work") && !body.contains("local_state_for_changes"));
+}
+
+/// Paused, Offline and Sync stopped send the window no pulse: a download row beginning or leaving the board wakes it.
+#[test]
+fn a_download_row_beginning_or_leaving_the_board_wakes_the_host() {
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = wakes.clone();
+    let (_engine, board) = engine_waking("an-invented-downloads-slot-8", move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    let seen = || wakes.load(std::sync::atomic::Ordering::SeqCst);
+    let start = seen();
+    let down = board.begin_download("f-down", "Docs/Invented down.pdf", 9_000);
+    assert!(seen() > start, "a row began");
+    let began = seen();
+    drop(down);
+    assert!(seen() > began, "a row left");
+    // An upload is not a copy coming down: it wakes nothing here.
+    let left = seen();
+    let up = board.begin_named("f-up", "Invented up.txt", Direction::Up, 300);
+    drop(up);
+    assert_eq!(seen(), left);
+    // A row that failed leaves the "coming down" list at once, and the window must learn of it.
+    let broken = board.begin_download("f-broken", "Invented broken.bin", 70);
+    let before_fail = seen();
+    board.mark_failed("f-broken");
+    assert!(seen() > before_fail, "a row failed");
+    drop(broken);
+}
+
+/// A locked SCREEN (the lock's start rule on a stored session) refuses what a person reads: `local_state`, not the
+/// work's door.
+#[test]
+fn a_locked_screen_refuses_the_read() {
+    let (engine, _board) = engine("an-invented-downloads-slot-9");
+    signed_in(&engine, "downloads-one@example.eu");
+    let (_dir, _db) = local_state(&engine, "downloads-one@example.eu", held);
+    let session = engine.session_turn();
+    assert!(engine.downloads_for(session).is_ok(), "the control: open");
+    *engine.lock_flow.lock().unwrap() = beebeeb_api::flows::LockFlow::at_start(beebeeb_api::flows::StartFacts {
+        session_stored: true,
+        ask_password_at_start: Some(false),
+        vault_closed: Some(false),
+        app_lock: Some(true),
+    });
+    assert_eq!(engine.lock_state(), super::super::lock_api::LockState::ScreenLocked);
+    assert_eq!(engine.downloads_for(session).unwrap_err(), LocalStateRefused::Locked);
 }

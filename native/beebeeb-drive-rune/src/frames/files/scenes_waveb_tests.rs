@@ -4,6 +4,7 @@
 
 use super::keeping::Download;
 use super::scenes_waveb::SCENES;
+use super::source::FilesFixture;
 use super::tests::*;
 use crate::State;
 use crate::init;
@@ -88,6 +89,31 @@ fn a_source_that_cannot_tell_how_far_shows_no_bar() {
     assert!(rt.state.download_of("contract").is_none());
     assert!(find(&rt, "row-6-download-words").is_none());
     assert!(find(&rt, "row-6-bar").is_none());
+}
+
+/// A copy that comes down for another reason (a player reading it, a conflict copy) shows its bar and does not claim a
+/// keep: the panel's Available offline stays off.
+#[test]
+fn a_copy_that_is_not_kept_shows_its_bar_and_does_not_turn_available_offline_on() {
+    let mut state = init();
+    state.select_only(6);
+    let mut fixture = FilesFixture::default();
+    let total = state.listing.items[6].size.unwrap_or(0).max(0) as u64;
+    fixture.more.downloads = vec![Download {
+        id: state.listing.items[6].id.clone(),
+        done: total / 2,
+        total,
+        kept: false,
+    }];
+    state.actions.source = Box::new(fixture);
+    let mut rt = runtime_of(state);
+    settle(&mut rt);
+    assert!(find(&rt, "row-6-download-words").is_some(), "the bar is drawn");
+    let kept_note = text(&rt, "offline-detail");
+    assert!(
+        kept_note.as_deref().is_none_or(|t| !t.contains(" of ")),
+        "no download figures under Available offline: {kept_note:?}"
+    );
 }
 
 #[test]
