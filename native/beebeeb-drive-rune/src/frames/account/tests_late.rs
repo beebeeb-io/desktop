@@ -95,6 +95,7 @@ fn send_code(r: &mut Rig, address: &str) {
 #[test]
 fn a_second_send_code_while_the_first_is_out_starts_nothing_and_dw_a66_names_the_address_the_code_went_to() {
     let mut r = rig("DW-A65", like_the_engine());
+    assert!(!disabled(&r.rt, "field-0-wrap"), "live before the press");
     send_code(&mut r, FIRST);
     assert_eq!(r.started(), [CallKind::StartEmail]);
     assert!(r.waiting());
@@ -103,10 +104,10 @@ fn a_second_send_code_while_the_first_is_out_starts_nothing_and_dw_a66_names_the
         "the password left the field with the press"
     );
     assert!(
-        disabled(&r.rt, "field-0"),
+        disabled(&r.rt, "field-0-wrap"),
         "the address is frozen while the code is sent"
     );
-    assert!(disabled(&r.rt, "field-1"), "and the password");
+    assert!(disabled(&r.rt, "field-1-wrap"), "and the password");
     // Away and back: the page shows the same wait, never a blank form that starts a second change.
     click(&mut r.rt, "btn-0");
     assert_eq!(r.pane(), Pane::Account);
