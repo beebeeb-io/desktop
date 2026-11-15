@@ -186,7 +186,7 @@ impl<S: AuthSecretStore> AuthVault<S> {
     pub fn new(store: S) -> Self {
         Self {
             store,
-            state: VaultLockState::Locked,
+            state: VaultLockState::Unlocked,
             master_key: None,
         }
     }
