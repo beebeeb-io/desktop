@@ -5,8 +5,11 @@
 //! the sheets that do not fit are counted in `more`. Sizes here are counted the way each message encodes; the
 //! encoding itself stays the last word ([`crate::serve`] never writes a message that does not encode).
 
+use std::collections::BTreeSet;
+
 use beebeeb_office_protocol::check::{
-    MAX_CELL_TEXT_BYTES, MAX_OUTLINE_ENTRIES, MAX_OUTLINE_TEXT_BYTES, MAX_SHEET_NAME_CHARS, MAX_SHEETS,
+    Limits, MAX_ANCHORS, MAX_CELL_TEXT_BYTES, MAX_FORMULA_BYTES, MAX_OUTLINE_ENTRIES, MAX_OUTLINE_TEXT_BYTES,
+    MAX_SHEET_NAME_CHARS, MAX_SHEETS, anchor_placeable,
 };
 use beebeeb_office_protocol::frame::{MAX_PAYLOAD, fits_one_frame};
 use beebeeb_office_protocol::office::{CellData, CellRange, OpenedSheets, OutlineData, OutlineEntry, SheetInfo};
@@ -132,18 +135,40 @@ pub(crate) fn sheets(mut all: Vec<SheetInfo>) -> OpenedSheets {
     answer
 }
 
-/// Whether the sizes alone of `range` (one width per column, one height per row) can fit one frame. When they
-/// cannot, the range is `RangeTooLarge` without asking the engine.
+/// The bytes of a `CellData` that are there whatever the range holds: the counts of cells, widths, heights, merges
+/// and anchors, the frozen panes, `missing_content`.
+const CELL_DATA_FIXED: usize = 5 * U32 + 2 * U32 + 1;
+
+/// Whether the sizes alone of `range` (one width per column, one height per row) and the block's fixed fields can fit
+/// one frame. When they cannot, the range is `RangeTooLarge` without asking the engine.
 pub(crate) fn range_sizes_fit(range: &CellRange) -> bool {
-    (u64::from(range.rows) + u64::from(range.cols)) * U32 as u64 <= MAX_PAYLOAD as u64
+    (u64::from(range.rows) + u64::from(range.cols)) * U32 as u64 + CELL_DATA_FIXED as u64 <= MAX_PAYLOAD as u64
 }
 
 /// The engine's cells for `asked`, as the app's checks accept them: every merge clipped to the asked range (a merge
-/// outside it dropped), every cell's text cut to its cap.
+/// outside it dropped), every cell's text and formula cut to their caps, a value that is not finite dropped, and the
+/// charts and pictures held to what the app takes: those it would refuse (`check::anchor_placeable`), a second one
+/// with an id already given, and those past the most a block carries are dropped. Whatever is dropped, the block
+/// says `missing_content`, so the status line tells the user.
 pub(crate) fn cell_data(mut data: CellData, asked: &CellRange) -> CellData {
     data.merges = data.merges.iter().filter_map(|m| clip(m, asked)).collect();
     for cell in &mut data.cells {
         cut_to_bytes(&mut cell.text, MAX_CELL_TEXT_BYTES);
+        if let Some(formula) = &mut cell.formula {
+            cut_to_bytes(formula, MAX_FORMULA_BYTES);
+        }
+        if cell.value.is_some_and(|v| !v.is_finite()) {
+            cell.value = None;
+            data.missing_content = true;
+        }
+    }
+    let given = data.anchors.len();
+    let mut ids = BTreeSet::new();
+    data.anchors
+        .retain(|a| anchor_placeable(a, &Limits::CONTRACT) && ids.insert(a.id));
+    data.anchors.truncate(MAX_ANCHORS);
+    if data.anchors.len() < given {
+        data.missing_content = true;
     }
     data
 }

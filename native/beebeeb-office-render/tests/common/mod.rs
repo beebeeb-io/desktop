@@ -30,6 +30,10 @@ pub const A4: PageSize = PageSize {
 pub const FAKE_SIZE: (u32, u32) = (4, 2);
 pub const FAKE_PAGE_BYTES: usize = 4 * 2 * 4;
 
+/// The fake engine's chart or picture: 5 x 4 px, RGBA8. Twenty pixels, so a drawing of ten colours or more fits.
+pub const FAKE_ANCHOR_SIZE: (u32, u32) = (5, 4);
+pub const FAKE_ANCHOR_BYTES: usize = 5 * 4 * 4;
+
 /// A grant for an ask that is only sized, never sent.
 pub const NO_GRANT: GrantRef = GrantRef { wire: 0, len: 0 };
 
@@ -274,12 +278,14 @@ pub struct Fake {
     pub outline: Vec<OutlineEntry>,
     pub words: u32,
     pub cells: Result<CellData, ErrorCode>,
+    pub anchor_size: Result<(u32, u32), ErrorCode>,
     /// When set, the first render waits until the test opens it.
     pub gate: Option<Gate>,
     pub opens: AtomicUsize,
     pub renders: AtomicUsize,
     pub cells_asked: AtomicUsize,
     pub outlines: AtomicUsize,
+    pub anchor_renders: AtomicUsize,
 }
 
 impl Default for Fake {
@@ -293,11 +299,13 @@ impl Default for Fake {
             outline: Vec::new(),
             words: 7,
             cells: Err(ErrorCode::Unsupported),
+            anchor_size: Ok(FAKE_ANCHOR_SIZE),
             gate: None,
             opens: AtomicUsize::new(0),
             renders: AtomicUsize::new(0),
             cells_asked: AtomicUsize::new(0),
             outlines: AtomicUsize::new(0),
+            anchor_renders: AtomicUsize::new(0),
         }
     }
 }
@@ -313,6 +321,10 @@ impl Fake {
 
     pub fn outlines(&self) -> usize {
         self.outlines.load(Ordering::SeqCst)
+    }
+
+    pub fn anchor_renders(&self) -> usize {
+        self.anchor_renders.load(Ordering::SeqCst)
     }
 }
 
@@ -365,6 +377,19 @@ impl OpenDoc for FakeDoc {
     fn cells(&self, _sheet: u32, _range: CellRange) -> Result<CellData, ErrorCode> {
         self.0.cells_asked.fetch_add(1, Ordering::SeqCst);
         self.0.cells.clone()
+    }
+
+    fn anchor_size(&self, _sheet: u32, _anchor: u32, _scale: f32) -> Result<(u32, u32), ErrorCode> {
+        self.0.anchor_size
+    }
+
+    fn render_anchor(&self, _sheet: u32, _anchor: u32, _scale: f32, out: &mut [u8]) -> Result<bool, ErrorCode> {
+        self.0.anchor_renders.fetch_add(1, Ordering::SeqCst);
+        // Every pixel its own colour: bytes 1, 2, 3, … (never 0), as a page's.
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = (i % 251) as u8 + 1;
+        }
+        Ok(true)
     }
 }
 
