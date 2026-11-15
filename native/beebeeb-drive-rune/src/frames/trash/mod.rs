@@ -77,6 +77,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         changed = true;
     }
     ui.was_open = open;
+    // Words kept for later wait until Trash is on screen: handed to a window showing something else, the opening
+    // of Trash would wipe them unseen.
+    ui.source.on_screen(open);
     let pumped = ui.source.pump();
     if let Some(notice) = pumped.notice {
         ui.notice = Some(notice);
@@ -252,10 +255,19 @@ pub(crate) fn notice_words(notice: &Notice) -> String {
         Notice::RestoreRefused(name) => {
             format!("Couldn\u{2019}t restore \u{201C}{name}\u{201D}. It\u{2019}s still in Trash.")
         }
-        Notice::RestoreNotDone => {
-            "A restore didn\u{2019}t go through before Beebeeb was locked or signed out. The item is still in Trash."
-                .into()
-        }
+        Notice::RestoreNotDone(names) => match names.as_slice() {
+            [name] => format!(
+                "Couldn\u{2019}t restore \u{201C}{name}\u{201D} before Beebeeb was locked or signed out. \
+                 It\u{2019}s still in Trash."
+            ),
+            [name, rest @ ..] => format!(
+                "Couldn\u{2019}t restore \u{201C}{name}\u{201D} and {} before Beebeeb was locked or signed out. \
+                 They\u{2019}re still in Trash.",
+                plural(rest.len(), "other item", "other items")
+            ),
+            // A source never says it without a name; no item is claimed to be anywhere.
+            [] => "A restore didn\u{2019}t go through before Beebeeb was locked or signed out.".into(),
+        },
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Trash. What\u{2019}s shown may be out of date.".into(),
         Notice::NotAvailable => "Not available yet in this version.".into(),
         Notice::FoldersKept { done, folders, inside } => folders_kept_words(*done, *folders, *inside),
