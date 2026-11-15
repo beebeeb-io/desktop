@@ -166,3 +166,32 @@ fn aumid_differs_for_the_test_build() {
     assert_eq!(test, "io.beebeeb.app.test");
     assert_eq!(aumid(AppIdentity::CURRENT), AppIdentity::CURRENT.bundle_identifier());
 }
+
+/// Ported from the 0.8.x `conflict_notification_gate_fails_open_when_config_unreadable`: a settings file that cannot be
+/// read means the defaults, and the defaults show a "needs a decision" toast (a lost decision is worse than one toast
+/// too many), and its Security toast too. `show` reads the file with `unwrap_or_default()`.
+#[test]
+fn toast_fails_open_when_the_settings_cannot_be_read() {
+    let unreadable: Result<DesktopConfig, String> = Err("config unreadable".to_string());
+    let switches = Switches::from_config(&unreadable.unwrap_or_default());
+    assert!(
+        wanted(Kind::NeedsDecision, &switches),
+        "a conflict toast is shown when the settings are unreadable"
+    );
+    assert!(wanted(Kind::LocalSpace, &switches));
+    assert!(wanted(Kind::Security, &switches));
+}
+
+/// The line above only holds while `show` falls back to the defaults. Pinned on the production text (the part above
+/// the test module), because a read of the real settings file is not hermetic.
+#[test]
+fn toast_fails_open_show_falls_back_to_the_defaults() {
+    let source = include_str!("windows_toast.rs");
+    let production = source.split("#[cfg(test)]").next().unwrap();
+    let show = production.split("pub(crate) fn show(").nth(1).expect("show exists");
+    let body = show.split("\n}\n").next().unwrap();
+    assert!(
+        body.contains("DesktopConfig::load_for(crate::shell::identity::engine_identity()).unwrap_or_default()"),
+        "show reads the settings and falls back to the defaults"
+    );
+}

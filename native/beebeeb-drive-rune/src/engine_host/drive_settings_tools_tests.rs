@@ -260,3 +260,63 @@ fn a_draft_is_percent_encoded() {
     assert_eq!(tools::percent("a b&c"), "a%20b%26c");
     assert!(tools::draft_for("x.json").contains("x.json"));
 }
+
+/// Ported from the 0.8.x `a_second_test_is_refused_while_one_runs_and_the_slot_frees_when_it_ends`: one test at a
+/// time. A press while a test runs starts nothing (the engine is asked for the three steps once), and the slot is
+/// free again when the test has ended.
+#[test]
+fn speed_single_flight_a_second_press_while_one_runs_starts_nothing_and_the_slot_frees_at_the_end() {
+    let fake = account();
+    *fake.speed_answers.lock().unwrap() = vec![
+        latency(),
+        throughput(35.2),
+        throughput(94.0),
+        latency(),
+        throughput(40.0),
+        throughput(50.0),
+    ];
+    let mut source = source(&fake, Arc::default());
+    source.run_speed_test();
+    // The state only moves on a pump, so this press arrives while the first test is still the running one.
+    source.run_speed_test();
+    source.run_speed_test();
+    assert_eq!(
+        source.take_toast(),
+        None,
+        "a refused press is not an error: it says nothing"
+    );
+    settle(&mut source);
+    assert_eq!(
+        *fake.speed_asked.lock().unwrap(),
+        [SpeedStep::Latency, SpeedStep::Upload, SpeedStep::Download],
+        "three presses, one test: the engine was asked for three steps, not nine"
+    );
+    assert!(
+        matches!(source.bandwidth().test, SpeedTest::Done(..)),
+        "the first test finished"
+    );
+    // The slot is free: a press after the end runs a new test.
+    source.run_speed_test();
+    assert!(source.bandwidth().test.running(), "a finished test frees the slot");
+    settle(&mut source);
+    assert_eq!(
+        fake.speed_asked.lock().unwrap().len(),
+        6,
+        "the second test asked for its own three steps"
+    );
+}
+
+/// Ported from the 0.8.x `the_command_takes_the_slot_before_it_sends_anything`: the press shows "running" in the same
+/// call that starts the engine's steps, before any answer is read, so no later press can start a second test in the
+/// gap. Read as behaviour: right after the press, and before the pump takes a single report, the test runs.
+#[test]
+fn speed_single_flight_the_press_takes_the_slot_before_any_step_answers() {
+    let fake = account();
+    *fake.speed_answers.lock().unwrap() = vec![latency(), throughput(35.2), throughput(94.0)];
+    let mut source = source(&fake, Arc::default());
+    assert_eq!(source.bandwidth().test, SpeedTest::Idle);
+    source.run_speed_test();
+    assert!(source.bandwidth().test.running(), "taken in the press itself");
+    assert_eq!(source.take_toast(), None);
+    settle(&mut source);
+}
