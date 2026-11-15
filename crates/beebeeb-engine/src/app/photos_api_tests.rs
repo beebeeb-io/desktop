@@ -537,3 +537,57 @@ fn the_head_of_a_copy_says_a_pictures_size() {
     assert_eq!(facts_of_copy(dir.path(), "../shot.png", false), PhotoMeta::default());
     assert_eq!(facts_of_copy(dir.path(), "Trip/none.png", false), PhotoMeta::default());
 }
+
+/// A minimal MP4 head: `ftyp`, then `moov/mvhd` saying `seconds` long (time scale 1000).
+fn mp4_head(seconds: u32) -> Vec<u8> {
+    let boxed = |kind: &[u8; 4], body: &[u8]| {
+        let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    };
+    let mut mvhd = vec![0u8; 100];
+    mvhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
+    mvhd[16..20].copy_from_slice(&(seconds * 1000).to_be_bytes());
+    let mut head = boxed(b"ftyp", b"isom\0\0\0\0isom");
+    head.extend(boxed(b"moov", &boxed(b"mvhd", &mvhd)));
+    head
+}
+
+#[test]
+fn video_seconds_of_a_dehydrated_placeholder_reads_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("Trip")).unwrap();
+    std::fs::write(dir.path().join("Trip").join("tram.mp4"), mp4_head(42)).unwrap();
+    // The control: a plain copy that is wholly here says its length.
+    let here = facts_of_copy(dir.path(), "Trip/tram.mp4", true);
+    assert_eq!(
+        here.duration_seconds,
+        Some(42),
+        "the instrument reads a copy that is here"
+    );
+    // A copy that is not a plain file here (a link to bytes elsewhere stands in for a placeholder, which this
+    // platform cannot make; on Windows the same check refuses an offline or recall-on-open file): nothing is
+    // opened, so nothing is downloaded.
+    #[cfg(unix)]
+    {
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("real.mp4"), mp4_head(42)).unwrap();
+        std::os::unix::fs::symlink(
+            elsewhere.path().join("real.mp4"),
+            dir.path().join("Trip").join("link.mp4"),
+        )
+        .unwrap();
+        assert_eq!(
+            facts_of_copy(dir.path(), "Trip/link.mp4", true),
+            PhotoMeta::default(),
+            "a copy that is not wholly a plain file here reads nothing"
+        );
+    }
+    // A folder where the file was: nothing.
+    std::fs::create_dir(dir.path().join("Trip").join("dir.mp4")).unwrap();
+    assert_eq!(facts_of_copy(dir.path(), "Trip/dir.mp4", true), PhotoMeta::default());
+    // A picture's size is not gated by this (the same read as before).
+    std::fs::write(dir.path().join("Trip").join("shot.png"), picture(31, 17)).unwrap();
+    assert_eq!(facts_of_copy(dir.path(), "Trip/shot.png", false).width, Some(31));
+}

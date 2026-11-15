@@ -397,6 +397,11 @@ fn facts_of_copy(sync_root: &std::path::Path, rel_path: &str, video: bool) -> Ph
     let Ok(path) = local_file_path_under_sync_root(sync_root, rel_path) else {
         return PhotoMeta::default();
     };
+    // A video's length is read only from a copy that is wholly on this PC (the rule of the viewer's read): a freed
+    // copy stays "Local" in the state for a while, and opening a placeholder on Windows starts a download.
+    if video && !copy_is_wholly_here(&path) {
+        return PhotoMeta::default();
+    }
     let mut head = Zeroizing::new(Vec::new());
     let read =
         std::fs::File::open(path).and_then(|file| file.take(photo_meta::HEAD_BYTES as u64).read_to_end(&mut head));
@@ -404,6 +409,16 @@ fn facts_of_copy(sync_root: &std::path::Path, rel_path: &str, video: bool) -> Ph
         return PhotoMeta::default();
     }
     photo_meta::from_head(&head, video)
+}
+
+/// Whether `path` is a plain file with every byte on this computer, asked from its attributes alone (nothing is
+/// opened for data): not a folder, not a link, not offline or recalled on open (Windows) or dataless (macOS).
+fn copy_is_wholly_here(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    let attrs = beebeeb_backup::attrs_of(&metadata);
+    !(attrs.is_dir || attrs.is_link || attrs.not_local)
 }
 
 /// The folders the account `user_id` added to Photo sources and switched off, by file id. `None`: they could not

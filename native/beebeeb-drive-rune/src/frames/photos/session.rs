@@ -46,6 +46,8 @@ pub struct Later {
     closed: bool,
     /// What Undo (Ctrl+Z) puts back: the photos the source said Beebeeb moved to Trash.
     pub(super) undo: Vec<PhotoId>,
+    /// How many answers of a selection's Keep are still to come: their failures are ONE message with a count.
+    several: usize,
 }
 
 /// How often the window looks again while something is on its way.
@@ -185,6 +187,15 @@ impl Ui {
         }
     }
 
+    /// Asks for a Keep. `Ok(true)`: accepted, said when this PC answers; `Ok(false)`: made (a fixture).
+    fn ask_keep(&mut self, id: PhotoId, keep: bool) -> Result<bool, Left> {
+        if self.later.closed {
+            return Err(Left::Unavailable);
+        }
+        self.source.keep_offline(id, keep)?;
+        Ok(self.source.answers_later())
+    }
+
     fn keep(&mut self, id: PhotoId, keep: bool) {
         let asked = if self.later.closed {
             Err(Left::Unavailable)
@@ -306,12 +317,34 @@ impl Ui {
             }
             Answered::Kept { id, keep, left } => match left {
                 Some(why) => {
-                    self.toast = Some(Toast::Left {
-                        what: What::Keep(keep),
-                        why,
-                        count: 1,
-                        again: vec![id],
-                    });
+                    let of_selection = self.later.several > 0;
+                    self.later.several = self.later.several.saturating_sub(1);
+                    match &mut self.toast {
+                        // One more of the same selection: the message counts it.
+                        Some(Toast::Left {
+                            what: What::Keep(was),
+                            count,
+                            again,
+                            ..
+                        }) if of_selection && *was == keep && !again.contains(&id) => {
+                            *count += 1;
+                            again.push(id);
+                        }
+                        _ => {
+                            self.toast = Some(Toast::Left {
+                                what: What::Keep(keep),
+                                why,
+                                count: 1,
+                                again: vec![id],
+                            });
+                        }
+                    }
+                }
+                None if self.later.several > 0 => {
+                    self.later.several -= 1;
+                    if keep && self.viewer.as_ref().is_some_and(|viewer| viewer.id == id) {
+                        self.toast = Some(Toast::Kept);
+                    }
                 }
                 None if keep && self.viewer.as_ref().is_some_and(|viewer| viewer.id == id) => {
                     self.toast = Some(Toast::Kept);
@@ -346,10 +379,23 @@ impl Ui {
             match intent {
                 // "On this PC", pressed again: it stops being kept (asked; said once this PC answered).
                 Intent::OfferRemoveFromPc(id) => self.keep(id, false),
+                // A selection: every photo is asked, the ones refused at the press are ONE message with a count, and the
+                // answers that come later add to it instead of replacing it.
                 Intent::KeepSeveral(ids) => {
+                    let (mut left, mut waiting, mut made) = (Vec::new(), 0, false);
                     for id in ids {
-                        self.keep(id, true);
+                        match self.ask_keep(id, true) {
+                            Err(why) => left.push((id, why)),
+                            Ok(true) => waiting += 1,
+                            Ok(false) => made = true,
+                        }
                     }
+                    self.toast = None;
+                    self.later.several = waiting;
+                    if made {
+                        self.toast = Some(Toast::Kept);
+                    }
+                    self.say_left(What::Keep(true), &left);
                 }
                 // Kept in this window for as long as it is open.
                 Intent::RememberAcross(_) | Intent::StopOriginal(_) => {}
@@ -379,6 +425,7 @@ impl Ui {
         self.filter = None;
         self.later.open_trash = None;
         self.later.undo.clear();
+        self.later.several = 0;
         self.relayout();
     }
 }
@@ -395,7 +442,9 @@ impl Toast {
             What::Trash => "Couldn\u{2019}t move to Trash".into(),
             What::Restore if several => format!("Couldn\u{2019}t put {count} back"),
             What::Restore => "Couldn\u{2019}t put it back".into(),
+            What::Keep(true) if several => format!("Couldn\u{2019}t keep {count} on this PC"),
             What::Keep(true) => "Couldn\u{2019}t keep it on this PC".into(),
+            What::Keep(false) if several => format!("Couldn\u{2019}t remove {count} from this PC"),
             What::Keep(false) => "Couldn\u{2019}t remove it from this PC".into(),
         };
         let reason = match why {
