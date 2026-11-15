@@ -169,9 +169,9 @@ fn a_password_offer_from_an_earlier_session_turn_does_nothing() {
     assert_eq!(offered(&source), None);
 }
 
-/// R2, the #424 trap: the screen locks and opens again (another turn of the session) while the password is checked.
-/// Its answer comes back after the move and is dropped before it is said: no toast, no step, and nothing written for
-/// the new turn.
+/// R2, the #424 trap: the screen locks and opens again (another turn of the session) while a wrong password is
+/// checked. Its answer comes back after the move (the engine answers it as overtaken) and is dropped before it is
+/// said: no toast, no step, nothing written for the new turn, and no wrong-try words for a try of another turn.
 #[test]
 fn a_password_answer_after_the_session_moved_is_dropped_before_it_is_said() {
     let server = server();
@@ -180,7 +180,7 @@ fn a_password_answer_after_the_session_moved_is_dropped_before_it_is_said() {
     settle(&mut source);
     server.proof_delay_ms.store(1_500, Ordering::SeqCst);
     let seen = source.app_lock.answers_seen.len();
-    source.app_lock_with_password(password(PASSWORD));
+    source.app_lock_with_password(password(WRONG));
     assert!(offered(&source).is_some_and(|offer| offer.checking));
     let moved = Instant::now();
     engine.lock_screen().unwrap();
