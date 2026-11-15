@@ -590,8 +590,9 @@ pub enum CallKind {
 pub struct CallMark {
     pub serial: u64,
     pub out: bool,
-    /// The session and the account are still the ones this call's answer was taken under (always true while it is
-    /// out). A late answer that is kept for a page is said only while this holds.
+    /// The session and the account are still the ones this call's press was made under (always true while it is
+    /// out). Kept per kind: another kind's answer never makes it true again. An answer, or a late answer kept for a
+    /// page, is said only while this holds.
     pub current: bool,
 }
 
@@ -682,14 +683,10 @@ pub trait AccountSource {
     fn products(&self) -> Vec<(ProductKind, ProductState)>;
     /// Engine: the plan summary (`GET /api/v1/billing/plan`); `None` hides the card.
     fn plan(&self) -> Option<Plan>;
-    /// Engine: `GET /api/v1/account/security` and the app-lock setting of this PC.
-    fn security(&self) -> Security;
-    /// Engine: `GET /api/v1/account/security-score`, checked each time the page opens.
-    fn factors(&self) -> Vec<Factor>;
     /// What the Security page draws. This body knows nothing, so a source that forgets it draws no score, no
-    /// mark and no control: a source says here what it really read ([`all_known`] for one that knows every
-    /// part). (Seam: Beebeeb's `GET /api/v1/account/security` and the score's own "can this be said" mark
-    /// fill more of it once the engine reads them.)
+    /// mark and no control: a source says here what it really read (the board's fixture knows every part).
+    /// (Seam: Beebeeb's `GET /api/v1/account/security` and the score's own "can this be said" mark fill more of it
+    /// once the engine reads them.)
     fn security_facts(&self) -> SecurityFacts {
         SecurityFacts::unknown()
     }
@@ -727,36 +724,31 @@ pub trait AccountSource {
     /// carrying OPAQUE messages only). The one call that takes a password.
     fn step_up(&mut self, password: Password<'_>, purpose: Purpose) -> Result<StepUp, Refused>;
 
-    /// Engine: `PATCH /api/v1/account` `{display_name}`; 1 to 64 characters, trimmed. `false`:
-    /// refused (empty, too long, or Beebeeb could not be reached); nothing changed.
-    fn set_name(&mut self, name: &str) -> bool;
-    /// What the Name page asks: [`AccountSource::set_name`] for a source that answers at once, or `Pending` for
-    /// one that asks Beebeeb on a worker (the answer comes through [`AccountSource::name_result`]).
-    fn save_name(&mut self, name: &str) -> NameAnswer {
-        if self.set_name(name) {
-            NameAnswer::Saved
-        } else {
-            NameAnswer::NotSaved(NameWhy::Offline)
-        }
-    }
+    /// Engine: `PATCH /api/v1/account` `{display_name}`; 1 to 64 characters, trimmed. `Saved` or `NotSaved` from
+    /// a source that answers at once, or `Pending` from one that asks Beebeeb on a worker (the answer comes through
+    /// [`AccountSource::name_result`]).
+    fn save_name(&mut self, name: &str) -> NameAnswer;
     /// How a save that answered `Pending` ended, once; `None` while it is out. A source drops an answer that
     /// belongs to a session or an account that is over.
     fn name_result(&mut self) -> Option<NameAnswer> {
         None
     }
-    /// Engine: `POST /api/v1/account/email-change` with the step-up's token and the new address;
-    /// the server sends an 8-digit code there. The old address stays until the code is entered.
-    fn start_email_change(&mut self, confirmation: StepUp, new_email: &str) -> Result<(), EmailRefused>;
-    /// Engine: `POST /api/v1/account/email-change/confirm` with the 8 digits.
-    fn confirm_email_change(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// The address Beebeeb sent the email change's code to (its own word, from the start or a resend), while that
+    /// change waits for its code: DW-A66 names it, never what a field holds. `None`: not known.
+    fn email_code_sent_to(&self) -> Option<String> {
+        None
+    }
     /// Engine: seconds until another code or link may be sent (60 after each one); 0: now.
     fn resend_wait(&self) -> u32;
-    /// Engine: sends the code (email change) or the link (deletion) again. `false`: too soon.
+    /// Sends the account deletion's code again (DW-A81). `false`: too soon. (The email's code is sent again through
+    /// `start_call(ResendEmail)`.)
     fn send_again(&mut self) -> bool;
 
     /// Starts `kind` on a worker: `input` is the address, or the code; `password` goes with the address only (it is
-    /// copied into a wiping buffer for the call). `true`: it is out, and its answer comes through `call_answer`;
-    /// `false`: this source answers the sync methods above instead.
+    /// copied into a wiping buffer for the call). `true`: it is out (or the same call already was: the serial of
+    /// `call_mark` says which), and its answer comes through `call_answer`; `false`: nothing was started (no open
+    /// session): the page says Beebeeb can't be reached, and nothing else is asked. Change email (both steps and
+    /// Send again) and every two-factor call go only this way.
     fn start_call(&mut self, _kind: CallKind, _input: &str, _password: &str) -> bool {
         false
     }
@@ -782,10 +774,6 @@ pub trait AccountSource {
     /// keeps them for after the unlock when a screen lock of the same account ended it, else they are wiped.
     fn keep_codes(&mut self, _codes: Vec<Secret>) {}
 
-    /// Whether "Send again" is offered for the email's code: `false` when Beebeeb has no route that sends it again.
-    fn can_send_again(&self) -> bool {
-        true
-    }
     /// Whether "Send again" is offered for the account deletion's code (DW-A81): `false` when Beebeeb has no route
     /// that sends it again. A fixture says `true` (the board).
     fn can_send_again_deletion(&self) -> bool {
@@ -800,39 +788,22 @@ pub trait AccountSource {
 
     /// Engine: `GET /api/v1/account/two-factor`.
     fn two_factor(&self) -> TwoFactor;
-    /// Engine: `POST /api/v1/account/two-factor/setup`: a new secret, not active until a code
-    /// from it is entered. `confirmation`: the step-up the server wants when the session is
-    /// older than 5 minutes, or a current code's proof when moving to a new authenticator.
-    fn begin_two_factor(&mut self, confirmation: Option<StepUp>) -> Result<Setup, Refused>;
-    /// Engine: `POST /api/v1/account/two-factor/enable` with the 6 digits: turns it on (or
-    /// replaces the secret) and returns the 8 new backup codes, shown once. A source that answers it
-    /// through [`Self::start_call`] (the engine) never gets here.
-    fn turn_on_two_factor(&mut self, _code: &str) -> Result<Vec<Secret>, CodeRefused> {
-        Err(CodeRefused::Offline)
-    }
-    /// Engine: `POST /api/v1/account/two-factor/backup-codes` with a current code: 8 new codes;
-    /// the old ones stop working. A source that answers it through [`Self::start_call`] never gets here.
-    fn new_backup_codes(&mut self, _code: &str) -> Result<Vec<Secret>, CodeRefused> {
-        Err(CodeRefused::Offline)
-    }
-    /// Engine: `POST /api/v1/account/two-factor/verify` with a current code, before the set-up
-    /// screen is shown again (moving to a new authenticator).
-    fn check_code(&mut self, code: &str) -> Result<(), CodeRefused>;
-    /// Engine: `DELETE /api/v1/account/two-factor` with a current code.
-    fn turn_off_two_factor(&mut self, code: &str) -> Result<(), CodeRefused>;
 
     /// Engine: `GET /api/v1/account/passkeys`.
     fn passkeys(&self) -> Vec<Passkey>;
-    /// Engine: confirms it is the person (Windows Hello), then the system passkey dialog (the
-    /// Windows WebAuthn API, no web view) and `POST /api/v1/account/passkeys`.
-    fn add_passkey(&mut self) -> Result<(), Refused>;
+    /// Engine: the account password (core's step-up: the server requires it), then the system passkey dialog (the
+    /// Windows WebAuthn API, no web view) and `POST /api/v1/account/passkeys`. `password`: what the person typed,
+    /// where [`Self::passkeys_need_password`]; a source that needs it refuses `None` as not confirmed and asks
+    /// nothing. `Ok`: it began (the system dialog is up); how it ended comes as a toast ([`AccountSource::notice`])
+    /// and the list is read again. The board's fixture ignores the password.
+    fn add_passkey(&mut self, password: Option<Password<'_>>) -> Result<(), Refused>;
     /// Engine: `PATCH /api/v1/account/passkeys/<id>` `{name}`: Beebeeb's name for it only.
     fn rename_passkey(&mut self, id: &str, name: &str) -> bool;
-    /// Engine: `DELETE /api/v1/account/passkeys/<id>`. The copy in the password manager stays.
-    fn remove_passkey(&mut self, id: &str) -> bool;
-    /// Added by lane bind-acct-d (defaults: the board's own flow). Adding and removing a passkey asks the account
-    /// password first (core's step-up: the server requires it): the pane then draws a password field and calls
-    /// `add_passkey_confirmed` / `remove_passkey_confirmed`. A fixture says `false`.
+    /// Engine: `DELETE /api/v1/account/passkeys/<id>` after the password, as for the add. The copy in the password
+    /// manager stays. `true`: it began (the engine) or was done (the fixture).
+    fn remove_passkey(&mut self, id: &str, password: Option<Password<'_>>) -> bool;
+    /// Adding and removing a passkey asks the account password first (owner ruling): the pane then draws a password
+    /// field and hands it to `add_passkey` / `remove_passkey`. A fixture says `false` (the board draws no field).
     fn passkeys_need_password(&self) -> bool {
         false
     }
@@ -844,31 +815,15 @@ pub trait AccountSource {
     fn can_rename_passkey(&self) -> bool {
         true
     }
-    /// Engine: `add_passkey` with the password the person typed. `Ok`: it began (the system dialog is up); how it
-    /// ended comes as a toast ([`AccountSource::notice`]) and the list is read again.
-    fn add_passkey_confirmed(&mut self, _password: Password<'_>) -> Result<(), Refused> {
-        self.add_passkey()
-    }
-    /// Engine: `remove_passkey` with the password the person typed; the answer comes as for the add.
-    fn remove_passkey_confirmed(&mut self, id: &str, _password: Password<'_>) -> bool {
-        self.remove_passkey(id)
-    }
 
     /// Engine: `GET /api/v1/account/activity`, by period ("Today", "October", "Earlier");
     /// `None` while security logging is off.
     fn activity(&self) -> Option<Vec<(String, Vec<Event>)>>;
     /// Engine: `PUT /api/v1/account/activity-tracking` on: a new log starts at once.
     fn start_activity(&mut self);
-    /// Engine: the same, off, with a current two-factor code (the step-up when two-factor is
-    /// off): recording stops and what was recorded is deleted within 30 days.
-    fn stop_activity(&mut self, code: &str) -> Result<(), CodeRefused>;
-    /// Stopping the recording asks the account PASSWORD (owner ruling 2026-11-14), not a two-factor code: the dialog
-    /// draws a password field and calls `stop_activity_confirmed`. A fixture says `false` (the board's code dialog).
-    fn stop_activity_needs_password(&self) -> bool {
-        false
-    }
-    /// Engine: stop the recording with the password the person typed. `true`: it began; how it ended comes as a toast
-    /// and the log is read again.
+    /// Engine: the same, off, with the account PASSWORD the person typed (owner ruling 2026-11-14: the dialog always
+    /// asks it, the board's DW-A78 too): recording stops and what was recorded is deleted within 30 days. `true`: it
+    /// began; how it ended comes as a toast and the log is read again.
     fn stop_activity_confirmed(&mut self, _password: Password<'_>) -> bool {
         false
     }
@@ -930,30 +885,6 @@ pub trait AccountSource {
     #[cfg(test)]
     fn sent(&self) -> Vec<String> {
         Vec::new()
-    }
-}
-
-/// The Security page's facts of a source that knows every part: taken from its accessors. For a fixture: a
-/// source that reads from Beebeeb fills `SecurityFacts::unknown()` with what it read (a score only once it
-/// may be said).
-pub fn all_known<S: AccountSource + ?Sized>(source: &S) -> SecurityFacts {
-    let sec = source.security();
-    let two = source.two_factor();
-    SecurityFacts {
-        backup_codes: sec.two_factor.then_some((two.codes_left, two.codes_total)),
-        app_lock: Some((sec.app_lock, sec.lock_after)),
-        password_changed: Some(sec.password_changed),
-        two_factor: Some(sec.two_factor),
-        passkeys: Some(sec.passkeys),
-        sessions: Count::Known(sec.sessions),
-        activity: Some(
-            source
-                .activity()
-                .map(|periods| periods.into_iter().flat_map(|(_, events)| events).collect()),
-        ),
-        factors: Some(source.factors()),
-        can_sign_out: true,
-        can_sign_out_all: true,
     }
 }
 

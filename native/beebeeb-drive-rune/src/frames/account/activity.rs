@@ -31,12 +31,9 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     let periods = source.activity();
     let on = periods.is_some();
     let confirm = match dialog {
-        // Owner ruling 2026-11-14: a risky action proves the PASSWORD (the board's DW-A78 asks it too). A source that
-        // asks it gets the password dialog; one that does not keeps the code dialog.
-        Some(Dialog::Code(CodeFor::StopActivity)) if source.stop_activity_needs_password() => {
-            Some(stop_with_password(f, t))
-        }
-        Some(Dialog::Code(CodeFor::StopActivity)) => Some(super::two_factor::code_dialog(CodeFor::StopActivity, f, t)),
+        // Owner ruling 2026-11-14: a risky action proves the PASSWORD (the board's DW-A78 asks it too): every source
+        // gets the password dialog.
+        Some(Dialog::Code(CodeFor::StopActivity)) => Some(stop_with_password(f, t)),
         _ => None,
     };
     // Behind the confirm the board draws the heading without its second line (DW-A78).
@@ -49,13 +46,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     let switch = lists::switch("item-0-0", "Record sign-in activity", on, t).on_press(move |s: &mut State| {
         if on {
             super::ask(s, Dialog::Code(CodeFor::StopActivity));
-            if s.account
-                .source
-                .as_deref()
-                .is_some_and(|source| source.stop_activity_needs_password())
-            {
-                form::focus(&mut s.account.form, Some(form::CURRENT_KEY));
-            }
+            form::focus(&mut s.account.form, Some(form::CURRENT_KEY));
         } else if let Some(source) = s.account.source.as_deref_mut() {
             source.start_activity();
         }
