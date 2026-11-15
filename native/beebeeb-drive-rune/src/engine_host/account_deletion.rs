@@ -41,6 +41,9 @@ use super::*;
 const KEPT_FOR: Duration = Duration::from_secs(4 * 60);
 /// How often [`watch`] looks whether what is kept still belongs to the session and account it was typed in.
 const WATCH_EVERY: Duration = Duration::from_millis(100);
+/// This slice's confirmations are numbered from here: never the number of a confirmation `account_actions.rs` holds
+/// for another purpose (its `spend` looks a confirmation up by its number first).
+const DELETION_HANDLES: u64 = 1 << 32;
 
 /// The toasts of a request Beebeeb refused for a reason that is not the code. Nothing changed in any of them.
 pub(super) const PLAN_FIRST: &str = "Cancel your plan first. No link was sent.";
@@ -52,6 +55,18 @@ pub(super) const EMAIL_NOT_SENT: &str =
 pub(super) const TOO_LATE_TO_UNDO: &str = "It can no longer be undone. Nothing changed.";
 /// A scheduled deletion whose time Beebeeb did not say.
 const NO_DATE: &str = "the date in the email we sent";
+/// "I've opened the link" when Beebeeb could not be asked: never said as "not used".
+pub(super) const NOT_CHECKED: &str = "Couldn't check with Beebeeb. Nothing changed. Try again.";
+
+/// How a read of Beebeeb's state ended.
+enum Read {
+    /// Beebeeb answered (kept for the session and account of the press).
+    Known(Deletion),
+    /// The read failed: nothing is known, and nothing may be said as known.
+    NotKnown,
+    /// The session or the account moved on while it was out: dropped, nothing said.
+    Moved,
+}
 
 /// The password and the step-up's token kept for one confirmation (see the module's doc).
 struct Kept {
@@ -179,7 +194,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             return Err(Refused::Offline);
         }
         self.account_deletion.made += 1;
-        let handle = self.account_deletion.made;
+        let handle = DELETION_HANDLES + self.account_deletion.made;
         *held(&self.account_deletion.kept) = Some(Kept {
             password: Zeroizing::new(text.to_string()),
             grant: Some(grant),
@@ -224,23 +239,22 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         }
     }
 
-    /// Beebeeb's state of the deletion, kept for the session and account of this press. `None`: not known (the read
-    /// failed, or the session or account moved on while it was out).
-    fn account_deletion_read(&mut self) -> Option<Deletion> {
+    /// Beebeeb's state of the deletion, kept for the session and account of this press.
+    fn account_deletion_read(&mut self) -> Read {
         let pressed = stamp(&self.engine);
         let answer = self.engine.account_deletion_for(pressed.0);
         if stamp(&self.engine) != pressed {
-            return None;
+            return Read::Moved;
         }
         match answer {
             Ok(state) => {
                 let deletion = shown(&state);
                 self.account_deletion.known = Some((pressed, deletion.clone()));
-                Some(deletion)
+                Read::Known(deletion)
             }
             Err(error) => {
                 log(format!("account: the deletion was not read ({})", error.words()));
-                None
+                Read::NotKnown
             }
         }
     }
@@ -313,9 +327,17 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         })
     }
 
-    /// "I've opened the link" (DW-A81): `true` only when Beebeeb says the deletion is scheduled.
+    /// "I've opened the link" (DW-A81): `true` only when Beebeeb says the deletion is scheduled. A check that failed is
+    /// said as one (a toast), so the page never says "not used" for an answer it did not get.
     pub(super) fn account_deletion_deletion_link_used(&mut self) -> bool {
-        matches!(self.account_deletion_read(), Some(Deletion::Scheduled { .. }))
+        match self.account_deletion_read() {
+            Read::Known(deletion) => matches!(deletion, Deletion::Scheduled { .. }),
+            Read::NotKnown => {
+                self.say(Said::failed(NOT_CHECKED, None, false));
+                false
+            }
+            Read::Moved => false,
+        }
     }
 
     /// Cancel deletion (DW-A81), with the password asked over the page.
@@ -359,14 +381,18 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         match error {
             // Nothing Beebeeb may still cancel, or a cancel whose end is not known: what stands is read again.
             DeletionError::NotScheduled | DeletionError::Unconfirmed => match self.account_deletion_read() {
-                Some(deletion) => {
-                    if matches!(deletion, Deletion::Scheduled { .. }) {
-                        self.say(Said::failed(TOO_LATE_TO_UNDO, None, false));
-                    }
+                // Beebeeb said it takes nothing, and the schedule stands: the time to undo it has passed.
+                Read::Known(deletion @ Deletion::Scheduled { .. }) if error == DeletionError::NotScheduled => {
+                    self.say(Said::failed(TOO_LATE_TO_UNDO, None, false));
                     Ok(deletion)
                 }
-                None if error == DeletionError::Unconfirmed => Err(Refused::Unconfirmed),
-                None => Err(Refused::Offline),
+                // The cancel's answer was lost and the schedule stands: it did not land. Nothing changed; the dialog
+                // stays for another try (never "it can no longer be undone").
+                Read::Known(Deletion::Scheduled { .. }) => Err(Refused::Offline),
+                Read::Known(deletion) => Ok(deletion),
+                Read::NotKnown if error == DeletionError::Unconfirmed => Err(Refused::Unconfirmed),
+                Read::NotKnown => Err(Refused::Offline),
+                Read::Moved => Err(Refused::NotConfirmed),
             },
             DeletionError::NotConfirmed | DeletionError::WrongPassword => Err(Refused::NotConfirmed),
             _ => Err(Refused::Offline),

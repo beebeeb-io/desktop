@@ -25,6 +25,10 @@ const SHRED_AFTER: &str = "2099-12-14T19:42:00+00:00";
 const ANSWER: u8 = 0;
 /// `delete-request` answers 409 `delete_subscription_active`.
 const PLAN_STILL_CHARGED: u8 = 1;
+/// `delete-cancel` spends the token and closes the connection: no answer, nothing cancelled.
+const CANCEL_ANSWER_LOST: u8 = 2;
+/// The state read answers 500.
+const STATE_FAILS: u8 = 3;
 
 /// The fake Beebeeb, and what it saw.
 struct Fake {
@@ -104,12 +108,16 @@ fn fake() -> Fake {
                     );
                 }
                 if req.json()["code"] != json!(CODE) {
-                    return Reply::json(401, json!({ "error": "invalid_code" }));
+                    // As Beebeeb: a wrong second factor is 400 `invalid_totp_code`.
+                    return Reply::json(400, json!({ "error": "invalid_totp_code" }));
                 }
                 *state_in.lock().unwrap() = "requested";
                 Reply::ok(
                     json!({ "email_link_sent": true, "link_expires_at": "2099-01-01T00:00:00Z", "scheduled": false }),
                 )
+            }
+            "GET /api/v1/auth/account/deletion" if authed && mode_in.load(Ordering::SeqCst) == STATE_FAILS => {
+                Reply::json(500, json!({ "error": "internal" }))
             }
             "GET /api/v1/auth/account/deletion" if authed => match *state_in.lock().unwrap() {
                 "scheduled" => Reply::ok(json!({
@@ -127,6 +135,9 @@ fn fake() -> Fake {
                 }
                 if !tokens.spend(req) {
                     return Reply::error(403, "step_up_required");
+                }
+                if mode_in.load(Ordering::SeqCst) == CANCEL_ANSWER_LOST {
+                    return Reply::hang_up();
                 }
                 let mut state = state_in.lock().unwrap();
                 if *state != "scheduled" {
@@ -284,7 +295,7 @@ fn undo_needs_the_step_up() {
     assert_eq!(*fake.state.lock().unwrap(), "none");
     assert_eq!(source.deletion(), Deletion::None);
     assert!(!kept(&source), "used up");
-    let again = StepUp::granted(Purpose::DeleteAccount, source.account_deletion.made);
+    let again = StepUp::granted(Purpose::DeleteAccount, DELETION_HANDLES + source.account_deletion.made);
     assert_eq!(
         source.undo_deletion(again),
         Err(Refused::NotConfirmed),
@@ -392,5 +403,63 @@ fn password_never_logged() {
         code.matches(" ({})\", error.words()));").count(),
         logs,
         "a log line formats something other than the error's words"
+    );
+}
+
+/// The delete step-up's confirmation is never taken for one `account_actions.rs` holds for another purpose (that file
+/// looks a confirmation up by its number before it checks the purpose).
+#[test]
+fn a_delete_step_up_never_spends_another_purposes_confirmation() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    let email = source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangeEmail)
+        .expect("proven for the email change");
+    let delete = proven(&mut source);
+    assert_ne!(delete.handle(), email.handle());
+    assert!(source.actions.spend(&delete, Purpose::ChangeEmail).is_none());
+    assert_eq!(
+        source.actions.held(),
+        1,
+        "the email change's confirmation is still held"
+    );
+    assert!(source.actions.spend(&email, Purpose::ChangeEmail).is_some());
+}
+
+/// A cancel whose answer is lost, while Beebeeb still has the deletion scheduled, did not land: nothing changed, and
+/// it is never said as "it can no longer be undone".
+#[test]
+fn a_cancel_whose_answer_is_lost_is_never_said_as_too_late() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    *fake.state.lock().unwrap() = "scheduled";
+    fake.mode.store(CANCEL_ANSWER_LOST, Ordering::SeqCst);
+    let confirmation = proven(&mut source);
+    assert_eq!(source.undo_deletion(confirmation), Err(Refused::Offline));
+    assert_ne!(source.notice(), Some(TOO_LATE_TO_UNDO));
+    assert!(
+        matches!(source.deletion(), Deletion::Scheduled { .. }),
+        "Beebeeb still has it"
+    );
+    assert_eq!(*fake.state.lock().unwrap(), "scheduled");
+}
+
+/// "I've opened the link" when Beebeeb cannot be asked: not known, said as a check that failed, never "not used".
+#[test]
+fn a_check_that_failed_never_says_the_link_was_not_used() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    *fake.state.lock().unwrap() = "scheduled";
+    fake.mode.store(STATE_FAILS, Ordering::SeqCst);
+    assert!(!source.deletion_link_used());
+    assert_eq!(source.notice(), Some(NOT_CHECKED));
+    assert!(
+        source.notice_failed(),
+        "the page reads this and does not say the link was not used"
+    );
+    assert_eq!(
+        source.deletion(),
+        Deletion::None,
+        "nothing was read, nothing is shown as known"
     );
 }

@@ -31,6 +31,8 @@ const ANSWERS: u8 = 0;
 const PLAN_STILL_CHARGED: u8 = 1;
 /// `delete-request` answers 409 `delete_already_scheduled`.
 const ALREADY_SCHEDULED: u8 = 2;
+/// `delete-cancel` spends the token and closes the connection: no answer.
+const CANCEL_ANSWER_LOST: u8 = 3;
 
 /// The fake Beebeeb, and what it saw.
 struct Fake {
@@ -100,7 +102,8 @@ fn fake() -> Fake {
                     _ => {}
                 }
                 if body["code"] != json!(CODE) {
-                    return Reply::json(401, json!({ "error": "invalid_code" }));
+                    // As Beebeeb: a wrong second factor is 400 `invalid_totp_code`.
+                    return Reply::json(400, json!({ "error": "invalid_totp_code" }));
                 }
                 *state_in.lock().unwrap() = "requested";
                 Reply::ok(
@@ -120,6 +123,9 @@ fn fake() -> Fake {
                 }
                 if !tokens.spend(request) {
                     return Reply::error(403, "step_up_required");
+                }
+                if mode_in.load(Ordering::SeqCst) == CANCEL_ANSWER_LOST {
+                    return Reply::hang_up();
                 }
                 let mut state = state_in.lock().unwrap();
                 if *state != "scheduled" {
@@ -387,4 +393,20 @@ fn password_never_logged() {
     let printed = format!("{wrong:?} {:?}", engine.account_deletion_for(turn));
     assert!(!printed.contains(PASSWORD));
     assert!(!printed.contains(TOKEN));
+}
+
+#[test]
+fn a_lost_cancel_answer_is_not_known() {
+    let fake = fake();
+    let engine = engine(&fake.api.base);
+    let turn = signed_in(&engine);
+    *fake.state.lock().unwrap() = "scheduled";
+    fake.mode.store(CANCEL_ANSWER_LOST, Ordering::SeqCst);
+
+    let grant = engine.step_up_for(turn, secret(PASSWORD)).expect("proven");
+    assert_eq!(
+        engine.cancel_account_deletion_for(turn, grant),
+        Err(DeletionError::Unconfirmed),
+        "it left and no answer came: never 'not scheduled', never 'cancelled'"
+    );
 }

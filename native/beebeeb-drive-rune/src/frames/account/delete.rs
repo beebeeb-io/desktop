@@ -272,12 +272,14 @@ fn link_sent(source: &dyn AccountSource, f: &Form, email: &str, t: &Theme) -> El
     children.push(fm::actions(vec![
         (
             opened.on_press(super::act(|ui: &mut AccountUi| {
-                if ui.source.as_deref_mut()?.deletion_link_used() {
-                    Some("DW-A82")
-                } else {
-                    ui.form.problem = Some(Problem::LinkNotUsed);
-                    None
+                let source = ui.source.as_deref_mut()?;
+                if source.deletion_link_used() {
+                    return Some("DW-A82");
                 }
+                // "Not used" only on Beebeeb's own answer: a check that failed is said by the source (a toast).
+                let answered = !source.notice_failed();
+                ui.form.problem = answered.then_some(Problem::LinkNotUsed);
+                None
             })),
             opened_b,
         ),
