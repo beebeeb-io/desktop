@@ -204,6 +204,9 @@ pub enum Notice {
     /// Windows: a delete or rename of a backed-up folder was refused; these are the words (they carry a path:
     /// show them, never log them).
     BackupRefusal { message: String },
+    /// Windows: File Explorer was refused moving, renaming or deleting a folder a Beebeeb service keeps
+    /// (`windows_cf::refuse_service_folders`). No words of its own: the host says it in the board's words (DW-1182).
+    ServiceFolderRefused,
 }
 
 /// The program around the engine. The engine holds one `Arc<dyn EngineHost>` for its lifetime.
@@ -289,6 +292,7 @@ impl std::fmt::Debug for Notice {
             Notice::QuotaWarning { .. } => "Notice::QuotaWarning",
             Notice::Conflict { .. } => "Notice::Conflict(<redacted>)",
             Notice::BackupRefusal { .. } => "Notice::BackupRefusal(<redacted>)",
+            Notice::ServiceFolderRefused => "Notice::ServiceFolderRefused",
         })
     }
 }

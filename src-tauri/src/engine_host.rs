@@ -46,6 +46,8 @@ impl EngineHost for TauriHost {
                     .show()
                     .map_err(|e| e.to_string())
             }
+            // A folder a Beebeeb service keeps (the native app's refusal, DW-1182): this app has no words for it.
+            Notice::ServiceFolderRefused => Ok(()),
         }
     }
 

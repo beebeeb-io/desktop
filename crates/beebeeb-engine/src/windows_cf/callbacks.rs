@@ -822,6 +822,9 @@ pub unsafe extern "system" fn notify_rename_completion_callback(
 // start or a stop in progress) the answer is STATUS_SUCCESS: the completion is dropped then too, so
 // nothing reaches the server, and the next placeholder refresh mints the item again.
 
+#[path = "callbacks_pre_op.rs"]
+mod pre_op;
+
 /// `NOTIFY_DELETE` (pre-operation): refuse deleting a protected item.
 ///
 /// SAFETY: as [`notify_file_close_completion_callback`].
@@ -844,11 +847,8 @@ pub unsafe extern "system" fn notify_delete_callback(
             params,
         )
     });
-    // SAFETY: the keys come from this live callback.
-    unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_DELETE, refusal.is_some()) };
-    if let Some(words) = refusal {
-        crate::backup_protect::note_refusal(&words);
-    }
+    // SAFETY: the keys and the parameters come from this live callback (`pre_op`: slice A9's refusal too).
+    unsafe { pre_op::answer(info, callback_parameters, CF_OPERATION_TYPE_ACK_DELETE, refusal) };
 }
 
 /// `NOTIFY_RENAME` (pre-operation): refuse renaming or moving a protected item, the move into the
@@ -874,11 +874,8 @@ pub unsafe extern "system" fn notify_rename_callback(
             params,
         )
     });
-    // SAFETY: the keys come from this live callback.
-    unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_RENAME, refusal.is_some()) };
-    if let Some(words) = refusal {
-        crate::backup_protect::note_refusal(&words);
-    }
+    // SAFETY: the keys and the parameters come from this live callback (`pre_op`: slice A9's refusal too).
+    unsafe { pre_op::answer(info, callback_parameters, CF_OPERATION_TYPE_ACK_RENAME, refusal) };
 }
 
 /// The words a delete of `info`'s item is refused with; `None` allows it (an undelete, this process's
