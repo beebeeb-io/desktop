@@ -15,7 +15,15 @@ use crate::frames::viewers::source::Match;
 /// A Letter PDF, one page per entry: the line of text it writes at 72 / 700 in 12 pt Helvetica; an empty entry is a
 /// page that only fills a rectangle (a scan has no text, only a picture: this is that page without the picture).
 fn text_pdf(pages: &[&str]) -> Vec<u8> {
+    text_pdf_on((612, 792), (72, 700), pages)
+}
+
+/// [`text_pdf`] on pages of `size` points (width, height), each line written at `at` (x, its baseline's height above
+/// the bottom of the page, as a PDF counts it).
+fn text_pdf_on(size: (u32, u32), at: (u32, u32), pages: &[&str]) -> Vec<u8> {
     const FIRST_PAGE: usize = 4;
+    let (width, height) = size;
+    let (x, baseline) = at;
     let kids: Vec<String> = (0..pages.len())
         .map(|i| format!("{} 0 R", FIRST_PAGE + 2 * i))
         .collect();
@@ -26,14 +34,14 @@ fn text_pdf(pages: &[&str]) -> Vec<u8> {
     ];
     for (i, line) in pages.iter().enumerate() {
         objects.push(format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> \
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << /Font << /F1 3 0 R >> >> \
              /Contents {} 0 R >>",
             FIRST_PAGE + 1 + 2 * i
         ));
         let content = if line.is_empty() {
             "0 0 0 rg\n0 0 306 396 re\nf\n".to_string()
         } else {
-            format!("BT /F1 12 Tf 72 700 Td ({line}) Tj ET\n")
+            format!("BT /F1 12 Tf {x} {baseline} Td ({line}) Tj ET\n")
         };
         objects.push(format!("<< /Length {} >>\nstream\n{content}endstream", content.len()));
     }
@@ -168,4 +176,28 @@ fn a_find_answered_after_the_document_closed_is_dropped() {
         });
         assert_eq!(delivered.into_inner().unwrap(), expected, "cancelled: {cancelled}");
     }
+}
+
+#[test]
+fn find_puts_the_box_on_the_words_on_an_a4_page() {
+    // An A4 page (595 x 842 pt) whose line is written low: its baseline 120 pt above the bottom, so 722 pt from the
+    // top. The box is in the page's own points with the top left corner the origin, one line of 12 pt Helvetica high,
+    // its top above the baseline by at most that line. Where a box would land if the page were not turned top-down
+    // (y about 118) or turned as if it were Letter (y about 662) is outside that band.
+    const HEIGHT: f32 = 842.0;
+    const BASELINE: f32 = 120.0;
+    let document = open(text_pdf_on((595, 842), (72, 120), &["Invented quay tide table"]));
+    let matches = found(&document, "tide");
+    assert_eq!(matches.len(), 1, "one match: {matches:?}");
+    let m = matches[0];
+    assert_eq!(m.page, 1);
+    let baseline_from_top = HEIGHT - BASELINE;
+    assert!(m.y > baseline_from_top - 16.0 && m.y < baseline_from_top, "y {m:?}");
+    assert!(
+        m.y + m.h > baseline_from_top,
+        "the box reaches below the baseline: {m:?}"
+    );
+    assert!(m.x > 72.0 && m.x < 300.0, "x {m:?}");
+    assert!(m.w > 5.0 && m.w < 60.0, "w {m:?}");
+    assert!(m.h > 8.0 && m.h < 16.0, "h {m:?}");
 }
