@@ -11,7 +11,7 @@ use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_shell as shell;
 use rune::{El, col};
 
-use super::source::UpdateCheck;
+use super::source::{Press, UPDATE_CAPTION, UpdateCheck};
 use super::{Dialog, Intent, MenuKind, SettingsUi};
 
 /// Where the Release channel menu drops, from its row's top-left corner (the board's place,
@@ -179,27 +179,32 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 fn release_notes(ui: &SettingsUi, t: &Theme) -> El {
     let n = ui.source.about().notes;
     let title = format!("Beebeeb {}", n.version);
-    let sub = format!("{} channel · released {}", n.channel.label(), n.released);
+    // The updater's offer carries no release date: the sub says the channel alone then, never "released " and nothing.
+    let sub = if n.released.is_empty() {
+        format!("{} channel", n.channel.label())
+    } else {
+        format!("{} channel · released {}", n.channel.label(), n.released)
+    };
     let notes = if n.lines.is_empty() {
         dialogs::bullets(&["No release notes were provided for this version.".to_string()], t)
     } else {
         dialogs::bullets(&n.lines, t)
     };
-    let body = vec![
-        notes,
-        dialogs::caption(
-            0,
-            "Download it, then open it to install. Beebeeb never installs an update by itself.",
-            t,
-        ),
-    ];
+    // Download first, then Restart to update (spec §4, "Apply"); a newer version's notes only (an older one is never
+    // offered: the source puts no older version's notes here).
+    let body = vec![notes, dialogs::caption(0, UPDATE_CAPTION, t)];
+    let press = n.press;
+    let mut action = dialogs::button(2, press.label(), Weight::Primary, t);
+    action = if press == Press::Wait {
+        action.disabled(true).focusable(false)
+    } else {
+        action.default_button().on_press(move |s: &mut State| {
+            s.settings.dialog = None;
+            s.settings.press_update(press);
+        })
+    };
     let foot = vec![
-        dialogs::button(2, "Restart to update", Weight::Primary, t)
-            .default_button()
-            .on_press(|s: &mut State| {
-                s.settings.dialog = None;
-                s.settings.ask(Intent::DownloadUpdate);
-            }),
+        action,
         dialogs::button(3, "Close", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
     dialogs::dialog(&title, 480.0, &title, Some(&sub), body, foot, t)
