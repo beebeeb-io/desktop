@@ -1042,6 +1042,7 @@ went
 were
 what
 where
+whether
 which
 while
 whole

@@ -13,11 +13,13 @@
 //! BLOCKS (the state database, and on Windows a Cloud Files call): a worker's, never the window's thread.
 //! Must not: log a name, a path or an id.
 
+use std::collections::HashSet;
+
 use crate::account::SessionGeneration;
 use crate::app::kept_api::NOT_SIGNED_IN;
 use crate::app::{CredentialStores, Engine};
 use crate::finder_show::item_namespace;
-use crate::state_db::Namespace;
+use crate::state_db::{Namespace, StateDb};
 
 /// Why [`Engine::keep_shared_offline_for`] kept nothing. Nothing was changed in any of these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,4 +62,54 @@ impl<C: CredentialStores> Engine<C> {
             }
         })
     }
+
+    /// Which of `item_ids` (ids of Shared with me rows, as the lists name them) are kept on this PC now. Read only:
+    /// it changes nothing. The same session checks as [`Self::keep_shared_offline_for`]; an id with no row, or a row
+    /// that is not a shared-with-me row (an own file), is simply not in the answer. The ids come back as asked, not
+    /// as the alias they resolved to.
+    pub fn shared_kept_of_for(
+        &self,
+        session: SessionGeneration,
+        item_ids: &[String],
+    ) -> Result<HashSet<String>, SharedKeepRefused> {
+        if !self.acct.session_unchanged_since(session) {
+            return Err(SharedKeepRefused::NotSignedIn);
+        }
+        let state = self.local_state_for_changes().map_err(|_| SharedKeepRefused::NotKept)?;
+        if state.session() != session {
+            return Err(SharedKeepRefused::NotSignedIn);
+        }
+        match state.with(|db| shared_kept_in(db, item_ids)) {
+            Ok(Ok(kept)) => Ok(kept),
+            Ok(Err(_)) => Err(SharedKeepRefused::NotKept),
+            Err(_) => Err(SharedKeepRefused::NotSignedIn),
+        }
+    }
 }
+
+/// The ids among `item_ids` whose row is a shared-with-me row AND kept (the rule of `kept_rows`), in one
+/// `sizes_and_kept` query. An alias is followed to the row it became before either check (as [`item_namespace`]
+/// does), and the id is returned as asked.
+fn shared_kept_in(db: &StateDb, item_ids: &[String]) -> Result<HashSet<String>, String> {
+    let mut resolved: Vec<(&String, String)> = Vec::new();
+    for id in item_ids {
+        let landed_as = db
+            .resolve_alias(id)
+            .map_err(|error| format!("read item: {error}"))?
+            .unwrap_or_else(|| id.clone());
+        if item_namespace(db, id)? == Some(Namespace::SharedWithMe) {
+            resolved.push((id, landed_as));
+        }
+    }
+    let ask: Vec<String> = resolved.iter().map(|(_, row)| row.clone()).collect();
+    let marks = db.sizes_and_kept(&ask).map_err(|error| format!("read kept: {error}"))?;
+    Ok(resolved
+        .into_iter()
+        .filter(|(_, row)| marks.get(row).is_some_and(|(_, kept)| *kept))
+        .map(|(id, _)| id.clone())
+        .collect())
+}
+
+#[cfg(test)]
+#[path = "shared_offline_tests.rs"]
+mod tests;
