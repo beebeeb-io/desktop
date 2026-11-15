@@ -402,9 +402,8 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
-            let mut vault = self.vault();
+            let vault = self.vault();
             let present = matches!(vault.session_token(), Ok(Some(_)));
-            let present = self.s11_probe(&mut vault, present).await;
             self.set_auth_present(present);
             if present {
                 // Whose the stored session is, as its sign-in recorded it (unknown stays unknown).
@@ -1043,9 +1042,6 @@ impl<C: CredentialStores> Engine<C> {
                 .map_err(|e| store::keychain_error("clear the stored session", e))?;
             if let Ok(mut email) = self.acct.auth_email.lock() {
                 *email = None;
-            }
-            if let Ok(mut profile) = self.acct.cached_profile.lock() {
-                *profile = None;
             }
             self.remember_session_user_id(None);
             self.acct.auth_health.note_result(None);
