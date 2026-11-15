@@ -304,3 +304,24 @@ fn a_password_answer_that_lands_on_another_page_is_said_when_the_page_opens_agai
     let r = rig("DW-A67");
     assert!(r.rt.accessibility_json().to_string().contains("Cancel"));
 }
+
+/// Review of desktop#427 (round 4): the answer kept for "while you were away" belongs to the session and the account it
+/// was answered under. When either changes before the page is opened again, it is dropped: never said to another
+/// account, never after a sign-out and sign-in.
+#[test]
+fn a_late_password_answer_is_dropped_when_the_session_or_account_moved_before_the_page_reopens() {
+    for answer in [Answered::Done, Answered::Refused(Refused::Unconfirmed)] {
+        let mut r = change_password();
+        click(&mut r.rt, "btn-0");
+        assert_ne!(r.pane(), Pane::Password, "left the page");
+        r.answer(answer);
+        // Another session or account now.
+        r.held.moved.set(true);
+        r.rt.update(|s, _| super::go(s, "DW-A67"));
+        settle(&mut r.rt);
+        assert_eq!(r.pane(), Pane::Password);
+        assert_eq!(r.problem(), None, "nothing is said of a change another session made");
+        assert!(r.rt.state.account.form.late_change.is_none(), "and nothing is kept");
+        assert!(!r.waiting());
+    }
+}

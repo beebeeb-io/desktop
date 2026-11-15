@@ -81,6 +81,8 @@ fn board_codes() -> Vec<Secret> {
 pub struct HeldCalls {
     /// The answer to deliver to the call that is out.
     pub answer: std::rc::Rc<std::cell::RefCell<Option<Answered>>>,
+    /// The session or the account moved on after the answer was taken (a sign-out and sign-in, another account).
+    pub moved: std::rc::Rc<std::cell::Cell<bool>>,
     /// Every call that was started, in order.
     pub started: std::rc::Rc<std::cell::RefCell<Vec<CallKind>>>,
     out: Option<CallKind>,
