@@ -503,6 +503,8 @@ fn cell(row: u32, col: u32) -> CellText {
         text: "1.250".to_owned(),
         align: Align::Right,
         bold: false,
+        value: Some(1.25),
+        formula: None,
     }
 }
 
@@ -513,6 +515,8 @@ fn data(cells: Vec<CellText>) -> CellData {
         row_heights: vec![15.0; 10],
         merges: Vec::new(),
         frozen: Frozen { rows: 0, cols: 0 },
+        anchors: Vec::new(),
+        missing_content: false,
     }
 }
 
@@ -759,8 +763,10 @@ fn cells_that_cannot_be_halved_are_refused() {
     };
     assert_eq!(check_cells(&one, &d, &L), Ok(()));
     let payload = d.encode().expect("one cell fits one frame");
-    // Counts 4, the cell 14 + its text, widths 8, heights 8, merges 20, frozen 8: half a frame and 62 bytes.
-    assert_eq!(payload.len(), MAX_CELL_TEXT_BYTES + 62);
+    // Counts 4, the cell 16 + its text + its value 8, widths 8, heights 8, merges 20, frozen 8, anchors 4,
+    // `missing_content` 1: half a frame and 77 bytes. With a formula and charts at their caps too, see
+    // `one_cell_at_every_cap_fits_one_frame`.
+    assert_eq!(payload.len(), MAX_CELL_TEXT_BYTES + 77);
     assert!(payload.len() < crate::frame::MAX_PAYLOAD);
 }
 
@@ -932,6 +938,9 @@ fn limits_are_the_contracts() {
     assert_eq!(MAX_SHEET_ROWS, 1_048_576);
     assert_eq!(MAX_SHEET_COLS, 16_384);
     assert_eq!(MAX_SHEET_NAME_CHARS, 255);
+    assert_eq!(MAX_FORMULA_BYTES, 8_192);
+    assert_eq!(MAX_ANCHORS, 256);
+    assert_eq!(MAX_ANCHOR_SIDE_PT.to_bits(), 20_000.0f32.to_bits());
     assert_eq!(
         Limits::CONTRACT,
         Limits {
@@ -944,6 +953,8 @@ fn limits_are_the_contracts() {
             max_cell_text_bytes: 32_768,
             max_outline_entries: 10_000,
             max_outline_text_bytes: 1_024,
+            max_formula_bytes: 8_192,
+            max_anchors: 256,
         }
     );
     assert_eq!(Limits::default(), Limits::CONTRACT);
@@ -969,6 +980,11 @@ fn refused_reasons_are_fixed_and_distinct() {
         Refused::SizesMismatch,
         Refused::BadCellSize,
         Refused::FrozenTooLarge,
+        Refused::BadValue,
+        Refused::FormulaTooLong,
+        Refused::TooManyAnchors,
+        Refused::BadAnchor,
+        Refused::DuplicateAnchor,
         Refused::TooManyEntries,
         Refused::BadNext,
         Refused::PagePastEnd,

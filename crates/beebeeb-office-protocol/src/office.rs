@@ -8,6 +8,10 @@
 //! `region` is a rectangle in those pixels (tiles of 512 px at large zooms) and lies inside the page. Pixels are RGBA8,
 //! `w * h * 4` bytes, in the section `out`.
 //!
+//! **Charts and pictures of a sheet** come with the cells as [`Anchor`]s (where the sheet places them, in points) and
+//! are drawn by their own request, [`RenderAnchor`], at `ceil(w_pt * scale)` x `ceil(h_pt * scale)` pixels
+//! ([`crate::check::anchor_pixels`]: the page rule without the page's height clamp).
+//!
 //! **Ids** are in the frame, not here: an answer (`Opened`, `Rendered`, `Error`, …) carries the id of its request in
 //! the frame header, and `Cancel` carries the id of the request it cancels.
 //!
@@ -33,6 +37,8 @@ pub const KIND_OUTLINE: u16 = 0x0104;
 pub const KIND_STATS: u16 = 0x0105;
 /// The app cancels the request whose id the frame carries.
 pub const KIND_CANCEL: u16 = 0x0106;
+/// The app asks for a chart or a picture of a sheet as pixels. Answered by `Rendered` or `Error`.
+pub const KIND_RENDER_ANCHOR: u16 = 0x0107;
 /// The helper opened a document or a deck: its pages and their sizes.
 pub const KIND_OPENED: u16 = 0x0201;
 /// The helper opened a workbook: its sheets.
@@ -482,17 +488,23 @@ impl Align {
 /// The flag bit for bold text. Every other bit is reserved and refused on decode.
 const FLAG_BOLD: u8 = 1;
 
-/// One non-empty cell: its text as shown (the number format already applied by the helper), its alignment, bold.
-#[derive(Clone, PartialEq, Eq)]
+/// One non-empty cell: its text as shown (the number format already applied by the helper), its alignment, bold;
+/// the number behind it, if it is a number or a date (`value`, finite: what Sum and Average add, so a currency or a
+/// percent cell counts as the number it is); and its formula as the file writes it, with its "=" (`formula`, at most
+/// [`crate::check::MAX_FORMULA_BYTES`]). The formula is only ever shown as text.
+#[derive(Clone, PartialEq)]
 pub struct CellText {
     pub row: u32,
     pub col: u32,
     pub text: String,
     pub align: Align,
     pub bold: bool,
+    pub value: Option<f64>,
+    pub formula: Option<String>,
 }
 
-/// The text is document content, so `Debug` shows its length only.
+/// The text, the value and the formula are document content, so `Debug` shows whether they are there and their
+/// lengths only.
 impl fmt::Debug for CellText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CellText")
@@ -501,7 +513,153 @@ impl fmt::Debug for CellText {
             .field("text_len", &self.text.len())
             .field("align", &self.align)
             .field("bold", &self.bold)
+            .field("has_value", &self.value.is_some())
+            .field("formula_len", &self.formula.as_ref().map(String::len))
             .finish()
+    }
+}
+
+impl CellText {
+    fn put(&self, o: &mut Out) {
+        o.u32(self.row);
+        o.u32(self.col);
+        o.u8(self.align.tag());
+        o.u8(if self.bold { FLAG_BOLD } else { 0 });
+        o.str(&self.text);
+        match self.value {
+            None => o.u8(0),
+            Some(v) => {
+                o.u8(1);
+                o.f64(v);
+            }
+        }
+        match &self.formula {
+            None => o.u8(0),
+            Some(formula) => {
+                o.u8(1);
+                o.str(formula);
+            }
+        }
+    }
+
+    /// The fewest bytes a cell takes on the wire: row, col, align, flags, a 4-byte text length, the value's tag and the
+    /// formula's tag.
+    const MIN_BYTES: usize = 4 + 4 + 1 + 1 + 4 + 1 + 1;
+
+    fn get(i: &mut In<'_>) -> Result<CellText, DecodeError> {
+        let row = i.u32()?;
+        let col = i.u32()?;
+        let align = Align::from_tag(i.u8()?)?;
+        let flags = i.u8()?;
+        if flags & !FLAG_BOLD != 0 {
+            return Err(DecodeError::BadTag);
+        }
+        let text = i.str()?;
+        let value = match i.u8()? {
+            0 => None,
+            1 => Some(i.f64()?),
+            _ => return Err(DecodeError::BadTag),
+        };
+        let formula = match i.u8()? {
+            0 => None,
+            1 => Some(i.str()?),
+            _ => return Err(DecodeError::BadTag),
+        };
+        Ok(CellText {
+            row,
+            col,
+            text,
+            align,
+            bold: flags & FLAG_BOLD != 0,
+            value,
+            formula,
+        })
+    }
+}
+
+/// What an [`Anchor`] holds: a chart or a picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorKind {
+    Chart,
+    Picture,
+}
+
+impl AnchorKind {
+    fn tag(self) -> u8 {
+        match self {
+            AnchorKind::Chart => 0,
+            AnchorKind::Picture => 1,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<AnchorKind, DecodeError> {
+        match tag {
+            0 => Ok(AnchorKind::Chart),
+            1 => Ok(AnchorKind::Picture),
+            _ => Err(DecodeError::BadTag),
+        }
+    }
+}
+
+/// A chart or a picture of a sheet, and where the sheet places it. `id` names it in a [`RenderAnchor`] (unique in
+/// its sheet, stable while the workbook is open). It sits over the cells from (`from_row`, `from_col`) to (`to_row`,
+/// `to_col`), both inclusive; its top-left corner is `x_pt`, `y_pt` into the `from` cell, and it is `w_pt` x `h_pt`
+/// points large.
+#[derive(Clone, PartialEq)]
+pub struct Anchor {
+    pub id: u32,
+    pub kind: AnchorKind,
+    pub from_row: u32,
+    pub from_col: u32,
+    pub to_row: u32,
+    pub to_col: u32,
+    pub x_pt: f32,
+    pub y_pt: f32,
+    pub w_pt: f32,
+    pub h_pt: f32,
+}
+
+/// Where a chart or a picture sits, and how large it is, says something about the document: `Debug` shows only which
+/// one it is.
+impl fmt::Debug for Anchor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Anchor")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Anchor {
+    /// Bytes of one anchor on the wire: the id, the kind, the four cell numbers, the four sizes.
+    pub(crate) const BYTES: usize = 4 + 1 + 4 * 4 + 4 * 4;
+
+    fn put(&self, o: &mut Out) {
+        o.u32(self.id);
+        o.u8(self.kind.tag());
+        o.u32(self.from_row);
+        o.u32(self.from_col);
+        o.u32(self.to_row);
+        o.u32(self.to_col);
+        o.f32(self.x_pt);
+        o.f32(self.y_pt);
+        o.f32(self.w_pt);
+        o.f32(self.h_pt);
+    }
+
+    fn get(i: &mut In<'_>) -> Result<Anchor, DecodeError> {
+        Ok(Anchor {
+            id: i.u32()?,
+            kind: AnchorKind::from_tag(i.u8()?)?,
+            from_row: i.u32()?,
+            from_col: i.u32()?,
+            to_row: i.u32()?,
+            to_col: i.u32()?,
+            x_pt: i.f32()?,
+            y_pt: i.f32()?,
+            w_pt: i.f32()?,
+            h_pt: i.f32()?,
+        })
     }
 }
 
@@ -513,15 +671,34 @@ pub struct Frozen {
 }
 
 /// The cells of an asked range. `col_widths` has one width per column of the range and `row_heights` one height per
-/// row, in points (0 = hidden); `merges` are the merged areas inside the range; `frozen` is the sheet's frozen panes.
-/// When the range's cells do not fit one frame, the helper answers [`ErrorCode::RangeTooLarge`] instead.
-#[derive(Debug, Clone, PartialEq)]
+/// row, in points (0 = hidden); `merges` are the merged areas inside the range; `frozen` is the sheet's frozen panes;
+/// `anchors` are the charts and pictures whose cells touch the range (at most [`crate::check::MAX_ANCHORS`]);
+/// `missing_content`: something in the range is not shown as the file means it (the status line "Some content isn't
+/// shown."). When the range's cells do not fit one frame, the helper answers [`ErrorCode::RangeTooLarge`] instead.
+#[derive(Clone, PartialEq)]
 pub struct CellData {
     pub cells: Vec<CellText>,
     pub col_widths: Vec<f32>,
     pub row_heights: Vec<f32>,
     pub merges: Vec<CellRange>,
     pub frozen: Frozen,
+    pub anchors: Vec<Anchor>,
+    pub missing_content: bool,
+}
+
+/// The cells are document content, so `Debug` shows counts only.
+impl fmt::Debug for CellData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CellData")
+            .field("cells", &self.cells.len())
+            .field("col_widths", &self.col_widths.len())
+            .field("row_heights", &self.row_heights.len())
+            .field("merges", &self.merges.len())
+            .field("frozen", &self.frozen)
+            .field("anchors", &self.anchors.len())
+            .field("missing_content", &self.missing_content)
+            .finish()
+    }
 }
 
 impl CellData {
@@ -529,11 +706,7 @@ impl CellData {
         let mut o = Out::new();
         let n = o.count(self.cells.len());
         for cell in self.cells.iter().take(n) {
-            o.u32(cell.row);
-            o.u32(cell.col);
-            o.u8(cell.align.tag());
-            o.u8(if cell.bold { FLAG_BOLD } else { 0 });
-            o.str(&cell.text);
+            cell.put(&mut o);
         }
         let n = o.count(self.col_widths.len());
         for w in self.col_widths.iter().take(n) {
@@ -549,30 +722,20 @@ impl CellData {
         }
         o.u32(self.frozen.rows);
         o.u32(self.frozen.cols);
+        let n = o.count(self.anchors.len());
+        for a in self.anchors.iter().take(n) {
+            a.put(&mut o);
+        }
+        o.bool(self.missing_content);
         o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<CellData, DecodeError> {
         let mut i = In::new(payload);
-        // Each cell: row, col, align, flags, a 4-byte text length.
-        let n = i.count(14)?;
+        let n = i.count(CellText::MIN_BYTES)?;
         let mut cells = Vec::with_capacity(n);
         for _ in 0..n {
-            let row = i.u32()?;
-            let col = i.u32()?;
-            let align = Align::from_tag(i.u8()?)?;
-            let flags = i.u8()?;
-            if flags & !FLAG_BOLD != 0 {
-                return Err(DecodeError::BadTag);
-            }
-            let text = i.str()?;
-            cells.push(CellText {
-                row,
-                col,
-                text,
-                align,
-                bold: flags & FLAG_BOLD != 0,
-            });
+            cells.push(CellText::get(&mut i)?);
         }
         let n = i.count(4)?;
         let mut col_widths = Vec::with_capacity(n);
@@ -593,6 +756,12 @@ impl CellData {
             rows: i.u32()?,
             cols: i.u32()?,
         };
+        let n = i.count(Anchor::BYTES)?;
+        let mut anchors = Vec::with_capacity(n);
+        for _ in 0..n {
+            anchors.push(Anchor::get(&mut i)?);
+        }
+        let missing_content = i.bool()?;
         i.finish()?;
         Ok(CellData {
             cells,
@@ -600,6 +769,45 @@ impl CellData {
             row_heights,
             merges,
             frozen,
+            anchors,
+            missing_content,
+        })
+    }
+}
+
+/// Render the chart or picture `anchor` (an [`Anchor::id`]) of sheet `sheet` at `scale` (device pixels per point, as
+/// a `Render`) as RGBA8 into the writable section `out`, `w * h * 4` bytes at the size
+/// [`crate::check::anchor_pixels`] gives. Answered by `Rendered` or `Error`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderAnchor {
+    pub sheet: u32,
+    pub anchor: u32,
+    pub scale: f32,
+    pub out: GrantRef,
+}
+
+impl RenderAnchor {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        let mut o = Out::new();
+        o.u32(self.sheet);
+        o.u32(self.anchor);
+        o.f32(self.scale);
+        self.out.put(&mut o);
+        o.finish()
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<RenderAnchor, DecodeError> {
+        let mut i = In::new(payload);
+        let sheet = i.u32()?;
+        let anchor = i.u32()?;
+        let scale = i.f32()?;
+        let out = GrantRef::get(&mut i)?;
+        i.finish()?;
+        Ok(RenderAnchor {
+            sheet,
+            anchor,
+            scale,
+            out,
         })
     }
 }
@@ -813,6 +1021,7 @@ pub enum Message {
     Opened(Opened),
     OpenedSheets(OpenedSheets),
     Render(Render),
+    RenderAnchor(RenderAnchor),
     Rendered(Rendered),
     Cells(Cells),
     CellData(CellData),
@@ -832,6 +1041,7 @@ impl Message {
             Message::Opened(_) => KIND_OPENED,
             Message::OpenedSheets(_) => KIND_OPENED_SHEETS,
             Message::Render(_) => KIND_RENDER,
+            Message::RenderAnchor(_) => KIND_RENDER_ANCHOR,
             Message::Rendered(_) => KIND_RENDERED,
             Message::Cells(_) => KIND_CELLS,
             Message::CellData(_) => KIND_CELL_DATA,
@@ -851,6 +1061,7 @@ impl Message {
             Message::Opened(m) => m.encode(),
             Message::OpenedSheets(m) => m.encode(),
             Message::Render(m) => m.encode(),
+            Message::RenderAnchor(m) => m.encode(),
             Message::Rendered(m) => m.encode(),
             Message::Cells(m) => m.encode(),
             Message::CellData(m) => m.encode(),
@@ -870,6 +1081,7 @@ impl Message {
             KIND_OPENED => Message::Opened(Opened::decode(payload)?),
             KIND_OPENED_SHEETS => Message::OpenedSheets(OpenedSheets::decode(payload)?),
             KIND_RENDER => Message::Render(Render::decode(payload)?),
+            KIND_RENDER_ANCHOR => Message::RenderAnchor(RenderAnchor::decode(payload)?),
             KIND_RENDERED => Message::Rendered(Rendered::decode(payload)?),
             KIND_CELLS => Message::Cells(Cells::decode(payload)?),
             KIND_CELL_DATA => Message::CellData(CellData::decode(payload)?),
