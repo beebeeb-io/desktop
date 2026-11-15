@@ -1,12 +1,13 @@
 //! A password change answered while its page was not open (desktop#427, the lead's follow-up): said at once wherever
 //! the person is, as a notice over the window whatever it shows (Files, another section of Settings, an account
-//! page), and in full on the Change password page, which its button opens. Said once: the page takes it.
+//! page), one toast line above a toast's own place, and in full on the Change password page, which its button
+//! opens. Said once: the page takes it.
 //!
 //! It is the press's: kept only while the call's mark is current (the session and the account of the press, per
 //! kind), dropped by `end_flows` (a lock, a sign-out, another account), never drawn while the gate is not Ready, and
 //! held outside the form so that leaving the account's sections does not lose it.
 
-use rune::{Cx, El, el};
+use rune::{Cx, El, el, row};
 
 use super::AccountUi;
 use super::source::{Answered, CallKind, CallMark, Refused};
@@ -87,12 +88,24 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         .w_full()
         .h_full()
         .child(behind)
-        .child(toast::layer(toast::toast_keyed(
-            "late-change",
-            icon,
-            tone,
-            notice(&late.answer),
-            Some(show),
-            &t,
-        )))
+        .child(
+            // One toast line above a toast's own place (`ui::toast::layer`: 42 pt): it stands until Show, so it never
+            // covers a screen's own toast (Files' Undo, an account page's notice).
+            row()
+                .key("late-change-layer")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .pb(84.0)
+                .justify_center()
+                .items_end()
+                .child(toast::toast_keyed(
+                    "late-change",
+                    icon,
+                    tone,
+                    notice(&late.answer),
+                    Some(show),
+                    &t,
+                )),
+        )
 }

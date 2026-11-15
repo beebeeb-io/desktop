@@ -241,3 +241,35 @@ fn a_refused_new_password_is_said_in_words() {
         "on return, with the new password gone"
     );
 }
+
+/// The notice over the window keeps the window behind it working: the frame keeps its keyboard focus when the notice
+/// comes, a control behind it still takes a press, and the notice with its button lies inside the window.
+#[test]
+fn the_late_notice_keeps_the_window_behind_it_working() {
+    let mut r = change_password(HeldCalls::default());
+    click(&mut r.rt, "btn-0");
+    assert_eq!(r.pane(), Pane::Security);
+    super::tests::tab_to(&mut r.rt, "item-4-0");
+    r.answer(Answered::Refused(Refused::Unconfirmed));
+    assert_eq!(
+        says(&r.rt, "late-change-text"),
+        "Your password change could not be confirmed"
+    );
+    assert!(
+        super::tests::info(&r.rt, "item-4-0").focused,
+        "the page behind keeps its focus when the notice comes"
+    );
+    let window = [0.0, 0.0, 958.0, 638.0];
+    for key in ["late-change", "late-change-action"] {
+        let [x, y, w, h] = super::tests::info(&r.rt, key).rect;
+        assert!(
+            x >= window[0] && y >= window[1] && x + w <= window[2] && y + h <= window[3] && w > 0.0,
+            "{key} at {:?} lies inside the window",
+            [x, y, w, h]
+        );
+    }
+    // A row of the page behind still takes a press, and the notice stays (it is not said yet).
+    click(&mut r.rt, "item-0-1");
+    assert_eq!(r.pane(), Pane::TwoFactor, "the press reached the page behind");
+    assert!(super::tests::find(&r.rt, "late-change-text").is_some(), "still said");
+}

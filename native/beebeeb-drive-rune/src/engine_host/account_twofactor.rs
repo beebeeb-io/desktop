@@ -44,8 +44,9 @@ type Held = Arc<Mutex<Option<(Stamp, PendingEnrollment)>>>;
 /// for.
 type Pending = Arc<Mutex<Option<(Stamp, String)>>>;
 
-/// One call's answer, with the session and account it was made for.
-type Done = (Stamp, CallKind, Answered);
+/// One call's answer: the session and account it was made for, and the ones right after the engine answered (a
+/// changed password stores its new session token, which moves the session's turn on: the engine's own write).
+type Done = (Stamp, Stamp, CallKind, Answered);
 
 /// Backup codes kept for after a screen lock, with the session and account they were made for (wiped on drop).
 struct Unseen {
@@ -59,9 +60,10 @@ pub(super) struct Calls {
     out: Vec<CallKind>,
     /// How many calls were started.
     counter: u64,
-    /// The latest call of each kind: its serial and the session and account its press was made under (set at the
-    /// start). A late answer is current only while the engine's session and account are still that press's.
-    latest: Vec<(CallKind, u64, Stamp)>,
+    /// The latest call of each kind: its serial, the session and account its press was made under (set at the
+    /// start), and, once it answered with a success, the session and account right after the engine's answer. A late
+    /// answer is current only while the engine's session and account are still one of those two.
+    latest: Vec<(CallKind, u64, Stamp, Option<Stamp>)>,
     held: Held,
     pending_email: Pending,
     /// A wait Beebeeb asked for before the email's code is sent again.
@@ -271,14 +273,16 @@ fn work<C: CredentialStores>(
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// See [`crate::frames::account::source::AccountSource::call_mark`].
     pub(super) fn a_call_mark(&self, kind: CallKind) -> Option<CallMark> {
-        let (_, serial, made_for) = self.calls.latest.iter().find(|(k, _, _)| *k == kind)?;
+        let (_, serial, made_for, answered_under) = self.calls.latest.iter().find(|(k, _, _, _)| *k == kind)?;
         let out = self.calls.out.contains(&kind);
+        let now = stamp(&self.engine);
         Some(CallMark {
             serial: *serial,
             out,
             // Per kind and per press (desktop#427, the lead's follow-up): one slot for every kind let another kind's
-            // answer make this one current again, and the turn of the drain let a same-account sign-in say it.
-            current: out || (*made_for == stamp(&self.engine) && self.open()),
+            // answer make this one current again, and the turn of the drain let a same-account sign-in say it. A
+            // success is current under the turn its own write moved to too (a changed password moves it on).
+            current: out || (self.open() && (*made_for == now || answered_under.as_ref() == Some(&now))),
         })
     }
 
@@ -318,15 +322,17 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     work(&engine, &held, &pending, made_for.clone(), kind, input, password)
                 }))
                 .unwrap_or(Answered::Refused(Refused::Offline));
-                let _ = answers.send((made_for, kind, answered));
+                // The turn right after the answer: a success's own write (a new session token) has moved it.
+                let after = stamp(&engine);
+                let _ = answers.send((made_for, after, kind, answered));
                 engine.wake_host();
             })
             .is_ok();
         if started {
             self.calls.out.push(kind);
             self.calls.counter += 1;
-            self.calls.latest.retain(|(k, _, _)| *k != kind);
-            self.calls.latest.push((kind, self.calls.counter, made_for_mark));
+            self.calls.latest.retain(|(k, _, _, _)| *k != kind);
+            self.calls.latest.push((kind, self.calls.counter, made_for_mark, None));
         }
         started
     }
@@ -396,7 +402,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// See [`crate::frames::account::source::AccountSource::call_answer`].
     pub(super) fn a_call_answer(&mut self) -> Option<(CallKind, Answered)> {
         self.forget_unseen_of_another_session();
-        while let Ok((made_for, kind, answered)) = self.calls.inbox.try_recv() {
+        while let Ok((made_for, after, kind, answered)) = self.calls.inbox.try_recv() {
             self.calls.out.retain(|k| *k != kind);
             // The turn may have moved since the press (a screen lock moves it) while the request was out and Beebeeb
             // may already have changed the account: an answer for the SAME account still reaches the pane, once (new
@@ -405,6 +411,19 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             if now.1 != made_for.1 || !self.open() {
                 self.calls.drop_held();
                 continue;
+            }
+            // A success that moved the turn by its own write is still that press's: its mark says so. A refusal
+            // never moved it, so a refusal answered under a later session is not (a moved session refuses).
+            if matches!(
+                answered,
+                Answered::Done | Answered::Setup(_) | Answered::NewKey(_) | Answered::Codes(_)
+            ) && let Some(entry) = self
+                .calls
+                .latest
+                .iter_mut()
+                .find(|(k, _, made, _)| *k == kind && *made == made_for)
+            {
+                entry.3 = Some(after);
             }
             if now != made_for {
                 // What is held under the old turn (a key that waits) is the old turn's: wiped. The answer stays.
