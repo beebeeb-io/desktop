@@ -38,9 +38,9 @@ impl<C: CredentialStores> Engine<C> {
         if self.view().gate != GateState::Ready {
             return Err(NOT_SIGNED_IN.to_string());
         }
-        let config = crate::config::DesktopConfig::load_for(self.identity)?;
-        let sync_root = config
-            .sync_root
+        // The settings' folder (a test build may name its own: `Engine::use_sync_root_for_test`).
+        let sync_root = self
+            .configured_sync_root()?
             .ok_or_else(|| "no sync folder is set on this computer".to_string())?;
         // The account-bound handle (task 2488): the pin is changed in the signed-in account's state alone, and
         // nothing is written into a state before it is proven that account's.
