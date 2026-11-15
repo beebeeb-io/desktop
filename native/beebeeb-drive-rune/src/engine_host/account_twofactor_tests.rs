@@ -557,3 +557,72 @@ fn an_answer_taken_under_one_session_is_not_current_once_the_session_moved() {
         "another session now: a late answer kept for the page is dropped"
     );
 }
+
+/// The same account signs in again (or a lock and an unlock move the session's turn): `current` answers for the
+/// press's own session, by kind.
+fn sign_in_again(engine: &TestEngine, fake: &Fake) {
+    engine
+        .sign_in_password(&fake.account.email, Zeroizing::new(PASSWORD.into()))
+        .expect("signs in again");
+    engine
+        .unlock_with_phrase(Zeroizing::new(fake.phrase.clone()))
+        .expect("the phrase unlocks");
+}
+
+/// Desktop#427, the lead's follow-up (1a): a password press, then a sign-out and a sign-in to the SAME account before
+/// its answer is taken. The answer is still handed over (the same account), but it was made for the earlier session:
+/// it is not current, so a page that kept it never says it in the new session.
+#[test]
+fn a_password_answer_taken_after_a_sign_out_and_sign_in_to_the_same_account_is_not_current() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    // Nothing takes the answer before the second sign-in.
+    std::thread::sleep(Duration::from_millis(300));
+    engine.sign_out_keeping_local_data().expect("signs out");
+    sign_in_again(&engine, &fake);
+    let Some((CallKind::ChangePassword, _)) = answer(&mut source) else {
+        panic!("the same account: the answer is handed over");
+    };
+    assert!(
+        !source.call_mark(CallKind::ChangePassword).unwrap().current,
+        "made for the earlier session: not current in this one"
+    );
+}
+
+/// Desktop#427, the lead's follow-up (1b): one slot for every kind let another kind's answer, taken under a moved turn,
+/// make the password answer current again. Each kind answers for its own press.
+#[test]
+fn a_password_answer_stays_not_current_after_another_kind_is_taken_under_a_moved_turn() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    assert!(answer(&mut source).is_some());
+    assert!(source.call_mark(CallKind::ChangePassword).unwrap().current);
+    // A screen lock and its unlock move the session's turn.
+    engine.lock_screen().expect("an open lock locks the screen");
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the platform's yes unlocks the screen");
+    assert!(source.start_call(CallKind::TurnOffTwoFactor, "123456", ""));
+    assert!(matches!(
+        answer(&mut source),
+        Some((CallKind::TurnOffTwoFactor, Answered::Done))
+    ));
+    assert!(
+        source.call_mark(CallKind::TurnOffTwoFactor).unwrap().current,
+        "made and taken under this turn"
+    );
+    assert!(
+        !source.call_mark(CallKind::ChangePassword).unwrap().current,
+        "the password press was made under the earlier turn"
+    );
+}

@@ -35,6 +35,8 @@ mod tests;
 #[cfg(test)]
 mod tests_calls;
 #[cfg(test)]
+mod tests_late;
+#[cfg(test)]
 mod tests_security;
 mod two_factor;
 

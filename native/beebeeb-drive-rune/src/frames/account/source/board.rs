@@ -85,7 +85,11 @@ pub struct HeldCalls {
     pub moved: std::rc::Rc<std::cell::Cell<bool>>,
     /// Every call that was started, in order.
     pub started: std::rc::Rc<std::cell::RefCell<Vec<CallKind>>>,
+    /// A press of the kind that is already out is "taken" and starts nothing (the engine's rule), instead of refused.
+    pub repeat_out: std::rc::Rc<std::cell::Cell<bool>>,
     out: Option<CallKind>,
+    /// What the call that is out was given (the address of a change of email).
+    input: String,
     marks: Vec<(CallKind, u64)>,
 }
 
@@ -524,10 +528,12 @@ impl AccountSource for BoardAccount {
         }
     }
     #[cfg(test)]
-    fn start_call(&mut self, kind: CallKind, _input: &str, _password: &str) -> bool {
+    fn start_call(&mut self, kind: CallKind, input: &str, _password: &str) -> bool {
         match self.held.as_mut() {
+            Some(held) if held.out == Some(kind) && held.repeat_out.get() => true,
             Some(held) if held.out.is_none() => {
                 held.out = Some(kind);
+                held.input = input.to_string();
                 held.started.borrow_mut().push(kind);
                 let serial = held.started.borrow().len() as u64;
                 held.marks.retain(|(k, _)| *k != kind);
@@ -543,6 +549,10 @@ impl AccountSource for BoardAccount {
         let kind = held.out?;
         let answered = held.answer.borrow_mut().take()?;
         held.out = None;
+        // The address Beebeeb names for the code is the one the call sent.
+        if let (CallKind::StartEmail, Answered::Done) = (kind, &answered) {
+            self.new_email = Some(std::mem::take(&mut held.input));
+        }
         Some((kind, answered))
     }
     #[cfg(test)]
