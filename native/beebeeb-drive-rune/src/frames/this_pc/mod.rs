@@ -624,7 +624,7 @@ fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
                     ))),
                     // Task 2530: what a way out did.
                     (None, Some((words, _))) => main.child(crate::ui::toast::layer(crate::ui::toast::toast(
-                        &crate::theme::icons_files::ALERT,
+                        &crate::theme::icons_files::CHECK,
                         crate::ui::toast::Tone::Done,
                         words,
                         None,
