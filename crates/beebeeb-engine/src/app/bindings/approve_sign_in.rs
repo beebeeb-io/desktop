@@ -12,8 +12,9 @@
 //! Session-bound like its neighbours (`*_for(session)`): every call is asked for the session the host read at its
 //! press. The token (and for the approval the master key) is copied only while the session in memory is that one and
 //! the screen is not locked, asked as a person's call (`person_session`): a locked screen, a closed vault, another
-//! session or none sends nothing. The approval asks again right before the claim leaves, so a lock or a sign-out
-//! during the step-up claims nothing.
+//! session or none sends nothing. The approval asks again right before the claim leaves and again right before the
+//! relay leaves: a lock or a sign-out during the step-up claims nothing, and one during the claim's round trip
+//! relays nothing (the keys stay on this PC).
 //!
 //! The point of no return is the RELAY, not the claim. Until the relay leaves, the keys have not left this PC
 //! whatever else happened: a claim whose answer was lost minted at most a session that nobody can use (the other
@@ -224,8 +225,9 @@ impl<C: CredentialStores> Engine<C> {
         let mut leg = Leg::StepUp;
         let mut first_leg = true;
         loop {
-            if leg == Leg::Claim {
-                // A lock, a sign-out or another sign-in during the step-up: the claim does not leave.
+            if leg != Leg::StepUp {
+                // A lock, a sign-out or another sign-in during the step-up: the claim does not leave. During the
+                // claim's round trip: the relay (the point of no return) does not leave, and nothing was approved.
                 self.approval_copy(session, |_| ())?;
             }
             let sent = self.send_approval_call(&token, next);
