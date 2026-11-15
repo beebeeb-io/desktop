@@ -640,6 +640,18 @@ fn a_custom_key_is_caught_after_an_equals_sign_and_in_a_debug_value() {
         "Records",
         "category Custom(\"Medical Records\") was refused",
     );
+    // The key before the `=` is read like any other word.
+    assert_never_written(
+        "url before =custom:",
+        "example.eu",
+        "see https://example.eu/Medical?category=custom:X today",
+    );
+    assert_never_written(
+        "path before =custom:",
+        "Medical",
+        "see /home/anna/Medical?category=custom:X today",
+    );
+    assert_never_written("email before =custom:", "anna@", "see anna@example.eu=custom:X today");
     // The word "custom" in prose is not the key.
     assert_eq!(redact::scrub("a custom folder was added"), "a custom folder was added");
 }

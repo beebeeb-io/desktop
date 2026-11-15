@@ -316,6 +316,12 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
         if let Some((key, value)) = token.split_once('=')
             && value.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("custom:"))
         {
+            // The key is a word like any other: a URL, a path or an email before the `=` still goes.
+            let key = if denied_name(key) {
+                REDACTED.to_string()
+            } else {
+                scrub_token(key, allow_uuid)
+            };
             out.push(format!("{key}=custom:<name>"));
             break;
         }
