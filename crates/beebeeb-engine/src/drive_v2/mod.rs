@@ -11,6 +11,13 @@ pub mod model_shell;
 pub mod photo_meta;
 pub mod status;
 
+#[cfg(test)]
+mod model_tests;
+#[cfg(test)]
+mod photo_meta_tests;
+#[cfg(test)]
+mod status_tests;
+
 use std::fmt;
 
 /// A failed drive command, as the `DriveSourceError` code the UI maps to the board's copy.
