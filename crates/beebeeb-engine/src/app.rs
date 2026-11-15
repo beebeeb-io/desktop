@@ -417,7 +417,6 @@ impl<C: CredentialStores> Engine<C> {
                 self.lock_started(flow);
             }
             self.fix_upgrade_candidate_at_startup();
-            self.delete_recent_searches_at_signed_out_start(present);
         });
         self.publish();
         self.view.read().gate
