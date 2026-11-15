@@ -151,7 +151,15 @@ struct Run<'a> {
 /// Whether an approval that did not complete may have been applied: it left and the answer was a server error
 /// (5xx), not an answer that proves a refusal. Only a 4xx proves the server did not take it.
 fn approval_may_have_landed(outcome: &InviteOutcome, status: u16) -> bool {
-    matches!(outcome, InviteOutcome::AwaitingApproval { .. }) && !(400..500).contains(&status)
+    // `Some(key)`: the key was sealed and only the approval failed. `None`: sealing failed, so no approval was ever
+    // sent and nothing can have landed.
+    matches!(
+        outcome,
+        InviteOutcome::AwaitingApproval {
+            recipient_public_key: Some(_),
+            ..
+        }
+    ) && !(400..500).contains(&status)
 }
 
 /// A request that got no answer (the network dropped, or it never left).

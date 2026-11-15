@@ -34,7 +34,7 @@ use zeroize::Zeroizing;
 use super::{EngineAccountSource, Stamp, stamp};
 use crate::frames::account::Pane;
 use crate::frames::account::source::{
-    Answered, CallKind, CodeRefused, EmailRefused, PaneState, Refused, Resend, Secret, Setup, TwoFactor,
+    Answered, CallKind, CallMark, CodeRefused, EmailRefused, PaneState, Refused, Resend, Secret, Setup, TwoFactor,
 };
 
 /// A key made for one session and account, waiting for its first code.
@@ -57,6 +57,9 @@ struct Unseen {
 pub(super) struct Calls {
     /// The calls that are out: a second press of the same call sends nothing.
     out: Vec<CallKind>,
+    /// How many calls were started, and the serial of the latest call of each kind.
+    counter: u64,
+    latest: Vec<(CallKind, u64)>,
     held: Held,
     pending_email: Pending,
     /// A wait Beebeeb asked for before the email's code is sent again.
@@ -74,6 +77,8 @@ impl Calls {
         let (answers, inbox) = mpsc::channel();
         Self {
             out: Vec::new(),
+            counter: 0,
+            latest: Vec::new(),
             held: Arc::default(),
             pending_email: Arc::default(),
             resend: super::email::Waiting::default(),
@@ -262,9 +267,13 @@ fn work<C: CredentialStores>(
 }
 
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
-    /// See [`crate::frames::account::source::AccountSource::call_out`].
-    pub(super) fn a_call_out(&self, kind: CallKind) -> bool {
-        self.calls.out.contains(&kind)
+    /// See [`crate::frames::account::source::AccountSource::call_mark`].
+    pub(super) fn a_call_mark(&self, kind: CallKind) -> Option<CallMark> {
+        let (_, serial) = self.calls.latest.iter().find(|(k, _)| *k == kind)?;
+        Some(CallMark {
+            serial: *serial,
+            out: self.calls.out.contains(&kind),
+        })
     }
 
     /// See [`crate::frames::account::source::AccountSource::start_call`].
@@ -308,6 +317,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             .is_ok();
         if started {
             self.calls.out.push(kind);
+            self.calls.counter += 1;
+            self.calls.latest.retain(|(k, _)| *k != kind);
+            self.calls.latest.push((kind, self.calls.counter));
         }
         started
     }

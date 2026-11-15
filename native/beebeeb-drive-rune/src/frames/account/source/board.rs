@@ -5,6 +5,8 @@ use super::*;
 
 /// The board's sample account: Anna Visser, anna@northwind.studio.
 pub struct BoardAccount {
+    #[cfg(test)]
+    held: Option<HeldChange>,
     /// `true`: the plan's details are not known (a test's state).
     plan_unknown: bool,
     security: Security,
@@ -72,7 +74,24 @@ fn board_codes() -> Vec<Secret> {
     BOARD_CODES.iter().map(|c| Secret::new(*c)).collect()
 }
 
+/// A test's control over a password change that the fixture holds as out (a worker's call that has not answered).
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct HeldChange {
+    /// The answer may come now.
+    pub release: std::rc::Rc<std::cell::Cell<bool>>,
+    /// How many changes were started.
+    pub started: std::rc::Rc<std::cell::Cell<u64>>,
+    out: bool,
+}
+
 impl BoardAccount {
+    /// Change password is asked through `start_call` and answers only when `held.release` is set.
+    #[cfg(test)]
+    pub fn holding_change(mut self, held: HeldChange) -> Self {
+        self.held = Some(held);
+        self
+    }
     /// Windows Hello's prompt stays up: no answer comes (the scene of DW-A14).
     pub fn holding_hello(mut self) -> Self {
         self.approvals.hold();
@@ -96,6 +115,8 @@ impl BoardAccount {
             this_device: this,
         };
         Self {
+            #[cfg(test)]
+            held: None,
             plan_unknown: false,
             security: Security {
                 app_lock: true,
@@ -495,6 +516,34 @@ impl AccountSource for BoardAccount {
             13 => Strength::Good,
             _ => Strength::Strong,
         }
+    }
+    #[cfg(test)]
+    fn start_call(&mut self, kind: CallKind, _input: &str, _password: &str) -> bool {
+        match self.held.as_mut() {
+            Some(held) if kind == CallKind::ChangePassword && !held.out => {
+                held.out = true;
+                held.started.set(held.started.get() + 1);
+                true
+            }
+            _ => false,
+        }
+    }
+    #[cfg(test)]
+    fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
+        let held = self.held.as_mut()?;
+        if held.out && held.release.get() {
+            held.out = false;
+            return Some((CallKind::ChangePassword, Answered::Done));
+        }
+        None
+    }
+    #[cfg(test)]
+    fn call_mark(&self, kind: CallKind) -> Option<CallMark> {
+        let held = self.held.as_ref().filter(|_| kind == CallKind::ChangePassword)?;
+        (held.started.get() > 0).then(|| CallMark {
+            serial: held.started.get(),
+            out: held.out,
+        })
     }
     fn change_password(&mut self, confirmation: StepUp, new: Password<'_>) -> Result<(), Refused> {
         if !self.redeem(confirmation, Purpose::ChangePassword) {

@@ -850,3 +850,22 @@ fn share_invite_unfinished_is_sent_for_a_500_and_not_for_a_4xx() {
         }
     }
 }
+
+/// Review of desktop#427 (delta 2, P2): an approval that was never made (the key could not be sealed) cannot have
+/// landed, whatever the status; a sealed one may have, unless a 4xx proves it was refused.
+#[test]
+fn an_approval_may_have_landed_only_when_one_was_made_and_no_4xx_refused_it() {
+    let waiting = |key: Option<[u8; 32]>| InviteOutcome::AwaitingApproval {
+        invite_id: INVITE.into(),
+        recipient_public_key: key,
+    };
+    for status in [0u16, 500, 503] {
+        assert!(approval_may_have_landed(&waiting(Some([7; 32])), status), "{status}");
+        assert!(
+            !approval_may_have_landed(&waiting(None), status),
+            "no approval was made: {status}"
+        );
+    }
+    assert!(!approval_may_have_landed(&waiting(Some([7; 32])), 403));
+    assert!(!approval_may_have_landed(&waiting(Some([7; 32])), 409));
+}

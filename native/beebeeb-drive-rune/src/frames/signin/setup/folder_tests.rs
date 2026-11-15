@@ -281,3 +281,11 @@ fn the_render_scenes_draw_their_states() {
     }
     assert!(render_scene("first-run").is_none() && render_scene("DW-0206").is_none());
 }
+
+/// Review of desktop#427 (delta 2, P2): "no folders" says only what is true; this app cannot add folders later.
+#[test]
+fn the_no_folders_words_promise_nothing_this_app_cannot_do() {
+    let words = super::folder::BACKUP_NONE;
+    assert!(words.contains("no folders it can back up"), "{words}");
+    assert!(!words.contains("add folders") && !words.contains("Settings"), "{words}");
+}

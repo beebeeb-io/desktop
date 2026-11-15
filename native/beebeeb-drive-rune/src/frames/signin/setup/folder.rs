@@ -200,14 +200,12 @@ pub fn backup_failed(k: &mut Keys, t: &Theme) -> El {
         )
 }
 
+/// What step 3 says when the read worked and found nothing: only what is true (this app cannot add folders).
+pub const BACKUP_NONE: &str = "Beebeeb found no folders it can back up on this PC. Nothing is turned on.";
+
 /// Step 3 when the read worked and this PC has no folder to offer: said as that, with a way on.
 pub fn backup_none(k: &mut Keys, t: &Theme) -> El {
     setup::column()
-        .child(au::heading(
-            "Back up your folders",
-            Some("Beebeeb found no folders to back up on this PC. You can add folders later in Settings \u{203a} Backups."),
-            false,
-            t,
-        ))
+        .child(au::heading("Back up your folders", Some(BACKUP_NONE), false, t))
         .child(actions().child(primary(k, "Continue", ButtonState::Enabled, t, Ui::not_now)))
 }

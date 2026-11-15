@@ -340,8 +340,13 @@ fn confirm_email(ui: &mut AccountUi) -> Option<&'static str> {
 
 /// Change password (DW-A67), and the same page after a wrong current password (DW-A68: the
 /// new password is kept, only the current one is retyped).
+/// What the Change password page says while a change is out (from this visit or an earlier one).
+pub(super) const CHANGING: &str = "A password change is still being made. Wait for it to finish.";
+
 pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
+    let out = f.waiting == Some(CallKind::ChangePassword);
     let current = match f.problem {
+        _ if out => Some(CHANGING),
         Some(Problem::WrongPassword) => Some("Current password is incorrect. Nothing was changed."),
         Some(Problem::Locked) => Some("Unlock first, then change your password."),
         Some(Problem::Offline) => Some(OFFLINE),
@@ -352,27 +357,39 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
     let mismatch = f.problem == Some(Problem::Mismatch);
     // While the change is out the page takes no press (a second change, a way out): nothing is drawn as changed
     // before Beebeeb answered, and its answer finds the page it is for.
-    let out = f.waiting == Some(CallKind::ChangePassword);
-    let (mut cancel, cancel_b) = button(0, "Cancel", Look::Plain, out, t);
+    // The fields are not editable and Change is off; Cancel stays, as the way out (the answer is settled when the
+    // page is opened again).
+    let (cancel, cancel_b) = button(0, "Cancel", Look::Plain, false, t);
     let (mut change, change_b) = button(1, "Change password", Look::Primary, out, t);
+    let cancel = cancel.on_press(|s: &mut State| super::go(s, "DW-A52"));
     if !out {
-        cancel = cancel.on_press(|s: &mut State| super::go(s, "DW-A52"));
         change = change.default_button().on_press(super::act(change_password));
     }
+    let frozen = |field: El| {
+        if out {
+            field.disabled(true).focusable(false)
+        } else {
+            field
+        }
+    };
     let lock = Some(&icons::PADLOCK);
-    let mut new = rune::col().key("new-password").w_full().gap(6.0).child(fm::field(
-        1,
-        &Field {
-            label: "New password",
-            icon: lock,
-            message: None,
-            error: weak,
-            input_key: form::NEW_KEY,
-        },
-        &f.new,
-        |s: &mut State| &mut s.account.form.new,
-        t,
-    ));
+    let mut new = rune::col()
+        .key("new-password")
+        .w_full()
+        .gap(6.0)
+        .child(frozen(fm::field(
+            1,
+            &Field {
+                label: "New password",
+                icon: lock,
+                message: None,
+                error: weak,
+                input_key: form::NEW_KEY,
+            },
+            &f.new,
+            |s: &mut State| &mut s.account.form.new,
+            t,
+        )));
     if !f.new.text.is_empty() {
         // Read after the new password: how strong core finds it.
         let strength = source.password_strength(&Password::from_field(&f.new.text));
@@ -382,21 +399,21 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
     set::pane(
         vec![
             set::heading("Change password", None, None, t),
-            fm::field(
+            frozen(fm::field(
                 0,
                 &Field {
                     label: "Current password",
                     icon: lock,
                     message: current,
-                    error: current.is_some(),
+                    error: current.is_some() && !out,
                     input_key: form::CURRENT_KEY,
                 },
                 &f.current,
                 |s: &mut State| &mut s.account.form.current,
                 t,
-            ),
+            )),
             new,
-            fm::field(
+            frozen(fm::field(
                 2,
                 &Field {
                     label: "New password again",
@@ -408,7 +425,7 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
                 &f.again,
                 |s: &mut State| &mut s.account.form.again,
                 t,
-            ),
+            )),
             au::banner(
                 &mut keys,
                 Tone::Neutral,
@@ -433,7 +450,8 @@ fn change_password(ui: &mut AccountUi) -> Option<&'static str> {
     let source = ui.source.as_deref_mut()?;
     // A change from an earlier visit of this page is still out: this press is refused with nothing sent, and the
     // page shows that wait. Its answer is that change's, and is drawn as that (never as a second press's).
-    if source.call_out(CallKind::ChangePassword) {
+    if let Some(mark) = source.call_mark(CallKind::ChangePassword).filter(|mark| mark.out) {
+        ui.form.waiting_serial = mark.serial;
         ui.form.waiting = Some(CallKind::ChangePassword);
         return None;
     }

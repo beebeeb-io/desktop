@@ -76,6 +76,8 @@ pub struct Form {
     pub saving_name: bool,
     /// The call that is out and not answered yet (`calls`): a press while it is does nothing.
     pub waiting: Option<CallKind>,
+    /// The serial of the call `waiting` is for (`AccountSource::call_mark`): only its answer settles the page.
+    pub waiting_serial: u64,
     /// The first code was wrong and the key it belonged to was replaced: the page says to scan again.
     pub key_replaced: bool,
 }
@@ -112,6 +114,7 @@ impl Default for Form {
             saved: None,
             saving_name: false,
             waiting: None,
+            waiting_serial: 0,
             key_replaced: false,
         }
     }
@@ -162,9 +165,16 @@ pub fn code(form: &Form, count: usize) -> String {
 /// was just opened or closed): the last problem goes, the secrets of other pages go, the
 /// field a person types in first gets the keyboard.
 pub fn arrive(ui: &mut AccountUi) {
+    // A password change from an earlier visit may still be out: the page shows that wait (and its answer is that
+    // change's), never a blank form that could start a second one.
+    let change_out = (ui.pane == Pane::Password && ui.dialog.is_none())
+        .then(|| ui.source.as_deref().and_then(|s| s.call_mark(CallKind::ChangePassword)))
+        .flatten()
+        .filter(|mark| mark.out);
     let f = &mut ui.form;
     f.problem = None;
-    f.waiting = None;
+    f.waiting = change_out.map(|_| CallKind::ChangePassword);
+    f.waiting_serial = change_out.map_or(0, |mark| mark.serial);
     f.key_replaced = false;
     f.renaming = None;
     f.saved = None;

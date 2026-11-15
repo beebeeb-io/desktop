@@ -585,6 +585,13 @@ pub enum CallKind {
     ChangePassword,
 }
 
+/// The latest call of one kind (see [`AccountSource::call_mark`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallMark {
+    pub serial: u64,
+    pub out: bool,
+}
+
 /// How a started call ended.
 pub enum Answered {
     Done,
@@ -750,10 +757,12 @@ pub trait AccountSource {
     fn start_call(&mut self, _kind: CallKind, _input: &str, _password: &str) -> bool {
         false
     }
-    /// Whether a call of this kind is out now (started, its answer not taken yet). A page that was left and opened
-    /// again asks this before it takes a new press: it shows the wait instead of starting a second call.
-    fn call_out(&self, _kind: CallKind) -> bool {
-        false
+    /// The latest call of this kind: its serial (one per call that was started, never reused) and whether it is
+    /// still out. A page that was left and opened again asks this: it shows the wait instead of starting a second
+    /// call, and an answer is settled only for the serial the page waits for. `None`: never started (or a source
+    /// that answers at once).
+    fn call_mark(&self, _kind: CallKind) -> Option<CallMark> {
+        None
     }
     /// The answer of a call that was started, once; one that belongs to a session or an account that is over is
     /// dropped by the source.
@@ -952,6 +961,8 @@ pub fn score(factors: &[Factor]) -> (usize, usize) {
 
 mod board;
 // Every public item of the fixture keeps its path here; `BOARD_BACKUP_CODE` has no reader outside it yet.
+#[cfg(test)]
+pub use board::HeldChange;
 #[allow(unused_imports)]
 pub use board::{
     BOARD_BACKUP_CODE, BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, BOARD_SIGN_OUT_REFUSED, BoardAccount, SignOutMode,

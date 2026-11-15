@@ -13,6 +13,7 @@ pub(super) fn start(ui: &mut AccountUi, kind: CallKind, input: &str, password: &
         return false;
     };
     if source.start_call(kind, input, password) {
+        ui.form.waiting_serial = source.call_mark(kind).map_or(0, |mark| mark.serial);
         ui.form.waiting = Some(kind);
         true
     } else {
@@ -32,6 +33,15 @@ fn code_problem(why: CodeRefused) -> Problem {
 /// answer for a call the page no longer waits for is dropped.
 pub fn settle(ui: &mut AccountUi, kind: CallKind, answered: Answered) -> Option<&'static str> {
     if ui.form.waiting != Some(kind) {
+        return None;
+    }
+    // An answer belongs to its own press: one for an earlier call never completes a later one.
+    let serial = ui
+        .source
+        .as_deref()
+        .and_then(|s| s.call_mark(kind))
+        .map(|mark| mark.serial);
+    if serial.is_some_and(|serial| serial != ui.form.waiting_serial) {
         return None;
     }
     ui.form.waiting = None;

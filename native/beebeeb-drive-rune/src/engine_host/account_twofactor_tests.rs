@@ -509,18 +509,26 @@ fn a_second_password_press_while_the_first_is_out_is_never_started() {
 }
 
 #[test]
-fn a_page_that_comes_back_can_see_that_a_password_change_is_still_out() {
+fn a_page_that_comes_back_can_see_that_a_password_change_is_still_out_and_which_call() {
     let fake = fake();
     let mut source = Source::new(signed_in(&fake));
-    assert!(!source.call_out(CallKind::ChangePassword));
+    assert_eq!(source.call_mark(CallKind::ChangePassword), None);
     source
         .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
         .expect("kept");
     assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
-    assert!(
-        source.call_out(CallKind::ChangePassword),
-        "out until its answer is taken"
-    );
+    let first = source.call_mark(CallKind::ChangePassword).expect("started");
+    assert!(first.out, "out until its answer is taken");
     assert!(answer(&mut source).is_some());
-    assert!(!source.call_out(CallKind::ChangePassword), "taken: no longer out");
+    let done = source
+        .call_mark(CallKind::ChangePassword)
+        .expect("the call is remembered");
+    assert!(!done.out, "taken: no longer out");
+    assert_eq!(done.serial, first.serial, "the answer is for the call that was started");
+    // A later press is a later call: its serial is never the earlier one's.
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    assert_ne!(source.call_mark(CallKind::ChangePassword).unwrap().serial, first.serial);
 }
