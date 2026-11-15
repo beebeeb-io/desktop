@@ -140,7 +140,8 @@ impl SetupEngine for Fake {
         self.app_lock.lock().unwrap().push((session, on, proof.is_some()));
         Ok(())
     }
-    // As the engine: another session writes nothing, and longer than the default needs a proof.
+    // As the engine: another session writes nothing, and longer than what is stored (the default while nothing is)
+    // needs a proof.
     fn set_lock_after_for(
         &self,
         session: SessionGeneration,
@@ -150,7 +151,15 @@ impl SetupEngine for Fake {
         if session != self.stamp().0 {
             return Err(beebeeb_engine::app::lock_password_api::AppLockRefused::Overtaken);
         }
-        if after > beebeeb_engine::app::lock_password_api::LockAfter::DEFAULT && proof.is_none() {
+        let stored = self
+            .lock_after
+            .lock()
+            .unwrap()
+            .last()
+            .map_or(beebeeb_engine::app::lock_password_api::LockAfter::DEFAULT, |write| {
+                write.1
+            });
+        if after > stored && proof.is_none() {
             return Err(beebeeb_engine::app::lock_password_api::AppLockRefused::ProofNeeded);
         }
         self.lock_after.lock().unwrap().push((session, after, proof.is_some()));

@@ -49,9 +49,10 @@ pub struct AwayLock {
     looking: bool,
     /// This engine has no automatic lock (the fixture): nothing more is asked.
     without: bool,
-    /// Looks made, and answers taken in (idle and events), for a test.
+    /// Looks made, answers taken in (idle and events) and wakes armed, for a test.
     pub(crate) looks: usize,
     pub(crate) answered: usize,
+    pub(crate) arms: usize,
     tx: mpsc::Sender<Looked>,
     rx: mpsc::Receiver<Looked>,
 }
@@ -67,6 +68,7 @@ impl Default for AwayLock {
             without: false,
             looks: 0,
             answered: 0,
+            arms: 0,
             tx,
             rx,
         }
@@ -164,6 +166,7 @@ impl AwayLock {
         }
         tx.wake_after(due.saturating_duration_since(now));
         self.armed = Some(due);
+        self.arms += 1;
     }
 }
 

@@ -258,3 +258,19 @@ fn leaving_the_app_locks_only_with_immediately() {
         live.engine.lock_state() == LockState::ScreenLocked
     });
 }
+
+/// A wake counts from the frame's clock, which is read before the poll measures: it can land a little before the time
+/// it was armed for. That poll arms again, so no look is left waiting for a poll that never comes (in the tray).
+#[test]
+fn a_wake_that_lands_just_before_its_time_arms_again() {
+    let mut live = live();
+    let soon = Instant::now() + Duration::from_millis(200);
+    let lock = away(&mut live.rt);
+    lock.due = Some(soon);
+    lock.armed = Some(soon);
+    let (arms, looks) = (lock.arms, lock.looks);
+    live.rt.frame(0.016);
+    let lock = away(&mut live.rt);
+    assert_eq!(lock.looks, looks, "not due yet: no look");
+    assert!(lock.arms > arms, "the early wake's poll arms the look again");
+}

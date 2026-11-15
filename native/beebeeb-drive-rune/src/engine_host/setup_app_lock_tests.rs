@@ -168,3 +168,37 @@ fn a_pc_without_a_prompt_keeps_app_lock_on_and_says_not_changed() {
     assert_eq!(set.source.take_outcomes(), app_lock(false, None));
     assert!(set.engine.app_lock.lock().unwrap().is_empty());
 }
+
+/// Step 2 again (opened from "You're set up"): the engine compares with what it stored, not with the default. A
+/// delay longer than that is refused without a proof; the step then asks Windows Hello and writes with its yes.
+#[test]
+fn step_two_again_asks_windows_hello_when_the_engine_wants_a_proof_against_what_it_stored() {
+    let mut set = set();
+    let prompts = Prompts::default();
+    set.source.hello = Box::new(prompts.clone());
+    set.source.set_app_lock(true, LockAfter::Immediately);
+    settle(&mut set, 2);
+    set.source.poll();
+    let _ = set.source.take_outcomes();
+    assert_eq!(prompts.asked.load(Ordering::SeqCst), 0);
+    // Five minutes is the default, but longer than the Immediately now stored.
+    set.source.set_app_lock(true, LockAfter::Min5);
+    settle(&mut set, 4);
+    set.source.poll();
+    assert_eq!(
+        prompts.asked.load(Ordering::SeqCst),
+        1,
+        "the engine's refusal brings the prompt"
+    );
+    prompts.answer(HelloResult::Verified);
+    settle(&mut set, 5);
+    settle(&mut set, 6);
+    assert_eq!(
+        set.engine.lock_after.lock().unwrap().last().copied(),
+        Some((
+            session(1),
+            beebeeb_engine::app::lock_password_api::LockAfter::Minutes5,
+            true
+        ))
+    );
+}
