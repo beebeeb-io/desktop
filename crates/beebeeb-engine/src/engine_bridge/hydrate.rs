@@ -116,12 +116,20 @@ impl EngineBridge {
 
     /// Keep there for a caller that takes no look of its own (the Tauri-era command): the look is taken here, before
     /// anything is downloaded. The native Keep there looks before its safety copy ([`Self::resolve_theirs_seen`]).
+    /// L409: this caller keeps no copy of the place, so the hydrate's relief for Keep there (an edit against agreed
+    /// content is the person's to replace) is not its own: an unsent change at the place is refused here, after the look
+    /// and before the hydrate, as before L409. A save after the look is refused by the hydrate's compare with the look.
     pub async fn resolve_keep_theirs(&self, file_id: &str, sync_root: &Path) -> anyhow::Result<()> {
         let entry = self.db.get_file(file_id)?;
         let path = entry
             .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?
             .path;
-        let seen = PlaceSeen::take_async(&local_file_path_under_sync_root(sync_root, &path)?).await?;
+        let place = local_file_path_under_sync_root(sync_root, &path)?;
+        let seen = PlaceSeen::take_async(&place).await?;
+        if self.place_holds_an_unsent_change(file_id, &place, true, false)? {
+            tracing::warn!("hydrate refused: the local file holds a change that is not sent");
+            return Err(anyhow::Error::new(UnsentLocalChange));
+        }
         self.resolve_theirs_seen(file_id, sync_root, seen).await
     }
 
@@ -166,9 +174,10 @@ impl EngineBridge {
                 .db
                 .get_file(file_id)?
                 .is_some_and(|entry| matches!(entry.status, FileStatus::Conflict | FileStatus::Error));
-        // L409: Keep there into the file's own place is the person's resolution whose caller took the start look and
-        // kept a copy of the place before this hydrate began (`HydrateStart::Seen`): an edit against agreed content is
-        // then theirs to replace. Every other hydrate keeps the guard's rule as it was.
+        // L409: Keep there into the file's own place (`HydrateStart::Seen`) is the person's resolution, and the place's
+        // bytes were kept before this hydrate began: the native Keep there makes its safety copy after its look, and the
+        // Tauri-era one (`resolve_keep_theirs`) keeps none, so it refuses an unsent change itself before it comes here.
+        // An edit against agreed content is then theirs to replace. Every other hydrate keeps the guard's rule as it was.
         let keep_there = persons_resolution && matches!(start, HydrateStart::Seen(_));
         // S6 (R8): the start look, before the start content look: right before the place is replaced it must still be
         // what this look saw, so a save made at any point after it (during the download included) is never replaced.
@@ -376,10 +385,10 @@ impl EngineBridge {
     /// unknown case covered only files hydrated before 0.8.13, and a held edit after a viewer save was not one).
     /// `persons_resolution`: the row was a conflict or an error when the hydrate began; its unknown bytes are then the
     /// person's to resolve (Keep there keeps a copy first), and only a change against agreed content refuses.
-    /// `keep_there` (L409): that resolution is Keep there into the file's own place, whose caller took the start look
-    /// and kept a copy of the place before the hydrate began. Its file with agreed content recorded and edited bytes is
-    /// then the person's to replace; a queued upload, and a change against content known only from fetches, still
-    /// refuse.
+    /// `keep_there` (L409): that resolution is Keep there into the file's own place, whose bytes were kept before the
+    /// hydrate began (the native Keep there's safety copy; the Tauri-era [`Self::resolve_keep_theirs`] keeps none and
+    /// refuses an unsent change before it hydrates). Its file with agreed content recorded and edited bytes is then the
+    /// person's to replace; a queued upload, and a change against content known only from fetches, still refuse.
     pub(super) fn place_holds_an_unsent_change(
         &self,
         file_id: &str,

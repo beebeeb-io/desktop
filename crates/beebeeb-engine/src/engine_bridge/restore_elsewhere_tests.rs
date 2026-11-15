@@ -1,7 +1,9 @@
 //! Task 2538 (engine part): a version restored on another device reaches this PC with its version number, and a
 //! versionless update never stamps a row's server time from this PC's clock. Driven through the functions the tick
 //! runs (`apply_sync_op`, `apply_snapshot`), with no server. Ledger 2468 L409: Keep there into the file's own place
-//! replaces an edited file whose agreed content is recorded (the hydrate's in-place guard).
+//! replaces an edited file whose agreed content is recorded (the hydrate's in-place guard), its copy kept first; a
+//! hydrate that keeps no copy (a plain one, the Tauri-era Keep there) is still refused. The hydrate-level tests reach no
+//! server either: the address answers nothing, so a hydrate let past the guard fails at its first request.
 
 use super::*;
 
@@ -457,5 +459,99 @@ fn keep_there_still_refuses_unknown_content() {
     println!("keep_there not agreed: refused unknown_queued={unknown_queued} fetched_keep_there={fetched_keep_there}");
     assert!(unknown_queued, "unknown content still refuses the queue");
     assert!(fetched_keep_there, "Keep there's relief is for agreed content only");
+    assert_eq!(std::fs::read(&place).unwrap(), b"edited on this PC");
+}
+
+/// The start look Keep there takes before its safety copy, moved past the settle boundary (the place was written a
+/// moment ago), as `tests/start_look_s6.rs` takes it.
+fn seen_settled(place: &Path) -> PlaceSeen {
+    match PlaceSeen::take_at(place, SystemTime::now() + Duration::from_secs(3)) {
+        Settle::Seen(seen) => seen,
+        other => panic!("the look: {other:?}"),
+    }
+}
+
+/// Whether `result` is the in-place guard's refusal (an unsent change at the place).
+fn refused_as_unsent(result: &anyhow::Result<()>) -> bool {
+    result
+        .as_ref()
+        .err()
+        .is_some_and(|error| engine_cause::<UnsentLocalChange>(error).is_some())
+}
+
+/// L409 through Keep there's own entry (`resolve_theirs_seen`, the one the native Keep there calls after its look and
+/// its safety copy): an edited file with agreed content recorded is let past the in-place guard, and the hydrate goes
+/// on to the download. No server answers here, so the download fails, the row reads `error` (the hydrate's own failure
+/// status, written only past the guard) and the place keeps its bytes. Mutants M3 (the relief deleted) and M5
+/// (`keep_there = false` in `hydrate_from`): red, refused by the guard with the row still a conflict.
+#[tokio::test]
+async fn keep_there_lets_the_resolution_past_the_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("Beebeeb");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = bridge_in(dir.path());
+    let file = "25380000-0000-4000-8000-000000000012";
+    let place = conflict_with_an_edit(&bridge, &sync_root, file);
+    let seen = seen_settled(&place);
+
+    let result = bridge.resolve_theirs_seen(file, &sync_root, seen).await;
+    let status = bridge.db().get_file(file).unwrap().unwrap().status;
+    println!(
+        "keep_there past the guard: refused_as_unsent={} status={status:?} result={result:?}",
+        refused_as_unsent(&result)
+    );
+    assert!(result.is_err(), "no server answers: the download fails");
+    assert!(!refused_as_unsent(&result), "not refused by the in-place guard");
+    assert_eq!(
+        status,
+        FileStatus::Error,
+        "the hydrate went past the guard to the download, which failed"
+    );
+    assert_eq!(std::fs::read(&place).unwrap(), b"edited on this PC");
+}
+
+/// L409's relief is Keep there's alone: a plain hydrate of the same conflict into its place (`hydrate_file`, which
+/// keeps no copy) is still refused by the guard before anything is asked, and the row stays a conflict. Mutant M6
+/// (`keep_there = persons_resolution`, the Keep there condition dropped): red.
+#[tokio::test]
+async fn keep_there_a_plain_hydrate_of_the_conflict_still_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("Beebeeb");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = bridge_in(dir.path());
+    let file = "25380000-0000-4000-8000-000000000013";
+    let place = conflict_with_an_edit(&bridge, &sync_root, file);
+
+    let result = bridge.hydrate_file(file, &place, &[sync_root.as_path()]).await;
+    let status = bridge.db().get_file(file).unwrap().unwrap().status;
+    println!(
+        "keep_there plain hydrate: refused_as_unsent={} status={status:?}",
+        refused_as_unsent(&result)
+    );
+    assert!(refused_as_unsent(&result), "refused by the in-place guard: {result:?}");
+    assert_eq!(status, FileStatus::Conflict);
+    assert_eq!(std::fs::read(&place).unwrap(), b"edited on this PC");
+}
+
+/// The Tauri-era Keep there (`resolve_keep_theirs`) keeps no copy of the place, so L409's relief is not its own: an
+/// edited file with agreed content recorded is refused before anything is asked, as before L409, and keeps its bytes.
+/// Mutant M7 (its refusal in `resolve_keep_theirs` deleted): red (the hydrate goes on to the download).
+#[tokio::test]
+async fn keep_there_without_a_kept_copy_still_refuses_an_edited_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("Beebeeb");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = bridge_in(dir.path());
+    let file = "25380000-0000-4000-8000-000000000014";
+    let place = conflict_with_an_edit(&bridge, &sync_root, file);
+
+    let result = bridge.resolve_keep_theirs(file, &sync_root).await;
+    let status = bridge.db().get_file(file).unwrap().unwrap().status;
+    println!(
+        "keep_there without a kept copy: refused_as_unsent={} status={status:?}",
+        refused_as_unsent(&result)
+    );
+    assert!(refused_as_unsent(&result), "refused before the hydrate: {result:?}");
+    assert_eq!(status, FileStatus::Conflict);
     assert_eq!(std::fs::read(&place).unwrap(), b"edited on this PC");
 }
