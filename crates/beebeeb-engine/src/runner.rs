@@ -534,6 +534,7 @@ async fn run(
     emit_payload(&app, tracker.running());
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut sync_complete_notifications = SyncCompleteNotificationState::default();
     let mut quota_warning_notifications = QuotaWarningNotificationState::default();
     // Working-set signals a busy bridge gate dropped (Task 9 fix round 1, item B): owed to the next tick.
@@ -655,6 +656,16 @@ async fn run(
                     // Windows breadcrumb flyout: reflect the paused state.
                     #[cfg(target_os = "windows")]
                     refresh_status_ui_snapshot(&db, mode, false);
+                    // Task 2521 (review P1-2): a paused tick pulls nothing, so with no heartbeat running (its
+                    // registration failed, or its task ended) nothing would count an ended session's refusals. One
+                    // small check of the session stands in for the pull: a 401 adds one to the run, an answer clears
+                    // it. Bounded well under the stop's graceful wait, so a stop is never held up by it; a check
+                    // that does not answer in time proves nothing and leaves the run.
+                    if heartbeat.as_ref().is_none_or(|(_, beating, _)| beating.is_finished())
+                        && let Ok(check) = tokio::time::timeout(PAUSED_SESSION_CHECK_TIMEOUT, api.session_check()).await
+                    {
+                        auth_health.note_api_answer(check.as_ref().err());
+                    }
                     continue;
                 }
 
@@ -857,7 +868,7 @@ async fn run(
                         // Task 1546 finding 5: a run of these that classify as
                         // auth failures (not network blips) is what flips
                         // `auth_health` and surfaces the persistent banner.
-                        auth_health.note_result(Some(&e));
+                        auth_health.note_api_answer(Some(&e));
                         emit_payload(
                             &app,
                             finish_tick_payload(&tracker, Err(&e), &link, tick_started_at, &db, &transfers),
@@ -961,25 +972,31 @@ async fn run(
             tracing::debug!("heartbeat producer did not stop within 1s; abandoning");
         }
 
-        let final_beat = HeartbeatBody {
-            status: "stopped".to_string(),
-            // Report the last known counts so the row's progress numbers don't
-            // reset to null on the terminal beat; zero speed, no current file.
-            files_synced: db.count_by_status(FileStatus::Local).ok().map(i64::from),
-            current_file: None,
-            speed_bps: Some(0),
-            ..Default::default()
-        };
-        // Best-effort + hard-bounded: swallow any error, never exceed ~1.5s.
-        match tokio::time::timeout(
-            Duration::from_millis(1500),
-            api.post_heartbeat(&session_id, &final_beat),
-        )
-        .await
-        {
-            Ok(Ok(())) => tracing::debug!(session_id = %session_id, "final 'stopped' heartbeat sent"),
-            Ok(Err(e)) => tracing::debug!(error = %e, "final 'stopped' heartbeat failed (best-effort)"),
-            Err(_) => tracing::debug!("final 'stopped' heartbeat timed out (best-effort)"),
+        // Task 2521 (review P3-1): no last beat for a session Beebeeb no longer accepts. The stop that closes the
+        // vault after its refusals sends nothing more with the refused token.
+        if auth_health.is_expired() {
+            tracing::debug!("no final 'stopped' heartbeat: the server no longer accepts this session");
+        } else {
+            let final_beat = HeartbeatBody {
+                status: "stopped".to_string(),
+                // Report the last known counts so the row's progress numbers don't
+                // reset to null on the terminal beat; zero speed, no current file.
+                files_synced: db.count_by_status(FileStatus::Local).ok().map(i64::from),
+                current_file: None,
+                speed_bps: Some(0),
+                ..Default::default()
+            };
+            // Best-effort + hard-bounded: swallow any error, never exceed ~1.5s.
+            match tokio::time::timeout(
+                Duration::from_millis(1500),
+                api.post_heartbeat(&session_id, &final_beat),
+            )
+            .await
+            {
+                Ok(Ok(())) => tracing::debug!(session_id = %session_id, "final 'stopped' heartbeat sent"),
+                Ok(Err(e)) => tracing::debug!(error = %e, "final 'stopped' heartbeat failed (best-effort)"),
+                Err(_) => tracing::debug!("final 'stopped' heartbeat timed out (best-effort)"),
+            }
         }
     }
 
@@ -1102,6 +1119,7 @@ pub use telemetry::AuthHealth;
 pub use telemetry::device_name;
 #[cfg(target_os = "macos")]
 pub use telemetry::hostname_or_unknown;
+pub(crate) use telemetry::is_session_refusal;
 use telemetry::*;
 
 mod lifecycle;
