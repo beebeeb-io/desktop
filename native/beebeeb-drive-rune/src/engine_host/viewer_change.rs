@@ -36,19 +36,15 @@ enum Answer {
     /// refusal, the switch, a Keep both copy, which is another file).
     Change { settled: Settled, holds: Option<i64> },
     /// A read of the open file's version: what the local state holds, the version the view's own queued save
-    /// became once it landed (`EditFacts::own_landed`), and when this PC read it ("09:14").
-    Read {
-        version: i64,
-        own_landed: Option<i64>,
-        at: String,
-    },
+    /// became (`EditFacts::own`), and when this PC read it ("09:14").
+    Read { version: i64, own: bool, at: String },
 }
 
 pub(super) struct Changes {
     tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Message>,
-    /// A change is with a worker: one at a time.
-    busy: bool,
+    /// A change is with a worker: one at a time. The file is not opened again meanwhile (`begin`).
+    pub(super) busy: bool,
     /// A read of the open file's version is with a worker (it never blocks a change).
     pub(super) checking: Arc<AtomicBool>,
     /// When the version was last asked for.
@@ -186,7 +182,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let text = Zeroizing::new(text.to_string());
         if self.spawn(file_id, stamp, move |engine| {
             let saved = engine.save_text(session, &id, &text, i64::from(base));
-            settle_save(saved, &id, &name, &text, shows, i64::from(base))
+            settle_save(saved, &id, &name, &text, shows)
         }) {
             SaveOutcome::Working
         } else {
@@ -212,7 +208,6 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     &name,
                     &text,
                     shows,
-                    now.version,
                 ),
                 None => (Settled::Failed, None),
             },
@@ -283,14 +278,15 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 Answer::Read { .. } => reads.push(message),
                 Answer::Change { settled, holds } => {
                     self.changes.busy = false;
-                    if current && found.is_none() {
+                    if current && found.is_none() && self.opening_as(message.opening).is_some() {
                         self.hold(message.opening, holds);
                         found = Some(settled);
-                    } else if let Settled::Saved { mut body, .. }
-                    | Settled::Queued { mut body }
-                    | Settled::Opened { mut body, .. } = settled
-                    {
-                        body.wipe();
+                    } else if current && found.is_none() {
+                        // Begun under an earlier opening of this file (delta check of #432): it never replaces what
+                        // is on screen. Its outcome is said; its text is overwritten.
+                        found = earlier(settled, file_id);
+                    } else {
+                        wipe(settled);
                     }
                 }
             }
@@ -337,12 +333,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// (it is then held, so one banner per version), unless it is the version the view's own queued save became.
     fn weigh(&mut self, message: Message, file_id: &str) -> Option<Newer> {
         let current = self.answers_for(&message, file_id);
-        let Answer::Read {
-            version,
-            own_landed,
-            at,
-        } = message.answer
-        else {
+        let Answer::Read { version, own, at } = message.answer else {
             return None;
         };
         let opening = self.opening_as(message.opening).filter(|_| current)?;
@@ -350,7 +341,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             return None;
         }
         opening.seen = version;
-        (own_landed != Some(version)).then(|| Newer {
+        (!own).then(|| Newer {
             from: String::new(),
             at,
         })
@@ -364,10 +355,14 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     }
 
     /// How long until the next read of the version is due, while one is read: the window is woken then, so the
-    /// banner comes without a press. Reads still to weigh: at once.
+    /// banner comes without a press. Reads still to weigh: at once. A read on its way: none (it wakes the window
+    /// itself when it ends, whatever it found).
     pub(super) fn next_check_due(&self) -> Option<Duration> {
         if !self.changes.pending.is_empty() {
             return Some(Duration::ZERO);
+        }
+        if self.changes.checking.load(Ordering::SeqCst) {
+            return None;
         }
         self.read_for(&self.open.as_ref()?.file_id)?;
         let waited = self.changes.checked.map_or(self.changes.every, |at| at.elapsed());
@@ -401,13 +396,14 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     opening: serial,
                     answer: Answer::Read {
                         version: facts.version,
-                        own_landed: facts.own_landed,
+                        own: facts.own,
                         at: hhmm(),
                     },
                 });
-                engine.wake();
             }
             checking.store(false, Ordering::SeqCst);
+            // Every end wakes the window, an answer or none: the next read is asked for from there.
+            engine.wake();
         });
         self.changes.checked = Some(Instant::now());
         if started.is_err() {
@@ -432,17 +428,16 @@ fn body_of_text(text: &str, shows: Shows) -> Option<Body> {
     text_body(text.as_bytes(), shows == Shows::Markdown)
 }
 
-/// What a save from `base` came to, for the view, and the version the view then holds: the one the save became;
-/// for a save stored here and not sent yet, the base it was saved from (the version it becomes is told apart when
-/// it lands: `EditFacts::own_landed`); for a conflict, none (the view still holds its own: the newer version is
-/// announced by the next read once the person leaves the question).
+/// What a save came to, for the view, and the version the view then holds: the one the save became; for a save
+/// stored here and not sent yet, the base the engine saved it from (its label: the text on screen is based on it;
+/// the version it becomes is told apart when it lands: `EditFacts::own`); for a conflict, none (the view still holds
+/// its own: the newer version is announced by the next read once the person leaves the question).
 fn settle_save(
     saved: Result<SaveEnd, EditRefused>,
     id: &str,
     name: &str,
     text: &str,
     shows: Shows,
-    base: i64,
 ) -> (Settled, Option<i64>) {
     match saved {
         Ok(SaveEnd::Saved { version }) => match body_of_text(text, shows) {
@@ -458,8 +453,14 @@ fn settle_save(
             ),
             None => (Settled::Failed, None),
         },
-        Ok(SaveEnd::Queued) => match body_of_text(text, shows) {
-            Some(body) => (Settled::Queued { body }, Some(base)),
+        Ok(SaveEnd::Queued { base }) => match body_of_text(text, shows) {
+            Some(body) => (
+                Settled::Queued {
+                    body,
+                    version: u32::try_from(base).unwrap_or(0),
+                },
+                Some(base),
+            ),
             None => (Settled::Failed, None),
         },
         Ok(SaveEnd::Conflict { theirs }) => (
@@ -472,4 +473,34 @@ fn settle_save(
         ),
         Err(_) => (Settled::Failed, None),
     }
+}
+
+/// A change's text, overwritten: nobody takes it.
+fn wipe(settled: Settled) {
+    if let Settled::Saved { mut body, .. } | Settled::Queued { mut body, .. } | Settled::Opened { mut body, .. } =
+        settled
+    {
+        body.wipe();
+    }
+}
+
+/// A change begun under an earlier opening of `file_id`, for the opening on screen now: what it came to, said, and
+/// nothing else (its text is overwritten). The switch (Available offline) is the file's, not the opening's: as it is.
+/// Keep theirs, under an earlier opening: nothing to say (the edit was dropped, as asked).
+fn earlier(settled: Settled, file_id: &str) -> Option<Settled> {
+    let said = match &settled {
+        Settled::Offline { .. } => return Some(settled),
+        Settled::Saved { id, version, .. } if id == file_id => {
+            format!("Your earlier edit was saved \u{00B7} encrypted \u{00B7} version {version}")
+        }
+        Settled::Saved { .. } => "Your earlier edit was saved as a copy next to this file".to_string(),
+        Settled::Queued { .. } => {
+            "Your earlier edit was saved on this PC \u{00B7} sends when Beebeeb can be reached".to_string()
+        }
+        Settled::Conflict(_) => "Your earlier edit was not saved: another device saved this file meanwhile".to_string(),
+        Settled::Failed => "Your earlier edit was not saved".to_string(),
+        Settled::Opened { .. } | Settled::Newer(_) | Settled::Said(_) => String::new(),
+    };
+    wipe(settled);
+    (!said.is_empty()).then_some(Settled::Said(said))
 }

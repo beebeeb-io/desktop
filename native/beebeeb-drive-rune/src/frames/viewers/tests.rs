@@ -75,6 +75,10 @@ impl ViewerSource for Recording {
         self.calls.borrow_mut().push(format!("resolve {id} {keep:?}"));
         self.inner.resolve(id, text, keep)
     }
+    /// A test says a change is on its way by asking for it in the calls.
+    fn saving(&self) -> bool {
+        self.calls.borrow().iter().any(|call| call == "saving")
+    }
     fn newer(&mut self, id: &str) -> Result<OpenFile, OpenError> {
         self.calls.borrow_mut().push(format!("newer {id}"));
         // A test refuses Show it by asking for it in the calls.
@@ -585,7 +589,7 @@ fn a_save_stored_here_keeps_a_newer_version_noticed_meanwhile() {
             at: "09:14".into(),
         }));
         let body = ui.file.body.clone();
-        ui.settle(super::source::Settled::Queued { body });
+        ui.settle(super::source::Settled::Queued { body, version: 3 });
     });
     rt.frame(0.0);
     rt.frame(0.0);
@@ -594,6 +598,47 @@ fn a_save_stored_here_keeps_a_newer_version_noticed_meanwhile() {
         info(&rt, "banner-text").text.as_deref(),
         Some("A newer version arrived, 09:14.")
     );
+}
+
+/// Delta check of #432, P1-2: a save stored here only is labelled with the version it was saved from (the text on
+/// screen is based on it), not with the label the screen had.
+#[test]
+fn a_save_stored_here_is_labelled_with_the_version_it_was_saved_from() {
+    let (mut rt, _) = note(false, false);
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        let body = ui.file.body.clone();
+        ui.settle(super::source::Settled::Queued { body, version: 5 });
+    });
+    assert_eq!(viewer(&rt).file.version, 5);
+}
+
+/// Delta check of #432, P1-2: a change of an earlier opening is said and nothing on screen changes.
+#[test]
+fn a_change_of_an_earlier_opening_is_said_and_changes_nothing_on_screen() {
+    let (mut rt, _) = note(false, false);
+    let before = viewer(&rt).file.version;
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.settle(super::source::Settled::Said("Your earlier edit was not saved".into()));
+    });
+    assert_eq!(viewer(&rt).toast.as_deref(), Some("Your earlier edit was not saved"));
+    assert_eq!(viewer(&rt).file.version, before);
+    assert!(viewer(&rt).editor.is_none());
+}
+
+/// Delta check of #432, P1-2: Show it while a change of the open file is on its way opens nothing and says so.
+#[test]
+fn show_it_while_a_change_is_on_its_way_waits_and_says_so() {
+    let (mut rt, calls) = note(true, false);
+    calls.borrow_mut().push("saving".into());
+    operate(&mut rt, "banner-btn");
+    assert_eq!(viewer(&rt).file.version, 3, "the version on screen stays");
+    assert!(
+        !calls.borrow().iter().any(|call| call.starts_with("newer")),
+        "nothing opened"
+    );
+    assert_eq!(viewer(&rt).toast.as_deref(), Some(super::NOT_WHILE_SAVING));
 }
 
 /// Review of #432, P3: Show it that is refused leaves the version on screen, its banner too, and says why.

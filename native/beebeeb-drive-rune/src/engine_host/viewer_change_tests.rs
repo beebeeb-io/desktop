@@ -22,7 +22,7 @@ fn what_the_local_state_says_is_what_the_switch_and_the_version_show() {
         version: 7,
         kept: true,
         can_write: true,
-        own_landed: None,
+        own: false,
     });
     let (source, file, _) = opened(&fake, NOTE);
     assert!(source.knows_offline());
@@ -42,7 +42,7 @@ fn what_the_local_state_says_is_what_the_switch_and_the_version_show() {
         version: 3,
         kept: false,
         can_write: false,
-        own_landed: None,
+        own: false,
     });
     let (source, _, _) = opened(&fake, NOTE);
     assert!(source.knows_offline() && !source.can_save());
@@ -131,7 +131,7 @@ fn a_newer_version_is_a_conflict_whose_other_side_is_another_device() {
 #[test]
 fn a_save_that_is_only_stored_here_says_so_and_a_refused_one_says_not_saved() {
     let fake = Fake::new();
-    fake.s().save_answer = Ok(SaveEnd::Queued);
+    fake.s().save_answer = Ok(SaveEnd::Queued { base: 0 });
     let (mut source, file, _) = opened(&fake, NOTE);
     source.save(NOTE, "mine", file.version);
     assert!(matches!(settled(&mut source, NOTE), Settled::Queued { .. }));
@@ -149,7 +149,7 @@ fn the_three_keeps() {
         version: 5,
         kept: false,
         can_write: true,
-        own_landed: None,
+        own: false,
     });
     assert_eq!(source.resolve(NOTE, "mine", Keep::Mine), SaveOutcome::Working);
     assert!(matches!(settled(&mut source, NOTE), Settled::Saved { .. }));
@@ -190,17 +190,7 @@ fn bump(fake: &Fake, version: i64) {
         version,
         kept: false,
         can_write: true,
-        own_landed: None,
-    });
-}
-
-/// The local state holds `version`, and the view's own queued save became `own` once it landed.
-fn bump_own(fake: &Fake, version: i64, own: i64) {
-    fake.s().edit = Some(EditFacts {
-        version,
-        kept: false,
-        can_write: true,
-        own_landed: Some(own),
+        own: false,
     });
 }
 
@@ -281,12 +271,12 @@ fn a_banner_for_a_session_that_moved_on_is_dropped() {
 }
 
 /// Review of #432, P1-1: a save that ends "Saved on this PC" lands later as the version it becomes. That version
-/// is the view's own (the engine says so: `EditFacts::own_landed`), never "A newer version arrived"; a version past
+/// is the view's own (the engine says so: `EditFacts::own`), never "A newer version arrived"; a version past
 /// it is another device's.
 #[test]
 fn a_queued_save_that_lands_later_is_not_announced_as_a_newer_version() {
     let fake = Fake::new();
-    fake.s().save_answer = Ok(SaveEnd::Queued);
+    fake.s().save_answer = Ok(SaveEnd::Queued { base: 0 });
     let (mut source, file, _) = opened(&fake, NOTE);
     assert_eq!(source.save(NOTE, "mine", file.version), SaveOutcome::Working);
     assert!(matches!(settled(&mut source, NOTE), Settled::Queued { .. }));
@@ -294,7 +284,7 @@ fn a_queued_save_that_lands_later_is_not_announced_as_a_newer_version() {
     // Not landed yet: the local state still holds 3.
     assert!(newer_answer(&mut source, NOTE).is_none());
     // Landed: 4, the version the view's own save became.
-    bump_own(&fake, 4, 4);
+    fake.land(4);
     for _ in 0..3 {
         assert!(
             newer_answer(&mut source, NOTE).is_none(),
@@ -302,7 +292,7 @@ fn a_queued_save_that_lands_later_is_not_announced_as_a_newer_version() {
         );
     }
     // Another device saved after it.
-    bump_own(&fake, 5, 4);
+    bump(&fake, 5);
     assert!(matches!(newer_answer(&mut source, NOTE), Some(Settled::Newer(_))));
 }
 
@@ -311,12 +301,13 @@ fn a_queued_save_that_lands_later_is_not_announced_as_a_newer_version() {
 #[test]
 fn another_devices_version_past_the_own_landed_one_is_announced_at_the_first_read() {
     let fake = Fake::new();
-    fake.s().save_answer = Ok(SaveEnd::Queued);
+    fake.s().save_answer = Ok(SaveEnd::Queued { base: 0 });
     let (mut source, file, _) = opened(&fake, NOTE);
     source.save(NOTE, "mine", file.version);
     assert!(matches!(settled(&mut source, NOTE), Settled::Queued { .. }));
     source.changes.every = Duration::ZERO;
-    bump_own(&fake, 5, 4);
+    fake.land(4);
+    bump(&fake, 5);
     assert!(matches!(newer_answer(&mut source, NOTE), Some(Settled::Newer(_))));
 }
 
@@ -355,6 +346,9 @@ fn a_newer_version_read_in_the_same_drain_as_a_change_is_kept_for_the_next_pump(
         source.settled(NOTE),
         Some(Settled::Offline { on: true, done: true })
     ));
+    // Not because a read is due (delta check of #432): the next one is an hour away.
+    source.changes.every = Duration::from_secs(3600);
+    source.changes.checked = Some(Instant::now());
     assert!(
         source.next_check().is_some_and(|after| after.is_zero()),
         "woken at once"
@@ -469,4 +463,142 @@ fn show_it_reads_the_file_again_as_beebeeb_has_it() {
         "the content comes on the poll"
     );
     assert_eq!(words(&answered(&mut source, NOTE)), NOTE_TEXT);
+}
+
+/// Delta check of #432, P1-1: a save answered Queued, then the file opened again (Show it). The new opening holds
+/// none of the earlier saves: when that save lands, its version is announced as a newer version, and a save from
+/// the version the new opening shows goes out from that version (the engine then answers Conflict: never continued
+/// from the earlier save's landing).
+#[test]
+fn a_new_opening_does_not_take_an_earlier_saves_landing_as_its_own() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Queued { base: 0 });
+    let (mut source, file, _) = opened(&fake, NOTE);
+    assert_eq!(source.save(NOTE, "mine", file.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Queued { version: 3, .. }));
+    let forgets = fake.s().forgets;
+    let again = source.newer(NOTE).expect("the file opens again");
+    assert_eq!(again.version, 3);
+    assert_eq!(
+        fake.s().forgets,
+        forgets + 1,
+        "the new opening forgot the earlier saves"
+    );
+    assert_eq!(words(&answered(&mut source, NOTE)), NOTE_TEXT);
+    fake.land(4);
+    source.changes.every = Duration::ZERO;
+    assert!(
+        matches!(newer_answer(&mut source, NOTE), Some(Settled::Newer(_))),
+        "the earlier save's landing is a newer version for this opening"
+    );
+    fake.s().save_answer = Ok(SaveEnd::Conflict { theirs: 4 });
+    assert_eq!(source.save(NOTE, "edit of 3", again.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Conflict(_)));
+    assert_eq!(
+        fake.s().saves.last().map(|save| save.2),
+        Some(3),
+        "sent from the version on screen"
+    );
+}
+
+/// Delta check of #432, P1-2: Show it waits while a change is on its way (its answer belongs to what is on screen).
+/// When it answers, a save stored here is labelled with the version it was saved from.
+#[test]
+fn show_it_waits_while_a_save_is_on_its_way() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Queued { base: 0 });
+    let (mut source, file, _) = opened(&fake, NOTE);
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert_eq!(source.save(NOTE, "mine", file.version), SaveOutcome::Working);
+    bump(&fake, 4);
+    assert!(source.saving());
+    assert_eq!(
+        source.newer(NOTE).err(),
+        Some(OpenError::NotNow),
+        "not while the save is on its way"
+    );
+    drop(door);
+    let Settled::Queued { version, body } = settled(&mut source, NOTE) else {
+        panic!("stored here");
+    };
+    assert_eq!(
+        (version, words(&body).as_str()),
+        (3, "mine"),
+        "labelled with its base, not the newer 4"
+    );
+    assert!(!source.saving());
+}
+
+/// Delta check of #432, P1-2: a change answered for an earlier opening never replaces the view: its outcome is
+/// said, its text overwritten, and what is on screen stays (here the newer version Show it opened).
+#[test]
+fn a_change_answered_for_an_earlier_opening_never_replaces_the_view() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Queued { base: 0 });
+    let (mut source, file, _) = opened(&fake, NOTE);
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert_eq!(source.save(NOTE, "mine", file.version), SaveOutcome::Working);
+    // Whatever opened the file again while the save was on its way (Show it waits for it; this goes past that).
+    source.changes.busy = false;
+    bump(&fake, 4);
+    let again = source.newer(NOTE).expect("the newer version opens");
+    assert_eq!(again.version, 4);
+    drop(door);
+    let said = settled(&mut source, NOTE);
+    let Settled::Said(words) = said else {
+        panic!("said, not applied");
+    };
+    assert_eq!(
+        words,
+        "Your earlier edit was saved on this PC \u{00B7} sends when Beebeeb can be reached"
+    );
+    // The view's opening still holds the newer version: a read of 4 is nothing new.
+    source.changes.every = Duration::ZERO;
+    assert!(newer_answer(&mut source, NOTE).is_none());
+}
+
+/// Delta check of #432, P3: Keep mine stored here only is labelled with the version it was saved from (the one the
+/// person chose to replace), and that version is the view's: no banner about it.
+#[test]
+fn keep_mine_stored_here_holds_the_version_it_replaced() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Queued { base: 0 });
+    let (mut source, _, _) = opened(&fake, NOTE);
+    bump(&fake, 5);
+    assert_eq!(source.resolve(NOTE, "mine", Keep::Mine), SaveOutcome::Working);
+    let Settled::Queued { version, .. } = settled(&mut source, NOTE) else {
+        panic!("stored here");
+    };
+    assert_eq!(version, 5, "labelled with the version it was saved from");
+    assert_eq!(fake.s().saves.last().map(|save| save.2), Some(5));
+    source.changes.every = Duration::ZERO;
+    for _ in 0..3 {
+        assert!(
+            newer_answer(&mut source, NOTE).is_none(),
+            "the version the person chose to replace is not news"
+        );
+    }
+}
+
+/// Delta check of #432, P3: while a read is on its way the window is not asked for frames: the read wakes it when
+/// it ends.
+#[test]
+fn no_wake_is_asked_for_while_a_read_is_on_its_way() {
+    let fake = Fake::new();
+    let (mut source, _, _) = opened(&fake, NOTE);
+    source.changes.every = Duration::ZERO;
+    let door = fake.door.lock().unwrap();
+    fake.s().edit_waits = true;
+    assert!(source.settled(NOTE).is_none(), "the read starts and waits");
+    until("the read is on its way", || {
+        source.changes.checking.load(Ordering::SeqCst)
+    });
+    assert_eq!(source.next_check(), None);
+    let wakes = fake.s().wakes;
+    drop(door);
+    read_done(&source);
+    until("the read woke the window", || fake.s().wakes > wakes);
+    fake.s().edit_waits = false;
 }

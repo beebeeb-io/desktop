@@ -114,17 +114,40 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
   window is woken for the next one (`ViewerSource::next_check`), so the banner comes without a press.
 - **The view's own save is never "a newer version":** Saved moves the view to the version it became; a save
   stored here only ("Saved on this PC · sends when Beebeeb can be reached") keeps the view at the save's base, and
-  the version it becomes once it lands is the engine's to tell (`EditFacts::own_landed`, read without forgetting
+  the version it becomes once it lands is the engine's to tell (`EditFacts::own`, read without forgetting
   the queued save). A version past that one is another device's and is announced. The two-versions question does
   not move the view: after Cancel and Discard changes the next read still announces the newer version. A read that
   comes back in the same drain as a change's answer is weighed on the next pump. A save stored here keeps a newer
   version noticed while it waited (its banner shows once the editor closes).
 - **Show it never labels older bytes with a newer version.** The label is read before the content (an open, Show
   it, Keep theirs). The engine does not read a copy on this PC whose version is behind the one it holds now, or is
-  not known (`LocalCopy::Behind`): Beebeeb's version is downloaded, and the status line says "The version in
-  Beebeeb, decrypted on this PC · the copy on this PC is not in sync with it."
+  not known (`LocalCopy::Behind`): Beebeeb's version is downloaded, and the status line says **"The version in
+  Beebeeb, decrypted on this PC · couldn't confirm the copy on this PC is this version"** (`Origin::BeebeebUnconfirmedHere`;
+  delta check of #432: "not in sync" claimed more than is known for a copy of a version not known).
+- **Why such a file does not open offline, though kept on this PC:** its copy here could not be confirmed as the
+  version Beebeeb has, so it is never shown as that version, and the download is the only way to it; offline it says
+  "Can't reach Beebeeb". Which copies: one older than the version pulled since (nothing replaces a kept file's bytes
+  on that pull, Windows or Linux), one written by a save from this viewer (its landing records no agreed content:
+  the bytes in the folder are the version before the save), one whose fetches served more than one version, and rows
+  synced before agreed content was recorded. How many such rows an upgraded PC has is to be counted before 0.9.0.
 - **Show it refused** (the file is gone, the session ended, it could not be read now): the version on screen stays
   open, its banner too, and the toast says why: **"Newer version not opened: the file is gone"** (also "the
   session ended", "nothing has synced on this PC yet", "this PC's data couldn't be confirmed as this account's",
   "Beebeeb is locked or signed out", "couldn't read it right now"). No board draws this toast: the words follow
   the status line's "Not opened: …".
+
+## A newer version: fix round 2 of #432 (lane fix432, 2026-11-15)
+
+- **"The view's own" belongs to the opening that saved.** The engine keeps, per file, the versions this session's
+  viewer saves became (with the base each was saved from) and the saves still to land; a new opening (open, Try
+  again, Show it) forgets them all (`Engine::forget_viewer_saves`). A version an earlier opening's save becomes is
+  then announced as newer, and a save from the new opening's version is never continued from it (it answers the
+  two-versions question).
+- **A change's answer belongs to the opening that asked.** Show it and Try again wait while a change is on its way
+  (`ViewerSource::saving`); Show it then says **"Newer version not opened yet: your change is still being saved"**.
+  An answer for an earlier opening never replaces what is on screen: it is said (`Settled::Said`: "Your earlier
+  edit was saved on this PC · sends when Beebeeb can be reached", "… saved · encrypted · version N", "… saved as a
+  copy next to this file", "… not saved: another device saved this file meanwhile", "… not saved"), and its text is
+  overwritten. No board draws these toasts.
+- **A save stored here is labelled with the version it was saved from** (`Settled::Queued::version`, the base the
+  engine used): the label is always the base of the text on screen.

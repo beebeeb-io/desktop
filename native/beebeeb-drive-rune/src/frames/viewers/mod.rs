@@ -106,6 +106,9 @@ pub const NOT_BUILT: &str = "Not built yet";
 /// What Try again says when the file could not even be asked for again (signed out, gone from this PC's list).
 pub const NOT_REOPENED: &str = "Couldn't open this file again. Go back to Files and open it from there.";
 
+/// What Show it says while a change of the open file is still on its way: nothing is opened meanwhile.
+pub const NOT_WHILE_SAVING: &str = "Newer version not opened yet: your change is still being saved";
+
 /// What Show it says when the newer version did not open: the version on screen stays, and why.
 pub fn not_shown(why: OpenError) -> String {
     let reason = match why.stopped() {
@@ -485,6 +488,11 @@ impl Ui {
     /// DW-1519's Show it: the newer version replaces the one on screen, at the person's press.
     pub fn show_newer(&mut self) {
         if self.file.newer.is_none() || self.editor.is_some() {
+            return;
+        }
+        // A change still on its way belongs to what is on screen: the newer version waits until it answered.
+        if self.source.saving() {
+            self.toast = Some(NOT_WHILE_SAVING.to_string());
             return;
         }
         match self.source.newer(&self.file.id) {

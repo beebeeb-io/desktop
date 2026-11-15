@@ -418,9 +418,10 @@ impl<C: CredentialStores> Engine<C> {
 
 /// Whether the copy on this computer is behind the version the local state holds for `file_id` (`current_version`):
 /// the version its bytes are is the agreed content's (`local_base_version`, while `local_hash` is recorded), else the
-/// version the fetches served (`fetched_content`, the lowest one when they served more than one), as the sync's own
-/// reading of a sync-folder file has it (`engine_bridge::syncflow`). Not known (neither recorded) is behind too: it
-/// is not provably the version Beebeeb has. A file at version 0 (never landed in Beebeeb) is never behind.
+/// version the fetches served (`fetched_content`) when they all served that one version, as the sync's own reading
+/// of a sync-folder file has it (`engine_bridge::syncflow`). Not known is behind too: neither recorded, or fetches of
+/// more than one version (mixed: the bytes are none of them), is not provably the version Beebeeb has. A file at
+/// version 0 (never landed in Beebeeb) is never behind.
 fn copy_is_behind(db: &crate::state_db::StateDb, file_id: &str) -> rusqlite::Result<bool> {
     let Some(contract) = db.get_file_contract_state(file_id)? else {
         return Ok(true);
@@ -430,7 +431,10 @@ fn copy_is_behind(db: &crate::state_db::StateDb, file_id: &str) -> rusqlite::Res
     }
     let copy = match contract.local_hash {
         Some(_) => Some(contract.local_base_version).filter(|version| *version > 0),
-        None => db.fetched_content(file_id)?.map(|(version, _)| version),
+        // A mixed candidate (no hash) is not one version's bytes (delta check of desktop#432).
+        None => db
+            .fetched_content(file_id)?
+            .and_then(|(version, hash)| hash.map(|_| version)),
     };
     Ok(copy.is_none_or(|version| version < contract.current_version))
 }

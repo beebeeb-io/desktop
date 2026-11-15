@@ -44,7 +44,9 @@ pub(super) fn read<E: ViewerEngine>(
         }
     }
     let opened = engine.fetch(file_id, IN_MEMORY_MAX, progress, cancel)?;
-    let origin = if recorded.unsettled || behind {
+    let origin = if behind {
+        Origin::BeebeebUnconfirmedHere
+    } else if recorded.unsettled {
         Origin::BeebeebNotThisPcs
     } else {
         Origin::Beebeeb

@@ -15,7 +15,7 @@
 //! log a name, a path or a byte of the text. The text is held in an anonymous file the queue copies from, never
 //! under a name of its own.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -34,8 +34,7 @@ const LAND_POLL: Duration = Duration::from_millis(150);
 
 /// A save that ended as [`SaveEnd::Queued`]: which upload carries it, from which base, for which session, under which
 /// write. Once that upload has landed, the version it became (the landing records it for that write) is the viewer's
-/// base, so a second save from the same viewer is not a conflict with the first. Keyed by file id; a session that
-/// moved on makes a record void.
+/// own: see [`ViewerSaves`].
 #[derive(Clone)]
 struct QueuedSave {
     session: SessionGeneration,
@@ -45,25 +44,94 @@ struct QueuedSave {
     token: Option<String>,
 }
 
-static QUEUED_SAVES: Mutex<Option<HashMap<String, QueuedSave>>> = Mutex::new(None);
+/// What this session's viewer saved of one file since that file was last opened (a new opening forgets it all:
+/// [`Engine::forget_viewer_saves`], review of desktop#432): the saves answered [`SaveEnd::Queued`] whose landing is
+/// not known yet, and every version its saves became, with the base each was saved from. Each version is one write's
+/// own landing, so keeping them is safe: a version another device made is never one of them. A record of another
+/// session is void.
+#[derive(Default)]
+struct ViewerSaves {
+    session: Option<SessionGeneration>,
+    queued: Vec<QueuedSave>,
+    /// The version a save became → the base it was saved from.
+    became: BTreeMap<i64, i64>,
+}
 
-fn remember_queued(file_id: &str, record: QueuedSave) {
-    if let Ok(mut all) = QUEUED_SAVES.lock() {
-        all.get_or_insert_with(HashMap::new).insert(file_id.to_string(), record);
+static VIEWER_SAVES: Mutex<Option<HashMap<String, ViewerSaves>>> = Mutex::new(None);
+
+/// `change` on the record of `file_id` for `session` (one of another session is started again).
+fn with_saves(file_id: &str, session: SessionGeneration, change: impl FnOnce(&mut ViewerSaves)) {
+    if let Ok(mut all) = VIEWER_SAVES.lock() {
+        let saves = all
+            .get_or_insert_with(HashMap::new)
+            .entry(file_id.to_string())
+            .or_default();
+        if saves.session != Some(session) {
+            *saves = ViewerSaves {
+                session: Some(session),
+                ..ViewerSaves::default()
+            };
+        }
+        change(saves);
     }
 }
 
-fn forget_queued(file_id: &str) {
-    if let Ok(mut all) = QUEUED_SAVES.lock() {
+fn remember_queued(file_id: &str, record: QueuedSave) {
+    with_saves(file_id, record.session, |saves| saves.queued.push(record));
+}
+
+/// `queued` landed as `version`: from now on `version` is the viewer's own (noted before the record is let go, so no
+/// read finds neither).
+fn note_landed(file_id: &str, queued: &QueuedSave, version: i64) {
+    with_saves(file_id, queued.session, |saves| {
+        saves.became.insert(version, queued.base);
+        saves.queued.retain(|other| other.op_id != queued.op_id);
+    });
+}
+
+/// Every save of `file_id` forgotten: a new opening holds none of them.
+fn forget_saves(file_id: &str) {
+    if let Ok(mut all) = VIEWER_SAVES.lock() {
         if let Some(map) = all.as_mut() {
             map.remove(file_id);
         }
     }
 }
 
-/// The version `queued`'s upload became, from the local state: once its op has left the queue, the version the
-/// landing recorded for its write (while the file's held write is still this save's). `None` when that is not known:
-/// still queued, a later save's write, or an op that left the queue without landing.
+/// The versions this session's viewer saves of `file_id` became, each with its base. A queued save whose landing is
+/// known now (`landed_as`, asked with the records copied out: no lock is held while the local state is read) is
+/// noted first.
+fn own_versions(
+    file_id: &str,
+    session: SessionGeneration,
+    landed_as: impl Fn(&QueuedSave) -> Option<i64>,
+) -> BTreeMap<i64, i64> {
+    let queued: Vec<QueuedSave> = VIEWER_SAVES
+        .lock()
+        .ok()
+        .and_then(|all| {
+            let saves = all.as_ref()?.get(file_id)?;
+            (saves.session == Some(session)).then(|| saves.queued.clone())
+        })
+        .unwrap_or_default();
+    for record in &queued {
+        if let Some(version) = landed_as(record).filter(|version| *version > record.base) {
+            note_landed(file_id, record, version);
+        }
+    }
+    VIEWER_SAVES
+        .lock()
+        .ok()
+        .and_then(|all| {
+            let saves = all.as_ref()?.get(file_id)?;
+            (saves.session == Some(session)).then(|| saves.became.clone())
+        })
+        .unwrap_or_default()
+}
+
+/// The version that landing recorded for `queued`'s write, from the local state: once its op has left the queue,
+/// while the file's held write is still this save's. `None` when that is not known: still queued, a later save's
+/// write, or an op that left the queue without landing.
 fn landed_version(db: &crate::state_db::StateDb, file_id: &str, queued: &QueuedSave) -> Option<i64> {
     let token = queued.token.as_deref()?;
     let gone = db.get_operation(&queued.op_id).ok().is_some_and(|op| op.is_none());
@@ -77,44 +145,22 @@ fn landed_version(db: &crate::state_db::StateDb, file_id: &str, queued: &QueuedS
     held.version
 }
 
-/// The version this viewer's own queued save for `file_id` became, once it landed (`landed_as`, asked with the
-/// record copied out: no lock is held while the local state is read). The record is kept: reading it forgets
-/// nothing, so a save from the same viewer still continues from that version (`base_after_own_landed_save`).
-/// `None`: no queued save of this session's, or not landed (yet).
-fn own_landed_version(
-    file_id: &str,
-    session: SessionGeneration,
-    landed_as: impl FnOnce(&QueuedSave) -> Option<i64>,
-) -> Option<i64> {
-    let queued = QUEUED_SAVES
-        .lock()
-        .ok()
-        .and_then(|all| all.as_ref().and_then(|map| map.get(file_id)).cloned())
-        .filter(|queued| queued.session == session)?;
-    landed_as(&queued)
-}
-
-/// The base a save from `base` continues from: `base`, or, when this viewer's own queued save has landed since and
-/// `current` (read by the caller from the local state) is exactly the version that save became (`landed_as`), that
-/// version. Anything else stays `base`, so the save answers Conflict: another device's version after the own one
-/// (review of desktop#424), an op that left the queue without landing, a later save's write.
+/// The base a save from `base` continues from: `base`, or, when `current` (read by the caller from the local state)
+/// is a version this viewer's own save from `base` became, that version. Anything else stays `base`, so the save
+/// answers Conflict: another device's version after the own one (review of desktop#424), an op that left the queue
+/// without landing, a save of an earlier opening (forgotten when the file opened again).
 fn base_after_own_landed_save(
     file_id: &str,
     session: SessionGeneration,
     base: i64,
     current: i64,
-    landed_as: impl FnOnce(&QueuedSave) -> Option<i64>,
+    landed_as: impl Fn(&QueuedSave) -> Option<i64>,
 ) -> i64 {
-    if current == base {
+    if current == base || current < base {
         return base;
     }
-    let landed = QUEUED_SAVES.lock().ok().is_some_and(|all| {
-        all.as_ref()
-            .and_then(|map| map.get(file_id))
-            .is_some_and(|q| q.session == session && q.base == base && current > base && landed_as(q) == Some(current))
-    });
-    if landed {
-        forget_queued(file_id);
+    let own = own_versions(file_id, session, landed_as);
+    if own.get(&current) == Some(&base) {
         current
     } else {
         base
@@ -130,9 +176,9 @@ pub struct EditFacts {
     pub kept: bool,
     /// The account may change the file.
     pub can_write: bool,
-    /// The version this viewer's own save, answered [`SaveEnd::Queued`], became once its upload landed: the
-    /// view's own version, not another device's. `None`: no such save, or not landed yet.
-    pub own_landed: Option<i64>,
+    /// The version the local state holds is one this viewer's own saves became since the file was opened (a save
+    /// answered [`SaveEnd::Queued`] included, once it landed): not another device's.
+    pub own: bool,
 }
 
 /// Why nothing was done.
@@ -153,8 +199,9 @@ pub enum EditRefused {
 pub enum SaveEnd {
     /// Stored and sent: the file's new version.
     Saved { version: i64 },
-    /// Stored on this PC; the upload is not done yet (it is sent as soon as Beebeeb can be reached).
-    Queued,
+    /// Stored on this PC; the upload is not done yet (it is sent as soon as Beebeeb can be reached). `base`: the
+    /// version it was saved from (the one this save continued from, which the view's text is then based on).
+    Queued { base: i64 },
     /// The file is already past the version the edit began from; nothing was written.
     Conflict { theirs: i64 },
 }
@@ -173,24 +220,34 @@ impl<C: CredentialStores> Engine<C> {
         if state.session() != session {
             return Err(EditRefused::NotSignedIn);
         }
-        // The version first, then whether it is the view's own landed save: a landing between the two reads makes
-        // the version older than the landing, never another device's.
+        // The version first, then whether it is one the view's own saves became: a landing between the two reads
+        // makes the version older than the landing, never another device's.
         let read = state
             .with(|db| {
                 let contract = db.get_file_contract_state(file_id)?;
-                let own = own_landed_version(file_id, session, |queued| landed_version(db, file_id, queued));
+                let own = contract.as_ref().is_some_and(|contract| {
+                    own_versions(file_id, session, |queued| landed_version(db, file_id, queued))
+                        .contains_key(&contract.current_version)
+                });
                 Ok::<_, rusqlite::Error>((contract, own))
             })
             .map_err(|_| EditRefused::NotSignedIn)?
             .map_err(|_| EditRefused::Unavailable)?;
-        let (contract, own_landed) = read;
+        let (contract, own) = read;
         let contract = contract.ok_or(EditRefused::Unavailable)?;
         Ok(EditFacts {
             version: contract.current_version,
             kept: contract.effective_pin_state() == PinState::Pinned,
             can_write: contract.can_write(),
-            own_landed,
+            own,
         })
+    }
+
+    /// A new opening of `file_id` in the viewer (open, Try again, Show it): it holds none of the viewer's earlier
+    /// saves, so none of them is its own any more (review of desktop#432). A version they become is then announced
+    /// as a newer version, and a save from the new opening's version answers Conflict, never continued from it.
+    pub fn forget_viewer_saves(&self, file_id: &str) {
+        forget_saves(file_id);
     }
 
     /// See the module's doc. `base` is the version the text was edited from.
@@ -265,8 +322,8 @@ impl<C: CredentialStores> Engine<C> {
             token: write_token,
         };
         // Remembered before the wait (review of desktop#432): a landing at any moment from here on is told apart as
-        // this viewer's own by its read of the version (`EditFacts::own_landed`), also one between the last look
-        // below and the Queued answer.
+        // this viewer's own by its read of the version (`EditFacts::own`), also one between the last look below and
+        // the Queued answer.
         remember_queued(file_id, queued.clone());
         // Wait, bounded, for the upload to land: the op leaves the queue, and the version it became is the one the
         // landing recorded for this save's write (never a version read off the row, which may be another device's).
@@ -275,13 +332,14 @@ impl<C: CredentialStores> Engine<C> {
             match state.with(|db| landed_version(db, file_id, &queued)) {
                 Err(_) => return Err(EditRefused::NotSignedIn),
                 Ok(Some(version)) if version > base => {
-                    forget_queued(file_id);
+                    // Noted, never forgotten: a read between here and the answer finds it the view's own.
+                    note_landed(file_id, &queued, version);
                     return Ok(SaveEnd::Saved { version });
                 }
                 Ok(_) => std::thread::sleep(LAND_POLL),
             }
         }
-        Ok(SaveEnd::Queued)
+        Ok(SaveEnd::Queued { base })
     }
 
     /// See the module's doc: Keep both. `device` and `hhmm` name the copy as every conflict copy is named.
@@ -437,6 +495,52 @@ mod queued_save_tests {
         );
     }
 
+    /// Delta check of #432, P2 (a): the save found its landing and answers Saved. From the moment it found it, a
+    /// read of the version finds it the view's own, also before the answer reached the view (the landing itself is
+    /// not asked again: `|_| None`).
+    #[test]
+    fn a_read_between_the_landing_found_and_the_saved_answer_finds_it_own() {
+        let s = SessionGeneration::for_test(3);
+        let record = QueuedSave {
+            session: s,
+            base: 4,
+            op_id: "op-saved".into(),
+            token: Some("token-saved".into()),
+        };
+        remember_queued("saved-answer", record.clone());
+        // What `save_text_for` does when its land wait finds the version, just before it answers Saved.
+        note_landed("saved-answer", &record, 5);
+        assert_eq!(own_versions("saved-answer", s, |_| None).get(&5), Some(&4));
+    }
+
+    /// Delta check of #432, P2 (b): the first queued save landed as 5, and the next save continued from it and waits
+    /// to land. Every read in that wait finds 5 the view's own: no banner about the person's own save.
+    #[test]
+    fn two_saves_in_a_row_keep_the_first_ones_version_their_own() {
+        let s = SessionGeneration::for_test(3);
+        let first = QueuedSave {
+            session: s,
+            base: 4,
+            op_id: "op-first".into(),
+            token: Some("token-first".into()),
+        };
+        remember_queued("two-in-a-row", first);
+        let landed = |q: &QueuedSave| (q.op_id == "op-first").then_some(5);
+        // The second save, from the base the view shows (4): continued from the first one's 5.
+        assert_eq!(base_after_own_landed_save("two-in-a-row", s, 4, 5, landed), 5);
+        remember_queued(
+            "two-in-a-row",
+            QueuedSave {
+                session: s,
+                base: 5,
+                op_id: "op-second".into(),
+                token: Some("token-second".into()),
+            },
+        );
+        // A read while the second one waits: the first one's 5 is still the view's own.
+        assert!(own_versions("two-in-a-row", s, landed).contains_key(&5));
+    }
+
     fn set_version(db: &StateDb, file_id: &str, version: i64) {
         let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
         contract.current_version = version;
@@ -529,27 +633,40 @@ mod queued_save_tests {
         };
         assert!(db.apply_landing(&input, &rekey).unwrap().is_some(), "it lands");
         assert_eq!(landed_version(&db, "f", &record()), Some(5));
-        // Review of desktop#432 (P1-1): the viewer's read of the version learns that 5 is its own save, as often as
-        // it asks, and forgets nothing: the next save from the viewer still continues from 5.
+        // Review of desktop#432: the viewer's read of the version learns that 5 is its own save, as often as it
+        // asks, and forgets nothing: the next save from the viewer still continues from 5.
         remember_queued("landing-peek", record());
         for _ in 0..2 {
             assert_eq!(
-                own_landed_version("landing-peek", session, |q| landed_version(&db, "f", q)),
-                Some(5),
-                "the own save's landed version"
+                own_versions("landing-peek", session, |q| landed_version(&db, "f", q)).get(&5),
+                Some(&4),
+                "the own save's landed version, saved from 4"
             );
         }
-        assert_eq!(
-            own_landed_version("landing-peek", SessionGeneration::for_test(9), |q| landed_version(
+        assert!(
+            own_versions("landing-peek", SessionGeneration::for_test(9), |q| landed_version(
                 &db, "f", q
-            )),
-            None,
+            ))
+            .is_empty(),
             "another session's record says nothing"
         );
         assert_eq!(
             base_after_own_landed_save("landing-peek", session, 4, 5, |q| landed_version(&db, "f", q)),
             5,
             "still continued from: the reads forgot nothing"
+        );
+        // Delta check of #432, P1-1: the file opened again (open, Try again, Show it). The new opening holds none of
+        // the earlier saves: the landing is not its own, and a save from the version it shows is a conflict.
+        remember_queued("landing-reopened", record());
+        forget_saves("landing-reopened");
+        assert!(
+            own_versions("landing-reopened", session, |q| landed_version(&db, "f", q)).is_empty(),
+            "not the new opening's own"
+        );
+        assert_eq!(
+            base_after_own_landed_save("landing-reopened", session, 4, 5, |q| landed_version(&db, "f", q)),
+            4,
+            "never continued from: the save from 4 answers Conflict"
         );
         // Another device saved after it, and the tick recorded its version.
         set_version(&db, "f", 6);

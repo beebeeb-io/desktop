@@ -626,6 +626,49 @@ fn after_the_viewers_own_save_landed_the_older_copy_here_is_not_read_as_it() {
     );
 }
 
+/// Delta check of desktop#432: no agreed content, but the fetches served bytes. One version's bytes, equal to the
+/// version the local state holds: read. Below it: declined. Bytes of more than one version (mixed): declined, they
+/// are none of them.
+#[test]
+fn a_copy_known_from_its_fetches_is_read_only_when_they_served_this_version_alone() {
+    let fake = fake("fetched");
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let (_dir, _root, db) = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    set_current_version(&db, NOTE, 4);
+    // Version 4's bytes, fetched (the agreed content folds into the candidate: no `local_hash` from here on).
+    db.record_local_baseline(NOTE, 4, "invented-hash-4").unwrap();
+    db.record_fetched_version(NOTE, 4, "invented-hash-4").unwrap();
+    assert_eq!(
+        db.fetched_content(NOTE).unwrap(),
+        Some((4, Some("invented-hash-4".to_string())))
+    );
+    assert!(db.get_file_contract_state(NOTE).unwrap().unwrap().local_hash.is_none());
+    assert_eq!(
+        opened(local(&engine, NOTE, NO_LIMIT)).copy,
+        OnThisPc::InSync,
+        "fetched as version 4 alone: read"
+    );
+    // Another fetch served other bytes of 4: mixed.
+    db.record_fetched_version(NOTE, 4, "invented-other-hash").unwrap();
+    assert_eq!(db.fetched_content(NOTE).unwrap(), Some((4, None)));
+    assert!(
+        matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)),
+        "mixed: declined"
+    );
+    // Version 3's bytes alone, with 4 the version now: below, declined.
+    db.record_local_baseline(NOTE, 3, "invented-hash-3").unwrap();
+    db.record_fetched_version(NOTE, 3, "invented-hash-3").unwrap();
+    assert_eq!(
+        db.fetched_content(NOTE).unwrap(),
+        Some((3, Some("invented-hash-3".to_string())))
+    );
+    assert!(
+        matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)),
+        "below: declined"
+    );
+}
+
 /// A file that never landed in Beebeeb (version 0, a new file on this PC) has no newer version to be behind.
 #[test]
 fn a_copy_of_a_file_not_in_beebeeb_yet_is_read() {

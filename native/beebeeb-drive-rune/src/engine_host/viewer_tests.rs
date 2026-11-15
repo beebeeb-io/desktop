@@ -90,6 +90,13 @@ struct Inner {
     lands_during_fetch: Option<i64>,
     /// The engine says the copy on this PC is behind the version Beebeeb has (`LocalCopy::Behind`).
     local_behind: bool,
+    /// The engine's record of the viewer's saves: the versions they became, and a save answered Queued whose
+    /// landing is still to come (`land`). A new opening forgets both (`forget_own_saves`), and counts it.
+    own_versions: Vec<i64>,
+    queued_save: bool,
+    forgets: usize,
+    /// A read of the version waits at the door too.
+    edit_waits: bool,
 }
 
 struct Fake {
@@ -130,7 +137,7 @@ impl Fake {
                     version: 3,
                     kept: false,
                     can_write: true,
-                    own_landed: None,
+                    own: false,
                 }),
                 kept_calls: Vec::new(),
                 kept_refused: false,
@@ -141,6 +148,10 @@ impl Fake {
                 edit_reads: 0,
                 lands_during_fetch: None,
                 local_behind: false,
+                own_versions: Vec::new(),
+                queued_save: false,
+                forgets: 0,
+                edit_waits: false,
             }),
             door: Mutex::new(()),
         };
@@ -319,9 +330,20 @@ impl ViewerEngine for Fake {
     }
 
     fn edit_facts(&self, _session: SessionGeneration, _file_id: &str) -> Option<EditFacts> {
+        if self.s().edit_waits {
+            drop(self.door.lock().unwrap());
+        }
         let mut s = self.s();
         s.edit_reads += 1;
-        s.edit
+        let own = s.edit.is_some_and(|edit| s.own_versions.contains(&edit.version));
+        s.edit.map(|edit| EditFacts { own, ..edit })
+    }
+
+    fn forget_own_saves(&self, _file_id: &str) {
+        let mut s = self.s();
+        s.own_versions.clear();
+        s.queued_save = false;
+        s.forgets += 1;
     }
 
     fn set_kept(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), ()> {
@@ -338,7 +360,19 @@ impl ViewerEngine for Fake {
         self.hold();
         let mut s = self.s();
         s.saves.push((file_id.to_string(), text.to_string(), base));
-        s.save_answer
+        // As the engine: a Queued answer names the base it saved from, and is remembered until it lands; a saved
+        // version is the viewer's own.
+        match s.save_answer {
+            Ok(SaveEnd::Queued { .. }) => {
+                s.queued_save = true;
+                Ok(SaveEnd::Queued { base })
+            }
+            Ok(SaveEnd::Saved { version }) => {
+                s.own_versions.push(version);
+                Ok(SaveEnd::Saved { version })
+            }
+            answer => answer,
+        }
     }
 
     fn save_copy(
@@ -359,6 +393,18 @@ impl ViewerEngine for Fake {
 }
 
 impl Fake {
+    /// The upload of a save answered Queued lands as `version`: the local state holds it, and it is the viewer's own
+    /// while the engine still remembers that save.
+    fn land(&self, version: i64) {
+        let mut s = self.s();
+        if let Some(edit) = s.edit.as_mut() {
+            edit.version = version;
+        }
+        if std::mem::take(&mut s.queued_save) {
+            s.own_versions.push(version);
+        }
+    }
+
     /// A change waits at the door while a test holds it.
     fn hold(&self) {
         if self.s().change_waits {

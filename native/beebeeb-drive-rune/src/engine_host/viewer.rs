@@ -156,6 +156,8 @@ pub trait ViewerEngine: Send + Sync + 'static {
     ) -> Result<SaveEnd, EditRefused> {
         Err(EditRefused::Failed)
     }
+    /// [`Engine::forget_viewer_saves`]: a new opening holds none of the viewer's earlier saves of `file_id`.
+    fn forget_own_saves(&self, _file_id: &str) {}
     /// [`Engine::save_text_copy_for`]. A worker's.
     fn save_copy(
         &self,
@@ -270,6 +272,10 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         hhmm: &str,
     ) -> Result<NewCopy, EditRefused> {
         self.engine.save_text_copy_for(session, file_id, text, device, hhmm)
+    }
+
+    fn forget_own_saves(&self, file_id: &str) {
+        self.engine.forget_viewer_saves(file_id);
     }
 }
 
@@ -727,8 +733,14 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// Open `file_id` for the session in memory: its facts now, its content on a worker.
     fn begin(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
         // Its facts first: a refusal leaves what is open as it is (Show it keeps the version on screen open, and the
-        // window says why). Then what was open before is over (a retry, Show it, or the source asked again).
+        // window says why). Then what was open before is over (a retry, Show it, or the source asked again). Never
+        // while a change is on its way: its answer belongs to the opening that asked (delta check of #432).
+        if self.changes.busy {
+            return Err(OpenError::NotNow);
+        }
         let (session, account, facts) = self.facts_now(file_id)?;
+        // The new opening holds none of the viewer's earlier saves: none of them is its own any more.
+        self.engine.forget_own_saves(file_id);
         if let Some(mut before) = self.open.take() {
             before.end();
         }
@@ -1146,6 +1158,10 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
 
     fn next_check(&self) -> Option<std::time::Duration> {
         self.next_check_due()
+    }
+
+    fn saving(&self) -> bool {
+        self.changes.busy
     }
 }
 
