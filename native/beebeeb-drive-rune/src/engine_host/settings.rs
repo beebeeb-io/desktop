@@ -3,15 +3,16 @@
 //! What it answers, and from where:
 //! - General (DW-0701) and its Theme menu (DW-0787): the theme from this PC's settings file, read when the window
 //!   starts (the first paint is local) and written merge-only; where new files are stored from Beebeeb
-//!   ([`Engine::storage_region`]); the version this binary was built as. No updater runs in this app yet, so
-//!   General never says a newer version exists.
+//!   ([`Engine::storage_region`]); the version this binary was built as. General never says a download is waiting:
+//!   no press sends one yet ([`updates`]).
 //! - General › Storage location (DW-0788, b, c, d): the account's choice and the list, by country, from Beebeeb. A
 //!   choice and "only store in this country" are sent once ([`Engine::set_storage_region_for`], the one call here
 //!   that writes account state) and shown only after Beebeeb took them; a refusal leaves the old choice and says so.
 //! - Notifications (DW-0750) and Recent notifications (DW-0791): [`notifications`], its own part (the account's
 //!   alert switches and notifications from Beebeeb, this PC's switches from its settings file).
-//! - About (DW-0751): the versions of this build ([`build_about`]); no updater runs, so no update check, channel or
-//!   notes are drawn.
+//! - About (DW-0751): the versions of this build ([`build_about`]) and, where this build has an updater (a Windows
+//!   release), Check now and the Release channel (DW-0789) on it: [`updates`], its own part. Elsewhere About draws
+//!   the versions only. The release notes (DW-0789b) stay the shell's frame: their "Restart to update" has no route.
 //! - Not wired here (the shell's "not built yet" frame in their place): Report a problem (no support bundle is built here yet).
 //!
 //! Thread rule (task 2470 W5): nothing here waits for Beebeeb or for the settings file's write lock on the window's
@@ -39,12 +40,13 @@ use super::log;
 use crate::frames::settings::Pane;
 use crate::frames::settings::source::{
     About, Channel, General, Location, Locations, Notifications, Pumped, ReadState, RecentAlert, ReleaseNotes,
-    SettingsSource, ThemeChoice, Unwired, Update, UpdateCheck,
+    SettingsSource, ThemeChoice, Update, UpdateCheck,
 };
 
 mod notifications;
 #[cfg(test)]
 mod tests;
+pub(crate) mod updates;
 
 use notifications::NotificationsPart;
 
@@ -105,8 +107,8 @@ pub struct EngineSettingsSource<C: CredentialStores> {
     inbox: mpsc::Receiver<Answer>,
     /// Notifications and Recent notifications.
     alerts: NotificationsPart<C>,
-    /// The panes this source does not answer for.
-    rest: Unwired,
+    /// About's Check now and Release channel: this PC's updater, where this build has one.
+    updates: Option<updates::UpdatesPart>,
 }
 
 /// What Beebeeb last said about where new files go.
@@ -169,8 +171,8 @@ pub fn version_words() -> String {
 
 /// About, from the build itself: the version (a release's number, else "test build"), the commit it was built from,
 /// and the revision of core this engine links. Nothing here is read from a file or the network, and none of it is a
-/// sample. No updater runs in this build, so the update check and the channel are left at their rest values and
-/// About does not draw them (`updates_available`).
+/// sample. The update check and the channel are left at their rest values here: the updater fills them where this
+/// build has one ([`updates::UpdatesPart::fill`]), and elsewhere About does not draw them (`updates_available`).
 pub fn build_about() -> About {
     let short = |full: &str| full.get(..7).unwrap_or(full).to_string();
     let version = match option_env!("BEEBEEB_RELEASE_VERSION").filter(|v| !v.is_empty()) {
@@ -288,6 +290,7 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
             }
         };
         let alerts = NotificationsPart::new(engine.clone(), identity, config.as_ref());
+        let updates = updates::UpdatesPart::for_this_pc(&engine, identity, config.as_ref());
         let (answers, inbox) = mpsc::channel();
         let mut source = Self {
             engine,
@@ -312,7 +315,7 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
             answers,
             inbox,
             alerts,
-            rest: Unwired,
+            updates,
         };
         if account_of(&source.engine).is_some() {
             source.read_region();
@@ -462,14 +465,20 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
         Self::answers_for(pane)
     }
 
-    /// Report a problem (DW-0782) is a dialog over General with no support bundle behind it yet.
+    /// Report a problem (DW-0782) is a dialog over General with no support bundle behind it yet. The channel menu
+    /// (DW-0789) needs an updater; the release notes (DW-0789b) also need a route for their "Restart to update",
+    /// which no press has yet.
     fn opens(&self, frame: &str) -> bool {
-        // The release notes and the channel menu need an updater, which this build does not have.
-        !matches!(frame, "DW-0782" | "DW-0789" | "DW-0789b")
+        match frame {
+            "DW-0782" | "DW-0789b" => false,
+            "DW-0789" => self.updates.is_some(),
+            _ => true,
+        }
     }
 
+    /// Where this build has an updater (a Windows release; a build that is not a release says it takes no updates).
     fn updates_available(&self) -> bool {
-        false
+        self.updates.is_some()
     }
 
     fn opened(&mut self, pane: Pane) {
@@ -608,7 +617,10 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
         let (changed, toast, busy) = self.alerts.pump();
         pumped.changed |= changed;
         pumped.toast = pumped.toast.or(toast);
-        pumped.busy = self.reading || self.writing || self.saving > 0 || waiting_to_say || busy;
+        let (updated, update_toast, updating) = self.updates.as_mut().map_or((false, None, false), |u| u.pump());
+        pumped.changed |= updated;
+        pumped.toast = pumped.toast.or(update_toast);
+        pumped.busy = self.reading || self.writing || self.saving > 0 || waiting_to_say || busy || updating;
         pumped
     }
 
@@ -623,8 +635,11 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
     fn mark_recent_seen(&mut self) {
         self.alerts.mark_recent_seen();
     }
+    /// Check now: the updater asks the release server, on its worker; About says Checking… until it answered.
     fn check_for_updates(&mut self) {
-        self.rest.check_for_updates();
+        if let Some(updates) = self.updates.as_mut() {
+            updates.check_now();
+        }
     }
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
         self.alerts.recent_alerts()
@@ -691,10 +706,17 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
     }
 
     fn about(&self) -> About {
-        build_about()
+        let mut about = build_about();
+        if let Some(updates) = &self.updates {
+            updates.fill(&mut about);
+        }
+        about
     }
+    /// Written to this PC's settings file; shown, and checked, once the file took it.
     fn set_channel(&mut self, channel: Channel) {
-        self.rest.set_channel(channel);
+        if let Some(updates) = self.updates.as_mut() {
+            updates.set_channel(channel);
+        }
     }
 
     fn general(&self) -> General {
@@ -743,5 +765,11 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
         let (release, held) = mpsc::channel();
         self.hold_next_write = Some(held);
         release
+    }
+
+    /// The updater part a test hands in (no test build has one of its own: `UpdatesPart::for_this_pc`).
+    pub(crate) fn with_updates(mut self, updates: Option<updates::UpdatesPart>) -> Self {
+        self.updates = updates;
+        self
     }
 }
