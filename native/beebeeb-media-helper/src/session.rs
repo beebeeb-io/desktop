@@ -8,7 +8,8 @@
 //!
 //! A bare audio stream (FLAC, MP3, ADTS, AIFF; [`crate::sniff`]) is known by its first bytes: its codec's route is
 //! checked first, and only then does FilmCraft's whole-file opener get the made-up name it picks a decoder by. AC-3
-//! has no such opener; its answer is the route table's. While a message is answered the [`Gate`] is open, so the
+//! has no such opener; its answer is the route table's. A bare stream on the system's route (ADTS AAC, E-AC-3) goes
+//! to the operating system's reader where it runs, which also describes it (FilmCraft has no decoder for it). While a message is answered the [`Gate`] is open, so the
 //! system decoder's own threads read only then.
 //!
 //! Never logs, never writes anything but protocol messages, holds no key, no name and no path.
@@ -26,10 +27,11 @@ use filmcraft_media::reader::{HEAD_LEN, read_range};
 use filmcraft_media::{FrameRequest, MediaError, SharedReader, SharedSource, VideoStreamInfo};
 
 use crate::decode::{display_size, mix_channels, scale_letterbox};
+use crate::mf::Unavailable;
 use crate::mf::gate::Gate;
 use crate::read::{PipeReader, ReadFlags, SharedWire, Wire, lock};
 use crate::routes::{Decision, Track, decide, is_reduced_quality, state_for};
-use crate::sniff::{Bare, sniff};
+use crate::sniff::{Bare, program_stream_mpeg_audio, sniff};
 use crate::system::{SystemOpen, SystemStreams};
 use crate::{ROUTES, Route, SYSTEM_FALLBACK, system, tags};
 
@@ -56,7 +58,8 @@ pub fn open_mp4(reader: PipeReader) -> Result<Mp4Source, CodecError> {
 }
 
 struct Playing {
-    source: SharedSource,
+    /// FilmCraft's source; `None` only for a bare stream that the system's decoder alone reads (row 14 of MCP2).
+    source: Option<SharedSource>,
     /// The video stream's own description: its frame rate is the clock of the frames (no direct dependency on the
     /// time crate: `frame_rate.sane().tick_of(n)` is all this needs).
     video: Option<VideoStreamInfo>,
@@ -185,16 +188,13 @@ fn open(
     // FilmCraft reads it whole and decodes it.
     let head = read_range(&*reader, 0, HEAD_LEN).map_err(|_| ErrorCode::ReadFailed)?;
     let bare = sniff(&head);
+    let program_layer = program_stream_mpeg_audio(&head);
     drop(head);
     if let Some(bare) = bare {
-        let track = Some(Track::of(table, bare.codec()));
-        let state = state_for(None, track, system_on, || system::availability(bare.codec()));
-        match decide(None, track, state) {
-            Decision::Ours(_) => {}
-            // Windows' reader over a bare elementary stream is not wired, and FilmCraft cannot describe one it has
-            // no decoder for: the honest answer for this helper.
-            Decision::System(_) => return Err(ErrorCode::NoSystemDecoder(bare.codec())),
-            Decision::Error(code) => return Err(code),
+        match bare_route(table, bare, system_on, || system::availability(bare.codec())) {
+            BareRoute::Ours => {}
+            BareRoute::System(codec) => return open_bare_on_system(&pipe, gate, flags, bare, codec),
+            BareRoute::Refused(code) => return Err(code),
         }
     }
     let source = match filmcraft_source(reader, bare) {
@@ -210,7 +210,9 @@ fn open(
         Some(v) => Some(track_of_video(table, &source, v, flags)?),
         None => None,
     };
-    let audio_track = info.audio().map(|a| Track::of_label(table, &a.codec));
+    let audio_track = info
+        .audio()
+        .map(|a| track_of_audio(table, &a.codec, &info.container, program_layer));
     let needs_codec = [video_track, audio_track]
         .into_iter()
         .flatten()
@@ -252,8 +254,7 @@ fn open(
         (Some(a), Some(codec)) => {
             let channels = a.channels.clamp(1, u32::from(MAX_CHANNELS)) as u16;
             let rate = a.sample_rate.clamp(1, MAX_RATE);
-            // Windows decodes HE-AAC in full; only FilmCraft plays it at its AAC-LC core.
-            let reduced = is_reduced_quality(&a.codec) && !on_system;
+            let reduced = reduced_quality(&a.codec, on_system);
             (Some(AudioInfo { rate, channels, codec }), reduced)
         }
         _ => (None, false),
@@ -290,7 +291,7 @@ fn open(
         None
     };
     let playing = Playing {
-        source,
+        source: Some(source),
         video: video.map(|(_, stream)| stream),
         // No audio stream at all when the file's sound does not play here.
         has_audio: audio.is_some(),
@@ -303,6 +304,90 @@ fn open(
         system,
     };
     Ok((playing, opened, tags))
+}
+
+/// Where a bare stream goes: FilmCraft's whole-file opener, the operating system's decoder, or a refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BareRoute {
+    Ours,
+    System(Codec),
+    Refused(ErrorCode),
+}
+
+/// The route of a bare stream of `bare`'s codec: the same decision as a file's audio-only track ([`decide`]), with
+/// `ask` (this process's Media Foundation) asked only when the switch is on and the codec needs the system's decoder.
+fn bare_route(
+    table: &[(Codec, Route)],
+    bare: Bare,
+    system_on: bool,
+    ask: impl FnOnce() -> Result<(), Unavailable>,
+) -> BareRoute {
+    let track = Some(Track::of(table, bare.codec()));
+    let state = state_for(None, track, system_on, ask);
+    match decide(None, track, state) {
+        Decision::Ours(_) => BareRoute::Ours,
+        Decision::System(plan) => BareRoute::System(plan.audio.unwrap_or(bare.codec())),
+        Decision::Error(code) => BareRoute::Refused(code),
+    }
+}
+
+/// A bare stream on the system's route (ADTS AAC or E-AC-3, with the switch on and Media Foundation running; row 14
+/// of MCP2): Windows' reader opens it over the same ranges and describes it, since FilmCraft has no decoder for it. A
+/// PC without that decoder answers `NoSystemDecoder(codec)` (the reader's own refusal), a stream Windows cannot read
+/// its code; nothing else does.
+fn open_bare_on_system(
+    pipe: &Arc<PipeReader>,
+    gate: &Arc<Gate>,
+    flags: &Arc<ReadFlags>,
+    bare: Bare,
+    codec: Codec,
+) -> Result<(Playing, Opened, Option<Tags>), ErrorCode> {
+    let system = SystemStreams::open(SystemOpen {
+        pipe,
+        gate,
+        flags,
+        container: bare.container(),
+        video: None,
+        audio: Some(codec),
+    })?;
+    let (rate, channels) = system.audio_format().ok_or(ErrorCode::NoSystemDecoder(codec))?;
+    let audio = AudioInfo {
+        rate: rate.clamp(1, MAX_RATE),
+        channels: channels.clamp(1, MAX_CHANNELS),
+        codec,
+    };
+    let duration_ms = system.duration_ms().unwrap_or(0);
+    let opened = Opened {
+        duration_ms,
+        video: None,
+        audio: Some(audio),
+        // The system's decoder decodes the whole stream (HE-AAC with its SBR).
+        reduced_quality: reduced_quality("", true),
+        no_sound: None,
+    };
+    let playing = Playing {
+        source: None,
+        video: None,
+        has_audio: true,
+        duration_ms,
+        video_index: 0,
+        audio_rate: audio.rate,
+        audio_origin_ms: 0,
+        audio_done: 0,
+        flags: flags.clone(),
+        system: Some(system),
+    };
+    let tags = tags::read(pipe.clone());
+    Ok((playing, opened, tags))
+}
+
+/// Whether the audio plays below the file's own quality here (`Opened::reduced_quality`, decision D-MED-7): HE-AAC
+/// that FilmCraft decodes, at its AAC-LC core (it decodes no SBR). Never on the system's decoder, which decodes HE-AAC
+/// in full (row 17 of MCP2). Only explicit signalling counts: FilmCraft's "HE-AAC" label (an MP4 whose
+/// AudioSpecificConfig says SBR or PS). HE-AAC that only a decoder finds (implicit SBR in ADTS, LATM or Matroska,
+/// labelled plain "AAC") is never guessed.
+fn reduced_quality(label: &str, on_system: bool) -> bool {
+    !on_system && is_reduced_quality(label)
 }
 
 /// FilmCraft's source over the app's ranges. A sniffed bare stream gets the name its whole-file opener picks a
@@ -337,6 +422,24 @@ fn refused_at_open(table: &[(Codec, Route)], system_on: bool) -> ErrorCode {
         Decision::Error(code) => code,
         Decision::Ours(_) | Decision::System(_) => ErrorCode::NoSystemDecoder(Codec::H264),
     }
+}
+
+/// FilmCraft's names for MPEG-TS and MPEG-PS (`Format::name` in filmcraft-mpegts).
+const PROGRAM_STREAMS: [&str; 4] = ["MPEG-2 TS", "MPEG-2 TS (BDAV/AVCHD)", "MPEG-1 System", "MPEG-2 PS"];
+
+/// The file's audio track for the decision. MPEG-TS and MPEG-PS name every MPEG audio layer "MPEG Audio", which reads
+/// as MP1/MP2; there the frame header in the file's first audio packets says the layer
+/// ([`program_stream_mpeg_audio`], row 15 of MCP2). Undetermined, it stays MP2 (both are FilmCraft's).
+fn track_of_audio(table: &[(Codec, Route)], label: &str, container: &str, program_layer: Option<Bare>) -> Track {
+    let track = Track::of_label(table, label);
+    if track.codec == Codec::Mp2
+        && label.eq_ignore_ascii_case("MPEG Audio")
+        && PROGRAM_STREAMS.contains(&container)
+        && program_layer == Some(Bare::Mp3)
+    {
+        return Track::of(table, Codec::Mp3);
+    }
+    track
 }
 
 /// The file's video track for the decision. FilmCraft's H.264 decoder checks the stream's parameters (interlaced,
@@ -383,6 +486,8 @@ fn want_video(p: &mut Playing, w: u32, h: u32) -> Result<FromHelper, ErrorCode> 
     }
     let frame = p
         .source
+        .as_ref()
+        .ok_or(ErrorCode::Internal)?
         .video_frame(FrameRequest::full(tick))
         .map_err(|e| map_error(&e, &p.flags))?;
     p.video_index += 1;
@@ -416,6 +521,8 @@ fn want_audio(p: &mut Playing, rate: u32, channels: u16, frames: u32) -> Result<
     let asked = frames.min(MAX_AUDIO_FRAMES) as usize;
     let buffer = p
         .source
+        .as_ref()
+        .ok_or(ErrorCode::Internal)?
         .audio(i64::try_from(start).unwrap_or(i64::MAX), asked, rate)
         .map_err(|e| map_error(&e, &p.flags))?;
     if buffer.frames() == 0 {
@@ -517,6 +624,150 @@ mod tests {
         assert_eq!(answer, Some(ErrorCode::TooLarge));
         let largest = reader.largest.load(Ordering::Relaxed);
         assert!(largest <= HEAD_LEN, "a read of {largest} bytes: more than the head");
+    }
+
+    /// Row 16 (MCP2): what row 19's open-time probe costs, per committed fixture: the first-frame decode of
+    /// `track_of_video`, timed around the function itself, three times each with a fresh source (the first is cold).
+    /// A measurement, not a gate: its numbers go to the branch notes. The lead's ruling: over 100 ms on any fixture,
+    /// the probe moves to the first play.
+    #[test]
+    #[ignore = "a measurement (row 16): cargo test --lib open_time_probe -- --ignored --nocapture"]
+    fn open_time_probe_cost_per_fixture() {
+        use std::time::Instant;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let manifest = std::fs::read_to_string(dir.join("manifest.tsv")).expect("the fixtures are committed");
+        let names: Vec<&str> = manifest
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| line.split('\t').next())
+            .collect();
+        assert_eq!(names.len(), 26, "the 26 fixture rows");
+        let mut probed = 0;
+        println!("file\topen ms\tprobe ms (3 runs)\twhat");
+        for name in names {
+            let bytes: Arc<[u8]> = std::fs::read(dir.join(name)).expect(name).into();
+            let mut runs = Vec::new();
+            let mut what = String::new();
+            let mut open_ms = 0.0;
+            for _ in 0..3 {
+                let reader: SharedReader = Arc::new(filmcraft_media::reader::MemReader(bytes.clone()));
+                let head = read_range(&*reader, 0, HEAD_LEN).expect("the head reads");
+                let started = Instant::now();
+                let source = match filmcraft_source(reader, sniff(&head)) {
+                    Ok(source) => source,
+                    Err(e) => {
+                        what = format!("refused at open ({:?})", map_error(&e, &ReadFlags::default()));
+                        break;
+                    }
+                };
+                open_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let Some(v) = source.info().video.clone() else {
+                    what = "no video: no probe".into();
+                    break;
+                };
+                let track = Track::of_label(ROUTES, &v.codec);
+                if track.route != Route::Rust || !SYSTEM_FALLBACK.contains(&track.codec) {
+                    what = format!("{:?} on {:?}: no probe", track.codec, track.route);
+                    break;
+                }
+                let started = Instant::now();
+                let probe = track_of_video(ROUTES, &source, &v, &ReadFlags::default());
+                runs.push(started.elapsed().as_secs_f64() * 1000.0);
+                what = format!("{} {}x{}: {probe:?}", v.codec, v.width, v.height);
+            }
+            if !runs.is_empty() {
+                probed += 1;
+            }
+            let runs: Vec<String> = runs.iter().map(|ms| format!("{ms:.1}")).collect();
+            println!("{name}\t{open_ms:.1}\t{}\t{what}", runs.join(" / "));
+        }
+        println!("probed: {probed} of 26");
+        assert!(probed >= 4, "the H.264 fixtures in MP4, Matroska and AVI are probed");
+    }
+
+    /// Row 14 (MCP2): a bare ADTS AAC or E-AC-3 stream goes to the system's decoder where it runs (it was refused
+    /// with `NoSystemDecoder` before); `NoSystemDecoder` / `NoSystemMedia` only where the system's decoder is not
+    /// there, and with the switch off Media Foundation is never asked.
+    #[test]
+    fn a_bare_system_stream_goes_to_the_system_decoder_where_it_runs() {
+        const TABLE: &[(Codec, Route)] = &[
+            (Codec::Aac, Route::System),
+            (Codec::Eac3, Route::System),
+            (Codec::Flac, Route::Rust),
+            (Codec::Ac3, Route::Unavailable),
+        ];
+        for bare in [Bare::Aac, Bare::Eac3] {
+            let codec = bare.codec();
+            assert_eq!(bare_route(TABLE, bare, true, || Ok(())), BareRoute::System(codec));
+            assert_eq!(
+                bare_route(TABLE, bare, true, || Err(Unavailable::NotHere)),
+                BareRoute::Refused(ErrorCode::NoSystemDecoder(codec))
+            );
+            assert_eq!(
+                bare_route(TABLE, bare, true, || Err(Unavailable::NoSystemMedia)),
+                BareRoute::Refused(ErrorCode::NoSystemMedia(codec))
+            );
+            assert_eq!(
+                bare_route(TABLE, bare, false, || panic!(
+                    "the switch is off: Media Foundation is never asked"
+                )),
+                BareRoute::Refused(ErrorCode::NoSystemDecoder(codec))
+            );
+        }
+        // FilmCraft's own codecs and the compiled-out ones never reach the system's decoder, and never ask.
+        assert_eq!(
+            bare_route(TABLE, Bare::Flac, true, || panic!("FilmCraft's own")),
+            BareRoute::Ours
+        );
+        assert_eq!(
+            bare_route(TABLE, Bare::Ac3, true, || panic!("not played here")),
+            BareRoute::Refused(ErrorCode::Unsupported(Codec::Ac3))
+        );
+    }
+
+    /// Row 17 (MCP2): HE-AAC is "reduced quality" only where FilmCraft decodes it and only from the explicit label;
+    /// on the system's decoder (the bare-stream path included) never.
+    #[test]
+    fn he_aac_is_reduced_only_on_filmcrafts_decoder_and_only_when_labelled() {
+        assert!(reduced_quality("HE-AAC", false));
+        assert!(!reduced_quality("HE-AAC", true));
+        for label in ["AAC", "AAC (ADTS)", "AAC (LATM)", "", "MP3"] {
+            assert!(!reduced_quality(label, false), "{label}");
+            assert!(!reduced_quality(label, true), "{label}");
+        }
+    }
+
+    /// Row 15 (MCP2): in MPEG-TS/PS an "MPEG Audio" track whose packets say Layer III is MP3; anywhere else, or
+    /// undetermined, the label's answer stands.
+    #[test]
+    fn mp3_in_a_transport_or_program_stream_reads_as_mp3() {
+        for container in PROGRAM_STREAMS {
+            let track = track_of_audio(ROUTES, "MPEG Audio", container, Some(Bare::Mp3));
+            assert_eq!(track.codec, Codec::Mp3, "{container}");
+            assert_eq!(track.route, Route::Rust);
+            let undetermined = track_of_audio(ROUTES, "MPEG Audio", container, None);
+            assert_eq!(undetermined.codec, Codec::Mp2, "{container}");
+            let layer2 = track_of_audio(ROUTES, "MPEG Audio", container, Some(Bare::Mp2));
+            assert_eq!(layer2.codec, Codec::Mp2, "{container}");
+        }
+        // Matroska, MP4 and AVI name MP3 apart: "MPEG Audio" there is Layer I/II, whatever bytes look like.
+        for container in ["Matroska", "MPEG-4", "AVI"] {
+            let track = track_of_audio(ROUTES, "MPEG Audio", container, Some(Bare::Mp3));
+            assert_eq!(track.codec, Codec::Mp2, "{container}");
+        }
+        // Other labels in a transport stream are untouched.
+        let aac = track_of_audio(ROUTES, "AAC (ADTS)", "MPEG-2 TS", Some(Bare::Mp3));
+        assert_eq!(aac.codec, Codec::Aac);
+        // FilmCraft's own names for the two committed MPEG-TS / MPEG-PS fixtures are the ones matched.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for name in ["h264-aac.ts", "mpeg2.mpg"] {
+            let bytes: Arc<[u8]> = std::fs::read(dir.join(name)).expect(name).into();
+            let source = filmcraft_source(Arc::new(filmcraft_media::reader::MemReader(bytes)), None)
+                .unwrap_or_else(|e| panic!("{name} opens: {e}"));
+            let container = source.info().container.clone();
+            assert!(PROGRAM_STREAMS.contains(&container.as_str()), "{name}: {container}");
+        }
     }
 
     /// Row 19 in MPEG-TS/PS: FilmCraft's own words for an H.264 stream its decoder refuses (as `h264_error` writes

@@ -56,6 +56,19 @@ impl Bare {
             Bare::Ac3 | Bare::Eac3 => None,
         }
     }
+
+    /// The stream's kind as a container name, for the operating system's reader when the stream goes there
+    /// (`crate::mf::convert::container_hint` turns it into a name hint).
+    pub fn container(self) -> &'static str {
+        match self {
+            Bare::Flac => "FLAC",
+            Bare::Mp2 | Bare::Mp3 => "MP3",
+            Bare::Aac => "ADTS",
+            Bare::Aiff => "AIFF",
+            Bare::Ac3 => "AC-3",
+            Bare::Eac3 => "E-AC-3",
+        }
+    }
 }
 
 /// The bare stream `head` (the file's first bytes) starts, or `None` for anything else (a container, or bytes this
@@ -219,6 +232,66 @@ fn mpeg_audio(head: &[u8]) -> Option<Bare> {
     Some(if first.layer == 3 { Bare::Mp3 } else { Bare::Mp2 })
 }
 
+/// The MPEG audio layer of an MPEG-TS or MPEG-PS file's audio, from its first bytes: FilmCraft names every layer
+/// "MPEG Audio" there, which reads as MP1/MP2 (row 15 of MCP2). Every MPEG audio PES packet (stream id `0xC0` to
+/// `0xDF`) that starts in `head` is read up to its first frame header. `Some(Bare::Mp3)` only when every one found is
+/// Layer III, `Some(Bare::Mp2)` when every one is Layer I or II; `None` when none is found or they disagree (the label's
+/// answer then stands). An ADTS AAC payload has layer `00` and is never counted.
+pub fn program_stream_mpeg_audio(head: &[u8]) -> Option<Bare> {
+    let mut layer3 = 0usize;
+    let mut layer12 = 0usize;
+    let mut at = 0usize;
+    while let Some(found) = head
+        .get(at..)?
+        .windows(4)
+        .position(|w| w[..3] == [0, 0, 1] && (0xC0..=0xDF).contains(&w[3]))
+    {
+        let start = at + found;
+        at = start + 4;
+        let Some(header) = pes_payload(head.get(start..)?).and_then(mpa_header) else {
+            continue;
+        };
+        if header.layer == 3 {
+            layer3 += 1;
+        } else {
+            layer12 += 1;
+        }
+    }
+    match (layer3, layer12) {
+        (0, 0) => None,
+        (_, 0) => Some(Bare::Mp3),
+        (0, _) => Some(Bare::Mp2),
+        _ => None,
+    }
+}
+
+/// The payload of the PES packet that starts `pes` (`00 00 01`, the stream id, the 16-bit length): after an MPEG-2
+/// header (ISO/IEC 13818-1 §2.4.3.6: its marker bits `10`, then its header length) or an MPEG-1 one (11172-1
+/// §2.4.3.3: stuffing, the optional buffer size, the time stamps). `None` for a header cut short or one that is
+/// neither.
+fn pes_payload(pes: &[u8]) -> Option<&[u8]> {
+    let flags = *pes.get(6)?;
+    if flags & 0xC0 == 0x80 {
+        let len = usize::from(*pes.get(8)?);
+        return pes.get(9 + len..);
+    }
+    let mut at = 6;
+    // At most 16 stuffing bytes.
+    while *pes.get(at)? == 0xFF && at < 6 + 16 {
+        at += 1;
+    }
+    if *pes.get(at)? & 0xC0 == 0x40 {
+        at += 2;
+    }
+    let skip = match *pes.get(at)? {
+        b if b & 0xF0 == 0x20 => 5,
+        b if b & 0xF0 == 0x30 => 10,
+        0x0F => 1,
+        _ => return None,
+    };
+    pes.get(at + skip..)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +424,60 @@ mod tests {
                 .collect();
             assert_eq!(sniff(&head), None, "random head starting {:02x?}", &head[..6]);
         }
+    }
+
+    /// One 188-byte transport stream packet that starts a PES packet (MPEG-2 header, a PTS) of `stream_id` whose
+    /// payload begins with `frame`.
+    fn ts_packet(stream_id: u8, frame: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0x47, 0x41, 0x01, 0x10];
+        packet.extend([0, 0, 1, stream_id, 0, 0, 0x84, 0x80, 5, 0x21, 0, 1, 0, 1]);
+        packet.extend(frame);
+        packet.resize(188, 0xFF);
+        packet
+    }
+
+    /// A program stream pack header (MPEG-1) and one PES packet (MPEG-1 header: two stuffing bytes, the buffer size,
+    /// a PTS) of `stream_id` whose payload begins with `frame`.
+    fn ps_pack(stream_id: u8, frame: &[u8]) -> Vec<u8> {
+        let mut pack = vec![0, 0, 1, 0xBA, 0x21, 0, 1, 0, 1, 0x80, 0, 1];
+        pack.extend([0, 0, 1, stream_id, 0, 0, 0xFF, 0xFF, 0x40, 0x20, 0x21, 0, 1, 0, 1]);
+        pack.extend(frame);
+        pack.resize(pack.len() + 400, 0);
+        pack
+    }
+
+    const MP3_HEADER: [u8; 4] = [0xFF, 0xFB, 0x90, 0x00];
+    const MP2_HEADER: [u8; 4] = [0xFF, 0xFD, 0xC4, 0x00];
+
+    /// Row 15 (MCP2): MP3 inside MPEG-TS/PS is told from MP2 by the frame header after the PES header; a head with no
+    /// MPEG audio packet, with ADTS in it, or with layers that disagree says nothing.
+    #[test]
+    fn the_layer_of_mpeg_audio_in_a_transport_or_program_stream_is_read() {
+        let mut ts = ts_packet(0xE0, &[0, 0, 0, 1, 0x67]);
+        ts.extend(ts_packet(0xC0, &MP3_HEADER));
+        ts.extend(ts_packet(0xC0, &MP3_HEADER));
+        assert_eq!(program_stream_mpeg_audio(&ts), Some(Bare::Mp3));
+        assert_eq!(
+            program_stream_mpeg_audio(&ts_packet(0xC1, &MP2_HEADER)),
+            Some(Bare::Mp2)
+        );
+        assert_eq!(program_stream_mpeg_audio(&ps_pack(0xC0, &MP3_HEADER)), Some(Bare::Mp3));
+        assert_eq!(program_stream_mpeg_audio(&ps_pack(0xC0, &MP2_HEADER)), Some(Bare::Mp2));
+
+        let mut mixed = ts_packet(0xC0, &MP3_HEADER);
+        mixed.extend(ts_packet(0xC1, &MP2_HEADER));
+        assert_eq!(program_stream_mpeg_audio(&mixed), None, "two streams that disagree");
+        // ADTS AAC in the same stream ids (ffmpeg puts it in 0xC0): layer 00, not MPEG audio.
+        let adts = [0xFF, 0xF1, 0x50, 0x80, 0x2E, 0x7F, 0xFC];
+        assert_eq!(program_stream_mpeg_audio(&ts_packet(0xC0, &adts)), None);
+        // Video only, a PES header cut short, nothing at all.
+        assert_eq!(program_stream_mpeg_audio(&ts_packet(0xE0, &MP3_HEADER)), None);
+        assert_eq!(program_stream_mpeg_audio(&[0, 0, 1, 0xC0, 0, 0, 0x84]), None);
+        assert_eq!(program_stream_mpeg_audio(&[]), None);
+        // The packet's PES header is skipped by its own length: a header that does not end where it says is no frame.
+        let mut wrong = ts_packet(0xC0, &MP3_HEADER);
+        wrong[12] = 9;
+        assert_eq!(program_stream_mpeg_audio(&wrong), None);
     }
 
     #[test]

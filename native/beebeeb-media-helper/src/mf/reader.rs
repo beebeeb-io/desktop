@@ -15,15 +15,15 @@ use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFMediaBuffer, IMFMediaSource, IMFMediaType, IMFSample, IMFSourceReader, MF_MT_AUDIO_NUM_CHANNELS,
     MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
     MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_MT_VIDEO_NOMINAL_RANGE,
-    MF_MT_VIDEO_ROTATION, MF_MT_YUV_MATRIX, MF_OBJECT_TYPE,
+    MF_MT_VIDEO_ROTATION, MF_MT_YUV_MATRIX, MF_OBJECT_TYPE, MF_PD_DURATION,
     MF_RESOLUTION_CONTENT_DOES_NOT_HAVE_TO_MATCH_EXTENSION_OR_MIME_TYPE, MF_RESOLUTION_MEDIASOURCE, MF_RESOLUTION_READ,
     MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-    MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+    MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
     MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
     MFAudioFormat_Float, MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_NV12, MFVideoFormat_P010,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
-use windows::Win32::System::Variant::VT_I8;
+use windows::Win32::System::Variant::{VT_I8, VT_UI8};
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::core::{GUID, IUnknown, Interface, PCWSTR};
 
@@ -43,6 +43,7 @@ use crate::system::refusal;
 const FIRST_VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 const FIRST_AUDIO: u32 = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
 const ALL_STREAMS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
+const MEDIA_SOURCE: u32 = MF_SOURCE_READER_MEDIASOURCE.0 as u32;
 const FLAG_ERROR: u32 = MF_SOURCE_READERF_ERROR.0 as u32;
 const FLAG_END: u32 = MF_SOURCE_READERF_ENDOFSTREAM.0 as u32;
 const FLAG_TYPE_CHANGED: u32 = MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32;
@@ -416,6 +417,25 @@ impl SystemAudio {
 
     fn fail(&self, e: windows::core::Error) -> ErrorCode {
         code_of(&e, self.codec, &self.flags)
+    }
+
+    /// The decoder's own rate and channels (what `Opened` says when Windows describes the file: row 14 of MCP2).
+    pub fn format(&self) -> (u32, u16) {
+        (self.rate, self.channels)
+    }
+
+    /// The file's duration as Windows' reader gives it (`MF_PD_DURATION`), when it knows it.
+    pub fn duration_ms(&self) -> Option<u64> {
+        // SAFETY: a plain attribute read of the reader's media source. The variant is read as a 64-bit unsigned
+        // integer only when its tag says it is one, and that kind owns nothing to free.
+        unsafe {
+            let value = self
+                .reader
+                .GetPresentationAttribute(MEDIA_SOURCE, &MF_PD_DURATION)
+                .ok()?;
+            let inner = &*value.Anonymous.Anonymous;
+            (inner.vt == VT_UI8).then(|| pts_ms(i64::try_from(inner.Anonymous.uhVal).unwrap_or(i64::MAX)))
+        }
     }
 
     /// One more decoded sample into the resampler, or the end of the stream.

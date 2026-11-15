@@ -243,6 +243,10 @@ pub fn container_hint(container: &str) -> &'static str {
         "media.ts"
     } else if has(&["adts"]) {
         "media.aac"
+    } else if has(&["e-ac-3", "e-ac3", "eac3"]) {
+        "media.ec3"
+    } else if has(&["ac-3", "ac3"]) {
+        "media.ac3"
     } else if has(&["3gp"]) {
         "media.3gp"
     } else {
@@ -474,6 +478,9 @@ mod tests {
         assert_eq!(container_hint("Matroska"), "media.mkv");
         assert_eq!(container_hint("AVI"), "media.avi");
         assert_eq!(container_hint("ADTS"), "media.aac");
+        // Row 14 (MCP2): a bare E-AC-3 / AC-3 stream's hint.
+        assert_eq!(container_hint("E-AC-3"), "media.ec3");
+        assert_eq!(container_hint("AC-3"), "media.ac3");
         assert_eq!(container_hint(""), "media.mp4");
     }
 }
