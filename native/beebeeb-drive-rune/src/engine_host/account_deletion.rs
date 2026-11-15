@@ -156,7 +156,13 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         ) {
             return None;
         }
-        Some(PaneState::Unwired)
+        Some(if !self.engine.has_session() {
+            PaneState::SignedOut
+        } else if self.refused() {
+            PaneState::SessionEnded
+        } else {
+            PaneState::Ready
+        })
     }
 
     /// The step-up of [`Purpose::DeleteAccount`]: the password is proven now and kept (see the module's doc).

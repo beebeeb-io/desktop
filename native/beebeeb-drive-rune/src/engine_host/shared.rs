@@ -591,7 +591,11 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
 /// A with-me row whose id the engine named as kept on this PC is drawn as available offline; every other row stays
 /// "no claim". Nothing here reads anything: the set is the engine's answer.
 pub(crate) fn mark_kept(held: &mut Held, kept: &HashSet<String>) {
-    let _ = (held, kept);
+    for row in &mut held.with_me {
+        if kept.contains(&row.id) {
+            row.pc = Some(PcState::AvailableOffline);
+        }
+    }
 }
 
 /// The engine's overview as the view's lists. Nothing here reads anything.

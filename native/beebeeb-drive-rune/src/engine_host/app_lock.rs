@@ -324,6 +324,7 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
         // cancel no answer of it is taken in (`take_in`), so nothing else would free the switch.
         if let Some(cancel) = self.prompt.take() {
             cancel();
+            self.changing = None;
         }
     }
 
