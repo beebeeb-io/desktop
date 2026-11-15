@@ -384,12 +384,13 @@ fn file_row_full(
             col()
                 .key(format!("{k}-upload"))
                 .w(COL_DATE_W + COL_GAP + COL_SIZE_W)
-                .gap(3.0)
+                .gap(4.0)
                 .child(
                     kit::label(
                         format!("{k}-upload-words"),
                         words.clone(),
-                        TWO_VERSIONS,
+                        // As the words of a copy on its way down (`keeping::progress`): the board's 11 pt caption.
+                        type_::CAPTION.lh(13.5),
                         t.text_secondary,
                     )
                     .truncate(),
