@@ -7,22 +7,30 @@ use super::{Cell, CellText, SheetView};
 /// The file's name on the board.
 pub const FILE_NAME: &str = "Budget 2026.xlsx";
 
-/// Column widths in points: A is the category, B the amount, the rest are the sheet's empty columns.
-const COL_WIDTHS: [f32; 6] = [188.0, 112.0, 96.0, 96.0, 96.0, 96.0];
-/// Row heights in points: 24 for the header row, 22 for the rest.
-const ROW_HEIGHT: f32 = 22.0;
-const ROWS: usize = 16;
+/// Column widths in points: the board's eight columns (`SH_COLS`, A to H), 118 wide each.
+const COL_WIDTHS: [f32; 8] = [118.0; 8];
+/// Row height in points: the board's 24 for every row, header row included.
+const ROW_HEIGHT: f32 = 24.0;
+/// The board draws 19 rows (`Array.from({ length: 19 })`).
+const ROWS: usize = 19;
 
-/// The eight lines of the budget: B2:B9 sum to 13,220, average 1,652.50, count 8 (the board's status line).
-const LINES: [(&str, &str); 8] = [
-    ("Rent", "3,600"),
-    ("Studio", "2,400"),
-    ("Software", "1,850"),
-    ("Travel", "1,500"),
-    ("Equipment", "1,280"),
-    ("Insurance", "1,120"),
-    ("Accountant", "900"),
-    ("Other", "570"),
+/// The board's `SH_DATA`, row by row, exactly: the header row, the eight items, the total, an empty row, the budget
+/// and what is left. Q1's eight items (B2:B9) are selected; B10 holds their sum, 13,220 (the status line computes
+/// Sum, Average and Count from the selection; they are never typed in).
+const DATA: [&[&str]; 13] = [
+    &["Item", "Q1", "Q2", "Q3", "Total"],
+    &["Studio rent", "4,200", "4,200", "4,200", "12,600"],
+    &["Equipment", "3,150", "820", "1,940", "5,910"],
+    &["Travel", "640", "1,880", "2,410", "4,930"],
+    &["Software", "410", "410", "455", "1,275"],
+    &["Insurance", "1,120", "0", "0", "1,120"],
+    &["Freelancers", "2,800", "3,600", "5,150", "11,550"],
+    &["Prints and frames", "380", "0", "1,260", "1,640"],
+    &["Marketing", "520", "640", "700", "1,860"],
+    &["Total", "13,220", "11,550", "16,115", "40,885"],
+    &[],
+    &["Budget", "14,000", "14,000", "16,000", "44,000"],
+    &["Left", "780", "2,450", "\u{2212}115", "3,115"],
 ];
 
 fn text(row: u32, col: u32, text: &str, right_aligned: bool, bold: bool) -> CellText {
@@ -37,17 +45,15 @@ fn text(row: u32, col: u32, text: &str, right_aligned: bool, bold: bool) -> Cell
 
 /// The board's workbook as a [`SheetView`].
 pub fn board() -> SheetView {
-    let mut cells = vec![
-        text(0, 0, "Category", false, true),
-        text(0, 1, "Planned (EUR)", true, true),
-    ];
-    for (i, (name, amount)) in LINES.iter().enumerate() {
-        let row = i as u32 + 1;
-        cells.push(text(row, 0, name, false, false));
-        cells.push(text(row, 1, amount, true, false));
+    let mut cells = Vec::new();
+    for (r, line) in DATA.iter().enumerate() {
+        for (c, word) in line.iter().enumerate() {
+            // The board: the header row and the total row are 600; the figures (every column after A, below the
+            // header) sit right.
+            let bold = r == 0 || r == 9;
+            cells.push(text(r as u32, c as u32, word, c > 0 && r > 0, bold));
+        }
     }
-    cells.push(text(9, 0, "Total", false, true));
-    cells.push(text(9, 1, "13,220", true, true));
     SheetView {
         tabs: vec!["2026".into(), "2025".into(), "Notes".into()],
         active: 0,
@@ -59,7 +65,8 @@ pub fn board() -> SheetView {
         // B10.
         current: Cell { row: 9, col: 1 },
         formula: "=SUM(B2:B9)".into(),
-        frozen: (1, 0),
+        // The board draws no frozen line.
+        frozen: (0, 0),
         merges: Vec::new(),
     }
 }
