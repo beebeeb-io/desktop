@@ -651,12 +651,12 @@ fn is_long_hex(core: &str) -> bool {
     !core.starts_with("0x") && core.len() >= 16 && core.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// A long run of letters, digits and `+_-=` with both letters and digits in it: the shape of a token.
 fn is_secret(core: &str) -> bool {
-    let tokenish = core.len() >= 20
+    core.len() >= 20
         && core.bytes().all(|b| b.is_ascii_alphanumeric() || b"+_-=".contains(&b))
         && core.bytes().any(|b| b.is_ascii_digit())
-        && core.bytes().any(|b| b.is_ascii_alphabetic());
-    tokenish
+        && core.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
 /// Three or more dot-separated base64url parts: the shape of a JWT.
