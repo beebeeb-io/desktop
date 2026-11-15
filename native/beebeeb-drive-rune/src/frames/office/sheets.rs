@@ -406,7 +406,7 @@ fn grid(view: &SheetView, t: &Theme) -> El {
                 .w(*w)
                 .h(HEADER_H)
                 .center()
-                .fill(t.surface)
+                .fill(t.selection)
                 .border_sides([0.0, kit::HAIR, kit::HAIR, 0.0], t.separator)
                 .border_layout()
                 .child(fitted(
