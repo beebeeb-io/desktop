@@ -24,14 +24,17 @@
 //!
 //! Mutants: M1 no candidate at `account_binding::adopt_unbound`; M2' a Windows start that may reset (the start's
 //! bind with `reset_allowed` true AND `LocalState::reset` answering `Ok(())`); M3 `close_adoption_window` a no-op;
-//! M4'' the start's two identity checks removed; M5 the bind after the registration.
+//! M5 the bind after the registration.
 
 mod common;
 
 // The three `#[ignore = "upgrade gap: …"]` tests need an adoption the native start does not make yet:
 // `LocalState::for_engine_start` shuts the adoption window at every start that binds, and nothing calls
 // `account_binding::adopt_unbound`, so a 0.8.25 PC's unowned queue is "no recorded account" and Windows refuses it.
-// An ignored test is not a pass: `-- --include-ignored` runs them.
+// An ignored test is not a pass: `-- --include-ignored` runs them. The fix (the candidate is whose vault key the store
+// holds at the first native startup, the window shuts at that startup, the start adopts for that candidate) makes them
+// pass. Here the store is written by a native handle that restores BEFORE the 0.8.25 `state.db` is put in place, so
+// the first startup that finds the release's `state.db` is the upgraded app's.
 
 /// Rule 1: the store holds A's complete session and the 0.8.25 data has no owner. A's first start keeps
 /// everything: `Started`, A recorded as the owner, the due operation still queued, every local file still there.
@@ -39,6 +42,7 @@ mod common;
 /// Mutant M1 (no candidate at `account_binding.rs:225`): owner `None`, the start refused.
 #[cfg(not(target_os = "macos"))]
 #[test]
+// un-ignore at CP1 with A2
 #[ignore = "upgrade gap: the native start shuts the adoption window and adopts nobody"]
 fn an_upgraded_pc_keeps_its_queue_for_the_account_whose_session_it_held() {
     in_own_process(
@@ -78,6 +82,7 @@ fn an_upgraded_pc_keeps_its_queue_for_the_account_whose_session_it_held() {
 /// `Ok(())`): B's start runs and B becomes the owner.
 #[cfg(not(target_os = "macos"))]
 #[test]
+// un-ignore at CP1 with A2
 #[ignore = "upgrade gap: the native start shuts the adoption window and adopts nobody"]
 fn another_account_on_an_upgraded_pc_is_refused_and_takes_nothing() {
     in_own_process("another_account_on_an_upgraded_pc_is_refused_and_takes_nothing", || {
@@ -199,11 +204,8 @@ fn no_vault_key_no_adoption_and_the_window_shuts_after_the_first_start() {
 
 /// Rule 4: the store holds a token and a key but NO email and no owner tags (a session stored before the email was
 /// kept), and the new handle has no cached profile. Open + restore + start: the start is refused with
-/// `IdentityUnknown`, nothing is adopted, nothing is purged, no engine exists.
-/// Mutant M4'' (the start's own `!identity.is_known()` refusal AND `decide`'s `Refuse` for an unknown session both
-/// removed): the unowned data is then "another account's" and the start answers `OtherAccountsData`. An adoption that
-/// accepts an unknown identity cannot turn this red: the start refuses before it binds, and an unknown identity
-/// records no owner field.
+/// `IdentityUnknown`, nothing is adopted, nothing is purged, no engine exists. An unknown identity stays refused with
+/// `IdentityUnknown`: it is never compared with, adopted into or reset against anything.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn an_unidentified_session_adopts_nothing() {
@@ -239,6 +241,7 @@ fn an_unidentified_session_adopts_nothing() {
 /// Mutant M5 (the bind after `port.register`): the failed registration comes first and nobody is recorded.
 #[cfg(not(target_os = "macos"))]
 #[test]
+// un-ignore at CP1 with A2
 #[ignore = "upgrade gap: the native start shuts the adoption window and adopts nobody"]
 fn the_adoption_happens_in_the_start_before_any_engine() {
     in_own_process("the_adoption_happens_in_the_start_before_any_engine", || {
