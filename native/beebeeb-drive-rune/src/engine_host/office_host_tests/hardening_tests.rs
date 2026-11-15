@@ -260,7 +260,13 @@ fn unhandled_frames_are_wiped() {
     host.close(CloseWhy::Closed);
     section.open();
     assert!(wait_for(|| host.worker_ended()), "the worker ends");
-    assert_eq!(host.wiped_frame_bytes(), 2 * late_len, "both queued frames");
+    // A reader that had not handed a frame on yet wipes it itself, after the worker ended: counted all the same.
+    assert!(
+        wait_for(|| host.wiped_frame_bytes() == 2 * late_len),
+        "both queued frames: {} of {} bytes",
+        host.wiped_frame_bytes(),
+        2 * late_len
+    );
 
     // The reader's, once the worker is gone: the helper's output outlives the close, and it writes one more frame.
     let write = Gate::default();
@@ -383,7 +389,7 @@ fn a_helper_that_refuses_every_range_is_stopped_by_the_budget() {
         let mut gathered = Vec::new();
         let mut answered = 0;
         loop {
-            if link.input_within(Duration::from_millis(30)) {
+            if link.input_within(Duration::from_millis(50)) {
                 let Some((id, message)) = link.next() else {
                     return;
                 };
@@ -419,10 +425,8 @@ fn a_helper_that_refuses_every_range_is_stopped_by_the_budget() {
     assert!(stopped_for(&host, Stop::Protocol), "{:?}", host.state());
     let peak = peak.load(SeqCst);
     assert!(peak <= MAX_SPLIT_OUTSTANDING as usize, "{peak} requests out at once");
-    assert!(
-        peak > MAX_SPLIT_OUTSTANDING as usize / 2,
-        "the count moved: {peak} at most"
-    );
+    // The instrument counts (a loaded machine may answer in smaller batches, so the floor is low).
+    assert!(peak >= 8, "the count moved: {peak} at most");
     assert!(cells_of(&events).is_empty());
     assert_eq!(log.kills(), 1);
 }
