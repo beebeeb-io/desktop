@@ -78,7 +78,14 @@ fn wait(rx: &mpsc::Receiver<HelloResult>, request: &HelloRequest, cancel_after: 
                 return result;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            // `start` answers exactly once; a sender that went without an answer is a failure of the module.
+            // After the probe's own cancel no answer is handed out (the cancel contract, `hello::HelloCancel`): the
+            // sender goes unanswered, and the prompt was taken away.
+            Err(mpsc::RecvTimeoutError::Disconnected) if cancelled => {
+                linger(Duration::from_secs(3));
+                return HelloResult::Cancelled;
+            }
+            // Before a cancel, `start` answers exactly once; a sender that went without an answer is a failure of the
+            // module.
             Err(mpsc::RecvTimeoutError::Disconnected) => return HelloResult::Failed,
         }
         if !cancelled && cancel_after.is_some_and(|after| started.elapsed() >= after) {
