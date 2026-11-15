@@ -73,7 +73,7 @@ The board's group "First run on Windows", 11 frames, in the same 960 x 640 windo
 
 | Frame | What | State |
 | --- | --- | --- |
-| DW-0201 | Step 1: add a passkey | built, 0 |
+| DW-0201 | Step 1: add a passkey | built; **deviation (D-P40-5, owner ruling: a passkey change proves the password)**: the step draws three things the board does not: the password field (Settings › Passkeys' field and words), "Add a passkey" busy while Windows' dialog is open (no words: Settings › Passkeys has none for it), and one refusal line in Settings › Passkeys' words (wrong password, cancelled dialog, offline, and the rest); the field moves the buttons down. `expected-red` on DW-0201 until the board draws all three: board, please draw them |
 | DW-0202 | Step 2: app lock, lock again after | built, 0 |
 | DW-0203 | Step 3: back up the six known folders | built, 0 |
 | DW-0204 | Step 4: thumbnails and previews (sample, size, format, space) | built, 0 |
