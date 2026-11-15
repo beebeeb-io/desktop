@@ -1,8 +1,9 @@
 #!/bin/sh
 # D-P3-1: every crate that reaches core (src-tauri, windows, crates/beebeeb-engine, and the native Rune app through
 # its lock) pins the SAME core rev, and no other one.
-# Core main abf4e5d (0.3.0 unreleased: chunk format v2 and the two-level lock, adopted on v2-native; a release waits
-# for task 2376); was 56cd54f (core main before the lock),
+# Core main 7d5b5f9 (0.3.0 unreleased: chunk format v2, the two-level lock and its app lock, adopted on v2-native; a
+# release waits for task 2376); was abf4e5d (the two-level lock before round 3 and app lock), 56cd54f (core main
+# before the lock),
 # v0.2.8 = f76ccfc (desktop v2, batch V028), v0.2.5 = f9257d7 (LD-0139), v0.2.3 = df93011,
 # v0.2.2 = 2d89adc, v0.2.1 = a5413d2, v0.2.0 = 3db0cc2.
 #
@@ -12,7 +13,7 @@
 #                                             each case run as its own process, as CI runs it
 # Every refusal prints one line and exits 1; a pass prints one line and exits 0.
 set -eu
-want=abf4e5d06f00cf66f5e00da3e622a001de50dd6b
+want=7d5b5f97892bb10cd027c0285fdc6af00476140b
 
 refuse() { echo "$1"; exit 1; }
 

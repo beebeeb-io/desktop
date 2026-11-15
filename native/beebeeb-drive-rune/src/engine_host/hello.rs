@@ -12,6 +12,8 @@ use crate::shell::platform::windows_hello::{self, HelloWindow};
 
 /// The line Windows shows in its prompt (DW-0009: "Unlock Beebeeb").
 const REASON: &str = "Unlock Beebeeb";
+/// The line for the proof that turns app lock off (Sign-in and security).
+pub const TURN_APP_LOCK_OFF: &str = "Turn off app lock for Beebeeb";
 
 /// Runs once with how the prompt ended, on the prompt's own thread.
 pub type HelloDone = Box<dyn FnOnce(HelloResult) + Send>;
@@ -27,12 +29,18 @@ pub trait HelloPrompter: Send {
 /// The prompt owned by the main window. Off Windows, and before the window has a native handle: `Err`.
 pub struct WindowHello {
     window: Arc<Mutex<Option<rune::WindowHandle>>>,
+    reason: &'static str,
 }
 
 impl WindowHello {
     /// `window`: the shell's slot for the main window's native handle (`shell::host::Wiring::window`).
     pub fn new(window: Arc<Mutex<Option<rune::WindowHandle>>>) -> Self {
-        Self { window }
+        Self::for_reason(window, REASON)
+    }
+
+    /// The prompt with its own line (`reason`, one of this file's constants).
+    pub fn for_reason(window: Arc<Mutex<Option<rune::WindowHandle>>>, reason: &'static str) -> Self {
+        Self { window, reason }
     }
 }
 
@@ -45,7 +53,7 @@ impl HelloPrompter for WindowHello {
             .as_ref()
             .and_then(HelloWindow::of)
             .ok_or(())?;
-        let request = windows_hello::start(window, REASON, done).ok_or(())?;
+        let request = windows_hello::start(window, self.reason, done).ok_or(())?;
         Ok(Box::new(move || request.cancel()))
     }
 }

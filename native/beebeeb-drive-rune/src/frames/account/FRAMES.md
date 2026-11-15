@@ -56,6 +56,12 @@ of a list read before a sign-out); the rest says so.
 | `DW-S03` | App lock's delay menu, open (was DW-0716). | built (light and dark: 0 failing on all six lines) |
 | `DW-S03b` | App lock off: no time choice (was DW-0716b). | built (light and dark: 0 failing on all six lines) |
 
+Deviation (lane, 2026-11-15): on the real engine App lock's switch is bound (core's `lock.app_lock`; off asks Windows
+Hello first) but its delay is not: the away lock that "locks again after" sets has no idle timer in this version. So
+the running app draws the row ON as "Lock Beebeeb · Windows Hello" with the switch and NO time choice (never a delay
+nothing acts on), and Setup's step 2 draws no "Lock again after" row. The board's frames (`DW-S03`, `DW-S03b`,
+`DW-0202`) keep theirs and still gate at 0. Ends when the away lock lands.
+
 Decision (lane, 2026-11-13): DW-A52, DW-A84, DW-A84a, DW-A57, DW-A57a, DW-0716 and DW-0716b are retired by the
 owner's ruling of 2026-11-13 (option C of three rendered options: one page), because the two screens listed the
 same subjects twice and the pane was a menu that said nothing about the account's state. The ruling wins over the

@@ -131,7 +131,7 @@ impl PurgeFake {
 }
 
 /// Pump until nothing is on its way; every purge end and notice told on the way.
-fn settle_purge(source: &mut EngineTrashSource<MemoryCredentials>) -> (Vec<PurgeEnd>, Vec<Notice>) {
+pub(super) fn settle_purge(source: &mut EngineTrashSource<MemoryCredentials>) -> (Vec<PurgeEnd>, Vec<Notice>) {
     let began = Instant::now();
     let (mut ends, mut notices) = (Vec::new(), Vec::new());
     loop {

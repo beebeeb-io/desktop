@@ -25,6 +25,7 @@ use super::*;
 use crate::State;
 use crate::shell::app::Section;
 
+mod count;
 mod purge;
 mod session;
 
@@ -52,6 +53,8 @@ struct Fake {
     list_mode: Arc<AtomicU8>,
     /// How a restore answers.
     restore_mode: Arc<AtomicU8>,
+    /// How the count (`GET /api/v1/files/count`) answers.
+    count_mode: Arc<AtomicU8>,
     /// How long the listing waits before it answers (with what Beebeeb held when it was asked), in ms.
     list_delay_ms: Arc<AtomicU64>,
     /// The next restore request says on the first that it reached the fake, then waits on the second before
@@ -86,6 +89,8 @@ fn fake(tag: &str) -> Fake {
         Arc::new(AtomicU64::new(0)),
     );
     let (list_in, restore_in, delay_in) = (list_mode.clone(), restore_mode.clone(), list_delay_ms.clone());
+    let count_mode = Arc::new(AtomicU8::new(ANSWER));
+    let count_in = count_mode.clone();
     let restore_hold = RestoreHold::default();
     let hold_in = restore_hold.clone();
     let purge = purge::PurgeFake::new(first.clone());
@@ -103,6 +108,22 @@ fn fake(tag: &str) -> Fake {
         };
         let rest = if theirs { &two } else { &one };
         let restoring = route.starts_with("POST /api/v1/files/") && route.ends_with("/restore");
+        if route == "GET /api/v1/files/count" {
+            match count_in.load(Ordering::SeqCst) {
+                SERVER_ERROR => return Reply::json(500, json!({ "error": "a server body" })),
+                SESSION_ENDED => return Reply::json(401, json!({ "error": "a server body" })),
+                _ => {}
+            }
+            // The server counts the same set its Trash listing returns, for the account whose token this is.
+            let mut as_listing = req.clone();
+            as_listing.path = "/api/v1/files?trashed=true".into();
+            let body: Value = serde_json::from_slice(&rest(&as_listing).body).expect("the fake's listing");
+            let trashed = purge_in.without_purged(&body["items"]).as_array().map_or(0, Vec::len);
+            return Reply::ok(json!({
+                "total_files": 40, "total_folders": 2, "total_bytes": 1,
+                "trashed_files": trashed, "trashed_bytes": 1
+            }));
+        }
         if !is_listing(req) && !restoring {
             return rest(req);
         }
@@ -147,6 +168,7 @@ fn fake(tag: &str) -> Fake {
         second_phrase,
         list_mode,
         restore_mode,
+        count_mode,
         list_delay_ms,
         restore_hold,
         purge,
@@ -254,7 +276,7 @@ fn the_trash_is_the_accounts_newest_deleted_first_with_names_decrypted_in_the_en
             size: crate::source::format_size(1_153_434 + 2_097_152),
         }
     );
-    assert_eq!(source.count(), None, "no badge: the engine has no count call");
+    assert_eq!(source.count(), Some(3), "the badge is the server's number");
     assert!(!source.actions_available());
     assert_eq!(source.emptying(), None);
 
@@ -521,10 +543,13 @@ fn the_window_shows_no_name_of_a_locked_session_or_of_the_account_before() {
     poll(&mut rt);
     let seen = words(&rt);
     assert!(seen.contains("Invented contract.pdf"), "the Trash is drawn: {seen}");
-    assert!(
-        !rt.elements().iter().any(|e| e.key.as_deref() == Some("Trash-badge")),
-        "no badge from the engine"
-    );
+    let badge = |rt: &Runtime<State>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("Trash-badge"))
+            .and_then(|e| e.text)
+    };
+    assert_eq!(badge(&rt).as_deref(), Some("3"), "the badge is the server's count");
 
     let _ = engine.lock();
     poll(&mut rt);
@@ -533,6 +558,7 @@ fn the_window_shows_no_name_of_a_locked_session_or_of_the_account_before() {
         assert!(!seen.contains(name), "{name} is still drawn after the lock");
     }
     assert!(seen.contains("Signed out"), "the signed-out state is drawn: {seen}");
+    assert_eq!(badge(&rt), None, "no badge for a locked session");
 
     engine.sign_out_keeping_local_data().expect("signed out");
     sign_in(&engine, &fake.second, &fake.second_phrase);
@@ -552,6 +578,7 @@ fn the_window_shows_no_name_of_a_locked_session_or_of_the_account_before() {
         seen.contains("Second account budget.xlsx"),
         "the second account's Trash: {seen}"
     );
+    assert_eq!(badge(&rt).as_deref(), Some("1"), "the second account's own count");
 }
 
 #[test]

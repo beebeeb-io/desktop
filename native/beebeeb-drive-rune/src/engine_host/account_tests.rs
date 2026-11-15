@@ -21,6 +21,8 @@ use zeroize::Zeroizing;
 
 use super::*;
 
+#[path = "app_lock_tests.rs"]
+mod app_lock;
 #[path = "account_bound_tests.rs"]
 mod bound;
 #[path = "account_tests_engine.rs"]

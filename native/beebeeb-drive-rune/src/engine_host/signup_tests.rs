@@ -13,6 +13,7 @@ use std::time::Instant;
 use beebeeb_engine::app::EngineConfig;
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
+use beebeeb_engine::keychain::{AuthSecretStore, LockFlag};
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::test_api::fake_signup::{
     self as fake_signup, CODE, FakeSignup, OPEN, WEB_ONLY_CALLS, WEB_ONLY_DOCUMENT, signup_handler,
@@ -140,6 +141,9 @@ fn typed(words: &[String]) -> Vec<&str> {
 fn an_account_is_created_and_signed_in_through_every_step_of_the_screens() {
     let server = server(OPEN);
     let (engine, mut source, store) = source_on(&server);
+    // An earlier account's app lock left off by a sign-out cut short: it never reaches the new account.
+    let slot = store.store_for("signup-test-slot");
+    slot.save_lock_flag(LockFlag::AppLock, b"0").unwrap();
     assert!(source.sign_up_available());
     assert_eq!(source.gate(), GateState::SignedOut);
 
@@ -211,6 +215,8 @@ fn an_account_is_created_and_signed_in_through_every_step_of_the_screens() {
     assert_eq!(server.state.terms_accepted.load(Ordering::SeqCst), 1);
     assert!(store.len() >= 2, "the session and the key are in the credential store");
     assert_eq!(requests(&server, "/auth/logout"), 0);
+    assert_eq!(slot.load_lock_flag(LockFlag::AppLock).unwrap(), None);
+    assert_eq!(engine.app_lock_for(engine.session_turn()), Ok(true));
 }
 
 #[test]

@@ -643,7 +643,7 @@ impl<C: CredentialStores> Engine<C> {
         profile: &AccountProfile,
     ) -> Result<(), String> {
         let _write = self.claim(turn)?;
-        let mut vault = self.vault();
+        let mut vault = self.vault_for_install(&profile.user_id, email)?;
         if let Err(error) = key_owner::remove_foreign_key(&mut vault, &profile.user_id, email) {
             tracing::warn!(%error, "sign-in refused: a stored vault key that is not this account's could not be removed");
             return Err(key_owner::FOREIGN_KEY_NOT_REMOVED.to_string());
@@ -1104,10 +1104,7 @@ impl<C: CredentialStores> Engine<C> {
     /// The session token (cloned for a person's single API call). `Err` when locked (either level) or signed out.
     fn session_token(&self) -> Result<String, String> {
         self.person_session(|session, _| session.token.clone())
-            .map_err(|refused| match refused {
-                lock_api::PersonRefused::ScreenLocked => "locked".to_string(),
-                lock_api::PersonRefused::NoSession => "not signed in".to_string(),
-            })
+            .map_err(|refused| refused.said_as("locked".to_string(), "not signed in".to_string()))
     }
 }
 

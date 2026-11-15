@@ -4,9 +4,9 @@
 
 use super::*;
 
-/// Everything this source never reads stays "not known", whatever else is held.
+/// Everything this source never reads stays "not known", whatever else is held (app lock is read: `app_lock_tests`).
 fn the_rest_is_not_known(facts: &SecurityFacts) {
-    assert!(facts.app_lock.is_none() && facts.password_changed.is_none() && facts.backup_codes.is_none());
+    assert!(facts.password_changed.is_none() && facts.backup_codes.is_none());
     assert!(facts.passkeys.is_none() && facts.activity.is_none() && facts.factors.is_none());
     assert!(!facts.can_sign_out_all, "Drive is the one app on this PC");
 }

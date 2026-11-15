@@ -42,6 +42,7 @@ use crate::shell::tray::TrayInputs;
 use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary};
 
 pub mod account;
+mod app_lock;
 pub mod backups;
 // Backups' "Other devices" and "Delete this backup" (`backups::EngineBackupsSource` delegates to it).
 pub mod backups_devices;
