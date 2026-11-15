@@ -919,3 +919,162 @@ fn a_result_and_the_index_print_no_name() {
     }
     assert!(printed.contains("Hit") && printed.contains("records: 5"), "{printed}");
 }
+
+/// The ways the turn moves on after A searched: a lock; a lock and an unlock (the same account in another turn, with
+/// no pump between them); another account's sign-in; a sign-out.
+fn turn_moves() -> [(&'static str, fn(&Host)); 4] {
+    [
+        ("a lock", Host::lock as fn(&Host)),
+        ("a lock and an unlock", |host: &Host| {
+            host.lock();
+            host.unlock();
+        }),
+        ("another account's sign-in", |host: &Host| host.sign_in_as(Some(OTHER))),
+        ("a sign-out", |host: &Host| host.sign_in_as(None)),
+    ]
+}
+
+/// A's files, by id: once A's turn ended, no reader hands out the facts of one of them.
+const MINE: [&str; 5] = ["f-draft", "f-signed", "f-sheet", "f-photo", "f-other"];
+
+/// The reader gate (`current`), alone: once the turn moved on, `wired`, `search` and `details` hand out nothing of the
+/// index of the turn that ended, even while it is still in memory because nothing ran `follow` yet (no pump, no ask,
+/// no open). The lock and the unlock keep the account: a gate on the account alone hands A's names out there.
+/// Mutant (M1): `current` hands out what is held, whatever the session.
+#[test]
+fn current_never_hands_out_an_ended_turns_index() {
+    for (said, move_on) in turn_moves() {
+        let host = host(Some(ME));
+        let mut source = opened(&host);
+        assert_eq!(
+            found(&mut source, "contract", Narrow::All).len(),
+            4,
+            "{said}: the control: A's names are found"
+        );
+        assert!(source.details("f-draft").is_some(), "{said}: the control");
+
+        move_on(&host);
+        assert!(
+            source.held.is_some() && source.found.is_some(),
+            "{said}: the control: nothing ran follow, A's index and result are still in memory"
+        );
+        assert!(
+            source.current().is_none(),
+            "{said}: the index of a turn that ended is handed out"
+        );
+        assert!(
+            !source.wired(),
+            "{said}: Search says it answers from an ended turn's index"
+        );
+        assert_eq!(
+            source.search("contract", Narrow::All),
+            Answer::Unavailable,
+            "{said}: A's results are handed out"
+        );
+        for id in MINE {
+            assert_eq!(source.details(id), None, "{said}: the facts of A's {id} are handed out");
+        }
+    }
+}
+
+/// `follow`, alone: at the first pump after the turn moved on (the window's poll), everything of the turn that ended
+/// goes from memory (A's index, result, words, recent searches and the work on its way), and the source belongs to the
+/// turn of the moment. The lock and the unlock run with no pump between them: the account is the same, only the turn
+/// says the session ended. Mutants (M2a): `follow` drops nothing; (M2b): `follow` compares the account, not the turn.
+#[test]
+fn follow_forgets_on_turn_change() {
+    for (said, move_on) in turn_moves() {
+        let host = host(Some(ME));
+        let mut source = opened(&host);
+        assert_eq!(
+            found(&mut source, "contract", Narrow::All).len(),
+            4,
+            "{said}: the control"
+        );
+        source.remember("contract");
+        settle(&mut source);
+        assert_eq!(source.recent(), ["contract"], "{said}: the control");
+        assert!(
+            source.held.is_some() && source.found.is_some() && source.wanted.is_some() && source.recent.is_some(),
+            "{said}: the control: A's state is in memory"
+        );
+
+        move_on(&host);
+        assert!(
+            source.pump().changed,
+            "{said}: the window is not told that what it drew went"
+        );
+        assert!(source.held.is_none(), "{said}: A's index is in memory");
+        assert!(source.found.is_none(), "{said}: A's result is in memory");
+        assert!(source.wanted.is_none(), "{said}: A's words are in memory");
+        assert!(
+            source.recent.is_none() && source.recent_next.is_empty(),
+            "{said}: A's recent searches are in memory"
+        );
+        assert!(
+            source.building.is_none() && source.asked.is_none() && source.recent_out.is_none(),
+            "{said}: work of A's turn is still waited for"
+        );
+        assert!(
+            source.of == session_of(&*host),
+            "{said}: the source does not follow the turn of the moment"
+        );
+    }
+}
+
+/// The take-in compare, alone: a build that answers for a turn the window's state does not belong to is dropped:
+/// never held, never counted as fresh, and the words asked are not run on it. In the app this happens inside ONE
+/// pump: its `follow` saw A's turn, then the turn moved on, and the build ran wholly in the new turn and was drained
+/// by the same pump (the job check does not catch it: nothing forgot the build). A test cannot time that, so the
+/// answer is handed to `take_in` as that pump hands it: the build the window waits for, A's names, and the session
+/// its worker saw before and after (the one after the move; none after a lock or a sign-out). Another account's
+/// answer holding A's names stands for an engine whose owner check let them through (task 2488's own layer,
+/// `tests_accounts.rs`): this layer alone still drops it. Mutant (M3): the compare in `take_in` deleted.
+#[test]
+fn a_build_landing_under_a_new_turn_is_dropped() {
+    for (said, move_on) in turn_moves() {
+        let host = host(Some(ME));
+        let theirs = build_local_index(&StateDb::open(&host.db).expect("the state")).expect("A's index");
+        assert_eq!(theirs.records.len(), 5, "the control: the answer holds A's names");
+        let mut source = EngineSearchSource::new(host.clone());
+        source.opened();
+        source.ask("contract", Narrow::All);
+        let job = source.building.expect("the control: A's build is on its way");
+
+        move_on(&host);
+        // No pump: the window's state still belongs to A's turn, and the build is still waited for.
+        source.take_in(Landed::Built(job, session_of(&*host), Ok(theirs)));
+        assert!(source.held.is_none(), "{said}: an index of another turn is held");
+        assert_eq!(source.installed, 0, "{said}: an index of another turn is installed");
+        assert!(source.built_at.is_none(), "{said}: a dropped build counts as fresh");
+        assert!(
+            source.asked.is_none() && source.found.is_none(),
+            "{said}: A's words ran on it"
+        );
+        assert!(!source.wired(), "{said}");
+        assert_eq!(
+            source.search("contract", Narrow::All),
+            Answer::Unavailable,
+            "{said}: A's results are handed out"
+        );
+        for id in MINE {
+            assert_eq!(source.details(id), None, "{said}: the facts of A's {id} are handed out");
+        }
+
+        // The window's side: what the real workers send is nobody's; the turn of the moment builds its own when Search
+        // opens (A after the unlock), and nothing for another account or with no one signed in.
+        settle(&mut source);
+        assert!(
+            source.held.is_none() && source.wanted.is_none(),
+            "{said}: A's index or words after the pump"
+        );
+        source.opened();
+        settle(&mut source);
+        let owner_now = SearchHost::unlocked(&*host) && SearchHost::account(&*host) == host.owner;
+        assert_eq!(
+            source.wired(),
+            owner_now,
+            "{said}: the turn of the moment does not build its own"
+        );
+    }
+}
