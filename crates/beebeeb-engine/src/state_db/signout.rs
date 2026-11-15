@@ -660,6 +660,7 @@ impl StateDb {
         if version >= ADOPTION_CLOSED {
             return Ok(Some(false));
         }
+        conn.pragma_update(None, "user_version", ADOPTION_CLOSED)?;
         Ok(Some(true))
     }
     /// R10 ruling 8 in the native build (lead ruling 2026-11-15 17:35), inside the start: record `session` as the
