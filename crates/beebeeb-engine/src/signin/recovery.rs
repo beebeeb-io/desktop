@@ -94,7 +94,7 @@ pub async fn recovered_key_matches_account(
 ) -> Result<bool, String> {
     recovery_check_answer(client, base_url, session_token, master_key)
         .await
-        .map(|answer| answer != RecoveryCheckAnswer::Mismatch)
+        .map(|answer| answer == RecoveryCheckAnswer::Matches)
 }
 
 /// The 12 words as the phrase's derivation reads them: lower case, letters only, one space between. One wiping
@@ -112,7 +112,7 @@ pub fn normalized_phrase(input: &str) -> Result<zeroize::Zeroizing<String>, Stri
         if words > 0 {
             phrase.push(' ');
         }
-        phrase.extend(letters.map(|letter| letter.to_ascii_lowercase()));
+        phrase.extend(letters);
         words += 1;
     }
     if words != 12 {
