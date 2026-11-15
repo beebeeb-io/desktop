@@ -94,6 +94,20 @@ impl<C: CredentialStores> Engine<C> {
         self.account_call_for(session, |api| async move { api.trashed_file_count().await })
     }
 
+    /// How many moves to or from Trash this handle made (each [`Engine::trash_items_for`] or
+    /// [`Engine::restore_items_for`] that moved at least one item). A window that keeps the Trash count compares it
+    /// with the number it last saw: a change means the count may have moved. Never waits, sends nothing.
+    pub fn trash_moves(&self) -> u64 {
+        self.trash_moves.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether a person's call may be sent now: `false` behind a locked screen or a closed vault (core's answer).
+    /// Never waits, sends nothing.
+    pub fn person_calls_allowed(&self) -> bool {
+        self.check_call(super::lock_api::Call::Person(super::lock_api::LockedAction::ViewStatus))
+            .is_ok()
+    }
+
     /// WRITES: put items back from Trash (`POST /api/v1/files/{id}/restore`, one call each, in order), for the
     /// session a person pressed under and no other. `session` is [`Engine::session_turn`] as the host read it AT
     /// THE PRESS (on its window's thread, before any worker started). Before EACH item the token is copied only
@@ -116,6 +130,7 @@ impl<C: CredentialStores> Engine<C> {
             restored = true;
         }
         if restored {
+            self.trash_moves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // Ask the sync engine to take the server's list again (the signed-in account's local state only; asks
             // nothing of a state that is not the session's), also when a later item failed.
             self.request_resnapshot();
@@ -154,6 +169,7 @@ impl<C: CredentialStores> Engine<C> {
             trashed = true;
         }
         if trashed {
+            self.trash_moves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // As after a restore: the signed-in account's local state only, also when a later item failed.
             self.request_resnapshot();
         }

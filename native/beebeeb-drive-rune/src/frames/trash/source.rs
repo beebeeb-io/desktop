@@ -79,6 +79,8 @@ pub struct Pumped {
     pub notice: Option<Notice>,
     /// A delete for good that was asked for ended.
     pub purge: Option<PurgeEnd>,
+    /// Poll again after this long even if nothing is on its way (the sidebar's count is due for a refresh).
+    pub wake_in: Option<std::time::Duration>,
 }
 
 pub trait TrashSource {
@@ -106,7 +108,7 @@ pub trait TrashSource {
     }
     /// The session or the account changed: drop every name and count at once.
     fn forget(&mut self) {}
-    /// The sidebar's count. `None`: no badge (a source that cannot count without reading the whole list).
+    /// The sidebar's count. `None`: no badge (the source has no number of Beebeeb's for this session and account).
     fn count(&self) -> Option<usize> {
         Some(self.totals().items)
     }

@@ -205,9 +205,7 @@ impl ApiClient {
             .send_with_retry(|| self.client.get(self.url("/api/v1/files/count")))
             .await?;
         let body: serde_json::Value = resp.json().await?;
-        body["trashed_files"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("the file counters carry no trashed count"))
+        Ok(body["trashed_files"].as_u64().unwrap_or(0))
     }
 
     pub async fn list_versions(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
