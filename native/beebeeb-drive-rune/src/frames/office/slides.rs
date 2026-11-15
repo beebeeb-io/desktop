@@ -336,6 +336,9 @@ fn bar(deck: &DeckBody, t: &Theme) -> El {
                 .px(10.0)
                 .center_y()
                 .radius(7.0)
+                .fill(t.paper)
+                .border(1.0, t.card_border)
+                .border_layout()
                 .hover(t.hover)
                 .press(t.press)
                 .focusable(true)
@@ -381,8 +384,13 @@ fn thumbnail(i: usize, n: u32, page: Option<SlidePage>, current: bool, t: &Theme
         .radius(4.0)
         .clip_rounded(4.0)
         .fill(Color::WHITE);
+    // The current slide wears the board's 2 px dark ring as a real border (a keyed, gated edge), inside the 8 px
+    // padding so the words do not move between the current slide and the others.
     let frame = if current {
-        frame.box_shadow(kit::ring(2.0, t.text))
+        frame
+            .border(2.0, t.text)
+            .border_layout()
+            .box_shadow(kit::drop(1.0, 4.0, Color::BLACK.alpha(0.14)))
     } else {
         frame.box_shadow(kit::drop(1.0, 4.0, Color::BLACK.alpha(0.14)))
     };
@@ -922,6 +930,31 @@ mod tests {
         assert!(find(&rt, "present-icon").is_some());
         assert_eq!(words(&rt, "present-hint"), "F5");
         assert!(find(&rt, "elsewhere").is_some() && find(&rt, "zoom").is_some());
+    }
+
+    /// DW-1509: "Open in another app…" is the outlined kind (paper fill with its border; the element info carries no
+    /// border, as docs' test notes), and the current slide's thumbnail keeps the size of the others under its ring.
+    #[test]
+    fn office_slides_elsewhere_is_outlined_and_the_ring_keeps_the_size() {
+        for dark in [false, true] {
+            let rt = scene(scene_deck, dark);
+            let t = tokens::theme(dark);
+            assert_eq!(
+                find(&rt, "elsewhere").expect("elsewhere").fill,
+                t.paper,
+                "outlined: paper fill"
+            );
+            let size = |k: &str| {
+                let r = find(&rt, k).unwrap().rect;
+                (r[2], r[3])
+            };
+            assert_eq!(
+                size("fs-1-slide"),
+                size("fs-0-slide"),
+                "the ring does not grow the thumbnail"
+            );
+            assert_eq!(size("fs-1-slide"), (THUMB_W, THUMB_H));
+        }
     }
 
     /// DW-1561's picture is the board's sunset (three stops, 180 degrees): the element carries a gradient, not a fill.

@@ -17,11 +17,12 @@
 //!
 //! The countdown is the engine's (`DeviceTick` comes from its `Tick`): no clock of the window's own counts it.
 //!
-//! How the engine's endings are drawn (the screen has no words of its own for some of them, see the branch notes):
-//! approved is DW-A08; denied DW-A09; the code's end, a socket that dropped and a server error after the code DW-A10
-//! (the code is spent, a new one is asked for); an approval this PC could not install (another account's, a session
-//! that moved, a store that refused) DW-A08's error state, "Nothing was signed in"; before any code, offline or the
-//! form's "didn't finish".
+//! How the engine's endings are drawn: approved is DW-A08; denied DW-A09; the code's end DW-A10; a socket that dropped
+//! and a server error after the code are a request that was LOST (DW-A10's layout with its own words: the code is spent,
+//! a new one is asked for); an approval this PC did not take is said for what it is, "Nothing was signed in": another
+//! account's session or local files here (`OtherAccount`), or a PC that moved on while it waited or could not store the
+//! session (`NotSignedIn`); a payload that did not open is DW-A08's error state; before any code, offline or the form's
+//! "didn't finish". The states without a board frame are flagged in `frames/signin/FRAMES.md`.
 //!
 //! Secrets: none passes through here. The code is shown and never logged; the payload, the token and the key stay in
 //! the engine.
@@ -35,7 +36,7 @@ use std::thread;
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::bindings::device_request::{
-    ANOTHER_DEVICE, DeviceRequestEvent, DeviceRequestRefused, DeviceSignedIn, device_request_name,
+    DeviceRequestEvent, DeviceRequestRefused, DeviceSignedIn, device_request_name,
 };
 use beebeeb_engine::app::{CredentialStores, Engine};
 
@@ -189,21 +190,21 @@ fn on_event(event: DeviceRequestEvent, asking_as: &str, shown: &AtomicBool) -> S
 /// `Device` endings. `None`: the request was stopped, and nothing is said.
 fn ending(result: Result<DeviceSignedIn, DeviceRequestRefused>, shown: bool) -> Option<SignInEvent> {
     use DeviceRequestRefused as Refused;
-    let not_installed = || {
-        SignInEvent::Device(DeviceStatus::KeysNotReceived {
-            by: ANOTHER_DEVICE.to_string(),
-        })
-    };
     Some(match result {
         // The gate decides what follows: Files, or (a key the store refused) the twelve words.
         Ok(signed_in) => SignInEvent::Device(DeviceStatus::Approved { by: signed_in.by }),
         Err(Refused::Stopped) => return None,
         Err(Refused::Denied { by }) => SignInEvent::Device(DeviceStatus::Denied { by }),
         Err(Refused::KeysNotReceived { by }) => SignInEvent::Device(DeviceStatus::KeysNotReceived { by }),
-        Err(Refused::Expired | Refused::ConnectionLost | Refused::Failed | Refused::Offline) if shown => {
-            SignInEvent::Device(DeviceStatus::Expired)
+        Err(Refused::Expired) if shown => SignInEvent::Device(DeviceStatus::Expired),
+        // The code is spent either way: the connection cannot be joined again (a new one is a new code), or Beebeeb
+        // ended the request with an error.
+        Err(Refused::ConnectionLost | Refused::Failed | Refused::Offline) if shown => {
+            SignInEvent::Device(DeviceStatus::Lost)
         }
-        Err(Refused::AccountMismatch | Refused::Overtaken | Refused::NotStored) if shown => not_installed(),
+        // The keys arrived; this PC did not take them.
+        Err(Refused::AccountMismatch) if shown => SignInEvent::Device(DeviceStatus::OtherAccount),
+        Err(Refused::Overtaken | Refused::NotStored) if shown => SignInEvent::Device(DeviceStatus::NotSignedIn),
         Err(Refused::Offline | Refused::ConnectionLost) => SignInEvent::DeviceRequested(Err(SignInProblem::Offline)),
         Err(_) => SignInEvent::DeviceRequested(Err(SignInProblem::Other)),
     })

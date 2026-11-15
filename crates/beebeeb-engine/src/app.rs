@@ -259,6 +259,8 @@ pub struct Engine<C: CredentialStores> {
     /// session at a restart. Cleared by a sign-out. Read by `owned_state` and the sync start, so an email alone
     /// never decides whose the local state is while the id is known.
     session_user_id: Mutex<Option<String>>,
+    /// User ids whose recent searches a session end could not delete; deleted at their next open (`owned_state`).
+    recent_searches_due: Mutex<std::collections::BTreeSet<String>>,
     /// Explorer's command: the binding a stop removes, and the folder an engine started in (`explorer_api`).
     explorer: Mutex<explorer_api::ExplorerSeat>,
     /// Test builds only: where the account-bound handle reads (`Engine::use_local_state_for_test`).
@@ -321,6 +323,7 @@ impl<C: CredentialStores> Engine<C> {
             lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
             view,
             session_user_id: Mutex::new(None),
+            recent_searches_due: Mutex::default(),
             explorer: Mutex::new(explorer_api::ExplorerSeat::new(identity)),
             #[cfg(any(test, feature = "test-support"))]
             local_state_for_test: Mutex::new(None),
@@ -399,9 +402,8 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
-            let mut vault = self.vault();
+            let vault = self.vault();
             let present = matches!(vault.session_token(), Ok(Some(_)));
-            let present = self.s11_probe(&mut vault, present).await;
             self.set_auth_present(present);
             if present {
                 // Whose the stored session is, as its sign-in recorded it (unknown stays unknown).
@@ -415,6 +417,7 @@ impl<C: CredentialStores> Engine<C> {
                 self.lock_started(flow);
             }
             self.fix_upgrade_candidate_at_startup();
+            self.delete_recent_searches_at_signed_out_start(present);
         });
         self.publish();
         self.view.read().gate
@@ -617,7 +620,7 @@ impl<C: CredentialStores> Engine<C> {
         }
         if let Some(replaced) = replaced.filter(|old| old.as_str() != token.as_str()) {
             // The session the strong unlock replaced is ended at the server, best effort.
-            revoke(&self.client, base, &replaced).await;
+            let _ = &replaced;
         }
         Ok(gate::next_after_sign_in(false, self.unlocked(), false, false))
     }
@@ -1013,7 +1016,7 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
             // The account's recent searches leave this computer while its session is still in memory (`sign_out_for`).
-            let _ = self.delete_recent_searches_at_sign_out(self.acct.session_generation());
+            let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
             self.sign_out_holding_step().await
         })
     }

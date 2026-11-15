@@ -551,15 +551,26 @@ fn macro_call(from: &str) -> &str {
     panic!("the call is not closed: {from}")
 }
 
-/// Rule 5: no log call of this module names the payload, the token, the key or the code (its fixed words aside), an
-/// event has no field that could hold one, and an event's `Debug` leaves the code out.
+/// Rule 5: no log call of this module, or of the key-storing helper it calls, names the payload, the token, the key or
+/// the code (its fixed words aside), an event has no field that could hold one, and an event's `Debug` leaves the code
+/// out.
 #[test]
 fn device_request_secrets_never_reach_a_log_line_or_an_event() {
     let source = include_str!("device_request.rs").replace("\r\n", "\n");
     let production = &source[..source.find("#[cfg(test)]").expect("the tests module")];
+    // The handed-over key is stored by the one helper the passkey sign-in shares (`passkeys_api::keep_handed_over_key`):
+    // its log calls are this request's too, and are scanned with the same words.
+    let shared = include_str!("../passkeys_api.rs").replace("\r\n", "\n");
+    let helper = &shared[shared
+        .find("fn keep_handed_over_key")
+        .expect("the shared key-storing helper")..];
+    let helper = &helper[..helper.find("\n    }\n").expect("the helper's end")];
     let mut calls = 0;
-    for (at, _) in production.match_indices("tracing::") {
-        let call = macro_call(&production[at..]);
+    for (at, scanned) in [production, helper]
+        .into_iter()
+        .flat_map(|scanned| scanned.match_indices("tracing::").map(move |(at, _)| (at, scanned)))
+    {
+        let call = macro_call(&scanned[at..]);
         // What the call writes besides its fixed words: its fields and arguments, with the literals taken out.
         let outside: String = call
             .split('"')
@@ -586,6 +597,7 @@ fn device_request_secrets_never_reach_a_log_line_or_an_event() {
         }
         calls += 1;
     }
+    // 3 in this module and 1 in the key-storing helper.
     assert!(calls >= 4, "the scan found the log calls: {calls}");
     let event = &production[production.find("pub enum DeviceRequestEvent").expect("the events")..];
     let event = &event[..event.find("\n}\n").expect("their end")];

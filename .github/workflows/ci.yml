@@ -162,6 +162,20 @@ jobs:
           cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
           test "$(cargo tree --locked -e normal --prefix none --target x86_64-pc-windows-msvc | sort -u | wc -l)" -eq 3
 
+      # The messages between the app and the Office helper (crates/beebeeb-office-protocol). Counted like the
+      # sandbox crate: the library's tests must be in the log, at or above their floor; and it lints clean.
+      - name: Office protocol crate
+        working-directory: crates/beebeeb-office-protocol
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/office-protocol-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/office-protocol-test.log"
+          python3 ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/office-protocol-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_office_protocol-
+          set -e
+          cargo clippy --locked --all-targets -- -D warnings
+
       - name: Release script self-tests
         run: |
           set -euo pipefail
