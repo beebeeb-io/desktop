@@ -120,6 +120,87 @@ impl ContentFingerprint {
     }
 }
 
+/// S6 (R8): what a hydrate's start look saw at a file's place, taken before anything is downloaded. The place is
+/// compared with it right before it is replaced, so bytes written there after the look are never replaced. `None`:
+/// nothing there (an error reads as nothing there, as the last look's does: a failed look then an answered one
+/// refuses).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceSeen {
+    pub(super) place: PathBuf,
+    pub(super) fingerprint: Option<ContentFingerprint>,
+}
+
+/// One look at a place (R10): seen; or written within [`HASH_CACHE_SETTLED`], so wait this long and look once more
+/// (file times are coarse: a write in the same timer tick would look unchanged); or dated ahead of the clock, which
+/// never settles in time, so refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Settle {
+    Seen(PlaceSeen),
+    Wait(std::time::Duration),
+    Refuse,
+}
+
+/// Past the settle boundary: the sleep is measured on the monotonic clock, the second look on the wall clock.
+const SETTLE_MARGIN: std::time::Duration = std::time::Duration::from_millis(25);
+
+impl PlaceSeen {
+    /// The look at `place`, at `now` (a test moves it past the settle boundary, as a change time cannot be set back).
+    pub(crate) fn take_at(place: &Path, now: std::time::SystemTime) -> Settle {
+        let seen = |fingerprint| {
+            Settle::Seen(PlaceSeen {
+                place: place.to_path_buf(),
+                fingerprint,
+            })
+        };
+        let Ok(fingerprint) = ContentFingerprint::of(place) else {
+            return seen(None);
+        };
+        if fingerprint.settled_at(now) {
+            return seen(Some(fingerprint));
+        }
+        match (fingerprint.last_touched() + HASH_CACHE_SETTLED).duration_since(now) {
+            Ok(wait) if wait <= HASH_CACHE_SETTLED => Settle::Wait(wait),
+            _ => Settle::Refuse,
+        }
+    }
+
+    /// The look, blocking: at most ONE wait, then the second look must see the place settled; anything else refuses.
+    pub fn take(place: &Path) -> Result<PlaceSeen, UnsentLocalChange> {
+        match Self::take_at(place, std::time::SystemTime::now()) {
+            Settle::Wait(wait) => {
+                std::thread::sleep(wait + SETTLE_MARGIN);
+                Self::look_again(place)
+            }
+            first => Self::seen_or_refuse(first),
+        }
+    }
+
+    /// [`Self::take`] on an async worker.
+    pub async fn take_async(place: &Path) -> Result<PlaceSeen, UnsentLocalChange> {
+        match Self::take_at(place, std::time::SystemTime::now()) {
+            Settle::Wait(wait) => {
+                tokio::time::sleep(wait + SETTLE_MARGIN).await;
+                Self::look_again(place)
+            }
+            first => Self::seen_or_refuse(first),
+        }
+    }
+
+    fn look_again(place: &Path) -> Result<PlaceSeen, UnsentLocalChange> {
+        Self::seen_or_refuse(Self::take_at(place, std::time::SystemTime::now()))
+    }
+
+    fn seen_or_refuse(look: Settle) -> Result<PlaceSeen, UnsentLocalChange> {
+        match look {
+            Settle::Seen(seen) => Ok(seen),
+            Settle::Wait(_) | Settle::Refuse => {
+                tracing::warn!("hydrate refused: the local file is being written, or dated ahead of the clock");
+                Err(UnsentLocalChange)
+            }
+        }
+    }
+}
+
 /// Task 1640 (review P2-5): [`sha256_file_hex`] of `file_id`'s file at `path`, read again only
 /// when its [`ContentFingerprint`] changed since the last read: a scan, a close and a stamp
 /// pass otherwise re-hashed every out-of-sync file (a plain file an atomic save left stays one)
@@ -206,4 +287,59 @@ pub(super) fn chunk_layout_matches_metadata(size_bytes: u64, chunk_count: u64, c
     let full_prefix = (count - 1) * chunk;
     let full_span = count * chunk;
     size > full_prefix && size <= full_span
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    /// S6 (R10): a place written a moment ago is not seen yet (wait, then look again); once settled it is seen; nothing
+    /// there needs no settle.
+    #[test]
+    fn s6_start_a_place_written_a_moment_ago_is_not_seen_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = dir.path().join("a.txt");
+        std::fs::write(&place, b"just written").unwrap();
+        let now = SystemTime::now();
+        let first = PlaceSeen::take_at(&place, now);
+        let later = PlaceSeen::take_at(&place, now + Duration::from_secs(3));
+        println!("s6 start look: at once {first:?}, 3 s later {later:?}");
+        assert!(
+            matches!(first, Settle::Wait(wait) if !wait.is_zero() && wait <= HASH_CACHE_SETTLED),
+            "not seen yet: {first:?}"
+        );
+        assert!(
+            matches!(&later, Settle::Seen(seen) if seen.fingerprint.is_some() && seen.place == place),
+            "seen once settled: {later:?}"
+        );
+        let none = dir.path().join("none.txt");
+        assert_eq!(
+            PlaceSeen::take_at(&none, now),
+            Settle::Seen(PlaceSeen {
+                place: none,
+                fingerprint: None
+            }),
+            "nothing there is seen at once"
+        );
+    }
+
+    /// S6 (R10): a place dated ahead of the clock (a tool set its modification time) never settles in time: refused at
+    /// once, with no long sleep.
+    #[test]
+    fn s6_start_a_place_dated_ahead_refuses_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = dir.path().join("a.txt");
+        std::fs::write(&place, b"dated ahead").unwrap();
+        let now = SystemTime::now();
+        let file = std::fs::File::options().write(true).open(&place).unwrap();
+        file.set_modified(now + Duration::from_secs(3600)).unwrap();
+        drop(file);
+        let look = PlaceSeen::take_at(&place, now);
+        println!("s6 start look, dated ahead: {look:?}");
+        assert_eq!(look, Settle::Refuse);
+        let started = std::time::Instant::now();
+        assert!(PlaceSeen::take(&place).is_err(), "the blocking look refuses too");
+        assert!(started.elapsed() < Duration::from_secs(1), "without a long sleep");
+    }
 }

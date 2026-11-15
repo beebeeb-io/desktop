@@ -120,6 +120,17 @@ mod local_classify;
 mod local_layout;
 mod operations;
 mod shared_roots;
+// S6: a kept file this PC does not hold is fetched again.
+mod kept_refetch;
+#[cfg(all(target_os = "windows", test))]
+pub(crate) use kept_refetch::fetch_kept_placeholder;
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+pub(crate) use kept_refetch::queue_kept_step;
+#[cfg(target_os = "windows")]
+pub(crate) use kept_refetch::spawn_kept_batch;
+pub use kept_refetch::{
+    KEPT_REFETCH_PER_TICK, KEPT_REFETCH_READ_PER_TICK, KeptBatch, KeptFetch, KeptPlace, KeptRefetch, RunningGuard,
+};
 // Task 2523: another device's version reaches the copy on this PC.
 mod stale_copies;
 pub use stale_copies::{REFRESH_ORDER, RefreshStep, STALE_COPIES_PER_PASS, STALE_COPIES_READ_PER_PASS, StaleCopyPass};
@@ -489,7 +500,7 @@ pub use errors::{OperationFailureClass, classify_operation_error, retry_delay_se
 
 mod content;
 use content::*;
-pub use content::{ContentFingerprint, cached_sha256_file_hex, content_frame, sha256_file_hex, sha256_hex};
+pub use content::{ContentFingerprint, PlaceSeen, cached_sha256_file_hex, content_frame, sha256_file_hex, sha256_hex};
 
 mod media;
 use media::*;

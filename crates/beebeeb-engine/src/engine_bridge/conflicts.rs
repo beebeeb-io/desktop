@@ -151,7 +151,7 @@ impl EngineBridge {
     /// the next tick from re-flagging a conflict if the user's old
     /// `content_hash` is still on the row (it isn't anymore — the row
     /// was already in Conflict — but we belt-and-brace anchor anyway).
-    pub async fn resolve_keep_theirs(&self, file_id: &str, sync_root: &Path) -> anyhow::Result<()> {
+    pub async fn resolve_theirs_seen(&self, file_id: &str, sync_root: &Path, seen: PlaceSeen) -> anyhow::Result<()> {
         let mut entry = self
             .db
             .get_file(file_id)?
@@ -160,7 +160,7 @@ impl EngineBridge {
         // hydrate_file flips Conflict → Downloading → Local on success
         // (or Error on failure). We don't care about the intermediate
         // state for this path.
-        self.hydrate_file(file_id, &dest, &[sync_root]).await?;
+        self.hydrate_seen(file_id, &dest, &[sync_root], seen).await?;
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)

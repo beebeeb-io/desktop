@@ -563,6 +563,9 @@ async fn run(
     // committed. Until it has, the send phase's wake sends nothing.
     #[cfg(not(target_os = "macos"))]
     let mut reconciled_this_run = false;
+    // S6: the kept files' step, for this engine run (one batch at a time, each failing file's backoff).
+    #[cfg(not(target_os = "macos"))]
+    let kept_refetch = Arc::new(crate::engine_bridge::KeptRefetch::default());
 
     loop {
         match next_wake(&mut cancel, &mut tick, &send_phase).await {
@@ -761,24 +764,16 @@ async fn run(
                         // macOS: the File Provider fetches on the working-set signal; the pass has nothing to do.
                         #[cfg(not(target_os = "windows"))]
                         let stale_copies_allowed = cfg!(not(target_os = "macos"));
+                        #[cfg(target_os = "windows")]
+                        let mut stale_refetch = Vec::new();
                         if tick.reached_server && stale_copies_allowed {
                             let (pass_bridge, pass_root) = (bridge.clone(), sync_root.clone());
                             match tokio::task::spawn_blocking(move || pass_bridge.refresh_stale_copies(&pass_root))
                                 .await
                             {
-                                // A kept file is fetched again now, off the tick, as a pin does.
+                                // A kept file it emptied joins the kept files' step below (one fetch at a time).
                                 #[cfg(target_os = "windows")]
-                                Ok(Ok(pass)) => {
-                                    for place in pass.refetch {
-                                        tokio::task::spawn_blocking(move || {
-                                            if let Err(error) =
-                                                crate::windows_cf::placeholders::hydrate_placeholder(&place)
-                                            {
-                                                tracing::warn!(%error, "stale copy: a kept file was not fetched again; the next open fetches it");
-                                            }
-                                        });
-                                    }
-                                }
+                                Ok(Ok(pass)) => stale_refetch = pass.refetch,
                                 #[cfg(not(target_os = "windows"))]
                                 Ok(Ok(_)) => {}
                                 Ok(Err(error)) => {
@@ -788,6 +783,18 @@ async fn run(
                                     tracing::warn!(%error, "stale copies: the pass panicked; next tick retries")
                                 }
                             }
+                        }
+                        // S6: a kept file this PC does not hold is fetched again, at the speed limit; none is started
+                        // while a sign-out's send phase is armed (a paused tick returned above). Windows: off the tick.
+                        #[cfg(target_os = "windows")]
+                        if tick.reached_server && !send_phase.is_armed() {
+                            let (kept_bridge, root) = (bridge.clone(), sync_root.clone());
+                            let (state, paused) = (kept_refetch.clone(), sync_paused.clone());
+                            crate::engine_bridge::spawn_kept_batch(kept_bridge, root, state, stale_refetch, paused);
+                        }
+                        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+                        if tick.reached_server && !send_phase.is_armed() {
+                            crate::engine_bridge::queue_kept_step(&bridge, &sync_root, &kept_refetch).await;
                         }
                         let completed_sync_work = queue_step(
                             &bridge,
