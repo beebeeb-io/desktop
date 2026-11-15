@@ -6,6 +6,11 @@
 //! the one the handle was made for: a lock, a sign-out, another sign-in or a session the server ended turns the
 //! handle into a refusal, and an answer that was read across such a change is dropped.
 //!
+//! One step is let through for a session the server ended (CP2 row 2.1, privacy): its close deletes that session's
+//! OWN recent searches ([`Engine::delete_recent_searches_of_ended_session`]), as a sign-out does. The owner is proven
+//! and the session checked as for every handle; only the server's refusal is not asked, and that handle never leaves
+//! this module.
+//!
 //! What a state that is not the session's means is decided here, once, for every window: nothing is read, and the
 //! reason is a fixed word ([`LocalStateRefused`]).
 //!
@@ -13,7 +18,8 @@
 //! computer, whose owner is checked; one file per account is a change inside this module.
 //!
 //! Must not: log or return a file's name, a path, an email, a user id, a token or a key; write anything before the
-//! owner is proven (the proof reads on a read-only connection); reset, adopt or delete local data.
+//! owner is proven (the proof reads on a read-only connection); reset, adopt or delete local data (the one wipe
+//! above deletes a single row: the ended session's own recent searches).
 
 use std::path::PathBuf;
 
@@ -87,6 +93,16 @@ enum Mode {
     Change,
 }
 
+/// Whether a session the server ended (the refusal run, `auth_health.is_expired()`) is refused.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// Every handle and every identity this module answers: refused as [`LocalStateRefused::SessionEnded`].
+    Refused,
+    /// Only [`Engine::delete_recent_searches_of_ended_session`], the close's wipe of the ended session's own recent
+    /// searches (CP2 row 2.1): it removes that row and writes nothing else.
+    OwnSearchesWipe,
+}
+
 /// The local state of the signed-in account. Made by [`Engine::local_state`] or
 /// [`Engine::local_state_for_changes`]; it borrows the engine handle, so it cannot be kept beyond it, and it
 /// answers only while the session it was made for is still the session.
@@ -97,6 +113,8 @@ pub struct OwnedState<'e> {
     writes: &'e std::sync::RwLock<()>,
     generation: SessionGeneration,
     db: std::sync::Arc<StateDb>,
+    /// [`Ended::Refused`] on every handle a caller outside this module gets.
+    ended: Ended,
 }
 
 impl OwnedState<'_> {
@@ -146,7 +164,7 @@ impl OwnedState<'_> {
         self.acct
             .while_session_is(self.writes, self.generation, |_| ())
             .ok_or(LocalStateRefused::SessionChanged)?;
-        if self.acct.auth_health.is_expired() {
+        if self.ended == Ended::Refused && self.acct.auth_health.is_expired() {
             return Err(LocalStateRefused::SessionEnded);
         }
         Ok(())
@@ -228,6 +246,11 @@ impl<C: CredentialStores> Engine<C> {
     /// named for it (the cached profile when it is that email's, else the id recorded with the stored session).
     /// `Err`: there is no session to hand local state to.
     pub(super) fn session_identity(&self) -> Result<Identity, LocalStateRefused> {
+        self.session_identity_as(Ended::Refused)
+    }
+
+    /// [`Self::session_identity`]; `ended` says whether a session the server ended is refused.
+    fn session_identity_as(&self, ended: Ended) -> Result<Identity, LocalStateRefused> {
         let email = {
             let session = self
                 .acct
@@ -246,7 +269,7 @@ impl<C: CredentialStores> Engine<C> {
                 }
             }
         };
-        if self.acct.auth_health.is_expired() {
+        if ended == Ended::Refused && self.acct.auth_health.is_expired() {
             return Err(LocalStateRefused::SessionEnded);
         }
         let profile = self.acct.cached_profile.lock().ok().and_then(|guard| guard.clone());
@@ -266,11 +289,40 @@ impl<C: CredentialStores> Engine<C> {
         identity
     }
 
+    /// WRITES, one step of closing a session the server ended ([`Engine::close_ended_session`], the session watcher's
+    /// close, and the close a confirmed 401 asks): the recent searches of the account of `session` are deleted from
+    /// this computer while the session is still in memory, as at a sign-out (lead ruling 2026-11-15 17:25). The one
+    /// step the account-bound handle lets through after the refusal run (CP2 row 2.1): it deletes that session's OWN
+    /// row (keyed by its user id, never an email) and writes nothing else. Every other check is the handle's: the
+    /// owner proven on a read-only connection first, `session` still the session in memory before and after. A locked
+    /// screen does not refuse it (the close's own work). `Err`: nothing was deleted; the close goes on.
+    pub(super) fn delete_recent_searches_of_ended_session(
+        &self,
+        session: SessionGeneration,
+    ) -> Result<(), LocalStateRefused> {
+        let state = self.owned_state_as(Mode::Change, Call::Work, Ended::OwnSearchesWipe)?;
+        // The handle's session is the one the close named, not a later one that opened in between.
+        if state.session() != session {
+            return Err(LocalStateRefused::SessionChanged);
+        }
+        let user_id = self
+            .session_identity_as(Ended::OwnSearchesWipe)?
+            .user_id
+            .ok_or(LocalStateRefused::IdentityUnknown)?;
+        state
+            .with(|db| db.clear_search_recent(&user_id))?
+            .map_err(|_| LocalStateRefused::Unreadable)
+    }
+
     fn owned_state(&self, mode: Mode, call: Call) -> Result<OwnedState<'_>, LocalStateRefused> {
+        self.owned_state_as(mode, call, Ended::Refused)
+    }
+
+    fn owned_state_as(&self, mode: Mode, call: Call, ended: Ended) -> Result<OwnedState<'_>, LocalStateRefused> {
         // First, so a transition during anything below turns the handle into a refusal at its first read.
         let generation = self.acct.session_generation();
         self.person_asks(call)?;
-        let session = self.session_identity()?;
+        let session = self.session_identity_as(ended)?;
         let path = self.local_state_path(&session);
         if !path.exists() {
             return Err(LocalStateRefused::NothingSynced);
@@ -310,6 +362,7 @@ impl<C: CredentialStores> Engine<C> {
             writes: &self.writes,
             generation,
             db: std::sync::Arc::new(db),
+            ended,
         };
         state.still_this_session()?;
         Ok(state)
