@@ -342,7 +342,7 @@ impl<C: CredentialStores> Engine<C> {
     /// key stay in the credential store. Signed out: the stop alone, and nothing is marked.
     pub fn lock_vault(&self) -> VaultLocked {
         let locked = self.runtime.block_on(async {
-            let _step = self.transition.lock().await;
+            let _step = self.session_ending_step().await;
             let vault = self.vault();
             let signed_in = self.lock_state() != LockState::SignedOut;
             let mut survives_restart = signed_in && vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
@@ -395,7 +395,7 @@ impl<C: CredentialStores> Engine<C> {
             return None;
         }
         let locked = self.runtime.block_on(async {
-            let _step = self.transition.lock().await;
+            let _step = self.session_ending_step().await;
             if !may_close() {
                 return None;
             }
@@ -426,6 +426,26 @@ impl<C: CredentialStores> Engine<C> {
     /// end that turn (still waiting for the step lock) has moved it already.
     pub fn session_steps_asked(&self) -> u64 {
         self.acct.session_steps_asked()
+    }
+
+    /// The step lock (`transition`) for a step that may END the session: the step is counted BEFORE the wait
+    /// ([`Self::session_steps_asked`]), so a host that took a decision for the turn of now (About's update hand-off,
+    /// asked again right before the installer starts) sees that a step which will end that turn is on its way,
+    /// also while that step still waits behind another one (the hand-off's own stop of sync holds this lock for
+    /// seconds). Counted: `lock_vault`, `close_session_the_server_refused` (once its first check found something to
+    /// close), `sign_out_for`, `sign_out_keeping_local_data`, `discard_partial_sign_in`.
+    ///
+    /// Not counted, and why:
+    /// - `restore`, `sign_in_password_step`, `two_factor_step`, `unlock_with_phrase_step`, `sign_in_passkey_step`,
+    ///   `signup_create_step`: they run only while no session is open, and a press of the update needs an open lock;
+    /// - `start_holding_step`, `add_to_file_explorer_again` and `stop` (the hand-off's own stop, and the quit's):
+    ///   they end no session;
+    /// - `change_password_step`: the person is there and their session goes on. Landed before the hand-off asks, its
+    ///   turn move refuses the hand-off anyway; still queued, the install for that same person is fine (wave 2,
+    ///   decision D-4: a choice, not an oversight).
+    pub(super) async fn session_ending_step(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.acct.note_session_step_asked();
+        self.transition.lock().await
     }
 
     /// Start the session watcher: ONE thread (`session-watch`) that asks [`Self::close_ended_session`] every

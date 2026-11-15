@@ -121,9 +121,9 @@ impl Presence {
     /// The session is still the one the press was taken in, its lock is open, and no session-ending step was asked
     /// since (one may still wait for the engine's step lock): the hand-off may run.
     pub(crate) fn holds(&self) -> bool {
-        let (turn, open, _steps) = (self.now)();
+        let (turn, open, steps) = (self.now)();
         let pressed = *self.pressed.lock().unwrap_or_else(|p| p.into_inner());
-        open && pressed.is_some_and(|pressed| Some(pressed.turn) == turn)
+        open && pressed.is_some_and(|pressed| Some(pressed.turn) == turn && pressed.steps == steps)
     }
 
     /// The hand-off was refused right before the installer ([`Self::holds`] said no): the row says the update waits

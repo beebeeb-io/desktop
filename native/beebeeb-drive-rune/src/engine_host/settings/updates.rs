@@ -118,7 +118,9 @@ pub const VERIFYING: &str = "Checking the download's signature…";
 pub const HANDING_OFF: &str = "Signature checked. Stopping sync, then starting the installer…";
 pub const RESTARTING: &str = "Restarting to update…";
 /// The press's hand-off did not run: Beebeeb was locked, or the session changed (a sign-out, another sign-in) since
-/// the press. Nothing stopped, nothing started; the verified file is kept for the person's next press.
+/// the press. Nothing stopped, nothing started; the verified file is kept for the person's next press. Also when that
+/// was seen only right before the installer (during the hand-off's stop): no installer was asked to start, and the
+/// sync the stop ended is started again.
 pub const WAITS_FOR_YOU: &str = "It waits for you: it installs when you choose Restart to update.";
 /// A channel chosen while the press's order runs: not saved (the order checks the channel it started on).
 pub const UPDATE_UNDER_WAY: &str = "An update is under way. Choose the channel once it is done.";
@@ -759,6 +761,11 @@ impl UpdatesPart {
         match self.shown() {
             // A verified file at rest: the press's hand-off waited for the person (the session changed or locked).
             Some(State::Available { .. } | State::ReadyToRestart { .. }) => Press::Restart,
+            // The hand-off was refused right before the installer for the same reason: the press the words offer.
+            Some(State::Failed {
+                failure: Failure::InstallerDidNotStart,
+                resume: Some(_),
+            }) if self.presence.waited() => Press::Restart,
             Some(State::Failed { .. }) => Press::Retry,
             _ => Press::Wait,
         }
@@ -854,10 +861,13 @@ impl UpdatesPart {
             } => checked(downloading(offer, *received, *total)),
             State::Verifying { .. } => checked(VERIFYING.into()),
             // At rest only when the press's hand-off waited for the person (while the order runs it says HANDING_OFF).
-            State::ReadyToRestart { offer, .. } => checked(format!(
-                "Version {} is downloaded and verified. {WAITS_FOR_YOU}",
-                offer.version
-            )),
+            State::ReadyToRestart { offer, .. } => checked(waits_for_you(offer)),
+            // The hand-off was refused right before the installer (locked, or the session ended or changed, during the
+            // stop): no installer was asked to start, so not "did not start"; the verified file is kept for the person.
+            State::Failed {
+                failure: Failure::InstallerDidNotStart,
+                resume: Some(offer),
+            } if self.presence.waited() => checked(waits_for_you(offer)),
             State::Restarting { .. } => checked(RESTARTING.into()),
             // A download the server did not send: never "couldn't check", nor "no update information" for a 404.
             State::Failed {
@@ -867,6 +877,11 @@ impl UpdatesPart {
             State::Failed { failure, .. } => failed(*failure, report.freshness),
         }
     }
+}
+
+/// A verified file that waits for the person's press, as the row says it.
+fn waits_for_you(offer: &beebeeb_updater::Offer) -> String {
+    format!("Version {} is downloaded and verified. {WAITS_FOR_YOU}", offer.version)
 }
 
 /// A download on its way, as the row says it.
