@@ -541,9 +541,9 @@ fn a_copy_of_a_version_older_than_the_one_beebeeb_has_now_is_not_read() {
 }
 
 /// Review of desktop#432 (P1-2), the viewer's own save: it lands as the version it became, but nothing writes its
-/// bytes into the account's folder on this computer. A write-keyed landing records no agreed content
-/// (`EngineBridge` upload: "A Finder write's copy is not read again"), and the Windows finalization is a create's
-/// only. The copy there is still the version before the save, so it is never read as the new one.
+/// bytes into the account's folder on this computer (the Windows finalization is a create's only). Since task 2523
+/// (F2) the landing knows it did not write that copy, so the copy stays agreed at the version before the save,
+/// behind the new one; it is never read as the new one (and the stale-copy pass brings it up to date).
 #[test]
 fn after_the_viewers_own_save_landed_the_older_copy_here_is_not_read_as_it() {
     let fake = fake("own-landed");
@@ -603,6 +603,8 @@ fn after_the_viewers_own_save_landed_the_older_copy_here_is_not_read_as_it() {
         mime_type: None,
         completed_payload: Some("/staged/viewer"),
         completed_payload_hash: None,
+        // The viewer's save never writes the sync folder's copy (task 2523, F2).
+        place_written: false,
         finalization: None,
         now: 22,
     };
@@ -618,8 +620,8 @@ fn after_the_viewers_own_save_landed_the_older_copy_here_is_not_read_as_it() {
             contract.local_base_version,
             contract.local_hash.as_deref()
         ),
-        (5, 5, None),
-        "the landing names 5 and records no agreed content"
+        (5, 4, Some("invented-agreed-hash")),
+        "the landing names 5; the folder's copy stays agreed at 4, behind 5 (task 2523, F2)"
     );
     assert!(
         matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)),
@@ -651,6 +653,8 @@ fn land_viewer_save(db: &StateDb, op_id: &str, base: i64, version: i64) {
         mime_type: None,
         completed_payload: payload.as_deref(),
         completed_payload_hash: None,
+        // The viewer's save never writes the sync folder's copy (task 2523, F2).
+        place_written: false,
         finalization: None,
         now: 22,
     };
