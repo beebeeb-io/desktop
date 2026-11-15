@@ -78,13 +78,28 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
   `00d54e32`). The More list is one row shorter than the board's, so the gate's lines for these three frames are not
   all 0: the counts in the tables above are measured (compare.sh, both themes), and each red line is this row or what
   sits below it. Board follow-up: take the row off the board, or put the page on the site first.
-- **DW-0781, DW-0789b: the caption follows the spec's update flow, not the board's words** (lead ruling,
-  2026-11-15; spec `docs/superpowers/specs/2026-11-11-native-installer-updater.md` §4, "Apply"). The board says
-  "Download it, then open it to install. Beebeeb never installs an update by itself.", the 0.8 flow (an installer in
-  Downloads, opened by the person). 0.9.0 downloads the installer, checks its signature, and installs it only when the
-  person chooses Restart to update, so the app says `source::UPDATE_CAPTION`: "Its signature is checked first. It
-  installs only when you choose Restart to update." One text line differs from the golden on each of the two frames,
-  in both themes. The button follows the step: "Download update" (the board's own word in its notes) while the
-  version is not downloaded, "Restart to update" once it is verified (the board's drawing, and the board sample's
-  state). Board follow-up: the same caption on the board (DW-1210's notes quote the old words too; its drawing, and
-  the app's tray, show no caption).
+- **DW-0781, DW-0789b, DW-1210: ONE press, "Restart to update"** (owner ruling, Guus 2026-11-15 08:16: one press:
+  download, then restart by itself the moment the file is verified, not two presses; it replaces the two steps of
+  #441). The press downloads the newer version, checks its signature, and, only on the file that its own download
+  verified, for the version pressed, hands it off: verified again, sync stops, the installer starts, the app closes
+  (`engine_host/settings/updates_worker.rs`, `one_press`). The spec's rule stands
+  (`docs/superpowers/specs/2026-11-11-native-installer-updater.md` §4, "Apply"): nothing installs without
+  `Event::Apply`, only the press's order sends it, and the hand-off is the only way to the installer; a background
+  check never downloads nor hands off. The board's
+  button, "Restart to update", now says what the press does at every step, so the button keeps the board's words; it
+  differs only where the board draws no state: disabled while the press runs (the caption's place says the step:
+  downloading, checking the signature, stopping sync and starting the installer, restarting), "Try again" after a
+  step failed (the caption's place says what failed; nothing was installed), and disabled after a stop of sync that
+  was not confirmed (the words say to restart Beebeeb). The board's caption, "Download it, then open it to install.
+  Beebeeb never installs an update by itself.", is the 0.8 two-step flow (an installer in Downloads, opened by the
+  person) and no longer applies: the app says `source::UPDATE_CAPTION`, "Its signature is checked first. It installs
+  only when you choose Restart to update." (lead ruling 2026-11-15, kept: the one press keeps it true). Board words
+  changed: that caption alone, one text line on DW-0781 and on DW-0789b, both themes. DW-1210 (the b's flyout, which
+  0.9.0 does not wire to the updater: `frames/tray/FRAMES.md`) draws "Restart to apply the update." and "Restart to
+  update", which fit the one press: unchanged. Board follow-up: the caption on the board.
+- **DW-0751, DW-0789: no row points to release notes that do not open** (review of #441). In the app the release
+  notes (DW-0789b) open only while a newer version is on offer (`EngineSettingsSource::opens`). Otherwise About draws
+  no "Release notes" row, and the older channel's row (DW-0789, Rules) says "This PC runs 0.9.1, from the Beta
+  channel." without "Read the release notes before you go back to an older version." and opens nothing: an older
+  version's notes are never shown (DW-0789b's button would offer it), and a link that opens nothing is a dead
+  control. The board sample opens the notes, so the frames as compared draw both rows as the board does.

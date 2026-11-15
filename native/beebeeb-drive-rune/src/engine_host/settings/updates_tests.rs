@@ -711,6 +711,7 @@ fn the_release_config_is_the_pinned_key_and_the_one_host() {
         MemStore::default(),
         Recording {
             did: Did::default(),
+            stop_gate: Gate::default(),
             starts: true,
             sync_back: None,
         },
