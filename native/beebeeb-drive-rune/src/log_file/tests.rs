@@ -432,7 +432,8 @@ fn an_http_status_keeps_its_prefix_and_never_its_body() {
         "the status and its reason stay: {file}"
     );
     // A bare status, or "HTTP" in prose, is not a prefix.
-    assert_eq!(redact::scrub("HTTP 404"), "HTTP 404");
+    // A status is always written with its standard reason and `<body omitted>`: nothing after the digits is read.
+    assert_eq!(redact::scrub("HTTP 404"), "HTTP 404 Not Found: <body omitted>");
     assert_eq!(redact::scrub("the HTTP client was built"), "the HTTP client was built");
 }
 
@@ -568,17 +569,17 @@ fn an_http_status_with_no_plain_reason_still_drops_its_body() {
         (
             "unknown status code",
             "HTTP 520 <unknown status code>: <html><head><title>Medical Records origin error</title></head><body>",
-            "HTTP 520 unknown status code: <body omitted>",
+            "HTTP 520: <body omitted>",
         ),
         (
             "unknown status code, plain text",
             "HTTP 509 <unknown status code>: Bandwidth exceeded for anna smith account",
-            "HTTP 509 unknown status code: <body omitted>",
+            "HTTP 509: <body omitted>",
         ),
         (
             "apostrophe in the reason",
             "HTTP 418 I'm a teapot: Medical Records body text here",
-            "HTTP 418 I m a teapot: <body omitted>",
+            "HTTP 418 I'm a teapot: <body omitted>",
         ),
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -851,5 +852,116 @@ fn quotes_of_mixed_styles_mark_from_the_first_opening_to_the_last_closing() {
         "unclosed double quote, then an apostrophe",
         "Photos",
         "could not open \u{201c}Anna Smith\u{2019}s Holiday Photos today",
+    );
+}
+
+// ---- Round 5 (delta review 3 of #442): the HTTP reason comes from a fixed table ----
+// Decision (lead, 2026-11-15 13:16): the HTTP reason comes from a fixed table, never from the text, because three
+// input-reading designs leaked (delta reviews 1-3).
+
+#[test]
+fn an_http_prefix_in_a_folder_name_never_writes_a_byte_after_its_digits() {
+    for text in [
+        "write lock C:\\Users\\Anna\\Projects\\Site (HTTP 404 Medical Records)\\Rome: Access is denied. (os error 5)",
+        "write lock /home/anna/Projects/Site (HTTP 404 Medical Records)/Rome: Permission denied (os error 13)",
+        "write lock C:\\Users\\Anna\\Projects\\(HTTP 500) Medical Records\\Rome: Access is denied. (os error 5)",
+        "could not read /Users/anna/Site \"HTTP 404 Medical Records\"/Rome: Permission denied (os error 13)",
+        "could not read C:\\Users\\Anna\\Site (HTTP 404 x=1)\\Medical Records\\Rome: Access is denied.",
+        "could not read /home/anna/Bug: HTTP 500 Medical Records/Rome: Permission denied (os error 13)",
+    ] {
+        for secret in ["Medical", "Records", "Smith", "x=1"] {
+            assert_never_written("HTTP in a folder name", secret, text);
+        }
+    }
+}
+
+#[test]
+fn a_real_status_is_written_with_the_tables_reason_and_never_the_inputs() {
+    for (input, written) in [
+        (
+            "sync ops: HTTP 502 Bad Gateway: <html><head>",
+            "sync ops: HTTP 502 Bad Gateway: <body omitted>",
+        ),
+        (
+            "HTTP 520 <unknown status code>: <html>Medical Records",
+            "HTTP 520: <body omitted>",
+        ),
+        (
+            "HTTP 418 I'm a teapot: Medical Records",
+            "HTTP 418 I'm a teapot: <body omitted>",
+        ),
+        (
+            "HTTP 503 Service Unavailable: upstream Anna Smith",
+            "HTTP 503 Service Unavailable: <body omitted>",
+        ),
+        // The input's reason is never copied, even when it is a plain phrase that differs from the table's.
+        ("HTTP 404 Medical Records: body", "HTTP 404 Not Found: <body omitted>"),
+        ("HTTP 599 anything at all", "HTTP 599: <body omitted>"),
+    ] {
+        assert_eq!(redact::scrub(input), written, "input: {input}");
+    }
+}
+
+#[test]
+fn quoted_names_stay_closed_when_a_later_quote_is_open() {
+    assert_never_written(
+        "second name unclosed",
+        "Files",
+        "\u{201c}a\u{201d} and \u{201c}Anna\u{2019}s Files",
+    );
+    assert_never_written(
+        "single then unclosed double",
+        "Files",
+        "\u{2018}a\u{2019} moved to \u{201c}Anna\u{2019}s Files today",
+    );
+}
+
+#[test]
+fn the_equals_cases_can_go_red_and_the_path_cut_off_is_pinned() {
+    // Each secret is a word the input holds outside the part after the `=` (the key before it is what leaked).
+    assert_never_written(
+        "key is a path",
+        "Downloads",
+        "could not read C:\\Users\\Anna\\Downloads\\export=1\\Medical Records\\scan.pdf: Access is denied. (os error 5)",
+    );
+    assert_never_written(
+        "unix key is a path",
+        "anna",
+        "could not read /home/anna/a=b/Medical Records/scan.pdf: Permission denied (os error 13)",
+    );
+    assert_never_written(
+        "key is a path with a file name",
+        "Anna",
+        "could not read C:\\Users\\Anna\\file=abc.pdf: Access is denied.",
+    );
+    // The cut-off fires on `<path>=<path>` too: a later folder with two spaces must not be written.
+    assert_never_written(
+        "cut-off after <path>=",
+        "Medical",
+        "could not read C:\\Users\\Anna\\x=1\\My Medical Records\\scan.pdf: Access is denied.",
+    );
+}
+
+#[test]
+fn an_equals_sign_inside_an_email_does_not_split_it() {
+    assert_never_written("email with =", "anna", "sign in as anna=smith@example.eu failed");
+    assert_never_written(
+        "email with = and a dot",
+        "anna",
+        "sign in as anna.smith=work@example.eu failed",
+    );
+}
+
+#[test]
+fn a_path_glued_to_the_word_before_it_is_cut_off() {
+    assert_never_written(
+        "glued unix path",
+        "Medical",
+        "at:/home/anna/My Medical Records/x: Permission denied",
+    );
+    assert_never_written(
+        "glued windows path",
+        "Medical",
+        "at:C:\\Users\\Anna\\My Medical Records\\x: Access is denied.",
     );
 }

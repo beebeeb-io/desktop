@@ -13,8 +13,9 @@
 //!    server body (JSON or HTML) is replaced whole. Control characters are blanked, so one event is one line.
 //!
 //! Also by shape of the sentence: text between “…”, ‘…’, «…» or backticks is one name (`<name>`: the engine quotes the
-//! names it prints); behind `HTTP <status> <reason>: ` (any reason up to 40 characters: `<unknown status code>` and `I'm a teapot` too) the
-//! rest is `<body omitted>` (an error text keeps the first 300 characters of a server's answer); `custom:<name>` is a backup folder the person picked; `on <host>` of the
+//! names it prints); from `HTTP <3 digits>` on, nothing of the text is written: the log writes `HTTP <status>` and the status's standard
+//! reason from a fixed table (`REASONS`), then `<body omitted>` (an error text keeps the first 300 characters of a
+//! server's answer); no byte after the digits is read; `custom:<name>` is a backup folder the person picked; `on <host>` of the
 //! lock-held sentence is `on <host>`; after an absolute path (also after a redacted label or `key=`) the rest of the
 //! text is dropped, because a name can hold spaces.
 //!
@@ -265,11 +266,7 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
     }
     if let Some((before, status)) = http_status_prefix(raw) {
         let head = scrub_with(before, allow_uuid);
-        let status = if status.is_empty() {
-            "<body omitted>".to_string()
-        } else {
-            format!("{status}: <body omitted>")
-        };
+        let status = format!("{status}: <body omitted>");
         return if head.is_empty() {
             status
         } else {
@@ -370,36 +367,86 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
     out.join(" ")
 }
 
-/// Splits `raw` at `HTTP <3 digits><reason>: ` (the shape of `DesktopApiError::HttpStatus`, whose text ends in the first
-/// 300 characters of the server's answer): the text before it, and the status with its reason phrase. `None` when
-/// there is no such prefix or nothing follows it.
+/// The standard reason phrase of each HTTP status the `http` crate knows (RFC 9110 and its registered extensions). The
+/// log writes THIS text for a status and never the text of the input: three designs that read the reason out of the input
+/// each leaked a name (delta reviews 1 to 3 of #442). An unknown status has no reason.
+const REASONS: &[(u16, &str)] = &[
+    (100, "Continue"),
+    (101, "Switching Protocols"),
+    (102, "Processing"),
+    (200, "OK"),
+    (201, "Created"),
+    (202, "Accepted"),
+    (203, "Non-Authoritative Information"),
+    (204, "No Content"),
+    (205, "Reset Content"),
+    (206, "Partial Content"),
+    (207, "Multi-Status"),
+    (208, "Already Reported"),
+    (226, "IM Used"),
+    (300, "Multiple Choices"),
+    (301, "Moved Permanently"),
+    (302, "Found"),
+    (303, "See Other"),
+    (304, "Not Modified"),
+    (305, "Use Proxy"),
+    (307, "Temporary Redirect"),
+    (308, "Permanent Redirect"),
+    (400, "Bad Request"),
+    (401, "Unauthorized"),
+    (402, "Payment Required"),
+    (403, "Forbidden"),
+    (404, "Not Found"),
+    (405, "Method Not Allowed"),
+    (406, "Not Acceptable"),
+    (407, "Proxy Authentication Required"),
+    (408, "Request Timeout"),
+    (409, "Conflict"),
+    (410, "Gone"),
+    (411, "Length Required"),
+    (412, "Precondition Failed"),
+    (413, "Payload Too Large"),
+    (414, "URI Too Long"),
+    (415, "Unsupported Media Type"),
+    (416, "Range Not Satisfiable"),
+    (417, "Expectation Failed"),
+    (418, "I'm a teapot"),
+    (421, "Misdirected Request"),
+    (422, "Unprocessable Entity"),
+    (423, "Locked"),
+    (424, "Failed Dependency"),
+    (426, "Upgrade Required"),
+    (428, "Precondition Required"),
+    (429, "Too Many Requests"),
+    (431, "Request Header Fields Too Large"),
+    (451, "Unavailable For Legal Reasons"),
+    (500, "Internal Server Error"),
+    (501, "Not Implemented"),
+    (502, "Bad Gateway"),
+    (503, "Service Unavailable"),
+    (504, "Gateway Timeout"),
+    (505, "HTTP Version Not Supported"),
+    (506, "Variant Also Negotiates"),
+    (507, "Insufficient Storage"),
+    (508, "Loop Detected"),
+    (510, "Not Extended"),
+    (511, "Network Authentication Required"),
+];
+
+/// Splits `raw` at the first `HTTP <3 ASCII digits>` (the start of `DesktopApiError::HttpStatus`'s text, which ends in
+/// the first 300 characters of the server's answer): the text before it, and `HTTP <status>` with the status's standard
+/// reason from [`REASONS`]. Nothing after the three digits is read, so nothing of it can be written: the only input
+/// bytes this writes are those digits. `None` when there is no such prefix.
 fn http_status_prefix(raw: &str) -> Option<(&str, String)> {
     for (at, _) in raw.match_indices("HTTP ") {
-        let rest = &raw[at + 5..];
-        let Some(digits) = rest.get(..3) else { continue };
+        let Some(digits) = raw[at + 5..].get(..3) else { continue };
+        let Ok(code) = digits.parse::<u16>() else { continue };
         if !digits.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let Some(colon) = rest.find(": ") else { continue };
-        // Any reason up to the first `": "`: `reqwest::StatusCode` prints `<unknown status code>` for a code it has
-        // no phrase for, and a phrase can hold an apostrophe (`418 I'm a teapot`).
-        let reason = rest[3..colon].trim();
-        if colon < 3 || reason.len() > 40 || rest[colon + 2..].trim().is_empty() {
-            continue;
-        }
-        // The reason is read like any other text: the brackets and the apostrophe are separators, a word with a shape goes.
-        let reason = scrub_with(reason, false);
-        // A prefix inside a path or a quoted name (a folder called `HTTP 404 pages`) is not a status: the rest still goes,
-        // but nothing of the prefix is written. Only where `DesktopApiError::HttpStatus` itself can start (the text, a `: `
-        // chain, a Debug quote or bracket) is the status shown.
-        let head = &raw[..at];
-        if !(head.is_empty() || head.ends_with(": ") || head.ends_with('"') || head.ends_with('(')) {
-            return Some((raw[..at].trim(), String::new()));
-        }
-        let status = if reason.is_empty() {
-            format!("HTTP {digits}")
-        } else {
-            format!("HTTP {digits} {reason}")
+        let status = match REASONS.iter().find(|(known, _)| *known == code) {
+            Some((_, reason)) => format!("HTTP {code} {reason}"),
+            None => format!("HTTP {code}"),
         };
         return Some((raw[..at].trim(), status));
     }
@@ -439,9 +486,19 @@ fn mark_quoted(raw: &str) -> String {
         out.push(NAME_MARK);
         out.push(' ');
         let rest = &chars[i + 1..];
-        // Fails closed: with no closing quote of the opener's OWN style after it (`’` alone is an apostrophe, not the end
-        // of `“…`), the rest of the text is the name. With one, the name runs to the last closing quote of ANY style.
-        i = if rest.contains(&CLOSING[style]) {
+        // Fails closed: the name runs to the last closing quote of ANY style only when it is well formed. With no closing
+        // quote of the opener's OWN style after it (`’` alone is an apostrophe, not the end of `“…`), with a later
+        // opener (`“`, `‘`, `«`) that has no closing quote of its own style after it, or with an odd number of backticks
+        // from here on, the rest of the text is the name.
+        let own_closer = rest.contains(&CLOSING[style]);
+        let later_openers_closed = rest.iter().enumerate().all(|(at, c)| {
+            OPENING[..3]
+                .iter()
+                .position(|o| o == c)
+                .is_none_or(|later| rest[at + 1..].contains(&CLOSING[later]))
+        });
+        let backticks_even = chars[i..].iter().filter(|c| **c == '`').count() % 2 == 0;
+        i = if own_closer && later_openers_closed && backticks_even {
             match rest.iter().rposition(|c| CLOSING.contains(c)) {
                 Some(last) => i + 1 + last + 1,
                 None => chars.len(),
@@ -455,7 +512,10 @@ fn mark_quoted(raw: &str) -> String {
 
 fn absolute_start(token: &str) -> bool {
     let b = token.as_bytes();
-    token.starts_with('/')
+    // A path glued to the word before it (`at:/home/anna/...`, `at:C:\Users\...`) starts a path too.
+    let glued = (token.contains(":/") && !token.contains("://")) || token.contains(":\\");
+    glued
+        || token.starts_with('/')
         || token.starts_with('\\')
         || token.starts_with('~')
         || token.starts_with('%')
@@ -486,6 +546,10 @@ fn scrub_token(token: &str, allow_uuid: bool) -> String {
         return token.to_string();
     }
     let (prefix, core, suffix) = (&token[..start], &token[start..end], &token[end..]);
+    // An email address is one word, even with an `=` in it (`anna=smith@example.eu`): never split at the `=`.
+    if core.find('@').is_some_and(|at| core[at..].contains('.')) {
+        return format!("{prefix}<email>{suffix}");
+    }
     // Trailing `=` padding (base64) belongs to the token, and the part before an `=` is a word like any other: a path,
     // an email or a file name there is replaced, not written.
     let unpadded = core.trim_end_matches('=');
