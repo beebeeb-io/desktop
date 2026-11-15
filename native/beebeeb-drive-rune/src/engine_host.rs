@@ -75,6 +75,11 @@ pub mod hello;
 pub mod item_preview;
 // The player's bytes: the engine's range reader for the session of the press (`media`).
 pub mod media;
+// An Office document's confined renderer: one helper per document, every answer checked (`office_host`).
+pub mod office_host;
+#[cfg(test)]
+#[path = "engine_host/office_host_tests.rs"]
+mod office_host_tests;
 pub mod open;
 pub mod passkeys;
 pub mod photos;

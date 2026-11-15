@@ -59,6 +59,11 @@ mod windows {
     /// The system's socket library refuses to start inside the container, so no verb that goes through it gets a
     /// socket (what is left below the library: `no_network_verb_succeeds_in_the_confined_helper`).
     const NETWORK_REFUSED: &str = "err network-start 10107";
+    /// The system resolver's answer to the confined helper: no DNS server for this caller (`DNS_ERROR_NO_DNS_SERVERS`,
+    /// measured on the Windows build VM). A server's answer instead (the name exists, or does not, or has no record)
+    /// means a lookup was made for the helper, even one the DNS client service's cache does not show: with the
+    /// package opt-out removed, the lookup is answered and no cache line appears.
+    const LOOKUP_REFUSED: &str = "err 9852";
     /// The system ends a container process that uses a handle value it does not hold (invalid handle).
     const ENDED_FOR_INVALID_HANDLE: u32 = 0xC000_0008;
     /// Kill on close, one active process, die on an unhandled exception, memory cap; and all eight UI classes.
@@ -1123,6 +1128,164 @@ mod windows {
             reached,
             (0, 0),
             "connections and datagrams that reached the test's sockets"
+        );
+    }
+
+    /// A TCP connect through the socket driver alone (no socket library) is refused in the confined helper. The
+    /// verbs above stop where the library starts, so they never reach the kernel's network filter; this one goes
+    /// past the library, as a helper that drives the driver itself would.
+    ///
+    /// **The target is a listening TCP port on another machine** (`BB_OFFICE_N1_TARGET=<ip:port>`), never
+    /// loopback or this machine's own address: the filter refuses those even to a container that holds a network
+    /// capability, so only another machine lets the capability mutant (`network-capability` in
+    /// `mutants-on-windows.ps1`) turn this test red. The plain probe connecting there through the driver alone is
+    /// the proof that the instrument can see a connection. Ignored unless asked for; asked for without a target is a
+    /// red with the reason.
+    #[test]
+    #[ignore = "needs BB_OFFICE_N1_TARGET: a listening TCP port on another machine of the network"]
+    fn a_raw_driver_connect_is_refused_in_the_confined_helper() {
+        let _serial = serial();
+        let target = std::env::var("BB_OFFICE_N1_TARGET")
+            .expect("BB_OFFICE_N1_TARGET is not set: this measurement was asked to run and could not");
+        let target: SocketAddr = target.parse().expect("BB_OFFICE_N1_TARGET is <ip:port>");
+        assert!(
+            !target.ip().is_loopback() && target.ip() != own_address(),
+            "the target is another machine, not loopback or this machine's own address"
+        );
+
+        let mut plain = Probe::plain();
+        let plain_raw = plain.attempt(&format!("raw-connect {target}"));
+        let plain_library = plain.attempt(&format!("connect {target}"));
+        drop(plain);
+        let mut confined = Probe::confined();
+        let confined_raw = confined.attempt(&format!("raw-connect {target}"));
+        let confined_library = confined.attempt(&format!("connect {target}"));
+        println!(
+            "raw-connect: plain {plain_raw:?} (library {plain_library:?}); confined {confined_raw:?} (library \
+             {confined_library:?})"
+        );
+
+        assert_eq!(
+            plain_raw, "ok",
+            "the plain probe connects through the socket driver alone"
+        );
+        assert!(
+            confined_raw.starts_with("err "),
+            "the confined helper's connect through the socket driver: {confined_raw}"
+        );
+    }
+
+    /// A fresh host name under `domain`, never asked before: `ocp-<time><pid><n>.<domain>`.
+    fn fresh_name(domain: &str) -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        format!(
+            "ocp-{nanos:x}{:x}{}.{domain}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    /// How many lines of the DNS client service's cache name `name` (`ipconfig /displaydns`; a name that does not
+    /// exist is cached too). The cache is the machine's, so it counts a lookup whoever asked the service for it.
+    fn cached(name: &str) -> usize {
+        let shown = Command::new("ipconfig")
+            .arg("/displaydns")
+            .output()
+            .expect("ipconfig runs");
+        String::from_utf8_lossy(&shown.stdout)
+            .to_ascii_lowercase()
+            .lines()
+            .filter(|line| line.contains(name))
+            .count()
+    }
+
+    /// `cached(name)` once it is non-zero, or after `within`.
+    fn cached_within(name: &str, within: Duration) -> usize {
+        let until = Instant::now() + within;
+        loop {
+            let seen = cached(name);
+            if seen > 0 || Instant::now() >= until {
+                return seen;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// The most lines `cached(name)` showed, sampled from now until `within` passed, on the same schedule as
+    /// [`cached_within`]: an entry that was in the cache for a moment and left again still counts.
+    fn cached_most_within(name: &str, within: Duration) -> usize {
+        let until = Instant::now() + within;
+        let mut most = 0;
+        loop {
+            most = most.max(cached(name));
+            if Instant::now() >= until {
+                return most;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// No name lookup is made on the confined helper's behalf: neither through the system resolver's interface (the
+    /// DNS client service makes that lookup, in its own process) nor by opening a share path whose host is a NAME
+    /// (the system resolves it before it can refuse the open). A document can carry such a path in a linked
+    /// picture, and a lookup of a crafted name would carry text off the machine even if no connection follows.
+    ///
+    /// **Counted machine-wide**, in the DNS client service's cache, never per process: the lookups happen in system
+    /// services, not in the helper. Each case uses a fresh name and is first shown to land in the cache for a plain
+    /// probe. A web-folder share path (`\\<name>@SSL\DavWWWRoot\x`) is printed as a measurement only: whether the
+    /// plain probe's lookup shows depends on the web-folder service running. `BB_OFFICE_LOOKUP_DOMAIN` names a
+    /// domain whose fresh names do not exist (for example `example.com`); asked for without it is a red.
+    #[test]
+    #[ignore = "needs BB_OFFICE_LOOKUP_DOMAIN: a domain whose fresh names do not exist; sends DNS queries"]
+    fn no_name_lookup_is_made_on_the_confined_helpers_behalf() {
+        let _serial = serial();
+        let domain = std::env::var("BB_OFFICE_LOOKUP_DOMAIN")
+            .expect("BB_OFFICE_LOOKUP_DOMAIN is not set: this measurement was asked to run and could not")
+            .to_ascii_lowercase();
+        let within = Duration::from_secs(5);
+        // (the case, the request it makes for a host name)
+        type Case = (&'static str, fn(&str) -> String);
+        let cases: [Case; 3] = [
+            ("resolver", |name| format!("dns {name}")),
+            ("share-name", |name| format!(r"read \\{name}\s\x")),
+            ("web-folder", |name| format!(r"read \\{name}@SSL\DavWWWRoot\x")),
+        ];
+
+        let mut plain = Probe::plain();
+        let plain_seen = cases.map(|(case, request)| {
+            let name = fresh_name(&domain);
+            let answer = plain.attempt(&request(&name));
+            (case, answer, cached_within(&name, within))
+        });
+        drop(plain);
+        let mut confined = Probe::confined();
+        let confined_seen = cases.map(|(case, request)| {
+            let name = fresh_name(&domain);
+            let answer = confined.attempt(&request(&name));
+            (case, answer, cached_most_within(&name, within))
+        });
+        println!("lookups (case, answer, lines in the cache): plain {plain_seen:?}; confined {confined_seen:?}");
+
+        for index in 0..2 {
+            let (case, _, seen) = &plain_seen[index];
+            assert!(
+                *seen > 0,
+                "{case}: the plain probe's lookup is seen in the cache (the instrument can count)"
+            );
+            let (case, answer, seen) = &confined_seen[index];
+            assert_eq!(
+                *seen, 0,
+                "{case}: lookups made for the confined helper (it answered {answer})"
+            );
+        }
+        // The cache shows only the lookups the service makes and keeps; the answer shows whether any server answered.
+        assert_eq!(
+            confined_seen[0].1, LOOKUP_REFUSED,
+            "resolver: the confined helper's lookup is refused, not answered by a server"
         );
     }
 

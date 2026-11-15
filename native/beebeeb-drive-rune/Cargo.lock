@@ -605,6 +605,7 @@ version = "0.0.1"
 dependencies = [
  "beebeeb-engine",
  "beebeeb-media-protocol",
+ "beebeeb-office-protocol",
  "beebeeb-office-sandbox",
  "beebeeb-updater",
  "chrono",
@@ -675,6 +676,10 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-media-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "beebeeb-office-protocol"
 version = "0.1.0"
 
 [[package]]
