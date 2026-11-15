@@ -38,7 +38,11 @@ mod view_steps;
 #[cfg(test)]
 mod create_tests;
 #[cfg(test)]
+mod device_tests;
+#[cfg(test)]
 mod lock_tests;
+#[cfg(test)]
+mod recovery_tests;
 #[cfg(test)]
 mod steps_tests;
 #[cfg(test)]
@@ -52,8 +56,8 @@ use crate::State;
 use crate::shell::app::{Event, GateState};
 use crate::shell::host;
 use source::{
-    DeviceRequest, DeviceStatus, FixtureSignInSource, HelloOutcome, NextAfterSignIn, PhraseProblem, Script,
-    SharedSession, SignInAnswer, SignInEvent, SignInProblem, SignInSource, TwoFactorProblem, board,
+    DeviceRequest, DeviceStatus, FixtureSignInSource, HelloOutcome, NewPasswordProblem, NextAfterSignIn, PhraseProblem,
+    Script, SharedSession, SignInAnswer, SignInEvent, SignInProblem, SignInSource, TwoFactorProblem, board,
 };
 use steps::Pictured;
 
@@ -88,6 +92,9 @@ pub enum Screen {
     Approved { by: String },
     /// DW-A08's error state: approved, and the keys did not arrive.
     KeysNotReceived,
+    /// Approved, and this PC did not sign in (no board frame: `FRAMES.md`, flagged deviations). `other_account`: it
+    /// holds another account; else it moved on while it waited, or could not store the session.
+    NotSignedIn { other_account: bool },
     /// DW-A09.
     Denied { by: String },
     /// DW-A26 and DW-A27; DW-A28 when `backup`.
@@ -108,6 +115,9 @@ pub enum Screen {
     NewPassword,
     /// DW-A50.
     PasswordUpdated,
+    /// The new password was set, and the account asks for a normal sign-in with it (two-factor): nothing was signed
+    /// in. DW-A50's layout and words for what is true here (no board frame: `FRAMES.md`, flagged deviations).
+    PasswordChanged,
     /// DW-A31 to DW-A44: create an account, at one of its steps (`create.rs`).
     Create(create::Step),
 }
@@ -161,6 +171,9 @@ pub struct Ui {
     seconds_left: u32,
     /// The waiting request's connection dropped (DW-A07: the pill reads "Reconnecting…").
     reconnecting: bool,
+    /// The spent code's screen (DW-A10's layout) is for a request that was lost, not one whose code expired. Read only
+    /// with `Screen::Device { expired: true }`, and set by both endings that lead there.
+    lost: bool,
     /// The pairing code on the clipboard, while this screen put it there.
     code_copy: Option<SecretCopy>,
     /// The element that takes keyboard focus once this change is on screen.
@@ -192,7 +205,7 @@ pub struct Ui {
     /// typed into `password`, the one password field.
     pub confirm: TextEdit,
     setting: bool,
-    set_problem: Option<SignInProblem>,
+    set_problem: Option<NewPasswordProblem>,
     /// Sign-up's own state (DW-A31 to DW-A44), made ONCE here with its secure fields.
     pub(super) create: create::Create,
     /// The session's gate as the last poll saw it (`follow_gate`).
@@ -228,6 +241,7 @@ impl Ui {
             request: None,
             seconds_left: 0,
             reconnecting: false,
+            lost: false,
             code_copy: None,
             focus: None,
             intents: Vec::new(),
@@ -282,6 +296,11 @@ impl Ui {
 
     pub fn seconds_left(&self) -> u32 {
         self.seconds_left
+    }
+
+    /// The spent code's screen is for a request that was lost (`DeviceStatus::Lost`).
+    pub fn lost(&self) -> bool {
+        self.lost
     }
 
     pub fn reconnecting(&self) -> bool {
@@ -666,8 +685,22 @@ impl Ui {
                         self.screen = Screen::KeysNotReceived;
                         self.focus = Some(TITLE_KEY);
                     }
+                    DeviceStatus::OtherAccount => {
+                        self.screen = Screen::NotSignedIn { other_account: true };
+                        self.focus = Some(TITLE_KEY);
+                    }
+                    DeviceStatus::NotSignedIn => {
+                        self.screen = Screen::NotSignedIn { other_account: false };
+                        self.focus = Some(TITLE_KEY);
+                    }
                     DeviceStatus::Denied { by } => self.screen = Screen::Denied { by },
                     DeviceStatus::Expired => {
+                        self.lost = false;
+                        self.seconds_left = 0;
+                        self.screen = Screen::Device { expired: true };
+                    }
+                    DeviceStatus::Lost => {
+                        self.lost = true;
                         self.seconds_left = 0;
                         self.screen = Screen::Device { expired: true };
                     }

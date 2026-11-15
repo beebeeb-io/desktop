@@ -207,6 +207,9 @@ pub enum Dialog {
     },
     /// No board frame: Deny came after this PC's own approval had gone through.
     ApproveTooLate,
+    /// The account password, asked over DW-A81 (Cancel deletion) and DW-A82 (Undo deletion) before the signed-in
+    /// cancel: core and the server require the step-up (D-P40-11; the board draws no password there).
+    DeletionPassword(delete::DeletionAsk),
 }
 
 // By hand: which confirm it is, never the id it holds.
@@ -231,6 +234,7 @@ impl std::fmt::Debug for Dialog {
             Dialog::ApproveExpired { handled } => write!(f, "ApproveExpired {{ handled: {handled} }}"),
             Dialog::ApproveUnsure { denying } => write!(f, "ApproveUnsure {{ denying: {denying} }}"),
             Dialog::ApproveTooLate => f.write_str("ApproveTooLate"),
+            Dialog::DeletionPassword(ask) => write!(f, "DeletionPassword({ask:?})"),
         }
     }
 }
@@ -244,6 +248,8 @@ impl Dialog {
             Dialog::Code(_) => true,
             // DW-A13, DW-A14: the approval code is typed and shown.
             Dialog::ApproveReview | Dialog::ApproveHello => true,
+            // Over DW-A81, DW-A82: takes the account password.
+            Dialog::DeletionPassword(_) => true,
             // DW-A15 to DW-A17: results; the code is wiped before they show.
             Dialog::ApproveApproved
             | Dialog::ApproveDenied
@@ -975,7 +981,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::Passkeys => passkeys::pane(source, form, dialog, &t),
         Pane::Activity => activity::pane(source, form, dialog, &t),
         Pane::Delete | Pane::DeleteFactor | Pane::DeleteLink | Pane::DeleteScheduled | Pane::DeleteUndone => {
-            (delete::pane(pane, source, form, &t), None)
+            (delete::pane(pane, source, form, &t), delete::overlay(dialog, form, &t))
         }
         Pane::ApproveCode => (approve::code_pane(&ui.approve, &t), None),
         Pane::ApproveReview => approve::review_pane(source, &ui.approve, dialog, &t),

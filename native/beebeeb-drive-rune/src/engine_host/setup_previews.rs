@@ -35,6 +35,8 @@ pub(super) struct StepFour {
     read: Option<Result<PreviewsFacts, PreviewsRefused>>,
     sample: Option<Measured>,
     pub(super) measuring: bool,
+    /// This PC's space limit in bytes, read once when step 4 first asks for it (`None`: none known).
+    limit: std::cell::OnceCell<Option<u64>>,
 }
 
 impl StepFour {
@@ -106,6 +108,12 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             size_of(setting.px).unwrap_or(PreviewSize::K2),
             format_of(setting.format),
         ))
+    }
+
+    /// Step 4's "Space on this PC": the engine's limit (read once), in the board's words; empty when none is known.
+    pub(super) fn previews_space_limit(&self) -> String {
+        let bytes = *self.previews.limit.get_or_init(|| self.engine.preview_limit_bytes());
+        bytes.map_or_else(String::new, bytes_words)
     }
 
     /// The account's own average at a format and long edge, where it has previews there.

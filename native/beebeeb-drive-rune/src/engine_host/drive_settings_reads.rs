@@ -115,14 +115,28 @@ pub(super) fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, ac
     }
 }
 
+/// The contract rows `rows` has read on this thread (a test's seam: a page that needs none must read none).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CONTRACT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The live entries a page may list (never a device's manifest in Backups): no contract row is read.
+pub(crate) fn live_entries(db: &StateDb) -> Result<Vec<FileEntry>, String> {
+    let backups = BackupsTree::read(db);
+    Ok(model::live_rows(db)
+        .map_err(|_| "rows")?
+        .into_iter()
+        .filter(|entry| !backups.is_hidden(&entry.path))
+        .collect())
+}
+
 /// The live rows a page may list (never a device's manifest in Backups), each with whether it is kept.
 pub(crate) fn rows(db: &StateDb) -> Result<Vec<(FileEntry, bool, DriveItem)>, String> {
-    let backups = BackupsTree::read(db);
     let mut rows = Vec::new();
-    for entry in model::live_rows(db).map_err(|_| "rows")? {
-        if backups.is_hidden(&entry.path) {
-            continue;
-        }
+    for entry in live_entries(db)? {
+        #[cfg(test)]
+        CONTRACT_READS.with(|reads| reads.set(reads.get() + 1));
         let contract = db.get_file_contract_state(&entry.file_id).map_err(|_| "contract")?;
         let kept = contract
             .as_ref()
@@ -131,11 +145,6 @@ pub(crate) fn rows(db: &StateDb) -> Result<Vec<(FileEntry, bool, DriveItem)>, St
         rows.push((entry, kept, item));
     }
     Ok(rows)
-}
-
-/// The files among `rows` (no folders).
-pub(crate) fn files_of(rows: &[(FileEntry, bool, DriveItem)]) -> Vec<&FileEntry> {
-    rows.iter().map(|(e, _, _)| e).filter(|e| !e.is_dir()).collect()
 }
 
 /// Storage insights: the account's use from Beebeeb, the rest from this PC's file list.
@@ -155,7 +164,13 @@ pub(crate) fn insights<E: DriveEngine>(engine: &E, account: &str) -> (Insights, 
         }
     };
     // Task 2488: another account's local state reads as nothing for insights.
-    let read = engine.local_state(|db| rows(db).map(|rows| insights_of(&files_of(&rows), usage)));
+    // The page needs each file's size and name, never its contract row: the walk reads none.
+    let read = engine.local_state(|db| {
+        live_entries(db).map(|entries| {
+            let files: Vec<&FileEntry> = entries.iter().filter(|e| !e.is_dir()).collect();
+            insights_of(&files, usage)
+        })
+    });
     match read {
         Ok(Ok(insights)) => (insights, Some(usage)),
         // Not this account's state: show usage only, no breakdown.

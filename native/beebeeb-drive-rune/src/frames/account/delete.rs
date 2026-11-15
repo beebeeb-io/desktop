@@ -1,10 +1,15 @@
 //! Delete the account (DW-A58, DW-A80 to DW-A83): four steps, each with the board's own words.
-//! What goes, the 72 hours to undo, the password; the second factor; the email link; the
+//! What goes, the time to undo, the password; the second factor; the email link; the
 //! schedule and how to undo it; and the screen that says the undo worked.
 //!
 //! The password goes into the OPAQUE step-up; its confirmation waits in the form between step
 //! 1 and step 2 and is consumed by `request_deletion`. Nothing is scheduled until the link in
 //! the email is used.
+//!
+//! Flagged deviations from the board (`FRAMES.md`): Cancel deletion (DW-A81) and Undo deletion
+//! (DW-A82) ask the account password first, in a dialog over the page, because core and the
+//! server require the step-up for a signed-in cancel (D-P40-11). The time to undo is Beebeeb's
+//! (the date the source names), never a length of time written here.
 
 use crate::State;
 use crate::theme::tokens::Theme;
@@ -16,8 +21,8 @@ use crate::ui::settings_list as lists;
 use rune::{Cx, El, col};
 
 use super::form::{self, Form, Problem};
-use super::forms::{button, code_error, send_again};
-use super::source::{AccountSource, Deletion, Password, Purpose, Refused};
+use super::forms::{button, code_error, refused, send_again};
+use super::source::{AccountSource, CodeRefused, Deletion, Password, Purpose, Refused};
 use super::{AccountUi, Dialog, Pane, icons};
 
 pub fn pane(pane: Pane, source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
@@ -32,7 +37,7 @@ pub fn pane(pane: Pane, source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
     }
 }
 
-/// Step 1 of 4 (DW-A58): what goes, the 72 hours, the password.
+/// Step 1 of 4 (DW-A58): what goes, the time to undo, the password.
 fn what_goes(f: &Form, t: &Theme) -> El {
     let goes = |index: usize, icon: &'static rune::Icon, title: &str, sub: &str| {
         set::item(0, index, &Row::new(Lead::Icon(icon), title).sub(sub), Vec::new(), t)
@@ -47,10 +52,11 @@ fn what_goes(f: &Form, t: &Theme) -> El {
     let (next, next_b) = button(1, "Continue", Look::Danger, false, t);
     set::pane(
         vec![
-            // The 72-hour line is read before the list.
+            // The line about the time to undo is read before the list. How long it is, is Beebeeb's: the date is
+            // shown once the deletion is scheduled (DW-A82).
             set::heading(
                 "Delete your Beebeeb account?",
-                Some("After you confirm by email, you have 72 hours to undo it. After that, it can't be undone."),
+                Some("After you confirm by email, you can undo it until the date shown. Then it is final."),
                 None,
                 t,
             ),
@@ -179,8 +185,11 @@ fn second_factor(f: &Form, t: &Theme) -> El {
             t,
         ),
     ];
-    if f.problem.is_some() {
-        children.push(code_error("Incorrect code. Nothing was deleted.", t));
+    match f.problem {
+        Some(Problem::WrongCode) => children.push(code_error("Incorrect code. Nothing was deleted.", t)),
+        Some(Problem::Offline) => children.push(code_error("Beebeeb can't be reached. Nothing was deleted.", t)),
+        // Anything else is said by the source over the page (a toast), or is not about this page.
+        _ => {}
     }
     children.push(rune::row().key("other-way").w_full().child(other));
     children.push(fm::actions(vec![
@@ -201,15 +210,22 @@ fn send_link(ui: &mut AccountUi) -> Option<&'static str> {
     };
     match source.request_deletion(confirmation, &code) {
         Ok(()) => Some("DW-A81"),
-        Err(refused) => match refused.confirmation {
-            // A wrong code: the proof of the password still stands, only the code is retyped.
+        Err(not_asked) => match not_asked.confirmation {
+            // The proof of the password still stands: only the code is retyped.
             Some(confirmation) => {
                 f.confirmation = Some(confirmation);
-                f.problem = Some(Problem::WrongCode);
+                f.problem = match not_asked.why {
+                    CodeRefused::Wrong => Some(Problem::WrongCode),
+                    CodeRefused::Offline => Some(Problem::Offline),
+                    // Not the code: the source says why over the page.
+                    CodeRefused::Expired | CodeRefused::NotConfirmed => None,
+                };
                 f.code = rune::TextEdit::new("").secure().revealed(true);
                 form::focus(f, Some(form::CODE_KEY));
                 None
             }
+            // Beebeeb has a deletion scheduled already: its schedule, and the way to undo it.
+            None if matches!(source.deletion(), Deletion::Scheduled { .. }) => Some("DW-A82"),
             None => Some("DW-A58"),
         },
     }
@@ -254,20 +270,20 @@ fn link_sent(source: &dyn AccountSource, f: &Form, email: &str, t: &Theme) -> El
     children.push(fm::actions(vec![
         (
             opened.on_press(super::act(|ui: &mut AccountUi| {
-                if ui.source.as_deref_mut()?.deletion_link_used() {
-                    Some("DW-A82")
-                } else {
-                    ui.form.problem = Some(Problem::LinkNotUsed);
-                    None
+                let source = ui.source.as_deref_mut()?;
+                if source.deletion_link_used() {
+                    return Some("DW-A82");
                 }
+                // "Not used" only on Beebeeb's own answer: a check that failed is said by the source (a toast).
+                let answered = !source.notice_failed();
+                ui.form.problem = answered.then_some(Problem::LinkNotUsed);
+                None
             })),
             opened_b,
         ),
         (
-            cancel.on_press(super::act(|ui: &mut AccountUi| {
-                ui.source.as_deref_mut()?.cancel_deletion_request();
-                Some("DW-A52")
-            })),
+            // The password first (D-P40-11): the dialog over this page does the cancel.
+            cancel.on_press(|s: &mut State| super::ask(s, Dialog::DeletionPassword(DeletionAsk::Cancel))),
             cancel_b,
         ),
     ]));
@@ -281,10 +297,11 @@ fn scheduled(on: &str, email: &str, t: &Theme) -> El {
     let (sign_out, sign_out_b) = button(1, "Sign out", Look::Quiet, false, t);
     set::pane(
         vec![
-            // The date is read in full.
+            // The date is read in full. It is the last moment it can be undone, as Beebeeb says it; the account
+            // is deleted after it.
             set::heading(
                 "Deletion scheduled",
-                Some(&format!("Your account will be deleted in 72 hours, on {on}.")),
+                Some(&format!("Your account will be deleted after {on}.")),
                 None,
                 t,
             ),
@@ -294,15 +311,16 @@ fn scheduled(on: &str, email: &str, t: &Theme) -> El {
                 Tone::Neutral,
                 &icons::CLOCK,
                 Some("You can undo it until then"),
+                // Beebeeb sends no second email at the confirm: the link it sent first undoes it too.
                 Some(&format!(
-                    "We sent a second email to {email} with a link to undo it. You can also undo it here or by signing in. Until then everything works as usual."
+                    "The link in the email we sent to {email} undoes it too. You can also undo it here or by signing in. Until then everything works as usual."
                 )),
                 false,
                 t,
             ),
             kit::label(
                 "note-0",
-                "After 72 hours every product's data is deleted and shredded within 30 days. Then nothing can bring it back, not you, not Beebeeb.",
+                "After that, every product's data is deleted and shredded. Then nothing can bring it back, not you, not Beebeeb.",
                 set::SUB,
                 t.text_tertiary,
             )
@@ -310,13 +328,13 @@ fn scheduled(on: &str, email: &str, t: &Theme) -> El {
             .w_full(),
             fm::actions(vec![
                 (
-                    undo.default_button().on_press(super::act(|ui: &mut AccountUi| {
-                        ui.source.as_deref_mut()?.undo_deletion().then_some("DW-A83")
-                    })),
+                    // The password first (D-P40-11): the dialog over this page does the undo.
+                    undo.default_button()
+                        .on_press(|s: &mut State| super::ask(s, Dialog::DeletionPassword(DeletionAsk::Undo))),
                     undo_b,
                 ),
                 (
-                    // Signs out of this app; signing in again within 72 hours offers the undo.
+                    // Signs out of this app; signing in again before that date offers the undo.
                     sign_out.on_press(|s: &mut State| {
                         super::go(s, "DW-A52");
                         super::ask(s, Dialog::SignOutApp);
@@ -327,6 +345,136 @@ fn scheduled(on: &str, email: &str, t: &Theme) -> El {
         ],
         t,
     )
+}
+
+/// Which change of a pending deletion the password is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeletionAsk {
+    /// Cancel deletion (DW-A81).
+    Cancel,
+    /// Undo deletion (DW-A82).
+    Undo,
+}
+
+/// The password asked over DW-A81 and DW-A82 (`Dialog::DeletionPassword`); else nothing.
+pub fn overlay(dialog: Option<&Dialog>, f: &Form, t: &Theme) -> Option<El> {
+    match dialog {
+        Some(Dialog::DeletionPassword(ask)) => Some(password_ask(*ask, f, t)),
+        _ => None,
+    }
+}
+
+/// The ask: the account password, then the change. The board draws no password here (D-P40-11, `FRAMES.md`).
+fn password_ask(ask: DeletionAsk, f: &Form, t: &Theme) -> El {
+    let message = match f.problem {
+        Some(Problem::WrongPassword) => Some("Incorrect password. Nothing changed."),
+        Some(Problem::Locked) => Some("Unlock first. Nothing changed."),
+        Some(Problem::Offline) => Some("Beebeeb can't be reached. Nothing changed."),
+        Some(Problem::Unconfirmed) => Some("We couldn't confirm it went through. Look again in a moment."),
+        _ => None,
+    };
+    let (title, action, rest) = match ask {
+        DeletionAsk::Cancel => (
+            "Cancel the deletion?",
+            "Cancel deletion",
+            "If the link in the email was used, the deletion is cancelled. If not, nothing is scheduled: ignore the email and the link expires.",
+        ),
+        DeletionAsk::Undo => (
+            "Undo the deletion?",
+            "Undo deletion",
+            "Your account stays as it is, and nothing is deleted.",
+        ),
+    };
+    let field = fm::field(
+        0,
+        &Field {
+            label: "Account password",
+            icon: None,
+            message,
+            error: message.is_some(),
+            input_key: form::CURRENT_KEY,
+        },
+        &f.current,
+        |s: &mut State| &mut s.account.form.current,
+        t,
+    );
+    let paragraph = fm::lead_paragraph("Enter your password to confirm it's you.", rest, t);
+    // Keys of their own: the page under the dialog has btn-0 and btn-1.
+    let (go, go_b) = button(4, action, Look::Primary, false, t);
+    let (back, back_b) = button(5, "Back", Look::Plain, false, t);
+    let mut go = go.on_press(super::act(confirm_ask));
+    if !f.current.text.is_empty() {
+        go = go.default_button();
+    }
+    let close = |s: &mut State| {
+        s.account.dialog = None;
+        form::arrive(&mut s.account);
+    };
+    set::dialog_with(
+        title,
+        440.0,
+        title,
+        paragraph,
+        vec![field],
+        vec![(go, go_b), (back.on_press(close), back_b)],
+        t,
+    )
+    .modal(false, close)
+}
+
+/// The ask's press: a real step-up through the source (as step 1 makes one), then the cancel or the undo with it.
+/// A wrong password changes nothing and keeps the dialog open; the typed password goes with the press either way.
+fn confirm_ask(ui: &mut AccountUi) -> Option<&'static str> {
+    let Some(Dialog::DeletionPassword(ask)) = ui.dialog else {
+        return None;
+    };
+    let f = &mut ui.form;
+    if f.current.text.is_empty() {
+        f.problem = Some(Problem::WrongPassword);
+        form::focus(f, Some(form::CURRENT_KEY));
+        return None;
+    }
+    let source = ui.source.as_deref_mut()?;
+    let answer = match source.step_up(Password::from_field(&f.current.text), Purpose::DeleteAccount) {
+        Ok(confirmation) => match ask {
+            DeletionAsk::Cancel => source.cancel_deletion_request(confirmation),
+            DeletionAsk::Undo => source.undo_deletion(confirmation),
+        },
+        Err(why) => Err(why),
+    };
+    f.current = form::secure();
+    match answer {
+        Ok(Deletion::None) => {
+            ui.dialog = None;
+            Some(match ask {
+                DeletionAsk::Cancel => "DW-A52",
+                DeletionAsk::Undo => "DW-A83",
+            })
+        }
+        // Nothing was scheduled, so nothing was cancelled: the link still works until it expires, and the page
+        // says that nothing is scheduled.
+        Ok(Deletion::LinkSent) => {
+            ui.dialog = None;
+            form::focus(&mut ui.form, None);
+            if ui.pane == Pane::DeleteLink {
+                ui.form.problem = Some(Problem::LinkNotUsed);
+                None
+            } else {
+                Some("DW-A81")
+            }
+        }
+        // Not undone (the source says why): the schedule stands.
+        Ok(Deletion::Scheduled { .. }) => {
+            ui.dialog = None;
+            form::focus(&mut ui.form, None);
+            (ui.pane != Pane::DeleteScheduled).then_some("DW-A82")
+        }
+        Err(why) => {
+            ui.form.problem = Some(refused(why));
+            form::focus(&mut ui.form, Some(form::CURRENT_KEY));
+            None
+        }
+    }
 }
 
 /// Deletion cancelled (DW-A83): a screen of its own, in the account window's layout.

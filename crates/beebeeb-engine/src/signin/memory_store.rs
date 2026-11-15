@@ -54,6 +54,17 @@ impl MemoryCredentials {
     pub fn key_reads(&self) -> usize {
         self.1.key_reads.load(Ordering::SeqCst)
     }
+
+    /// From now on a vault key write answers `Ok` and keeps nothing (a store whose read-back fails), or keeps it again.
+    pub fn lose_key_writes(&self, lose: bool) {
+        self.1.lose_key_writes.store(lose, Ordering::SeqCst);
+    }
+
+    /// From now on a session token write is refused with `words` as the error's text (a platform error can name what
+    /// it touched), or (`None`) is kept again.
+    pub fn refuse_token_writes(&self, words: Option<&str>) {
+        *self.1.refuse_token_writes.lock().expect("memory credentials") = words.map(str::to_string);
+    }
 }
 
 /// What a test asks of the store beside its items.
@@ -63,6 +74,10 @@ struct Probes {
     /// Reads work, writes of lock entries are refused.
     fail_lock_writes: AtomicBool,
     key_reads: AtomicUsize,
+    /// A vault key write answers `Ok` and keeps nothing.
+    lose_key_writes: AtomicBool,
+    /// A session token write is refused with these words.
+    refuse_token_writes: Mutex<Option<String>>,
 }
 
 impl MemoryStore {
@@ -90,6 +105,16 @@ impl MemoryStore {
 
 impl AuthSecretStore for MemoryStore {
     fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+        if let Some(words) = self
+            .all
+            .1
+            .refuse_token_writes
+            .lock()
+            .expect("memory credentials")
+            .clone()
+        {
+            return Err(AuthStoreError::Backend(words));
+        }
         self.save("session-token", token.expose_for_request().as_bytes())
     }
     fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
@@ -99,6 +124,9 @@ impl AuthSecretStore for MemoryStore {
         self.delete("session-token")
     }
     fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+        if self.all.1.lose_key_writes.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         self.save("vault-key", wrapped.expose_for_crypto())
     }
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {

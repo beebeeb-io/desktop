@@ -282,6 +282,10 @@ impl CredentialStores for AskedFor {
         self.identities.lock().unwrap().push(identity);
         self.inner.for_account(identity, account_id)
     }
+    fn legacy_flat(&self, identity: &'static EngineIdentity) -> Option<Self::Store> {
+        self.identities.lock().unwrap().push(identity);
+        self.inner.legacy_flat(identity)
+    }
 }
 
 /// Review of #309, P2-1: the handle took its identity twice (`Engine::open(&TEST, …, PlatformCredentials(&REAL))`
@@ -314,18 +318,30 @@ fn the_handle_names_its_own_identity_to_the_credential_stores() {
 #[test]
 fn the_platform_credential_stores_carry_no_identity() {
     let app = include_str!("../src/app.rs").replace("\r\n", "\n");
+    // The trait and the platform stores live beside the handle (`app/credential_stores.rs`).
+    let stores = include_str!("../src/app/credential_stores.rs").replace("\r\n", "\n");
     assert!(
-        app.contains("\npub struct PlatformCredentials;\n"),
+        stores.contains("\npub struct PlatformCredentials;\n"),
         "PlatformCredentials grew a field"
     );
     assert!(
-        app.contains("fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store;"),
+        stores.contains("fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store;"),
         "the trait no longer takes the handle's identity per call"
+    );
+    assert!(
+        stores.contains("fn legacy_flat(&self, _identity: &'static EngineIdentity) -> Option<Self::Store> {"),
+        "the flat layout is asked for with the handle's identity too"
     );
     assert!(
         app.contains("AuthVault::new(self.stores.for_account(self.identity, &self.config.account_id))"),
         "the handle's one vault constructor passes its own identity"
     );
     assert_eq!(app.matches(".for_account(").count(), 1, "one place asks the stores");
+    // The other: the move of a flat-layout session at open, with the identity `Engine::open` was given.
+    assert_eq!(stores.matches(".for_account(").count(), 1, "one place moves a session");
+    assert!(
+        app.contains("credential_stores::adopt_legacy_flat(identity, &config.account_id, &stores);"),
+        "the move at open names the handle's identity"
+    );
     let _unit: beebeeb_engine::app::PlatformCredentials = beebeeb_engine::app::PlatformCredentials;
 }

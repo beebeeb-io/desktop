@@ -7,6 +7,7 @@
 //! folders seen as a grid are kept here by id, for as long as the app runs.
 
 use std::collections::HashSet;
+use std::sync::Mutex;
 
 use rune::{El, Key, KeyEvent, PointerPress, Tx, row};
 
@@ -31,6 +32,8 @@ pub trait ThumbSource: Send + 'static {
     fn pixels(&self, _id: &str) -> Option<rune::Pixels> {
         None
     }
+    /// The tile of this item scrolled far out of view: what is held of it may go, so the tiles in view can be fetched.
+    fn release(&self, _id: &str) {}
 }
 
 /// Nothing is connected that hands over thumbnails: every picture stays a plain tile.
@@ -61,6 +64,23 @@ impl ThumbSource for BoardThumbs {
     }
 }
 
+impl GridUi {
+    /// A picture asked for earlier whose tile is now more than [`grid_tiles::KEEP_ROWS`] rows out of view is let go.
+    fn release_far(&self, items: &[DriveItem], near: &std::ops::Range<usize>, thumbs: &dyn ThumbSource) {
+        let mut asked = self.asked.lock().unwrap();
+        if asked.is_empty() {
+            return;
+        }
+        let band = grid_tiles::KEEP_ROWS * self.columns.max(1);
+        let (from, to) = (near.start.saturating_sub(band), (near.end + band).min(items.len()));
+        for item in items[..from].iter().chain(&items[to..]) {
+            if asked.remove(&item.id) {
+                thumbs.release(&item.id);
+            }
+        }
+    }
+}
+
 /// What the grid keeps (`global::Ui::grid`).
 pub struct GridUi {
     pub thumbs: Box<dyn ThumbSource>,
@@ -68,6 +88,12 @@ pub struct GridUi {
     folders: HashSet<Option<String>>,
     /// How many tiles stand side by side at the window's width (set when the grid is laid out).
     columns: usize,
+    /// Where the scrolling area and the tiles' box stand in the window, and how high the area is (set when the grid is
+    /// laid out): the tiles in view follow from them.
+    area: [f32; 2],
+    rows_y: f32,
+    /// The pictures this grid asked its source for, not yet released.
+    asked: Mutex<HashSet<String>>,
 }
 
 impl Default for GridUi {
@@ -76,6 +102,9 @@ impl Default for GridUi {
             thumbs: Box::new(NoThumbs),
             folders: HashSet::new(),
             columns: 1,
+            area: [0.0, 0.0],
+            rows_y: 0.0,
+            asked: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -194,6 +223,10 @@ pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
     }
     let thumbs = s.global.grid.thumbs.as_ref();
     let count = s.listing.items.len();
+    let g = &s.global.grid;
+    // Only the tiles in view (and a row above and below) ask for their picture; the rest stay plain tiles.
+    let near = grid_tiles::items_in_view(g.area[0] + grid_tiles::PAD_Y - g.rows_y, g.area[1], g.columns, count);
+    g.release_far(&s.listing.items, &near, thumbs);
     let tiles = s
         .listing
         .items
@@ -201,14 +234,22 @@ pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
         .enumerate()
         .map(|(i, item)| {
             let sub = sub_of(item);
-            let length = pictured(item).then(|| thumbs.video_length(&item.id)).flatten();
+            let asks = pictured(item) && near.contains(&i);
+            if asks {
+                g.asked.lock().unwrap().insert(item.id.clone());
+            }
+            let length = asks.then(|| thumbs.video_length(&item.id)).flatten();
             let mut tile = grid_tiles::tile(
                 i,
                 &Tile {
                     name: &item.name,
                     sub: &sub,
-                    thumb: thumb_of(item, thumbs),
-                    pixels: pictured(item).then(|| thumbs.pixels(&item.id)).flatten(),
+                    thumb: if pictured(item) && !asks {
+                        Thumb::Plain
+                    } else {
+                        thumb_of(item, thumbs)
+                    },
+                    pixels: asks.then(|| thumbs.pixels(&item.id)).flatten(),
                     length: length.as_deref(),
                     selected: s.is_selected(i),
                 },
@@ -254,17 +295,22 @@ pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
         .focusable(true)
         .no_focus_ring()
         .on_key(on_key)
-        .on_layout(|s: &mut State, [_, _, w, _]| {
+        .on_layout(|s: &mut State, [_, y, w, _]| {
             s.global.grid.columns = grid_tiles::columns(w + 2.0 * grid_tiles::PAD_X);
+            s.global.grid.rows_y = y;
         });
     if let Some(i) = s.selected.filter(|&i| i < s.listing.items.len()) {
         rows = rows.active_descendant(format!("grid-{i}"));
     }
     Some(
-        grid_tiles::grid(rows, tiles).on_drop_files(|s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
-            let folder = s.listing.folder.id.clone();
-            s.upload(folder, files, tx);
-        }),
+        grid_tiles::grid(rows, tiles)
+            .on_layout(|s: &mut State, [_, y, _, h]| {
+                s.global.grid.area = [y, h];
+            })
+            .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
+                let folder = s.listing.folder.id.clone();
+                s.upload(folder, files, tx);
+            }),
     )
 }
 
@@ -284,4 +330,98 @@ pub fn scene(s: &mut State) {
     // DW-0420 counts the folder itself ("1 on this PC ..."), which is what the app says.
     s.global.board_status_words = Some("4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only".to_string());
     set(s, true);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use rune::{Env, Runtime};
+
+    use super::*;
+    use crate::frames::shared::tests::settle;
+    use crate::view;
+
+    /// Which items the grid asked for a picture, and which it let go.
+    #[derive(Default)]
+    struct Log {
+        asked: HashSet<String>,
+        released: HashSet<String>,
+    }
+
+    struct Counting(Arc<Mutex<Log>>);
+
+    impl ThumbSource for Counting {
+        fn arrived(&self, id: &str) -> bool {
+            self.0.lock().unwrap().asked.insert(id.to_string());
+            false
+        }
+        fn video_length(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn pixels(&self, id: &str) -> Option<rune::Pixels> {
+            self.0.lock().unwrap().asked.insert(id.to_string());
+            None
+        }
+        fn release(&self, id: &str) {
+            self.0.lock().unwrap().released.insert(id.to_string());
+        }
+    }
+
+    fn picture(i: usize) -> DriveItem {
+        DriveItem {
+            id: format!("p{i}"),
+            parent_id: None,
+            name: format!("IMG_{i:04}.jpg"),
+            is_folder: false,
+            size: Some(2_000_000),
+            child_count: None,
+            modified_at: String::new(),
+            mime: Some("image/jpeg".to_string()),
+            has_thumbnail: true,
+            shared_type: None,
+            shared_badges: Vec::new(),
+            pc_status: None,
+            is_protected: false,
+        }
+    }
+
+    #[test]
+    fn folder_grid_fetches_pictures_for_tiles_scrolled_into_view() {
+        const N: usize = 400;
+        let log = Arc::new(Mutex::new(Log::default()));
+        let mut state = crate::shell::state::init();
+        state.listing.items = (0..N).map(picture).collect();
+        state.list_error = None;
+        state.show_detail_pane = false;
+        state.clear_selection();
+        state.global.grid.thumbs = Box::new(Counting(log.clone()));
+        set(&mut state, true);
+        let env = Env {
+            system_dark: false,
+            scale: 2.0,
+        };
+        let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
+        settle(&mut rt);
+        {
+            let log = log.lock().unwrap();
+            assert!(log.asked.contains("p0"), "the first tile asks");
+            // About five rows of a handful of tiles are in view; the grid never asks for all 400.
+            assert!(log.asked.len() < N / 4, "asked for {} of {N}", log.asked.len());
+            assert!(!log.asked.contains("p399"), "a tile far below asks for nothing");
+        }
+        // Scroll to the end: the tiles there now ask, and the first ones, far out of view, are let go.
+        rt.update(|_, tx| tx.scroll_into_view(format!("grid-{}", N - 1)));
+        settle(&mut rt);
+        settle(&mut rt);
+        let log = log.lock().unwrap();
+        assert!(log.asked.contains("p399"), "the tiles scrolled into view ask");
+        assert!(
+            log.released.contains("p0"),
+            "the pictures scrolled far out of view are let go"
+        );
+        assert!(!log.released.contains("p399"));
+        assert!(log.asked.len() < N, "still not every tile");
+    }
 }

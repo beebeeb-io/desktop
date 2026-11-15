@@ -6,13 +6,16 @@
 //! call the engine through [`source::SetupSource`]. What leaves the group (the main window, a
 //! settings pane) is an [`Intent`] the shell takes with [`Ui::take_intents`].
 //!
-//! Nothing here is a secret: no password, code or phrase is shown or typed in these steps. One will be: step 1's
-//! account password ([`Ui::passkey_password`], not drawn yet), once slice A10 draws its field.
+//! One secret is typed here: step 1's account password ([`Ui::passkey_password`], a secure field), which "Add a
+//! passkey" hands to the engine once (owner ruling: a passkey change proves the password). It is wiped from the field
+//! right after that call and whenever step 1 is left; it is never shown, logged or kept. No code or phrase is shown or
+//! typed in these steps. The first-run window counts as a window that shows a secret (`shell::registry`).
 
 mod folder;
 pub mod guide;
 pub mod guide_marks;
 pub mod icons;
+mod passkey;
 pub mod source;
 mod view;
 
@@ -28,8 +31,8 @@ use crate::frames::account::source::Password;
 use crate::shell::app::{Event, GateState};
 use crate::shell::host;
 use source::{
-    Explorer, FixtureSetupSource, Folder, FolderAsk, LockAfter, Outcome, PreviewFormat, PreviewSize, Sample, Script,
-    SetupSource, Switch,
+    Explorer, FixtureSetupSource, Folder, FolderAsk, LockAfter, Outcome, PasskeyAnswer, PasskeyRefused, PreviewFormat,
+    PreviewSize, Sample, Script, SetupSource, Switch,
 };
 
 pub use view::view;
@@ -40,6 +43,8 @@ pub const TITLE_KEY: &str = "title";
 pub const COMPARE_DONE_KEY: &str = "cmp-done";
 /// "Compare" on step 4: focus returns there when the view closes.
 pub const COMPARE_KEY: &str = "btn-0";
+/// Step 1's password field (its text input): focus goes there when the password is missing or wrong.
+pub const PASSWORD_KEY: &str = "passkey-password";
 
 /// The compare view's sheet, on the board: 700 x 520 inside the 960 x 640 window.
 pub const SHEET: (f32, f32) = (700.0, 520.0);
@@ -172,6 +177,20 @@ pub enum Answered {
     NotKnown,
 }
 
+/// Step 1 between "Add a passkey" and its answer. The add runs while Windows' passkey dialog is open, off the
+/// window's thread: the window is never held for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PasskeyStep {
+    /// Nothing asked, or the passkey was added (`Results::passkey`).
+    #[default]
+    Ready,
+    /// Asked, not answered: Windows' passkey dialog is open, or Beebeeb is being asked. "Add a passkey" takes no
+    /// second press; "Not now" and "Skip setup" stay.
+    Waiting,
+    /// Not added, and why: step 1 stays, says it in one line, and can still be skipped.
+    Refused(PasskeyRefused),
+}
+
 /// Where the person goes when they leave setup. The shell opens it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
@@ -224,8 +243,10 @@ pub struct Ui {
     /// A size or format was chosen on step 4: the stored one no longer moves it.
     previews_chosen: bool,
     /// The account password step 1 hands to "Add a passkey" (owner ruling: a passkey change proves the password).
-    /// Secure. Not drawn yet: slice A10 draws its field (`view.rs`) and clears it when the step is left.
+    /// Secure; drawn by `view.rs`. Wiped right after it is handed over, and when step 1 is left.
     pub passkey_password: rune::TextEdit,
+    /// Step 1 between its press and its answer.
+    pub passkey_step: PasskeyStep,
 }
 
 /// Decode a PNG into pixels Rune draws. A file that does not decode draws nothing.
@@ -288,6 +309,7 @@ impl Ui {
             finished: false,
             previews_chosen: false,
             passkey_password: rune::TextEdit::new("").secure(),
+            passkey_step: PasskeyStep::Ready,
         };
         ui.start_on_stored_previews();
         ui
@@ -419,6 +441,7 @@ impl Ui {
     }
 
     fn advance(&mut self) {
+        self.leave_passkey_step();
         self.step = Step::STEPS
             .into_iter()
             .find(|step| *step > self.step)
@@ -442,19 +465,60 @@ impl Ui {
         }
     }
 
-    /// "Add a passkey": Windows' own dialog, then step 2. A cancelled dialog stays on step 1.
+    /// "Add a passkey": the password goes to the engine once (core's step-up), then Windows' own dialog opens. The
+    /// answer comes later ([`Ui::pump`]): step 2 follows only once the passkey was added; a refusal stays on step 1
+    /// with its line. The source refuses an empty password itself (nothing is sent), so the board's fixture, which
+    /// asks for none, still walks its frames.
     pub fn add_passkey(&mut self) {
-        if self.step != Step::Passkey {
+        if self.step != Step::Passkey || self.passkey_step == PasskeyStep::Waiting {
             return;
         }
         if !self.available(Step::Passkey) {
             // Nothing answers for a passkey: the step is left, and nothing is claimed.
             return self.advance();
         }
-        let password = Password::from_field(&self.passkey_password.text);
-        if self.source.add_passkey(password) {
-            self.results.passkey = true;
-            self.advance();
+        let started = self
+            .source
+            .add_passkey(Password::from_field(&self.passkey_password.text));
+        // The password has left the field once it is handed over: wiped, never kept.
+        self.passkey_password.clear();
+        if started {
+            self.passkey_step = PasskeyStep::Waiting;
+        }
+        // An answer that is already there (a refusal said at the press, or the board's fixture) is taken in now.
+        self.take_in_passkey();
+    }
+
+    /// The answer of "Add a passkey", once it is there. Added: said on "You're set up" whatever step shows by then,
+    /// and step 2 follows only from step 1 (a person who went on is not moved). Refused: step 1 says why.
+    fn take_in_passkey(&mut self) {
+        let Some(answer) = self.source.take_passkey_answer() else {
+            return;
+        };
+        match answer {
+            PasskeyAnswer::Added => {
+                self.results.passkey = true;
+                self.passkey_step = PasskeyStep::Ready;
+                if self.step == Step::Passkey {
+                    self.advance();
+                }
+            }
+            PasskeyAnswer::Refused(why) => {
+                self.passkey_step = PasskeyStep::Refused(why);
+                if self.step == Step::Passkey {
+                    self.focus = Some(match why {
+                        PasskeyRefused::NoPassword | PasskeyRefused::WrongPassword => PASSWORD_KEY,
+                        _ => TITLE_KEY,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Step 1 is left (its answer may still come): what was typed into its password field goes.
+    fn leave_passkey_step(&mut self) {
+        if self.step == Step::Passkey {
+            self.passkey_password.clear();
         }
     }
 
@@ -559,6 +623,7 @@ impl Ui {
         if self.compare.is_some() || self.step == Step::Done {
             return;
         }
+        self.leave_passkey_step();
         self.step = Step::Done;
         self.focus = Some(TITLE_KEY);
     }
@@ -696,6 +761,7 @@ impl Ui {
         for outcome in self.source.take_outcomes() {
             self.take_in(outcome);
         }
+        self.take_in_passkey();
         if let Some(folders) = self.source.fresh_folders() {
             self.folders = folders;
         }
@@ -817,7 +883,9 @@ pub fn scene(frame: &str) -> Option<Ui> {
     })
 }
 
-/// The steps the running app has no answer for yet, as its source says them (`engine_host::setup`).
+/// The steps the renders below draw as "not in this version", to show that state. (The running app answers step 1 on
+/// Windows now, `engine_host::setup_passkey`; it stays listed so the renders keep showing the state, and the walk
+/// below passes it with Continue.)
 const NOT_IN_THIS_VERSION: &[Step] = &[Step::Passkey, Step::Backup, Step::Previews];
 
 /// The states of the first run the board has no frame for, by a name of their own, for a headless render

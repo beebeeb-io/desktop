@@ -382,3 +382,72 @@ fn gone_and_then_a_refusal_is_not_nothing_was_sent() {
     settle(&mut source);
     assert_eq!(server.asked("GET /api/v1/account/sessions"), reads + 1);
 }
+
+/// "Everywhere else" sent again one by one, and Beebeeb answers each sign-out with an error, slowly. The loop
+/// ends at its overall deadline, never after every session at its full time: past it nothing more is sent, the
+/// outcome is not known ("checking", and the list is read), and the toast's button then has every session that
+/// still stands, the unsent ones too. The deadline is the test's own short one, never a real 45 s.
+#[test]
+fn everywhere_else_retry_ends_within_a_deadline() {
+    use super::super::sign_out_session::EVERYWHERE_ELSE_DEADLINE_FOR_TEST as DEADLINE;
+    let server = server();
+    for id in ["s-tablet", "s-laptop", "s-watch", "s-car"] {
+        server.people[0].sessions.lock().unwrap().push(
+            json!({ "id": id, "device_name": "An invented device", "device_kind": "android",
+                    "country_code": "FI", "last_active_at": null, "is_current": false }),
+        );
+    }
+    let others = 6;
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    assert_eq!(ids(&source).len(), 1 + others, "precondition: this PC and six others");
+    // The one request for all of them is refused: its toast's button sends them one by one.
+    server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.sign_out_everywhere_else();
+    settle(&mut source);
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    assert!(server.deleted.lock().unwrap().is_empty());
+
+    // Each answer takes longer than the whole deadline: one is sent, and then it is past.
+    DEADLINE.with(|deadline| deadline.set(Some(Duration::from_millis(300))));
+    server.change_delay_ms.store(400, Ordering::SeqCst);
+    // The list read after the answer is held, so "checking" can be seen before the list has the last word.
+    let (open, hook) = gate();
+    *server.during_read.lock().unwrap() = Some(hook);
+    let began = Instant::now();
+    source.run_notice_action();
+    // The test's own time: one call and its answer, far under six at their full time (2.4 s).
+    loop {
+        source.pump();
+        if source.notice() == Some(UNKNOWN_SIGN_OUT) {
+            break;
+        }
+        assert!(
+            began.elapsed() < Duration::from_millis(1600),
+            "no outcome within the deadline: {:?}",
+            source.notice()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        server.deleted.lock().unwrap().len(),
+        1,
+        "nothing is sent past the deadline"
+    );
+    open.send(()).unwrap();
+    settle(&mut source);
+    // Not known for the one sent, not sent for the rest: the list says all stand, and all can be sent again.
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT_ELSEWHERE));
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    assert_eq!(ids(&source).len(), 1 + others);
+
+    // The button sends every one that stands, the unsent ones too; answered at once, all of them end.
+    DEADLINE.with(|deadline| deadline.set(None));
+    server.change_mode.store(ANSWER, Ordering::SeqCst);
+    server.change_delay_ms.store(0, Ordering::SeqCst);
+    source.run_notice_action();
+    settle(&mut source);
+    let deleted = server.deleted.lock().unwrap().len();
+    assert_eq!(deleted, 1 + others, "the button sent all six that stood");
+    assert_eq!(ids(&source), ["s-this"]);
+}

@@ -5,7 +5,9 @@ use rune::tok::Family;
 use rune::{Color, Cx, El, Span, TextStyle, col, el, row};
 
 use super::source::{Explorer, LockAfter, PreviewFormat, PreviewSize, Switch};
-use super::{Answered, Compare, CompareMode, PHOTO, SHEET, Setting, Step, Ui, act, folder, icons};
+use super::{
+    Answered, Compare, CompareMode, PHOTO, PasskeyStep, SHEET, Setting, Step, Ui, act, folder, icons, passkey,
+};
 use crate::State;
 use crate::frames::signin::icons as signin_icons;
 use crate::theme::tokens::{self, Theme, type_};
@@ -38,7 +40,7 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         (Step::Explorer, _) if ui.asks_folder() => folder::ask(&ui.folder, &mut k, &t),
         // A start worked, but this PC didn't keep the folder: said as an error, never as "Added".
         (Step::Explorer, _) if ui.folder_unsaved() => folder::unsaved(&mut k, &t),
-        (Step::Passkey, _) => passkey(&mut k, &t),
+        (Step::Passkey, _) => passkey::step(ui, &mut k, &t),
         (Step::Lock, _) => lock(ui, &mut k, &t),
         (Step::Backup, _) if ui.loading(Step::Backup) => folder::backup_loading(&mut k, &t),
         (Step::Backup, _) if ui.failed(Step::Backup) => folder::backup_failed(&mut k, &t),
@@ -158,48 +160,6 @@ fn switch(row_key: &str, name: &str, on: bool, t: &Theme, to: impl Fn(&mut Ui) +
         .focus_ring(2.0, 2.0, t.accent_deep)
         .cursor(rune::Cursor::Pointer)
         .on_press_tx(act(to))
-}
-
-// ---------------------------------------------------------------------------
-// DW-0201: a passkey
-// ---------------------------------------------------------------------------
-
-fn passkey(k: &mut Keys, t: &Theme) -> El {
-    let rows = vec![
-        setup::item(
-            k,
-            Some(&icons::FACE),
-            "Saved by Windows",
-            Some("In Passwords or your password manager, behind Windows Hello"),
-            |_| Vec::new(),
-            None,
-            false,
-            t,
-        ),
-        setup::item(
-            k,
-            Some(&icons::PADLOCK),
-            "Private",
-            Some("Beebeeb can't use it to open your files by itself."),
-            |_| Vec::new(),
-            None,
-            true,
-            t,
-        ),
-    ];
-    setup::column()
-        .child(au::heading(
-            "Add a passkey",
-            Some("Sign in and unlock your files on a new device, with no codes. It doesn't replace your 12 words, so keep those safe."),
-            false,
-            t,
-        ))
-        .child(setup::list(k, rows, None, t))
-        .child(
-            actions()
-                .child(primary(k, "Add a passkey", ButtonState::Enabled, t, Ui::add_passkey))
-                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
-        )
 }
 
 // ---------------------------------------------------------------------------
@@ -827,12 +787,15 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         Some(Answered::NotKnown) => "Not changed",
         Some(Answered::NotChanged) | None => on_off(on),
     };
+    // The passkey's answer may still be out (step 1 was left while Windows' dialog or Beebeeb was answering): no value
+    // is claimed before it.
+    let passkey = match ui.passkey_step {
+        PasskeyStep::Waiting => "Adding\u{2026}",
+        _ if r.passkey => "Added",
+        _ => "Not added",
+    };
     let rows: [(&str, String, Setting); 7] = [
-        (
-            "Passkey",
-            if r.passkey { "Added" } else { "Not added" }.into(),
-            Setting::Passkey,
-        ),
+        ("Passkey", passkey.into(), Setting::Passkey),
         ("App lock", switch(Switch::AppLock, r.app_lock).into(), Setting::AppLock),
         ("Backup", backup, Setting::Backup),
         (

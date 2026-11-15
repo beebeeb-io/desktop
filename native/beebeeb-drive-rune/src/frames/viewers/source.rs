@@ -223,6 +223,19 @@ pub enum Body {
     Table(TableDoc),
     /// DW-1515: an archive's list.
     Archive(ArchiveDoc),
+    /// DW-1507: a text document in the office editor's frame.
+    Word(super::office::WordDoc),
+    /// DW-1508: a spreadsheet, read-only (the Office engine's cells, already formatted).
+    Sheet(super::super::office::sheets::SheetView),
+    /// DW-1509, DW-1561: a presentation, read-only (the slide on the stage, and Present).
+    Deck(super::super::office::slides::DeckBody),
+    /// DW-1507, DW-1511: a Word document, read-only (the pages' pictures are the source's, asked by number).
+    Doc(super::super::office::docs::DocBody),
+    /// DW-1556: an office document, and the editor did not start on this PC. Nothing of the file
+    /// is held here and nothing was changed.
+    NoEditor,
+    /// DW-1556, DW-1563, DW-1564: the Office viewer's state (a failure, opening, content missing).
+    OfficeState(super::super::office::states::StateBody),
 }
 
 /// The kind and its counts, never a word of the content, a name or a title.
@@ -238,6 +251,12 @@ impl fmt::Debug for Body {
             Body::Markdown(doc) => write!(f, "Markdown({doc:?})"),
             Body::Photo(_) => f.write_str("Photo"),
             Body::Audio(_) => f.write_str("Audio"),
+            Body::Word(doc) => write!(f, "Word({doc:?})"),
+            Body::NoEditor => f.write_str("NoEditor"),
+            Body::OfficeState(b) => write!(f, "OfficeState({:?})", b.state),
+            Body::Sheet(v) => write!(f, "Sheet({} cells)", v.cells.len()),
+            Body::Deck(d) => write!(f, "Deck({} slides)", d.view.slides.len()),
+            Body::Doc(d) => fmt::Debug::fmt(d, f),
             Body::Pdf(doc) => write!(f, "Pdf({} pages)", doc.pages),
             Body::Table(doc) => write!(f, "Table({} rows)", doc.rows.len()),
             Body::Archive(doc) => write!(f, "Archive({} entries)", doc.entries.len()),
@@ -251,6 +270,9 @@ impl Body {
         match self {
             Body::Text(doc) => doc.wipe(),
             Body::Markdown(doc) => doc.source.zeroize(),
+            Body::Word(doc) => doc.wipe(),
+            Body::Sheet(view) => view.wipe(),
+            Body::Doc(doc) => doc.wipe(),
             _ => {}
         }
     }
@@ -518,6 +540,20 @@ pub trait ViewerSource {
     fn resolve(&mut self, _file_id: &str, _text: &str, _keep: Keep) -> SaveOutcome {
         SaveOutcome::Failed
     }
+    /// Save the open office document's changes as a new, encrypted version of the file whose
+    /// version `base` was opened (the editor holds the changes; nothing of them crosses here).
+    fn save_document(&mut self, _file_id: &str, _base: u32) -> SaveOutcome {
+        SaveOutcome::Failed
+    }
+    /// Settle a conflict the last [`ViewerSource::save_document`] reported (DW-1554).
+    fn resolve_document(&mut self, _file_id: &str, _keep: Keep) -> SaveOutcome {
+        SaveOutcome::Failed
+    }
+    /// What the open document's command search finds for `query` (styles, commands, files), from
+    /// what is held in memory: it is asked at every draw. Nothing until an editor answers.
+    fn commands(&self, _file_id: &str, _query: &str) -> Vec<super::office_over::CommandGroup> {
+        Vec::new()
+    }
     /// The newer version another device saved while this one is open (DW-1519's Show it).
     fn newer(&mut self, _file_id: &str) -> Result<OpenFile, OpenError> {
         Err(OpenError::NotFound)
@@ -647,6 +683,17 @@ pub mod board {
     pub const CSV: &str = "rates-2026.csv";
     /// DW-1515.
     pub const ZIP: &str = "shoot-selects-export.zip";
+    /// DW-1507.
+    pub const DOCX: &str = "service-agreement.docx";
+    /// DW-1511: an older Word file.
+    pub const DOC: &str = "proposal-2012.doc";
+    /// DW-1508.
+    pub const SHEET: &str = "budget-2026.xlsx";
+    /// DW-1509, DW-1561 (the id of `office::slides::slides_fixture::file()`).
+    pub const DECK: &str = "lisbon-trip-recap.pptx";
+    /// DW-1507, DW-1511 (the ids of `office::docs::docs_fixture::file`): a Word file in the viewer.
+    pub const DOC_VIEW: &str = super::super::super::office::docs::docs_fixture::DOCX_ID;
+    pub const DOC_OLD_VIEW: &str = super::super::super::office::docs::docs_fixture::DOC_ID;
     /// DW-1513's text, as the note's source (DW-1523 shows it with one more line being typed).
     pub const NOTES_TEXT: &str = "# Meeting notes, 4 Nov\n\nPresent: Anna, Lotte, Jonas\n\n## Harbourlight shoot\n- Final selects due **Friday**\n- Colour grade in `Shoot selects/graded`\n- Send the agreement: [Service agreement](Service agreement.docx)\n\n## Studio\n- Rent goes up in January (see Studio rent 2026.pdf)\n- Book the Lisbon follow-up\n";
 }
@@ -657,8 +704,10 @@ pub struct FixtureViewerSource {
     pub calls: Vec<String>,
     /// DW-1519: another device saved a newer version of the note while it is open.
     pub newer: bool,
-    /// DW-1526: the next save of the note finds that newer version in its way.
+    /// DW-1526, DW-1554: the next save finds that newer version in its way.
     pub conflict: bool,
+    /// Which board frame's office document is handed over.
+    pub office: super::office::board::Case,
 }
 
 impl FixtureViewerSource {
@@ -694,6 +743,22 @@ impl FixtureViewerSource {
         Some(file)
     }
 
+    /// The agreement as stored by a save at 09:41, as `version`, under `name` if given.
+    fn agreement_saved(version: u32, name: Option<&str>) -> SaveOutcome {
+        let Some(mut file) = Self::file(board::DOCX) else {
+            return SaveOutcome::Failed;
+        };
+        file.version = version;
+        file.body = Body::Word(super::office::board::service_agreement_saved());
+        if let Some(name) = name {
+            file.name = name.to_string();
+        }
+        SaveOutcome::Saved {
+            file,
+            at: "09:41".into(),
+        }
+    }
+
     fn file(id: &str) -> Option<OpenFile> {
         let f = |path: &[&str], name: &str, facts: &str, body: Body| OpenFile {
             id: id.to_string(),
@@ -724,6 +789,36 @@ impl FixtureViewerSource {
                     free: 12_400 * MB,
                 },
             ),
+            board::DOCX => OpenFile {
+                version: 7,
+                ..f(
+                    &["Files"],
+                    "Service agreement.docx",
+                    "Word document \u{00B7} 38 KB \u{00B7} opens in the editor",
+                    Body::Word(super::office::board::service_agreement()),
+                )
+            },
+            board::DOC => OpenFile {
+                version: 2,
+                ..f(
+                    &["Files", "Documents"],
+                    "Proposal 2012.doc",
+                    "Word 97\u{2013}2004 document \u{00B7} 220 KB",
+                    Body::Word(super::office::board::proposal()),
+                )
+            },
+            board::SHEET => OpenFile {
+                version: 12,
+                ..f(
+                    &["Files"],
+                    super::super::office::sheets::sheets_fixture::FILE_NAME,
+                    "Excel workbook \u{00B7} 84 KB",
+                    Body::Sheet(super::super::office::sheets::sheets_fixture::board()),
+                )
+            },
+            board::DECK => super::super::office::slides::slides_fixture::file(),
+            board::DOC_VIEW => super::super::office::docs::docs_fixture::file(false),
+            board::DOC_OLD_VIEW => super::super::office::docs::docs_fixture::file(true),
             board::FAILED => f(
                 &["Files", "Invoices 2026"],
                 "Invoice 0139.pdf",
@@ -789,7 +884,65 @@ impl ViewerSource for FixtureViewerSource {
         if self.newer && file_id == board::NOTES {
             file.newer = Some(Self::other_side());
         }
+        if file_id == board::DOCX {
+            use super::office::board::{Case, service_agreement_as};
+            if self.office == Case::NoEditor {
+                file.body = Body::NoEditor;
+                file.facts = "Word document \u{00B7} 38 KB".into();
+            } else {
+                file.body = Body::Word(service_agreement_as(self.office));
+            }
+        }
         Ok(file)
+    }
+
+    /// The fixture saves the agreement as the board's DW-1553 shows it: the next version, at 09:41.
+    fn save_document(&mut self, file_id: &str, base: u32) -> SaveOutcome {
+        self.calls.push(format!("save document {file_id} from version {base}"));
+        if file_id != board::DOCX {
+            return SaveOutcome::Failed;
+        }
+        if self.conflict {
+            let other = Self::other_side();
+            return SaveOutcome::Conflict(Conflict {
+                from: other.from,
+                at: other.at,
+                version: base + 1,
+            });
+        }
+        let table = self.office == super::office::board::Case::Table;
+        self.office = super::office::board::Case::Selected;
+        let mut outcome = Self::agreement_saved(base + 1, None);
+        // What was saved is what was on screen: the inserted table stays.
+        if let (true, SaveOutcome::Saved { file, .. }) = (table, &mut outcome)
+            && let Body::Word(doc) = &mut file.body
+        {
+            doc.sections = super::office::board::service_agreement_as(super::office::board::Case::Table).sections;
+        }
+        outcome
+    }
+
+    fn resolve_document(&mut self, file_id: &str, keep: Keep) -> SaveOutcome {
+        self.calls.push(format!("resolve document {file_id} {keep:?}"));
+        let Some(theirs) = Self::file(file_id).filter(|_| file_id == board::DOCX) else {
+            return SaveOutcome::Failed;
+        };
+        self.conflict = false;
+        self.office = super::office::board::Case::Selected;
+        match keep {
+            // Mine next to theirs, under this PC's name.
+            Keep::Both => Self::agreement_saved(1, Some("Service agreement (Anna-Laptop).docx")),
+            Keep::Mine => Self::agreement_saved(theirs.version + 2, None),
+            Keep::Theirs => SaveOutcome::Opened(OpenFile {
+                version: theirs.version + 1,
+                body: Body::Word(super::office::board::service_agreement_saved()),
+                ..theirs
+            }),
+        }
+    }
+
+    fn commands(&self, _file_id: &str, query: &str) -> Vec<super::office_over::CommandGroup> {
+        super::office::board::commands(query)
     }
 
     /// The fixture saves the note as the board's DW-1524 shows it: version 4 at 09:41, 1.5 KB
@@ -905,6 +1058,11 @@ impl ViewerSource for FixtureViewerSource {
     /// The fixture's second try gets as far as the board's DW-1516 draws.
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
         self.calls.push(format!("retry {file_id}"));
+        // The editor starts at the second try (DW-1556's Try again).
+        if file_id == board::DOCX && self.office == super::office::board::Case::NoEditor {
+            self.office = super::office::board::Case::Plain;
+            return self.open(file_id);
+        }
         let mut file = Self::file(file_id).ok_or(OpenError::NotFound)?;
         file.body = Body::Decrypting {
             done: 0,

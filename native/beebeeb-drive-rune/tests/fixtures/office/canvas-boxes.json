@@ -1,0 +1,87 @@
+{
+ "_note": "board points in the golden's client-area coordinates (1278x798); PNGs are 2x. Where the page runs past the window the crop is clamped to the window. DW-1558 draws no document canvas (a file list with the detail pane). G0b: page boxes are clamped to the stage's bottom edge (y 770); DW-1508's sheet is the grid area under the formula bar, above the sheet tabs.",
+ "boxes": {
+  "DW-1508": {
+   "kind": "sheet",
+   "x": 220,
+   "y": 150,
+   "w": 1058,
+   "h": 590
+  },
+  "DW-1509": {
+   "kind": "slide",
+   "x": 524,
+   "y": 263,
+   "w": 640,
+   "h": 360
+  },
+  "DW-1557": {
+   "kind": "page",
+   "x": 594,
+   "y": 140,
+   "w": 520,
+   "h": 630
+  },
+  "DW-1558": null,
+  "DW-1559": {
+   "kind": "sheet",
+   "x": 220,
+   "y": 183,
+   "w": 1058,
+   "h": 557
+  },
+  "DW-1560": {
+   "kind": "slide",
+   "x": 524,
+   "y": 279.5,
+   "w": 640,
+   "h": 360
+  },
+  "DW-1561": {
+   "kind": "slide",
+   "x": 89,
+   "y": 89.5,
+   "w": 1100,
+   "h": 619
+  },
+  "DW-1507": {
+   "kind": "page",
+   "x": 594,
+   "y": 140,
+   "w": 520,
+   "h": 630
+  },
+  "DW-1511": {
+   "kind": "page",
+   "x": 594,
+   "y": 185,
+   "w": 520,
+   "h": 585
+  },
+  "DW-1563": {
+   "kind": "page",
+   "x": 594,
+   "y": 140,
+   "w": 520,
+   "h": 630
+  }
+ },
+ "clamped": {
+  "DW-1557": {
+   "w": 520.0,
+   "h": 630.0
+  },
+  "DW-1507": {
+   "w": 520.0,
+   "h": 630.0
+  },
+  "DW-1511": {
+   "w": 520.0,
+   "h": 585.0
+  },
+  "DW-1563": {
+   "w": 520.0,
+   "h": 630.0
+  }
+ }
+}

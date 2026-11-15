@@ -570,4 +570,8 @@ impl<C: CredentialStores> ThumbSource for EngineThumbs<C> {
     fn pixels(&self, id: &str) -> Option<Pixels> {
         self.store.picture(id, ThumbCut::Square)
     }
+
+    fn release(&self, id: &str) {
+        self.store.drop_file(id);
+    }
 }

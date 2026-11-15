@@ -1,0 +1,188 @@
+// keymap-office.js: the gate keys of the office editor in the window (DW-1507 to DW-1511, DW-1550 to
+// DW-1561) and of the dialog over it (DW-1234). Runs after keymap.js, in the same scope (`win`, `api`,
+// `q`, `qa`). Scoped to these frames by the board's own frame id, so no other golden gains a key.
+// The window's caption, sidebar and toolbar keep the keys every window has (keymap.js). Keys here are
+// by the editor's structure, numbered in document order; the native side counts the same way.
+{
+  const ofFrame = (win.closest('[id^="DW-"]') || {}).id || '';
+  if (/^DW-(15(0[7-9]|1[01]|5\d|6[01])e?|1234)$/.test(ofFrame)) {
+    const shown = (el) => !!el && el.getClientRects().length > 0;
+    const box = (key, el, extra = {}) => { if (shown(el)) api.box(key, el, extra); };
+    const text = (key, el, extra = {}) => { if (shown(el) && el.textContent.trim()) api.text(key, el, extra); };
+    const icon = (key, el) => { if (shown(el)) api.icon(key, el); };
+    const dim = (el) => ({ opacity: getComputedStyle(el).opacity });
+    // A `.mk-tbtn`: its box, then its glyph or its letter.
+    const tool = (key, b) => {
+      box(key, b, { on: b.classList.contains('on'), off: b.classList.contains('is-off') });
+      icon(`${key}-icon`, q(':scope > svg', b));
+      text(`${key}-letter`, q(':scope > b', b));
+      const word = q(':scope > span', b);
+      if (word) text(`${key}-label`, word);
+    };
+    // A `.kit-btn`: box, glyph, word, and the mono shortcut after the word.
+    const button = (key, b) => {
+      if (!shown(b)) return;
+      box(key, b);
+      icon(`${key}-icon`, q(':scope > svg', b));
+      const word = q(':scope > span', b);
+      const hint = word && q(':scope > .font-mono', word);
+      if (hint) { api.textNode(`${key}-label`, word); text(`${key}-hint`, hint, dim(hint)); } else text(`${key}-label`, word);
+    };
+    const main = q('.mk-main');
+    // The ribbon; a wrapper dims the whole of it while the editor did not start (DW-1556).
+    const ribbon = main && (q(':scope > .flex-none.flex.flex-col', main) || q(':scope > div > .flex-none.flex.flex-col', main));
+    // The dot after the file's name: changes that are not saved.
+    box('crumb-dot', q('.mk-crumbs span.inline-flex > span'));
+    if (ribbon) {
+      box('rib', ribbon);
+      const [tabs, tools] = qa(':scope > div', ribbon);
+      // The tabs' row: the tabs, the command search, Share, Save.
+      qa(':scope > span.relative', tabs).forEach((tab, i) => {
+        api.textNode(`rib-tab-${i}`, tab);
+        box('rib-tab-on', q(':scope > span.absolute', tab));
+      });
+      const find = q('.mk-pop2', tabs);
+      if (find) {
+        box('rib-find', find);
+        icon('rib-find-icon', q(':scope > svg', find));
+        text('rib-find-text', q(':scope > .t-cap', find));
+        box('rib-find-kbd-box', q('kbd', find));
+        if (q('kbd', find)) api.textNode('rib-find-kbd', q('kbd', find));
+      }
+      qa('.kit-btn', tabs).forEach((b, i) => button(`rib-btn-${i}`, b));
+      // The tools' row, in order: tool buttons, pop-up buttons, hairlines.
+      if (tools) {
+        box('rib-tools', tools);
+        let nt = 0, np = 0, ns = 0;
+        for (const c of tools.children) {
+          const el = c.classList.contains('kit-go') ? c.firstElementChild : c;
+          if (!el) continue;
+          if (el.classList.contains('mk-tbtn')) tool(`rt-${nt++}`, el);
+          else if (el.classList.contains('mk-pop2')) {
+            const k = `rp-${np++}`;
+            box(k, el); api.textNode(`${k}-label`, el); icon(`${k}-caret`, q(':scope > svg', el));
+          } else if (el.classList.contains('mk-sep')) box(`rsep-${ns++}`, el);
+        }
+      }
+    }
+    // Word: the outline pane, and the page on its stage.
+    const body = main && q('.mk-body', main);
+    const outline = body && q('.flex.flex-col.gap-1.py-3.px-2', body);
+    if (outline) {
+      box('ol', outline);
+      text('ol-title', q('.t-label', outline));
+      const close = q('.mk-tbtn', outline);
+      if (close) tool('ol-close', close);
+      qa(':scope > span.t-sub', outline).forEach((line, i) => {
+        box(`ol-${i}-row`, line, { on: getComputedStyle(line).backgroundColor !== 'rgba(0, 0, 0, 0)' });
+        api.textNode(`ol-${i}`, line);
+      });
+    }
+    const stage = body && q('.flex-1.min-w-0.relative.flex.justify-center', body);
+    if (stage) {
+      box('stage', stage);
+      const page = q(':scope > .flex.flex-col', stage);
+      if (page) {
+        box('page', page);
+        // Lines are numbered in order; a table is `tbl`, its cells `tbl-<row>-<column>`.
+        // The viewer frames (the plain ids) draw the Office engine's render of the page, a picture: it is
+        // ONE `page` box, gated by its pixels. The editor frames (`e`) keep a key per line (0.9.1).
+        let np = 0;
+        const lines = ofFrame.endsWith('e') ? qa(':scope > div, :scope > p', page) : [];
+        lines.forEach((line) => {
+          if (!line.classList.contains('grid')) { text(`pg-${np++}`, line, dim(line)); return; }
+          box('tbl', line);
+          const cols = getComputedStyle(line).gridTemplateColumns.split(' ').length;
+          qa(':scope > span', line).forEach((cell, i) => text(`tbl-${Math.floor(i / cols)}-${i % cols}`, cell));
+        });
+      }
+      const float = q(':scope > .glass', stage);
+      if (float) {
+        box('float', float);
+        qa('.mk-tbtn', float).forEach((b, i) => tool(`ft-${i}`, b));
+      }
+    }
+    // The editor did not start (DW-1556): the second button (the first is keymap-files.js's `empty-add`).
+    const failed = body && q('.kit-empty', body);
+    if (failed) qa('button.kit-btn', failed).forEach((b, i) => { if (i > 0) button(`empty-btn-${i}`, b); });
+    // The tile of a question's head (`.wn-dlg-alert`).
+    const alert = q('.wn-dlg-alert .kit-tile');
+    if (alert) { box('dlg-tile', alert); icon('dlg-tile-icon', q('svg', alert)); }
+    // The command search (Ctrl+K): the field, the results by group, the foot.
+    const pal = q('[class*="z-[7]"]');
+    if (pal) {
+      box('scrim', q('.mk-scrim'));
+      box('pal', pal);
+      const [head, list, foot] = qa(':scope > div', pal);
+      icon('pal-find-icon', q(':scope > svg', head));
+      api.textNode('pal-query', q(':scope > .t-body', head));
+      box('pal-caret', q('.kit-caret', head));
+      box('pal-esc-box', q('kbd', head));
+      api.textNode('pal-esc', q('kbd', head));
+      let n = 0;
+      qa(':scope > div', list).forEach((group, g) => {
+        text(`pal-g${g}`, q(':scope > .t-label', group));
+        qa(':scope > div.flex', group).forEach((line) => {
+          const k = `pal-${n++}`;
+          box(`${k}-row`, line, { on: getComputedStyle(line).backgroundColor !== 'rgba(0, 0, 0, 0)' });
+          text(k, q(':scope > .t-body', line));
+          const kbd = q('kbd', line);
+          if (kbd) { box(`${k}-kbd-box`, kbd); api.textNode(`${k}-kbd`, kbd); }
+        });
+      });
+      box('pal-foot', foot);
+      icon('pal-foot-icon', q(':scope > svg', foot));
+      api.textNode('pal-foot-text', foot);
+    }
+    // DW-1557: the "About this viewer" card, bottom right over the document (a keyed box, so its place is gated).
+    const lic = qa('.absolute[class*="z-[8]"]', win).find((e) => shown(e) && /About this viewer/.test(e.textContent));
+    if (lic) box('lic-panel', lic);
+    // The status line: what the document is, then how it is kept, zoom, About.
+    const foot = main && q(':scope > .mk-foot', main);
+    if (foot) {
+      let n = 0, ns = 0;
+      for (const c of foot.children) {
+        const el = c.classList.contains('kit-go') ? c.firstElementChild : c;
+        if (!el || !shown(el)) continue;
+        if (el.classList.contains('mk-sep')) { box(`st-sep-${ns++}`, el); continue; }
+        if (el.classList.contains('flex-1')) continue;
+        // A state's dot and its words are keymap.js's (`status-dot`, `status-text`).
+        if (el.classList.contains('mk-sdot') || el.tagName === 'B') continue;
+        const k = `st-${n++}`;
+        const svgs = qa(':scope > svg', el);
+        const mono = q(':scope > .font-mono', el);
+        if (svgs.length === 2 && mono) { icon(`${k}-less`, svgs[0]); text(`${k}-zoom`, mono); icon(`${k}-more`, svgs[1]); }
+        else if (svgs.length === 1) { icon(`${k}-icon`, svgs[0]); api.textNode(k, el); }
+        else text(k, el);
+      }
+    }
+  }
+}
+// Present mode (DW-1561): the whole screen is the slide on black. No window, no ribbon, so the keys above find nothing.
+// The stage, the slide and its lines in order, the Esc hint, and the count of slides.
+{
+  const pFrame = (win.closest('[id^="DW-"]') || {}).id || '';
+  if (pFrame === 'DW-1561') {
+    const shown = (el) => !!el && el.getClientRects().length > 0;
+    const stage = win.querySelector('.kit-body > .relative.grid');
+    if (shown(stage)) {
+      api.box('pres-stage', stage);
+      const slide = stage.querySelector(':scope > .flex.flex-col');
+      if (shown(slide)) {
+        api.box('pres-slide', slide);
+        let n = 0;
+        for (const line of slide.children) {
+          if (!shown(line)) continue;
+          if (line.tagName === 'UL') {
+            line.querySelectorAll(':scope > li').forEach((li, i) => api.text(`pres-li-${i}`, li));
+          } else if (line.classList.contains('mk-ph')) api.box('pres-image', line);
+          else if (line.textContent.trim()) api.text(`pres-${n++}`, line);
+        }
+      }
+      const esc = stage.querySelector('kbd');
+      if (shown(esc)) { api.box('pres-esc-box', esc); api.textNode('pres-esc', esc); }
+      const count = [...stage.querySelectorAll(':scope > span.font-mono')].find(shown);
+      if (count) api.text('pres-count', count);
+    }
+  }
+}

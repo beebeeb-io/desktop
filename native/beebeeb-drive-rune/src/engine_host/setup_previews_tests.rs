@@ -249,3 +249,17 @@ fn sample_is_bundled_only_when_said() {
     let sample = heic.source.sample();
     assert_eq!(sample.preview_png, sample.original_png);
 }
+
+#[test]
+fn setup_space_limit_is_the_engines() {
+    use crate::frames::signin::setup::source::SetupSource;
+    // The engine reports 35 GB: step 4 says "35 GB", not the board's constant.
+    let engine = fake();
+    *engine.previews.lock().unwrap() = Some(Ok(facts(false, Wire::Heic, 2560, 3)));
+    engine.space_limit.store(35_000_000_000, Ordering::SeqCst);
+    let set = set_on(engine, FakePlatform::default());
+    assert_eq!(set.source.space_limit(), "35 GB");
+    // No limit known: empty (the row is not drawn), never "20 GB".
+    let none = step_four(Ok(facts(false, Wire::Heic, 2560, 3)), false);
+    assert_eq!(none.source.space_limit(), "");
+}

@@ -428,20 +428,12 @@ fn account_draws_who_is_signed_in_and_the_plan() {
 }
 
 #[test]
-fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
+fn only_the_three_sections_answer_and_the_approval_and_delete_panes_are_wired() {
     let server = server();
     let source = Source::new(signed_in(&server));
-    for pane in [
-        Pane::Delete,
-        Pane::DeleteFactor,
-        Pane::DeleteLink,
-        Pane::DeleteScheduled,
-        Pane::DeleteUndone,
-        Pane::ApproveCode,
-        Pane::ApproveReview,
-    ] {
-        assert_eq!(source.pane_state(pane), PaneState::Unwired, "{pane:?}");
-    }
+    // Approving a sign-in answers too (`account_approve.rs`).
+    assert_ne!(source.pane_state(Pane::ApproveCode), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::ApproveReview), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Account), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Security), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Sessions), PaneState::Unwired);
@@ -451,6 +443,12 @@ fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
     // The password change and the passkeys answer too (`account_password.rs`, `passkeys.rs`).
     assert_ne!(source.pane_state(Pane::Password), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Passkeys), PaneState::Unwired);
+    // Deleting the account answers too, on each of its pages: DW-A58, DW-A80 to DW-A83 (`account_deletion.rs`).
+    assert_ne!(source.pane_state(Pane::Delete), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::DeleteFactor), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::DeleteLink), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::DeleteScheduled), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::DeleteUndone), PaneState::Unwired);
 }
 
 #[test]

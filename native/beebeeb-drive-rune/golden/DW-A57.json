@@ -855,7 +855,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": false
+   "danger": false,
+   "selected": false
   },
   "item-0-0-icon": {
    "kind": "icon",
@@ -1053,7 +1054,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": false
+   "danger": false,
+   "selected": false
   },
   "item-1-0-icon": {
    "kind": "icon",
@@ -1139,7 +1141,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": false
+   "danger": false,
+   "selected": false
   },
   "item-1-1-icon": {
    "kind": "icon",
@@ -1225,7 +1228,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": false
+   "danger": false,
+   "selected": false
   },
   "item-1-2-icon": {
    "kind": "icon",
@@ -1315,7 +1319,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": false
+   "danger": false,
+   "selected": false
   },
   "item-1-3-icon": {
    "kind": "icon",
@@ -1437,7 +1442,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": false
+   "danger": false,
+   "selected": false
   },
   "item-2-0-icon": {
    "kind": "icon",
@@ -1524,7 +1530,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": false
+   "danger": false,
+   "selected": false
   },
   "item-2-1-icon": {
    "kind": "icon",
@@ -1665,7 +1672,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": true
+   "danger": true,
+   "selected": false
   },
   "item-3-0-icon": {
    "kind": "icon",
@@ -1716,7 +1724,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": true
+   "danger": true,
+   "selected": false
   },
   "item-3-1-icon": {
    "kind": "icon",
@@ -1817,9 +1826,9 @@
    "kind": "text",
    "x": 270,
    "y": 607.5,
-   "w": 471.9,
-   "h": 14.5,
-   "text": "Deletes every product's data after 72 hours to undo. After that it cannot be undone.",
+   "w": 449.41,
+   "h": 30.5,
+   "text": "After you confirm by email you can still undo it for a time. After that it cannot be undone.",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 12,
@@ -1842,7 +1851,8 @@
     "pad": "0px 10px",
     "gap": "8px"
    },
-   "danger": true
+   "danger": true,
+   "selected": false
   },
   "item-4-0-icon": {
    "kind": "icon",

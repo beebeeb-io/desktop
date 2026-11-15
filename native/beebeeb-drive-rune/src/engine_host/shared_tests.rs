@@ -473,21 +473,6 @@ fn a_change_beebeeb_never_made_is_never_drawn_as_made_also_when_the_refresh_fail
 }
 
 #[test]
-fn what_is_not_bound_sends_nothing_and_says_not_available() {
-    let fake = fake("unbound");
-    let mut source = EngineSharedSource::new(signed_in(&fake));
-    opened(&mut source);
-    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 1] = [&|s| s.keep_offline(OTHERS)];
-    for act in unbound {
-        assert!(!act(&mut source));
-        assert_eq!(settle(&mut source), [Notice::NotAvailable]);
-    }
-    assert!(changes(&fake.fake).is_empty());
-    assert_eq!(source.invitations().len(), 1);
-    assert_eq!(source.people_shares().len(), 1);
-}
-
-#[test]
 fn decline_stop_sharing_and_close_request_go_out_once_by_id_and_nothing_is_drawn_before_beebeeb_answered() {
     let fake = fake("ends");
     let mut source = EngineSharedSource::new(signed_in(&fake));
@@ -631,13 +616,8 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
     );
     assert!(crate::ui::sidebar::badge_for(&rt.state, crate::ui::sidebar::SidebarSection::Shared).is_some());
 
-    // A control that is not bound says so in the window.
-    rt.state.frames.shared.selected = Some(0);
-    rt.update(|s, _| {
-        s.frames.shared.source.keep_offline(OTHERS);
-    });
+    // Every control is bound now (slice B4 bound the last one): the lists stay drawn.
     poll(&mut rt);
-    assert!(words(&rt).contains("Not available yet in this version"));
     assert!(words(&rt).contains("Invented trip"));
 
     let _ = engine.lock();
@@ -837,3 +817,7 @@ fn an_unfinished_invite_says_whether_the_approval_left() {
         "never claims they cannot open it when that is not known"
     );
 }
+
+// plan40 batch 1, slice B4: the tests of Make available offline on someone else's file.
+#[path = "shared_offline_tests.rs"]
+mod offline;

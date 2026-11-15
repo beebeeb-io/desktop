@@ -532,3 +532,170 @@ fn undo_is_for_every_item_moved_in_this_session_not_only_the_last_move() {
     ended.recv_timeout(WAIT).expect("the call ended");
     assert_eq!(changes(&mut source), [(Action::Restore, vec![done(NOTES), done(PLAN)])]);
 }
+
+/// The Files window's source, shared with the test: Move to Trash, Undo and their answers go to the real source;
+/// everything else is the window's own, and nothing here reads it.
+struct Shared(Arc<Mutex<Source>>);
+
+type Asked = Result<(), ActionError>;
+
+#[rustfmt::skip]
+impl FilesSource for Shared {
+    fn counts(&self) -> Option<crate::frames::files::source::Counts> { None }
+    fn account(&self) -> Option<crate::frames::files::source::Account> { None }
+    fn storage_split(&self) -> Option<crate::frames::files::source::StorageSplit> { None }
+    fn sync_state(&self) -> Option<String> { None }
+    fn details(&self, item: &DriveItem, folder: &str) -> crate::frames::files::source::Details {
+        crate::frames::files::source::NoEngine.details(item, folder)
+    }
+    fn changed_label(&self, _: &DriveItem) -> Option<String> { None }
+    fn can_add(&self, _: Option<&str>) -> bool { true }
+    fn sort_of(&self, _: Option<&str>) -> Option<crate::frames::files::Sort> { None }
+    fn set_sort(&mut self, _: Option<&str>, _: crate::frames::files::Sort) {}
+    fn trash(&mut self, items: &[DriveItem]) -> Asked { self.0.lock().unwrap().trash(items) }
+    fn restore(&mut self, items: &[DriveItem]) -> Asked { self.0.lock().unwrap().restore(items) }
+    fn duplicate(&mut self, _: &[DriveItem], _: &[&str]) -> Asked { Ok(()) }
+    fn keep_offline(&mut self, _: &[DriveItem], _: bool) -> Asked { Ok(()) }
+    fn copy_link(&mut self, _: &[DriveItem]) -> Asked { Ok(()) }
+    fn open(&mut self, _: &[DriveItem]) -> Asked { Ok(()) }
+    fn show_in_file_explorer(&mut self, _: &[DriveItem]) -> Asked { Ok(()) }
+    fn upload(&mut self, _: Option<&str>, _: &[std::path::PathBuf]) -> Asked { Ok(()) }
+    fn new_folder(&mut self, _: Option<&str>, _: &str) -> Asked { Ok(()) }
+    fn rename(&mut self, _: &DriveItem, _: &str) -> Asked { Ok(()) }
+    fn move_to(&mut self, _: &[DriveItem], _: Option<&str>) -> Asked { Ok(()) }
+    fn free_up_space(&mut self, _: &[DriveItem]) -> Asked { Ok(()) }
+    fn open_in_file_explorer(&mut self, _: Option<&str>) -> Asked { Ok(()) }
+    fn changes(&mut self) -> Vec<Change> { self.0.lock().unwrap().changes() }
+    fn answers_later(&self) -> bool { self.0.lock().unwrap().answers_later() }
+}
+
+/// The Files window over the shared source, showing these rows.
+fn window_over(shared: &Arc<Mutex<Source>>, ids: &[&str]) -> rune::Runtime<crate::State> {
+    let mut state = crate::init();
+    state.actions.source = Box::new(Shared(shared.clone()));
+    state.listing.items = rows(ids);
+    let env = rune::Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = rune::Runtime::new(state, crate::view, (1278.0, 798.0), env);
+    rt.frame(0.0);
+    rt
+}
+
+/// Select these rows of the window, move them to Trash, and take Beebeeb's answer into the window.
+fn press_trash(rt: &mut rune::Runtime<crate::State>, shared: &Arc<Mutex<Source>>, ids: &[&str]) {
+    let ended = watch_next_call(&mut shared.lock().unwrap());
+    rt.update(|s, tx| {
+        let rows: Vec<usize> = (0..s.listing.items.len())
+            .filter(|&row| ids.contains(&s.listing.items[row].id.as_str()))
+            .collect();
+        s.select_only(rows[0]);
+        s.actions.selection.extend(rows);
+        assert!(s.trash_selection(tx));
+    });
+    ended.recv_timeout(WAIT).expect("the call ended");
+    rt.update(|s, _| {
+        s.take_changes();
+    });
+}
+
+/// What the window's Undo holds.
+fn window_undo(rt: &rune::Runtime<crate::State>) -> std::collections::BTreeSet<String> {
+    rt.state.actions.undo.iter().map(|(_, item)| item.id.clone()).collect()
+}
+
+/// What the source lets an Undo ask for.
+fn adapter_undo(shared: &Arc<Mutex<Source>>) -> std::collections::BTreeSet<String> {
+    let source = shared.lock().unwrap();
+    source
+        .trash
+        .moved
+        .as_ref()
+        .map(|(_, held)| held.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// These ids, as a set.
+fn id_set(ids: &[&str]) -> std::collections::BTreeSet<String> {
+    ids.iter().map(|id| id.to_string()).collect()
+}
+
+/// The restores that reached the fake.
+fn restores(fake: &Fake) -> Vec<(String, &'static str)> {
+    sent(fake)
+        .into_iter()
+        .filter(|(route, _)| route.ends_with("/restore"))
+        .collect()
+}
+
+/// Review of 2468, L321: what Undo holds has one owner, the window (`Actions::undo`). Over the real source, after a
+/// move to Trash, a partial one and an Undo (at its press and once answered), the window's Undo and what the source
+/// lets an Undo ask for are the same items. After a change of folder the window holds nothing and an Undo asks
+/// nothing; the next Undo asks only for what the window holds, and the two are the same again.
+#[test]
+fn window_and_adapter_hold_same_undo_set() {
+    let fake = fake("one-undo");
+    let (_engine, source) = signed_in(&fake);
+    let shared = Arc::new(Mutex::new(source));
+    let mut rt = window_over(&shared, &[NOTES, PLAN, NOT_THERE, PHOTO]);
+
+    // A move to Trash: both moved.
+    press_trash(&mut rt, &shared, &[NOTES, PLAN]);
+    assert_eq!(window_undo(&rt), id_set(&[NOTES, PLAN]));
+    assert_eq!(adapter_undo(&shared), window_undo(&rt));
+
+    // A partial move: one moved, one Beebeeb does not have.
+    press_trash(&mut rt, &shared, &[NOT_THERE, PHOTO]);
+    assert_eq!(window_undo(&rt), id_set(&[NOTES, PLAN, PHOTO]));
+    assert_eq!(adapter_undo(&shared), window_undo(&rt));
+
+    // Undo: at the press the window hands over all it holds, and the source holds nothing more either.
+    let (release, ended) = hold_next_call(&mut shared.lock().unwrap());
+    rt.update(|s, tx| assert!(s.undo(tx)));
+    assert!(window_undo(&rt).is_empty());
+    assert_eq!(
+        adapter_undo(&shared),
+        window_undo(&rt),
+        "the source still holds what the window handed over"
+    );
+    release.send(()).expect("the worker waits");
+    ended.recv_timeout(WAIT).expect("the call ended");
+    rt.update(|s, _| {
+        s.take_changes();
+    });
+    assert!(window_undo(&rt).is_empty());
+    assert_eq!(adapter_undo(&shared), window_undo(&rt));
+    assert_eq!(restores(&fake), [restored(NOTES), restored(PLAN), restored(PHOTO)]);
+
+    // A change of folder: the window holds nothing for Undo, and an Undo asks nothing.
+    press_trash(&mut rt, &shared, &[NOTES]);
+    assert_eq!(adapter_undo(&shared), window_undo(&rt));
+    rt.update(|s, _| s.open_folder(None));
+    assert!(window_undo(&rt).is_empty());
+    let before = sent(&fake).len();
+    rt.update(|s, tx| assert!(!s.undo(tx)));
+    assert_eq!(
+        sent(&fake).len(),
+        before,
+        "an Undo after a change of folder sent something"
+    );
+
+    // The next move and its Undo: only what the window holds is asked for, and the two are the same again.
+    rt.update(|s, _| s.listing.items = rows(&[PLAN]));
+    press_trash(&mut rt, &shared, &[PLAN]);
+    assert_eq!(window_undo(&rt), id_set(&[PLAN]));
+    let ended = watch_next_call(&mut shared.lock().unwrap());
+    rt.update(|s, tx| assert!(s.undo(tx)));
+    assert_eq!(adapter_undo(&shared), window_undo(&rt));
+    ended.recv_timeout(WAIT).expect("the call ended");
+    rt.update(|s, _| {
+        s.take_changes();
+    });
+    assert_eq!(
+        restores(&fake)[3..],
+        [restored(PLAN)],
+        "Undo asked for more than the window held"
+    );
+    assert_eq!(adapter_undo(&shared), window_undo(&rt));
+}

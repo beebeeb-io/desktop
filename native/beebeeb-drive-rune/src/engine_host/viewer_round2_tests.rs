@@ -553,7 +553,7 @@ fn a_pdf_opens_and_its_pages_are_rendered_when_the_view_asks_for_them() {
         PageState::Ready,
         "not this source's to wait for"
     );
-    assert!(!source.finds(), "the text is not searched here");
+    assert!(source.finds(), "a PDF's text is searched here");
 }
 
 #[test]
@@ -655,6 +655,10 @@ fn find_on_a_source_that_cannot_search_says_it_is_not_built_never_no_matches() {
         assert!(began.elapsed() < Duration::from_secs(20));
         std::thread::sleep(Duration::from_millis(2));
     }
+    // A PDF is searched on this source while its opening is the session's (Find is bound). Only a PDF has Find here
+    // at all: a picture or a text has no Find bar to open, so the source that cannot search is this one once the
+    // session moved on and before the window drew that: the PDF is still on screen, its text is not searched.
+    fake.new_session("b@example.eu");
     ui.open_find();
     assert!(
         ui.media.find.is_none(),

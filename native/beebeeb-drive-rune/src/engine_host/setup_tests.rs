@@ -4,7 +4,7 @@
 //! Every name is invented.
 
 use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::{Duration, Instant};
 
 use rune::{Env, Runtime, Tx};
@@ -15,15 +15,20 @@ use crate::shell::actions::{EngineActions, FixtureEngine};
 use crate::shell::app::GateState as ShellGate;
 use crate::shell::host::{self, Shell};
 use crate::shell::platform::fake::FakePlatform;
+use beebeeb_engine::app::passkeys_api::PasskeyProblem;
 use beebeeb_engine::app::photo_previews_api::{PreviewsFacts, PreviewsRefused, SampleFacts};
 use beebeeb_engine::photo_previews::PreviewSetting;
 
 #[path = "setup_app_lock_tests.rs"]
 mod app_lock;
+#[path = "setup_backup_tests.rs"]
+mod backup_tests;
 #[path = "setup_folder_tests.rs"]
 mod folder_tests;
 #[path = "setup_glue_tests.rs"]
 mod glue;
+#[path = "setup_passkey_tests.rs"]
+mod passkey_tests;
 #[path = "setup_previews_tests.rs"]
 mod previews_tests;
 
@@ -77,6 +82,8 @@ struct Fake {
     previews_held: Mutex<()>,
     previews_sets: Mutex<Vec<(SessionGeneration, PreviewSetting)>>,
     previews_photo: AtomicBool,
+    /// The space limit this double reports, in bytes (0: none).
+    space_limit: AtomicU64,
     /// Every "Lock again after" write: its session, its value, and whether a proof came with it.
     lock_after: Mutex<
         Vec<(
@@ -85,6 +92,13 @@ struct Fake {
             bool,
         )>,
     >,
+    /// Step 1: what the add answers (`None`: this double binds no passkey), what the read of the list answers, an
+    /// add that waits here until released (Windows' dialog is open), and every read and add in order: what, its
+    /// session, and for an add the password it was handed (an invented one).
+    passkey: Mutex<Option<Result<(), PasskeyProblem>>>,
+    passkey_list: Mutex<Result<(), PasskeyProblem>>,
+    passkey_held: Mutex<()>,
+    passkey_calls: Mutex<Vec<(&'static str, SessionGeneration, String)>>,
 }
 
 fn session(number: u64) -> SessionGeneration {
@@ -124,7 +138,12 @@ fn fake() -> Arc<Fake> {
         previews_held: Mutex::new(()),
         previews_sets: Mutex::default(),
         previews_photo: AtomicBool::new(false),
+        space_limit: AtomicU64::new(0),
         lock_after: Mutex::default(),
+        passkey: Mutex::new(None),
+        passkey_list: Mutex::new(Ok(())),
+        passkey_held: Mutex::new(()),
+        passkey_calls: Mutex::default(),
     })
 }
 
@@ -139,6 +158,9 @@ impl Fake {
 impl SetupEngine for Fake {
     fn binds_previews(&self) -> bool {
         self.previews.lock().unwrap().is_some()
+    }
+    fn preview_limit_bytes(&self) -> Option<u64> {
+        Some(self.space_limit.load(Ordering::SeqCst)).filter(|bytes| *bytes > 0)
     }
     fn previews_facts_for(&self, _session: SessionGeneration) -> Result<PreviewsFacts, PreviewsRefused> {
         previews_tests::fake_read(self)
@@ -359,109 +381,6 @@ fn settle(set: &mut Set, wakes: usize) -> bool {
         std::thread::sleep(Duration::from_millis(5));
     }
     set.source.poll()
-}
-
-/// A first run on `engine` whose folder read is held until the returned guard drops.
-fn backup_read_held(engine: &Arc<Fake>) -> (EngineSetupSource<Fake>, std::sync::MutexGuard<'_, ()>) {
-    engine.reads_choices.store(true, Ordering::SeqCst);
-    let held = engine.choices_held.lock().unwrap();
-    let (asked, platform, first_run) = (
-        Arc::<Asked>::default(),
-        Arc::new(FakePlatform::default()),
-        Arc::<FirstRun>::default(),
-    );
-    first_run.read(&**engine);
-    (
-        EngineSetupSource::new(engine.clone(), hooks(&asked, platform, first_run)),
-        held,
-    )
-}
-
-#[test]
-fn the_backup_step_is_not_called_unavailable_while_its_folders_are_still_being_read() {
-    let engine = fake();
-    let (mut source, held) = backup_read_held(&engine);
-    // The read is on its worker and has not answered: the step must not say "not in this version".
-    assert!(
-        source.available(Step::Backup),
-        "a read that is running is not an absence"
-    );
-    assert!(
-        source.loading(Step::Backup),
-        "it is drawn as loading until the read answers"
-    );
-    assert!(!source.loading(Step::Notifications), "no other step is loading");
-    drop(held);
-    let began = Instant::now();
-    // The answer: no folders were found. That is an answer, not an absence: the step stays (it is never "not in
-    // this version" while Backups is on), is no longer loading, and did not fail.
-    let began = Instant::now();
-    while source.loading(Step::Backup) {
-        assert!(began.elapsed() < Duration::from_secs(10), "the read never answered");
-        source.poll();
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(source.available(Step::Backup) && !source.failed(Step::Backup));
-    assert!(source.folders().is_empty());
-}
-
-#[test]
-fn a_failed_folder_read_is_a_failure_with_try_again_never_not_in_this_version() {
-    let engine = fake();
-    engine.choices_fail.store(true, Ordering::SeqCst);
-    let (mut source, held) = backup_read_held(&engine);
-    drop(held);
-    let began = Instant::now();
-    while !source.failed(Step::Backup) {
-        assert!(began.elapsed() < Duration::from_secs(10), "the read never answered");
-        source.poll();
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(source.available(Step::Backup), "the step stays: it is not an absence");
-    assert!(!source.loading(Step::Backup));
-    // Try again: the read goes out again, and its answer replaces the failure.
-    engine.choices_fail.store(false, Ordering::SeqCst);
-    *engine.choices.lock().unwrap() = vec![BackupChoice {
-        key: "documents".into(),
-        name: "Documents".into(),
-        on: true,
-        items: Some(3),
-    }];
-    source.retry_backups();
-    assert!(
-        !source.failed(Step::Backup),
-        "not drawn as failed while it is read again"
-    );
-    while source.folders().is_empty() {
-        assert!(
-            began.elapsed() < Duration::from_secs(10),
-            "the second read never answered"
-        );
-        source.poll();
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(!source.failed(Step::Backup) && !source.loading(Step::Backup));
-}
-
-#[test]
-fn the_backup_step_offers_the_folders_the_read_found() {
-    let engine = fake();
-    *engine.choices.lock().unwrap() = vec![BackupChoice {
-        key: "documents".into(),
-        name: "Documents".into(),
-        on: true,
-        items: Some(3),
-    }];
-    let (mut source, held) = backup_read_held(&engine);
-    drop(held);
-    let began = Instant::now();
-    while source.folders().is_empty() {
-        assert!(began.elapsed() < Duration::from_secs(10), "the read never answered");
-        source.poll();
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(source.available(Step::Backup) && !source.loading(Step::Backup));
-    assert_eq!(source.folders()[0].name, "Documents");
 }
 
 #[test]

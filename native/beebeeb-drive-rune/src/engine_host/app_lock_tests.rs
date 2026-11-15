@@ -10,24 +10,33 @@ use beebeeb_engine::keychain::{AuthSecretStore, LockFlag};
 use super::*;
 use crate::engine_host::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult};
 
-/// The prompts that are up, oldest first.
+/// The prompts that are up, oldest first, and how many were taken away. A prompt that was taken away keeps its
+/// answer here: the test hands it out late, as one decided before its cancel would arrive.
 #[derive(Clone, Default)]
 struct Prompts {
     up: Arc<Mutex<Vec<HelloDone>>>,
     asked: Arc<AtomicUsize>,
+    taken_away: Arc<AtomicUsize>,
 }
 
 impl HelloPrompter for Prompts {
     fn start(&self, done: HelloDone) -> Result<HelloCancel, ()> {
         self.asked.fetch_add(1, Ordering::SeqCst);
         self.up.lock().unwrap().push(done);
-        Ok(Box::new(|| {}))
+        let taken_away = self.taken_away.clone();
+        Ok(Box::new(move || {
+            taken_away.fetch_add(1, Ordering::SeqCst);
+        }))
     }
 }
 
 impl Prompts {
     fn asked(&self) -> usize {
         self.asked.load(Ordering::SeqCst)
+    }
+
+    fn taken_away(&self) -> usize {
+        self.taken_away.load(Ordering::SeqCst)
     }
 
     /// The oldest prompt that is up ends with `result` (on the prompt's own thread, in the app).
@@ -309,6 +318,47 @@ fn a_stale_delay_on_the_page_asks_windows_hello_when_the_engine_wants_a_proof() 
     settle(&mut source);
     assert_eq!(stored_after(&engine), Some(LockAfter::Minutes30));
     assert_eq!(delay(&source).as_deref(), Some("30 min"));
+}
+
+/// L274, the cancel contract (`hello::HelloCancel`): a prompt taken away when the page went hands nothing to app lock,
+/// not even a yes decided before its cancel that arrives late, also while a newer prompt is up under the same session
+/// and account. The page is not left waiting for it, and the newer prompt's own answer still counts. (A prompt is up:
+/// one `pump` takes the late answer in; `settle` would wait for the person.)
+#[test]
+fn no_answer_after_cancel_reaches_the_app_lock() {
+    let server = server();
+    let (engine, mut source, prompts) = with_prompts(&server);
+    source.set_app_lock(false);
+    assert_eq!(prompts.asked(), 1);
+    source.closed();
+    assert_eq!(prompts.taken_away(), 1, "the page went: its prompt is taken away");
+    // The page comes back and works: nothing waits for the prompt that was taken away.
+    opened(&mut source, Pane::Security);
+    source.set_app_lock(false);
+    assert_eq!(prompts.asked(), 2, "turning it off asks again");
+    // The first prompt's yes arrives now, with the second prompt up under the same stamp.
+    prompts.answer(HelloResult::Verified);
+    source.pump();
+    assert!(stored(&engine), "a yes of a prompt that was taken away writes nothing");
+    assert_eq!(switch(&source), Some(true));
+    assert_eq!(source.notice(), None, "and says nothing");
+    assert_eq!(prompts.taken_away(), 1, "the second prompt stays up");
+    // The second prompt is the one that counts.
+    prompts.answer(HelloResult::Cancelled);
+    settle(&mut source);
+    assert!(stored(&engine));
+    assert_eq!(
+        source.notice(),
+        Some("App lock is still on: Windows Hello did not confirm it's you.")
+    );
+    // A yes that arrives after the page went, with no prompt up any more, writes nothing either.
+    source.set_app_lock(false);
+    assert_eq!(prompts.asked(), 3);
+    source.closed();
+    prompts.answer(HelloResult::Verified);
+    settle(&mut source);
+    assert!(stored(&engine), "a yes after the page went writes nothing");
+    assert_eq!(switch(&source), Some(true));
 }
 
 /// "Use your password" (no board frame: D-2).

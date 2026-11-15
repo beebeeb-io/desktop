@@ -681,11 +681,17 @@ async fn run(
                 // An unreadable config runs no pass, as the mirror did.
                 match crate::config::DesktopConfig::load_for(identity) {
                     Ok(cfg) => {
-                        let sources = crate::backup::sources::backup_sources(
+                        let mut sources = crate::backup::sources::backup_sources(
                             &db,
                             &cfg.known_folder_backup,
                             &cfg.known_folder_source,
                         );
+                        // DW-0737: the folders the person chose, passed like a known folder.
+                        sources.extend(crate::backup::sources::chosen_sources(
+                            &cfg.backup_chosen_folders,
+                            &cfg.known_folder_backup,
+                            Some(&sync_root),
+                        ));
                         // LD-0113 §6.2: a moved original (a Known Folder Move) or a newly resolved device folder
                         // changes what is protected; the folder switch refreshes at once (`set_known_folder_backup`).
                         crate::backup_protect::set_own_backups(crate::backup::own_backups_for(&db, &sources));

@@ -163,6 +163,20 @@ pub struct Pumped {
     /// The answer to "Delete this backup" (a source that answers late): done, or refused with a fixed sentence.
     /// Nothing was deleted in a refusal.
     pub deleted: Option<Result<(), &'static str>>,
+    /// The answer to "Stop and move the backup to Trash" with the account password (DW-1410's second step).
+    pub stopped: Option<Stopped>,
+}
+
+/// What became of a "Stop and move the backup to Trash" a source answered late. Each refusal is a fixed sentence that
+/// says whether anything changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// The folder is no longer backed up and its backup is in Trash.
+    Done,
+    /// Nothing changed (the password was not accepted, the session ended, ...): said under the password field.
+    Refused(&'static str),
+    /// The folder is no longer backed up, but the move to Trash was not confirmed: said in the section.
+    StoppedOnly(&'static str),
 }
 
 #[cfg_attr(not(test), allow(dead_code))] // the defaulted methods are for the view lane's poll (PR body)
@@ -214,6 +228,22 @@ pub trait BackupsSource {
     fn add_folder(&mut self, path: &str) -> bool;
     /// Stop backing up a chosen folder; its copy stays (read-only) or goes to Trash.
     fn remove_folder(&mut self, id: &str, move_copy_to_trash: bool);
+    /// `true` where moving a chosen folder's backup to Trash proves the ACCOUNT PASSWORD first (the engine: lead ruling
+    /// 2026-11-15, a flagged deviation from DW-1410, which draws no password). Then "Stop and move the backup to Trash"
+    /// asks for it and calls [`BackupsSource::remove_folder_to_trash`]; the fixture (the board) moves at once.
+    fn trash_needs_password(&self) -> bool {
+        false
+    }
+    /// Stop backing up a chosen folder and move its backup to Trash once `password` is proven. `true`: sent (the answer
+    /// comes through [`Pumped::stopped`]); `false`: nothing sent.
+    fn remove_folder_to_trash(&mut self, _id: &str, _password: &str) -> bool {
+        false
+    }
+    /// A "Stop and move the backup to Trash" is on its way (a source that answers late): the dialog says so and sends
+    /// nothing more.
+    fn stopping(&self) -> bool {
+        false
+    }
     fn retry(&mut self, id: &str);
     fn retry_all(&mut self);
     /// Move another device's backup to Trash. It is a risky action: the engine proves the ACCOUNT PASSWORD

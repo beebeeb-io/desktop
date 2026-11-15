@@ -1119,7 +1119,8 @@ pub use accounts::{legacy_platform_keychain_store, platform_keychain_store_for};
 
 #[path = "../src/keychain/legacy.rs"]
 mod legacy;
-/// Tests only: the migration's own tests drive the two-store variant directly; production runs the account variant.
-#[cfg(any(test, feature = "test-support"))]
+/// The engine handle moves a flat-layout session with the two-store variant at open, and clears the flat layout with
+/// the sweep at every clear (`app::credential_stores`).
 pub use legacy::migrate_legacy_keychain_between;
 pub use legacy::migrate_legacy_keychain_to_account;
+pub(crate) use legacy::sweep_legacy;

@@ -643,7 +643,7 @@ fn what_could_not_be_freed_is_never_answered_as_freed() {
         [
             "f-up:Unsent",
             "f-conf:Unsent",
-            "f-err:Unsent",
+            "f-err:Error",
             "f-kept:Kept",
             "f-open:Left",
             "d-k:Unsent+",
@@ -654,6 +654,37 @@ fn what_could_not_be_freed_is_never_answered_as_freed() {
     // Nothing but the one file the reclaim freed changed.
     assert_eq!(db.get_file("f-k1").unwrap().unwrap().status, FileStatus::CloudOnly);
     assert_eq!(db.get_file("f-up").unwrap().unwrap().status, FileStatus::Uploading);
+}
+
+/// A file in error here (its download failed) is answered as in error, never as a change that waits to be sent; in a
+/// folder the reason is the one that says most, whatever the order of its rows (review of 2468, L256.1).
+#[test]
+fn error_row_is_not_answered_as_unsent() {
+    use crate::free_up_space::free_selection;
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    held(&db, "f-err", "/err.txt", ItemKind::File, FileStatus::Error, false);
+    // A folder: one file in error, one the reclaim could not free (open in an app).
+    local(&db, "d-e", "/E", ItemKind::Folder);
+    held(&db, "f-e1", "/E/one.txt", ItemKind::File, FileStatus::Error, false);
+    local(&db, "f-e2", "/E/two.txt", ItemKind::File);
+    // A folder: one file in error, one uploading: the unsent change says most.
+    local(&db, "d-u", "/U", ItemKind::Folder);
+    held(&db, "f-u1", "/U/one.txt", ItemKind::File, FileStatus::Error, false);
+    held(&db, "f-u2", "/U/two.txt", ItemKind::File, FileStatus::Uploading, false);
+    // A folder: one file in error, one kept: the kept file says most.
+    local(&db, "d-k", "/K", ItemKind::Folder);
+    held(&db, "f-k1", "/K/one.txt", ItemKind::File, FileStatus::Error, false);
+    held(&db, "f-k2", "/K/two.txt", ItemKind::File, FileStatus::Local, true);
+    let candidates = vec![("f-e2".to_string(), "/E/two.txt".to_string(), 10)];
+    let selection = ids(&["f-err", "d-e", "d-u", "d-k"]);
+    let answer = free_selection(&db, &selection, candidates, |_| {});
+    assert_eq!(told(&answer), ["f-err:Error", "d-e:Error", "d-u:Unsent", "d-k:Kept"]);
+    assert_eq!(
+        db.get_file("f-err").unwrap().unwrap().status,
+        FileStatus::Error,
+        "nothing of it changed"
+    );
 }
 
 /// `Engine::free_up_space_of` asks who is signed in and whose the local state is before anything is touched.

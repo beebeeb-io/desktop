@@ -18,9 +18,10 @@
 //!   list of single files it gave up on). "Try again" switches the folder on again (clears the stop).
 //! - Other devices and Delete this backup: `engine_host::backups_devices` (`DeviceCalls`: the engine's session-bound
 //!   read of the device manifests, and the delete behind the account password).
-//! - Not bound (`wired(part)` is `false`): Mail Backup (a proposal), a chosen folder (the settings file holds
-//!   known-folder keys only: no "Add a folder", no "Remove"), and a device page's "Open in Photos" / "Open in Files"
-//!   (the shell does not take Backups' intents yet).
+//! - A folder the person chose (DW-0737 "chosen by you"): listed after the six from the same read; Add a folder…
+//!   (DW-0738) and Stop backing up (DW-1410) are slice A7's (`engine_host/backup_folders.rs`).
+//! - Not bound (`wired(part)` is `false`): Mail Backup (a proposal), and a device page's "Open in Photos" / "Open in
+//!   Files" (the shell takes Backups' folder picker only).
 //!
 //! Thread rule: nothing here waits on the window's thread. One worker per source does every read and every switch,
 //! in the order asked, and sends each answer down one channel, which [`BackupsSource::pump`] drains.
@@ -50,7 +51,6 @@ use beebeeb_engine::signin::gate::GateState;
 
 use super::backups_devices::{DeviceCalls, DevicesEngine};
 use super::log;
-use super::scaffold::not_wired;
 use crate::frames::backups::source::{
     BackupsRoot, BackupsSource, Device, FileKind, Folder, NotBackedUp, Part, Pumped, Status,
 };
@@ -105,6 +105,29 @@ pub trait BackupsEngine: DevicesEngine + Send + Sync + 'static {
     fn sync_running(&self) -> bool {
         true
     }
+    /// Add a chosen folder for `session` (`Engine::add_backup_folder_for`, slice A7). BLOCKS: a worker's. The default
+    /// adds nothing.
+    fn add_folder_for(
+        &self,
+        _session: beebeeb_engine::account::SessionGeneration,
+        _path: &str,
+    ) -> Result<(), beebeeb_engine::app::bindings::backup_folders::AddRefused> {
+        Err(beebeeb_engine::app::bindings::backup_folders::AddRefused::Backups(
+            BackupsError::Settings,
+        ))
+    }
+    /// Stop backing up a chosen folder for `session`, its backup to Trash after the password is proven when one is
+    /// given (`Engine::remove_backup_folder_for`, slice A7). BLOCKS: a worker's. The default stops nothing.
+    fn remove_folder_for(
+        &self,
+        _session: beebeeb_engine::account::SessionGeneration,
+        _id: &str,
+        _trash_password: Option<&[u8]>,
+    ) -> Result<(), beebeeb_engine::app::bindings::backup_folders::RemoveRefused> {
+        Err(beebeeb_engine::app::bindings::backup_folders::RemoveRefused::Backups(
+            BackupsError::Settings,
+        ))
+    }
 }
 
 impl<C: CredentialStores> BackupsEngine for Engine<C> {
@@ -133,6 +156,21 @@ impl<C: CredentialStores> BackupsEngine for Engine<C> {
     }
     fn sync_running(&self) -> bool {
         self.view().start == beebeeb_engine::sync_view::Start::Running
+    }
+    fn add_folder_for(
+        &self,
+        session: beebeeb_engine::account::SessionGeneration,
+        path: &str,
+    ) -> Result<(), beebeeb_engine::app::bindings::backup_folders::AddRefused> {
+        self.add_backup_folder_for(session, Path::new(path)).map(|_| ())
+    }
+    fn remove_folder_for(
+        &self,
+        session: beebeeb_engine::account::SessionGeneration,
+        id: &str,
+        trash_password: Option<&[u8]>,
+    ) -> Result<(), beebeeb_engine::app::bindings::backup_folders::RemoveRefused> {
+        self.remove_backup_folder_for(session, id, trash_password)
     }
 }
 
@@ -299,15 +337,16 @@ impl<E: BackupsEngine> EngineBackupsSource<E> {
     /// The switch of `row` as the window shows it and the next press compares with: the last one asked for, else the
     /// last one read.
     fn effective_on(&self, row: &BackupFolderRow) -> bool {
-        self.switching.get(row.key).map_or(row.on, |(want, _)| *want)
+        self.switching.get(row.key.as_str()).map_or(row.on, |(want, _)| *want)
     }
 
-    /// The rows the section draws: the folders this PC has.
+    /// The rows the section draws: the folders this PC has, and every folder the person chose (one gone from this PC
+    /// stays, so it can be removed).
     fn rows(&self) -> impl Iterator<Item = &BackupFolderRow> {
         self.held()
             .into_iter()
             .flat_map(|overview| overview.folders.iter())
-            .filter(|row| row.state != FolderState::Unavailable)
+            .filter(|row| row.state != FolderState::Unavailable || row.chosen_by_you())
     }
 }
 
@@ -373,13 +412,13 @@ pub(crate) fn last_backup_words(at_ms: i64, today: chrono::NaiveDate) -> String 
 
 fn folder_of(row: &BackupFolderRow, today: chrono::NaiveDate) -> Folder {
     Folder {
-        id: row.key.to_string(),
-        name: row.name.to_string(),
+        id: row.key.clone(),
+        name: row.name.clone(),
         // Not counted (inside OneDrive's folder, or not on Windows): 0, and the PR names the trait's gap.
         items: row.items.map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)),
         // The engine has no size of a backed-up folder (PR body): never a guess.
         size: String::new(),
-        chosen_by_you: false,
+        chosen_by_you: row.chosen_by_you(),
         on: row.on,
         last_backup: row
             .last_pass_at_ms
@@ -390,8 +429,7 @@ fn folder_of(row: &BackupFolderRow, today: chrono::NaiveDate) -> Folder {
 
 impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
     fn wired(&self, part: Part) -> bool {
-        // Not bound: Mail Backup (a proposal), a chosen folder (Add / Remove) and a device page's links (the shell
-        // does not take Backups' intents yet).
+        // Not bound: Mail Backup (a proposal) and a device page's links (the shell takes Backups' folder picker only).
         matches!(
             part,
             Part::Root
@@ -399,6 +437,8 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
                 | Part::Status
                 | Part::NotBackedUp
                 | Part::BackUpNow
+                | Part::AddFolder
+                | Part::RemoveFolder
                 | Part::Retry
                 | Part::Devices
                 | Part::DeleteDevice
@@ -490,6 +530,7 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
             }
         }
         pumped.busy |= self.pending.load(Ordering::SeqCst) > 0;
+        self.backup_folders_pump(&mut pumped);
         let devices = self.devices.pump();
         pumped.changed |= devices.changed;
         pumped.busy |= devices.busy;
@@ -663,14 +704,27 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         }
     }
 
-    /// Not bound (slice A7, `backup_folders.rs`).
+    /// Slice A7 (`backup_folders.rs`): the folder picker's answer, asked of the engine.
     fn add_folder(&mut self, path: &str) -> bool {
-        not_wired(self.backup_folders_add_folder(path))
+        self.backup_folders_add_folder(path)
     }
 
-    /// Not bound (slice A7, `backup_folders.rs`).
+    /// Slice A7 (`backup_folders.rs`): "Stop and keep the backup"; a move to Trash needs the password.
     fn remove_folder(&mut self, id: &str, move_copy_to_trash: bool) {
-        not_wired(self.backup_folders_remove_folder(id, move_copy_to_trash))
+        self.backup_folders_remove_folder(id, move_copy_to_trash)
+    }
+
+    /// Slice A7: the move to Trash proves the account password (DW-1410's second step).
+    fn trash_needs_password(&self) -> bool {
+        true
+    }
+
+    fn remove_folder_to_trash(&mut self, id: &str, password: &str) -> bool {
+        self.backup_folders_remove_folder_to_trash(id, password)
+    }
+
+    fn stopping(&self) -> bool {
+        self.backup_folders_stopping()
     }
 
     /// "Back up again" for a folder that turned itself off: switched on, which clears its stop and starts it over
@@ -685,13 +739,13 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
     }
 
     fn retry_all(&mut self) {
-        let keys: Vec<&'static str> = self
+        let keys: Vec<String> = self
             .rows()
             .filter(|row| row.state == FolderState::Stopped)
-            .map(|row| row.key)
+            .map(|row| row.key.clone())
             .collect();
         for key in keys {
-            self.set_folder(key, true);
+            self.set_folder(&key, true);
         }
     }
 
@@ -705,7 +759,8 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
 /// Whether `path` may be chosen as a backup folder by the app `identity`, whose sync folder is `sync_root`.
 /// Refused: the sync folder itself, anything inside it, and any folder with the identity's own sync-folder name
 /// in its path (the suggested location, also before sync was ever started). Names compare without case, as
-/// Windows does. (A chosen folder is not bound yet: the engine keeps known folders only; module doc.)
+/// Windows does. (In a real build the engine's rule decides, `Engine::add_backup_folder_for`; this one stays for its
+/// tests.)
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn may_back_up(identity: &EngineIdentity, sync_root: Option<&Path>, path: &Path) -> bool {
     let same =

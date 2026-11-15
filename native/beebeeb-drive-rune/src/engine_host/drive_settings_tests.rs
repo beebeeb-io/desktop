@@ -632,6 +632,43 @@ fn another_accounts_local_state_reads_as_nothing() {
     let source = source(&fake, Arc::default());
     assert_eq!(source.keep(), Keep::Failed, "A never sees B's folders");
     assert!(source.on_pc.is_none(), "A never sees B's local sizes");
+    // L186: the insights show the use from Beebeeb and no breakdown of B's files.
+    match source.insights() {
+        Insights::Ready(data) => {
+            assert!(
+                data.kinds.is_empty() && data.largest.is_empty() && data.more.is_none(),
+                "A never sees B's kinds or largest files"
+            );
+            assert_eq!(data.totals, "0 files · 0 bytes");
+        }
+        other => panic!("the use is still shown, not {other:?}"),
+    }
+}
+
+/// L185/L384: the Storage insights need each file's size and name, never its contract row: none is read.
+/// Mutant M1: `insights()` goes through `rows()` again -> the count is not 0 and this is red.
+#[test]
+fn insights_reads_no_contract_rows() {
+    let fake = account();
+    reads::CONTRACT_READS.with(|reads| reads.set(0));
+    let (insights, usage) = reads::insights(&*fake, "invented@beebeeb.io");
+    assert_eq!(usage, Some((240 * GB, 1_000 * GB)));
+    match insights {
+        Insights::Ready(data) => assert_eq!(data.totals, "14 files · 7.8 GB", "the same page as before"),
+        other => panic!("insights are ready, not {other:?}"),
+    }
+    assert_eq!(
+        reads::CONTRACT_READS.with(|reads| reads.get()),
+        0,
+        "insights read no contract row"
+    );
+    // The control: the rows the folder tree needs do read one per live row.
+    let rows = fake.db();
+    assert!(reads::rows(&rows).unwrap().len() > 1);
+    assert!(
+        reads::CONTRACT_READS.with(|reads| reads.get()) > 0,
+        "the counter counts: rows() reads contract rows"
+    );
 }
 
 /// A refused Apply (sync not running) sends a refusal the window can draw (P2-6).
@@ -891,4 +928,82 @@ fn the_engines_own_glue_hands_out_nothing_with_no_one_signed_in() {
     };
     assert!(DriveEngine::set_limits(&engine, engine.session_turn(), change).is_err());
     assert_eq!(DriveEngine::limits(&engine), Ok(found), "nothing was written");
+}
+
+/// L184: the app's own glue on a real handle, signed in on the fake API: the local read and the insights answer
+/// from that account's state (a kept folder, its files), and the use comes from the account's server.
+#[test]
+fn the_engines_glue_reads_the_signed_in_accounts_state() {
+    use beebeeb_engine::app::{Engine, EngineConfig};
+    use beebeeb_engine::host::ChannelHost;
+    use beebeeb_engine::identity::TEST;
+    use beebeeb_engine::signin::memory_store::MemoryCredentials;
+    use beebeeb_engine::test_api::FakeApi;
+    use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
+
+    const PASSWORD: &str = "an invented password for the settings glue";
+    let (account, phrase) = FakeAccount::register("glue-settings@example.eu", PASSWORD, TEST_PHRASE);
+    let account = Arc::new(account);
+    let api = FakeApi::start(account_handler(account.clone()));
+    let (host, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "drive-settings-glue-slot".into(),
+        state_dir: crate::engine_host::tests::process_state_dir(),
+        api_base: api.base.clone(),
+    };
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("opens"));
+    engine.restore();
+    engine
+        .sign_in_password(&account.email, zeroize::Zeroizing::new(PASSWORD.into()))
+        .expect("the fake accepts the password");
+    engine
+        .unlock_with_phrase(zeroize::Zeroizing::new(phrase))
+        .expect("the phrase unlocks");
+    assert_eq!(engine.gate(), GateState::Ready);
+
+    // This account's local state: a kept folder with a document and a clip in it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let db = StateDb::open(&path).unwrap();
+    file(&db, "d-papers", "Papers", 0, true);
+    file(&db, "f-tax", "Papers/Taxes 2025.pdf", 212_000_000, false);
+    file(&db, "f-clip", "Papers/Clip one.mov", 4 * GB, false);
+    db.set_recursive_pin("d-papers", true, 1_794_000_000).unwrap();
+    db.set_owner(&Identity::new(Some(&account.user_id), Some(&account.email)))
+        .unwrap();
+    drop(db);
+    engine.use_local_state_for_test(path);
+
+    let who = DriveEngine::account(&*engine).expect("the signed-in account");
+    assert!(still_for(&*engine, &who));
+    // The local read: the folder tree and the kept sizes of this account's state.
+    let sent = Mutex::new(Vec::new());
+    reads::read_local(&*engine, &FakePlatform::default(), &who, &|answer| {
+        sent.lock().unwrap().push(answer)
+    });
+    let sent = sent.into_inner().unwrap();
+    let keep = sent.iter().find_map(|a| match a {
+        Answer::Keep(keep) => Some(keep.clone()),
+        _ => None,
+    });
+    match keep {
+        Some(Keep::Ready { folders, .. }) => {
+            assert_eq!(folders.len(), 1);
+            assert_eq!(folders[0].name, "Papers");
+            assert!(folders[0].kept, "the pinned folder reads as kept");
+        }
+        other => panic!("the tree is this account's, not {other:?}"),
+    }
+    assert!(
+        sent.iter().any(|a| matches!(a, Answer::OnThisPc(Some(_)))),
+        "the on-this-PC sizes are read"
+    );
+    // The insights: this account's files, and the use the server names.
+    let (insights, usage) = reads::insights(&*engine, &who);
+    assert_eq!(usage, DriveEngine::storage_info(&*engine).ok());
+    assert!(usage.is_some(), "the fake answers the use");
+    match insights {
+        Insights::Ready(data) => assert_eq!(data.totals, "2 files · 4.2 GB"),
+        other => panic!("insights are ready, not {other:?}"),
+    }
 }
