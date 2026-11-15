@@ -7,6 +7,13 @@ use rune::{El, col, el, row};
 use super::source::{NewPasswordProblem, PhraseProblem};
 use super::steps::{CONFIRM_KEY, Pictured};
 use super::view::{GENERIC_FAILURE, actions};
+use super::view_steps::{escape_first, open, primary, then, word_grid};
+use super::{EMAIL_KEY, PASSWORD_KEY, Ui, act, icons};
+use crate::State;
+use crate::theme::tokens::{Theme, type_};
+use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, FieldSpec, FieldState, Keys, Tone};
+use crate::ui::au_entry::{self, FocusedSpec};
+use crate::ui::kit;
 
 /// What the new password's step says for each of its answers (DW-A49 draws none: these are the rule's words). Past
 /// the registration the window cannot tell whether the password changed, so those words are true either way.
@@ -18,13 +25,6 @@ const SET_ENDED: &str =
     "If your new password was set, sign in with it. If not, go back and enter your recovery phrase again.";
 const SET_OTHER: &str =
     "That didn't finish, and nothing was signed in. Try again. If your new password was already set, sign in with it.";
-use super::view_steps::{escape_first, open, primary, then, word_grid};
-use super::{EMAIL_KEY, PASSWORD_KEY, Ui, act, icons};
-use crate::State;
-use crate::theme::tokens::{Theme, type_};
-use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, FieldSpec, FieldState, Keys, Tone};
-use crate::ui::au_entry::{self, FocusedSpec};
-use crate::ui::kit;
 
 /// The banner when the phrase did not verify. DW-A48 draws the wrong phrase; the hourly limit's
 /// words are the board's rule for it.
