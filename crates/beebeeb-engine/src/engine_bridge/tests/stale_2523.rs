@@ -328,6 +328,9 @@ async fn stale_2523_a_redownload_queued_before_a_remote_rename_never_writes_at_t
     bridge.db.engine_start_repair().unwrap();
     bridge.db.reconcile_stale_in_flight_on_startup().unwrap();
     web_renames(&server, master_key, file, "notes-final.txt");
+    // The mock answers `/sync/ops` with no ops: the rename reaches this pull as a snapshot (as after a restart's
+    // re-snapshot), through the same row write a `file_rename` op takes.
+    bridge.db.request_resnapshot().unwrap();
     sync_tick_outcome(&bridge, &sync_root).await.unwrap();
     let row = bridge.db.get_file(file).unwrap().unwrap();
     let ops = bridge.db.list_operations_for_file(file).unwrap();
