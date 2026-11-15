@@ -27,8 +27,19 @@ pub const KEPT_NO_AGREED: &str =
     "Beebeeb cannot confirm that this copy matches the synced version, so it was left here.";
 /// A change of the file is waiting to be sent.
 pub const KEPT_UPLOAD_QUEUED: &str = "A change to this file is waiting to be sent, so it was left here.";
-/// The copy could not be read, or changed while it was read.
+/// The copy could not be opened or read.
 pub const KEPT_UNREADABLE: &str = "Beebeeb could not read this copy to check it, so it was left here.";
+/// The state database could not answer, so the copy was never opened.
+pub const KEPT_CHECK_FAILED: &str = "Beebeeb could not check this copy, so it was left here.";
+/// The copy is a link or a special file, not a plain file.
+pub const KEPT_NOT_A_FILE: &str = "This is not a plain file (a link or a special file), so it was left here.";
+/// The copy was written, or replaced, while Free up space was running.
+pub const KEPT_CHANGED: &str = "This copy changed while Free up space was running, so it was left here.";
+/// The file was kept, or changed state, while Free up space was running.
+pub const KEPT_NOW_KEPT: &str =
+    "This file was kept on this computer while Free up space was running, so it was left here.";
+/// The operating system refused to remove the copy.
+pub const KEPT_REMOVE_FAILED: &str = "Beebeeb could not remove this copy, so it was left here.";
 
 /// Allowed roots a cache file may live under for `free_up_space` to delete it.
 /// The engine writes hydrated cache copies under the sync root (Windows
@@ -150,10 +161,9 @@ pub(crate) fn free_up_space_in(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // The whole choice of what leaves this computer is made in `free_up_space_unix`, right after the handle's
-        // own check; it is not cut short (a copy left behind would be a file no row knows of).
-        let _ = go_on;
-        free_up_space_unix(identity, db, sync_root)
+        // Each file is decided and removed together in `free_up_space_unix`, which asks `go_on` before each one:
+        // a lock or sign-out ends it there, and what was freed until then is the answer.
+        free_up_space_unix(identity, db, sync_root, go_on)
     }
 }
 
@@ -488,66 +498,119 @@ fn dehydrate_these(
 }
 
 /// Unix reclaim path (macOS File Provider / Linux FUSE): the engine stores hydrated copies as separate files, so a
-/// `remove_file` genuinely reclaims the bytes.
+/// `remove_file` genuinely reclaims the bytes. `go_on` is asked before each file: once it says no, no further
+/// file is touched, and what was freed until then is the answer.
 ///
 /// Task 2526: a copy INSIDE the sync folder (Linux: the pin's hydrate writes the folder file itself and records it
-/// as the cache copy; nothing watches it) may hold an edit nobody detected. It is removed only when its bytes hash
-/// to the row's agreed content (`local_hash`), read the way the Windows stamp reads a payload (streamed, and
-/// refused if the file changed while it was read), and with no upload of the file queued. Any other copy there is
-/// left on disk with its row untouched and listed in `not_freed`. Copies in the engine's own cache directories
-/// are the engine's alone and need no check.
+/// as the cache copy; nothing watches it) may hold an edit nobody detected. Each such copy is decided and removed
+/// on its own, in this order, and any failed step keeps the copy and its row and lists it in `not_freed`:
+/// 1. it is a plain file (not a link, not a pipe), and the row holds agreed content (`local_hash`) with no upload
+///    of the file queued;
+/// 2. its [`ContentFingerprint`] (size, times, device and inode) is the same before and after its SHA-256 is
+///    streamed, the open handle is the file the path names, and the hash equals `local_hash`;
+/// 3. the row is still unpinned and `Local`, and the fingerprint is taken once more, right before the unlink;
+/// 4. the file is removed, and only then is its row marked online only.
+///
+/// What remains is POSIX's own gap: a write that lands between the last fingerprint and the `unlink` is deleted.
+/// That is microseconds, and no check from outside can close it (Windows holds an exclusive handle across its
+/// check and its action; a POSIX file cannot be locked against another program's write). A crash between the
+/// unlink and the row's mark leaves a `Local` row with no file, which the next reclaim skips (its path is gone).
+/// Copies in the engine's own cache directories are the engine's alone and need no check.
 #[cfg(not(target_os = "windows"))]
 pub fn free_up_space_unix(
     identity: &crate::identity::EngineIdentity,
     db: &crate::state_db::StateDb,
     sync_root: &std::path::Path,
+    go_on: &dyn Fn() -> bool,
 ) -> Result<FreeUpSpaceResult, String> {
-    // Snapshot every UNPINNED, LOCAL file's cache copy BEFORE any DB transition (eviction nulls `cache_path`).
-    // Pinned files are excluded by the query, so they are always kept.
+    reclaim_unix(
+        identity,
+        db,
+        sync_root,
+        go_on,
+        &Seams {
+            remove: &|path| std::fs::remove_file(path),
+            at: &|_, _| {},
+        },
+    )
+}
+
+/// What [`reclaim_unix`] does that a test replaces: the unlink, and a call at two points of one copy's check.
+#[cfg(not(target_os = "windows"))]
+pub(crate) struct Seams<'a> {
+    pub remove: &'a dyn Fn(&std::path::Path) -> std::io::Result<()>,
+    /// Called with `("read", file_id)` after the bytes were hashed and before the second fingerprint, and with
+    /// `("delete", file_id)` right before the last fingerprint.
+    pub at: &'a dyn Fn(&str, &str),
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn reclaim_unix(
+    identity: &crate::identity::EngineIdentity,
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    go_on: &dyn Fn() -> bool,
+    seams: &Seams<'_>,
+) -> Result<FreeUpSpaceResult, String> {
+    // Snapshot every UNPINNED, LOCAL file's cache copy; each row is looked at again right before it is touched.
     let rows = db
         .disposable_unpinned_cache_rows()
         .map_err(|e| format!("list cache paths: {e}"))?;
     let allowed_roots = free_up_space_allowed_roots(identity, sync_root);
     let sync_canonical = sync_root.canonicalize().unwrap_or_else(|_| sync_root.to_path_buf());
 
-    // Decide first: which rows become online only, which copies are removed, which stay.
-    let mut evict_ids: Vec<String> = Vec::new();
-    let mut remove: Vec<PathBuf> = Vec::new();
-    let mut not_freed: Vec<NotFreed> = Vec::new();
-    for (file_id, path, agreed) in rows {
-        let canonical = PathBuf::from(&path).canonicalize().ok();
-        if let Some(canonical) = canonical.as_ref().filter(|c| c.starts_with(&sync_canonical)) {
-            if let Err(reason) = sync_copy_is_agreed(db, &file_id, canonical, agreed.as_deref()) {
-                tracing::warn!(file_id = %file_id, reason, "free_up_space: kept a sync folder copy it could not prove agreed");
-                not_freed.push(NotFreed { file_id, reason });
-                continue;
-            }
-        }
-        evict_ids.push(file_id);
-        // Unresolvable path, or outside every allowed cache root: never delete (the row still goes online only).
-        if let Some(canonical) = canonical.filter(|c| allowed_roots.iter().any(|root| c.starts_with(root))) {
-            remove.push(canonical);
-        }
-    }
-
-    db.mark_cloud_only_after_dehydrate(&evict_ids, now_unix_seconds())
-        .map_err(|e| format!("evict unpinned cache: {e}"))?;
-    #[cfg(target_os = "linux")]
-    remove_linux_freedesktop_thumbnails_for_evicted_files(db, sync_root, &evict_ids);
-
-    // Sum the real file sizes we remove so `bytes_freed` is an exact count, not an estimate. A missing file
-    // contributes 0 (already gone: nothing reclaimed by us).
     let mut bytes_freed: u64 = 0;
-    for canonical in remove {
-        let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
-        match std::fs::remove_file(&canonical) {
-            Ok(()) => bytes_freed = bytes_freed.saturating_add(size),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!(error = %error, path = %canonical.display(), "free_up_space: could not remove cache file");
+    let mut not_freed: Vec<NotFreed> = Vec::new();
+    let mut freed_ids: Vec<String> = Vec::new();
+    for (file_id, path, agreed) in rows {
+        if !go_on() {
+            tracing::info!("free_up_space: stopped before the last file (the session that asked is gone)");
+            break;
+        }
+        let canonical = PathBuf::from(&path).canonicalize().ok();
+        let outcome = match canonical {
+            // Unresolvable path, or outside every allowed cache root: nothing is deleted (the row still goes
+            // online only, as before).
+            None => Ok(0),
+            Some(ref c) if !allowed_roots.iter().any(|root| c.starts_with(root)) => Ok(0),
+            Some(ref c) if c.starts_with(&sync_canonical) => {
+                reclaim_sync_copy(db, &file_id, std::path::Path::new(&path), c, agreed.as_deref(), seams)
+            }
+            // The engine's own cache directory: no byte check, by design.
+            Some(ref c) => {
+                let size = std::fs::metadata(c).map(|m| m.len()).unwrap_or(0);
+                match (seams.remove)(c) {
+                    Ok(()) => Ok(size),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "free_up_space: could not remove cache file");
+                        Err(KEPT_REMOVE_FAILED)
+                    }
+                }
+            }
+        };
+        match outcome {
+            Ok(freed) => {
+                bytes_freed = bytes_freed.saturating_add(freed);
+                // Only a copy that is gone (or has none to remove) has its row marked online only.
+                match db.mark_cloud_only_after_dehydrate(std::slice::from_ref(&file_id), now_unix_seconds()) {
+                    Ok(1) => freed_ids.push(file_id),
+                    Ok(_) => {
+                        tracing::warn!(file_id = %file_id, "free_up_space: row no longer eligible after its copy was removed")
+                    }
+                    Err(error) => {
+                        tracing::warn!(file_id = %file_id, error = %error, "free_up_space: could not mark row online only")
+                    }
+                }
+            }
+            Err(reason) => {
+                tracing::warn!(file_id = %file_id, reason, "free_up_space: kept a copy");
+                not_freed.push(NotFreed { file_id, reason });
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    remove_linux_freedesktop_thumbnails_for_evicted_files(db, sync_root, &freed_ids);
 
     tracing::info!(
         bytes_freed,
@@ -557,41 +620,84 @@ pub fn free_up_space_unix(
     Ok(FreeUpSpaceResult { bytes_freed, not_freed })
 }
 
-/// `Ok` only when the sync folder copy at `path` provably holds the row's agreed content; otherwise the plain
-/// words for why it stays.
+/// Steps 1 to 4 of [`free_up_space_unix`] for one sync folder copy. `Ok(bytes removed)`, or the plain words for
+/// why the copy stays. `original` is the path as the row records it, `canonical` what it resolves to.
 #[cfg(not(target_os = "windows"))]
-fn sync_copy_is_agreed(
+fn reclaim_sync_copy(
     db: &crate::state_db::StateDb,
     file_id: &str,
-    path: &std::path::Path,
+    original: &std::path::Path,
+    canonical: &std::path::Path,
     agreed: Option<&str>,
-) -> Result<(), &'static str> {
+    seams: &Seams<'_>,
+) -> Result<u64, &'static str> {
+    use crate::engine_bridge::ContentFingerprint;
+    use crate::state_db::{FileStatus, PinState};
     use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+
+    // 1. A plain file, never a link or a pipe: opening a pipe blocks, and a link would act on its target. Looked
+    // at before anything is opened.
+    for path in [original, canonical] {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_file() => {}
+            Ok(_) => return Err(KEPT_NOT_A_FILE),
+            Err(_) => return Err(KEPT_UNREADABLE),
+        }
+    }
     let Some(agreed) = agreed else {
         return Err(KEPT_NO_AGREED);
     };
     // Anti-goal 3 (as the Windows stamp): the agreed content counts only while no upload of the file is queued.
-    // A database error is not an answer: keep the copy.
-    if db.sync_folder_upload_queued(file_id).map_err(|_| KEPT_UNREADABLE)? {
+    // A database error is not an answer: keep the copy, in its own words.
+    if db.sync_folder_upload_queued(file_id).map_err(|_| KEPT_CHECK_FAILED)? {
         return Err(KEPT_UPLOAD_QUEUED);
     }
-    let stamp = |file: &std::fs::File| file.metadata().map(|m| (m.len(), m.modified().ok(), m.is_file()));
-    let mut file = std::fs::File::open(path).map_err(|_| KEPT_UNREADABLE)?;
-    let before = stamp(&file).map_err(|_| KEPT_UNREADABLE)?;
-    if !before.2 {
-        return Err(KEPT_UNREADABLE);
-    }
-    // Stream it; never load a large file into memory.
+
+    // 2. The same file, unchanged, across the read.
+    let before = ContentFingerprint::of(canonical).map_err(|_| KEPT_UNREADABLE)?;
+    let mut file = std::fs::File::open(canonical).map_err(|_| KEPT_UNREADABLE)?;
     let mut hasher = Sha256::new();
+    // Stream it; never load a large file into memory.
     std::io::copy(&mut file, &mut hasher).map_err(|_| KEPT_UNREADABLE)?;
-    // Written while it was read: not a stable answer.
-    if stamp(&file).map_err(|_| KEPT_UNREADABLE)? != before {
-        return Err(KEPT_UNREADABLE);
+    (seams.at)("read", file_id);
+    let after = ContentFingerprint::of(canonical).map_err(|_| KEPT_CHANGED)?;
+    let handle = file.metadata().map_err(|_| KEPT_UNREADABLE)?;
+    let named = std::fs::symlink_metadata(canonical).map_err(|_| KEPT_CHANGED)?;
+    if after != before || (handle.dev(), handle.ino()) != (named.dev(), named.ino()) {
+        return Err(KEPT_CHANGED);
     }
-    if format!("{:x}", hasher.finalize()) == agreed {
-        Ok(())
-    } else {
-        Err(KEPT_EDITED)
+    if format!("{:x}", hasher.finalize()) != agreed {
+        return Err(KEPT_EDITED);
+    }
+
+    // 3. The row as it is now, then the file once more.
+    let still_free = match (db.get_file(file_id), db.get_file_contract_state(file_id)) {
+        (Ok(Some(entry)), Ok(Some(contract))) => {
+            entry.status == FileStatus::Local && contract.effective_pin_state() != PinState::Pinned
+        }
+        (Ok(_), Ok(_)) => false,
+        _ => return Err(KEPT_CHECK_FAILED),
+    };
+    if !still_free {
+        return Err(KEPT_NOW_KEPT);
+    }
+    if db.sync_folder_upload_queued(file_id).map_err(|_| KEPT_CHECK_FAILED)? {
+        return Err(KEPT_UPLOAD_QUEUED);
+    }
+    (seams.at)("delete", file_id);
+    if ContentFingerprint::of(canonical).map_err(|_| KEPT_CHANGED)? != before {
+        return Err(KEPT_CHANGED);
+    }
+
+    // 4. Gone, or kept: the caller marks the row only for a copy that is gone.
+    match (seams.remove)(canonical) {
+        Ok(()) => Ok(handle.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => {
+            tracing::warn!(error = %error, "free_up_space: could not remove a sync folder copy");
+            Err(KEPT_REMOVE_FAILED)
+        }
     }
 }
 
@@ -604,10 +710,12 @@ fn now_unix_seconds() -> i64 {
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod unix_tests {
-    //! Task 2526: the unix reclaim removes a sync folder copy only when its bytes are the agreed content.
+    //! Task 2526: the unix reclaim removes a sync folder copy only when its bytes are the agreed content, and
+    //! checks again right before it deletes.
     use super::*;
-    use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+    use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation, StateDb};
     use sha2::{Digest, Sha256};
+    use std::cell::Cell;
 
     struct Root {
         _dir: tempfile::TempDir,
@@ -617,6 +725,13 @@ mod unix_tests {
 
     fn sha(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn kept(id: &str, reason: &'static str) -> NotFreed {
+        NotFreed {
+            file_id: id.into(),
+            reason,
+        }
     }
 
     impl Root {
@@ -633,13 +748,18 @@ mod unix_tests {
         fn seed(&self, id: &str, name: &str, on_disk: &[u8], agreed: Option<String>) -> PathBuf {
             let path = self.root.join(name);
             std::fs::write(&path, on_disk).unwrap();
+            self.seed_row(id, name, &path, on_disk.len(), agreed);
+            path
+        }
+
+        fn seed_row(&self, id: &str, name: &str, cache_path: &Path, len: usize, agreed: Option<String>) {
             self.db
                 .upsert_file_with_contract(
                     &FileEntry {
                         file_id: id.into(),
                         path: format!("/{name}"),
                         status: FileStatus::Local,
-                        size_bytes: on_disk.len() as i64,
+                        size_bytes: len as i64,
                         modified_at: 0,
                         content_hash: None,
                         remote_updated_at: 0,
@@ -650,9 +770,8 @@ mod unix_tests {
                 )
                 .unwrap();
             self.db
-                .mark_cached(id, &path.to_string_lossy(), on_disk.len() as i64, 1)
+                .mark_cached(id, &cache_path.to_string_lossy(), len as i64, 1)
                 .unwrap();
-            path
         }
 
         fn status(&self, id: &str) -> FileStatus {
@@ -662,9 +781,30 @@ mod unix_tests {
         fn free(&self) -> FreeUpSpaceResult {
             free_up_space_in(&crate::identity::REAL, &self.db, &self.root, &|| true).unwrap()
         }
+
+        /// The reclaim with a write (or any act) at the named point of a copy's check, and an unlink to choose.
+        fn free_with(
+            &self,
+            go_on: &dyn Fn() -> bool,
+            remove: &dyn Fn(&Path) -> std::io::Result<()>,
+            at: &dyn Fn(&str, &str),
+        ) -> FreeUpSpaceResult {
+            reclaim_unix(
+                &crate::identity::REAL,
+                &self.db,
+                &self.root,
+                go_on,
+                &Seams { remove, at },
+            )
+            .unwrap()
+        }
+
+        fn free_at(&self, at: &dyn Fn(&str, &str)) -> FreeUpSpaceResult {
+            self.free_with(&|| true, &|p| std::fs::remove_file(p), at)
+        }
     }
 
-    /// Red today: an edit nobody detected (no watcher) in a copy that is no longer kept is deleted.
+    /// Red before the fix: an edit nobody detected (no watcher) in a copy that is no longer kept is deleted.
     #[test]
     fn an_edited_unkept_copy_survives_free_up_space() {
         let r = Root::new();
@@ -682,13 +822,7 @@ mod unix_tests {
         );
         assert_eq!(r.status("edited"), FileStatus::Local, "the row still says it is here");
         assert_eq!(result.bytes_freed, 0);
-        assert_eq!(
-            result.not_freed,
-            vec![NotFreed {
-                file_id: "edited".into(),
-                reason: KEPT_EDITED
-            }]
-        );
+        assert_eq!(result.not_freed, vec![kept("edited", KEPT_EDITED)]);
     }
 
     #[test]
@@ -709,13 +843,7 @@ mod unix_tests {
         let result = r.free();
         assert_eq!(std::fs::read(&path).unwrap(), b"anything");
         assert_eq!(r.status("unknown"), FileStatus::Local);
-        assert_eq!(
-            result.not_freed,
-            vec![NotFreed {
-                file_id: "unknown".into(),
-                reason: KEPT_NO_AGREED
-            }]
-        );
+        assert_eq!(result.not_freed, vec![kept("unknown", KEPT_NO_AGREED)]);
     }
 
     /// One run, three rows: the kept ones do not hold back the agreed one, and the counts say which is which.
@@ -733,5 +861,222 @@ mod unix_tests {
         );
         assert_eq!(result.not_freed.len(), 2);
         assert_eq!(result.bytes_freed, 4);
+    }
+
+    /// P2-4: an agreed copy with a change of the file waiting to be sent is not the agreed content any more.
+    #[test]
+    fn an_agreed_copy_with_an_upload_queued_survives() {
+        let r = Root::new();
+        let path = r.seed("queued", "queued.txt", b"same", Some(sha(b"same")));
+        r.db.enqueue_operation(&PendingOperation {
+            op_id: "op-1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("queued".into()),
+            parent_id: None,
+            target_path: Some("queued.txt".into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: Some(1),
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+        let result = r.free();
+        assert!(path.exists());
+        assert_eq!(r.status("queued"), FileStatus::Local);
+        assert_eq!(result.not_freed, vec![kept("queued", KEPT_UPLOAD_QUEUED)]);
+    }
+
+    /// P1-1 (a): a same-size write while the bytes are being read (the hash is of the old bytes and matches).
+    #[test]
+    fn a_write_while_the_copy_is_read_keeps_it() {
+        let r = Root::new();
+        let path = r.seed("busy", "busy.txt", b"version one", Some(sha(b"version one")));
+        let result = r.free_at(&|stage, _| {
+            if stage == "read" {
+                std::fs::write(&path, b"version TWO!").unwrap();
+            }
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), b"version TWO!");
+        assert_eq!(r.status("busy"), FileStatus::Local);
+        assert_eq!(result.bytes_freed, 0);
+        assert_eq!(result.not_freed, vec![kept("busy", KEPT_CHANGED)]);
+    }
+
+    /// P1-1: a write that keeps the size and sets the times back, after the hash and before the delete.
+    #[test]
+    fn a_same_size_write_with_the_times_set_back_before_the_delete_keeps_it() {
+        let r = Root::new();
+        let path = r.seed("sneaky", "sneaky.txt", b"version one", Some(sha(b"version one")));
+        let meta = std::fs::metadata(&path).unwrap();
+        let result = r.free_at(&|stage, _| {
+            if stage == "delete" {
+                let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                use std::io::Write;
+                (&file).write_all(b"version two").unwrap();
+                file.set_modified(meta.modified().unwrap()).unwrap();
+            }
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), b"version two", "the edit is on disk");
+        assert_eq!(r.status("sneaky"), FileStatus::Local);
+        assert_eq!(result.not_freed, vec![kept("sneaky", KEPT_CHANGED)]);
+    }
+
+    /// P1-1 (b): an editor that saves to a temp file and renames it over the path, after the hash.
+    #[test]
+    fn a_save_by_rename_before_the_delete_keeps_the_new_file() {
+        let r = Root::new();
+        let path = r.seed("renamed", "renamed.txt", b"version one", Some(sha(b"version one")));
+        let result = r.free_at(&|stage, _| {
+            if stage == "delete" {
+                let temp = path.with_extension("tmp");
+                std::fs::write(&temp, b"my edit").unwrap();
+                std::fs::rename(&temp, &path).unwrap();
+            }
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), b"my edit");
+        assert_eq!(r.status("renamed"), FileStatus::Local);
+        assert_eq!(result.not_freed, vec![kept("renamed", KEPT_CHANGED)]);
+    }
+
+    /// P1-1 (b), during the read: the handle still holds the old file, the path names the new one.
+    #[test]
+    fn a_save_by_rename_during_the_read_keeps_the_new_file() {
+        let r = Root::new();
+        let path = r.seed("renamed2", "renamed2.txt", b"version one", Some(sha(b"version one")));
+        let result = r.free_at(&|stage, _| {
+            if stage == "read" {
+                let temp = path.with_extension("tmp");
+                std::fs::write(&temp, b"version one").unwrap();
+                std::fs::rename(&temp, &path).unwrap();
+            }
+        });
+        assert!(path.exists(), "the file now at the path is not the one that was hashed");
+        assert_eq!(r.status("renamed2"), FileStatus::Local);
+        assert_eq!(result.not_freed, vec![kept("renamed2", KEPT_CHANGED)]);
+    }
+
+    /// P2-1: a keep made during the run (the row is pinned after the snapshot) keeps its file, and the row.
+    #[test]
+    fn a_keep_made_during_the_run_keeps_the_file() {
+        let r = Root::new();
+        let first = r.seed("a-first", "a.txt", b"aaaa", Some(sha(b"aaaa")));
+        let second = r.seed("b-second", "b.txt", b"bbbb", Some(sha(b"bbbb")));
+        let calls = Cell::new(0);
+        let result = r.free_with(
+            &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    r.db.set_recursive_pin("b-second", true, 5).unwrap();
+                }
+                true
+            },
+            &|p| std::fs::remove_file(p),
+            &|_, _| {},
+        );
+        assert!(!first.exists(), "the first copy was freed");
+        assert!(second.exists(), "the copy kept during the run stays");
+        assert_eq!(r.status("b-second"), FileStatus::Local);
+        assert_eq!(result.not_freed, vec![kept("b-second", KEPT_NOW_KEPT)]);
+        assert_eq!(result.bytes_freed, 4);
+    }
+
+    /// P3-3: a delete the system refuses leaves the copy, and its row says it is here.
+    #[test]
+    fn a_refused_delete_leaves_the_row_local() {
+        let r = Root::new();
+        let path = r.seed("refused", "refused.txt", b"same", Some(sha(b"same")));
+        let result = r.free_with(
+            &|| true,
+            &|_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            &|_, _| {},
+        );
+        assert!(path.exists());
+        assert_eq!(r.status("refused"), FileStatus::Local);
+        assert_eq!(result.bytes_freed, 0);
+        assert_eq!(result.not_freed, vec![kept("refused", KEPT_REMOVE_FAILED)]);
+    }
+
+    /// P2-2: a session that ended stops the run before the next file.
+    #[test]
+    fn a_session_that_ends_stops_the_run_before_the_next_file() {
+        let r = Root::new();
+        let first = r.seed("a-first", "a.txt", b"aaaa", Some(sha(b"aaaa")));
+        let second = r.seed("b-second", "b.txt", b"bbbb", Some(sha(b"bbbb")));
+        let calls = Cell::new(0);
+        let result = r.free_with(
+            &|| {
+                calls.set(calls.get() + 1);
+                calls.get() < 2
+            },
+            &|p| std::fs::remove_file(p),
+            &|_, _| {},
+        );
+        assert_eq!((first.exists(), second.exists()), (false, true));
+        assert_eq!(r.status("b-second"), FileStatus::Local);
+        assert!(
+            result.not_freed.is_empty(),
+            "nothing was looked at, so nothing is reported"
+        );
+        assert_eq!(result.bytes_freed, 4);
+    }
+
+    /// P3-2: a link at the copy's place is not followed: its target (another file) is not deleted.
+    #[test]
+    fn a_link_in_the_sync_folder_is_never_followed() {
+        let r = Root::new();
+        let target = r.root.join("other.txt");
+        std::fs::write(&target, b"same").unwrap();
+        let link = r.root.join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        r.seed_row("linked", "link.txt", &link, 4, Some(sha(b"same")));
+        let result = r.free();
+        assert_eq!(std::fs::read(&target).unwrap(), b"same", "the target is untouched");
+        assert!(link.symlink_metadata().is_ok(), "the link is untouched");
+        assert_eq!(r.status("linked"), FileStatus::Local);
+        assert_eq!(result.not_freed, vec![kept("linked", KEPT_NOT_A_FILE)]);
+    }
+
+    /// P3-4: a copy that cannot be opened is kept, in the words for that.
+    #[test]
+    fn an_unopenable_copy_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let r = Root::new();
+        let path = r.seed("locked", "locked.txt", b"same", Some(sha(b"same")));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&path).is_ok() {
+            eprintln!("skipped: this user can open a mode 000 file (root)");
+            return;
+        }
+        let result = r.free();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(path.exists());
+        assert_eq!(r.status("locked"), FileStatus::Local);
+        assert_eq!(result.not_freed, vec![kept("locked", KEPT_UNREADABLE)]);
+    }
+
+    /// P3-4: the claim that the engine's own cache directory is freed with no byte check (no agreed content).
+    #[test]
+    fn a_copy_in_the_engines_own_cache_directory_is_still_freed() {
+        let r = Root::new();
+        let cache = dirs::cache_dir()
+            .expect("a cache dir")
+            .join(crate::identity::TEST.config_dir_name());
+        std::fs::create_dir_all(&cache).unwrap();
+        let dir = tempfile::Builder::new().prefix("free-up-").tempdir_in(&cache).unwrap();
+        let path = dir.path().join("staged.bin");
+        std::fs::write(&path, b"staged copy").unwrap();
+        r.seed_row("staged", "staged.bin", &path, 11, None);
+        let result = free_up_space_in(&crate::identity::TEST, &r.db, &r.root, &|| true).unwrap();
+        assert!(!path.exists());
+        assert_eq!(r.status("staged"), FileStatus::CloudOnly);
+        assert_eq!(result.bytes_freed, 11);
+        assert!(result.not_freed.is_empty());
     }
 }

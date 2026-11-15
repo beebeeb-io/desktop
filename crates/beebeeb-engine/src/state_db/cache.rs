@@ -244,23 +244,14 @@ impl StateDb {
         Ok(evicted)
     }
     pub fn disposable_unpinned_cache_paths(&self) -> Result<Vec<String>> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "
-            SELECT cache_path
-            FROM files
-            WHERE cache_bytes > 0
-              AND cache_path IS NOT NULL
-              AND status = 'local'
-              AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
-            ORDER BY last_opened_at ASC, modified_at ASC, file_id ASC
-            ",
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect()
+        Ok(self
+            .disposable_unpinned_cache_rows()?
+            .into_iter()
+            .map(|(_, path, _)| path)
+            .collect())
     }
-    /// [`Self::disposable_unpinned_cache_paths`] with each row's id and agreed content (`local_hash`), for the
-    /// reclaim that checks a copy's bytes before it removes it (non-Windows: task 2526).
+    /// The cache copies of every unpinned, `Local` file, in eviction order, with each row's id and agreed content
+    /// (`local_hash`): the reclaim that checks a copy's bytes before it removes it reads these (task 2526).
     pub fn disposable_unpinned_cache_rows(&self) -> Result<Vec<(String, String, Option<String>)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
