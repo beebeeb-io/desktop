@@ -223,8 +223,14 @@ fn a_look_arms_one_wake_and_waits_at_most_a_minute() {
         away(&mut live.rt).looks,
     );
     // Twenty-five minutes are left, but a shorter delay chosen meanwhile is followed within a minute.
-    assert!(due.expect("a look is due") <= Instant::now() + LOOK_AT_MOST_EVERY);
-    assert_eq!(armed, due, "the wake is armed for the look");
+    let due = due.expect("a look is due");
+    assert!(due <= Instant::now() + LOOK_AT_MOST_EVERY);
+    // One wake is armed, no later than the look: a wake armed earlier (the first look's) is kept, and its poll arms
+    // the next.
+    assert!(
+        armed.is_some_and(|armed| armed <= due),
+        "a wake is armed for the look or before it"
+    );
     for _ in 0..20 {
         live.rt.frame(0.016);
     }
