@@ -116,8 +116,15 @@ fn arriving(id: &str, name: &str, bytes: i64) -> DriveItem {
 /// one with its bar, one waiting, and the status line says how far it is.
 pub fn uploading(s: &mut State) {
     // Nothing is selected, so no panel shows (its toggle stays on, as the board draws it).
-    // The folder as DW-0420 draws it (its rows, thumbnails and order); the uploads stand after them.
-    super::scenes_waveb::lisbon_trip(s);
+    // The folder as DW-0420 draws it (its rows, thumbnails and order), over the fixture that takes uploads.
+    s.source = Box::new(crate::frames::global::samples::TripByDate::new());
+    (s.listing, s.list_error) = crate::load(s.source.as_ref(), None);
+    s.actions = super::Actions::new(Box::new(FilesFixture::default()));
+    s.open_folder(Some("f-lisbon".to_string()));
+    s.clear_selection();
+    s.actions.sort = super::Sort::default();
+    s.global = crate::frames::global::Ui::default();
+    s.global.grid.thumbs = Box::new(super::long_list::TripThumbs);
     let mut tx = rune::Tx::default();
     let files = [
         std::path::PathBuf::from("Miradouro.heic"),
