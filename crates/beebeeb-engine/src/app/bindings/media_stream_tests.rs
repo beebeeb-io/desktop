@@ -1042,8 +1042,9 @@ fn holding(
 
 /// Row 10: a forward seek while the read-ahead fetches inside its window (chunk 1 under way, chunk 2 still to come)
 /// gives that window up at once: the fetch under way is stopped and not kept, chunk 2 is never asked for, the seek's
-/// bytes are chunk 12's, and the new window (chunks 13 and 14) is read ahead. Mutant (row 10, a): the generation step
-/// in `seek_to` removed → chunk 1 is kept and chunk 2 fetched while the seek reads → red here.
+/// bytes are chunk 12's, and the new window (chunks 13 and 14) is read ahead. Mutants (row 10): (a) the generation
+/// step in `seek_to` removed → chunk 1 is kept → red here; (a') its `job.next = job.end` removed → chunk 2 is fetched
+/// while the seek reads → red here.
 #[test]
 fn media_forward_seek_with_read_ahead_gives_up_the_window() {
     const CHUNK: u64 = 1_000;
