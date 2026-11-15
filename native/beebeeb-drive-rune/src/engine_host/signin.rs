@@ -47,6 +47,8 @@ use beebeeb_engine::app::signup_api::SignupAttempt;
 
 #[path = "signin_device.rs"]
 mod signin_device;
+#[path = "signin_recovery.rs"]
+mod signin_recovery;
 #[path = "signup.rs"]
 mod signup;
 use crate::frames::signin::create_source::{PasswordVerdict, SignUpEvent};
@@ -620,18 +622,21 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         );
     }
 
-    fn begin_recovery_verify(&mut self, _email: &str, _words: &[&str]) {
-        self.not_bound(
-            "begin_recovery_verify",
-            SignInEvent::RecoveryPhraseVerified(Err(PhraseProblem::Other)),
-        );
+    /// The in-app recovery with the twelve words (`signin_recovery.rs`), and the device request: both doors are bound.
+    fn in_app_doors_available(&self) -> bool {
+        true
     }
 
-    fn begin_set_password(&mut self, _password: &str) {
-        self.not_bound(
-            "begin_set_password",
-            SignInEvent::PasswordSet(Err(SignInProblem::Other)),
-        );
+    fn begin_recovery_verify(&mut self, email: &str, words: &[&str]) {
+        self.recovery_begin_verify(email, words);
+    }
+
+    fn begin_set_password(&mut self, password: &str) {
+        self.recovery_begin_set_password(password);
+    }
+
+    fn password_strength(&self, password: &str) -> Option<crate::frames::signin::source::PasswordStrength> {
+        self.recovery_strength(password)
     }
 
     fn sign_up_available(&self) -> bool {
@@ -714,6 +719,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         }
         let answers = self.answers.clone();
         let job: Job<C> = Box::new(move |engine| {
+            engine.recovery_forget();
             if engine.discard_partial_sign_in().is_err() {
                 still_signed_in(&answers);
             }
