@@ -17,7 +17,7 @@ use rune::{El, Tx, row};
 
 use super::form::{self, Form, Problem};
 use super::forms::{button, code_error};
-use super::source::{AccountSource, CallKind, CodeRefused};
+use super::source::{AccountSource, CallKind};
 use super::{AccountUi, CodeFor, Dialog, Pane, icons};
 
 /// The clipboard is cleared 60 seconds after a secret was copied (the board's rule).
@@ -26,6 +26,8 @@ const CLIPBOARD_CLEARS: Duration = Duration::from_secs(60);
 pub fn pane(pane: Pane, source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &Theme) -> (El, Option<El>) {
     match (pane, &f.setup, &f.codes) {
         (Pane::TwoFactorSetup, Some(_), _) => (setup(f, t), None),
+        // The key could not be asked for (no open session) or Beebeeb did not make one: the set-up page says so.
+        (Pane::TwoFactorSetup, None, _) if f.problem.is_some() => (setup(f, t), None),
         (Pane::BackupCodes, _, Some(_)) => (
             backup_codes(f, t),
             (dialog == Some(&Dialog::LeaveCodes)).then(|| leave_codes(t)),
@@ -37,10 +39,15 @@ pub fn pane(pane: Pane, source: &dyn AccountSource, f: &Form, dialog: Option<&Di
 /// Two-factor authentication (DW-A69): the QR code, the key, the first code.
 fn setup(f: &Form, t: &Theme) -> El {
     let Some(setup) = &f.setup else {
-        // Not made yet: nothing of a key is drawn. When Beebeeb did not make one, the page says so.
-        let said = f.problem.map(|_| {
+        // Not made yet: nothing of a key is drawn. A key still on its way (an earlier request) is waited for; when
+        // Beebeeb did not make one, the page says so.
+        let said = f.problem.map(|problem| {
             code_error(
-                "Could not start the set-up. Check your connection, go back and try again.",
+                if problem == Problem::StillOut {
+                    super::forms::STILL_OUT
+                } else {
+                    "Could not start the set-up. Check your connection, go back and try again."
+                },
                 t,
             )
         });
@@ -84,6 +91,8 @@ fn setup(f: &Form, t: &Theme) -> El {
                 "That code was wrong, so the key changed. Scan the new code and try again."
             } else if f.problem == Some(Problem::Offline) {
                 "Beebeeb could not be reached. Nothing was changed."
+            } else if f.problem == Some(Problem::StillOut) {
+                super::forms::STILL_OUT
             } else {
                 "Invalid code. Try again."
             },
@@ -100,20 +109,13 @@ fn setup(f: &Form, t: &Theme) -> El {
 /// Checks the first code; on success two-factor is on and the backup codes are shown once.
 pub(super) fn turn_on(ui: &mut AccountUi) -> Option<&'static str> {
     let code = form::code(&ui.form, 6);
-    if ui.form.waiting.is_some() || super::calls::start(ui, CallKind::TurnOnTwoFactor, &code, "") {
-        return None;
+    if ui.form.waiting.is_none()
+        && super::calls::start(ui, CallKind::TurnOnTwoFactor, &code, "") == super::calls::Start::NotStarted
+    {
+        // No open session: nothing was sent.
+        ui.form.problem = Some(Problem::Offline);
     }
-    match ui.source.as_deref_mut()?.turn_on_two_factor(&code) {
-        Ok(codes) => {
-            ui.form.codes = Some(codes);
-            ui.pane = Pane::BackupCodes;
-            Some("DW-A70")
-        }
-        Err(_) => {
-            ui.form.problem = Some(Problem::WrongCode);
-            None
-        }
-    }
+    None
 }
 
 /// The codes as they are copied and saved: numbered, under a heading.
@@ -370,8 +372,15 @@ pub(super) fn code_dialog(code_for: CodeFor, f: &Form, t: &Theme) -> El {
         |s: &mut State| &mut s.account.form.code,
         t,
     )];
-    if f.problem.is_some() {
-        extra.push(code_error("Incorrect code. Try again.", t));
+    if let Some(problem) = f.problem {
+        extra.push(code_error(
+            match problem {
+                Problem::Offline => "Beebeeb could not be reached. Nothing was changed.",
+                Problem::StillOut => super::forms::STILL_OUT,
+                _ => "Incorrect code. Try again.",
+            },
+            t,
+        ));
     }
     let foot = vec![
         (act_el, act_b),
@@ -435,39 +444,22 @@ fn confirm_code(ui: &mut AccountUi) -> Option<&'static str> {
     if ui.form.waiting.is_some() {
         return None;
     }
-    let started = match code_for {
-        CodeFor::TurnOffTwoFactor => Some(CallKind::TurnOffTwoFactor),
-        CodeFor::MoveAuthenticator => Some(CallKind::CheckCode),
-        CodeFor::NewBackupCodes => Some(CallKind::NewBackupCodes),
-        CodeFor::StopActivity => None,
+    // Stopping the recording asks the password, never a code (`activity::stop_with_password`): no call here.
+    let kind = match code_for {
+        CodeFor::TurnOffTwoFactor => CallKind::TurnOffTwoFactor,
+        CodeFor::MoveAuthenticator => CallKind::CheckCode,
+        CodeFor::NewBackupCodes => CallKind::NewBackupCodes,
+        CodeFor::StopActivity => return None,
     };
-    if let Some(kind) = started
-        && code.len() == 6
-        && super::calls::start(ui, kind, &code, "")
-    {
+    if code.len() < 6 {
+        // Not a whole code: refused here, nothing is sent.
+        ui.form.problem = Some(Problem::WrongCode);
+        form::focus(&mut ui.form, Some(form::CODE_KEY));
         return None;
     }
-    let source = ui.source.as_deref_mut()?;
-    let outcome: Result<&'static str, CodeRefused> = if code.len() < 6 {
-        Err(CodeRefused::Wrong)
-    } else {
-        match code_for {
-            CodeFor::TurnOffTwoFactor => source.turn_off_two_factor(&code).map(|()| "DW-A52"),
-            CodeFor::MoveAuthenticator => source.check_code(&code).map(|()| "DW-A69"),
-            CodeFor::StopActivity => source.stop_activity(&code).map(|()| "DW-A79"),
-            CodeFor::NewBackupCodes => source.new_backup_codes(&code).map(|codes| {
-                ui.form.codes = Some(codes);
-                ui.pane = Pane::BackupCodes;
-                "DW-A70"
-            }),
-        }
-    };
-    match outcome {
-        Ok(frame) => Some(frame),
-        Err(_) => {
-            ui.form.problem = Some(Problem::WrongCode);
-            form::focus(&mut ui.form, Some(form::CODE_KEY));
-            None
-        }
+    if super::calls::start(ui, kind, &code, "") == super::calls::Start::NotStarted {
+        // No open session: nothing was sent.
+        ui.form.problem = Some(Problem::Offline);
     }
+    None
 }

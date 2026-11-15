@@ -103,7 +103,9 @@ impl<C: CredentialStores> Engine<C> {
     /// WRITES: change the account's password (`POST /api/v1/auth/change-password-start` + `-finish`, each behind a
     /// step-up of `current`). `session`: the session the press was made for ([`Engine::session_turn`]); another
     /// one changes nothing. On `Ok` the new session token is stored and in memory, the server has ended every other
-    /// session, and sync runs again on the new token when it was running.
+    /// session, and sync runs again on the new token when it was running. `Ok` is the session generation the change's
+    /// own write moved to (the claim of `keep_new_session`): a host that stamps the press with `session` knows the
+    /// answer is still that press's under exactly this turn, and under no turn a lock or a sign-in moved to.
     ///
     /// `Err` leaves the password as it was, except [`PasswordChangeError::Unconfirmed`]: once the finish has left,
     /// only a refusal the server said in so many words (a 4xx answer) proves nothing changed; no answer, a server
@@ -114,7 +116,7 @@ impl<C: CredentialStores> Engine<C> {
         session: SessionGeneration,
         current: Zeroizing<String>,
         new: Zeroizing<String>,
-    ) -> Result<(), PasswordChangeError> {
+    ) -> Result<SessionGeneration, PasswordChangeError> {
         // Local checks first: nothing is sent for a password core would refuse anyway.
         if *current == *new {
             return Err(PasswordChangeError::SamePassword);
@@ -124,7 +126,8 @@ impl<C: CredentialStores> Engine<C> {
         }
         let syncing = self.is_syncing();
         let root = self.sync_root().ok();
-        self.runtime
+        let moved_to = self
+            .runtime
             .block_on(self.change_password_step(session, current, new))?;
         // The running engine holds the token that was just ended: it starts again on the new one. A refusal here is
         // not the change's: the password is changed and stored; sync waits for the next start.
@@ -141,7 +144,7 @@ impl<C: CredentialStores> Engine<C> {
                 }
             }
         }
-        Ok(())
+        Ok(moved_to)
     }
 
     async fn change_password_step(
@@ -149,7 +152,7 @@ impl<C: CredentialStores> Engine<C> {
         session: SessionGeneration,
         current: Zeroizing<String>,
         new: Zeroizing<String>,
-    ) -> Result<(), PasswordChangeError> {
+    ) -> Result<SessionGeneration, PasswordChangeError> {
         let _step = self.transition.lock().await;
         let held = self.held_session(session)?;
         let base = self.config.api_base.clone();
@@ -329,8 +332,10 @@ impl<C: CredentialStores> Engine<C> {
         session: SessionGeneration,
         old_token: &str,
         new_token: &str,
-    ) -> Result<(), PasswordChangeError> {
+    ) -> Result<SessionGeneration, PasswordChangeError> {
         let _write = self.claim(session).map_err(|_| PasswordChangeError::NotSignedIn)?;
+        // The generation the claim moved to, read under its write lock: no other transition is between.
+        let moved_to = self.acct.session_generation();
         let vault = self.vault();
         // Put back beside the new token whose session it is (`install_session` removes the old tag first).
         let owner = key_owner::session_owner_of(&vault, old_token);
@@ -352,7 +357,7 @@ impl<C: CredentialStores> Engine<C> {
             current.token = new_token.to_string();
         }
         self.acct.auth_health.note_result(None);
-        Ok(())
+        Ok(moved_to)
     }
 }
 

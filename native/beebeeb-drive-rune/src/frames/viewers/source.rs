@@ -90,7 +90,7 @@ impl fmt::Debug for Details {
 /// A newer version saved elsewhere.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Newer {
-    /// "Anna's iPhone".
+    /// "Anna's iPhone". Empty: no device is named (the engine does not say which device saved: decision 2505).
     pub from: String,
     /// "09:14".
     pub at: String,
@@ -191,6 +191,9 @@ pub enum Origin {
     /// Downloaded from Beebeeb, for a file whose copy on this PC is not settled with it (two versions to choose
     /// from, or a sync of this file that failed): what is shown may not be what is on this PC; the view says so.
     BeebeebNotThisPcs,
+    /// Downloaded from Beebeeb, for a file whose copy on this PC could not be confirmed as the version Beebeeb has
+    /// (older, or of a version not known): the copy is not shown as it; the view says so.
+    BeebeebUnconfirmedHere,
 }
 
 /// What the content area shows.
@@ -320,14 +323,21 @@ pub enum Settled {
         version: u32,
         at: String,
     },
-    /// The edit is stored on this PC and sent as soon as Beebeeb can be reached; the version is not known yet.
-    Queued { body: Body },
+    /// The edit is stored on this PC and sent as soon as Beebeeb can be reached; the version it becomes is not known
+    /// yet. `version`: the one it was saved from, which the text on screen is based on (its label).
+    Queued { body: Body, version: u32 },
     /// Keep theirs: the edit is dropped and the file as Beebeeb has it is shown.
     Opened { body: Body, version: u32 },
     /// Another device saved the file meanwhile; nothing was written.
     Conflict(Conflict),
+    /// The local state holds a version of the open file that this view does not (DW-1519). Nothing on screen
+    /// changed: the banner offers it.
+    Newer(Newer),
     /// Not done, nothing changed.
     Failed,
+    /// A change begun before the file was opened again (Show it, Try again): what it came to, said. Nothing on
+    /// screen changes.
+    Said(String),
 }
 
 /// Which of the theme's inks a run of text is drawn in.
@@ -571,6 +581,15 @@ pub trait ViewerSource {
     /// press.
     fn answers_later(&self) -> bool {
         false
+    }
+    /// A change of the open file is on its way (a save, a keep, the switch): Show it waits until it answered.
+    fn saving(&self) -> bool {
+        false
+    }
+    /// How long until this source next reads whether a newer version arrived (DW-1519), while it reads one: the
+    /// window asks to be woken then, so the banner comes without a press. `None`: it does not read.
+    fn next_check(&self) -> Option<std::time::Duration> {
+        None
     }
     /// Download and decrypt again after a failure.
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError>;

@@ -130,12 +130,16 @@ fn a_confirmed_change_replaces_the_mirrored_email_for_that_session_only() {
     let old = engine.account_email();
     assert!(old.is_some());
     // Nothing to store, or another session: the old address stays.
-    assert!(!engine.email_changed_for(session, "  "));
+    assert!(engine.email_changed_for(session, "  ").is_none());
     let stale = crate::account::SessionGeneration::for_test(1);
-    assert!(!engine.email_changed_for(stale, "new.address@example.eu"));
+    assert!(engine.email_changed_for(stale, "new.address@example.eu").is_none());
     assert_eq!(engine.account_email(), old);
 
-    assert!(engine.email_changed_for(session, "new.address@example.eu"));
+    assert_eq!(
+        engine.email_changed_for(session, "new.address@example.eu"),
+        Some(engine.session_turn()),
+        "it hands back the generation its own write moved to"
+    );
     assert_eq!(engine.account_email().as_deref(), Some("new.address@example.eu"));
     assert_eq!(
         engine.vault().account_email().ok().flatten().as_deref(),

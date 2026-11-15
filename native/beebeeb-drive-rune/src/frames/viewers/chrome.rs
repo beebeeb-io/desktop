@@ -320,6 +320,10 @@ pub const FROM_THIS_PC_UNSENT: &str = "Opened from the copy on this PC \u{00B7} 
 /// The same, for a copy read while sync is off: nothing says it is still the version Beebeeb has.
 pub const FROM_THIS_PC_SYNC_OFF: &str =
     "Opened from the copy on this PC \u{00B7} sync is off, Beebeeb may have a newer version";
+/// What the line says for the version Beebeeb has of a file whose copy on this PC could not be confirmed as that
+/// version (older, or of a version not known: `LocalCopy::Behind`).
+pub const FROM_BEEBEEB_UNCONFIRMED_HERE: &str =
+    "The version in Beebeeb, decrypted on this PC \u{00B7} couldn't confirm the copy on this PC is this version";
 /// What the line says for the version Beebeeb has of a file whose copy on this PC is not in sync with it.
 pub const FROM_BEEBEEB_NOT_THIS_PCS: &str =
     "The version in Beebeeb, decrypted on this PC \u{00B7} the copy on this PC is not in sync with it";
@@ -350,6 +354,7 @@ pub(super) fn origin_status(origin: super::source::Origin, shows_content: bool, 
         Origin::ThisPc { unsent: true } => Some((FROM_THIS_PC_UNSENT, true)),
         Origin::ThisPcSyncOff => Some((FROM_THIS_PC_SYNC_OFF, true)),
         Origin::BeebeebNotThisPcs => Some((FROM_BEEBEEB_NOT_THIS_PCS, true)),
+        Origin::BeebeebUnconfirmedHere => Some((FROM_BEEBEEB_UNCONFIRMED_HERE, true)),
     };
     match said {
         Some((text, warns)) => Status {

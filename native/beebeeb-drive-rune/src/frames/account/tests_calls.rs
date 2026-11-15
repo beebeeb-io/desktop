@@ -321,7 +321,7 @@ fn a_late_password_answer_is_dropped_when_the_session_or_account_moved_before_th
         settle(&mut r.rt);
         assert_eq!(r.pane(), Pane::Password);
         assert_eq!(r.problem(), None, "nothing is said of a change another session made");
-        assert!(r.rt.state.account.form.late_change.is_none(), "and nothing is kept");
+        assert!(r.rt.state.account.late_change.is_none(), "and nothing is kept");
         assert!(!r.waiting());
     }
 }

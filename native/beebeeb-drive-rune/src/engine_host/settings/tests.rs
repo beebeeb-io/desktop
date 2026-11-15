@@ -1010,7 +1010,7 @@ fn about_draws_the_updaters_answer_and_check_now_asks_again() {
     let engine = signed_in(&account);
     let mut rt = window_on(engine.clone());
     let rig = super::updates::tests::rig_up_to_date("0.9.1");
-    let seen = rig.seen.clone();
+    let (seen, gate) = (rig.seen.clone(), rig.gate.clone());
     let source = EngineSettingsSource::for_identity(engine, &TEST).with_updates(Some(rig.part));
     rt.update(move |s, _| {
         s.settings.source = Box::new(source);
@@ -1048,10 +1048,13 @@ fn about_draws_the_updaters_answer_and_check_now_asks_again() {
         button.rect[0] + button.rect[2] / 2.0,
         button.rect[1] + button.rect[3] / 2.0,
     );
+    // The answer is held until the window has drawn Checking…: never a race with the worker.
+    gate.close();
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(0.016);
     assert!(shows(&rt, "Checking…"), "the row says Checking… until it answers");
+    gate.open();
     wait(&mut rt, &answered);
     assert_eq!(seen.lock().unwrap().len(), 4, "Check now asked once more");
 }

@@ -1,5 +1,5 @@
 //! The Passkeys pane (DW-A73 to DW-A76) on the real engine: [`PasskeyCalls`], the part of `EngineAccountSource`
-//! behind `passkeys`, `add_passkey_confirmed`, `remove_passkey_confirmed`, and the sign-in screen's "Use a passkey".
+//! behind `passkeys`, `add_passkey` and `remove_passkey` (with the password), and the sign-in screen's "Use a passkey".
 //!
 //! - The list is the engine's read of Beebeeb's own list ([`Engine::passkeys`]), read when the pane opens (and again
 //!   when it is older than [`FRESH_FOR`]) and after every change: nothing is drawn before a change was made, a
@@ -593,7 +593,7 @@ pub fn wiping(password: &Password<'_>) -> Option<Zeroizing<String>> {
     Some(buffer)
 }
 
-/// Adding takes the password (`add_passkey_confirmed`): the pane asks for it, so `add_passkey` is not reached.
+/// Adding takes the password: `add_passkey(None)` is refused as not confirmed and asks nothing.
 pub(super) fn add_without_password() -> Result<(), Refused> {
     Err(Refused::NotConfirmed)
 }

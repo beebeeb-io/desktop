@@ -11,12 +11,22 @@
 //! - **What is trusted is fixed in the build.** One key (`keys/updater-v2.pub`, through
 //!   `host::windows_release_trust`), one host (`host::RELEASE_BASE_URL`), never below 0.9.0, nothing signed before the
 //!   build itself. Nothing here reads a host, a key or a channel address from a setting, a flag or the environment.
+//! - **The route follows this PC's proxy settings; the host and the signatures do not.** The client uses reqwest's
+//!   defaults, as the engine's own client does (`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and Windows' system proxy):
+//!   a proxy can see that this PC asks the release server and can hold updates back (after 14 days the words say
+//!   that no update has been verified), but it cannot change the host TLS checks, nor what the signatures, the
+//!   not-before time and the per-channel mark let install.
 //! - **One worker owns the updater.** Every request and every chunk of a download runs there, never on the window's
-//!   thread; the window takes what it reported in [`UpdatesPart::pump`]. It checks once at launch and then whenever
-//!   `Updater::background_check_due` says so (every 4 hours), which is what About's foot line says.
-//! - **Nothing is installed by a check.** A check only asks; an older version on a channel is said (`About::older`)
-//!   and never offered; a download and "Restart to update" are separate events that no press sends yet (see
-//!   `UpdatesPart::fill`: General never says a download is waiting).
+//!   thread; the window takes what it reported in [`UpdatesPart::pump`], and the worker wakes the window after each
+//!   report (`Engine::wake_host`). It checks once at launch and then whenever `Updater::background_check_due` says so
+//!   (every 4 hours; 15 minutes after a failure), which is what About's foot line says.
+//! - **Nothing is installed by a check, and nothing without "Restart to update".** A check only asks; an older
+//!   version on a channel is said (`About::older`) and never offered: its notes are never the dialog's, and neither
+//!   press acts on it. "Download update" ([`UpdatesPart::download_update`]) downloads the newer version and checks its
+//!   signature, then waits. "Restart to update" ([`UpdatesPart::restart_to_update`]) only once the file is verified:
+//!   the worker verifies it again, stops sync, starts the installer, and the window quits (`Pumped::restart`). The
+//!   installer did not start: sync starts again if the hand-off had stopped it (`Pumped::start_sync`). Sync did not
+//!   confirm its stop: no installer starts, and the words say Beebeeb could not confirm it (not that it is running).
 //! - **A build that is not a release has no updater and asks nothing.** Without a build time
 //!   (`host::BUILD_NOT_BEFORE`) or a release version the updater would refuse every manifest (`NoBuildTime`), after
 //!   two requests: it is not built ([`release_config`] is `None`), not one request leaves this PC, and About draws the
@@ -35,6 +45,11 @@
 // compiled, and unused.
 #![cfg_attr(not(any(windows, test)), allow(dead_code))]
 
+use std::cell::Cell;
+#[cfg(any(windows, test))]
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -45,11 +60,11 @@ use beebeeb_engine::config::{DesktopConfig, ReleaseChannel};
 use beebeeb_engine::identity::EngineIdentity;
 #[cfg(any(windows, test))]
 use beebeeb_updater::{Apply, EngineStopped, Offer, VerifiedInstaller};
-use beebeeb_updater::{Clock, Event, Failure, Freshness, Http, Intent, Refusal, State, Store, Updater};
+use beebeeb_updater::{Clock, Event, Failure, Freshness, Http, Intent, Persisted, Refusal, State, Store, Updater};
 use chrono::{DateTime, Local};
 
 use super::{STILL_SAVING, log};
-use crate::frames::settings::source::{About, Channel, OlderChannel, ReleaseNotes, UpdateCheck};
+use crate::frames::settings::source::{About, Channel, OlderChannel, Press, Pumped, ReleaseNotes, Update, UpdateCheck};
 
 /// How often the worker asks the updater whether a background check is due (the updater's own rule decides).
 const LOOK_EVERY: Duration = Duration::from_secs(60);
@@ -73,9 +88,16 @@ pub const NOTHING_PUBLISHED: &str = "The release server has no update informatio
 pub const NOT_SIGNED_FILE: &str =
     "The download was not the file Beebeeb signed. It was deleted and nothing was installed.";
 pub const STOPPED_DOWNLOAD: &str = "The download stopped before it was complete. Nothing was installed.";
+/// The release server answered the download with a status instead of the file (a check that failed has nothing to
+/// resume, so these words are a download's alone).
+pub const NOT_SENT: &str = "The release server did not send the update. Nothing was installed. Try again in a moment.";
 pub const OFFER_CHANGED: &str = "The version on offer changed. Nothing was installed.";
 pub const NO_DISK: &str = "The update could not be saved on this PC. Nothing was installed.";
-pub const SYNC_DID_NOT_STOP: &str = "Sync did not stop, so the update was not started.";
+/// The hand-off's stop was not confirmed. On Windows this is also a stop whose task ended while File Explorer's
+/// connection did not let go (the engine says `Unconfirmed` for both): so these words never say that sync runs, nor
+/// that it stopped, only what is known. A new start of sync needs a restart of Beebeeb in both cases.
+pub const SYNC_UNCONFIRMED: &str =
+    "Beebeeb could not confirm that sync stopped, so the update was not started. Restart Beebeeb, then update.";
 pub const INSTALLER_DID_NOT_START: &str = "The installer did not start. Nothing was installed.";
 pub const VERIFYING: &str = "Checking the download's signature…";
 pub const RESTARTING: &str = "Restarting to update…";
@@ -86,28 +108,109 @@ pub(crate) trait Drive {
     fn step(&mut self, event: Event) -> State;
     fn background_check_due(&self) -> bool;
     fn freshness(&self) -> Freshness;
+    /// When the last check that passed every rule was answered (Unix seconds): what "checked <time>" says.
+    fn last_verified(&self) -> Option<u64>;
 }
 
-impl<H: Http, C: Clock, S: Store, A: beebeeb_updater::Apply> Drive for Updater<H, C, S, A> {
+/// The updater's record, watched: the time of the last check that passed every rule, as the machine wrote it
+/// (`Persisted::last_check`: saved only after such a check, and read when the updater starts). The machine keeps
+/// that time to itself; the record it writes is the one place it shows.
+pub(crate) struct Watched<S> {
+    store: S,
+    verified: Rc<Cell<Option<u64>>>,
+}
+
+impl<S: Store> Store for Watched<S> {
+    fn load(&self) -> Persisted {
+        let persisted = self.store.load();
+        self.verified.set(persisted.last_check);
+        persisted
+    }
+    fn save(&mut self, persisted: &Persisted) -> bool {
+        let saved = self.store.save(persisted);
+        if saved {
+            self.verified.set(persisted.last_check);
+        }
+        saved
+    }
+}
+
+/// The updater, with the time of its last verified check ([`Watched`]).
+pub(crate) struct Watching<H: Http, C: Clock, S: Store, A: beebeeb_updater::Apply> {
+    updater: Updater<H, C, Watched<S>, A>,
+    verified: Rc<Cell<Option<u64>>>,
+}
+
+impl<H: Http, C: Clock, S: Store, A: beebeeb_updater::Apply> Watching<H, C, S, A> {
+    pub(crate) fn new(config: beebeeb_updater::Config, http: H, clock: C, store: S, apply: A) -> Self {
+        let verified = Rc::new(Cell::new(None));
+        let store = Watched {
+            store,
+            verified: verified.clone(),
+        };
+        Self {
+            updater: Updater::new(config, http, clock, store, apply),
+            verified,
+        }
+    }
+}
+
+impl<H: Http, C: Clock, S: Store, A: beebeeb_updater::Apply> Drive for Watching<H, C, S, A> {
     fn step(&mut self, event: Event) -> State {
-        Updater::step(self, event).clone()
+        self.updater.step(event).clone()
     }
     fn background_check_due(&self) -> bool {
-        Updater::background_check_due(self)
+        self.updater.background_check_due()
     }
     fn freshness(&self) -> Freshness {
-        Updater::freshness(self)
+        self.updater.freshness()
+    }
+    fn last_verified(&self) -> Option<u64> {
+        self.verified.get()
     }
 }
 
-/// Builds the updater on the worker's thread.
-pub(crate) type MakeDrive = Box<dyn FnOnce() -> Box<dyn Drive> + Send>;
+/// The hand-off stopped a running sync and the installer did not start: [`EngineApply::resume_engine`] asks, the
+/// window's [`UpdatesPart::pump`] takes it (`Pumped::start_sync`), and the shell starts sync with its own start.
+#[derive(Clone, Default)]
+pub(crate) struct SyncBack(Arc<AtomicBool>);
+
+impl SyncBack {
+    pub(crate) fn ask(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    fn take(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// Builds the updater on the worker's thread; its hand-off asks for sync back through the [`SyncBack`] it is given.
+pub(crate) type MakeDrive = Box<dyn FnOnce(SyncBack) -> Box<dyn Drive> + Send>;
+
+/// How the worker paces itself and tells the window it has something.
+pub(crate) struct Tuning {
+    /// How often it asks the updater whether a background check is due.
+    pub(crate) look_every: Duration,
+    /// Wakes the window after a report (the engine's wake target in the app).
+    pub(crate) wake: Box<dyn Fn() + Send>,
+}
+
+impl Tuning {
+    fn standard(wake: Box<dyn Fn() + Send>) -> Self {
+        Self {
+            look_every: LOOK_EVERY,
+            wake,
+        }
+    }
+}
 
 /// One state the worker reached, for the order numbered `serial` (0: the launch check and every background check).
 pub(crate) struct Report {
     serial: u64,
     state: State,
     freshness: Freshness,
+    /// When the last verified check was answered (Unix seconds), as the record holds it at this report.
+    verified: Option<u64>,
     at: DateTime<Local>,
 }
 
@@ -157,6 +260,10 @@ pub(crate) struct UpdatesPart {
     saves: mpsc::Sender<Saved>,
     saved: mpsc::Receiver<Saved>,
     toast_next: Option<&'static str>,
+    /// The hand-off asks for sync back here.
+    sync_back: SyncBack,
+    /// `Restarting` was seen and the quit asked for: once.
+    quit_asked: bool,
 }
 
 fn channel_of(channel: ReleaseChannel) -> Channel {
@@ -194,29 +301,32 @@ fn busy(state: &State) -> bool {
 /// window's end is dropped.
 fn work(
     make: MakeDrive,
+    sync_back: SyncBack,
     channel: beebeeb_updater::Channel,
     orders: mpsc::Receiver<Order>,
     reports: mpsc::Sender<Report>,
+    tuning: Tuning,
 ) {
-    let mut updater = make();
+    let mut updater = make(sync_back);
     let mut channel = channel;
+    let wake = &*tuning.wake;
     let background = |channel| Event::Check {
         channel,
         intent: Intent::Background,
     };
-    if !run(&mut *updater, 0, background(channel), &reports) {
+    if !run(&mut *updater, 0, background(channel), &reports, wake) {
         return;
     }
     loop {
-        let alive = match orders.recv_timeout(LOOK_EVERY) {
+        let alive = match orders.recv_timeout(tuning.look_every) {
             Ok(Order { serial, event }) => {
                 if let Event::Check { channel: asked, .. } = &event {
                     channel = *asked;
                 }
-                run(&mut *updater, serial, event, &reports)
+                run(&mut *updater, serial, event, &reports, wake)
             }
             Err(mpsc::RecvTimeoutError::Timeout) if updater.background_check_due() => {
-                run(&mut *updater, 0, background(channel), &reports)
+                run(&mut *updater, 0, background(channel), &reports, wake)
             }
             Err(mpsc::RecvTimeoutError::Timeout) => true,
             Err(mpsc::RecvTimeoutError::Disconnected) => false,
@@ -227,23 +337,33 @@ fn work(
     }
 }
 
-/// One event, then `Tick`s until the machine has no work left. `false`: the window's end is gone.
-fn run(updater: &mut dyn Drive, serial: u64, event: Event, reports: &mpsc::Sender<Report>) -> bool {
-    let report = |state: &State, updater: &dyn Drive| Report {
-        serial,
-        state: state.clone(),
-        freshness: updater.freshness(),
-        at: Local::now(),
+/// One event, then `Tick`s until the machine has no work left; the window is woken after each report. `false`: the
+/// window's end is gone.
+fn run(updater: &mut dyn Drive, serial: u64, event: Event, reports: &mpsc::Sender<Report>, wake: &dyn Fn()) -> bool {
+    let send = |state: &State, updater: &dyn Drive| {
+        let sent = reports
+            .send(Report {
+                serial,
+                state: state.clone(),
+                freshness: updater.freshness(),
+                verified: updater.last_verified(),
+                at: Local::now(),
+            })
+            .is_ok();
+        if sent {
+            wake();
+        }
+        sent
     };
     let mut state = updater.step(event);
-    if reports.send(report(&state, updater)).is_err() {
+    if !send(&state, updater) {
         return false;
     }
     let mut said = Instant::now();
     while busy(&state) {
         state = updater.step(Event::Tick);
         if !busy(&state) || said.elapsed() >= PROGRESS_EVERY {
-            if reports.send(report(&state, updater)).is_err() {
+            if !send(&state, updater) {
                 return false;
             }
             said = Instant::now();
@@ -263,9 +383,39 @@ impl UpdatesPart {
     ) -> Option<Self> {
         #[cfg(all(windows, not(test)))]
         {
+            use beebeeb_updater::host::{BUILD_MARK, BUILD_NOT_BEFORE};
+            // Keeps the build's mark in the binary: the release workflow reads it there (as `windows_release_trust`
+            // does).
+            std::hint::black_box(BUILD_MARK);
             let (channel, from) = channels(config);
-            let make = release::updater(engine.clone(), identity)?;
-            Some(Self::live(make, identity, channel, from, super::version_words()))
+            let folder = rune::dirs::AppDirs::new(crate::shell::identity::AppIdentity::CURRENT.state_dir_id())
+                .map(|dirs| crate::shell::local_data_of(&dirs, "windows"));
+            match release_setup(BUILD_NOT_BEFORE, option_env!("BEEBEEB_RELEASE_VERSION"), folder) {
+                ReleaseSetup::NotARelease => None,
+                ReleaseSetup::Broken => {
+                    log("settings: this release build could not set its updater up");
+                    Some(Self::with_mode(
+                        Mode::NoWorker,
+                        identity,
+                        channel,
+                        from,
+                        super::version_words(),
+                    ))
+                }
+                ReleaseSetup::Ready { config, record } => {
+                    let make = release::updater(engine.clone(), identity, config, record);
+                    let woken = engine.clone();
+                    let tuning = Tuning::standard(Box::new(move || woken.wake_host()));
+                    Some(Self::live_tuned(
+                        make,
+                        identity,
+                        channel,
+                        from,
+                        super::version_words(),
+                        tuning,
+                    ))
+                }
+            }
         }
         #[cfg(not(all(windows, not(test))))]
         {
@@ -274,8 +424,8 @@ impl UpdatesPart {
         }
     }
 
-    /// The part on an updater `make` builds on the worker's thread.
-    #[cfg(any(windows, test))]
+    /// The part on an updater `make` builds on the worker's thread, looking every minute, waking nothing.
+    #[cfg(test)]
     pub(crate) fn live(
         make: MakeDrive,
         identity: &'static EngineIdentity,
@@ -283,12 +433,34 @@ impl UpdatesPart {
         from: Channel,
         installed: String,
     ) -> Self {
+        Self::live_tuned(
+            make,
+            identity,
+            channel,
+            from,
+            installed,
+            Tuning::standard(Box::new(|| {})),
+        )
+    }
+
+    /// The part on an updater `make` builds on the worker's thread, paced and waking as `tuning` says.
+    #[cfg(any(windows, test))]
+    pub(crate) fn live_tuned(
+        make: MakeDrive,
+        identity: &'static EngineIdentity,
+        channel: Channel,
+        from: Channel,
+        installed: String,
+        tuning: Tuning,
+    ) -> Self {
         let (orders, inbox) = mpsc::channel();
         let (reports, taken) = mpsc::channel();
         let first = line(channel);
+        let sync_back = SyncBack::default();
+        let handed = sync_back.clone();
         let started = std::thread::Builder::new()
             .name("settings-updates".into())
-            .spawn(move || work(make, first, inbox, reports));
+            .spawn(move || work(make, handed, first, inbox, reports, tuning));
         let mode = match started {
             Ok(_) => Mode::Live(Worker { orders, reports: taken }),
             Err(_) => {
@@ -296,7 +468,9 @@ impl UpdatesPart {
                 Mode::NoWorker
             }
         };
-        Self::with_mode(mode, identity, channel, from, installed)
+        let mut part = Self::with_mode(mode, identity, channel, from, installed);
+        part.sync_back = sync_back;
+        part
     }
 
     fn with_mode(
@@ -320,6 +494,8 @@ impl UpdatesPart {
             saves,
             saved,
             toast_next: None,
+            sync_back: SyncBack::default(),
+            quit_asked: false,
         }
     }
 
@@ -350,6 +526,34 @@ impl UpdatesPart {
             intent: Intent::Manual,
         };
         if self.send(event) {
+            self.asked = Some(self.sent);
+        }
+    }
+
+    /// "Download update": the newer version on offer (or the rest of an interrupted download) is downloaded and its
+    /// signature checked; it then waits for "Restart to update". Nothing while a press or a check is out; never an
+    /// older version (the machine would need `DownloadDowngrade`, which nothing here sends).
+    pub(crate) fn download_update(&mut self) {
+        if self.asked.is_some() {
+            return;
+        }
+        let offered = matches!(
+            self.shown(),
+            Some(State::Available { offer } | State::Failed { resume: Some(offer), .. }) if !offer.downgrade
+        );
+        if offered && self.send(Event::Download) {
+            self.asked = Some(self.sent);
+        }
+    }
+
+    /// "Restart to update", only once the download is verified (spec §4: `Apply` is sent by this press alone). The
+    /// worker verifies the file again, stops sync, starts the installer; `pump` then asks the window to quit.
+    pub(crate) fn restart_to_update(&mut self) {
+        if self.asked.is_some() {
+            return;
+        }
+        let ready = matches!(self.shown(), Some(State::ReadyToRestart { offer, .. }) if !offer.downgrade);
+        if ready && self.send(Event::Apply) {
             self.asked = Some(self.sent);
         }
     }
@@ -388,8 +592,9 @@ impl UpdatesPart {
         }
     }
 
-    /// Take what the worker and the channel's writer answered: (changed, a toast, busy).
-    pub(crate) fn pump(&mut self) -> (bool, Option<&'static str>, bool) {
+    /// Take what the worker and the channel's writer answered; and, from the hand-off, the quit (the installer
+    /// started) or sync back (it did not, after sync was stopped for it).
+    pub(crate) fn pump(&mut self) -> Pumped {
         let mut toast = self.toast_next.take();
         let mut changed = toast.is_some();
         while let Ok(Saved { channel, saved }) = self.saved.try_recv() {
@@ -407,11 +612,13 @@ impl UpdatesPart {
             }
         }
         let mut ended = false;
+        let mut restarting = false;
         if let Mode::Live(worker) = &self.mode {
             loop {
                 match worker.reports.try_recv() {
                     Ok(report) => {
                         changed = true;
+                        restarting |= matches!(report.state, State::Restarting { .. });
                         if self.asked.is_some_and(|asked| report.serial >= asked) && !busy(&report.state) {
                             self.asked = None;
                         }
@@ -433,18 +640,28 @@ impl UpdatesPart {
             self.last = None;
             changed = true;
         }
-        let working =
-            matches!(self.mode, Mode::Live(_)) && self.last.as_ref().is_some_and(|report| busy(&report.state));
-        (changed, toast, self.asked.is_some() || self.saving.is_some() || working)
+        // Before the launch check's first report About says Checking… too: the window keeps looking until it came.
+        let working = matches!(self.mode, Mode::Live(_)) && self.last.as_ref().is_none_or(|report| busy(&report.state));
+        let restart = restarting && !self.quit_asked;
+        self.quit_asked |= restart;
+        let start_sync = self.sync_back.take();
+        Pumped {
+            changed: changed || restart || start_sync,
+            toast,
+            busy: self.asked.is_some() || self.saving.is_some() || working,
+            restart,
+            start_sync,
+        }
     }
 
     /// About's update rows: the check's words, the channel the settings file holds, an older channel build (said,
-    /// never offered), and the notes of a version on offer.
+    /// never offered), and the notes of a NEWER version on offer, with what the dialog's button does now. An older
+    /// version's notes are never put here: DW-0789b's button would offer it.
     pub(crate) fn fill(&self, about: &mut About) {
         about.channel = self.channel;
         about.check = self.check();
         about.older = self.older();
-        if let Some(offer) = self.offer() {
+        if let Some(offer) = self.upgrade() {
             about.notes = ReleaseNotes {
                 version: offer.version.to_string(),
                 channel: self.channel,
@@ -456,7 +673,44 @@ impl UpdatesPart {
                     .filter(|line| !line.is_empty())
                     .map(str::to_string)
                     .collect(),
+                press: self.press(),
             };
+        }
+    }
+
+    /// General's "a new version" (DW-0781): a newer version on offer, what its button does now, and, while a press is
+    /// worked on or after one did not go through, the row's words in the caption's place. Never an older version.
+    pub(crate) fn update(&self) -> Update {
+        let Some(offer) = self.upgrade() else {
+            return Update::Current;
+        };
+        let press = self.press();
+        let says = match self.shown() {
+            Some(State::Available { .. } | State::ReadyToRestart { .. }) if press != Press::Wait => None,
+            _ => Some(self.check().says().to_string()),
+        };
+        Update::Available {
+            version: offer.version.to_string(),
+            press,
+            says,
+        }
+    }
+
+    /// The release notes (DW-0789b) have something real to show: a newer version is on offer.
+    pub(crate) fn has_notes(&self) -> bool {
+        self.upgrade().is_some()
+    }
+
+    /// What the update's button does now: wait while a press is out or the machine works; restart once the file is
+    /// verified; otherwise download.
+    fn press(&self) -> Press {
+        if self.asked.is_some() {
+            return Press::Wait;
+        }
+        match self.shown() {
+            Some(State::ReadyToRestart { .. }) => Press::Restart,
+            Some(State::Downloading { .. } | State::Verifying { .. } | State::Restarting { .. }) => Press::Wait,
+            _ => Press::Download,
         }
     }
 
@@ -469,15 +723,20 @@ impl UpdatesPart {
         Some(state)
     }
 
-    fn offer(&self) -> Option<&beebeeb_updater::Offer> {
-        match self.shown()? {
+    /// A NEWER version on offer, at any step of its way (a failed download it can resume included). Never a downgrade.
+    fn upgrade(&self) -> Option<&beebeeb_updater::Offer> {
+        let offer = match self.shown()? {
             State::Available { offer }
             | State::Downloading { offer, .. }
             | State::Verifying { offer }
             | State::ReadyToRestart { offer, .. }
-            | State::Restarting { offer } => Some(offer),
-            _ => None,
-        }
+            | State::Restarting { offer }
+            | State::Failed {
+                resume: Some(offer), ..
+            } => offer,
+            _ => return None,
+        };
+        (!offer.downgrade).then_some(offer)
     }
 
     fn older(&self) -> Option<OlderChannel> {
@@ -504,7 +763,13 @@ impl UpdatesPart {
             // The launch check is on its way.
             return UpdateCheck::Checking;
         };
-        let when = when(report.at, Local::now());
+        // The time of the last VERIFIED check: a background check that got no answer, or a refused one, keeps the
+        // offer on screen and does not make it look newer.
+        let at = report
+            .verified
+            .and_then(|secs| DateTime::from_timestamp(i64::try_from(secs).ok()?, 0))
+            .map_or(report.at, |at| at.with_timezone(&Local));
+        let when = when(at, Local::now());
         let checked = |words: String| UpdateCheck::Checked(words);
         match state {
             State::Idle => checked(NOT_CHECKED.into()),
@@ -527,6 +792,11 @@ impl UpdatesPart {
                 checked(format!("Version {} is downloaded and verified.", offer.version))
             }
             State::Restarting { .. } => checked(RESTARTING.into()),
+            // A download the server did not send: never "couldn't check", nor "no update information" for a 404.
+            State::Failed {
+                failure: Failure::ServerStatus(_),
+                resume: Some(_),
+            } => checked(NOT_SENT.into()),
             State::Failed { failure, .. } => failed(*failure, report.freshness),
         }
     }
@@ -554,7 +824,7 @@ pub(crate) fn failed(failure: Failure, freshness: Freshness) -> UpdateCheck {
         Failure::DownloadInterrupted { .. } => STOPPED_DOWNLOAD,
         Failure::DowngradeChanged => OFFER_CHANGED,
         Failure::Disk => NO_DISK,
-        Failure::EngineStillRunning => SYNC_DID_NOT_STOP,
+        Failure::EngineStillRunning => SYNC_UNCONFIRMED,
         Failure::InstallerDidNotStart => INSTALLER_DID_NOT_START,
     };
     match (words, freshness) {
@@ -595,18 +865,67 @@ fn channels(config: Option<&DesktopConfig>) -> (Channel, Channel) {
     (channel_of(chosen), channel_of(from))
 }
 
+/// Starts the verified installer and says whether it started. A release on Windows: the passive NSIS run
+/// ([`start_installer`]). A test hands in its own: no test ever starts an installer.
+#[cfg(any(windows, test))]
+pub(crate) type StartInstaller = Box<dyn FnMut(&VerifiedInstaller, EngineStopped) -> bool>;
+
+/// Windows: the crate's passive NSIS start (`VerifiedInstaller::start_nsis`, the only way to start one). Elsewhere
+/// nothing is started.
+#[cfg(any(windows, test))]
+// A Windows test build never calls it: no test there may start a real installer.
+#[cfg_attr(all(windows, test), allow(dead_code))]
+fn start_installer(installer: &VerifiedInstaller, stopped: EngineStopped) -> bool {
+    #[cfg(windows)]
+    {
+        installer.start_nsis(stopped)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (installer, stopped);
+        false
+    }
+}
+
 /// "Restart to update": the engine stops before the installer starts, and the installer is the crate's
 /// `VerifiedInstaller`, verified again and held at this moment by the machine.
 #[cfg(any(windows, test))]
 pub(crate) struct EngineApply<C: CredentialStores> {
     engine: Arc<Engine<C>>,
     identity: &'static EngineIdentity,
+    /// Where a failed start asks for sync back.
+    sync_back: SyncBack,
+    /// This hand-off's stop ended a running sync: a failed start asks for it back. A sync that was not running is
+    /// not started by an update that did not happen.
+    stopped_running: bool,
+    /// A stop was not confirmed in this process: the engine slot is empty since, so a later stop would say
+    /// `WasNotRunning` about a task that may still run. No proof is minted again until Beebeeb restarts.
+    unconfirmed: bool,
+    start: StartInstaller,
 }
 
 #[cfg(any(windows, test))]
 impl<C: CredentialStores> EngineApply<C> {
-    pub(crate) fn new(engine: Arc<Engine<C>>, identity: &'static EngineIdentity) -> Self {
-        Self { engine, identity }
+    /// The release's hand-off, with the real installer start ([`start_installer`]).
+    #[cfg_attr(all(windows, test), allow(dead_code))]
+    pub(crate) fn new(engine: Arc<Engine<C>>, identity: &'static EngineIdentity, sync_back: SyncBack) -> Self {
+        Self::starting_with(engine, identity, sync_back, Box::new(start_installer))
+    }
+
+    pub(crate) fn starting_with(
+        engine: Arc<Engine<C>>,
+        identity: &'static EngineIdentity,
+        sync_back: SyncBack,
+        start: StartInstaller,
+    ) -> Self {
+        Self {
+            engine,
+            identity,
+            sync_back,
+            stopped_running: false,
+            unconfirmed: false,
+            start,
+        }
     }
 }
 
@@ -614,52 +933,56 @@ impl<C: CredentialStores> EngineApply<C> {
 impl<C: CredentialStores> Apply for EngineApply<C> {
     /// The quit path's stop (`EngineActions::stop_for_quit` calls the same `Engine::stop`): the runner stops before
     /// its next operation and the queue in `state.db` stays as it is, so an upload that was cut is sent again by
-    /// the next start. A stop the engine did not confirm mints no proof: the installer is not started.
+    /// the next start. A stop the engine did not confirm mints no proof: the installer is not started. (On Windows
+    /// the engine also says `Unconfirmed` when its task ended and File Explorer's connection did not let go; the two
+    /// are one answer here, so the words say only that the stop was not confirmed: `SYNC_UNCONFIRMED`.)
     fn stop_engine(&mut self) -> Option<EngineStopped> {
-        match self.engine.stop() {
-            SyncStop::Stopped | SyncStop::WasNotRunning => Some(EngineStopped::engine_stopped_and_uploads_parked()),
+        if self.unconfirmed {
+            log("settings: an earlier stop of sync was not confirmed; the update waits for a restart of Beebeeb");
+            return None;
+        }
+        let stopped = match self.engine.stop() {
+            SyncStop::Stopped => true,
+            SyncStop::WasNotRunning => false,
             SyncStop::Unconfirmed => {
                 log("settings: sync did not confirm it stopped; the update was not started");
-                None
+                self.unconfirmed = true;
+                return None;
             }
-        }
+        };
+        self.stopped_running = stopped;
+        Some(EngineStopped::engine_stopped_and_uploads_parked())
     }
 
-    /// Windows: the passive NSIS installer, then the channel that served it is recorded (spec §4: the shell writes
-    /// `installed_release_channel` when the installer started). Elsewhere nothing is started.
+    /// The installer, then the channel that served it is recorded (spec §4: the shell writes
+    /// `installed_release_channel` when the installer started).
     fn launch(&mut self, installer: &VerifiedInstaller, offer: &Offer, stopped: EngineStopped) -> bool {
-        #[cfg(windows)]
-        {
-            if !installer.start_nsis(stopped) {
-                return false;
-            }
-            let served = offer.channel;
-            let recorded = DesktopConfig::update_for(self.identity, |config| {
-                let channel = release_channel(match served {
-                    beebeeb_updater::Channel::Stable => Channel::Stable,
-                    beebeeb_updater::Channel::Beta => Channel::Beta,
-                    beebeeb_updater::Channel::Alpha => Channel::Alpha,
-                });
-                config.installed_release_channel = Some(channel);
-                (true, ())
-            });
-            if recorded.is_err() {
-                log("settings: the installer started; the channel it came from was not recorded");
-            }
-            true
+        if !(self.start)(installer, stopped) {
+            return false;
         }
-        #[cfg(not(windows))]
-        {
-            let _ = (installer, offer, stopped, self.identity);
-            false
+        let served = match offer.channel {
+            beebeeb_updater::Channel::Stable => ReleaseChannel::Stable,
+            beebeeb_updater::Channel::Beta => ReleaseChannel::Beta,
+            beebeeb_updater::Channel::Alpha => ReleaseChannel::Alpha,
+        };
+        let recorded = DesktopConfig::update_for(self.identity, |config| {
+            config.installed_release_channel = Some(served);
+            (true, ())
+        });
+        if recorded.is_err() {
+            log("settings: the installer started; the channel it came from was not recorded");
         }
+        true
     }
 
-    /// The installer did not start after sync was stopped. Starting sync again needs the shell's start (the sync
-    /// folder and the first-run state), which this part does not hold: the same gap as the quit path's
-    /// `resume_after_cancelled_quit`. Sync starts again with the app's next start of sync.
+    /// The installer did not start after sync was stopped for it: the shell starts sync again with its own start
+    /// (the folder and the first-run state are the shell's), through `SyncBack` and the window's poll. Only a sync
+    /// this hand-off stopped.
     fn resume_engine(&mut self) {
-        log("settings: the installer did not start; sync stays stopped until it is started again");
+        if std::mem::take(&mut self.stopped_running) {
+            log("settings: the installer did not start; sync is started again");
+            self.sync_back.ask();
+        }
     }
 }
 
@@ -683,18 +1006,53 @@ pub(crate) fn release_config(
     })
 }
 
+/// What a build sets its updater up with, or why it has none.
+#[cfg(any(windows, test))]
+pub(crate) enum ReleaseSetup {
+    /// Not a release build (no build time, or no release version): no updater, and not one request.
+    NotARelease,
+    /// A release build that could not set its updater up (no local data folder; a version or a trust it cannot
+    /// read): About says the updater did not start, never only the versions.
+    Broken,
+    /// The release's config, and where its record lives.
+    Ready {
+        config: beebeeb_updater::Config,
+        record: PathBuf,
+    },
+}
+
+/// The release glue, testable on every platform: the build's time and version (`host::BUILD_NOT_BEFORE`,
+/// `BEEBEEB_RELEASE_VERSION`) and this app's local data folder, as [`UpdatesPart::for_this_pc`] passes them.
+#[cfg(any(windows, test))]
+pub(crate) fn release_setup(build_time: Option<u64>, version: Option<&str>, folder: Option<PathBuf>) -> ReleaseSetup {
+    if build_time.is_none() || version.is_none() {
+        return ReleaseSetup::NotARelease;
+    }
+    let Some(folder) = folder else {
+        return ReleaseSetup::Broken;
+    };
+    match release_config(build_time, version, &folder) {
+        Some(config) => ReleaseSetup::Ready {
+            config,
+            record: folder.join("updater.json"),
+        },
+        None => ReleaseSetup::Broken,
+    }
+}
+
 /// The release build's updater: the trust baked into this build, the one host, this PC's record and folder.
 #[cfg(all(windows, not(test)))]
 mod release {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use beebeeb_engine::app::{CredentialStores, Engine};
     use beebeeb_engine::identity::EngineIdentity;
-    use beebeeb_updater::host::{BUILD_MARK, BUILD_NOT_BEFORE, FileStore, SystemClock};
+    use beebeeb_updater::host::{FileStore, SystemClock};
     use beebeeb_updater::net::HttpsClient;
-    use beebeeb_updater::{Http, Response, Unreachable, Updater};
+    use beebeeb_updater::{Http, Response, Unreachable};
 
-    use super::{Drive, EngineApply, MakeDrive};
+    use super::{Drive, EngineApply, MakeDrive, Watching};
     use crate::engine_host::log;
 
     /// The https client, or none when it could not be built: every check then ends offline, in sight.
@@ -712,17 +1070,13 @@ mod release {
         }
     }
 
-    /// `None`: not a release build (no build time, or no release version), so no updater runs.
     pub(super) fn updater<C: CredentialStores + 'static>(
         engine: Arc<Engine<C>>,
         identity: &'static EngineIdentity,
-    ) -> Option<MakeDrive> {
-        // Keeps the build's mark in the binary: the release workflow reads it there (as `windows_release_trust` does).
-        std::hint::black_box(BUILD_MARK);
-        let dirs = rune::dirs::AppDirs::new(crate::shell::identity::AppIdentity::CURRENT.state_dir_id())?;
-        let folder = crate::shell::local_data_of(&dirs, "windows");
-        let config = super::release_config(BUILD_NOT_BEFORE, option_env!("BEEBEEB_RELEASE_VERSION"), &folder)?;
-        Some(Box::new(move || {
+        config: beebeeb_updater::Config,
+        record: PathBuf,
+    ) -> MakeDrive {
+        Box::new(move |sync_back| {
             let client = HttpsClient::new().map_or_else(
                 |_| {
                     log("settings: the updater's https client could not be built");
@@ -730,10 +1084,10 @@ mod release {
                 },
                 Client::Https,
             );
-            let store = FileStore::new(folder.join("updater.json"));
-            let apply = EngineApply::new(engine, identity);
-            Box::new(Updater::new(config, client, SystemClock, store, apply)) as Box<dyn Drive>
-        }))
+            let store = FileStore::new(record);
+            let apply = EngineApply::new(engine, identity, sync_back);
+            Box::new(Watching::new(config, client, SystemClock, store, apply)) as Box<dyn Drive>
+        })
     }
 }
 
