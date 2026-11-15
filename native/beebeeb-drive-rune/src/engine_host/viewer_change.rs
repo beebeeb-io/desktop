@@ -60,6 +60,25 @@ pub(super) struct Changes {
     pending: Vec<Message>,
 }
 
+impl Message {
+    /// A change's text, overwritten: the answer is never taken.
+    fn wipe(self) {
+        if let Answer::Change { settled, .. } = self.answer {
+            wipe(settled);
+        }
+    }
+}
+
+/// Answers never taken (the source is let go: the file closed, the window went) are overwritten with it: an answer
+/// kept for the next pump (`pending`) and one still on its way back alike.
+impl Drop for Changes {
+    fn drop(&mut self) {
+        for message in self.pending.drain(..).chain(self.rx.try_iter()) {
+            message.wipe();
+        }
+    }
+}
+
 impl Default for Changes {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
@@ -125,7 +144,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let started = std::thread::Builder::new().name("viewer-change".into()).spawn(move || {
             let (settled, holds) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&engine)))
                 .unwrap_or((Settled::Failed, None));
-            let _ = tx.send(Message {
+            let sent = tx.send(Message {
                 file_id: id,
                 session: stamp.session,
                 account: stamp.account,
@@ -136,6 +155,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     worker: true,
                 },
             });
+            // Nobody takes it any more (the source is gone): its text is overwritten here.
+            if let Err(mpsc::SendError(message)) = sent {
+                message.wipe();
+            }
             engine.wake();
         });
         if started.is_err() {

@@ -653,6 +653,28 @@ mod queued_save_tests {
         );
     }
 
+    /// Delta check of #432 round 2: the record is read for its own opening only. A save of the later opening lands
+    /// 4 → 5; a late read or save of the earlier opening finds none of it (no own version, no adoption: Conflict).
+    #[test]
+    fn an_earlier_opening_reads_nothing_of_a_later_ones_saves() {
+        let (store, s) = (ViewerSavesStore::default(), session());
+        let earlier = open_saves(&store, "f", s);
+        let now = open_saves(&store, "f", s);
+        let record = save(s, now, 4, "op-now");
+        assert!(remember_queued(&store, "f", record.clone()));
+        assert!(note_landed(&store, "f", &record, 5));
+        assert_eq!(
+            own_versions(&store, "f", s, now, |_| None).get(&5),
+            Some(&4),
+            "the control"
+        );
+        assert!(own_versions(&store, "f", s, earlier, |_| Some(5)).is_empty());
+        assert_eq!(
+            base_after_own_landed_save(&store, "f", s, earlier, 4, 5, |_| Some(5)),
+            4
+        );
+    }
+
     /// Delta check of #432 round 2, P3: a new opening drops the records of other sessions; a session transition of
     /// the account's runtime empties them all; a queued save keeps only its latest record.
     #[test]
