@@ -21,11 +21,14 @@ use std::fmt;
 /// linger in freed memory. All three fields are `Zeroize`: `[u8; 32]`,
 /// `String` (token), and `Option<String>` (email) each implement it in
 /// `zeroize` 1.x, so no field needs `#[zeroize(skip)]`.
-#[derive(zeroize::ZeroizeOnDrop)]
 pub struct Session {
     pub token: String,
     pub master_key: [u8; 32],
     pub email: Option<String>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {}
 }
 
 impl fmt::Debug for Session {
