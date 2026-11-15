@@ -36,18 +36,42 @@ pub enum Route {
 
 /// The route each codec SHIPS with: one row per codec (a test holds every codec to exactly one row).
 ///
-/// - Patent-pool codecs (D-MED-2 (c)): FilmCraft's decoders, ON until counsel's answer flips a row: H.264, AAC,
-///   AC-3, E-AC-3, MPEG-2, ProRes, DNxHD.
-/// - HEVC: FilmCraft's decoder is built, and its route ships OFF: the shipped route is the system's decoder.
-/// - Royalty-free (or expired) codecs: FilmCraft's decoders.
+/// Which decoder is COMPILED IN is decided by this crate's Cargo features (legal brief F1, 2026-11-15: a route that is
+/// off is not the same as not shipped; the vendored FilmCraft hub makes every codec crate an optional feature, the
+/// scaffold owns that and the release gate that counts it). A codec's row is `Rust` only when its feature is on:
+/// - OFF in the alpha, compiled out until counsel clears them: features `h264`, `aac`, `eac3` (the system decoder
+///   serves them: row `System`), and `ac3`, `mpeg2`, `prores`, `dnx` (no system decoder: row `Unavailable`);
+/// - HEVC: no feature exists, never compiled in: `System` only;
+/// - royalty-free or expired (AV1, VP8, VP9, Opus, Vorbis, FLAC, ALAC, MP3/MP2/MP1, PCM): always `Rust`.
 pub const ROUTES: &[(Codec, Route)] = &[
+    #[cfg(feature = "h264")]
     (Codec::H264, Route::Rust),
+    #[cfg(not(feature = "h264"))]
+    (Codec::H264, Route::System),
+    #[cfg(feature = "aac")]
     (Codec::Aac, Route::Rust),
+    #[cfg(not(feature = "aac"))]
+    (Codec::Aac, Route::System),
+    #[cfg(feature = "ac3")]
     (Codec::Ac3, Route::Rust),
+    #[cfg(not(feature = "ac3"))]
+    (Codec::Ac3, Route::Unavailable),
+    #[cfg(feature = "eac3")]
     (Codec::Eac3, Route::Rust),
+    #[cfg(not(feature = "eac3"))]
+    (Codec::Eac3, Route::System),
+    #[cfg(feature = "mpeg2")]
     (Codec::Mpeg2, Route::Rust),
+    #[cfg(not(feature = "mpeg2"))]
+    (Codec::Mpeg2, Route::Unavailable),
+    #[cfg(feature = "prores")]
     (Codec::ProRes, Route::Rust),
+    #[cfg(not(feature = "prores"))]
+    (Codec::ProRes, Route::Unavailable),
+    #[cfg(feature = "dnx")]
     (Codec::Dnx, Route::Rust),
+    #[cfg(not(feature = "dnx"))]
+    (Codec::Dnx, Route::Unavailable),
     (Codec::Hevc, Route::System),
     (Codec::Vp8, Route::Rust),
     (Codec::Vp9, Route::Rust),
@@ -86,16 +110,26 @@ mod tests {
             assert_eq!(rows, 1, "{codec:?}");
         }
         assert_eq!(ROUTES.len(), Codec::ALL.len());
-        // The owner's ruling, as it ships: HEVC on the system's decoder, the other pool codecs on FilmCraft's.
+        // The legal brief's F1, as it ships: HEVC on the system's decoder only, and no row says `Rust` for a codec
+        // whose feature is off (the feature builds the decoder in; the row follows it).
         assert_eq!(route(Codec::Hevc), Route::System);
+        assert_eq!(route(Codec::H264) == Route::Rust, cfg!(feature = "h264"));
+        assert_eq!(route(Codec::Aac) == Route::Rust, cfg!(feature = "aac"));
+        assert_eq!(route(Codec::Ac3) == Route::Rust, cfg!(feature = "ac3"));
+        assert_eq!(route(Codec::Eac3) == Route::Rust, cfg!(feature = "eac3"));
+        assert_eq!(route(Codec::Mpeg2) == Route::Rust, cfg!(feature = "mpeg2"));
+        assert_eq!(route(Codec::ProRes) == Route::Rust, cfg!(feature = "prores"));
+        assert_eq!(route(Codec::Dnx) == Route::Rust, cfg!(feature = "dnx"));
         for codec in [
-            Codec::H264,
-            Codec::Aac,
-            Codec::Ac3,
-            Codec::Eac3,
-            Codec::Mpeg2,
-            Codec::ProRes,
-            Codec::Dnx,
+            Codec::Vp8,
+            Codec::Vp9,
+            Codec::Av1,
+            Codec::Mp3,
+            Codec::Flac,
+            Codec::Alac,
+            Codec::Opus,
+            Codec::Vorbis,
+            Codec::Pcm,
         ] {
             assert_eq!(route(codec), Route::Rust, "{codec:?}");
         }
