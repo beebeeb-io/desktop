@@ -186,6 +186,9 @@ enum Answer {
     },
 }
 
+/// How long a Backups id that came back none (or not at all) waits before it is read again.
+const ROOT_RETRY: Duration = Duration::from_secs(3);
+
 /// See the module's doc.
 pub struct LocalCopies<E: FilesEngine> {
     engine: Arc<E>,
@@ -202,6 +205,9 @@ pub struct LocalCopies<E: FilesEngine> {
     changes: Vec<Change>,
     /// The Backups folder's id, read for `seen`'s account. The outer `None`: not read (or not readable).
     root: Option<Option<String>>,
+    /// When the Backups id was last asked for, and how long a none or failed answer waits before it is asked again.
+    root_asked: Option<Instant>,
+    pub(crate) root_retry: Duration,
     /// The one timer that wakes the window when a message's time is over ([`Self::wake_after`]).
     wakes: Option<mpsc::Sender<Instant>>,
 }
@@ -221,6 +227,8 @@ impl<E: FilesEngine> LocalCopies<E> {
             in_flight: HashSet::new(),
             changes: Vec::new(),
             root: None,
+            root_asked: None,
+            root_retry: ROOT_RETRY,
             wakes: None,
         }
     }
@@ -259,9 +267,15 @@ impl<E: FilesEngine> LocalCopies<E> {
         self.in_flight.clear();
         self.changes.clear();
         self.root = None;
+        self.root_asked = Some(Instant::now());
         self.send(Ask::BackupsRoot);
         true
     }
+
+    /// The sidebar's Backups has no folder to show: ask again, now and then, while the answer is none or failed (a
+    /// first sync brings the folder in, and a first backup creates it). Never once per session; never while a folder
+    /// is known; at most one ask per [`ROOT_RETRY`], and the window is woken for the next one.
+    pub fn look_for_backups(&mut self) {}
 
     fn send(&mut self, ask: Ask) -> bool {
         let (true, Some(account)) = self.seen.clone() else {

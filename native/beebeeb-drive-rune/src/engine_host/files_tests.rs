@@ -669,6 +669,10 @@ fn the_backups_id_is_read_per_session_and_handed_out_for_the_account_it_was_read
     copies.pump();
     settled(&mut copies);
     assert_eq!(copies.backups_root().as_deref(), Some("b-root"));
+    // A locked vault hands nothing out, before any pump.
+    fake.s().unlocked = false;
+    assert_eq!(copies.backups_root(), None);
+    fake.s().unlocked = true;
     // Another account: the first one's id is not handed out, before any pump.
     fake.s().account = Some("b@example.eu".into());
     assert_eq!(copies.backups_root(), None);

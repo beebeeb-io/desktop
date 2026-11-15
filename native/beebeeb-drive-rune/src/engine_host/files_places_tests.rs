@@ -22,6 +22,7 @@ use super::super::files_window_support::{drawn, settle, until_drawn, window};
 use super::*;
 use crate::engine_host::EngineFilesSource;
 use crate::frames::files::source::{ActionError, FilesSource};
+use crate::shell::app::{Screen, Section};
 
 const PASSWORD: &str = "an invented password for places";
 /// A second valid 12-word phrase (a BIP-39 test vector), for the second account.
@@ -69,6 +70,11 @@ fn put(db: &StateDb, id: &str, path: &str, parent: Option<&str>, kind: ItemKind)
 /// Two accounts on one fake. The first account's local state holds the Backups tree (this PC's backup and a phone's)
 /// and a plain folder.
 fn world(tag: &str) -> World {
+    world_with(tag, true)
+}
+
+/// `with_backups`: false is an account whose state holds no Backups folder (nothing backed up yet).
+fn world_with(tag: &str, with_backups: bool) -> World {
     let (first, _) = FakeAccount::register(&format!("places-one-{tag}@example.eu"), PASSWORD, TEST_PHRASE);
     let (second, _) = FakeAccount::register(&format!("places-two-{tag}@example.eu"), PASSWORD, OTHER_PHRASE);
     let (first, second) = (Arc::new(first), Arc::new(second));
@@ -112,34 +118,38 @@ fn world(tag: &str) -> World {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.db");
     let db = StateDb::open(&path).unwrap();
-    put(&db, ROOT, "/Backups", None, ItemKind::Folder);
-    db.mark_backups_root_for_test(ROOT).unwrap();
-    put(&db, THIS_PC, "/Backups/Invented Laptop", Some(ROOT), ItemKind::Folder);
-    put(&db, OTHER_PC, "/Backups/Invented Phone", Some(ROOT), ItemKind::Folder);
-    put(
-        &db,
-        DOCS,
-        "/Backups/Invented Laptop/Documents",
-        Some(THIS_PC),
-        ItemKind::Folder,
-    );
-    put(
-        &db,
-        NOTE,
-        "/Backups/Invented Laptop/Documents/note.txt",
-        Some(DOCS),
-        ItemKind::File,
-    );
+    if with_backups {
+        put(&db, ROOT, "/Backups", None, ItemKind::Folder);
+        db.mark_backups_root_for_test(ROOT).unwrap();
+        put(&db, THIS_PC, "/Backups/Invented Laptop", Some(ROOT), ItemKind::Folder);
+        put(&db, OTHER_PC, "/Backups/Invented Phone", Some(ROOT), ItemKind::Folder);
+        put(
+            &db,
+            DOCS,
+            "/Backups/Invented Laptop/Documents",
+            Some(THIS_PC),
+            ItemKind::Folder,
+        );
+        put(
+            &db,
+            NOTE,
+            "/Backups/Invented Laptop/Documents/note.txt",
+            Some(DOCS),
+            ItemKind::File,
+        );
+    }
     put(&db, PLAIN, "/Plain", None, ItemKind::Folder);
     put(&db, PLAIN_FILE, "/Plain/plain.txt", Some(PLAIN), ItemKind::File);
     db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
         .unwrap();
-    db.set_backup_layout(&BackupLayout {
-        root_id: ROOT.into(),
-        device_folder_id: THIS_PC.into(),
-        device_folder_name: "Invented Laptop".into(),
-    })
-    .unwrap();
+    if with_backups {
+        db.set_backup_layout(&BackupLayout {
+            root_id: ROOT.into(),
+            device_folder_id: THIS_PC.into(),
+            device_folder_name: "Invented Laptop".into(),
+        })
+        .unwrap();
+    }
     drop(db);
     engine.use_local_state_for_test(path);
     World {
@@ -418,7 +428,11 @@ fn this_pcs_backup_row_says_this_pc_and_others_say_nothing() {
 
 /// Pump the source until it hands out the Backups id (the worker's read lands on `changes`).
 fn backups_root_of(source: &mut Source) -> Option<String> {
-    let until = std::time::Instant::now() + WAIT;
+    backups_root_of_for(source, WAIT)
+}
+
+fn backups_root_of_for(source: &mut Source, wait: Duration) -> Option<String> {
+    let until = std::time::Instant::now() + wait;
     while std::time::Instant::now() < until {
         source.changes();
         if let Some(root) = source.backups_root() {
@@ -456,8 +470,13 @@ fn the_sidebars_backups_opens_the_device_rows_and_nothing_in_the_tree_changes() 
     until_drawn(&mut rt, "This PC");
     let now = drawn(&rt);
     assert!(now.contains("Invented Laptop"), "the device rows are drawn:\n{now}");
+    // The section STAYS Backups on the next frames (the real engine's crumbs start at the Files root).
+    assert_eq!(
+        section_of(&rt),
+        Some(Section::Backups),
+        "the sidebar's Backups jumped away:\n{now}"
+    );
     assert_eq!(rt.state.listing.folder.id.as_deref(), Some(ROOT));
-    // Nothing in the tree offers rename, move or delete: the root, a device row and a file inside one.
     assert!(rt.state.in_protected_folder());
     assert!(rt.state.selects_one_at_a_time());
     let devices = [row(THIS_PC, Some(ROOT), true), row(OTHER_PC, Some(ROOT), true)];
@@ -466,8 +485,74 @@ fn the_sidebars_backups_opens_the_device_rows_and_nothing_in_the_tree_changes() 
         rt.state.actions.source.protection(Some(ROOT), None),
         Some(Protection::BackupsRoot)
     );
+    // A file inside a device's backup: the section stays, and F2 says it cannot change (the window's own word).
+    rt.update(|s, _| s.open_folder(Some(DOCS.to_string())));
+    until_drawn(&mut rt, "note.txt");
+    assert_eq!(section_of(&rt), Some(Section::Backups));
+    let note = row(NOTE, Some(DOCS), false);
     assert_eq!(
-        rt.state.actions.source.protection(Some(ROOT), Some(&devices[0])),
+        rt.state.actions.source.protection(Some(DOCS), Some(&note)),
         Some(Protection::DeviceBackup(THIS_PC.into()))
     );
+    rt.update(|s, _| s.select_only(0));
+    rt.key(rune::KeyEvent {
+        key: rune::Key::Function(2),
+        mods: rune::Mods::default(),
+    });
+    settle(&mut rt);
+    assert!(rt.state.actions.rename.is_none(), "a rename began inside a backup");
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(crate::frames::files::Toast::Failed(
+            crate::frames::files::source::Action::Rename,
+            ActionError::Protected
+        ))
+    );
+}
+
+fn section_of(rt: &rune::Runtime<crate::State>) -> Option<Section> {
+    match rt.state.shell.app.screen() {
+        Screen::Drive(route) => Some(route.section),
+        _ => None,
+    }
+}
+
+#[test]
+fn an_account_with_no_backups_folder_draws_no_backups_yet_and_never_the_dev_card() {
+    let world = world_with("none", false);
+    let mut rt = window(&world.engine);
+    sign_in(&world.engine, &world.first, TEST_PHRASE);
+    settle(&mut rt);
+    rt.update(|s, _| {
+        crate::shell::host::dispatch(
+            s,
+            crate::shell::app::Event::Navigate(crate::shell::app::Route::section(Section::Backups)),
+        )
+    });
+    until_drawn(&mut rt, "No backups yet");
+    let now = drawn(&rt);
+    assert!(
+        now.contains("Turn on backups in Settings \u{203A} Backups."),
+        "the line:\n{now}"
+    );
+    assert!(!now.contains("NOT BUILT YET"), "the dev card in a real build:\n{now}");
+    assert_eq!(section_of(&rt), Some(Section::Backups));
+}
+
+#[test]
+fn the_backups_id_is_read_again_when_it_first_came_back_none() {
+    // This PC's state holds no Backups folder yet: the first read answers none, and the section would stay on it.
+    let world = world_with("later", false);
+    sign_in(&world.engine, &world.first, TEST_PHRASE);
+    let mut source = EngineFilesSource::new(world.engine.clone());
+    assert_eq!(backups_root_of_for(&mut source, Duration::from_millis(300)), None);
+    // The folder comes to be (a first sync, a first backup).
+    {
+        let db = StateDb::open(&world._dir.path().join("state.db")).unwrap();
+        put(&db, ROOT, "/Backups", None, ItemKind::Folder);
+        db.mark_backups_root_for_test(ROOT).unwrap();
+    }
+    source.copies.root_retry = Duration::ZERO;
+    source.look_for_backups();
+    assert_eq!(backups_root_of(&mut source).as_deref(), Some(ROOT));
 }
