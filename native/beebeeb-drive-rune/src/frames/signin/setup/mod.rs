@@ -330,6 +330,18 @@ impl Ui {
         self.source.loading(step)
     }
 
+    /// Whether this step's read failed (see `SetupSource::failed`).
+    pub fn failed(&self, step: Step) -> bool {
+        self.source.failed(step)
+    }
+
+    /// "Try again" on step 3 after a failed read.
+    pub fn retry_backup(&mut self) {
+        if self.step == Step::Backup && self.failed(Step::Backup) {
+            self.source.retry_backups();
+        }
+    }
+
     /// Whether the File Explorer step is still asking for the sync folder.
     pub fn asks_folder(&self) -> bool {
         self.available(Step::Explorer) && self.folder != FolderAsk::Settled

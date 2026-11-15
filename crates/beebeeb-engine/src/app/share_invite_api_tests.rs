@@ -689,9 +689,9 @@ fn share_invite_answers_and_logs_carry_no_key_material() {
         answers[0],
         InviteAnswer::Unfinished {
             invite_id: INVITE.into(),
-            approval_sent: false,
+            approval_sent: true,
         },
-        "a refused approval: they hold no key they can open"
+        "a 500 is not a refusal: the approval may have been applied"
     );
     assert!(
         logs.contains("an invite that holds no key could not be withdrawn"),
@@ -828,5 +828,25 @@ fn share_invite_unfinished_says_whether_the_approval_left_without_an_answer() {
             },
             "{item}: the approval left, its answer was lost, and the withdrawal failed"
         );
+    }
+}
+
+/// Review of desktop#427 (P2): only a 4xx proves the approval was refused; a 5xx may have been applied.
+#[test]
+fn share_invite_unfinished_is_sent_for_a_500_and_not_for_a_4xx() {
+    for (status, sent) in [(500u16, true), (503, true), (403, false), (409, false)] {
+        for item in [FILE, FOLDER] {
+            let f = fixture(Some(person(49).public));
+            f.server.lock().unwrap().approve_status = status;
+            f.server.lock().unwrap().cancel_status = 500;
+            assert_eq!(
+                f.invite(item),
+                InviteAnswer::Unfinished {
+                    invite_id: INVITE.into(),
+                    approval_sent: sent,
+                },
+                "{item}: approve answered {status}"
+            );
+        }
     }
 }

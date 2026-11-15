@@ -61,6 +61,8 @@ struct Fake {
     reads_choices: AtomicBool,
     choices: Mutex<Vec<BackupChoice>>,
     choices_held: Mutex<()>,
+    /// The read of them fails.
+    choices_fail: AtomicBool,
 }
 
 fn session(number: u64) -> SessionGeneration {
@@ -94,6 +96,7 @@ fn fake() -> Arc<Fake> {
         reads_choices: AtomicBool::new(false),
         choices: Mutex::default(),
         choices_held: Mutex::new(()),
+        choices_fail: AtomicBool::new(false),
     })
 }
 
@@ -146,9 +149,12 @@ impl SetupEngine for Fake {
     fn sync_folder(&self) -> Option<PathBuf> {
         self.folder.lock().unwrap().clone()
     }
-    fn backup_choices(&self) -> Vec<BackupChoice> {
+    fn backup_choices(&self) -> Option<Vec<BackupChoice>> {
         let _held = self.choices_held.lock().unwrap();
-        self.choices.lock().unwrap().clone()
+        if self.choices_fail.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(self.choices.lock().unwrap().clone())
     }
     fn reads_backup_choices(&self) -> bool {
         self.reads_choices.load(Ordering::SeqCst)
@@ -298,14 +304,54 @@ fn the_backup_step_is_not_called_unavailable_while_its_folders_are_still_being_r
     assert!(!source.loading(Step::Notifications), "no other step is loading");
     drop(held);
     let began = Instant::now();
-    // The answer: no folders were found, so now the step says it is not available.
-    while source.available(Step::Backup) {
+    // The answer: no folders were found. That is an answer, not an absence: the step stays (it is never "not in
+    // this version" while Backups is on), is no longer loading, and did not fail.
+    let began = Instant::now();
+    while source.loading(Step::Backup) {
         assert!(began.elapsed() < Duration::from_secs(10), "the read never answered");
         source.poll();
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert!(source.available(Step::Backup) && !source.failed(Step::Backup));
     assert!(source.folders().is_empty());
-    assert!(!source.loading(Step::Backup), "the answer ends the loading");
+}
+
+#[test]
+fn a_failed_folder_read_is_a_failure_with_try_again_never_not_in_this_version() {
+    let engine = fake();
+    engine.choices_fail.store(true, Ordering::SeqCst);
+    let (mut source, held) = backup_read_held(&engine);
+    drop(held);
+    let began = Instant::now();
+    while !source.failed(Step::Backup) {
+        assert!(began.elapsed() < Duration::from_secs(10), "the read never answered");
+        source.poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(source.available(Step::Backup), "the step stays: it is not an absence");
+    assert!(!source.loading(Step::Backup));
+    // Try again: the read goes out again, and its answer replaces the failure.
+    engine.choices_fail.store(false, Ordering::SeqCst);
+    *engine.choices.lock().unwrap() = vec![BackupChoice {
+        key: "documents".into(),
+        name: "Documents".into(),
+        on: true,
+        items: Some(3),
+    }];
+    source.retry_backups();
+    assert!(
+        !source.failed(Step::Backup),
+        "not drawn as failed while it is read again"
+    );
+    while source.folders().is_empty() {
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "the second read never answered"
+        );
+        source.poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!source.failed(Step::Backup) && !source.loading(Step::Backup));
 }
 
 #[test]

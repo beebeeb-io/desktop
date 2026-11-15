@@ -148,6 +148,12 @@ struct Run<'a> {
     client: reqwest::Client,
 }
 
+/// Whether an approval that did not complete may have been applied: it left and the answer was a server error
+/// (5xx), not an answer that proves a refusal. Only a 4xx proves the server did not take it.
+fn approval_may_have_landed(outcome: &InviteOutcome, status: u16) -> bool {
+    matches!(outcome, InviteOutcome::AwaitingApproval { .. }) && !(400..500).contains(&status)
+}
+
 /// A request that got no answer (the network dropped, or it never left).
 struct Unanswered;
 
@@ -357,9 +363,13 @@ impl<C: CredentialStores> Engine<C> {
                     };
                 }
             };
+            let status = resp.status;
             match flow.on_response(resp).map_err(flow_refusal)? {
                 InviteStep::Send(next) => req = next,
-                InviteStep::Done(outcome) => return Ok((outcome, false)),
+                InviteStep::Done(outcome) => {
+                    let sent = approval_may_have_landed(&outcome, status);
+                    return Ok((outcome, sent));
+                }
             }
         }
     }
@@ -373,13 +383,18 @@ impl<C: CredentialStores> Engine<C> {
         first: FolderStep,
     ) -> Result<(InviteOutcome, bool), InviteRefused> {
         let mut step = first;
+        // The status of the last answer: only a 4xx proves the approval was refused (see `approval_may_have_landed`).
+        let mut status = 0;
         loop {
             let FolderSend {
                 request,
                 mark_custody_seen,
             } = match step {
                 FolderStep::Send(send) => send,
-                FolderStep::Done(outcome) => return Ok((outcome, false)),
+                FolderStep::Done(outcome) => {
+                    let sent = approval_may_have_landed(&outcome, status);
+                    return Ok((outcome, sent));
+                }
                 // A link is never what an invite makes.
                 FolderStep::LinkCreated(_) => return Err(InviteRefused::Failed),
             };
@@ -406,6 +421,7 @@ impl<C: CredentialStores> Engine<C> {
                     };
                 }
             };
+            status = resp.status;
             step = flow.on_response(resp).map_err(flow_refusal)?;
         }
     }

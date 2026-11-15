@@ -431,6 +431,12 @@ fn change_password(ui: &mut AccountUi) -> Option<&'static str> {
         return None;
     }
     let source = ui.source.as_deref_mut()?;
+    // A change from an earlier visit of this page is still out: this press is refused with nothing sent, and the
+    // page shows that wait. Its answer is that change's, and is drawn as that (never as a second press's).
+    if source.call_out(CallKind::ChangePassword) {
+        ui.form.waiting = Some(CallKind::ChangePassword);
+        return None;
+    }
     let f = &mut ui.form;
     // The new password first: a wrong current password must not be asked twice for a typo.
     if !source.password_strength(&Password::from_field(&f.new.text)).accepted() {

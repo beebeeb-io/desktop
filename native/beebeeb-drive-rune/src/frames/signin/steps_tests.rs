@@ -1000,3 +1000,27 @@ fn where_the_source_has_in_app_doors_both_doors_to_another_device_are_drawn() {
     click(&mut rt, "link-0-box");
     assert!(a11y(&rt).contains("I have another device signed in"));
 }
+
+/// Review of #427 (P2): the Phrase step's hint offered "approve from another device" where the source has none.
+#[test]
+fn the_phrase_hint_names_another_device_only_where_the_source_has_the_door() {
+    let (mut rt, _) = form(Script {
+        in_app_doors: false,
+        ..Script::default()
+    });
+    ui(&mut rt).screen = Screen::Phrase;
+    rt.frame(0.016);
+    let page = a11y(&rt);
+    assert!(page.contains("Enter your 12 words"), "the hint is there: {page}");
+    assert!(
+        !page.contains("approve from another device"),
+        "no clause without the door: {page}"
+    );
+    let (mut rt, _) = form(Script::default());
+    ui(&mut rt).screen = Screen::Phrase;
+    rt.frame(0.016);
+    assert!(
+        a11y(&rt).contains("approve from another device"),
+        "with the door it is drawn"
+    );
+}

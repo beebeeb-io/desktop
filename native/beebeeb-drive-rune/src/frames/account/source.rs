@@ -750,6 +750,11 @@ pub trait AccountSource {
     fn start_call(&mut self, _kind: CallKind, _input: &str, _password: &str) -> bool {
         false
     }
+    /// Whether a call of this kind is out now (started, its answer not taken yet). A page that was left and opened
+    /// again asks this before it takes a new press: it shows the wait instead of starting a second call.
+    fn call_out(&self, _kind: CallKind) -> bool {
+        false
+    }
     /// The answer of a call that was started, once; one that belongs to a session or an account that is over is
     /// dropped by the source.
     fn call_answer(&mut self) -> Option<(CallKind, Answered)> {

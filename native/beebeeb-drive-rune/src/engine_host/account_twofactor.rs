@@ -262,12 +262,23 @@ fn work<C: CredentialStores>(
 }
 
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
+    /// See [`crate::frames::account::source::AccountSource::call_out`].
+    pub(super) fn a_call_out(&self, kind: CallKind) -> bool {
+        self.calls.out.contains(&kind)
+    }
+
     /// See [`crate::frames::account::source::AccountSource::start_call`].
     pub(super) fn start_a_call(&mut self, kind: CallKind, input: &str, password: &str) -> bool {
         if !self.open() {
             return false;
         }
         if self.calls.out.contains(&kind) {
+            if kind == CallKind::ChangePassword {
+                // A second press while a change is out is never "started", and never shares the first one's
+                // answer: refused, and the password its step-up kept is wiped (review of desktop#427).
+                self.password.forget();
+                return false;
+            }
             return true;
         }
         let made_for = stamp(&self.engine);

@@ -485,3 +485,44 @@ fn a_password_change_answered_after_the_session_ended_is_dropped() {
         "nothing of the ended session is answered"
     );
 }
+
+#[test]
+fn a_second_password_press_while_the_first_is_out_is_never_started() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""), "press A");
+    // Press B: its step-up keeps a password again, and the call is refused: not "started", no answer of A's is B's.
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(
+        !source.start_call(CallKind::ChangePassword, "A Second Invented Password 7", ""),
+        "B is not taken while A is out"
+    );
+    // The password B's step-up kept is wiped: nothing is left to start a change with.
+    assert!(!source.start_call(CallKind::ChangePassword, "A Third Invented Password 9", ""));
+    let Some((CallKind::ChangePassword, _)) = answer(&mut source) else {
+        panic!("A's answer comes");
+    };
+    assert!(answer(&mut source).is_none(), "one answer, for A only");
+}
+
+#[test]
+fn a_page_that_comes_back_can_see_that_a_password_change_is_still_out() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    assert!(!source.call_out(CallKind::ChangePassword));
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    assert!(
+        source.call_out(CallKind::ChangePassword),
+        "out until its answer is taken"
+    );
+    assert!(answer(&mut source).is_some());
+    assert!(!source.call_out(CallKind::ChangePassword), "taken: no longer out");
+}

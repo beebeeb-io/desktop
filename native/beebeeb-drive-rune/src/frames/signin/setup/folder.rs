@@ -182,3 +182,32 @@ pub fn backup_loading(k: &mut Keys, t: &Theme) -> El {
                 .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
         )
 }
+
+/// Step 3 when reading the folders failed: said as a failure, never as "not in this version". Try again reads them
+/// again; Not now goes on with nothing turned on.
+pub fn backup_failed(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Back up your folders",
+            Some("Beebeeb couldn\u{2019}t read the folders on this PC. Nothing is turned on."),
+            false,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::retry_backup))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+/// Step 3 when the read worked and this PC has no folder to offer: said as that, with a way on.
+pub fn backup_none(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Back up your folders",
+            Some("Beebeeb found no folders to back up on this PC. You can add folders later in Settings \u{203a} Backups."),
+            false,
+            t,
+        ))
+        .child(actions().child(primary(k, "Continue", ButtonState::Enabled, t, Ui::not_now)))
+}

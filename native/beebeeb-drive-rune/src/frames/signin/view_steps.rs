@@ -209,7 +209,19 @@ pub fn two_factor(ui: &Ui, backup: bool, k: &mut Keys, t: &Theme) -> El {
 // ---------------------------------------------------------------------------
 
 /// DW-A23's hint: a sentence that ends in a link, on the board's two lines.
-fn paste_hint(k: &mut Keys, t: &Theme) -> El {
+fn paste_hint(k: &mut Keys, doors: bool, t: &Theme) -> El {
+    // Where the source has no approval from another device, the hint ends before that clause: never a link that
+    // leads to the web's recovery page.
+    if !doors {
+        return kit::label(
+            k.next("note"),
+            "Your password is right. Enter your 12 words (paste all 12 into any box).",
+            type_::CAPTION,
+            t.text_tertiary,
+        )
+        .wrap()
+        .w_full();
+    }
     const LINE_1: &str = "Your password is right. Enter your 12 words (paste all 12 into any";
     const LINE_2: &str = "box), or ";
     const LINK: &str = "approve from another device";
@@ -336,7 +348,7 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     ));
     c = match ui.phrase_problem() {
         Some(problem) => c.child(phrase_banner(k, problem, t)),
-        None => c.child(paste_hint(k, t)),
+        None => c.child(paste_hint(k, ui.in_app_doors(), t)),
     };
     let grid = word_grid(ui, t);
     let state = if ui.restoring() {

@@ -41,6 +41,8 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         (Step::Passkey, _) => passkey(&mut k, &t),
         (Step::Lock, _) => lock(ui, &mut k, &t),
         (Step::Backup, _) if ui.loading(Step::Backup) => folder::backup_loading(&mut k, &t),
+        (Step::Backup, _) if ui.failed(Step::Backup) => folder::backup_failed(&mut k, &t),
+        (Step::Backup, _) if ui.folders.is_empty() => folder::backup_none(&mut k, &t),
         (Step::Backup, _) => backup(ui, &mut k, &t),
         (Step::Previews, _) => previews(ui, &mut k, &t),
         (Step::Explorer, _) => match &ui.explorer {

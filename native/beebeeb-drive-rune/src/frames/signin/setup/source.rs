@@ -205,6 +205,12 @@ pub trait SetupSource {
     fn loading(&self, _step: super::Step) -> bool {
         false
     }
+    /// Whether this step's read FAILED (not "nothing found"): it says it could not read, with Try again.
+    fn failed(&self, _step: super::Step) -> bool {
+        false
+    }
+    /// Try again after a failed read of step 3's folders.
+    fn retry_backups(&mut self) {}
     /// Whether the first run still has to ask for the sync folder, and what it suggests.
     fn folder_ask(&self) -> FolderAsk {
         FolderAsk::Settled
