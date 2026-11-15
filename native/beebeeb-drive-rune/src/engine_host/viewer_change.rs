@@ -245,27 +245,39 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// session, as an open reads them; its content is not read again (the window holds the edit, and the reader
     /// under it stays the session-changed state). The save goes from the version the edit began from (the window's
     /// `base`): a file that changed meanwhile is the two-versions question, never overwritten. Nothing while a change
-    /// is on its way; never for another account or after a sign-out.
+    /// is on its way or while Beebeeb is locked; never for another account or after a sign-out.
     fn resume(&mut self, file_id: &str) {
         if self.changes.busy {
             return;
         }
         let engine = self.engine.clone();
-        let Some(opening) = self.open.as_mut().filter(|opening| {
+        // Only while Beebeeb is open (review of #452, P2-B): a press that reaches the view while it is locked (the lock
+        // landed, the screen not redrawn yet) uses nothing up, and the next press after the unlock opens the file again.
+        let resumable = self.open.as_ref().is_some_and(|opening| {
             opening.file_id == file_id
                 && opening.ended
                 && opening.resumable
                 && engine.has_session()
+                && engine.screen_open()
                 && engine.account() == opening.account
-        }) else {
+        });
+        if !resumable {
             return;
-        };
+        }
         let session = engine.session_turn();
         let epoch = engine.begin_opening(session, file_id);
+        // Taken up only once its facts were read: the earlier opening stays ended and resumable until then, so a read
+        // that fails is tried again at the next press, never left as a Save that fails with no words (P2-B).
+        let Some(edit) = engine.edit_facts(session, file_id, epoch) else {
+            return;
+        };
+        let Some(opening) = self.open.as_mut() else {
+            return;
+        };
         self.changes.openings += 1;
         opening.session = session;
         opening.epoch = epoch;
-        opening.edit = engine.edit_facts(session, file_id, epoch);
+        opening.edit = Some(edit);
         opening.serial = self.changes.openings;
         opening.ended = false;
         opening.resumable = false;
@@ -628,6 +640,8 @@ fn settle_save(
         // Delta 3 of desktop#432: an earlier change to this file on this PC has not been sent yet; queued after it,
         // this save would replace it unasked. Nothing was stored: the edit stays, and the person is told why.
         Err(EditRefused::EarlierChangeNotSent) => (Settled::Refused(EARLIER_NOT_SENT.to_string()), None),
+        // Task 2530, item 1: that earlier change is held back; the words promise no send.
+        Err(EditRefused::EarlierChangeHeld) => (Settled::Refused(EARLIER_HELD.to_string()), None),
         Err(_) => (Settled::Failed, None),
     }
 }

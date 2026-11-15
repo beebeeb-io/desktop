@@ -4,7 +4,22 @@
 
 use crate::state_db::StateDb;
 
-/// `file_id` has an earlier change this PC holds back. Read once, after the accept refused the save.
-pub(crate) fn earlier_change_is_held(_db: &StateDb, _file_id: &str) -> bool {
-    false
+/// `file_id` has an earlier change this PC holds back. Read once, after the accept refused the save:
+/// - a queued write of the file whose tries are used up (parked, or given up: `ItemPresentation::parked_finder_upload`).
+///   Nothing sends it until the person settles it; This PC lists it under Sync history's problems;
+/// - a held edit of task 2524 (`held_edits`), which This PC lists too.
+///
+/// Per file, from the readers This PC's own rows come from. A read that fails answers `false` (the words then say
+/// "not sent yet"); nothing but the words depends on it.
+pub(crate) fn earlier_change_is_held(db: &StateDb, file_id: &str) -> bool {
+    let parked = db
+        .item_presentation(file_id)
+        .ok()
+        .flatten()
+        .is_some_and(|item| item.parked_finder_upload);
+    // Every held edit, by its index (`list_held_edits`); at most one row is this file's.
+    parked
+        || db
+            .list_held_edits()
+            .is_ok_and(|held| held.iter().any(|(id, ..)| id == file_id))
 }
