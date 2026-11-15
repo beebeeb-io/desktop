@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::dto::DriveItem;
-use crate::state_db::{FileEntry, UnsentChange};
+use crate::state_db::{FileEntry, HeldEdits, UnsentChange};
 use crate::transfer_progress::{ActiveTransferDto, Direction};
 
 /// The engine snapshot fields the tray flyout, the banners, Backups and the getting-ready strip draw.
@@ -320,6 +320,68 @@ pub fn sync_problems(queue: &[UnsentChange]) -> Vec<SyncProblem> {
         .collect()
 }
 
+/// Task 2524: why a held edit is not sent. A reason this build does not know says only that it is held back.
+fn held_reason(reason: &str) -> &'static str {
+    match reason {
+        "base_unknown" => {
+            "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on this PC. Nothing was lost."
+        }
+        _ => "Not sent: this PC is holding this change back.",
+    }
+}
+
+/// The one row for every `content_unknown` file.
+const UNCHECKED_WORDS: &str = "Not sent until they are checked: this PC has no record of what these files held when they last synced, so it can’t tell whether any was changed. Nothing to do now. Nothing was lost.";
+
+/// Task 2524: what the engine holds and does not send, as problems so it never looks synced: one per held edit whose
+/// base is unknown (id `held:<file id>`), and ONE summary row for the `content_unknown` files (id
+/// `held:content_unknown`: the count and the first names). None can be tried again (`retryable` is false).
+pub fn held_edit_problems(held: &HeldEdits) -> Vec<SyncProblem> {
+    let at = |t: i64| (t > 0).then(|| super::model::iso(t));
+    let mut out: Vec<SyncProblem> = held
+        .each
+        .iter()
+        .map(|(file_id, path, reason, detected_at)| {
+            let (name, folder) = leaf(path);
+            SyncProblem {
+                id: format!("held:{file_id}"),
+                file_id: Some(file_id.clone()),
+                name,
+                folder,
+                reason: held_reason(reason),
+                retryable: false,
+                backup: false,
+                at: at(*detected_at),
+            }
+        })
+        .collect();
+    if held.unchecked > 0 {
+        let names: Vec<String> = held.unchecked_first.iter().map(|f| leaf(&f.1).0).collect();
+        let more = held.unchecked - i64::try_from(names.len()).unwrap_or(0);
+        let files = if held.unchecked == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{} files", held.unchecked)
+        };
+        let and_more = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        out.push(SyncProblem {
+            id: "held:content_unknown".into(),
+            file_id: held.unchecked_first.first().map(|f| f.0.clone()),
+            name: format!("{files} not checked yet ({}{and_more})", names.join(", ")),
+            folder: String::new(),
+            reason: UNCHECKED_WORDS,
+            retryable: false,
+            backup: false,
+            at: at(held.unchecked_first.first().map_or(0, |f| f.2)),
+        });
+    }
+    out
+}
+
 /// One Available-offline row (DW-0715): a kept item that no kept folder holds, with a folder's file count and bytes.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -374,3 +436,6 @@ pub fn offline_entries(rows: &[(FileEntry, bool, DriveItem)]) -> Vec<OfflineEntr
     });
     out
 }
+
+#[cfg(test)]
+mod held_tests;

@@ -44,7 +44,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.bg)
         .child(toolbar);
     if ui.filter == Filter::Problems && ui.problem_count() > 0 {
-        main = main.child(problems_bar(&t));
+        main = main.child(problems_bar(ui.retryable_problem_count() > 0, &t));
     }
     main = main
         .child(match super::offline::not_ready(ui.standing()) {
@@ -108,10 +108,10 @@ fn filter(ui: &Ui, t: &Theme) -> El {
 }
 
 /// The bar under the toolbar on the Problems filter (`.mk-bulk`).
-fn problems_bar(t: &Theme) -> El {
+fn problems_bar(try_all: bool, t: &Theme) -> El {
     const WORDS: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
     const TITLE: TextStyle = TextStyle::new(12.5, 600.0).lh(17.0);
-    row()
+    let mut bar = row()
         .key("problems-bar")
         .role("group")
         .label("Can't sync")
@@ -130,11 +130,15 @@ fn problems_bar(t: &Theme) -> El {
             WORDS,
             t.text_secondary,
         ))
-        .child(el().key("problems-bar-spacer").grow(1.0))
-        .child(
+        .child(el().key("problems-bar-spacer").grow(1.0));
+    // Task 2524: held edits have no Try again; the bar offers it only while something can be tried again.
+    if try_all {
+        bar = bar.child(
             chrome::outline_button("btn-try-all-again", "Try all again", Some(&icons::RETRY), t)
                 .on_press(|s: &mut State| s.this_pc.retry_all()),
-        )
+        );
+    }
+    bar
 }
 
 /// "Today", "Yesterday", then the day in words: "Sunday 1 Nov".
@@ -189,7 +193,7 @@ fn list(ui: &Ui, t: &Theme) -> El {
             );
             d += 1;
         }
-        if change.problem().is_some() {
+        if change.can_retry() {
             retries += 1;
         }
         days = days.child(change_row(i, change, retries, t));
@@ -262,7 +266,8 @@ fn change_row(i: usize, change: &Change, retry_no: usize, t: &Theme) -> El {
     let shown = change.clone();
 
     let mut retry = el().key("retry-cell").w(96.0);
-    if let Some(problem) = failed.clone() {
+    // A held edit is a problem with no Try again (task 2524).
+    if let Some(problem) = failed.clone().filter(|_| change.can_retry()) {
         let key = if retry_no > 1 {
             format!("btn-try-again-{retry_no}")
         } else {

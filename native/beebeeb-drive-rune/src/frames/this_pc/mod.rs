@@ -171,6 +171,11 @@ impl Ui {
         self.source.problems().len()
     }
 
+    /// The problems Try again applies to (task 2524: a held edit has no action).
+    pub fn retryable_problem_count(&self) -> usize {
+        self.source.problems().iter().filter(|c| c.can_retry()).count()
+    }
+
     pub fn kept_count(&self) -> usize {
         self.source.kept_count()
     }

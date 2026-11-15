@@ -57,9 +57,9 @@ use super::{app_lock::AppLockPart, log};
 use crate::frames::account::Pane;
 use crate::frames::account::approve::{Approval, Denial, Lookup, SignInRequest};
 use crate::frames::account::source::{
-    AccountSource, Answered, CallKind, CodeRefused, Count, Deletion, DeletionRefused, DeviceKind, EmailRefused, Event,
-    Factor, Identity, NameAnswer, PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped,
-    Purpose, Refused, Secret, Security, SecurityFacts, Session, Setup, SignOutAnswer, StepUp, Strength, TwoFactor,
+    AccountSource, Answered, CallKind, CodeRefused, Count, Deletion, DeletionRefused, DeviceKind, Event, Identity,
+    NameAnswer, PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose, Refused,
+    Secret, SecurityFacts, Session, SignOutAnswer, StepUp, Strength, TwoFactor,
 };
 
 #[path = "account_actions.rs"]
@@ -1054,38 +1054,16 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     // ---- Not bound: each pane these belong to is `PaneState::Unwired`, or the page that shows them draws no
     // control for them (`security_facts`), so no drawn control reaches them. Each does nothing and claims nothing.
 
-    /// The old rows' values have no "not known": the page is drawn from `security_facts`, never from this.
-    fn security(&self) -> Security {
-        Security {
-            app_lock: false,
-            lock_after: String::new(),
-            password_changed: String::new(),
-            two_factor: false,
-            passkeys: 0,
-            sign_in_activity: false,
-            sessions: 0,
-        }
-    }
-    fn factors(&self) -> Vec<Factor> {
-        Vec::new()
-    }
     /// "All apps": Drive is the only Beebeeb app on this PC in this version, so the row is not drawn
     /// (`can_sign_out_all` is false); never reached from a drawn control.
     fn sign_out_all_apps(&mut self) -> SignOutAnswer {
         SignOutAnswer::Refused(NOT_BOUND)
     }
-    /// The name is saved through `save_name` (it waits on Beebeeb: a worker, never this call).
-    fn set_name(&mut self, _name: &str) -> bool {
-        false
-    }
-    fn start_email_change(&mut self, _confirmation: StepUp, _new_email: &str) -> Result<(), EmailRefused> {
-        Err(EmailRefused::Offline)
-    }
-    fn confirm_email_change(&mut self, _code: &str) -> Result<(), CodeRefused> {
-        Err(CodeRefused::Offline)
-    }
     fn resend_wait(&self) -> u32 {
         self.resend_left()
+    }
+    fn email_code_sent_to(&self) -> Option<String> {
+        self.pending_address()
     }
     fn send_again(&mut self) -> bool {
         false
@@ -1116,29 +1094,22 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn keep_codes(&mut self, codes: Vec<Secret>) {
         self.a_keep_codes(codes);
     }
-    fn can_send_again(&self) -> bool {
-        email::can_send_again()
-    }
-    fn begin_two_factor(&mut self, _confirmation: Option<StepUp>) -> Result<Setup, Refused> {
-        Err(Refused::Offline)
-    }
-    fn check_code(&mut self, _code: &str) -> Result<(), CodeRefused> {
-        Err(CodeRefused::Offline)
-    }
-    fn turn_off_two_factor(&mut self, _code: &str) -> Result<(), CodeRefused> {
-        Err(CodeRefused::Offline)
-    }
     fn passkeys(&self) -> Vec<Passkey> {
         self.passkeys.passkeys()
     }
-    fn add_passkey(&mut self) -> Result<(), Refused> {
-        super::passkeys::add_without_password()
+    /// The password is asked (`passkeys_need_password`): without it nothing is asked and it is refused as not
+    /// confirmed.
+    fn add_passkey(&mut self, password: Option<Password<'_>>) -> Result<(), Refused> {
+        match password {
+            Some(password) => super::passkeys::add_confirmed(&mut self.passkeys, password),
+            None => super::passkeys::add_without_password(),
+        }
     }
     fn rename_passkey(&mut self, id: &str, name: &str) -> bool {
         self.passkeys.rename(id, name)
     }
-    fn remove_passkey(&mut self, _id: &str) -> bool {
-        false
+    fn remove_passkey(&mut self, id: &str, password: Option<Password<'_>>) -> bool {
+        password.is_some_and(|password| super::passkeys::remove_confirmed(&mut self.passkeys, id, password))
     }
     fn passkeys_need_password(&self) -> bool {
         true
@@ -1148,18 +1119,6 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
     fn can_rename_passkey(&self) -> bool {
         self.passkeys.can_rename()
-    }
-    fn add_passkey_confirmed(&mut self, password: Password<'_>) -> Result<(), Refused> {
-        super::passkeys::add_confirmed(&mut self.passkeys, password)
-    }
-    fn remove_passkey_confirmed(&mut self, id: &str, password: Password<'_>) -> bool {
-        super::passkeys::remove_confirmed(&mut self.passkeys, id, password)
-    }
-    fn stop_activity(&mut self, _code: &str) -> Result<(), CodeRefused> {
-        Err(CodeRefused::Offline)
-    }
-    fn stop_activity_needs_password(&self) -> bool {
-        true
     }
     fn stop_activity_confirmed(&mut self, password: Password<'_>) -> bool {
         super::passkeys::wiping(&password).is_some_and(|password| self.activity.stop(password))

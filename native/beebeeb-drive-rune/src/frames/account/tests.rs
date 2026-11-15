@@ -113,6 +113,11 @@ fn source(rt: &Runtime<State>) -> &dyn AccountSource {
     rt.state.account.source.as_deref().expect("the fixture")
 }
 
+/// App lock and its delay, as the Security page is told them.
+fn lock_facts(rt: &Runtime<State>) -> (bool, String) {
+    source(rt).security_facts().app_lock.expect("the board knows app lock")
+}
+
 pub(super) fn asked(rt: &Runtime<State>) -> Vec<Intent> {
     rt.state.settings.intents.clone()
 }
@@ -272,11 +277,11 @@ fn app_lock_turns_by_keyboard_and_without_it_there_is_no_time_choice() {
     assert!(find(&rt, "item-1-0-pop").is_some());
     tab_to(&mut rt, "item-1-0-switch");
     key(&mut rt, Key::Text(" ".into()));
-    assert!(!source(&rt).security().app_lock);
+    assert!(!lock_facts(&rt).0);
     assert!(find(&rt, "item-1-0-pop").is_none(), "off: no time choice (DW-0716b)");
     assert_eq!(says(&rt, "item-1-0-sub"), "Off: anyone using this PC can open Beebeeb");
     key(&mut rt, Key::Enter);
-    assert!(source(&rt).security().app_lock);
+    assert!(lock_facts(&rt).0);
 }
 
 /// The real app's row: a source that gives no delay (nothing in this version acts on one) draws the switch and no
@@ -480,7 +485,7 @@ fn a_seeded_secret_is_in_no_element_tree_and_no_label() {
 // ---------------------------------------------------------------------------
 
 use super::form;
-use super::source::{BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, CodeRefused, Deletion, Strength};
+use super::source::{BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, Deletion, Strength};
 
 /// Everything a screen reader, the frame gate or the feedback mode could read of the window.
 fn every_word(rt: &Runtime<State>) -> String {
@@ -558,13 +563,19 @@ fn the_password_changes_through_the_step_up_and_is_in_no_request() {
         rt.state.account.form.current.text.is_empty(),
         "the current one is retyped"
     );
-    assert_eq!(source(&rt).security().password_changed, "3 weeks ago");
+    assert_eq!(
+        source(&rt).security_facts().password_changed.unwrap_or_default(),
+        "3 weeks ago"
+    );
 
     rt.update(|s, _| form::type_in(&mut s.account.form.current, BOARD_PASSWORD));
     settle(&mut rt);
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.account.pane, Pane::Security, "back to Sign-in and security");
-    assert_eq!(source(&rt).security().password_changed, "Just now");
+    assert_eq!(
+        source(&rt).security_facts().password_changed.unwrap_or_default(),
+        "Just now"
+    );
     assert!(
         rt.state.account.form.new.text.is_empty(),
         "nothing typed outlives the page"
@@ -732,8 +743,8 @@ fn deleting_the_account_takes_four_steps_and_can_be_undone() {
     assert_eq!(source(&rt).deletion(), Deletion::None);
 
     let mut board = BoardAccount::new();
-    assert_eq!(board.stop_activity("000000"), Err(CodeRefused::Wrong));
-    assert!(board.activity().is_some(), "a wrong code stops nothing");
+    assert!(!board.stop_activity_confirmed(Password::from_field("not the password")));
+    assert!(board.activity().is_some(), "a wrong password stops nothing");
 }
 
 /// The board's sample devices, word for word (DW-A55's rows, DW-A56's sentence): the confirm
@@ -933,7 +944,7 @@ fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
     );
     key(&mut rt, Key::Up);
     key(&mut rt, Key::Enter);
-    assert_eq!(source(&rt).security().lock_after, "30 min");
+    assert_eq!(lock_facts(&rt).1, "30 min");
     assert_eq!(rt.state.account.dialog, None, "the pop-up closes");
     assert_eq!(says(&rt, "item-1-0-pop-label"), "30 min");
     assert_eq!(rt.state.account.pane, Pane::Security);
@@ -951,18 +962,18 @@ fn the_delay_menu_takes_a_press_and_esc_changes_nothing() {
     );
     key(&mut rt, Key::Escape);
     assert_eq!(rt.state.account.dialog, None);
-    assert_eq!(source(&rt).security().lock_after, "5 min", "Esc chooses nothing");
+    assert_eq!(lock_facts(&rt).1, "5 min", "Esc chooses nothing");
     assert_eq!(section(&rt), Some(SettingsPane::Security), "and settings stays open");
     click(&mut rt, "item-1-0-pop-button");
     click(&mut rt, "menu-0-item-3");
-    assert_eq!(source(&rt).security().lock_after, "60 min");
+    assert_eq!(lock_facts(&rt).1, "60 min");
     assert!(find(&rt, "menu-0").is_none());
 }
 
 #[test]
 fn with_the_lock_off_there_is_no_delay_and_turning_it_on_brings_it_back() {
     let mut rt = runtime("DW-S03b");
-    assert!(!source(&rt).security().app_lock);
+    assert!(!lock_facts(&rt).0);
     assert!(find(&rt, "item-1-0-pop").is_none(), "no time choice");
     assert!(find(&rt, "menu-0").is_none());
     assert_eq!(says(&rt, "item-1-0-sub"), "Off: anyone using this PC can open Beebeeb");
@@ -971,7 +982,7 @@ fn with_the_lock_off_there_is_no_delay_and_turning_it_on_brings_it_back() {
     settle(&mut rt);
     assert_eq!(rt.state.account.dialog, None);
     click(&mut rt, "item-1-0-switch");
-    assert!(source(&rt).security().app_lock, "DW-0716");
+    assert!(lock_facts(&rt).0, "DW-0716");
     assert_eq!(says(&rt, "item-1-0-sub"), "Windows Hello · locks again after");
     assert!(find(&rt, "item-1-0-pop").is_some());
 }
@@ -1013,13 +1024,13 @@ fn a_stored_delay_the_menu_does_not_have_checks_no_row() {
     // Enter with no row under the keys takes nothing; the stored delay stays.
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.account.dialog, None);
-    assert_eq!(source(&rt).security().lock_after, "15 min");
+    assert_eq!(lock_facts(&rt).1, "15 min");
     // The keys still reach every row: Down starts at the first.
     click(&mut rt, "item-1-0-pop-button");
     key(&mut rt, Key::Down);
     assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(Some(0))));
     key(&mut rt, Key::Enter);
-    assert_eq!(source(&rt).security().lock_after, "Immediately", "chosen, not assumed");
+    assert_eq!(lock_facts(&rt).1, "Immediately", "chosen, not assumed");
 }
 
 /// Review of desktop#427 (P1, twice): a password change that is still out when the page is left and opened again.

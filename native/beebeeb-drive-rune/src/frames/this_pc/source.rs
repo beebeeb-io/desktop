@@ -54,6 +54,9 @@ pub enum Reason {
     /// The engine's own plain words for why (`drive_v2::status::reason_for`): a fixed sentence, never a
     /// raw error code, a path or a server's words.
     Said(&'static str),
+    /// Task 2524: a sync-folder edit the engine holds and does not send (`drive_v2::status::held_edit_problems`).
+    /// The engine has no action for it, so the row has no Try again.
+    Held(&'static str),
 }
 
 impl Reason {
@@ -65,8 +68,13 @@ impl Reason {
                 format!("Couldn't reach Beebeeb after {tries} tries. Nothing was lost.")
             }
             Reason::NameInUse { place } => format!("The name is already in use in {place}. Nothing was lost."),
-            Reason::Said(words) => (*words).to_string(),
+            Reason::Said(words) | Reason::Held(words) => (*words).to_string(),
         }
+    }
+
+    /// Whether Try again applies: a held edit has no action.
+    pub fn retryable(&self) -> bool {
+        !matches!(self, Reason::Held(_))
     }
 }
 
@@ -149,6 +157,11 @@ impl Change {
             What::Failed { problem, .. } => Some(problem),
             _ => None,
         }
+    }
+
+    /// A problem that Try again applies to (a held edit is one that it does not).
+    pub fn can_retry(&self) -> bool {
+        matches!(&self.what, What::Failed { reason, .. } if reason.retryable())
     }
 }
 

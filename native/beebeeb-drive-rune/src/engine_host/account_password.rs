@@ -118,6 +118,7 @@ impl<C: CredentialStores> PasswordCalls<C> {
         let new = Zeroizing::new(new.to_string());
         self.engine
             .change_password_for(kept.pressed.0, kept.password, new)
+            .map(|_| ())
             .map_err(refusal)
     }
 

@@ -463,7 +463,7 @@ fn stopping_the_recording_proves_the_password_and_the_switch_moves_only_with_the
     let mut source = Source::new(signed_in_on(&server));
     opened(&mut source, Pane::Activity);
     assert!(source.activity().is_some(), "on");
-    assert!(source.can_stop_activity() && source.stop_activity_needs_password());
+    assert!(source.can_stop_activity());
     // Nothing typed: nothing is started.
     assert!(!source.stop_activity_confirmed(Password::from_field("")));
     assert_eq!(server.asked("PUT /api/v1/me/tracking"), 0);

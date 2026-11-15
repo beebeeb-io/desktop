@@ -74,8 +74,16 @@ fn fixture() -> Fixture {
         parent_id: None,
         item_kind: ItemKind::File,
     };
-    db.upsert_file_with_contract(&entry, |contract| contract.item_kind = entry.item_kind.clone())
-        .unwrap();
+    // The copy holds the agreed content (task 2526: off Windows a sync folder copy is freed only then).
+    let agreed = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(vec![7u8; HELD as usize]))
+    };
+    db.upsert_file_with_contract(&entry, |contract| {
+        contract.item_kind = entry.item_kind.clone();
+        contract.local_hash = Some(agreed);
+    })
+    .unwrap();
     db.mark_cached("f-1", file.to_str().unwrap(), HELD as i64, 1).unwrap();
     db.set_owner(&Identity::new(Some("user-a"), Some("a@example.eu")))
         .unwrap();
