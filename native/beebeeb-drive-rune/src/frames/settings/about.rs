@@ -154,8 +154,9 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         3,
         Some("More"),
         vec![
-            // "About audits" is not drawn: the site has no audits page to send to (`shell::web_pages`).
-            web(3, 0, "beebeeb.io", "beebeeb.io", true),
+            // "About audits" is not drawn: the site has no audits page to send to (`shell::web_pages`). The first
+            // row of its list: no rule above it (the board, recaptured without audits).
+            web(3, 0, "beebeeb.io", "beebeeb.io", false),
         ],
         Some(&a.company),
         t,
