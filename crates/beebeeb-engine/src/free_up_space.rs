@@ -716,6 +716,7 @@ mod unix_tests {
     use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation, StateDb};
     use sha2::{Digest, Sha256};
     use std::cell::Cell;
+    use std::path::Path;
 
     struct Root {
         _dir: tempfile::TempDir,
