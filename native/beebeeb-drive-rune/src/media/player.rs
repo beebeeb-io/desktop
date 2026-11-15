@@ -8,15 +8,44 @@
 //! [`NowPlayingSink`] (the OS's media controls; `os_controls::OsControls`), [`MediaOpener`] / [`MediaBytes`] (the
 //! file's bytes; the engine's range reader, bound in `engine_host::media`).
 //!
-//! Slice M2 (`media-host`) fills the state machine. The scaffold's player plays nothing: `open` answers
-//! [`Refusal::CouldNotPlay`], the rest are no-ops or `None`; `stop` already blanks the frame and clears the OS's
-//! media controls.
+//! **The states:** [`Phase`]: `Idle → Opening → Playing / Paused → Ended`, or `Stopped(reason)` from any of them.
+//!
+//! **One worker thread per opened item** (`Worker`, in [`worker`]). It opens the item's bytes, starts the helper, sends `Open`, and
+//! then, every tick (at most [`TICK`]):
+//! 1. takes what the helper sent, as the batch it arrived in, and checks every message against what was asked:
+//!    a read inside the item and at most `MAX_IN_FLIGHT_READS` unanswered; one `Opened` (at most 48 h; the file's
+//!    own video size is not held to the asked size); a `Frame` exactly the size of the want it answers; `Audio` of the
+//!    asked channels, at most the asked frames, every sample finite (then clamped to [-1, 1]); one answer per want;
+//!    tags with control characters taken out. Anything else kills the helper: "This file could not be played.";
+//! 2. answers the reads from [`MediaBytes`]; the answer's buffer is wiped once it is queued;
+//! 3. kills the helper when `Opened` did not come within 10 s, or a want was not answered within 5 s (the time this
+//!    side spends reading bytes is not counted against the helper);
+//! 4. asks for the next frame (`WantVideo` at the drawn size in device pixels, capped at 1920 x 1080; asked only once
+//!    the view said its size) and the next PCM (`WantAudio` at the device's format), one of each at a time;
+//! 5. shows a frame when its time is at or before the clock (the sound device's clock; without sound, a wall clock
+//!    started at Play), and drops a frame more than one frame-time late (unless nothing was shown for 250 ms: a slow
+//!    PC shows a halting picture, not a black one).
+//!
+//! **Stopping is never a request to the worker.** What a run holds that must end at once (the helper's link, the
+//! sound) sits in its `Slots`; `stop` (a lock, a sign-out, an account change, a close), `next`, `previous` and `open`
+//! take them and end them on the caller's thread: the helper killed, the sound dropped. The worker sees its run
+//! cancelled at its next tick, lets go of the item's bytes (and with them the chunk cache) and ends. The frame is
+//! blanked and the OS's media controls cleared on the same call. A new run waits for the thread of the one before
+//! it before it starts a helper: two helpers are never alive at once.
+//!
+//! **Session rule:** every answer a worker publishes carries its run's generation; a run that was stopped or
+//! replaced publishes nothing more.
+//!
+//! **TEST builds only** (the build's identity, never the real app): after 1 s of playback, one `media.played` line
+//! (the codec's protocol number, the frames shown and the RMS of the sound in that second, whether the helper was
+//! confined), read by the VM 401 rung. No name, id, tag or byte is logged, here or anywhere in the player.
 
 use std::fmt;
 use std::io;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use beebeeb_media_protocol::{Codec, FromHelper, KindHint, ToHelper};
 use zeroize::Zeroizing;
@@ -27,6 +56,10 @@ use super::os_controls::{NowPlaying, OsButton};
 use super::transport::LinkError;
 use super::video::VideoSurface;
 
+mod worker;
+
+use worker::{Start, Worker};
+
 // ---- The seams ----
 
 /// The pipes to ONE running helper.
@@ -36,6 +69,11 @@ pub trait Link: Send {
     fn recv(&mut self, timeout: Duration) -> Result<FromHelper, LinkError>;
     /// Ends the helper now (it is not asked).
     fn kill(&mut self);
+    /// Whether the helper runs confined (`transport::HelperLink`: started through the sandbox). A link of the tests
+    /// is not.
+    fn confined(&self) -> bool {
+        false
+    }
 }
 
 /// Starts a helper for one item.
@@ -105,7 +143,8 @@ impl fmt::Debug for MediaItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// No decoder here for this format, or its route is off: "This PC can't play <name> files here." The name is
-    /// the format's (`Codec::name`), never the file's.
+    /// the format's (`Codec::name`), never the file's; empty when the format has no name (the view says "this
+    /// kind of file").
     NoDecoder(String),
     /// The codec's route is the system's decoder and this PC has none (decision D-MED-2: HEVC on a Windows PC
     /// without Microsoft's HEVC extension): "This PC can't play HEVC video without Microsoft's HEVC extension." Never
@@ -152,9 +191,72 @@ impl fmt::Debug for PlayState {
     }
 }
 
+/// Where the player is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// Nothing was opened.
+    Idle,
+    /// The bytes, the helper or the helper's `Opened` are not there yet.
+    Opening,
+    Playing,
+    Paused,
+    /// The helper said the file ended and all of it was shown and heard.
+    Ended,
+    /// Stopped: by a close, a lock, a sign-out, an account change, or a failure (the state's `refused` says which).
+    Stopped(StopReason),
+}
+
+// ---- Limits and times ----
+
+/// The longest a worker waits for the helper before it looks at its own state again.
+const TICK: Duration = Duration::from_millis(10);
+/// `Opened` within 10 s of `Open`.
+const OPEN_WAIT_MS: u64 = 10_000;
+/// Every want answered within 5 s.
+const ANSWER_WAIT_MS: u64 = 5_000;
+/// The longest recording or video the player accepts: 48 h.
+const MAX_DURATION_MS: u64 = 48 * 60 * 60 * 1000;
+/// A frame-time when the helper gave no frame rate.
+const DEFAULT_FRAME_MS: u64 = 40;
+/// Frames waiting to be shown, at most.
+const HELD_FRAMES: usize = 2;
+/// After this long without a frame shown, a late frame is shown instead of dropped.
+const SHOW_LATE_AFTER_MS: u64 = 250;
+/// One `WantAudio` asks for a tenth of a second.
+const AUDIO_PARTS_PER_SECOND: u32 = 10;
+/// The OS's media controls get the position this often.
+const NOW_PLAYING_EVERY_MS: u64 = 1_000;
+/// The test build's `media.played` line comes after this much playback.
+const PLAYED_AFTER_MS: u64 = 1_000;
+/// Previous past this point starts the item again; before it, goes to the item before.
+const RESTART_AFTER_MS: u64 = 3_000;
+/// The most messages a worker takes in one tick.
+const BATCH_MAX: usize = 128;
+
+// ---- The wall clock ----
+
+/// The wall clock the timeouts (and a video without sound) run on. A trait so the tests can hold time still.
+trait Clock: Send + Sync {
+    fn now_ms(&self) -> u64;
+}
+
+struct Monotonic(Instant);
+
+impl Clock for Monotonic {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.0.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 // ---- The player ----
 
 struct Player {
+    /// This player, for the workers (they hold it weakly: a player nobody holds ends its run).
+    me: Weak<Mutex<Player>>,
     opener: Arc<dyn MediaOpener>,
     links: Arc<dyn LinkFactory>,
     audio: Arc<dyn AudioFactory>,
@@ -162,6 +264,227 @@ struct Player {
     surface: VideoSurface,
     /// The drawn stage in device pixels (`set_view_size`); frames are asked at this size, capped at 1920 x 1080.
     view: (u32, u32),
+    clock: Arc<dyn Clock>,
+    /// Bumped by every open, stop and failure: a worker of an older generation publishes nothing.
+    generation: u64,
+    phase: Phase,
+    /// What [`PlayerHandle::state`] answers.
+    shown: Option<PlayState>,
+    /// The picture from the tags.
+    art: Option<rune::Pixels>,
+    /// A frame was shown since the last blank.
+    has_frame: bool,
+    /// The items Next and Previous move through, and where the player is in it.
+    queue: Vec<MediaItem>,
+    at: usize,
+    run: Option<Run>,
+    /// The thread of the run before: the next run waits for it before it starts a helper.
+    previous: Option<thread::JoinHandle<()>>,
+    /// What the tests read. Filled in test builds only.
+    record: Record,
+}
+
+/// What the tests read of the player (`player_tests.rs`). Nothing is put in it outside the tests.
+#[derive(Default)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct Record {
+    /// The times of the frames shown, in order.
+    shown: Vec<u64>,
+    /// The times of the frames that passed every check.
+    received: Vec<u64>,
+    /// How often the frame was blanked.
+    blanked: usize,
+}
+
+/// One opened item's worker, as the player holds it.
+struct Run {
+    slots: Arc<Slots>,
+    commands: mpsc::Sender<Cmd>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+/// What a run holds that a stop must end at once, from any thread, without the worker.
+#[derive(Default)]
+struct Slots {
+    /// Set by [`Slots::end`]; the worker's reads take it too.
+    cancel: AtomicBool,
+    link: Mutex<Option<Box<dyn Link>>>,
+    sound: Mutex<Option<Box<dyn AudioSink>>>,
+}
+
+impl Slots {
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// Cancels the run: the helper killed, the sound dropped, now. Fine to call more than once.
+    fn end(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        let link = lock(&self.link).take();
+        if let Some(mut link) = link {
+            link.kill();
+        }
+        drop(lock(&self.sound).take());
+    }
+
+    /// Hands the started helper to the run. A run cancelled meanwhile kills it instead: `false`.
+    fn put_link(&self, mut link: Box<dyn Link>) -> bool {
+        let mut slot = lock(&self.link);
+        if self.cancelled() {
+            drop(slot);
+            link.kill();
+            return false;
+        }
+        *slot = Some(link);
+        true
+    }
+
+    /// Hands the opened sound to the run. A run cancelled meanwhile drops it instead: `false`.
+    fn put_sound(&self, sound: Box<dyn AudioSink>) -> bool {
+        let mut slot = lock(&self.sound);
+        if self.cancelled() {
+            return false;
+        }
+        *slot = Some(sound);
+        true
+    }
+}
+
+/// What the handle asks of a worker.
+enum Cmd {
+    Play,
+    Pause,
+    Seek(u64),
+}
+
+impl Player {
+    /// Ends the current run: its helper killed and its sound dropped now; its thread is kept for the next run to
+    /// wait for.
+    fn end_run(&mut self) {
+        if let Some(mut run) = self.run.take() {
+            run.slots.end();
+            if let Some(thread) = run.thread.take() {
+                self.previous = Some(thread);
+            }
+        }
+    }
+
+    /// The frame blanked and let go; the tags' picture zeroed and let go.
+    fn blank(&mut self) {
+        self.surface.blank_and_release();
+        self.has_frame = false;
+        if let Some(art) = self.art.take() {
+            zero_out(&art);
+        }
+        #[cfg(test)]
+        {
+            self.record.blanked += 1;
+        }
+    }
+
+    fn clear_controls(&mut self) {
+        if let Some(controls) = self.now_playing.as_mut() {
+            controls.clear();
+        }
+    }
+
+    /// Starts a worker for the queue's current item; whatever played before is ended first.
+    fn start_current(&mut self) -> Result<(), Refusal> {
+        let Some(item) = self.queue.get(self.at).cloned() else {
+            return Err(Refusal::CouldNotPlay);
+        };
+        self.end_run();
+        self.generation += 1;
+        self.blank();
+        self.phase = Phase::Opening;
+        self.shown = Some(PlayState {
+            file_id: item.file_id.clone(),
+            at_ms: 0,
+            length_ms: item.length_ms,
+            playing: true,
+            buffering: true,
+            title: String::new(),
+            artist: String::new(),
+            reduced_quality: false,
+            refused: None,
+        });
+        let slots = Arc::new(Slots::default());
+        let (commands, taken) = mpsc::channel();
+        let worker = Worker::new(Start {
+            generation: self.generation,
+            player: self.me.clone(),
+            item,
+            opener: Arc::clone(&self.opener),
+            links: Arc::clone(&self.links),
+            audio: Arc::clone(&self.audio),
+            clock: Arc::clone(&self.clock),
+            slots: Arc::clone(&slots),
+            commands: taken,
+            previous: self.previous.take(),
+        });
+        match thread::Builder::new()
+            .name("media-player".into())
+            .spawn(move || worker.run())
+        {
+            Ok(thread) => {
+                self.run = Some(Run {
+                    slots,
+                    commands,
+                    thread: Some(thread),
+                });
+                Ok(())
+            }
+            Err(_) => {
+                self.failed(Refusal::CouldNotPlay);
+                Err(Refusal::CouldNotPlay)
+            }
+        }
+    }
+
+    /// Stops what plays (see [`PlayerHandle::stop`]).
+    fn stop(&mut self, reason: StopReason) {
+        self.end_run();
+        self.generation += 1;
+        if self.phase != Phase::Idle {
+            self.phase = Phase::Stopped(reason);
+        }
+        self.shown = None;
+        self.queue.clear();
+        self.at = 0;
+        self.blank();
+        self.clear_controls();
+    }
+
+    /// The current item failed: the run ended, the refusal shown. The queue stays (Next skips the item).
+    fn failed(&mut self, refusal: Refusal) {
+        self.end_run();
+        self.generation += 1;
+        self.phase = Phase::Stopped(StopReason::Failed);
+        if let Some(state) = self.shown.as_mut() {
+            state.playing = false;
+            state.buffering = false;
+            state.title.clear();
+            state.artist.clear();
+            state.refused = Some(refusal);
+        }
+        self.blank();
+        self.clear_controls();
+    }
+
+    fn command(&self, cmd: Cmd) {
+        if let Some(run) = &self.run {
+            let _ = run.commands.send(cmd);
+        }
+    }
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        if let Some(run) = self.run.take() {
+            run.slots.end();
+        }
+        self.clear_controls();
+    }
 }
 
 /// The shell's player. Clones share it.
@@ -185,19 +508,39 @@ impl PlayerHandle {
         surface: VideoSurface,
     ) -> PlayerHandle {
         PlayerHandle {
-            inner: Arc::new(Mutex::new(Player {
-                opener,
-                links,
-                audio,
-                now_playing,
-                surface,
-                view: (0, 0),
-            })),
+            inner: Arc::new_cyclic(|me| {
+                Mutex::new(Player {
+                    me: me.clone(),
+                    opener,
+                    links,
+                    audio,
+                    now_playing,
+                    surface,
+                    view: (0, 0),
+                    clock: Arc::new(Monotonic(Instant::now())),
+                    generation: 0,
+                    phase: Phase::Idle,
+                    shown: None,
+                    art: None,
+                    has_frame: false,
+                    queue: Vec::new(),
+                    at: 0,
+                    run: None,
+                    previous: None,
+                    record: Record::default(),
+                })
+            }),
         }
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut Player) -> T) -> T {
-        f(&mut self.inner.lock().unwrap_or_else(PoisonError::into_inner))
+        f(&mut lock(&self.inner))
+    }
+
+    /// The tests' wall clock, before anything is opened.
+    #[cfg(test)]
+    fn set_clock(&self, clock: Arc<dyn Clock>) {
+        self.with(|player| player.clock = clock);
     }
 
     /// The same player (not a copy of its state).
@@ -211,54 +554,110 @@ impl PlayerHandle {
     }
 
     /// Plays `item`, with `queue` (the folder's other recordings, in its order) for Next and Previous. Whatever
-    /// played before is stopped first.
+    /// played before is stopped first. `item` need not be in `queue`; when it is not, it goes first. A refusal that
+    /// comes later (no bytes, no helper, the helper's answer) is the state's `refused`.
     pub fn open(&self, item: MediaItem, queue: Vec<MediaItem>) -> Result<(), Refusal> {
-        let _ = (item, queue);
-        Err(Refusal::CouldNotPlay)
+        let (queue, at) = with_item(item, queue);
+        self.with(|player| {
+            player.queue = queue;
+            player.at = at;
+            player.start_current()
+        })
     }
 
-    pub fn play(&self) {}
+    pub fn play(&self) {
+        self.with(|player| player.command(Cmd::Play));
+    }
 
-    pub fn pause(&self) {}
+    pub fn pause(&self) {
+        self.with(|player| player.command(Cmd::Pause));
+    }
 
     pub fn seek(&self, at_ms: u64) {
-        let _ = at_ms;
+        self.with(|player| player.command(Cmd::Seek(at_ms)));
     }
 
     /// The queue's next item. `false`: there is none.
     pub fn next(&self) -> bool {
-        false
+        self.with(|player| {
+            if player.at + 1 >= player.queue.len() {
+                return false;
+            }
+            player.at += 1;
+            let _ = player.start_current();
+            true
+        })
     }
 
     /// The queue's previous item (or the start of this one). `false`: nothing moved.
     pub fn previous(&self) -> bool {
-        false
+        self.with(|player| {
+            if player.queue.is_empty() {
+                return false;
+            }
+            let at_ms = player.shown.as_ref().map_or(0, |state| state.at_ms);
+            if at_ms > RESTART_AFTER_MS || player.at == 0 {
+                if at_ms > 0 && player.run.is_some() {
+                    player.command(Cmd::Seek(0));
+                    return true;
+                }
+                return false;
+            }
+            player.at -= 1;
+            let _ = player.start_current();
+            true
+        })
     }
 
-    /// What plays, or `None` when nothing was opened.
+    /// What plays, or `None` when nothing was opened (or it was stopped by a close, a lock, a sign-out or an
+    /// account change).
     pub fn state(&self) -> Option<PlayState> {
-        None
+        self.with(|player| player.shown.clone())
+    }
+
+    /// Where the player is.
+    pub fn phase(&self) -> Phase {
+        self.with(|player| player.phase)
     }
 
     /// The video's current frame.
     pub fn frame(&self) -> Option<rune::Pixels> {
-        None
+        self.with(|player| player.has_frame.then(|| player.surface.pixels()))
     }
 
     /// The recording's picture from its tags.
     pub fn art(&self) -> Option<rune::Pixels> {
-        None
+        self.with(|player| player.art.clone())
     }
 
-    /// Stops what plays: the helper killed, the sound dropped, the bytes released, the frame blanked, the OS's media
-    /// controls cleared.
+    /// Stops what plays: the helper killed, the sound dropped, the frame blanked, the OS's media controls cleared,
+    /// all before this returns; the item's bytes (and the engine's chunk cache) are let go by the worker at its next
+    /// tick.
     pub fn stop(&self, reason: StopReason) {
-        let _ = reason;
-        self.with(|player| {
-            player.surface.blank_and_release();
-            if let Some(controls) = player.now_playing.as_mut() {
-                controls.clear();
-            }
-        });
+        self.with(|player| player.stop(reason));
     }
 }
+
+/// Sets `pixels` to zeros of the same size before they are let go (the toolkit's atlas copy is overwritten only if
+/// the view is drawn again: the gap the photo viewer states too).
+fn zero_out(pixels: &rune::Pixels) {
+    let (w, h) = pixels.size();
+    if w > 0 && h > 0 {
+        pixels.set(w, h, vec![0; w as usize * h as usize * 4]);
+    }
+}
+
+/// The queue with `item` in it, and where `item` is.
+fn with_item(item: MediaItem, mut queue: Vec<MediaItem>) -> (Vec<MediaItem>, usize) {
+    match queue.iter().position(|other| other.file_id == item.file_id) {
+        Some(at) => (queue, at),
+        None => {
+            queue.insert(0, item);
+            (queue, 0)
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "player_tests.rs"]
+mod tests;
