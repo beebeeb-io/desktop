@@ -88,3 +88,19 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
   Available offline is not read (`knows_offline`): the details panel draws no switch and the photo no action for it.
 - **Leaving a file** overwrites the decrypted text it held (`OpenFile::wipe`, `Ui`'s drop); a `{:?}` of an open
   file prints kinds and counts, never a name or a word of it.
+
+## A newer version, on the engine (lane w4, 2026-11-15)
+
+- **Design note, board vs decision 2505 (honesty trigger 2).** DW-1519's board draws "A newer version arrived from
+  Anna's iPhone, 09:14." The engine does not know which device saved, and device names come after 0.9.0 (decision
+  2505). On the engine the banner says **"A newer version arrived, 09:14."**: no device, the time this PC noticed
+  it. The board's words stay as drawn (`Newer::from` set); an empty `from` drops the clause (`text::newer_banner`).
+  The golden of DW-1519 is unchanged.
+- **How it is noticed:** while a file is open, `viewer_change::check_for_newer` reads the local state's version
+  (`Engine::edit_facts_for`) on a worker about every 1.5 s, one read at a time. A version past the one the view
+  holds comes back as `Settled::Newer`; one banner per version. The view's own save moves what the view holds
+  (`rebase`), so it never announces itself. An answer for another session or account is dropped.
+- **Show it** opens the file again (`ViewerSource::newer` = `begin`): the version and content as Beebeeb has them
+  now, arriving on the poll. With the editor open nothing is read again (the frame refuses).
+- **Not traced:** that the sync engine raises `current_version` in the local state when another device's save lands
+  while a file is open. The tests move it in the fake engine; whether it moves in a real sync is for the native rung.
