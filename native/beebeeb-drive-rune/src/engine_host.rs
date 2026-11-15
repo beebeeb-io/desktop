@@ -989,6 +989,14 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         })
     }
 
+    fn new_file(&mut self, folder: Option<&str>, name: &str) -> Result<(), ActionError> {
+        self.local(|db, sync_root| {
+            let folder_entry = file_ops::resolve_folder(db, folder).map_err(map_drive_err)?;
+            file_ops::create_file(db, sync_root, folder_entry.as_ref(), name, &[]).map_err(map_drive_err)?;
+            Ok(())
+        })
+    }
+
     fn rename(&mut self, item: &DriveItem, name: &str) -> Result<(), ActionError> {
         self.local(|db, sync_root| {
             let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;

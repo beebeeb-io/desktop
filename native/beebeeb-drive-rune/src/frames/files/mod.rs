@@ -11,6 +11,7 @@ pub mod background_menu;
 pub mod browse_states;
 pub mod changes;
 pub mod conflict;
+pub mod create_file;
 pub mod details;
 pub mod dialogs;
 pub mod facts;
