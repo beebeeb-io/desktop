@@ -157,3 +157,73 @@ fn photos_space_starts_the_video_it_shows() {
     ui.close_viewer();
     assert!(ui.playing.is_none(), "closing the viewer lets it go");
 }
+
+// ---- fx-player-readers: the stage draws only its own video's player state ----
+
+use rune::{Env, Runtime};
+
+use crate::media::player::{MediaItem, Press};
+use crate::shell::app::{Event, Route, Section};
+use crate::{State, init, view};
+use beebeeb_engine::account::SessionGeneration;
+use beebeeb_media_protocol::KindHint;
+
+/// A player that holds `file_id`'s refusal ("This file could not be played."): the state of that file only.
+fn holding_refused(file_id: &str) -> PlayerHandle {
+    let player = a_player();
+    let item = MediaItem {
+        file_id: file_id.into(),
+        kind: KindHint::Video,
+        length_ms: 0,
+        press: Press {
+            session: SessionGeneration::for_test(1),
+            account: Some("a@example.eu".into()),
+        },
+    };
+    player.open(item, Vec::new()).expect("the player starts its worker");
+    let began = std::time::Instant::now();
+    while !player.state().is_some_and(|state| state.refused.is_some()) {
+        assert!(began.elapsed() < std::time::Duration::from_secs(5), "the refusal lands");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    player
+}
+
+/// The Photos window on the board's video, which this window started (`own` is the file it opened) while `player`
+/// is what the process-wide player holds now.
+fn stage_of(own: &str, player: PlayerHandle) -> Runtime<State> {
+    let mut ui = Ui::new(Box::new(FixturePhotos::new()));
+    ui.open(video_id());
+    ui.playing = Some((video_id(), player));
+    ui.playing_file = Some(own.into());
+    let mut state = init();
+    crate::shell::host::dispatch(&mut state, Event::Navigate(Route::section(Section::Photos)));
+    state.photos = ui;
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
+    rt.frame(0.0);
+    rt
+}
+
+fn has(rt: &Runtime<State>, key: &str) -> bool {
+    rt.elements()
+        .iter()
+        .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+}
+
+/// The stage shows its own video's refusal, and none of another file's: a song that took the player over after
+/// this window started its video leaves the video's stage idle.
+#[test]
+fn fxr_the_stage_draws_its_own_videos_state_only() {
+    let own = stage_of("pv", holding_refused("pv"));
+    assert!(has(&own, "ph-player-refused"), "the video's own refusal is said");
+    let other = stage_of("pv", holding_refused("song-a"));
+    assert!(has(&other, "ph-stage"), "the stage is drawn");
+    assert!(
+        !has(&other, "ph-player-refused"),
+        "another file's refusal is not this video's"
+    );
+}

@@ -292,3 +292,119 @@ fn mfx_space_on_a_refused_video_plays_it_again() {
         "Space after a refusal opens the video again"
     );
 }
+
+// ---- fx-player-readers: the details panel reads only its own file's player state ----
+
+/// A helper that answers `Open` with a video whose decoding is reduced on this PC, then nothing.
+struct ReducedLink {
+    answered: bool,
+}
+
+impl Link for ReducedLink {
+    fn send(&mut self, _msg: &beebeeb_media_protocol::ToHelper) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn recv(
+        &mut self,
+        _timeout: Duration,
+    ) -> Result<beebeeb_media_protocol::FromHelper, crate::media::transport::LinkError> {
+        if !self.answered {
+            self.answered = true;
+            return Ok(beebeeb_media_protocol::FromHelper::Opened(
+                beebeeb_media_protocol::Opened {
+                    duration_ms: 60_000,
+                    video: Some(beebeeb_media_protocol::VideoInfo {
+                        w: 640,
+                        h: 360,
+                        fps_milli: 30_000,
+                        codec: beebeeb_media_protocol::Codec::H264,
+                    }),
+                    audio: None,
+                    reduced_quality: true,
+                    no_sound: None,
+                },
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        Err(crate::media::transport::LinkError::Timeout)
+    }
+    fn kill(&mut self) {}
+}
+
+struct ReducedLinks;
+impl LinkFactory for ReducedLinks {
+    fn start(&self) -> Result<Box<dyn Link>, Refusal> {
+        Ok(Box::new(ReducedLink { answered: false }))
+    }
+}
+
+struct OneByte;
+impl MediaBytes for OneByte {
+    fn len(&self) -> u64 {
+        1
+    }
+    fn read_at(
+        &mut self,
+        _offset: u64,
+        _len: u32,
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, ()> {
+        Ok(zeroize::Zeroizing::new(vec![0]))
+    }
+}
+
+struct OpensOneByte;
+impl MediaOpener for OpensOneByte {
+    fn open(&self, _file_id: &str) -> Result<Box<dyn MediaBytes>, Refusal> {
+        Ok(Box::new(OneByte))
+    }
+}
+
+/// A player whose `file_id` is open and flagged "reduced quality on this PC".
+fn holding_reduced(file_id: &str) -> PlayerHandle {
+    let player = PlayerHandle::new(
+        Arc::new(OpensOneByte),
+        Arc::new(ReducedLinks),
+        Arc::new(NoAudio),
+        None,
+        VideoSurface::new(),
+    );
+    let item = MediaItem {
+        file_id: file_id.into(),
+        kind: KindHint::Video,
+        length_ms: 0,
+        press: Press {
+            session: SessionGeneration::for_test(1),
+            account: Some("a@example.eu".into()),
+        },
+    };
+    player.open(item, Vec::new()).expect("the player starts its worker");
+    let began = Instant::now();
+    while !player.state().is_some_and(|state| state.reduced_quality) {
+        assert!(began.elapsed() < Duration::from_secs(5), "the flag lands in the player");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    player
+}
+
+fn with_details(player: PlayerHandle) -> Runtime<State> {
+    let (mut rt, _calls) = opened("v1", player);
+    rt.state.viewer.ui.as_mut().expect("a file is open").toggle_details();
+    rt.frame(0.0);
+    rt.settle_all();
+    rt.frame(0.0);
+    rt
+}
+
+/// The details panel says "Reduced quality on this PC" for its own file only: another file's flag is not this one's.
+#[test]
+fn fxr_details_show_the_reduced_quality_of_their_own_file_only() {
+    let own = with_details(holding_reduced("v1"));
+    assert!(has(&own, "detail-reduced"), "this file's own flag is said");
+    let other = with_details(holding_reduced("song-a"));
+    assert!(has(&other, "detail-pane"), "the panel is drawn");
+    assert!(
+        !has(&other, "detail-reduced"),
+        "another file's reduced-quality flag is not this video's"
+    );
+}

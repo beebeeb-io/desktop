@@ -180,7 +180,7 @@ mod live_tests;
 
 /// The stage's picture of a video the player plays: the player's frame, scaled to fit, and the player's bar on it
 /// (the drawing of `viewers::video::bar`, shared with a video opened from Files).
-fn live_stage(photo: El, handle: &crate::media::player::PlayerHandle, t: &Theme) -> El {
+fn live_stage(photo: El, handle: &crate::media::player::PlayerHandle, own: Option<&str>, t: &Theme) -> El {
     use crate::frames::viewers::video::{self, Times};
     let ask = handle.clone();
     // The picture takes the whole stage (the fixture's 600 x 400 is the board's drawing): its size is what the
@@ -189,10 +189,14 @@ fn live_stage(photo: El, handle: &crate::media::player::PlayerHandle, t: &Theme)
         let (w, h) = video::ask_size(w, h);
         ask.set_view_size(w, h);
     });
-    if let Some(frame) = handle.frame() {
+    // Only this video's own state: while the player holds another file (a song started from Files), the stage keeps
+    // its own picture and an idle bar, never that file's frame, times or refusal.
+    let state = own.and_then(|file| handle.state_of(file));
+    if state.is_some()
+        && let Some(frame) = handle.frame()
+    {
         photo = photo.pixels_fit(&frame, SurfaceFit::Fit);
     }
-    let state = handle.state();
     let ink = Color::WHITE;
     let inner = match state.as_ref().and_then(|s| s.refused.as_ref()) {
         Some(why) => kit::label("ph-player-refused", video::refusal_words(why), style::CAP, ink),
@@ -284,7 +288,7 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         Kind::Photo => None,
     };
     if let Some(handle) = live {
-        photo = live_stage(photo, &handle, t);
+        photo = live_stage(photo, &handle, ui.playing_file.as_deref(), t);
     } else if let Kind::Video(seconds) = shown.kind
         && !ui.source.answers_later()
     {
