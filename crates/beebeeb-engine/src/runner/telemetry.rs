@@ -110,7 +110,10 @@ impl AuthHealth {
                 self.add_refusal();
                 true
             }
-            Some(_) => false,
+            Some(_) => {
+                self.add_refusal();
+                true
+            }
         }
     }
 
