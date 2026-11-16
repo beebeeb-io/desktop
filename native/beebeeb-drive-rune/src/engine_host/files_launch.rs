@@ -8,8 +8,9 @@
 //!   (`still`, handed to every start below), and starts nothing when it moved. Every lock, sign-out, sign-in and
 //!   unlock moves the session's turn (`Engine::session_turn`).
 //! - The launch worker's starts wait their turn in [`Pending`], which a session end empties
-//!   (`FilesSource::forget_starts`, from `frames/files/reset.rs`): what the ended session asked for is dropped, not
-//!   kept until the lock is let go.
+//!   (`FilesSource::forget_starts`, from `frames/files/reset.rs`), and so do the queues of the session
+//!   [`super::launcher::Launcher`]s (tray, viewer): what the ended session asked for is dropped, not kept until the
+//!   lock is let go.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -46,6 +47,11 @@ type Job = Box<dyn FnOnce() + Send>;
 /// session end empties it ([`Pending::forget`]).
 #[derive(Clone, Default)]
 pub(super) struct Pending(Arc<Mutex<Queue>>);
+
+/// The queues a session end empties besides the one asked: every session [`super::launcher::Launcher`]'s (the tray's,
+/// the viewer's), so one session end drops all of the ended session's starts, not only Files'. In a test only the
+/// queues joined by the same thread (tests run in parallel and each is its own session).
+static JOINED: Mutex<Vec<(std::thread::ThreadId, std::sync::Weak<Mutex<Queue>>)>> = Mutex::new(Vec::new());
 
 #[derive(Default)]
 struct Queue {
@@ -94,11 +100,31 @@ impl Pending {
         handed
     }
 
-    /// A session ended: every start not begun yet goes. A start that is running already compares its session inside
-    /// the launch lock.
+    /// This queue is emptied by every session end ([`Pending::forget`], whichever queue it is called on).
+    pub(super) fn join_session_end(&self) {
+        let me = std::thread::current().id();
+        let mut joined = JOINED.lock().unwrap_or_else(PoisonError::into_inner);
+        joined.retain(|(_, queue)| queue.strong_count() > 0);
+        if !joined.iter().any(|(_, queue)| queue.as_ptr() == Arc::as_ptr(&self.0)) {
+            joined.push((me, Arc::downgrade(&self.0)));
+        }
+    }
+
+    /// A session ended: every start not begun yet goes, in this queue and in every joined one. A start that is
+    /// running already compares its session inside the launch lock.
     pub(super) fn forget(&self) {
-        let gone = std::mem::take(&mut self.held().starts);
-        drop(gone);
+        let me = std::thread::current().id();
+        let others: Vec<_> = JOINED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(thread, _)| !cfg!(test) || *thread == me)
+            .filter_map(|(_, queue)| queue.upgrade())
+            .collect();
+        for queue in others.iter().chain(std::iter::once(&self.0)) {
+            let gone = std::mem::take(&mut queue.lock().unwrap_or_else(PoisonError::into_inner).starts);
+            drop(gone);
+        }
     }
 
     /// How many starts wait.
