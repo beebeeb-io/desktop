@@ -32,7 +32,9 @@
 //!   locked leaves the cover until a later poll sees the session open again, so no frame shows the content between
 //!   the engine's lock and the window's next read of the gate. A look that failed (it panicked) decided nothing: the
 //!   cover holds and the wake is said again as the longest time away, so the engine locks unless nothing can lock
-//!   (fail closed, as a resume with no idle reading: P3-2). Where nothing an idle time says could lock (app lock off:
+//!   (fail closed, as a resume with no idle reading: P3-2). A retry that fails too does NOT lift the cover (Guus's
+//!   ruling, fail closed): [`Cover::Failed`] stays, asks again each [`LOOK_AT_MOST_EVERY`], and offers the sign-in path
+//!   ([`AwayLock::sign_in_offered`]), never an Unlock that asks nothing. Where nothing an idle time says could lock (app lock off:
 //!   the engine's last idle answer; an engine without the automatic lock), nothing is covered: app lock off never
 //!   locks, so it never shows the lock screen either.
 //! - The engine's look reads the credential store and waits for the lock's write hold: it runs on a worker, one idle
@@ -185,6 +187,9 @@ enum Cover {
     Held,
     /// The look with this number says the wake: its answer lifts the cover, unless it locked.
     Asked(usize),
+    /// The look that says the wake failed twice: the engine decided nothing, so the cover STAYS (fail closed; the
+    /// cover offers the sign-in path, [`AwayLock::sign_in_offered`]) and the wake is said again at the next due look.
+    Failed,
     /// A look locked, or the poll saw the session closed, under the cover: it lifts at a LATER poll that sees the
     /// session open (the window read the gate again before it, in the same frame).
     Locked,
@@ -213,8 +218,10 @@ pub struct AwayLock {
     resumed: bool,
     /// The window's content is covered (D-B2-3).
     cover: Cover,
-    /// The look that says the wake failed once already: a second failure lifts the cover (see `measure`).
+    /// The look that says the wake failed once already: a second failure holds the cover as [`Cover::Failed`].
     failed_wake: bool,
+    /// No look has passed since the cover went up and one failed twice: the cover offers the sign-in path.
+    no_check: bool,
     /// Whether the cover was on when the last poll ended: a cover turned on between two polls (the tray's resume, a
     /// click on the b) still gets the instant commit of the poll that follows.
     polled_cover: bool,
@@ -246,6 +253,7 @@ impl Default for AwayLock {
             resumed: false,
             cover: Cover::Off,
             failed_wake: false,
+            no_check: false,
             polled_cover: false,
             could_lock: true,
             tells: WakeCover::shell(),
@@ -262,6 +270,12 @@ impl AwayLock {
     /// The window's content is covered: drawn as the lock screen while a wake may lock (D-B2-3; the module doc).
     pub fn covers(&self) -> bool {
         self.cover != Cover::Off
+    }
+
+    /// The cover stays because the engine's look failed and nothing passed: it offers the sign-in path (a button that
+    /// closes the engine's lock, so the engine's own password screen checks), never an Unlock that asks nothing.
+    pub fn sign_in_offered(&self) -> bool {
+        self.no_check && self.covers()
     }
 
     /// Whether a wake covers here: something an idle time says could lock (app lock on, as the engine last answered;
@@ -358,16 +372,21 @@ impl AwayLock {
             if self.cover != Cover::Off && answer.locked {
                 // The engine locked: this frame's gate may have been read before it.
                 self.cover = Cover::Locked;
+                self.no_check = false;
                 lift_if_open = false;
             } else if self.cover == Cover::Asked(looked.number) && looked.answer.is_none() {
                 // The look that says the wake failed: the engine decided nothing (P3-2, fail closed). The cover holds,
                 // and after the grace the wake is said again as the longest time away (unknown, as a resume with no
                 // idle reading), which locks unless nothing an idle time says can lock.
-                // Once only: a retry that fails too ends the cover (a look that fails every time must not hold the
-                // window under a lock screen that cannot unlock, forever).
+                // A retry that fails too does NOT lift it (the cover fails closed): it stays, offers the sign-in path
+                // and tries again at the next due look.
                 if std::mem::replace(&mut self.failed_wake, true) {
                     self.failed_wake = false;
-                    self.cover = Cover::Off;
+                    self.no_check = true;
+                    self.cover = Cover::Failed;
+                    self.away = None;
+                    self.gap_found_at = None;
+                    self.due = Some(now + LOOK_AT_MOST_EVERY);
                 } else {
                     self.cover = Cover::Held;
                     self.away = Some(Duration::MAX);
@@ -376,6 +395,7 @@ impl AwayLock {
             } else if self.cover == Cover::Asked(looked.number) {
                 // The look that says the wake locked nothing.
                 self.failed_wake = false;
+                self.no_check = false;
                 self.cover = Cover::Off;
             }
         }
@@ -392,6 +412,7 @@ impl AwayLock {
             self.resumed = false;
             self.could_lock = true;
             self.failed_wake = false;
+            self.no_check = false;
             if self.cover != Cover::Off {
                 self.cover = Cover::Locked;
             }
@@ -400,6 +421,7 @@ impl AwayLock {
         if lift_if_open {
             // Open again after the lock (an unlock, or another session): the lock screen was the window's.
             self.cover = Cover::Off;
+            self.no_check = false;
         }
         let opened_at = *self.opened_at.get_or_insert(now);
         let pc_idle = pc_idle.or_else(|| rune::last_input().map(|at| now.saturating_duration_since(at)));
@@ -442,12 +464,17 @@ impl AwayLock {
             self.arm(due, now, tx);
             return came;
         }
-        let idle = idle.max(self.away.unwrap_or_default());
+        // A cover that failed closed asks again as the longest time away (unknown: it locks unless nothing can).
+        let idle = if self.cover == Cover::Failed {
+            Duration::MAX
+        } else {
+            idle.max(self.away.unwrap_or_default())
+        };
         if let Some(number) = self.ask(Away::Idle(idle), true, actions, wake) {
             self.looking = true;
             self.away = None;
             self.gap_found_at = None;
-            if self.cover == Cover::Held {
+            if matches!(self.cover, Cover::Held | Cover::Failed) {
                 self.cover = Cover::Asked(number);
             }
         } else if !self.without {

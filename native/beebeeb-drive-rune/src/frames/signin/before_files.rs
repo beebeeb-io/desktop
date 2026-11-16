@@ -40,6 +40,9 @@ pub const SIGN_OUT: &str = "sign-out";
 /// The lock screen's second button, shown once Windows Hello could not answer.
 pub const USE_PASSWORD_KEY: &str = "gate-btn-1";
 
+/// The cover's sign-in button, shown while the engine's look failed and nothing passed (`shell::away`).
+pub const COVER_SIGN_IN_KEY: &str = "cover-sign-in";
+
 /// `.kit-btn-lg`'s words: 13px/500 on 19.5px.
 const BUTTON_LG: TextStyle = TextStyle::new(13.0, 500.0).lh(19.5).tracking(-0.065);
 /// `.t-sub`: 12px on 15px.
@@ -204,6 +207,31 @@ fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
     block.child(actions)
 }
 
+/// The cover whose look failed: the lock screen's look with the sign-in path in place of an Unlock that would ask
+/// nothing (the engine's lock is open). The press closes the engine's lock; its own password screen takes the window.
+fn cover_sign_in(t: &Theme) -> El {
+    let mut block = col().key("gate").items_center().gap(8.0);
+    for child in head(&ic::PADLOCK, "Beebeeb is locked", "Sign in to see your files.", false, t) {
+        block = block.child(child);
+    }
+    block.child(
+        row().key("gate-actions").mt(8.0).gap(8.0).child(
+            button(
+                COVER_SIGN_IN_KEY,
+                "Sign in",
+                Some(&ic::APP_LOCK),
+                Look::Primary,
+                28.0,
+                crate::ui::settings_dialog::BUTTON_MD,
+                t,
+            )
+            .default_button()
+            .autofocus()
+            .on_press_tx(|s: &mut State, _: &mut rune::Tx| s.shell.actions.lock_vault_now()),
+        ),
+    )
+}
+
 /// DW-0014: where to get a plan (only on the website), Check again, Sign out.
 fn no_plan(t: &Theme) -> El {
     let mut block = col().key("gate").w(NO_PLAN_W).items_center().gap(8.0);
@@ -311,7 +339,11 @@ fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
                 title: "Beebeeb is locked",
                 sub: None,
             },
-            locked(lock_said, &t),
+            if s.shell.away.sign_in_offered() && current_gate != GateState::Locked {
+                cover_sign_in(&t)
+            } else {
+                locked(lock_said, &t)
+            },
             locked_line(s.shell.sync_runs()),
             t.text_tertiary,
         )

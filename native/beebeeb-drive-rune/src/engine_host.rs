@@ -551,6 +551,11 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     fn screen_open(&self) -> bool {
         away::screen_open(&self.engine)
     }
+
+    /// The wake cover's sign-in path: the vault's lock (key out of memory), whose way back is the password.
+    fn lock_vault_now(&self) {
+        let _ = self.engine.lock();
+    }
 }
 
 // ---------------------------------------------------------------------------

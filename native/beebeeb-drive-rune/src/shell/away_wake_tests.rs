@@ -85,6 +85,9 @@ impl ShellActions for Scripted {
     fn screen_open(&self) -> bool {
         self.inner.screen_open()
     }
+    fn lock_vault_now(&self) {
+        self.inner.lock_vault_now()
+    }
 }
 
 /// The tray's resume of a wake, said as the window's `on_tray` says it.
@@ -417,16 +420,14 @@ fn a_lock_read_between_two_polls_takes_the_files_away_in_the_frame_that_shows_it
     the_first_locked_frame_holds_no_file_name(true);
 }
 
-/// A look that fails EVERY time (an engine that panics on each look) does not hold the cover forever: the first failure
-/// fails closed (the wake said again as the longest time away), the retry's failure lifts the cover.
-/// Mutant: drop the `failed_wake` check in `measure` -> the cover stays and `until` times out.
-#[test]
-fn an_always_failing_look_does_not_hold_the_cover_forever() {
-    let mut live = live();
-    until_drawn(&mut live, FILE_NAME);
-    idle_for(&mut live, Duration::from_secs(60));
-    looked(&mut live);
-    let failing = Scripted::over(&live, None, true);
+/// The engine's look that fails EVERY time (an engine that panics on each look): the wake cover fails CLOSED (Guus's
+/// ruling). The first failure says the wake again; the retry's failure holds the cover too, and nothing lifts it
+/// without a passing check.
+/// Mutant: back to "a second failure sets `Cover::Off`" -> red at "an always-failing look never lifts the cover".
+fn always_failing(live: &mut Live) -> Arc<dyn ShellActions> {
+    idle_for(live, Duration::from_secs(60));
+    looked(live);
+    let failing = Scripted::over(live, None, true);
     live.rt.update(|s, _| {
         s.shell.actions = failing.clone();
         s.shell
@@ -434,10 +435,60 @@ fn an_always_failing_look_does_not_hold_the_cover_forever() {
             .event(Away::Idle(Duration::from_secs(3 * 60)), &failing, None)
     });
     assert!(away(&mut live.rt).covers(), "the resume covers at once");
-    until(&mut live, "the cover held after the retry failed too", |live| {
-        !live.rt.state.shell.away.covers()
+    let before = away(&mut live.rt).answered;
+    // The failed look and the failed retry (after the grace).
+    answers(live, before + 2);
+    failing
+}
+
+#[test]
+fn an_always_failing_look_never_lifts_the_cover() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    always_failing(&mut live);
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_millis(600) {
+        live.rt.frame(0.016);
+        assert!(away(&mut live.rt).covers(), "the cover lifted with no passing check");
+        assert!(
+            !words(&live).contains(FILE_NAME),
+            "the files showed under a cover that no look cleared"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(live.engine.lock_state(), LockState::Open, "nothing locked it either");
+}
+
+/// The cover that stays up offers the normal sign-in path, never an Unlock that does nothing (the engine is open: the
+/// lock screen's Unlock asks nothing). Its press closes the engine's lock through the engine, so the window shows the
+/// engine's own password screen, which is the path that checks.
+/// Mutant: leave the cover's Unlock in place -> red at "no Unlock on the cover".
+#[test]
+fn the_sign_in_path_is_offered() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    always_failing(&mut live);
+    until_drawn(&mut live, "Sign in");
+    let drawn = words(&live);
+    assert!(!drawn.contains("Unlock"), "no Unlock on the cover:\n{drawn}");
+    assert!(!drawn.contains(FILE_NAME), "no file on the cover");
+    let r = live
+        .rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some(crate::frames::signin::before_files::COVER_SIGN_IN_KEY))
+        .expect("a sign-in button on the cover")
+        .rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    live.rt.pointer_down(x, y);
+    live.rt.pointer_up(x, y);
+    until(&mut live, "the press closed nothing", |live| {
+        live.engine.lock_state() != LockState::Open
     });
-    assert!(away(&mut live.rt).looks >= 2, "the failed look and the failed retry");
+    until(&mut live, "the cover held the engine's own screen back", |live| {
+        !registry::covered(&live.rt.state)
+    });
+    assert!(!words(&live).contains(FILE_NAME), "the files stay away");
 }
 
 /// `Shell::covered` is `registry::covered`'s predicate, not a copy.
