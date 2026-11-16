@@ -153,7 +153,7 @@ struct PressedOpener {
 
 impl MediaOpener for PressedOpener {
     fn open(&self, file_id: &str) -> Result<Box<dyn MediaBytes>, Refusal> {
-        self.inner.open(file_id)
+        self.inner.open_for(&self.press, file_id)
     }
 }
 
