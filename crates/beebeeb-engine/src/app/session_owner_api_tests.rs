@@ -164,3 +164,26 @@ fn signin_wipe_a_named_session_keeps_its_email() {
     assert_eq!(engine.settle_session_owner(), OwnerSettled::Recorded);
     assert_eq!(engine.account_email(), before);
 }
+
+/// A session whose owner id is known but whose email was never stored is asked again, and named.
+#[test]
+fn signin_wipe_a_session_with_an_id_but_no_email_is_named_by_the_next_ask() {
+    let (engine, _api, account) = a_session_from_before_the_owner_tag("owner-id-only");
+    assert_eq!(engine.settle_session_owner(), OwnerSettled::Recorded);
+    let mut vault = engine.vault();
+    let token = vault.session_token().unwrap().expect("a stored token");
+    vault.clear_session().unwrap();
+    vault.install_session(token).unwrap();
+    engine.acct.session.lock().unwrap().as_mut().unwrap().email = None;
+    *engine.acct.auth_email.lock().unwrap() = None;
+    assert!(engine.user_id().is_some(), "the id is known");
+    assert_eq!(engine.account_email(), None);
+
+    // The minute's throttle belongs to the first ask; the ask of a later minute is the same call.
+    assert_eq!(engine.settle_session_owner_now(), OwnerSettled::Recorded);
+    assert_eq!(engine.account_email().as_deref(), Some(account.email.as_str()));
+    assert_eq!(
+        engine.vault().account_email().unwrap().as_deref(),
+        Some(account.email.as_str())
+    );
+}

@@ -177,3 +177,22 @@ fn signin_wipe_a_completed_sign_in_keeps_no_challenge_and_no_stretch() {
     );
     assert_eq!(half_done(&engine), (false, false), "nothing of the finished step stays");
 }
+
+/// A passkey or device sign-in (and a recovery) installs through `store_first_sign_in`, not through the password
+/// step's own start: a proven password waiting for its code must not outlive the session that was stored instead.
+#[test]
+fn signin_wipe_a_stored_first_sign_in_forgets_the_half_done_password_step() {
+    let fake = fake("wipe-stored", true);
+    let engine = opened(&fake, "stored");
+    at_the_code(&engine, &fake);
+    let token = fake.account.session_token.clone();
+    let profile = engine
+        .runtime
+        .block_on(super::super::fetch_profile(&engine.client, &fake.api.base, &token))
+        .expect("the fake answers the profile");
+    let turn = engine.session_turn();
+    engine
+        .store_first_sign_in(turn, &token, &fake.account.email, &profile)
+        .expect("the session is stored");
+    assert_eq!(half_done(&engine), (false, false), "the stored session ended the half-done step");
+}
