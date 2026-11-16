@@ -276,3 +276,33 @@ fn a_section_is_copied_out_whole_and_only_into_its_own_length() {
     }
     assert_eq!(copied, 2);
 }
+
+/// SCRATCH (never merged): what strict handle checks do in a plain and a confined probe.
+#[test]
+fn diag_strict_handles() {
+    let _serial = serial();
+    let verbs = [
+        "strict-handles",
+        "bad-handle",
+        "close 1234",
+        "close 7ffffff8",
+        "setevent 7ffffff8",
+        "setevent 1234",
+        "wait 7ffffff8",
+        "stale close",
+        "stale set",
+        "stale wait",
+    ];
+    for confined in [false, true] {
+        for verb in verbs {
+            let mut probe = if confined { Probe::confined() } else { Probe::plain() };
+            let answer = answer_or_end(&mut probe, verb);
+            let ended = if answer.is_none() && confined {
+                probe.child().wait_timeout(BOUND).unwrap().map(|status| status.code())
+            } else {
+                None
+            };
+            println!("diag: confined={confined} {verb}: answer {answer:?} ended {ended:x?}");
+        }
+    }
+}

@@ -446,3 +446,60 @@ pub(crate) fn memory() -> String {
 pub(crate) fn memory() -> String {
     "err unsupported".into()
 }
+
+// ---- SCRATCH (never merged): strict-handle diagnostics ----
+#[cfg(windows)]
+pub(crate) fn diag(request: &str) -> String {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, GetCurrentProcess, GetProcessMitigationPolicy, ProcessStrictHandleCheckPolicy, SetEvent,
+        WaitForSingleObject,
+    };
+    let (verb, rest) = request.split_once(' ').unwrap_or((request, ""));
+    let value = |text: &str| usize::from_str_radix(text, 16).unwrap_or(0) as HANDLE;
+    // SAFETY (all): scratch diagnostics; each call takes any handle value and either fails or raises.
+    unsafe {
+        match verb {
+            "strict-handles" => {
+                let mut flags = 0u32;
+                let ok = GetProcessMitigationPolicy(
+                    GetCurrentProcess(),
+                    ProcessStrictHandleCheckPolicy,
+                    (&raw mut flags).cast(),
+                    4,
+                );
+                if ok == 0 {
+                    format!("err {}", last_error())
+                } else {
+                    format!("ok flags={flags:#x}")
+                }
+            }
+            "close" => {
+                let r = CloseHandle(value(rest));
+                format!("ok {r} {}", last_error())
+            }
+            "wait" => {
+                let r = WaitForSingleObject(value(rest), 0);
+                format!("ok {r:#x} {}", last_error())
+            }
+            "stale" => {
+                let event = CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
+                if event.is_null() {
+                    return format!("err create {}", last_error());
+                }
+                let closed = CloseHandle(event);
+                let r = match rest {
+                    "close" => CloseHandle(event) as u32,
+                    "set" => SetEvent(event) as u32,
+                    _ => WaitForSingleObject(event, 0),
+                };
+                format!(
+                    "ok value={:#x} closed={closed} r={r:#x} {}",
+                    event as usize,
+                    last_error()
+                )
+            }
+            _ => "err unknown".into(),
+        }
+    }
+}

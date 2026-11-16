@@ -1211,6 +1211,8 @@ fn main() {
             "window" => hardening::window(),
             "jit" => hardening::jit(),
             "bad-handle" => hardening::bad_handle(),
+            #[cfg(windows)]
+            "strict-handles" | "close" | "wait" | "stale" => hardening::diag(&line),
             "token" => hardening::token(),
             "memory" => hardening::memory(),
             "hang" | "spin" => {
