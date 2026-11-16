@@ -338,6 +338,8 @@ fn a_ghost_at_the_path_and_a_case_sensitive_volume_refuse_nothing() {
     });
 
     let f = case_twins();
+    // Ask the volume: does `report.pdf` already name the entry `Report.pdf` (NTFS, APFS) or is it a new one (ext4)?
+    let twins_on_disk = !f.root.path().join("report.pdf").exists();
     write(f.root.path(), "report.pdf", b"lower's");
     with_rule_for_test(CaseRule::Sensitive, || {
         assert_eq!(
@@ -348,7 +350,13 @@ fn a_ghost_at_the_path_and_a_case_sensitive_volume_refuse_nothing() {
             file_ops::rename(&f.db, f.root.path(), &get(&f.db, "lower"), "Renamed.pdf"),
             Ok("Renamed.pdf".to_string())
         );
-        assert_eq!(names(f.root.path(), ""), ["Archive", "Renamed.pdf", "Report.pdf"]);
+        // Case twins exist only on a volume that tells case apart; elsewhere both spellings are one entry, moved once.
+        let expected: &[&str] = if twins_on_disk {
+            &["Archive", "Renamed.pdf", "Report.pdf"]
+        } else {
+            &["Archive", "Renamed.pdf"]
+        };
+        assert_eq!(names(f.root.path(), ""), expected);
     });
 }
 
