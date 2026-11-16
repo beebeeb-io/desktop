@@ -3087,7 +3087,7 @@
    "x": 430,
    "y": 316,
    "w": 236,
-   "h": 235,
+   "h": 432,
    "bg": [
     254,
     253,
@@ -3328,6 +3328,225 @@
    ],
    "tracking": 0
   },
+  "menu-item-7": {
+   "kind": "box",
+   "x": 434,
+   "y": 547,
+   "w": 228,
+   "h": 30,
+   "hot": false
+  },
+  "menu-item-7-label": {
+   "kind": "text",
+   "x": 466,
+   "y": 553.5,
+   "w": 97.38,
+   "h": 17,
+   "text": "Details",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-7-shortcut": {
+   "kind": "text",
+   "x": 597.38,
+   "y": 554.75,
+   "w": 52.62,
+   "h": 14.5,
+   "text": "Alt+Enter",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-8": {
+   "kind": "box",
+   "x": 434,
+   "y": 585.5,
+   "w": 228,
+   "h": 30,
+   "hot": false
+  },
+  "menu-item-8-label": {
+   "kind": "text",
+   "x": 466,
+   "y": 592,
+   "w": 135.59,
+   "h": 17,
+   "text": "Rename",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-8-shortcut": {
+   "kind": "text",
+   "x": 635.59,
+   "y": 593.25,
+   "w": 14.41,
+   "h": 14.5,
+   "text": "F2",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-9": {
+   "kind": "box",
+   "x": 434,
+   "y": 615.5,
+   "w": 228,
+   "h": 30,
+   "hot": false
+  },
+  "menu-item-9-label": {
+   "kind": "text",
+   "x": 466,
+   "y": 622,
+   "w": 184,
+   "h": 17,
+   "text": "Move…",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-10": {
+   "kind": "box",
+   "x": 434,
+   "y": 645.5,
+   "w": 228,
+   "h": 30,
+   "hot": false
+  },
+  "menu-item-10-label": {
+   "kind": "text",
+   "x": 466,
+   "y": 652,
+   "w": 184,
+   "h": 17,
+   "text": "Duplicate",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-11": {
+   "kind": "box",
+   "x": 434,
+   "y": 675.5,
+   "w": 228,
+   "h": 30,
+   "hot": false
+  },
+  "menu-item-11-label": {
+   "kind": "text",
+   "x": 466,
+   "y": 682,
+   "w": 184,
+   "h": 17,
+   "text": "Version history…",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-12": {
+   "kind": "box",
+   "x": 434,
+   "y": 714,
+   "w": 228,
+   "h": 30,
+   "hot": false
+  },
+  "menu-item-12-label": {
+   "kind": "text",
+   "x": 466,
+   "y": 720.5,
+   "w": 113.63,
+   "h": 17,
+   "text": "Move to Trash",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    176,
+    10,
+    29,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-12-shortcut": {
+   "kind": "text",
+   "x": 613.63,
+   "y": 721.75,
+   "w": 36.37,
+   "h": 14.5,
+   "text": "Delete",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
   "menu-sep-0": {
    "kind": "box",
    "x": 434,
@@ -3345,6 +3564,32 @@
    "kind": "box",
    "x": 434,
    "y": 482.5,
+   "w": 228,
+   "h": 0.5,
+   "bg": [
+    22,
+    22,
+    11,
+    23
+   ]
+  },
+  "menu-sep-2": {
+   "kind": "box",
+   "x": 434,
+   "y": 581,
+   "w": 228,
+   "h": 0.5,
+   "bg": [
+    22,
+    22,
+    11,
+    23
+   ]
+  },
+  "menu-sep-3": {
+   "kind": "box",
+   "x": 434,
+   "y": 709.5,
    "w": 228,
    "h": 0.5,
    "bg": [
