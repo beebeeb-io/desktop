@@ -313,7 +313,6 @@ impl AwayLock {
         tx: &mut Tx,
     ) -> bool {
         let came = self.measure(open, pc_idle, actions, wake, tx);
-        self.tell();
         let covers = self.covers();
         // Compared with the last poll's end, not this poll's start: a cover turned on between two polls (an event)
         // is new to this frame too.
@@ -451,6 +450,7 @@ impl AwayLock {
     /// sleep (as idle time).
     pub fn event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
         self.take_event(seen, actions, wake);
+        self.tell();
     }
 
     fn take_event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
