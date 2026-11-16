@@ -315,3 +315,27 @@ fn launch_spawn_holds_the_lock_while_spawning() {
         "the lock is held around a system call that starts one"
     );
 }
+
+/// F11 on H1-S: the app's starts take the SAME lock as the helpers' start (`beebeeb_office_sandbox::launch_lock`, which
+/// `Sandbox::spawn` takes). Held through the sandbox's own call, the app's lock is seen held; let go, it is free.
+#[test]
+fn launch_lock_is_the_sandboxs_own() {
+    assert!(
+        (0..20).any(|_| launch::free_within(Duration::from_millis(250))),
+        "the probe never saw the lock free"
+    );
+    let (holding, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let helper_start = std::thread::spawn(move || {
+        let _guard = beebeeb_office_sandbox::launch_lock();
+        holding.send(()).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(3));
+    });
+    held.recv().unwrap();
+    assert!(
+        !launch::free_within(Duration::from_millis(300)),
+        "while the sandbox's lock is held, the app's starts wait for it"
+    );
+    release.send(()).unwrap();
+    helper_start.join().unwrap();
+}
