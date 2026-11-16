@@ -764,6 +764,23 @@ fn tiles_ask_their_region() {
 }
 
 #[test]
+fn a_thumbnail_is_asked_at_its_width() {
+    let fake = Fake::default();
+    let mut view = fake.view(OfficeKind::Pptx);
+    fake.set(pages(3));
+    assert!(matches!(view.poll(), Some(Body::Deck(_))));
+    let thumb = OfficePicture::Thumb { slide: 1, dpi: 144 };
+    assert!(view.picture(thumb).is_none());
+    let log = fake.log();
+    assert_eq!(log.pages.len(), 1);
+    let (_, slide, scale, region) = log.pages[0];
+    assert_eq!((slide, region), (1, None));
+    // `THUMB_W_PT` wide at 144 dpi: 140 × 144 / 96 = 210 px across a 595 pt slide.
+    assert_eq!(scale, kinds::THUMB_W_PT * 144.0 / 96.0 / 595.0);
+    assert_eq!(check::page_pixels(&A4, scale).map(|(w, _)| w), Some(210));
+}
+
+#[test]
 fn a_new_scale_keeps_the_old_picture_until_the_new_one_comes() {
     let fake = Fake::default();
     let mut view = doc_view(&fake, 1);

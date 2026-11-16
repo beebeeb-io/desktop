@@ -208,9 +208,13 @@ impl Host for Live {
     }
 
     fn retry(&mut self) -> bool {
-        self.ids.clear();
-        self.back.clear();
-        self.host.retry()
+        // Only a retry the host took starts afresh: a refused one leaves the asks on their way as they are.
+        let taken = self.host.retry();
+        if taken {
+            self.ids.clear();
+            self.back.clear();
+        }
+        taken
     }
 
     fn close(&mut self, why: CloseWhy) {
