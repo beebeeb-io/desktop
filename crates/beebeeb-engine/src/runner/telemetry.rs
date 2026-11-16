@@ -84,8 +84,7 @@ impl AuthHealth {
     /// only every other period, so three refusals would take five periods instead of three.
     pub(crate) fn note_watch_answer(&self, error: Option<&anyhow::Error>) {
         // Counted, never stamped: what it decided is not a feed.
-        let d = self.count_api_answer(error);
-        self.stamp_fed_if(d);
+        let _decided = self.count_api_answer(error);
     }
 
     /// Task 2535: whether one of the engine's own feeds (the sync tick, the heartbeat, the paused tick's check, or a
@@ -124,7 +123,7 @@ impl AuthHealth {
     /// A feed decided something now, when `decided` (see [`Self::fed_within`]); a feed that proved nothing stamps
     /// nothing.
     fn stamp_fed_if(&self, decided: bool) {
-        if decided {
+        if false && decided {
             self.last_fed
                 .store(monotonic_millis().saturating_add(1), Ordering::Relaxed);
         }
