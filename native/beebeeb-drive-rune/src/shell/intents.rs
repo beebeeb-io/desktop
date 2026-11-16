@@ -160,6 +160,7 @@ pub fn take_picked_folder(s: &mut State, tx: &mut Tx) -> bool {
     let answered = PICKING.with(|picking| {
         let mut picking = picking.borrow_mut();
         let open = picking.as_mut()?;
+        open.session_changed = now.as_deref() != Some(open.account.as_str());
         let got = open.answer.try_recv();
         match got {
             Err(mpsc::TryRecvError::Empty) => {
