@@ -85,7 +85,9 @@ fn a_lock_whose_proof_outlives_the_wait_closes_the_vault_and_refuses_starts_unti
     assert_eq!(pc.port.registers(), 0, "nothing registered");
 
     drop(release);
-    wait_until("the stopped proof's client is gone", || client.strong_count() == 0);
+    // Its outcome is recorded only once its task is dropped, after the sender the start's refusal reads.
+    pc.wait_for_outcomes(1);
+    assert_eq!(client.strong_count(), 0, "the stopped proof's client is gone");
 
     assert_eq!(
         pc.start(),
@@ -125,7 +127,9 @@ fn a_sign_out_whose_proof_outlives_the_wait_still_signs_out_and_refuses_starts_u
     );
 
     drop(release);
-    wait_until("the stopped proof's client is gone", || client.strong_count() == 0);
+    // Its outcome is recorded only once its task is dropped, after the sender the start's refusal reads.
+    pc.wait_for_outcomes(1);
+    assert_eq!(client.strong_count(), 0, "the stopped proof's client is gone");
 
     assert_eq!(
         pc.start(),
@@ -154,17 +158,17 @@ fn a_stop_reports_a_proof_that_outlived_its_wait_until_it_let_go() {
     );
     assert_eq!(stop(), ProofStop::Unconfirmed, "a later stop waits for it again");
     drop(release);
-    wait_until("the stopped proof's client is gone", || client.strong_count() == 0);
+    // Its outcome is recorded only once its task is dropped, after the sender the start's refusal reads.
+    pc.wait_for_outcomes(1);
+    assert_eq!(client.strong_count(), 0, "the stopped proof's client is gone");
     assert_eq!(stop(), ProofStop::Ended, "a stop once it let go");
 
     let pc = Pc::new();
     synced_rows(&pc.db());
     pc.sign_in(&owner());
     let (asked, listing_asked) = mpsc::channel();
-    pc.seams(|seams| {
-        seams.listing = Some(hanging(asked));
-        seams.stop_wait = Some(SHORT_STOP_WAIT);
-    });
+    // The stop's own wait here: a proof that drops at its next await is reported as soon as it ended.
+    pc.seams(|seams| seams.listing = Some(hanging(asked)));
     pc.engine.serve_own_data_proofs();
     assert_eq!(pc.start(), Err(SyncStartRefused::OtherAccountsData));
     listing_asked.recv_timeout(WAIT).expect("the proof is listing");
