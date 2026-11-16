@@ -448,7 +448,10 @@ pub fn backup_copy_of(db: &StateDb, folder: &ChosenFolder) -> Result<Option<Stri
 /// of the set). `NotFound` is not one (P3-12): before anything is sent it is an id that is no file id or no such row,
 /// and from the server (404) the move found nothing to move; either way nothing moved.
 fn may_have_reached(error: &DeleteBackupError) -> bool {
-    matches!(error, DeleteBackupError::Offline | DeleteBackupError::Failed("server"))
+    matches!(
+        error,
+        DeleteBackupError::Offline | DeleteBackupError::Failed("server") | DeleteBackupError::NotFound
+    )
 }
 
 /// DW-1410 as one sequence, its steps handed in (the engine's: the settings file and the state database, the
