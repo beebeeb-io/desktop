@@ -269,11 +269,6 @@ fn release_the_folder(s: &mut State) -> bool {
         return false;
     };
     // Before the cover: a lock takes the cover away too (the lock screen is not the cover), and must not hand it over.
-    if !(session_gate::open(s) && s.shell.app.account() == Some(account.as_str())) {
-        HELD_FOLDER.set(None);
-        log("a picked folder that waited was dropped: the window locked, signed out or shows another account");
-        return true;
-    }
     if registry::covered(s) {
         return false;
     }
