@@ -207,7 +207,7 @@ impl std::fmt::Display for SyncStartRefused {
             Self::OtherAccountsData => f.write_str(account_binding::OTHER_ACCOUNT_ON_WINDOWS),
             Self::IdentityUnknown => f.write_str(account_binding::IDENTITY_UNKNOWN),
             Self::StopUnconfirmed => f.write_str(account_binding::ENGINE_STOP_UNCONFIRMED),
-            Self::StopFinishing => f.write_str(account_binding::ENGINE_STOP_UNCONFIRMED),
+            Self::StopFinishing => f.write_str(account_binding::ENGINE_STOP_FINISHING),
             Self::StateInUse => {
                 f.write_str("Another program is syncing with this app's local state. Nothing was changed.")
             }
