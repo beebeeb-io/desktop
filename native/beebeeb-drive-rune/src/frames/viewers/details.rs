@@ -22,9 +22,25 @@ fn intent(intent: Intent) -> impl Fn(&mut State) + 'static {
     }
 }
 
-/// `offline_known`: the source read whether the file is kept on this PC (`ViewerSource::knows_offline`).
-/// When it did not, the panel draws no Available offline switch: a state that was not read is not shown.
+/// The words of decision D-MED-7: what the player decodes is below full quality on this PC.
+pub const REDUCED_QUALITY: &str = "Reduced quality on this PC";
+
+/// Whether the file's player (if it has one) decodes below full quality on this PC: `PlayState::reduced_quality`.
+pub fn is_reduced(state: Option<&crate::media::player::PlayState>) -> bool {
+    state.is_some_and(|s| s.reduced_quality)
+}
+
+/// The details of a file that is not played in the shell's player (the Office viewers): [`panel_with`] without the
+/// reduced-quality note.
 pub fn panel(file: &OpenFile, offline_known: bool, t: &Theme) -> El {
+    panel_with(file, offline_known, false, t)
+}
+
+/// The file's details. `offline_known`: the source read whether the file is kept on this PC
+/// (`ViewerSource::knows_offline`); when it did not, the panel draws no Available offline switch: a state that was
+/// not read is not shown. `reduced_quality` (see [`is_reduced`]): the panel then carries "Reduced quality on this PC"
+/// under the decrypted-here note.
+pub fn panel_with(file: &OpenFile, offline_known: bool, reduced_quality: bool, t: &Theme) -> El {
     let d = &file.details;
     let kind_line = if d.size.is_empty() {
         file.facts.clone()
@@ -65,6 +81,14 @@ pub fn panel(file: &OpenFile, offline_known: bool, t: &Theme) -> El {
             type_::CAPTION,
             t.text_tertiary,
         ));
+    if reduced_quality {
+        pane = pane.child(kit::label(
+            "detail-reduced",
+            REDUCED_QUALITY,
+            type_::CAPTION,
+            t.text_tertiary,
+        ));
+    }
     if !d.facts.is_empty() {
         pane = pane.child(meta);
     }

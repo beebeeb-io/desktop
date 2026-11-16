@@ -204,6 +204,7 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
         crate::engine_host::EngineSignInSource::with_hello(engine.clone(), Box::new(hello)),
     )));
+    crate::engine_host::media::install_shell_player(engine.clone(), s.shell.main_window_slot());
     // An open file: read from the engine, decrypted in memory (`engine_host::viewer`); one source per opened file.
     let viewer_engine = engine.clone();
     crate::frames::viewers::wire(
