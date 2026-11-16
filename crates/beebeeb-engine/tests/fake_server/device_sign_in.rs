@@ -47,13 +47,14 @@ fn start_server() -> (FakeApi, Arc<Mutex<Vec<String>>>) {
     let lines = Arc::new(Mutex::new(Vec::<String>::new()));
     let sink = lines.clone();
     let listener = server::bind(server::loopback_listen("127.0.0.1:0").unwrap()).unwrap();
-    let handler = server::fixture_handler(
+    let fake = server::start_fixture(
+        listener,
         fixture(),
         Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
         Arc::new(AtomicU64::new(0)),
         Switches::default(),
-    );
-    let fake = FakeApi::start_on(listener, handler).unwrap();
+    )
+    .unwrap();
     (fake, lines)
 }
 
