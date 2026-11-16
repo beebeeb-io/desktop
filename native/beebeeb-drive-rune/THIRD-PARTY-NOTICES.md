@@ -7,6 +7,10 @@ up yet (open, named in the pull request that added the renderer).
 Also compiled in, with nothing asked of a binary: two colour profiles in `hayro-interpret`
 (`CGATS001Compat-v2-micro.icc` and `LAB.icc`, both CC0-1.0 by that crate's `assets/README.md`).
 
+## Ubuntu Light, in the Office viewer's helper
+
+Ubuntu Light (`Ubuntu-Light.ttf`, Dalton Maag Ltd for Canonical, via `epaint_default_fonts` 0.37), the Office engine's last-resort text face, compiled into `beebeeb-office-render`: Ubuntu Font Licence 1.0 (`Ubuntu-font-1.0`), its notice and licence carried in the font's own metadata.
+
 ## The 14 standard PDF fonts' stand-ins (Foxit fonts, from PDFium), in `hayro-font`
 
 ```

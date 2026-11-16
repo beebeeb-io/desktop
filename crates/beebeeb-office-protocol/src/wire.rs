@@ -32,6 +32,10 @@ impl Out {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
 
+    pub(crate) fn f64(&mut self, v: f64) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+
     pub(crate) fn bool(&mut self, v: bool) {
         self.0.push(u8::from(v));
     }
@@ -98,6 +102,16 @@ impl<'a> In<'a> {
     /// A finite `f32`: NaN and the infinities are refused here, so no later arithmetic sees one.
     pub(crate) fn f32(&mut self) -> Result<f32, DecodeError> {
         let v = f32::from_le_bytes(self.take()?);
+        if v.is_finite() {
+            Ok(v)
+        } else {
+            Err(DecodeError::NotFinite)
+        }
+    }
+
+    /// A finite `f64`, by the same rule as [`In::f32`].
+    pub(crate) fn f64(&mut self) -> Result<f64, DecodeError> {
+        let v = f64::from_le_bytes(self.take()?);
         if v.is_finite() {
             Ok(v)
         } else {
