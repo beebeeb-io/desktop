@@ -204,6 +204,8 @@ struct TestSeams {
     listing: Option<TestListing>,
     /// The listing's time-out, in place of [`LIST_TIMEOUT`].
     list_timeout: Option<Duration>,
+    /// How long a stop waits for a stopped proof, in place of [`STOP_WAIT`].
+    stop_wait: Option<Duration>,
     /// The OS's answers for the start after an adoption, in place of the real ones.
     restart_port: Option<Arc<dyn crate::sync_root_port::SyncRootPort>>,
     /// Owed proofs the service took up (before the one-per-turn rule), and proofs it started.
@@ -341,17 +343,21 @@ impl<C: CredentialStores> Engine<C> {
     pub(in crate::app) async fn stop_proofs(&self) {
         #[cfg(any(target_os = "windows", test, feature = "test-support"))]
         {
-            let running = {
+            let (running, wait) = {
                 let seat = self.own_data_seat();
                 let mut state = lock(&seat.state);
                 state.owed = None;
                 state.ready = false;
                 state.stops = state.stops.wrapping_add(1);
-                std::mem::take(&mut state.running)
+                #[cfg(test)]
+                let wait = state.test.stop_wait.unwrap_or(STOP_WAIT);
+                #[cfg(not(test))]
+                let wait = STOP_WAIT;
+                (std::mem::take(&mut state.running), wait)
             };
             for proof in running {
                 proof.abort.abort();
-                if tokio::time::timeout(STOP_WAIT, proof.ended).await.is_err() {
+                if tokio::time::timeout(wait, proof.ended).await.is_err() {
                     tracing::warn!("ownership proof: a stopped proof did not end in time");
                 }
             }

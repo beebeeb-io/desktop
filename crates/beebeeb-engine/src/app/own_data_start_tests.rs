@@ -28,6 +28,10 @@ use crate::sync_root_port::SyncRootPort;
 #[path = "own_data_start_race_tests.rs"]
 mod race;
 
+/// Row fx-stop-timeout: a stopped proof that does not let go of its client within the stop's wait.
+#[path = "own_data_start_stop_tests.rs"]
+mod stop;
+
 type TestEngine = Engine<MemoryCredentials>;
 type Answer = std::pin::Pin<Box<dyn std::future::Future<Output = Listing> + Send>>;
 
