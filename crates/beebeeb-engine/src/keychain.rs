@@ -12,7 +12,7 @@ use std::fmt;
 use super::identity::EngineIdentity;
 const MASTER_KEY_BYTES: usize = 32;
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub struct SecretBytes(Vec<u8>);
 
 impl SecretBytes {
@@ -48,12 +48,6 @@ impl Drop for SecretBytes {
     fn drop(&mut self) {
         // Volatile writes (`zeroize`): a plain fill before the free may be removed as a dead store.
         zeroize::Zeroize::zeroize(self);
-    }
-}
-
-impl fmt::Debug for SecretBytes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SecretBytes(<redacted>, len={})", self.0.len())
     }
 }
 
