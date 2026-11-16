@@ -245,9 +245,14 @@ pub fn nesting(path: &Path, other: &Path) -> Option<Nesting> {
 
 /// The first of `others` that `path` nests with ([`nesting`]), and how; the same folder before any other.
 pub fn nested_with<'a, T>(path: &Path, others: &'a [T], at: impl Fn(&T) -> &Path) -> Option<(Nesting, &'a T)> {
-    others
+    let same = others
         .iter()
-        .find_map(|other| nesting(path, at(other)).map(|how| (how, other)))
+        .find(|other| nesting(path, at(other)) == Some(Nesting::Same));
+    same.map(|other| (Nesting::Same, other)).or_else(|| {
+        others
+            .iter()
+            .find_map(|other| nesting(path, at(other)).map(|how| (how, other)))
+    })
 }
 
 /// An add's refusal for a folder that nests `how` with one backed up already.
