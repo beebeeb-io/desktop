@@ -77,6 +77,8 @@ mod pages;
 mod viewer_find;
 #[path = "viewer_media.rs"]
 pub(crate) mod viewer_media;
+#[path = "viewer_office.rs"]
+pub(crate) mod viewer_office;
 #[path = "viewer_text.rs"]
 mod viewer_text;
 use pages::{Pages, PdfEnds};
@@ -97,6 +99,9 @@ pub(super) use change::this_pc;
 mod where_from;
 use where_from::{Recorded, read};
 
+#[cfg(test)]
+#[path = "viewer_office_tests.rs"]
+mod office_tests;
 #[cfg(test)]
 #[path = "viewer_tests.rs"]
 mod tests;
@@ -407,6 +412,8 @@ pub struct EngineViewerSource<E: ViewerEngine> {
     changes: change::Changes,
     /// The recording or video on screen and its queue (`viewer_media`).
     media: viewer_media::Media,
+    /// The Office file on screen: its switches, its read and its renderer (`viewer_office`).
+    office: viewer_office::Office,
 }
 
 impl<C: CredentialStores + 'static> EngineViewerSource<LiveViewerEngine<C>> {
@@ -445,6 +452,17 @@ pub(super) fn shows(name: &str) -> Shows {
 
 /// "Markdown" of "Markdown · 1.4 KB": the kind in a word, by the name.
 pub(super) fn kind_word(name: &str) -> &'static str {
+    // The board's words (DW-1507, DW-1508, DW-1509, DW-1511), once the Office route is on.
+    if let Some(kinds::OfficeRoute::Shows(kind) | kinds::OfficeRoute::NoPreview(kind)) = kinds::office_route(name) {
+        return match kind {
+            kinds::OfficeKind::Docx => "Word document",
+            kinds::OfficeKind::Doc => "Word 97\u{2013}2004 document",
+            kinds::OfficeKind::Xlsx => "Excel workbook",
+            kinds::OfficeKind::Xls => "Excel 97\u{2013}2004 workbook",
+            kinds::OfficeKind::Pptx => "PowerPoint presentation",
+            kinds::OfficeKind::Ppt => "PowerPoint 97\u{2013}2004 presentation",
+        };
+    }
     match kinds::viewer_of(name) {
         Some(Viewer::Markdown) => "Markdown",
         Some(Viewer::Text) => "Text",
@@ -616,6 +634,9 @@ fn body_of(error: OpenFileError) -> Option<Body> {
         OpenFileError::NotSignedIn | OpenFileError::NotYours => Body::Stopped(Stopped::SessionChanged),
         OpenFileError::NotFound => Body::Stopped(Stopped::Gone),
         OpenFileError::NothingSynced => Body::Stopped(Stopped::NothingSynced),
+        // Refused to this account (403), and a version that kept changing: named, never "not decrypted".
+        OpenFileError::NoAccess => Body::Stopped(Stopped::NoAccess),
+        OpenFileError::ChangedWhileOpening => Body::Stopped(Stopped::Changed),
         OpenFileError::Failed => Body::Failed,
     })
 }
@@ -627,6 +648,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             open: None,
             changes: change::Changes::default(),
             media: viewer_media::Media::default(),
+            office: viewer_office::Office::default(),
         }
     }
 
@@ -656,6 +678,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let epoch = self.engine.begin_opening(session, file_id);
         if let Some(mut before) = self.open.take() {
             before.end();
+            self.office_left();
         }
         let recorded = Recorded {
             here: facts.on_this_pc.is_some(),
@@ -702,7 +725,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             opening.seen = edit.version;
         }
         let media = self.media_body(session, opening.account.clone(), file_id, &facts.name, &facts.folders);
-        let body = if let Some(media) = media {
+        // An Office file goes by its own route, before the viewer's kinds (`viewer_office`).
+        let office = self.office_route(&facts.name);
+        let body = if let Some(route) = office {
+            self.office_begin(route, &opening, &facts, recorded)
+        } else if let Some(media) = media {
             media
         } else if shows == Shows::Nothing {
             Body::NotPreviewable(NoPreview::NoViewer)
@@ -786,10 +813,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 // A panic in this worker must not leave the view on "Decrypting" for good: it answers Failed.
                 let (answer, document): (Answer, Option<viewer_pdf::Document>) =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let (session, bytes, origin) = match read(&*engine, &file_id, recorded, &report, &cancel) {
-                            Ok(read) => read,
-                            Err(error) => return (Err(error), None),
-                        };
+                        let (session, bytes, origin) =
+                            match read(&*engine, &file_id, recorded, IN_MEMORY_MAX, &report, &cancel) {
+                                Ok(read) => read,
+                                Err(error) => return (Err(error), None),
+                            };
                         let (mut content, document) = match (&pdf, shows) {
                             (Some(ends), Shows::Pdf) => {
                                 let (body, document) = open_pdf(bytes, &ends.size);
@@ -873,6 +901,9 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     fn poll(&mut self, file_id: &str) -> Option<Body> {
         if let Some(body) = self.media_poll(file_id) {
             return Some(body);
+        }
+        if let Some(answer) = self.office_poll(file_id) {
+            return answer;
         }
         let opening = self.open.as_mut().filter(|opening| opening.file_id == file_id)?;
         let same_account = self.engine.has_session() && self.engine.account() == opening.account;
@@ -960,6 +991,9 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
+        if let Some(answer) = self.office_retry(file_id) {
+            return answer;
+        }
         self.begin(file_id)
     }
 
@@ -999,12 +1033,25 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn previews(&self, name: &str) -> bool {
-        shows(name) != Shows::Nothing || self.media_previews(name)
+        shows(name) != Shows::Nothing || self.media_previews(name) || self.office_route(name).is_some()
     }
 
-    /// An audio or a video file kept on this PC still opens in the player when playback is available (D-MED-13).
+    /// An audio or a video file kept on this PC still opens in the player when playback is available (D-MED-13); an
+    /// Office file opens in the viewer while its route is on ("Open in another app…" stays one press away).
     fn opens_here_when_kept(&self, name: &str) -> bool {
-        self.media_previews(name)
+        self.media_previews(name) || self.office_route(name).is_some()
+    }
+
+    fn office_live(&self) -> bool {
+        true
+    }
+
+    fn office_picture(&self, file_id: &str, which: kinds::OfficePicture) -> Option<rune::Pixels> {
+        self.office_picture_of(file_id, which)
+    }
+
+    fn office_cells(&self, file_id: &str, sheet: u32, first_row: u32, first_col: u32, rows: u32, cols: u32) {
+        self.office_cells_of(file_id, sheet, first_row, first_col, rows, cols);
     }
 
     fn can_play(&self) -> bool {
@@ -1110,5 +1157,6 @@ impl<E: ViewerEngine> Drop for EngineViewerSource<E> {
             opening.end();
         }
         self.media_closed();
+        self.office_left();
     }
 }

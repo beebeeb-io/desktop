@@ -11,6 +11,5 @@ DW-1201	Windows draws the taskbar and the b in the notification area, pressed wh
 DW-1230	Windows draws the b in the notification area; its badge shows the state	open
 DW-1231	Windows draws the b's menu above it; Pause syncing, no shortcuts	open
 DW-1231b	Windows draws the b's menu while sync is paused; Resume syncing	open
-DW-1562	Windows draws Open With, offering another app for an Office file	open
 DW-1901	Windows draws the installer's Installing page, with a progress bar	open
 DW-1902	Windows draws the installer's last page; Run Beebeeb ticked	open

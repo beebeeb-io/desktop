@@ -70,15 +70,6 @@ fn rendered_exact_ask_is_accepted() {
         check_rendered(&whole(2.0 * S100), &A4, len(1588, 2246), &rendered(1588, 2246), &L),
         Ok(())
     );
-    // ±1 px of rounding on either side.
-    assert_eq!(
-        check_rendered(&whole(S100), &A4, len(793, 1122), &rendered(793, 1122), &L),
-        Ok(())
-    );
-    assert_eq!(
-        check_rendered(&whole(S100), &A4, len(795, 1124), &rendered(795, 1124), &L),
-        Ok(())
-    );
     // A tile inside the page, and one that ends exactly at its corner.
     assert_eq!(
         check_rendered(&tile(0, 512, 512, 300), &A4, len(512, 300), &rendered(512, 300), &L),
@@ -98,8 +89,8 @@ fn rendered_exact_ask_is_accepted() {
 
 #[test]
 fn rendered_with_another_size_is_refused() {
-    // Only the width differs (by more than the rounding), and the section length agrees with the wrong size: the
-    // width comparison alone must refuse it.
+    // Only the width differs, and the section length agrees with the wrong size: the width comparison alone must
+    // refuse it.
     let ask = tile(0, 0, 100, 200);
     assert_eq!(
         check_rendered(&ask, &A4, len(120, 200), &rendered(120, 200), &L),
@@ -137,8 +128,8 @@ fn rendered_with_another_size_is_refused() {
 
 #[test]
 fn rendered_over_4096_is_refused() {
-    // One pixel over the limit is within the rounding of the ask, and the section length agrees: the limit alone
-    // must refuse it.
+    // One pixel over the limit, and the section length agrees: the limit is held before the size is compared, so it
+    // refuses as over the limit.
     let ask = tile(0, 0, 4096, 10);
     assert_eq!(
         check_rendered(&ask, &WIDE, len(4097, 10), &rendered(4097, 10), &L),
@@ -166,6 +157,44 @@ fn rendered_over_4096_is_refused() {
     assert_eq!(
         check_rendered(&whole(S100), &WIDE, len(4267, 134), &rendered(4267, 134), &L),
         Err(Refused::TooLarge)
+    );
+}
+
+/// US Letter, in points: 816 x 1056 px at [`S100`] in single precision (817 x 1057 in double).
+const LETTER: PageSize = PageSize {
+    w_pt: 612.0,
+    h_pt: 792.0,
+};
+
+/// F7: there is no rounding slack. The app and the helper size a page by one rule, so a side one pixel off is a fault,
+/// even when the section's length agrees with it.
+#[test]
+fn a_rendered_page_must_equal_the_ask_exactly() {
+    // A 3 x 2 tile answered 2 x 3: the same 24 bytes, each side one pixel off.
+    let ask = tile(0, 0, 3, 2);
+    assert_eq!(
+        len(3, 2),
+        len(2, 3),
+        "the premise: the section length cannot tell them apart"
+    );
+    assert_eq!(
+        check_rendered(&ask, &A4, len(2, 3), &rendered(2, 3), &L),
+        Err(Refused::WrongSize)
+    );
+    assert_eq!(check_rendered(&ask, &A4, len(3, 2), &rendered(3, 2), &L), Ok(()));
+
+    // A whole Letter page at 100 %: 816 x 1056 is the ask; one pixel more or less on either side is refused.
+    assert_eq!(page_pixels(&LETTER, S100), Some((816, 1056)));
+    for (w, h) in [(817, 1056), (815, 1056), (816, 1057), (816, 1055), (817, 1057)] {
+        assert_eq!(
+            check_rendered(&whole(S100), &LETTER, len(w, h), &rendered(w, h), &L),
+            Err(Refused::WrongSize),
+            "{w} x {h}"
+        );
+    }
+    assert_eq!(
+        check_rendered(&whole(S100), &LETTER, len(816, 1056), &rendered(816, 1056), &L),
+        Ok(())
     );
 }
 
@@ -474,6 +503,8 @@ fn cell(row: u32, col: u32) -> CellText {
         text: "1.250".to_owned(),
         align: Align::Right,
         bold: false,
+        value: Some(1.25),
+        formula: None,
     }
 }
 
@@ -484,6 +515,8 @@ fn data(cells: Vec<CellText>) -> CellData {
         row_heights: vec![15.0; 10],
         merges: Vec::new(),
         frozen: Frozen { rows: 0, cols: 0 },
+        anchors: Vec::new(),
+        missing_content: false,
     }
 }
 
@@ -730,8 +763,10 @@ fn cells_that_cannot_be_halved_are_refused() {
     };
     assert_eq!(check_cells(&one, &d, &L), Ok(()));
     let payload = d.encode().expect("one cell fits one frame");
-    // Counts 4, the cell 14 + its text, widths 8, heights 8, merges 20, frozen 8: half a frame and 62 bytes.
-    assert_eq!(payload.len(), MAX_CELL_TEXT_BYTES + 62);
+    // Counts 4, the cell 16 + its text + its value 8, widths 8, heights 8, merges 20, frozen 8, anchors 4,
+    // `missing_content` 1: half a frame and 77 bytes. With a formula and charts at their caps too, see
+    // `one_cell_at_every_cap_fits_one_frame`.
+    assert_eq!(payload.len(), MAX_CELL_TEXT_BYTES + 77);
     assert!(payload.len() < crate::frame::MAX_PAYLOAD);
 }
 
@@ -903,6 +938,9 @@ fn limits_are_the_contracts() {
     assert_eq!(MAX_SHEET_ROWS, 1_048_576);
     assert_eq!(MAX_SHEET_COLS, 16_384);
     assert_eq!(MAX_SHEET_NAME_CHARS, 255);
+    assert_eq!(MAX_FORMULA_BYTES, 8_192);
+    assert_eq!(MAX_ANCHORS, 256);
+    assert_eq!(MAX_ANCHOR_SIDE_PT.to_bits(), 20_000.0f32.to_bits());
     assert_eq!(
         Limits::CONTRACT,
         Limits {
@@ -915,6 +953,8 @@ fn limits_are_the_contracts() {
             max_cell_text_bytes: 32_768,
             max_outline_entries: 10_000,
             max_outline_text_bytes: 1_024,
+            max_formula_bytes: 8_192,
+            max_anchors: 256,
         }
     );
     assert_eq!(Limits::default(), Limits::CONTRACT);
@@ -940,6 +980,11 @@ fn refused_reasons_are_fixed_and_distinct() {
         Refused::SizesMismatch,
         Refused::BadCellSize,
         Refused::FrozenTooLarge,
+        Refused::BadValue,
+        Refused::FormulaTooLong,
+        Refused::TooManyAnchors,
+        Refused::BadAnchor,
+        Refused::DuplicateAnchor,
         Refused::TooManyEntries,
         Refused::BadNext,
         Refused::PagePastEnd,

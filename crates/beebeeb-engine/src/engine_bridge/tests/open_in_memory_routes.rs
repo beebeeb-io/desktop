@@ -123,7 +123,8 @@ async fn the_pinned_api_route_says_session_ended_gone_and_failed_by_kind() {
     for (status, kind) in [
         (401, OpenFileError::SessionEnded),
         (404, OpenFileError::NotFound),
-        (403, OpenFileError::Failed),
+        // A 403 is the account's access ending (CP2 row 10.3), not a failed download.
+        (403, OpenFileError::NoAccess),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let pair = Pair::start(KEY, TEST_FILE_ID, STRIDE, SIZE);

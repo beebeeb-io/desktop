@@ -18,17 +18,21 @@ use std::collections::HashMap;
 use std::fmt;
 
 use rune::tok::Family;
-use rune::{Cx, El, Icon, Span, TextStyle, col, el, rich, row};
+use rune::{Cx, El, Icon, Key, Mods, Span, SurfaceFit, TextStyle, col, el, rich, row};
 use zeroize::Zeroize;
 
 use crate::State;
 use crate::frames::placeholder;
+use crate::frames::viewers::kinds::OfficePicture;
+#[cfg(test)]
+use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::{caption, kit, sidebar};
 
-use super::docs::{ABOUT, ENCRYPTED, KEEP_FIRST, OPEN_ELSEWHERE};
+use super::docs::{ABOUT, ENCRYPTED, KEEP_FIRST, Live, OPEN_ELSEWHERE};
+use super::states::QUIET_LINE;
 
 #[path = "sheets_fixture.rs"]
 pub mod sheets_fixture;
@@ -58,6 +62,22 @@ pub struct CellText {
     pub text: String,
     pub right_aligned: bool,
     pub bold: bool,
+    /// The number behind the cell: Sum, Average and Count use it, and fall back to the text only for a cell without one.
+    pub value: Option<f64>,
+    /// The cell's formula as text ("=SUM(B2:B9)"), shown in the formula bar while it is the current cell.
+    pub formula: Option<String>,
+}
+
+/// A chart or picture the sheet places: its box in points from the sheet's origin, and the cells it starts and ends in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SheetAnchor {
+    pub anchor: u32,
+    pub from: Cell,
+    pub to: Cell,
+    pub x_pt: f32,
+    pub y_pt: f32,
+    pub w_pt: f32,
+    pub h_pt: f32,
 }
 
 /// One sheet of a workbook as the viewer draws it. A live host fills it; only this is drawn from.
@@ -78,6 +98,26 @@ pub struct SheetView {
     /// Rows and columns that stay in view, as the file says.
     pub frozen: (u32, u32),
     pub merges: Vec<(Cell, Cell)>,
+    /// The sheet index `active` points at in the workbook (the tabs may be fewer than the sheets).
+    pub sheet: u32,
+    /// Rows and columns of the active sheet (the scroll bounds).
+    pub extent: (u32, u32),
+    /// The first row and column in view; the scene moves it.
+    pub top_left: Cell,
+    /// Charts and pictures of the active sheet.
+    pub anchors: Vec<SheetAnchor>,
+    /// Some content could not be drawn: the status bar says so quietly.
+    pub missing_content: bool,
+    /// The tabs' "more" menu (`sheets_tabs`): the sheets the renderer could not name, and whether the menu is open.
+    pub more: More,
+}
+
+/// The sheet tabs' "more" menu: `unnamed` sheets of the workbook past the named tabs (the renderer's count), and
+/// whether the menu is open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct More {
+    pub unnamed: u32,
+    pub open: bool,
 }
 
 /// Its counts, never a cell.
@@ -95,6 +135,10 @@ impl SheetView {
         }
         for cell in &mut self.cells {
             cell.text.zeroize();
+            if let Some(f) = cell.formula.as_mut() {
+                f.zeroize();
+            }
+            cell.value = None;
         }
         self.formula.zeroize();
         self.selection = None;
@@ -155,7 +199,7 @@ pub fn stats(view: &SheetView) -> Option<Stats> {
         if cell.row < r0 || cell.row > r1 || cell.col < c0 || cell.col > c1 {
             continue;
         }
-        if let Some(v) = number(&cell.text) {
+        if let Some(v) = cell.value.or_else(|| number(&cell.text)) {
             out.sum += v;
             out.count += 1;
         }
@@ -189,7 +233,8 @@ fn figure(v: f64) -> String {
 
 /// The words of the status line's left side, in order: where the sheet is, then the selection's figures.
 pub fn status_words(view: &SheetView) -> Vec<String> {
-    let mut words = vec![format!("Sheet {} of {}", view.active + 1, view.tabs.len().max(1))];
+    let sheets = view.tabs.len().saturating_add(view.more.unnamed as usize);
+    let mut words = vec![format!("Sheet {} of {}", view.active + 1, sheets.max(1))];
     if let Some(stats) = stats(view) {
         match stats.average() {
             Some(avg) => {
@@ -243,6 +288,21 @@ fn fitted(key: impl Into<String>, words: &str, style: TextStyle, color: rune::Co
     kit::label(key, words, style, color).w(rune::text::advance(words, style))
 }
 
+/// What the formula bar says of the current cell: its formula, else what the host prepared, else the cell's own text.
+pub fn formula_text(view: &SheetView) -> String {
+    let here = view
+        .cells
+        .iter()
+        .find(|c| c.row == view.current.row && c.col == view.current.col);
+    if let Some(f) = here.and_then(|c| c.formula.as_ref()) {
+        return f.clone();
+    }
+    if !view.formula.is_empty() {
+        return view.formula.clone();
+    }
+    here.map(|c| c.text.clone()).unwrap_or_default()
+}
+
 /// The formula bar, read-only: the cell's name as text, then the formula as text (no "fx" mark: the board draws none). No box around either.
 fn formula_bar(view: &SheetView, t: &Theme) -> El {
     let name = a1(view.current);
@@ -267,7 +327,7 @@ fn formula_bar(view: &SheetView, t: &Theme) -> El {
         .border_layout()
         .child(cellbox)
         .child(
-            kit::label("sh-formula", view.formula.clone(), MONO, t.text)
+            kit::label("sh-formula", formula_text(view), MONO, t.text)
                 .truncate()
                 .min_w(0.0),
         )
@@ -385,8 +445,122 @@ fn merge_of(view: &SheetView, r: u32, c: u32) -> (u32, bool) {
     (1, false)
 }
 
+/// Which rows and columns of the sheet are drawn.
+pub struct Shown {
+    pub rows: Vec<u32>,
+    pub cols: Vec<u32>,
+}
+
+/// A row without a size yet, and a column without one (what the source fills gaps with).
+const ROW_PT: f32 = 15.0;
+const COL_PT: f32 = 48.0;
+
+impl Shown {
+    /// Everything the view holds (the fixture's workbook).
+    fn all(view: &SheetView) -> Shown {
+        Shown {
+            rows: (0..view.row_heights.len() as u32).collect(),
+            cols: (0..view.col_widths.len() as u32).collect(),
+        }
+    }
+
+    /// The frozen rows and columns, then those from `top_left` that fit `screen` (points).
+    fn from_top_left(view: &SheetView, screen: (f32, f32)) -> Shown {
+        let (rows_in, cols_in) = fit(view, screen);
+        let (r0, c0) = (view.top_left.row, view.top_left.col);
+        let mut rows: Vec<u32> = (0..view.frozen.0.min(r0)).collect();
+        rows.extend(r0..r0 + rows_in);
+        let mut cols: Vec<u32> = (0..view.frozen.1.min(c0)).collect();
+        cols.extend(c0..c0 + cols_in);
+        rows.retain(|r| (*r as usize) < view.row_heights.len());
+        cols.retain(|c| (*c as usize) < view.col_widths.len());
+        Shown { rows, cols }
+    }
+}
+
+/// How many rows and columns from `top_left` fill `screen` (at least one each).
+pub fn fit(view: &SheetView, screen: (f32, f32)) -> (u32, u32) {
+    let count = |sizes: &[f32], from: u32, room: f32, gap: f32| {
+        let (mut used, mut n) = (0.0, 0u32);
+        while used < room && n < 4096 {
+            used += sizes.get((from + n) as usize).copied().unwrap_or(gap);
+            n += 1;
+        }
+        n.max(1)
+    };
+    (
+        count(&view.row_heights, view.top_left.row, screen.1, ROW_PT),
+        count(&view.col_widths, view.top_left.col, screen.0, COL_PT),
+    )
+}
+
+/// Rows moved by Page Up and Page Down.
+const PAGE_ROWS: u32 = 20;
+
+/// The sheet's keys: arrows, Page Up and Down, Home and End move what is in view, never past the extent. `true`: taken.
+pub fn scroll_key(view: &mut SheetView, key: &Key, m: &Mods) -> bool {
+    if m.ctrl || m.alt || m.cmd {
+        return false;
+    }
+    let (rows, cols) = (i64::from(view.extent.0), i64::from(view.extent.1));
+    let (row, col) = (i64::from(view.top_left.row), i64::from(view.top_left.col));
+    let (nr, nc) = match key {
+        Key::Down => (row + 1, col),
+        Key::Up => (row - 1, col),
+        Key::Right => (row, col + 1),
+        Key::Left => (row, col - 1),
+        Key::PageDown => (row + i64::from(PAGE_ROWS), col),
+        Key::PageUp => (row - i64::from(PAGE_ROWS), col),
+        Key::Home => (0, 0),
+        Key::End => (rows - 1, col),
+        _ => return false,
+    };
+    view.top_left = Cell {
+        row: nr.clamp(0, (rows - 1).max(0)) as u32,
+        col: nc.clamp(0, (cols - 1).max(0)) as u32,
+    };
+    true
+}
+
+/// The charts and pictures of the sheet, each at its place from the first row and column in view, clipped by the grid.
+/// A picture that has not come draws its box empty.
+fn anchors_of(view: &SheetView, live: Option<&Live>, t: &Theme) -> El {
+    let mut layer = el().key("sh-anchors").absolute(0.0, 0.0).size(0.0, 0.0);
+    let Some(live) = live else { return layer };
+    let x0: f32 = (0..view.top_left.col)
+        .map(|c| view.col_widths.get(c as usize).copied().unwrap_or(COL_PT))
+        .sum();
+    let y0: f32 = (0..view.top_left.row)
+        .map(|r| view.row_heights.get(r as usize).copied().unwrap_or(ROW_PT))
+        .sum();
+    for a in &view.anchors {
+        let (x, y) = (a.x_pt - x0, a.y_pt - y0);
+        if x + a.w_pt <= 0.0 || y + a.h_pt <= 0.0 || x >= live.screen.0 || y >= live.screen.1 {
+            continue;
+        }
+        let picture = live.asks.get(OfficePicture::Anchor {
+            sheet: view.sheet,
+            anchor: a.anchor,
+            zoom_pct: 100,
+            dpi: live.dpi,
+        });
+        let mut b = el()
+            .key(format!("sh-anchor-{}", a.anchor))
+            .role("image")
+            .label("Chart or picture")
+            .absolute(ROW_HEAD_W + x, HEADER_H + y)
+            .size(a.w_pt, a.h_pt);
+        b = match picture {
+            Some(p) => b.pixels_fit(&p, SurfaceFit::Fill),
+            None => b.border(kit::HAIR, t.separator).border_layout(),
+        };
+        layer = layer.child(b);
+    }
+    layer
+}
+
 /// The grid: the corner and the column letters, then each row with its number and its cells.
-fn grid(view: &SheetView, t: &Theme) -> El {
+fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
     let by_place: HashMap<(u32, u32), &CellText> = view.cells.iter().map(|c| ((c.row, c.col), c)).collect();
     let selected = view.selection.map(bounds);
     let in_selection =
@@ -398,8 +572,8 @@ fn grid(view: &SheetView, t: &Theme) -> El {
             .border_sides([0.0, kit::HAIR, kit::HAIR, 0.0], t.separator)
             .border_layout(),
     );
-    for (c, w) in view.col_widths.iter().enumerate() {
-        let c = c as u32;
+    for &c in &shown.cols {
+        let w = &view.col_widths[c as usize];
         head = head.child(
             row()
                 .key(format!("sh-col-{}", col_letters(c)))
@@ -418,8 +592,8 @@ fn grid(view: &SheetView, t: &Theme) -> El {
         );
     }
     let mut body = col().key("sh-body");
-    for (r, h) in view.row_heights.iter().enumerate() {
-        let r = r as u32;
+    for &r in &shown.rows {
+        let h = &view.row_heights[r as usize];
         // A frozen boundary is a heavier line under the last frozen row.
         let under = if view.frozen.0 > 0 && r + 1 == view.frozen.0 {
             1.0
@@ -437,11 +611,9 @@ fn grid(view: &SheetView, t: &Theme) -> El {
                 .border_layout()
                 .child(fitted(format!("sh-row-{r}-t"), &number, ROW_NUMBER, t.text_tertiary)),
         );
-        let mut c = 0u32;
-        while (c as usize) < view.col_widths.len() {
+        for &c in &shown.cols {
             let (span, hidden) = merge_of(view, r, c);
             if hidden {
-                c += 1;
                 continue;
             }
             let span = span.max(1);
@@ -478,7 +650,6 @@ fn grid(view: &SheetView, t: &Theme) -> El {
                 };
             }
             line = line.child(cell);
-            c += span;
         }
         body = body.child(line);
     }
@@ -493,47 +664,16 @@ fn grid(view: &SheetView, t: &Theme) -> El {
         .clip_rounded(0.0)
         .child(head)
         .child(body)
+        .child(anchors)
 }
 
-/// The sheet tabs under the grid. No "+": a viewer adds no sheet.
-fn sheet_tabs(view: &SheetView, t: &Theme) -> El {
-    let mut tabs = row()
-        .key("sh-tabs")
-        .role("tablist")
-        .label("Sheets")
-        .w_full()
-        .h(TABS_H)
-        .px(8.0)
-        .gap(2.0)
-        .center_y()
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
-    for (i, name) in view.tabs.iter().enumerate() {
-        let on = i == view.active;
-        // The open sheet is a pill: the content fill, a hairline ring, 22 high, 5 round. The others are plain words.
-        let mut tab = el()
-            .key(format!("sh-tab-{i}"))
-            .role("tab")
-            .label(name.clone())
-            .checked(on)
-            .h(22.0)
-            .px(12.0)
-            .center()
-            .radius(5.0)
-            .child(fitted(
-                format!("sh-tab-{i}-t"),
-                name,
-                if on { TAB_ON } else { TAB },
-                if on { t.text } else { t.text_tertiary },
-            ));
-        if on {
-            tab = tab.fill(t.paper).border(kit::HAIR, t.separator).border_layout();
-        }
-        tabs = tabs.child(tab);
-    }
-    tabs
-}
+#[path = "sheets_scroll.rs"]
+pub mod sheets_scroll;
+pub use sheets_scroll::scroll_key_tx;
+
+#[path = "sheets_tabs.rs"]
+mod sheets_tabs;
+use sheets_tabs::sheet_tabs;
 
 /// A status word with its figure in mono, as the board sets it ("Sum " sans, "13,220" mono; "Count 8" is all sans).
 fn status_word(key: String, word: &str, t: &Theme) -> El {
@@ -576,10 +716,24 @@ fn status(view: &SheetView, t: &Theme) -> El {
         bar = bar.child(status_word(format!("st-{n}"), word, t));
         n += 1;
     }
+    let mut said = String::new();
+    if view.missing_content {
+        // The board's OvStatus: after the left words, `·` and the one quiet line.
+        bar = bar
+            .child(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary))
+            .child(fitted(
+                format!("st-{}", n + 1),
+                QUIET_LINE,
+                type_::STATUS,
+                t.text_tertiary,
+            ));
+        n += 2;
+        said = format!(". {QUIET_LINE}");
+    }
     let enc = format!("st-{n}");
     let dot = format!("st-{}", n + 1);
     let about = format!("st-{}", n + 2);
-    bar.label(format!("{}. {ENCRYPTED}", words.join(", ")))
+    bar.label(format!("{}{said}. {ENCRYPTED}", words.join(", ")))
         .child(el().key("st-gap").grow(1.0))
         .child(
             row()
@@ -614,7 +768,33 @@ fn status(view: &SheetView, t: &Theme) -> El {
 /// The window with the spreadsheet viewer: caption, sidebar, the window's toolbar, then the formula bar, the grid,
 /// the sheet tabs and the status line. There is no ribbon and no edit control anywhere in it.
 pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView) -> El {
+    window_with(s, cx, ui, view, &Shown::all(view), None)
+}
+
+/// The window of a workbook the Office engine renders: the grid from the first row and column in view, the cells in
+/// view and one screen more asked of the source each frame, the charts and pictures at their places.
+pub fn window_live(
+    s: &State,
+    cx: &mut Cx<State>,
+    ui: &Ui,
+    view: &SheetView,
+    live: &Live,
+    cells: &dyn Fn(u32, u32, u32, u32, u32),
+) -> El {
+    let (rows, cols) = fit(view, live.screen);
+    cells(view.sheet, view.top_left.row, view.top_left.col, rows * 2, cols * 2);
+    window_with(s, cx, ui, view, &Shown::from_top_left(view, live.screen), Some(live))
+}
+
+fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: &Shown, live: Option<&Live>) -> El {
     let t = tokens::theme(cx.system_dark());
+    let mut cells = grid(view, shown, anchors_of(view, live, &t), &t);
+    // A workbook in a renderer scrolls (`sheets_scroll`); the fixture's is the board's still sheet.
+    if live.is_some() {
+        let (down, across) = (cx.layout(sheets_scroll::DOWN), cx.layout(sheets_scroll::ACROSS));
+        cells = cells.child(sheets_scroll::overlay(view, down, across, &t));
+    }
+    let room = cx.layout_size("sh-tabs").map(|[w, _]| w);
     let mut body = row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(
         col()
             .key("sheet")
@@ -623,8 +803,8 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView) -> El {
             .h_full()
             .child(viewer_bar(&t))
             .child(formula_bar(view, &t))
-            .child(grid(view, &t))
-            .child(sheet_tabs(view, &t)),
+            .child(cells)
+            .child(sheet_tabs(view, live.is_some(), room, &t)),
     );
     if ui.show_details {
         body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
@@ -666,7 +846,6 @@ mod tests {
     use rune::{Env, Runtime};
 
     use super::*;
-    use crate::frames::viewers::source::Body;
     use crate::{init, view};
 
     fn runtime_of(state: State, dark: bool) -> Runtime<State> {
@@ -905,3 +1084,7 @@ mod tests {
         assert!(find(&rt, "vbar-page").is_none(), "a sheet has no page words");
     }
 }
+
+#[cfg(test)]
+#[path = "sheets_live_tests.rs"]
+mod live_tests;

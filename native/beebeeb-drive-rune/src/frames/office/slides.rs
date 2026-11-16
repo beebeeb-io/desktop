@@ -20,10 +20,13 @@
 use rune::tok::Family;
 use rune::{Color, Cx, El, Icon, Key, Mods, Pixels, Span, SurfaceFit, TextStyle, col, el, row};
 
-use super::docs::{ABOUT, KEEP_FIRST, OPEN_ELSEWHERE};
+use super::docs::{ABOUT, KEEP_FIRST, Live, OPEN_ELSEWHERE};
+use super::states;
 use crate::State;
 use crate::frames::placeholder;
 use crate::frames::signin::icons::EYE;
+use crate::frames::viewers::kinds::OfficePicture;
+use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
@@ -75,6 +78,8 @@ pub struct DeckView {
     pub count: u32,
     /// The stage's zoom in per cent (the bar's "- 100% +").
     pub zoom: u16,
+    /// Some content of a slide could not be drawn: the status bar says so quietly (the live source sets it).
+    pub quiet: bool,
 }
 
 impl DeckView {
@@ -85,6 +90,7 @@ impl DeckView {
             current: 1,
             count,
             zoom: 100,
+            quiet: false,
         }
     }
 }
@@ -112,14 +118,52 @@ pub struct SlideWords {
 pub struct DeckBody {
     pub view: DeckView,
     pub presenting: bool,
+    /// A touchpad's travel toward the next step of the wheel, in points ([`DeckBody::wheel_step`]).
+    pub wheel: i32,
 }
+
+/// Points of touchpad travel that step one slide, and of a mouse wheel's (a notch is 40 points; a smooth wheel sends it
+/// in parts).
+const SWIPE: i32 = 120;
+const NOTCH: i32 = 40;
 
 impl DeckBody {
     pub fn new(view: DeckView) -> Self {
         DeckBody {
             view,
             presenting: false,
+            wheel: 0,
         }
+    }
+
+    /// The wheel over the slide (in the window and in Present): no free scroll, the next or the previous slide. A mouse
+    /// wheel steps once per notch ([`NOTCH`] points, whether it comes whole or, from a smooth wheel, in parts; toward
+    /// you: the next); a touchpad once per [`SWIPE`] points of travel, and its coasting after the fingers lift moves
+    /// nothing. Turning back starts afresh. A sideways delta is not the deck's. `true`: taken.
+    pub fn wheel_step(&mut self, ev: &rune::WheelEvent) -> bool {
+        if ev.dy.abs() < ev.dx.abs() {
+            return false;
+        }
+        if ev.phase == rune::GesturePhase::Began {
+            self.wheel = 0;
+        }
+        if ev.momentum {
+            return true;
+        }
+        let dy = ev.dy.round() as i32;
+        if dy != 0 && (self.wheel > 0) != (dy > 0) {
+            self.wheel = 0;
+        }
+        self.wheel = self.wheel.saturating_add(dy);
+        let step = if ev.precise { SWIPE } else { NOTCH };
+        if self.wheel <= -step {
+            self.next();
+            self.wheel = 0;
+        } else if self.wheel >= step {
+            self.previous();
+            self.wheel = 0;
+        }
+        true
     }
 
     /// Show slide `n` (clamped to the deck).
@@ -487,16 +531,21 @@ fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) ->
         .h_full()
         .center()
         .fill(t.field)
+        .on_wheel(wheel_steps)
         .child(slide)
+}
+
+/// The slide's wheel handler: [`DeckBody::wheel_step`] on the open deck.
+fn wheel_steps(s: &mut State, ev: rune::WheelEvent, _: &mut rune::Tx) -> bool {
+    viewers::deck_mut(s).is_some_and(|deck| deck.wheel_step(&ev))
 }
 
 /// The status line: "Slide 2 of 3" at the left; Encrypted, a dot and About (a link to the viewer's About) at the right.
 fn status(deck: &DeckBody, t: &Theme) -> El {
     let words = format!("Slide {} of {}", deck.view.current, deck.view.count);
-    row()
+    let mut bar = row()
         .key("status-bar")
         .role("status")
-        .label(format!("{words}. {ENCRYPTED}"))
         .w_full()
         .h(28.0)
         .px(16.0)
@@ -508,22 +557,36 @@ fn status(deck: &DeckBody, t: &Theme) -> El {
         .child(
             kit::label("st-0", words.clone(), type_::STATUS, t.text_tertiary)
                 .w(rune::text::advance(&words, type_::STATUS)),
-        )
+        );
+    // The board's OvStatus: after the left words, `·` and the one quiet line.
+    let mut n = 1;
+    let mut said = String::new();
+    if deck.view.quiet {
+        bar = bar
+            .child(kit::label("st-1", "\u{00B7}", type_::STATUS, t.text_tertiary))
+            .child(
+                kit::label("st-2", states::QUIET_LINE, type_::STATUS, t.text_tertiary)
+                    .w(rune::text::advance(states::QUIET_LINE, type_::STATUS)),
+            );
+        n = 3;
+        said = format!(". {}", states::QUIET_LINE);
+    }
+    let (enc, dot, about) = (format!("st-{n}"), format!("st-{}", n + 1), format!("st-{}", n + 2));
+    bar.label(format!("{words}{said}. {ENCRYPTED}"))
         .child(el().key("st-gap").grow(1.0))
         .child(
             row()
-                .key("st-1-box")
+                .key(format!("{enc}-box"))
                 .gap(4.0)
                 .center_y()
-                .child(kit::glyph("st-1-icon", &icons::LOCK, 11.0, t.accent_deep))
+                .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
                 .child(
-                    kit::label("st-1", ENCRYPTED, STATUS_ENC, t.accent_deep)
-                        .w(rune::text::advance(ENCRYPTED, STATUS_ENC)),
+                    kit::label(enc, ENCRYPTED, STATUS_ENC, t.accent_deep).w(rune::text::advance(ENCRYPTED, STATUS_ENC)),
                 ),
         )
-        .child(kit::label("st-2", "\u{00B7}", type_::STATUS, t.text_tertiary))
+        .child(kit::label(dot, "\u{00B7}", type_::STATUS, t.text_tertiary))
         .child(
-            el().key("st-3-box")
+            el().key(format!("{about}-box"))
                 .role("link")
                 .label("About this viewer")
                 .focusable(true)
@@ -533,7 +596,7 @@ fn status(deck: &DeckBody, t: &Theme) -> El {
                     }
                 })
                 .child(
-                    kit::label("st-3", ABOUT, type_::STATUS, t.text_tertiary)
+                    kit::label(about, ABOUT, type_::STATUS, t.text_tertiary)
                         .w(rune::text::advance(ABOUT, type_::STATUS))
                         .spans(vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)]),
                 ),
@@ -543,6 +606,52 @@ fn status(deck: &DeckBody, t: &Theme) -> El {
 /// The window of DW-1509: the caption, the sidebar, and the deck beside it. `page(n)`: the source's answer for
 /// slide `n`.
 pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>) -> El {
+    window_with(s, cx, ui, deck, page, page)
+}
+
+/// How many filmstrip slides are asked: those on screen plus one screen more (each row is a thumbnail and its gap).
+fn thumbs_asked(screen_h: f32) -> u32 {
+    (2.0 * screen_h / (THUMB_H + 10.0)).ceil() as u32 + 1
+}
+
+/// The picture of a live slide as a [`SlidePage`]: its pixels only, never the fixture's words.
+fn live_page(pixels: Option<Pixels>) -> Option<SlidePage> {
+    pixels.map(|p| SlidePage {
+        pixels: Some(p),
+        words: None,
+    })
+}
+
+/// The window of a deck the Office engine renders: the filmstrip asks the thumbnails in view and one screen more, the
+/// stage asks the slide on it at the stage's zoom.
+pub fn window_live(s: &State, cx: &mut Cx<State>, ui: &Ui, deck: &DeckBody, live: &Live) -> El {
+    let dpi = live.dpi;
+    let limit = thumbs_asked(live.screen.1);
+    let thumb = move |n: u32| {
+        if n > limit {
+            return None;
+        }
+        live_page(live.asks.get(OfficePicture::Thumb { slide: n - 1, dpi }))
+    };
+    let zoom = deck.view.zoom;
+    let stage = move |n: u32| {
+        live_page(live.asks.get(OfficePicture::Page {
+            page: n - 1,
+            zoom_pct: zoom,
+            dpi,
+        }))
+    };
+    window_with(s, cx, ui, deck, &thumb, &stage)
+}
+
+fn window_with(
+    s: &State,
+    cx: &mut Cx<State>,
+    ui: &Ui,
+    deck: &DeckBody,
+    thumb: &dyn Fn(u32) -> Option<SlidePage>,
+    stage_page: &dyn Fn(u32) -> Option<SlidePage>,
+) -> El {
     let t = tokens::theme(cx.system_dark());
     let main = col()
         .key("content-area")
@@ -559,8 +668,8 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, deck: &DeckBody, page: &dy
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .child(filmstrip(deck, page, &t))
-                .child(stage(deck, page, &t)),
+                .child(filmstrip(deck, thumb, &t))
+                .child(stage(deck, stage_page, &t)),
         )
         .child(status(deck, &t));
     col()
@@ -641,8 +750,50 @@ fn slide_of_words(words: Option<&SlideWords>) -> El {
 /// Present: the slide on black, `esc` at the top right (it says "Back to the slides" to a screen reader), the
 /// count at the bottom right. Dark and light are the same: the slide is a page.
 pub fn present(cx: &mut Cx<State>, deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>) -> El {
-    let t = tokens::theme(cx.system_dark());
     let words = page(deck.view.current).and_then(|p| p.words);
+    present_of(cx, deck, slide_of_words(words.as_ref()))
+}
+
+/// The zoom, in per cent of the slide's own size, at which a slide fits a screen of `screen` points (16:9 slides, as
+/// the board's: [`SLIDE_W`] by [`SLIDE_H`] at 100 %).
+pub fn present_zoom(screen: (f32, f32)) -> u16 {
+    let fit = (screen.0 / SLIDE_W).min(screen.1 / SLIDE_H) * 100.0;
+    fit.floor().clamp(1.0, f32::from(u16::MAX)) as u16
+}
+
+/// Present for a deck the Office engine renders: the slide's own pixels asked at the screen's size, never the
+/// fixture's words. While the picture comes the screen is black.
+pub fn present_live(cx: &mut Cx<State>, deck: &DeckBody, live: &Live) -> El {
+    let zoom = present_zoom(live.screen);
+    let pixels = live.asks.get(OfficePicture::Page {
+        page: deck.view.current - 1,
+        zoom_pct: zoom,
+        dpi: live.dpi,
+    });
+    let slide = match pixels {
+        Some(p) => {
+            let (w, h) = (SLIDE_W * f32::from(zoom) / 100.0, SLIDE_H * f32::from(zoom) / 100.0);
+            el().key("pres-picture")
+                .role("image")
+                .label(format!("Slide {}", deck.view.current))
+                .size(w, h)
+                .pixels_fit(&p, SurfaceFit::Fill)
+        }
+        None => el().key("pres-picture").size(0.0, 0.0),
+    };
+    present_of(cx, deck, slide)
+}
+
+/// Whether the open file is a deck in Present: the shell keeps the screen out of captures and shares meanwhile.
+pub fn presenting(s: &State) -> bool {
+    matches!(
+        s.viewer.ui.as_ref().map(|ui| &ui.file.body),
+        Some(Body::Deck(deck)) if deck.presenting
+    )
+}
+
+fn present_of(cx: &mut Cx<State>, deck: &DeckBody, centre: El) -> El {
+    let t = tokens::theme(cx.system_dark());
     col()
         .key("pres-stage")
         .role("group")
@@ -650,13 +801,14 @@ pub fn present(cx: &mut Cx<State>, deck: &DeckBody, page: &dyn Fn(u32) -> Option
         .w_full()
         .h_full()
         .fill(Color::BLACK)
+        .on_wheel(wheel_steps)
         .child(
             el().key("pres-centre")
                 .absolute(0.0, 0.0)
                 .w_full()
                 .h_full()
                 .center()
-                .child(slide_of_words(words.as_ref())),
+                .child(centre),
         )
         .child(
             row()
@@ -969,3 +1121,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "slides_live_tests.rs"]
+mod live_tests;

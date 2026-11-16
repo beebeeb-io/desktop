@@ -26,6 +26,17 @@
 //! [`SandboxError::Unsupported`] and starts nothing. On Windows the helper is created suspended, the confinement is
 //! read back from the new process, and only then does it run; any failure on the way ends the process.
 //!
+//! **Mitigations.** Each profile also has a closed table of process mitigations ([`Profile::mitigations`]). The
+//! helper is created under them, and each one is read back from the new process before it runs, together with the
+//! token's less-privileged container flag and its integrity level (low).
+//!
+//! **Memory.** The job caps the memory the helper commits privately ([`Limits::memory_bytes`]). Memory a helper
+//! commits through a section it makes itself is not charged to that cap, so on Windows a watch thread per helper
+//! reads its private and shared commit every 100 ms and ends it once their sum passes the limit plus the bytes of the
+//! sections the app granted it that are still alive ([`Child::killed_for_memory`]). Known residual: a helper can
+//! commit faster than one poll, so the system's commit can be exhausted for up to about 100 ms before the kill
+//! releases it. A grant still cannot be taken back; this only bounds the total.
+//!
 //! Errors carry a step name and an operating-system code, never a path, a name or file content.
 
 #![deny(unsafe_code)]
@@ -33,10 +44,15 @@
 use std::fmt;
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+mod attributes;
 mod block;
 
+#[cfg(windows)]
+mod watch;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -106,6 +122,30 @@ pub enum Profile {
 /// The capability Media Foundation needs to start in a less-privileged AppContainer.
 const REGISTRY_READ: &str = "registryRead";
 
+/// The process mitigations a helper is created under, as plain names (no system type), one table per [`Profile`]:
+/// [`Profile::mitigations`]. On Windows each one that is on is set at the helper's creation and read back from the
+/// new process before it runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Mitigations {
+    /// No window-system (win32k) system calls: no window, no desktop, no drawing through the kernel's graphics part.
+    pub no_window_system_calls: bool,
+    /// No image (library) loads from a remote location.
+    pub no_remote_images: bool,
+    /// No image loads from a file with a low mandatory label.
+    pub no_low_label_images: bool,
+    /// Libraries are searched in the system folder before the helper's own.
+    pub prefer_system32_images: bool,
+    /// The system's legacy extension points (libraries it would load into every process) are not loaded.
+    pub no_extension_points: bool,
+    /// No dynamic code: no memory is made executable at run time.
+    pub no_dynamic_code: bool,
+    /// Using a handle value the process does not hold ends the process.
+    pub strict_handle_checks: bool,
+    /// Only Microsoft-signed images (libraries) load. The helper's own executable is mapped by the system when the
+    /// process is created, before this applies.
+    pub microsoft_signed_only: bool,
+}
+
 impl Profile {
     /// The capabilities this profile's helper holds, by their Windows names, in the order they are asked for.
     pub const fn capabilities(self) -> &'static [&'static str] {
@@ -121,6 +161,119 @@ impl Profile {
             ],
         }
     }
+
+    /// The process mitigations this profile's helper is created under.
+    ///
+    /// [`Profile::NoCapabilities`] (the Office helper, and the media helper on its own decoders) gets every one.
+    /// [`Profile::SystemDecoder`] gets only the four that cannot stop Windows' own decoders from working: no remote
+    /// and no low-label images, no extension points, strict handle checks. Whether those decoders run without the
+    /// window system, without dynamic code and with Microsoft-signed libraries only is not measured, so those stay off.
+    pub const fn mitigations(self) -> Mitigations {
+        match self {
+            Profile::NoCapabilities => Mitigations {
+                no_window_system_calls: true,
+                no_remote_images: true,
+                no_low_label_images: true,
+                prefer_system32_images: true,
+                no_extension_points: true,
+                no_dynamic_code: true,
+                strict_handle_checks: true,
+                microsoft_signed_only: true,
+            },
+            Profile::SystemDecoder { .. } => Mitigations {
+                no_window_system_calls: false,
+                no_remote_images: true,
+                no_low_label_images: true,
+                prefer_system32_images: false,
+                no_extension_points: true,
+                no_dynamic_code: false,
+                strict_handle_checks: true,
+                microsoft_signed_only: false,
+            },
+        }
+    }
+}
+
+/// The relative identifier of the low integrity level (`SECURITY_MANDATORY_LOW_RID`). A helper's token may be no
+/// higher.
+#[cfg_attr(not(windows), allow(dead_code))]
+const LOW_INTEGRITY_RID: u32 = 0x1000;
+
+/// What the system says about a new, still suspended helper, read back before it runs (Windows, `watch::read_facts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct TokenFacts {
+    /// The process is in the helper's job.
+    pub(crate) in_job: bool,
+    /// The token is an AppContainer token.
+    pub(crate) app_container: bool,
+    /// The token holds exactly the profile's capabilities, each once (compared by the system's identifiers; false for
+    /// a token outside a container, which has no capability list).
+    pub(crate) exact_capabilities: bool,
+    /// The token is a less-privileged AppContainer: the opt-out of the "all application packages" group took effect
+    /// (the token carries the attribute `WIN://NOALLAPPPKG`, set).
+    pub(crate) less_privileged: bool,
+    /// The relative identifier of the token's integrity level.
+    pub(crate) integrity_rid: u32,
+    /// The mitigations the process runs under, each read back from it.
+    pub(crate) mitigations: Mitigations,
+}
+
+/// Refuses a helper whose facts are not those of `profile`'s confinement: one check per fact, each with its own
+/// reason. Pure, so every refusal is tested on every operating system.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn check_facts(facts: &TokenFacts, profile: Profile) -> Result<(), SandboxError> {
+    if !facts.in_job {
+        return Err(SandboxError::NotConfined("not in the job"));
+    }
+    if !facts.app_container {
+        return Err(SandboxError::NotConfined("not an AppContainer"));
+    }
+    if !facts.exact_capabilities {
+        return Err(SandboxError::NotConfined("holds other capabilities than its profile's"));
+    }
+    if !facts.less_privileged {
+        return Err(SandboxError::NotConfined("not a less-privileged AppContainer"));
+    }
+    if facts.integrity_rid > LOW_INTEGRITY_RID {
+        return Err(SandboxError::NotConfined("its integrity level is above low"));
+    }
+    let wanted = profile.mitigations();
+    let got = facts.mitigations;
+    if wanted.no_window_system_calls && !got.no_window_system_calls {
+        return Err(SandboxError::NotConfined("window-system calls are allowed"));
+    }
+    if wanted.no_remote_images && !got.no_remote_images {
+        return Err(SandboxError::NotConfined("remote images may load"));
+    }
+    if wanted.no_low_label_images && !got.no_low_label_images {
+        return Err(SandboxError::NotConfined("low-label images may load"));
+    }
+    if wanted.prefer_system32_images && !got.prefer_system32_images {
+        return Err(SandboxError::NotConfined("system images are not preferred"));
+    }
+    if wanted.no_extension_points && !got.no_extension_points {
+        return Err(SandboxError::NotConfined("extension points are loaded"));
+    }
+    if wanted.no_dynamic_code && !got.no_dynamic_code {
+        return Err(SandboxError::NotConfined("dynamic code is allowed"));
+    }
+    if wanted.strict_handle_checks && !got.strict_handle_checks {
+        return Err(SandboxError::NotConfined("handle checks are not strict"));
+    }
+    if wanted.microsoft_signed_only && !got.microsoft_signed_only {
+        return Err(SandboxError::NotConfined(
+            "images that are not Microsoft-signed may load",
+        ));
+    }
+    Ok(())
+}
+
+/// The memory watch's rule: a helper is over when its private and shared commit together pass its limit plus the
+/// bytes of the sections granted to it that are still alive in the app.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn over_memory(private: u64, shared: u64, limit: u64, granted: u64) -> bool {
+    private.saturating_add(shared) > limit.saturating_add(granted)
 }
 
 /// Why a helper was not started, or why an operation on it failed.
@@ -141,6 +294,10 @@ pub enum SandboxError {
     },
     /// The new process did not have the confinement that was asked for. It was ended before it ran.
     NotConfined(&'static str),
+    /// This Windows cannot report a helper's shared memory, so the memory watch cannot bound it and it was ended
+    /// before it ran. The counter needs Windows 10 22H2 or Windows 11 22H2, each with the September 2023 update or a
+    /// later one. A caller shows the person that the file cannot be shown until Windows is updated.
+    NeedsNewerWindows,
 }
 
 impl fmt::Display for SandboxError {
@@ -151,6 +308,10 @@ impl fmt::Display for SandboxError {
             Self::Limits(why) => write!(f, "limits refused: {why}"),
             Self::Os { step, code } => write!(f, "sandbox step '{step}' failed with system code {code}"),
             Self::NotConfined(what) => write!(f, "the helper was not confined ({what}); it was ended before it ran"),
+            Self::NeedsNewerWindows => write!(
+                f,
+                "this Windows cannot report the helper's shared memory (it needs a newer update); the helper was ended before it ran"
+            ),
         }
     }
 }
@@ -182,6 +343,37 @@ pub struct Pipes {
     pub to_helper: File,
     /// The helper's standard output. A read returns end-of-file once the helper is gone.
     pub from_helper: File,
+}
+
+/// The one lock every start of a process of the app takes. See [`launch_lock`].
+static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
+
+/// Held while ANY process of the app is started: [`Sandbox::spawn`] takes the same lock, so no other launch can
+/// inherit a helper's pipe ends while they are inheritable (on Windows a helper's two pipe ends are inheritable from
+/// just before its process is created until just after, and every process created in that window with handle
+/// inheritance on would receive them). Every `std::process::Command` spawn, `ShellExecuteW`, `SHOpenWithDialog` and
+/// handler invoke of the app runs under it.
+///
+/// Not re-entrant: a thread that holds a [`LaunchGuard`] and then calls [`Sandbox::spawn`] (or this function) waits for
+/// itself for ever. Take the guard around the one launch call and drop it right after.
+///
+/// A panic while the lock was held does not leave it unusable: the lock carries no data that could be half-written.
+pub fn launch_lock() -> LaunchGuard {
+    LaunchGuard {
+        _held: LAUNCH_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+    }
+}
+
+/// Proof that the launch lock is held; dropping it releases the lock. See [`launch_lock`].
+#[must_use = "the launch lock is held only while the guard lives"]
+pub struct LaunchGuard {
+    _held: MutexGuard<'static, ()>,
+}
+
+impl fmt::Debug for LaunchGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LaunchGuard")
+    }
 }
 
 /// Starts confined helpers.
@@ -233,8 +425,14 @@ impl Sandbox {
     ///
     /// Never starts an unconfined process: see the crate documentation. On Windows the helper's token is read back
     /// before it runs, and a token whose capabilities are not exactly the profile's ends it.
+    ///
+    /// Takes the [`launch_lock`] first, on every operating system, before anything else is checked or made: it waits
+    /// while another launch of the app holds it. Never call this while holding a [`LaunchGuard`].
     pub fn spawn(&self, helper_exe: &Path) -> Result<Child, SandboxError> {
-        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile)?;
+        // Taken here, before the platform call, so the one lock is the same on every system; the platform releases
+        // it as soon as the helper's pipe ends are no longer inheritable.
+        let launch = launch_lock();
+        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile, launch)?;
         Ok(Child {
             inner,
             pipes: Some(pipes),
@@ -282,6 +480,14 @@ impl Child {
         self.inner.kill()
     }
 
+    /// True once the crate's memory watch ended the helper: its private and shared commit together passed its
+    /// limit plus the bytes of the sections granted to it that are still alive (see the crate documentation), or its
+    /// memory could no longer be read while it ran. Set before the kill, so it is true by the time the helper's end can
+    /// be seen.
+    pub fn killed_for_memory(&self) -> bool {
+        self.inner.killed_for_memory()
+    }
+
     /// Hands `section` to the helper with exactly `access`: the section's handle is duplicated into the helper's
     /// process with those rights only, and not inheritable. Send the returned [`Granted`] to the helper over the
     /// pipe; it maps the section with [`helper::map`], which closes that handle again when the mapping ends.
@@ -289,7 +495,17 @@ impl Child {
     /// A grant cannot be taken back: the helper can use it until it drops the mapping or ends. Each call places a
     /// new handle in the helper. The two pipe ends of [`Sandbox::spawn`] stay the only handles a helper inherits.
     pub fn grant(&self, section: &Section, access: Access) -> Result<Granted, SandboxError> {
-        self.inner.grant(&section.inner, access)
+        let granted = self.inner.grant(&section.inner, access)?;
+        section.granted_to.count(section.len(), self.inner.granted_bytes());
+        Ok(granted)
+    }
+
+    /// How many handles the helper process has open now. A helper that keeps every handle it is given grows this
+    /// number; its caller decides the bound and calls [`Child::kill`].
+    ///
+    /// Off Windows no `Child` exists (every start is [`SandboxError::Unsupported`]).
+    pub fn handle_count(&self) -> Result<u32, SandboxError> {
+        self.inner.handle_count()
     }
 }
 
@@ -300,9 +516,43 @@ impl Child {
 /// still holds a grant then sees zeros, never the old bytes.
 ///
 /// While a helper holds a read-write grant it can change these bytes at any moment: read them once the helper has
-/// said it is done.
+/// said it is done, with [`Section::copy_to`].
 pub struct Section {
     inner: platform::SectionInner,
+    granted_to: GrantedTo,
+}
+
+impl Drop for Section {
+    fn drop(&mut self) {
+        // Before the memory is zeroed and released (the inner value's drop, right after this).
+        self.granted_to.release(self.len());
+    }
+}
+
+/// The granted-bytes counter of every child a section was granted to, each once: a section granted to a child adds
+/// its length to that child's counter on its first grant, and takes it off again when the section is dropped. A
+/// helper's memory watch reads its counter.
+#[derive(Default)]
+struct GrantedTo {
+    counters: Mutex<Vec<Arc<AtomicU64>>>,
+}
+
+impl GrantedTo {
+    fn count(&self, len: usize, counter: &Arc<AtomicU64>) {
+        let mut counters = self.counters.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if counters.iter().any(|known| Arc::ptr_eq(known, counter)) {
+            return;
+        }
+        counter.fetch_add(len as u64, Ordering::SeqCst);
+        counters.push(Arc::clone(counter));
+    }
+
+    fn release(&self, len: usize) {
+        let mut counters = self.counters.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for counter in counters.drain(..) {
+            counter.fetch_sub(len as u64, Ordering::SeqCst);
+        }
+    }
 }
 
 impl Section {
@@ -313,12 +563,27 @@ impl Section {
         let len = section_length(len as u64)?;
         Ok(Self {
             inner: platform::SectionInner::new(len)?,
+            granted_to: GrantedTo::default(),
         })
     }
 
     /// The bytes.
+    ///
+    /// Only for a section no helper holds read-write: a helper with a read-write grant can change these bytes while
+    /// the returned slice is alive, and a shared slice promises that they do not change. For a section a helper
+    /// writes, use [`Section::copy_to`].
     pub fn as_slice(&self) -> &[u8] {
         self.inner.as_slice()
+    }
+
+    /// Copies the section's bytes into `out`, which must be exactly [`Section::len`] bytes long (any other length is
+    /// refused and nothing is copied). The bytes are read from the mapping itself, never through a `&[u8]` of it, so
+    /// this is the way to read a section a helper holds read-write: a helper writing at the same moment can leave a
+    /// torn value in `out`, never a reference to memory that changes under it.
+    ///
+    /// Off Windows: no `Section` exists ([`Section::new`] is [`SandboxError::Unsupported`]).
+    pub fn copy_to(&self, out: &mut [u8]) -> Result<(), SandboxError> {
+        copy_exactly(self.len(), out, |out| self.inner.copy_into(out))
     }
 
     /// The bytes, to write.
@@ -328,12 +593,12 @@ impl Section {
 
     /// The length in bytes.
     pub fn len(&self) -> usize {
-        self.as_slice().len()
+        self.inner.len()
     }
 
     /// Always false: a section holds at least one byte.
     pub fn is_empty(&self) -> bool {
-        self.as_slice().is_empty()
+        self.len() == 0
     }
 }
 
@@ -353,6 +618,16 @@ impl std::os::windows::io::AsRawHandle for Section {
     fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
         self.inner.raw_handle()
     }
+}
+
+/// The rule of [`Section::copy_to`]: `out` is exactly `len` bytes (never the shorter of the two), and only then is
+/// `copy` handed all of it to fill. Any other length copies nothing.
+fn copy_exactly(len: usize, out: &mut [u8], copy: impl FnOnce(&mut [u8])) -> Result<(), SandboxError> {
+    if out.len() != len {
+        return Err(SandboxError::Limits("a copy whose length is not the section's"));
+    }
+    copy(out);
+    Ok(())
 }
 
 /// A length the crate accepts for a section or a grant: 1 byte to [`MAX_SECTION_BYTES`].
@@ -474,6 +749,7 @@ mod tests {
             ("lib", include_str!("lib.rs")),
             ("block", include_str!("block.rs")),
             ("windows", include_str!("windows.rs")),
+            ("watch", include_str!("watch.rs")),
             ("unsupported", include_str!("unsupported.rs")),
         ];
         // Built from pieces so this test's own text does not match.
@@ -498,7 +774,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 32);
+        assert_eq!(checked, 40);
     }
 
     /// Both lengths are refused before any system call, on every operating system.
@@ -577,6 +853,298 @@ mod tests {
             SandboxError::Limits("the memory limit is zero"),
             "a profile changes no limit check"
         );
+    }
+
+    /// One lock for every launch: a thread holding [`launch_lock`] holds back [`Sandbox::spawn`] on another thread.
+    /// The lock is taken before the platform is asked anything, so this holds where nothing can be started too.
+    #[test]
+    fn spawn_and_launch_lock_are_one_lock() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let sandbox = Sandbox::new(Limits::default()).unwrap();
+        // Refused at once on every system once the lock is free: relative (Windows) or no sandbox module (others).
+        let refused = Path::new("not-absolute.exe");
+        let started = Instant::now();
+        assert!(sandbox.spawn(refused).is_err());
+        let free = started.elapsed();
+        assert!(
+            free < Duration::from_millis(250),
+            "the instrument can fail: with the lock free, spawn answers at once ({free:?})"
+        );
+
+        let (held, is_held) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _launch = launch_lock();
+            held.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        is_held.recv().unwrap();
+        let started = Instant::now();
+        assert!(sandbox.spawn(refused).is_err());
+        let waited = started.elapsed();
+        holder.join().unwrap();
+        assert!(
+            waited >= Duration::from_millis(250),
+            "spawn waited for the launch another thread held ({waited:?})"
+        );
+    }
+
+    /// The copy out of a section takes exactly the section's length, never the shorter of the two.
+    #[test]
+    fn copy_to_needs_the_exact_length() {
+        let source = [7u8, 1, 2, 3, 4, 5, 6, 9];
+        let fill = |out: &mut [u8]| out.copy_from_slice(&source[..out.len()]);
+
+        let mut exact = [0u8; 8];
+        assert_eq!(copy_exactly(source.len(), &mut exact, fill), Ok(()));
+        assert_eq!(exact, source, "every byte was copied");
+
+        let mut copied = 0;
+        for wrong in [7usize, 9, 0] {
+            let mut out = vec![0u8; wrong];
+            assert_eq!(
+                copy_exactly(source.len(), &mut out, fill),
+                Err(SandboxError::Limits("a copy whose length is not the section's")),
+                "a buffer of {wrong} bytes for a section of 8"
+            );
+            assert_eq!(
+                out.iter().filter(|&&byte| byte != 0).count(),
+                0,
+                "nothing was copied into it"
+            );
+            copied += 1;
+        }
+        assert_eq!(copied, 3);
+
+        #[cfg(not(windows))]
+        assert_eq!(Section::new(8).unwrap_err(), SandboxError::Unsupported);
+    }
+
+    const EVERY_PROFILE: [Profile; 3] = [
+        Profile::NoCapabilities,
+        Profile::SystemDecoder { hevc: false },
+        Profile::SystemDecoder { hevc: true },
+    ];
+
+    /// The mitigations as a list of (name, on), in a fixed order, so a table can be counted and compared by name.
+    fn named(m: Mitigations) -> [(&'static str, bool); 8] {
+        [
+            ("no window-system calls", m.no_window_system_calls),
+            ("no remote images", m.no_remote_images),
+            ("no low-label images", m.no_low_label_images),
+            ("prefer system images", m.prefer_system32_images),
+            ("no extension points", m.no_extension_points),
+            ("no dynamic code", m.no_dynamic_code),
+            ("strict handle checks", m.strict_handle_checks),
+            ("Microsoft-signed only", m.microsoft_signed_only),
+        ]
+    }
+
+    fn names_on(m: Mitigations) -> Vec<&'static str> {
+        named(m)
+            .into_iter()
+            .filter(|(_, on)| *on)
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// The table per profile is closed and pinned: the Office helper's profile has all eight, the system decoder's
+    /// exactly the four that cannot stop Windows' decoders.
+    #[test]
+    fn mitigations_are_a_closed_table_per_profile() {
+        assert_eq!(
+            names_on(Profile::NoCapabilities.mitigations()).len(),
+            8,
+            "every mitigation"
+        );
+        assert_eq!(
+            names_on(Profile::default().mitigations()),
+            names_on(Profile::NoCapabilities.mitigations())
+        );
+        let safe_subset = [
+            "no remote images",
+            "no low-label images",
+            "no extension points",
+            "strict handle checks",
+        ];
+        for hevc in [false, true] {
+            assert_eq!(
+                names_on(Profile::SystemDecoder { hevc }.mitigations()),
+                safe_subset,
+                "the system decoder's four, hevc {hevc}"
+            );
+        }
+        assert_eq!(
+            names_on(Mitigations::default()).len(),
+            0,
+            "the instrument counts what is on"
+        );
+    }
+
+    /// Everything a confined helper of `profile` reads back.
+    fn confined_facts(profile: Profile) -> TokenFacts {
+        TokenFacts {
+            in_job: true,
+            app_container: true,
+            exact_capabilities: true,
+            less_privileged: true,
+            integrity_rid: LOW_INTEGRITY_RID,
+            mitigations: profile.mitigations(),
+        }
+    }
+
+    /// One row per fact: each missing one refuses the helper with its own reason; the full set is accepted.
+    #[test]
+    fn check_facts_refuses_each_missing_property() {
+        let refused = |why| Err(SandboxError::NotConfined(why));
+        let mut rows = 0;
+        for profile in EVERY_PROFILE {
+            let full = confined_facts(profile);
+            assert_eq!(
+                check_facts(&full, profile),
+                Ok(()),
+                "{profile:?}: the full set is accepted"
+            );
+
+            let token_rows: [(TokenFacts, &str); 6] = [
+                (TokenFacts { in_job: false, ..full }, "not in the job"),
+                (
+                    TokenFacts {
+                        app_container: false,
+                        ..full
+                    },
+                    "not an AppContainer",
+                ),
+                (
+                    TokenFacts {
+                        exact_capabilities: false,
+                        ..full
+                    },
+                    "holds other capabilities than its profile's",
+                ),
+                (
+                    TokenFacts {
+                        less_privileged: false,
+                        ..full
+                    },
+                    "not a less-privileged AppContainer",
+                ),
+                (
+                    TokenFacts {
+                        integrity_rid: 0x2000,
+                        ..full
+                    },
+                    "its integrity level is above low",
+                ),
+                (
+                    TokenFacts {
+                        integrity_rid: LOW_INTEGRITY_RID + 1,
+                        ..full
+                    },
+                    "its integrity level is above low",
+                ),
+            ];
+            for (facts, why) in token_rows {
+                assert_eq!(check_facts(&facts, profile), refused(why), "{profile:?}");
+                rows += 1;
+            }
+            // Below low (untrusted) is no less confined.
+            let untrusted = TokenFacts {
+                integrity_rid: 0,
+                ..full
+            };
+            assert_eq!(check_facts(&untrusted, profile), Ok(()));
+
+            // One missing mitigation at a time, for each the profile asks for.
+            let wanted = profile.mitigations();
+            let reasons = [
+                "window-system calls are allowed",
+                "remote images may load",
+                "low-label images may load",
+                "system images are not preferred",
+                "extension points are loaded",
+                "dynamic code is allowed",
+                "handle checks are not strict",
+                "images that are not Microsoft-signed may load",
+            ];
+            for (index, (name, on)) in named(wanted).into_iter().enumerate() {
+                if !on {
+                    continue;
+                }
+                let mut missing = wanted;
+                match index {
+                    0 => missing.no_window_system_calls = false,
+                    1 => missing.no_remote_images = false,
+                    2 => missing.no_low_label_images = false,
+                    3 => missing.prefer_system32_images = false,
+                    4 => missing.no_extension_points = false,
+                    5 => missing.no_dynamic_code = false,
+                    6 => missing.strict_handle_checks = false,
+                    _ => missing.microsoft_signed_only = false,
+                }
+                let facts = TokenFacts {
+                    mitigations: missing,
+                    ..full
+                };
+                assert_eq!(
+                    check_facts(&facts, profile),
+                    refused(reasons[index]),
+                    "{profile:?}: {name}"
+                );
+                rows += 1;
+            }
+            // A mitigation the profile does not ask for, read back on, is no refusal.
+            let more = TokenFacts {
+                mitigations: Profile::NoCapabilities.mitigations(),
+                ..full
+            };
+            assert_eq!(check_facts(&more, profile), Ok(()));
+        }
+        // 6 token rows per profile, 8 mitigation rows for the Office profile, 4 for each system-decoder one.
+        assert_eq!(rows, 3 * 6 + 8 + 4 + 4, "the instrument ran every row");
+    }
+
+    /// Shared commit counts against the limit, and the bytes the app granted raise it; equal is not over.
+    #[test]
+    fn over_memory_counts_shared_commit_and_grants() {
+        const MIB: u64 = 1024 * 1024;
+        let limit = 1024 * MIB;
+        assert!(!over_memory(100 * MIB, 0, limit, 0), "well under");
+        assert!(
+            over_memory(100 * MIB, 1536 * MIB, limit, 0),
+            "a section the helper made itself counts"
+        );
+        assert!(!over_memory(512 * MIB, 512 * MIB, limit, 0), "equal is not over");
+        assert!(over_memory(512 * MIB, 512 * MIB + 1, limit, 0), "one byte past is over");
+        assert!(
+            !over_memory(512 * MIB, 1024 * MIB, limit, 512 * MIB),
+            "sections the app granted raise the bound"
+        );
+        assert!(over_memory(512 * MIB, 1024 * MIB + 1, limit, 512 * MIB));
+        assert!(over_memory(u64::MAX, u64::MAX, u64::MAX - 1, 0), "no overflow decides");
+    }
+
+    /// A section counts once per child, however often it is granted to it, and leaves every counter when it goes.
+    #[test]
+    fn granted_bytes_count_each_child_once_and_fall_on_drop() {
+        let first = Arc::new(AtomicU64::new(0));
+        let second = Arc::new(AtomicU64::new(0));
+        let section = GrantedTo::default();
+        for _ in 0..3 {
+            section.count(4096, &first);
+        }
+        section.count(4096, &second);
+        let other = GrantedTo::default();
+        other.count(100, &first);
+        assert_eq!(
+            (first.load(Ordering::SeqCst), second.load(Ordering::SeqCst)),
+            (4196, 4096)
+        );
+        section.release(4096);
+        assert_eq!((first.load(Ordering::SeqCst), second.load(Ordering::SeqCst)), (100, 0));
+        other.release(100);
+        assert_eq!(first.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(not(windows))]

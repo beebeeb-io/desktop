@@ -210,9 +210,9 @@ pub fn set_scene(ui: &mut Ui, frame: &str) {
 }
 
 /// The keys of what is open over the document. `true`: the key was taken.
-pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // A presentation's keys (Present's arrows and Space) before the viewer's own.
-    if super::office_glue::on_key(s, ev) {
+    if super::office_glue::on_key(s, ev, tx) {
         return true;
     }
     let Some(ui) = super::ui(s) else { return false };

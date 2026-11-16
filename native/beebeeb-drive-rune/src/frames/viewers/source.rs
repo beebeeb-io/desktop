@@ -160,6 +160,10 @@ pub enum Stopped {
     /// This PC holds a change to the file that is not in Beebeeb yet, and its copy could not be read just now.
     /// The older version Beebeeb has is not shown in its place. Trying again may work.
     CopyNotReadable,
+    /// Beebeeb refused this account the file: it is no longer shared with it. Trying again does not change that.
+    NoAccess,
+    /// The file changed while it was opening, each time it was read. Trying again may work.
+    Changed,
 }
 
 impl Stopped {
@@ -171,6 +175,7 @@ impl Stopped {
                 | Stopped::SessionChanged
                 | Stopped::NotNow
                 | Stopped::CopyNotReadable
+                | Stopped::Changed
                 | Stopped::NothingSynced
                 | Stopped::NotThisAccounts
         )
@@ -276,6 +281,34 @@ impl Body {
             Body::Word(doc) => doc.wipe(),
             Body::Sheet(view) => view.wipe(),
             Body::Doc(doc) => doc.wipe(),
+            _ => {}
+        }
+    }
+
+    /// The person's place in an open Office document, carried from `old` (the body on screen) into this new body of
+    /// the SAME open file (`Ui::pump`: a page, the outline or cells came): the page, the zoom and the outline pane of a
+    /// document; the slide, the zoom and Present of a deck; the tab, the scroll, the selection of a sheet (same sheet
+    /// only). Another pair of kinds carries nothing, and nothing else is ever carried (media, PDF, text: as handed).
+    pub fn carry_view(&mut self, old: &Body) {
+        match (self, old) {
+            (Body::Doc(new), Body::Doc(old)) => {
+                new.page = old.page.clamp(1, new.view.pages.max(1));
+                new.at = old.at;
+                new.view.zoom = old.view.zoom;
+                new.outline_open = old.outline_open;
+            }
+            (Body::Deck(new), Body::Deck(old)) => {
+                new.view.current = old.view.current.clamp(1, new.view.count.max(1));
+                new.view.zoom = old.view.zoom;
+                new.presenting = old.presenting;
+            }
+            (Body::Sheet(new), Body::Sheet(old)) if new.sheet == old.sheet => {
+                new.active = old.active;
+                new.top_left = old.top_left;
+                new.selection = old.selection;
+                new.current = old.current;
+                new.formula.clone_from(&old.formula);
+            }
             _ => {}
         }
     }
@@ -651,6 +684,20 @@ pub trait ViewerSource {
     fn picture(&self, _file_id: &str, _which: Picture) -> Option<rune::Pixels> {
         None
     }
+    /// A picture of an open Office file: the one held, else asked of its renderer once and `None` until it comes (as
+    /// [`ViewerSource::picture`]).
+    fn office_picture(&self, _file_id: &str, _which: super::kinds::OfficePicture) -> Option<rune::Pixels> {
+        None
+    }
+    /// Whether this source holds the open Office file in a renderer: the scenes ask it for pictures and cells. `false`
+    /// (the default, the fixture source): they draw the fixture pictures. Not told by the answers, which are `None`
+    /// both before a live picture comes and always from a fixture.
+    fn office_live(&self) -> bool {
+        false
+    }
+    /// The view shows these cells of `sheet`: asked if not held; the cells come later through
+    /// [`ViewerSource::poll`] as a new `Body::Sheet`.
+    fn office_cells(&self, _file_id: &str, _sheet: u32, _first_row: u32, _first_col: u32, _rows: u32, _cols: u32) {}
     /// Where `words` are in the open PDF, in reading order. Empty: nowhere, or no text to search.
     fn find(&mut self, _file_id: &str, _words: &str) -> Vec<Match> {
         Vec::new()

@@ -69,6 +69,7 @@ pub fn refusal_words_with(system_decoder_on: bool, why: &Refusal) -> String {
         ),
         Refusal::CouldNotPlay => "This file could not be played.".into(),
         Refusal::NotSignedIn => "Sign in to play this file.".into(),
+        Refusal::NeedsWindowsUpdate => crate::windows_floor::NEEDS_WINDOWS_UPDATE.into(),
         Refusal::NotInstalled | Refusal::NoSandbox => "Playback isn't available on this PC.".into(),
     }
 }

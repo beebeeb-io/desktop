@@ -4,8 +4,8 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SendError, Sender};
+use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Instant;
 
@@ -16,9 +16,10 @@ use beebeeb_office_sandbox as sandbox;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    CannotOpen, CellData, Command, DocKind, Event, Helper, Input, Link, MAX_IN_FLIGHT, NoPreview, OfficeState, Out,
-    OutlineEntry, PageSize, RenderAsk, RequestId, Shared, Starter, Stop, Timeouts, wipe_cells, wipe_entries,
-    wipe_message,
+    Anchor, AnchorAsk, CannotOpen, CellData, Command, DocKind, Event, HANDLE_SLACK, HELPER_EXE, Helper, Input, Link,
+    MAX_IN_FLIGHT, MAX_KNOWN_ANCHORS, MAX_SPLIT_OUTSTANDING, MAX_SPLIT_REQUESTS, NoPreview, OfficeState, Out,
+    OutlineEntry, PageSize, Received, RenderAsk, RequestId, Shared, Starter, Stop, Timeouts, lock, wipe_cells,
+    wipe_entries, wipe_message,
 };
 
 /// Starts the worker of one document on a thread of its own. `false` when no thread could be made: the worker, and
@@ -78,10 +79,43 @@ struct Run<S: Starter> {
     oldest_since: Instant,
     /// The requests out, oldest first: the helper answers them in this order.
     sent: VecDeque<Sent<S::Section>>,
-    /// Renders not sent yet (more than [`MAX_IN_FLIGHT`] asked).
-    waiting: VecDeque<RenderAsk>,
+    /// Pages and anchors not sent yet (more than [`MAX_IN_FLIGHT`] asked).
+    waiting: VecDeque<Ask>,
     /// The outline's entries so far, while it is being asked.
     outline: Option<Vec<OutlineEntry>>,
+    /// When the outline's first page was asked: its budget counts from here.
+    outline_since: Option<Instant>,
+    /// The budget of each range the window asked, while any of its requests is out.
+    splits: Vec<Split>,
+    next_split: u64,
+    /// The helper's open handles at its first checked page: the bound counts from here.
+    handle_baseline: Option<u32>,
+}
+
+/// One range the window asked, and the halves asked for it after `RangeTooLarge`.
+struct Split {
+    id: u64,
+    /// Its requests out now.
+    outstanding: u32,
+    /// Halves asked for it so far.
+    halves: u32,
+    /// When the window's ask was sent: [`Timeouts::split`] counts from here.
+    since: Instant,
+}
+
+/// A page or a chart or picture the window asked: they share [`MAX_IN_FLIGHT`] and the waiting queue.
+enum Ask {
+    Page(RenderAsk),
+    Anchor(AnchorAsk),
+}
+
+impl Ask {
+    fn id(&self) -> RequestId {
+        match self {
+            Ask::Page(ask) => ask.id,
+            Ask::Anchor(ask) => ask.id,
+        }
+    }
 }
 
 struct Sent<T> {
@@ -97,9 +131,18 @@ enum Asked<T> {
         request: office::Render,
         section: T,
     },
+    Anchor {
+        ask: AnchorAsk,
+        request: office::RenderAnchor,
+        section: T,
+    },
     Outline(office::Outline),
     Stats,
-    Cells(office::Cells),
+    /// A range, or a half of one, and the window's ask it belongs to.
+    Cells {
+        asked: office::Cells,
+        split: u64,
+    },
 }
 
 struct Worker<S: Starter> {
@@ -116,21 +159,44 @@ struct Worker<S: Starter> {
     phase: Phase,
 }
 
+/// A panic on the worker thread: the shared helper is ended, the window says "Renderer stopped" with no Try again,
+/// and the worker counts as ended. Does nothing when the worker returns normally.
+struct PanicGuard(Arc<Shared>);
+
+impl Drop for PanicGuard {
+    fn drop(&mut self) {
+        if !thread::panicking() {
+            return;
+        }
+        let helper = lock(&self.0.inner).helper.take();
+        if let Some(helper) = helper {
+            helper.end();
+        }
+        self.0.push(Out::State(OfficeState::Stopped {
+            why: Stop::Failed,
+            can_retry: false,
+        }));
+        self.0.mark_worker_ended();
+    }
+}
+
 impl<S: Starter> Worker<S> {
     fn run(mut self) {
+        // Dropped before `self` on an unwind: the guard ends the helper while the worker's handles still exist.
+        let _guard = PanicGuard(self.shared.clone());
         self.start_helper();
         while !self.done() {
             let input = match self.deadline() {
-                Some(at) => {
+                Some((at, why)) => {
                     let now = Instant::now();
                     if at <= now {
-                        self.stopped(Stop::TimedOut);
+                        self.stopped(why);
                         continue;
                     }
                     match self.inputs.recv_timeout(at - now) {
                         Ok(input) => input,
                         Err(RecvTimeoutError::Timeout) => {
-                            self.stopped(Stop::TimedOut);
+                            self.stopped(why);
                             continue;
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -154,23 +220,41 @@ impl<S: Starter> Worker<S> {
         matches!(self.phase, Phase::Done) || self.shared.is_closed()
     }
 
-    /// The oldest request's deadline: `Open` from the start request, any other from when it became the oldest.
-    fn deadline(&self) -> Option<Instant> {
+    /// The next deadline and what missing it means. The oldest request's timer (`Open` from the start request, any
+    /// other from when it became the oldest) is `TimedOut`; a budget (an asked range and its halves, an outline) is
+    /// `Protocol`: every answer came in time, and there was no end to them.
+    fn deadline(&self) -> Option<(Instant, Stop)> {
         let run = self.run.as_ref()?;
-        let oldest = run.sent.front()?;
-        Some(match oldest.asked {
-            Asked::Open => run.started_at + self.timeouts.open,
-            _ => run.oldest_since + self.timeouts.request,
-        })
+        let mut next = run.sent.front().map(|oldest| match oldest.asked {
+            Asked::Open => (run.started_at + self.timeouts.open, Stop::TimedOut),
+            _ => (run.oldest_since + self.timeouts.request, Stop::TimedOut),
+        });
+        let budgets = run
+            .splits
+            .iter()
+            .map(|split| split.since + self.timeouts.split)
+            .chain(run.outline_since.map(|since| since + self.timeouts.outline));
+        for at in budgets {
+            if next.is_none_or(|(soonest, _)| at < soonest) {
+                next = Some((at, Stop::Protocol));
+            }
+        }
+        next
     }
 
-    /// Drops every section and the document. A close killed the helper already (the shared handle); dropping its
-    /// handle here ends it too.
+    /// Drops every section and the document, and wipes the helper frames still queued. A close killed the helper
+    /// already (the shared handle); dropping its handle here ends it too.
     fn finish(mut self) {
         if let Some(run) = self.run.take() {
             wipe_run(run);
         }
         self.doc = Doc::Gone;
+        // Frames nobody will handle: wiped and counted. Then the channel's receiving end goes, so that a frame read
+        // later fails to send and its reader wipes it.
+        while let Ok(input) = self.inputs.try_recv() {
+            self.shared.wipe_input(input);
+        }
+        drop(self.inputs);
         self.shared.mark_worker_ended();
     }
 
@@ -179,8 +263,12 @@ impl<S: Starter> Worker<S> {
         if !self.starter.installed() {
             return self.end_with(OfficeState::NoPreview(NoPreview::NotInstalled));
         }
-        // Before any helper starts: Windows Error Reporting keeps no dump of it.
-        if self.starter.exclude_from_crash_reports().is_err() {
+        // Only the helper of our own name is started: that is the name crash reports leave out.
+        let Some(name) = self.starter.file_name().filter(|name| name == HELPER_EXE) else {
+            return self.end_with(OfficeState::NoPreview(NoPreview::NotInstalled));
+        };
+        // Before EVERY start: Windows Error Reporting keeps no dump of it.
+        if self.starter.exclude_from_crash_reports(&name).is_err() {
             return self.stopped(Stop::Failed);
         }
         // The document's section, once: the bytes are copied in and wiped.
@@ -219,7 +307,12 @@ impl<S: Starter> Worker<S> {
         self.links += 1;
         let link_no = self.links;
         let writer = spawn_writer(to_helper);
-        let reading = spawn_reader(from_helper, link_no, self.shared.commands.clone());
+        let reading = spawn_reader(
+            from_helper,
+            link_no,
+            self.shared.commands.clone(),
+            Arc::downgrade(&self.shared),
+        );
         let (Some(writer), true) = (writer, reading) else {
             helper.end();
             self.shared.disown();
@@ -235,6 +328,10 @@ impl<S: Starter> Worker<S> {
             sent: VecDeque::new(),
             waiting: VecDeque::new(),
             outline: None,
+            outline_since: None,
+            splits: Vec::new(),
+            next_split: 0,
+            handle_baseline: None,
         });
         let granted = match (self.run.as_ref(), &self.doc) {
             (Some(run), Doc::Section(section)) => Some(self.starter.grant(&run.helper, section, sandbox::Access::Read)),
@@ -256,16 +353,20 @@ impl<S: Starter> Worker<S> {
     fn start_failed(&mut self, error: sandbox::SandboxError) {
         if error == sandbox::SandboxError::Unsupported {
             self.end_with(OfficeState::NoPreview(NoPreview::NoSandbox));
+        } else if error == sandbox::SandboxError::NeedsNewerWindows {
+            crate::windows_floor::note_needs_windows_update();
+            self.end_with(OfficeState::NoPreview(NoPreview::NeedsWindowsUpdate));
         } else {
             self.stopped(Stop::Failed);
         }
     }
 
-    /// Kills the running helper and drops its sections.
+    /// Kills the running helper and drops its sections. The anchors it named go with it.
     fn kill_run(&mut self) {
         if let Some(run) = self.run.take() {
             run.helper.end();
             self.shared.disown();
+            lock(&self.shared.inner).anchors.clear();
             wipe_run(run);
         }
     }
@@ -310,7 +411,17 @@ impl<S: Starter> Worker<S> {
                 let Some(run) = self.run.as_mut() else {
                     return;
                 };
-                run.waiting.push_back(ask);
+                run.waiting.push_back(Ask::Page(ask));
+                self.pump_renders();
+            }
+            Command::RenderAnchor(ask) => {
+                if !matches!(self.phase, Phase::Sheets) {
+                    return;
+                }
+                let Some(run) = self.run.as_mut() else {
+                    return;
+                };
+                run.waiting.push_back(Ask::Anchor(ask));
                 self.pump_renders();
             }
             Command::Cancel(id) => self.cancel(id),
@@ -321,10 +432,23 @@ impl<S: Starter> Worker<S> {
                 }
             }
             Command::Cells { sheet, range } => {
-                if matches!(self.phase, Phase::Sheets) {
-                    let asked = office::Cells { sheet, range };
-                    self.ask(Message::Cells(asked), Asked::Cells(asked));
+                if !matches!(self.phase, Phase::Sheets) {
+                    return;
                 }
+                let Some(run) = self.run.as_mut() else {
+                    return;
+                };
+                // The ask's budget: one request out, no halves yet, the clock running.
+                let split = run.next_split;
+                run.next_split += 1;
+                run.splits.push(Split {
+                    id: split,
+                    outstanding: 1,
+                    halves: 0,
+                    since: Instant::now(),
+                });
+                let asked = office::Cells { sheet, range };
+                self.ask(Message::Cells(asked), Asked::Cells { asked, split });
             }
         }
     }
@@ -355,7 +479,8 @@ impl<S: Starter> Worker<S> {
         true
     }
 
-    /// Sends waiting renders while fewer than [`MAX_IN_FLIGHT`] are out (a cancelled one counts until answered).
+    /// Sends waiting pages and anchors while fewer than [`MAX_IN_FLIGHT`] are out (a cancelled one counts until
+    /// answered).
     fn pump_renders(&mut self) {
         loop {
             let Some(run) = self.run.as_mut() else {
@@ -364,7 +489,7 @@ impl<S: Starter> Worker<S> {
             let out = run
                 .sent
                 .iter()
-                .filter(|sent| matches!(sent.asked, Asked::Render { .. }))
+                .filter(|sent| matches!(sent.asked, Asked::Render { .. } | Asked::Anchor { .. }))
                 .count();
             if out >= MAX_IN_FLIGHT {
                 return;
@@ -372,10 +497,44 @@ impl<S: Starter> Worker<S> {
             let Some(ask) = run.waiting.pop_front() else {
                 return;
             };
-            if !self.send_render(ask) {
+            let sent = match ask {
+                Ask::Page(ask) => self.send_render(ask),
+                Ask::Anchor(ask) => self.send_anchor(ask),
+            };
+            if !sent {
                 return;
             }
         }
+    }
+
+    /// A section of exactly the asked `w * h * 4` bytes, granted read-write, and the `RenderAnchor` at the asked scale.
+    fn send_anchor(&mut self, ask: AnchorAsk) -> bool {
+        let len = ask.w as usize * ask.h as usize * 4;
+        let section = match self.starter.section(len) {
+            Ok(section) => section,
+            Err(_) => {
+                self.stopped(Stop::Failed);
+                return false;
+            }
+        };
+        let granted = self
+            .run
+            .as_ref()
+            .map(|run| self.starter.grant(&run.helper, &section, sandbox::Access::ReadWrite));
+        let Some(Ok(granted)) = granted else {
+            self.stopped(Stop::Failed);
+            return false;
+        };
+        let request = office::RenderAnchor {
+            sheet: ask.sheet,
+            anchor: ask.anchor.id,
+            scale: ask.scale,
+            out: office::GrantRef {
+                wire: granted.wire,
+                len: granted.len,
+            },
+        };
+        self.ask(Message::RenderAnchor(request), Asked::Anchor { ask, request, section })
     }
 
     /// A section of exactly the asked `w * h * 4` bytes, granted read-write, and the `Render` at the asked scale.
@@ -412,14 +571,18 @@ impl<S: Starter> Worker<S> {
         let Some(run) = self.run.as_mut() else {
             return;
         };
-        if let Some(at) = run.waiting.iter().position(|ask| ask.id == id) {
+        if let Some(at) = run.waiting.iter().position(|ask| ask.id() == id) {
             let _ = run.waiting.remove(at);
             return;
         }
-        let sent = run
-            .sent
-            .iter_mut()
-            .find(|sent| !sent.cancelled && matches!(&sent.asked, Asked::Render { ask, .. } if ask.id == id));
+        let sent = run.sent.iter_mut().find(|sent| {
+            !sent.cancelled
+                && match &sent.asked {
+                    Asked::Render { ask, .. } => ask.id == id,
+                    Asked::Anchor { ask, .. } => ask.id == id,
+                    _ => false,
+                }
+        });
         let Some(sent) = sent else {
             return;
         };
@@ -442,17 +605,20 @@ impl<S: Starter> Worker<S> {
             return;
         }
         run.outline = Some(Vec::new());
+        run.outline_since = Some(Instant::now());
         let asked = office::Outline { from: 0 };
         self.ask(Message::Outline(asked), Asked::Outline(asked));
     }
 
-    fn on_frame(&mut self, link: u64, frame: Result<Frame, FrameError>) {
+    fn on_frame(&mut self, link: u64, frame: Result<Received, FrameError>) {
         let (current, oldest) = match &self.run {
             Some(run) => (run.link, run.sent.front().map(|sent| sent.wire)),
-            None => return,
+            // After a stop: no helper runs, nothing is asked. Wiped, not handled.
+            None => return self.unhandled(frame),
         };
         if current != link {
-            return;
+            // An earlier helper's frame. Wiped, not handled.
+            return self.unhandled(frame);
         }
         let frame = match frame {
             Ok(frame) => frame,
@@ -460,7 +626,7 @@ impl<S: Starter> Worker<S> {
             // The pipe closed or failed: the helper is gone (a crash, out of memory).
             Err(FrameError::Closed | FrameError::Truncated | FrameError::Io(_)) => return self.stopped(Stop::Exited),
         };
-        let Frame { kind, id, mut payload } = frame;
+        let Received { kind, id, mut payload } = frame;
         // An app id, and the oldest one out: the helper answers in request order.
         if check::check_answer_id(id, |id| Some(id) == oldest).is_err() {
             payload.zeroize();
@@ -475,10 +641,45 @@ impl<S: Starter> Worker<S> {
             return;
         };
         let Some(sent) = run.sent.pop_front() else {
+            let mut message = message;
+            wipe_message(&mut message);
             return self.stopped(Stop::Protocol);
         };
         run.oldest_since = Instant::now();
         self.answer(sent, message);
+    }
+
+    /// A helper frame the worker does not handle: its payload is wiped and counted.
+    fn unhandled(&self, frame: Result<Received, FrameError>) {
+        if let Ok(mut frame) = frame {
+            self.shared.wipe_frame(&mut frame);
+        }
+    }
+
+    /// After a checked answer, the helper's open handles stay within its count at its first checked page, plus one
+    /// per render out, plus [`HANDLE_SLACK`]. Over it, the helper is stopped (`Protocol`) and `false` comes back: a
+    /// helper that keeps the sections it was handed pins their memory. The first checked page (`page`) reads the
+    /// count it is measured from. Where the count cannot be read, nothing is bounded.
+    fn handles_ok(&mut self, page: bool) -> bool {
+        let Some(run) = self.run.as_mut() else {
+            return false;
+        };
+        let Some(count) = run.helper.handle_count() else {
+            return true;
+        };
+        let over = match run.handle_baseline {
+            Some(base) => u64::from(count) > u64::from(base) + MAX_IN_FLIGHT as u64 + u64::from(HANDLE_SLACK),
+            None => {
+                if page {
+                    run.handle_baseline = Some(count);
+                }
+                false
+            }
+        };
+        if over {
+            self.stopped(Stop::Protocol);
+        }
+        !over
     }
 
     fn kind_has_pages(&self) -> bool {
@@ -494,15 +695,24 @@ impl<S: Starter> Worker<S> {
             (Asked::Open, Message::OpenedSheets(opened)) if !pages => self.opened_sheets(opened),
             (Asked::Open, Message::Error(error)) => self.open_refused(error.code),
             // Cancelled: its answer is checked for id, order and kind (above), then discarded with its section.
-            (Asked::Render { .. }, Message::Rendered(_) | Message::Error(_)) if cancelled => {}
+            (Asked::Render { .. } | Asked::Anchor { .. }, Message::Rendered(_) | Message::Error(_)) if cancelled => {
+                let _ = self.handles_ok(false);
+            }
             (Asked::Render { ask, request, section }, Message::Rendered(got)) => {
                 self.rendered(ask, request, section, got)
             }
+            (Asked::Anchor { ask, request, section }, Message::Rendered(got)) => {
+                self.rendered_anchor(ask, request, section, got)
+            }
             (Asked::Outline(asked), Message::OutlineData(got)) => self.outline_page(asked, got),
-            (Asked::Stats, Message::StatsData(got)) => self.shared.push(Out::Event(Event::Stats { words: got.words })),
-            (Asked::Cells(asked), Message::CellData(got)) => self.cells(asked, got),
-            (Asked::Cells(asked), Message::Error(error)) => self.cells_refused(asked, error.code),
-            (Asked::Render { .. } | Asked::Outline(_) | Asked::Stats, Message::Error(error)) => {
+            (Asked::Stats, Message::StatsData(got)) => {
+                if self.handles_ok(false) {
+                    self.shared.push(Out::Event(Event::Stats { words: got.words }));
+                }
+            }
+            (Asked::Cells { asked, split }, Message::CellData(got)) => self.cells(asked, split, got),
+            (Asked::Cells { asked, split }, Message::Error(error)) => self.cells_refused(asked, split, error.code),
+            (Asked::Render { .. } | Asked::Anchor { .. } | Asked::Outline(_) | Asked::Stats, Message::Error(error)) => {
                 self.request_refused(error.code)
             }
             // Any other kind of answer: not what was asked.
@@ -570,14 +780,54 @@ impl<S: Starter> Worker<S> {
         if check::check_rendered(&request, &size, len as u64, &got, &check::Limits::CONTRACT).is_err() {
             return self.stopped(Stop::Protocol);
         }
+        if !self.handles_ok(true) {
+            return;
+        }
         let mut rgba = vec![0u8; len];
-        self.starter.copy_out(&section, &mut rgba);
+        if !self.starter.copy_out(&section, &mut rgba) {
+            // Never a page of zeros shown as the page.
+            rgba.zeroize();
+            return self.stopped(Stop::Failed);
+        }
         drop(section);
         self.shared.push(Out::Event(Event::Page {
             id: ask.id,
             page: ask.page,
             scale: ask.scale,
             region: ask.region,
+            w: got.w,
+            h: got.h,
+            rgba,
+            missing_content: got.missing_content,
+        }));
+    }
+
+    /// A chart or picture: checked against the anchor it was asked for (exactly the asked size), then copied out.
+    fn rendered_anchor(
+        &mut self,
+        ask: AnchorAsk,
+        request: office::RenderAnchor,
+        section: S::Section,
+        got: office::Rendered,
+    ) {
+        let len = self.starter.section_len(&section);
+        if check::check_rendered_anchor(&request, &ask.anchor, len as u64, &got, &check::Limits::CONTRACT).is_err() {
+            return self.stopped(Stop::Protocol);
+        }
+        if !self.handles_ok(true) {
+            return;
+        }
+        let mut rgba = vec![0u8; len];
+        if !self.starter.copy_out(&section, &mut rgba) {
+            rgba.zeroize();
+            return self.stopped(Stop::Failed);
+        }
+        drop(section);
+        self.shared.push(Out::Event(Event::Anchor {
+            id: ask.id,
+            sheet: ask.sheet,
+            anchor: ask.anchor.id,
+            scale: ask.scale,
             w: got.w,
             h: got.h,
             rgba,
@@ -599,6 +849,10 @@ impl<S: Starter> Worker<S> {
             wipe_entries(&mut got.entries);
             return self.stopped(Stop::Protocol);
         }
+        if !self.handles_ok(false) {
+            wipe_entries(&mut got.entries);
+            return;
+        }
         let office::OutlineData { entries, next } = got;
         let Some(run) = self.run.as_mut() else {
             return;
@@ -611,16 +865,23 @@ impl<S: Starter> Worker<S> {
             }
             None => {
                 let all = run.outline.take().unwrap_or_default();
+                run.outline_since = None;
                 self.shared.push(Out::Event(Event::Outline(all)));
             }
         }
     }
 
-    fn cells(&mut self, asked: office::Cells, mut got: CellData) {
+    fn cells(&mut self, asked: office::Cells, split: u64, mut got: CellData) {
         if check::check_cells(&asked, &got, &check::Limits::CONTRACT).is_err() {
             wipe_cells(&mut got);
             return self.stopped(Stop::Protocol);
         }
+        if !self.handles_ok(false) {
+            wipe_cells(&mut got);
+            return;
+        }
+        self.split_answered(split);
+        self.remember_anchors(asked.sheet, &got.anchors);
         self.shared.push(Out::Event(Event::Cells {
             sheet: asked.sheet,
             range: asked.range,
@@ -628,34 +889,93 @@ impl<S: Starter> Worker<S> {
         }));
     }
 
-    /// `RangeTooLarge`: both halves are asked (each its own answer); a range that cannot be halved is the helper's
-    /// error. Any other code: stopped.
-    fn cells_refused(&mut self, asked: office::Cells, code: ErrorCode) {
+    /// `RangeTooLarge`: both halves are asked (each its own answer), within the ask's budget: at most
+    /// [`MAX_SPLIT_OUTSTANDING`] of its requests out and [`MAX_SPLIT_REQUESTS`] halves in all. Past it, or for a
+    /// range that cannot be halved, the helper is wrong. Any other code: stopped.
+    fn cells_refused(&mut self, asked: office::Cells, split: u64, code: ErrorCode) {
         if code != ErrorCode::RangeTooLarge {
             return self.stopped(Stop::Failed);
         }
-        match check::halve_range(&asked) {
-            Ok(halves) => {
-                for half in halves {
-                    if !self.ask(Message::Cells(half), Asked::Cells(half)) {
-                        return;
-                    }
-                }
+        let Ok(halves) = check::halve_range(&asked) else {
+            return self.stopped(Stop::Protocol);
+        };
+        // The refused request is answered; its two halves go out.
+        let within = self
+            .run
+            .as_mut()
+            .and_then(|run| run.splits.iter_mut().find(|budget| budget.id == split))
+            .is_some_and(|budget| {
+                budget.outstanding = budget.outstanding.saturating_add(1);
+                budget.halves = budget.halves.saturating_add(2);
+                budget.outstanding <= MAX_SPLIT_OUTSTANDING && budget.halves <= MAX_SPLIT_REQUESTS
+            });
+        if !within {
+            return self.stopped(Stop::Protocol);
+        }
+        for half in halves {
+            if !self.ask(Message::Cells(half), Asked::Cells { asked: half, split }) {
+                return;
             }
-            Err(_) => self.stopped(Stop::Protocol),
+        }
+    }
+
+    /// The charts and pictures of checked cells of `sheet`, as the window may ask them: up to [`MAX_KNOWN_ANCHORS`]
+    /// (one already known is updated).
+    fn remember_anchors(&self, sheet: u32, anchors: &[Anchor]) {
+        let mut inner = lock(&self.shared.inner);
+        if inner.closed.is_some() {
+            return;
+        }
+        for anchor in anchors {
+            let key = (sheet, anchor.id);
+            if inner.anchors.len() < MAX_KNOWN_ANCHORS || inner.anchors.contains_key(&key) {
+                inner.anchors.insert(key, anchor.clone());
+            }
+        }
+    }
+
+    /// One request of the ask `split` was answered with its cells; with none left out, its budget ends.
+    fn split_answered(&mut self, split: u64) {
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        let Some(at) = run.splits.iter().position(|budget| budget.id == split) else {
+            return;
+        };
+        let budget = &mut run.splits[at];
+        budget.outstanding = budget.outstanding.saturating_sub(1);
+        if budget.outstanding == 0 {
+            run.splits.remove(at);
         }
     }
 }
 
 /// Reads frames from the helper into the worker's channel until the pipe ends (the helper is gone) or the worker is.
-fn spawn_reader(mut from_helper: Box<dyn Read + Send>, link: u64, to_worker: Sender<Input>) -> bool {
+/// A frame the worker can no longer take is wiped here.
+fn spawn_reader(
+    mut from_helper: Box<dyn Read + Send>,
+    link: u64,
+    to_worker: Sender<Input>,
+    shared: Weak<Shared>,
+) -> bool {
     thread::Builder::new()
         .name("office-helper-read".to_owned())
         .spawn(move || {
             loop {
-                let frame = frame::read_frame(&mut from_helper);
+                let frame = frame::read_frame(&mut from_helper).map(|Frame { kind, id, payload }| Received {
+                    kind,
+                    id,
+                    payload: Zeroizing::new(payload),
+                });
                 let last = frame.is_err();
-                if to_worker.send(Input::Frame { link, frame }).is_err() || last {
+                if let Err(SendError(input)) = to_worker.send(Input::Frame { link, frame }) {
+                    // The worker has ended. Without the host, dropping it wipes it (`Zeroizing`).
+                    if let Some(shared) = shared.upgrade() {
+                        shared.wipe_input(input);
+                    }
+                    return;
+                }
+                if last {
                     return;
                 }
             }

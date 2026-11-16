@@ -4,13 +4,14 @@
 //!
 //! Kept in its own file because `mod.rs` is at its line limit.
 
-use rune::{Cx, El, KeyEvent};
+use rune::{Cx, El, KeyEvent, Tx};
 
 use super::Ui;
+use super::kinds::OfficePicture;
 use super::office_over::Over;
 use super::source::{Body, FixtureViewerSource, OpenFile};
 use crate::State;
-use crate::frames::office::docs::{self, DocBody};
+use crate::frames::office::docs::{self, Asks, DocBody, Live};
 use crate::frames::office::slides::{self, DeckBody};
 use crate::frames::office::{dialogs, sheets, states};
 
@@ -42,12 +43,40 @@ pub fn open_doc(s: &mut State, file: OpenFile) -> bool {
     super::open_from(s, Box::new(FixtureViewerSource::new()), &file.id) && doc_mut(s).is_some()
 }
 
-/// The window of a spreadsheet or a presentation: what `view` hands over for those bodies.
+/// The window's DPI: 96 at a scale of 1 (what Rune's environment says, never assumed).
+pub(super) fn dpi_of(cx: &Cx<State>) -> u16 {
+    (cx.env().scale * 96.0).round().clamp(48.0, 960.0) as u16
+}
+
+/// The window's size in points as the last frame laid it out (a first frame: the board's).
+pub(super) fn screen_of(cx: &Cx<State>) -> (f32, f32) {
+    cx.layout_size("window").map(|[w, h]| (w, h)).unwrap_or((1278.0, 798.0))
+}
+
+/// The window of a spreadsheet or a presentation: what `view` hands over for those bodies. A file in a renderer
+/// (`office_live`) asks it for what is drawn; the fixture source draws the fixture's pictures.
 pub(super) fn window(s: &State, cx: &mut Cx<State>, ui: &Ui) -> El {
+    let live = ui.source.office_live();
+    let id = ui.file.id.clone();
+    let ask = |which: OfficePicture| ui.source.office_picture(&id, which);
+    let asks = Asks::new(&ask);
+    let (dpi, screen) = (dpi_of(cx), screen_of(cx));
+    let pics = Live {
+        asks: &asks,
+        dpi,
+        screen,
+    };
     match &ui.file.body {
+        Body::Sheet(view) if live => {
+            let cells = |sheet, row, col, rows, cols| ui.source.office_cells(&id, sheet, row, col, rows, cols);
+            sheets::window_live(s, cx, ui, view, &pics, &cells)
+        }
         Body::Sheet(view) => sheets::window(s, cx, ui, view),
+        Body::Deck(deck) if deck.presenting && live => slides::present_live(cx, deck, &pics),
         Body::Deck(deck) if deck.presenting => slides::present(cx, deck, &slides::slides_fixture::page),
+        Body::Deck(deck) if live => slides::window_live(s, cx, ui, deck, &pics),
         Body::Deck(deck) => slides::window(s, cx, ui, deck, &slides::slides_fixture::page),
+        Body::Doc(doc) if live => docs::window_live(s, cx, ui, doc, &pics),
         Body::Doc(doc) => {
             let older = doc.view.older_format;
             docs::window(s, cx, ui, doc, &move |n| docs::docs_fixture::page(older, n))
@@ -57,12 +86,45 @@ pub(super) fn window(s: &State, cx: &mut Cx<State>, ui: &Ui) -> El {
     }
 }
 
-/// The deck's keys (Present's arrows, Space, Esc; F5 and Ctrl+Enter in the window). `true`: taken.
-pub(super) fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
+/// Try again on the Office failure panel: the window says it is opening, and a file in a renderer is opened again by
+/// its source (once: the host's rule). A refusal leaves "The viewer stopped" without the button. The fixture source's
+/// retry would open the board's file, so it is not asked.
+pub fn office_try_again(s: &mut State) {
+    let Some(ui) = super::ui(s) else { return };
+    let Body::OfficeState(body) = &mut ui.file.body else {
+        return;
+    };
+    if !body.try_again() || !ui.source.office_live() {
+        return;
+    }
+    let id = ui.file.id.clone();
+    match ui.source.retry(&id) {
+        Ok(file) => ui.replace(file),
+        Err(_) => {
+            if let Body::OfficeState(body) = &mut ui.file.body {
+                body.stopped_again();
+            }
+        }
+    }
+}
+
+/// The deck's keys (Present's arrows, Space, Esc; F5 and Ctrl+Enter in the window). `true`: taken. A document's and a
+/// workbook's keys move their scroll viewport with `tx` too.
+pub(super) fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if deck_mut(s).is_some_and(|deck| deck.on_key(&ev.key, &ev.mods)) {
         return true;
     }
-    doc_mut(s).is_some_and(|doc| doc.on_key(&ev.key, &ev.mods))
+    if docs::on_key(s, ev, tx) {
+        return true;
+    }
+    // A workbook in a renderer: the keys scroll what is in view.
+    match super::ui(s) {
+        Some(ui) if ui.source.office_live() => match &mut ui.file.body {
+            Body::Sheet(view) => sheets::scroll_key_tx(view, &ev.key, &ev.mods, tx),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Esc while Present is on leaves Present, not the viewer: the shell asks before it closes the file. `true`: taken.
@@ -220,8 +282,8 @@ mod tests {
         assert!(is_placeholder(sheets::FRAMES, "DW-1559"));
         assert!(is_placeholder(slides::FRAMES, "DW-1560"));
         assert!(
-            !super::super::kinds::OFFICE_VIEWER_ON,
-            "the viewer stays off until O-CP3"
+            super::super::kinds::OFFICE_VIEWER_ON,
+            "the viewer is on since O-CP3; the editor frames stay placeholders"
         );
     }
 }

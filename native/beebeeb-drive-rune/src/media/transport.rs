@@ -42,7 +42,7 @@ use beebeeb_media_protocol::{
     Codec, FromHelper, MAX_READ, MEDIA_SYSTEM_DECODER_ON, Route, ToHelper, WireError, profile_for_with, read_to_app,
     write_msg,
 };
-use beebeeb_office_sandbox::{Child, Limits, Profile, Sandbox};
+use beebeeb_office_sandbox::{Child, Limits, Profile, Sandbox, SandboxError};
 use zeroize::Zeroize;
 
 use super::player::{Link, LinkFactory, Refusal};
@@ -198,6 +198,17 @@ pub enum LinkError {
     Protocol(WireError),
 }
 
+/// What a sandbox error means to the player: a Windows too old for the sandbox says so (logged once per app start,
+/// the reason only); every other error is "no sandbox".
+pub(crate) fn sandbox_refusal(error: SandboxError) -> Refusal {
+    if error == SandboxError::NeedsNewerWindows {
+        crate::windows_floor::note_needs_windows_update();
+        Refusal::NeedsWindowsUpdate
+    } else {
+        Refusal::NoSandbox
+    }
+}
+
 /// One running, confined helper.
 pub struct HelperLink {
     /// `None` for a link over a test's pipes, and after [`HelperLink::kill`].
@@ -234,8 +245,8 @@ impl HelperLink {
 
     /// The spawn itself, through the sandbox only.
     fn spawn_in(exe: &Path, profile: Profile) -> Result<HelperLink, Refusal> {
-        let sandbox = Sandbox::with_profile(HELPER_LIMITS, profile).map_err(|_| Refusal::NoSandbox)?;
-        let mut child = sandbox.spawn(exe).map_err(|_| Refusal::NoSandbox)?;
+        let sandbox = Sandbox::with_profile(HELPER_LIMITS, profile).map_err(sandbox_refusal)?;
+        let mut child = sandbox.spawn(exe).map_err(sandbox_refusal)?;
         let Some(pipes) = child.take_pipes() else {
             let _ = child.kill();
             return Err(Refusal::NoSandbox);

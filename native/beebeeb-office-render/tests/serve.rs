@@ -30,6 +30,8 @@ const VECTORS: &str = include_str!("../../../crates/beebeeb-office-protocol/test
 const LETTER: &[u8] = include_bytes!("fixtures/letter-1.docx");
 const SPIKE: &[u8] = include_bytes!("fixtures/spike.docx");
 const REMOTE: &[u8] = include_bytes!("fixtures/remote.docx");
+const SHEETS: &[u8] = include_bytes!("fixtures/sheets-3.xlsx");
+const DECK: &[u8] = include_bytes!("fixtures/deck-3.pptx");
 
 /// The port `remote.docx` links its picture to.
 const REMOTE_PORT: u16 = 47477;
@@ -101,6 +103,8 @@ fn cell(row: u32, col: u32, text_len: usize) -> CellText {
         text: "x".repeat(text_len),
         align: Align::Left,
         bold: false,
+        value: None,
+        formula: None,
     }
 }
 
@@ -111,6 +115,8 @@ fn no_merges_block(cells: Vec<CellText>, rows: usize, cols: usize) -> CellData {
         row_heights: vec![15.0; rows],
         merges: Vec::new(),
         frozen: Frozen { rows: 0, cols: 0 },
+        anchors: Vec::new(),
+        missing_content: false,
     }
 }
 
@@ -348,10 +354,11 @@ fn a_cell_block_over_one_frame_answers_range_too_large() {
         rows: 2,
         cols: 2,
     };
-    // A 2 x 2 block with two cells: count (4), two cells (14 bytes and the text each), widths (4 + 8), heights
-    // (4 + 8), no merges (4), frozen panes (8): 68 bytes and the two texts.
+    // A 2 x 2 block with two cells: count (4), two cells (16 bytes and the text each: no value, no formula), widths
+    // (4 + 8), heights (4 + 8), no merges (4), frozen panes (8), no anchors (4), `missing_content` (1): 77 bytes and
+    // the two texts.
     let block = |second: usize| no_merges_block(vec![cell(0, 0, 32 * 1024), cell(0, 1, second)], 2, 2);
-    let fits = MAX_PAYLOAD - 68 - 32 * 1024;
+    let fits = MAX_PAYLOAD - 77 - 32 * 1024;
     assert_eq!(
         block(fits).encode().map(|p| p.len()),
         Ok(MAX_PAYLOAD),
@@ -767,20 +774,41 @@ fn open_errors_map_to_their_codes() {
         assert_eq!(memory.live_reads(), 0);
     }
 
-    // The real engine. Presentations and workbooks are not built in it yet: any bytes are Unsupported. Bytes that are
-    // no file at all are Damaged.
+    // The real engine. EXPECTED RED at the S0 pin (its workbooks and decks open nothing yet: Unsupported) and GREEN
+    // once O-CP3 moves the pin to the merged sheets and slides head (first seen there): our own workbook and deck open;
+    // bytes that are no file at all are Damaged (helper decision 10); a workbook package handed as `.xls` is not a
+    // compound file, so the engine's content check refuses it as Unsupported (no `.xls` writer here: stdlib only).
     let not_a_file: Vec<u8> = (0..64u32).map(|i| (i * 37 + 11) as u8).collect();
     let real = [
-        (DocKind::Pptx, SPIKE, ErrorCode::Unsupported),
-        (DocKind::Xlsx, SPIKE, ErrorCode::Unsupported),
-        (DocKind::Xls, SPIKE, ErrorCode::Unsupported),
-        (DocKind::Docx, not_a_file.as_slice(), ErrorCode::Damaged),
+        (DocKind::Docx, not_a_file.as_slice(), Some(ErrorCode::Damaged)),
+        (DocKind::Xlsx, not_a_file.as_slice(), Some(ErrorCode::Damaged)),
+        (DocKind::Pptx, not_a_file.as_slice(), Some(ErrorCode::Damaged)),
+        (DocKind::Xls, SHEETS, Some(ErrorCode::Unsupported)),
+        (DocKind::Pptx, DECK, None),
+        (DocKind::Xlsx, SHEETS, None),
     ];
     for (kind, bytes, expected) in real {
         let memory = FakeMemory::new();
-        let (helper, answer) = open_real(&memory, kind, bytes);
-        assert_eq!(answer, error(expected), "{kind:?}");
-        assert_eq!(helper.exit_code(), EXIT_OK);
+        let (mut helper, answer) = open_real(&memory, kind, bytes);
+        match (expected, answer) {
+            (Some(code), answer) => {
+                assert_eq!(answer, error(code), "{kind:?}");
+                assert_eq!(helper.exit_code(), EXIT_OK);
+            }
+            (None, Message::Opened(opened)) if kind == DocKind::Pptx => {
+                check_opened(&opened, &Limits::CONTRACT).expect("the app's check accepts the Opened");
+                assert_eq!(opened.pages, 3, "deck-3.pptx has three slides");
+                helper.close();
+                assert_eq!(helper.exit_code(), EXIT_OK);
+            }
+            (None, Message::OpenedSheets(sheets)) if kind == DocKind::Xlsx => {
+                check_sheets(&sheets, &Limits::CONTRACT).expect("the app's check accepts the OpenedSheets");
+                assert_eq!(sheets.sheets.len(), 3, "sheets-3.xlsx has three sheets");
+                helper.close();
+                assert_eq!(helper.exit_code(), EXIT_OK);
+            }
+            (None, other) => panic!("{kind:?}: an open document was due: {other:?}"),
+        }
     }
 
     // Over the app's 100 MiB input limit: TooLarge, and nothing is mapped.

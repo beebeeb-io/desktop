@@ -1162,3 +1162,16 @@ fn error_reports_are_excluded_before_the_first_helper_starts() {
     );
     assert_eq!(*order.lock().unwrap(), [exclude], "0 spawns");
 }
+
+/// F4: a Windows older than the sandbox needs is its own refusal; every other sandbox error stays "no sandbox"
+/// (red first: both mapped to `NoSandbox`).
+#[test]
+fn a_too_old_windows_is_its_own_refusal() {
+    use crate::media::transport::sandbox_refusal;
+    use beebeeb_office_sandbox::SandboxError;
+    assert_eq!(
+        sandbox_refusal(SandboxError::NeedsNewerWindows),
+        Refusal::NeedsWindowsUpdate
+    );
+    assert_eq!(sandbox_refusal(SandboxError::Unsupported), Refusal::NoSandbox);
+}

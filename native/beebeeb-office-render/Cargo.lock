@@ -88,11 +88,17 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 [[package]]
 name = "beebeeb-office"
 version = "0.0.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "deckcraft-model",
  "deckcraft-pptx",
+ "deckcraft-render",
+ "gridcraft-calc",
+ "gridcraft-chart",
+ "gridcraft-core",
+ "gridcraft-formula",
  "gridcraft-model",
+ "gridcraft-numfmt",
  "gridcraft-xlsx",
  "wordcraft-doc",
  "wordcraft-docbin",
@@ -386,26 +392,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "deckcraft-anim"
+version = "0.18.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+dependencies = [
+ "deckcraft-geom",
+ "deckcraft-model",
+ "serde",
+]
+
+[[package]]
 name = "deckcraft-color"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "serde",
 ]
 
 [[package]]
+name = "deckcraft-fonts"
+version = "0.18.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+dependencies = [
+ "epaint_default_fonts",
+ "harfrust",
+ "kurbo",
+ "log",
+ "skrifa 0.47.0",
+ "unicode-bidi",
+]
+
+[[package]]
 name = "deckcraft-geom"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "kurbo",
  "serde",
 ]
 
 [[package]]
+name = "deckcraft-metafile"
+version = "0.18.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+dependencies = [
+ "image",
+ "kurbo",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "deckcraft-model"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "deckcraft-color",
  "deckcraft-geom",
@@ -418,7 +457,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-pptx"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "deckcraft-color",
  "deckcraft-geom",
@@ -427,6 +466,41 @@ dependencies = [
  "quick-xml",
  "thiserror 2.0.21",
  "zip",
+]
+
+[[package]]
+name = "deckcraft-render"
+version = "0.18.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+dependencies = [
+ "deckcraft-anim",
+ "deckcraft-color",
+ "deckcraft-fonts",
+ "deckcraft-geom",
+ "deckcraft-metafile",
+ "deckcraft-model",
+ "deckcraft-text",
+ "image",
+ "kurbo",
+ "log",
+ "skrifa 0.47.0",
+ "vello_common",
+ "vello_cpu",
+]
+
+[[package]]
+name = "deckcraft-text"
+version = "0.18.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+dependencies = [
+ "chrono",
+ "deckcraft-color",
+ "deckcraft-fonts",
+ "deckcraft-geom",
+ "deckcraft-model",
+ "unicode-bidi",
+ "unicode-linebreak",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -457,6 +531,12 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
+name = "epaint_default_fonts"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfc1cc505827f4c23eedc297975a0fd038268d41293f389dd8ff3b574aefab19"
 
 [[package]]
 name = "equivalent"
@@ -609,9 +689,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridcraft-calc"
+version = "0.19.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+dependencies = [
+ "gridcraft-core",
+ "gridcraft-formula",
+ "gridcraft-functions",
+ "gridcraft-model",
+ "gridcraft-numfmt",
+ "log",
+]
+
+[[package]]
+name = "gridcraft-chart"
+version = "0.19.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+dependencies = [
+ "gridcraft-calc",
+ "gridcraft-core",
+ "gridcraft-model",
+ "gridcraft-numfmt",
+ "serde",
+]
+
+[[package]]
 name = "gridcraft-core"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "chrono",
  "js-sys",
@@ -622,7 +727,7 @@ dependencies = [
 [[package]]
 name = "gridcraft-formula"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "gridcraft-core",
  "serde",
@@ -630,9 +735,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridcraft-functions"
+version = "0.19.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+dependencies = [
+ "gridcraft-core",
+ "regex",
+]
+
+[[package]]
 name = "gridcraft-math"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "ratex-font",
  "ratex-layout",
@@ -643,7 +757,7 @@ dependencies = [
 [[package]]
 name = "gridcraft-model"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "gridcraft-core",
  "gridcraft-formula",
@@ -655,9 +769,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridcraft-numfmt"
+version = "0.19.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+dependencies = [
+ "gridcraft-core",
+]
+
+[[package]]
 name = "gridcraft-xlsx"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "aes",
  "gridcraft-core",
@@ -1705,7 +1827,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wordcraft-doc"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "base64",
  "log",
@@ -1719,7 +1841,7 @@ dependencies = [
 [[package]]
 name = "wordcraft-docbin"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "cfb",
  "chrono",
@@ -1735,7 +1857,7 @@ dependencies = [
 [[package]]
 name = "wordcraft-docx"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "aes",
  "base64",
@@ -1758,7 +1880,7 @@ dependencies = [
 [[package]]
 name = "wordcraft-fonts"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "brotli-decompressor 5.0.3",
  "harfrust",
@@ -1773,7 +1895,7 @@ dependencies = [
 [[package]]
 name = "wordcraft-geom"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "image",
  "serde",
@@ -1782,7 +1904,7 @@ dependencies = [
 [[package]]
 name = "wordcraft-layout"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "craft-proof",
  "image",
@@ -1803,7 +1925,7 @@ dependencies = [
 [[package]]
 name = "wordcraft-metafile"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "kurbo",
  "thiserror 2.0.21",
@@ -1812,7 +1934,7 @@ dependencies = [
 [[package]]
 name = "wordcraft-render"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=a39e602f0792ad55123c243eb9bc8a3968a2e98c#a39e602f0792ad55123c243eb9bc8a3968a2e98c"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
 dependencies = [
  "image",
  "log",

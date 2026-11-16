@@ -18,6 +18,7 @@
 //! | Alt+Left, Backspace; Alt+Right | back; forward |
 //! | Ctrl+F | Search names |
 //! | Escape | close the menu, else clear the selection |
+//! | Right, Left (file menu) | into Open With's submenu on its first line; back to "Open With" (also Escape) |
 
 use super::Intent;
 use crate::State;
@@ -28,6 +29,10 @@ use crate::ui::sidebar::SidebarSection;
 use rune::{Key, KeyEvent, Tx};
 
 fn menu_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // Open With's submenu (DW-1562): Right-arrow into it, its own lines, Left-arrow and Escape back out.
+    if let Some(handled) = super::open_with_menu::key(s, ev, tx) {
+        return handled;
+    }
     let Some(open) = s.actions.menu else { return false };
     let entries = s.menu_entries(open.kind);
     let hot = match ev.key {

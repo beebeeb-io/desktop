@@ -400,3 +400,11 @@ fn the_details_flag_follows_the_players_state() {
     assert!(!super::super::details::is_reduced(Some(&s)));
     assert!(!super::super::details::is_reduced(None));
 }
+
+#[test]
+fn a_too_old_windows_says_so_in_the_media_view() {
+    assert_eq!(
+        refusal_words(&Refusal::NeedsWindowsUpdate),
+        "This file can't be shown until Windows is updated."
+    );
+}
