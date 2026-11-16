@@ -1,22 +1,40 @@
 //! Slice A7 on the adapter (`EngineBackupsSource`): an add asked of the engine for the session of its press and its
 //! answer dropped when it lands under another account; an add the engine took read back from the engine, with a pass
 //! asked for; a refusal said in the engine's words; "Stop and keep the backup" and "Stop and move the backup to Trash"
-//! reaching the engine as asked, the move only with the account password, one at a time. Every name is invented.
+//! reaching the engine as asked, the move only with the account password, one at a time. And the folder picker's
+//! answer through the shell's poll (`shell::intents`), for the session of the press: one picked after the session
+//! changed while the picker was open never reaches the engine (P2-1, the review of #463). Every name is invented.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::backup_devices_api::{BackupDevices, DevicesRefused};
 use beebeeb_engine::app::backups_api::{BackupFolderRow, BackupsOverview};
 use beebeeb_engine::backup_delete::DeleteBackupError;
+use rune::{Env, Runtime};
 
 use super::*;
+use crate::State;
+use crate::frames::backups::BackupsUi;
+use crate::shell::actions::FixtureEngine;
+use crate::shell::app::GateState;
+use crate::shell::host::{Shell, poll};
+use crate::shell::intents::{FolderFor, a_folder_picker_is_open, pick_folder_with, poll_drains_for_this_test};
+use crate::shell::platform::PlatformError;
+use crate::shell::platform::fake::FakePlatform;
+use crate::shell::{registry, session_gate, state};
 
 const A: &str = "invented-a@beebeeb.io";
 const B: &str = "invented-b@beebeeb.io";
 const PROJECTS: &str = "custom:Projects";
 const PICKED: &str = r"C:\Users\Invented\Projects";
+/// A folder picked after the session changed while the picker was open.
+const PICKED_LATE: &str = r"C:\Users\Invented\Late";
+/// A folder B picks in a picker B opened.
+const PICKED_BY_B: &str = r"C:\Users\Invented\Theirs";
 
 /// The engine handle as the adapter sees it: one chosen folder (Projects) beside Documents.
 struct Fake {
@@ -268,4 +286,175 @@ fn stop_keeps_or_moves_to_trash_only_with_the_password() {
             (session, PROJECTS.to_string(), Some("invented password".len())),
         ]
     );
+}
+
+const ENV: Env = Env {
+    system_dark: false,
+    scale: 2.0,
+};
+
+/// The window as the running app holds it: the shell signed in to A (the session gate open), Backups bound to the
+/// adapter over `fake`, the shell's poll acting on its queues. Also the shell's engine (to sign in or out) and the count
+/// of the adapter's adds and stops still out (to wait on).
+fn window(fake: &Arc<Fake>) -> (Runtime<State>, Arc<FixtureEngine>, Arc<AtomicUsize>) {
+    let shell = Arc::new(FixtureEngine::ready());
+    shell.set_account(A);
+    let source = EngineBackupsSource::new(fake.clone());
+    let pending = source.backup_folders.pending.clone();
+    let mut state = state::init_with(Shell::fixture_on(shell.clone(), Arc::new(FakePlatform::default())));
+    state.backups = BackupsUi::new(Some(Box::new(source)));
+    let mut rt = Runtime::new(state, registry::view, (1280.0, 800.0), ENV);
+    rt.poll = Some(poll);
+    poll_drains_for_this_test();
+    rt.frame(0.0);
+    settled(&mut rt, "the window opens on A's session");
+    (rt, shell, pending)
+}
+
+/// Frames (each runs the shell's poll) until `done`; fails after ten seconds, saying `what`.
+fn frame_until(rt: &mut Runtime<State>, what: &str, mut done: impl FnMut(&Runtime<State>) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done(rt) {
+        assert!(Instant::now() < deadline, "{what}");
+        rt.frame(0.0);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Frames until the window may act on the session that is signed in now (the session gate is open) and Backups has
+/// read that session's list: the shell, the window and the adapter all see the same session.
+fn settled(rt: &mut Runtime<State>, what: &str) {
+    frame_until(rt, what, |rt| {
+        session_gate::open(&rt.state)
+            && rt
+                .state
+                .backups
+                .source()
+                .is_some_and(|source| !source.folders().is_empty())
+    });
+}
+
+/// A folder picker that stays open until the test closes it (`close`), on `folder`.
+fn held_picker(
+    folder: &str,
+) -> (
+    mpsc::Sender<()>,
+    impl FnOnce() -> Result<Option<PathBuf>, PlatformError> + Send + 'static,
+) {
+    let (close, closed) = mpsc::channel::<()>();
+    let folder = PathBuf::from(folder);
+    let picker = move || {
+        let _ = closed.recv();
+        Ok(Some(folder))
+    };
+    (close, picker)
+}
+
+/// The person closes the open picker on its folder: frames until the shell's poll took the answer (no picker is open)
+/// and every add it asked of the engine has finished (it is in `Fake::adds`).
+fn close_and_take(rt: &mut Runtime<State>, close: &mpsc::Sender<()>, pending: &AtomicUsize) {
+    close.send(()).unwrap();
+    frame_until(rt, "the picker's answer is taken", |_| !a_folder_picker_is_open());
+    frame_until(rt, "no add is out", |_| pending.load(Ordering::SeqCst) == 0);
+}
+
+fn adds(fake: &Fake) -> Vec<(SessionGeneration, String)> {
+    fake.adds.lock().unwrap().clone()
+}
+
+/// P2-1 (the review of #463): A presses Add a folder…, B signs in while the picker is still open, and the folder then
+/// picked never reaches the engine: nothing is added to B's backups. B signs in fully before the pick (the shell, the
+/// window and Backups all show B), the case the review traced. The instrument can fail: a pick under the press's own
+/// session reaches the engine, and B's own press afterwards reaches B (the dropped pick left no picker open).
+#[test]
+fn a_folder_picked_after_another_account_signed_in_is_dropped() {
+    let fake = Fake::new();
+    let (mut rt, shell, pending) = window(&fake);
+
+    let (close, picker) = held_picker(PICKED);
+    assert!(
+        pick_folder_with(&rt.state, FolderFor::Backups, picker),
+        "A's press opens the picker"
+    );
+    close_and_take(&mut rt, &close, &pending);
+    assert_eq!(
+        adds(&fake),
+        vec![(SessionGeneration::for_test(1), PICKED.to_string())],
+        "a folder picked under the press's own session reaches the engine"
+    );
+
+    let (close, picker) = held_picker(PICKED_LATE);
+    assert!(pick_folder_with(&rt.state, FolderFor::Backups, picker));
+    fake.sign_in(B);
+    shell.set_account(B);
+    settled(&mut rt, "the window and Backups show B while A's picker is open");
+    rt.frame(0.0);
+    assert!(a_folder_picker_is_open(), "the picker is still open");
+    close_and_take(&mut rt, &close, &pending);
+    assert_eq!(
+        adds(&fake).len(),
+        1,
+        "the folder picked after B signed in is not asked of the engine"
+    );
+
+    let (close, picker) = held_picker(PICKED_BY_B);
+    assert!(
+        pick_folder_with(&rt.state, FolderFor::Backups, picker),
+        "B's own press opens a picker"
+    );
+    close_and_take(&mut rt, &close, &pending);
+    assert_eq!(
+        adds(&fake),
+        vec![
+            (SessionGeneration::for_test(1), PICKED.to_string()),
+            (SessionGeneration::for_test(2), PICKED_BY_B.to_string()),
+        ],
+        "only A's pick under A and B's own pick under B reached the engine"
+    );
+}
+
+/// P2-1: a session that changed while the picker was open is not the press's even when it seems to be back. A presses
+/// Add a folder…, signs out while the picker is open and signs in again (a new session of the same account): the folder
+/// then picked is dropped. And while the app is locked, a press opens no picker at all.
+#[test]
+fn a_folder_picked_across_a_sign_out_and_in_is_dropped() {
+    let fake = Fake::new();
+    let (mut rt, shell, pending) = window(&fake);
+
+    let (close, picker) = held_picker(PICKED_LATE);
+    assert!(pick_folder_with(&rt.state, FolderFor::Backups, picker));
+    *fake.account.lock().unwrap() = None;
+    shell.set_gate(GateState::SignedOut);
+    frame_until(&mut rt, "the window sees the sign-out", |rt| {
+        rt.state.shell.app.gate() == GateState::SignedOut
+    });
+    fake.sign_in(A);
+    shell.set_gate(GateState::Ready);
+    settled(&mut rt, "A's new session shows while the picker is open");
+    rt.frame(0.0);
+    assert!(a_folder_picker_is_open(), "the picker is still open");
+    close_and_take(&mut rt, &close, &pending);
+    assert!(
+        adds(&fake).is_empty(),
+        "the folder picked across a sign-out and in is not asked of the engine: {:?}",
+        adds(&fake)
+    );
+
+    // The instrument can fail: A's press in the new session reaches the engine under that session.
+    let (close, picker) = held_picker(PICKED);
+    assert!(pick_folder_with(&rt.state, FolderFor::Backups, picker));
+    close_and_take(&mut rt, &close, &pending);
+    assert_eq!(adds(&fake), vec![(SessionGeneration::for_test(2), PICKED.to_string())]);
+
+    // Locked (the account is still the window's): the session gate is closed, and a press opens no picker.
+    shell.set_gate(GateState::Locked);
+    frame_until(&mut rt, "the window sees the lock", |rt| {
+        rt.state.shell.app.gate() == GateState::Locked
+    });
+    let (_close, picker) = held_picker(PICKED);
+    assert!(
+        !pick_folder_with(&rt.state, FolderFor::Backups, picker),
+        "locked, a press opens no picker"
+    );
+    assert!(!a_folder_picker_is_open());
 }
