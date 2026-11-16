@@ -9,7 +9,7 @@ use super::window_state::{Monitor, Restored};
 
 /// What a window's frame adds around the inner size Rune is given, at scale 1: measured 1282 x 801 for a
 /// 1280 x 800 inner size (rung R-UP). It is kept out of the room so the OUTER window fits the work area.
-pub const FRAME_PX: (f64, f64) = (2.0, 1.0);
+pub const FRAME_PX: (f64, f64) = (0.0, 0.0);
 
 /// The displays as the window code should see them: each one's rectangle is its work area (when the OS gave
 /// one for that display) less the frame allowance. `work`: `(whole display, its work area)` pairs, as
