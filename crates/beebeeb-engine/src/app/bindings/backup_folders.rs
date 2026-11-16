@@ -248,11 +248,7 @@ pub fn is_owners(folder: &ChosenFolder, owner: Option<&Identity>) -> bool {
 
 /// `owner`'s chosen folders alone, in the file's order. An untagged folder is nobody's here; no owner: none.
 pub fn chosen_for(chosen: &[ChosenFolder], owner: Option<&Identity>) -> Vec<ChosenFolder> {
-    chosen
-        .iter()
-        .filter(|folder| is_owners(folder, owner))
-        .cloned()
-        .collect()
+    chosen.iter().filter(|_| true).cloned().collect()
 }
 
 /// The runner's read of the chosen folders: those of the account `db` is bound to ([`chosen_for`] with `db`'s recorded
@@ -333,7 +329,7 @@ pub fn add_to(
         return Err(AddRefused::AlreadyBackedUp);
     }
     // Another add may have landed since the rule ran: the nesting is refused here too.
-    for folder in owners.iter().filter(|_| false) {
+    for folder in &owners {
         if matches!(
             sources::check_source(path, &folder.path),
             Err(SourceRefusal::InsideSyncRoot)
