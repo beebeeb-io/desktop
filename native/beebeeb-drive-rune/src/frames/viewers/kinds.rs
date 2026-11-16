@@ -252,15 +252,17 @@ pub enum OfficeRoute {
     NoPreview(OfficeKind),
 }
 
-/// The Office type of a file, by its name's extension. `None`: not an Office file.
+/// The Office type of a file, by its name's extension. `None`: not an Office file, or one of the types O-CP3 did not
+/// measure (`.docm .dotx .dotm .dot .xlsm .xltx .pptm .ppsx`): those stay their own app's, as before (a measuring row
+/// lists them).
 pub fn office_of(name: &str) -> Option<OfficeKind> {
     let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
     Some(match ext.as_str() {
-        "docx" | "docm" | "dotx" | "dotm" => OfficeKind::Docx,
-        "doc" | "dot" => OfficeKind::Doc,
-        "xlsx" | "xlsm" | "xltx" => OfficeKind::Xlsx,
+        "docx" => OfficeKind::Docx,
+        "doc" => OfficeKind::Doc,
+        "xlsx" => OfficeKind::Xlsx,
         "xls" => OfficeKind::Xls,
-        "pptx" | "pptm" | "ppsx" => OfficeKind::Pptx,
+        "pptx" => OfficeKind::Pptx,
         "ppt" | "pps" => OfficeKind::Ppt,
         _ => return None,
     })

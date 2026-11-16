@@ -7,7 +7,9 @@ pub(super) fn is_this_groups(s: &State, item: &crate::source::DriveItem) -> bool
     // An Office file while its route is on (`kinds::office_route`): the Office viewer, or its no-preview state for a
     // type that is not shown here (`.ppt`, DW-1556), from a source that holds Office files in a renderer
     // (`office_live`: the engine's). With the switches off, or from the board's fixture, it is its own app's.
-    let office = kinds::office_route(&item.name).is_some();
+    let route = kinds::office_route(&item.name);
+    let office = route.is_some();
+    let no_preview = matches!(route, Some(kinds::OfficeRoute::NoPreview(_)));
     !item.is_folder
         && (kinds::viewer_of(&item.name).is_some() || office)
         // A kind the window's source does not show here stays its own app's. So does a file whose bytes are kept
@@ -17,6 +19,8 @@ pub(super) fn is_this_groups(s: &State, item: &crate::source::DriveItem) -> bool
         // are: Enter on one reads it, it never runs it (`kinds::its_app_shows_it`).
         && super::route_source(s).is_some_and(|source| {
             (!office || source.office_live())
+                // A kept file the viewer has no preview for (`.ppt`, `.pps`) opens in its own app.
+                && !(no_preview && source.kept_on_this_pc(&item.id))
                 && source.previews(&item.name)
                 && !(kinds::its_app_shows_it(&item.name)
                     && source.kept_on_this_pc(&item.id)

@@ -1136,3 +1136,46 @@ fn a_version_that_kept_changing_says_try_again() {
     );
     assert!(Stopped::Changed.can_retry());
 }
+
+/// P3-7: only the five measured types route to the viewer; the eight others are their own app's.
+#[test]
+fn the_eight_unmeasured_types_have_no_office_route() {
+    for ext in ["docm", "dotx", "dotm", "dot", "xlsm", "xltx", "pptm", "ppsx"] {
+        let name = format!("a.{ext}");
+        assert_eq!(office_route_with(&name, true, ALL), None, "{name}");
+        assert_eq!(kinds::office_route(&name), None, "{name}");
+    }
+    assert_eq!(
+        office_route_with("a.pps", true, ALL),
+        Some(OfficeRoute::NoPreview(OfficeKind::Ppt))
+    );
+}
+
+/// P3-6: a kept `.ppt` has no preview, so the source does not claim it; a kept `.docx` it does.
+#[test]
+fn a_kept_file_opens_here_only_where_the_viewer_shows_it() {
+    let fake = Fake::default();
+    let source = source_with(
+        TestEngine::new(&[("f1", "Invented.docx", 64)]),
+        &fake,
+        Opened::default(),
+    );
+    for name in ["a.docx", "a.doc", "a.xlsx", "a.xls", "a.pptx"] {
+        assert!(source.opens_here_when_kept(name), "{name}");
+    }
+    for name in ["a.ppt", "a.pps", "a.docm", "a.ppsx"] {
+        assert!(!source.opens_here_when_kept(name), "{name}");
+    }
+}
+
+/// P2-3: the Office renderer is live only where the sandbox crate has a module (Windows).
+#[test]
+fn office_is_live_only_where_the_sandbox_exists() {
+    let fake = Fake::default();
+    let source = source_with(
+        TestEngine::new(&[("f1", "Invented.docx", 64)]),
+        &fake,
+        Opened::default(),
+    );
+    assert_eq!(source.office_live(), cfg!(windows));
+}
