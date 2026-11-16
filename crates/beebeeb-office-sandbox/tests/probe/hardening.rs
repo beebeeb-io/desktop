@@ -91,9 +91,12 @@ pub(crate) fn section_commit(_mebibytes: &str) -> String {
     "err unsupported".into()
 }
 
+/// Every grant `hold-grants` mapped, kept until the process ends.
+static KEPT: std::sync::Mutex<Vec<helper::Mapped>> = std::sync::Mutex::new(Vec::new());
+
 pub(crate) fn hold_grants(rest: &str) -> String {
     let words: Vec<&str> = rest.split(' ').filter(|word| !word.is_empty()).collect();
-    if words.is_empty() || words.len() % 2 != 0 {
+    if words.is_empty() || !words.len().is_multiple_of(2) {
         return "err parse".into();
     }
     let mut held = 0;
@@ -104,7 +107,9 @@ pub(crate) fn hold_grants(rest: &str) -> String {
         match helper::map(Granted { wire, len }, Access::Read) {
             Ok(mapped) => {
                 // Never unmapped and the grant's handle never closed: what a helper that keeps its grants does.
-                std::mem::forget(mapped);
+                KEPT.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(mapped);
                 held += 1;
             }
             Err(error) => return refusal(error),

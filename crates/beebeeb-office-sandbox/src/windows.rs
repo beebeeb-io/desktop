@@ -360,20 +360,20 @@ impl SectionInner {
     pub(crate) fn copy_into(&self, out: &mut [u8]) {
         assert!(out.len() <= self.len, "a copy longer than the section");
         let source = self.view.Value.cast::<u8>().cast_const();
-        let words = out.len() / 8;
-        let (head, tail) = out.split_at_mut(words * 8);
-        for (index, chunk) in head.chunks_exact_mut(8).enumerate() {
+        let (words, tail) = out.as_chunks_mut::<8>();
+        let done = words.len() * 8;
+        for (index, word_out) in words.iter_mut().enumerate() {
             // SAFETY: the view is mapped readable for `self.len` bytes until `drop`, and `index * 8 + 8 <= out.len()
             // <= self.len`; the view starts on a page boundary, so each word read is aligned. The read goes through
             // the raw address: no reference to the shared bytes is made, so a helper writing them at this moment can
             // leave a torn value in `out` but never changes memory a reference points to. Volatile, so each word is
             // read exactly once and nothing is assumed about bytes another process may change.
             let word = unsafe { std::ptr::read_volatile(source.add(index * 8).cast::<u64>()) };
-            chunk.copy_from_slice(&word.to_ne_bytes());
+            *word_out = word.to_ne_bytes();
         }
         for (index, byte) in tail.iter_mut().enumerate() {
-            // SAFETY: as above, one byte inside the view: `words * 8 + index < out.len() <= self.len`.
-            *byte = unsafe { std::ptr::read_volatile(source.add(words * 8 + index)) };
+            // SAFETY: as above, one byte inside the view: `done + index < out.len() <= self.len`.
+            *byte = unsafe { std::ptr::read_volatile(source.add(done + index)) };
         }
     }
 }

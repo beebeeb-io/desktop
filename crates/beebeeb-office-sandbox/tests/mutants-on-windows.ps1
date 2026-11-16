@@ -60,6 +60,9 @@ $mutants = [ordered]@{
     'no-memory-watch'               = @('child\.watch = Some\(watch\);', 'drop(watch);')
     'watch-private-only'            = @('@lib private\.saturating_add\(shared\) > limit\.saturating_add\(granted\)', 'private > limit.saturating_add(granted)')
     'handle-count-zero'             = @('Ok\(count\)', 'Ok(0)')
+    # The raw copy out of a section: the tail read from the start of the view; every word read one word late.
+    'copy-tail-offset'              = @('source\.add\(done \+ index\)', 'source.add(index)')
+    'copy-word-offset'              = @('source\.add\(index \* 8\)\.cast::<u64>\(\)', 'source.add(index * 8 + 8).cast::<u64>()')
 }
 
 $profiles = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'

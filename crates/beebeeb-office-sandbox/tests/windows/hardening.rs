@@ -178,6 +178,15 @@ fn what_the_job_counts_of_held_grants() {
     );
     drop(plain);
 
+    // The instrument can fail: a plain probe reads its own counters.
+    let mut plain = Probe::plain();
+    let own = plain.attempt("memory");
+    assert!(
+        own.starts_with("memory private="),
+        "the plain probe read its counters: {own}"
+    );
+    drop(plain);
+
     let mut confined = Probe::confined();
     let commit_before = system_commit();
     let memory_before = confined.attempt("memory");
@@ -209,6 +218,15 @@ fn what_the_job_counts_of_held_grants() {
 #[test]
 fn handle_count_reads_the_helper() {
     let _serial = serial();
+    // The instrument can fail: `hold-grants` maps and keeps a section in a plain probe, which inherits the handle.
+    let control = Section::new(65_536).expect("a section");
+    make_inheritable(control.as_raw_handle());
+    let mut plain = Probe::plain();
+    let wire = control.as_raw_handle() as usize as u64;
+    assert_eq!(plain.attempt(&format!("hold-grants {wire} 65536")), "ok 1");
+    drop(plain);
+    drop(control);
+
     let mut confined = Probe::confined();
     assert_eq!(confined.ask("ping"), "pong");
     let baseline = confined.child().handle_count().expect("a count");
@@ -225,4 +243,36 @@ fn handle_count_reads_the_helper() {
         held >= baseline + 8,
         "{held} handles after 8 kept grants, {baseline} before"
     );
+}
+
+/// A section is copied out whole, byte for byte, through the raw view (its length is not a multiple of 8, so the
+/// word loop and the tail both run), and a buffer of another length is refused with nothing copied.
+#[test]
+fn a_section_is_copied_out_whole_and_only_into_its_own_length() {
+    const LEN: usize = 3 * 4096 + 5;
+    let mut section = Section::new(LEN).expect("a section");
+    for (index, byte) in section.as_mut_slice().iter_mut().enumerate() {
+        *byte = pattern(index);
+    }
+    let mut out = vec![0u8; LEN];
+    assert_eq!(section.copy_to(&mut out), Ok(()));
+    let same = out
+        .iter()
+        .enumerate()
+        .filter(|&(index, &byte)| byte == pattern(index))
+        .count();
+    assert_eq!(same, LEN, "every byte arrived in its place");
+
+    let mut copied = 0;
+    for wrong in [LEN - 1, LEN + 1] {
+        let mut out = vec![0u8; wrong];
+        assert_eq!(
+            section.copy_to(&mut out),
+            Err(SandboxError::Limits("a copy whose length is not the section's")),
+            "a buffer of {wrong} bytes"
+        );
+        assert_eq!(out.iter().filter(|&&byte| byte != 0).count(), 0, "nothing was copied");
+        copied += 1;
+    }
+    assert_eq!(copied, 2);
 }
