@@ -44,7 +44,7 @@ fn an_engine_upload_into_a_folder_completes_and_the_row_says_uploaded() {
     let payload = dir.path().join("payload.bin");
     std::fs::write(&payload, b"patched upload").unwrap();
     let db = Arc::new(StateDb::open(dir.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db, Arc::new(client));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::TEST, db, Arc::new(client));
     let op = PendingOperation {
         op_id: "op-patch-upload".into(),
         kind: OperationKind::UploadVersion,
