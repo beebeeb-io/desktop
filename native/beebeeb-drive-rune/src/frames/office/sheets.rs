@@ -543,7 +543,15 @@ fn anchors_of(view: &SheetView, shown: &Shown, live: Option<&Live>, t: &Theme) -
 
 /// The grid: the corner and the column letters, then each row with its number and its cells.
 fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
-    let by_place: HashMap<(u32, u32), &CellText> = view.cells.iter().map(|c| ((c.row, c.col), c)).collect();
+    // Only the cells on a drawn row and column are indexed: a sheet held at its cell cap costs a scan, not 65,536 inserts.
+    let (rows_in, cols_in): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) =
+        (shown.rows.iter().copied().collect(), shown.cols.iter().copied().collect());
+    let by_place: HashMap<(u32, u32), &CellText> = view
+        .cells
+        .iter()
+        .filter(|c| rows_in.contains(&c.row) && cols_in.contains(&c.col))
+        .map(|c| ((c.row, c.col), c))
+        .collect();
     let width = |c: u32| view.col_widths.get(c as usize).copied().unwrap_or(0.0);
     let merges = MergesShown::of(view, &shown.rows, &shown.cols, width);
     let selected = view.selection.map(bounds);
@@ -1116,3 +1124,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sheets_live_tests.rs"]
 mod live_tests;
+
+#[cfg(test)]
+#[path = "sheets_budget_tests.rs"]
+mod budget_tests;
