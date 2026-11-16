@@ -486,7 +486,7 @@ pub fn switch_on_refusal_with(
     let known = all.iter().any(|place| place.key == key && place.known);
     let backed_up: Vec<&Place> = all
         .iter()
-        .filter(|place| place.key != key && !(known && place.known))
+        .filter(|place| place.key != key && place.on && !(known && place.known))
         .collect();
     all.iter()
         .filter(|place| place.key == key)
@@ -562,7 +562,7 @@ pub fn add_to_with(
         LocalStateRefused::IdentityUnknown,
     )))?;
     let all = places(config, Some(owner), paths);
-    let taken: Vec<&Place> = all.iter().filter(|place| takes(place)).collect();
+    let taken: Vec<&Place> = all.iter().filter(|place| !place.known).collect();
     if let Some((how, _)) = nested_with(path, &taken, |place| place.path.as_path()) {
         return Err(add_refusal(how));
     }
