@@ -34,6 +34,7 @@ mod view_create_phrase;
 mod view_recover;
 mod view_recovery;
 mod view_steps;
+pub mod wipe;
 
 #[cfg(test)]
 mod create_tests;
@@ -49,6 +50,8 @@ mod recovery_tests;
 mod steps_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wipe_tests;
 
 use std::time::Duration;
 

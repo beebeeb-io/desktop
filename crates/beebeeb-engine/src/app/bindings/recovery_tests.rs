@@ -413,3 +413,58 @@ fn recovery_meter_reads_the_servers_minimum_and_a_short_password_sends_nothing()
     );
     assert_eq!(count(&fake.api, START), 1);
 }
+
+// ---------------------------------------------------------------------------
+// The wipe (census row, lane signin-wipe): the held recovery, which holds the key the words derived and the server's
+// recovery token, ends with the flow: when the flow is left, when a sign-in replaces it, and when its engine goes.
+// ---------------------------------------------------------------------------
+
+/// Leaving a half-done sign-in is the engine's own rule for the recovery too: the held flow is forgotten by
+/// `discard_partial_sign_in` itself, whichever host calls it.
+#[test]
+fn signin_wipe_leaving_a_half_done_sign_in_forgets_the_held_recovery() {
+    let fake = server("wipe-leave");
+    let (engine, _store) = opened(&fake.api, "wipe-leave");
+    verified(&engine, &fake);
+    assert!(holds_a_recovery(&engine), "the words were verified: the flow is held");
+    engine.discard_partial_sign_in().expect("nothing is signed in to end");
+    assert!(
+        !holds_a_recovery(&engine),
+        "the key and the recovery token go when the recovery is left"
+    );
+}
+
+/// A sign-in that stores a session ends every other half-done step: a held recovery does not wait behind it.
+#[test]
+fn signin_wipe_a_sign_in_ends_a_held_recovery() {
+    let fake = server("wipe-replaced");
+    let (engine, _store) = opened(&fake.api, "wipe-replaced");
+    verified(&engine, &fake);
+    assert!(holds_a_recovery(&engine), "the words were verified: the flow is held");
+    engine
+        .sign_in_password(&fake.account.email, Zeroizing::new(OLD_PASSWORD.to_string()))
+        .expect("the password still signs in");
+    assert!(
+        !holds_a_recovery(&engine),
+        "the sign-in replaced the recovery: its key and token are gone"
+    );
+}
+
+/// An engine that goes takes its held recovery with it at once, not at another engine's next look into the slot.
+#[test]
+fn signin_wipe_a_dropped_engine_leaves_no_held_recovery() {
+    let fake = server("wipe-drop");
+    let (engine, _store) = opened(&fake.api, "wipe-drop");
+    verified(&engine, &fake);
+    // A second hold of the account runtime keeps the entry's owner alive, so another test's look into the slot (which
+    // drops the entries of dead owners) cannot pass this test for the wrong reason.
+    let acct = engine.acct.clone();
+    let owner = Arc::downgrade(&acct);
+    assert!(super::held_for(&owner), "the words were verified: the flow is held");
+    drop(engine);
+    assert!(
+        !super::held_for(&owner),
+        "the engine went: its recovery's key and token went with it"
+    );
+    drop(acct);
+}

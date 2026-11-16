@@ -36,3 +36,7 @@ impl<C: CredentialStores> Engine<C> {
         result
     }
 }
+
+#[cfg(test)]
+#[path = "signin_api_tests.rs"]
+mod tests;

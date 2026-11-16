@@ -103,3 +103,64 @@ fn the_watchers_ask_records_the_owner_off_its_own_thread() {
         Some(account.user_id.as_str())
     );
 }
+
+/// Census row (lane signin-wipe): a session that comes back with no email beside it (none stored, as after an email
+/// write that failed at the sign-in) is named by the same answer that names its owner: the session in memory, the
+/// account label a window reads, and the credential store, which still holds the token that was asked about. The email
+/// is there before the id, so a window that reads "the email, else the id" never sees the id in between.
+#[test]
+fn signin_wipe_a_later_named_session_gets_its_email_with_its_id() {
+    let (engine, _api, account) = a_session_from_before_the_owner_tag("owner-unnamed");
+    // What a restart leaves of a session stored without its email: the token is stored again on its own, and the
+    // session in memory and the account label know no address.
+    let mut vault = engine.vault();
+    let token = vault.session_token().unwrap().expect("a stored token");
+    vault.clear_session().unwrap();
+    vault.install_session(token).unwrap();
+    assert_eq!(vault.account_email().unwrap(), None);
+    engine
+        .acct
+        .session
+        .lock()
+        .unwrap()
+        .as_mut()
+        .expect("a session in memory")
+        .email = None;
+    *engine.acct.auth_email.lock().unwrap() = None;
+    assert_eq!(engine.account_email(), None);
+
+    assert_eq!(engine.settle_session_owner(), OwnerSettled::Recorded);
+    assert_eq!(engine.user_id().as_deref(), Some(account.user_id.as_str()));
+    assert_eq!(
+        engine.account_email().as_deref(),
+        Some(account.email.as_str()),
+        "the account label"
+    );
+    assert_eq!(
+        engine
+            .acct
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|s| s.email.clone())
+            .as_deref(),
+        Some(account.email.as_str()),
+        "the session in memory"
+    );
+    assert_eq!(
+        engine.vault().account_email().unwrap().as_deref(),
+        Some(account.email.as_str()),
+        "the credential store, for the next start"
+    );
+}
+
+/// A session that has its email keeps it: the owner's answer names only a session that has none.
+#[test]
+fn signin_wipe_a_named_session_keeps_its_email() {
+    let (engine, _api, account) = a_session_from_before_the_owner_tag("owner-named");
+    let before = engine.account_email();
+    assert_eq!(before.as_deref(), Some(account.email.as_str()));
+    assert_eq!(engine.settle_session_owner(), OwnerSettled::Recorded);
+    assert_eq!(engine.account_email(), before);
+}

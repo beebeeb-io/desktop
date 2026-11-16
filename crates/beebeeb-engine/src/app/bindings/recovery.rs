@@ -115,6 +115,16 @@ fn held() -> MutexGuard<'static, Vec<Held>> {
     entries
 }
 
+/// Whether the slot holds a recovery of the engine whose account runtime `owner` points at, read WITHOUT dropping the
+/// entries of dropped engines first (the wipe tests: what an engine's drop leaves behind).
+#[cfg(test)]
+fn held_for(owner: &Weak<AccountRuntime>) -> bool {
+    HELD.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .any(|entry| entry.owner.ptr_eq(owner))
+}
+
 fn seconds_of(retry_after: u64) -> u32 {
     u32::try_from(retry_after).unwrap_or(u32::MAX)
 }
