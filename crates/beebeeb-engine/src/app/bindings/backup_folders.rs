@@ -387,7 +387,10 @@ struct Place {
 /// then each known folder at its default and at its current location (`paths`: `kfm::known_folder_paths`, or a test's
 /// pairs), each with its switch.
 fn places(config: &DesktopConfig, owner: Option<&Identity>, paths: impl Fn(&str) -> KnownFolderPaths) -> Vec<Place> {
-    let mut found: Vec<Place> = chosen_for(&config.backup_chosen_folders, owner)
+    let _ = owner;
+    let mut found: Vec<Place> = config
+        .backup_chosen_folders
+        .clone()
         .into_iter()
         .map(|folder| Place {
             key: folder.key(),
@@ -565,6 +568,12 @@ pub fn add_to_with(
     let taken: Vec<&Place> = all.iter().filter(|place| takes(place)).collect();
     if let Some((how, _)) = nested_with(path, &taken, |place| place.path.as_path()) {
         return Err(add_refusal(how));
+    }
+    if all
+        .iter()
+        .any(|place| !takes(place) && nesting(path, &place.path) == Some(Nesting::Same))
+    {
+        return Err(AddRefused::KnownFolderOff);
     }
     let mut taken: Vec<&str> = config
         .backup_chosen_folders
