@@ -326,6 +326,10 @@ fn ld0105_w1_native_the_upgrade_from_partial_to_progressive_keeps_every_placehol
     let after = census(&qa, &names);
     println!("ld0105-w1-native: after  {after:?}");
     assert_eq!(after, before, "0 placeholders lost or changed");
+    // Measured 2026-11-16 (VM 401, Windows 11): after an UPDATE registration Windows still reports the old
+    // policy, (0, 0), until the root is next CONNECTED; the app connects right after registering, and reads
+    // the policy back only then (`connect_root`). So connect, then read.
+    qa.connect(serve_first_64k);
     let policy = crate::windows_cf::hydration_policy_of(&qa.root).unwrap();
     println!("ld0105-w1-native: policy read back {policy:?}");
     assert!(
