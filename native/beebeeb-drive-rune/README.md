@@ -6,10 +6,10 @@ Native Windows desktop app for Beebeeb Drive, built with [Rune](https://github.c
 
 ```sh
 # Source lavapipe for headless rendering on WSL
-source ~/code/bb-legion-native/lavapipe/env.sh
+source <lavapipe-dir>/env.sh
 
 # Shared target dir (warm cache)
-export CARGO_TARGET_DIR=~/code/bb-worktrees/target-native-n2
+export CARGO_TARGET_DIR=<shared-target-dir>
 
 # Run (opens window on Windows, headless on WSL)
 cargo run -p beebeeb-drive-rune
@@ -56,7 +56,7 @@ render): the previous render is deleted first, so there is never a pass on a sta
 token. A tolerance may only get tighter. If Rune cannot draw something, say so in the PR under "Rune limitations".
 
 `compare.sh` builds through `scripts/coord/build-slot.sh` (set `BUILD_SLOT` if yours lives elsewhere, or pass
-`--no-build` after your own build) and renders with lavapipe when `~/code/bb-legion-native/lavapipe/env.sh` exists.
+`--no-build` after your own build) and renders with lavapipe when `$LAVAPIPE_ENV` (the lavapipe `env.sh`) exists.
 
 ### How the golden is made
 
