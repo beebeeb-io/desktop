@@ -375,3 +375,86 @@ fn a_locked_window_only_comes_forward_and_the_verb_is_not_kept() {
             .all(|call| !matches!(call, Call::CopyLink(..) | Call::ShareLink(..)))
     );
 }
+
+/// Review of #463, P3-7: a verb that comes while the window is covered (the away lock's wake cover: the engine has not
+/// said whether the wake locks) waits. Nothing is looked up, selected or opened behind the cover; once the cover is gone
+/// the verb runs, checked again as it came. A cover that became the lock drops it, and nothing opens at the unlock. The
+/// window's own poll runs what waits.
+/// Mutants: in `handle_with`, delete the `if registry::covered(s) { … return; }` block -> red at "the engine is not asked
+/// behind the cover" (Version history opens behind it); in `host::poll_screen`, delete the `after_the_cover` call -> red
+/// at "the window's poll took what waited".
+#[test]
+fn a_verb_under_the_wake_cover_waits_for_its_end() {
+    let waits = || WAITING.with_borrow(Option::is_some);
+    // Driven by hand: the window's own poll would run what waits with the running instance's lookup (none here).
+    let (mut rt, _, _) = window();
+    rt.poll = None;
+    select(&mut rt, "contract");
+    let engine = Items::of(ACCOUNT);
+    rt.update(|s, _| s.shell.away.set_cover_for_test(true));
+    assert!(registry::covered(&rt.state));
+    rt.update(|s, tx| handle_with(s, ExplorerVerb::Versions, "budget", Some(&engine), tx));
+    settle(&mut rt);
+    assert_eq!(engine.asked.get(), 0, "the engine is not asked behind the cover");
+    assert!(rt.state.actions.dialog.is_none(), "nothing opens behind the cover");
+    assert_eq!(
+        row_id(&rt),
+        Some("contract".to_string()),
+        "nothing is selected behind it"
+    );
+    let mut ran = false;
+    rt.update(|s, tx| ran = after_the_cover_with(s, Some(&engine), tx));
+    assert!(!ran && waits(), "it waits while the window is covered");
+    rt.update(|s, tx| {
+        s.shell.away.set_cover_for_test(false);
+        ran = after_the_cover_with(s, Some(&engine), tx);
+    });
+    settle(&mut rt);
+    assert!(ran && !waits(), "the cover is gone: it ran");
+    assert!(
+        matches!(&rt.state.actions.dialog, Some(Dialog::Versions(item)) if item.id == "budget"),
+        "Version history, once the cover is gone"
+    );
+    assert_eq!(engine.asked.get(), 1, "checked again as it came");
+
+    // The cover became the lock: the verb goes, and nothing opens at the unlock.
+    let (mut rt, calls, fixture) = window();
+    rt.poll = None;
+    let engine = Items::of(ACCOUNT);
+    rt.update(|s, _| s.shell.away.set_cover_for_test(true));
+    rt.update(|s, tx| handle_with(s, ExplorerVerb::Share, "contract", Some(&engine), tx));
+    assert!(waits());
+    fixture.set_gate(GateState::Locked);
+    rt.update(|s, tx| {
+        s.shell.refresh();
+        ran = after_the_cover_with(s, Some(&engine), tx);
+    });
+    assert_eq!(rt.state.shell.app.gate(), GateState::Locked);
+    assert!(!ran && !waits(), "the lock drops it");
+    fixture.set_gate(GateState::Ready);
+    rt.update(|s, tx| {
+        s.shell.refresh();
+        s.shell.away.set_cover_for_test(false);
+        ran = after_the_cover_with(s, Some(&engine), tx);
+    });
+    settle(&mut rt);
+    assert!(!ran, "nothing kept for after the unlock");
+    assert!(rt.state.actions.dialog.is_none(), "nothing opens at the unlock");
+    assert_eq!(engine.asked.get(), 0, "the engine was never asked");
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| !matches!(call, Call::CopyLink(..) | Call::ShareLink(..)))
+    );
+
+    // The window's own poll runs what waits once the cover is gone.
+    let (mut rt, _, _) = window();
+    rt.update(|s, _| s.shell.away.set_cover_for_test(true));
+    rt.update(|s, tx| handle_with(s, ExplorerVerb::Show, "contract", Some(&engine), tx));
+    assert!(waits());
+    rt.update(|s, _| s.shell.away.set_cover_for_test(false));
+    settle(&mut rt);
+    assert!(!waits(), "the window's poll took what waited");
+}

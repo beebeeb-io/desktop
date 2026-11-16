@@ -18,9 +18,12 @@
 //!   own local state), then Files, the item's folder, the item selected, and the verb's own surface. Share and Copy
 //!   link open the window's Share dialog (DW-0407), whose own button is Copy link: nothing is shared or copied until
 //!   the person presses there. Version history… opens DW-0413. Show in Beebeeb stops at the selection.
+//!   Under the away lock's wake cover (`registry::covered`: the engine has not said whether the wake locks) the verb
+//!   waits, and runs once the cover is gone ([`after_the_cover`]; review of #463, P3-7).
 //!
 //! Must not: log a path, a name or an id; share, copy or change anything from the menu by itself.
 
+use std::cell::RefCell;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -39,6 +42,7 @@ use crate::shell::deeplink::{self, RegistryValue};
 use crate::shell::host;
 use crate::shell::identity::AppIdentity;
 use crate::shell::instance;
+use crate::shell::registry;
 use crate::shell::session_gate;
 
 #[cfg(test)]
@@ -50,6 +54,18 @@ const WATCH_EVERY: Duration = Duration::from_secs(5);
 
 /// The running instance's lookup ([`handle`]): the engine's account-bound local state, set by [`register`].
 static ENGINE: Mutex<Option<Arc<dyn ItemLookup + Send + Sync>>> = Mutex::new(None);
+
+/// A verb that came while the window was covered ([`handle_with`]), with the account the window showed then.
+struct Waiting {
+    verb: ExplorerVerb,
+    item: String,
+    account: Option<String>,
+}
+
+thread_local! {
+    /// The verb that waits for the cover's end, on the window's thread. One: a later verb replaces it.
+    static WAITING: RefCell<Option<Waiting>> = const { RefCell::new(None) };
+}
 
 fn unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -331,12 +347,56 @@ pub(crate) fn handle(s: &mut State, verb: ExplorerVerb, item: &str, tx: &mut Tx)
 
 /// [`handle`], with the engine lookup handed in (a test's).
 pub(crate) fn handle_with(s: &mut State, verb: ExplorerVerb, item: &str, engine: Option<&dyn ItemLookup>, tx: &mut Tx) {
+    // Under the wake cover the engine has not said whether the wake locks: nothing is looked up, navigated or opened
+    // behind it. The verb waits for the cover's end (review of #463, P3-7).
+    if registry::covered(s) {
+        let account = s.shell.app.account().map(str::to_owned);
+        WAITING.set(Some(Waiting {
+            verb,
+            item: item.to_owned(),
+            account,
+        }));
+        host::log("a File Explorer verb waits for the lock screen");
+        return;
+    }
     let window_open = session_gate::open(s);
     let account = s.shell.app.account().map(str::to_owned);
     match control::explorer_verb(verb, item, window_open, account.as_deref(), engine) {
         VerbPlan::ShowOnly(why) => host::log(format!("a File Explorer verb was not followed: {why}")),
         VerbPlan::Open { verb, folder, item } => open(s, verb, folder, &item, tx),
     }
+}
+
+/// The main window's poll, after the away lock's (`host::poll_screen`): a verb that waited under the cover runs once
+/// the cover is gone, checked again as it came ([`handle`]). A window that locked or signed out meanwhile (the cover
+/// became the lock), or another account, drops it, as a locked window drops a verb: nothing is kept for after an
+/// unlock. `true`: it ran.
+pub(crate) fn after_the_cover(s: &mut State, tx: &mut Tx) -> bool {
+    let engine = unpoisoned(&ENGINE).clone();
+    after_the_cover_with(s, engine.as_deref().map(|e| e as &dyn ItemLookup), tx)
+}
+
+/// [`after_the_cover`], with the engine lookup handed in (a test's).
+pub(crate) fn after_the_cover_with(s: &mut State, engine: Option<&dyn ItemLookup>, tx: &mut Tx) -> bool {
+    let account = s.shell.app.account();
+    let Some(same_account) =
+        WAITING.with_borrow(|waiting| waiting.as_ref().map(|waiting| waiting.account.as_deref() == account))
+    else {
+        return false;
+    };
+    if !session_gate::open(s) || !same_account {
+        WAITING.set(None);
+        host::log("a File Explorer verb that waited was not followed: the window locked, or another account");
+        return false;
+    }
+    if registry::covered(s) {
+        return false;
+    }
+    let Some(waiting) = WAITING.take() else {
+        return false;
+    };
+    handle_with(s, waiting.verb, &waiting.item, engine, tx);
+    true
 }
 
 /// The row of the item `id` in the folder the Files window holds.
