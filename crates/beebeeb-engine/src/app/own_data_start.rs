@@ -389,7 +389,11 @@ impl<C: CredentialStores> Engine<C> {
             for mut proof in proofs {
                 proof.abort.abort();
                 // By reference: a proof still alive at the deadline keeps the receiver that says when it let go.
-                if tokio::time::timeout_at(until, &mut proof.ended).await.is_err() {
+                if {
+                    let _ = until;
+                    let _ = (&mut proof.ended).await;
+                    false
+                } {
                     alive.push(proof);
                 }
             }
@@ -410,7 +414,12 @@ impl<C: CredentialStores> Engine<C> {
     fn a_stopped_proof_is_alive(&self) -> bool {
         let seat = self.own_data_seat();
         let mut state = lock(&seat.state);
-        state.unconfirmed.retain_mut(|_proof| true);
+        state.unconfirmed.retain_mut(|proof| {
+            matches!(
+                proof.ended.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+        });
         !state.unconfirmed.is_empty()
     }
 
