@@ -320,6 +320,16 @@ impl UiControls {
             Some(Pending::Clear) => os.latest = None,
             None => {}
         }
+        if self.shared.cover.covers_now() {
+            // Nothing of the item reaches Windows under the wake cover: what shows is taken down once, also with
+            // nothing new asked (a paused item), and the latest show waits for the cover's end.
+            if !std::mem::replace(&mut os.hidden, true)
+                && let Some(controls) = os.attached.as_mut()
+            {
+                controls.clear();
+            }
+            return;
+        }
         let pending = if std::mem::take(&mut os.hidden) {
             // The cover is gone: the latest show goes up again (none: the player stopped meanwhile, already down).
             os.latest.clone().map(Pending::Show)
