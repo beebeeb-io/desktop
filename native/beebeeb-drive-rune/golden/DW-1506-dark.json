@@ -866,7 +866,7 @@
    "y": 54.75,
    "w": 233.23,
    "h": 13,
-   "text": "Page 1 of 4 \u00b7 210 KB",
+   "text": "Page 1 of 4 · 210 KB",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 11,
@@ -878,52 +878,6 @@
     255
    ],
    "tracking": 0
-  },
-  "view-toggle": {
-   "kind": "box",
-   "x": 551.23,
-   "y": 40.75,
-   "w": 102,
-   "h": 28,
-   "bg": [
-    35,
-    30,
-    24,
-    255
-   ]
-  },
-  "view-list": {
-   "kind": "box",
-   "x": 553.23,
-   "y": 42.75,
-   "w": 28,
-   "h": 24,
-   "on": false
-  },
-  "view-list-icon": {
-   "kind": "icon",
-   "x": 560.73,
-   "y": 48.25,
-   "w": 13,
-   "h": 13,
-   "icon": [
-    "M5 12h14"
-   ],
-   "filled": false,
-   "color": [
-    186,
-    183,
-    178,
-    255
-   ]
-  },
-  "view-grid": {
-   "kind": "box",
-   "x": 582.23,
-   "y": 42.75,
-   "w": 40,
-   "h": 24,
-   "on": false
   },
   "sort-btn": {
    "kind": "box",
@@ -1188,7 +1142,7 @@
    "y": 775.75,
    "w": 230.7,
    "h": 17,
-   "text": "Decrypted on this PC \u00b7 the key never left it",
+   "text": "Decrypted on this PC · the key never left it",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 11.5,
@@ -1581,6 +1535,26 @@
     178,
     255
    ]
+  },
+  "view-toggle-dim": {
+   "kind": "box",
+   "x": 764.23,
+   "y": 40.75,
+   "w": 61,
+   "h": 28,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "9px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "2px",
+    "gap": "1px",
+    "opacity": "0.45"
+   }
   },
   "viewer-body": {
    "kind": "box",
