@@ -228,7 +228,7 @@ impl<C: CredentialStores> Engine<C> {
         let mut leg = Leg::StepUp;
         let mut first_leg = true;
         loop {
-            if leg == Leg::Claim {
+            if leg != Leg::StepUp {
                 // A lock, a sign-out or another sign-in during the step-up: the claim does not leave. During the
                 // claim's round trip: the relay (the point of no return) does not leave, and nothing was approved.
                 self.approval_copy(session, |_| ())?;
