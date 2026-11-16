@@ -146,12 +146,16 @@ pub(crate) fn range_sizes_fit(range: &CellRange) -> bool {
 }
 
 /// The engine's cells for `asked`, as the app's checks accept them: every merge clipped to the asked range (a merge
-/// outside it dropped), every cell's text and formula cut to their caps, a value that is not finite dropped, and the
-/// charts and pictures held to what the app takes: those it would refuse (`check::anchor_placeable`), a second one
-/// with an id already given, and those past the most a block carries are dropped. Whatever is dropped, the block
-/// says `missing_content`, so the status line tells the user.
+/// outside it dropped), the frozen panes cut to the range's end, every cell's text and formula cut to their caps, a value
+/// that is not finite dropped, and the charts and pictures held to what the app takes: those it would refuse
+/// (`check::anchor_placeable`), a second one with an id already given, and those past the most a block carries are
+/// dropped. Whatever is dropped, the block says `missing_content`, so the status line tells the user.
 pub(crate) fn cell_data(mut data: CellData, asked: &CellRange) -> CellData {
     data.merges = data.merges.iter().filter_map(|m| clip(m, asked)).collect();
+    // The sheet's frozen panes reach no further than the cells asked (the app refuses more): a block near the top says
+    // fewer than a sheet with deep panes has, and the app keeps the largest it was told.
+    data.frozen.rows = data.frozen.rows.min(asked.row.saturating_add(asked.rows));
+    data.frozen.cols = data.frozen.cols.min(asked.col.saturating_add(asked.cols));
     for cell in &mut data.cells {
         cut_to_bytes(&mut cell.text, MAX_CELL_TEXT_BYTES);
         if let Some(formula) = &mut cell.formula {
@@ -246,5 +250,35 @@ mod tests {
             cols: 2,
         };
         assert_eq!(clip(&inside, &asked), Some(inside));
+    }
+
+    #[test]
+    fn frozen_panes_are_cut_to_the_asked_range() {
+        use beebeeb_office_protocol::check::{Limits, check_cells};
+        use beebeeb_office_protocol::office::{Cells, Frozen};
+        // Rows 5 to 14 and columns 5 to 8 asked: the range ends after row 15 and column 9.
+        let asked = CellRange {
+            row: 5,
+            col: 5,
+            rows: 10,
+            cols: 4,
+        };
+        let block = |rows, cols| CellData {
+            cells: Vec::new(),
+            col_widths: vec![48.0; 4],
+            row_heights: vec![15.0; 10],
+            merges: Vec::new(),
+            frozen: Frozen { rows, cols },
+            anchors: Vec::new(),
+            missing_content: false,
+        };
+        // A workbook's sheet-sized panes: cut, so the app's check takes the answer.
+        let cut = cell_data(block(1_048_576, 16_384), &asked);
+        assert_eq!(cut.frozen, Frozen { rows: 15, cols: 9 });
+        let ask = Cells { sheet: 0, range: asked };
+        assert_eq!(check_cells(&ask, &cut, &Limits::CONTRACT), Ok(()));
+        // Panes inside the range are the file's own.
+        assert_eq!(cell_data(block(1, 0), &asked).frozen, Frozen { rows: 1, cols: 0 });
+        assert_eq!(cell_data(block(15, 9), &asked).frozen, Frozen { rows: 15, cols: 9 });
     }
 }

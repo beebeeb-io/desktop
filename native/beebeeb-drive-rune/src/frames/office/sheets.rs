@@ -68,7 +68,8 @@ pub struct CellText {
     pub formula: Option<String>,
 }
 
-/// A chart or picture the sheet places: its box in points from the sheet's origin, and the cells it starts and ends in.
+/// A chart or picture the sheet places: its top-left corner `x_pt`, `y_pt` into its `from` cell (the protocol's words: a
+/// cell plus an offset into it), its size, and the cells it starts and ends in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SheetAnchor {
     pub anchor: u32,
@@ -95,7 +96,8 @@ pub struct SheetView {
     pub current: Cell,
     /// The current cell's formula as text ("=SUM(B2:B9)"), or its value's text.
     pub formula: String,
-    /// Rows and columns that stay in view, as the file says.
+    /// Rows and columns that stay in view, as the file says (the largest a block reported: `hold_frozen`). Only as many
+    /// as fit the screen are drawn.
     pub frozen: (u32, u32),
     pub merges: Vec<(Cell, Cell)>,
     /// The sheet index `active` points at in the workbook (the tabs may be fewer than the sheets).
@@ -429,26 +431,10 @@ fn bounds(range: (Cell, Cell)) -> (u32, u32, u32, u32) {
     (a.row.min(b.row), a.row.max(b.row), a.col.min(b.col), a.col.max(b.col))
 }
 
-/// How many columns the merge starting at this cell spans to the right (1: none), and whether this cell is hidden
-/// under another cell's merge.
-fn merge_of(view: &SheetView, r: u32, c: u32) -> (u32, bool) {
-    for m in &view.merges {
-        let (r0, r1, c0, c1) = bounds(*m);
-        if r < r0 || r > r1 || c < c0 || c > c1 {
-            continue;
-        }
-        if r == r0 && c == c0 {
-            return (c1 - c0 + 1, false);
-        }
-        return (1, true);
-    }
-    (1, false)
-}
-
-/// Which rows and columns of the sheet are drawn.
+/// Which rows and columns of the sheet are drawn, and where (`sheets_bounds::Side`).
 pub struct Shown {
-    pub rows: Vec<u32>,
-    pub cols: Vec<u32>,
+    rows: Side,
+    cols: Side,
 }
 
 /// A row without a size yet, and a column without one (what the source fills gaps with).
@@ -459,21 +445,19 @@ impl Shown {
     /// Everything the view holds (the fixture's workbook).
     fn all(view: &SheetView) -> Shown {
         Shown {
-            rows: (0..view.row_heights.len() as u32).collect(),
-            cols: (0..view.col_widths.len() as u32).collect(),
+            rows: Side::all(&view.row_heights),
+            cols: Side::all(&view.col_widths),
         }
     }
 
-    /// The frozen rows and columns, then those from `top_left` that fit `screen` (points).
+    /// The frozen rows and columns that fit `screen` (points), then those from `top_left` that fit the rest: at most a
+    /// screen, however large the frozen panes, and at most `MAX_DRAWN_CELLS` cells.
     fn from_top_left(view: &SheetView, screen: (f32, f32)) -> Shown {
-        let (rows_in, cols_in) = fit(view, screen);
         let (r0, c0) = (view.top_left.row, view.top_left.col);
-        let mut rows: Vec<u32> = (0..view.frozen.0.min(r0)).collect();
-        rows.extend(r0..r0 + rows_in);
-        let mut cols: Vec<u32> = (0..view.frozen.1.min(c0)).collect();
-        cols.extend(c0..c0 + cols_in);
-        rows.retain(|r| (*r as usize) < view.row_heights.len());
-        cols.retain(|c| (*c as usize) < view.col_widths.len());
+        let rows = Side::walk(&view.row_heights, view.frozen.0, r0, screen.1, ROW_PT);
+        let mut cols = Side::walk(&view.col_widths, view.frozen.1, c0, screen.0, COL_PT);
+        // The rows are at most `MAX_LINES`, so cutting the columns keeps the product within the budget.
+        cols.keep((MAX_DRAWN_CELLS / rows.len().max(1)).max(1));
         Shown { rows, cols }
     }
 }
@@ -482,7 +466,7 @@ impl Shown {
 pub fn fit(view: &SheetView, screen: (f32, f32)) -> (u32, u32) {
     let count = |sizes: &[f32], from: u32, room: f32, gap: f32| {
         let (mut used, mut n) = (0.0, 0u32);
-        while used < room && n < 4096 {
+        while used < room && n < MAX_LINES {
             used += sizes.get((from + n) as usize).copied().unwrap_or(gap);
             n += 1;
         }
@@ -522,19 +506,17 @@ pub fn scroll_key(view: &mut SheetView, key: &Key, m: &Mods) -> bool {
     true
 }
 
-/// The charts and pictures of the sheet, each at its place from the first row and column in view, clipped by the grid.
-/// A picture that has not come draws its box empty.
-fn anchors_of(view: &SheetView, live: Option<&Live>, t: &Theme) -> El {
+/// The charts and pictures of the sheet, each at its `from` cell plus its offset into that cell (the protocol's words),
+/// from where this frame drew (or walked back to) that cell's row and column, clipped by the grid. A picture that has
+/// not come draws its box empty.
+fn anchors_of(view: &SheetView, shown: &Shown, live: Option<&Live>, t: &Theme) -> El {
     let mut layer = el().key("sh-anchors").absolute(0.0, 0.0).size(0.0, 0.0);
     let Some(live) = live else { return layer };
-    let x0: f32 = (0..view.top_left.col)
-        .map(|c| view.col_widths.get(c as usize).copied().unwrap_or(COL_PT))
-        .sum();
-    let y0: f32 = (0..view.top_left.row)
-        .map(|r| view.row_heights.get(r as usize).copied().unwrap_or(ROW_PT))
-        .sum();
     for a in &view.anchors {
-        let (x, y) = (a.x_pt - x0, a.y_pt - y0);
+        let (Some(x), Some(y)) = (shown.cols.start_of(a.from.col), shown.rows.start_of(a.from.row)) else {
+            continue;
+        };
+        let (x, y) = (x + a.x_pt, y + a.y_pt);
         if x + a.w_pt <= 0.0 || y + a.h_pt <= 0.0 || x >= live.screen.0 || y >= live.screen.1 {
             continue;
         }
@@ -562,6 +544,8 @@ fn anchors_of(view: &SheetView, live: Option<&Live>, t: &Theme) -> El {
 /// The grid: the corner and the column letters, then each row with its number and its cells.
 fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
     let by_place: HashMap<(u32, u32), &CellText> = view.cells.iter().map(|c| ((c.row, c.col), c)).collect();
+    let width = |c: u32| view.col_widths.get(c as usize).copied().unwrap_or(0.0);
+    let merges = MergesShown::of(view, &shown.rows, &shown.cols, width);
     let selected = view.selection.map(bounds);
     let in_selection =
         |r: u32, c: u32| selected.is_some_and(|(r0, r1, c0, c1)| r >= r0 && r <= r1 && c >= c0 && c <= c1);
@@ -572,7 +556,7 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
             .border_sides([0.0, kit::HAIR, kit::HAIR, 0.0], t.separator)
             .border_layout(),
     );
-    for &c in &shown.cols {
+    for &c in shown.cols.iter() {
         let w = &view.col_widths[c as usize];
         head = head.child(
             row()
@@ -592,10 +576,12 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
         );
     }
     let mut body = col().key("sh-body");
-    for &r in &shown.rows {
+    for (ri, &r) in shown.rows.iter().enumerate() {
         let h = &view.row_heights[r as usize];
-        // A frozen boundary is a heavier line under the last frozen row.
-        let under = if view.frozen.0 > 0 && r + 1 == view.frozen.0 {
+        // A frozen boundary is a heavier line under the last frozen row (under the last one drawn when the screen cut
+        // the frozen rows short).
+        let cut_here = shown.rows.cut && ri + 1 == shown.rows.frozen;
+        let under = if view.frozen.0 > 0 && (r + 1 == view.frozen.0 || cut_here) {
             1.0
         } else {
             kit::HAIR
@@ -611,13 +597,26 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
                 .border_layout()
                 .child(fitted(format!("sh-row-{r}-t"), &number, ROW_NUMBER, t.text_tertiary)),
         );
-        for &c in &shown.cols {
-            let (span, hidden) = merge_of(view, r, c);
-            if hidden {
-                continue;
-            }
-            let span = span.max(1);
-            let w: f32 = (c..c + span).filter_map(|i| view.col_widths.get(i as usize)).sum();
+        for (ci, &c) in shown.cols.iter().enumerate() {
+            // A merge's first row spans its drawn columns; its other rows draw a blank as wide, so the cells after it
+            // stay in their columns; only its last row has the line under it.
+            let (w, under) = match merges.at(ri, ci) {
+                AtCell::Covered => continue,
+                AtCell::Own => (width(c), under),
+                AtCell::Spans { w, last } => (w, if last { under } else { 0.0 }),
+                AtCell::Blank { w, last } => {
+                    let fill = if in_selection(r, c) { t.selection } else { t.paper };
+                    line = line.child(
+                        el().key(format!("sh-blank-{r}-{c}"))
+                            .w(w)
+                            .h(*h)
+                            .fill(fill)
+                            .border_sides([0.0, kit::HAIR, if last { under } else { 0.0 }, 0.0], t.separator)
+                            .border_layout(),
+                    );
+                    continue;
+                }
+            };
             let here = Cell { row: r, col: c };
             let mut cell = row()
                 .key(format!("sh-cell-{r}-{c}"))
@@ -673,6 +672,10 @@ pub use sheets_scroll::scroll_key_tx;
 
 #[path = "sheets_tabs.rs"]
 mod sheets_tabs;
+
+#[path = "sheets_bounds.rs"]
+mod sheets_bounds;
+use sheets_bounds::{AtCell, MAX_DRAWN_CELLS, MAX_LINES, MergesShown, Side};
 use sheets_tabs::sheet_tabs;
 
 /// A status word with its figure in mono, as the board sets it ("Sum " sans, "13,220" mono; "Count 8" is all sans).
@@ -788,7 +791,7 @@ pub fn window_live(
 
 fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: &Shown, live: Option<&Live>) -> El {
     let t = tokens::theme(cx.system_dark());
-    let mut cells = grid(view, shown, anchors_of(view, live, &t), &t);
+    let mut cells = grid(view, shown, anchors_of(view, shown, live, &t), &t);
     // A workbook in a renderer scrolls (`sheets_scroll`); the fixture's is the board's still sheet.
     if live.is_some() {
         let (down, across) = (cx.layout(sheets_scroll::DOWN), cx.layout(sheets_scroll::ACROSS));
