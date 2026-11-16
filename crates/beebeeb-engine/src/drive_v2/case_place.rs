@@ -111,6 +111,11 @@ pub fn spelled_as_on_disk(sync_root: &Path, rel: &str, rule: CaseRule) -> io::Re
             }
             other |= rule.same_name(&found, name);
         }
+        // The system reaches the name although no entry is spelled so, nor the same name by `same_name` (another Unicode
+        // form on APFS, an NTFS case pair `to_lowercase` does not pair, an 8.3 short name): another entry's place.
+        if !exact && !other && std::fs::symlink_metadata(dir.join(name)).is_ok() {
+            other = true;
+        }
         if !exact {
             return Ok(!other);
         }
