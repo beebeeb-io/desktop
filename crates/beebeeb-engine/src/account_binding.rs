@@ -140,6 +140,11 @@ pub const OTHER_ACCOUNT_ON_WINDOWS: &str = "Beebeeb couldn’t confirm that the 
 pub const ENGINE_STOP_UNCONFIRMED: &str =
     "Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.";
 
+/// The sentence for a start refused while a stopped ownership proof still holds its client: that write ends by itself
+/// and the refusal with it, so the person is told to try again, never to restart.
+pub const ENGINE_STOP_FINISHING: &str =
+    "Beebeeb’s sync is still finishing its last stop. Nothing was changed. Try again in a moment.";
+
 /// An engine-start refusal the person is shown (Task 12 fix round 2, ruling P): a closed code and its constant
 /// sentence, recorded by the engine start and exposed as `engine_refusal` on `sync_status`. The two binding refusals,
 /// and a start refused because an earlier engine stop was never confirmed (spec §5.6). Nothing in it names an account.

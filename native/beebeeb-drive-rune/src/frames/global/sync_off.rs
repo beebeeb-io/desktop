@@ -25,17 +25,21 @@ pub enum Refused {
     FolderOfAnotherProvider,
     FolderUnreadable,
     FolderMissing,
-    RegistrationFailed { code: Option<i32> },
+    RegistrationFailed {
+        code: Option<i32>,
+    },
     OtherAccountsData,
     IdentityUnknown,
     StopUnconfirmed,
+    /// A stopped proof still holds its client: the refusal ends by itself, so it is a retry.
+    StopFinishing,
     StateInUse,
     Other,
 }
 
 impl Refused {
     /// Every kind, for the tests (a code where one is carried).
-    pub const ALL: [Refused; 9] = [
+    pub const ALL: [Refused; 10] = [
         Refused::FolderOfAnotherProvider,
         Refused::FolderUnreadable,
         Refused::FolderMissing,
@@ -45,6 +49,7 @@ impl Refused {
         Refused::OtherAccountsData,
         Refused::IdentityUnknown,
         Refused::StopUnconfirmed,
+        Refused::StopFinishing,
         Refused::StateInUse,
         Refused::Other,
     ];
@@ -65,8 +70,7 @@ pub struct SyncOff {
 pub enum Action {
     /// Close the modal and ask for one start.
     TryAgain,
-    /// Quit the app (a restart is the fix). No refusal needs it since the unconfirmed stop clears by itself.
-    #[allow(dead_code)]
+    /// Quit the app (a restart is the fix).
     Quit,
     Close,
 }
@@ -94,6 +98,7 @@ pub struct Words {
 }
 
 const RETRY: &[Action] = &[Action::TryAgain, Action::Close];
+const RESTART: &[Action] = &[Action::Quit, Action::Close];
 const NO_FIX: &[Action] = &[Action::Close];
 const SUPPORT: &str = "support@beebeeb.io";
 
@@ -161,6 +166,15 @@ pub fn words(off: &SyncOff, product: &str) -> Words {
             NO_FIX,
         ),
         Refused::StopUnconfirmed => (
+            format!("Quit and reopen {product}"),
+            format!(
+                "Sync didn\u{2019}t confirm that it stopped, so it can\u{2019}t start again until {product} \
+                 restarts. Nothing was changed."
+            ),
+            format!("Quit {product}, then open it again."),
+            RESTART,
+        ),
+        Refused::StopFinishing => (
             "Sync is still finishing".to_string(),
             format!(
                 "The last stop of sync hasn\u{2019}t finished yet, so {product} didn\u{2019}t start it again. \

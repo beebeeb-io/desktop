@@ -75,13 +75,10 @@ fn a_lock_whose_proof_outlives_the_wait_closes_the_vault_and_refuses_starts_unti
     pc.sign_in(&owner());
     assert_eq!(
         pc.start(),
-        Err(SyncStartRefused::StopUnconfirmed),
+        Err(SyncStartRefused::StopFinishing),
         "no start while the stopped proof's client is alive"
     );
-    assert_eq!(
-        pc.engine.view().start,
-        Start::Refused(SyncStartRefused::StopUnconfirmed)
-    );
+    assert_eq!(pc.engine.view().start, Start::Refused(SyncStartRefused::StopFinishing));
     assert_eq!(pc.port.registers(), 0, "nothing registered");
 
     drop(release);
@@ -122,7 +119,7 @@ fn a_sign_out_whose_proof_outlives_the_wait_still_signs_out_and_refuses_starts_u
     pc.sign_in(&other());
     assert_eq!(
         pc.start(),
-        Err(SyncStartRefused::StopUnconfirmed),
+        Err(SyncStartRefused::StopFinishing),
         "no start while the stopped proof's client is alive"
     );
 
@@ -180,4 +177,28 @@ fn a_stop_reports_a_proof_that_outlived_its_wait_until_it_let_go() {
         "a proof that drops at its next await ends within the wait"
     );
     assert_eq!(clients[0].strong_count(), 0, "its client is gone");
+}
+
+/// Row fx-stop-words (mutant SW-D: the finishing sentence tells a restart again, or the unconfirmed one stops
+/// telling it): a stop whose proof outlived the wait refuses as `StopFinishing`, whose words say to try again; an
+/// engine stop that was never confirmed (only a restart ends it) stays `StopUnconfirmed` with "quit and reopen".
+#[test]
+fn a_finishing_stop_says_try_again_and_an_unconfirmed_engine_stop_keeps_quit_and_reopen() {
+    let finishing = SyncStartRefused::StopFinishing.to_string();
+    for word in ["restart", "reopen", "Quit"] {
+        assert!(!finishing.contains(word), "{finishing}");
+    }
+    assert!(finishing.contains("Try again"), "{finishing}");
+    assert_eq!(SyncStartRefused::StopFinishing.kind(), "stop_finishing");
+
+    let pc = Pc::new();
+    pc.sign_in(&owner());
+    pc.engine.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+    let refused = pc
+        .start()
+        .expect_err("an engine whose stop was never confirmed refuses every start");
+    assert_eq!(refused, SyncStartRefused::StopUnconfirmed);
+    assert!(refused.to_string().contains("Quit and reopen"), "{refused}");
+    // Unlike the proof's refusal, nothing clears it: a second start refuses the same way.
+    assert_eq!(pc.start(), Err(SyncStartRefused::StopUnconfirmed));
 }
