@@ -400,8 +400,7 @@ pub fn window(
         .child({
             let mut content = row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(body);
             if ui.show_details {
-                let reduced_quality =
-                    super::details::is_reduced(ui.source.player().and_then(|h| h.state_of(&ui.file.id)).as_ref());
+                let reduced_quality = super::details::is_reduced(ui.source.player().and_then(|h| h.state()).as_ref());
                 content = content.child(super::details::panel_with(
                     &ui.file,
                     ui.knows_offline(),

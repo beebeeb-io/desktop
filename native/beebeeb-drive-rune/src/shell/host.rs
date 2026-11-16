@@ -498,6 +498,7 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= poll_capture(s, tx);
     // Last, so a clear that `media::stop_all` posted above (a lock, a sign-out) reaches Windows in this same poll.
     // The poll also runs for a hidden window whenever it is woken (rune's `poll_hidden`), so the tray case is covered.
+    (s.shell.media_pump)();
     changed
 }
 
