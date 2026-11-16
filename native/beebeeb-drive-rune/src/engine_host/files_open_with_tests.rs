@@ -204,3 +204,73 @@ fn off_windows_the_chooser_says_not_on_this_system() {
         Err(ActionError::NotOnThisSystem)
     );
 }
+
+/// Puts the file `id` in the engine's own local state with this status, kept on this PC (`Pinned`) or not.
+fn put_kept(set: &Set, id: &str, name: &str, status: FileStatus, kept: bool) {
+    use beebeeb_engine::state_db::PinState;
+    let entry = FileEntry {
+        file_id: id.to_string(),
+        path: format!("/{name}"),
+        status,
+        size_bytes: 10,
+        modified_at: 1_794_000_000,
+        content_hash: None,
+        remote_updated_at: 1_794_000_000,
+        parent_id: None,
+        item_kind: ItemKind::File,
+    };
+    set.engine
+        .local_state_for_changes()
+        .expect("the account's local state")
+        .with(|db| {
+            db.upsert_file_with_contract(&entry, |contract| {
+                contract.item_kind = ItemKind::File;
+                contract.pin_state = if kept { PinState::Pinned } else { PinState::Unpinned };
+            })
+        })
+        .expect("the account's local state")
+        .expect("written");
+}
+
+/// DW-1562's Open With ▸ an app on the real engine: only a copy KEPT on this PC (kept AND its bytes here, for this
+/// session) gets past the engine's check; off Windows the start then says it is not on this system. A file that is
+/// only listed, here but not kept, or kept and still coming down is refused before any start.
+#[cfg(not(windows))]
+#[test]
+fn open_with_an_app_needs_the_copy_kept_on_this_pc() {
+    let mut set = set("a5-app", true, true);
+    let _running = hold_running(&set.engine);
+    let app = crate::frames::files::source::AppChoice {
+        id: "invented.exe".into(),
+        label: "Invented".into(),
+    };
+    let notes = row(NOTES, "Invented notes.txt", false);
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::Failed),
+        "online only"
+    );
+    put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Local, false);
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::Failed),
+        "here, not kept"
+    );
+    put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Downloading, true);
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::Failed),
+        "kept, still coming down"
+    );
+    put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Local, true);
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::NotOnThisSystem),
+        "kept and here: past every check, and off Windows there is no handler to start"
+    );
+    // A folder is never handed to an app.
+    assert_eq!(
+        set.source.open_in_app(&row(FOLDER, "Invented folder", true), &app),
+        Err(ActionError::Failed)
+    );
+}

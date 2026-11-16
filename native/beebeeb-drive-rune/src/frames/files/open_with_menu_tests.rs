@@ -119,6 +119,19 @@ fn open_with_offered_only_for_a_shown_office_file() {
         test_route::with(switches_on, || file_menu(&s)),
         test_route::with(switches_off, || file_menu(&s))
     );
+    // A protected Word file (Backups): its own short menu, and no submenu beside its second line (Preview).
+    s.listing.items[AGREEMENT_ROW].is_protected = true;
+    s.select_only(AGREEMENT_ROW);
+    s.actions.menu = Some(super::OpenMenu {
+        kind: MenuKind::File,
+        at: (430.0, 316.0),
+        hot: Some(OPEN_WITH),
+    });
+    test_route::with(switches_on, || {
+        assert_eq!(labels(&file_menu(&s))[..2], ["Open", "Preview"]);
+        assert!(open_with_menu::offered_for(&s).is_none());
+        assert_eq!(open_with_menu::at(&s), None, "no submenu over Preview");
+    });
 }
 
 #[test]
@@ -212,6 +225,16 @@ fn dw_1562_scene_draws_the_boards_menu() {
             "the board's row 6 of 12"
         );
         assert_eq!(rt.state.listing.items.len(), 12);
+        // The board draws it without the details panel.
+        assert!(!rt.state.show_detail_pane);
+        assert!(find(&rt, "detail-pane").is_none());
+        let mut with_pane = crate::init();
+        scene_open_with(&mut with_pane);
+        with_pane.show_detail_pane = true;
+        assert!(
+            find(&runtime_of(with_pane), "detail-pane").is_some(),
+            "the control: the key is the pane's"
+        );
         let label = |key: &str| info(&rt, key).text;
         assert_eq!(label("menu-item-0-label").as_deref(), Some("Open (Beebeeb)"));
         assert_eq!(label("menu-item-1-label").as_deref(), Some("Open With"));

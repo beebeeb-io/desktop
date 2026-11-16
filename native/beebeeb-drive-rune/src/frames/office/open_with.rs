@@ -41,6 +41,8 @@ pub fn scene_open_with(s: &mut State) {
         s.listing.items.insert(at, agreement());
     }
     s.select_only(AGREEMENT_ROW);
+    // The board draws DW-1562 without the details panel (`details: null`).
+    s.show_detail_pane = false;
     s.actions.menu = Some(OpenMenu {
         kind: MenuKind::File,
         at: (430.0, 316.0),

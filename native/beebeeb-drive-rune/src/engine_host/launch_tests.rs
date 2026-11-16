@@ -19,10 +19,8 @@ const UNDER_LOCK: [&str; 2] = ["launch::spawn(", "launch::locked("];
 /// The one start the scan knows of outside this crate: the engine's ffmpeg (P0 2542, held for the owner).
 const FFMPEG: &str = "../../crates/beebeeb-engine/src/engine_bridge/media.rs";
 
-/// `src` with its comments and the insides of its string and char literals blanked out (same length, same lines),
-/// and cut where an inline test module starts (`#[cfg(test)]` over `mod name {`).
+/// `src` with its comments and the insides of its string and char literals blanked out (same length, same lines).
 fn code_only(src: &str) -> String {
-    let src = cut_inline_tests(src);
     let b = src.as_bytes();
     let mut out = b.to_vec();
     let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
@@ -96,50 +94,89 @@ fn code_only(src: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// `src` up to its first inline test module (`#[cfg(test)]`, then attributes, then `mod name {`). A test module
-/// declared as a file of its own (`mod name;`) is not cut: its file is not scanned.
-fn cut_inline_tests(src: &str) -> &str {
-    let lines: Vec<(usize, &str)> = src
-        .split_inclusive('\n')
-        .scan(0, |at, line| {
-            let start = *at;
-            *at += line.len();
-            Some((start, line))
-        })
-        .collect();
-    for (n, (start, line)) in lines.iter().enumerate() {
-        if line.trim() != "#[cfg(test)]" {
+/// `code` (from [`code_only`]) with every inline test module blanked: `#[cfg(test)]`, the attributes after it, then
+/// `mod name { … }` to its closing brace. The code after it is still scanned. A test module in a file of its own
+/// (`mod name;`) is left: its file is not scanned.
+fn without_inline_tests(code: &str) -> String {
+    let mut out = code.as_bytes().to_vec();
+    let mut from = 0;
+    while let Some(n) = code[from..].find("#[cfg(test)]") {
+        let start = from + n;
+        let mut i = start + "#[cfg(test)]".len();
+        loop {
+            let rest = &code[i..];
+            let trimmed = rest.trim_start();
+            i += rest.len() - trimmed.len();
+            if !trimmed.starts_with("#[") {
+                break;
+            }
+            i += trimmed.find(']').map_or(trimmed.len(), |e| e + 1);
+        }
+        let head = code[i..]
+            .trim_start_matches("pub(crate) ")
+            .trim_start_matches("pub(super) ")
+            .trim_start_matches("pub ");
+        let head_at = code.len() - head.len();
+        let open = head
+            .starts_with("mod ")
+            .then(|| head.find(['{', ';']).map(|e| head_at + e))
+            .flatten()
+            .filter(|&open| code.as_bytes()[open] == b'{');
+        let Some(open) = open else {
+            from = start + 1;
             continue;
+        };
+        let mut depth = 0;
+        let mut end = code.len();
+        for (k, c) in code[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + k + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
         }
-        let next = lines[n + 1..]
-            .iter()
-            .map(|(_, l)| l.trim())
-            .find(|l| !l.starts_with("#["));
-        if next.is_some_and(|l| l.contains("mod ") && l.ends_with('{')) {
-            return &src[..*start];
+        for c in &mut out[start..end] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
         }
+        from = end;
     }
-    src
+    String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The 1-based lines of every start in `src` that no [`UNDER_LOCK`] call holds.
-fn bare_starts(src: &str) -> Vec<usize> {
-    let code = code_only(src);
+/// The starts in `src`: the 1-based lines of those no [`UNDER_LOCK`] call holds, and how many one holds.
+fn starts(src: &str) -> (Vec<usize>, usize) {
+    let code = without_inline_tests(&code_only(src));
     let mut held: Vec<bool> = Vec::new();
-    let mut bare = Vec::new();
+    let (mut bare, mut covered) = (Vec::new(), 0);
     for (at, c) in code.char_indices() {
         let before = &code[..at];
         if c == '(' {
             held.push(UNDER_LOCK.iter().any(|call| before.ends_with(&call[..call.len() - 1])));
-        }
-        if c == '(' && STARTS.iter().any(|start| before.ends_with(&start[..start.len() - 1])) && !held.contains(&true) {
-            bare.push(before.matches('\n').count() + 1);
+            if STARTS.iter().any(|start| before.ends_with(&start[..start.len() - 1])) {
+                if held.contains(&true) {
+                    covered += 1;
+                } else {
+                    bare.push(before.matches('\n').count() + 1);
+                }
+            }
         }
         if c == ')' {
             held.pop();
         }
     }
-    bare
+    (bare, covered)
+}
+
+fn bare_starts(src: &str) -> Vec<usize> {
+    starts(src).0
 }
 
 /// Every `.rs` file under `dir` that is not a test's: no `tests.rs`, no `*_tests.rs`, nothing in a `*_tests` or
@@ -188,6 +225,18 @@ fn every_launch_takes_the_launch_lock() {
         Vec::<usize>::new(),
         "an inline test module is not the app's code"
     );
+    assert_eq!(
+        bare_starts(
+            "fn f() {}\n#[cfg(test)]\n#[path = \"x\"]\nmod t {\n    fn g() { Command::new(\"x\"); }\n}\nfn h() { Command::new(\"y\").spawn(); }\n"
+        ),
+        [7],
+        "the code after an inline test module is still scanned"
+    );
+    assert_eq!(
+        starts("launch::spawn(Command::new(\"x\"));").1,
+        1,
+        "a start under the lock is counted as held"
+    );
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let lock_file = root.join("src/engine_host/launch.rs");
@@ -199,17 +248,35 @@ fn every_launch_takes_the_launch_lock() {
         files.iter().any(|f| f.ends_with("engine_host.rs")),
         "engine_host.rs is scanned"
     );
-    let mut bare = Vec::new();
+    let (mut bare, mut held) = (Vec::new(), Vec::new());
     for file in files.iter().filter(|f| **f != lock_file) {
-        let src = std::fs::read_to_string(file).unwrap();
-        for line in bare_starts(&src) {
-            bare.push(format!("{}:{line}", file.strip_prefix(root).unwrap_or(file).display()));
+        let name = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let (lines, covered) = starts(&std::fs::read_to_string(file).unwrap());
+        bare.extend(lines.into_iter().map(|line| format!("{name}:{line}")));
+        if covered > 0 {
+            held.push((name, covered));
         }
     }
     assert_eq!(
         bare,
         Vec::<String>::new(),
         "a start outside launch::spawn / launch::locked"
+    );
+    held.sort();
+    // The scan saw the starts it is meant to see, each under the lock: open, the chooser and Show in File Explorer
+    // (7, every system's), and Open With's handler.
+    assert_eq!(
+        held,
+        [
+            ("src/engine_host.rs".to_string(), 7),
+            ("src/engine_host/open_with_apps.rs".to_string(), 1)
+        ],
+        "the starts held by the lock"
     );
 
     // The one named exception outside the crate: the engine's ffmpeg (P0 2542), still the only bare start there.

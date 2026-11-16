@@ -104,10 +104,14 @@ pub(crate) mod test_route {
     }
 }
 
-/// The one file Open With is for: a single selected file the viewer shows. `None`: the menu is as before.
+/// The one file Open With is for: a single selected file the viewer shows, outside Backups and the service folders
+/// (their menu is Open, Preview, Show in File Explorer and Details only: `menus::file_menu`). `None`: the menu is as
+/// before, and no submenu is drawn or picked.
 pub fn offered_for(s: &State) -> Option<DriveItem> {
     match &s.selected_items()[..] {
-        [only] if !only.is_folder && viewer_shows(&only.name) => Some(only.clone()),
+        [only] if !only.is_folder && !only.is_protected && !s.protects_selection() && viewer_shows(&only.name) => {
+            Some(only.clone())
+        }
         _ => None,
     }
 }
@@ -157,6 +161,10 @@ fn words(label: &str) -> &'static str {
 pub fn at(s: &State) -> Option<(f32, f32)> {
     let open = s.actions.menu?;
     if open.kind != MenuKind::File || open.hot != Some(OPEN_WITH) || offered_for(s).is_none() {
+        return None;
+    }
+    // Only beside the menu's own "Open With" line (never over another menu's line at that place).
+    if super::menus::file_menu(s).get(OPEN_WITH).and_then(Entry::id) != Some(OPEN_WITH_ID) {
         return None;
     }
     let (win_w, _) = s.actions.window;
