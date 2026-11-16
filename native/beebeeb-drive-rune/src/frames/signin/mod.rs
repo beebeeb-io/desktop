@@ -40,6 +40,8 @@ mod create_tests;
 #[cfg(test)]
 mod device_tests;
 #[cfg(test)]
+mod hold_tests;
+#[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
 mod recovery_tests;
@@ -344,8 +346,15 @@ impl Ui {
     /// "Open Drive" on DW-A08.
     pub fn open_drive(&mut self) {
         if matches!(self.screen, Screen::Approved { .. }) {
+            // The shell held this window over the open gate; leaving the screen lets the gate decide.
+            self.screen = Screen::SignIn;
             self.go(Intent::Next(NextAfterSignIn::Drive));
         }
+    }
+
+    /// DW-A08 is up, or the request that leads to it is waiting: the shell keeps this window in front although the engine already opened the session.
+    pub fn holds_open_gate(&self) -> bool {
+        matches!(self.screen, Screen::Approved { .. } | Screen::Device { expired: false })
     }
 
     /// Whichever wait this screen holds is over: the prompt is dismissed, the request closed,
@@ -518,6 +527,9 @@ impl Ui {
                 self.focus = Some(EMAIL_KEY);
                 true
             }
+            // DW-A08 is seen over the gate the approval opened; "Open Drive" leaves it.
+            // The gate opens before the answer reaches the window, so a request still waiting is held too.
+            GateState::Ready if self.holds_open_gate() => false,
             _ => {
                 let changed = self.screen != Screen::SignIn;
                 self.forget_steps();
@@ -764,12 +776,14 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let Some(ui) = ui(s) else { return false };
     let mut changed = ui.pump();
     changed |= ui.follow_gate(gate);
+    let hold = ui.holds_open_gate();
     changed |= ui.follow_lock(gate == GateState::Locked);
     // A focus that came before the first poll followed the lock: the prompt starts now (once per lock).
     if std::mem::take(&mut ui.focus_before_first_poll) {
         ui.lock_window_focused();
     }
     ui.settle(tx);
+    changed |= s.shell.app.hold_sign_in(hold);
     changed
 }
 
