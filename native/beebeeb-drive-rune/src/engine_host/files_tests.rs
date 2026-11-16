@@ -756,7 +756,7 @@ fn the_mark_of_a_row_is_read_the_way_a_listing_reads_it() {
     .collect();
     let mark = |mark: &str| Some(Some(mark.to_string()));
     assert_eq!(
-        marks_in(&db, &ids),
+        marks_in(&db, None, &ids),
         [
             mark("on_this_pc"),
             mark("available_offline"),
@@ -851,7 +851,7 @@ fn kept_file_with_unsent_change_reads_its_unsent_mark() {
             Some(crate::source_engine::item(row).pc_status)
         })
         .collect();
-    let marks = marks_in(&db, &ids);
+    let marks = marks_in(&db, None, &ids);
     let kept = Some(Some("available_offline".to_string()));
     assert_eq!(
         marks[..3],

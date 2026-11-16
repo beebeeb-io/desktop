@@ -95,6 +95,23 @@ pub fn reclaim_place(sync_root: &Path, rel: &str) -> Option<PathBuf> {
     matches!(conflict_below(sync_root, &place), Ok(None)).then_some(place)
 }
 
+/// [`reclaim_place`] for the row `file_id`, asked of the local state too (`places`, one pass of
+/// `drive_v2::case_place`): `None` as well when the entry at its place is another row's (two server items with one
+/// name, or with one name but for letter case on a volume that compares names without case) or that cannot be told.
+/// That entry is never made online only, nor its pin cleared, as this row's.
+#[cfg_attr(
+    not(any(target_os = "windows", any(test, feature = "test-support"))),
+    allow(dead_code)
+)]
+pub fn reclaim_place_of(
+    places: &mut crate::drive_v2::case_place::PlaceCheck<'_>,
+    file_id: &str,
+    rel: &str,
+) -> Option<PathBuf> {
+    let place = reclaim_place(places.sync_root(), rel)?;
+    places.is_own_place(file_id).then_some(place)
+}
+
 /// The folders one pass has found to be their own names, so a pass over many rows looks each folder up once
 /// (`windows_cf::populate_placeholders` runs every tick, over every cloud-only row).
 #[cfg_attr(

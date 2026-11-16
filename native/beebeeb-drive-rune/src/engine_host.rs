@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::drive_v2::DriveError;
+use beebeeb_engine::drive_v2::case_place::{self, Clash};
 use beebeeb_engine::drive_v2::model::{self, Sort as EngineSort};
 use beebeeb_engine::engine_status::EngineStatusView;
 use beebeeb_engine::file_ops;
@@ -54,6 +55,9 @@ mod binding_tests;
 pub mod drive_previews;
 pub mod drive_settings;
 pub mod files;
+#[cfg(test)]
+#[path = "engine_host/files_case_twins_tests.rs"]
+mod files_case_twins_tests;
 mod files_conflicts;
 mod files_downloads;
 mod files_facts;
@@ -575,8 +579,13 @@ impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
     /// The whole folder, name ascending, with its crumbs from the root. Before the first sync there is no local
     /// state: that, a folder that is gone and a database that cannot be read are errors, never an empty folder.
     fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError> {
+        let sync_root = self.engine.sync_root().ok();
         let read = |db: &StateDb| -> Result<Listing, DriveError> {
-            let (rows, _total) = model::children_of(db, folder_id, EngineSort::default(), 0, usize::MAX)?;
+            let (mut rows, _total) = model::children_of(db, folder_id, EngineSort::default(), 0, usize::MAX)?;
+            // A row whose place on this PC is another item's is marked: its presses on disk are refused.
+            if let Some(sync_root) = &sync_root {
+                case_place::mark_shared_places(db, sync_root, &mut rows);
+            }
             let folder = model::resolve_folder(db, folder_id)?;
             let path: Vec<_> = model::crumbs(db, folder.as_ref())?
                 .into_iter()
@@ -702,7 +711,7 @@ fn not_wired(what: &str) -> ActionError {
 /// every hand-over of a file to another app (the Files window's Open, a viewer's "Open in another app…").
 fn path_the_system_opens(db: &StateDb, sync_root: &Path, id: &str) -> Result<std::path::PathBuf, ActionError> {
     let entry = file_ops::resolve(db, id).map_err(map_drive_err)?;
-    let path = file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?;
+    let path = file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)?;
     if !entry.is_dir() && file_ops::is_dangerous_executable(&path) {
         return Err(ActionError::Failed);
     }
@@ -1018,7 +1027,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
             let mut paths = Vec::with_capacity(items.len());
             for item in items {
                 let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
-                paths.push(file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?);
+                paths.push(file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)?);
             }
             Ok(paths)
         })?;
@@ -1152,7 +1161,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         let path = self.local(|db, sync_root| match folder {
             Some(id) => {
                 let entry = file_ops::resolve(db, id).map_err(map_drive_err)?;
-                file_ops::item_path(sync_root, &entry).map_err(map_drive_err)
+                file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)
             }
             None => Ok(sync_root.to_path_buf()),
         })?;

@@ -136,8 +136,19 @@ pub const NO_SYNC_FOLDER: &str = "no sync folder is set on this computer";
 pub const NOT_SIGNED_IN: &str = "not signed in";
 pub const NOT_YOURS: &str = "the local state on this computer is another account's";
 pub const NO_LOCAL_STATE: &str = "the local state on this computer could not be opened";
+/// The entry at the item's place on this computer is another server item's with the very same name
+/// (`drive_v2::case_place`).
+pub const SHARED_PLACE: &str = "another item here has the same name on this computer";
+/// The entry at the item's place on this computer is another item's whose name differs only by letter case, on a
+/// volume that compares names without case (`drive_v2::case_place`).
+pub const SHARED_PLACE_BUT_CASE: &str = "another item here has the same name but for capital letters on this computer";
+/// The pin change was refused or failed.
+const NOT_CHANGED: &str = "could not change what is kept on this computer";
 
-/// The pin change itself, on a state database already open.
+/// The pin change itself, on a state database already open. Refused, and nothing written, when the entry at the item's
+/// place is another row's: the change pins and fetches by that place on disk (the system's pin state, the download
+/// that keeps it), so it would keep or release the other row's file as this one, and record this one as kept while its
+/// own bytes never come. Asked before the state database or the queued change for other devices are written.
 fn pin(
     identity: &'static crate::identity::EngineIdentity,
     api_base: &str,
@@ -146,11 +157,21 @@ fn pin(
     file_id: &str,
     kept: bool,
 ) -> Result<(), String> {
+    use crate::drive_v2::case_place::{CaseRule, Clash, PlaceCheck};
+    if let Ok(Some(entry)) = db.get_file(file_id) {
+        match PlaceCheck::new(&db, sync_root, CaseRule::host()).clash(&entry) {
+            Ok(None) => {}
+            Ok(Some(Clash::SameName)) => return Err(SHARED_PLACE.to_string()),
+            Ok(Some(Clash::Case)) => return Err(SHARED_PLACE_BUT_CASE.to_string()),
+            // Whose the entry is could not be read: nothing is changed.
+            Err(_) => return Err(NOT_CHANGED.to_string()),
+        }
+    }
     // The pin change reads and writes the state database only (and the OS pin state): no request, so the client
     // carries no token and no key, as the 0.8 app's command builds it.
     let api = Arc::new(ApiClient::new(api_base.to_string(), String::new(), [0u8; 32]));
     EngineBridge::new(identity, db, api)
         .set_recursive_pin(sync_root, file_id, kept)
         .map(|_| ())
-        .map_err(|_| "could not change what is kept on this computer".to_string())
+        .map_err(|_| NOT_CHANGED.to_string())
 }

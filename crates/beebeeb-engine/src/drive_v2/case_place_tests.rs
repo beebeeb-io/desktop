@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::DriveError;
-use super::case_place::{self, CaseRule, with_rule_for_test};
+use super::case_place::{self, CaseRule, Clash, with_rule_for_test};
 use super::model::{self, Sort};
 use crate::file_ops;
 use crate::state_db::{self, FileEntry, FileStatus, ItemKind, Namespace, PrunedRow, StateDb};
@@ -156,7 +156,7 @@ fn open_and_show_hand_over_only_the_rows_own_entry() {
         );
         assert_eq!(
             file_ops::item_path_for(&f.db, f.root.path(), &get(&f.db, "lower")),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
     });
 }
@@ -168,7 +168,7 @@ fn rename_of_a_case_twin_never_renames_the_other_rows_entry() {
     with_rule_for_test(CaseRule::Insensitive, || {
         assert_eq!(
             file_ops::rename(&f.db, f.root.path(), &get(&f.db, "lower"), "Renamed.pdf"),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
         assert_eq!(names(f.root.path(), ""), ["Archive", "Report.pdf"]);
         assert_eq!(
@@ -187,7 +187,7 @@ fn move_of_a_case_twin_never_moves_the_other_rows_entry() {
         let archive = get(&f.db, "archive");
         assert_eq!(
             file_ops::move_items(&f.db, f.root.path(), &[get(&f.db, "lower")], Some(&archive)),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
         assert_eq!(names(f.root.path(), ""), ["Archive", "Report.pdf"]);
         assert!(names(f.root.path(), "Archive").is_empty());
@@ -203,7 +203,7 @@ fn duplicate_of_a_case_twin_copies_none_of_the_other_rows_bytes() {
     with_rule_for_test(CaseRule::Insensitive, || {
         assert_eq!(
             file_ops::duplicate(&f.db, f.root.path(), &get(&f.db, "lower")),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
         assert_eq!(names(f.root.path(), ""), ["Archive", "Report.pdf"]);
         assert_eq!(
@@ -249,11 +249,11 @@ fn presses_into_or_below_a_case_twin_folder_are_refused() {
         let (upper, lower) = (get(&f.db, "docs-upper"), get(&f.db, "docs-lower"));
         assert_eq!(
             file_ops::item_path_for(&f.db, f.root.path(), &get(&f.db, "a-lower")),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
         assert_eq!(
             file_ops::item_path_for(&f.db, f.root.path(), &lower),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
         assert_eq!(
             file_ops::item_path_for(&f.db, f.root.path(), &get(&f.db, "a-upper")),
@@ -261,19 +261,19 @@ fn presses_into_or_below_a_case_twin_folder_are_refused() {
         );
         assert_eq!(
             file_ops::create_folder(&f.db, f.root.path(), Some(&lower), "New"),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
         assert_eq!(
             file_ops::create_file(&f.db, f.root.path(), Some(&lower), "New.txt", b""),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
         assert_eq!(
             file_ops::copy_in(&f.db, f.root.path(), Some(&lower), std::slice::from_ref(&source)),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
         assert_eq!(
             file_ops::move_items(&f.db, f.root.path(), &[get(&f.db, "loose")], Some(&lower)),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::Case))
         );
         assert_eq!(
             names(f.root.path(), "Docs"),
@@ -303,19 +303,19 @@ fn two_server_items_with_the_same_name_change_nothing_on_disk() {
         let entry = get(&f.db, id);
         assert_eq!(
             file_ops::item_path_for(&f.db, f.root.path(), &entry),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::SameName))
         );
         assert_eq!(
             file_ops::rename(&f.db, f.root.path(), &entry, "Renamed.jpg"),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::SameName))
         );
         assert_eq!(
             file_ops::move_items(&f.db, f.root.path(), std::slice::from_ref(&entry), Some(&archive)),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::SameName))
         );
         assert_eq!(
             file_ops::duplicate(&f.db, f.root.path(), &entry),
-            Err(DriveError::Conflict)
+            Err(DriveError::SharedPlace(Clash::SameName))
         );
     }
     assert_eq!(names(f.root.path(), ""), ["Archive", "Photo.jpg"]);
@@ -460,4 +460,154 @@ fn a_case_twin_folder_that_went_removes_only_its_own_children() {
         )),
         ["b-lower"]
     );
+}
+
+/// The two pairs every press below is asked about, and a row alone: case twins (`Report.pdf` on disk, `upper`'s),
+/// two server items named `Photo.jpg`, and `alone.jpg`.
+fn twins_and_one_alone() -> Fixture {
+    let f = case_twins();
+    row(&f.db, "same-a", "Photo.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "same-b", "Photo.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "alone", "alone.jpg", None, false, true, FileStatus::Local);
+    write(f.root.path(), "Photo.jpg", b"one entry");
+    write(f.root.path(), "alone.jpg", b"alone's");
+    f
+}
+
+/// One pass says why a place is another row's: the very same name, or the same name but for case.
+#[test]
+fn a_pass_over_many_places_says_why_each_is_another_rows() {
+    let f = twins_and_one_alone();
+    with_rule_for_test(CaseRule::Insensitive, || {
+        let mut places = case_place::PlaceCheck::new(&f.db, f.root.path(), CaseRule::host());
+        let clash = |places: &mut case_place::PlaceCheck<'_>, id: &str| places.clash(&get(&f.db, id)).unwrap();
+        assert_eq!(clash(&mut places, "lower"), Some(case_place::Clash::Case));
+        assert_eq!(clash(&mut places, "same-a"), Some(case_place::Clash::SameName));
+        assert_eq!(clash(&mut places, "same-b"), Some(case_place::Clash::SameName));
+        assert_eq!(clash(&mut places, "upper"), None);
+        assert_eq!(clash(&mut places, "alone"), None);
+        assert!(!places.is_own_place("lower") && !places.is_own_place("same-a"));
+        assert!(places.is_own_place("upper") && places.is_own_place("alone"));
+        assert!(
+            !places.is_own_place("no such row"),
+            "a row that is not there has no place of its own"
+        );
+    });
+}
+
+/// Free up space (`free_up_space::dehydrate_these`, Windows): the place it would make online only is never the entry of
+/// another row; the owner row and a row alone keep theirs.
+#[test]
+fn free_up_space_never_reclaims_another_rows_entry() {
+    let f = twins_and_one_alone();
+    with_rule_for_test(CaseRule::Insensitive, || {
+        let mut places = case_place::PlaceCheck::new(&f.db, f.root.path(), CaseRule::host());
+        let mut place = |id: &str, rel: &str| crate::name_alias::reclaim_place_of(&mut places, id, rel);
+        assert_eq!(place("lower", "report.pdf"), None, "the case twin");
+        assert_eq!(place("same-a", "Photo.jpg"), None, "a same-name twin");
+        assert_eq!(place("same-b", "Photo.jpg"), None, "the other same-name twin");
+        assert_eq!(place("upper", "Report.pdf"), Some(f.root.path().join("Report.pdf")));
+        assert_eq!(place("alone", "alone.jpg"), Some(f.root.path().join("alone.jpg")));
+    });
+}
+
+/// Photo previews: a photo's original is read for its preview only from its own entry; never the other row's bytes as
+/// its preview.
+#[test]
+fn a_photo_preview_is_never_made_from_another_rows_entry() {
+    use crate::photo_previews::plan;
+    let f = twins_and_one_alone();
+    row(&f.db, "pic-upper", "Pic.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "pic-lower", "pic.jpg", None, false, true, FileStatus::Local);
+    write(f.root.path(), "Pic.jpg", b"pic-upper's");
+    let photos = plan::local_photos(&f.db).unwrap();
+    let own = |id: &str| {
+        let photo = photos.iter().find(|photo| photo.id == id).unwrap();
+        plan::own_place(&f.db, f.root.path(), photo)
+    };
+    with_rule_for_test(CaseRule::Insensitive, || {
+        assert!(!own("pic-lower"), "the case twin");
+        assert!(!own("same-a") && !own("same-b"), "the same-name twins");
+        assert!(own("pic-upper"), "the row whose spelling the entry has");
+        assert!(own("alone"), "a photo alone at its place");
+    });
+    with_rule_for_test(CaseRule::Sensitive, || {
+        assert!(own("pic-lower"), "a volume that tells case apart: its own entry");
+        assert!(!own("same-a"), "one name is one entry on every volume");
+    });
+}
+
+/// Two server items named `Photo.jpg`, one entry on disk; `srv-a` went to Trash on the web, so the snapshot drops its
+/// row. The entry goes only when its placeholder names `srv-a`: one that names `srv-b`, or nothing (unreadable), stays.
+/// A pruned row with no twin is removed whatever its entry says (as before).
+#[test]
+fn the_prune_of_one_of_two_same_name_items_removes_only_its_own_entry() {
+    let f = fixture();
+    row(&f.db, "srv-a", "Photo.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "srv-b", "Photo.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "loose", "loose.txt", None, false, true, FileStatus::Local);
+    write(f.root.path(), "Photo.jpg", b"one entry");
+    write(f.root.path(), "loose.txt", b"loose");
+    let seen: HashSet<String> = ["srv-b"].into_iter().map(str::to_string).collect();
+    let mut gone = model::drop_absent_rows(&f.db, &seen, 1_800_000_000).unwrap();
+    gone.sort_by(|a, b| a.file_id.cmp(&b.file_id));
+    assert_eq!(ids(&gone), ["loose", "srv-a"]);
+    let photo = f.root.path().join("Photo.jpg");
+    let removable = |names: Option<&'static str>| {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let read = |path: &Path| {
+            asked.borrow_mut().push(path.to_path_buf());
+            names.map(str::to_string)
+        };
+        let kept = case_place::removable_by_identity(&f.db, f.root.path(), gone.clone(), &read);
+        (
+            ids(&kept).iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            asked.into_inner(),
+        )
+    };
+    assert_eq!(
+        removable(Some("srv-b")),
+        (vec!["loose".to_string()], vec![photo.clone()]),
+        "the entry is the other item's: it stays"
+    );
+    assert_eq!(
+        removable(None),
+        (vec!["loose".to_string()], vec![photo.clone()]),
+        "nobody can tell whose: it stays"
+    );
+    assert_eq!(
+        removable(Some("srv-a")),
+        (vec!["loose".to_string(), "srv-a".to_string()], vec![photo]),
+        "its own placeholder goes"
+    );
+}
+
+/// The listing marks each row whose presses on disk are refused, and only those: the case twin and both same-name
+/// items. The owner row and a row alone keep their state. On a volume that tells case apart, only the same-name pair.
+#[test]
+fn the_listing_marks_each_row_whose_place_is_another_rows() {
+    use super::dto::LocalState;
+    let f = twins_and_one_alone();
+    let marks = |rule| {
+        with_rule_for_test(rule, || {
+            let (mut items, _) = model::children_of(&f.db, None, Sort::default(), 0, usize::MAX).unwrap();
+            case_place::mark_shared_places(&f.db, f.root.path(), &mut items);
+            let mut marks: Vec<(String, Option<LocalState>)> =
+                items.into_iter().map(|item| (item.id, item.local)).collect();
+            marks.sort_by(|a, b| a.0.cmp(&b.0));
+            marks
+        })
+    };
+    let all = |lower| {
+        vec![
+            ("alone".to_string(), Some(LocalState::Downloaded)),
+            ("archive".to_string(), None),
+            ("lower".to_string(), Some(lower)),
+            ("same-a".to_string(), Some(LocalState::NameShared)),
+            ("same-b".to_string(), Some(LocalState::NameShared)),
+            ("upper".to_string(), Some(LocalState::Downloaded)),
+        ]
+    };
+    assert_eq!(marks(CaseRule::Insensitive), all(LocalState::NameSharedButCase));
+    assert_eq!(marks(CaseRule::Sensitive), all(LocalState::OnlineOnly));
 }

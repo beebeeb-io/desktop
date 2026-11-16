@@ -184,7 +184,9 @@ pub fn row_name(item: &DriveItem, date: &str, size: &str) -> String {
         (1, _) => "shared with 1 person".to_string(),
         (n, _) => format!("shared with {n} people"),
     });
-    if let Some(state) = PcState::of(item.pc_status.as_deref()) {
+    if let Some(words) = name_shared(item.pc_status.as_deref()) {
+        parts.push(words.to_lowercase());
+    } else if let Some(state) = PcState::of(item.pc_status.as_deref()) {
         parts.push(
             match state {
                 PcState::OnlineOnly => "online only",
@@ -375,6 +377,21 @@ fn file_row_full(
                             .w(COL_PC_W)
                             .h(14.0),
                     );
+            } else if let Some(words) = name_shared(item.pc_status.as_deref()) {
+                // Its place on this PC is another item's: its presses on disk are refused. The neutral glyph of the
+                // column, never Amber.
+                pc = pc.child(
+                    kit::state_glyph(
+                        format!("{k}-pc"),
+                        &crate::theme::icons_files::ALERT,
+                        None,
+                        "name-shared",
+                        15.0,
+                        t.text_tertiary,
+                    )
+                    .role("image")
+                    .label(words),
+                );
             } else if let Some(state) = PcState::of(item.pc_status.as_deref()) {
                 pc = pc.child(pc_glyph(format!("{k}-pc"), state, surface, t));
             }
@@ -497,5 +514,16 @@ fn shared_cell(k: &str, item: &DriveItem, meta: Color, surface: Color, t: &Theme
     } else {
         cell = cell.child(kit::label(format!("{k}-dash"), "\u{2014}", type_::META_MONO, meta));
         cell
+    }
+}
+
+/// What the PC column says of a row whose place on this PC is another item's (`case_place`, the engine's mark): its
+/// presses on disk are refused, and the message of each says why. `None`: any other row.
+pub(crate) fn name_shared(pc_status: Option<&str>) -> Option<&'static str> {
+    use crate::source_engine::{NAME_SHARED, NAME_SHARED_BUT_CASE};
+    match pc_status {
+        Some(NAME_SHARED) => Some("Same name as another item here"),
+        Some(NAME_SHARED_BUT_CASE) => Some("Same name as another item here, except for capital letters"),
+        _ => None,
     }
 }

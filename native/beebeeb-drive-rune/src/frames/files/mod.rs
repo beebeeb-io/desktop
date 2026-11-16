@@ -197,6 +197,13 @@ impl Toast {
             // The viewers' words for a full disk ("Not enough space to decrypt", "free on this PC").
             ActionError::NoRoom => " There is not enough space on this PC.",
             ActionError::TooLarge => " It is too large to make here.",
+            ActionError::NameShared => {
+                " Another item here has the same name. Rename one on the web to use it on this PC."
+            }
+            ActionError::NameSharedButCase => {
+                " Another item here has the same name except for capital letters. Rename one on the web to use it on \
+                 this PC."
+            }
             _ => "",
         };
         format!("Couldn't {}.{fix}", action.words())

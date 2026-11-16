@@ -90,6 +90,8 @@ impl State {
                     | ActionError::NotYet
                     | ActionError::HasLink
                     | ActionError::TooLarge
+                    | ActionError::NameShared
+                    | ActionError::NameSharedButCase
             )
             && match action {
                 Action::Upload => !matches!(&self.actions.retry_upload, Some((_, files)) if files.is_empty()),

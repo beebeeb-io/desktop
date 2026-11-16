@@ -13,7 +13,7 @@
 //! path are spelled otherwise ([`spelled_as_on_disk`]) WHILE another row has that place. A row alone at its place is
 //! never refused for its spelling: after a rename by case alone elsewhere its entry keeps the old spelling for a while
 //! (a remote rename leaves the entry where it is, `engine_bridge::meta_2`), and the entry is still its own. A place
-//! that is another row's is a [`DriveError::Conflict`]: the other row's bytes are never opened, renamed, moved, copied
+//! that is another row's is a [`DriveError::SharedPlace`]: the other row's bytes are never opened, renamed, moved, copied
 //! or read as this row's. The row stays reachable through every press that goes by its id (Move to Trash, versions, a
 //! link, the in-app viewer's download).
 
@@ -22,6 +22,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::DriveError;
+use super::dto::{DriveItem, LocalState};
 use crate::state_db::{FileEntry, FileStatus, PrunedRow, StateDb};
 
 /// How the volume under the account's folder compares names.
@@ -100,7 +101,14 @@ pub fn spelled_as_on_disk(sync_root: &Path, rel: &str, rule: CaseRule) -> io::Re
 
 /// The names of each folder read so far, so a pass over many rows reads each folder once. `None`: not there.
 #[derive(Default)]
-struct Listings(HashMap<PathBuf, Option<Vec<String>>>);
+struct Listings(HashMap<PathBuf, Option<Names>>);
+
+/// One folder's names: as spelled, and as [`CaseRule::Insensitive`] compares them (a name is looked up once, however
+/// many entries the folder holds).
+struct Names {
+    spelled: HashSet<String>,
+    folded: HashSet<String>,
+}
 
 fn spelled_in(listings: &mut Listings, sync_root: &Path, rel: &str, rule: CaseRule) -> io::Result<bool> {
     if rule == CaseRule::Sensitive {
@@ -111,11 +119,13 @@ fn spelled_in(listings: &mut Listings, sync_root: &Path, rel: &str, rule: CaseRu
     for name in rel.trim_matches('/').split('/').filter(|name| !name.is_empty()) {
         if !listings.0.contains_key(&dir) {
             let names = match std::fs::read_dir(&dir) {
-                Ok(entries) => Some(
-                    entries
+                Ok(entries) => {
+                    let spelled = entries
                         .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-                        .collect::<io::Result<Vec<_>>>()?,
-                ),
+                        .collect::<io::Result<HashSet<_>>>()?;
+                    let folded = spelled.iter().map(|name| rule.fold(name)).collect();
+                    Some(Names { spelled, folded })
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error),
             };
@@ -124,13 +134,12 @@ fn spelled_in(listings: &mut Listings, sync_root: &Path, rel: &str, rule: CaseRu
         let Some(names) = &listings.0[&dir] else {
             return Ok(true);
         };
-        if names.iter().any(|found| found == name) {
+        if names.spelled.contains(name) {
             dir.push(name);
             continue;
         }
-        // The same name by `same_name`, or one the system reaches although no entry is spelled so.
-        let other =
-            names.iter().any(|found| rule.same_name(found, name)) || std::fs::symlink_metadata(dir.join(name)).is_ok();
+        // The same name under `rule`, or one the system reaches although no entry is spelled so.
+        let other = names.folded.contains(&rule.fold(name)) || std::fs::symlink_metadata(dir.join(name)).is_ok();
         return Ok(!other);
     }
     Ok(true)
@@ -159,43 +168,120 @@ pub fn shares_its_exact_path(db: &StateDb, entry: &FileEntry) -> Result<bool, Dr
     Ok(false)
 }
 
-/// The place of every row still in the local state (not being trashed) under `rule`. Reads every row: asked only when
-/// the disk spells a place otherwise, which is rare.
-fn held_places(db: &StateDb, rule: CaseRule, except: Option<&str>) -> Result<HashSet<String>, DriveError> {
-    Ok(db
-        .file_overview_rows()
-        .map_err(DriveError::db)?
-        .iter()
-        .filter(|(row, _)| {
-            row.status != FileStatus::Trashing
-                && Some(row.file_id.as_str()) != except
-                && !row.path.trim_matches('/').is_empty()
-        })
-        .map(|(row, _)| rule.fold(&row.path))
-        .collect())
+/// The place of every row still in the local state (not being trashed) under `rule`, with the ids of the rows there.
+/// Reads every row: asked only when the disk spells a place otherwise, which is rare.
+fn places_held(db: &StateDb, rule: CaseRule) -> Result<HashMap<String, Vec<String>>, DriveError> {
+    let mut held: HashMap<String, Vec<String>> = HashMap::new();
+    for (row, _) in db.file_overview_rows().map_err(DriveError::db)? {
+        if row.status != FileStatus::Trashing && !row.path.trim_matches('/').is_empty() {
+            held.entry(rule.fold(&row.path)).or_default().push(row.file_id);
+        }
+    }
+    Ok(held)
+}
+
+/// Why the entry at a row's place on disk is another row's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clash {
+    /// Another server item of its kind has exactly its name in its folder: one entry on every system, and nothing in
+    /// the local state says whose.
+    SameName,
+    /// Another row has its name but for letter case, and the entry on disk carries a spelling that is not this row's
+    /// (a volume that compares names without case).
+    Case,
+}
+
+/// Many places asked in one pass (a folder's listing, a reclaim over many files): each folder on the way is read once,
+/// and the places every row holds are read once, the first time a place on disk is spelled otherwise.
+pub struct PlaceCheck<'a> {
+    db: &'a StateDb,
+    sync_root: &'a Path,
+    rule: CaseRule,
+    listings: Listings,
+    held: Option<HashMap<String, Vec<String>>>,
+}
+
+impl<'a> PlaceCheck<'a> {
+    pub fn new(db: &'a StateDb, sync_root: &'a Path, rule: CaseRule) -> Self {
+        Self {
+            db,
+            sync_root,
+            rule,
+            listings: Listings::default(),
+            held: None,
+        }
+    }
+
+    pub fn sync_root(&self) -> &'a Path {
+        self.sync_root
+    }
+
+    /// Whether the entry at `entry`'s place is another row's, and why ([`place_is_another_rows`]). `Err`: a folder on
+    /// the way or the local state could not be read.
+    pub fn clash(&mut self, entry: &FileEntry) -> Result<Option<Clash>, DriveError> {
+        if shares_its_exact_path(self.db, entry)? {
+            return Ok(Some(Clash::SameName));
+        }
+        match spelled_in(&mut self.listings, self.sync_root, &entry.path, self.rule) {
+            Ok(true) => Ok(None),
+            Ok(false) => {
+                if self.held.is_none() {
+                    self.held = Some(places_held(self.db, self.rule)?);
+                }
+                let another = self.held.as_ref().is_some_and(|held| {
+                    held.get(&self.rule.fold(&entry.path))
+                        .is_some_and(|ids| ids.iter().any(|id| *id != entry.file_id))
+                });
+                Ok(another.then_some(Clash::Case))
+            }
+            Err(error) => Err(DriveError::io(error)),
+        }
+    }
+
+    /// Whether the row `file_id` has its own entry at its place: `false` for a row whose place is another row's, for a
+    /// row that is not there, and when that cannot be read.
+    pub fn is_own_place(&mut self, file_id: &str) -> bool {
+        match self.db.get_file(file_id) {
+            Ok(Some(entry)) => matches!(self.clash(&entry), Ok(None)),
+            _ => false,
+        }
+    }
 }
 
 /// Whether the entry at `entry`'s place below `sync_root` is another row's: another server item of its kind has exactly
 /// its path, or the disk spells the place otherwise while another row has it under [`CaseRule::host`]. `Err`: a folder
 /// on the way or the local state could not be read.
 pub fn place_is_another_rows(db: &StateDb, sync_root: &Path, entry: &FileEntry) -> Result<bool, DriveError> {
-    if shares_its_exact_path(db, entry)? {
-        return Ok(true);
-    }
-    let rule = CaseRule::host();
-    match spelled_as_on_disk(sync_root, &entry.path, rule) {
-        Ok(true) => Ok(false),
-        Ok(false) => Ok(held_places(db, rule, Some(&entry.file_id))?.contains(&rule.fold(&entry.path))),
-        Err(error) => Err(DriveError::io(error)),
+    Ok(PlaceCheck::new(db, sync_root, CaseRule::host()).clash(entry)?.is_some())
+}
+
+/// Mark the rows of a listing whose place on disk is another row's ([`PlaceCheck::clash`]): their `local` says so
+/// ([`LocalState::NameShared`], [`LocalState::NameSharedButCase`]), as their presses on disk are refused. One pass over
+/// `sync_root` under [`CaseRule::host`]: each folder on the way is read once. A row whose place cannot be read, or that
+/// the local state does not have, keeps the state it had.
+pub fn mark_shared_places(db: &StateDb, sync_root: &Path, items: &mut [DriveItem]) {
+    let mut places = PlaceCheck::new(db, sync_root, CaseRule::host());
+    for item in items {
+        let Ok(Some(entry)) = db.get_file(&item.id) else {
+            continue;
+        };
+        match places.clash(&entry) {
+            Ok(Some(Clash::SameName)) => item.local = Some(LocalState::NameShared),
+            Ok(Some(Clash::Case)) => item.local = Some(LocalState::NameSharedButCase),
+            Ok(None) | Err(_) => {}
+        }
     }
 }
 
 /// Refuse a press on the place of `entry` (`None`: the account's folder itself, always its own) when it is another
-/// row's ([`place_is_another_rows`]).
+/// row's ([`place_is_another_rows`]), with why ([`DriveError::SharedPlace`]).
 pub fn refuse_shared_place(db: &StateDb, sync_root: &Path, entry: Option<&FileEntry>) -> Result<(), DriveError> {
     match entry {
-        Some(entry) if place_is_another_rows(db, sync_root, entry)? => Err(DriveError::Conflict),
-        _ => Ok(()),
+        Some(entry) => match PlaceCheck::new(db, sync_root, CaseRule::host()).clash(entry)? {
+            Some(clash) => Err(DriveError::SharedPlace(clash)),
+            None => Ok(()),
+        },
+        None => Ok(()),
     }
 }
 
@@ -214,13 +300,65 @@ pub fn removable_places(db: &StateDb, sync_root: &Path, pruned: &[PrunedRow], ru
         return pruned.to_vec();
     }
     // Rare (two items at one place, one of them gone): read every remaining place once.
-    let held = held_places(db, rule, None).ok();
+    let held = places_held(db, rule).ok();
     pruned
         .iter()
         .zip(&spelled_otherwise)
         .filter(|(row, otherwise)| {
-            !**otherwise || held.as_ref().is_some_and(|held| !held.contains(&rule.fold(&row.path)))
+            !**otherwise
+                || held
+                    .as_ref()
+                    .is_some_and(|held| !held.contains_key(&rule.fold(&row.path)))
         })
         .map(|(row, _)| row.clone())
+        .collect()
+}
+
+/// Whether another server item still in the local state (not being trashed) has exactly `path`, besides `file_id`.
+/// `Err`: the local state could not be read.
+fn another_server_item_at(db: &StateDb, path: &str, file_id: &str) -> Result<bool, DriveError> {
+    for stored in [path.to_string(), format!("/{path}")] {
+        let rows = db.file_rows_at_path(&stored).map_err(DriveError::db)?;
+        if rows.iter().any(|other| {
+            other.file_id != file_id
+                && other.status != FileStatus::Trashing
+                && other.remote_updated_at > 0
+                && other.path.trim_matches('/') == path
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Of `pruned` (rows a snapshot no longer has, already gone from `db`), the ones whose entry may be removed when another
+/// server item still in the local state has exactly the pruned row's path: two server items with one name are one
+/// entry on every system, and nothing in the local state says whose it is. Then the entry goes only when `identity_at`
+/// reads the pruned row's own id on it (a placeholder's identity, Windows). An entry that names the other row, names
+/// nothing or cannot be read stays: it may be the other row's file. The pruned row is logged by its id. A row with no
+/// such twin passes as it is, and the order (children before parents) is kept.
+pub fn removable_by_identity(
+    db: &StateDb,
+    sync_root: &Path,
+    pruned: Vec<PrunedRow>,
+    identity_at: &dyn Fn(&Path) -> Option<String>,
+) -> Vec<PrunedRow> {
+    pruned
+        .into_iter()
+        .filter(|row| {
+            let path = row.path.trim_matches('/');
+            if path.is_empty() || !another_server_item_at(db, path, &row.file_id).unwrap_or(true) {
+                return true;
+            }
+            let place = sync_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let own = identity_at(&place).as_deref() == Some(row.file_id.as_str());
+            if !own {
+                tracing::warn!(
+                    file_id = %row.file_id,
+                    "pruned row not removed: the placeholder identity there is another item or unknown"
+                );
+            }
+            own
+        })
         .collect()
 }

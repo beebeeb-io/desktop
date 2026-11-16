@@ -171,13 +171,15 @@ pub(super) fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &s
                 // kept across a version change, takes the listing's version when it holds nothing: as at a
                 // mint, its first fetch serves that version whole. One that holds bytes stays without.
                 // Task 2407: only an entry that is this name's own (never a different file an 8.3 short name
-                // reaches) takes the row's identity.
+                // reaches) takes the row's identity. Nor the entry of another server item at this place (one name,
+                // or one name but for case): the second of two such rows is not placed, and claims nothing here.
                 if !entry.is_dir()
                     && needs_identity.contains(&entry.file_id)
                     && matches!(
                         crate::name_alias::conflict_below(&parent_dir, &parent_dir.join(&name)),
                         Ok(None)
                     )
+                    && not_another_rows(db, sync_root, &entry)
                     && matches!(
                         placeholders::platform_view(&parent_dir.join(&name)),
                         crate::unknown_check::PlatformView::Placeholder {
@@ -209,4 +211,25 @@ pub(super) fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &s
 /// LD-0113 §6.3: put back every placeholder a protected row lost (the after-the-fact restore), now.
 pub fn restore_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::Path) -> usize {
     populate_placeholders(db, sync_root).created
+}
+
+/// Whether the entry at `entry`'s place is not another row's (`drive_v2::case_place`); asked only of a row whose
+/// placeholder already existed and that needs its version recorded. Another row's, or not known: logged by id, and
+/// nothing is recorded for this row.
+fn not_another_rows(
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    entry: &crate::state_db::FileEntry,
+) -> bool {
+    let own = matches!(
+        crate::drive_v2::case_place::place_is_another_rows(db, sync_root, entry),
+        Ok(false)
+    );
+    if !own {
+        tracing::debug!(
+            file_id = %entry.file_id,
+            "placeholder version not recorded: another item has the same name at this place"
+        );
+    }
+    own
 }
