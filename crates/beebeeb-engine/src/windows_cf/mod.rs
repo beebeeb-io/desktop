@@ -1627,6 +1627,8 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
     }
 }
 
+// A placeholder's identity read by its place (the prune of two server items with one name).
+pub mod identity_at;
 // The placeholder pass (task 2240, LD-0113), in its own file under the size ratchet.
 mod populate;
 use populate::populate_placeholders;

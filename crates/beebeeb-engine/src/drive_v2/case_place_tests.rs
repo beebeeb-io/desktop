@@ -536,3 +536,48 @@ fn a_photo_preview_is_never_made_from_another_rows_entry() {
         assert!(!own("same-a"), "one name is one entry on every volume");
     });
 }
+
+/// Two server items named `Photo.jpg`, one entry on disk; `srv-a` went to Trash on the web, so the snapshot drops its
+/// row. The entry goes only when its placeholder names `srv-a`: one that names `srv-b`, or nothing (unreadable), stays.
+/// A pruned row with no twin is removed whatever its entry says (as before).
+#[test]
+fn the_prune_of_one_of_two_same_name_items_removes_only_its_own_entry() {
+    let f = fixture();
+    row(&f.db, "srv-a", "Photo.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "srv-b", "Photo.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "loose", "loose.txt", None, false, true, FileStatus::Local);
+    write(f.root.path(), "Photo.jpg", b"one entry");
+    write(f.root.path(), "loose.txt", b"loose");
+    let seen: HashSet<String> = ["srv-b"].into_iter().map(str::to_string).collect();
+    let mut gone = model::drop_absent_rows(&f.db, &seen, 1_800_000_000).unwrap();
+    gone.sort_by(|a, b| a.file_id.cmp(&b.file_id));
+    assert_eq!(ids(&gone), ["loose", "srv-a"]);
+    let photo = f.root.path().join("Photo.jpg");
+    let removable = |names: Option<&'static str>| {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let read = |path: &Path| {
+            asked.borrow_mut().push(path.to_path_buf());
+            names.map(str::to_string)
+        };
+        let kept = case_place::removable_by_identity(&f.db, f.root.path(), gone.clone(), &read);
+        (
+            ids(&kept).iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            asked.into_inner(),
+        )
+    };
+    assert_eq!(
+        removable(Some("srv-b")),
+        (vec!["loose".to_string()], vec![photo.clone()]),
+        "the entry is the other item's: it stays"
+    );
+    assert_eq!(
+        removable(None),
+        (vec!["loose".to_string()], vec![photo.clone()]),
+        "nobody can tell whose: it stays"
+    );
+    assert_eq!(
+        removable(Some("srv-a")),
+        (vec!["loose".to_string(), "srv-a".to_string()], vec![photo]),
+        "its own placeholder goes"
+    );
+}

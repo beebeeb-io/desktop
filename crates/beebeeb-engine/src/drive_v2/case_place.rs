@@ -291,3 +291,52 @@ pub fn removable_places(db: &StateDb, sync_root: &Path, pruned: &[PrunedRow], ru
         .map(|(row, _)| row.clone())
         .collect()
 }
+
+/// Whether another server item still in the local state (not being trashed) has exactly `path`, besides `file_id`.
+/// `Err`: the local state could not be read.
+fn another_server_item_at(db: &StateDb, path: &str, file_id: &str) -> Result<bool, DriveError> {
+    for stored in [path.to_string(), format!("/{path}")] {
+        let rows = db.file_rows_at_path(&stored).map_err(DriveError::db)?;
+        if rows.iter().any(|other| {
+            other.file_id != file_id
+                && other.status != FileStatus::Trashing
+                && other.remote_updated_at > 0
+                && other.path.trim_matches('/') == path
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Of `pruned` (rows a snapshot no longer has, already gone from `db`), the ones whose entry may be removed when another
+/// server item still in the local state has exactly the pruned row's path: two server items with one name are one
+/// entry on every system, and nothing in the local state says whose it is. Then the entry goes only when `identity_at`
+/// reads the pruned row's own id on it (a placeholder's identity, Windows). An entry that names the other row, names
+/// nothing or cannot be read stays: it may be the other row's file. The pruned row is logged by its id. A row with no
+/// such twin passes as it is, and the order (children before parents) is kept.
+pub fn removable_by_identity(
+    db: &StateDb,
+    sync_root: &Path,
+    pruned: Vec<PrunedRow>,
+    identity_at: &dyn Fn(&Path) -> Option<String>,
+) -> Vec<PrunedRow> {
+    pruned
+        .into_iter()
+        .filter(|row| {
+            let path = row.path.trim_matches('/');
+            if path.is_empty() || !another_server_item_at(db, path, &row.file_id).unwrap_or(true) {
+                return true;
+            }
+            let place = sync_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let own = identity_at(&place).as_deref() == Some(row.file_id.as_str());
+            if !own {
+                tracing::warn!(
+                    file_id = %row.file_id,
+                    "pruned row not removed: the placeholder identity there is another item or unknown"
+                );
+            }
+            own
+        })
+        .collect()
+}
