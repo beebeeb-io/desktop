@@ -706,7 +706,7 @@ fn deleting_the_account_takes_four_steps_and_can_be_undone() {
     let mut rt = runtime("DW-A58");
     assert_eq!(
         says(&rt, "set-sub"),
-        "After you confirm by email, you can undo it until the date shown. Then it is final."
+        "After you confirm by email, you can still undo it until a date we show you. After that, it can't be undone."
     );
     assert_eq!(name(&rt, "btn-1"), "Continue, destructive");
     rt.update(|s, _| form::type_in(&mut s.account.form.current, "wrong"));
@@ -1162,14 +1162,17 @@ fn a_change_that_is_still_out_is_shown_as_out_when_the_page_comes_back_and_its_a
     assert_eq!(held.started.borrow().len(), 1);
 }
 
-/// DW-A58's subtitle fits the board's one line (the 520 pt column, `set::SUB`), so nothing below it moves, and it
-/// names no length of time: how long it can be undone is Beebeeb's, and the date is shown once it is scheduled.
+/// DW-A58's subtitle is the board's two-line sentence (two lines of the 520 pt column, `set::SUB`), and it names no
+/// length of time: how long it can be undone is Beebeeb's, and the date is shown once it is scheduled.
 #[test]
-fn the_delete_subtitle_fits_one_line_and_names_no_length_of_time() {
+fn the_delete_subtitle_is_the_boards_two_lines_and_names_no_length_of_time() {
     let rt = runtime("DW-A58");
     let sub = says(&rt, "set-sub");
     let width = rune::text::advance(&sub, crate::ui::account_set::SUB);
-    assert!(width <= 520.0, "{width} pt: wraps past the 520 pt column");
+    assert!(
+        width > 520.0 && width <= 1040.0,
+        "{width} pt: not two lines of the 520 pt column"
+    );
     let lower = sub.to_lowercase();
     for words in ["72", "hour", "day"] {
         assert!(!lower.contains(words), "names a length of time: {words}");

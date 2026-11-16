@@ -829,7 +829,8 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A82", |s| {
         s.account.source = Some(Box::new(source::BoardAccount::new().with_deletion(
             source::Deletion::Scheduled {
-                on: "8 November at 19:42".into(),
+                // The board's own sample date (the flow's fixture keeps its own, `board.rs`).
+                on: "5 December at 18:42".into(),
             },
         )));
         go(s, "DW-A82");

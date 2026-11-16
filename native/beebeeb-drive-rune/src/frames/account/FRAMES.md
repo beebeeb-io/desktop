@@ -176,7 +176,7 @@ Flagged deviations (lane p40-delete-account, 2026-11-15, lead rulings 16:35 and 
   (DW-A81) and Undo deletion (DW-A82) open a password dialog over the page (`Dialog::DeletionPassword`), which the
   board does not draw.
 - Board says 72 hours; the server keeps the account for 30 days; board update after 0.9.0. The copy names no length of
-  time: DW-A58 and the Security page's Delete row say it can be undone "until the date shown" / "for a time", and
+  time: DW-A58 and DW-A25's row say it can be undone "until a date we show you", the Security page's Delete row "for a time", and
   DW-A82 names Beebeeb's own `cancel_until` ("Your account will be deleted after {date}."; the note under it drops "72
   hours" and "within 30 days").
 - DW-A82's banner: the board says "We sent a second email … with a link to undo it"; Beebeeb sends no email at the
