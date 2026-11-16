@@ -24843,4 +24843,32 @@ mod tests {
         assert_eq!(api.account_region().await.unwrap().preferred_region.as_deref(), Some("europe"));
         println!("LANDED {landed:?}");
     }
+
+    /// EVIDENCE HARNESS for task 2173's compatibility matrix, never committed: the RELEASED 0.8.12
+    /// engine's whole-file hydrate against a real local server. Same env as the 2173 branch's
+    /// real-server test (BB_REAL_SERVER_URL loopback only, BB_REAL_SESSION_TOKEN, BB_REAL_FILE_ID,
+    /// BB_REAL_SHA256, BB_REAL_REPORT).
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "matrix harness"]
+    async fn matrix_2173_released_engine_against_a_real_server() {
+        use sha2::Digest;
+        use std::io::Write as _;
+        let env = |n: &str| std::env::var(n).unwrap_or_else(|_| panic!("{n} must be set"));
+        let url = env("BB_REAL_SERVER_URL");
+        assert!(url.starts_with("http://127.0.0.1:"), "loopback only: {url}");
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(StateDb::open(&dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(url, env("BB_REAL_SESSION_TOKEN"), [0u8; 32]));
+        let bridge = EngineBridge::new(db, api);
+        let file_id = env("BB_REAL_FILE_ID");
+        let plaintext = bridge.do_hydrate(&file_id, None).await.expect("hydrate");
+        let got: String = sha2::Sha256::digest(&*plaintext).iter().map(|b| format!("{b:02x}")).collect();
+        let line = format!("released-0.8.12: sha256={got} bytes={}", plaintext.len());
+        println!("{line}");
+        if let Ok(path) = std::env::var("BB_REAL_REPORT") {
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+            writeln!(f, "{line}").unwrap();
+        }
+        assert_eq!(got, env("BB_REAL_SHA256"));
+    }
 }
