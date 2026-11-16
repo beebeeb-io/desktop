@@ -14,6 +14,7 @@ use beebeeb_core::backup::Mutation;
 
 use crate::backup_protect;
 use crate::drive_v2::DriveError;
+use crate::drive_v2::case_place;
 use crate::path_safety;
 use crate::state_db::{FileEntry, FileStatus, Namespace, PERMISSION_WRITE, StateDb};
 use crate::vault_tree;
@@ -151,6 +152,8 @@ pub fn create_folder(
     if name_taken(db, sync_root, parent.map(|p| p.file_id.as_str()), &parent_rel, &name) {
         return Err(DriveError::NameTaken);
     }
+    // Into a folder whose place on disk is another row's, the new folder would land in that row's folder.
+    case_place::refuse_shared_place(db, sync_root, parent)?;
     std::fs::create_dir(full_path(sync_root, &rel)?).map_err(DriveError::io)?;
     Ok(rel)
 }
@@ -171,6 +174,8 @@ pub fn rename(db: &StateDb, sync_root: &Path, entry: &FileEntry, name: &str) -> 
     if !same_but_case && name_taken(db, sync_root, entry.parent_id.as_deref(), &parent_rel, &name) {
         return Err(DriveError::NameTaken);
     }
+    // The entry at the row's place is renamed: never one that is another row's (`case_place`).
+    case_place::refuse_shared_place(db, sync_root, Some(entry))?;
     let new_rel = join_rel(&parent_rel, &name);
     std::fs::rename(full_path(sync_root, &old_rel)?, full_path(sync_root, &new_rel)?).map_err(DriveError::io)?;
     Ok(new_rel)
@@ -186,6 +191,8 @@ pub fn move_items(
     let target_rel = folder_rel(target);
     let target_id = target.map(|t| t.file_id.as_str());
     refuse_if_shared_read_only(db, target)?;
+    // Into a folder whose place on disk is another row's, the items would land in that row's folder.
+    case_place::refuse_shared_place(db, sync_root, target)?;
     let mut plan = Vec::new();
     for entry in entries {
         if entry.parent_id.as_deref() == target_id {
@@ -208,6 +215,7 @@ pub fn move_items(
         if name_taken(db, sync_root, target_id, &target_rel, &name) {
             return Err(DriveError::NameTaken);
         }
+        case_place::refuse_shared_place(db, sync_root, Some(entry))?;
         plan.push((full_path(sync_root, &old_rel)?, full_path(sync_root, &new_rel)?));
     }
     for (from, to) in plan {
@@ -265,6 +273,8 @@ pub fn duplicate(db: &StateDb, sync_root: &Path, entry: &FileEntry) -> Result<St
     if backup_protect::protected_destination(db, &join_rel(&parent_rel, &name)).is_some() {
         return Err(DriveError::ReadOnly);
     }
+    // The copy is made from the entry at the row's place: never from another row's bytes.
+    case_place::refuse_shared_place(db, sync_root, Some(entry))?;
     for attempt in 1..1000 {
         let candidate = copy_name(&name, attempt);
         if name_taken(db, sync_root, entry.parent_id.as_deref(), &parent_rel, &candidate) {
@@ -286,6 +296,7 @@ pub fn copy_in(
     sources: &[PathBuf],
 ) -> Result<usize, DriveError> {
     refuse_if_shared_read_only(db, parent)?;
+    case_place::refuse_shared_place(db, sync_root, parent)?;
     let parent_rel = folder_rel(parent);
     let dir = full_path(sync_root, &parent_rel)?;
     if !dir.is_dir() {
@@ -375,6 +386,15 @@ pub fn resolve_folder(db: &StateDb, id: Option<&str>) -> Result<Option<FileEntry
 /// The item's on-disk path inside the sync root (sync_root + state-DB relative path).
 pub fn item_path(sync_root: &Path, entry: &FileEntry) -> Result<PathBuf, DriveError> {
     full_path(sync_root, &entry.path)
+}
+
+/// [`item_path`] for a press that hands the entry to the system (Open, Show in File Explorer), asked of the local state:
+/// [`DriveError::Conflict`] when the entry at that place is another row's (`drive_v2::case_place`: two items whose
+/// names differ only by case, or two with one name). That entry is never handed over as this one.
+pub fn item_path_for(db: &StateDb, sync_root: &Path, entry: &FileEntry) -> Result<PathBuf, DriveError> {
+    let path = full_path(sync_root, &entry.path)?;
+    case_place::refuse_shared_place(db, sync_root, Some(entry))?;
+    Ok(path)
 }
 
 /// Whether the file has an extension the old shell refused to launch via "Open"

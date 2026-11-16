@@ -72,6 +72,7 @@ fn create_file_with(
     if name_taken(db, sync_root, parent.map(|p| p.file_id.as_str()), &parent_rel, &name) {
         return Err(DriveError::NameTaken);
     }
+    crate::drive_v2::case_place::refuse_shared_place(db, sync_root, parent)?;
     let path = full_path(sync_root, &rel)?;
     match name_alias::conflict_below(sync_root, &path) {
         Ok(None) => {}
