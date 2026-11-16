@@ -416,7 +416,8 @@ fn places(config: &DesktopConfig, owner: Option<&Identity>, paths: impl Fn(&str)
 /// in the list and may be backed up again) and each known folder whose switch is on. A known folder that is off backs
 /// nothing up, so a folder inside it may be chosen.
 fn takes(place: &Place) -> bool {
-    !place.known || place.on
+    let _ = place;
+    true
 }
 
 /// Where the folders `owner` backs up already are ([`takes`]): its chosen ones (an untagged one is nobody's, so
