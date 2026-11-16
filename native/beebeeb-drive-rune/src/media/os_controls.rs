@@ -373,11 +373,14 @@ impl NowPlayingSink for UiControls {
     fn clear(&mut self) {
         // The player stopped (also at a lock, a sign-out or another account): a press that waited for the cover's end
         // goes with what it was for.
-        self.shared.buttons.drain();
         *locked(&self.shared.pending) = Some(Pending::Clear);
     }
 
     fn take_buttons(&mut self) -> Vec<OsButton> {
+        // Under the wake cover a press waits in the queue: nothing starts or moves behind the cover.
+        if self.shared.cover.covers_now() {
+            return Vec::new();
+        }
         self.shared.buttons.drain()
     }
 }
