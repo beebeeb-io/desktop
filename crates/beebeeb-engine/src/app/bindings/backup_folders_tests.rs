@@ -584,9 +584,9 @@ fn a_folder_inside_or_holding_a_backed_up_folder_cannot_be_chosen() {
 // ── Review of #463: P3-8 (per account), P3-9, P3-10, P3-12 ─────────────────────────────────────────────────────────
 
 /// P3-8: a chosen folder is its account's alone. Only that account's folders are passed, listed and removed; a tagged
-/// folder of A is never passed for B; an untagged folder (written before folders were per account) is taken in by the
-/// owner this PC's local data is bound to and kept backing up, never by another account, and with no bound owner it is
-/// passed for nobody. The tag holds neither the id nor the email in clear.
+/// folder of A is never passed for B. An untagged folder (written by a test build before folders were per account) is
+/// nobody's, and its folder can be added again under a name of its own (lead ruling 2026-11-16 01:04). The tag holds
+/// neither the id nor the email in clear.
 #[test]
 fn chosen_folders_are_the_choosing_accounts_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -602,37 +602,11 @@ fn chosen_folders_are_the_choosing_accounts_alone() {
     };
     let all = vec![mine.clone(), theirs.clone(), earlier.clone()];
 
-    // Tagged: each account its own; nobody without an owner. An untagged folder is nobody's until it is taken in.
+    // Each account its own; nobody without an owner; an untagged folder for no account.
     assert_eq!(chosen_for(&all, Some(&me())), vec![mine.clone()]);
     assert_eq!(chosen_for(&all, Some(&other)), vec![theirs.clone()]);
     assert_eq!(chosen_for(&all, None), Vec::<ChosenFolder>::new());
-
-    // The bound owner takes the untagged folder in and keeps backing it up; the other account never sees it.
-    let (passed, adopted) = passed_for(&all, Some(&me()));
-    assert_eq!(adopted, 1);
-    let mine_names: Vec<&str> = passed.iter().map(|folder| folder.name.as_str()).collect();
-    assert_eq!(mine_names, ["Projects", "Letters"]);
-    assert_eq!(passed[1].owner, owner_tag(&me()), "taken in as the bound owner's");
-    assert_eq!(
-        passed_for(&all, None),
-        (Vec::new(), 0),
-        "no bound owner: passed for nobody"
-    );
-    assert_eq!(visible_to(&all, &other, false), vec![theirs.clone()]);
-    assert_eq!(
-        visible_to(&all, &me(), false),
-        vec![mine.clone()],
-        "a session alone takes nothing in"
-    );
-    assert_eq!(visible_to(&all, &me(), true), passed);
-    let mut written = all.clone();
-    assert_eq!(adopt_untagged(&mut written, &me()), 1);
-    assert_eq!(
-        chosen_for(&written, Some(&other)),
-        vec![theirs.clone()],
-        "never the other account's"
-    );
-    assert_eq!(adopt_untagged(&mut written, &me()), 0, "taken in once");
+    assert!(!is_owners(&earlier, Some(&me())) && !is_owners(&earlier, Some(&other)));
 
     // A tag made from the email alone still matches the owner whose record later has the id too.
     let by_email = Identity::new(None, Some("Other@Example.invalid"));
@@ -649,7 +623,7 @@ fn chosen_folders_are_the_choosing_accounts_alone() {
     );
     assert_eq!(tag.len(), 64);
 
-    // An add is tagged as its account's; its name is clear of every account's names (their switch keys share one
+    // An add is tagged as its account's; its name is clear of every name in the file (their switch keys share one
     // backup set); the same folder is "backed up already" only for the same account.
     let shared = dir.path().join("Recipes");
     std::fs::create_dir_all(&shared).unwrap();
@@ -670,10 +644,21 @@ fn chosen_folders_are_the_choosing_accounts_alone() {
     );
     assert_eq!(config.backup_chosen_folders.len(), 2);
     assert_eq!(taken_paths(&config, &other).first(), Some(&shared));
+
+    // The untagged folder's own folder is added again: not "backed up already", and under a name of its own, so it
+    // never shares the untagged entry's switch key.
+    let letters = dir.path().join("Letters");
+    std::fs::create_dir_all(&letters).unwrap();
+    let mut config = settings_with(&[&earlier]);
+    assert!(!taken_paths(&config, &me()).contains(&letters));
+    let key = add_to(&mut config, &letters, &[], &me()).unwrap();
+    assert_eq!(key, "custom:Letters (2)");
+    assert_eq!(chosen_for(&config.backup_chosen_folders, Some(&me())).len(), 1);
 }
 
-/// P3-8, the runner's read: only the folders of the account this local data is bound to are passed; another
-/// account's local data passes its own; a local state with no owner recorded passes nothing.
+/// P3-8, the runner's read: only the folders of the account this local data is bound to are passed, never an untagged
+/// one, not even for that owner; another account's local data passes its own; a local state with no owner recorded
+/// passes nothing.
 #[test]
 fn the_runner_passes_the_local_datas_owners_folders_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -683,17 +668,21 @@ fn the_runner_passes_the_local_datas_owners_folders_alone() {
         owner: owner_tag(&other),
         ..chosen("Recipes", dir.path().join("Recipes"))
     };
-    let config = settings_with(&[&mine, &theirs]);
+    let earlier = ChosenFolder {
+        owner: None,
+        ..chosen("Letters", dir.path().join("Letters"))
+    };
+    let config = settings_with(&[&mine, &theirs, &earlier]);
 
     let a = tempfile::tempdir().unwrap();
-    assert_eq!(runner_chosen(&REAL, &owned_db(a.path()), &config), vec![mine.clone()]);
+    assert_eq!(runner_chosen(&owned_db(a.path()), &config), vec![mine.clone()]);
     let b = tempfile::tempdir().unwrap();
     let theirs_db = StateDb::open(b.path().join("state.db")).unwrap();
     theirs_db.set_owner(&other).unwrap();
-    assert_eq!(runner_chosen(&REAL, &theirs_db, &config), vec![theirs.clone()]);
+    assert_eq!(runner_chosen(&theirs_db, &config), vec![theirs.clone()]);
     let c = tempfile::tempdir().unwrap();
     let unowned = StateDb::open(c.path().join("state.db")).unwrap();
-    assert_eq!(runner_chosen(&REAL, &unowned, &config), Vec::<ChosenFolder>::new());
+    assert_eq!(runner_chosen(&unowned, &config), Vec::<ChosenFolder>::new());
 }
 
 /// P3-9: "Stop and move the backup to Trash" for a folder whose backup this PC has not found is refused before
@@ -784,43 +773,4 @@ fn with_no_layout_a_new_name_skips_every_devices_backup_names() {
     let mut config = DesktopConfig::default();
     let key = add_to(&mut config, &projects, &backup_folder_names(&db).unwrap(), &me()).unwrap();
     assert_eq!(key, "custom:Projects (2)", "the kept Projects is never written into");
-}
-
-/// P3-8, the lead's amendment: an untagged folder (written before folders were per account) keeps backing up for the
-/// owner this PC's local data is bound to, and the settings file then holds that owner's tag (taken in once); with no
-/// owner recorded nothing is passed and nothing is written. The settings file is a value here.
-#[test]
-fn an_untagged_folder_is_taken_in_and_written_by_the_bound_owner_alone() {
-    let dir = tempfile::tempdir().unwrap();
-    let earlier = ChosenFolder {
-        owner: None,
-        ..chosen("Letters", dir.path().join("Letters"))
-    };
-    let file = RefCell::new(settings_with(&[&earlier]));
-    let write = |bound: &Identity| {
-        let count = adopt_untagged(&mut file.borrow_mut().backup_chosen_folders, bound);
-        Some(count)
-    };
-
-    let a = tempfile::tempdir().unwrap();
-    let mine = owned_db(a.path());
-    let snapshot = file.borrow().clone();
-    let passed = chosen_taking_in(&mine, &snapshot, write);
-    assert_eq!(passed.len(), 1, "kept backing up for the bound owner");
-    assert_eq!(passed[0].owner, owner_tag(&me()));
-    assert_eq!(
-        file.borrow().backup_chosen_folders[0].owner,
-        owner_tag(&me()),
-        "the settings file holds the bound owner's tag"
-    );
-    // Taken in once: the next read writes nothing.
-    let snapshot = file.borrow().clone();
-    let again = chosen_taking_in(&mine, &snapshot, |_| panic!("nothing left to take in"));
-    assert_eq!(again, passed);
-
-    // No owner recorded: nothing passed, nothing written.
-    let file = settings_with(&[&earlier]);
-    let c = tempfile::tempdir().unwrap();
-    let unowned = StateDb::open(c.path().join("state.db")).unwrap();
-    assert!(chosen_taking_in(&unowned, &file, |_| panic!("no bound owner takes anything in")).is_empty());
 }

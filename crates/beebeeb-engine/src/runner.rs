@@ -687,9 +687,9 @@ async fn run(
                             &cfg.known_folder_source,
                         );
                         // DW-0737: the folders the person chose, passed like a known folder: this local data's
-                        // owner's alone (P3-8, untagged ones taken in by it at its first start).
+                        // owner's alone (P3-8; an untagged one is nobody's).
                         sources.extend(crate::backup::sources::chosen_sources(
-                            &crate::app::bindings::backup_folders::runner_chosen(identity, &db, &cfg),
+                            &crate::app::bindings::backup_folders::runner_chosen(&db, &cfg),
                             &cfg.known_folder_backup,
                             Some(&sync_root),
                         ));

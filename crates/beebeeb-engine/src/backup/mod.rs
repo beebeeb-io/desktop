@@ -31,9 +31,8 @@ pub fn own_backups(identity: &'static crate::identity::EngineIdentity, db: &Stat
     let mut on = sources::backup_sources_quiet(&cfg.known_folder_backup, &cfg.known_folder_source);
     // The folders the person chose (DW-0737) are protected like the known ones while they are on: the ones the runner
     // passes for this local data's owner (P3-8).
-    let owner = db.owner().ok().flatten();
     on.extend(sources::chosen_sources(
-        &crate::app::bindings::backup_folders::passed_for(&cfg.backup_chosen_folders, owner.as_ref()).0,
+        &crate::app::bindings::backup_folders::runner_chosen(db, &cfg),
         &cfg.known_folder_backup,
         None,
     ));
