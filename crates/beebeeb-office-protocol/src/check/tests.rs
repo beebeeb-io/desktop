@@ -546,10 +546,8 @@ fn cells_exact_ask_is_accepted() {
         },
     ];
     d.col_widths = vec![0.0, 48.0, 120.5, 3.0];
-    d.frozen = Frozen {
-        rows: MAX_SHEET_ROWS,
-        cols: MAX_SHEET_COLS,
-    };
+    // Frozen panes up to the range's end (after row 15 and column 9).
+    d.frozen = Frozen { rows: 15, cols: 9 };
     assert_eq!(check_cells(&ask(), &d, &L), Ok(()));
 }
 
@@ -687,6 +685,25 @@ fn cells_frozen_past_a_sheet_is_refused() {
     assert_eq!(check_cells(&ask(), &d, &L), Err(Refused::FrozenTooLarge));
 }
 
+#[test]
+fn cells_frozen_past_the_asked_range_is_refused() {
+    // The range ends after row 15 and column 9 (rows 5 to 14, columns 5 to 8): panes up to there are the block's to
+    // say; past it, a crafted workbook's sheet-sized panes reach the view.
+    let mut d = data(Vec::new());
+    for (rows, cols) in [(15, 9), (15, 0), (0, 9), (1, 1)] {
+        d.frozen = Frozen { rows, cols };
+        assert_eq!(check_cells(&ask(), &d, &L), Ok(()), "{rows} x {cols}");
+    }
+    for (rows, cols) in [(16, 0), (0, 10), (16, 10), (MAX_SHEET_ROWS, MAX_SHEET_COLS)] {
+        d.frozen = Frozen { rows, cols };
+        assert_eq!(
+            check_cells(&ask(), &d, &L),
+            Err(Refused::FrozenTooLarge),
+            "{rows} x {cols}"
+        );
+    }
+}
+
 fn range(row: u32, col: u32, rows: u32, cols: u32) -> CellRange {
     CellRange { row, col, rows, cols }
 }
@@ -757,10 +774,8 @@ fn cells_that_cannot_be_halved_are_refused() {
     d.col_widths = vec![48.0];
     d.row_heights = vec![15.0];
     d.merges = vec![one.range];
-    d.frozen = Frozen {
-        rows: MAX_SHEET_ROWS,
-        cols: MAX_SHEET_COLS,
-    };
+    // The most frozen panes a one-cell range at A1 may carry (its end); their size on the wire is fixed whatever they are.
+    d.frozen = Frozen { rows: 1, cols: 1 };
     assert_eq!(check_cells(&one, &d, &L), Ok(()));
     let payload = d.encode().expect("one cell fits one frame");
     // Counts 4, the cell 16 + its text + its value 8, widths 8, heights 8, merges 20, frozen 8, anchors 4,

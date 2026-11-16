@@ -134,8 +134,9 @@ impl Model {
         }
         put_sizes(&mut view.col_widths, range.col, &col_widths, DEFAULT_COL_PT);
         put_sizes(&mut view.row_heights, range.row, &row_heights, DEFAULT_ROW_PT);
-        for merge in merges {
-            let corners = (
+        // Held once each and capped, and the frozen panes the largest reported (`sheets_bounds`).
+        view.hold_merges(merges.into_iter().map(|merge| {
+            (
                 sheets::Cell {
                     row: merge.row,
                     col: merge.col,
@@ -144,12 +145,9 @@ impl Model {
                     row: merge.row + merge.rows.saturating_sub(1),
                     col: merge.col + merge.cols.saturating_sub(1),
                 },
-            );
-            if !view.merges.contains(&corners) {
-                view.merges.push(corners);
-            }
-        }
-        view.frozen = (frozen.rows, frozen.cols);
+            )
+        }));
+        view.hold_frozen(frozen.rows, frozen.cols);
         for anchor in anchors {
             let placed = SheetAnchor {
                 anchor: anchor.id,

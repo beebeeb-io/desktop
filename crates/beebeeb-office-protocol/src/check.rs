@@ -151,7 +151,7 @@ pub enum Refused {
     SizesMismatch,
     /// A column width or row height that is not finite or is negative.
     BadCellSize,
-    /// Frozen panes larger than a sheet can be.
+    /// Frozen panes larger than a sheet can be, or past the asked range's end.
     FrozenTooLarge,
     /// A cell's value that is not finite.
     BadValue,
@@ -198,7 +198,7 @@ impl Refused {
             Refused::MergeOutsideRange => "a merge outside the asked range",
             Refused::SizesMismatch => "column widths or row heights do not match the range",
             Refused::BadCellSize => "a column width or row height that is not finite or is negative",
-            Refused::FrozenTooLarge => "frozen panes larger than a sheet",
+            Refused::FrozenTooLarge => "frozen panes larger than a sheet or past the asked range",
             Refused::BadValue => "a cell value that is not finite",
             Refused::FormulaTooLong => "a formula over the limit",
             Refused::TooManyAnchors => "too many charts and pictures",
@@ -394,8 +394,9 @@ pub fn check_sheets(got: &OpenedSheets, limits: &Limits) -> Result<(), Refused> 
 
 /// A `CellData` answer to `asked`: no more cells than the range holds, every cell inside it with its text and its
 /// formula under their caps and its value finite, every merge inside it, one finite non-negative width per column and
-/// height per row, frozen panes in a sheet, at most [`MAX_ANCHORS`] charts and pictures, each [`anchor_placeable`]
-/// and each with its own id.
+/// height per row, frozen panes in a sheet and not past the range's end (the helper cuts them there: panes past the cells
+/// asked are not the block's to say, and a crafted workbook's sheet-sized panes would reach the view), at most
+/// [`MAX_ANCHORS`] charts and pictures, each [`anchor_placeable`] and each with its own id.
 pub fn check_cells(asked: &Cells, got: &CellData, limits: &Limits) -> Result<(), Refused> {
     let range = &asked.range;
     if got.cells.len() as u64 > range.area() {
@@ -433,7 +434,12 @@ pub fn check_cells(asked: &Cells, got: &CellData, limits: &Limits) -> Result<(),
     {
         return Err(Refused::BadCellSize);
     }
-    if got.frozen.rows > limits.max_sheet_rows || got.frozen.cols > limits.max_sheet_cols {
+    let end = |start: u32, len: u32| u64::from(start) + u64::from(len);
+    if got.frozen.rows > limits.max_sheet_rows
+        || got.frozen.cols > limits.max_sheet_cols
+        || u64::from(got.frozen.rows) > end(range.row, range.rows)
+        || u64::from(got.frozen.cols) > end(range.col, range.cols)
+    {
         return Err(Refused::FrozenTooLarge);
     }
     check_anchors(&got.anchors, limits)
