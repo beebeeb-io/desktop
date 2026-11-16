@@ -293,8 +293,10 @@ fn address_tag(email: &str) -> Option<String> {
 /// Whether `folder` is `owner`'s: its tag is `owner`'s ([`owner_tag`], by the id alone). Untagged, tagged by an
 /// address (until [`retag_by_id`]), or no owner: never.
 pub fn is_owners(folder: &ChosenFolder, owner: Option<&Identity>) -> bool {
+    let by_address = owner.and_then(|owner| owner.email.as_deref()).and_then(address_tag);
     match (folder.owner.as_deref(), owner.and_then(owner_tag)) {
-        (Some(tag), Some(owners)) => tag == owners,
+        (Some(tag), Some(owners)) => tag == owners || by_address.as_deref() == Some(tag),
+        (Some(tag), None) => by_address.as_deref() == Some(tag),
         _ => false,
     }
 }
@@ -313,7 +315,7 @@ pub fn retag_by_id(config: &mut DesktopConfig, owner: &Identity) -> usize {
     };
     let mut retagged = 0;
     for at in 0..config.backup_chosen_folders.len() {
-        if config.backup_chosen_folders[at].owner.as_deref() == Some(by_id.as_str()) {
+        if config.backup_chosen_folders[at].owner.as_deref() != Some(by_address.as_str()) {
             continue;
         }
         let owners: Vec<PathBuf> = config
