@@ -271,6 +271,13 @@ impl AwayLock {
                 // The engine locked: this frame's gate may have been read before it.
                 self.cover = Cover::Locked;
                 lift_if_open = false;
+            } else if self.cover == Cover::Asked(looked.number) && looked.answer.is_none() {
+                // The look that says the wake failed: the engine decided nothing (P3-2, fail closed). The cover holds,
+                // and after the grace the wake is said again as the longest time away (unknown, as a resume with no
+                // idle reading), which locks unless nothing an idle time says can lock.
+                self.cover = Cover::Held;
+                self.away = Some(Duration::MAX);
+                self.gap_found_at = Some(now);
             } else if self.cover == Cover::Asked(looked.number) {
                 // The look that says the wake locked nothing.
                 self.cover = Cover::Off;

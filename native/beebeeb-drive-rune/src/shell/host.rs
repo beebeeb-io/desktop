@@ -355,7 +355,6 @@ impl Shell {
                 // The cover first (review of #463, P3-15): a wake the main window's poll has not found yet is covered
                 // now, and the flyout is told before it reads and shows, so it never opens on file names or activity.
                 // That poll comes after this click (it runs on the main window's turn) and says the wake.
-                self.away.cover_a_gap_not_yet_found();
                 self.tell_flyout_covered(self.covered().then(|| self.sync_runs()));
                 // Read before it shows: a hidden flyout was not kept current.
                 self.read_flyout();
