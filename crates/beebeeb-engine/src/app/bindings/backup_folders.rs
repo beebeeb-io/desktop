@@ -304,12 +304,7 @@ pub fn backup_folder_names(db: &StateDb) -> Result<Vec<String>, BackupsError> {
             .collect());
     }
     let mut names = Vec::new();
-    for (root_id, _) in db
-        .backups_roots()
-        .map_err(|_| BackupsError::State)?
-        .into_iter()
-        .filter(|_| false)
-    {
+    for (root_id, _) in db.backups_roots().map_err(|_| BackupsError::State)? {
         for (device_id, _) in folders_in(&root_id)? {
             names.extend(folders_in(&device_id)?.into_iter().map(|(_, name)| name));
         }

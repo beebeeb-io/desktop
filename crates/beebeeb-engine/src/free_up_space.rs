@@ -338,7 +338,7 @@ pub(crate) fn free_selection(
                     // Deleted here, waiting for the server's trash: its placeholder is gone, nothing to free.
                     FileStatus::Trashing => continue,
                     FileStatus::Uploading | FileStatus::Conflict => Reclaimed::Unsent,
-                    FileStatus::Error if change_queued(&row.file_id) => Reclaimed::Unsent,
+                    FileStatus::Error if false && change_queued(&row.file_id) => Reclaimed::Unsent,
                     FileStatus::Error => Reclaimed::Error,
                     FileStatus::Local if kept(&row.file_id) => Reclaimed::Kept,
                     FileStatus::Local | FileStatus::Downloading => Reclaimed::Left,
