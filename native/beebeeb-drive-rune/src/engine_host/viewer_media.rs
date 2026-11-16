@@ -20,7 +20,7 @@ use beebeeb_media_protocol::KindHint;
 use super::*;
 use crate::frames::viewers::kinds::{AudioDoc, Track, VideoDoc};
 use crate::media::StopReason;
-use crate::media::player::{MediaItem, PlayerHandle};
+use crate::media::player::{MediaItem, PlayerHandle, Press};
 
 /// A folder's audio files as the Files listing sorts them, and the folder's name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,10 +184,16 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             player.play();
             return true;
         }
+        // The press goes WITH every item (the queue's too): the player opens each for this session of this account.
+        let press = Press {
+            session: shown.session,
+            account: shown.account.clone(),
+        };
         let item = MediaItem {
             file_id: file_id.to_string(),
             kind: shown.kind,
             length_ms: 0,
+            press: press.clone(),
         };
         let queue = shown
             .queue
@@ -196,6 +202,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 file_id: id.clone(),
                 kind: KindHint::Audio,
                 length_ms: 0,
+                press: press.clone(),
             })
             .collect();
         let session = shown.session;

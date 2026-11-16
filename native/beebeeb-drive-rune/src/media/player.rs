@@ -55,6 +55,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use beebeeb_engine::account::SessionGeneration;
 use beebeeb_media_protocol::{Codec, FromHelper, KindHint, MEDIA_SYSTEM_DECODER_ON, ToHelper};
 use beebeeb_office_sandbox::Profile;
 use zeroize::Zeroizing;
@@ -128,8 +129,32 @@ pub trait NowPlayingSink: Send {
 }
 
 /// Opens an item's bytes (the engine's range reader, for the session of the press).
+///
+/// The player hands its worker this opener bound to the press that came WITH the item ([`MediaItem::press`]), so the
+/// worker's `open` is [`MediaOpener::open_for`] with that press: a file is opened for the session and the account of
+/// the press that asked for it, never for a process-wide stamp and never for "now".
 pub trait MediaOpener: Send + Sync {
+    /// Opens `file_id` with no press known. The engine's opener refuses it (`Refusal::NotSignedIn`); the tests'
+    /// fakes, which have no session, answer it.
     fn open(&self, file_id: &str) -> Result<Box<dyn MediaBytes>, Refusal>;
+    /// Opens `file_id` for `press`. Default: [`MediaOpener::open`] (a fake without a session).
+    fn open_for(&self, press: &Press, file_id: &str) -> Result<Box<dyn MediaBytes>, Refusal> {
+        let _ = press;
+        self.open(file_id)
+    }
+}
+
+/// The opener a run's worker is handed: the player's opener with the item's press, so the worker's `open` opens for
+/// that press and for no other.
+struct PressedOpener {
+    inner: Arc<dyn MediaOpener>,
+    press: Press,
+}
+
+impl MediaOpener for PressedOpener {
+    fn open(&self, file_id: &str) -> Result<Box<dyn MediaBytes>, Refusal> {
+        self.inner.open_for(&self.press, file_id)
+    }
 }
 
 /// One item's decrypted bytes, by range.
@@ -141,6 +166,23 @@ pub trait MediaBytes: Send {
 
 // ---- What the player plays, and what it says ----
 
+/// The press that asked for an item: the session and the account it was made under, taken on the window's thread at
+/// the press. It travels WITH the item to the opener (each item of a queue carries the press that made the queue), so
+/// the bytes are opened for that session of that account or not at all.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Press {
+    pub session: SessionGeneration,
+    /// Whose session it was (the email, else the user id), as `engine_host::stamp` names an account.
+    pub account: Option<String>,
+}
+
+/// Never the account.
+impl fmt::Debug for Press {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Press({:?})", self.session)
+    }
+}
+
 /// One file the player can play.
 #[derive(Clone, PartialEq, Eq)]
 pub struct MediaItem {
@@ -148,6 +190,8 @@ pub struct MediaItem {
     pub kind: KindHint,
     /// The length the window already knows (the queue's, a thumbnail's); the helper's `Opened` replaces it.
     pub length_ms: u64,
+    /// The press the item is opened for.
+    pub press: Press,
 }
 
 /// The kind and the length, never the id.
@@ -450,11 +494,16 @@ impl Player {
         });
         let slots = Arc::new(Slots::default());
         let (commands, taken) = mpsc::channel();
+        // The worker opens the item for the press that came with it, through this run's own opener.
+        let opener: Arc<dyn MediaOpener> = Arc::new(PressedOpener {
+            inner: Arc::clone(&self.opener),
+            press: item.press.clone(),
+        });
         let worker = Worker::new(Start {
             generation: self.generation,
             player: self.me.clone(),
             item,
-            opener: Arc::clone(&self.opener),
+            opener,
             links: Arc::clone(&self.links),
             audio: Arc::clone(&self.audio),
             clock: Arc::clone(&self.clock),
@@ -662,6 +711,25 @@ impl PlayerHandle {
     /// account change).
     pub fn state(&self) -> Option<PlayState> {
         self.with(|player| player.shown.clone())
+    }
+
+    /// What the player says of `file_id`: its state while it is the player's current item (playing, paused, ended or
+    /// refused), else `None`. A view draws only this: another file's times, tags, picture or refusal are never its own.
+    pub fn state_of(&self, file_id: &str) -> Option<PlayState> {
+        self.with(|player| player.shown.clone().filter(|state| state.file_id == file_id))
+    }
+
+    /// Whether the player holds a live run of `file_id`: it is the current item, its worker runs, and it was not
+    /// refused. Play and Pause then go to that run; otherwise a Play opens the file again (a refusal ends the run but
+    /// keeps the state, so the state alone is no answer).
+    pub fn holds(&self, file_id: &str) -> bool {
+        self.with(|player| {
+            player.run.is_some()
+                && player
+                    .shown
+                    .as_ref()
+                    .is_some_and(|state| state.file_id == file_id && state.refused.is_none())
+        })
     }
 
     /// Where the player is.

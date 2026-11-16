@@ -30,6 +30,8 @@ struct Inner {
     presses: Vec<SessionGeneration>,
     /// The session ends while the player opens the file (an answer that comes back late).
     ends_on_open: bool,
+    /// The next open is refused as "could not be played" (offline, say); the one after opens.
+    refuse_next: bool,
     opened: Vec<String>,
 }
 
@@ -59,6 +61,7 @@ impl World {
                     .collect(),
                 presses: Vec::new(),
                 ends_on_open: false,
+                refuse_next: false,
                 opened: Vec::new(),
             }),
             player: Mutex::new(None),
@@ -184,6 +187,9 @@ impl MediaOpener for FakeOpener {
             // As the real opener answers a session that ended: the session is gone, the engine refuses it.
             s.turn += 1;
             return Err(Refusal::NotSignedIn);
+        }
+        if std::mem::take(&mut s.refuse_next) {
+            return Err(Refusal::CouldNotPlay);
         }
         Ok(Box::new(Zeros))
     }
@@ -484,4 +490,46 @@ fn kept_audio_opens_in_the_player_when_playback_is_available() {
     assert!(!ready.opens_here_when_kept("c.pdf") && !ready.opens_here_when_kept("d.txt"));
     let not_ready = source(&World::new(false));
     assert!(!not_ready.opens_here_when_kept("a.mp3") && !not_ready.opens_here_when_kept("b.mp4"));
+}
+
+/// P2-4: a Play that was refused (offline, say) leaves the refusal on screen, and the next Play on the same file opens
+/// it again; before, the player still named the file, so the press went to a run that no longer existed.
+#[test]
+fn mfx_play_after_a_refusal_opens_the_file_again() {
+    let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
+    let mut source = source(&world);
+    source.open("t1").expect("opens");
+    world.s().refuse_next = true;
+    assert!(source.play("t1", true));
+    wait_until("the refusal lands in the player", || {
+        world
+            .handle()
+            .state()
+            .is_some_and(|state| state.refused == Some(Refusal::CouldNotPlay))
+    });
+    assert!(source.play("t1", true), "Play again");
+    wait_until("the second Play opens the file again", || world.s().opened.len() == 2);
+    assert_eq!(world.s().opened, ["t1", "t1"]);
+    wait_until("it plays", || world.handle().phase() == Phase::Playing);
+}
+
+/// P2-3: while one recording plays, another recording of the same folder shows ITS OWN title, not playing; the
+/// queue marks the open file. Before, the view took the playing file's state because it was in the queue.
+#[test]
+fn mfx_a_recordings_doc_is_its_own_while_another_plays() {
+    let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
+    let mut source = source(&world);
+    source.open("t1").expect("opens");
+    assert!(source.play("t1", true));
+    wait_until("t1 plays", || world.handle().phase() == Phase::Playing);
+    source.open("t2").expect("the second recording opens");
+    let Some(Body::Audio(doc)) = source.poll("t2") else {
+        panic!("the second recording's view gets its body");
+    };
+    assert_eq!(doc.title, "invented-two.flac", "its own name, not the playing file's");
+    assert!(!doc.playing, "it is not the one playing");
+    let current: Vec<&str> = doc.queue.iter().filter(|t| t.current).map(|t| t.id.as_str()).collect();
+    assert_eq!(current, ["t2"], "the queue marks the open file");
 }

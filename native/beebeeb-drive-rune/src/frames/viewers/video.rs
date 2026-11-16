@@ -24,6 +24,10 @@ use crate::ui::kit;
 #[path = "player_view_tests.rs"]
 mod player_view_tests;
 
+#[cfg(test)]
+#[path = "own_file_tests.rs"]
+mod own_file_tests;
+
 /// Frames are asked at the stage's size in device pixels; the window's scale is not known where the stage reports
 /// its size, so the ask is the drawn points times this (the player caps it at 1920 x 1080 and the stage scales to
 /// fit, so a larger screen is never blurrier than a smaller ask would be sharp).

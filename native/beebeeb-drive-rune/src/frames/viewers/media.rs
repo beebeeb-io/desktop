@@ -12,6 +12,10 @@ use crate::State;
 pub const ZOOMS: [u32; 8] = [50, 75, 100, 125, 150, 200, 300, 400];
 /// The key of the find bar's field.
 pub const FIND_KEY: &str = "find-input";
+/// What Find says on a PDF whose session ended (CP2 row 10.2): the true state, never "Not built yet" (Find is built)
+/// and never "No matches" for words nobody looked for.
+pub const FIND_SESSION_ENDED: &str =
+    "Can't search this file: Beebeeb was locked or signed out, or another account signed in.";
 /// The keys of the table and of the archive's list, which take the arrows.
 pub const TABLE_KEY: &str = "csv-table";
 pub const LIST_KEY: &str = "rows";

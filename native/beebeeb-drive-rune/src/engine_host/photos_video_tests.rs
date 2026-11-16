@@ -8,9 +8,10 @@ use std::sync::Arc;
 use beebeeb_media_protocol::KindHint;
 
 use super::*;
+use crate::media::StopReason;
 use crate::media::audio_out::AudioError;
 use crate::media::player::{
-    AudioFactory, AudioSink, Link, LinkFactory, MediaBytes, MediaItem, MediaOpener, PlayerHandle, Refusal,
+    AudioFactory, AudioSink, Link, LinkFactory, MediaBytes, MediaItem, MediaOpener, PlayerHandle, Press, Refusal,
 };
 use crate::media::video::VideoSurface;
 
@@ -137,4 +138,142 @@ fn late_video_open_under_another_session_dropped() {
         },
     );
     assert!(got.is_none(), "nothing is handed to the stage of the second account");
+}
+
+/// Waits up to 10 s for the player to settle on a refusal (the open runs on the player's worker), and answers it.
+fn refusal_of_player(player: &PlayerHandle) -> Option<Refusal> {
+    let began = std::time::Instant::now();
+    loop {
+        if let Some(refused) = player.state().and_then(|state| state.refused) {
+            return Some(refused);
+        }
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(10),
+            "the player settles on an answer"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// P1-3: a video pressed in Photos is opened by the REAL opener for the press's session, though no other press was
+/// ever made in this process: it is never refused as "Sign in to play this file.". (Its helper is not installed here,
+/// so the run ends at the helper's start, after the bytes were opened.) Before, the opener read a process-wide stamp
+/// that only a Files press wrote, and refused.
+#[test]
+fn mfx_photos_video_opens_for_the_press_not_a_stamp() {
+    let fake = fake("mfx-video-press");
+    let (engine, mut source, _store, _dir) = signed_in(&fake);
+    open(&mut source);
+    let tram = number(&source, TRAM);
+    let player = PlayerHandle::new(
+        Arc::new(crate::engine_host::media::EngineMediaOpener::new(engine.clone())),
+        Arc::new(NoLinks),
+        Arc::new(NoAudio),
+        None,
+        VideoSurface::new(),
+    );
+    let got = source.play_with(
+        tram,
+        player.clone(),
+        true,
+        |player, item| player.open(item, Vec::new()),
+        || {},
+    );
+    assert!(got.is_some(), "the shell's player is handed to the stage");
+    let refused = refusal_of_player(&player);
+    player.stop(StopReason::Closed);
+    assert_ne!(
+        refused,
+        Some(Refusal::NotSignedIn),
+        "a signed-in person's video is opened for their press, never refused as not signed in"
+    );
+}
+
+/// An opener that keeps the press each open was made for.
+struct PressRecorder(std::sync::Mutex<Vec<Press>>);
+impl MediaOpener for PressRecorder {
+    fn open(&self, _file_id: &str) -> Result<Box<dyn MediaBytes>, Refusal> {
+        panic!("an item was opened without its press")
+    }
+    fn open_for(&self, press: &Press, _file_id: &str) -> Result<Box<dyn MediaBytes>, Refusal> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(press.clone());
+        Err(Refusal::CouldNotPlay)
+    }
+}
+
+/// P1-3: the press made in Photos travels WITH the item through the player into the opener: the session and the
+/// account the press was made under.
+#[test]
+fn mfx_photos_video_carries_its_press_into_the_opener() {
+    let fake = fake("mfx-video-carries");
+    let (engine, mut source, _store, _dir) = signed_in(&fake);
+    open(&mut source);
+    let tram = number(&source, TRAM);
+    let recorder = Arc::new(PressRecorder(std::sync::Mutex::new(Vec::new())));
+    let player = PlayerHandle::new(
+        recorder.clone(),
+        Arc::new(NoLinks),
+        Arc::new(NoAudio),
+        None,
+        VideoSurface::new(),
+    );
+    let pressed = crate::engine_host::stamp::stamp(&engine);
+    source.play_with(
+        tram,
+        player.clone(),
+        true,
+        |player, item| player.open(item, Vec::new()),
+        || {},
+    );
+    assert_eq!(refusal_of_player(&player), Some(Refusal::CouldNotPlay));
+    let presses = recorder
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(presses.len(), 1, "one open, through the press's opener");
+    assert_eq!(presses[0].session, pressed.0, "the press's session");
+    assert_eq!(presses[0].account, pressed.1, "the press's account");
+    assert!(presses[0].account.is_some(), "a signed-in press names its account");
+}
+
+/// P1-3: the engine's opener opens for a press of the account that is signed in, and refuses a press without one, a
+/// press of another account (a stale generation can equal this account's: each account counts from its own start),
+/// and an open with no press at all.
+#[test]
+fn mfx_engine_opener_opens_only_for_the_press_account() {
+    let fake = fake("mfx-video-account");
+    let (engine, _source, _store, _dir) = signed_in(&fake);
+    let opener = crate::engine_host::media::EngineMediaOpener::new(engine.clone());
+    let (session, account) = crate::engine_host::stamp::stamp(&engine);
+    assert!(account.is_some(), "the test signs an account in");
+    assert_eq!(
+        opener.open(TRAM).err(),
+        Some(Refusal::NotSignedIn),
+        "no press: nothing is opened"
+    );
+    let others = Press {
+        session,
+        account: Some("someone-else@example.eu".into()),
+    };
+    assert_eq!(
+        opener.open_for(&others, TRAM).err(),
+        Some(Refusal::NotSignedIn),
+        "another account's press opens nothing"
+    );
+    let nobodys = Press { session, account: None };
+    assert_eq!(
+        opener.open_for(&nobodys, TRAM).err(),
+        Some(Refusal::NotSignedIn),
+        "a press without an account opens nothing"
+    );
+    let own = Press { session, account };
+    assert_ne!(
+        opener.open_for(&own, TRAM).err(),
+        Some(Refusal::NotSignedIn),
+        "the signed-in account's press opens its file"
+    );
 }
