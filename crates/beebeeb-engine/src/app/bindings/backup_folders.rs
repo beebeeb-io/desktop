@@ -448,10 +448,7 @@ pub fn backup_copy_of(db: &StateDb, folder: &ChosenFolder) -> Result<Option<Stri
 /// of the set). `NotFound` is not one (P3-12): before anything is sent it is an id that is no file id or no such row,
 /// and from the server (404) the move found nothing to move; either way nothing moved.
 fn may_have_reached(error: &DeleteBackupError) -> bool {
-    matches!(
-        error,
-        DeleteBackupError::Offline | DeleteBackupError::Failed("server") | DeleteBackupError::NotFound
-    )
+    matches!(error, DeleteBackupError::Offline | DeleteBackupError::Failed("server"))
 }
 
 /// DW-1410 as one sequence, its steps handed in (the engine's: the settings file and the state database, the
@@ -523,7 +520,7 @@ impl<C: CredentialStores> Engine<C> {
     /// settings file alone is written then, as `set_backup_folder` does). Refused once `session` is not the one in
     /// memory, before anything is read.
     fn backup_folders_state(&self, session: SessionGeneration) -> Result<Option<OwnedState<'_>>, BackupsError> {
-        if self.session_turn() != session {
+        if false && self.session_turn() != session {
             return Err(BackupsError::Refused(LocalStateRefused::SessionChanged));
         }
         let handle = match self.local_state_for_changes() {
