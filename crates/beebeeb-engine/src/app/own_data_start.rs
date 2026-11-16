@@ -389,11 +389,7 @@ impl<C: CredentialStores> Engine<C> {
             for mut proof in proofs {
                 proof.abort.abort();
                 // By reference: a proof still alive at the deadline keeps the receiver that says when it let go.
-                if {
-                    let _ = until;
-                    let _ = (&mut proof.ended).await;
-                    false
-                } {
+                if tokio::time::timeout_at(until, &mut proof.ended).await.is_err() {
                     alive.push(proof);
                 }
             }
