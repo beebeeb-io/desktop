@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use beebeeb_engine::app::EngineConfig;
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
+use beebeeb_engine::signin::gate::GateState;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use beebeeb_engine::test_api::{ConfirmTokens, FakeApi, Reply, Request};
@@ -350,6 +351,75 @@ fn late_answer_dropped() {
     assert_eq!(source.deletion(), Deletion::None, "nothing is shown as asked");
     assert!(!kept(&source));
     assert_eq!(source.notice(), None, "nothing is said");
+}
+
+/// A request whose link went out while the screen locked (the lock lands in the round trip, after the re-check).
+fn requested_under_a_lock(fake: &Fake, engine: &TestEngine, source: &mut Source) {
+    let confirmation = proven(source);
+    let locking = engine.clone();
+    *fake.during_request.lock().unwrap() = Some(Box::new(move || {
+        let _ = locking.lock_screen();
+    }));
+    source
+        .request_deletion(confirmation, CODE)
+        .expect_err("the answer came for a turn that is over");
+    assert_eq!(
+        fake.asked("POST /api/v1/auth/account/delete-request"),
+        1,
+        "the link went out"
+    );
+}
+
+/// P3-6 residual: the link was mailed under a lock, so the person is told after the unlock (once).
+#[test]
+fn a_link_mailed_under_a_lock_is_told_after_the_unlock() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    source.opened(Pane::Security);
+    requested_under_a_lock(&fake, &engine, &mut source);
+    assert_eq!(engine.gate(), GateState::ScreenLocked);
+    source.pump();
+    assert_eq!(source.notice(), None, "nothing is said over the lock");
+
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the screen opens");
+    source.pump();
+    assert_eq!(source.said().map(|said| said.words), Some(LINK_SENT_LATE));
+    assert!(source.account_deletion.late.is_none(), "said once");
+    source.clear_notice();
+    source.pump();
+    assert_eq!(source.notice(), None, "not said again");
+}
+
+/// A closed vault (a sign-out) wipes it unsaid.
+#[test]
+fn a_link_mailed_under_a_lock_is_never_told_after_a_sign_out() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    source.opened(Pane::Security);
+    requested_under_a_lock(&fake, &engine, &mut source);
+    let _ = engine.lock_vault();
+    source.pump();
+    assert!(source.account_deletion.late.is_none(), "wiped with the session");
+    assert_eq!(source.notice(), None);
+}
+
+/// Another account signed in: the kept link of the first is never said to the second.
+#[test]
+fn a_link_mailed_for_another_account_is_never_told() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    source.opened(Pane::Security);
+    let mut other = stamp(&engine);
+    other.1 = Some("another-account@example.eu".to_owned());
+    source.account_deletion.late = Some(other);
+    source.pump();
+    assert!(source.account_deletion.late.is_none(), "wiped unsaid");
+    assert_eq!(source.notice(), None);
 }
 
 /// The mutant's companion: "I've opened the link" is Beebeeb's answer, never this PC's guess.

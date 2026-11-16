@@ -103,6 +103,10 @@ pub enum DeletionError {
     Unconfirmed,
     /// Beebeeb answered with an error, or an answer that did not read.
     Failed,
+    /// Only for the request: the link WENT OUT (Beebeeb took it), and the session moved on while it was out (a lock, a
+    /// sign-out, another sign-in), so the answer is dropped as a [`DeletionError::NotSignedIn`] would be. The caller
+    /// decides, for the session and account it stamped, whether the person is told the link was sent.
+    SentThenMoved,
 }
 
 impl DeletionError {
@@ -124,6 +128,7 @@ impl DeletionError {
             Self::NotScheduled => "nothing scheduled",
             Self::Unconfirmed => "not known",
             Self::Failed => "not done",
+            Self::SentThenMoved => "sent, then the session moved on",
         }
     }
 }
@@ -261,7 +266,11 @@ impl<C: CredentialStores> Engine<C> {
             Ok(_) => Err(DeletionError::Failed),
             Err(error) => Err(error),
         };
-        self.deletion_answered(session, result)
+        let went_out = result.is_ok();
+        match self.deletion_answered(session, result) {
+            Err(DeletionError::NotSignedIn) if went_out => Err(DeletionError::SentThenMoved),
+            answered => answered,
+        }
     }
 
     /// WRITES: cancel a SCHEDULED deletion from this session, with the step-up's token `grant` (the server's signed-in
