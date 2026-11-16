@@ -13,8 +13,8 @@
 //! never opens anything, because the account is compared too. Nothing of a file opened late plays under another
 //! session.
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, PoisonError};
 
 use beebeeb_engine::app::bindings::media_stream::MediaReader;
 use beebeeb_engine::app::viewer_api::OpenFileError;
@@ -23,8 +23,7 @@ use zeroize::Zeroizing;
 
 use super::stamp::account_of;
 use crate::media::audio_out::DefaultAudio;
-use crate::media::os_controls::{NowPlaying, OsButton, OsControls};
-use crate::media::player::{MediaBytes, MediaOpener, NowPlayingSink, PlayerHandle, Press, Refusal};
+use crate::media::player::{MediaBytes, MediaOpener, PlayerHandle, Press, Refusal};
 use crate::media::transport::SandboxedHelpers;
 use crate::media::video::VideoSurface;
 
@@ -79,52 +78,14 @@ impl<C: CredentialStores + 'static> MediaOpener for EngineMediaOpener<C> {
     }
 }
 
-/// The OS's media controls of the main window, attached when the window exists (it does not yet when the player is
-/// made). `show` runs on the player's thread; attaching is asked of the controls' own `attach`.
-struct LazyControls {
-    window: Arc<Mutex<Option<rune::WindowHandle>>>,
-    controls: Option<OsControls>,
-}
-
-impl LazyControls {
-    fn attached(&mut self) -> Option<&mut OsControls> {
-        if self.controls.is_none() {
-            let window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
-            self.controls = window.as_ref().and_then(OsControls::attach);
-        }
-        self.controls.as_mut()
-    }
-}
-
-impl NowPlayingSink for LazyControls {
-    fn show(&mut self, now: &NowPlaying) {
-        if let Some(controls) = self.attached() {
-            controls.show(now);
-        }
-    }
-
-    fn clear(&mut self) {
-        if let Some(controls) = self.controls.as_mut() {
-            controls.clear();
-        }
-    }
-
-    fn take_buttons(&mut self) -> Vec<OsButton> {
-        self.controls.as_mut().map(OsControls::take_buttons).unwrap_or_default()
-    }
-}
-
 /// Makes the shell's one player with the real helper, sound device and media controls, and registers it
 /// (`media::set_shell_player`). Called once when the window is built on the engine (`shell::state::init_on_engine`).
-pub fn install_shell_player<C: CredentialStores + 'static>(
-    engine: Arc<Engine<C>>,
-    window: Arc<Mutex<Option<rune::WindowHandle>>>,
-) {
+pub fn install_shell_player<C: CredentialStores + 'static>(engine: Arc<Engine<C>>) {
     let player = PlayerHandle::new(
         Arc::new(EngineMediaOpener::new(engine)),
         Arc::new(SandboxedHelpers),
         Arc::new(DefaultAudio),
-        Some(Box::new(LazyControls { window, controls: None })),
+        Some(Box::new(crate::media::os_controls::shell_controls())),
         VideoSurface::new(),
     );
     crate::media::set_shell_player(player);
