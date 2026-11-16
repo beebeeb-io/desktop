@@ -317,7 +317,7 @@ pub fn live_rows(db: &StateDb) -> Result<Vec<FileEntry>, DriveError> {
 }
 
 /// Whether `a` should stay at a shared path instead of `b` (rows the server has not confirmed; a confirmed row never
-/// loses to another): the server's row (a remote time recorded), then a row that is not merely local, then the smaller id.
+/// loses to another): a row with a remote time recorded (none can reach here today, so this clause is idle), then a row that is not merely local, then the smaller id.
 fn prefer(a: &FileEntry, b: &FileEntry) -> bool {
     let known = |e: &FileEntry| e.remote_updated_at > 0;
     let not_local = |e: &FileEntry| e.status != FileStatus::Local;

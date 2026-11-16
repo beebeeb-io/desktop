@@ -1,7 +1,7 @@
 //! A link to a folder, one link over several files (a bundle), and taking a folder's links off (DW-0502, DW-0506),
 //! for a host without a UI toolkit (the native Share dialog and Shared): [`Engine::folder_link_for`],
-//! [`Engine::bundle_link_for`], [`Engine::folder_links_revoke_for`]. The flows moved from the Tauri shell's
-//! `share_v2/folder_flows.rs` (`folder_link`, `bundle_link`, `folder_link_revokes`); those are left as they were.
+//! [`Engine::bundle_link_for`], [`Engine::folder_links_revoke_for`]. The flows moved out of the old shell's
+//! `share_v2/folder_flows.rs` (`folder_link`, `bundle_link`, `folder_link_revokes`), which is gone.
 //! A link to ONE file stays [`Engine::share_link_for`] (`share_link_api.rs`), which refuses a folder.
 //!
 //! No crypto step is built here. A folder link is core's `FolderShare::link` (the folder's key from its custody

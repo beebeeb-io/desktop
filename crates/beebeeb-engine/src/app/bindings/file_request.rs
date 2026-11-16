@@ -1,7 +1,6 @@
 //! File requests (DW-0503, DW-0504, DW-0507): a link anyone can upload into, for a host without a UI toolkit (the
 //! native Shared window): [`Engine::file_request_create_for`] and [`Engine::file_request_copy_for`]. The flows moved
-//! from the Tauri shell's `share_v2/requests.rs` (`file_request_create`, `file_request_copy`); those are left as they
-//! were. Closing a request and taking a closed one off the list are [`Engine::share_change`]'s
+//! out of the old shell's `share_v2/requests.rs` (`file_request_create`, `file_request_copy`), which is gone. Closing a request and taking a closed one off the list are [`Engine::share_change`]'s
 //! (`ShareChange::CloseRequest`, `ShareChange::HideRequest`); changing a request's expiry has no route on Beebeeb and
 //! is not offered.
 //!

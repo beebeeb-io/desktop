@@ -1,5 +1,5 @@
 //! The share safety number and the local "compared" marks (DW-0513, DW-0515; B05e with its Amendment 1), for a host
-//! without a UI toolkit. Ported from the Tauri shell's `share_v2/safety.rs` (`safety_view`, `trust`, `share_trust_in`,
+//! without a UI toolkit. Ported from the old shell's `share_v2/safety.rs` (`safety_view`, `trust`, `share_trust_in`,
 //! `mark_compared_in`, `accept_share_key_in`, `refused_invite`, `anyway_seal`, `record_anyway_in`); the seal's
 //! expectation from the marks and the outcome records are `invite_for`'s (`share_invite_api.rs`), read here, not
 //! copied.
