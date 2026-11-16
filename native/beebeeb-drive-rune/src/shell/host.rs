@@ -887,9 +887,6 @@ fn read_again_after_a_check(s: &mut State, tx: &mut Tx) -> bool {
         return false;
     }
     s.shell.files_reread_due = false;
-    if !(s.list_error.is_some() || s.listing.items.is_empty()) {
-        return false;
-    }
     let folder = s.listing.folder.id.clone();
     let (read, error) = super::state::load(s.source.as_ref(), folder.as_deref());
     let scroll = s.take_reread(read, error);
