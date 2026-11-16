@@ -56,3 +56,27 @@ fn engine_delete_suppression_prunes_stale_entries() {
         "a stale suppression entry must be pruned so a later user delete propagates"
     );
 }
+
+#[test]
+fn engine_remove_of_one_case_twin_is_not_a_user_delete_of_the_other_spelling() {
+    // Report.pdf / report.pdf are two server rows but ONE entry on NTFS/APFS. The engine removes the entry by
+    // the pruned row's path (`report.pdf`); the volume's delete notice names the entry as spelled on disk
+    // (`Report.pdf`). That notice must consume the registration; a miss would reach `handle_delete`, find the
+    // OTHER twin's row at `Report.pdf` and queue a server trash of it.
+    use crate::drive_v2::case_place::{CaseRule, with_rule_for_test};
+    let removed = std::path::Path::new("/sync/w2-case-r3-a/report.pdf");
+    let notice = std::path::Path::new("/sync/w2-case-r3-a/Report.pdf");
+    with_rule_for_test(CaseRule::Insensitive, || {
+        suppress_engine_delete(removed);
+        assert!(take_engine_delete_suppressed(notice), "the notice under the other spelling is the engine's own");
+        assert!(!take_engine_delete_suppressed(removed), "consumed once");
+    });
+    // A case-sensitive volume holds two entries: a delete of the other spelling is the person's.
+    let removed = std::path::Path::new("/sync/w2-case-r3-b/report.pdf");
+    let other = std::path::Path::new("/sync/w2-case-r3-b/Report.pdf");
+    with_rule_for_test(CaseRule::Sensitive, || {
+        suppress_engine_delete(removed);
+        assert!(!take_engine_delete_suppressed(other));
+        assert!(take_engine_delete_suppressed(removed));
+    });
+}
