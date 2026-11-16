@@ -194,8 +194,8 @@ impl ApproveCalls {
 /// session open (`open`: in memory and not held as ended). A screen lock keeps it; a sign-out, a closed vault or
 /// another account does not.
 fn keeps_late(made_for: &Stamp, now: &Stamp, open: bool) -> bool {
-    let _ = open;
-    made_for.1.is_some() && made_for.1 == now.1
+    let _ = now;
+    open && made_for.1.is_some()
 }
 
 /// How an approval's ending reads on the screen.
