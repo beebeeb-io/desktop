@@ -127,8 +127,14 @@ fn keep_on_this_pc_of_a_twin_is_refused_and_writes_nothing() {
         for id in ["same-a", "same-b"] {
             assert_eq!(pin_of(id, true).err().as_deref(), Some(super::SHARED_PLACE), "{id}");
         }
-        assert_eq!(pin_of("lower", false).err().as_deref(), Some(super::SHARED_PLACE));
-        assert_eq!(pin_of("lower", true).err().as_deref(), Some(super::SHARED_PLACE));
+        assert_eq!(
+            pin_of("lower", false).err().as_deref(),
+            Some(super::SHARED_PLACE_BUT_CASE)
+        );
+        assert_eq!(
+            pin_of("lower", true).err().as_deref(),
+            Some(super::SHARED_PLACE_BUT_CASE)
+        );
         assert_eq!(kept(), ["lower"], "nothing pinned, nothing released");
         assert_eq!(ops(), 0, "no change queued for other devices");
         pin_of("upper", true).expect("the row whose spelling the entry has");

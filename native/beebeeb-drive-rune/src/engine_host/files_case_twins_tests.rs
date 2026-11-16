@@ -189,8 +189,9 @@ fn ask(set: &Set, id: &str) -> (Result<(), ActionError>, Vec<PathBuf>) {
     (answer, asked)
 }
 
-/// The refusal a twin's press answers.
-const TWIN: Result<(), ActionError> = Err(ActionError::Failed);
+/// The refusal a press on the case twin answers, and on either of two items with the very same name.
+const CASE_TWIN: Result<(), ActionError> = Err(ActionError::NameSharedButCase);
+const SAME_NAME: Result<(), ActionError> = Err(ActionError::NameShared);
 
 /// Open and Open in another app… (`path_the_system_opens`): the twin and the two same-name items are refused and no
 /// path is handed over; the row whose spelling the entry has, and a row alone, get their own entry.
@@ -198,9 +199,9 @@ const TWIN: Result<(), ActionError> = Err(ActionError::Failed);
 fn open_of_a_twin_never_hands_over_the_other_rows_entry() {
     let set = set("t1");
     with_rule_for_test(CaseRule::Insensitive, || {
-        assert_eq!(ask(&set, LOWER), (TWIN, vec![]), "the case twin");
-        assert_eq!(ask(&set, SAME_A), (TWIN, vec![]), "a same-name twin");
-        assert_eq!(ask(&set, SAME_B), (TWIN, vec![]), "the other same-name twin");
+        assert_eq!(ask(&set, LOWER), (CASE_TWIN, vec![]), "the case twin");
+        assert_eq!(ask(&set, SAME_A), (SAME_NAME, vec![]), "a same-name twin");
+        assert_eq!(ask(&set, SAME_B), (SAME_NAME, vec![]), "the other same-name twin");
         assert_eq!(
             ask(&set, UPPER),
             (Ok(()), vec![set.root.join(set.name("Invented Case", ".txt"))]),
@@ -219,8 +220,8 @@ fn show_in_file_explorer_of_a_twin_is_refused() {
     let mut set = set("t2");
     let mut shown = |set: &mut Set, id: &str| set.source.show_in_file_explorer(&[row(id, "", false)]);
     with_rule_for_test(CaseRule::Insensitive, || {
-        assert_eq!(shown(&mut set, LOWER), TWIN, "the case twin");
-        assert_eq!(shown(&mut set, SAME_A), TWIN, "a same-name twin");
+        assert_eq!(shown(&mut set, LOWER), CASE_TWIN, "the case twin");
+        assert_eq!(shown(&mut set, SAME_A), SAME_NAME, "a same-name twin");
         assert_eq!(shown(&mut set, UPPER), Ok(()));
         assert_eq!(shown(&mut set, ALONE), Ok(()));
     });
@@ -248,14 +249,105 @@ fn show_in_file_explorer_of_a_twin_is_refused() {
 fn open_in_file_explorer_of_a_twin_folder_is_refused() {
     let mut set = set("t3");
     with_rule_for_test(CaseRule::Insensitive, || {
-        assert_eq!(set.source.open_in_file_explorer(Some(DIR_LOWER)), TWIN);
+        assert_eq!(set.source.open_in_file_explorer(Some(DIR_LOWER)), CASE_TWIN);
         assert_eq!(set.source.open_in_file_explorer(Some(DIR_UPPER)), Ok(()));
     });
     // A volume that tells case apart: each spelling is its own entry, nothing is refused for case.
     with_rule_for_test(CaseRule::Sensitive, || {
         assert_eq!(set.source.open_in_file_explorer(Some(DIR_LOWER)), Ok(()));
         assert_eq!(ask(&set, LOWER).0, Ok(()));
-        assert_eq!(ask(&set, SAME_A).0, TWIN, "one name is one entry on every volume");
+        assert_eq!(ask(&set, SAME_A).0, SAME_NAME, "one name is one entry on every volume");
     });
     let _ = &set.engine;
+}
+
+/// The Files list marks each row whose presses on disk are refused, in the PC column's words, and only those; on a
+/// volume that tells case apart only the two items with the very same name.
+#[test]
+fn the_files_list_marks_each_twin_and_only_the_twins() {
+    let set = set("t4");
+    let marks = |rule| {
+        with_rule_for_test(rule, || {
+            let listing = crate::engine_host::EngineDriveSource::new(set.engine.clone())
+                .list(None)
+                .expect("the listing");
+            let mut marks: Vec<(String, Option<String>)> = listing
+                .items
+                .into_iter()
+                .map(|item| (item.id, item.pc_status))
+                .collect();
+            marks.sort();
+            marks
+        })
+    };
+    let all = |lower: &str| {
+        let on = Some("on_this_pc".to_string());
+        vec![
+            (UPPER.to_string(), on.clone()),
+            (LOWER.to_string(), Some(lower.to_string())),
+            (SAME_A.to_string(), Some("name_shared".to_string())),
+            (SAME_B.to_string(), Some("name_shared".to_string())),
+            (DIR_UPPER.to_string(), None),
+            (DIR_LOWER.to_string(), None),
+            (ALONE.to_string(), on),
+        ]
+    };
+    let insensitive = marks(CaseRule::Insensitive);
+    let mut lower_folder_marked = all("name_shared_but_case");
+    lower_folder_marked[5].1 = Some("name_shared_but_case".to_string());
+    assert_eq!(
+        insensitive, lower_folder_marked,
+        "the case twin file and the case twin folder"
+    );
+    assert_eq!(marks(CaseRule::Sensitive), all("on_this_pc"));
+    assert_eq!(
+        crate::frames::files::list::name_shared(Some("name_shared_but_case")),
+        Some("Same name as another item here, except for capital letters")
+    );
+    assert_eq!(crate::frames::files::list::name_shared(Some("on_this_pc")), None);
+}
+
+/// What the message says: each twin refusal says why and what fixes it, and offers no Try again (asking again changes
+/// nothing). Every other Conflict (a folder moved into itself, an item that cannot go to Trash yet) keeps the plain
+/// failure: the twin's words are never said of something else.
+#[test]
+fn a_twin_refusal_says_why_and_a_plain_conflict_does_not() {
+    use crate::frames::files::Toast;
+    use crate::frames::files::source::Action;
+    assert_eq!(
+        Toast::failure(Action::Open, ActionError::NameSharedButCase),
+        "Couldn't open. Another item here has the same name except for capital letters. Rename one on the web to \
+         use it on this PC."
+    );
+    assert_eq!(
+        Toast::failure(Action::Rename, ActionError::NameShared),
+        "Couldn't rename. Another item here has the same name. Rename one on the web to use it on this PC."
+    );
+    assert_eq!(map_drive_err(DriveError::Conflict), ActionError::Failed);
+    assert_eq!(
+        Toast::failure(Action::Move, map_drive_err(DriveError::Conflict)),
+        "Couldn't move."
+    );
+    assert_eq!(
+        map_drive_err(DriveError::SharedPlace(Clash::Case)),
+        ActionError::NameSharedButCase
+    );
+    assert_eq!(
+        map_drive_err(DriveError::SharedPlace(Clash::SameName)),
+        ActionError::NameShared
+    );
+    // Keep on this PC's refusal, from the engine's fixed words.
+    use beebeeb_engine::app::kept_api::{SHARED_PLACE, SHARED_PLACE_BUT_CASE};
+    assert_eq!(
+        crate::engine_host::files::kept_refusal(SHARED_PLACE_BUT_CASE),
+        ActionError::NameSharedButCase
+    );
+    assert_eq!(
+        crate::engine_host::files::kept_refusal(SHARED_PLACE),
+        ActionError::NameShared
+    );
+    assert_eq!(
+        crate::engine_host::files::kept_refusal("could not change what is kept on this computer"),
+        ActionError::Failed
+    );
 }

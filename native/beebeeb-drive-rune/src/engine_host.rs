@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::drive_v2::DriveError;
+use beebeeb_engine::drive_v2::case_place::{self, Clash};
 use beebeeb_engine::drive_v2::model::{self, Sort as EngineSort};
 use beebeeb_engine::engine_status::EngineStatusView;
 use beebeeb_engine::file_ops;
@@ -559,8 +560,13 @@ impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
     /// The whole folder, name ascending, with its crumbs from the root. Before the first sync there is no local
     /// state: that, a folder that is gone and a database that cannot be read are errors, never an empty folder.
     fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError> {
+        let sync_root = self.engine.sync_root().ok();
         let read = |db: &StateDb| -> Result<Listing, DriveError> {
-            let (rows, _total) = model::children_of(db, folder_id, EngineSort::default(), 0, usize::MAX)?;
+            let (mut rows, _total) = model::children_of(db, folder_id, EngineSort::default(), 0, usize::MAX)?;
+            // A row whose place on this PC is another item's is marked: its presses on disk are refused.
+            if let Some(sync_root) = &sync_root {
+                case_place::mark_shared_places(db, sync_root, &mut rows);
+            }
             let folder = model::resolve_folder(db, folder_id)?;
             let path: Vec<_> = model::crumbs(db, folder.as_ref())?
                 .into_iter()
@@ -714,6 +720,8 @@ fn map_drive_err(e: DriveError) -> ActionError {
         DriveError::NameTaken | DriveError::InvalidName => ActionError::NameTaken,
         DriveError::NotFound => ActionError::Failed,
         DriveError::Conflict => ActionError::Failed,
+        DriveError::SharedPlace(Clash::SameName) => ActionError::NameShared,
+        DriveError::SharedPlace(Clash::Case) => ActionError::NameSharedButCase,
         _ => ActionError::Failed,
     }
 }

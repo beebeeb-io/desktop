@@ -91,6 +91,11 @@ pub(crate) fn crumb(crumb: dto::Crumb) -> Crumb {
     }
 }
 
+/// `pc_status` of a row whose place on this PC is another item's with the very same name.
+pub const NAME_SHARED: &str = "name_shared";
+/// `pc_status` of a row whose place on this PC is another item's whose name differs only by capital letters.
+pub const NAME_SHARED_BUT_CASE: &str = "name_shared_but_case";
+
 /// The engine's row as the UI's row. One place, so a field the UI adds is mapped once.
 pub(crate) fn item(item: dto::DriveItem) -> DriveItem {
     DriveItem {
@@ -110,6 +115,9 @@ pub(crate) fn item(item: dto::DriveItem) -> DriveItem {
             dto::LocalState::Downloaded => Some("on_this_pc".to_string()),
             dto::LocalState::OnlineOnly => Some("online_only".to_string()),
             dto::LocalState::AvailableOffline => Some("available_offline".to_string()),
+            // Its place on this PC is another item's (`case_place`): marked, its presses on disk refused.
+            dto::LocalState::NameShared => Some(NAME_SHARED.to_string()),
+            dto::LocalState::NameSharedButCase => Some(NAME_SHARED_BUT_CASE.to_string()),
             // Syncing and failed have no mark in this column yet.
             dto::LocalState::Syncing | dto::LocalState::Failed => None,
         }),

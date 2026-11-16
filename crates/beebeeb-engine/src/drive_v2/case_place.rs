@@ -13,7 +13,7 @@
 //! path are spelled otherwise ([`spelled_as_on_disk`]) WHILE another row has that place. A row alone at its place is
 //! never refused for its spelling: after a rename by case alone elsewhere its entry keeps the old spelling for a while
 //! (a remote rename leaves the entry where it is, `engine_bridge::meta_2`), and the entry is still its own. A place
-//! that is another row's is a [`DriveError::Conflict`]: the other row's bytes are never opened, renamed, moved, copied
+//! that is another row's is a [`DriveError::SharedPlace`]: the other row's bytes are never opened, renamed, moved, copied
 //! or read as this row's. The row stays reachable through every press that goes by its id (Move to Trash, versions, a
 //! link, the in-app viewer's download).
 
@@ -22,6 +22,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::DriveError;
+use super::dto::{DriveItem, LocalState};
 use crate::state_db::{FileEntry, FileStatus, PrunedRow, StateDb};
 
 /// How the volume under the account's folder compares names.
@@ -254,12 +255,33 @@ pub fn place_is_another_rows(db: &StateDb, sync_root: &Path, entry: &FileEntry) 
     Ok(PlaceCheck::new(db, sync_root, CaseRule::host()).clash(entry)?.is_some())
 }
 
+/// Mark the rows of a listing whose place on disk is another row's ([`PlaceCheck::clash`]): their `local` says so
+/// ([`LocalState::NameShared`], [`LocalState::NameSharedButCase`]), as their presses on disk are refused. One pass over
+/// `sync_root` under [`CaseRule::host`]: each folder on the way is read once. A row whose place cannot be read, or that
+/// the local state does not have, keeps the state it had.
+pub fn mark_shared_places(db: &StateDb, sync_root: &Path, items: &mut [DriveItem]) {
+    let mut places = PlaceCheck::new(db, sync_root, CaseRule::host());
+    for item in items {
+        let Ok(Some(entry)) = db.get_file(&item.id) else {
+            continue;
+        };
+        match places.clash(&entry) {
+            Ok(Some(Clash::SameName)) => item.local = Some(LocalState::NameShared),
+            Ok(Some(Clash::Case)) => item.local = Some(LocalState::NameSharedButCase),
+            Ok(None) | Err(_) => {}
+        }
+    }
+}
+
 /// Refuse a press on the place of `entry` (`None`: the account's folder itself, always its own) when it is another
-/// row's ([`place_is_another_rows`]).
+/// row's ([`place_is_another_rows`]), with why ([`DriveError::SharedPlace`]).
 pub fn refuse_shared_place(db: &StateDb, sync_root: &Path, entry: Option<&FileEntry>) -> Result<(), DriveError> {
     match entry {
-        Some(entry) if place_is_another_rows(db, sync_root, entry)? => Err(DriveError::Conflict),
-        _ => Ok(()),
+        Some(entry) => match PlaceCheck::new(db, sync_root, CaseRule::host()).clash(entry)? {
+            Some(clash) => Err(DriveError::SharedPlace(clash)),
+            None => Ok(()),
+        },
+        None => Ok(()),
     }
 }
 

@@ -70,6 +70,12 @@ pub enum ActionError {
     /// its drive, too big for it, or the move failed), and it is never deleted for good. The file and its upload
     /// stay as they were.
     NotToRecycleBin,
+    /// Another item here has the very same name, and this PC holds one entry for the two: the press would reach the
+    /// other item's file, so nothing was done. Asking again changes nothing; renaming one on the web does.
+    NameShared,
+    /// Another item here has the same name but for capital letters, and this PC (which does not tell them apart)
+    /// holds one entry for the two: the press would reach the other item's file, so nothing was done.
+    NameSharedButCase,
 }
 
 /// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").

@@ -34,6 +34,9 @@ pub enum DriveError {
     Quota,
     ReadOnly,
     Conflict,
+    /// The entry at the item's place on disk is another item's (`case_place`: two server items with one name, or one
+    /// name but for case on a volume that compares names without case). Refused; the other item's file is untouched.
+    SharedPlace(case_place::Clash),
     TooLarge,
     Locked,
     SignedOut,
@@ -49,7 +52,7 @@ impl DriveError {
             DriveError::NameTaken => "name-taken",
             DriveError::Quota => "quota",
             DriveError::ReadOnly => "read-only",
-            DriveError::Conflict => "conflict",
+            DriveError::Conflict | DriveError::SharedPlace(_) => "conflict",
             DriveError::Locked => "locked",
             DriveError::SignedOut => "signed-out",
             DriveError::InvalidName | DriveError::Failed(_) => "failed",

@@ -193,6 +193,13 @@ impl Toast {
             ActionError::NotSent => " It has changes that are not uploaded yet.",
             ActionError::HoldsKept => " Something in it is kept on this PC.",
             ActionError::NotToRecycleBin => " This file can't go to the Recycle Bin, so it was left as it is.",
+            ActionError::NameShared => {
+                " Another item here has the same name. Rename one on the web to use it on this PC."
+            }
+            ActionError::NameSharedButCase => {
+                " Another item here has the same name except for capital letters. Rename one on the web to use it on \
+                 this PC."
+            }
             _ => "",
         };
         format!("Couldn't {}.{fix}", action.words())
