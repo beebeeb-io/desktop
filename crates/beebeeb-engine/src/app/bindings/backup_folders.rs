@@ -562,15 +562,9 @@ pub fn add_to_with(
         LocalStateRefused::IdentityUnknown,
     )))?;
     let all = places(config, Some(owner), paths);
-    let taken: Vec<&Place> = all.iter().filter(|place| !place.known).collect();
+    let taken: Vec<&Place> = all.iter().filter(|place| takes(place)).collect();
     if let Some((how, _)) = nested_with(path, &taken, |place| place.path.as_path()) {
         return Err(add_refusal(how));
-    }
-    if all
-        .iter()
-        .any(|place| !takes(place) && nesting(path, &place.path) == Some(Nesting::Same))
-    {
-        return Err(AddRefused::KnownFolderOff);
     }
     let mut taken: Vec<&str> = config
         .backup_chosen_folders
