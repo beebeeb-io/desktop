@@ -1,20 +1,21 @@
 # beebeeb-io/desktop
 
-Beebeeb desktop app (PUBLIC repo). Full Rust on Windows and macOS (0.9.0); the React/Tauri web view was removed on `v2-native`.
-Entrypoints: `src-tauri/src/lib.rs` (`run()`, command handlers); `runner.rs`, `engine_bridge.rs`, `state_db.rs` own scheduling and sync.
+Beebeeb desktop app (PUBLIC repo). Full Rust on Windows and macOS (0.9.0); the React/Tauri app was removed on `v2-native`
+(decision 2537: no Tauri build on any OS).
+Entrypoints: the native app `native/beebeeb-drive-rune/src/main.rs` (hands over to `shell/`); the engine handle a host calls,
+`crates/beebeeb-engine/src/app.rs` (`Engine`); `runner.rs`, `engine_bridge.rs`, `state_db.rs` own scheduling and sync.
 Native UI: `native/beebeeb-drive-rune/` (Rune). Capabilities per OS: `docs/CAPABILITIES.md`.
 Moved detail (release status, architecture, File Provider rules, macOS window rules, API client, sync engine, signing): `docs/agent-notes.md`.
 
 ## Commands
 
 ```sh
-cd src-tauri && cargo check --locked --all-targets           # compile check
-cd src-tauri && cargo test --locked 2>&1 | tee /tmp/bb-desktop-test.log
+cd crates/beebeeb-engine && cargo check --locked --all-targets           # compile check (engine)
 cd crates/beebeeb-engine && cargo test --locked 2>&1 | tee /tmp/bb-engine-test.log
+cd native/beebeeb-drive-rune && cargo test --locked 2>&1 | tee /tmp/bb-native-test.log   # the native app (Rust 1.99.1)
 cd crates/beebeeb-updater && cargo test --locked --features net   # the native updater's rules
 python3 scripts/assert-cargo-test-counts.py --self-test      # the count guard CI uses (proves it rejects empty runs)
 scripts/check-engine-boundary.sh                              # engine must not depend on tauri
-scripts/release-macos-local.sh <VERSION> <CHANNEL>           # macOS release: local only, fail-closed (docs/RELEASING.md)
 ```
 
 Truth lines: `cargo test` -> per-binary `test result: ok. N passed; 0 failed` (each library/integration binary must execute tests; only the
@@ -27,18 +28,19 @@ Quiet checks, from the workspace root: `make test-quiet REPO=desktop` and `make 
 Module map: `MAP.md` (generated; `make map REPO=desktop`) -- start here for "where does X live"; do not hand-edit.
 
 ```
-src-tauri/src/lib.rs        run(): Builder + #[tauri::command] handlers (41k lines: outline it, never read it whole); capabilities/default.json = permissions
-src-tauri/src/runner.rs, engine_bridge/, state_db.rs   scheduling, bridge to core's sync engine, local state (state.db records the account owner)
-src-tauri/src/account_binding.rs, own_data_proof.rs    R10: local data belongs to ONE account; every engine start goes through spawn_bound_engine
-src-tauri/src/config.rs     DesktopConfig: written only via try_update_at_then (one lock, not re-entrant)
-src-tauri/src/api_client.rs, api_client/direct.rs, direct_download.rs, download_pin.rs   provenance headers, direct S3, version-bound downloads
-src-tauri/src/keychain.rs, session_commands.rs, sign_out/, browser_login.rs, reauth.rs   credentials (OS store), sign-in/out
-src-tauri/src/finder_setup/, finder_removal.rs, macos_file_provider.rs, macos_popover.rs, surfaces/   macOS Finder + window surfaces
-src-tauri/src/windows_cf/   Windows Cloud Files (CFAPI); linux_fuse/ = unmounted prototype
+native/beebeeb-drive-rune/  the Rune-based native app (0.9.0): main.rs, shell/ (lifetime, windows, tray), frames/, engine_host/
+crates/beebeeb-engine/      the sync engine (no tauri dep); tests/fixtures/ holds the JSON contract fixtures. Under src/:
+  app.rs, app/              the `Engine` handle the native app calls (sign-in, unlock, sync start/stop, lists)
+  runner.rs, engine_bridge/, state_db.rs   scheduling, bridge to core's sync engine, local state (state.db records the account owner)
+  account_binding.rs, own_data_proof.rs    R10: local data belongs to ONE account; every engine start goes through spawn_bound_engine
+  config.rs, config/        DesktopConfig: written only via try_update_at_then (one lock, not re-entrant)
+  api_client.rs, api_client/direct.rs, direct_download.rs, download_pin.rs   provenance headers, direct S3, version-bound downloads
+  keychain.rs, session_commands.rs, sign_out/, signin/, reauth.rs   credentials (OS store), sign-in/out
+  windows_cf/               Windows Cloud Files (CFAPI); linux_fuse/ = unmounted prototype
 BeebeebFileProvider/        macOS File Provider extension (Swift; ExtensionLog.swift is its only logger); built by scripts/build-fileprovider-extension.sh
-src-tauri/macos/FileProviderBridge.m   ObjC bridge; scripts/ (release, signing, count guards)
-native/beebeeb-drive-rune/  the Rune-based native UI (0.9.0)
-crates/beebeeb-engine/      the sync engine (no tauri dep); tests/fixtures/ holds the JSON contract fixtures
+packaging/macos/            FileProviderBridge.m (the ObjC bridge), entitlements, icons: the macOS phase's inputs
+native/beebeeb-drive-rune/docs/macos/   the macOS phase's carried rules (Finder domain, removal, sign-out, menu bar, packaging and signing)
+scripts/                    CI and release tooling (count guards, core pin, engine boundary, release checks)
 crates/beebeeb-updater/     the native updater (no Tauri, no UI): manifest, minisign check, policy, one State + step
 docs/ (RELEASING.md, CAPABILITIES.md, IPC_PROTOCOL.md, specs/, plans/)
 packaging/windows/          the native app's NSIS installer by plain makensis (README.md = the lead's Windows commands and the upgrade rehearsal)
@@ -65,7 +67,8 @@ packaging/windows/          the native app's NSIS installer by plain makensis (R
 
 The rules whose breakage costs data, a key, a credential or a user. One line each; the detail is in `docs/agent-notes.md`.
 
-- macOS builds locally, not in CI (Developer ID key never exported — task 1608). macOS release = `scripts/release-macos-local.sh <VERSION> <CHANNEL>`.
+- macOS builds locally, not in CI (Developer ID key never exported — task 1608). The macOS release steps are carried in
+  `native/beebeeb-drive-rune/docs/macos/packaging-signing-update.md` (the 0.8.x script went with the Tauri app).
 - The updater private key `~/.tauri/beebeeb-desktop.key` is mode 0600, **never commit**; generated without a password, so rotate before public release.
 - File Provider logs only through `ExtensionLog`, never `NSLog` (on macOS 26 it reaches the unified log as `<private>`); never a path, file name or error text.
 - Finder blocker is provisioning: fix signing/provisioning — never mask as a UI timeout or a fake local folder root.
@@ -80,7 +83,7 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 - A null `download_version` (legacy) keeps the unpinned download; never invent a pin. Windows Cloud Files roots are PROGRESSIVE (LD-0105 W1); a placeholder's bytes are trusted only for its recorded minted version (task 2180), else it is poisoned and emptied (S6), never written into.
 - Finder writes (`write_id`): record the completion first; the op is never abandoned/parked — it retries only local landing (one transaction).
 - A sync-folder create, truncate, replace, rename, copy, upload-from or delete by a name the folder did not report asks `name_alias::conflict_below` (core's `short_name_alias`) first, and takes its conflict path on a conflict: on Windows the name can reach another file through its 8.3 short name (task 2407).
-- A per-app name (bundle id, config/state folder, credential service, sync folder, Cloud Files provider name/GUID/class ids, backup device, daemon socket, app group, log folder) comes from the `EngineIdentity` the code is handed (`crates/beebeeb-engine/src/identity.rs`: `REAL` and `TEST`, nothing else): never a literal, never `identity::REAL` outside `src-tauri/src/real_app.rs` and the native `shell/identity.rs` (`identity_pin_tests.rs`). A native build is the TEST app unless built with `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app`.
+- A per-app name (bundle id, config/state folder, credential service, sync folder, Cloud Files provider name/GUID/class ids, backup device, daemon socket, app group, log folder) comes from the `EngineIdentity` the code is handed (`crates/beebeeb-engine/src/identity.rs`: `REAL` and `TEST`, nothing else): never a literal, never `identity::REAL` outside the two identity files (`crates/beebeeb-engine/src/identity.rs` and the native `shell/identity.rs`) and the native build script (`identity_pin_tests.rs`). A native build is the TEST app unless built with `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app`.
 - A storage location is a COUNTRY, never a city (Guus, 2026-10-19).
 - The Backups root is the row flagged `system_role = backups_root`, never a folder found by name; everything at or under it, and a move into it, is refused BEFORE a Windows delete/rename and by Finder's capabilities (core's `check_drive_mutation` on its `BackupPosition`; an item created in the tree is not refused), answered from the state DB only (never the network, never this process's own change); its files are read-only (Windows `FILE_ATTRIBUTE_READONLY`, which the engine's own changes lift through `read_only::Lifted` only; Finder without `allowsWriting`); a device's `.device.json` is never listed; `docs/CAPABILITIES.md` (LD-0113).
 
@@ -92,7 +95,6 @@ gates"): each builder pushes a branch with a compile check (Linux + Windows), it
 its own frames, and opens no PR; ONE integration PR per wave carries the ONE full run (engine + native crates) and the ONE review.
 Workspace `AGENTS.md` → "Batch, then gate". Here: the truth lines above; macOS UI follows the
 specs in `docs/specs/` and the design files in `design/` (design wins over code; deviations are recorded before the code changes).
-New command: `#[tauri::command]` in `lib.rs`, register in `invoke_handler!`, permission in `capabilities/default.json` if it touches an OS API.
 
 ## Design files
 

@@ -1,6 +1,6 @@
 //! The drive window's data, read from the local state database: the DTOs a shell shows (`dto`) and the view
-//! models that build them (`model`). No Tauri type appears here; the Tauri shell wraps these in its `drive_*`
-//! commands (`src-tauri/src/drive_v2/commands.rs`) and the Rune shell calls them directly.
+//! models that build them (`model`). No Tauri type appears here; the 0.8.x Tauri shell wrapped these in its `drive_*`
+//! commands (`src-tauri/src/drive_v2/commands.rs`); the Rune shell calls them directly.
 //!
 //! Errors are `"<code>: <detail>"` with a `DriveSourceError` code; the detail is a fixed word,
 //! never a path or a name.

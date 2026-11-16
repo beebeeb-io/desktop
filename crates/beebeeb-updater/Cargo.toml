@@ -8,7 +8,7 @@ license = "AGPL-3.0-or-later"
 
 # Design: docs/superpowers/specs/2026-11-11-native-installer-updater.md.
 # Rule: no `tauri` crate in this dependency tree, ever (`cargo tree -p beebeeb-updater | grep -c tauri` prints 0).
-# Versions match `src-tauri/Cargo.toml` where both use a crate, so the desktop app links one copy.
+# Where the native app's manifest names the same crate, keep the two versions equal, so the app links one copy.
 
 [dependencies]
 base64 = "0.22"

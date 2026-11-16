@@ -2,6 +2,12 @@
 
 Desktop releases ship with authored, workbench-style release notes. The generated GitHub changelog still matters, but it is appended after the authored notes instead of being the only release body.
 
+**Two release lines.** The native app (0.9.0 and later) is released by `.github/workflows/release-native-windows.yml`
+("Native Windows releases (0.9.0 and later)" below). The 0.8.x Tauri app is released from `main` with that line's own
+`release.yml` until `v2-native` merges into `main`; on `v2-native` the Tauri app, `release.yml`, the macOS signing
+workflow and the macOS release scripts are gone (no Tauri build on any OS in 0.9.0). Sections that describe only the
+0.8.x line say so; that line's full copy of this file is on `main` and at tag `desktop-v0.8.25`.
+
 ## Release blockers
 
 `RELEASE_BLOCKERS.md` at the repository root lists what must be fixed before any desktop release is cut, one list item (a line that starts with `- `) per blocker. While it lists an item, the release checks refuse: `release.yml` fails closed in its "Validate release notes" job (step "Refuse while RELEASE_BLOCKERS.md lists an item", with an `::error` that names the file), and `scripts/release-macos-local.sh` stops at step 1 and prints the items. A blocker is added when a merge to main ships something that must not reach a release yet, and the change that resolves it removes its item; an empty list, or no file, lets the release through. It exists because a rule that lives only in someone's memory does not stop a release: the first blocker is that a sign-out discards Finder saves still waiting to upload, so no release may ship the Finder write queue until that is fixed. `scripts/test-release-macos-local.sh` has a scenario that proves the script refuses. An item prefixed `- [macOS] ` (exact token, case-sensitive) is scoped to macOS only and is skipped by the Windows and Linux release workflow; `scripts/release-blockers-check.sh` implements the scope logic, and `scripts/test-release-blockers-check.sh` covers it.
@@ -74,9 +80,10 @@ tested in `tests/releaseChannelChecks.test.ts`):
 
   > macOS: not in this release; it follows in a later version.
 
-  (`MACOS_NOT_IN_RELEASE_LINE` in `scripts/release-channel-checks.mjs`.) The `release.yml`
+  (`MACOS_NOT_IN_RELEASE_LINE` in `scripts/release-channel-checks.mjs`.) The 0.8.x `release.yml`
   workflow detects the binding `[macOS]` items automatically and passes `--no-macos` to the
-  validator; `scripts/test-release-blockers-check.sh` and `tests/releaseChannelChecks.test.ts`
+  validator; `release-native-windows.yml` always passes it (a native release is Windows only).
+  `scripts/test-release-blockers-check.sh` and `scripts/tests/releaseChannelChecks.test.ts`
   cover both branches.
 
 Windows releases publish both NSIS (`setup.exe`) and MSI assets. Keep the updater manifest split
@@ -85,10 +92,14 @@ point at the MSI asset, and the generic `windows-x86_64` fallback should stay on
 fresh installs are documented as NSIS installs. Mixing installer types during an update creates
 separate Windows Installed Apps entries.
 
-## Updater Signing Key Rotation
+## Updater Signing Key Rotation (0.8.x line)
 
-Tauri's updater verifies update packages with the public key baked into the installed app at
-build time (`src-tauri/tauri.conf.json` → `plugins.updater.pubkey`). The GitHub release workflow
+This section is the 0.8.x line's. The native line's key is its own (`crates/beebeeb-updater/keys/updater-v2.pub`;
+"Native Windows releases" below).
+
+Tauri's updater verifies update packages with the public key baked into the installed 0.8.x app at
+build time (that app's `tauri.conf.json` → `plugins.updater.pubkey`; this repo keeps the same key as
+`crates/beebeeb-updater/keys/updater-0.8.pub`). The GitHub release workflow
 signs updater packages with `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; the published channel manifest then carries the generated
 `.sig` file contents as each platform's `signature`.
@@ -97,7 +108,7 @@ Never switch the CI signing secret and the baked public key in the same release.
 is a two-release sequence:
 
 1. **Transition release N:** the release commit contains the **new** public key in
-   `src-tauri/tauri.conf.json`, but CI still uses the **old** `TAURI_SIGNING_PRIVATE_KEY`. Existing
+   the app's `tauri.conf.json`, but CI still uses the **old** `TAURI_SIGNING_PRIVATE_KEY`. Existing
    installs trust only the old baked key, so they can verify and apply this release. After applying
    it, those installs contain the new baked public key.
 2. **New-key release N+1:** only after release N has shipped and Guus has explicitly decided it is
@@ -132,7 +143,8 @@ The two checklists below stay for the next rotation.
 ### Signature-key guard
 
 `scripts/check-updater-signature-key.mjs` decodes the minisign key ID of each updater signature
-and compares it with the key ID of `plugins.updater.pubkey` in `tauri.conf.json`. The release
+and compares it with the key ID of the 0.8.x key (`crates/beebeeb-updater/keys/updater-0.8.pub`) by
+default, or of the key named by `--pubkey-file` (the native line passes `updater-v2.pub`). The release
 workflow runs it twice and fails closed on any mismatch:
 
 - in the build job, on every staged `release-assets/*.sig` (before anything is published), and
@@ -161,7 +173,7 @@ anything else.
 
 Mechanical checklist for release N:
 
-1. Confirm `src-tauri/tauri.conf.json` contains the new public key fingerprint
+1. Confirm the release commit's `tauri.conf.json` contains the new public key fingerprint
    `C6FADFD59D732197`.
 2. Confirm repository/organization secrets still point at the old updater signing key. Do not
    update `TAURI_SIGNING_PRIVATE_KEY` or `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` yet.
@@ -220,7 +232,9 @@ Service coordinates (non-secret):
 | CI identity | app registration `beebeeb-desktop-release`, federated credential `repo:beebeeb-io/desktop:environment:desktop-release` (GitHub environment `desktop-release`, deployment branches `main` and `release/*`) |
 | Role | `Artifact Signing Certificate Profile Signer`, scoped to the account |
 
-How a release build signs (all in `release.yml`, Windows job only):
+How a 0.8.x release build signs (all in that line's `release.yml`, Windows job only; the native workflow uses the
+same Azure account, environment and trust boundary, with its own steps in `release-native-windows.yml` → `build`:
+"Azure login for Artifact Signing (OIDC)", "Build and sign the installer", the Authenticode gate):
 
 1. `azure/login` authenticates by GitHub OIDC federated credential — no
    client secret or certificate is stored anywhere. It supplies the
@@ -251,12 +265,14 @@ How a release build signs (all in `release.yml`, Windows job only):
    gate's `-SelfTest` must first reject an unsigned and a wrong-publisher
    fixture. Any failure blocks the release.
 
-Dispatch `release.yml` from `main` or from a `release/*` branch. No Azure step is
+Dispatch the release workflow (`release-native-windows.yml`; `release.yml` on the 0.8.x line) from `main` or from a
+`release/*` branch. No Azure step is
 needed per release. The trust boundary has four parts, and each one is checked:
 
 - **Azure trusts one subject:** `repo:beebeeb-io/desktop:environment:desktop-release`.
   Only a job that names the GitHub environment `desktop-release` gets that subject in
-  its OIDC token. In `release.yml` that is the `build` job.
+  its OIDC token. In `release-native-windows.yml` those are `build` and `publish-manifest` (in the 0.8.x
+  `release.yml`, `build`).
 - **The environment deploys only from `main` and `release/*`** (custom deployment
   branch policies; admins cannot bypass them). A run from any other branch is refused
   before the job starts, so it never gets a token Azure accepts.
@@ -269,7 +285,9 @@ needed per release. The trust boundary has four parts, and each one is checked:
       method "merge", review threads resolved);
     - the six CI jobs every release branch runs must pass: Frontend, Rust check
       (Windows), Rust check (macOS), Rust test (Linux), File Provider Swift (macOS), and
-      the macOS release script check;
+      the macOS release script check (on `v2-native` five of the six are gone: the Tauri suites,
+      Frontend and the macOS release script check; the ruleset needs updating before `v2-native`
+      merges into `main`, or a `release/*` pull request waits on checks that never report);
     - force-pushes are refused.
   - A release-branch merge is a plain `gh pr merge --merge` once those checks are
     green. `--admin` is neither needed nor used. A direct push, even with an admin
@@ -287,8 +305,8 @@ needed per release. The trust boundary has four parts, and each one is checked:
     - Creating a release branch is not a pull request. The required checks are not
       enforced on creation, and CI does not run on pushes to `release/*`.
     - So an admin who creates (or deletes and recreates) `release/x.y.z` at an
-      unreviewed commit gets a branch that `release.yml` can sign.
-    - `release.yml`'s own test gate still runs on that commit, but nothing reviews it.
+      unreviewed commit gets a branch that the release workflow can sign.
+    - The release workflow's own test gate still runs on that commit, but nothing reviews it.
     - The rule: cut a release branch only from a `desktop-v*` tag whose commit is the merge
       commit of a pull request merged into `main` or a `release/*` branch, and which has a
       published GitHub release, or from a commit on `main`. Keep the cut commit in the release
@@ -299,11 +317,12 @@ needed per release. The trust boundary has four parts, and each one is checked:
     - A tag ruleset that limits tagging to the release workflow is not possible: GitHub refuses
       the Actions app as a bypass actor (HTTP 422). That is why the check below tests the tag
       commit itself instead of protecting the tag.
-    - `release.yml` enforces that rule (task 2281, next bullet): it refuses any other
+    - The release workflow enforces that rule (task 2281, next bullet): it refuses any other
       branch point before signing.
   - Neither ruleset limits who holds an admin token. A tool or session acting with an
     admin's token can still create, delete or recreate a release branch.
-- **`release.yml` refuses an unreviewed branch point:** `verify-branch-point` runs before
+- **The release workflow refuses an unreviewed branch point** (`release-native-windows.yml` here, `release.yml` on
+  the 0.8.x line): `verify-branch-point` runs before
   `build`, so before any job holds the `desktop-release` environment or an Azure token. For a
   dispatch from a `release/*` branch it walks the branch's first-parent history from the
   dispatched commit back to its starting point (the first commit that is not a merge of a pull
@@ -346,104 +365,13 @@ timestamp keeps every published signature valid indefinitely. Nothing in this
 repo or in CI secrets can impersonate the publisher — only that Azure account
 plus the GitHub workflow's OIDC subject can.
 
-## macOS: local build, then backfill the manifest
+## macOS
 
-macOS is not in `release.yml`'s CI build matrix (see the matrix comment) — Developer ID signing
-happens on a Mac that holds the `Developer ID Application: Devidee B.V. (R8352WDJJR)` keychain
-identity, never via an exported `.p12` CI secret. Once Windows and Linux have already been built
-and the GitHub release created by the normal workflow run (Procedure below, step 3), the macOS
-part is ONE command on an Apple Silicon Mac.
+There is no 0.9.0 macOS build yet. The 0.8.x macOS release (a local build on a Mac holding the Developer ID identity,
+then a manifest backfill) went with the Tauri app; its steps, checks and acceptance list are carried in
+`native/beebeeb-drive-rune/docs/macos/packaging-signing-update.md` for the macOS phase.
 
-### The one command
-
-```sh
-git fetch origin tag desktop-v0.8.7
-git worktree add ../desktop-rel-0.8.7 --detach desktop-v0.8.7   # exactly the commit CI built
-cd ../desktop-rel-0.8.7
-scripts/release-macos-local.sh 0.8.7 alpha --dry-run            # read every command first
-scripts/release-macos-local.sh 0.8.7 alpha
-```
-
-`scripts/release-macos-local.sh <VERSION> <CHANNEL> [--dry-run] [--from-step N] [--skip-local-sig-check]` runs the 13 steps
-below, prints a banner per step, and **stops at the first failure** with the cause, a remediation
-and the exact `--from-step N` resume command. Everything that can say "no" runs before the first
-upload (step 10); a failure before it leaves GitHub untouched, and the failure message says so.
-
-| Step | What it does | Fail-closed gate |
-| --- | --- | --- |
-| 1 | Release-state gate (always runs, also on resume) | clean tree; `HEAD` == the commit `desktop-v<VERSION>` points to on origin; the CI release exists with its Windows/Linux `.sig`s; `RELEASE_NOTES.md` names the version, has no `<!-- lead:` marker and carries real test counts (`<N> pass / 0 fail`, `test result: ok. <N> passed`, both non-zero); `RELEASE_BLOCKERS.md` lists no item (see "Release blockers"); `minisign` installed (unless `--skip-local-sig-check`); signing identity, both profiles and the ASC key present; Apple Silicon |
-| 2 | Build (`bun install --frozen-lockfile`, version patched into `tauri.conf.json` for the build only, hardened runtime on) with `--bundles app` and a `--config` override turning `createUpdaterArtifacts` off, updater signing variables stripped. Records the commit it built from in `<VERSION>/build-commit` | a resume past this step (`--from-step` 3-13) is refused in step 1 unless that commit equals `HEAD`; `tauri.conf.json` and the tracked `dist/index.html` are restored the moment the build ends and again on any exit; the tree must be clean afterwards |
-| 3 | Preflight the unnotarized `.app` | `CFBundleShortVersionString == VERSION`; `macos-release-preflight.sh` (hardened runtime on the app, appex and helper, profiles, entry-point guard). The `spctl` execute assessment is skipped on this pass only (`BB_PREFLIGHT_SKIP_SPCTL_EXECUTE`) because Gatekeeper cannot accept an app Apple has not notarized yet |
-| 4 | Notarize the `.app` (`notarytool submit --wait`, ASC API key) | status must be `Accepted`; otherwise the notary log's issues are printed |
-| 5 | Staple the `.app`, then verify | `stapler validate`, `codesign --verify --deep --strict`, `spctl -a -vv` must say `source=Notarized Developer ID`, full preflight |
-| 6 | Rebuild the `.dmg` from the **stapled** app (`ditto` into a stage folder with an `/Applications` link, `hdiutil create`, `codesign --timestamp`) | the stage copy must validate as stapled; the dmg must verify and show a Developer ID authority |
-| 7 | Notarize the `.dmg` | status `Accepted` |
-| 8 | Staple the `.dmg`, then verify | `stapler validate`, `spctl -a -vv -t install` must say `source=Notarized Developer ID`, preflight (`hdiutil verify`), and the dmg is mounted read-only to prove the app inside is stapled and versioned |
-| 9 | Create the updater `Beebeeb.app.tar.gz` from the stapled app (step 2 builds none: updater artifacts are off there) | single top-level `Beebeeb.app`; the extracted app is stapled and versioned |
-| 10 | `gh release upload` dmg + updater bundle to `desktop-v<VERSION>` | both are downloaded again and their sha256 must equal the local files; a stale `.sig` from an earlier attempt is deleted first |
-| 11 | Dispatch `sign-macos-updater-artifact.yml`, wait (the run is identified by the URL `gh workflow run` prints; without one, only if exactly one new run exists, otherwise the script stops instead of guessing) | run must succeed; `Beebeeb.app.tar.gz.sig` must exist on the release; verified with `minisign` against the tarball and the baked public key (`BB_UPDATER_VERIFY_PUBKEY` overrides the key for a rotation transition release); fails closed without `minisign` unless `--skip-local-sig-check` |
-| 12 | Dispatch `release.yml` (`publish_existing=true`, same version/channel), wait | run must succeed |
-| 13 | Read the channel manifest from `beebeeb-io/releases` | `version == VERSION`, `darwin-aarch64` points at this release's `Beebeeb.app.tar.gz`, its signature string equals the uploaded `.sig` (a consistency check only; step 11 is what verifies the signature), Linux/Windows entries still on this tag |
-
-Defaults, all overridable by environment (no secret is stored in the script or the repo):
-
-| Variable | Default |
-| --- | --- |
-| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Devidee B.V. (R8352WDJJR)` (or the SHA-1 hash) |
-| `MACOS_APP_PROVISION_PROFILE`, `MACOS_FILE_PROVIDER_PROVISION_PROFILE` | `~/.private_keys/macos-developer-id-profiles/{BeebeebApp,BeebeebFileProvider}.provisionprofile` |
-| `BB_NOTARY_KEY_ID`, `BB_NOTARY_ISSUER` | `5KRWK96245`, `8cacf7df-c877-47db-aab2-7c9f1f9f5fda` (App Store Connect API key identifiers, not secrets) |
-| `BB_NOTARY_KEY_PATH` | `~/.private_keys/AuthKey_<key id>.p8` |
-| `BB_RELEASE_REPO`, `BB_RELEASES_REPO`, `BB_WORKFLOW_REF` | `beebeeb-io/desktop`, `beebeeb-io/releases`, `main` |
-| `BB_NOTARY_TIMEOUT`, `BB_POLL_INTERVAL`, `BB_WORKFLOW_TIMEOUT` | `45m`, `15` (s), `1800` (s) |
-
-`--dry-run` prints every command of every step and runs none (not even `git`). `--from-step N`
-resumes at step N; step 1 still runs, and each later step fails with a clear message if the
-artifacts from the earlier steps are not on disk or were built from another commit than `HEAD` (they live in
-`src-tauri/target/release-macos-local/<VERSION>/` and `src-tauri/target/<triple>/release/bundle/`).
-Notary submission ids, file hashes and workflow run ids are written to `release-summary.txt` there.
-
-What the script does **not** do, by design: it never commits anything, never touches the stable
-manifest unless you pass `stable`, and never replaces installing the dmg on a Mac and exercising
-it. A release is verified by `RELEASE_NOTES.md` naming the version AND the workflow runs being
-green AND the manifest resolving (step 13), and, for a Finder-facing change, by a hand test.
-
-Step 2 builds only the `.app` (`--bundles app`), so Tauri's `bundle_dmg.sh` never runs, and the dmg is built with `hdiutil`: that script styles the
-window through Finder AppleScript and failed with `-10006` (Automation permission) during the
-0.8.5 cut. Updater artifacts are switched off for the local build because the updater private key (`TAURI_SIGNING_PRIVATE_KEY`) exists only as a CI secret since the 2026-09-25 rotation, and Tauri exits non-zero when it is asked for a signed updater bundle without it; the file keeps `createUpdaterArtifacts: true` (preflight asserts it, CI needs it) and the off switch is a CLI override. The consequence is a plain volume (the app and an `/Applications` link) without
-Tauri's icon positions; compare it with the previous dmg once and say so if that matters.
-
-`scripts/test-release-macos-local.sh` is the Linux-runnable test of this script (shims for the
-macOS and GitHub tools; it asserts the step order, the artifact contents and each fail-closed
-gate, and is counted: `release-macos-local: N passed, 0 failed`). CI runs it as the job
-"macOS release script (shim test)". It does not prove that Apple's tools behave like the shims.
-
-### Manual steps (reference)
-
-The script automates exactly this sequence; keep it as the reference for what each step means and
-for running a single step by hand.
-
-1. **Set the app version first** (the script does this for you in step 2; task 1670 issue 3: this step was missing, and a local bundle built without it is versioned `0.1.0`, the placeholder in `src-tauri/tauri.conf.json`, because Tauri names the bundle and reports `CFBundleShortVersionString` from that file's own `version`). It mirrors the `Set app version for this release` step in `.github/workflows/release.yml` (the `jq --arg version "$RELEASE_VERSION" '.version = $version' src-tauri/tauri.conf.json` line, ~L238). Run it in the release worktree, on plain semver only, and never commit the result. Edit `VERSION` to the release version (plain semver, no `-alpha`/`-beta` suffix) and paste the block into your interactive shell. It carries no comments on purpose: macOS's default interactive zsh has `interactive_comments` off, so a trailing `# ...` on the `VERSION=` line is parsed as a command and `VERSION` is never set. It uses if/else, not `|| exit 1`, because `exit` in a pasted block would close your terminal. It works in both zsh and bash. Afterwards `jq -r .version` must print `VERSION`, not `0.1.0`; a bad `VERSION` prints the "plain semver only" line and changes nothing.
-
-   ```sh
-   VERSION=0.8.7
-   if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-     jq --arg version "$VERSION" '.version = $version' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp \
-       && mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
-     jq -r .version src-tauri/tauri.conf.json
-   else
-     echo "plain semver only: got '$VERSION'" >&2
-   fi
-   ```
-
-   After the build, `plutil -extract CFBundleShortVersionString raw <built .app>/Contents/Info.plist` must print the same version.
-2. Build locally: `APPLE_SIGNING_IDENTITY=<Developer ID hash> MACOS_APP_PROVISION_PROFILE=… MACOS_FILE_PROVIDER_PROVISION_PROFILE=… BEEBEEB_RELEASE_VERSION=<version> BEEBEEB_MACOS_HARDENED_RUNTIME=1 bunx tauri build --target aarch64-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked` (no updater private key exists on this Mac, so updater artifacts are off and only the `.app` is built; Apple Silicon only for now — see the matrix comment for why). `BEEBEEB_MACOS_HARDENED_RUNTIME=1` is required for a release build: it turns on hardened runtime + secure timestamps on the File Provider extension and its CTL helper, which notarization requires on every nested executable, not just the app.
-3. Run `scripts/macos-release-preflight.sh <path to the built .app>` — it fails closed if hardened runtime, the provisioning profiles, or the File Provider entry-point guard (task 1524) are wrong.
-4. Notarize the `.app` (zip it first — `ditto -c -k --keepParent Beebeeb.app app.zip`), `xcrun notarytool submit --wait`, then `xcrun stapler staple` it, before building the `.dmg` from the now-stapled app — this way the ticket travels with the app inside the dmg too. Then notarize + staple the `.dmg` itself. `scripts/macos-release-preflight.sh <artifact>` re-run on each proves `spctl -a -vv` / `spctl -a -vv -t install` both say `source=Notarized Developer ID`.
-5. Upload the `.dmg` and the updater bundle (made by hand from the stapled app, `tar -czf Beebeeb.app.tar.gz Beebeeb.app` — named from `productName` alone, no version/arch suffix; do not confuse it with the versioned `.dmg` filename) to the existing `desktop-v<version>` GitHub release with `gh release upload`.
-6. The updater `.sig` needs `TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD`, which since the 2026-09-25 rotation (desktop PR #62) exists only as this repo's CI secret. Run `.github/workflows/sign-macos-updater-artifact.yml` via `gh workflow run … -f release_tag=desktop-v<version>` to sign the uploaded `Beebeeb.app.tar.gz` and upload the resulting `.sig` back to the same release — this is the only CI step in the whole macOS route, and it never touches Developer ID material.
-7. Re-run `release.yml` with `publish_existing=true` for the same `version`/`channel` — the `publish-manifest` job's `fetch_optional_sig` now finds the macOS `.sig` and backfills the `darwin-aarch64` manifest entry (see that job's comments) without rebuilding or re-tagging Windows/Linux.
-
-## Build Once, Promote By Manifest
+## Build Once, Promote By Manifest (0.8.x line)
 
 Desktop release artifacts are built once with a plain semver version such as `0.2.1`. Do not bake
 `-alpha` or `-beta` into the release version. The release channel is selected separately in the
@@ -459,12 +387,14 @@ downgrade messaging. `DesktopConfig.release_channel` remains only the user's con
 check next. Switching the configured channel does not rewrite the current-channel display until an
 update or downgrade is actually installed from that channel.
 
-## Procedure
+## Procedure (0.8.x line, on `main`)
+
+The native line's procedure is "Native Windows releases (0.9.0 and later)" below.
 
 1. Author `RELEASE_NOTES.md` at the repository root for the plain semver version being cut, such as `0.2.1`.
 2. Commit `RELEASE_NOTES.md` with the release preparation changes.
 3. Trigger `.github/workflows/release.yml` with `version=<plain semver>`, `channel=<initial channel>`, and `publish_existing=false`.
-4. The workflow validates the notes, then runs the release test gate on `ubuntu-latest` (`bun test` for the frontend suite and `cargo test --locked` from `src-tauri` for the Rust crate). It fails closed before the Windows/Linux build matrix if `RELEASE_NOTES.md` is missing, the notes do not mention the exact version string, or either test command fails — no installer artifacts are produced until the gate is green.
+4. The workflow validates the notes, then runs the release test gate on `ubuntu-latest` (`bun test` for the frontend suite and `cargo test --locked` in the Tauri crate). It fails closed before the Windows/Linux build matrix if `RELEASE_NOTES.md` is missing, the notes do not mention the exact version string, or either test command fails — no installer artifacts are produced until the gate is green.
 5. Once the gate passes, the workflow runs the Windows/Linux build matrix once, creates `desktop-v<version>`, uploads the assets, then publishes only the selected channel manifest.
 6. Promote the same build to another channel by rerunning `.github/workflows/release.yml` with the same `version`, the new `channel`, and `publish_existing=true`.
 7. A `publish_existing=true` run skips release-note validation, skips the test gate, skips the build matrix, skips GitHub release creation, and only rewrites the selected channel manifest to point at the existing `desktop-v<version>` assets.
@@ -475,8 +405,10 @@ update or downgrade is actually installed from that channel.
 
 ## Native Windows releases (0.9.0 and later)
 
-The native Windows app has its own workflow, `.github/workflows/release-native-windows.yml`; `release.yml` stays the
-0.8.x path and is the only writer of `desktop/latest.json`, `beta.json` and `alpha.json`. Design and open decisions:
+The native Windows app has its own workflow, `.github/workflows/release-native-windows.yml`; the 0.8.x line's
+`release.yml` (on `main`) is the only writer of `desktop/latest.json`, `beta.json` and `alpha.json`, and it goes when
+`v2-native` merges into `main`. Whether the 0.8.25 bridge is promoted to beta and stable from the 0.8.x line before that
+merge, so that every 0.8.x install passes through it, is Guus's call (D-T-14). Design and open decisions:
 `docs/superpowers/specs/2026-11-11-native-installer-updater.md`. **Status: the workflow has never run.**
 
 - Same inputs (`version`, `channel`, `publish_existing`); a version below 0.9.0 is refused. Same gates: authored
@@ -488,7 +420,8 @@ The native Windows app has its own workflow, `.github/workflows/release-native-w
   `crates/beebeeb-updater/keys/updater-v2.pub`; private half only as the `desktop-release` environment's secrets
   `UPDATER_V2_PRIVATE_KEY` / `UPDATER_V2_PRIVATE_KEY_PASSWORD`). The 0.8.x key signs 0.8.x only. A native build
   trusts the v2 key alone; 0.8.25 trusts both, each for its own line.
-- Every job that signs (here `build` and `publish-manifest`; `release.yml`'s `build`; the macOS signing workflow)
+- Every job that signs (here `build` and `publish-manifest`; on the 0.8.x line also `release.yml`'s `build` and the
+  macOS signing workflow)
   names the `desktop-release` environment, and no step that holds a key installs dependencies. The settings that
   make this a boundary are in the spec, section 6 ("Settings Guus must make").
 - Promoting a build to another channel and **withdrawing** one are both `publish_existing=true`: a withdrawal
