@@ -189,7 +189,7 @@ mod tests {
 
     /// The default Pictures and OneDrive's, as Known Folder Move leaves them: the default one empty.
     fn moved_pictures(dir: &Path) -> (PathBuf, PathBuf) {
-        let default = dir.join("Users").join("guus").join("Pictures");
+        let default = dir.join("Users").join("alex").join("Pictures");
         let onedrive = dir.join("OneDrive").join("Pictures");
         std::fs::create_dir_all(&default).unwrap();
         std::fs::create_dir_all(&onedrive).unwrap();

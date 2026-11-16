@@ -602,6 +602,8 @@ impl<C: CredentialStores> Engine<C> {
         }
         let base = self.config.api_base.trim_end_matches('/').to_string();
         let identity = self.identity;
+        // What the delete answered, kept for a session that moves while it runs (`with_shared` refuses after it then).
+        let mut answered = None;
         let deleted = state
             .with_shared(|db| {
                 // What this PC backs up now, read fresh; a settings file that cannot be read keeps the runner's last
@@ -610,7 +612,7 @@ impl<C: CredentialStores> Engine<C> {
                 let me = crate::backup::device::device_self(identity);
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token.to_string(), *key));
                 let bridge = EngineBridge::new(identity, db.clone(), api);
-                self.runtime.block_on(async {
+                let answer = self.runtime.block_on(async {
                     // This PC's own device folder: refused before the password is proven.
                     let pc_name = this_pc_name(identity, me.as_ref());
                     if let Some(refused) =
@@ -620,14 +622,32 @@ impl<C: CredentialStores> Engine<C> {
                     }
                     backup_delete::delete_backup(&base, &self.client, token.as_str(), &db, &own, folder_id, password)
                         .await
-                })
+                });
+                answered = Some(answer.clone());
+                answer
             })
-            // The session moved while the delete ran: whatever it answered is not handed over.
-            .map_err(|_| DeleteBackupError::SignedOut)?;
+            // The session moved: before the delete ran, or while it ran. Its own answer is not handed over; what it may
+            // have done is.
+            .unwrap_or_else(|_| after_session_moved(answered.as_ref()));
         if sent(&deleted) {
             self.request_resnapshot();
         }
         deleted
+    }
+}
+
+/// The answer of a delete whose session moved. Moved before the delete ran (`answered` is
+/// `None`), or the delete was refused before it could move anything (the password, the rule, a backup not found):
+/// signed out, and nothing changed is true. The delete may have moved the backup to Trash (done, or no answer, or the
+/// server's error): unconfirmed (`Failed("server")`, the answer every caller reads as "may have reached Beebeeb": the
+/// sync engine reads the list again, "Stop and move the backup to Trash" keeps the folder out of the set and says its
+/// backup may have moved), never "signed out, nothing changed".
+fn after_session_moved(answered: Option<&Result<(), DeleteBackupError>>) -> Result<(), DeleteBackupError> {
+    match answered {
+        Some(Ok(()) | Err(DeleteBackupError::Offline | DeleteBackupError::Failed("server"))) => {
+            Err(DeleteBackupError::Failed("server"))
+        }
+        _ => Err(DeleteBackupError::SignedOut),
     }
 }
 

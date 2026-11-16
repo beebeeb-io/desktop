@@ -328,7 +328,7 @@ mod tests {
         // Windows-reserved filename chars all map to '_'.
         assert_eq!(sanitize_device_segment("a:b*c?d\"e<f>g|h"), "a_b_c_d_e_f_g_h");
         // A plain hostname is preserved verbatim.
-        assert_eq!(sanitize_device_segment("Guus-PC"), "Guus-PC");
+        assert_eq!(sanitize_device_segment("Alex-PC"), "Alex-PC");
     }
 
     #[test]

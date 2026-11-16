@@ -36,7 +36,7 @@
 
 use std::path::{Path, PathBuf};
 
-use beebeeb_core::backup::{category_folder_name, custom_category_name, fold_name};
+use beebeeb_core::backup::custom_category_name;
 use sha2::{Digest, Sha256};
 
 use crate::account::SessionGeneration;
@@ -361,6 +361,7 @@ pub fn add_to(
         name: custom_category_name(&raw, &taken),
         path: path.to_path_buf(),
         owner: Some(tag),
+        folder_id: None,
     };
     let key = folder.key();
     config.backup_chosen_folders.push(folder);
@@ -400,12 +401,33 @@ pub fn put_back_into(config: &mut DesktopConfig, removed: &Removed) {
     config.set_known_folder(&key, removed.was_on);
 }
 
-/// The state database's part of an add: the folder's backup starts over (no records, no last pass, no stop), and the
-/// protection takes it in (it is this PC's active backup now). Run after the settings file holds it.
+/// Record `folder_id` as the folder of `owner`'s chosen folder `key`'s backup (the pass, before it creates that
+/// folder: `backup::host`). Only `owner`'s entry is written (P3-8; an untagged one is nobody's). `false`: no such
+/// entry (removed meanwhile, or another account's), nothing written.
+pub fn record_folder_id(config: &mut DesktopConfig, key: &str, owner: &Identity, folder_id: &str) -> bool {
+    match config
+        .backup_chosen_folders
+        .iter_mut()
+        .find(|folder| folder.key() == key && is_owners(folder, Some(owner)))
+    {
+        Some(folder) => {
+            folder.folder_id = Some(folder_id.to_string());
+            true
+        }
+        None => false,
+    }
+}
+
+/// The state database's part of an add: the folder's backup starts over (no records, no last pass, no stop, and no
+/// folder remembered for its key: an earlier folder of the same name, removed, may have passed into a backup the person
+/// kept, and the new one never continues there, P3-10), and the protection takes it in (it is this PC's active backup
+/// now). Run after the settings file holds it.
 pub fn start_over(identity: &'static EngineIdentity, db: &StateDb, key: &str) -> Result<(), BackupsError> {
     let now = chrono::Utc::now().timestamp_millis();
     db.restart_backup_pass(key, now).map_err(|_| BackupsError::State)?;
     db.clear_backup_stop(key).map_err(|_| BackupsError::State)?;
+    db.set_backup_category_folder(key, None)
+        .map_err(|_| BackupsError::State)?;
     crate::backup_protect::refresh_own_backups(identity, db);
     Ok(())
 }
@@ -420,27 +442,25 @@ pub fn leave_set(identity: &'static EngineIdentity, db: &StateDb, key: &str) -> 
     Ok(purged)
 }
 
-/// The id of `folder`'s backup in Beebeeb (`Backups/<device>/<name>`), as the local state knows it. `None`: no layout
-/// yet, or no such folder (it never passed). Only that one folder: never another folder's backup, never the device's.
+/// The id of `folder`'s backup in Beebeeb (`Backups/<device>/<name>`): the folder whose id its entry holds
+/// (`ChosenFolder::folder_id`, recorded by its pass), while the local state holds it in this device's folder. Never
+/// found by its name: another folder of that name (a backup the person kept) is not this one's. `None`: no id (it never
+/// passed), no layout yet, or that folder is not in this device's folder as the local state knows it. Only that one
+/// folder: never another folder's backup, never the device's.
 pub fn backup_copy_of(db: &StateDb, folder: &ChosenFolder) -> Result<Option<String>, BackupsError> {
+    let Some(id) = folder.folder_id.as_deref() else {
+        return Ok(None);
+    };
     let Some(layout) = db.backup_layout().map_err(|_| BackupsError::State)? else {
         return Ok(None);
     };
-    let wanted = fold_name(&category_folder_name(&folder.category()));
     let children = db
         .children_of(Some(&layout.device_folder_id))
         .map_err(|_| BackupsError::State)?;
     Ok(children
         .into_iter()
         .map(|(entry, _)| entry)
-        .find(|entry| {
-            entry.is_dir()
-                && entry
-                    .path
-                    .rsplit('/')
-                    .next()
-                    .is_some_and(|leaf| fold_name(leaf) == wanted)
-        })
+        .find(|entry| entry.is_dir() && entry.file_id == id)
         .map(|entry| entry.file_id))
 }
 
