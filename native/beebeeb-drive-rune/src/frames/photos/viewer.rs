@@ -162,6 +162,13 @@ fn player(ui: &Ui, viewing: &Viewing, seconds: u32, t: &Theme) -> El {
                 ),
         )
         .child(kit::label("ph-player-text-1", length(seconds), style::CAP_MONO, white))
+        // The board's own note on this bar: the system player draws the real controls on Windows.
+        .child(kit::label(
+            "ph-player-text-2",
+            "Windows draws the player controls",
+            style::CAP,
+            white.alpha(0.7),
+        ))
 }
 
 /// The player's handle when the stage shows the video the window holds: `held` is the item this window started and
