@@ -357,6 +357,8 @@ impl UiControls {
             Pending::Show(now) => controls.show(&now),
             Pending::Clear => {
                 controls.clear();
+                // A press Windows sent before its controls went off belongs to what stopped.
+                self.shared.buttons.drain();
             }
         }
     }
@@ -389,7 +391,7 @@ impl NowPlayingSink for UiControls {
 /// Under the shell's wake cover ([`WakeCover::shell`]).
 pub fn shell_controls() -> UiControls {
     static SHELL: OnceLock<UiControls> = OnceLock::new();
-    SHELL.get_or_init(|| UiControls::under(WakeCover::shell())).clone()
+    SHELL.get_or_init(UiControls::default).clone()
 }
 
 #[cfg(windows)]
