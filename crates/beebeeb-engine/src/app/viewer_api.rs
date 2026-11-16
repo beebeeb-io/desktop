@@ -422,7 +422,10 @@ impl<C: CredentialStores> Engine<C> {
         };
         // As the Files window resolves a row for the system's Open: below the folder, by plain names only.
         let path = crate::file_ops::full_path(&root, rel_path).ok()?;
-        matches!(crate::name_alias::conflict_below(&root, &path), Ok(None)).then_some(path)
+        // Nor is the entry of another row whose name differs only by case (`drive_v2::case_place`).
+        (matches!(crate::name_alias::conflict_below(&root, &path), Ok(None))
+            && crate::drive_v2::case_place::refuse_another_spelling(&root, rel_path).is_ok())
+        .then_some(path)
     }
 }
 

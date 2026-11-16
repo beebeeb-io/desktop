@@ -622,7 +622,10 @@ impl<C: CredentialStores> Engine<C> {
             None => return None,
         };
         let path = crate::file_ops::full_path(&root, rel_path).ok()?;
-        matches!(crate::name_alias::conflict_below(&root, &path), Ok(None)).then_some((root, path))
+        // Nor is the entry of another row whose name differs only by case (`drive_v2::case_place`).
+        (matches!(crate::name_alias::conflict_below(&root, &path), Ok(None))
+            && crate::drive_v2::case_place::refuse_another_spelling(&root, rel_path).is_ok())
+        .then_some((root, path))
     }
 }
 

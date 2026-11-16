@@ -5,12 +5,15 @@
 //! Errors are `"<code>: <detail>"` with a `DriveSourceError` code; the detail is a fixed word,
 //! never a path or a name.
 
+pub mod case_place;
 pub mod dto;
 pub mod model;
 pub mod model_shell;
 pub mod photo_meta;
 pub mod status;
 
+#[cfg(test)]
+mod case_place_tests;
 #[cfg(test)]
 mod model_tests;
 #[cfg(test)]
