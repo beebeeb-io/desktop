@@ -1,9 +1,11 @@
 //! Every operating system without a sandbox module: nothing is ever started.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use crate::{Access, ExitStatus, Granted, Limits, Pipes, Profile, SandboxError};
+use crate::{Access, ExitStatus, Granted, LaunchGuard, Limits, Pipes, Profile, SandboxError};
 
 /// No value of this type exists: a `Child` cannot be made on these systems.
 #[derive(Debug)]
@@ -25,6 +27,18 @@ impl ChildInner {
     pub(crate) fn grant(&self, _section: &SectionInner, _access: Access) -> Result<Granted, SandboxError> {
         match *self {}
     }
+
+    pub(crate) fn handle_count(&self) -> Result<u32, SandboxError> {
+        match *self {}
+    }
+
+    pub(crate) fn granted_bytes(&self) -> &Arc<AtomicU64> {
+        match *self {}
+    }
+
+    pub(crate) fn killed_for_memory(&self) -> bool {
+        match *self {}
+    }
 }
 
 /// No value of this type exists: a section cannot be made on these systems.
@@ -40,6 +54,14 @@ impl SectionInner {
     }
 
     pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        match *self {}
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match *self {}
+    }
+
+    pub(crate) fn copy_into(&self, _out: &mut [u8]) {
         match *self {}
     }
 }
@@ -63,10 +85,12 @@ pub(crate) fn map(_wire: u64, _len: usize, _access: Access) -> Result<MappedInne
 
 pub(crate) fn remove_left_over_profiles() {}
 
+/// Nothing is started; the launch lock is released on return.
 pub(crate) fn spawn(
     _helper_exe: &Path,
     _limits: Limits,
     _profile: Profile,
+    _launch: LaunchGuard,
 ) -> Result<(ChildInner, Pipes), SandboxError> {
     Err(SandboxError::Unsupported)
 }
