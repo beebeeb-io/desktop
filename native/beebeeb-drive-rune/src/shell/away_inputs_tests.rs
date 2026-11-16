@@ -4,6 +4,7 @@
 //! ([`WakeCover`]): at once at a resume, before any poll after a wake Windows did not announce, and when it is gone.
 //! Every name is invented.
 
+use super::*;
 use crate::shell::app::{Intent, Outcome, Route, Screen, Section};
 
 /// The window shows `section`.
