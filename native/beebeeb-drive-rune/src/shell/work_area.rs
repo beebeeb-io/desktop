@@ -47,7 +47,12 @@ pub fn usable(displays: &[Monitor], work: &[(Rect, Rect)]) -> Vec<Monitor> {
 /// OS and the window's defaults decide.
 pub fn first_place(size_points: (f32, f32), min_points: (f32, f32), monitors: &[Monitor]) -> Restored {
     let usable_m = |m: &&Monitor| m.w > 0 && m.h > 0 && m.scale.is_finite() && m.scale > 0.0;
-    let Some(m) = monitors.iter().find(usable_m) else {
+    let Some(m) = monitors
+        .iter()
+        .filter(usable_m)
+        .find(|m| m.primary)
+        .or_else(|| monitors.iter().find(usable_m))
+    else {
         return Restored::default();
     };
     let fit = |want: f32, min: f32, room: u32| {
