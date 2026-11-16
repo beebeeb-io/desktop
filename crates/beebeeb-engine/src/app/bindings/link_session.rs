@@ -4,7 +4,8 @@
 //!
 //! The three session checks, each asked of the session of the press ([`Engine::session_turn`] as the host read it):
 //! - [`Engine::link_run`]: when the token and the key are copied. A press of a session that is not the one in memory
-//!   is refused before anything of it is looked at.
+//!   is refused before the local state or Beebeeb is asked anything (each flow checks the shape of its own input,
+//!   an id, a title, a password, first).
 //! - [`Engine::link_send`]: before EACH request. A press made under one session never sends under another.
 //! - [`Engine::hand_over`]: before the link is handed over. A link made for one session is never handed to another.
 //!
