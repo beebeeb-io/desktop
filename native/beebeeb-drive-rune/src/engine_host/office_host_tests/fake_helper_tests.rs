@@ -295,6 +295,8 @@ pub(super) struct Fake {
     section_panic: Option<usize>,
     sections_asked: usize,
     failing_copy: bool,
+    /// Every start fails with this sandbox error.
+    start_error: Option<SandboxError>,
 }
 
 impl Fake {
@@ -310,7 +312,14 @@ impl Fake {
             section_panic: None,
             sections_asked: 0,
             failing_copy: false,
+            start_error: None,
         }
+    }
+
+    /// Every start fails with `error`, as the sandbox's refusal does.
+    pub(super) fn failing_start(mut self, error: SandboxError) -> Fake {
+        self.start_error = Some(error);
+        self
     }
 
     /// Each start takes `delay` before it returns.
@@ -419,6 +428,9 @@ impl Starter for Fake {
     }
 
     fn start(&mut self) -> Result<Link<FakeHelper>, SandboxError> {
+        if let Some(error) = self.start_error.clone() {
+            return Err(error);
+        }
         if !self.start_delay.is_zero() {
             thread::sleep(self.start_delay);
         }

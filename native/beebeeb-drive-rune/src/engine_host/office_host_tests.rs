@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use beebeeb_office_protocol::check;
 use beebeeb_office_protocol::office::{self, ErrorCode, Message};
+use beebeeb_office_sandbox::SandboxError;
 use zeroize::Zeroizing;
 
 use super::office_host::*;
@@ -949,6 +950,26 @@ fn a_missing_helper_says_not_installed() {
     assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());
     assert_eq!(&host.state(), &OfficeState::NoPreview(NoPreview::NotInstalled));
     assert_eq!(host.helper_pid(), None, "no helper");
+}
+
+/// F4: a Windows older than the sandbox needs says so, not "Renderer stopped" (red first: it mapped to `Stopped`).
+#[test]
+fn a_too_old_windows_needs_a_windows_update() {
+    let registry = Registry::new();
+    let fake = Fake::new(|link| serve(link, &[LETTER])).failing_start(SandboxError::NeedsNewerWindows);
+    let mut host = open_with(
+        fake,
+        &registry,
+        TEST_TIMEOUTS,
+        DocKind::Docx,
+        Zeroizing::new(doc()),
+        noop_wake(),
+    );
+    let mut events = Vec::new();
+    let ended = |host: &OfficeHost, _: &[Event]| host.worker_ended() && !matches!(host.state(), OfficeState::Opening);
+    assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());
+    assert_eq!(&host.state(), &OfficeState::NoPreview(NoPreview::NeedsWindowsUpdate));
+    assert_eq!(host.helper_pid(), None);
 }
 
 #[cfg(not(windows))]
