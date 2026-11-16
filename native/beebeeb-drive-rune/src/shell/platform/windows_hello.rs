@@ -291,13 +291,15 @@ impl OneUp {
         }
     }
 
-    /// The app is quitting: the prompt that is up (whoever asked for it) is taken away as by its owner's cancel (no
-    /// answer of it is handed out), and this waits, at most `limit`, until its thread asked Windows to close it.
+    /// The app is quitting: the prompt that is up (whoever asked for it) is taken away and its owner is answered
+    /// `Cancelled` (never a yes), and this waits, at most `limit`, until its thread asked Windows to close it.
     /// `true`: no prompt is up, or its thread is done with Windows.
     fn take_away_and_wait(&self, limit: Duration) -> bool {
         let up = lock(&self.up).clone();
         let Some(control) = up else { return true };
-        control.cancel();
+        // Not the owner's silent cancel: the owner is answered `Cancelled` (never a yes), so an owner that waits
+        // (app lock off, approve) is not left waiting when Windows cancels the shutdown.
+        control.supersede();
         control.wait_finished(limit)
     }
 
@@ -311,6 +313,12 @@ impl OneUp {
 }
 
 static UP: OneUp = OneUp::new();
+
+#[cfg(test)]
+thread_local! {
+    /// Whether the quit on this test thread reaches [`UP`].
+    static QUIT_ON_GLOBAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// A prompt that is up, or about to be. Dropping this leaves the prompt alone (a newer [`start`] still takes it
 /// away).
@@ -335,6 +343,12 @@ impl HelloRequest {
 /// nobody to answer, so the quit asks Windows first. Whether and when the prompt leaves the screen is Windows' (the
 /// native rung checks it). `true`: no prompt was up, or its thread is done with Windows within `limit`.
 pub fn take_away_for_quit(limit: Duration) -> bool {
+    // A test thread that runs the quit hook (`host::on_quit`) leaves the process-wide slot, shared with other
+    // tests, alone unless it asks for it.
+    #[cfg(test)]
+    if !QUIT_ON_GLOBAL.with(std::cell::Cell::get) {
+        return true;
+    }
     UP.take_away_and_wait(limit)
 }
 
@@ -775,8 +789,46 @@ mod tests {
         );
         let mut got = None;
         control.answer(completed(raw::VERIFIED), |result| got = Some(result));
-        assert_eq!(got, None, "its owner hears nothing, also of a yes");
+        assert_eq!(
+            got,
+            Some(HelloResult::Cancelled),
+            "its owner is answered Cancelled, also of a yes: it is never left waiting"
+        );
         thread.join().unwrap();
+    }
+
+    /// Tests that put a control in the process-wide slot ([`UP`]) one at a time.
+    #[cfg(not(windows))]
+    static GLOBAL_UP: Mutex<()> = Mutex::new(());
+
+    /// The process-wide take-away with a prompt up (off Windows `start` ends at once, so the control is placed by
+    /// hand): the quit answers its owner `Cancelled` (a shutdown that is cancelled leaves nobody waiting), never a
+    /// yes, and the slot is free after.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_quit_on_the_global_slot_answers_the_owner_cancelled_and_never_a_yes() {
+        let _one = lock(&GLOBAL_UP);
+        QUIT_ON_GLOBAL.with(|on| on.set(true));
+        let control = Arc::new(Control::default());
+        UP.take_place(&control);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn({
+            let control = control.clone();
+            move || {
+                assert_eq!(control.wait(), Woken::TakenAway);
+                control.finished();
+                UP.leave(&control);
+                // Windows said yes in the same instant.
+                control.answer(completed(raw::VERIFIED), |result| {
+                    let _ = tx.send(result);
+                });
+            }
+        });
+        assert!(take_away_for_quit(Duration::from_secs(10)));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(HelloResult::Cancelled));
+        thread.join().unwrap();
+        assert!(lock(&UP.up).is_none());
+        QUIT_ON_GLOBAL.with(|on| on.set(false));
     }
 
     /// A prompt's thread that never gets done (Windows does not answer) holds the quit no longer than its limit.
@@ -809,6 +861,7 @@ mod tests {
 
         #[test]
         fn start_answers_once_on_its_own_thread() {
+            let _one = lock(&super::GLOBAL_UP);
             let (tx, rx) = mpsc::channel();
             let caller = std::thread::current().id();
             let window = HelloWindow::from_hwnd(1).unwrap();
