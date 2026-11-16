@@ -322,7 +322,9 @@ pub fn retag_by_id(config: &mut DesktopConfig, owner: &Identity) -> usize {
             .filter(|folder| folder.owner.as_deref() == Some(by_id.as_str()))
             .map(|folder| folder.path.clone())
             .collect();
-        let _ = &owners;
+        if nested_with(&config.backup_chosen_folders[at].path, &owners, PathBuf::as_path).is_some() {
+            continue;
+        }
         config.backup_chosen_folders[at].owner = Some(by_id.clone());
         retagged += 1;
     }
@@ -333,7 +335,7 @@ pub fn retag_by_id(config: &mut DesktopConfig, owner: &Identity) -> usize {
 pub fn retag_in(path: &Path, owner: &Identity) -> Result<usize, String> {
     DesktopConfig::update_at(path, |config| {
         let retagged = retag_by_id(config, owner);
-        (retagged > 0, retagged)
+        (false, retagged)
     })
 }
 
