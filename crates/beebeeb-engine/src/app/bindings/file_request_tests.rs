@@ -71,7 +71,7 @@ impl Fixture {
         self.engine.file_request_create_for(self.engine.session_turn(), choices)
     }
 
-    fn copy(&self, id: &str) -> Result<MadeLink, ShareLinkError> {
+    fn copy(&self, id: &str) -> Result<MadeLink, RequestCopyError> {
         self.engine.file_request_copy_for(self.engine.session_turn(), id)
     }
 
@@ -420,4 +420,34 @@ fn a_session_that_moves_before_the_request_leaves_sends_nothing() {
     before_next_send(&f.engine);
     assert_eq!(f.copy(FOREIGN_REQUEST).unwrap_err(), ShareLinkError::NotSignedIn);
     assert_eq!(f.count(LIST), 0, "the list was never read");
+}
+
+#[test]
+fn a_closed_requests_link_is_refused_with_words_and_nothing_is_copied() {
+    let f = fixture();
+    f.create(&choices("Invented drop")).expect("a request");
+    let id = text(&f.server.lock().unwrap().rows[0], "id").to_string();
+    f.server.lock().unwrap().rows[0]["closed"] = json!(true);
+    let refused = f.copy(&id).unwrap_err();
+    assert_eq!(refused, RequestCopyError::Closed);
+    assert_eq!(refused.words(), "This request is closed");
+    // Closed is said first, as the Shared list draws it, even when its expiry has passed too.
+    f.server.lock().unwrap().rows[0]["expires_at"] = json!("2020-01-02T03:04:05Z");
+    assert_eq!(f.copy(&id).unwrap_err(), RequestCopyError::Closed);
+    assert_eq!(f.count(CREATE), 1, "nothing new was made");
+}
+
+#[test]
+fn an_expired_requests_link_is_refused_with_words_and_nothing_is_copied() {
+    let f = fixture();
+    let made = f.create(&choices("Invented drop")).expect("a request");
+    let id = text(&f.server.lock().unwrap().rows[0], "id").to_string();
+    f.server.lock().unwrap().rows[0]["expires_at"] = json!("2020-01-02T03:04:05Z");
+    let refused = f.copy(&id).unwrap_err();
+    assert_eq!(refused, RequestCopyError::Expired);
+    assert_eq!(refused.words(), "This request has expired");
+    // An expiry still ahead: the link is copied as before.
+    f.server.lock().unwrap().rows[0]["expires_at"] = json!("2999-01-02T03:04:05Z");
+    assert_eq!(f.copy(&id).expect("an open request's link").expose(), made.expose());
+    assert_eq!(f.count(CREATE), 1, "nothing new was made");
 }

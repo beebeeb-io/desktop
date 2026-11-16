@@ -19,6 +19,9 @@
 //! - Only a 401 is a session that ended. A 403 is Beebeeb refusing (a frozen account), never a signed-out session.
 //! - A request Beebeeb does not list for the account, or lists as taken off the list, is not found; one whose stored
 //!   key does not open under this vault key is never handed out.
+//! - A request that is closed, or past its expiry, takes no more files: its link is refused with words
+//!   ([`RequestCopyError::Closed`], [`RequestCopyError::Expired`]) and nothing is copied. Closed is said first, as the
+//!   Shared list draws it.
 //!
 //! BLOCKS on the handle's runtime: call it from a worker thread, never from the UI thread.
 //!
@@ -29,7 +32,7 @@ use beebeeb_core::share_flow::ShareFlowError;
 use beebeeb_core::share_flow::request::{CreateRequest, FILE_REQUESTS_PATH, RequestOptions, rebuild_request_link};
 use serde_json::Value;
 
-use super::link_session::{get, state_refusal};
+use super::link_session::{LinkRefusal, get, state_refusal};
 use crate::account::SessionGeneration;
 use crate::app::share_invite_api::{canonical, own_item};
 use crate::app::share_link_api::{MadeLink, ShareLinkError, web_origin};
@@ -38,6 +41,52 @@ use crate::app::{CredentialStores, Engine};
 #[cfg(test)]
 #[path = "file_request_tests.rs"]
 mod tests;
+
+/// Why a request's link was not copied again. Fixed words only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestCopyError {
+    /// The request is closed: it takes no more files. Nothing was copied.
+    Closed,
+    /// The request is past its expiry: it takes no more files. Nothing was copied.
+    Expired,
+    /// Any other refusal, in the link's words.
+    Link(ShareLinkError),
+}
+
+impl RequestCopyError {
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Closed => "This request is closed",
+            Self::Expired => "This request has expired",
+            Self::Link(refused) => refused.words(),
+        }
+    }
+}
+
+impl std::fmt::Display for RequestCopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.words())
+    }
+}
+
+impl From<ShareLinkError> for RequestCopyError {
+    fn from(refused: ShareLinkError) -> Self {
+        Self::Link(refused)
+    }
+}
+
+impl From<LinkRefusal> for RequestCopyError {
+    fn from(refused: LinkRefusal) -> Self {
+        Self::Link(refused.into())
+    }
+}
+
+/// A refusal that is a link's is equal to that link refusal.
+impl PartialEq<ShareLinkError> for RequestCopyError {
+    fn eq(&self, other: &ShareLinkError) -> bool {
+        matches!(self, Self::Link(refused) if refused == other)
+    }
+}
 
 /// What the new-request form chose. `None` is "not set" (no note, the top level, no limit, never expires).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -98,7 +147,7 @@ impl<C: CredentialStores> Engine<C> {
         &self,
         session: SessionGeneration,
         request_id: &str,
-    ) -> Result<MadeLink, ShareLinkError> {
+    ) -> Result<MadeLink, RequestCopyError> {
         let id = canonical(request_id).ok_or(ShareLinkError::NotFound)?;
         let app_url = web_origin(&self.config.api_base).ok_or(ShareLinkError::Refused)?;
         let run = self.link_run(session)?;
@@ -109,8 +158,8 @@ impl<C: CredentialStores> Engine<C> {
                 .get("file_requests")
                 .and_then(Value::as_array)
                 .ok_or(ShareLinkError::Refused)?,
-            401 => return Err(ShareLinkError::SessionEnded),
-            _ => return Err(ShareLinkError::Refused),
+            401 => return Err(ShareLinkError::SessionEnded.into()),
+            _ => return Err(ShareLinkError::Refused.into()),
         };
         let text = |row: &'_ Value, field: &str| row.get(field).and_then(Value::as_str).map(str::to_string);
         let row = rows
@@ -119,6 +168,10 @@ impl<C: CredentialStores> Engine<C> {
                 text(row, "id").as_deref() == Some(id) && row.get("hidden").and_then(Value::as_bool) != Some(true)
             })
             .ok_or(ShareLinkError::NotFound)?;
+        // A request that takes no more files: its link is refused before its key is opened.
+        if let Some(over) = over(row, chrono::Utc::now().timestamp()) {
+            return Err(over);
+        }
         let master = MasterKey::from_bytes(*run.key());
         let link = rebuild_request_link(
             &app_url,
@@ -129,7 +182,7 @@ impl<C: CredentialStores> Engine<C> {
         )
         .ok_or(ShareLinkError::KeyUnavailable);
         drop(master);
-        self.hand_over(&run, link?).map_err(ShareLinkError::from)
+        self.hand_over(&run, link?).map_err(RequestCopyError::from)
     }
 
     /// `folder` as one of the account's own folders in the local state of `session`.
@@ -150,6 +203,25 @@ impl<C: CredentialStores> Engine<C> {
             None => Err(ShareLinkError::NotFound),
         }
     }
+}
+
+/// Why a listed request takes no more files at `now` (seconds since 1970), as the Shared list reads its row: closed
+/// first, then an expiry at or before `now`. `None`: it is open.
+fn over(row: &Value, now: i64) -> Option<RequestCopyError> {
+    if row.get("closed").and_then(Value::as_bool) == Some(true) {
+        return Some(RequestCopyError::Closed);
+    }
+    let expiry = row.get("expires_at").and_then(Value::as_str).and_then(seconds_of)?;
+    (expiry <= now).then_some(RequestCopyError::Expired)
+}
+
+/// A stamp as Beebeeb writes it (RFC 3339), or seconds since 1970.
+fn seconds_of(stamp: &str) -> Option<i64> {
+    let stamp = stamp.trim();
+    chrono::DateTime::parse_from_rfc3339(stamp)
+        .map(|at| at.timestamp())
+        .ok()
+        .or_else(|| stamp.parse::<i64>().ok())
 }
 
 /// A core refusal as fixed words. Never formats the error.
