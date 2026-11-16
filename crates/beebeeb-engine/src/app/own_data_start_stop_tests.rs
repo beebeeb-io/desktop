@@ -133,3 +133,47 @@ fn a_sign_out_whose_proof_outlives_the_wait_still_signs_out_and_refuses_starts_u
         "once the client is gone, a start goes on to the binding again"
     );
 }
+
+/// Row fx-stop-timeout (mutant ST-R: the stop reports `Ended` when its wait ran out, as its old unit answer implied).
+/// A stop reports a proof held past its wait as unconfirmed, and so does a later stop while it is still alive; once it
+/// let go, a stop reports it ended. A proof that drops at its next await is reported ended, its client gone.
+#[test]
+fn a_stop_reports_a_proof_that_outlived_its_wait_until_it_let_go() {
+    let pc = Pc::new();
+    let (client, release) = a_proof_held_in_a_write(&pc);
+    let stop = || pc.engine.runtime.block_on(pc.engine.stop_proofs());
+
+    assert_eq!(
+        stop(),
+        ProofStop::Unconfirmed,
+        "the wait ran out with the proof in its write"
+    );
+    assert!(
+        client.strong_count() > 0,
+        "the premise: the proof is still in its write"
+    );
+    assert_eq!(stop(), ProofStop::Unconfirmed, "a later stop waits for it again");
+    drop(release);
+    wait_until("the stopped proof's client is gone", || client.strong_count() == 0);
+    assert_eq!(stop(), ProofStop::Ended, "a stop once it let go");
+
+    let pc = Pc::new();
+    synced_rows(&pc.db());
+    pc.sign_in(&owner());
+    let (asked, listing_asked) = mpsc::channel();
+    pc.seams(|seams| {
+        seams.listing = Some(hanging(asked));
+        seams.stop_wait = Some(SHORT_STOP_WAIT);
+    });
+    pc.engine.serve_own_data_proofs();
+    assert_eq!(pc.start(), Err(SyncStartRefused::OtherAccountsData));
+    listing_asked.recv_timeout(WAIT).expect("the proof is listing");
+    let clients = pc.seams(|seams| seams.clients.clone());
+
+    assert_eq!(
+        pc.engine.runtime.block_on(pc.engine.stop_proofs()),
+        ProofStop::Ended,
+        "a proof that drops at its next await ends within the wait"
+    );
+    assert_eq!(clients[0].strong_count(), 0, "its client is gone");
+}

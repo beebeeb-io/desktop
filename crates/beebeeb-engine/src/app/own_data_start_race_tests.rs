@@ -74,7 +74,11 @@ fn a_stop_before_the_proof_read_the_keys_ends_it_without_a_client() {
     paused.recv_timeout(WAIT).expect("the service thread took up the proof");
     let turn = pc.engine.acct.session_generation();
 
-    pc.engine.runtime.block_on(pc.engine.stop_proofs());
+    assert_eq!(
+        pc.engine.runtime.block_on(pc.engine.stop_proofs()),
+        ProofStop::Ended,
+        "no proof was running yet"
+    );
     release.send(()).unwrap();
 
     pc.wait_for_outcomes(1);

@@ -343,7 +343,9 @@ impl<C: CredentialStores> Engine<C> {
     pub fn lock_vault(&self) -> VaultLocked {
         let locked = self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
-            self.stop_proofs().await;
+            // A proof that did not end in time (`ProofStop::Unconfirmed`) does not hold the Lock back: the vault closes
+            // all the same, and the proof's seat refuses every start until its client is gone.
+            let _ = self.stop_proofs().await;
             let vault = self.vault();
             let signed_in = self.lock_state() != LockState::SignedOut;
             let mut survives_restart = signed_in && vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
@@ -402,8 +404,9 @@ impl<C: CredentialStores> Engine<C> {
             if !may_close() {
                 return None;
             }
-            // A proof stops wherever a session ends, before the engine, as at a lock and a sign-out.
-            self.stop_proofs().await;
+            // A proof stops wherever a session ends, before the engine, as at a lock and a sign-out. One that did not
+            // end in time does not hold the close back: its seat refuses every start until its client is gone.
+            let _ = self.stop_proofs().await;
             // The account's recent searches leave this computer while the session is still in memory, as at a
             // sign-out, also once the refusal run marked the session ended (its own row only).
             let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
@@ -539,7 +542,9 @@ impl<C: CredentialStores> Engine<C> {
         if !self.unlocked() {
             return Ok((turn, Some(old)));
         }
-        self.stop_proofs().await;
+        // A proof that did not end in time does not refuse the strong unlock, unlike the engine's unconfirmed stop: the
+        // old token is ended at the server afterwards, and the proof's seat refuses every start until it let go.
+        let _ = self.stop_proofs().await;
         if self.stop_holding_step().await == SyncStop::Unconfirmed {
             return Err(crate::account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
         }

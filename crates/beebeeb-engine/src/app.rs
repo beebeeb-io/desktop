@@ -1025,7 +1025,7 @@ impl<C: CredentialStores> Engine<C> {
     /// out and does it in the same hold (`signin_api::discard_partial_sign_in`).
     async fn sign_out_holding_step(&self) -> Result<(), String> {
         {
-            self.stop_proofs().await;
+            let _ = self.stop_proofs().await; // Not ended in time: its seat refuses starts, the sign-out goes on.
             if self.stop_holding_step().await == SyncStop::Unconfirmed {
                 return Err(account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
             }
