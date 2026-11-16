@@ -512,7 +512,7 @@ impl Ui {
 const WORDS_FOLDER: &str = "Couldn\u{2019}t add that folder \u{00B7} not available right now";
 const WORDS_CHANGE: &str = "Couldn\u{2019}t change that folder";
 /// Move… while a move to Trash of the photo is on its way: what did not happen, then Files' own sentence.
-const WORDS_MOVE_IN_FLIGHT: &str = "Still on its way \u{00B7} nothing was sent twice";
+const WORDS_MOVE_IN_FLIGHT: &str = "Couldn\u{2019}t move. The last change is still on its way.";
 const WORDS_MOVE: &str = "Couldn\u{2019}t move \u{00B7} not available right now";
 
 impl Toast {
