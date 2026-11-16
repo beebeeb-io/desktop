@@ -13,7 +13,7 @@ use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::app::backups_api::{FolderState, StateRead};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{BackupLayout, FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation};
 
@@ -157,7 +157,7 @@ fn leave_from<'a>(
 ) -> impl FnOnce() -> Result<Removed, BackupsError> + 'a {
     move || {
         let removed = remove_from(&mut config.borrow_mut(), key).ok_or(BackupsError::UnknownFolder)?;
-        leave_set(&REAL, db, key)?;
+        leave_set(&TEST, db, key)?;
         Ok(removed)
     }
 }
@@ -420,7 +420,7 @@ fn an_add_forgets_the_folder_a_removed_one_of_its_name_had() {
     let db = laid_out(dir.path());
     db.set_backup_category_folder("custom:Projects", Some(PROJECTS))
         .unwrap();
-    start_over(&REAL, &db, "custom:Projects").unwrap();
+    start_over(&TEST, &db, "custom:Projects").unwrap();
     assert_eq!(db.backup_category_folder("custom:Projects").unwrap(), None);
 }
 
@@ -445,7 +445,7 @@ fn remove_never_touches_local_files() {
         let mut config = DesktopConfig::default();
         check_chosen(&folder, &root, &taken_paths(&config, &me())).unwrap();
         let key = add_to(&mut config, &folder, &backup_folder_names(&db).unwrap(), &me()).unwrap();
-        start_over(&REAL, &db, &key).unwrap();
+        start_over(&TEST, &db, &key).unwrap();
         let mut added = config.backup_chosen_folders[0].clone();
         if password.is_some() {
             // It passed once: its backup is in this device's backup, so the move to Trash has one to move (P3-9).
@@ -529,9 +529,9 @@ fn a_call_for_another_session_writes_nothing() {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     let dir = tempfile::tempdir().unwrap();
-    let before = DesktopConfig::load_for(&REAL)
+    let before = DesktopConfig::load_for(&TEST)
         .ok()
         .map(|c| (c.backup_chosen_folders, c.known_folder_backup, c.known_folder_source));
 
@@ -567,7 +567,7 @@ fn a_call_for_another_session_writes_nothing() {
         engine.choose_backup_source_for(engine.session_turn(), "documents", KnownFolderSource::OneDrive),
         Err(BackupsError::Refused(LocalStateRefused::SignedOut))
     );
-    let after = DesktopConfig::load_for(&REAL)
+    let after = DesktopConfig::load_for(&TEST)
         .ok()
         .map(|c| (c.backup_chosen_folders, c.known_folder_backup, c.known_folder_source));
     assert_eq!(before, after, "the settings file is not written for a refusal");
@@ -583,7 +583,7 @@ fn choosing_a_moved_folders_source_settles_its_question() {
             .unwrap()
     );
     assert_eq!(db.backup_source_questions().unwrap().len(), 1);
-    source_chosen(&REAL, &db, "documents").unwrap();
+    source_chosen(&TEST, &db, "documents").unwrap();
     assert!(
         db.backup_source_questions().unwrap().is_empty(),
         "the question is settled"

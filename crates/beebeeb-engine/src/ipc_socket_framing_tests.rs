@@ -90,7 +90,7 @@ impl IpcFixture {
             "token".into(),
             [7u8; 32],
         ));
-        let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
+        let bridge = Arc::new(EngineBridge::new(&crate::identity::TEST, db.clone(), api));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();

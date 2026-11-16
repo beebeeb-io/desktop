@@ -86,8 +86,8 @@ tokio::task_local! {
 pub fn init_for_test() -> PathBuf {
     static SCRATCH: OnceLock<tempfile::TempDir> = OnceLock::new();
     let scratch = SCRATCH.get_or_init(|| tempfile::tempdir().expect("create scratch state dir"));
-    // The suites run as the real identity (today's names, in sandboxed and scratch dirs).
-    let _ = BEEBEEB_STATE_DIR.set((&crate::identity::REAL, scratch.path().to_path_buf()));
+    // The suites run as the TEST identity (the test build's names, in sandboxed and scratch dirs), never REAL.
+    let _ = BEEBEEB_STATE_DIR.set((&crate::identity::TEST, scratch.path().to_path_buf()));
     BEEBEEB_STATE_DIR
         .get()
         .map(|(_, dir)| dir.clone())
@@ -365,7 +365,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let sync_root = temp.path().join("sync-root");
         let app_local_data = temp.path().join("app-local-data");
-        let state_dir = crate::identity::REAL.state_dir_in(&app_local_data);
+        let state_dir = crate::identity::TEST.state_dir_in(&app_local_data);
         fs::create_dir_all(&sync_root).unwrap();
 
         let outcome = prepare_beebeeb_state_dir_at(&sync_root, &state_dir).unwrap();

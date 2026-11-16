@@ -17,7 +17,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::SessionToken;
 use crate::signin::gate::GateState;
 use crate::signin::memory_store::MemoryCredentials;
@@ -51,7 +51,7 @@ fn rig(name: &str) -> Rig {
         state_dir: crate::state_paths::init_for_test(),
         api_base: fake.base.clone(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     let dir = tempfile::tempdir().unwrap();
     let local_state = dir.path().join("state.db");
     engine.use_local_state_for_test(local_state.clone());

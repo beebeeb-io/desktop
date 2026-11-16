@@ -133,7 +133,7 @@ mod tests {
 
     use super::super::{Engine, EngineConfig};
     use crate::host::ChannelHost;
-    use crate::identity::REAL;
+    use crate::identity::TEST;
     use crate::keychain::SecretBytes;
     use crate::signin::memory_store::MemoryCredentials;
 
@@ -148,9 +148,11 @@ mod tests {
             state_dir: crate::state_paths::init_for_test(),
             api_base: "http://127.0.0.1:9".into(),
         };
-        let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("opens"));
+        let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("opens"));
         let vault = engine.vault();
-        vault.store_wrapped_master_key(SecretBytes::new_master_key(&[9; 32])).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[9; 32]))
+            .unwrap();
         if let Some(owner) = owner {
             vault.bind_vault_key_owner(owner).unwrap();
         }
@@ -219,11 +221,16 @@ mod tests {
         let key = engine.read_kept_key("user-a", "me@example.com").expect("read");
         {
             let vault = engine.vault();
-            vault.install_session(SessionToken::new("tok".to_string()).unwrap()).unwrap();
+            vault
+                .install_session(SessionToken::new("tok".to_string()).unwrap())
+                .unwrap();
             vault.bind_session_owner("user-a").unwrap();
             assert_eq!(vault.vault_key_owner().unwrap(), None);
         }
-        let _ = engine.install_kept_key(&KeptKey::Proven(Zeroizing::new(*key), Checked::Matched), "me@example.com".into());
+        let _ = engine.install_kept_key(
+            &KeptKey::Proven(Zeroizing::new(*key), Checked::Matched),
+            "me@example.com".into(),
+        );
         assert_eq!(engine.vault().vault_key_owner().unwrap().as_deref(), Some("user-a"));
     }
 
@@ -236,10 +243,15 @@ mod tests {
         let key = engine.read_kept_key("user-a", "me@example.com").expect("read");
         {
             let vault = engine.vault();
-            vault.install_session(SessionToken::new("tok".to_string()).unwrap()).unwrap();
+            vault
+                .install_session(SessionToken::new("tok".to_string()).unwrap())
+                .unwrap();
             vault.bind_session_owner("user-a").unwrap();
         }
-        let _ = engine.install_kept_key(&KeptKey::Proven(Zeroizing::new(*key), Checked::NoCheckOnFile), "me@example.com".into());
+        let _ = engine.install_kept_key(
+            &KeptKey::Proven(Zeroizing::new(*key), Checked::NoCheckOnFile),
+            "me@example.com".into(),
+        );
         assert_eq!(engine.vault().vault_key_owner().unwrap(), None);
     }
 }

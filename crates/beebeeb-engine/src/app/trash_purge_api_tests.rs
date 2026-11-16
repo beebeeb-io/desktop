@@ -185,7 +185,7 @@ fn screen_locked_engine(
         api_base: api.base.clone(),
     };
     let engine = crate::app::Engine::open(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         config,
         host,
         crate::signin::memory_store::MemoryCredentials::default(),

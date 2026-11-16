@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 use super::super::{Engine, EngineConfig};
 use super::*;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use crate::test_api::{FakeApi, Reply, Request};
@@ -65,7 +65,7 @@ fn engine(fake: &Fake, sign_in: bool) -> Engine<MemoryCredentials> {
         state_dir: crate::state_paths::init_for_test(),
         api_base: fake.api.base.clone(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the engine opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens");
     engine.restore();
     if sign_in {
         engine

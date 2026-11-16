@@ -17,7 +17,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, OperationKind, PendingOperation};
@@ -104,7 +104,7 @@ impl Pc {
         };
         let opened = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(
             state_paths::STATE_DIR_OVERRIDE.scope(state_dir, async move {
-                Engine::open(&REAL, config, host, MemoryCredentials::default())
+                Engine::open(&TEST, config, host, MemoryCredentials::default())
             }),
         );
         let engine = Arc::new(opened.expect("the handle opens on a state folder of its own"));

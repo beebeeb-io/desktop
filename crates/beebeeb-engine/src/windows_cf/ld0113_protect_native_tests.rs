@@ -447,7 +447,7 @@ fn counting_bridge(qa: &QaRoot) -> (crate::engine_bridge::EngineBridge, std::net
     );
     let db = Arc::new(StateDb::open(qa._dir.path().join("state.db")).unwrap());
     (
-        crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db, Arc::new(api)),
+        crate::engine_bridge::EngineBridge::new(&crate::identity::TEST, db, Arc::new(api)),
         listener,
     )
 }

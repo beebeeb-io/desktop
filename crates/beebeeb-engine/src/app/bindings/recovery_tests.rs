@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use super::{RecoveryDone, RecoveryRefused};
 use crate::app::{Engine, EngineConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::AuthVault;
 use crate::signin::gate::GateState;
 use crate::signin::memory_store::MemoryCredentials;
@@ -145,7 +145,7 @@ fn opened(api: &FakeApi, slot: &str) -> (Arc<TestEngine>, MemoryCredentials) {
         state_dir: crate::state_paths::init_for_test(),
         api_base: api.base.clone(),
     };
-    let engine = Engine::open(&REAL, config, host, store.clone()).expect("the engine opens");
+    let engine = Engine::open(&TEST, config, host, store.clone()).expect("the engine opens");
     engine.restore();
     (Arc::new(engine), store)
 }
@@ -349,7 +349,10 @@ fn recovery_finalize_with_no_answer_holds_nothing() {
 
     assert_eq!(done, Err(RecoveryRefused::Offline));
     assert_eq!(count(&fake.api, FINALIZE), 1, "the last step was sent");
-    assert!(!holds_a_recovery(&engine), "no answer: the recovery is over, nothing is kept for a retry");
+    assert!(
+        !holds_a_recovery(&engine),
+        "no answer: the recovery is over, nothing is kept for a retry"
+    );
     assert!(!engine.has_session());
     assert_eq!(engine.gate(), GateState::SignedOut);
     assert_eq!(stored_token(&store, "no-answer"), None);

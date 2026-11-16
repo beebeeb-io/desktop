@@ -68,7 +68,10 @@ fn engine_remove_of_one_case_twin_is_not_a_user_delete_of_the_other_spelling() {
     let notice = std::path::Path::new("/sync/w2-case-r3-a/Report.pdf");
     with_rule_for_test(CaseRule::Insensitive, || {
         suppress_engine_delete(removed);
-        assert!(take_engine_delete_suppressed(notice), "the notice under the other spelling is the engine's own");
+        assert!(
+            take_engine_delete_suppressed(notice),
+            "the notice under the other spelling is the engine's own"
+        );
         assert!(!take_engine_delete_suppressed(removed), "consumed once");
     });
     // A case-sensitive volume holds two entries: a delete of the other spelling is the person's.

@@ -13,7 +13,7 @@ use super::super::{Engine, EngineConfig};
 use super::*;
 use crate::account::SessionTransition;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::test_api::{FakeApi, Reply, Request};
@@ -28,7 +28,7 @@ fn engine_at(base: &str) -> Engine<MemoryCredentials> {
         state_dir: crate::state_paths::init_for_test(),
         api_base: base.to_string(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens");
     let _writes = engine.writes.write().unwrap();
     engine
         .acct

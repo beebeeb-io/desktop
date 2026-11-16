@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::super::{Engine, EngineConfig};
 use super::pin;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::gate::GateState;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
@@ -38,7 +38,7 @@ fn set_kept_is_refused_while_no_one_is_signed_in() {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     assert_eq!(engine.view().gate, GateState::SignedOut);
     assert_eq!(
         engine.set_kept("f-1", true).err().as_deref(),
@@ -57,7 +57,7 @@ fn the_pin_change_keeps_a_folder_with_its_contents_and_releases_it() {
     put(&db, "f-2", "other.txt", false);
     let open = || StateDb::open(&path).unwrap();
     pin(
-        &REAL,
+        &TEST,
         "http://127.0.0.1:9",
         std::sync::Arc::new(open()),
         sync_root.path(),
@@ -68,7 +68,7 @@ fn the_pin_change_keeps_a_folder_with_its_contents_and_releases_it() {
     let kept: Vec<String> = db.kept_rows().unwrap().into_iter().map(|e| e.file_id).collect();
     assert_eq!(kept, ["d-a", "f-1"]);
     pin(
-        &REAL,
+        &TEST,
         "http://127.0.0.1:9",
         std::sync::Arc::new(open()),
         sync_root.path(),
@@ -114,7 +114,7 @@ fn keep_on_this_pc_of_a_twin_is_refused_and_writes_nothing() {
     assert_eq!(ops(), 0);
     let pin_of = |id: &str, kept: bool| {
         pin(
-            &REAL,
+            &TEST,
             "http://127.0.0.1:9",
             Arc::new(StateDb::open(&path).unwrap()),
             sync_root.path(),

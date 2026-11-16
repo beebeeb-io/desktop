@@ -229,7 +229,7 @@ fn a_locked_screen_deletes_nothing_and_sends_nothing() {
         api_base: api.base.clone(),
     };
     let engine = crate::app::Engine::open(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         config,
         host,
         crate::signin::memory_store::MemoryCredentials::default(),

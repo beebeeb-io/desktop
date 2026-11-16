@@ -95,20 +95,20 @@ fn a_program_named_ffmpeg_is_never_started() {
         #[cfg(not(target_os = "linux"))]
         std::env::current_exe().unwrap(),
     )
-        .args([
-            "--exact",
-            "engine_bridge::tests::video_frame::a_program_named_ffmpeg_is_never_started",
-            "--test-threads=1",
-            "--nocapture",
-        ])
-        .env(CHILD, dir.path())
-        .env(
-            "PATH",
-            format!("{}:{}", dir.path().display(), std::env::var("PATH").unwrap_or_default()),
-        )
-        .env("BEEBEEB_FFMPEG_PATH", &fake)
-        .output()
-        .unwrap();
+    .args([
+        "--exact",
+        "engine_bridge::tests::video_frame::a_program_named_ffmpeg_is_never_started",
+        "--test-threads=1",
+        "--nocapture",
+    ])
+    .env(CHILD, dir.path())
+    .env(
+        "PATH",
+        format!("{}:{}", dir.path().display(), std::env::var("PATH").unwrap_or_default()),
+    )
+    .env("BEEBEEB_FFMPEG_PATH", &fake)
+    .output()
+    .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),

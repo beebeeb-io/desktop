@@ -268,7 +268,7 @@ fn open(credentials: &MemoryCredentials) -> Host {
         "the handle talks to the fake API, never to production"
     );
     Host {
-        engine: Engine::open(&beebeeb_engine::identity::REAL, config, host, credentials.clone()).unwrap(),
+        engine: Engine::open(&beebeeb_engine::identity::TEST, config, host, credentials.clone()).unwrap(),
         messages,
         wakes,
     }
@@ -311,7 +311,7 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     let _serial = serial();
     let credentials = MemoryCredentials::default();
     let sync_root: PathBuf = tempfile::tempdir().unwrap().keep();
-    DesktopConfig::update_for(&beebeeb_engine::identity::REAL, |cfg| {
+    DesktopConfig::update_for(&beebeeb_engine::identity::TEST, |cfg| {
         cfg.sync_root = Some(sync_root.clone());
         (true, ())
     })
@@ -401,7 +401,7 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     host.engine.pause().unwrap();
     assert!(host.engine.is_paused() && host.engine.is_syncing());
     assert!(
-        DesktopConfig::load_for(&beebeeb_engine::identity::REAL)
+        DesktopConfig::load_for(&beebeeb_engine::identity::TEST)
             .unwrap()
             .pause_sync,
         "the pause is written, so a restart stays paused"
@@ -409,7 +409,7 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     host.engine.resume().unwrap();
     assert!(!host.engine.is_paused());
     assert!(
-        !DesktopConfig::load_for(&beebeeb_engine::identity::REAL)
+        !DesktopConfig::load_for(&beebeeb_engine::identity::TEST)
             .unwrap()
             .pause_sync
     );
@@ -1153,7 +1153,7 @@ fn the_watcher_closes_an_ended_session_and_ends_with_its_handle() {
         state_dir: beebeeb_engine::state_paths::init_for_test(),
         api_base: beebeeb_engine::runner::api_base_url(),
     };
-    let engine = Arc::new(Engine::open(&beebeeb_engine::identity::REAL, config, host, credentials.clone()).unwrap());
+    let engine = Arc::new(Engine::open(&beebeeb_engine::identity::TEST, config, host, credentials.clone()).unwrap());
     assert_eq!(engine.restore(), GateState::SignedOut);
     assert!(matches!(
         engine.sign_in_password(EMAIL, secret(PASSWORD)),
@@ -1190,7 +1190,7 @@ fn a_locked_screen_refuses_the_guide_mark_read_and_write() {
     let _serial = serial();
     let credentials = MemoryCredentials::default();
     let sync_root: PathBuf = tempfile::tempdir().unwrap().keep();
-    DesktopConfig::update_for(&beebeeb_engine::identity::REAL, |cfg| {
+    DesktopConfig::update_for(&beebeeb_engine::identity::TEST, |cfg| {
         cfg.sync_root = Some(sync_root.clone());
         (true, ())
     })

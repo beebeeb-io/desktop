@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use super::super::{Engine, EngineConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::gate::NextAfterSignIn;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
@@ -77,7 +77,7 @@ fn opened(fake: &Fake, slot: &str) -> Engine<MemoryCredentials> {
         state_dir: crate::state_paths::init_for_test(),
         api_base: fake.api.base.clone(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the engine opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens");
     engine.restore();
     engine
 }
@@ -194,5 +194,9 @@ fn signin_wipe_a_stored_first_sign_in_forgets_the_half_done_password_step() {
     engine
         .store_first_sign_in(turn, &token, &fake.account.email, &profile)
         .expect("the session is stored");
-    assert_eq!(half_done(&engine), (false, false), "the stored session ended the half-done step");
+    assert_eq!(
+        half_done(&engine),
+        (false, false),
+        "the stored session ended the half-done step"
+    );
 }

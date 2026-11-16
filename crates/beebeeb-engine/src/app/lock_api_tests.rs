@@ -7,7 +7,7 @@ use super::super::{Engine, EngineConfig};
 use super::PersonRefused;
 use crate::account::SessionTransition;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 
@@ -18,7 +18,7 @@ fn engine_with_a_session() -> Arc<Engine<MemoryCredentials>> {
         state_dir: crate::state_paths::init_for_test(),
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     {
         let _writes = engine.writes.write().unwrap();
         engine

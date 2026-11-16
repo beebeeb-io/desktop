@@ -18,7 +18,7 @@ const VERSION_TWO: &[u8] = b"version two";
 fn bridge_in(dir: &Path) -> EngineBridge {
     let db = Arc::new(StateDb::open(dir.join("state.db")).unwrap());
     let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "token".into(), MASTER_KEY));
-    EngineBridge::new(&crate::identity::REAL, db, api)
+    EngineBridge::new(&crate::identity::TEST, db, api)
 }
 
 /// The name as a server row carries it, sealed as `tests/sync.rs`'s `enc_name` seals it (a fixture, never a write).
@@ -619,7 +619,7 @@ async fn keep_there_refuses_a_save_made_during_the_download() {
             account.session_token.clone(),
             account.master_key,
         ));
-        let bridge = EngineBridge::new(&crate::identity::REAL, db, api);
+        let bridge = EngineBridge::new(&crate::identity::TEST, db, api);
         let place = sync_root.join("report.docx");
         std::fs::write(&place, AGREED_AT_THE_LOOK).unwrap();
         put_conflict_row(&bridge, &file, "report.docx", AGREED_AT_THE_LOOK);

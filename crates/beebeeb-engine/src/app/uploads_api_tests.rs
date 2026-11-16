@@ -8,7 +8,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation, StateDb};
@@ -26,7 +26,7 @@ fn engine(slot: &str) -> (Arc<TestEngine>, Arc<TransferBoard>) {
         api_base: "http://127.0.0.1:9".into(),
     };
     (
-        Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens")),
+        Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens")),
         board,
     )
 }
@@ -66,9 +66,10 @@ fn payload_copy(id: &str) -> String {
     static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = DIR.get_or_init(|| tempfile::tempdir().expect("a directory for the uploads' copies"));
-    let copy = dir
-        .path()
-        .join(format!("{id}-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let copy = dir.path().join(format!(
+        "{id}-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(&copy, b"an invented copy").expect("a copy to upload");
     copy.to_string_lossy().into_owned()
 }

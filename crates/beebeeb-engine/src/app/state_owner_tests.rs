@@ -8,7 +8,7 @@ use super::super::{Engine, EngineConfig};
 use super::owned_by;
 use crate::account_binding::Identity;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::StateDb;
 
@@ -62,7 +62,7 @@ fn a_signed_out_handle_owns_no_state() {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     let (dir, db) = db_owned_by(Some(who(Some("u-first"), Some("first@example.eu"))));
     drop(db);
     engine.use_local_state_for_test(dir.path().join("state.db"));
