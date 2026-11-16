@@ -90,11 +90,10 @@ pub(super) fn paper_live(n: u32, doc: &DocBody, live: &Live, top: f32) -> El {
     let side = TILE_PX as f32 / device;
     let mut page = shell(n, doc).h(h);
     let mut tiles = Vec::new();
-    for row_ in 0..rows {
-        let y = row_ as f32 * side;
-        if y >= band_bottom || y + side <= band_top {
-            continue;
-        }
+    // Only the rows that touch the band: the page's size is the file's, so the loop never walks every row of it.
+    let first = (band_top / side).floor().max(0.0) as u32;
+    let last = ((band_bottom / side).ceil().max(0.0) as u32).min(rows);
+    for row_ in first..last {
         for col_ in 0..cols {
             tiles.push((
                 col_,

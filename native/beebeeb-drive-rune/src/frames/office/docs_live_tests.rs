@@ -233,6 +233,20 @@ fn office_docs_a_zoom_change_asks_again() {
 }
 
 #[test]
+fn office_docs_an_absurd_page_size_is_bounded() {
+    let mut body = doc_of(2, 150, 1);
+    if let Body::Doc(d) = &mut body {
+        d.view.page_sizes_pt = vec![(1.0, 1.0e9), (f32::NAN, 842.0)];
+    }
+    let (_rt, log) = live_runtime(body, 1.0, None);
+    assert!(
+        log.pictures.borrow().len() < 200,
+        "bounded: {} asks",
+        log.pictures.borrow().len()
+    );
+}
+
+#[test]
 fn office_docs_asks_each_key_once_per_frame() {
     let (_rt, log) = live_runtime(doc_of(6, 150, 1), 1.0, None);
     let keys = log.pictures.borrow().clone();

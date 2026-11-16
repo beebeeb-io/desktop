@@ -444,7 +444,9 @@ fn size_pt(doc: &DocBody, n: u32) -> (f32, f32) {
         .page_sizes_pt
         .get(n as usize - 1)
         .copied()
-        .filter(|(w, h)| *w > 0.0 && *h > 0.0)
+        // A size the file states is trusted only as far as a page can be: finite, positive, and at most 20 times as
+        // tall as wide or the reverse (an absurd one is the board's A4).
+        .filter(|(w, h)| w.is_finite() && h.is_finite() && *w > 0.0 && *h > 0.0 && h / w <= 20.0 && w / h <= 20.0)
         .unwrap_or((595.0, 842.0))
 }
 
