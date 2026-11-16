@@ -40,6 +40,7 @@ pub mod session_gate;
 #[cfg(test)]
 mod start_refusal_tests;
 pub mod state;
+pub mod storage_view;
 pub mod surfaces;
 pub mod tray;
 // Rendered by `platform/windows.rs`; tested (and looked at) on every platform.

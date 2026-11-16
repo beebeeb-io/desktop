@@ -1103,3 +1103,5 @@ mod flows;
 mod owned_state;
 #[path = "host_tests_session_gate.rs"]
 mod session_gate;
+#[path = "host_tests_storage.rs"]
+mod storage;

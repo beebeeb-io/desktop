@@ -27,6 +27,10 @@ pub struct State {
     /// The storage split by category: `Some((files_bytes, photos_bytes))` from the board fixture
     /// or the engine; `None` when the split is not known (a live window before the engine wires it).
     pub(crate) storage_split: Option<(i64, i64)>,
+    /// How the live window reads the signed-in account's storage again (`shell::storage_view`); `None` in a scene.
+    pub(crate) storage_reader: Option<super::storage_view::StorageReader>,
+    /// The read in flight, stamped with the account that asked.
+    pub(crate) storage_pending: Option<super::storage_view::Pending>,
     pub(crate) selected: Option<usize>,
     pub(crate) search: TextEdit,
     pub(crate) sidebar_section: SidebarSection,
@@ -115,6 +119,8 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
             quota_bytes: 0,
         }),
         storage_split,
+        storage_reader: None,
+        storage_pending: None,
         selected,
         search: TextEdit::new(""),
         sidebar_section: SidebarSection::Files,
@@ -233,6 +239,17 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
             .with_approval_window(s.shell.main_window_slot()),
     ));
     s.storage_split = None;
+    // The figure follows the account: cleared at a sign-out or another account, read again for the one that signs in.
+    let storage_engine = engine.clone();
+    s.storage_reader = Some(std::sync::Arc::new(move || {
+        storage_engine
+            .storage_info()
+            .ok()
+            .map(|(used, quota)| source::StorageSummary {
+                used_bytes: used,
+                quota_bytes: quota,
+            })
+    }));
     // The first-time guide's "done", once per account: the engine keeps it in the account's own local state.
     s.guide_marks = Box::new(crate::engine_host::guide::EngineGuideMarks::new(engine.clone()));
     // Shared reads the engine (`engine_host::shared`): from Beebeeb only, for the session in memory.
