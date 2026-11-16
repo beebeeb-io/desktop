@@ -190,13 +190,32 @@ struct TestSeams {
     asks_at_release: Vec<u64>,
     /// Each finished proof's outcome, by kind, once the service acted on it.
     outcomes: Vec<&'static str>,
+    /// Where the service thread waits for a test: just before the proof reads the session's keys, and right after it
+    /// spawned the proof's task. A test's stop then comes at that moment.
+    before_keys: Option<TestPause>,
+    after_spawn: Option<TestPause>,
 }
+
+/// A test's pause for the service thread: it returns when the test lets the thread go on.
+#[cfg(test)]
+type TestPause = Arc<dyn Fn() + Send + Sync>;
 
 #[cfg(test)]
 type TestListing = Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Listing> + Send>> + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+impl Seat {
+    /// Waits at the test's pause `at` picks, if one is set, with the seat unlocked.
+    fn test_pause(&self, at: impl FnOnce(&TestSeams) -> Option<TestPause>) {
+        let pause = at(&lock(&self.state).test);
+        if let Some(pause) = pause {
+            pause();
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
@@ -517,6 +536,8 @@ impl<C: CredentialStores> Engine<C> {
         if !self.proof_still_current(turn) {
             return Some(Ok(Outcome::Changed(Tally::default())));
         }
+        #[cfg(test)]
+        seat.test_pause(|seams| seams.before_keys.clone());
         let Ok(((token, key), identity)) = start::keys_for_engine_start(&self.acct) else {
             return Some(Ok(Outcome::NotEligible));
         };
@@ -576,6 +597,8 @@ impl<C: CredentialStores> Engine<C> {
             drop(api);
             outcome
         });
+        #[cfg(test)]
+        seat.test_pause(|seams| seams.after_spawn.clone());
         {
             let mut state = lock(&seat.state);
             state.running.retain(|running| !running.abort.is_finished());
