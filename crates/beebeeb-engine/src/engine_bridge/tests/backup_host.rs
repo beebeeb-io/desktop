@@ -38,6 +38,8 @@ struct DriveMock {
     /// mounts during the check). Its one test is Unix only.
     #[cfg_attr(not(unix), allow(dead_code))]
     create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// The next folder create is carried out but answered 500 (its answer lost on the way back).
+    lose_create_answer: Arc<AtomicBool>,
 }
 
 const PAGE: usize = 2;
@@ -117,6 +119,8 @@ impl DriveMock {
         let notices: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(Some(Vec::new())));
         let fail_later_pages = Arc::new(AtomicBool::new(false));
         let create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::default();
+        let lose_create_answer = Arc::new(AtomicBool::new(false));
+        let lose = Arc::clone(&lose_create_answer);
         let (tree, log, halt) = (Arc::clone(&nodes), Arc::clone(&requests), Arc::clone(&stop));
         let (ahead, rows, fail_later) = (
             Arc::clone(&date_ahead_s),
@@ -193,7 +197,10 @@ impl DriveMock {
                     };
                     let answer = node_json(&id, &node);
                     tree.insert(id, node);
-                    http_json("201 Created", answer)
+                    match lose.swap(false, Ordering::SeqCst) {
+                        true => http_json("500 Internal Server Error", serde_json::json!({ "error": "lost" })),
+                        false => http_json("201 Created", answer),
+                    }
                 } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
                     let id = path.trim_start_matches("/api/v1/files/").to_string();
                     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
@@ -229,6 +236,7 @@ impl DriveMock {
             notices,
             fail_later_pages,
             create_on_notices,
+            lose_create_answer,
         }
     }
 
@@ -417,32 +425,6 @@ async fn host_lists_the_category_tree_across_pages() {
             .all(|r| r.origin.as_deref() == Some(beebeeb_types::backup::ORIGIN_BACKUP))
     );
     assert_eq!(Fixture::creates(&requests), 0);
-}
-
-/// A first backup adopts the device folder's existing `Pictures` (the old mirror's) instead of creating a second
-/// one, remembers it, and creates a category folder only where there is none.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn host_adopts_the_existing_category_folder_and_remembers_it() {
-    let fx = Fixture::new();
-    let legacy = fx.add(Some(&fx.device.clone()), "Pictures", true, 0);
-    fx.add(Some(&legacy), "old.jpg", false, 3);
-    let host = fx.host(vec![Category::Pictures, Category::Documents]);
-
-    let tree = host.device_tree(&Category::Pictures).await.unwrap();
-    assert_eq!(tree.category_folder_live, None, "a first backup on this device");
-    assert_eq!(tree.folders[""], uuid(&legacy));
-    assert_eq!(tree.files.len(), 1);
-    assert_eq!(
-        fx.bridge.db.backup_category_folder("pictures").unwrap().as_deref(),
-        Some(legacy.as_str())
-    );
-
-    let documents = host.device_tree(&Category::Documents).await.unwrap();
-    let requests = fx.server.finish();
-    assert_eq!(Fixture::creates(&requests), 1, "only Documents had no folder");
-    assert!(documents.files.is_empty() && documents.complete);
-    let made = fx.bridge.db.backup_category_folder("documents").unwrap().unwrap();
-    assert_eq!(documents.folders[""], uuid(&made));
 }
 
 /// Rule 11 inside core's pass (a folder deleted after the pass's notice check): a category folder deleted elsewhere
@@ -1789,3 +1771,6 @@ async fn the_scheduler_switches_off_a_stopped_backup_when_it_starts() {
         })
         .await;
 }
+
+// The category folder's adoption (a known folder's, never a chosen folder's) and the per-account switches.
+mod owners_and_adoption;

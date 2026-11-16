@@ -644,8 +644,10 @@ fn a_pdf_kept_on_this_pc_is_rendered_from_its_copy() {
     assert_eq!(source.origin("f-pdf"), Origin::ThisPc { unsent: true });
 }
 
+/// CP2 row 10.2: Find on a PDF whose session ended says so (locked, signed out or another account) and the view shows
+/// the stopped state at once; never "Not built yet" (Find is built) and never "No matches".
 #[test]
-fn find_on_a_source_that_cannot_search_says_it_is_not_built_never_no_matches() {
+fn mfx_find_on_a_pdf_whose_session_ended_says_so_never_not_built() {
     let fake = Fake::new();
     fake.put("f-pdf", "Invented plan.pdf", &sample_pdf(2, 612, 792));
     let mut ui = crate::frames::viewers::Ui::open(Box::new(Source::on(fake.clone())), "f-pdf").expect("it opens");
@@ -664,7 +666,21 @@ fn find_on_a_source_that_cannot_search_says_it_is_not_built_never_no_matches() {
         ui.media.find.is_none(),
         "no find bar that would answer for words nobody looked for"
     );
-    assert_eq!(ui.toast.as_deref(), Some("Not built yet: Find in this document"));
+    assert_eq!(
+        ui.toast.as_deref(),
+        Some(crate::frames::viewers::media::FIND_SESSION_ENDED),
+        "the press says the session ended, never that Find is not built"
+    );
+    assert!(
+        crate::frames::viewers::media::FIND_SESSION_ENDED.contains("signed out")
+            && crate::frames::viewers::media::FIND_SESSION_ENDED.contains("another account"),
+        "the words name both ends: signed out, another account"
+    );
+    assert_eq!(
+        ui.file.body,
+        Body::Stopped(Stopped::SessionChanged),
+        "the view shows that the file's session ended, at once"
+    );
 }
 
 #[test]

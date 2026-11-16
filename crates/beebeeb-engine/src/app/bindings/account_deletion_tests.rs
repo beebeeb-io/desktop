@@ -354,9 +354,11 @@ fn late_answer_dropped() {
             .acct
             .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
     }));
+    // The link went out before the session moved, so the answer says it was sent (the window tells it after an unlock
+    // for the same account), never "nothing was sent".
     assert_eq!(
         engine.request_account_deletion_for(now, secret(PASSWORD), CODE),
-        Err(DeletionError::NotSignedIn)
+        Err(DeletionError::SentThenMoved)
     );
 }
 

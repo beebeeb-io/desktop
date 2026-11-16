@@ -33,3 +33,11 @@ Hand-written below the generated table; `make map` on `v2-native` may drop it, s
 3. **Uploads refused on demand** (off by default). A line `uploads-off` on standard input (stays until the server stops), or
    `POST /fake-control/uploads-refused` with `{"refused": true}` and back with `{"refused": false}`. While on, every
    `POST|PUT /api/v1/uploads/...` is hung up on without an answer (what a client reads as unreachable); every other route answers as before.
+4. **A device sign-in (DW-A07 to DW-A10).** Start the app with `--api-base http://127.0.0.1:<port>` and ask to sign in with
+   another device: the app's socket (`GET /api/v1/auth/cli`) is served on the same port and the app shows a code. The fake's
+   second device answers with one HTTP call, no token: `POST /fake-control/device-approve` with `{"code": "XXXX-XXXX"}` (or
+   `{}`: the one waiting request) approves it the way an approving app does (shown the request, a password step-up for that
+   code, the claim, the account's key sealed to the app's key); the app ends signed in and unlocked. `{"approver": "stranger"}`:
+   another account tries and is refused (403), the request keeps waiting. `POST /fake-control/device-deny` denies it (DW-A09);
+   `POST /fake-control/device-code-life` with `{"seconds": n}` (1 to 300) shortens the codes issued after it (DW-A10);
+   `GET /fake-control/device-requests` answers `{"waiting": n}`. The routes and the wire: `fake_device_signin.rs`.

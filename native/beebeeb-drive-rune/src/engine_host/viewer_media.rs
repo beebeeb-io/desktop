@@ -4,10 +4,15 @@
 //! `opens_here_when_kept` and the poll's media branch here.
 //!
 //! Session rule (the binding shape of `files_trash.rs` and `stamp.rs`): the press stamps the session and the account
-//! the file was opened for. The player opens the file for the stamped session only (`media::stamp_press`), and an
-//! answer that comes back under another session or account stops the player and is never shown as playing. A lock,
-//! a sign-out or another account end it on the window's side too, without asking a worker (the shell's poll calls
-//! `media::stop_all`, and this poll says so to the view).
+//! the file was opened for, and that press goes WITH every item to the player (`MediaItem::press`); the player opens
+//! each item for its own press only (`engine_host::media`), and an answer that comes back under another session or
+//! account stops the player and is never shown as playing. A lock, a sign-out or another account end it on the
+//! window's side too, without asking a worker (the shell's poll calls `media::stop_all`, and this poll says so to the
+//! view).
+//!
+//! A view is of ONE file: the doc shows the player's state only while the player's current item is this file
+//! (`PlayerHandle::state_of`); another recording's title, times or refusal are never this one's. A Play on a file the
+//! player does not hold live (another file plays, or this one was refused) opens it again.
 //!
 //! Nothing is downloaded to open the view or to list the queue: the queue is a read of the local state (owner-checked,
 //! task 2488); a track's bytes are read by the player when it plays.
@@ -20,7 +25,7 @@ use beebeeb_media_protocol::KindHint;
 use super::*;
 use crate::frames::viewers::kinds::{AudioDoc, Track, VideoDoc};
 use crate::media::StopReason;
-use crate::media::player::{MediaItem, PlayerHandle};
+use crate::media::player::{MediaItem, PlayerHandle, Press};
 
 /// A folder's audio files as the Files listing sorts them, and the folder's name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,7 +166,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             && self.engine.account() == shown.account
     }
 
-    /// Play or pause `file_id`. The first play opens it with the queue, for the session stamped at the press.
+    /// Play or pause `file_id`. A play of a file the player does not hold live (the first, one after another file, or
+    /// one after a refusal) opens it with the queue, every item carrying the press's session and account.
     pub(super) fn media_play(&mut self, file_id: &str, on: bool) -> bool {
         let Some(player) = self.engine.media_player() else {
             return false;
@@ -173,21 +179,28 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             player.stop(StopReason::AccountChanged);
             return false;
         }
-        let playing_this = player.state().is_some_and(|state| state.file_id == file_id);
+        // A refusal keeps the file's state on screen but ends its run: that file is not held, so Play opens it anew.
+        let holds_this = player.holds(file_id);
         if !on {
-            if playing_this {
+            if holds_this {
                 player.pause();
             }
             return true;
         }
-        if playing_this {
+        if holds_this {
             player.play();
             return true;
         }
+        // The press goes WITH every item (the queue's too): the player opens each for this session of this account.
+        let press = Press {
+            session: shown.session,
+            account: shown.account.clone(),
+        };
         let item = MediaItem {
             file_id: file_id.to_string(),
             kind: shown.kind,
             length_ms: 0,
+            press: press.clone(),
         };
         let queue = shown
             .queue
@@ -196,13 +209,12 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 file_id: id.clone(),
                 kind: KindHint::Audio,
                 length_ms: 0,
+                press: press.clone(),
             })
             .collect();
-        let session = shown.session;
-        self.engine.media_press(session);
         let opened = player.open(item, queue).is_ok();
         // A cheap early exit for a session that ended BEFORE the press returned. This is NOT the guarantee: the
-        // player opens on its worker thread, later, and the opener there opens only for the stamped session (see
+        // player opens on its worker thread, later, and the opener there opens only for the item's own press (see
         // `engine_host/media.rs`); a refusal reaches the view through the player's state.
         let still = self.media.on.as_ref().is_some_and(|shown| self.media_is_current(shown));
         if !still {
@@ -233,7 +245,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         if shown.kind != KindHint::Audio {
             return None;
         }
-        let state = self.engine.media_player()?.state();
+        let state = self.engine.media_player()?.state_of(&shown.file_id);
         let doc = audio_doc(shown, state.as_ref());
         let shown = self.media.on.as_mut()?;
         if shown.drawn.as_ref() == Some(&doc) {
@@ -263,10 +275,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     }
 }
 
-/// The view's recording from what the player says (`None`: nothing plays yet, the file's own name stands in).
+/// The view's recording from what the player says of THIS file (`None`: the player holds nothing of it, so the file's
+/// own name stands in, not playing). Another file's state is never taken, even one of the same queue.
 fn audio_doc(shown: &Shown, state: Option<&crate::media::player::PlayState>) -> AudioDoc {
-    let state = state.filter(|state| shown.queue.iter().any(|(id, _)| *id == state.file_id));
-    let current = state.map_or(shown.file_id.as_str(), |state| state.file_id.as_str());
+    let state = state.filter(|state| state.file_id == shown.file_id);
+    let current = shown.file_id.as_str();
     let name_of = |id: &str| {
         shown
             .queue

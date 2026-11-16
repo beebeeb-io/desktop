@@ -837,9 +837,9 @@ fn task_2190_fu2_keep_both_name_fits_the_name_limit() {
     assert_eq!(name, format!("{} (MacBook Pro, 10.00).txt", "日".repeat(76)));
     assert!(name.len() <= MAX_NAME_BYTES);
     // A multibyte device name, and one far too long: the device is cut; the time and the extension stay.
-    let curly = keep_both_name(&wide, "Guus’s MacBook Pro", "10.00", &none);
+    let curly = keep_both_name(&wide, "Alex’s MacBook Pro", "10.00", &none);
     assert!(
-        curly.len() <= MAX_NAME_BYTES && curly.ends_with(" (Guus’s MacBook Pro, 10.00).txt"),
+        curly.len() <= MAX_NAME_BYTES && curly.ends_with(" (Alex’s MacBook Pro, 10.00).txt"),
         "{curly}"
     );
     let long = keep_both_name("notes.txt", &"x".repeat(300), "10.00", &none);

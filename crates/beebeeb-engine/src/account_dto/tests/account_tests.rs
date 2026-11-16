@@ -129,7 +129,7 @@ fn devices_parse() {
             "devices": [
                 {
                     "id": "d1",
-                    "hostname": "guus-mbp",
+                    "hostname": "alex-mbp",
                     "platform": "macos",
                     "bb_version": "0.3.1",
                     "last_seen": "2026-06-01T12:00:00Z",
@@ -138,7 +138,7 @@ fn devices_parse() {
                 },
                 {
                     "id": "d2",
-                    "hostname": "guus-pc",
+                    "hostname": "alex-pc",
                     "platform": "windows",
                     "bb_version": null,
                     "last_seen": "2026-06-02T12:00:00Z",
@@ -174,7 +174,7 @@ fn client_sync_sessions_parse() {
                     "bytes_total": 2000,
                     "heartbeat_status": "healthy",
                     "current_file": "report.pdf",
-                    "device_hostname": "guus-mbp",
+                    "device_hostname": "alex-mbp",
                     "device_platform": "macos",
                     "device_id": "d1",
                     "speed_bps": 5000000

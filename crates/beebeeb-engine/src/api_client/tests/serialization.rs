@@ -61,7 +61,7 @@ fn heartbeat_body_skips_none_optionals_but_keeps_zero() {
 fn registered_device_parses_and_tolerates_extra_fields() {
     let json = r#"{
             "id": "11111111-1111-1111-1111-111111111111",
-            "hostname": "guus-pc",
+            "hostname": "alex-pc",
             "platform": "windows",
             "bb_version": "0.1.0",
             "last_seen": "2026-06-15T00:00:00Z",

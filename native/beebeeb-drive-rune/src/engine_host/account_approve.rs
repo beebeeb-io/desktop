@@ -193,7 +193,7 @@ impl ApproveCalls {
 /// Whether an ending made under `made_for` is still kept to be said under `now`: the same account (named), and its
 /// session open (`open`: in memory and not held as ended). A screen lock keeps it; a sign-out, a closed vault or
 /// another account does not.
-fn keeps_late(made_for: &Stamp, now: &Stamp, open: bool) -> bool {
+pub(super) fn keeps_late(made_for: &Stamp, now: &Stamp, open: bool) -> bool {
     open && made_for.1.is_some() && made_for.1 == now.1
 }
 

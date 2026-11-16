@@ -291,13 +291,23 @@ pub fn reconcile_stopped_switches(
     if stopped.is_empty() {
         return Ok(stopped);
     }
+    // The owner's own switches alone (P3-8): a stop row of this owner's can name a chosen folder's key that another
+    // account's folder holds now (this owner's folder of that name was removed after it stopped). Settings that cannot
+    // be read tell no chosen folder's owner: only the known folders' switches are tried then.
     let still_on: Vec<String> = match crate::config::DesktopConfig::load_for(identity) {
-        Ok(cfg) => stopped
+        Ok(cfg) => {
+            let owners = crate::app::bindings::backup_folders::runner_chosen(db, &cfg);
+            stopped
+                .iter()
+                .filter(|key| cfg.known_folder_enabled(key) && crate::backup::host::owners_switch(key, &owners))
+                .cloned()
+                .collect()
+        }
+        Err(_) => stopped
             .iter()
-            .filter(|key| cfg.known_folder_enabled(key))
+            .filter(|key| crate::backup::host::owners_switch(key, &[]))
             .cloned()
             .collect(),
-        Err(_) => stopped.clone(),
     };
     if !still_on.is_empty() {
         let switched = crate::backup::host::switch_off_in_settings(identity, &still_on);

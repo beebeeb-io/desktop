@@ -136,6 +136,13 @@ pub struct ChosenFolder {
     /// account), so the person adds the folder again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// The server id of its backup's folder (`Backups/<device>/<name>`), recorded by the pass before it creates that
+    /// folder (`backup::host`). Its backup continues in this folder alone: after a sign-out (which empties the local
+    /// state) and after "Back up again", never in another folder of the same name. Missing: no folder yet (a new add,
+    /// or a settings file from before this field): the pass makes a new one, never adopting one by its name. The entry
+    /// goes, its id with it, when the folder is removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
 }
 
 impl ChosenFolder {
