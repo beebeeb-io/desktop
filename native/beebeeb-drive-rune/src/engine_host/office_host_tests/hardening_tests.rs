@@ -4,9 +4,9 @@
 //! notes.
 
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,10 @@ fn stopped_for(host: &OfficeHost, why: Stop) -> bool {
     matches!(host.state(), OfficeState::Stopped { why: got, .. } if got == why)
 }
 
+/// The wait of the test below: it starts the test binary as a helper beside a full suite, which the 2 s of `WITHIN`
+/// is too short for. A pass returns at once; only a real hang waits this long.
+const LOADED: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[test]
 fn the_exclusion_names_the_started_file_and_is_written_every_start() {
     let registry = Registry::new();
@@ -66,14 +70,21 @@ fn the_exclusion_names_the_started_file_and_is_written_every_start() {
     });
     let (mut host, log, _) = open_fake(fake, &registry, DocKind::Docx);
     let mut events = Vec::new();
-    assert!(until_open(&mut host, &mut events), "{:?}", host.state());
+    assert!(
+        pump_for(&mut host, &mut events, LOADED, |host, _| !matches!(
+            host.state(),
+            OfficeState::Opening
+        )),
+        "{:?}",
+        host.state()
+    );
     assert!(host.retry(), "Try again: {:?}", host.state());
     let second = OfficeState::Stopped {
         why: Stop::Exited,
         can_retry: false,
     };
     assert!(
-        pump(&mut host, &mut events, |host, _| host.state() == second),
+        pump_for(&mut host, &mut events, LOADED, |host, _| host.state() == second),
         "{:?}",
         host.state()
     );
@@ -92,7 +103,14 @@ fn the_exclusion_names_the_started_file_and_is_written_every_start() {
     let other = Fake::new(|link| serve(link, &[LETTER])).named("other.exe");
     let (mut host, log, _) = open_fake(other, &registry, DocKind::Docx);
     let mut events = Vec::new();
-    assert!(until_open(&mut host, &mut events), "{:?}", host.state());
+    assert!(
+        pump_for(&mut host, &mut events, LOADED, |host, _| !matches!(
+            host.state(),
+            OfficeState::Opening
+        )),
+        "{:?}",
+        host.state()
+    );
     assert_eq!(host.state(), OfficeState::NoPreview(NoPreview::NotInstalled));
     assert_eq!(log.starts(), 0);
     assert!(lock(&log.calls).is_empty(), "{:?}", lock(&log.calls));
@@ -109,7 +127,7 @@ fn the_exclusion_names_the_started_file_and_is_written_every_start() {
             let mut host = OfficeHost::open(&exe, DocKind::Docx, bytes, noop_wake());
             let mut events = Vec::new();
             assert!(
-                pump(&mut host, &mut events, |host, _| host.worker_ended()),
+                pump_for(&mut host, &mut events, LOADED, |host, _| host.worker_ended()),
                 "start {start}: {:?}",
                 host.state()
             );

@@ -89,7 +89,12 @@ fn a_program_named_ffmpeg_is_never_started() {
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(dir.path().join("clip.mp4"), b"not a video").unwrap();
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
+    let out = std::process::Command::new(
+        #[cfg(target_os = "linux")]
+        "/proc/self/exe",
+        #[cfg(not(target_os = "linux"))]
+        std::env::current_exe().unwrap(),
+    )
         .args([
             "--exact",
             "engine_bridge::tests::video_frame::a_program_named_ffmpeg_is_never_started",
