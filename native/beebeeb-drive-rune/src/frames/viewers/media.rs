@@ -98,6 +98,7 @@ impl Ui {
         // the session's, so one it cannot search is a PDF whose session ended (locked, signed out, another account):
         // the press says so, and the view shows that state now (the source's poll), never "Not built yet".
         if !self.source.finds() {
+            self.pump();
             self.toast = Some(FIND_SESSION_ENDED.to_string());
             return;
         }
