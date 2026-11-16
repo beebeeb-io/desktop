@@ -256,6 +256,41 @@ fn office_docs_an_absurd_page_size_is_bounded() {
 }
 
 #[test]
+fn office_docs_a_tall_page_asks_only_the_tile_rows_near_the_screen() {
+    // A page the size rule allows (20:1) but far taller than the screen: at 150 % it is 35 tile rows. Only the rows that
+    // touch the band (one screen above, the screen, one below) may be asked, however tall the page is.
+    const WINDOW_H: f32 = 798.0; // live_runtime's window
+    let (w, h) = (595.0, 11_900.0);
+    let mut body = doc_of(3, 150, 1);
+    if let Body::Doc(d) = &mut body {
+        d.view.page_sizes_pt = vec![(w, h); 3];
+    }
+    let (_rt, log) = live_runtime(body, 1.0, None);
+    // At scale 1 a tile is TILE_PX points; the band ends at most two screens below page 1's top.
+    let side = TILE_PX as f32;
+    let page_rows = (h * 1.5 / side).ceil() as u32;
+    let band_rows = (2.0 * WINDOW_H / side).ceil() as u32;
+    assert!(
+        page_rows > 4 * band_rows,
+        "the instrument: the page ({page_rows} rows) is far taller than the band ({band_rows})"
+    );
+    let rows: Vec<(u32, u32)> = log
+        .pictures
+        .borrow()
+        .iter()
+        .filter_map(|p| match p {
+            OfficePicture::Tile { page, row, .. } => Some((*page, *row)),
+            _ => None,
+        })
+        .collect();
+    assert!(!rows.is_empty(), "tiles were asked");
+    assert!(
+        rows.iter().all(|&(_, row)| row < band_rows),
+        "every asked tile row touches the band ({band_rows} rows): {rows:?}"
+    );
+}
+
+#[test]
 fn office_docs_asks_each_key_once_per_frame() {
     let (_rt, log) = live_runtime(doc_of(6, 150, 1), 1.0, None);
     let keys = log.pictures.borrow().clone();
