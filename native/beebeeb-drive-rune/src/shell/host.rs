@@ -104,6 +104,8 @@ pub struct Shell {
     /// the UI thread, at the end of every poll. Held so a test counts the calls; the real one reads the main
     /// window's handle from the slot and does nothing while there is none.
     media_pump: Arc<dyn Fn() + Send + Sync>,
+    /// Stops what plays when the session closes under the window (`media::stop_all`). Held so a test sees the stop.
+    media_stop: Arc<dyn Fn(crate::media::StopReason) + Send + Sync>,
 }
 
 impl Shell {
@@ -126,6 +128,7 @@ impl Shell {
         });
         Shell {
             media_pump,
+            media_stop: Arc::new(crate::media::stop_all),
             app,
             actions,
             platform,
@@ -201,6 +204,12 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn set_media_pump_for_test(&mut self, pump: Arc<dyn Fn() + Send + Sync>) {
         self.media_pump = pump;
+    }
+
+    /// Replaces what the poll calls to stop playback when the session closes (a test's recording fake).
+    #[cfg(test)]
+    pub(crate) fn set_media_stop_for_test(&mut self, stop: Arc<dyn Fn(crate::media::StopReason) + Send + Sync>) {
+        self.media_stop = stop;
     }
 
     /// The slot the main window's native handle is put in once it exists: the lock screen's Windows Hello
@@ -631,7 +640,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             // An open file: its decrypted content goes with the account that leaves.
             crate::frames::viewers::end_session(s, now.1 != account);
             // Playback stops, on a lock too: the helper, the sound, Windows' media controls (`media::stop_all`).
-            crate::media::stop_all(crate::media::StopReason::at_session_end(now.0, other_account));
+            (s.shell.media_stop)(crate::media::StopReason::at_session_end(now.0, other_account));
             // An open Office document: its confined renderer is killed and what it rendered is wiped.
             crate::engine_host::office_host::end_session(now.0 == super::app::GateState::Locked);
             // An item's Details or Preview: the page and what its read decrypted go too.
@@ -1068,6 +1077,9 @@ pub fn on_menu(s: &mut State, action: MenuAction, tx: &mut Tx) {
     }
 }
 
+/// How long a quit waits for a Windows Hello prompt's thread to ask Windows to close the prompt.
+const QUIT_HELLO_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// The window is closing. It keeps running in the notification area (DW-1231: "closing the
 /// window leaves the b running"); with no b to come back through, closing quits.
 pub fn on_close(s: &mut State, tx: &mut Tx) {
@@ -1094,6 +1106,11 @@ pub fn on_close(s: &mut State, tx: &mut Tx) {
 /// when the shell is dropped with the root state.
 pub fn on_quit(s: &mut State, _tx: &mut Tx) {
     s.shell.save_window_place();
+    // A Windows Hello prompt that is up goes with the app: the lock screen stops waiting for it (a shutdown Windows
+    // then cancels leaves its Unlock working), and Windows is asked to close every prompt before the process ends. A
+    // prompt whose owner is gone stays on screen with nobody to answer.
+    crate::frames::signin::on_quit(s);
+    super::platform::windows_hello::take_away_for_quit(QUIT_HELLO_WAIT);
     s.shell.actions.stop_for_quit();
     s.shell.stopped_for_quit = true;
     if let Some(tray) = &s.shell.tray {

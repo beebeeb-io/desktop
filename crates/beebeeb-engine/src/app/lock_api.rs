@@ -48,6 +48,14 @@ pub(super) const NO_SESSION: StartFacts = StartFacts {
     app_lock: None,
 };
 
+/// One Windows Hello (platform) prompt's claim on the screen lock ([`Engine::ask_screen_unlock`]): the lock as it
+/// held when the prompt was asked for. It lives as long as that lock ([`Engine::screen_unlock_ask_holds`]); a host
+/// keeps it beside its prompt and hands it back with the prompt's answer ([`Engine::unlock_screen_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenUnlockAsk {
+    turn: SessionGeneration,
+}
+
 /// Why a step of the lock did nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockRefused {
@@ -329,6 +337,31 @@ impl<C: CredentialStores> Engine<C> {
         }
         self.publish();
         Ok(())
+    }
+
+    /// The claim of a Windows Hello (platform) prompt on the screen lock, read when the prompt is about to be asked
+    /// for: `None` when the screen is not locked (nothing a prompt could open, so none is asked). Read without
+    /// waiting (the window's thread asks): the turn, the state, then the turn again; a move between them is no claim.
+    pub fn ask_screen_unlock(&self) -> Option<ScreenUnlockAsk> {
+        let turn = self.acct.session_generation();
+        let locked = self.lock_state() == LockState::ScreenLocked;
+        (locked && self.acct.session_unchanged_since(turn)).then_some(ScreenUnlockAsk { turn })
+    }
+
+    /// Does the lock the prompt was asked for still hold? `false` from the moment the screen opened by any means
+    /// (another prompt, the password), locked again (every lock moves the session's turn, so a lock after an unlock
+    /// is another lock), the vault closed, a sign-out or another account's sign-in. A host takes its prompt away
+    /// then; whatever that prompt still answers opens nothing ([`Self::unlock_screen_for`]). Never waits.
+    pub fn screen_unlock_ask_holds(&self, ask: ScreenUnlockAsk) -> bool {
+        self.acct.session_unchanged_since(ask.turn)
+            && self.lock_state() == LockState::ScreenLocked
+            && self.acct.session_unchanged_since(ask.turn)
+    }
+
+    /// The prompt asked under `ask` said Windows verified the person: the screen opens only while that same lock
+    /// holds, decided in the hold every lock move takes ([`Self::unlock_screen_platform_verified`]).
+    pub fn unlock_screen_for(&self, ask: ScreenUnlockAsk) -> Result<(), LockRefused> {
+        self.unlock_screen_platform_verified(ask.turn)
     }
 
     /// "Ask for my password when Beebeeb starts". `None`: the setting could not be read (the next start is closed).

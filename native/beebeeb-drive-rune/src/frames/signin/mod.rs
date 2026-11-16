@@ -787,6 +787,13 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     changed
 }
 
+/// The app is quitting (`shell::host::on_quit`): a Windows Hello prompt the lock screen waits for is taken away.
+pub fn on_quit(s: &mut State) {
+    if let Some(ui) = ui(s) {
+        ui.lock_end_hello();
+    }
+}
+
 /// The window lost or got focus. Leaving it hides a password that was shown, so the app
 /// switcher's picture of the window holds bullets (DW-A02). For `App::on_focus` in the shell.
 pub fn on_window_focus(s: &mut State, focused: bool) {

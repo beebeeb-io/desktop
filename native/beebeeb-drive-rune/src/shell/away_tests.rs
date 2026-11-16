@@ -274,6 +274,53 @@ fn the_operating_systems_lock_locks_the_screen() {
     });
 }
 
+/// The lock the tray says (Windows' session lock, Win+L; the b's menu has no lock item) while the main window is
+/// hidden (no window shown: its slot holds no handle): the poll that sees the lock stops playback as the idle lock's
+/// does (`media::stop_all`, as a lock), and the OS's media controls are pumped after it in that same poll, so the
+/// clear reaches Windows with the window hidden.
+#[test]
+fn the_trays_os_lock_stops_playback_and_pumps_the_clear_with_the_window_hidden() {
+    let mut live = live();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let (stops, pumps) = (seen.clone(), seen.clone());
+    live.rt.update(move |s, _| {
+        s.shell.set_media_stop_for_test(Arc::new(move |reason| {
+            stops.lock().unwrap().push(format!("stop {reason:?}"));
+        }));
+        s.shell
+            .set_media_pump_for_test(Arc::new(move || pumps.lock().unwrap().push("pump".into())));
+    });
+    assert!(
+        live.rt.state.shell.main_window_slot().lock().unwrap().is_none(),
+        "no window is shown"
+    );
+    live.rt.frame(0.016);
+    assert_eq!(
+        seen.lock().unwrap().iter().filter(|e| e.starts_with("stop")).count(),
+        0,
+        "open: nothing stops"
+    );
+    live.rt.update(|s, tx| host::on_tray(s, TrayEvent::SessionLocked, tx));
+    until(&mut live, "the tray's lock did not stop playback", |live| {
+        live.engine.lock_state() == LockState::ScreenLocked
+            && seen.lock().unwrap().iter().any(|e| e.starts_with("stop"))
+    });
+    let seen = seen.lock().unwrap().clone();
+    let stop = seen
+        .iter()
+        .position(|e| e == "stop Locked")
+        .unwrap_or_else(|| panic!("stopped as a lock: {seen:?}"));
+    assert!(
+        seen[stop + 1..].iter().any(|e| e == "pump"),
+        "the clear is pumped after the stop: {seen:?}"
+    );
+    assert_eq!(
+        seen.iter().filter(|e| e.starts_with("stop")).count(),
+        1,
+        "stopped once: {seen:?}"
+    );
+}
+
 #[test]
 fn an_unlock_without_input_starts_a_new_count() {
     let mut live = live();
