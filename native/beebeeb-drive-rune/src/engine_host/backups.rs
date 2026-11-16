@@ -406,10 +406,7 @@ fn run<E: BackupsEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
             log(format!("backups: a folder was not switched ({})", error.kind()));
             // P3-3: a switch that would back a folder up twice names that folder, in the engine's words, while the
             // account is still the one asked for.
-            let named = match error {
-                BackupsError::Nested => None,
-                _ => None,
-            };
+            let named = engine.nested_words(&key).filter(|_| still_for(engine, &account));
             let words = named.map_or(NOT_SWITCHED, kept);
             let _ = answers.send(Answer::Refused { generation, words });
         }
