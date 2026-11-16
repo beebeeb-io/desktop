@@ -411,7 +411,7 @@ impl BoardBandwidth {
     /// 125 KB/s.
     fn upload_speed(&self) -> (String, String) {
         match self.upload_limit {
-            Some(mbps) if mbps * 125 < 3200 && mbps * 125 < 1000 => ((mbps * 125).to_string(), "KB/s".into()),
+            Some(mbps) if mbps * 125 < 1000 => ((mbps * 125).to_string(), "KB/s".into()),
             Some(mbps) if mbps * 125 < 3200 => (format!("{:.1}", mbps as f32 * 0.125), "MB/s".into()),
             _ => ("3.2".into(), "MB/s".into()),
         }
@@ -560,5 +560,25 @@ impl BoardBandwidth {
             waiting_metered: waiting,
             test: self.test.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod upload_speed_tests {
+    use super::BoardBandwidth;
+
+    fn speed(limit: Option<u32>) -> (String, String) {
+        let board = BoardBandwidth { upload_limit: limit, ..BoardBandwidth::default() };
+        board.upload_speed()
+    }
+
+    #[test]
+    fn a_limit_under_a_megabyte_a_second_is_shown_in_kilobytes_above_it_in_megabytes() {
+        assert_eq!(speed(Some(4)), ("500".into(), "KB/s".into()));
+        assert_eq!(speed(Some(7)), ("875".into(), "KB/s".into()));
+        assert_eq!(speed(Some(8)), ("1.0".into(), "MB/s".into()));
+        assert_eq!(speed(Some(16)), ("2.0".into(), "MB/s".into()));
+        assert_eq!(speed(Some(26)), ("3.2".into(), "MB/s".into()));
+        assert_eq!(speed(None), ("3.2".into(), "MB/s".into()));
     }
 }
