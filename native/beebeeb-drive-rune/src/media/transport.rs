@@ -338,8 +338,15 @@ impl HelperLink {
             let _ = child.kill();
         }
         self.to_writer = None;
-        self.from_reader = None;
+        // What the helper sent and nobody took (frames, sound, tags) is zeroed before it is let go: the inbox, then
+        // the batches still queued by the reader (one it hands over after this is zeroed by the reader itself).
+        wipe_batch(self.inbox.make_contiguous());
         self.inbox.clear();
+        if let Some(from) = self.from_reader.take() {
+            while let Ok(mut batch) = from.try_recv() {
+                wipe_batch(&mut batch);
+            }
+        }
         if let Some(ended) = self.ended.take()
             && matches!(ended.recv_timeout(KILL_WAIT), Err(mpsc::RecvTimeoutError::Disconnected))
         {
@@ -385,6 +392,29 @@ impl Link for HelperLink {
 pub(super) fn wipe(msg: &mut ToHelper) {
     if let ToHelper::Data { bytes, .. } = msg {
         bytes.zeroize();
+    }
+}
+
+/// Overwrites what a helper's answer holds of the file: a frame's pixels, sound, the tags' words and picture.
+pub(super) fn wipe_answer(msg: &mut FromHelper) {
+    match msg {
+        FromHelper::Frame { rgba, .. } => rgba.zeroize(),
+        FromHelper::Audio { samples, .. } => samples.zeroize(),
+        FromHelper::Tags(tags) => {
+            tags.title.zeroize();
+            tags.artist.zeroize();
+            if let Some((_, _, rgba)) = tags.art.as_mut() {
+                rgba.zeroize();
+            }
+        }
+        FromHelper::ReadAt { .. } | FromHelper::Opened(_) | FromHelper::Ended | FromHelper::Error(_) => {}
+    }
+}
+
+/// [`wipe_answer`] for each answer of a batch.
+fn wipe_batch(batch: &mut [Result<FromHelper, WireError>]) {
+    for msg in batch.iter_mut().flatten() {
+        wipe_answer(msg);
     }
 }
 
@@ -435,8 +465,14 @@ fn read_loop(from: Box<dyn Read + Send>, out: mpsc::SyncSender<Batch>) {
                 break last;
             }
         };
-        if out.send(batch).is_err() || last {
-            return;
+        match out.send(batch) {
+            Ok(()) if !last => {}
+            Ok(()) => return,
+            // The link let go: nobody takes this batch, so it is zeroed here.
+            Err(mpsc::SendError(mut batch)) => {
+                wipe_batch(&mut batch);
+                return;
+            }
         }
     }
 }
@@ -469,3 +505,7 @@ impl LinkFactory for SandboxedHelpers {
         Ok(Box::new(HelperLink::start_in(&exe, profile)?))
     }
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;

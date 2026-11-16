@@ -59,7 +59,7 @@ use crate::frames::photos::source::{
     Pumped, Shape, SourceRef, StripItem, Totals, Viewing,
 };
 use crate::media::StopReason;
-use crate::media::player::{MediaItem, PlayerHandle, Refusal};
+use crate::media::player::{MediaItem, PlayerHandle, Press, Refusal};
 use crate::source::DriveItem;
 use beebeeb_media_protocol::KindHint;
 
@@ -473,10 +473,15 @@ impl<C: CredentialStores> EnginePhotos<C> {
         if !file.video {
             return None;
         }
+        // The press goes WITH the item: the player opens the video for this session of this account only.
         let item = MediaItem {
             file_id: file.id.clone(),
             kind: KindHint::Video,
             length_ms: u64::from(self.thumbs.length(&file.id).unwrap_or(0)) * 1000,
+            press: Press {
+                session: pressed.0,
+                account: pressed.1.clone(),
+            },
         };
         let opened = open(&player, item);
         between();

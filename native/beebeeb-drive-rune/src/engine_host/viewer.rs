@@ -168,8 +168,6 @@ pub trait ViewerEngine: Send + Sync + 'static {
     fn media_queue(&self, _session: SessionGeneration, _file_id: &str) -> Option<viewer_media::MediaQueue> {
         None
     }
-    /// The press that opens the player: the session the engine must open the file's bytes for. Default: none.
-    fn media_press(&self, _session: SessionGeneration) {}
     fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, _opening: u64) -> Option<EditFacts> {
         None
     }
@@ -294,10 +292,6 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 
     fn media_queue(&self, session: SessionGeneration, file_id: &str) -> Option<viewer_media::MediaQueue> {
         viewer_media::queue_of(&self.engine, session, file_id)
-    }
-
-    fn media_press(&self, session: SessionGeneration) {
-        super::media::stamp_press(session);
     }
 
     fn edit_facts(&self, session: SessionGeneration, file_id: &str, opening: u64) -> Option<EditFacts> {

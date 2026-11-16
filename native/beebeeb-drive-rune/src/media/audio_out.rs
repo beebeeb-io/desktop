@@ -6,9 +6,9 @@
 //! Slice M4 (`media-audio-out`). The ring and the clock ([`Ring`]) are plain code and are tested without a device.
 
 use super::player::{AudioFactory, AudioSink};
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(test)]
 #[path = "audio_out_tests.rs"]
@@ -26,15 +26,94 @@ pub enum AudioError {
     Failed,
 }
 
+/// The ring's samples: one buffer of fixed size, written round and round. Samples already played stay in it until
+/// they are written over, so the whole of it is zeroed on a flush and when it is dropped (the file's decoded sound
+/// never stays behind in freed memory).
+struct Samples {
+    /// Every slot of the ring; its length is the ring's size.
+    data: Vec<f32>,
+    /// The slot of the oldest queued sample.
+    head: usize,
+    /// How many samples are queued.
+    len: usize,
+}
+
+impl Samples {
+    fn with_capacity(cap: usize) -> Samples {
+        Samples {
+            data: vec![0.0; cap],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Queues `samples` after the others; the caller keeps to the free room.
+    fn extend_from(&mut self, samples: &[f32]) {
+        let cap = self.data.len();
+        let mut at = (self.head + self.len) % cap.max(1);
+        for sample in samples.iter().take(cap - self.len) {
+            self.data[at] = *sample;
+            at = (at + 1) % cap;
+        }
+        self.len += samples.len().min(cap - self.len);
+    }
+
+    /// Moves the oldest `out.len()` samples (at most what is queued) into `out`.
+    fn take_into(&mut self, out: &mut [f32]) {
+        let n = out.len().min(self.len);
+        let cap = self.data.len();
+        for slot in out[..n].iter_mut() {
+            *slot = self.data[self.head];
+            self.head = (self.head + 1) % cap;
+        }
+        self.len -= n;
+    }
+
+    /// Drops the oldest `n` samples (at most what is queued).
+    #[cfg(not(any(windows, target_os = "macos")))]
+    fn skip(&mut self, n: usize) {
+        let n = n.min(self.len);
+        self.head = (self.head + n) % self.data.len().max(1);
+        self.len -= n;
+    }
+
+    /// Nothing queued, and every slot zeroed (also the ones already played).
+    fn wipe(&mut self) {
+        self.data.as_mut_slice().zeroize();
+        self.head = 0;
+        self.len = 0;
+    }
+}
+
+impl Drop for Samples {
+    fn drop(&mut self) {
+        self.data.as_mut_slice().zeroize();
+    }
+}
+
 /// The queued sound and the clock: frames the device took since the last flush, counted from the pts of the first
-/// sample queued after it. Silence the device asked for while the ring was empty is not counted.
+/// sample queued after it. Silence the device asked for while the ring was empty is not counted as sound; it does
+/// move the sound before it through the device's own buffer ([`Ring::clock_ms`]).
 struct Ring {
-    buf: VecDeque<f32>,
+    buf: Samples,
     cap: usize,
     rate: u32,
     channels: u16,
     base_pts_ms: Option<u64>,
     played_frames: u64,
+    /// Frames of sound the device took in a row, the latest of them last (silence breaks the run).
+    run_frames: u64,
+    /// Frames of silence the device took since the last frame of sound.
+    silent_after: u64,
     underruns: u64,
 }
 
@@ -44,12 +123,14 @@ impl Ring {
         let rate = rate.max(1);
         let cap = rate as usize * channels as usize * RING_SECONDS as usize;
         Ring {
-            buf: VecDeque::with_capacity(cap),
+            buf: Samples::with_capacity(cap),
             cap,
             rate,
             channels,
             base_pts_ms: None,
             played_frames: 0,
+            run_frames: 0,
+            silent_after: 0,
             underruns: 0,
         }
     }
@@ -66,7 +147,7 @@ impl Ring {
         if self.base_pts_ms.is_none() {
             self.base_pts_ms = Some(pts_ms);
         }
-        self.buf.extend(samples[..take].iter().copied());
+        self.buf.extend_from(&samples[..take]);
         take
     }
 
@@ -76,16 +157,27 @@ impl Ring {
         let ch = self.channels as usize;
         let mut n = out.len().min(self.buf.len());
         n -= n % ch;
-        for (o, s) in out[..n].iter_mut().zip(self.buf.drain(..n)) {
-            *o = s;
-        }
+        self.buf.take_into(&mut out[..n]);
         for o in out[n..].iter_mut() {
             *o = 0.0;
         }
         if n < out.len() {
             self.underruns += 1;
         }
-        self.played_frames += (n / ch) as u64;
+        let sound = (n / ch) as u64;
+        let silence = ((out.len() - n) / ch) as u64;
+        if sound > 0 {
+            // The sound comes first in the buffer, the silence after it.
+            self.run_frames = if self.silent_after == 0 {
+                self.run_frames.saturating_add(sound)
+            } else {
+                sound
+            };
+            self.silent_after = silence;
+        } else {
+            self.silent_after = self.silent_after.saturating_add(silence);
+        }
+        self.played_frames = self.played_frames.saturating_add(sound);
         n
     }
 
@@ -95,25 +187,32 @@ impl Ring {
         let ch = self.channels as usize;
         let mut n = samples.min(self.buf.len());
         n -= n % ch;
-        self.buf.drain(..n);
-        self.played_frames += (n / ch) as u64;
+        self.buf.skip(n);
+        self.played_frames = self.played_frames.saturating_add((n / ch) as u64);
     }
 
-    /// A seek: nothing queued, the clock starts over at the next sample.
+    /// A seek (and a stop): nothing queued, every slot zeroed, the clock starts over at the next sample.
     fn flush(&mut self) {
-        self.buf.clear();
+        self.buf.wipe();
         self.base_pts_ms = None;
         self.played_frames = 0;
+        self.run_frames = 0;
+        self.silent_after = 0;
     }
 
-    /// Where playback has got to, in the file's time; `None` before the first sample played.
+    /// Where playback has got to, in the file's time; `None` before the first sample played. The device hears a
+    /// frame `latency_frames` after it took it, so the last frames taken are not heard yet; but once the ring ran
+    /// empty, the silence the device took after them pushed them out: after `latency_frames` of it, the clock is
+    /// at the end of the sound (P2-2 of the #462 review: the player's end comes on a real device too). Saturating
+    /// throughout: a timestamp near the end of `u64` (a helper's answer) can neither wrap nor panic here.
     fn clock_ms(&self, latency_frames: u64) -> Option<u64> {
         let base = self.base_pts_ms?;
         if self.played_frames == 0 {
             return None;
         }
-        let heard = self.played_frames.saturating_sub(latency_frames);
-        Some(base + heard * 1000 / self.rate as u64)
+        let unheard = latency_frames.saturating_sub(self.silent_after).min(self.run_frames);
+        let heard = self.played_frames.saturating_sub(unheard);
+        Some(base.saturating_add(heard.saturating_mul(1000) / u64::from(self.rate)))
     }
 }
 
@@ -154,9 +253,13 @@ impl<T: cpal::Sample + cpal::FromSample<f32>> DeviceSample for T {
 }
 
 /// The per-buffer step of the output callback: the ring's sound in the device's format, silence when the ring is empty
-/// or busy (never wait on the player's thread). `scratch` is reused between calls.
+/// or busy (never wait on the player's thread). `scratch` is reused between calls; zeroed before it grows (the old
+/// buffer is freed) and, as a `Zeroizing`, when the stream drops it.
 #[cfg(any(windows, target_os = "macos", test))]
-fn fill_device<T: DeviceSample>(shared: &Shared, scratch: &mut Vec<f32>, data: &mut [T]) {
+fn fill_device<T: DeviceSample>(shared: &Shared, scratch: &mut Zeroizing<Vec<f32>>, data: &mut [T]) {
+    if data.len() > scratch.capacity() {
+        scratch.zeroize();
+    }
     scratch.resize(data.len(), 0.0);
     match shared.ring.try_lock() {
         Ok(mut ring) => {
@@ -370,7 +473,7 @@ impl AudioFactory for DefaultAudio {
 /// `cpal`: WASAPI in shared mode on Windows, CoreAudio on macOS.
 #[cfg(any(windows, target_os = "macos"))]
 mod device {
-    use super::{AudioError, Ordering, Shared, fill_device};
+    use super::{AudioError, Ordering, Shared, Zeroizing, fill_device};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use std::sync::Arc;
 
@@ -410,8 +513,8 @@ mod device {
     {
         let data_shared = Arc::clone(shared);
         let err_shared = Arc::clone(shared);
-        // One buffer for the device's own format; sized on the first callbacks, then reused.
-        let mut scratch: Vec<f32> = Vec::with_capacity(16_384);
+        // One buffer for the device's own format; sized on the first callbacks, then reused; zeroed with the stream.
+        let mut scratch: Zeroizing<Vec<f32>> = Zeroizing::new(Vec::with_capacity(16_384));
         device.build_output_stream::<T, _, _>(
             config,
             move |data: &mut [T], info: &cpal::OutputCallbackInfo| {

@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 use super::worker::{refusal_of, writes_played_line};
 use super::{
     AudioFactory, AudioSink, Clock, Link, LinkFactory, MediaBytes, MediaItem, MediaOpener, NoSound, NowPlayingSink,
-    Phase, PlayerHandle, Refusal, lock,
+    Phase, PlayerHandle, Press, Refusal, lock,
 };
 use crate::media::StopReason;
 use crate::media::audio_out::AudioError;
@@ -466,6 +466,15 @@ fn item(id: &str, kind: KindHint) -> MediaItem {
         file_id: id.to_owned(),
         kind,
         length_ms: 0,
+        press: a_press(),
+    }
+}
+
+/// The press every item of these tests is opened for (the fakes have no session).
+fn a_press() -> Press {
+    Press {
+        session: beebeeb_engine::account::SessionGeneration::for_test(1),
+        account: None,
     }
 }
 

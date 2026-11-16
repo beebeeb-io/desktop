@@ -5,9 +5,18 @@
 //!
 //! System Media Transport Controls through `ISystemMediaTransportControlsInterop::GetForWindow`. macOS and Linux:
 //! [`OsControls::attach`] answers `None` (the macOS Now Playing slice is in the macOS phase).
+//!
+//! **Threads (P2-1 of the #462 review).** The controls belong to the window: they are attached and written on the UI
+//! thread only. The player feeds them from its own thread while it holds the player's lock, so the player is handed
+//! a [`UiControls`]: its `show` and `clear` only leave what to show next, and [`UiControls::pump`], on the UI thread
+//! (the shell's poll), attaches the window's controls once and carries out the latest of it. Nothing the player
+//! calls waits on Windows. The process's one is [`shell_controls`].
+//!
+//! **No artwork in 0.9.0** (P3-2 of the #462 review): the player keeps no picture, and [`SHOWS_ART`] keeps the one
+//! path that hands Windows a picture shut.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use beebeeb_media_protocol::{MAX_ART, cut_text};
 
@@ -135,6 +144,10 @@ impl ButtonQueue {
     }
 }
 
+/// Whether a picture is handed to Windows' controls. Off while artwork is out of the release: nothing is shown and
+/// nothing on the UI thread waits for the picture's stream to be written.
+pub const SHOWS_ART: bool = false;
+
 /// The picture as PNG bytes, built in memory. `None` for a picture that is empty, over `MAX_ART` a side, or whose
 /// bytes are not `w * h * 4`.
 pub fn encode_art_png(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
@@ -166,6 +179,11 @@ pub struct OsControls {
 impl OsControls {
     /// The controls of `window` (its native handle, on the UI thread). `None`: this OS has none here.
     pub fn attach(window: &rune::WindowHandle) -> Option<OsControls> {
+        OsControls::attach_with(window, ButtonQueue::default())
+    }
+
+    /// [`OsControls::attach`], with the buttons Windows presses pushed to `buttons`.
+    pub fn attach_with(window: &rune::WindowHandle, buttons: ButtonQueue) -> Option<OsControls> {
         #[cfg(windows)]
         {
             // The window's native handle, the way `shell/platform/windows_hello.rs` reads it (UI thread).
@@ -177,11 +195,11 @@ impl OsControls {
                 .ok()
                 .flatten()
                 .filter(|hwnd| *hwnd != 0)?;
-            imp::attach(hwnd)
+            imp::attach(hwnd, buttons)
         }
         #[cfg(not(windows))]
         {
-            let _ = window;
+            let _ = (window, buttons);
             None
         }
     }
@@ -226,6 +244,87 @@ impl NowPlayingSink for OsControls {
     }
 }
 
+/// What the player last asked of the controls and the UI thread has not carried out yet.
+enum Pending {
+    Show(NowPlaying),
+    Clear,
+}
+
+/// The controls as the player holds them: see the module's "Threads". Clones share them.
+#[derive(Clone, Default)]
+pub struct UiControls {
+    shared: Arc<UiShared>,
+}
+
+#[derive(Default)]
+struct UiShared {
+    /// The latest show or clear the player asked for; a newer one replaces it.
+    pending: Mutex<Option<Pending>>,
+    /// The buttons Windows pressed: its handler pushes, the player takes them.
+    buttons: ButtonQueue,
+    /// The window's controls once attached. Only [`UiControls::pump`] (the UI thread) touches them.
+    attached: Mutex<Option<Box<dyn NowPlayingSink>>>,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl UiControls {
+    /// On the UI thread, with the main window: attaches the window's controls the first time there is something to
+    /// show, then carries out the latest show or clear. Cheap when nothing is pending; call it on every poll.
+    pub fn pump(&self, window: &rune::WindowHandle) {
+        self.pump_with(|buttons| {
+            OsControls::attach_with(window, buttons).map(|controls| Box::new(controls) as Box<dyn NowPlayingSink>)
+        });
+    }
+
+    /// [`UiControls::pump`] with the attaching given (the tests hand a fake). An attach that answers `None` (no window
+    /// yet, no controls on this OS) drops the update: the player feeds the next one within a second.
+    fn pump_with(&self, attach: impl FnOnce(ButtonQueue) -> Option<Box<dyn NowPlayingSink>>) {
+        let Some(pending) = locked(&self.shared.pending).take() else {
+            return;
+        };
+        let mut attached = locked(&self.shared.attached);
+        if attached.is_none() {
+            if matches!(pending, Pending::Clear) {
+                // Nothing was shown: nothing to clear.
+                return;
+            }
+            *attached = attach(self.shared.buttons.clone());
+        }
+        let Some(controls) = attached.as_mut() else {
+            return;
+        };
+        match pending {
+            Pending::Show(now) => controls.show(&now),
+            Pending::Clear => controls.clear(),
+        }
+    }
+}
+
+/// The player's side: never a call into Windows, only what to do next.
+impl NowPlayingSink for UiControls {
+    fn show(&mut self, now: &NowPlaying) {
+        *locked(&self.shared.pending) = Some(Pending::Show(now.clone()));
+    }
+
+    fn clear(&mut self) {
+        *locked(&self.shared.pending) = Some(Pending::Clear);
+    }
+
+    fn take_buttons(&mut self) -> Vec<OsButton> {
+        self.shared.buttons.drain()
+    }
+}
+
+/// The process's one: the shell's player is handed a clone (`engine_host::media::install_shell_player`) and the
+/// shell's poll pumps it on the UI thread.
+pub fn shell_controls() -> UiControls {
+    static SHELL: OnceLock<UiControls> = OnceLock::new();
+    SHELL.get_or_init(UiControls::default).clone()
+}
+
 #[cfg(windows)]
 mod imp {
     use windows::Foundation::{TimeSpan, TypedEventHandler};
@@ -238,7 +337,9 @@ mod imp {
     use windows::Win32::System::WinRT::ISystemMediaTransportControlsInterop;
     use windows::core::HSTRING;
 
-    use super::{ButtonQueue, NowPlaying, OsButton, OsControls, PlaybackKind, encode_art_png, playback_kind};
+    use super::{
+        ButtonQueue, NowPlaying, OsButton, OsControls, PlaybackKind, SHOWS_ART, encode_art_png, playback_kind,
+    };
 
     /// Windows counts time in 100 ns steps.
     fn span(ms: u64) -> TimeSpan {
@@ -257,13 +358,12 @@ mod imp {
         }
     }
 
-    pub(super) fn attach(hwnd: isize) -> Option<OsControls> {
+    pub(super) fn attach(hwnd: isize, buttons: ButtonQueue) -> Option<OsControls> {
         let interop =
             windows::core::factory::<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>().ok()?;
         // SAFETY: a COM call on a live interface. The handle is only a number to Windows: one that names no window
         // is refused with an error, and nothing is read through it here.
         let smtc: SystemMediaTransportControls = unsafe { interop.GetForWindow(HWND(hwnd as *mut _)) }.ok()?;
-        let buttons = ButtonQueue::default();
         smtc.SetIsPlayEnabled(true).ok()?;
         smtc.SetIsPauseEnabled(true).ok()?;
         smtc.SetIsNextEnabled(true).ok()?;
@@ -323,7 +423,8 @@ mod imp {
                 video.SetSubtitle(&HSTRING::from(now.artist.as_str()))?;
             }
         }
-        match now.art.as_ref().and_then(|(w, h, rgba)| encode_art_png(*w, *h, rgba)) {
+        let art = now.art.as_ref().filter(|_| SHOWS_ART);
+        match art.and_then(|(w, h, rgba)| encode_art_png(*w, *h, rgba)) {
             Some(png) => updater.SetThumbnail(&reference_from_memory(&png)?)?,
             None => updater.SetThumbnail(None::<&RandomAccessStreamReference>)?,
         }
