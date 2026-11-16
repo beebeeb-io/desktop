@@ -47,13 +47,6 @@ pub fn switch_off_in_settings(identity: &'static crate::identity::EngineIdentity
     crate::config::DesktopConfig::update_for(identity, |cfg| {
         for key in keys {
             cfg.set_known_folder(key, false);
-            for folder in cfg
-                .backup_chosen_folders
-                .iter_mut()
-                .filter(|folder| folder.key() == *key)
-            {
-                folder.folder_id = None;
-            }
         }
         (true, ())
     })
@@ -217,6 +210,10 @@ impl DesktopBackupHost {
             .bridge
             .backup_new_folder_id()
             .map_err(host_error("category_folder_create"))?;
+        self.bridge
+            .backup_create_folder_as(parent, c.display_name(), &id)
+            .await
+            .map_err(host_error("category_folder_create"))?;
         let recorded = crate::config::DesktopConfig::update_for(self.bridge.identity, |cfg| {
             let recorded = crate::app::bindings::backup_folders::record_folder_id(cfg, &key, &owner, &id);
             (recorded, recorded)
@@ -226,10 +223,6 @@ impl DesktopBackupHost {
                 "category_folder: the new folder's id was not recorded".into(),
             ));
         }
-        self.bridge
-            .backup_create_folder_as(parent, c.display_name(), &id)
-            .await
-            .map_err(host_error("category_folder_create"))?;
         db.set_backup_category_folder(&key, Some(&id))
             .map_err(db_error("category_folder"))?;
         Ok((id, None))
