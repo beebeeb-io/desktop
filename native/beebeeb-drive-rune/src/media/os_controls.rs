@@ -378,10 +378,6 @@ impl NowPlayingSink for UiControls {
     }
 
     fn take_buttons(&mut self) -> Vec<OsButton> {
-        // Under the wake cover a press waits in the queue: nothing starts or moves behind the cover.
-        if self.shared.cover.covers_now() {
-            return Vec::new();
-        }
         self.shared.buttons.drain()
     }
 }

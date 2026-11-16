@@ -506,6 +506,7 @@ fn request_as(s: &mut State, intent: Intent, link: bool) -> Outcome {
         s.shell.open_main();
         return Outcome::Deferred;
     }
+    super::intents::a_later_ask_came();
     let outcome = dispatch(s, Event::Request(intent));
     s.shell.open_main();
     outcome
