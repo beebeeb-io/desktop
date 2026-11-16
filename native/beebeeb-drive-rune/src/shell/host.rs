@@ -510,11 +510,6 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// [`request`] for a `beebeeb://` link (`link`): held under the wake cover the same way, but kept across a lock of the
 /// same account (`intents::after_the_cover`; the lead's ruling of 2026-11-16 05:05: a link only opens a view).
 fn request_as(s: &mut State, intent: Intent, link: bool) -> Outcome {
-    if under_the_wake_cover(s) {
-        super::intents::hold_under_the_cover(s, intent, link);
-        s.shell.open_main();
-        return Outcome::Deferred;
-    }
     super::intents::a_later_ask_came();
     let outcome = dispatch(s, Event::Request(intent));
     s.shell.open_main();
@@ -679,6 +674,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         changed |= super::platform::windows_verbs::after_the_cover(s, tx);
     }
     // The same for a picked folder and an ask to show a place (`intents`, review of #464, P3-1).
+    changed |= super::intents::after_the_cover(s);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
