@@ -234,7 +234,7 @@ fn an_app_press_opens_the_kept_copy_in_that_app() {
 }
 
 #[test]
-fn beebeeb_in_the_submenu_opens_the_viewer() {
+fn beebeeb_in_the_submenu_makes_the_same_open_call_as_open_beebeeb() {
     // What "Open (Beebeeb)" does…
     let (mut rt, by_open) = spied_with(true, Some(vec![app(1)]));
     right_click(&mut rt, &format!("row-{AGREEMENT_ROW}-date"));

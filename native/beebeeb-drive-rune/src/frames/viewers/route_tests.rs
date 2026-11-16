@@ -43,6 +43,9 @@ struct Script {
     asked: Vec<&'static str>,
     origin: Option<Origin>,
     kept_here: bool,
+    /// The source holds Office files in a renderer and opens a kept one here (`ViewerSource::office_live`,
+    /// `opens_here_when_kept`), as the engine's source does while the Office route is on.
+    opens_here: bool,
     cannot_save: bool,
     no_copies: bool,
 }
@@ -72,6 +75,12 @@ impl ViewerSource for Scripted {
     fn kept_on_this_pc(&self, _: &str) -> bool {
         self.0.borrow_mut().asked.push("kept?");
         self.0.borrow().kept_here
+    }
+    fn opens_here_when_kept(&self, _: &str) -> bool {
+        self.0.borrow().opens_here
+    }
+    fn office_live(&self) -> bool {
+        self.0.borrow().opens_here
     }
     fn origin(&self, _: &str) -> Origin {
         self.0.borrow().origin.unwrap_or(Origin::Beebeeb)
@@ -403,6 +412,50 @@ fn a_lists_open_of_a_file_kept_on_this_pc_is_left_to_its_own_app_and_another_fil
     assert_eq!(opens(&script, "open"), 1);
     assert_eq!(route_item(&rt).as_deref(), Some(FILE));
     assert!(drawn(&rt).contains(WORDS));
+}
+
+/// Step 5 turned the Office switches on: a list's Open of an Office file goes to the viewer (a `.ppt` to its no-preview
+/// state), kept on this PC or not, as the engine's source opens a kept Office file here. Before, `viewer_of` alone
+/// decided, it has no Office kind, and every Office file went to the system's app ("Open (Beebeeb)" too).
+#[test]
+fn a_lists_open_of_an_office_file_goes_to_the_viewer_while_its_route_is_on() {
+    assert!(super::kinds::OFFICE_VIEWER_ON, "the shipped switches are on");
+    for kept in [false, true] {
+        for name in [
+            "Invented letter.docx",
+            "Invented letter.doc",
+            "Invented sheet.xlsx",
+            "Invented sheet.xls",
+            "Invented deck.pptx",
+            "Invented deck.ppt",
+        ] {
+            let (mut rt, script) = window(Script {
+                kept_here: kept,
+                opens_here: true,
+                ..Script::default()
+            });
+            let mut opened = false;
+            rt.update(|s, _| opened = open_item(s, &item(name)));
+            frames(&mut rt, 4);
+            assert!(opened, "{name}, kept {kept}");
+            assert_eq!(opens(&script, "open"), 1, "{name}, kept {kept}");
+            assert_eq!(route_item(&rt).as_deref(), Some(FILE), "{name}, kept {kept}");
+        }
+    }
+    // The same files from a source with no Office renderer (the board's fixture): their own app's.
+    let (mut rt, script) = window(Script::default());
+    let mut opened = true;
+    rt.update(|s, _| opened = open_item(s, &item("Invented letter.docx")));
+    frames(&mut rt, 4);
+    assert!(!opened);
+    assert_eq!(opens(&script, "open"), 0);
+    // A kind no viewer and no Office route shows: the system's app, the source not asked.
+    let (mut rt, script) = window(Script::default());
+    let mut opened = true;
+    rt.update(|s, _| opened = open_item(s, &item("Invented scene.blend")));
+    frames(&mut rt, 4);
+    assert!(!opened);
+    assert_eq!(opens(&script, "open"), 0);
 }
 
 #[test]
