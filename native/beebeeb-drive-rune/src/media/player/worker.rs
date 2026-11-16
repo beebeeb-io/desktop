@@ -668,7 +668,7 @@ impl Worker {
         let shown_artist = clean_text(&artist);
         title.zeroize();
         artist.zeroize();
-        if !art_ok {
+        if !art_ok || !in_order {
             return Err(broke());
         }
         self.tags_taken = true;

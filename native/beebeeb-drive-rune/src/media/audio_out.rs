@@ -88,7 +88,6 @@ impl Samples {
 
     /// Nothing queued, and every slot zeroed (also the ones already played).
     fn wipe(&mut self) {
-        self.data.as_mut_slice().zeroize();
         self.head = 0;
         self.len = 0;
     }
