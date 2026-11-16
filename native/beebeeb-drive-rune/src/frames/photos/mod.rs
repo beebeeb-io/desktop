@@ -237,6 +237,13 @@ impl Ui {
         }
     }
 
+    /// Where a photo is in the timeline as it shows now: (day, index). `None`: not in it.
+    fn place_of(&self, id: PhotoId) -> Option<(usize, usize)> {
+        (0..self.days.len())
+            .flat_map(|day| (0..self.days[day].len).map(move |index| (day, index)))
+            .find(|&(day, index)| self.source.photo(self.filter, day, index).is_some_and(|p| p.id == id))
+    }
+
     pub fn set_width(&mut self, width: f32) {
         if (width - self.width).abs() > 0.25 && width > 0.0 {
             self.width = width;

@@ -271,6 +271,9 @@ pub trait ThisPcSource {
     /// One of the two sections opened (`frames::this_pc::poll` saw the route arrive): a source that reads late reads
     /// again when what it holds is old.
     fn opened(&mut self) {}
+    /// A sync check finished: the lists may have changed. A source that reads late reads again when someone looked
+    /// at them in this session; otherwise the next opening reads.
+    fn refresh(&mut self) {}
     /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
     /// frame instead of sample sync history.
     fn wired(&self) -> bool {

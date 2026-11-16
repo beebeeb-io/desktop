@@ -25,6 +25,11 @@ struct Held {
     forgot: usize,
     /// How often the window told the source the section opened.
     opened: usize,
+    /// How often a finished check asked the source to read again, and what that read brings: these rows go in at the
+    /// top, and these ids leave.
+    refreshed: usize,
+    arrives: Vec<Row>,
+    leaves: Vec<String>,
 }
 
 struct Stub(Rc<RefCell<Held>>);
@@ -71,6 +76,14 @@ impl TrashSource for Stub {
     }
     fn opened(&mut self) {
         self.0.borrow_mut().opened += 1;
+    }
+    fn refresh(&mut self) {
+        let mut held = self.0.borrow_mut();
+        held.refreshed += 1;
+        let arrived = std::mem::take(&mut held.arrives);
+        held.rows.splice(0..0, arrived);
+        let gone = std::mem::take(&mut held.leaves);
+        held.rows.retain(|row| !gone.contains(&row.id));
     }
     fn actions_available(&self) -> bool {
         false
@@ -334,4 +347,67 @@ fn a_gate_or_account_change_makes_the_window_drop_every_name() {
         held.borrow().opened > opened_before,
         "the section re-opens after an account change while the gate stays Ready"
     );
+}
+
+/// A finished check reads Trash again: what was deleted on another device shows, what left is gone, with no click; the
+/// selection stays with its item.
+#[test]
+fn a_finished_check_shows_arrivals_and_removals_and_the_selection_stays_with_its_item() {
+    let (mut rt, held) = window(Held {
+        rows: three(),
+        ..Held::default()
+    });
+    click(&mut rt, "row-1");
+    assert_eq!(rt.state.frames.trash.selected_item.as_deref(), Some("b"));
+    {
+        let mut held = held.borrow_mut();
+        held.arrives = vec![row("n1", "New one.pdf"), row("n2", "New two.pdf")];
+        held.leaves = vec!["a".into()];
+    }
+    super::after_a_check(&mut rt.state);
+    poll(&mut rt);
+    let ids: Vec<String> = rt.state.frames.trash.source.items().into_iter().map(|r| r.id).collect();
+    assert_eq!(ids, ["n1", "n2", "b", "c"], "arrivals show, the removed one is gone");
+    assert_eq!(rt.state.frames.trash.selected_item.as_deref(), Some("b"));
+    assert_eq!(
+        rt.state.frames.trash.selected,
+        Some(2),
+        "Bravo's row moved, the selection with it"
+    );
+    assert_eq!(held.borrow().refreshed, 1);
+
+    // The selected item itself leaves on a later check: the selection ends, no other item is chosen.
+    held.borrow_mut().leaves = vec!["b".into()];
+    super::after_a_check(&mut rt.state);
+    poll(&mut rt);
+    assert_eq!(
+        (
+            rt.state.frames.trash.selected,
+            rt.state.frames.trash.selected_item.clone()
+        ),
+        (None, None)
+    );
+}
+
+/// While an item's menu is open the read waits; it runs on the first poll after the menu closed.
+#[test]
+fn a_finished_check_waits_while_the_row_menu_is_open_and_reads_once_it_closed() {
+    use crate::frames::shared::parts::menu::Open;
+    let (mut rt, held) = window(Held {
+        rows: three(),
+        ..Held::default()
+    });
+    click(&mut rt, "row-1");
+    rt.update(|s, _| s.frames.trash.menu = Some(Open::at(10.0, 10.0)));
+    held.borrow_mut().arrives = vec![row("n1", "New one.pdf")];
+    super::after_a_check(&mut rt.state);
+    poll(&mut rt);
+    assert_eq!(held.borrow().refreshed, 0, "nothing is read under an open menu");
+    assert_eq!(rt.state.frames.trash.source.items().len(), 3);
+
+    rt.update(|s, _| s.frames.trash.menu = None);
+    poll(&mut rt);
+    assert_eq!(held.borrow().refreshed, 1, "read once the menu closed");
+    assert_eq!(rt.state.frames.trash.source.items().len(), 4);
+    assert_eq!(rt.state.frames.trash.selected_item.as_deref(), Some("b"));
 }

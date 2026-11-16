@@ -1025,3 +1025,151 @@ fn the_question_closes_when_its_problem_leaves_the_list() {
     assert!(rt.state.this_pc.asking.is_none());
     assert!(!has(&rt, "dialog-settle"));
 }
+
+// ---- A finished check reads the lists again ----
+
+mod reread {
+    use super::super::source::{Contains, Kept, KeptStatus, Pumped};
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct Held {
+        kept: Vec<Kept>,
+        refreshed: usize,
+        arrives: Vec<Kept>,
+        leaves: Vec<String>,
+        dirty: bool,
+    }
+
+    /// A source whose read lands when the window asks again: new kept items go in at the top, others leave.
+    struct Moving(Rc<RefCell<Held>>);
+
+    impl ThisPcSource for Moving {
+        fn refresh(&mut self) {
+            let mut held = self.0.borrow_mut();
+            held.refreshed += 1;
+            held.dirty = true;
+        }
+        // The read's answer lands here, between the window's polls, as an engine source's does.
+        fn pump(&mut self) -> Pumped {
+            let mut held = self.0.borrow_mut();
+            let changed = std::mem::take(&mut held.dirty);
+            if changed {
+                let arrives = std::mem::take(&mut held.arrives);
+                held.kept.splice(0..0, arrives);
+                let gone = std::mem::take(&mut held.leaves);
+                held.kept.retain(|k| !gone.contains(&k.id));
+            }
+            Pumped {
+                changed,
+                ..Pumped::default()
+            }
+        }
+        fn today(&self) -> chrono::NaiveDate {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+        }
+        fn history(&self) -> Vec<Change> {
+            Vec::new()
+        }
+        fn problems(&self) -> Vec<Change> {
+            Vec::new()
+        }
+        fn retry(&mut self, _: &str) {}
+        fn retry_all(&mut self) {}
+        fn settle(&mut self, _: &str, _: Exit) {}
+        fn kept(&self) -> Vec<Kept> {
+            self.0.borrow().kept.clone()
+        }
+        fn remove_from_pc(&mut self, _: &str) {}
+        fn remove_all_from_pc(&mut self) {}
+    }
+
+    fn kept(id: &str) -> Kept {
+        Kept {
+            id: id.into(),
+            name: format!("{id}.pdf"),
+            kind: super::super::source::Kind::Document,
+            bytes: 1000,
+            contains: Contains::Items(1),
+            status: KeptStatus::UpToDate,
+        }
+    }
+
+    fn ids(rt: &Runtime<State>) -> Vec<String> {
+        rt.state.this_pc.source.kept().into_iter().map(|k| k.id).collect()
+    }
+
+    fn window() -> (Runtime<State>, Rc<RefCell<Held>>) {
+        let held = Rc::new(RefCell::new(Held {
+            kept: vec![kept("a"), kept("b"), kept("c")],
+            ..Held::default()
+        }));
+        let mut rt = with_source(super::super::Section::AvailableOffline, Box::new(Moving(held.clone())));
+        poll(&mut rt);
+        (rt, held)
+    }
+
+    /// New kept items and a removed one show after a finished check; the selected item stays selected, and the menu
+    /// open on a row is about its item, never the item that took the row's place. The read waits under the menu.
+    #[test]
+    fn a_finished_check_shows_arrivals_and_removals_and_the_selection_and_menu_stay_with_their_item() {
+        let (mut rt, held) = window();
+        rt.update(|s, _| s.this_pc.open_menu(1, (10.0, 10.0)));
+        assert_eq!((rt.state.this_pc.selected, ids(&rt)[1].as_str()), (Some(1), "b"));
+        {
+            let mut held = held.borrow_mut();
+            held.arrives = vec![kept("n1"), kept("n2")];
+            held.leaves = vec!["a".into()];
+        }
+        crate::frames::this_pc::after_a_check(&mut rt.state);
+        poll(&mut rt);
+        assert_eq!(held.borrow().refreshed, 0, "nothing is read under an open menu");
+        assert_eq!(ids(&rt), ["a", "b", "c"]);
+
+        rt.update(|s, _| {
+            s.this_pc.close_menu();
+        });
+        poll(&mut rt);
+        assert_eq!(held.borrow().refreshed, 1, "read once the menu closed");
+        assert_eq!(
+            ids(&rt),
+            ["n1", "n2", "b", "c"],
+            "arrivals show, the removed one is gone"
+        );
+        assert_eq!(
+            rt.state.this_pc.selected,
+            Some(2),
+            "Bravo's row moved, the selection with it"
+        );
+    }
+
+    /// A read lands under an open menu: the menu's row follows its item, and the menu closes when the item left.
+    #[test]
+    fn a_read_that_lands_under_an_open_menu_keeps_the_menu_on_its_item() {
+        let (mut rt, held) = window();
+        rt.update(|s, _| s.this_pc.open_menu(1, (10.0, 10.0)));
+        {
+            let mut held = held.borrow_mut();
+            held.arrives = vec![kept("n1")];
+            held.dirty = true;
+        }
+        poll(&mut rt);
+        assert_eq!(
+            rt.state.this_pc.menu.as_ref().map(|m| m.row),
+            Some(2),
+            "the menu moved with its item"
+        );
+        assert_eq!(rt.state.this_pc.selected, Some(2));
+
+        {
+            let mut held = held.borrow_mut();
+            held.leaves = vec!["b".into()];
+            held.dirty = true;
+        }
+        poll(&mut rt);
+        assert!(rt.state.this_pc.menu.is_none(), "the item left: the menu closes");
+        assert_eq!(rt.state.this_pc.selected, None, "and no other item is chosen");
+    }
+}

@@ -43,10 +43,29 @@ pub struct TrashUi {
     seen: Option<(crate::shell::app::GateState, Option<String>)>,
     /// Whether the Trash section was open at the last poll.
     was_open: bool,
+    /// A sync check finished and the list is to be read again: waits while a menu or a dialog is open.
+    pub(crate) reread_due: bool,
 }
 
 /// How often the poll runs again while a read or a restore is on its way.
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A sync check finished (`shell::host::poll`): the list is read again, on the first poll with nothing open over it.
+pub fn after_a_check(s: &mut State) {
+    s.frames.trash.reread_due = true;
+    reread_if_free(s);
+}
+
+/// The read a finished check asked for, when nothing is open over the list (`after_a_check`, and every poll).
+fn reread_if_free(s: &mut State) {
+    let ready = s.shell.app.gate() == crate::shell::app::GateState::Ready;
+    let free = s.frames.trash.menu.is_none() && s.frames.shared.dialog.is_none();
+    let ui = &mut s.frames.trash;
+    if ui.reread_due && ready && free {
+        ui.reread_due = false;
+        ui.source.refresh();
+    }
+}
 
 /// The window's poll (`shell::host::poll`): a gate or account change drops the source's names at once, on the
 /// window's side; opening the Trash section asks for the list (the source decides whether it is old); what arrived
@@ -55,6 +74,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let gate = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
     let open =
         s.sidebar_section == crate::ui::sidebar::SidebarSection::Trash && gate.0 == crate::shell::app::GateState::Ready;
+    reread_if_free(s);
     let ui = &mut s.frames.trash;
     let mut changed = false;
     if ui.seen.as_ref() != Some(&gate) {
@@ -67,10 +87,12 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             // The section must re-open (`opened`) on the next poll so a new read starts: without this,
             // an account change while the gate stays Ready would show "Loading" forever.
             ui.was_open = false;
+            ui.reread_due = false;
             changed = true;
         }
         ui.seen = Some(gate);
     }
+    let ui = &mut s.frames.trash;
     if open && !ui.was_open {
         ui.notice = None;
         ui.source.opened();
@@ -187,6 +209,7 @@ impl Default for TrashUi {
             notice: None,
             seen: None,
             was_open: false,
+            reread_due: false,
         }
     }
 }

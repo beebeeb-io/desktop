@@ -543,6 +543,18 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         }
     }
 
+    /// A finished check: a list that was read in this session is read again; otherwise the next opening reads.
+    fn refresh(&mut self) {
+        if !self.engine.has_session() {
+            return;
+        }
+        if self.listing.is_some() {
+            self.read();
+        } else {
+            self.read_at = None;
+        }
+    }
+
     fn pump(&mut self) -> Pumped {
         let mut changed = std::mem::take(&mut self.dirty);
         // The session moved on since the list was read: it goes now, on the window's side.

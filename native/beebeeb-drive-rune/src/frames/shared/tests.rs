@@ -640,3 +640,212 @@ fn shared_with_me_details_and_preview() {
         Some("Brand review.pdf \u{00B7} 2.4 MB")
     );
 }
+
+// ---- A finished check reads the lists again ----
+
+mod reread {
+    use super::super::parts::menu::Open;
+    use super::super::parts::table::{Extra, Kind, Row};
+    use super::super::source::{
+        Access, BoardShared, Invitation, InviteResult, LinkShare, Member, PeopleShare, Pumped, Request, SharedSource,
+    };
+    use super::{click, runtime, settle};
+    use crate::State;
+    use rune::Runtime;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What a read brings, as a test sets it: rows that arrive at the top of With me, ids that leave it.
+    #[derive(Default)]
+    struct Held {
+        refreshed: usize,
+        arrives: Vec<Row>,
+        arrived: Vec<Row>,
+        leaves: Vec<String>,
+        gone: Vec<String>,
+        dirty: bool,
+    }
+
+    /// The board's lists, with a read that lands when the window asks again.
+    struct Moving(BoardShared, Rc<RefCell<Held>>);
+
+    impl SharedSource for Moving {
+        fn invitations(&self) -> Vec<Invitation> {
+            self.0.invitations()
+        }
+        fn with_me(&self) -> Vec<Row> {
+            let held = self.1.borrow();
+            let mut rows: Vec<Row> = held.arrived.clone();
+            rows.extend(self.0.with_me());
+            rows.retain(|row| !held.gone.contains(&row.id));
+            rows
+        }
+        fn people_shares(&self) -> Vec<PeopleShare> {
+            self.0.people_shares()
+        }
+        fn links(&self) -> Vec<LinkShare> {
+            self.0.links()
+        }
+        fn requests(&self) -> Vec<Request> {
+            self.0.requests()
+        }
+        fn accept(&mut self, id: &str) -> bool {
+            self.0.accept(id)
+        }
+        fn decline(&mut self, id: &str) -> bool {
+            self.0.decline(id)
+        }
+        fn keep_offline(&mut self, id: &str) -> bool {
+            self.0.keep_offline(id)
+        }
+        fn stop_sharing(&mut self, id: &str) -> bool {
+            self.0.stop_sharing(id)
+        }
+        fn close_request(&mut self, id: &str) -> bool {
+            self.0.close_request(id)
+        }
+        fn remove_request(&mut self, id: &str) -> bool {
+            self.0.remove_request(id)
+        }
+        fn members(&self, share: &str) -> Vec<Member> {
+            self.0.members(share)
+        }
+        fn set_access(&mut self, share: &str, person: &str, access: Access) -> bool {
+            self.0.set_access(share, person, access)
+        }
+        fn remove_access(&mut self, share: &str, person: &str) -> bool {
+            self.0.remove_access(share, person)
+        }
+        fn invite_answer(&mut self) -> Option<(String, InviteResult)> {
+            None
+        }
+        fn refresh(&mut self) {
+            let mut held = self.1.borrow_mut();
+            held.refreshed += 1;
+            held.dirty = true;
+        }
+        // The read's answer lands here, between the window's polls, as an engine source's does.
+        fn pump(&mut self) -> Pumped {
+            let mut held = self.1.borrow_mut();
+            let changed = std::mem::take(&mut held.dirty);
+            if changed {
+                let arrives = std::mem::take(&mut held.arrives);
+                held.arrived.splice(0..0, arrives);
+                let leaves = std::mem::take(&mut held.leaves);
+                held.gone.extend(leaves);
+            }
+            Pumped {
+                changed,
+                ..Pumped::default()
+            }
+        }
+    }
+
+    fn row(id: &str, name: &str) -> Row {
+        Row {
+            id: id.into(),
+            name: name.into(),
+            kind: Kind::Document,
+            date: "2 Nov 2026".into(),
+            size: "1 KB".into(),
+            extra: Extra::Words(String::new()),
+            pc: None,
+        }
+    }
+
+    thread_local! {
+        static HELD: RefCell<Option<Rc<RefCell<Held>>>> = const { RefCell::new(None) };
+    }
+
+    fn scene(s: &mut State) {
+        super::super::scenes::dw_0501(s);
+        let held = HELD.with(|h| h.borrow().clone()).expect("the test's held");
+        s.frames.shared.source = Box::new(Moving(BoardShared::new(), held));
+    }
+
+    fn window() -> (Runtime<State>, Rc<RefCell<Held>>) {
+        let held = Rc::new(RefCell::new(Held::default()));
+        HELD.with(|h| *h.borrow_mut() = Some(held.clone()));
+        let mut rt = runtime(scene);
+        poll(&mut rt);
+        (rt, held)
+    }
+
+    fn poll(rt: &mut Runtime<State>) {
+        rt.update(|s, tx| {
+            super::super::poll(s, tx);
+        });
+        settle(rt);
+    }
+
+    fn with_me_ids(rt: &Runtime<State>) -> Vec<String> {
+        rt.state
+            .frames
+            .shared
+            .source
+            .with_me()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    /// New shares and a removed one show after a finished check, with no click; the selected share stays selected
+    /// (its row moved down, the selection with it) and a menu open for it is about that share, not the row's new
+    /// occupant.
+    #[test]
+    fn a_finished_check_shows_arrivals_and_removals_and_the_selection_stays_with_its_item() {
+        let (mut rt, held) = window();
+        let before = with_me_ids(&rt);
+        assert!(before.len() >= 3, "the board's list: {before:?}");
+        click(&mut rt, "row-1");
+        let chosen = before[1].clone();
+        assert_eq!(rt.state.frames.shared.selected, Some(1));
+        rt.update(|s, _| s.frames.shared.menu = Some(Open::at(10.0, 10.0)));
+        {
+            let mut held = held.borrow_mut();
+            held.arrives = vec![row("n1", "New one.pdf"), row("n2", "New two.pdf")];
+            held.leaves = vec![before[0].clone()];
+        }
+        // The menu is open: the read waits.
+        super::super::after_a_check(&mut rt.state);
+        poll(&mut rt);
+        assert_eq!(held.borrow().refreshed, 0, "nothing is read under an open menu");
+        assert_eq!(with_me_ids(&rt), before);
+
+        rt.update(|s, _| s.frames.shared.menu = None);
+        poll(&mut rt);
+        assert_eq!(held.borrow().refreshed, 1, "read once the menu closed");
+        let now = with_me_ids(&rt);
+        assert_eq!(now[..2], ["n1", "n2"], "arrivals show: {now:?}");
+        assert!(!now.contains(&before[0]), "the removed share is gone");
+        let at = rt.state.frames.shared.selected.expect("the selection stays");
+        assert_eq!(now[at], chosen, "the selection is on its share: row {at} of {now:?}");
+    }
+
+    /// A read lands while the menu is open (it was on its way before the menu opened): the menu stays about its item.
+    #[test]
+    fn a_read_that_lands_under_an_open_menu_leaves_the_menu_on_its_item_and_closes_it_when_the_item_left() {
+        let (mut rt, held) = window();
+        let before = with_me_ids(&rt);
+        click(&mut rt, "row-1");
+        rt.update(|s, _| s.frames.shared.menu = Some(Open::at(10.0, 10.0)));
+        {
+            let mut held = held.borrow_mut();
+            held.arrives = vec![row("n1", "New one.pdf")];
+            held.dirty = true;
+        }
+        poll(&mut rt);
+        assert!(rt.state.frames.shared.menu.is_some(), "the menu stays");
+        assert_eq!(rt.state.frames.shared.selected, Some(2));
+        assert_eq!(with_me_ids(&rt)[2], before[1]);
+
+        held.borrow_mut().leaves = vec![before[1].clone()];
+        held.borrow_mut().dirty = true;
+        poll(&mut rt);
+        assert_eq!(
+            rt.state.frames.shared.selected, None,
+            "its item left: no other is chosen"
+        );
+        assert!(rt.state.frames.shared.menu.is_none(), "the menu closes with it");
+    }
+}

@@ -62,6 +62,26 @@ pub struct SharedUi {
     seen: Option<(crate::shell::app::GateState, Option<String>)>,
     /// Whether the Shared section was open at the last poll.
     was_open: bool,
+    /// A sync check finished and the lists are to be read again: waits while a menu or a dialog is open.
+    pub(crate) reread_due: bool,
+}
+
+/// A sync check finished (`shell::host::poll`): the lists are read again, on the first poll with nothing open over
+/// them. The source decides whether a list nobody looked at is read now or at its next opening.
+pub fn after_a_check(s: &mut State) {
+    s.frames.shared.reread_due = true;
+    reread_if_free(s);
+}
+
+/// The read a finished check asked for, when nothing is open over the lists (`after_a_check`, and every poll: a read
+/// that waited runs on the first poll after what was open closed).
+fn reread_if_free(s: &mut State) {
+    let ready = s.shell.app.gate() == crate::shell::app::GateState::Ready;
+    let ui = &mut s.frames.shared;
+    if ui.reread_due && ready && !ui.reread_waits() {
+        ui.reread_due = false;
+        ui.source.refresh();
+    }
 }
 
 /// How often the poll runs again while a read or a change is on its way.
@@ -74,6 +94,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let gate = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
     let open = s.sidebar_section == crate::ui::sidebar::SidebarSection::Shared
         && gate.0 == crate::shell::app::GateState::Ready;
+    reread_if_free(s);
     let ui = &mut s.frames.shared;
     let mut changed = false;
     if ui.seen.as_ref() != Some(&gate) {
@@ -87,6 +108,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             }
             // The section must re-open on the next poll, so a new read starts for the new account.
             ui.was_open = false;
+            ui.reread_due = false;
             changed = true;
         }
         ui.seen = Some(gate);
@@ -97,6 +119,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         changed = true;
     }
     ui.was_open = open;
+    // The selected ITEM, before the lists change under it: a read lands between polls, and an index would then name
+    // another item (its menu would act on it).
+    let chosen = ui.selected_id();
     let pumped = ui.source.pump();
     if let Some(notice) = pumped.notice {
         ui.notice = Some(notice);
@@ -110,9 +135,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         tx.wake_after(POLL_EVERY);
     }
     if pumped.changed {
-        // An item that went takes the selection with it.
-        let left = ui.count();
-        ui.selected = ui.selected.filter(|i| *i < left);
+        // The selection follows its item; an item that went takes the selection (and its menu) with it.
+        ui.selected = chosen.and_then(|id| ui.item_ids().iter().position(|have| *have == id));
         if ui.selected.is_none() {
             ui.menu = None;
         }
@@ -186,6 +210,7 @@ impl Default for SharedUi {
             notice: None,
             seen: None,
             was_open: false,
+            reread_due: false,
         }
     }
 }
@@ -240,13 +265,28 @@ impl SharedUi {
     /// The id of the selected item.
     fn selected_id(&self) -> Option<String> {
         let i = self.selected?;
-        let people = self.source.people_shares();
+        self.item_ids().into_iter().nth(i)
+    }
+
+    /// The ids of the items of the tab that shows, in the order they are drawn.
+    fn item_ids(&self) -> Vec<String> {
         match self.tab {
-            Tab::WithMe => self.source.with_me().get(i).map(|r| r.id.clone()),
-            Tab::ByMe if i < people.len() => Some(people[i].id.clone()),
-            Tab::ByMe => self.source.links().get(i - people.len()).map(|l| l.id.clone()),
-            Tab::Requests => self.source.requests().get(i).map(|r| r.id.clone()),
+            Tab::WithMe => self.source.with_me().into_iter().map(|r| r.id).collect(),
+            Tab::ByMe => self
+                .source
+                .people_shares()
+                .into_iter()
+                .map(|p| p.id)
+                .chain(self.source.links().into_iter().map(|l| l.id))
+                .collect(),
+            Tab::Requests => self.source.requests().into_iter().map(|r| r.id).collect(),
         }
+    }
+
+    /// Something is open over the lists that a read would move under it: a menu, or a dialog (an invitation, a
+    /// link's expiry, People with access). The read of a finished check waits until it closed.
+    fn reread_waits(&self) -> bool {
+        self.menu.is_some() || self.dialog.is_some()
     }
 
     /// The key of item `i` of the tab that shows: focus goes where the selection goes.

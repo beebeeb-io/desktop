@@ -90,6 +90,8 @@ pub struct EngineSharedSource<C: CredentialStores> {
     reads: u64,
     /// A read was asked for while one was on its way: start it when that one lands.
     again: bool,
+    /// The section was opened in this session: only then is a finished check followed by a read.
+    asked: bool,
     /// The ids (an invitation's, a person's) with a change on its way: one change per id at a time.
     changing: HashSet<String>,
     notice: Option<Notice>,
@@ -143,6 +145,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             reading: None,
             reads: 0,
             again: false,
+            asked: false,
             changing: HashSet::new(),
             notice: None,
             unmade: false,
@@ -548,9 +551,22 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         if !self.engine.has_session() {
             return;
         }
+        self.asked = true;
         let fresh = self.current().is_some() && self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
         if !fresh {
             self.read();
+        }
+    }
+
+    /// A finished check: lists someone looked at in this session are read again; otherwise the next opening reads.
+    fn refresh(&mut self) {
+        if !self.engine.has_session() {
+            return;
+        }
+        if self.asked {
+            self.read();
+        } else {
+            self.read_at = None;
         }
     }
 
@@ -577,6 +593,7 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
     fn forget(&mut self) {
         self.held = None;
         self.again = false;
+        self.asked = false;
         self.changing.clear();
         self.inviting.clear();
         self.invite_answers.clear();

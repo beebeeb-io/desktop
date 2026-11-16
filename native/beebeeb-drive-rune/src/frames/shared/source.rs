@@ -276,6 +276,9 @@ pub trait SharedSource {
     }
     /// The Shared section opened: read the lists if they are missing or old.
     fn opened(&mut self) {}
+    /// A sync check finished: what this PC knows of the account may have changed. A source that reads late reads
+    /// the lists again when someone looked at them in this session; otherwise the next opening reads.
+    fn refresh(&mut self) {}
     /// Take in what arrived since the last call (the window's poll).
     fn pump(&mut self) -> Pumped {
         Pumped::default()
