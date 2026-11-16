@@ -559,11 +559,13 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         // The lock path's fade (review of #463; privacy): the content of a session that closed or changed leaves in
         // this frame's commit. Compared with what the last poll saw, so a gate a refresh moved between two polls
         // counts too. Otherwise every removed element fades out over 0.15 s under the lock screen.
-        let left_open = now.0 != gate
-            && matches!(
+        let open_gate = |gate: super::app::GateState| {
+            matches!(
                 gate,
                 super::app::GateState::Ready | super::app::GateState::FirstRun | super::app::GateState::NoPlan
-            );
+            )
+        };
+        let left_open = open_gate(gate) && !open_gate(now.0);
         if left_open || other_account {
             tx.instant();
         }

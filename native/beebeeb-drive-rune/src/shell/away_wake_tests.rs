@@ -3,6 +3,8 @@
 //! before the first poll after a wake opens a covered flyout, and the lock screen's first frame holds nothing of the
 //! content. Every name and password is invented.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::*;
 use crate::frames::global::sync_off::SyncOff;
 use crate::shell::actions::{ActionError, AwayJob};
@@ -11,19 +13,19 @@ use crate::shell::flyout_window;
 use crate::shell::surfaces::WindowKind;
 use crate::shell::tray::{LeftClick, TrayInputs};
 
-/// The live window's actions with the away look changed: each look's job is the engine's own, made late by `slow`, or
-/// one that panics (`fails`). Everything else is the live window's.
+/// The live window's actions with the away look changed: each look's job is the engine's own, held until the test
+/// releases `hold` (at most 10 s), or one that panics (`fails`). Everything else is the live window's.
 struct Scripted {
     inner: Arc<dyn ShellActions>,
-    slow: Duration,
+    hold: Option<Arc<AtomicBool>>,
     fails: bool,
 }
 
 impl Scripted {
-    fn over(live: &Live, slow: Duration, fails: bool) -> Arc<dyn ShellActions> {
+    fn over(live: &Live, hold: Option<Arc<AtomicBool>>, fails: bool) -> Arc<dyn ShellActions> {
         Arc::new(Scripted {
             inner: live.rt.state.shell.actions.clone(),
-            slow,
+            hold,
             fails,
         })
     }
@@ -68,9 +70,14 @@ impl ShellActions for Scripted {
     }
     fn away_job(&self, seen: Away) -> Option<AwayJob> {
         let job = self.inner.away_job(seen)?;
-        let (slow, fails) = (self.slow, self.fails);
+        let (hold, fails) = (self.hold.clone(), self.fails);
         Some(Box::new(move || {
-            std::thread::sleep(slow);
+            if let Some(hold) = hold {
+                let began = Instant::now();
+                while !hold.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(10) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
             assert!(!fails, "a look that fails (the test's)");
             job()
         }))
@@ -132,8 +139,8 @@ fn a_wake_windows_announced_before_the_first_poll_is_covered_at_once() {
 }
 
 /// P3-1: a cover an event turned on between two polls is new to the next frame too: that frame's commit takes the files
-/// away at once, with no element of them left fading out under the cover. (The resume's look is made slow, so the
-/// cover is still on in that frame.)
+/// away at once, with no element of them left fading out under the cover. (The resume's look is held until the test
+/// releases it, so the cover is still on in that frame.)
 /// Mutant: in `AwayLock::poll`, compare with the cover at this poll's start (`let covered = self.covers();` before
 /// `measure`) -> red at "the first frame after the resume holds no file name" (the Files window, leaving).
 #[test]
@@ -145,19 +152,21 @@ fn a_cover_turned_on_between_two_polls_takes_the_files_away_in_one_frame() {
     thirty_minutes(&live);
     idle_for(&mut live, Duration::from_secs(29 * 60));
     looked(&mut live);
-    let slow = Scripted::over(&live, Duration::from_millis(800), false);
+    let hold = Arc::new(AtomicBool::new(false));
+    let held = Scripted::over(&live, Some(hold.clone()), false);
     live.rt
-        .update(|s, _| s.shell.away.event(Away::Idle(Duration::from_secs(3 * 60)), &slow, None));
+        .update(|s, _| s.shell.away.event(Away::Idle(Duration::from_secs(3 * 60)), &held, None));
     assert!(away(&mut live.rt).covers(), "the resume covers at once");
     live.rt.frame(0.016);
-    assert!(away(&mut live.rt).covers(), "its slow look has not answered yet");
+    assert!(away(&mut live.rt).covers(), "its held look has not answered");
     let drawn = words(&live);
     assert!(
         !drawn.contains(FILE_NAME),
         "the first frame after the resume holds no file name:\n{drawn}"
     );
     assert!(drawn.contains("Beebeeb is locked"), "{drawn}");
-    until(&mut live, "the slow look's answer did not lift the cover", |live| {
+    hold.store(true, Ordering::SeqCst);
+    until(&mut live, "the held look's answer did not lift the cover", |live| {
         !live.rt.state.shell.away.covers()
     });
     until_drawn(&mut live, FILE_NAME);
@@ -177,7 +186,7 @@ fn a_wake_whose_look_failed_stays_covered_and_the_engine_locks_it() {
     idle_for(&mut live, Duration::from_secs(29 * 60));
     looked(&mut live);
     let before = away(&mut live.rt).answered;
-    let failing = Scripted::over(&live, Duration::ZERO, true);
+    let failing = Scripted::over(&live, None, true);
     live.rt.update(|s, _| {
         s.shell
             .away
@@ -228,7 +237,7 @@ fn a_failed_wake_said_again_to_an_engine_that_locks_nothing_lifts_the_cover() {
         .set_app_lock_for(live.engine.session_turn(), false, Some(AppLockProof::PlatformVerified))
         .unwrap();
     let (before, looks) = (away(&mut live.rt).answered, away(&mut live.rt).looks);
-    let failing = Scripted::over(&live, Duration::ZERO, true);
+    let failing = Scripted::over(&live, None, true);
     live.rt.update(|s, _| {
         s.shell
             .away
@@ -353,49 +362,57 @@ fn live_flyout() -> Live {
 }
 
 /// The lock path's fade (review of #463, the lead's 'lock fade' row; privacy): when the engine locks, the frame that
-/// first shows the lock screen holds nothing of the Files window, not even an element leaving. Both ways the window
-/// reads a lock: its poll's own read of the gate, and a refresh between two polls (the engine lane's status events, the
-/// b's menu).
-/// Mutant: drop the `tx.instant()` where the poll sees the session leave an open gate (`host::poll_screen`) -> red
-/// (both paths: the file's row is still listed, leaving, in the first locked frame).
-#[test]
-fn the_lock_takes_the_files_away_in_the_frame_that_shows_it() {
-    for between_polls in [false, true] {
-        let mut live = live();
-        until_drawn(&mut live, FILE_NAME);
-        live.rt.settle_all();
-        live.rt.frame(0.016);
-        live.engine.lock_screen().expect("the screen locks");
-        if between_polls {
-            live.rt.update(|s, _| {
-                s.shell.refresh();
-            });
-            assert_eq!(
-                live.rt.state.shell.app.gate(),
-                GateState::Locked,
-                "read between two polls"
-            );
-        }
-        // The frame that first draws the window with its gate Locked.
-        let began = Instant::now();
-        loop {
-            live.rt.frame(0.016);
-            if live.rt.state.shell.app.gate() == GateState::Locked {
-                break;
-            }
-            assert!(
-                began.elapsed() < Duration::from_secs(10),
-                "the window never read the lock"
-            );
-        }
-        let drawn = words(&live);
-        assert!(
-            !drawn.contains(FILE_NAME),
-            "between polls {between_polls}: the first locked frame holds the file name:\n{drawn}"
-        );
-        assert!(
-            drawn.contains("Beebeeb is locked"),
-            "between polls {between_polls}:\n{drawn}"
+/// first shows the lock screen holds nothing of the Files window, not even an element leaving. `between_polls`: the
+/// window reads the lock in a refresh between two polls (the engine lane's status events, the b's menu), not in the
+/// poll's own read of the gate.
+fn the_first_locked_frame_holds_no_file_name(between_polls: bool) {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    live.rt.settle_all();
+    live.rt.frame(0.016);
+    live.engine.lock_screen().expect("the screen locks");
+    if between_polls {
+        live.rt.update(|s, _| {
+            s.shell.refresh();
+        });
+        assert_eq!(
+            live.rt.state.shell.app.gate(),
+            GateState::Locked,
+            "read between two polls"
         );
     }
+    // The frame that first draws the window with its gate Locked.
+    let began = Instant::now();
+    loop {
+        live.rt.frame(0.016);
+        if live.rt.state.shell.app.gate() == GateState::Locked {
+            break;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "the window never read the lock"
+        );
+    }
+    let drawn = words(&live);
+    assert!(
+        !drawn.contains(FILE_NAME),
+        "the first locked frame holds the file name:\n{drawn}"
+    );
+    assert!(drawn.contains("Beebeeb is locked"), "{drawn}");
+}
+
+/// The lock the poll's own read of the gate finds.
+/// Mutant: drop the `tx.instant()` where the poll sees the session leave an open gate (`host::poll_screen`, the
+/// `session_seen` block) -> red (the file's row is still listed, leaving, in the first locked frame).
+#[test]
+fn the_lock_the_poll_reads_takes_the_files_away_in_the_frame_that_shows_it() {
+    the_first_locked_frame_holds_no_file_name(false);
+}
+
+/// The lock a refresh read between two polls.
+/// Mutants: drop that `tx.instant()` -> red; key it on this poll's own refresh (`read_by_the_gate`) instead of the
+/// last poll's session -> red here only.
+#[test]
+fn a_lock_read_between_two_polls_takes_the_files_away_in_the_frame_that_shows_it() {
+    the_first_locked_frame_holds_no_file_name(true);
 }

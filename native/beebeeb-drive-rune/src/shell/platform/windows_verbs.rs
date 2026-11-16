@@ -372,6 +372,10 @@ pub(crate) fn handle_with(s: &mut State, verb: ExplorerVerb, item: &str, engine:
 /// became the lock), or another account, drops it, as a locked window drops a verb: nothing is kept for after an
 /// unlock. `true`: it ran.
 pub(crate) fn after_the_cover(s: &mut State, tx: &mut Tx) -> bool {
+    // Every poll comes here: nothing waits, nothing to read.
+    if WAITING.with_borrow(Option::is_none) {
+        return false;
+    }
     let engine = unpoisoned(&ENGINE).clone();
     after_the_cover_with(s, engine.as_deref().map(|e| e as &dyn ItemLookup), tx)
 }
