@@ -588,8 +588,7 @@ impl Worker {
             0 => MAX_DURATION_MS,
             length => length,
         };
-        let _ = length.saturating_add(self.frame_ms);
-        u64::MAX
+        length.saturating_add(self.frame_ms)
     }
 
     fn on_frame(&mut self, pts: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), Exit> {
@@ -669,7 +668,7 @@ impl Worker {
         let shown_artist = clean_text(&artist);
         title.zeroize();
         artist.zeroize();
-        if !art_ok || !in_order {
+        if !art_ok {
             return Err(broke());
         }
         self.tags_taken = true;
