@@ -107,7 +107,7 @@ pub(crate) fn find(rt: &Runtime<State>, key: &str) -> Option<rune::ElementInfo> 
         .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
-fn doc_of(pages: u32, zoom: u16, at: u32) -> Body {
+pub(crate) fn doc_of(pages: u32, zoom: u16, at: u32) -> Body {
     let mut view = docs_fixture::view();
     view.pages = pages;
     view.page_sizes_pt = vec![(595.0, 842.0); pages as usize];
@@ -117,7 +117,19 @@ fn doc_of(pages: u32, zoom: u16, at: u32) -> Body {
     Body::Doc(body)
 }
 
-fn asked_pages_of(log: &Log) -> Vec<u32> {
+/// The stage scrolled to page `at` (1-based) as a key does it (the viewport and the page in view together), drawn
+/// once; only what that build asked is kept.
+pub(crate) fn go_to(rt: &mut Runtime<State>, log: &Log, at: u32) {
+    log.pictures.borrow_mut().clear();
+    rt.update(|s, tx| {
+        let d = viewers::doc_mut(s).expect("a document");
+        d.go_to_page(at);
+        scroll::show_page(d, tx);
+    });
+    rt.frame(0.0);
+}
+
+pub(crate) fn asked_pages_of(log: &Log) -> Vec<u32> {
     let mut pages: Vec<u32> = log
         .pictures
         .borrow()
@@ -134,8 +146,10 @@ fn asked_pages_of(log: &Log) -> Vec<u32> {
 
 #[test]
 fn office_docs_asks_only_the_pages_near_the_screen() {
-    // 60 pages, page 31 (zero-based 30) in view at 100 %.
-    let (rt, log) = live_runtime(doc_of(60, 100, 31), 1.0, Some((100, 140)));
+    // 60 pages, page 31 (zero-based 30) in view at 100 %: the stage scrolled there as a key does it.
+    let (mut rt, log) = live_runtime(doc_of(60, 100, 1), 1.0, Some((100, 140)));
+    go_to(&mut rt, &log, 31);
+    assert_eq!(viewers::doc_mut(&mut rt.state).map(|d| d.page), Some(31));
     let asked = asked_pages_of(&log);
     assert!(!asked.is_empty(), "the pages near the screen are asked");
     assert!(
@@ -146,13 +160,8 @@ fn office_docs_asks_only_the_pages_near_the_screen() {
         !asked.contains(&0) && !asked.contains(&59),
         "never page 0 or 59: {asked:?}"
     );
-    for n in 31..=60 {
-        let key = if n == 1 {
-            "page".to_string()
-        } else {
-            format!("page-{n}")
-        };
-        assert!(find(&rt, &key).is_some(), "page {n} keeps its box");
+    for n in 1..=60 {
+        assert!(find(&rt, &scroll::page_key(n)).is_some(), "page {n} keeps its box");
     }
 }
 
@@ -358,15 +367,17 @@ fn office_docs_scroll_frame_time_p95() {
         };
         let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
         rt.poll = Some(crate::shell::host::poll);
+        rt.frame(0.0);
+        rt.frame(0.0);
+        // The wheel over the stage, as a reader scrolls: one screen per 30 frames.
+        let stage = find(&rt, scroll::STAGE).expect("the stage").rect;
+        let (x, y) = (stage[0] + stage[2] / 2.0, stage[1] + stage[3] / 2.0);
+        let per_frame = stage[3] / 30.0;
         let mut times = Vec::with_capacity(600);
-        for frame in 0..600u32 {
-            // One screen per 30 frames.
-            if frame % 30 == 0 {
-                let d = viewers::doc_mut(&mut rt.state).expect("a document");
-                d.go_to_page(d.page + 1);
-            }
+        for _ in 0..600u32 {
+            rt.wheel(x, y, -per_frame);
             let t = Instant::now();
-            rt.frame(f64::from(frame) / 60.0);
+            rt.frame(1.0 / 60.0);
             times.push(t.elapsed());
             std::thread::sleep(Duration::from_millis(4));
         }

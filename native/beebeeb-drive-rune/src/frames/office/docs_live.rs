@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use rune::{El, Pixels, SurfaceFit, el};
 
-use super::{DocBody, PAGE_GAP, box_pt, paper, shell};
+use super::{DocBody, PAGE_GAP, box_pt, paper_box, shell};
 use crate::frames::viewers::kinds::{OfficePicture, TILE_PX, uses_tiles};
 
 /// What a live document asks its renderer for: every key at most once per frame (the answer is kept for the frame),
@@ -41,35 +41,41 @@ pub struct Live<'a> {
     pub screen: (f32, f32),
 }
 
-/// The pages whose pictures are asked: those on screen, one screen above and one screen below (1-based, first to
-/// last). The stage draws from the page in view, so the pages above are asked ahead of a scroll up, never drawn.
+/// The pages whose pictures are asked (1-based, first to last): those that touch the band from one screen above the
+/// stage's top to one screen below its foot, where the stage's viewport stands (`docs_scroll`). Measured from the offset,
+/// not from the top page's top: a page taller than the band (200 %, a short window) still brings the next one when its
+/// foot is near. The walk stops at the band's foot, so a long document costs the pages above it, not all of them.
 pub fn asked_pages(doc: &DocBody, screen_h: f32) -> (u32, u32) {
     let pages = doc.view.pages.max(1);
-    let first = doc.page.clamp(1, pages);
-    let mut lo = first;
-    let mut above = 0.0;
-    while lo > 1 && above < screen_h {
-        lo -= 1;
-        above += box_pt(doc, lo).1 + PAGE_GAP;
+    let y = doc.view_y();
+    let (band_top, band_bottom) = (y - screen_h, y + 2.0 * screen_h);
+    let (mut lo, mut hi) = (None, 1);
+    let mut top = super::scroll::PAD_TOP;
+    for n in 1..=pages {
+        if top > band_bottom {
+            break;
+        }
+        let bottom = top + box_pt(doc, n).1;
+        if bottom >= band_top {
+            lo.get_or_insert(n);
+            hi = n;
+        }
+        top = bottom + PAGE_GAP;
     }
-    let mut hi = first;
-    let mut below = box_pt(doc, first).1 + PAGE_GAP;
-    while hi < pages && below < 2.0 * screen_h {
-        hi += 1;
-        below += box_pt(doc, hi).1 + PAGE_GAP;
-    }
-    (lo, hi)
+    let lo = lo.unwrap_or_else(|| doc.page.clamp(1, pages));
+    (lo, hi.max(lo))
 }
 
 /// Page `n` drawn from the renderer, its box as the file sizes it. Below the tile scale one whole picture; at or above
 /// it the tiles that touch the asked band, each at its own place (integer pixels over the device factor), over the
 /// held page at the lowest scale while any tile of this scale is still on its way. `top`: where the page starts, in
-/// points below the first drawn page's top.
+/// points below the stage's top as it was last seen scrolled (negative above it). Its box never depends on whether a
+/// picture has come, so an answer never moves the pages.
 pub(super) fn paper_live(n: u32, doc: &DocBody, live: &Live, top: f32) -> El {
     let zoom = doc.view.zoom;
     let page0 = n - 1;
     if !uses_tiles(zoom, live.dpi) {
-        return paper(
+        return paper_box(
             n,
             doc,
             live.asks.get(OfficePicture::Page {

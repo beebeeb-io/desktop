@@ -118,14 +118,52 @@ pub struct SlideWords {
 pub struct DeckBody {
     pub view: DeckView,
     pub presenting: bool,
+    /// A touchpad's travel toward the next step of the wheel, in points ([`DeckBody::wheel_step`]).
+    pub wheel: i32,
 }
+
+/// Points of touchpad travel that step one slide, and of a mouse wheel's (a notch is 40 points; a smooth wheel sends it
+/// in parts).
+const SWIPE: i32 = 120;
+const NOTCH: i32 = 40;
 
 impl DeckBody {
     pub fn new(view: DeckView) -> Self {
         DeckBody {
             view,
             presenting: false,
+            wheel: 0,
         }
+    }
+
+    /// The wheel over the slide (in the window and in Present): no free scroll, the next or the previous slide. A mouse
+    /// wheel steps once per notch ([`NOTCH`] points, whether it comes whole or, from a smooth wheel, in parts; toward
+    /// you: the next); a touchpad once per [`SWIPE`] points of travel, and its coasting after the fingers lift moves
+    /// nothing. Turning back starts afresh. A sideways delta is not the deck's. `true`: taken.
+    pub fn wheel_step(&mut self, ev: &rune::WheelEvent) -> bool {
+        if ev.dy.abs() < ev.dx.abs() {
+            return false;
+        }
+        if ev.phase == rune::GesturePhase::Began {
+            self.wheel = 0;
+        }
+        if ev.momentum {
+            return true;
+        }
+        let dy = ev.dy.round() as i32;
+        if dy != 0 && (self.wheel > 0) != (dy > 0) {
+            self.wheel = 0;
+        }
+        self.wheel = self.wheel.saturating_add(dy);
+        let step = if ev.precise { SWIPE } else { NOTCH };
+        if self.wheel <= -step {
+            self.next();
+            self.wheel = 0;
+        } else if self.wheel >= step {
+            self.previous();
+            self.wheel = 0;
+        }
+        true
     }
 
     /// Show slide `n` (clamped to the deck).
@@ -493,7 +531,13 @@ fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) ->
         .h_full()
         .center()
         .fill(t.field)
+        .on_wheel(wheel_steps)
         .child(slide)
+}
+
+/// The slide's wheel handler: [`DeckBody::wheel_step`] on the open deck.
+fn wheel_steps(s: &mut State, ev: rune::WheelEvent, _: &mut rune::Tx) -> bool {
+    viewers::deck_mut(s).is_some_and(|deck| deck.wheel_step(&ev))
 }
 
 /// The status line: "Slide 2 of 3" at the left; Encrypted, a dot and About (a link to the viewer's About) at the right.
@@ -757,6 +801,7 @@ fn present_of(cx: &mut Cx<State>, deck: &DeckBody, centre: El) -> El {
         .w_full()
         .h_full()
         .fill(Color::BLACK)
+        .on_wheel(wheel_steps)
         .child(
             el().key("pres-centre")
                 .absolute(0.0, 0.0)

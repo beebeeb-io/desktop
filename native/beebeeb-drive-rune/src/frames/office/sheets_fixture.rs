@@ -76,5 +76,6 @@ pub fn board() -> SheetView {
         top_left: Cell { row: 0, col: 0 },
         anchors: vec![],
         missing_content: false,
+        more: super::More::default(),
     }
 }

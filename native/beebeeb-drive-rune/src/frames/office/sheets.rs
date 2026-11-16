@@ -24,6 +24,7 @@ use zeroize::Zeroize;
 use crate::State;
 use crate::frames::placeholder;
 use crate::frames::viewers::kinds::OfficePicture;
+#[cfg(test)]
 use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Ui};
 use crate::theme::icons;
@@ -107,6 +108,16 @@ pub struct SheetView {
     pub anchors: Vec<SheetAnchor>,
     /// Some content could not be drawn: the status bar says so quietly.
     pub missing_content: bool,
+    /// The tabs' "more" menu (`sheets_tabs`): the sheets the renderer could not name, and whether the menu is open.
+    pub more: More,
+}
+
+/// The sheet tabs' "more" menu: `unnamed` sheets of the workbook past the named tabs (the renderer's count), and
+/// whether the menu is open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct More {
+    pub unnamed: u32,
+    pub open: bool,
 }
 
 /// Its counts, never a cell.
@@ -222,7 +233,8 @@ fn figure(v: f64) -> String {
 
 /// The words of the status line's left side, in order: where the sheet is, then the selection's figures.
 pub fn status_words(view: &SheetView) -> Vec<String> {
-    let mut words = vec![format!("Sheet {} of {}", view.active + 1, view.tabs.len().max(1))];
+    let sheets = view.tabs.len().saturating_add(view.more.unnamed as usize);
+    let mut words = vec![format!("Sheet {} of {}", view.active + 1, sheets.max(1))];
     if let Some(stats) = stats(view) {
         match stats.average() {
             Some(avg) => {
@@ -655,57 +667,13 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
         .child(anchors)
 }
 
-/// The sheet tabs under the grid. No "+": a viewer adds no sheet.
-fn sheet_tabs(view: &SheetView, live: bool, t: &Theme) -> El {
-    let mut tabs = row()
-        .key("sh-tabs")
-        .role("tablist")
-        .label("Sheets")
-        .w_full()
-        .h(TABS_H)
-        .px(8.0)
-        .gap(2.0)
-        .center_y()
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
-    for (i, name) in view.tabs.iter().enumerate() {
-        let on = i == view.active;
-        // The open sheet is a pill: the content fill, a hairline ring, 22 high, 5 round. The others are plain words.
-        let mut tab = el()
-            .key(format!("sh-tab-{i}"))
-            .role("tab")
-            .label(name.clone())
-            .checked(on)
-            .h(22.0)
-            .px(12.0)
-            .center()
-            .radius(5.0)
-            .child(fitted(
-                format!("sh-tab-{i}-t"),
-                name,
-                if on { TAB_ON } else { TAB },
-                if on { t.text } else { t.text_tertiary },
-            ));
-        if on {
-            tab = tab.fill(t.paper).border(kit::HAIR, t.separator).border_layout();
-        }
-        if live && !on {
-            tab = tab
-                .focusable(true)
-                .cursor(rune::Cursor::Pointer)
-                .on_press(move |s: &mut State| {
-                    if let Some(Body::Sheet(view)) = viewers::ui(s).map(|ui| &mut ui.file.body) {
-                        view.active = i;
-                        view.sheet = i as u32;
-                        view.top_left = Cell { row: 0, col: 0 };
-                    }
-                });
-        }
-        tabs = tabs.child(tab);
-    }
-    tabs
-}
+#[path = "sheets_scroll.rs"]
+pub mod sheets_scroll;
+pub use sheets_scroll::scroll_key_tx;
+
+#[path = "sheets_tabs.rs"]
+mod sheets_tabs;
+use sheets_tabs::sheet_tabs;
 
 /// A status word with its figure in mono, as the board sets it ("Sum " sans, "13,220" mono; "Count 8" is all sans).
 fn status_word(key: String, word: &str, t: &Theme) -> El {
@@ -820,6 +788,13 @@ pub fn window_live(
 
 fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: &Shown, live: Option<&Live>) -> El {
     let t = tokens::theme(cx.system_dark());
+    let mut cells = grid(view, shown, anchors_of(view, live, &t), &t);
+    // A workbook in a renderer scrolls (`sheets_scroll`); the fixture's is the board's still sheet.
+    if live.is_some() {
+        let (down, across) = (cx.layout(sheets_scroll::DOWN), cx.layout(sheets_scroll::ACROSS));
+        cells = cells.child(sheets_scroll::overlay(view, down, across, &t));
+    }
+    let room = cx.layout_size("sh-tabs").map(|[w, _]| w);
     let mut body = row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(
         col()
             .key("sheet")
@@ -828,8 +803,8 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
             .h_full()
             .child(viewer_bar(&t))
             .child(formula_bar(view, &t))
-            .child(grid(view, shown, anchors_of(view, live, &t), &t))
-            .child(sheet_tabs(view, live.is_some(), &t)),
+            .child(cells)
+            .child(sheet_tabs(view, live.is_some(), room, &t)),
     );
     if ui.show_details {
         body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
