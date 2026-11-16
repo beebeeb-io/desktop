@@ -34,6 +34,8 @@ use crate::ui::{caption, kit, sidebar};
 
 #[path = "slides_fixture.rs"]
 pub mod slides_fixture;
+#[path = "slides_strip.rs"]
+mod strip;
 
 /// The group's board frames and the scene that shows each (`frames::scenes`). DW-1560 stays a placeholder (0.9.1).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
@@ -120,6 +122,9 @@ pub struct DeckBody {
     pub presenting: bool,
     /// A touchpad's travel toward the next step of the wheel, in points ([`DeckBody::wheel_step`]).
     pub wheel: i32,
+    /// The filmstrip's scroll offset in points from the first slide's top, and its height as last laid out.
+    pub strip_y: u32,
+    pub strip_h: u32,
 }
 
 /// Points of touchpad travel that step one slide, and of a mouse wheel's (a notch is 40 points; a smooth wheel sends it
@@ -133,6 +138,8 @@ impl DeckBody {
             view,
             presenting: false,
             wheel: 0,
+            strip_y: 0,
+            strip_h: STRIP_H_GUESS,
         }
     }
 
@@ -169,6 +176,7 @@ impl DeckBody {
     /// Show slide `n` (clamped to the deck).
     pub fn go(&mut self, n: u32) {
         self.view.current = n.clamp(1, self.view.count.max(1));
+        self.reveal_current();
     }
 
     pub fn next(&mut self) {
@@ -261,6 +269,10 @@ const ZOOM_MAX: u16 = 125;
 const FILMSTRIP_W: f32 = 190.0;
 const THUMB_W: f32 = 140.0;
 const THUMB_H: f32 = 79.0;
+/// The gap between two filmstrip rows, a row's pitch, and the strip's height before its first layout.
+const STRIP_GAP: u32 = 10;
+const STRIP_PITCH: u32 = THUMB_H as u32 + STRIP_GAP;
+const STRIP_H_GUESS: u32 = 560;
 const SLIDE_W: f32 = 640.0;
 const SLIDE_H: f32 = 360.0;
 
@@ -468,26 +480,15 @@ fn thumbnail(i: usize, n: u32, page: Option<SlidePage>, current: bool, t: &Theme
 }
 
 fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) -> El {
+    let rows = deck.strip_rows();
+    let first = *rows.start();
     let mut list = col()
-        .key("filmstrip")
+        .key("fs-rows")
         .role("list")
         .label("Slides")
-        .w(FILMSTRIP_W)
-        .h_full()
-        .min_h(0.0)
-        .py(12.0)
-        .px(12.0)
-        .gap(10.0)
-        .fill(t.sidebar_bg)
-        .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
-        .border_layout()
-        .child(row().key("fs-head").w_full().px(4.0).center_y().child(kit::label(
-            "fs-title",
-            "SLIDES",
-            PANE_LABEL,
-            t.text_tertiary,
-        )));
-    for (i, thumb) in deck.view.slides.iter().enumerate() {
+        .w_full()
+        .gap(STRIP_GAP as f32);
+    for (i, thumb) in deck.view.slides.iter().enumerate().skip(first).take(rows.count()) {
         let n = thumb.n;
         let current = n == deck.view.current;
         list = list.child(
@@ -509,7 +510,46 @@ fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme
                 .child(thumbnail(i, n, page(n), current, t)),
         );
     }
-    list
+    // The rows drawn are a window of the deck: they start where slide `first` stands, less the scroll offset.
+    list = list.offset(0.0, (first as u32 * STRIP_PITCH) as f32 - deck.strip_y as f32);
+    col()
+        .key("filmstrip")
+        .w(FILMSTRIP_W)
+        .h_full()
+        .min_h(0.0)
+        .py(12.0)
+        .px(12.0)
+        .gap(10.0)
+        .fill(t.sidebar_bg)
+        .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
+        .border_layout()
+        .child(row().key("fs-head").w_full().px(4.0).center_y().child(kit::label(
+            "fs-title",
+            "SLIDES",
+            PANE_LABEL,
+            t.text_tertiary,
+        )))
+        .child(
+            col()
+                .key("fs-list")
+                .w_full()
+                .instant_changes()
+                .grow(1.0)
+                .min_h(0.0)
+                .clip_rounded(0.0)
+                .on_wheel(strip_wheel)
+                .on_layout_tx(|s: &mut State, r: [f32; 4], tx: &mut rune::Tx| {
+                    if !viewers::deck_mut(s).is_some_and(|d| d.set_strip_h(r[3])) {
+                        tx.live_only();
+                    }
+                })
+                .child(list),
+        )
+}
+
+/// The strip's wheel handler: [`DeckBody::strip_wheel`] on the open deck.
+fn strip_wheel(s: &mut State, ev: rune::WheelEvent, _: &mut rune::Tx) -> bool {
+    viewers::deck_mut(s).is_some_and(|deck| deck.strip_wheel(&ev))
 }
 
 fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) -> El {
@@ -609,11 +649,6 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, deck: &DeckBody, page: &dy
     window_with(s, cx, ui, deck, page, page)
 }
 
-/// How many filmstrip slides are asked: those on screen plus one screen more (each row is a thumbnail and its gap).
-fn thumbs_asked(screen_h: f32) -> u32 {
-    (2.0 * screen_h / (THUMB_H + 10.0)).ceil() as u32 + 1
-}
-
 /// The picture of a live slide as a [`SlidePage`]: its pixels only, never the fixture's words.
 fn live_page(pixels: Option<Pixels>) -> Option<SlidePage> {
     pixels.map(|p| SlidePage {
@@ -622,17 +657,11 @@ fn live_page(pixels: Option<Pixels>) -> Option<SlidePage> {
     })
 }
 
-/// The window of a deck the Office engine renders: the filmstrip asks the thumbnails in view and one screen more, the
+/// The window of a deck the Office engine renders: the filmstrip draws and asks the thumbnails in view and one row each side, the
 /// stage asks the slide on it at the stage's zoom.
 pub fn window_live(s: &State, cx: &mut Cx<State>, ui: &Ui, deck: &DeckBody, live: &Live) -> El {
     let dpi = live.dpi;
-    let limit = thumbs_asked(live.screen.1);
-    let thumb = move |n: u32| {
-        if n > limit {
-            return None;
-        }
-        live_page(live.asks.get(OfficePicture::Thumb { slide: n - 1, dpi }))
-    };
+    let thumb = move |n: u32| live_page(live.asks.get(OfficePicture::Thumb { slide: n - 1, dpi }));
     let zoom = deck.view.zoom;
     let stage = move |n: u32| {
         live_page(live.asks.get(OfficePicture::Page {

@@ -144,3 +144,92 @@ fn office_slides_the_wheel_steps_in_present() {
     wheel_over(&mut rt, "pres-stage", -100.0, false);
     assert_eq!(current(&mut rt), 2);
 }
+
+// ---------------------------------------------------------------------------
+// The filmstrip scrolls (P3-8): a deck longer than one screen
+// ---------------------------------------------------------------------------
+
+use crate::frames::office::docs::live_tests::Log;
+
+fn thumbs_asked(log: &Log) -> Vec<u32> {
+    log.pictures
+        .borrow()
+        .iter()
+        .filter_map(|k| match k {
+            OfficePicture::Thumb { slide, .. } => Some(*slide),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `count` presses of `key` on the deck, then the window draws what it asks.
+fn press_deck(rt: &mut rune::Runtime<State>, log: &Log, key: Key, count: u32) {
+    log.pictures.borrow_mut().clear();
+    rt.update(|s, _| {
+        let deck = viewers::deck_mut(s).expect("a deck");
+        for _ in 0..count {
+            assert!(deck.on_key(&key, &Mods::default()));
+        }
+    });
+    rt.frame(0.0);
+    rt.frame(0.0);
+}
+
+fn inside(rt: &rune::Runtime<State>, row: &str, strip: &str) -> bool {
+    let (r, s) = (
+        find(rt, row).unwrap_or_else(|| panic!("{row} is drawn")).rect,
+        find(rt, strip).expect("the strip is drawn").rect,
+    );
+    r[1] >= s[1] - 0.5 && r[1] + r[3] <= s[1] + s[3] + 0.5
+}
+
+#[test]
+fn office_slides_filmstrip_asks_only_the_slides_in_view() {
+    let (_rt, log) = live_runtime(deck(200), 1.0, None);
+    let asked = thumbs_asked(&log);
+    assert!(asked.contains(&0), "the first slide is in view");
+    assert!(
+        asked.iter().all(|&n| n < 20),
+        "slides far down are not asked: {asked:?}"
+    );
+}
+
+#[test]
+fn office_slides_filmstrip_keeps_the_current_slide_in_view_after_page_down_x100() {
+    let (mut rt, log) = live_runtime(deck(200), 1.0, None);
+    press_deck(&mut rt, &log, Key::PageDown, 100);
+    assert_eq!(current(&mut rt), 101);
+    assert!(find(&rt, "fs-100").is_some(), "slide 101's line is drawn");
+    assert!(inside(&rt, "fs-100", "fs-list"), "and it is inside the strip");
+    assert!(find(&rt, "fs-0").is_none(), "slide 1 has scrolled away");
+}
+
+#[test]
+fn office_slides_filmstrip_reaches_slide_150_and_asks_it_once() {
+    let (mut rt, log) = live_runtime(deck(200), 1.0, None);
+    press_deck(&mut rt, &log, Key::PageDown, 149);
+    assert_eq!(current(&mut rt), 150);
+    assert!(inside(&rt, "fs-149", "fs-list"));
+    let asked = thumbs_asked(&log);
+    assert_eq!(asked.iter().filter(|&&n| n == 149).count(), 1, "asked once: {asked:?}");
+    assert!(
+        asked.iter().all(|&n| (100..200).contains(&n)),
+        "none out of view: {asked:?}"
+    );
+}
+
+#[test]
+fn office_slides_filmstrip_wheel_scrolls_the_strip_not_the_slide() {
+    let (mut rt, log) = live_runtime(deck(200), 1.0, None);
+    log.pictures.borrow_mut().clear();
+    wheel_over(&mut rt, "fs-list", -400.0, false);
+    assert_eq!(current(&mut rt), 1, "the wheel over the strip leaves the slide");
+    assert!(find(&rt, "fs-0").is_none(), "the first line has scrolled away");
+    let asked = thumbs_asked(&log);
+    assert!(
+        !asked.is_empty() && asked.iter().all(|&n| n > 0),
+        "the new ones are asked: {asked:?}"
+    );
+    wheel_over(&mut rt, "fs-list", 100_000.0, false);
+    assert!(find(&rt, "fs-0").is_some(), "and back to the top it stops");
+}
