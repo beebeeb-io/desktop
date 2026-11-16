@@ -202,7 +202,7 @@ mod tests {
             ..saved
         };
         assert_eq!(size_on_change(FirstRun, Main, Some(&maximized)), Some((1280.0, 800.0)));
-        assert_eq!(first_run_options().min_size, Some((960.0, 640.0)));
+        assert_eq!(first_run_options(&Restored::default()).min_size, Some((960.0, 640.0)));
     }
 
     #[test]
