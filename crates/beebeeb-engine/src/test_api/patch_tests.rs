@@ -52,7 +52,13 @@ fn an_engine_upload_into_a_folder_completes_and_the_row_says_uploaded() {
         parent_id: Some(FOLDER.into()),
         target_path: Some("Docs/new.txt".into()),
         metadata_json: Some(
-            json!({ "content_type": "text/plain", "parent_changed": true, "display_name": "new.txt" }).to_string(),
+            json!({
+                "content_type": "text/plain",
+                "parent_changed": true,
+                "display_name": "new.txt",
+                "name_encrypted": account.encrypted_name(NEW_FILE, "new.txt"),
+            })
+            .to_string(),
         ),
         payload_path: Some(payload.to_string_lossy().into_owned()),
         base_version: None,
