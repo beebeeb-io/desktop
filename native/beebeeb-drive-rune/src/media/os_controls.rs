@@ -391,7 +391,7 @@ impl NowPlayingSink for UiControls {
 /// Under the shell's wake cover ([`WakeCover::shell`]).
 pub fn shell_controls() -> UiControls {
     static SHELL: OnceLock<UiControls> = OnceLock::new();
-    SHELL.get_or_init(UiControls::default).clone()
+    SHELL.get_or_init(|| UiControls::under(WakeCover::shell())).clone()
 }
 
 #[cfg(windows)]

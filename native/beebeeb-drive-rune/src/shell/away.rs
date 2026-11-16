@@ -451,7 +451,6 @@ impl AwayLock {
     /// sleep (as idle time).
     pub fn event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
         self.take_event(seen, actions, wake);
-        self.tell();
     }
 
     fn take_event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
