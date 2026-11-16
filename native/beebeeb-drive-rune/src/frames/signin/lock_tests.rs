@@ -214,17 +214,17 @@ fn unlock_asks_windows_hello_once_and_each_answer_is_a_sentence_or_nothing() {
     assert_eq!(script.count("sign_in") + script.count("unlock"), 0);
 }
 
-/// The app quits while the lock screen waits for its prompt: the prompt is taken away, and a quit Windows then
-/// cancels (a shutdown another app refused) leaves Unlock asking again.
+/// The app quits (the shell's quit hook) while the lock screen waits for its prompt: the prompt is taken away, and a
+/// quit Windows then cancels (a shutdown another app refused) leaves Unlock asking again.
 #[test]
 fn a_quit_takes_the_lock_screens_prompt_away_and_unlock_asks_again_after_it() {
     let (_, script, mut rt) = window(false);
     // Not waiting for a prompt: the quit asks nothing of the source.
-    rt.update(|s, _| super::on_quit(s));
+    rt.update(host::on_quit);
     assert_eq!(script.calls(), Vec::<&str>::new());
     click(&mut rt, lock::UNLOCK_KEY);
     assert!(ui(&rt).lock_hello_waiting());
-    rt.update(|s, _| super::on_quit(s));
+    rt.update(host::on_quit);
     assert_eq!(script.calls(), ["hello", "cancel_hello"]);
     assert!(!ui(&rt).lock_hello_waiting());
     click(&mut rt, lock::UNLOCK_KEY);

@@ -742,7 +742,7 @@ mod tests {
 
     /// The app quits while a prompt is up (whoever asked for it): the prompt is taken away, its owner hears nothing of
     /// it, also of a yes, and the quit returns only once the prompt's thread asked Windows to close it. A prompt whose
-    /// owner is gone stays on screen otherwise (VM 401: an "Unlock Beebeeb" prompt outlived the app that asked).
+    /// owner is gone stays on screen otherwise, with nobody to answer.
     #[test]
     fn a_quit_takes_the_prompt_away_and_waits_until_its_thread_asked_windows_to_close_it() {
         use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
