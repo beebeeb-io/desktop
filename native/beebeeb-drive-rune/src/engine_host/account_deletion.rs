@@ -350,7 +350,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         let Some(made_for) = self.account_deletion.late.as_ref() else {
             return;
         };
-        if !keeps_late(made_for, &now, open) {
+        if false && !keeps_late(made_for, &now, open) {
             self.account_deletion.late = None;
             return;
         }

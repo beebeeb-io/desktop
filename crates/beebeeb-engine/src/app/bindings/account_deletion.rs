@@ -268,7 +268,7 @@ impl<C: CredentialStores> Engine<C> {
         };
         let went_out = result.is_ok();
         match self.deletion_answered(session, result) {
-            Err(DeletionError::NotSignedIn) if went_out && false => Err(DeletionError::SentThenMoved),
+            Err(DeletionError::NotSignedIn) if went_out => Err(DeletionError::SentThenMoved),
             answered => answered,
         }
     }
