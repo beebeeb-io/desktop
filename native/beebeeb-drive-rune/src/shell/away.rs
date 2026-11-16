@@ -139,7 +139,7 @@ impl WakeCover {
     /// the window.
     pub fn covers_now(&self) -> bool {
         let told = *self.lock();
-        told.covers || told.gap_not_yet_found(Instant::now(), SystemTime::now())
+        told.covers
     }
 
     /// Whether both are the same one.
@@ -313,6 +313,7 @@ impl AwayLock {
         tx: &mut Tx,
     ) -> bool {
         let came = self.measure(open, pc_idle, actions, wake, tx);
+        self.tell();
         let covers = self.covers();
         // Compared with the last poll's end, not this poll's start: a cover turned on between two polls (an event)
         // is new to this frame too.
