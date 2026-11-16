@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::{CredentialStores, Engine, LocalStateRefused};
+use crate::app::bindings::backup_folders::switch_on_refusal;
 use crate::backup::kfm::{self, KnownFolderPaths, SourceResolution};
 use crate::backup::sources::ChosenFolder;
 use crate::config::{DesktopConfig, KnownFolderSource};
@@ -97,6 +98,9 @@ pub enum BackupsError {
     Settings,
     /// The state database answered with an error.
     State,
+    /// Switching it on would back a folder up twice (P3-3): it is, holds or lies inside another folder of the
+    /// account's that is backed up now. `Engine::switch_on_refused` names that folder.
+    Nested,
 }
 
 impl BackupsError {
@@ -107,6 +111,7 @@ impl BackupsError {
             Self::UnknownFolder => "unknown_folder",
             Self::Settings => "settings",
             Self::State => "state",
+            Self::Nested => "nested",
         }
     }
 }
@@ -343,14 +348,19 @@ impl<C: CredentialStores> Engine<C> {
             handle.still_this_session().map_err(BackupsError::Refused)?;
         }
         let identity = self.identity;
+        let asker = self.switch_asker(handle.as_ref());
         switched_or_undone(
             || {
                 DesktopConfig::update_for(identity, |config| {
+                    // Never backed up twice (P3-3), read from the file this update holds: the rule is the add's.
+                    if on && switch_on_refusal(config, key, asker.as_ref()).is_some() {
+                        return (false, Err(BackupsError::Nested));
+                    }
                     let was = config.known_folder_enabled(key);
                     config.set_known_folder(key, on);
-                    (was != on, was)
+                    (was != on, Ok(was))
                 })
-                .map_err(|_| BackupsError::Settings)
+                .map_err(|_| BackupsError::Settings)?
             },
             || match handle {
                 Some(handle) => handle
