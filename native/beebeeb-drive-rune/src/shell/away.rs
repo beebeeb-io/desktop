@@ -192,7 +192,7 @@ impl AwayLock {
     /// Whether a wake covers here: something an idle time says could lock (app lock on, as the engine last answered;
     /// `true` until it answered) and an engine with the automatic lock.
     fn wake_covers(&self) -> bool {
-        !self.without
+        self.could_lock
     }
 
     /// A gap between the poll's last run while the engine was open and now, far past the look interval: the app did
