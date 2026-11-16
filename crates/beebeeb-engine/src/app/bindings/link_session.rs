@@ -103,6 +103,10 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Send one request of the press, only while its session is still the session in memory.
     pub(super) fn link_send(&self, run: &LinkRun<'_>, req: HttpRequest) -> Result<HttpResponse, LinkRefusal> {
+        #[cfg(test)]
+        if let Some(hook) = tests::BEFORE_SEND.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         if !self.session_is_still(run.session, &run.key) {
             return Err(LinkRefusal::NotSignedIn);
         }
@@ -143,4 +147,16 @@ pub(super) fn get(path: &str) -> HttpRequest {
     req.method = Method::Get;
     req.body = None;
     req
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// Test seam: runs once at the top of the next [`super::Engine::link_send`] on this thread, before its session
+        /// check (the session moves between the press's run and its request).
+        pub(in crate::app::bindings) static BEFORE_SEND: RefCell<Option<Box<dyn FnOnce()>>> =
+            const { RefCell::new(None) };
+    }
 }

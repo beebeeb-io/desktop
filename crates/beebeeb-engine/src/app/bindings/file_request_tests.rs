@@ -380,3 +380,44 @@ fn a_copied_link_read_for_a_session_that_ended_meanwhile_is_not_handed_over() {
     );
     assert_eq!(f.count(LIST), 1, "it was read before the session moved");
 }
+
+/// The session moves at the top of the press's next request, before that request's own session check.
+fn before_next_send(engine: &Arc<TestEngine>) {
+    let engine = engine.clone();
+    crate::app::bindings::link_session::tests::BEFORE_SEND
+        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || signed_in(&engine))));
+}
+
+#[test]
+fn a_press_of_another_session_is_refused_before_any_of_its_choices_is_looked_at() {
+    // The run's session check (`link_session.rs`, `Engine::link_run`): a press of a session that is gone is refused
+    // as not signed in, never told "not found" about a folder it chose.
+    let f = fixture();
+    let turn = f.engine.session_turn();
+    signed_in(&f.engine);
+    let into_nothing = RequestChoices {
+        folder_id: Some("../x".into()),
+        ..choices("Invented drop")
+    };
+    assert_eq!(
+        f.engine.file_request_create_for(turn, &into_nothing).unwrap_err(),
+        ShareLinkError::NotSignedIn
+    );
+    assert_eq!(f.sent(), 0, "nothing was sent");
+}
+
+#[test]
+fn a_session_that_moves_before_the_request_leaves_sends_nothing() {
+    // The send's session check (`link_session.rs`, `Engine::link_send`): the session moves after the press's run
+    // and before its request; the request never leaves.
+    let f = fixture();
+    before_next_send(&f.engine);
+    assert_eq!(
+        f.create(&choices("Invented drop")).unwrap_err(),
+        ShareLinkError::NotSignedIn
+    );
+    assert_eq!(f.count(CREATE), 0, "the request never left");
+    before_next_send(&f.engine);
+    assert_eq!(f.copy(FOREIGN_REQUEST).unwrap_err(), ShareLinkError::NotSignedIn);
+    assert_eq!(f.count(LIST), 0, "the list was never read");
+}
