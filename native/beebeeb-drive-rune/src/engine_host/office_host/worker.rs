@@ -73,7 +73,8 @@ struct Run<S: Starter> {
     helper: Arc<S::Process>,
     writer: Sender<Outgoing>,
     ids: Ids,
-    /// When this helper's start was requested: the open timer counts from here.
+    /// When this helper had started (its start returned, after any wait for the launch lock): the open timer counts
+    /// from here.
     started_at: Instant,
     /// When the oldest request out became the oldest: the request timer counts from here.
     oldest_since: Instant,
@@ -259,7 +260,6 @@ impl<S: Starter> Worker<S> {
     }
 
     fn start_helper(&mut self) {
-        let started_at = Instant::now();
         if !self.starter.installed() {
             return self.end_with(OfficeState::NoPreview(NoPreview::NotInstalled));
         }
@@ -288,10 +288,23 @@ impl<S: Starter> Worker<S> {
         if matches!(self.doc, Doc::Gone) {
             return self.stopped(Stop::Failed);
         }
-        let link = match self.starter.start() {
+        // The start may wait for the launch lock, which Windows' app chooser holds for as long as it is open. Meanwhile
+        // the worker takes no close, so the document's section waits where a close drops it at once.
+        if !self.shared.park(Box::new(std::mem::replace(&mut self.doc, Doc::Gone))) {
+            return;
+        }
+        let started = self.starter.start();
+        self.doc = self
+            .shared
+            .unpark()
+            .and_then(|doc| doc.downcast::<Doc<S::Section>>().ok())
+            .map_or(Doc::Gone, |doc| *doc);
+        let link = match started {
             Ok(link) => link,
             Err(error) => return self.start_failed(error),
         };
+        // The open timer counts from here: the wait for the lock was not the helper's time.
+        let started_at = Instant::now();
         let Link {
             helper,
             to_helper,

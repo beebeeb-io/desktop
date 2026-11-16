@@ -218,6 +218,34 @@ fn an_app_press_on_a_file_not_kept_says_keep_first_and_opens_nothing() {
     }
 }
 
+/// Review of #467, P3-2: right after Keep on this PC the row is marked kept while the copy still comes down. Every line
+/// that hands the file to another app (an app, Other…) asks the source at the press (the engine: kept AND the bytes
+/// here), not the row's mark: "Keep this file on this PC first.", and nothing is opened.
+#[test]
+fn open_with_on_a_file_kept_but_not_here_yet_says_keep_first() {
+    for line in ["menu-1-item-1", "menu-1-item-3"] {
+        let mut s = with_agreement(true);
+        let mut fixture = FilesFixture::default();
+        fixture.apps = Some(vec![app(1), app(2)]);
+        fixture.not_here = vec![AGREEMENT_ID.into()];
+        let calls = fixture.calls.clone();
+        s.actions.source = Box::new(fixture);
+        let mut rt = runtime_of(s);
+        click(&mut rt, &format!("row-{AGREEMENT_ROW}-date"));
+        assert!(rt.state.selection_is_kept(), "the row says kept");
+        open_the_submenu(&mut rt);
+        click(&mut rt, line);
+        settle(&mut rt);
+        assert_eq!(asked(&calls), [], "{line}: nothing is opened, fetched or decrypted");
+        assert_eq!(rt.state.live_toast(), Some(Toast::KeepFirst), "{line}");
+        assert_eq!(
+            info(&rt, "toast").label.as_deref(),
+            Some(crate::frames::office::docs::KEEP_FIRST),
+            "{line}"
+        );
+    }
+}
+
 #[test]
 fn an_app_press_opens_the_kept_copy_in_that_app() {
     let (mut rt, calls) = spied_with(true, Some(vec![app(1), app(2)]));

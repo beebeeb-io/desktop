@@ -55,6 +55,7 @@ pub mod files;
 mod files_conflicts;
 mod files_downloads;
 mod files_facts;
+mod files_launch;
 mod files_link;
 #[cfg(test)]
 #[path = "engine_host/files_open_with_tests.rs"]
@@ -212,8 +213,9 @@ fn log(message: impl AsRef<str>) {
 // ---------------------------------------------------------------------------
 
 /// Open a file or folder with the OS's default handler. Never passes the path
-/// through a shell interpreter.
-fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
+/// through a shell interpreter. `still` is asked inside the launch lock, right before the start: `false` (the
+/// press's session moved on) starts nothing.
+fn open_path(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), files_source::ActionError> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -221,16 +223,19 @@ fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
         let verb: Vec<u16> = "open\0".encode_utf16().collect();
         // SAFETY: ShellExecuteW is called with valid null-terminated wide strings. The function
         // returns a value > 32 on success. No shell interpretation of the path occurs.
-        let result = launch::locked(|| unsafe {
-            windows_sys::Win32::UI::Shell::ShellExecuteW(
-                std::ptr::null_mut(),
-                verb.as_ptr(),
-                wide.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-            )
-        });
+        let result = launch::locked(|| {
+            still().then(|| unsafe {
+                windows_sys::Win32::UI::Shell::ShellExecuteW(
+                    std::ptr::null_mut(),
+                    verb.as_ptr(),
+                    wide.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                )
+            })
+        })
+        .ok_or(files_source::ActionError::Unavailable)?;
         if (result as usize) <= 32 {
             return Err(files_source::ActionError::Failed);
         }
@@ -238,12 +243,15 @@ fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
     #[cfg(target_os = "macos")]
     {
         // `open` on macOS: the path is passed as a single argv element, not through a shell.
-        launch::spawn(std::process::Command::new("open").arg(path)).map_err(|_| files_source::ActionError::Failed)?;
+        launch::locked(|| still().then(|| std::process::Command::new("open").arg(path).spawn()))
+            .ok_or(files_source::ActionError::Unavailable)?
+            .map_err(|_| files_source::ActionError::Failed)?;
     }
     #[cfg(target_os = "linux")]
     {
         // `xdg-open` on Linux: the path is passed as a single argv element, not through a shell.
-        launch::spawn(std::process::Command::new("xdg-open").arg(path))
+        launch::locked(|| still().then(|| std::process::Command::new("xdg-open").arg(path).spawn()))
+            .ok_or(files_source::ActionError::Unavailable)?
             .map_err(|_| files_source::ActionError::Failed)?;
     }
     Ok(())
@@ -255,8 +263,12 @@ fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
 ///
 /// The launch lock is held for the whole call: the chooser starts the app picked INSIDE `SHOpenWithDialog`, and the
 /// call has no point between "picked" and "started" where the lock could be taken. So while the chooser is open,
-/// every other start of the app (a helper, Open, Show in File Explorer) waits until it closes.
-fn choose_app(path: &std::path::Path) -> Result<(), files_source::ActionError> {
+/// every other start of the app (a helper, Open, Show in File Explorer) waits until it closes. A chooser that waited
+/// for another one opens only while `still()` holds once the lock is taken (the press's session).
+fn choose_app(
+    path: &std::path::Path,
+    still: impl Fn() -> bool + Send + 'static,
+) -> Result<(), files_source::ActionError> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -275,7 +287,7 @@ fn choose_app(path: &std::path::Path) -> Result<(), files_source::ActionError> {
                         pcszClass: std::ptr::null(),
                         oaifInFlags: OAIF_EXEC,
                     };
-                    let _ = launch::locked(|| SHOpenWithDialog(std::ptr::null_mut(), &info));
+                    let _ = launch::locked(|| still().then(|| SHOpenWithDialog(std::ptr::null_mut(), &info)));
                     if com >= 0 {
                         CoUninitialize();
                     }
@@ -286,31 +298,35 @@ fn choose_app(path: &std::path::Path) -> Result<(), files_source::ActionError> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = path;
+        let _ = (path, still);
         Err(files_source::ActionError::NotOnThisSystem)
     }
 }
 
 /// Reveal a file or folder in File Explorer / Finder / Files. Never passes the
-/// path through a shell interpreter.
-fn reveal_in_file_explorer(path: &std::path::Path) -> Result<(), files_source::ActionError> {
+/// path through a shell interpreter. `still`: as [`open_path`]'s.
+fn reveal_in_file_explorer(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), files_source::ActionError> {
     #[cfg(target_os = "windows")]
     {
         // `explorer.exe /select,<path>` as ONE argv element: the process is started directly
         // via `CreateProcessW`, no shell in between. The path is never parsed by cmd.exe.
-        launch::spawn(std::process::Command::new("explorer.exe").arg(format!("/select,{}", path.display())))
+        let select = format!("/select,{}", path.display());
+        launch::locked(|| still().then(|| std::process::Command::new("explorer.exe").arg(select).spawn()))
+            .ok_or(files_source::ActionError::Unavailable)?
             .map_err(|_| files_source::ActionError::Failed)?;
     }
     #[cfg(target_os = "macos")]
     {
-        launch::spawn(std::process::Command::new("open").arg("-R").arg(path))
+        launch::locked(|| still().then(|| std::process::Command::new("open").arg("-R").arg(path).spawn()))
+            .ok_or(files_source::ActionError::Unavailable)?
             .map_err(|_| files_source::ActionError::Failed)?;
     }
     #[cfg(target_os = "linux")]
     {
         // Open the parent folder.
         if let Some(parent) = path.parent() {
-            launch::spawn(std::process::Command::new("xdg-open").arg(parent))
+            launch::locked(|| still().then(|| std::process::Command::new("xdg-open").arg(parent).spawn()))
+                .ok_or(files_source::ActionError::Unavailable)?
                 .map_err(|_| files_source::ActionError::Failed)?;
         }
     }
@@ -367,7 +383,7 @@ impl<C: CredentialStores> LiveEngine<C> {
         let live = self.clone();
         setup::Hooks {
             start_sync: Arc::new(move || live.start_sync().is_ok()),
-            open_folder: |folder| open_path(folder).is_ok(),
+            open_folder: |folder| open_path(folder, &|| true).is_ok(),
             platform,
             first_run: self.first_run.clone(),
             explorer_step: cfg!(target_os = "windows"),
@@ -480,7 +496,8 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     fn open_in_file_explorer(&self) -> Result<(), actions::ActionError> {
         let path = open_folder::beebeeb_folder(&self.engine)
             .map_err(|_| actions::ActionError::NotAvailable("sync is not running"))?;
-        open_path(&path).map_err(|_| actions::ActionError::Failed("the Beebeeb folder did not open".to_string()))
+        open_path(&path, &|| true)
+            .map_err(|_| actions::ActionError::Failed("the Beebeeb folder did not open".to_string()))
     }
 
     fn profile_holder(&self) -> Option<ProfileHolder> {
@@ -628,25 +645,10 @@ pub struct EngineFilesSource<C: CredentialStores> {
     start_failed: Arc<Mutex<Vec<Change>>>,
     /// Files' Open and Show in File Explorer start here, never on the window's thread (ruling R-OW1).
     later: launch::Later,
+    /// The starts handed to `later` and not begun yet: a session end empties it (`forget_starts`).
+    pending: files_launch::Pending,
     /// What starts a file or a folder (the system's own; a test's stand-in).
-    starts: Starts,
-}
-
-/// What Files' Open and Show in File Explorer start: the system's own handlers ([`open_path`],
-/// [`reveal_in_file_explorer`]). Each takes the launch lock itself.
-#[derive(Clone, Copy)]
-struct Starts {
-    open: fn(&Path) -> Result<(), ActionError>,
-    reveal: fn(&Path) -> Result<(), ActionError>,
-}
-
-impl Default for Starts {
-    fn default() -> Self {
-        Starts {
-            open: open_path,
-            reveal: reveal_in_file_explorer,
-        }
-    }
+    starts: files_launch::Starts,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -666,7 +668,8 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             apps: open_with_apps::Apps::default(),
             start_failed: Arc::new(Mutex::new(Vec::new())),
             later: launch::Later::default(),
-            starts: Starts::default(),
+            pending: files_launch::Pending::default(),
+            starts: files_launch::Starts::default(),
             engine,
             upload_left: None,
         }
@@ -747,36 +750,40 @@ impl<C: CredentialStores> EngineFilesSource<C> {
         choose(&path)
     }
 
-    /// Is the file with this id kept on this PC, by the engine, for the session `turn`: kept (by its own pin or a kept
-    /// folder's) AND its bytes here. A copy that is only listed, or still coming down, is not: handing it to an app
-    /// would make Windows fetch it and decrypt it for that app.
     /// Start each of `paths` with `start` on the launch worker, in order, never on the window's thread (R-OW1): the
-    /// paths were resolved at the press, under the account-bound handle. `Ok`: handed over. A start that fails there
-    /// is said through `changes` (the first one; the rest are not started), unless the session moved on since the press.
+    /// paths were resolved at the press, under the account-bound handle. `Ok`: handed over. Each start asks for the
+    /// press's session inside the launch lock and starts nothing once it moved; a session end drops what has not
+    /// begun (`files_launch`). A start that fails is said through `changes` (the first one; the rest are not
+    /// started), unless the session moved on since the press.
     fn start_later(
         &mut self,
         action: files_source::Action,
         paths: Vec<PathBuf>,
-        start: fn(&Path) -> Result<(), ActionError>,
+        start: files_launch::Start,
     ) -> Result<(), ActionError> {
         let turn = self.engine.session_turn();
         let (engine, failed) = (self.engine.clone(), self.start_failed.clone());
-        self.later
-            .run(move || {
-                if let Err(why) = paths.iter().try_for_each(|path| start(path))
-                    && engine.session_turn() == turn
-                {
-                    failed
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(Change::Failed(action, why));
-                    engine.wake_host();
-                }
-            })
+        let job = move || {
+            let still = || engine.session_turn() == turn;
+            if let Err(why) = paths.iter().try_for_each(|path| start(path, &still))
+                && still()
+            {
+                failed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(Change::Failed(action, why));
+                engine.wake_host();
+            }
+        };
+        self.pending
+            .run_later(&mut self.later, job)
             .map_err(|()| ActionError::Failed)
     }
 
-    fn kept_here(&self, turn: beebeeb_engine::account::SessionGeneration, id: &str) -> bool {
+    /// Is the file with this id kept on this PC, by the engine, for the session `turn`: kept (by its own pin or a kept
+    /// folder's) AND its bytes here. A copy that is only listed, or still coming down, is not: handing it to an app
+    /// would make Windows fetch it and decrypt it for that app.
+    fn kept_here_for(&self, turn: beebeeb_engine::account::SessionGeneration, id: &str) -> bool {
         self.engine.edit_facts_for(turn, id, 0).is_ok_and(|facts| facts.kept)
             && self
                 .engine
@@ -899,8 +906,22 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.start_later(files_source::Action::Open, paths, open)
     }
 
+    /// Other… (Windows' app chooser). It opens only while the session of this press is still the one once the
+    /// launch lock is taken: another chooser that holds it may stay open across a lock or a sign-out.
     fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
-        self.open_with_by(item, choose_app)
+        let (engine, turn) = (self.engine.clone(), self.engine.session_turn());
+        self.open_with_by(item, move |path| {
+            choose_app(path, move || engine.session_turn() == turn)
+        })
+    }
+
+    /// Kept AND its bytes here, by the engine's facts now (Open With's lines other than Beebeeb ask it at the press).
+    fn kept_here(&self, item: &DriveItem) -> bool {
+        !item.is_folder && self.kept_here_for(self.engine.session_turn(), &item.id)
+    }
+
+    fn forget_starts(&mut self) {
+        self.pending.forget();
     }
 
     /// The apps Windows reports for the file's type (DW-1562): what is held; a type not asked yet is asked once on a
@@ -915,19 +936,22 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
 
     /// Open With ▸ an app (DW-1562): only the copy KEPT on this PC, by the engine's own facts at the press, and its
     /// path resolved under the account-bound handle at the press (never a path from the menu's time, never one made
-    /// from a name). Nothing is fetched, decrypted or copied for it. The app starts on a COM thread; a start that
-    /// fails there is said through `changes`, unless the session moved on since the press.
+    /// from a name). Nothing is fetched, decrypted or copied for it. The app starts on a COM thread, only while the
+    /// press's session is still the one inside the launch lock; a start that fails there is said through `changes`,
+    /// unless the session moved on since the press.
     fn open_in_app(&mut self, item: &DriveItem, app: &files_source::AppChoice) -> Result<(), ActionError> {
         if item.is_folder {
             return Err(ActionError::Failed);
         }
         let turn = self.engine.session_turn();
-        if !self.kept_here(turn, &item.id) {
+        if !self.kept_here_for(turn, &item.id) {
             return Err(ActionError::Failed);
         }
         let path = self.local(|db, sync_root| path_the_system_opens(db, sync_root, &item.id))?;
         let (engine, failed) = (self.engine.clone(), self.start_failed.clone());
-        open_with_apps::open_in(path, app.id.clone(), move |answer| {
+        let now = self.engine.clone();
+        let still = move || now.session_turn() == turn;
+        open_with_apps::open_in(self.starts.app, path, app.id.clone(), still, move |answer| {
             if answer.is_err() && engine.session_turn() == turn {
                 failed
                     .lock()

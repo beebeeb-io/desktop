@@ -19,6 +19,10 @@ use crate::State;
 use crate::shell::app::Section;
 use crate::shell::registry::{self, FrameGroup};
 
+#[cfg(test)]
+#[path = "reset_tests.rs"]
+mod tests;
+
 /// Is the Files window what the route shows? (Backups shows its folder in it: `protected.rs`.)
 fn on_files_route(s: &State) -> bool {
     matches!(
@@ -107,6 +111,8 @@ pub fn end_session(s: &mut State, account_left: bool) {
     } = &mut s.actions;
     // Another session of this window: an answer asked for under the one that ended is dropped.
     *session_no += 1;
+    // What it asked to start (Open, Show in File Explorer) and has not begun goes, on a lock too.
+    source.forget_starts();
     // The folder has not loaded under the next session yet.
     *first_load_strip = false;
     // The account left (a sign-out, another account): what it was uploading is cancelled and
@@ -163,9 +169,11 @@ pub fn end_session(s: &mut State, account_left: bool) {
 /// The shell's session gate closed under the window (`shell::session_gate`), in any way: also
 /// the session that ended while the gate stayed Ready, where the rows stay (`session.rs`). What
 /// could still act goes: every dialog through the wiping path, a name being typed in a row, an
-/// open menu, a picker that was asked for, and Search over the window. No source is asked.
+/// open menu, a picker that was asked for, the starts not begun yet, and Search over the window.
+/// Nothing is read from a source.
 pub fn session_closed(s: &mut State) {
     close_dialogs(s);
+    s.actions.source.forget_starts();
     s.actions.picker = None;
     s.actions.drop_hover = None;
     s.actions.upload_menu = None;
