@@ -118,6 +118,8 @@ pub struct FakeAccount {
     pub(super) versions: Mutex<HashMap<String, FakeVersions>>,
     /// Whole uploads, the change log and stored pictures ([`super::fake_uploads`]).
     pub(super) uploads: super::fake_uploads::UploadState,
+    /// The stored search-index shards ([`super::fake_search_shards`]).
+    pub(super) search_shards: super::fake_search_shards::SearchShardState,
     /// How many version restores reached this account (a request with its token), whatever the answer.
     restores: AtomicUsize,
     /// The status the next version restore is answered with, without being made.
@@ -175,6 +177,7 @@ impl FakeAccount {
             links_listed_as: Mutex::new(None),
             versions: Mutex::new(HashMap::new()),
             uploads: Default::default(),
+            search_shards: Default::default(),
             restores: AtomicUsize::new(0),
             restore_refusal: Mutex::new(None),
             restore_hangs_up: AtomicBool::new(false),
@@ -731,6 +734,14 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }
             }
 
+            // ── The counter row (the Trash badge); before the single-file arm below, which would answer 404 ──
+            "GET /api/v1/files/count" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.files_count()
+            }
+
             // ── Files listing ───────────────────────────────────────────
             "GET /api/v1/files" => {
                 if req.bearer() != Some(&account.session_token) {
@@ -922,7 +933,12 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
             }
 
             // ── Search shards ───────────────────────────────────────────
-            "GET /api/v1/search-index/shards" => Reply::ok(json!({ "shards": [] })),
+            _ if FakeAccount::is_search_shard_route(req) => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.search_shard_route(req)
+            }
 
             // ── Shares invites ──────────────────────────────────────────
             "GET /api/v1/shares/invites/incoming" => Reply::ok(json!({ "invites": [] })),
