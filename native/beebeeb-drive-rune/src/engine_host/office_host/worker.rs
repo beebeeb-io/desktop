@@ -353,6 +353,9 @@ impl<S: Starter> Worker<S> {
     fn start_failed(&mut self, error: sandbox::SandboxError) {
         if error == sandbox::SandboxError::Unsupported {
             self.end_with(OfficeState::NoPreview(NoPreview::NoSandbox));
+        } else if error == sandbox::SandboxError::NeedsNewerWindows {
+            crate::windows_floor::note_needs_windows_update();
+            self.end_with(OfficeState::NoPreview(NoPreview::NeedsWindowsUpdate));
         } else {
             self.stopped(Stop::Failed);
         }

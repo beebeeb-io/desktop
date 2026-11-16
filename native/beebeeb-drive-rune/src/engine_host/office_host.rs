@@ -165,6 +165,9 @@ pub enum NoPreview {
     NoSandbox,
     /// The helper is not installed beside the app.
     NotInstalled,
+    /// This Windows is older than the sandbox needs (`SandboxError::NeedsNewerWindows`): "This file can't be shown
+    /// until Windows is updated."
+    NeedsWindowsUpdate,
 }
 
 /// Why the file cannot be opened.
