@@ -374,10 +374,10 @@ fn office_docs_scroll_frame_time_p95() {
         let (x, y) = (stage[0] + stage[2] / 2.0, stage[1] + stage[3] / 2.0);
         let per_frame = stage[3] / 30.0;
         let mut times = Vec::with_capacity(600);
-        for frame in 0..600u32 {
+        for _ in 0..600u32 {
             rt.wheel(x, y, -per_frame);
             let t = Instant::now();
-            rt.frame(f64::from(frame) / 60.0);
+            rt.frame(1.0 / 60.0);
             times.push(t.elapsed());
             std::thread::sleep(Duration::from_millis(4));
         }

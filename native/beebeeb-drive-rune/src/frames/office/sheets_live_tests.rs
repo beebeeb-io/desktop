@@ -38,11 +38,30 @@ fn sheet_in(rt: &mut rune::Runtime<State>) -> &mut SheetView {
     }
 }
 
+/// The first row and column in view moved to `to` as a key moves them (the scroll viewports follow, one truth), drawn
+/// once; only what that build asked is kept.
+fn scroll_to(rt: &mut rune::Runtime<State>, log: &crate::frames::office::docs::live_tests::Log, to: Cell) {
+    log.cells.borrow_mut().clear();
+    log.pictures.borrow_mut().clear();
+    rt.update(|s, tx| {
+        if let Some(Body::Sheet(view)) = viewers::ui(s).map(|ui| &mut ui.file.body) {
+            view.top_left = to;
+            sheets_scroll::follow(view, tx);
+        }
+    });
+    rt.frame(0.0);
+}
+
 #[test]
 fn office_sheets_asks_the_cells_in_view() {
-    let mut view = big();
-    view.top_left = Cell { row: 100, col: 3 };
-    let (_rt, log) = live_runtime(Body::Sheet(view), 1.0, None);
+    let (mut rt, log) = live_runtime(Body::Sheet(big()), 1.0, None);
+    scroll_to(&mut rt, &log, Cell { row: 100, col: 3 });
+    rt.frame(0.0);
+    assert_eq!(
+        sheet_in(&mut rt).top_left,
+        Cell { row: 100, col: 3 },
+        "the viewports agree"
+    );
     let asked = log.cells.borrow().clone();
     assert_eq!(asked.len(), 1, "one ask per frame: {asked:?}");
     let (sheet, row, col, rows, cols) = asked[0];
@@ -53,10 +72,11 @@ fn office_sheets_asks_the_cells_in_view() {
 #[test]
 fn office_sheets_draws_from_the_top_left() {
     let mut view = big();
-    view.top_left = Cell { row: 100, col: 3 };
     view.cells.push(cell(100, 3, "here", None));
     view.cells.push(cell(0, 0, "far away", None));
-    let (rt, _log) = live_runtime(Body::Sheet(view), 1.0, None);
+    let (mut rt, log) = live_runtime(Body::Sheet(view), 1.0, None);
+    scroll_to(&mut rt, &log, Cell { row: 100, col: 3 });
+    rt.frame(0.0);
     assert!(
         find(&rt, "sh-cell-100-3-t").is_some(),
         "the first cell in view is drawn"

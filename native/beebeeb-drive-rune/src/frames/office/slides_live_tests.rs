@@ -133,6 +133,9 @@ fn office_slides_the_wheel_steps_in_present() {
     let (mut rt, _log) = live_runtime(deck(5), 1.0, None);
     rt.update(|s, _| viewers::deck_mut(s).expect("a deck").present());
     rt.frame(0.0);
+    rt.frame(0.0);
+    rt.settle_all();
+    rt.frame(1.0);
     wheel_over(&mut rt, "pres-stage", -100.0, false);
     assert_eq!(current(&mut rt), 2);
 }

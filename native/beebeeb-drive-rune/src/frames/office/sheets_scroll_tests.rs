@@ -29,9 +29,11 @@ fn rect(rt: &Runtime<State>, key: &str) -> [f32; 4] {
     find(rt, key).unwrap_or_else(|| panic!("{key} is drawn")).rect
 }
 
+/// A few frames with time going by (a scroll bar and a menu fade in; at no time they stay clear and take no press).
 fn settle(rt: &mut Runtime<State>) {
-    rt.frame(0.0);
-    rt.frame(0.0);
+    for _ in 0..20 {
+        rt.frame(1.0 / 60.0);
+    }
 }
 
 /// The middle of the grid.
@@ -112,6 +114,7 @@ fn office_sheets_keys_move_the_viewports_too() {
 fn office_sheets_the_scroll_bars_move_the_top_left() {
     let (mut rt, _log) = live_runtime(Body::Sheet(big()), 1.0, None);
     rt.set_system_scroll_bars(ScrollBars::Always);
+    rt.update(|_, _| {});
     settle(&mut rt);
     let thumbs: Vec<[f32; 4]> = rt
         .elements()
@@ -129,7 +132,7 @@ fn office_sheets_the_scroll_bars_move_the_top_left() {
         rt.pointer_move(from.0, from.1);
         rt.pointer_down(from.0, from.1);
         rt.pointer_move(from.0 + by.0 / 2.0, from.1 + by.1 / 2.0);
-        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
         rt.pointer_move(from.0 + by.0, from.1 + by.1);
         rt.pointer_up(from.0 + by.0, from.1 + by.1);
         settle(rt);
@@ -137,7 +140,11 @@ fn office_sheets_the_scroll_bars_move_the_top_left() {
     drag(&mut rt, (tall[0] + tall[2] / 2.0, tall[1] + tall[3] / 2.0), (0.0, 60.0));
     let (down, _) = offsets(&rt);
     let row = sheet(&mut rt).top_left.row;
-    assert!(row > 0, "the bar down moved the rows: {down}");
+    assert!(
+        row > 0,
+        "the bar down moved the rows: {down}; thumb {tall:?}, under it {:?}",
+        rt.element_at(tall[0] + tall[2] / 2.0, tall[1] + tall[3] / 2.0)
+    );
     assert_eq!(row, (down / ROW_Q).round() as u32);
     drag(&mut rt, (wide[0] + wide[2] / 2.0, wide[1] + wide[3] / 2.0), (60.0, 0.0));
     let (_, across) = offsets(&rt);
@@ -182,11 +189,18 @@ fn office_sheets_tabs_past_the_width_go_behind_more() {
         Some("3 more sheets not listed here".to_string())
     );
     let item = rect(&rt, "sh-more-29");
-    rt.pointer_down(item[0] + 4.0, item[1] + item[3] / 2.0);
-    rt.pointer_up(item[0] + 4.0, item[1] + item[3] / 2.0);
+    let (ix, iy) = (item[0] + 4.0, item[1] + item[3] / 2.0);
+    let under = rt.element_at(ix, iy);
+    rt.pointer_down(ix, iy);
+    rt.pointer_up(ix, iy);
     settle(&mut rt);
     let view = sheet(&mut rt);
-    assert_eq!((view.active, view.sheet, view.more.open), (29, 29, false));
+    assert_eq!(
+        (view.active, view.sheet, view.more.open),
+        (29, 29, false),
+        "item {item:?}, menu {:?}, under it {under:?}",
+        find(&rt, "sh-more-menu").map(|e| e.rect)
+    );
     assert!(find(&rt, "sh-tab-29").is_some(), "the open sheet's tab is in the bar");
     assert!(find(&rt, "sh-more-menu").is_none());
     assert_eq!(

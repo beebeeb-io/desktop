@@ -16,9 +16,11 @@ fn rect(rt: &Runtime<State>, key: &str) -> [f32; 4] {
     find(rt, key).unwrap_or_else(|| panic!("{key} is drawn")).rect
 }
 
+/// A few frames with time going by (a scroll bar and a menu fade in; at no time they stay clear and take no press).
 fn settle(rt: &mut Runtime<State>) {
-    rt.frame(0.0);
-    rt.frame(0.0);
+    for _ in 0..20 {
+        rt.frame(1.0 / 60.0);
+    }
 }
 
 /// The wheel over the middle of the stage, `dy` points (negative scrolls down, as the toolkit's wheel does).
@@ -98,6 +100,7 @@ fn office_docs_a_scroll_asks_the_pages_that_come_into_view_and_no_others() {
 fn office_docs_the_scroll_bar_drags_the_stage() {
     let (mut rt, _log) = live_runtime(doc_of(60, 100, 1), 1.0, None);
     rt.set_system_scroll_bars(ScrollBars::Always);
+    rt.update(|_, _| {});
     settle(&mut rt);
     let stage = rect(&rt, STAGE);
     let thumb = rt
@@ -111,12 +114,16 @@ fn office_docs_the_scroll_bar_drags_the_stage() {
     rt.pointer_move(x, y);
     rt.pointer_down(x, y);
     rt.pointer_move(x, y + 50.0);
-    rt.frame(0.0);
+    rt.frame(1.0 / 60.0);
     rt.pointer_move(x, y + 100.0);
     rt.pointer_up(x, y + 100.0);
     settle(&mut rt);
     let at = measured(&rt);
-    assert!(at > 1000.0, "the drag moved the stage: {at}");
+    assert!(
+        at > 1000.0,
+        "the drag moved the stage: {at}; thumb {thumb:?}, under it {:?}",
+        rt.element_at(x, y)
+    );
     let d = doc(&mut rt);
     assert!(
         (d.scroll_y - at).abs() < 0.6,

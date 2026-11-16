@@ -103,13 +103,14 @@ pub fn with_doc_tx(act: impl Fn(&mut DocBody) + 'static) -> impl Fn(&mut State, 
 
 /// The document's keys ([`DocBody::on_key`]), then the stage follows the page they went to. `true`: taken.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    match viewers::doc_mut(s) {
-        Some(doc) if doc.on_key(&ev.key, &ev.mods) => {
-            show_page(doc, tx);
-            true
-        }
-        _ => false,
+    let Some(doc) = viewers::doc_mut(s) else {
+        return false;
+    };
+    if !doc.on_key(&ev.key, &ev.mods) {
+        return false;
     }
+    show_page(doc, tx);
+    true
 }
 
 /// The stage: the pages' column in a viewport that scrolls both ways, with the kit's scroll bar on it. `stage_y`: the
