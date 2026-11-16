@@ -17,8 +17,8 @@
 //!   about (`SessionUnknown`) gets no tag; the id is still recorded for the session in memory.
 //! - A session that came back with no email is named by the same answer (`name_unnamed_session`), before its id is
 //!   recorded: the session in memory, the account label and, while the stored token is the one asked about, the
-//!   credential store. The turn does not move for it either. A session whose id is known at its start is not asked
-//!   again, so one that has its id but no stored email stays unnamed until its next sign-in.
+//!   credential store. The turn does not move for it either. A session that has its id but no email is asked
+//!   again, and named.
 //! - Asked as a person's call (`person_session`): never under a locked screen, so the first ask is after the unlock.
 //!   The session watcher asks at most once a minute while the owner is unknown; a call that needs the owner now (the
 //!   two-factor calls) asks at once.
@@ -50,11 +50,25 @@ pub enum OwnerSettled {
 }
 
 impl<C: CredentialStores> Engine<C> {
+    /// The id is known and the session in memory carries its email: a session with an id but no email is asked again,
+    /// so it gets named (`name_unnamed_session`).
     fn owner_known(&self) -> bool {
-        self.session_user_id
+        let id_known = self
+            .session_user_id
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
+            .is_some();
+        id_known && !self.session_lacks_email()
+    }
+
+    /// A session is in memory and names no email.
+    fn session_lacks_email(&self) -> bool {
+        self.acct
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|held| held.email.is_none())
     }
 
     /// Whether an ask may start now: the owner is unknown, a session is in memory and the screen is open, and no ask
