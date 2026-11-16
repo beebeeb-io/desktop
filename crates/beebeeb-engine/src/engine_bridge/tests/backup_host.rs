@@ -419,32 +419,6 @@ async fn host_lists_the_category_tree_across_pages() {
     assert_eq!(Fixture::creates(&requests), 0);
 }
 
-/// A first backup adopts the device folder's existing `Pictures` (the old mirror's) instead of creating a second
-/// one, remembers it, and creates a category folder only where there is none.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn host_adopts_the_existing_category_folder_and_remembers_it() {
-    let fx = Fixture::new();
-    let legacy = fx.add(Some(&fx.device.clone()), "Pictures", true, 0);
-    fx.add(Some(&legacy), "old.jpg", false, 3);
-    let host = fx.host(vec![Category::Pictures, Category::Documents]);
-
-    let tree = host.device_tree(&Category::Pictures).await.unwrap();
-    assert_eq!(tree.category_folder_live, None, "a first backup on this device");
-    assert_eq!(tree.folders[""], uuid(&legacy));
-    assert_eq!(tree.files.len(), 1);
-    assert_eq!(
-        fx.bridge.db.backup_category_folder("pictures").unwrap().as_deref(),
-        Some(legacy.as_str())
-    );
-
-    let documents = host.device_tree(&Category::Documents).await.unwrap();
-    let requests = fx.server.finish();
-    assert_eq!(Fixture::creates(&requests), 1, "only Documents had no folder");
-    assert!(documents.files.is_empty() && documents.complete);
-    let made = fx.bridge.db.backup_category_folder("documents").unwrap().unwrap();
-    assert_eq!(documents.folders[""], uuid(&made));
-}
-
 /// Rule 11 inside core's pass (a folder deleted after the pass's notice check): a category folder deleted elsewhere
 /// turns that backup off as core's `unknown` (settings, stop notice, folder forgotten, queued uploads dropped) and
 /// nothing is queued; a deleted device folder turns every backup off and forgets the layout. Nothing is uploaded
@@ -1789,3 +1763,6 @@ async fn the_scheduler_switches_off_a_stopped_backup_when_it_starts() {
         })
         .await;
 }
+
+// The category folder's adoption (a known folder's, never a chosen folder's) and the per-account switches.
+mod owners_and_adoption;

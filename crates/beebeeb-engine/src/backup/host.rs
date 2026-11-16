@@ -53,6 +53,19 @@ pub fn switch_off_in_settings(identity: &'static crate::identity::EngineIdentity
     .is_ok()
 }
 
+/// Whether the switch `key` in the PC's settings file is the local data's owner's to turn off (the per-account rule
+/// of P3-8): a known folder's switch is the PC's; a chosen folder's (`custom:<name>`) only when the folder is one of
+/// `owners_chosen` (`backup_folders::runner_chosen`: tagged with that owner; an untagged one is nobody's). Every
+/// account's chosen folders share the one backup set, so a stop or a reconcile here never turns off another
+/// account's. A key that names no category: never.
+pub fn owners_switch(key: &str, owners_chosen: &[crate::backup::sources::ChosenFolder]) -> bool {
+    match Category::from_key(key) {
+        Some(Category::Custom(_)) => owners_chosen.iter().any(|folder| folder.key() == key),
+        Some(_) => true,
+        None => false,
+    }
+}
+
 /// The tree of a backup whose device or category folder is gone: nothing listed, and complete (there is nothing more).
 fn gone_tree(device_folder_live: bool, category_folder_live: Option<bool>) -> DeviceTree {
     DeviceTree {
@@ -114,8 +127,14 @@ impl DesktopBackupHost {
         Ok((tree, clock))
     }
 
-    /// The category folder's id: the remembered one, else (a first backup, or "Back up again") the live folder of
-    /// that name in the device folder (the old mirror's `GLegion/Pictures` is adopted), else a new one.
+    /// The category folder's id: the remembered one, else (a first backup, or "Back up again") for a known folder the
+    /// live folder of that name in the device folder (the old mirror's `GLegion/Pictures` is adopted), else a new one.
+    ///
+    /// A folder the person chose (`Category::Custom`) with no folder remembered never adopts (P3-10, by
+    /// construction): a live folder of its name may be another backup the person kept ("Stop and keep the backup")
+    /// that the local rows do not hold yet, so its new name could not skip it; its pass would write into that kept
+    /// backup. It gets a new folder. "Back up again" after a stop (which forgets the folder) also starts a new folder
+    /// for it, beside the old one if that one is still there.
     async fn category_folder(&self, c: &Category) -> Result<(String, Option<bool>), HostError> {
         let db = self.bridge.db();
         if let Some(id) = db
@@ -129,11 +148,13 @@ impl DesktopBackupHost {
                 .map_err(host_error("category_folder_state"))?;
             return Ok((id, Some(state == BackupFolderState::Live)));
         }
-        let id = self
-            .bridge
-            .backup_ensure_folder(&self.layout.device_folder_id, c.display_name())
-            .await
-            .map_err(host_error("category_folder_create"))?;
+        let parent = &self.layout.device_folder_id;
+        let id = if matches!(c, Category::Custom(_)) {
+            self.bridge.backup_create_folder(parent, c.display_name()).await
+        } else {
+            self.bridge.backup_ensure_folder(parent, c.display_name()).await
+        }
+        .map_err(host_error("category_folder_create"))?;
         db.set_backup_category_folder(&c.key(), Some(&id))
             .map_err(db_error("category_folder"))?;
         Ok((id, None))
@@ -320,7 +341,15 @@ impl DesktopBackupHost {
             // waiting for the OneDrive answer), so none keeps going after its backup was removed.
             let mut on: Vec<Category> = self.enabled.clone();
             if let Ok(cfg) = crate::config::DesktopConfig::load_for(self.bridge.identity) {
-                for category in cfg.known_folder_backup.iter().filter_map(|key| Category::from_key(key)) {
+                // The local data's owner's switches alone (P3-8): another account's chosen folder, or an untagged one,
+                // is not this device's backup of this account, and its switch is not this stop's to turn off.
+                let owners = crate::app::bindings::backup_folders::runner_chosen(db, &cfg);
+                for category in cfg
+                    .known_folder_backup
+                    .iter()
+                    .filter(|key| owners_switch(key, &owners))
+                    .filter_map(|key| Category::from_key(key))
+                {
                     if !on.contains(&category) {
                         on.push(category);
                     }
