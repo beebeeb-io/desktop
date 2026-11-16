@@ -119,6 +119,27 @@ fn office_sheets_bounds_many_merges_cost_per_frame_is_bounded() {
 }
 
 #[test]
+fn office_sheets_bounds_overlapping_merges_cost_per_frame_is_bounded() {
+    // A crafted workbook (or helper): K21 merged alone, then 5,000 areas over A1:K21 that overlap it only at their last
+    // cell. Each would read 231 drawn cells before it is turned away; a frame reads at most a few per drawn cell.
+    let mut view = sheet(400, 30);
+    view.merges.push((Cell { row: 20, col: 10 }, Cell { row: 20, col: 10 }));
+    view.merges
+        .extend((0..5_000).map(|_| (Cell { row: 0, col: 0 }, Cell { row: 20, col: 10 })));
+    let (mut rt, log) = live_runtime(Body::Sheet(view), 1.0, None);
+    CELLS_SCANNED.with(|n| n.set(0));
+    rebuild(&mut rt, &log, |_| {});
+    let scanned = CELLS_SCANNED.with(|n| n.get());
+    let drawn = cells_drawn(&rt).len() as u64;
+    // Two drawn cells' worth per build at most (a frame may build twice), never 231 per area held (1,155,000).
+    assert!(scanned <= 2 * 2 * drawn, "{scanned} cells read for {drawn} drawn");
+    assert!(
+        find(&rt, "sh-cell-0-0").is_some() && find(&rt, "sh-cell-20-10").is_some(),
+        "the overlapping areas are not drawn; A1 and K21 are"
+    );
+}
+
+#[test]
 fn office_sheets_bounds_a_merge_keeps_the_cells_beside_it_in_their_columns() {
     let mut view = sheet(400, 30);
     // B2:C3, two rows: the second row's D3 stays under D2.

@@ -222,7 +222,11 @@ impl MergesShown {
                 break;
             }
             spend -= 2 * area;
-            if (ra..rb).any(|ri| at[ri * n + ca..ri * n + cb].iter().any(|a| *a != AtCell::Own)) {
+            let taken = |a: &AtCell| {
+                scanned();
+                *a != AtCell::Own
+            };
+            if (ra..rb).any(|ri| at[ri * n + ca..ri * n + cb].iter().any(taken)) {
                 continue;
             }
             let w: f32 = cols[ca..cb].iter().map(|&c| width(c)).sum();
@@ -281,6 +285,18 @@ thread_local! {
 pub(super) fn looked() {
     #[cfg(test)]
     MERGES_LOOKED.with(|n| n.set(n.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many drawn cells the merges' overlap check read (a test counts a frame's).
+    pub(super) static CELLS_SCANNED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// One drawn cell read by the overlap check (counted for the tests).
+fn scanned() {
+    #[cfg(test)]
+    CELLS_SCANNED.with(|n| n.set(n.get() + 1));
 }
 
 #[cfg(test)]
