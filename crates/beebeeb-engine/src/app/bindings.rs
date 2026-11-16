@@ -9,6 +9,7 @@ pub mod approve_sign_in;
 pub mod backup_folders;
 pub mod device_request;
 pub mod file_request;
+mod link_session;
 pub mod media_stream;
 pub mod needs_attention;
 pub mod photos_folders;

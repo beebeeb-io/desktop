@@ -13,7 +13,8 @@
 //! - One session only. `session` is [`Engine::session_turn`] as the host read it AT THE PRESS. The token and the vault
 //!   key of that session are copied together while it is the session in memory, and the same question is asked again
 //!   before EACH request and before the link is handed over: a press made under one session never sends under
-//!   another, and its link is never handed to another.
+//!   another, and its link is never handed to another. Each of those checks is `link_session.rs`'s, shared with the
+//!   file requests.
 //! - The folder comes from the account's local state: one of its own folders (never a received share, never the
 //!   Backups tree). A file, or an id the local state does not hold as the account's, is refused with nothing sent.
 //! - Every folder id core asks to remember (L7d) is written to the custody memory BEFORE the request that uses it; a
@@ -48,12 +49,11 @@ use beebeeb_core::share_flow::link::{CreateLink, LinkOptions, LinkStep};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use super::link_session::state_refusal;
 use crate::account::SessionGeneration;
-use crate::app::owned_state::LocalStateRefused;
-use crate::app::share_invite_api::own_item;
+use crate::app::share_invite_api::{canonical, own_item};
 use crate::app::share_link_api::{LinkChoices, MadeLink, ShareLinkError, key_of, web_origin};
 use crate::app::{CredentialStores, Engine};
-use crate::auth_transport;
 use crate::state_db::StateDb;
 
 #[cfg(test)]
@@ -119,15 +119,6 @@ impl std::fmt::Display for FolderLinkError {
     }
 }
 
-/// What one press runs on: the session of the press, its token and vault key (copied together), and the transport.
-struct Run<'a> {
-    session: SessionGeneration,
-    token: Zeroizing<String>,
-    key: Zeroizing<[u8; 32]>,
-    base: &'a str,
-    client: reqwest::Client,
-}
-
 impl<C: CredentialStores> Engine<C> {
     /// WRITES on the server (at most one new link): the link to the account's folder `folder_id`, for the account of
     /// `session`. `choices`: `None`, or choices with nothing chosen, is the plain Copy link (the folder's live link if
@@ -150,7 +141,7 @@ impl<C: CredentialStores> Engine<C> {
             return Err(FolderLinkError::NotSignedIn);
         }
         let (revision, seen) = state.with(|db| own_folder(db, id)).map_err(state_refusal)??;
-        let master = MasterKey::from_bytes(*run.key);
+        let master = MasterKey::from_bytes(*run.key());
 
         // Nothing chosen is the plain request: the folder's own live link, never a second one behind it.
         let plain = choices.is_none_or(|c| c.expires_in_hours.is_none() && c.passphrase.is_none());
@@ -159,7 +150,7 @@ impl<C: CredentialStores> Engine<C> {
             let links = listed(self.link_send(&run, req)?)?;
             let live = live_folder_links(&links, id);
             if let Some(link) = live.iter().find_map(|row| rebuilt_folder_link(&app_url, &master, row)) {
-                return self.hand_over(&run, link);
+                return self.hand_over(&run, link).map_err(FolderLinkError::from);
             }
             if !live.is_empty() {
                 return Err(FolderLinkError::HasLink);
@@ -201,7 +192,7 @@ impl<C: CredentialStores> Engine<C> {
             let resp = self.link_send(&run, request)?;
             step = flow.on_response(resp).map_err(flow_refusal)?;
         };
-        self.hand_over(&run, link)
+        self.hand_over(&run, link).map_err(FolderLinkError::from)
     }
 
     /// WRITES on the server (one new link): one link over the account's files `file_ids`, in that order, for the
@@ -230,7 +221,7 @@ impl<C: CredentialStores> Engine<C> {
             return Err(FolderLinkError::Invalid);
         }
         let run = self.link_run(session)?;
-        let master = MasterKey::from_bytes(*run.key);
+        let master = MasterKey::from_bytes(*run.key());
         // From the signed-in account's local state: every file's key, or nothing is sent.
         let keys: Vec<FileKey> = self
             .local_state()
@@ -268,7 +259,7 @@ impl<C: CredentialStores> Engine<C> {
                 LinkStep::Created(created) => break created.link,
             }
         };
-        self.hand_over(&run, link)
+        self.hand_over(&run, link).map_err(FolderLinkError::from)
     }
 
     /// WRITES on the server: "Stop sharing" a folder's links. Every link of the account's on the folder `folder_id`
@@ -295,58 +286,6 @@ impl<C: CredentialStores> Engine<C> {
             }
         }
         Ok(())
-    }
-
-    /// The token and the vault key of `session`, copied together while it is the session in memory.
-    fn link_run(&self, session: SessionGeneration) -> Result<Run<'_>, FolderLinkError> {
-        let (token, key) = self
-            .person_session(|current, _| {
-                (
-                    Zeroizing::new(current.token.clone()),
-                    Zeroizing::new(current.master_key),
-                )
-            })
-            .map_err(|_| FolderLinkError::NotSignedIn)?;
-        if !self.session_is_still(session, &key) {
-            return Err(FolderLinkError::NotSignedIn);
-        }
-        let client = auth_transport::client_for(&self.config.api_base).map_err(|_| FolderLinkError::Offline)?;
-        Ok(Run {
-            session,
-            token,
-            key,
-            base: self.config.api_base.trim_end_matches('/'),
-            client,
-        })
-    }
-
-    /// Send one request of the press, only while its session is still the session in memory.
-    fn link_send(&self, run: &Run<'_>, req: HttpRequest) -> Result<HttpResponse, FolderLinkError> {
-        if !self.session_is_still(run.session, &run.key) {
-            return Err(FolderLinkError::NotSignedIn);
-        }
-        self.runtime
-            .block_on(auth_transport::send_to(run.base, &run.client, Some(&run.token), req))
-            .map_err(|_| FolderLinkError::Offline)
-    }
-
-    /// The hand-over: only while the session in memory is the very one the token and the key were copied from.
-    fn hand_over(&self, run: &Run<'_>, link: Zeroizing<String>) -> Result<MadeLink, FolderLinkError> {
-        if !self.session_is_still(run.session, &run.key) {
-            return Err(FolderLinkError::NotSignedIn);
-        }
-        Ok(MadeLink {
-            session: run.session,
-            link,
-        })
-    }
-}
-
-/// An id as the server writes it: a canonical lower-case UUID, never normalized (an id is key-derivation input).
-fn canonical(id: &str) -> Option<&str> {
-    match uuid::Uuid::parse_str(id) {
-        Ok(u) if u.hyphenated().to_string() == id => Some(id),
-        _ => None,
     }
 }
 
@@ -432,18 +371,6 @@ fn rebuilt_folder_link(app_url: &str, master: &MasterKey, row: &Value) -> Option
         Some(wrapped),
         false,
     )
-}
-
-fn state_refusal(refused: LocalStateRefused) -> FolderLinkError {
-    match refused {
-        LocalStateRefused::SessionEnded => FolderLinkError::SessionEnded,
-        LocalStateRefused::Unreadable => FolderLinkError::Refused,
-        LocalStateRefused::SignedOut | LocalStateRefused::Locked | LocalStateRefused::SessionChanged => {
-            FolderLinkError::NotSignedIn
-        }
-        // Nothing synced, or a local state that is not this account's: no item of it is this account's.
-        _ => FolderLinkError::NotFound,
-    }
 }
 
 /// A file of the bundle refused by the file link's key rule (`key_of`).
