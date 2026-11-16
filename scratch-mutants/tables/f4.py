@@ -1,0 +1,25 @@
+MUT = [
+    dict(id="F4-office", crate="native", where="linux",
+         note="f4-words Office (72fc4082): start_failed's NeedsNewerWindows arm falls to self.stopped(Stop::Failed) "
+              "(the windows_floor note call kept; only the end_with line swapped)",
+         files=[("native/beebeeb-drive-rune/src/engine_host/office_host/worker.rs",
+                 "            self.end_with(OfficeState::NoPreview(NoPreview::NeedsWindowsUpdate));\n",
+                 "            self.stopped(Stop::Failed);\n")],
+         filt="engine_host::office_host_tests::a_too_old_windows_needs_a_windows_update",
+         expect=["a_too_old_windows_needs_a_windows_update"]),
+    dict(id="F4-media", crate="native", where="linux",
+         note="f4-words media (72fc4082): transport.rs sandbox_refusal returns NoSandbox for NeedsNewerWindows",
+         files=[("native/beebeeb-drive-rune/src/media/transport.rs",
+                 "        crate::windows_floor::note_needs_windows_update();\n        Refusal::NeedsWindowsUpdate\n",
+                 "        crate::windows_floor::note_needs_windows_update();\n        Refusal::NoSandbox\n")],
+         filt="media::player::tests::a_too_old_windows_is_its_own_refusal",
+         expect=["a_too_old_windows_is_its_own_refusal"]),
+    dict(id="F4-log", crate="native", where="linux",
+         note="f4-words log (72fc4082): windows_floor.rs note_once without the swap (always emits). The if-block is "
+              "deleted; `flag` and `Ordering` become unused (warnings only)",
+         files=[("native/beebeeb-drive-rune/src/windows_floor.rs",
+                 "    if flag.swap(true, Ordering::AcqRel) {\n        return false;\n    }\n",
+                 "")],
+         filt="windows_floor::tests::needs_windows_update_is_logged_once_for_two_failures",
+         expect=["needs_windows_update_is_logged_once_for_two_failures"]),
+]
