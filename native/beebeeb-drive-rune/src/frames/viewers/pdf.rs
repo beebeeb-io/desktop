@@ -85,6 +85,7 @@ pub fn tools(ui: &Ui, t: &Theme) -> Vec<El> {
     let figure = format!("{zoom}%");
     let group = row()
         .key("zoom-group")
+        .ml(12.0)
         .role("group")
         .label("Zoom")
         .padding(2.0)
