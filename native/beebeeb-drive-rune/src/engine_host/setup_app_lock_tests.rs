@@ -12,13 +12,18 @@ use crate::frames::signin::setup::source::LockAfter;
 struct Prompts {
     up: Arc<Mutex<Vec<HelloDone>>>,
     asked: Arc<AtomicUsize>,
+    /// How many prompts their owner took away (the cancels called).
+    taken_away: Arc<AtomicUsize>,
 }
 
 impl HelloPrompter for Prompts {
     fn start(&self, done: HelloDone) -> Result<HelloCancel, ()> {
         self.asked.fetch_add(1, Ordering::SeqCst);
         self.up.lock().unwrap().push(done);
-        Ok(Box::new(|| {}))
+        let taken_away = self.taken_away.clone();
+        Ok(Box::new(move || {
+            taken_away.fetch_add(1, Ordering::SeqCst);
+        }))
     }
 }
 
@@ -201,4 +206,32 @@ fn step_two_again_asks_windows_hello_when_the_engine_wants_a_proof_against_what_
             true
         ))
     );
+}
+
+/// The first run holds its prompt (`with_hello`): a prompt that answered is never taken away, a newer one takes the
+/// place of the one that is up, and leaving the first run (the shell drops its source) takes the one that is up away.
+#[test]
+fn leaving_the_first_run_takes_its_prompt_away() {
+    let prompts = Prompts::default();
+    let set = set();
+    let mut set = Set {
+        source: set.source.with_hello(Box::new(prompts.clone())),
+        ..set
+    };
+    let taken_away = || prompts.taken_away.load(Ordering::SeqCst);
+    set.source.set_app_lock(false, LockAfter::Min5);
+    assert_eq!(prompts.asked.load(Ordering::SeqCst), 1);
+    prompts.answer(HelloResult::Cancelled);
+    set.source.set_app_lock(false, LockAfter::Min5);
+    assert_eq!(prompts.asked.load(Ordering::SeqCst), 2);
+    assert_eq!(taken_away(), 0, "the prompt that answered is not taken away");
+    set.source.set_app_lock(false, LockAfter::Min5);
+    assert_eq!(prompts.asked.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        taken_away(),
+        1,
+        "the newer prompt takes the place of the one that was up"
+    );
+    drop(set);
+    assert_eq!(taken_away(), 2, "leaving the first run takes its prompt away");
 }

@@ -173,6 +173,10 @@ pub(super) struct AppLockPart<C: CredentialStores> {
     /// Every answer taken in, as `Debug` prints it (the password test reads them).
     #[cfg(test)]
     pub(super) answers_seen: Vec<String>,
+    /// The workers this part started (`computing`): a test tells an answer still being computed from one that was
+    /// lost. The app lets its workers run on their own.
+    #[cfg(test)]
+    workers: Vec<std::thread::JoinHandle<()>>,
     tx: mpsc::Sender<Answer>,
     rx: mpsc::Receiver<Answer>,
 }
@@ -274,9 +278,28 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
             said: None,
             #[cfg(test)]
             answers_seen: Vec::new(),
+            #[cfg(test)]
+            workers: Vec::new(),
             tx,
             rx,
         }
+    }
+
+    /// A worker of this part is on its way: the app lets it run on its own; a test keeps it (`computing`).
+    fn keep(&mut self, worker: std::thread::JoinHandle<()>) {
+        #[cfg(test)]
+        self.workers.push(worker);
+        #[cfg(not(test))]
+        drop(worker);
+    }
+
+    /// Whether a worker of this part still runs (tests only). Its answer is then still on its way, never lost: core's
+    /// password check takes seconds on a busy PC. A worker that ended sent its answer first, so the next `pump` takes
+    /// it in.
+    #[cfg(test)]
+    pub(super) fn computing(&mut self) -> bool {
+        self.workers.retain(|worker| !worker.is_finished());
+        !self.workers.is_empty()
     }
 
     fn open(&self) -> bool {
@@ -336,7 +359,7 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
         let number = self.reads;
         let made_for = stamp(&self.engine);
         let (engine, tx, mine) = (self.engine.clone(), self.tx.clone(), made_for.clone());
-        let started = std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("account-app-lock".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -349,9 +372,9 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
                     result,
                 });
                 engine.wake_host();
-            })
-            .is_ok();
-        if started {
+            });
+        if let Ok(worker) = worker {
+            self.keep(worker);
             self.reading = Some(number);
         }
     }
@@ -469,7 +492,7 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
             Some(AppLockProof::PlatformVerified) => Proved::Hello,
             Some(AppLockProof::Password(_)) => Proved::Password,
         };
-        let started = std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("account-app-lock".into())
             .spawn(move || {
                 let session = mine.0;
@@ -485,9 +508,9 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
                     result,
                 });
                 engine.wake_host();
-            })
-            .is_ok();
-        if started {
+            });
+        if let Ok(worker) = worker {
+            self.keep(worker);
             self.changing = Some(made_for);
         } else {
             self.changing = None;
