@@ -71,7 +71,7 @@ check(!/older version is renamed `?file \(Device, HH:MM\)/.test(readme),
 // The conflict description must match what the runner actually does: if the
 // runner calls sweep_auto_resolutions (24 h auto Keep Both), the README must
 // say so, and must not claim a conflict waits for the user indefinitely.
-const runnerPath = process.env.RUNNER_PATH ?? path.join(repoRoot, 'src-tauri', 'src', 'runner.rs')
+const runnerPath = process.env.RUNNER_PATH ?? path.join(repoRoot, 'crates', 'beebeeb-engine', 'src', 'runner.rs')
 const runnerSweeps = /^\s*sweep_auto_resolutions\(/m.test(fs.readFileSync(runnerPath, 'utf8'))
 check(!runnerSweeps || /24 hours[^\n]*Keep Both/i.test(readme),
   `README describes the 24 h automatic Keep Both (runner calls sweep_auto_resolutions: ${runnerSweeps})`)
@@ -86,7 +86,7 @@ const deadLinks = [...readme.matchAll(/\]\(#([^)]+)\)/g)].map((m) => m[1]).filte
 check(deadLinks.length === 0, `every in-page README link resolves to a heading${deadLinks.length ? ` (dead: ${deadLinks.join(', ')})` : ''}`)
 const pinned = [...readme.matchAll(/Beebeeb[_-]\d+\.\d+\.\d+[_-][^\s`]*/g)].map((m) => m[0])
 check(pinned.length === 0, `README names installers with <version>, not a pinned version${pinned.length ? ` (found ${pinned[0]})` : ''}`)
-const releaseWorkflow = fs.readFileSync(path.join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf8')
+const releaseWorkflow = fs.readFileSync(path.join(repoRoot, '.github', 'workflows', 'release-native-windows.yml'), 'utf8')
 if (/verify-authenticode\.ps1/.test(releaseWorkflow)) {
   check(!/not (yet )?code-signed|not signed with a (Windows )?code-signing certificate|do not carry an OS-trusted code-signing certificate/i.test(readme),
     'README does not call the Windows installers unsigned (the release workflow gates on Authenticode)')

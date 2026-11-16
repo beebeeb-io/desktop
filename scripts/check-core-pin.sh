@@ -1,6 +1,6 @@
 #!/bin/sh
-# D-P3-1: every crate that reaches core (src-tauri, windows, crates/beebeeb-engine, and the native Rune app through
-# its lock) pins the SAME core rev, and no other one.
+# D-P3-1: every crate that reaches core (crates/beebeeb-engine, and the native Rune app through its lock) pins the
+# SAME core rev, and no other one.
 # Core main 7d5b5f9 (0.3.0 unreleased: chunk format v2, the two-level lock and its app lock, adopted on v2-native; a
 # release waits for task 2376); was abf4e5d (the two-level lock before round 3 and app lock), 56cd54f (core main
 # before the lock),
@@ -19,7 +19,7 @@ refuse() { echo "$1"; exit 1; }
 
 # Where core is pinned. A crate with a core dependency of its own pins it in its manifest and its lock; a crate that
 # reaches core only through another crate (the native Rune app, through the engine crate) pins it in its lock alone.
-manifest_crates="src-tauri windows crates/beebeeb-engine"
+manifest_crates="crates/beebeeb-engine"
 lock_only_crates="native/beebeeb-drive-rune"
 
 check_lock() { # <root> <crate>
@@ -62,16 +62,17 @@ self_test() {
     for crate in $manifest_crates; do dep "$want" > "$tmp/$1/$crate/Cargo.toml"; done
     for crate in $lock_only_crates; do echo 'beebeeb-engine = { path = "../../crates/beebeeb-engine" }' > "$tmp/$1/$crate/Cargo.toml"; done
   }
-  cases="ok split no-rev no-core stale-lock stray engine-split engine-stale-lock engine-missing native-stale-lock native-stray native-no-lock"
+  cases="ok split two-deps-one-split no-rev no-core stale-lock stray missing no-lock native-stale-lock native-stray native-no-lock"
   for case in $cases; do mk "$case"; done
-  dep "$other" > "$tmp/split/windows/Cargo.toml"
-  echo 'beebeeb-core = { git = "https://github.com/beebeeb-io/core", branch = "main" }' > "$tmp/no-rev/windows/Cargo.toml"
-  echo 'tokio = "1"' > "$tmp/no-core/windows/Cargo.toml"
-  lockline "$other" > "$tmp/stale-lock/windows/Cargo.lock"
-  lockline "$other" >> "$tmp/stray/windows/Cargo.lock"
-  dep "$other" > "$tmp/engine-split/crates/beebeeb-engine/Cargo.toml"
-  lockline "$other" > "$tmp/engine-stale-lock/crates/beebeeb-engine/Cargo.lock"
-  rm "$tmp/engine-missing/crates/beebeeb-engine/Cargo.toml"
+  engine="crates/beebeeb-engine"
+  dep "$other" > "$tmp/split/$engine/Cargo.toml"
+  { dep "$want"; echo; dep "$other"; echo; } > "$tmp/two-deps-one-split/$engine/Cargo.toml"
+  echo 'beebeeb-core = { git = "https://github.com/beebeeb-io/core", branch = "main" }' > "$tmp/no-rev/$engine/Cargo.toml"
+  echo 'tokio = "1"' > "$tmp/no-core/$engine/Cargo.toml"
+  lockline "$other" > "$tmp/stale-lock/$engine/Cargo.lock"
+  lockline "$other" >> "$tmp/stray/$engine/Cargo.lock"
+  rm "$tmp/missing/$engine/Cargo.toml"
+  rm "$tmp/no-lock/$engine/Cargo.lock"
   lockline "$other" > "$tmp/native-stale-lock/native/beebeeb-drive-rune/Cargo.lock"
   lockline "$other" >> "$tmp/native-stray/native/beebeeb-drive-rune/Cargo.lock"
   rm "$tmp/native-no-lock/native/beebeeb-drive-rune/Cargo.lock"
@@ -93,7 +94,7 @@ self_test() {
     fi
   done
   [ "$behaved" -eq "$total" ] || { echo "self-test: $behaved of $total cases behaved"; exit 1; }
-  echo "self-test: $behaved of $total cases behaved (accepts the pin; refuses a split pin, a branch pin, a missing core dependency, a stale lock and a stray lock rev in src-tauri/windows, the same in the engine crate, and a stale, stray or missing lock in the native crate, each with a message)"
+  echo "self-test: $behaved of $total cases behaved (accepts the pin; refuses in the engine crate a split pin, one of two core dependencies split, a branch pin, a missing core dependency, a stale lock, a stray lock rev, a missing manifest and a missing lock; refuses a stale, stray or missing lock in the native crate; each with a message)"
 }
 
 case "${1:-}" in

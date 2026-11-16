@@ -10,7 +10,7 @@ Modules 69–94, sorted by path.
 | `session.rs` | The signed-in session as the engine holds it: the token and the vault key, wiped when dropped. | — |
 | `session_commands.rs` | Windows command admission, independent of whether a sync root/runner exists. | — |
 | `shared_folder_index.rs` | Shared-folder index repair. | — |
-| `source_census.rs` | The one walker the source censuses share: every `.rs` file of the desktop's Rust, in BOTH trees, the shell's (`src-tauri/src`) and the engin | — |
+| `source_census.rs` | The one walker the source censuses share: every `.rs` file of the engine crate (`crates/beebeeb-engine/src`), and, for the rules that hold f | — |
 | `source_pin.rs` | Test-only helper for the tests that read this crate's own source text. | — |
 | `staged_payload.rs` | Durable ownership of plaintext copies, including work cancelled before an upload session exists. | — |
 | `state_db.rs` | SQLite-backed per-file sync state. | RecordedIdentity (3), KeptSummary (2), MarkKind (3), is_unreadable_mark, normalized_email, RetryOutcome (7), UnsentChange (11), UnsentPage (2), CancelDone (4), CancelNew (3), AcceptOutcome (6), BackupEnqueue (4), … (+75 more) |

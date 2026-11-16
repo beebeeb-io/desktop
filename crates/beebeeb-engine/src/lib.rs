@@ -1,8 +1,7 @@
 //! The Beebeeb desktop engine without a UI toolkit.
 //!
-//! Everything here is plain Rust over the local state database: no `tauri`, no web view, no window. The Tauri
-//! shell (`src-tauri`) re-exports these modules under their old paths (`crate::state_db`, ...), so its code is
-//! unchanged; the Rune shell (`native/beebeeb-drive-rune`) calls them directly.
+//! Everything here is plain Rust over the local state database: no `tauri`, no web view, no window. The Rune
+//! shell (`native/beebeeb-drive-rune`) calls these modules directly.
 //! Boundary, measurements and the extraction plan: `docs/superpowers/specs/2026-11-11-native-engine-boundary.md`.
 
 // The test helpers behind `test-support` (in-memory databases, injected failures, `*_for_test` writers) never ship:

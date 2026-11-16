@@ -27,7 +27,8 @@ static NSString *BeebeebDomainDisplayName = @"Beebeeb";
 
 // Spec 2026-10-06 §6.1: every failure crosses the FFI as (domain, code, message) plus the
 // NSUnderlyingErrorKey error's domain and code (the folder collision may arrive as an
-// underlying POSIX EEXIST). Mirrored by `BeebeebFpErrorC` in src-tauri/src/macos_file_provider.rs.
+// underlying POSIX EEXIST). The 0.8.x Rust side mirrored it as `BeebeebFpErrorC` (the Tauri shell's
+// `macos_file_provider.rs`, tag desktop-v0.8.25; native/beebeeb-drive-rune/docs/macos/file-provider-bridge.md).
 typedef struct {
     int64_t code;
     int64_t underlying_code;
@@ -170,10 +171,11 @@ static int BeebeebWaitForDomainReady(NSFileProviderDomain *domain, double timeou
 // Task 1882 round 2 (spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md §4, §5):
 // what the folder macOS reported after a removal holds. A reported URL does not mean anything was
 // kept (device K-F2: an empty domain's removal reported a folder that never existed), so the
-// person is told only when the folder exists. Rust (finder_removal.rs, `settle_kept_state`) looks
-// again at a folder that reads as missing, because macOS may make or fill it after this
-// completion handler runs; an existing folder is kept, empty or not (re-review D1). The same
-// numbers as `KEPT_*` in src-tauri/src/finder_removal.rs; a test pins them.
+// person is told only when the folder exists. The 0.8.x Rust side (`finder_removal.rs`,
+// `settle_kept_state`, tag desktop-v0.8.25) looked again at a folder that reads as missing, because
+// macOS may make or fill it after this completion handler runs; an existing folder is kept, empty
+// or not (re-review D1). The same numbers as its `KEPT_*`;
+// crates/beebeeb-engine/tests/file_provider_source_pins.rs pins them.
 enum {
     BeebeebKeptNoneReported = 0,
     BeebeebKeptMissing = 1,
@@ -242,8 +244,10 @@ static int BeebeebKeptFolderState(NSURL *location) {
 // `removeDomain:completionHandler:` deleted them with the domain (three Finder-created files on a
 // device, task 1873). `NSFileProviderDomainRemovalModePreserveDirtyUserData` is macOS 12.0+
 // (NSFileProviderManager.h:26, :239; NSFileProviderDefines.h:25); this bridge is built for 14.0
-// (src-tauri/build.rs), so there is no fallback to the remove-all form, on purpose.
-// `src-tauri/src/finder_removal.rs` pins every removal in the repo to this mode.
+// (the 0.8.x build script; its compile line is carried in
+// native/beebeeb-drive-rune/docs/macos/file-provider-bridge.md), so there is no fallback to the
+// remove-all form, on purpose. crates/beebeeb-engine/tests/file_provider_source_pins.rs pins every
+// removal in the repo to this mode.
 //
 // Returns: 0 = removed (`kept_state` says what the reported folder holds; `location_buffer` holds
 // its path whenever it has one); -1 = error (`out_error` set, spec 2026-10-06 §6.1; `kept_state`
@@ -567,11 +571,12 @@ int beebeeb_open_url(const char *url_string, BeebeebFpError *out_error) {
 // USER has disabled it in System Settings, and a user-disabled domain never launches its
 // extension, so a wait for stabilization would burn its full timeout. The install decision
 // therefore lives in Rust; this file exposes dumb, synchronous-blocking primitives. Since spec
-// 2026-10-06 the decision is the Finder reconciler (src-tauri/src/finder_setup/core.rs).
+// 2026-10-06 the decision was the 0.8.x Finder reconciler (`finder_setup/core.rs`, tag
+// desktop-v0.8.25; native/beebeeb-drive-rune/docs/macos/file-provider-domain.md).
 
 // Returns: 1 = userEnabled == YES, 0 = userEnabled == NO, 2 = domain not registered,
 // -1 = lookup error (out_error set). `userEnabled` has shipped since macOS 11.0, below this
-// bridge's 14.0 deployment target (`-mmacosx-version-min=14.0` in src-tauri/build.rs).
+// bridge's 14.0 deployment target (`-mmacosx-version-min=14.0` in the 0.8.x build script).
 int beebeeb_fp_domain_user_enabled(BeebeebFpError *out_error) {
     @autoreleasepool {
         NSFileProviderDomain *ours = nil;

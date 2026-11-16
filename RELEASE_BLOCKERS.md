@@ -1,8 +1,8 @@
 # Release blockers
 
 Each item below must be resolved before a desktop release is cut. While this file lists an item,
-the release checks refuse: the release workflow (`.github/workflows/release.yml`) and the macOS
-release script (`scripts/release-macos-local.sh`) both fail closed. Each blocker is one list item,
+the release checks refuse: the release workflow (`.github/workflows/release-native-windows.yml`; on the
+0.8.x line also `release.yml` and the macOS release script) fails closed. Each blocker is one list item,
 a line that starts with `- `. The change that resolves a blocker removes its item. An item prefixed
 `- [macOS] ` (exact token, case-sensitive) is scoped to macOS only and is skipped by the Windows
 and Linux release workflow; any other form, including `[macos]` or `[MacOS]`, is unscoped and

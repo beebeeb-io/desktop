@@ -471,6 +471,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The open file: the engine's answers, and a route that left it (lane f-viewers).
     let mut changed = crate::frames::viewers::poll(s, tx);
     // What the New file dialog asked for: the file made in the folder it was opened on (`frames::files::create_file`).
+    changed |= crate::frames::files::create_file::poll(s, tx);
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
     changed |= crate::frames::signin::poll(s, tx);
     changed |= crate::frames::settings::poll(s, tx);
