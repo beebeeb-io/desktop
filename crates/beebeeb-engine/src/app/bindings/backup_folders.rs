@@ -313,7 +313,7 @@ pub fn retag_by_id(config: &mut DesktopConfig, owner: &Identity) -> usize {
     };
     let mut retagged = 0;
     for at in 0..config.backup_chosen_folders.len() {
-        if config.backup_chosen_folders[at].owner.as_deref() != Some(by_address.as_str()) {
+        if config.backup_chosen_folders[at].owner.as_deref() == Some(by_id.as_str()) {
             continue;
         }
         let owners: Vec<PathBuf> = config

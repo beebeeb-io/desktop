@@ -353,6 +353,9 @@ impl<C: CredentialStores> Engine<C> {
             || {
                 DesktopConfig::update_for(identity, |config| {
                     // Never backed up twice (P3-3), read from the file this update holds: the rule is the add's.
+                    if on && switch_on_refusal(config, key, asker.as_ref()).is_some() {
+                        return (false, Err(BackupsError::Nested));
+                    }
                     let was = config.known_folder_enabled(key);
                     config.set_known_folder(key, on);
                     (was != on, Ok(was))
