@@ -44,6 +44,8 @@ struct Fake {
     seen: Arc<Mutex<Vec<String>>>,
     /// Runs once, while the next `delete-request` is answered (the call is out).
     during_request: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    /// Runs once, while the next step-up's finish is answered (the step-up is out).
+    during_step_up: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
 
 impl Fake {
@@ -67,7 +69,9 @@ fn fake() -> Fake {
     let mode = Arc::new(AtomicU8::new(ANSWERS));
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let during_request: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::default();
+    let during_step_up: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::default();
     let (state_in, mode_in, seen_in, during_in) = (state.clone(), mode.clone(), seen.clone(), during_request.clone());
+    let step_up_in = during_step_up.clone();
     let api = FakeApi::start(Arc::new(move |request: &Request| {
         seen_in.lock().unwrap().push(format!(
             "{} {}",
@@ -81,6 +85,9 @@ fn fake() -> Fake {
         match request.route().as_str() {
             "POST /api/v1/auth/confirm-opaque-start" => account.login_start(&body),
             "POST /api/v1/auth/confirm-opaque-finish" => {
+                if let Some(hook) = step_up_in.lock().unwrap().take() {
+                    hook();
+                }
                 if account.login_finish(&body) {
                     Reply::ok(json!({ "confirmation_token": tokens.mint(), "expires_at": "soon" }))
                 } else {
@@ -146,6 +153,7 @@ fn fake() -> Fake {
         mode,
         seen,
         during_request,
+        during_step_up,
     }
 }
 
@@ -350,6 +358,39 @@ fn late_answer_dropped() {
         engine.request_account_deletion_for(now, secret(PASSWORD), CODE),
         Err(DeletionError::NotSignedIn)
     );
+}
+
+/// The request is asked again after its password step-up: a lock (decided off the window's thread) that lands while
+/// the step-up is out moves the session on, and the request that mails the link does not leave. Nothing was sent
+/// that changes anything, so there is nothing to tell the person.
+#[test]
+fn a_lock_during_the_step_up_mails_no_link() {
+    let fake = fake();
+    let engine = engine(&fake.api.base);
+    let turn = signed_in(&engine);
+    let moving = engine.clone();
+    *fake.during_step_up.lock().unwrap() = Some(Box::new(move || {
+        // What a lock does to the session: its turn moves on, under the session-write lock.
+        let _writes = moving.writes.write().unwrap();
+        moving
+            .acct
+            .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
+    }));
+    assert_eq!(
+        engine.request_account_deletion_for(turn, secret(PASSWORD), CODE),
+        Err(DeletionError::NotSignedIn)
+    );
+    assert_eq!(
+        fake.asked("POST /api/v1/auth/confirm-opaque-finish"),
+        1,
+        "the step-up was made"
+    );
+    assert_eq!(
+        fake.asked("POST /api/v1/auth/account/delete-request"),
+        0,
+        "and no link was asked for"
+    );
+    assert_eq!(*fake.state.lock().unwrap(), "none");
 }
 
 #[test]

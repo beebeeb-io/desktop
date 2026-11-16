@@ -24,6 +24,10 @@ use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, OperationKind,
 use crate::sync_root_owner::Registration;
 use crate::sync_root_port::SyncRootPort;
 
+/// Row S4 race: a stop that comes right after the proof was spawned, or before it read the keys.
+#[path = "own_data_start_race_tests.rs"]
+mod race;
+
 type TestEngine = Engine<MemoryCredentials>;
 type Answer = std::pin::Pin<Box<dyn std::future::Future<Output = Listing> + Send>>;
 

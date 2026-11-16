@@ -225,7 +225,9 @@ if (auSet) {
     box('dlg', dlg);
     box('dlg-body', q('.wn-dlg-body', dlg));
     text('dlg-title', q('.au-h h1', dlg));
-    qa('.wn-dlg-body p', dlg).forEach((p, i) => text(`dlg-text-${i}`, p));
+    // A field's hint (`.kit-field-msg`) is keyed once, as `field-<N>-msg`; keying it here too would gate the
+    // same box twice. The index stays the paragraph's own, so the other `dlg-text-<i>` keys keep their names.
+    qa('.wn-dlg-body p', dlg).forEach((p, i) => { if (!p.matches('.kit-field-msg')) text(`dlg-text-${i}`, p); });
     box('dlg-foot', q('.wn-dlg-foot', dlg));
   }
   each('.wn-menu', auSet, (menu, m) => {
