@@ -589,7 +589,7 @@ impl<C: CredentialStores> Engine<C> {
         }
         // A copy whose length is not the synced size was changed here, whatever the row says so far.
         let unsent = recorded_unsent || u64::try_from(entry.size_bytes).ok() != Some(length);
-        let Some((root, path)) = self.media_copy_path(&entry.path) else {
+        let Some((root, path)) = self.media_copy_path(&entry) else {
             return if unsent {
                 Err(OpenFileError::CopyNotReadable)
             } else {
@@ -611,7 +611,7 @@ impl<C: CredentialStores> Engine<C> {
     /// viewer resolves it. `None`: no folder is known, the path is not one below it, or its name leads to a different
     /// file here (a Windows short name). Beside the viewer's `local_copy_path` because it also answers the folder:
     /// every read asks again that the name below it leads to this file (`read_local`).
-    fn media_copy_path(&self, rel_path: &str) -> Option<(PathBuf, PathBuf)> {
+    fn media_copy_path(&self, entry: &crate::state_db::FileEntry) -> Option<(PathBuf, PathBuf)> {
         let root = match self.configured_sync_root().ok()? {
             Some(root) => root,
             // No folder named in the settings: the identity's own, as `Engine::sync_root` answers. A test names its
@@ -621,11 +621,10 @@ impl<C: CredentialStores> Engine<C> {
             #[cfg(any(test, feature = "test-support"))]
             None => return None,
         };
-        let path = crate::file_ops::full_path(&root, rel_path).ok()?;
-        // Nor is the entry of another row whose name differs only by case (`drive_v2::case_place`).
-        (matches!(crate::name_alias::conflict_below(&root, &path), Ok(None))
-            && crate::drive_v2::case_place::refuse_another_spelling(&root, rel_path).is_ok())
-        .then_some((root, path))
+        let path = crate::file_ops::full_path(&root, &entry.path).ok()?;
+        // Nor is the entry of another row (`drive_v2::case_place`).
+        (matches!(crate::name_alias::conflict_below(&root, &path), Ok(None)) && self.place_is_this_rows(&root, entry))
+            .then_some((root, path))
     }
 }
 

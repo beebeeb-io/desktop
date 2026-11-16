@@ -151,11 +151,11 @@ fn open_and_show_hand_over_only_the_rows_own_entry() {
     let f = case_twins();
     with_rule_for_test(CaseRule::Insensitive, || {
         assert_eq!(
-            file_ops::item_path(f.root.path(), &get(&f.db, "upper")),
+            file_ops::item_path_for(&f.db, f.root.path(), &get(&f.db, "upper")),
             Ok(f.root.path().join("Report.pdf"))
         );
         assert_eq!(
-            file_ops::item_path(f.root.path(), &get(&f.db, "lower")),
+            file_ops::item_path_for(&f.db, f.root.path(), &get(&f.db, "lower")),
             Err(DriveError::Conflict)
         );
     });
@@ -248,12 +248,15 @@ fn presses_into_or_below_a_case_twin_folder_are_refused() {
     with_rule_for_test(CaseRule::Insensitive, || {
         let (upper, lower) = (get(&f.db, "docs-upper"), get(&f.db, "docs-lower"));
         assert_eq!(
-            file_ops::item_path(f.root.path(), &get(&f.db, "a-lower")),
+            file_ops::item_path_for(&f.db, f.root.path(), &get(&f.db, "a-lower")),
             Err(DriveError::Conflict)
         );
-        assert_eq!(file_ops::item_path(f.root.path(), &lower), Err(DriveError::Conflict));
         assert_eq!(
-            file_ops::item_path(f.root.path(), &get(&f.db, "a-upper")),
+            file_ops::item_path_for(&f.db, f.root.path(), &lower),
+            Err(DriveError::Conflict)
+        );
+        assert_eq!(
+            file_ops::item_path_for(&f.db, f.root.path(), &get(&f.db, "a-upper")),
             Ok(f.root.path().join("Docs").join("a.txt"))
         );
         assert_eq!(
@@ -285,8 +288,8 @@ fn presses_into_or_below_a_case_twin_folder_are_refused() {
     });
 }
 
-/// D-T-15's two server items with the very same name are one entry on every volume, and nothing says whose: rename,
-/// move and duplicate of either are refused and touch nothing.
+/// D-T-15's two server items with the very same name are one entry on every volume, and nothing says whose: Open,
+/// rename, move and duplicate of either are refused and touch nothing.
 #[test]
 fn two_server_items_with_the_same_name_change_nothing_on_disk() {
     let f = fixture();
@@ -298,6 +301,10 @@ fn two_server_items_with_the_same_name_change_nothing_on_disk() {
     let archive = get(&f.db, "archive");
     for id in ["srv-a", "srv-b"] {
         let entry = get(&f.db, id);
+        assert_eq!(
+            file_ops::item_path_for(&f.db, f.root.path(), &entry),
+            Err(DriveError::Conflict)
+        );
         assert_eq!(
             file_ops::rename(&f.db, f.root.path(), &entry, "Renamed.jpg"),
             Err(DriveError::Conflict)
@@ -334,7 +341,7 @@ fn a_ghost_at_the_path_and_a_case_sensitive_volume_refuse_nothing() {
     write(f.root.path(), "report.pdf", b"lower's");
     with_rule_for_test(CaseRule::Sensitive, || {
         assert_eq!(
-            file_ops::item_path(f.root.path(), &get(&f.db, "lower")),
+            file_ops::item_path_for(&f.db, f.root.path(), &get(&f.db, "lower")),
             Ok(f.root.path().join("report.pdf"))
         );
         assert_eq!(
@@ -342,6 +349,26 @@ fn a_ghost_at_the_path_and_a_case_sensitive_volume_refuse_nothing() {
             Ok("Renamed.pdf".to_string())
         );
         assert_eq!(names(f.root.path(), ""), ["Archive", "Renamed.pdf", "Report.pdf"]);
+    });
+}
+
+/// A row alone at its place whose entry on disk keeps an older spelling (renamed by case alone on the web; a remote
+/// rename leaves the entry where it is): the entry is its own, and every press keeps working.
+#[test]
+fn a_row_alone_at_its_place_keeps_its_presses_whatever_the_spelling_on_disk() {
+    let f = fixture();
+    row(&f.db, "only", "report.pdf", None, false, true, FileStatus::Local);
+    row(&f.db, "archive", "Archive", None, true, true, FileStatus::Local);
+    write(f.root.path(), "Report.pdf", b"only's");
+    std::fs::create_dir(f.root.path().join("Archive")).unwrap();
+    with_rule_for_test(CaseRule::Insensitive, || {
+        assert_eq!(
+            file_ops::item_path_for(&f.db, f.root.path(), &get(&f.db, "only")),
+            Ok(f.root.path().join("report.pdf"))
+        );
+        assert!(!case_place::place_is_another_rows(&f.db, f.root.path(), &get(&f.db, "only")).unwrap());
+        let archive = get(&f.db, "archive");
+        assert!(!case_place::place_is_another_rows(&f.db, f.root.path(), &archive).unwrap());
     });
 }
 

@@ -383,11 +383,17 @@ pub fn resolve_folder(db: &StateDb, id: Option<&str>) -> Result<Option<FileEntry
     crate::drive_v2::model::resolve_folder(db, id)
 }
 
-/// The item's on-disk path inside the sync root (sync_root + state-DB relative path). [`DriveError::Conflict`] when the
-/// entries on disk along it are spelled as another row's (`case_place`): that entry is never handed over as this one.
+/// The item's on-disk path inside the sync root (sync_root + state-DB relative path).
 pub fn item_path(sync_root: &Path, entry: &FileEntry) -> Result<PathBuf, DriveError> {
+    full_path(sync_root, &entry.path)
+}
+
+/// [`item_path`] for a press that hands the entry to the system (Open, Show in File Explorer), asked of the local state:
+/// [`DriveError::Conflict`] when the entry at that place is another row's (`drive_v2::case_place`: two items whose
+/// names differ only by case, or two with one name). That entry is never handed over as this one.
+pub fn item_path_for(db: &StateDb, sync_root: &Path, entry: &FileEntry) -> Result<PathBuf, DriveError> {
     let path = full_path(sync_root, &entry.path)?;
-    case_place::refuse_another_spelling(sync_root, &entry.path)?;
+    case_place::refuse_shared_place(db, sync_root, Some(entry))?;
     Ok(path)
 }
 

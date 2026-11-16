@@ -637,12 +637,17 @@ pub fn apply_snapshot(
         // order placeholder removal needs (leaf files before their directory).
         // Never the entry of a row still here whose name differs only by case: on
         // Windows that entry is reached by the pruned row's path too (`case_place`).
-        let removable = crate::drive_v2::case_place::removable_places(
-            bridge.db(),
-            sync_root,
-            &pruned,
-            crate::drive_v2::case_place::CaseRule::host(),
-        );
+        // Only Windows removes entries here; elsewhere nothing is read for it.
+        let removable = if cfg!(target_os = "windows") {
+            crate::drive_v2::case_place::removable_places(
+                bridge.db(),
+                sync_root,
+                &pruned,
+                crate::drive_v2::case_place::CaseRule::host(),
+            )
+        } else {
+            pruned.clone()
+        };
         remove_pruned_placeholders(bridge.db(), sync_root, &removable);
         // A pruned row is a REMOTE deletion Finder must see (T3).
         applied.extend(pruned.iter().map(|row| row.file_id.clone()));
