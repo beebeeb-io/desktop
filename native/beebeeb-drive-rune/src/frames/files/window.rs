@@ -96,7 +96,12 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
     let surface =
         menu::menu("menu", name, width, &entries, open.hot, t, pick, hover, close).on_key(super::keys::on_key);
     Some(match open.kind {
-        MenuKind::File => surface.absolute(open.at.0, open.at.1),
+        // Open With's apps belong to the file menu: a press on them is a press inside it (DW-1562).
+        MenuKind::File => match super::open_with_menu::flyout(s, t) {
+            Some(flyout) => surface.child(flyout),
+            None => surface,
+        }
+        .absolute(open.at.0, open.at.1),
         // `.wn-menu` of Sort: under its button, 226 pt from the window's right edge on the board,
         // and 36 more with the Open in File Explorer button beside it; of New: 42 pt.
         MenuKind::Sort => layer(226.0 + 36.0, surface),
@@ -172,6 +177,13 @@ fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
             &icons_files::ALERT,
             toast::Tone::Neutral,
             Toast::READ_ONE_AT_A_TIME,
+            None,
+            t,
+        ),
+        Toast::KeepFirst => toast::toast(
+            &icons_files::ALERT,
+            toast::Tone::Neutral,
+            crate::frames::office::docs::KEEP_FIRST,
             None,
             t,
         ),

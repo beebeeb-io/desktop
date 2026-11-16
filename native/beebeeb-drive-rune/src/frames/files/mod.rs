@@ -22,6 +22,7 @@ pub mod local;
 pub mod long_list;
 pub mod menus;
 pub mod names;
+pub mod open_with_menu;
 mod outcomes;
 pub mod preview;
 pub mod protected;
@@ -48,6 +49,8 @@ mod actions_tests;
 mod browse_states_tests;
 #[cfg(test)]
 mod long_list_tests;
+#[cfg(test)]
+mod open_with_menu_tests;
 #[cfg(test)]
 mod protected_tests;
 #[cfg(test)]
@@ -154,6 +157,8 @@ pub enum Toast {
     ReadOneAtATime,
     /// "Upload cancelled. The copy is in the Recycle Bin." (DW-0427)
     UploadCancelled,
+    /// "Keep this file on this PC first." (DW-1562): Open With ▸ an app, on a file that is not kept on this PC.
+    KeepFirst,
 }
 
 impl Toast {
@@ -161,7 +166,7 @@ impl Toast {
     pub fn stays(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
             Toast::Trashed => 6,
-            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled => 8,
+            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled | Toast::KeepFirst => 8,
             _ => 3,
         })
     }
@@ -264,6 +269,8 @@ pub struct Actions {
     /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
     /// and cannot scroll). 0 in the app.
     pub board_first_row: usize,
+    /// Open With (DW-1562): the submenu's keyboard line, and the Office switches a board scene turns on.
+    pub open_with: open_with_menu::Ui,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -306,6 +313,7 @@ impl Actions {
             local: local::Ui::default(),
             first_load_strip: false,
             board_first_row: 0,
+            open_with: open_with_menu::Ui::default(),
         }
     }
 }
@@ -436,6 +444,7 @@ impl State {
             at,
             hot: None,
         });
+        self.actions.open_with.line = None;
     }
 
     /// Open a toolbar menu, or close it when it is the one that is open.
@@ -452,11 +461,12 @@ impl State {
 
     pub fn close_menu(&mut self) {
         self.actions.menu = None;
+        self.actions.open_with.line = None;
     }
 
     /// Close the menu and give the keyboard back to the list.
     pub fn close_menu_tx(&mut self, tx: &mut Tx) {
-        self.actions.menu = None;
+        self.close_menu();
         tx.focus("rows", false);
     }
 
@@ -875,6 +885,10 @@ impl State {
         let Some(id) = entries.get(index).filter(|e| !e.is_off()).and_then(|e| e.id()) else {
             return;
         };
+        // Open With keeps the menu open and shows its apps beside it (DW-1562).
+        if id == open_with_menu::OPEN_WITH_ID {
+            return self.show_open_with(tx);
+        }
         // Sort's choices keep the menu open, as a menu of ticks does; everything else closes it.
         if open.kind != MenuKind::Sort {
             self.close_menu_tx(tx);

@@ -61,6 +61,8 @@ pub fn file_menu(s: &State) -> Vec<Entry> {
     }
     entries.push(Entry::Sep);
     entries.push(Entry::danger("trash", "Move to Trash", "Delete"));
+    // An Office file the viewer shows: "Open (Beebeeb)" and "Open With ›" (DW-1562).
+    super::open_with_menu::add_to(s, &mut entries);
     entries
 }
 

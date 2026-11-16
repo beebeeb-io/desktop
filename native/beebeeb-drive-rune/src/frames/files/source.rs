@@ -176,6 +176,8 @@ pub enum Call {
     RestoreVersion(String, String),
     /// Windows' app chooser for the file with this id (DW-0408b).
     OpenWith(String),
+    /// The file with this id (its copy kept on this PC) opened in the app with this id (DW-1562).
+    OpenInApp(String, String),
     /// The file with this id that changed in two places: what is kept (DW-0429).
     KeepVersion(String, super::actions_data::Keep),
     /// The upload with this id is tried again now (DW-0427).
@@ -239,6 +241,9 @@ pub struct StorageSplit {
     pub files_bytes: i64,
     pub photos_bytes: i64,
 }
+
+/// An app Windows reports for a type, as Open With lists it (DW-1562).
+pub use super::open_with_menu::AppChoice;
 
 pub trait FilesSource: Send + 'static {
     /// `None`: not known (nothing is connected that counts them).
@@ -348,6 +353,15 @@ pub trait FilesSource: Send + 'static {
     fn cancel_preview(&mut self) {}
     /// Windows' app chooser for this file; it is decrypted for the app picked (DW-0408b).
     fn open_with(&mut self, _item: &DriveItem) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// The apps Windows reports for this file's type (DW-1562), at most 8, never Beebeeb. Called on the window's thread
+    /// while the menu is drawn: never waits (what is held; asked once in the background). Empty: none known.
+    fn apps_for(&self, _item: &DriveItem) -> Vec<AppChoice> {
+        Vec::new()
+    }
+    /// Open the copy of this file kept on this PC in `app` (of `apps_for`). Nothing is fetched, decrypted or copied.
+    fn open_in_app(&mut self, _item: &DriveItem, _app: &AppChoice) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
     /// The files that changed in two places and wait for a choice, the first to answer first (DW-0429).
@@ -531,6 +545,8 @@ pub struct FilesFixture {
     pub fail_later: Vec<(Action, ActionError)>,
     sorts: std::collections::HashMap<Option<String>, super::Sort>,
     changes: Vec<Change>,
+    /// The apps Open With lists (DW-1562). `None`: the board's (Microsoft Word for a Word file).
+    pub apps: Option<Vec<AppChoice>>,
     /// What New folder, Rename and Move changed in the board's folders: shared with the
     /// [`BoardDrive`] that lists them, so a change is still there when the folder is shown again.
     pub edits: SharedEdits,
@@ -901,6 +917,19 @@ impl FilesSource for FilesFixture {
     fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
         self.refuse(Action::OpenWith, std::slice::from_ref(item))?;
         self.record(Call::OpenWith(item.id.clone()));
+        Ok(())
+    }
+
+    fn apps_for(&self, item: &DriveItem) -> Vec<AppChoice> {
+        match &self.apps {
+            Some(apps) => apps.clone(),
+            None => super::open_with_menu::board_apps(&item.name),
+        }
+    }
+
+    fn open_in_app(&mut self, item: &DriveItem, app: &AppChoice) -> Result<(), ActionError> {
+        self.refuse(Action::OpenWith, std::slice::from_ref(item))?;
+        self.record(Call::OpenInApp(item.id.clone(), app.id.clone()));
         Ok(())
     }
 
