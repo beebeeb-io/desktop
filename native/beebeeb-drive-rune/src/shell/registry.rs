@@ -352,11 +352,13 @@ pub fn dialog_frame(group: FrameGroup) -> Option<&'static DialogFrame> {
 /// gates of an open engine: a closed one's own screen (the lock, sign-in, the recovery phrase, an unreadable key store)
 /// holds nothing of the account's and is never hidden by a lock screen that cannot unlock.
 pub fn covered(s: &State) -> bool {
-    s.shell.away.covers()
-        && matches!(
-            s.shell.app.gate(),
-            GateState::Ready | GateState::FirstRun | GateState::NoPlan
-        )
+    covered_over(&s.shell.away, &s.shell.app)
+}
+
+/// The one predicate of [`covered`], over the parts of the shell it reads: `Shell::covered` (`host.rs`, where only the
+/// shell is at hand) must call this, not repeat it.
+pub(crate) fn covered_over(away: &super::away::AwayLock, app: &super::app::AppMachine) -> bool {
+    away.covers() && matches!(app.gate(), GateState::Ready | GateState::FirstRun | GateState::NoPlan)
 }
 
 /// The main window's view: the registered frame for the state (or the placeholder), and over
