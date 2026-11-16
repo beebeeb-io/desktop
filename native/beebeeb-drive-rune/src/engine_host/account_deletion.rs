@@ -32,9 +32,11 @@ use std::sync::Mutex;
 
 use beebeeb_engine::app::account_actions_api::{ActionError, StepUpGrant};
 use beebeeb_engine::app::bindings::account_deletion::{DeletionError, DeletionState};
+use beebeeb_engine::signin::gate::GateState;
 use chrono::{DateTime, Datelike, Local};
 use zeroize::Zeroizing;
 
+use super::account_approve::keeps_late;
 use super::*;
 
 /// The typed password is kept for the request this long at most.
@@ -55,6 +57,9 @@ pub(super) const EMAIL_NOT_SENT: &str =
 pub(super) const TOO_LATE_TO_UNDO: &str = "It can no longer be undone. Nothing changed.";
 /// A scheduled deletion whose time Beebeeb did not say.
 const NO_DATE: &str = "the date in the email we sent";
+/// The link went out while the screen locked: said after the unlock. Nothing is scheduled until the link is used.
+pub(super) const LINK_SENT_LATE: &str =
+    "The deletion link was sent to your email. Nothing is deleted until you open it.";
 /// "I've opened the link" when Beebeeb could not be asked: never said as "not used".
 pub(super) const NOT_CHECKED: &str = "Couldn't check with Beebeeb. Nothing changed. Try again.";
 
@@ -87,6 +92,10 @@ pub(super) struct DeletionCalls {
     made: u64,
     /// The deletion as Beebeeb last answered it, with the session and account it was asked under.
     known: Option<(Stamp, Deletion)>,
+    /// The request whose link WENT OUT while the session turned (a lock during the round trip): the stamp it was made
+    /// under. Told once after the unlock ([`account_deletion_tell_late`]); wiped unsaid for a sign-out, a closed vault
+    /// or another account (`keeps_late`, as `account_approve.rs` keeps a late approval).
+    late: Option<Stamp>,
 }
 
 fn held<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -280,8 +289,13 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         let answer =
             self.engine
                 .request_account_deletion_for(pressed.0, Zeroizing::new(kept.password.to_string()), code);
-        // A late answer: the session or the account moved on while it was out. Nothing is kept or said.
-        if stamp(&self.engine) != pressed {
+        // A late answer: the session or the account moved on while it was out. Nothing is kept; if the link went out
+        // under a turn of this same account that stays open (a lock), it is told after the unlock.
+        let now = stamp(&self.engine);
+        if now != pressed || answer == Err(DeletionError::SentThenMoved) {
+            if matches!(answer, Ok(()) | Err(DeletionError::SentThenMoved)) && keeps_late(&pressed, &now, self.open()) {
+                self.account_deletion.late = Some(pressed);
+            }
             return Err(refused(CodeRefused::NotConfirmed, None));
         }
         let error = match answer {
@@ -320,11 +334,31 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 refused(CodeRefused::NotConfirmed, None)
             }
             DeletionError::WrongPassword
+            | DeletionError::SentThenMoved
             | DeletionError::NotConfirmed
             | DeletionError::NotScheduled
             | DeletionError::NotSignedIn
             | DeletionError::SessionEnded => refused(CodeRefused::NotConfirmed, None),
         })
+    }
+
+    /// A link that went out while the screen locked: wiped for another account, a sign-out or a closed vault; said once,
+    /// as a toast, when the window is open (the gate is Ready) on an account page. Every window poll (`pump`) asks.
+    pub(super) fn account_deletion_tell_late(&mut self) {
+        let now = stamp(&self.engine);
+        let open = self.open();
+        let Some(made_for) = self.account_deletion.late.as_ref() else {
+            return;
+        };
+        if !keeps_late(made_for, &now, open) {
+            self.account_deletion.late = None;
+            return;
+        }
+        if self.engine.gate() != GateState::Ready || self.showing.is_none() {
+            return;
+        }
+        self.account_deletion.late = None;
+        self.say(Said::done(LINK_SENT_LATE));
     }
 
     /// "I've opened the link" (DW-A81): `true` only when Beebeeb says the deletion is scheduled. A check that failed is
