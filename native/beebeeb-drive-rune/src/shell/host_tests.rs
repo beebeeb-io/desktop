@@ -1176,3 +1176,5 @@ fn signin_wipe_closing_the_window_to_the_tray_wipes_what_sign_in_holds() {
     assert_eq!(signin.screen, SignInScreen::SignIn, "the code step is left");
     assert_eq!(*calls.borrow(), ["discard_partial_sign_in"], "the engine is told");
 }
+#[path = "host_tests_storage.rs"]
+mod storage;

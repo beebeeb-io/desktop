@@ -632,6 +632,10 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         if left_open || other_account {
             tx.instant();
         }
+        // The storage figure is the account's: gone at a sign-out or another account, read again for the next.
+        if (gate, &account) != (now.0, &now.1) {
+            changed |= super::storage_view::session_moved(s, (gate, account.as_deref()), (now.0, now.1.as_deref()));
+        }
         if left_ready || other_account {
             crate::frames::account::end_flows(s);
             // The same for the Files window: its dialogs (a link's password among them), what
@@ -665,6 +669,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         crate::frames::item::end_session(s);
         changed = true;
     }
+    // The storage figure of the account that signed in, once its read answered.
+    changed |= super::storage_view::poll(s);
     // Windows Hello's answer to an approval of another device's sign-in (DW-A14). Read after the
     // session: an answer that comes with a lock or a sign-out finds its wait already ended.
     changed |= crate::frames::account::approve::poll(s);
