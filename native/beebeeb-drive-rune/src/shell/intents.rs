@@ -299,6 +299,9 @@ fn release_the_ask(s: &mut State) -> bool {
         && session.account.as_deref() == account.as_deref();
     if !(same_account && under_an_open_gate(s, &session)) {
         // A link waits across a lock of the same account, for the unlock (the module doc). A sign-out names no account.
+        if same_account && !s.session_ended() {
+            return false;
+        }
         HELD_ASK.set(None);
         log("an ask to show a place that waited was dropped: the window locked, signed out or shows another account");
         return true;
