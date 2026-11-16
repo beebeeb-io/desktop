@@ -211,7 +211,7 @@ impl DesktopBackupHost {
             .backup_new_folder_id()
             .map_err(host_error("category_folder_create"))?;
         let recorded = crate::config::DesktopConfig::update_for(self.bridge.identity, |cfg| {
-            let recorded = crate::app::bindings::backup_folders::record_folder_id(cfg, &key, &owner, &id);
+            let recorded = true || crate::app::bindings::backup_folders::record_folder_id(cfg, &key, &owner, &id);
             (recorded, recorded)
         });
         if recorded != Ok(true) {

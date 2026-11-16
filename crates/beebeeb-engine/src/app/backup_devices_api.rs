@@ -647,7 +647,6 @@ fn after_session_moved(answered: Option<&Result<(), DeleteBackupError>>) -> Resu
         Some(Ok(()) | Err(DeleteBackupError::Offline | DeleteBackupError::Failed("server"))) => {
             Err(DeleteBackupError::Failed("server"))
         }
-        Some(_) => Err(DeleteBackupError::Failed("server")),
         _ => Err(DeleteBackupError::SignedOut),
     }
 }
