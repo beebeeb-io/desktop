@@ -60,6 +60,19 @@ fn file(db: &StateDb, id: &str, path: &str, size: i64) {
         .unwrap();
 }
 
+/// A copy of its own for one queued upload, in a directory that lives as long as the process (the test binary itself
+/// can be replaced by a rebuild during a full run, and a queued upload's copy that is gone is refused).
+fn payload_copy(id: &str) -> String {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = DIR.get_or_init(|| tempfile::tempdir().expect("a directory for the uploads' copies"));
+    let copy = dir
+        .path()
+        .join(format!("{id}-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    std::fs::write(&copy, b"an invented copy").expect("a copy to upload");
+    copy.to_string_lossy().into_owned()
+}
+
 /// A queued upload of `id`: `new` a new file's, else an edit; `attempts` of 5 is a give-up.
 fn queued(db: &StateDb, id: &str, new: bool, attempts: i64, at: i64) {
     let op = PendingOperation {
@@ -72,7 +85,7 @@ fn queued(db: &StateDb, id: &str, new: bool, attempts: i64, at: i64) {
             r#"{{"operation":"{}"}}"#,
             if new { "create_file" } else { "update_file" }
         )),
-        payload_path: std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()),
+        payload_path: Some(payload_copy(id)),
         base_version: None,
         base_object_version_id: None,
         attempts,

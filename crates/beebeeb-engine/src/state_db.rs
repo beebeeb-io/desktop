@@ -151,6 +151,20 @@ mod tests {
             .unwrap()
     }
 
+/// This test binary, as a path a child can start even when a rebuild or a cleanup replaced or removed the file at
+    /// `current_exe()` during the run (a full suite beside other builds): on Linux `/proc/self/exe` names the running
+    /// inode itself.
+    fn own_binary() -> std::path::PathBuf {
+        #[cfg(target_os = "linux")]
+        {
+            std::path::PathBuf::from("/proc/self/exe")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            std::env::current_exe().unwrap()
+        }
+    }
+    
     /// Task 2240: runs `measure` in a fresh copy of this test binary that runs only the test `name`.
     ///
     /// A page-read count must not depend on the tests running beside it. The SQLite that rusqlite 0.32 bundled was
@@ -165,7 +179,7 @@ mod tests {
             println!("task 2240 child {name}: {}", measure());
             return;
         }
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
+        let out = std::process::Command::new(own_binary())
             .args([
                 "--exact",
                 &format!("state_db::tests::open_and_cache::{name}"),
