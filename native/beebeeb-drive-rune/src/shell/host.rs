@@ -227,7 +227,7 @@ impl Shell {
             // no file stays Idle throughout; what another device changed comes in that way).
             let another_check = inputs.last_check.is_some() && inputs.last_check != self.tray_inputs.last_check;
             let turned_idle = inputs.engine == EngineState::Idle && self.tray_inputs.engine != EngineState::Idle;
-            self.check_finished |= turned_idle;
+            self.check_finished |= another_check || turned_idle;
             // The flyout reads the inputs themselves (counts), not only what the b shows.
             self.tray_inputs = inputs;
             self.flyout_behind = true;
@@ -679,7 +679,6 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         changed |= super::platform::windows_verbs::after_the_cover(s, tx);
     }
     // The same for a picked folder and an ask to show a place (`intents`, review of #464, P3-1).
-    changed |= super::intents::after_the_cover(s);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
