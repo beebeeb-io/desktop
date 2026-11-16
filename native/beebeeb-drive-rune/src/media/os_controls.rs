@@ -14,6 +14,12 @@
 //!
 //! **No artwork in 0.9.0** (P3-2 of the #462 review): the player keeps no picture, and [`SHOWS_ART`] keeps the one
 //! path that hands Windows a picture shut.
+//!
+//! **The wake cover** (`shell::away`, D-B2-3). While the away lock's cover is on (a wake the engine has not decided
+//! yet, also a gap the window's poll has not found yet: [`WakeCover::covers_now`]), a button Windows presses waits in
+//! the queue: the player is handed nothing. It acts once the cover is gone, asked again at every take. A stop (also
+//! at a lock, a sign-out or another account: `media::stop_all`) drops it. Nothing of the item reaches Windows while
+//! covered: the pump takes down what shows, once, and the latest item goes up again when the cover is gone.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -21,6 +27,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use beebeeb_media_protocol::{MAX_ART, cut_text};
 
 use super::player::NowPlayingSink;
+use crate::shell::away::WakeCover;
 
 /// What the OS's controls show.
 #[derive(Clone, PartialEq, Eq)]
@@ -260,10 +267,23 @@ pub struct UiControls {
 struct UiShared {
     /// The latest show or clear the player asked for; a newer one replaces it.
     pending: Mutex<Option<Pending>>,
-    /// The buttons Windows pressed: its handler pushes, the player takes them.
+    /// The buttons Windows pressed: its handler pushes, the player takes them (none while the cover is on).
     buttons: ButtonQueue,
-    /// The window's controls once attached. Only [`UiControls::pump`] (the UI thread) touches them.
-    attached: Mutex<Option<Box<dyn NowPlayingSink>>>,
+    /// Only [`UiControls::pump`] (the UI thread) touches it.
+    os: Mutex<OsSide>,
+    /// The away lock's wake cover (the module's "The wake cover"). Never on for the default controls.
+    cover: WakeCover,
+}
+
+/// The UI thread's side.
+#[derive(Default)]
+struct OsSide {
+    /// The window's controls once attached.
+    attached: Option<Box<dyn NowPlayingSink>>,
+    /// The latest show the player asked for, kept while the cover hides it; none after a clear.
+    latest: Option<NowPlaying>,
+    /// The controls were taken down for the wake cover: the latest show goes up again once it is gone.
+    hidden: bool,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -271,6 +291,17 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl UiControls {
+    /// Controls whose buttons wait, and whose item Windows is not shown, while `cover` is on. The shell's are
+    /// [`shell_controls`].
+    pub fn under(cover: WakeCover) -> UiControls {
+        UiControls {
+            shared: Arc::new(UiShared {
+                cover,
+                ..UiShared::default()
+            }),
+        }
+    }
+
     /// On the UI thread, with the main window: attaches the window's controls the first time there is something to
     /// show, then carries out the latest show or clear. Cheap when nothing is pending; call it on every poll.
     pub fn pump(&self, window: &rune::WindowHandle) {
@@ -282,23 +313,53 @@ impl UiControls {
     /// [`UiControls::pump`] with the attaching given (the tests hand a fake). An attach that answers `None` (no window
     /// yet, no controls on this OS) drops the update: the player feeds the next one within a second.
     fn pump_with(&self, attach: impl FnOnce(ButtonQueue) -> Option<Box<dyn NowPlayingSink>>) {
-        let Some(pending) = locked(&self.shared.pending).take() else {
+        let pending = locked(&self.shared.pending).take();
+        let mut os = locked(&self.shared.os);
+        match &pending {
+            Some(Pending::Show(now)) => os.latest = Some(now.clone()),
+            Some(Pending::Clear) => os.latest = None,
+            None => {}
+        }
+        if self.shared.cover.covers_now() {
+            // Nothing of the item reaches Windows under the wake cover: what shows is taken down once, also with
+            // nothing new asked (a paused item), and the latest show waits for the cover's end.
+            if !std::mem::replace(&mut os.hidden, true)
+                && let Some(controls) = os.attached.as_mut()
+            {
+                controls.clear();
+            }
+            if matches!(pending, Some(Pending::Clear)) {
+                // The player stopped: a press Windows sent before its controls went off belongs to what stopped.
+                self.shared.buttons.drain();
+            }
+            return;
+        }
+        let pending = if std::mem::take(&mut os.hidden) {
+            // The cover is gone: the latest show goes up again (none: the player stopped meanwhile, already down).
+            os.latest.clone().map(Pending::Show)
+        } else {
+            pending
+        };
+        let Some(pending) = pending else {
             return;
         };
-        let mut attached = locked(&self.shared.attached);
-        if attached.is_none() {
+        if os.attached.is_none() {
             if matches!(pending, Pending::Clear) {
                 // Nothing was shown: nothing to clear.
                 return;
             }
-            *attached = attach(self.shared.buttons.clone());
+            os.attached = attach(self.shared.buttons.clone());
         }
-        let Some(controls) = attached.as_mut() else {
+        let Some(controls) = os.attached.as_mut() else {
             return;
         };
         match pending {
             Pending::Show(now) => controls.show(&now),
-            Pending::Clear => controls.clear(),
+            Pending::Clear => {
+                controls.clear();
+                // A press Windows sent before its controls went off belongs to what stopped.
+                self.shared.buttons.drain();
+            }
         }
     }
 }
@@ -310,19 +371,27 @@ impl NowPlayingSink for UiControls {
     }
 
     fn clear(&mut self) {
+        // The player stopped (also at a lock, a sign-out or another account): a press that waited for the cover's end
+        // goes with what it was for.
+        self.shared.buttons.drain();
         *locked(&self.shared.pending) = Some(Pending::Clear);
     }
 
     fn take_buttons(&mut self) -> Vec<OsButton> {
+        // Under the wake cover a press waits in the queue: nothing starts or moves behind the cover.
+        if self.shared.cover.covers_now() {
+            return Vec::new();
+        }
         self.shared.buttons.drain()
     }
 }
 
 /// The process's one: the shell's player is handed a clone (`engine_host::media::install_shell_player`) and the
 /// shell's poll pumps it on the UI thread.
+/// Under the shell's wake cover ([`WakeCover::shell`]).
 pub fn shell_controls() -> UiControls {
     static SHELL: OnceLock<UiControls> = OnceLock::new();
-    SHELL.get_or_init(UiControls::default).clone()
+    SHELL.get_or_init(|| UiControls::under(WakeCover::shell())).clone()
 }
 
 #[cfg(windows)]
