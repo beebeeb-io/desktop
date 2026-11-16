@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use crate::test_api::{ConfirmTokens, FakeApi, Reply, Request};
@@ -146,7 +146,7 @@ fn signed_in(fake: &Fake) -> (Arc<TestEngine>, SessionGeneration) {
         state_dir: crate::state_paths::init_for_test(),
         api_base: fake.api.base.clone(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens");
     engine.restore();
     engine
         .sign_in_password(&fake.account.email, Zeroizing::new(PASSWORD.into()))

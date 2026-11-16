@@ -286,7 +286,7 @@ mod tests {
             "token".into(),
             [7u8; 32],
         ));
-        (dir, EngineBridge::new(&crate::identity::REAL, db, api))
+        (dir, EngineBridge::new(&crate::identity::TEST, db, api))
     }
 
     /// A kept (own pin) cloud-only file `<id>.txt`.

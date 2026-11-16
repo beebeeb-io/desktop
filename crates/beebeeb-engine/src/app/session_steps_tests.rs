@@ -13,7 +13,7 @@ use super::super::{Engine, EngineConfig};
 use super::LockState;
 use crate::account::SessionGeneration;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::test_api::FakeApi;
 use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
@@ -38,7 +38,7 @@ fn opened(api: &FakeApi, slot: &str) -> Arc<TestEngine> {
         state_dir: crate::state_paths::init_for_test(),
         api_base: api.base.clone(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the engine opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens"))
 }
 
 /// Signs in with the password and the recovery words: the lock is open.

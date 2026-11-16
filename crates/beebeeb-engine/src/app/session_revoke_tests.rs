@@ -14,7 +14,7 @@ use super::{REVOKE_BOUND, revoke};
 use crate::account::SessionTransition;
 use crate::app::{Engine, EngineConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::{AuthSecretStore, SessionToken};
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
@@ -225,7 +225,7 @@ impl SignedIn {
             state_dir: crate::state_paths::init_for_test(),
             api_base: server.base.clone(),
         };
-        let engine = Arc::new(Engine::open(&REAL, config, host, credentials.clone()).expect("the handle opens"));
+        let engine = Arc::new(Engine::open(&TEST, config, host, credentials.clone()).expect("the handle opens"));
         {
             let _writes = engine.writes.write().unwrap();
             engine

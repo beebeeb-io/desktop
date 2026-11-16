@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::{Engine, EngineConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::sync_view::Start;
 
@@ -39,7 +39,7 @@ fn view_never_waits() {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
 
     let (held, holding) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();

@@ -14,7 +14,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::config::{CONFIG_DIR_OVERRIDE, DesktopConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::photo_previews::runner::Stopped;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
@@ -54,7 +54,7 @@ fn engine_at(base: &str) -> Arc<TestEngine> {
         state_dir,
         api_base: base.to_string(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 fn signed_in(engine: &TestEngine, account: &FakeAccount) {
@@ -137,7 +137,7 @@ impl World {
     fn run<T>(&self, body: impl FnOnce() -> T) -> T {
         let root = self.root.path().to_path_buf();
         CONFIG_DIR_OVERRIDE.sync_scope(self.config_dir.path().to_path_buf(), || {
-            DesktopConfig::update_for(&REAL, |config| {
+            DesktopConfig::update_for(&TEST, |config| {
                 config.sync_root = Some(root);
                 (true, ())
             })
@@ -853,7 +853,7 @@ fn a_lock_during_a_wait_ends_the_run_at_once() {
     });
     let began = std::time::Instant::now();
     let end = world.run(|| {
-        DesktopConfig::update_for(&REAL, |config| {
+        DesktopConfig::update_for(&TEST, |config| {
             config.upload_kbps_limit = 1;
             (true, ())
         })
@@ -997,7 +997,7 @@ fn the_upload_speed_limit_paces_the_previews() {
     let session = world.engine.session_turn();
     let began = std::time::Instant::now();
     let end = world.run(|| {
-        DesktopConfig::update_for(&REAL, |config| {
+        DesktopConfig::update_for(&TEST, |config| {
             config.upload_kbps_limit = 1;
             (true, ())
         })

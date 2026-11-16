@@ -12,7 +12,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::{AuthSecretStore, SessionToken};
 use crate::session::Session;
 use crate::signin::gate::GateState;
@@ -32,7 +32,7 @@ fn engine() -> Arc<TestEngine> {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 /// A session in memory, as a sign-in and an unlock leave it (as `owned_state_tests::signed_in`). Answers its turn.
@@ -634,7 +634,7 @@ fn engine_with(credentials: MemoryCredentials) -> Arc<TestEngine> {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    Arc::new(Engine::open(&REAL, config, host, credentials).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, credentials).expect("the handle opens"))
 }
 
 /// The lead's case: a sign-out's delete fails (the state was held), the delete's due mark lives in memory and goes

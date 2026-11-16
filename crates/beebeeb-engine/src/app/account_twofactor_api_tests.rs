@@ -9,7 +9,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 
@@ -85,7 +85,7 @@ fn engine(api_base: &str) -> Arc<TestEngine> {
         state_dir,
         api_base: api_base.into(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 fn signed_in(engine: &TestEngine) -> SessionGeneration {

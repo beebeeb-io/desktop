@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 use super::super::super::{Engine, EngineConfig};
 use super::*;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::test_api::FakeApi;
 use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
@@ -27,7 +27,7 @@ fn a_session_from_before_the_owner_tag(tag: &str) -> (Engine<MemoryCredentials>,
         state_dir: crate::state_paths::init_for_test(),
         api_base: api.base.clone(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the engine opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens");
     engine.restore();
     engine
         .sign_in_password(&account.email, Zeroizing::new(PASSWORD.into()))

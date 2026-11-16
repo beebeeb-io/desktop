@@ -11,7 +11,7 @@ use base64::Engine as _;
 use super::{CredentialStores, LEGACY_FLAT_SLOT, PlatformCredentials};
 use crate::app::{Engine, EngineConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::{AuthSecretStore, SecretBytes, SessionToken};
 use crate::signin::gate::GateState;
 use crate::signin::memory_store::{MemoryCredentials, MemoryStore};
@@ -41,7 +41,7 @@ fn open(credentials: &MemoryCredentials) -> Result<TestEngine, String> {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    Engine::open(&REAL, config, host, credentials.clone())
+    Engine::open(&TEST, config, host, credentials.clone())
 }
 
 fn opened(credentials: &MemoryCredentials) -> TestEngine {
@@ -54,7 +54,7 @@ fn slot(credentials: &MemoryCredentials) -> MemoryStore {
 
 fn flat(credentials: &MemoryCredentials) -> MemoryStore {
     credentials
-        .legacy_flat(&REAL)
+        .legacy_flat(&TEST)
         .expect("the test stores have a flat layout")
 }
 
@@ -300,7 +300,7 @@ fn nothing_secret_reaches_the_log() {
 #[test]
 fn the_platform_flat_layout_is_asked_on_windows_and_macos_only() {
     assert_eq!(
-        PlatformCredentials.legacy_flat(&REAL).is_some(),
+        PlatformCredentials.legacy_flat(&TEST).is_some(),
         cfg!(any(target_os = "windows", target_os = "macos"))
     );
 }
@@ -326,7 +326,7 @@ fn open_on<C: CredentialStores + Clone>(stores: &C, api_base: &str) -> Engine<C>
         state_dir,
         api_base: api_base.into(),
     };
-    Engine::open(&REAL, config, host, stores.clone()).expect("the handle opens")
+    Engine::open(&TEST, config, host, stores.clone()).expect("the handle opens")
 }
 
 /// No server listens there; nothing in these tests needs one.

@@ -7,7 +7,7 @@ use super::super::{Engine, EngineConfig};
 use super::{Places, decide_first_run, final_path};
 use crate::config::{CONFIG_DIR_OVERRIDE, DesktopConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::sync_folder_rule::SyncFolderRefused;
 
@@ -17,7 +17,7 @@ fn invented(name: &str) -> PathBuf {
 }
 
 fn file() -> DesktopConfig {
-    DesktopConfig::load_for(&REAL).expect("the settings read")
+    DesktopConfig::load_for(&TEST).expect("the settings read")
 }
 
 /// A real handle on the process's test state folder (a handle opens on no other), which nothing here writes.
@@ -29,7 +29,7 @@ fn engine() -> (Engine<MemoryCredentials>, PathBuf) {
         state_dir: state_dir.clone(),
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens");
     (engine, state_dir)
 }
 
@@ -38,16 +38,16 @@ fn a_new_pc_has_its_first_run_to_do_and_it_is_decided_once() {
     let dir = tempfile::tempdir().unwrap();
     CONFIG_DIR_OVERRIDE.sync_scope(dir.path().to_path_buf(), || {
         assert_eq!(file().native_setup_done, None, "a file the native app never opened");
-        assert_eq!(decide_first_run(&REAL), Ok(true));
+        assert_eq!(decide_first_run(&TEST), Ok(true));
         assert_eq!(file().native_setup_done, Some(false));
         // Quitting in the middle of the first run, after the first start kept its folder: the next open still
         // has the first run to do. The settings said so already; a folder that came later does not change it.
-        DesktopConfig::update_for(&REAL, |config| {
+        DesktopConfig::update_for(&TEST, |config| {
             config.sync_root = Some(invented("Beebeeb"));
             (true, ())
         })
         .unwrap();
-        assert_eq!(decide_first_run(&REAL), Ok(true));
+        assert_eq!(decide_first_run(&TEST), Ok(true));
         assert_eq!(file().native_setup_done, Some(false));
     });
 }
@@ -57,15 +57,15 @@ fn an_08x_install_never_sees_the_first_run() {
     let dir = tempfile::tempdir().unwrap();
     CONFIG_DIR_OVERRIDE.sync_scope(dir.path().to_path_buf(), || {
         // What 0.8.x left: a sync folder, and no word about the native first run.
-        DesktopConfig::update_for(&REAL, |config| {
+        DesktopConfig::update_for(&TEST, |config| {
             config.sync_root = Some(invented("Beebeeb"));
             (true, ())
         })
         .unwrap();
         assert_eq!(file().native_setup_done, None);
-        assert_eq!(decide_first_run(&REAL), Ok(false));
+        assert_eq!(decide_first_run(&TEST), Ok(false));
         assert_eq!(file().native_setup_done, Some(true));
-        assert_eq!(decide_first_run(&REAL), Ok(false), "and it stays decided");
+        assert_eq!(decide_first_run(&TEST), Ok(false), "and it stays decided");
     });
 }
 
@@ -92,7 +92,7 @@ fn the_sync_folder_is_kept_once_and_the_first_run_reads_its_flag() {
         // Keeping a folder says nothing about the first run.
         assert_eq!(file().native_setup_done, None);
         assert_eq!(engine.first_run_due(), Ok(true));
-        DesktopConfig::update_for(&REAL, |config| {
+        DesktopConfig::update_for(&TEST, |config| {
             config.native_setup_done = Some(true);
             (true, ())
         })
@@ -147,7 +147,7 @@ fn the_folder_check_asks_the_real_disk_and_this_computer() {
             assert_eq!(check(&home), Err(SyncFolderRefused::Home));
             // The real app never syncs into the test build's folder (wherever this OS puts it: on a Mac it is
             // inside the folder apps keep their data in, which the rule says first).
-            let others = crate::config::default_sync_root_suggestion(REAL.other_build());
+            let others = crate::config::default_sync_root_suggestion(TEST.other_build());
             let refused = check(&others);
             assert!(
                 matches!(refused, Err(SyncFolderRefused::AnotherApps | SyncFolderRefused::Home)),

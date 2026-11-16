@@ -12,7 +12,7 @@ use super::super::{Engine, EngineConfig};
 use super::*;
 use crate::account_binding::Identity;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::gate::GateState;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{BackupLayout, BackupPassRecord, BackupStop, OperationKind, PendingOperation};
@@ -190,7 +190,7 @@ fn switching_off_purges_only_that_folders_pending_uploads() {
     let db = owned_db(dir.path());
     db.enqueue_operation(&backup_op("m-1", "music")).unwrap();
     db.enqueue_operation(&backup_op("p-1", "pictures")).unwrap();
-    apply_switch(&REAL, &db, "music", false).unwrap();
+    apply_switch(&TEST, &db, "music", false).unwrap();
     let left: Vec<String> = db
         .list_due_operations(999)
         .unwrap()
@@ -211,7 +211,7 @@ fn switching_on_clears_the_stop_back_up_again() {
     })
     .unwrap();
     db.enqueue_operation(&backup_op("m-1", "music")).unwrap();
-    apply_switch(&REAL, &db, "music", true).unwrap();
+    apply_switch(&TEST, &db, "music", true).unwrap();
     assert!(db.backup_stops().unwrap().is_empty(), "the stop is cleared");
     assert_eq!(
         db.list_due_operations(999).unwrap().len(),
@@ -229,9 +229,9 @@ fn a_handle_with_no_one_signed_in_refuses_the_read_and_the_switch_and_writes_not
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     assert_eq!(engine.view().gate, GateState::SignedOut);
-    let before = DesktopConfig::load_for(&REAL).ok().map(|c| c.known_folder_backup);
+    let before = DesktopConfig::load_for(&TEST).ok().map(|c| c.known_folder_backup);
     assert_eq!(
         engine.backups_overview(),
         Err(BackupsError::Refused(LocalStateRefused::SignedOut))
@@ -244,7 +244,7 @@ fn a_handle_with_no_one_signed_in_refuses_the_read_and_the_switch_and_writes_not
         engine.set_backup_folder("not-a-folder", true),
         Err(BackupsError::UnknownFolder)
     );
-    let after = DesktopConfig::load_for(&REAL).ok().map(|c| c.known_folder_backup);
+    let after = DesktopConfig::load_for(&TEST).ok().map(|c| c.known_folder_backup);
     assert_eq!(before, after, "the settings file is not written for a refusal");
 }
 

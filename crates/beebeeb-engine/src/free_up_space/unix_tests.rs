@@ -48,7 +48,7 @@ mod linux {
 
     impl Root {
         fn new() -> Self {
-            Self::with_identity(&crate::identity::REAL)
+            Self::with_identity(&crate::identity::TEST)
         }
 
         fn with_identity(identity: &'static crate::identity::EngineIdentity) -> Self {
@@ -590,7 +590,7 @@ mod no_lease {
         .unwrap();
         db.mark_cached("a", &path.to_string_lossy(), 4, 1).unwrap();
         let result = reclaim_unix(
-            &crate::identity::REAL,
+            &crate::identity::TEST,
             &db,
             &root,
             &|| true,

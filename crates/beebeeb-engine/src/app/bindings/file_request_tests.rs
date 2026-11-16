@@ -16,7 +16,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, StateDb};
@@ -171,7 +171,7 @@ fn fixture() -> Fixture {
         state_dir: crate::state_paths::init_for_test(),
         api_base: api.base.clone(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     engine.use_local_state_for_test(path);
     signed_in(&engine);
     Fixture {
