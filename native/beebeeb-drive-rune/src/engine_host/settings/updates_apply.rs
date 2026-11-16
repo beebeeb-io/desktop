@@ -16,7 +16,7 @@ pub(crate) type StartInstaller = Box<dyn FnMut(&VerifiedInstaller, EngineStopped
 fn start_installer(installer: &VerifiedInstaller, stopped: EngineStopped) -> bool {
     #[cfg(windows)]
     {
-        installer.start_nsis(stopped)
+        installer.start_nsis(stopped, super::super::launch::spawn)
     }
     #[cfg(not(windows))]
     {

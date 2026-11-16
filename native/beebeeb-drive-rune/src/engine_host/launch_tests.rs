@@ -16,6 +16,11 @@ const STARTS: [&str; 5] = [
 ];
 /// The calls that hold the launch lock around what is inside their parentheses.
 const UNDER_LOCK: [&str; 2] = ["launch::spawn(", "launch::locked("];
+/// The updater crate's way of saying it: `VerifiedInstaller::start_nsis` takes the app's `launch::spawn` as a parameter
+/// of this name and starts the installer through it (the crate cannot name the lock itself).
+const UPDATER_UNDER_LOCK: [&str; 1] = ["under_launch_lock("];
+/// The updater crate's one start: the passive NSIS installer.
+const UPDATER: &str = "../../crates/beebeeb-updater/src/machine.rs";
 /// The one start the scan knows of outside this crate: the engine's ffmpeg (P0 2542, held for the owner).
 const FFMPEG: &str = "../../crates/beebeeb-engine/src/engine_bridge/media.rs";
 
@@ -153,13 +158,18 @@ fn without_inline_tests(code: &str) -> String {
 
 /// The starts in `src`: the 1-based lines of those no [`UNDER_LOCK`] call holds, and how many one holds.
 fn starts(src: &str) -> (Vec<usize>, usize) {
+    starts_under(src, &UNDER_LOCK)
+}
+
+/// [`starts`] with the calls that hold the lock named: this crate's, or the updater crate's.
+fn starts_under(src: &str, under_lock: &[&str]) -> (Vec<usize>, usize) {
     let code = without_inline_tests(&code_only(src));
     let mut held: Vec<bool> = Vec::new();
     let (mut bare, mut covered) = (Vec::new(), 0);
     for (at, c) in code.char_indices() {
         let before = &code[..at];
         if c == '(' {
-            held.push(UNDER_LOCK.iter().any(|call| before.ends_with(&call[..call.len() - 1])));
+            held.push(under_lock.iter().any(|call| before.ends_with(&call[..call.len() - 1])));
             if STARTS.iter().any(|start| before.ends_with(&start[..start.len() - 1])) {
                 if held.contains(&true) {
                     covered += 1;
@@ -283,7 +293,7 @@ fn every_launch_takes_the_launch_lock() {
     let ffmpeg = std::fs::read_to_string(root.join(FFMPEG)).unwrap();
     let ffmpeg_bare = bare_starts(&ffmpeg);
     eprintln!(
-        "launch scan: {} files, 0 bare; one named exception: {FFMPEG}:{ffmpeg_bare:?} (P0 2542)",
+        "launch scan: {} files + the updater, 0 bare; one named exception: {FFMPEG}:{ffmpeg_bare:?} (P0 2542)",
         files.len()
     );
     assert_eq!(
@@ -338,4 +348,52 @@ fn launch_lock_is_the_sandboxs_own() {
     );
     release.send(()).unwrap();
     helper_start.join().unwrap();
+}
+
+/// P3-4: the updater crate's installer start is seen by the scan, and it is under the launch lock (the app's
+/// `launch::spawn`, handed in as `under_launch_lock`). With ffmpeg's (P0 2542) the scan's named exceptions stay 1.
+#[test]
+fn the_updaters_installer_start_takes_the_launch_lock() {
+    // The instrument first, on fixed text: the updater's own phrasing counts as held; a bare start does not.
+    let held = "fn f(under_launch_lock: impl FnOnce(&mut Command) -> R) { under_launch_lock(Command::new(\"x\").args([\"/P\"])); }";
+    assert_eq!(starts_under(held, &UPDATER_UNDER_LOCK), (Vec::new(), 1));
+    let bare = "fn f() {\n    Command::new(\"x\").spawn();\n}";
+    assert_eq!(starts_under(bare, &UPDATER_UNDER_LOCK), (vec![2], 0));
+    assert_eq!(
+        starts_under(held, &UNDER_LOCK).0.len(),
+        1,
+        "this crate's own phrasing is not the updater's: it must not pass for it"
+    );
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let updater_dir = root.join(UPDATER).parent().unwrap().to_path_buf();
+    let mut files = Vec::new();
+    non_test_files(&updater_dir, &mut files);
+    files.sort();
+    assert!(
+        files.iter().any(|f| f.ends_with("machine.rs")),
+        "the scan reads the updater's machine: {files:?}"
+    );
+    let (mut bare, mut covered) = (Vec::new(), 0);
+    for file in &files {
+        let (lines, held) = starts_under(&std::fs::read_to_string(file).unwrap(), &UPDATER_UNDER_LOCK);
+        bare.extend(lines.into_iter().map(|line| format!("{}:{line}", file.display())));
+        covered += held;
+    }
+    assert_eq!(
+        bare,
+        Vec::<String>::new(),
+        "a start in the updater outside under_launch_lock"
+    );
+    assert_eq!(
+        covered, 1,
+        "the updater's one start (the installer) is seen, under the lock"
+    );
+
+    // The app hands the lock in: its call site passes `launch::spawn`.
+    let apply = std::fs::read_to_string(root.join("src/engine_host/settings/updates_apply.rs")).unwrap();
+    assert!(
+        code_only(&apply).contains("start_nsis(stopped, super::super::launch::spawn)"),
+        "the app starts the installer through launch::spawn"
+    );
 }

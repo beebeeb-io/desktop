@@ -502,11 +502,37 @@ fn a_helper_that_keeps_its_handles_is_stopped() {
         );
     }
     assert!(stopped_for(&host, Stop::Protocol), "{:?}", host.state());
-    let allowed = 1 + MAX_IN_FLIGHT + HANDLE_SLACK as usize;
+    // The ceiling counts from the start (0 here); the open answer already holds one handle.
+    let allowed = MAX_IN_FLIGHT + HANDLE_SLACK as usize - 1;
     assert_eq!(
         pages_of(&events),
         allowed,
-        "the first page, then one per render out plus the slack past it"
+        "pages up to the ceiling: the requests out plus the slack, from the count at the start"
+    );
+    assert_eq!(log.kills(), 1);
+}
+
+/// P3-5: the ceiling is absolute (the count right after the start, plus the requests out, plus the slack): a helper
+/// that takes its handles all at once, before its first answer, is over it at that answer. A bound measured from
+/// the first answer's count would take the high count for its start point and never fire.
+#[test]
+fn a_helper_over_the_handle_ceiling_at_its_first_answer_is_stopped() {
+    let registry = Registry::new();
+    let sizes = [LETTER; 4];
+    let burst = MAX_IN_FLIGHT as u32 + HANDLE_SLACK + 1;
+    let fake = Fake::new(move |link| serve(link, &sizes)).bursting_handles(burst);
+    let (mut host, log, _) = open_fake(fake, &registry, DocKind::Docx);
+    let mut events = Vec::new();
+    assert!(
+        pump(&mut host, &mut events, |host, _| stopped(host)),
+        "{:?}",
+        host.state()
+    );
+    assert!(stopped_for(&host, Stop::Protocol), "{:?}", host.state());
+    assert_eq!(
+        pages_of(&events),
+        0,
+        "no page was shown from the helper over the ceiling"
     );
     assert_eq!(log.kills(), 1);
 }

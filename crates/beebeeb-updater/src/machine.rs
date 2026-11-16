@@ -108,12 +108,17 @@ impl VerifiedInstaller {
     /// Starts the installer the way Tauri's updater does for 0.8.x (`/P` passive: progress only; `/R` start the
     /// app afterwards; `/UPDATE` keep shortcuts and the autostart entry). A per-user install: no elevation. The
     /// installer waits for this process to exit; it never ends it.
+    ///
+    /// `under_launch_lock` is the app's own start (`launch::spawn`): the installer starts while the app holds the
+    /// launch lock every other start of a process takes, so it never runs in the moment a helper's pipe ends are
+    /// inheritable. This crate cannot name that lock; the app hands the start in.
     #[cfg(windows)]
-    pub fn start_nsis(&self, _stopped: EngineStopped) -> bool {
-        std::process::Command::new(&self.path)
-            .args(["/P", "/R", "/UPDATE"])
-            .spawn()
-            .is_ok()
+    pub fn start_nsis(
+        &self,
+        _stopped: EngineStopped,
+        under_launch_lock: impl FnOnce(&mut std::process::Command) -> std::io::Result<std::process::Child>,
+    ) -> bool {
+        under_launch_lock(std::process::Command::new(&self.path).args(["/P", "/R", "/UPDATE"])).is_ok()
     }
 }
 
