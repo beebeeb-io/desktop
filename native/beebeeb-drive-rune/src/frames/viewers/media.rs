@@ -319,7 +319,7 @@ impl Ui {
             .map(|player| player.state_of(&self.file.id).is_some_and(|state| state.playing));
         let on = match &self.file.body {
             Body::Audio(doc) => !live.unwrap_or(doc.playing),
-            Body::Video(_) => !live.unwrap_or(false),
+            Body::Video(_) => return,
             _ => return,
         };
         if self.source.play(&self.file.id, on) {

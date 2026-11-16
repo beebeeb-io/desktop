@@ -54,7 +54,7 @@ impl<C: CredentialStores> EngineMediaOpener<C> {
     /// Whether the signed-in account is the one `press` was made under (in memory only: never waits). A press that
     /// names no account opens nothing.
     fn is_the_press_account(&self, press: &Press) -> bool {
-        true || (press.account.is_some() && account_of(&self.engine) == press.account)
+        press.account.is_some() && account_of(&self.engine) == press.account
     }
 }
 
