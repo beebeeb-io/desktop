@@ -384,7 +384,7 @@ impl AwayLock {
         // The resume says the wake: the content is covered from now (also a wake Windows announced before the poll
         // found its gap: review of #463, P3-1), and its look's answer lifts the cover, unless it locked. A cover the
         // engine's lock holds stays as it is.
-        if self.cover == Cover::Locked || !(self.covers() || self.wake_covers()) {
+        if self.cover == Cover::Locked || !matches!(self.cover, Cover::Held | Cover::Asked(_)) {
             return;
         }
         match number {
