@@ -50,6 +50,8 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use super::link_session::state_refusal;
+// The one `get` of the link code, for the callers outside `bindings` (the module is private to it).
+pub(in crate::app) use super::link_session::get;
 use crate::account::SessionGeneration;
 use crate::app::share_invite_api::{canonical, own_item};
 use crate::app::share_link_api::{LinkChoices, MadeLink, ShareLinkError, key_of, web_origin};
@@ -223,9 +225,11 @@ impl<C: CredentialStores> Engine<C> {
         let run = self.link_run(session)?;
         let master = MasterKey::from_bytes(*run.key());
         // From the signed-in account's local state: every file's key, or nothing is sent.
-        let keys: Vec<FileKey> = self
-            .local_state()
-            .map_err(state_refusal)?
+        let state = self.local_state().map_err(state_refusal)?;
+        if state.session() != session {
+            return Err(FolderLinkError::NotSignedIn);
+        }
+        let keys: Vec<FileKey> = state
             .with(|db| {
                 ids.iter()
                     .map(|id| key_of(db, &master, id))

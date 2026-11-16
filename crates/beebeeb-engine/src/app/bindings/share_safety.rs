@@ -48,7 +48,7 @@
 //! Must not: log or return a key, a fingerprint, a sealed key, an address, an id the person did not pass in, or a
 //! server's words. A `ShareFlowError`, an `HttpRequest` or a `SealedApproval` is never formatted.
 
-use beebeeb_core::auth_flow::{HttpRequest, HttpResponse, Method};
+use beebeeb_core::auth_flow::{HttpRequest, HttpResponse};
 use beebeeb_core::kdf::{FileKey, MasterKey};
 use beebeeb_core::share_flow::member::{self, PeerKeyExpectation, SealedApproval};
 use beebeeb_core::share_flow::{self, ShareFlowError, safety};
@@ -56,6 +56,7 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::account::SessionGeneration;
+use crate::app::bindings::share_folder_link::get;
 use crate::app::lock_api::PersonRefused;
 use crate::app::owned_state::{LocalStateRefused, OwnedState};
 use crate::app::share_invite_api::{canonical, file_key, own_item, peers_for_email};
@@ -685,14 +686,6 @@ fn state_refusal(refused: LocalStateRefused) -> SafetyRefused {
         LocalStateRefused::SessionEnded => SafetyRefused::SessionEnded,
         _ => SafetyRefused::Failed,
     }
-}
-
-/// A GET on the session with no confirm token and no body.
-fn get(path: &str) -> HttpRequest {
-    let mut req = HttpRequest::session_post(path.to_string(), Value::Null);
-    req.method = Method::Get;
-    req.body = None;
-    req
 }
 
 #[cfg(test)]

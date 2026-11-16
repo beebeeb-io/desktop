@@ -143,7 +143,7 @@ pub(super) fn state_refusal(refused: LocalStateRefused) -> LinkRefusal {
 }
 
 /// A read on the session with no confirm token and no body.
-pub(super) fn get(path: &str) -> HttpRequest {
+pub(in crate::app) fn get(path: &str) -> HttpRequest {
     let mut req = HttpRequest::session_post(path.to_string(), Value::Null);
     req.method = Method::Get;
     req.body = None;

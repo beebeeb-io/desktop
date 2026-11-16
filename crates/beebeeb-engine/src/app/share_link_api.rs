@@ -24,7 +24,7 @@
 //!
 //! Must not: log an id, a name, a link or anything the server sends; build a key, a token or a link by hand.
 
-use beebeeb_core::auth_flow::{HttpRequest, HttpResponse, Method};
+use beebeeb_core::auth_flow::{HttpRequest, HttpResponse};
 use beebeeb_core::item_id::{ItemClass, item_class};
 use beebeeb_core::kdf::{FileKey, MasterKey};
 use beebeeb_core::share_flow::link::{CreateLink, LinkOptions, LinkStep, open_link_file_key, rebuild_link};
@@ -32,6 +32,7 @@ use beebeeb_core::share_flow::{self, ShareFlowError};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use super::bindings::share_folder_link::get;
 use super::owned_state::LocalStateRefused;
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
@@ -210,7 +211,7 @@ impl<C: CredentialStores> Engine<C> {
         // the file's own live link, never a second one behind it. Only a real choice asks for a new link.
         let plain = choices.is_none_or(|c| c.expires_in_hours.is_none() && c.passphrase.is_none());
         if plain {
-            let mine = listed(send(get(format!("{MINE}?file_id={id}")))?)?;
+            let mine = listed(send(get(&format!("{MINE}?file_id={id}")))?)?;
             let live = live_links(&mine, id);
             link = live
                 .iter()
@@ -259,7 +260,9 @@ fn local_refusal(refusal: LocalStateRefused) -> ShareLinkError {
     match refusal {
         LocalStateRefused::SessionEnded => ShareLinkError::SessionEnded,
         LocalStateRefused::Unreadable => ShareLinkError::Refused,
-        LocalStateRefused::SignedOut | LocalStateRefused::Locked => ShareLinkError::NotSignedIn,
+        LocalStateRefused::SignedOut | LocalStateRefused::Locked | LocalStateRefused::SessionChanged => {
+            ShareLinkError::NotSignedIn
+        }
         // Nothing synced, or a local state that is not this account's: no item of it is this account's.
         _ => ShareLinkError::NotFound,
     }
@@ -287,14 +290,6 @@ pub(super) fn key_of(db: &StateDb, master: &MasterKey, id: &str) -> Result<FileK
         Ok(ItemClass::Owner) => Ok(beebeeb_core::kdf::derive_file_key(master, id.as_bytes())),
         _ => Err(unavailable),
     }
-}
-
-/// A read on the session with no confirm token and no body.
-fn get(path: String) -> HttpRequest {
-    let mut req = HttpRequest::session_post(path, Value::Null);
-    req.method = Method::Get;
-    req.body = None;
-    req
 }
 
 /// The account's links as Beebeeb listed them. An answer that is not a list of links is a read that failed: it

@@ -637,3 +637,12 @@ fn a_link_made_for_a_session_that_ended_meanwhile_is_not_handed_over() {
     assert_eq!(fake.first.links().len(), 1);
     assert_eq!(fake.second.links().len(), 0);
 }
+
+#[test]
+fn a_local_state_that_moved_to_another_session_says_not_signed_in_not_not_found() {
+    // A press whose session moved under the local state is not "no such file": it is not signed in.
+    assert_eq!(
+        local_refusal(LocalStateRefused::SessionChanged),
+        ShareLinkError::NotSignedIn
+    );
+}
