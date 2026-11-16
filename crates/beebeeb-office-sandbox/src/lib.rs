@@ -33,6 +33,7 @@
 use std::fmt;
 use std::fs::File;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 mod block;
@@ -184,6 +185,37 @@ pub struct Pipes {
     pub from_helper: File,
 }
 
+/// The one lock every start of a process of the app takes. See [`launch_lock`].
+static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
+
+/// Held while ANY process of the app is started: [`Sandbox::spawn`] takes the same lock, so no other launch can
+/// inherit a helper's pipe ends while they are inheritable (on Windows a helper's two pipe ends are inheritable from
+/// just before its process is created until just after, and every process created in that window with handle
+/// inheritance on would receive them). Every `std::process::Command` spawn, `ShellExecuteW`, `SHOpenWithDialog` and
+/// handler invoke of the app runs under it.
+///
+/// Not re-entrant: a thread that holds a [`LaunchGuard`] and then calls [`Sandbox::spawn`] (or this function) waits for
+/// itself for ever. Take the guard around the one launch call and drop it right after.
+///
+/// A panic while the lock was held does not leave it unusable: the lock carries no data that could be half-written.
+pub fn launch_lock() -> LaunchGuard {
+    LaunchGuard {
+        _held: LAUNCH_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+    }
+}
+
+/// Proof that the launch lock is held; dropping it releases the lock. See [`launch_lock`].
+#[must_use = "the launch lock is held only while the guard lives"]
+pub struct LaunchGuard {
+    _held: MutexGuard<'static, ()>,
+}
+
+impl fmt::Debug for LaunchGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LaunchGuard")
+    }
+}
+
 /// Starts confined helpers.
 #[derive(Debug, Clone, Copy)]
 pub struct Sandbox {
@@ -233,8 +265,14 @@ impl Sandbox {
     ///
     /// Never starts an unconfined process: see the crate documentation. On Windows the helper's token is read back
     /// before it runs, and a token whose capabilities are not exactly the profile's ends it.
+    ///
+    /// Takes the [`launch_lock`] first, on every operating system, before anything else is checked or made: it waits
+    /// while another launch of the app holds it. Never call this while holding a [`LaunchGuard`].
     pub fn spawn(&self, helper_exe: &Path) -> Result<Child, SandboxError> {
-        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile)?;
+        // Taken here, before the platform call, so the one lock is the same on every system; the platform releases
+        // it as soon as the helper's pipe ends are no longer inheritable.
+        let launch = launch_lock();
+        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile, launch)?;
         Ok(Child {
             inner,
             pipes: Some(pipes),
@@ -291,6 +329,14 @@ impl Child {
     pub fn grant(&self, section: &Section, access: Access) -> Result<Granted, SandboxError> {
         self.inner.grant(&section.inner, access)
     }
+
+    /// How many handles the helper process has open now. A helper that keeps every handle it is given grows this
+    /// number; its caller decides the bound and calls [`Child::kill`].
+    ///
+    /// Off Windows no `Child` exists (every start is [`SandboxError::Unsupported`]).
+    pub fn handle_count(&self) -> Result<u32, SandboxError> {
+        self.inner.handle_count()
+    }
 }
 
 /// Memory the app shares with a helper: an unnamed section backed by the paging file, mapped read-write in the app.
@@ -317,8 +363,22 @@ impl Section {
     }
 
     /// The bytes.
+    ///
+    /// Only for a section no helper holds read-write: a helper with a read-write grant can change these bytes while
+    /// the returned slice is alive, and a shared slice promises that they do not change. For a section a helper
+    /// writes, use [`Section::copy_to`].
     pub fn as_slice(&self) -> &[u8] {
         self.inner.as_slice()
+    }
+
+    /// Copies the section's bytes into `out`, which must be exactly [`Section::len`] bytes long (any other length is
+    /// refused and nothing is copied). The bytes are read from the mapping itself, never through a `&[u8]` of it, so
+    /// this is the way to read a section a helper holds read-write: a helper writing at the same moment can leave a
+    /// torn value in `out`, never a reference to memory that changes under it.
+    ///
+    /// Off Windows: no `Section` exists ([`Section::new`] is [`SandboxError::Unsupported`]).
+    pub fn copy_to(&self, out: &mut [u8]) -> Result<(), SandboxError> {
+        copy_exactly(self.len(), out, |out| self.inner.copy_into(out))
     }
 
     /// The bytes, to write.
@@ -328,12 +388,12 @@ impl Section {
 
     /// The length in bytes.
     pub fn len(&self) -> usize {
-        self.as_slice().len()
+        self.inner.len()
     }
 
     /// Always false: a section holds at least one byte.
     pub fn is_empty(&self) -> bool {
-        self.as_slice().is_empty()
+        self.len() == 0
     }
 }
 
@@ -353,6 +413,16 @@ impl std::os::windows::io::AsRawHandle for Section {
     fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
         self.inner.raw_handle()
     }
+}
+
+/// The rule of [`Section::copy_to`]: `out` is exactly `len` bytes (never the shorter of the two), and only then is
+/// `copy` handed all of it to fill. Any other length copies nothing.
+fn copy_exactly(len: usize, out: &mut [u8], copy: impl FnOnce(&mut [u8])) -> Result<(), SandboxError> {
+    if out.len() != len {
+        return Err(SandboxError::Limits("a copy whose length is not the section's"));
+    }
+    copy(out);
+    Ok(())
 }
 
 /// A length the crate accepts for a section or a grant: 1 byte to [`MAX_SECTION_BYTES`].
@@ -577,6 +647,72 @@ mod tests {
             SandboxError::Limits("the memory limit is zero"),
             "a profile changes no limit check"
         );
+    }
+
+    /// One lock for every launch: a thread holding [`launch_lock`] holds back [`Sandbox::spawn`] on another thread.
+    /// The lock is taken before the platform is asked anything, so this holds where nothing can be started too.
+    #[test]
+    fn spawn_and_launch_lock_are_one_lock() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let sandbox = Sandbox::new(Limits::default()).unwrap();
+        // Refused at once on every system once the lock is free: relative (Windows) or no sandbox module (others).
+        let refused = Path::new("not-absolute.exe");
+        let started = Instant::now();
+        assert!(sandbox.spawn(refused).is_err());
+        let free = started.elapsed();
+        assert!(
+            free < Duration::from_millis(250),
+            "the instrument can fail: with the lock free, spawn answers at once ({free:?})"
+        );
+
+        let (held, is_held) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _launch = launch_lock();
+            held.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        is_held.recv().unwrap();
+        let started = Instant::now();
+        assert!(sandbox.spawn(refused).is_err());
+        let waited = started.elapsed();
+        holder.join().unwrap();
+        assert!(
+            waited >= Duration::from_millis(250),
+            "spawn waited for the launch another thread held ({waited:?})"
+        );
+    }
+
+    /// The copy out of a section takes exactly the section's length, never the shorter of the two.
+    #[test]
+    fn copy_to_needs_the_exact_length() {
+        let source = [7u8, 1, 2, 3, 4, 5, 6, 9];
+        let fill = |out: &mut [u8]| out.copy_from_slice(&source[..out.len()]);
+
+        let mut exact = [0u8; 8];
+        assert_eq!(copy_exactly(source.len(), &mut exact, fill), Ok(()));
+        assert_eq!(exact, source, "every byte was copied");
+
+        let mut copied = 0;
+        for wrong in [7usize, 9, 0] {
+            let mut out = vec![0u8; wrong];
+            assert_eq!(
+                copy_exactly(source.len(), &mut out, fill),
+                Err(SandboxError::Limits("a copy whose length is not the section's")),
+                "a buffer of {wrong} bytes for a section of 8"
+            );
+            assert_eq!(
+                out.iter().filter(|&&byte| byte != 0).count(),
+                0,
+                "nothing was copied into it"
+            );
+            copied += 1;
+        }
+        assert_eq!(copied, 3);
+
+        #[cfg(not(windows))]
+        assert_eq!(Section::new(8).unwrap_err(), SandboxError::Unsupported);
     }
 
     #[cfg(not(windows))]

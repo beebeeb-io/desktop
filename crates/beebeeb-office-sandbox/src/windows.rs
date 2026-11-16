@@ -47,7 +47,6 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::FILETIME;
@@ -86,14 +85,14 @@ use windows_sys::Win32::System::SystemInformation::{
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, DETACHED_PROCESS,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, OpenProcessToken, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-    PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    GetProcessHandleCount, InitializeProcThreadAttributeList, OpenProcessToken,
+    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use crate::block::{checked_path, command_line, environment_block, is_our_profile_name, profile_name, same_members};
-use crate::{Access, ExitStatus, Granted, KILLED_EXIT_CODE, Limits, Pipes, Profile, SandboxError};
+use crate::{Access, ExitStatus, Granted, KILLED_EXIT_CODE, LaunchGuard, Limits, Pipes, Profile, SandboxError};
 
 /// `SE_GROUP_ENABLED`: the attribute a granted capability carries.
 const SE_GROUP_ENABLED: u32 = 4;
@@ -116,10 +115,6 @@ const JOB_LIMIT_FLAGS: u32 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
     | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
     | JOB_OBJECT_LIMIT_JOB_MEMORY;
-
-/// Between "the pipe ends are inheritable" and "the helper exists" no other helper of ours is created, so one
-/// helper never receives another's pipe ends.
-static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 fn os(step: &'static str) -> SandboxError {
     // SAFETY: reads the calling thread's last-error value; no pointer is involved.
@@ -220,6 +215,16 @@ impl ChildInner {
             len: section.len as u64,
         })
     }
+
+    pub(crate) fn handle_count(&self) -> Result<u32, SandboxError> {
+        let mut count = 0u32;
+        // SAFETY: `process` is the helper's open process handle, returned by process creation with full access (so
+        // with query access); `count` is a valid place for one u32.
+        if unsafe { GetProcessHandleCount(self.process.as_raw_handle(), &mut count) } == 0 {
+            return Err(os("handle count"));
+        }
+        Ok(count)
+    }
 }
 
 /// The rights a grant carries into the helper: exactly these, never the rights of the app's own handle.
@@ -275,6 +280,33 @@ impl SectionInner {
 
     pub(crate) fn raw_handle(&self) -> HANDLE {
         self.mapping.as_raw_handle()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Copies the first `out.len()` bytes of the view into `out`, read from the view's address with volatile reads.
+    /// `Section::copy_to` hands over exactly `len` bytes; a longer `out` is a bug of ours and panics here before
+    /// anything is read.
+    pub(crate) fn copy_into(&self, out: &mut [u8]) {
+        assert!(out.len() <= self.len, "a copy longer than the section");
+        let source = self.view.Value.cast::<u8>().cast_const();
+        let words = out.len() / 8;
+        let (head, tail) = out.split_at_mut(words * 8);
+        for (index, chunk) in head.chunks_exact_mut(8).enumerate() {
+            // SAFETY: the view is mapped readable for `self.len` bytes until `drop`, and `index * 8 + 8 <= out.len()
+            // <= self.len`; the view starts on a page boundary, so each word read is aligned. The read goes through
+            // the raw address: no reference to the shared bytes is made, so a helper writing them at this moment can
+            // leave a torn value in `out` but never changes memory a reference points to. Volatile, so each word is
+            // read exactly once and nothing is assumed about bytes another process may change.
+            let word = unsafe { std::ptr::read_volatile(source.add(index * 8).cast::<u64>()) };
+            chunk.copy_from_slice(&word.to_ne_bytes());
+        }
+        for (index, byte) in tail.iter_mut().enumerate() {
+            // SAFETY: as above, one byte inside the view: `words * 8 + index < out.len() <= self.len`.
+            *byte = unsafe { std::ptr::read_volatile(source.add(words * 8 + index)) };
+        }
     }
 }
 
@@ -898,7 +930,15 @@ fn confirm_confined(process: &OwnedHandle, job: &OwnedHandle, expected: &Capabil
     Ok(())
 }
 
-pub(crate) fn spawn(helper_exe: &Path, limits: Limits, profile: Profile) -> Result<(ChildInner, Pipes), SandboxError> {
+/// `launch` is the app's launch lock, taken by the caller before anything here: between "the pipe ends are
+/// inheritable" and "the helper exists" no other process of the app is created, so no launch receives a helper's
+/// pipe ends. It is released as soon as the helper's ends are closed in the parent.
+pub(crate) fn spawn(
+    helper_exe: &Path,
+    limits: Limits,
+    profile: Profile,
+    launch: LaunchGuard,
+) -> Result<(ChildInner, Pipes), SandboxError> {
     let units: Vec<u16> = helper_exe.as_os_str().encode_wide().collect();
     let application = checked_path(&units)?;
     if !std::fs::metadata(helper_exe).map(|m| m.is_file()).unwrap_or(false) {
@@ -945,7 +985,6 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits, profile: Profile) -> Resu
     let mut created = PROCESS_INFORMATION::default();
     let flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS | EXTENDED_STARTUPINFO_PRESENT;
 
-    let guard = SPAWN_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     for end in inherited {
         // SAFETY: `end` is one of the two open pipe ends owned by this function.
         if unsafe { SetHandleInformation(end, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
@@ -976,7 +1015,7 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits, profile: Profile) -> Resu
     // read from a dead helper ends instead of waiting for ever.
     drop(helper_stdin);
     drop(helper_stdout);
-    drop(guard);
+    drop(launch);
     if let Some(failure) = failure {
         return Err(failure);
     }
