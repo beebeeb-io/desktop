@@ -44,6 +44,8 @@ use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary
 pub mod account;
 mod app_lock;
 mod away;
+mod drive_errors;
+use drive_errors::{map_drive_err, map_new_file_err};
 pub mod backups;
 // Backups' "Other devices" and "Delete this backup" (`backups::EngineBackupsSource` delegates to it).
 pub mod backups_devices;
@@ -707,17 +709,6 @@ fn path_the_system_opens(db: &StateDb, sync_root: &Path, id: &str) -> Result<std
     Ok(path)
 }
 
-/// Map a `DriveError` to the UI's `ActionError`.
-fn map_drive_err(e: DriveError) -> ActionError {
-    match e {
-        DriveError::ReadOnly => ActionError::Protected,
-        DriveError::NameTaken | DriveError::InvalidName => ActionError::NameTaken,
-        DriveError::NotFound => ActionError::Failed,
-        DriveError::Conflict => ActionError::Failed,
-        _ => ActionError::Failed,
-    }
-}
-
 impl<C: CredentialStores> EngineFilesSource<C> {
     /// A local file operation, on the signed-in account's local state (the account-bound handle, task 2488) and
     /// the sync root: both are required. Refused when sync is not running for this handle (`Engine::is_syncing`):
@@ -1127,7 +1118,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     fn new_file(&mut self, folder: Option<&str>, name: &str) -> Result<(), ActionError> {
         self.local(|db, sync_root| {
             let folder_entry = file_ops::resolve_folder(db, folder).map_err(map_drive_err)?;
-            file_ops::create_file(db, sync_root, folder_entry.as_ref(), name, &[]).map_err(map_drive_err)?;
+            file_ops::create_file(db, sync_root, folder_entry.as_ref(), name, &[]).map_err(map_new_file_err)?;
             Ok(())
         })
     }

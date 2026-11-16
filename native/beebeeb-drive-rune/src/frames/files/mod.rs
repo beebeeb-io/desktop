@@ -194,6 +194,9 @@ impl Toast {
             ActionError::NotSent => " It has changes that are not uploaded yet.",
             ActionError::HoldsKept => " Something in it is kept on this PC.",
             ActionError::NotToRecycleBin => " This file can't go to the Recycle Bin, so it was left as it is.",
+            // The viewers' words for a full disk ("Not enough space to decrypt", "free on this PC").
+            ActionError::NoRoom => " There is not enough space on this PC.",
+            ActionError::TooLarge => " It is too large to make here.",
             _ => "",
         };
         format!("Couldn't {}.{fix}", action.words())

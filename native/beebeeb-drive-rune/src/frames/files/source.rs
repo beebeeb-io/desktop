@@ -70,6 +70,12 @@ pub enum ActionError {
     /// its drive, too big for it, or the move failed), and it is never deleted for good. The file and its upload
     /// stay as they were.
     NotToRecycleBin,
+    /// New file left it: the disk of this PC has no room for it. Nothing was made; asking again after making room
+    /// works.
+    NoRoom,
+    /// New file left it: more than a new file is made with here. Nothing was made, and Try again would change
+    /// nothing.
+    TooLarge,
 }
 
 /// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").

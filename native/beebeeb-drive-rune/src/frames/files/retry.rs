@@ -85,7 +85,11 @@ impl State {
         offers_try_again(action)
             && !matches!(
                 why,
-                ActionError::NotOnThisSystem | ActionError::HoldsKept | ActionError::NotYet | ActionError::HasLink
+                ActionError::NotOnThisSystem
+                    | ActionError::HoldsKept
+                    | ActionError::NotYet
+                    | ActionError::HasLink
+                    | ActionError::TooLarge
             )
             && match action {
                 Action::Upload => !matches!(&self.actions.retry_upload, Some((_, files)) if files.is_empty()),
