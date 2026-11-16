@@ -1,6 +1,8 @@
 //! Every operating system without a sandbox module: nothing is ever started.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use crate::{Access, ExitStatus, Granted, LaunchGuard, Limits, Pipes, Profile, SandboxError};
@@ -27,6 +29,14 @@ impl ChildInner {
     }
 
     pub(crate) fn handle_count(&self) -> Result<u32, SandboxError> {
+        match *self {}
+    }
+
+    pub(crate) fn granted_bytes(&self) -> &Arc<AtomicU64> {
+        match *self {}
+    }
+
+    pub(crate) fn killed_for_memory(&self) -> bool {
         match *self {}
     }
 }

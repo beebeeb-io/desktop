@@ -3,9 +3,16 @@
 //! | Layer | What it takes away |
 //! |---|---|
 //! | AppContainer, opted out of the "all application packages" group, with the profile's capabilities only (none by default) | network (also loopback), the user's files, every writable place |
-//! | Job object: 1 active process, kill on close, memory cap, UI restrictions | child processes; outliving the parent; unbounded memory; clipboard, desktop and global-atom access |
+//! | Job object: 1 active process, kill on close, memory cap, UI restrictions | child processes; outliving the parent; unbounded private memory; clipboard, desktop and global-atom access |
+//! | Memory watch (the `watch` module): private plus shared commit, every 100 ms | unbounded memory through sections the helper makes itself |
 //! | Restricted token: privileges removed, Administrators deny-only | whatever an elevated parent's token would add |
 //! | Handle list | every handle of the parent except the two pipe ends |
+//! | Process mitigations, per profile (`Profile::mitigations`) | the window system, dynamic code, foreign and remote libraries, extension points, unchecked handle use |
+//!
+//! Read back from the suspended process before it runs (`watch::read_facts`, judged by `crate::check_facts`): the
+//! job, the container, the capabilities, the less-privileged container flag, the integrity level (low) and every
+//! mitigation of the profile. Its memory counters are read once too: a Windows that cannot report a helper's shared
+//! commit cannot watch it, so the helper does not run there (`SandboxError::NeedsNewerWindows`).
 //!
 //! **Shared memory.** A [`crate::Section`] is an unnamed section backed by the paging file; its handle is not
 //! inheritable. A grant duplicates it into the running helper with exactly the rights asked for (map-read, or
@@ -37,7 +44,8 @@
 //! holds must be the derived ones, each once, no more and no fewer. Windows accepts any capability name (a misspelled
 //! one too), so the names themselves are pinned by a test of `Profile::capabilities`.
 //!
-//! This is the only module with `unsafe`. Every block is one call into the system, with its invariant stated.
+//! This module and `watch` are the only ones with `unsafe`. Every block is one call into the system, with its
+//! invariant stated.
 #![allow(unsafe_code)]
 
 use std::ffi::c_void;
@@ -47,6 +55,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::FILETIME;
@@ -57,13 +67,12 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows_sys::Win32::Security::Isolation::{CreateAppContainerProfile, DeleteAppContainerProfile};
 use windows_sys::Win32::Security::{
-    CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, DeriveCapabilitySidsFromName, EqualSid, FreeSid,
-    GetTokenInformation, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_QUERY, TokenCapabilities, TokenIsAppContainer,
-    WinBuiltinAdministratorsSid,
+    CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, DeriveCapabilitySidsFromName, FreeSid, PSID,
+    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_QUERY, WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+    CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT_DESKTOP,
     JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS,
     JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
@@ -87,12 +96,17 @@ use windows_sys::Win32::System::Threading::{
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
     GetProcessHandleCount, InitializeProcThreadAttributeList, OpenProcessToken,
     PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
-use crate::block::{checked_path, command_line, environment_block, is_our_profile_name, profile_name, same_members};
-use crate::{Access, ExitStatus, Granted, KILLED_EXIT_CODE, LaunchGuard, Limits, Pipes, Profile, SandboxError};
+use crate::block::{checked_path, command_line, environment_block, is_our_profile_name, profile_name};
+use crate::watch::{Watch, commit, read_facts};
+use crate::{
+    Access, ExitStatus, Granted, KILLED_EXIT_CODE, LaunchGuard, Limits, Mitigations, Pipes, Profile, SandboxError,
+    check_facts,
+};
 
 /// `SE_GROUP_ENABLED`: the attribute a granted capability carries.
 const SE_GROUP_ENABLED: u32 = 4;
@@ -116,7 +130,35 @@ const JOB_LIMIT_FLAGS: u32 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
     | JOB_OBJECT_LIMIT_JOB_MEMORY;
 
-fn os(step: &'static str) -> SandboxError {
+// The `PROCESS_CREATION_MITIGATION_POLICY_*_ALWAYS_ON` bits, from WinBase.h of the Windows SDK (10.0.26100); windows-sys
+// 0.61 does not carry them. All eight are in the attribute's first 64-bit word.
+const STRICT_HANDLE_CHECKS_ALWAYS_ON: u64 = 1 << 24;
+const WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON: u64 = 1 << 28;
+const EXTENSION_POINT_DISABLE_ALWAYS_ON: u64 = 1 << 32;
+const PROHIBIT_DYNAMIC_CODE_ALWAYS_ON: u64 = 1 << 36;
+const BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON: u64 = 1 << 44;
+const IMAGE_LOAD_NO_REMOTE_ALWAYS_ON: u64 = 1 << 52;
+const IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON: u64 = 1 << 56;
+const IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON: u64 = 1 << 60;
+
+/// The creation attribute's word for a profile's mitigations.
+fn creation_mitigations(wanted: Mitigations) -> u64 {
+    [
+        (wanted.no_window_system_calls, WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON),
+        (wanted.no_remote_images, IMAGE_LOAD_NO_REMOTE_ALWAYS_ON),
+        (wanted.no_low_label_images, IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON),
+        (wanted.prefer_system32_images, IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON),
+        (wanted.no_extension_points, EXTENSION_POINT_DISABLE_ALWAYS_ON),
+        (wanted.no_dynamic_code, PROHIBIT_DYNAMIC_CODE_ALWAYS_ON),
+        (wanted.strict_handle_checks, STRICT_HANDLE_CHECKS_ALWAYS_ON),
+        (wanted.microsoft_signed_only, BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON),
+    ]
+    .iter()
+    .filter(|(on, _)| *on)
+    .fold(0, |word, (_, bit)| word | bit)
+}
+
+pub(crate) fn os(step: &'static str) -> SandboxError {
     // SAFETY: reads the calling thread's last-error value; no pointer is involved.
     SandboxError::Os {
         step,
@@ -125,18 +167,44 @@ fn os(step: &'static str) -> SandboxError {
 }
 
 /// Takes ownership of a handle the system just returned.
-fn owned(handle: HANDLE) -> OwnedHandle {
+pub(crate) fn owned(handle: HANDLE) -> OwnedHandle {
     // SAFETY: every caller passes a handle that a system call returned as open and that nothing else owns; it is
     // closed exactly once, by the returned value.
     unsafe { OwnedHandle::from_raw_handle(handle) }
 }
 
-/// A confined helper: its process handle and its job. Dropping it ends the helper.
+/// A confined helper: its process handle, its job and its memory watch. Dropping it ends the helper.
 #[derive(Debug)]
 pub(crate) struct ChildInner {
     process: OwnedHandle,
     job: OwnedHandle,
     pid: u32,
+    /// The bytes of the sections granted to this helper that are still alive in the app (`crate::GrantedTo`).
+    granted: Arc<AtomicU64>,
+    /// Set by the memory watch before it ends the helper.
+    killed_for_memory: Arc<AtomicBool>,
+    /// Started right before the helper runs.
+    watch: Option<Watch>,
+}
+
+/// Ends a helper: its job first (every process in it), then the process. Fine on a helper that already ended. The
+/// one path of `Child::kill`, of dropping a `Child` and of the memory watch.
+pub(crate) fn end(process: &OwnedHandle, job: &OwnedHandle) -> Result<(), SandboxError> {
+    // SAFETY: `job` is an open job handle. Ends every process in the job.
+    let job_ended = unsafe { TerminateJobObject(job.as_raw_handle(), KILLED_EXIT_CODE) } != 0;
+    // SAFETY: `process` is an open process handle.
+    let process_ended = unsafe { TerminateProcess(process.as_raw_handle(), KILLED_EXIT_CODE) } != 0;
+    if job_ended || process_ended {
+        return Ok(());
+    }
+    let failure = os("kill");
+    // Both calls fail on a process that has already ended: that is not an error.
+    // SAFETY: `process` is an open process handle; a zero wait only asks.
+    if unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_OBJECT_0 {
+        Ok(())
+    } else {
+        Err(failure)
+    }
 }
 
 impl ChildInner {
@@ -165,19 +233,15 @@ impl ChildInner {
     }
 
     pub(crate) fn kill(&self) -> Result<(), SandboxError> {
-        // SAFETY: `job` is an open job handle owned by `self`. Ends every process in the job.
-        let job_ended = unsafe { TerminateJobObject(self.job.as_raw_handle(), KILLED_EXIT_CODE) } != 0;
-        // SAFETY: `process` is an open process handle owned by `self`.
-        let process_ended = unsafe { TerminateProcess(self.process.as_raw_handle(), KILLED_EXIT_CODE) } != 0;
-        if job_ended || process_ended {
-            return Ok(());
-        }
-        let failure = os("kill");
-        // Both calls fail on a process that has already ended: that is not an error.
-        match self.wait(Duration::ZERO) {
-            Ok(Some(_)) => Ok(()),
-            _ => Err(failure),
-        }
+        end(&self.process, &self.job)
+    }
+
+    pub(crate) fn granted_bytes(&self) -> &Arc<AtomicU64> {
+        &self.granted
+    }
+
+    pub(crate) fn killed_for_memory(&self) -> bool {
+        self.killed_for_memory.load(Ordering::SeqCst)
     }
 }
 
@@ -185,6 +249,10 @@ impl Drop for ChildInner {
     fn drop(&mut self) {
         // The job handle closes right after this and would end the helper too; killing first leaves no window.
         let _ = self.kill();
+        // The helper is ending, so the watch's wait returns at once; its thread is joined before the handles close.
+        if let Some(watch) = &mut self.watch {
+            watch.finish();
+        }
     }
 }
 
@@ -515,7 +583,7 @@ impl Drop for Container {
 
 /// The capability identifiers of one [`Profile`], derived by the system from the profile's names. Everything the
 /// system allocated for them is freed when this is dropped, after the helper's token was read back.
-struct CapabilitySids {
+pub(crate) struct CapabilitySids {
     /// One enabled entry per capability, in the profile's order.
     granted: Vec<SID_AND_ATTRIBUTES>,
     /// Every allocation of the system's: each identifier, then each array that held them. Freed once.
@@ -523,7 +591,7 @@ struct CapabilitySids {
 }
 
 impl CapabilitySids {
-    fn of(profile: Profile) -> Result<Self, SandboxError> {
+    pub(crate) fn of(profile: Profile) -> Result<Self, SandboxError> {
         let mut sids = Self {
             granted: Vec::new(),
             allocations: Vec::new(),
@@ -586,7 +654,7 @@ impl CapabilitySids {
         self.granted.len() as u32
     }
 
-    fn identifiers(&self) -> Vec<PSID> {
+    pub(crate) fn identifiers(&self) -> Vec<PSID> {
         self.granted.iter().map(|entry| entry.Sid).collect()
     }
 }
@@ -851,83 +919,16 @@ fn directory(
     Ok(buffer)
 }
 
-/// Reads the confinement back from the new, still suspended process: in the job, an AppContainer, and holding
-/// exactly the capabilities in `expected`.
-fn confirm_confined(process: &OwnedHandle, job: &OwnedHandle, expected: &CapabilitySids) -> Result<(), SandboxError> {
-    let mut in_job = 0i32;
-    // SAFETY: both handles are open; `in_job` is a valid place for the answer.
-    if unsafe { IsProcessInJob(process.as_raw_handle(), job.as_raw_handle(), &mut in_job) } == 0 {
-        return Err(os("job membership"));
-    }
-    if in_job == 0 {
-        return Err(SandboxError::NotConfined("not in the job"));
-    }
-
-    let mut raw: HANDLE = null_mut();
-    // SAFETY: `process` is open with full access; `raw` receives a new handle.
-    if unsafe { OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut raw) } == 0 {
-        return Err(os("helper token"));
-    }
-    let token = owned(raw);
-
-    let mut is_container = 0u32;
-    let mut returned = 0u32;
-    // SAFETY: `is_container` is writable for the 4 bytes this class returns.
-    if unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenIsAppContainer,
-            (&raw mut is_container).cast(),
-            4,
-            &mut returned,
-        )
-    } == 0
-    {
-        return Err(os("container read-back"));
-    }
-    if is_container == 0 {
-        return Err(SandboxError::NotConfined("not an AppContainer"));
-    }
-
-    // The answer is a count followed by that many identifier-and-attributes entries whose identifiers point into the
-    // same buffer; with no capability it is a count of zero. 4 KiB, pointer-aligned: room for far more than the five
-    // capabilities a profile has (about 60 bytes each).
-    let mut capabilities = [0u64; 512];
-    // SAFETY: the buffer is writable for the length passed and aligned for the structure.
-    let ok = unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenCapabilities,
-            capabilities.as_mut_ptr().cast(),
-            size_of_val(&capabilities) as u32,
-            &mut returned,
-        )
-    };
-    if ok == 0 {
-        return Err(os("capabilities read-back"));
-    }
-    let groups = capabilities.as_ptr().cast::<TOKEN_GROUPS>();
-    // SAFETY: the call succeeded, so the buffer starts with the structure; the count is read, not trusted (below).
-    let count = unsafe { (*groups).GroupCount } as usize;
-    let room =
-        (size_of_val(&capabilities) - std::mem::offset_of!(TOKEN_GROUPS, Groups)) / size_of::<SID_AND_ATTRIBUTES>();
-    if count > room {
-        return Err(SandboxError::NotConfined("the capability read-back does not fit"));
-    }
-    // SAFETY: `count` entries follow the count inside the buffer (checked against its room above); each identifier
-    // points into the same buffer, which lives until the comparison below is done.
-    let held: Vec<PSID> = unsafe {
-        let entries = (&raw const (*groups).Groups).cast::<SID_AND_ATTRIBUTES>();
-        (0..count).map(|index| (*entries.add(index)).Sid).collect()
-    };
-    let equal = |a: &PSID, b: &PSID| {
-        // SAFETY: both are valid identifiers: one from the read-back buffer above, one derived by the system.
-        unsafe { EqualSid(*a, *b) != 0 }
-    };
-    if !same_members(&held, &expected.identifiers(), equal) {
-        return Err(SandboxError::NotConfined("holds other capabilities than its profile's"));
-    }
-    Ok(())
+/// Reads the confinement back from the new, still suspended process and judges it against `profile`: in the job, an
+/// AppContainer holding exactly the capabilities in `expected`, less-privileged, at low integrity, under every
+/// mitigation of the profile (`crate::check_facts`).
+fn confirm_confined(
+    process: &OwnedHandle,
+    job: &OwnedHandle,
+    expected: &CapabilitySids,
+    profile: Profile,
+) -> Result<(), SandboxError> {
+    check_facts(&read_facts(process, job, expected)?, profile)
 }
 
 /// `launch` is the app's launch lock, taken by the caller before anything here: between "the pipe ends are
@@ -965,14 +966,16 @@ pub(crate) fn spawn(
         Reserved: 0,
     }];
     let packages_policy = [ALL_APPLICATION_PACKAGES_OPT_OUT];
+    let mitigation_policy = [creation_mitigations(profile.mitigations())];
     let inherited: [HANDLE; 2] = [helper_stdin.as_raw_handle(), helper_stdout.as_raw_handle()];
     let jobs: [HANDLE; 1] = [job.as_raw_handle()];
 
-    let mut attributes = AttributeList::new(4)?;
+    let mut attributes = AttributeList::new(5)?;
     attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
     attributes.set(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &packages_policy)?;
     attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inherited)?;
     attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs)?;
+    attributes.set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &mitigation_policy)?;
 
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
@@ -1021,15 +1024,28 @@ pub(crate) fn spawn(
     }
 
     // From here every early return drops `child`, which ends the suspended process.
-    let child = ChildInner {
+    let mut child = ChildInner {
         process: owned(created.hProcess),
         job,
         pid: created.dwProcessId,
+        granted: Arc::new(AtomicU64::new(0)),
+        killed_for_memory: Arc::new(AtomicBool::new(false)),
+        watch: None,
     };
     let thread = owned(created.hThread);
     // The helper has not run yet. Its profile folder goes now; if it cannot be removed, the helper never runs.
     container.unregister()?;
-    confirm_confined(&child.process, &child.job, &granted)?;
+    confirm_confined(&child.process, &child.job, &granted, profile)?;
+    // A Windows that cannot report the helper's shared commit cannot watch it: the helper never runs there.
+    commit(child.process.as_raw_handle())?;
+    let watch = Watch::start(
+        &child.process,
+        &child.job,
+        limits.memory_bytes,
+        Arc::clone(&child.granted),
+        Arc::clone(&child.killed_for_memory),
+    )?;
+    child.watch = Some(watch);
     // SAFETY: `thread` is the open handle of the helper's suspended first thread.
     if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
         return Err(os("resume"));
