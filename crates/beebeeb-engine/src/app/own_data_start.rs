@@ -397,7 +397,7 @@ impl<C: CredentialStores> Engine<C> {
                 return ProofStop::Ended;
             }
             tracing::warn!("ownership proof: a stopped proof did not end in time");
-            drop(alive);
+            lock(&seat.state).unconfirmed.append(&mut alive);
             ProofStop::Unconfirmed
         }
         #[cfg(not(any(target_os = "windows", test, feature = "test-support")))]
@@ -410,12 +410,7 @@ impl<C: CredentialStores> Engine<C> {
     fn a_stopped_proof_is_alive(&self) -> bool {
         let seat = self.own_data_seat();
         let mut state = lock(&seat.state);
-        state.unconfirmed.retain_mut(|proof| {
-            matches!(
-                proof.ended.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-            )
-        });
+        state.unconfirmed.retain_mut(|_proof| true);
         !state.unconfirmed.is_empty()
     }
 
