@@ -353,7 +353,7 @@ impl AppMachine {
     }
 
     /// The sign-in window asks to stay in front of an open gate until the person leaves its screen
-    /// (`frames::signin::Ui::holds_open_gate`). Only an open gate is held; every other gate decides alone.
+    /// (`frames::signin::Ui::holds_open_gate`). Only an open gate is held (Ready, or the first run of a new PC, which DW-A08 comes before); every other gate decides alone.
     pub fn hold_sign_in(&mut self, hold: bool) -> bool {
         let changed = self.sign_in_hold != hold;
         self.sign_in_hold = hold;
@@ -363,7 +363,7 @@ impl AppMachine {
     pub fn screen(&self) -> Screen {
         match self.gate {
             GateState::SignedOut => Screen::SignIn,
-            GateState::Ready if self.sign_in_hold => Screen::SignIn,
+            GateState::Ready | GateState::FirstRun if self.sign_in_hold => Screen::SignIn,
             GateState::Ready => match self.settings {
                 Some(pane) => Screen::Settings(pane),
                 None => Screen::Drive(self.current.clone()),

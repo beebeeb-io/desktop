@@ -51,3 +51,34 @@ fn the_shell_keeps_the_sign_in_window_over_an_open_gate_only_while_it_asks() {
     locked.hold_sign_in(true);
     assert_eq!(locked.screen(), Shown::Gate(GateState::Locked));
 }
+
+/// Mutant: drop `GateState::FirstRun` from the `follow_gate` hold arm (a new PC's approval is reset to the form).
+#[test]
+fn on_a_new_pc_the_approval_is_seen_before_the_first_run() {
+    let mut ui = waiting();
+    ui.follow_gate(GateState::FirstRun);
+    assert_eq!(
+        ui.screen,
+        Screen::Device { expired: false },
+        "the waiting request is not dropped"
+    );
+    ui.apply(SignInEvent::Device(DeviceStatus::Approved {
+        by: "another device".into(),
+    }));
+    ui.follow_gate(GateState::FirstRun);
+    assert!(matches!(ui.screen, Screen::Approved { .. }));
+    assert!(ui.holds_open_gate());
+    ui.open_drive();
+    assert!(ui.take_intents().contains(&Intent::Next(NextAfterSignIn::Drive)));
+}
+
+/// Mutant: drop `GateState::FirstRun` from the `screen` hold arm in `shell/app.rs`.
+#[test]
+fn the_shell_holds_the_sign_in_window_over_the_first_run_gate_too() {
+    let mut app = AppMachine::for_session(Session::of(GateState::FirstRun, "user-a"));
+    assert_eq!(app.screen(), Shown::Gate(GateState::FirstRun));
+    app.hold_sign_in(true);
+    assert_eq!(app.screen(), Shown::SignIn);
+    app.hold_sign_in(false);
+    assert_eq!(app.screen(), Shown::Gate(GateState::FirstRun));
+}
