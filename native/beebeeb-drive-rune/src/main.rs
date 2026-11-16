@@ -25,6 +25,9 @@
 // Debug builds retain the console subsystem for developer convenience.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(test)]
+#[path = "../build_version.rs"]
+mod build_version;
 mod engine_host;
 #[cfg(feature = "feedback")]
 mod feedback;
