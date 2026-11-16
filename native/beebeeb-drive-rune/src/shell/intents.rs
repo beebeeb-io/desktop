@@ -6,6 +6,11 @@
 //! generic [`pick_folder_for`], whose answer goes back to the section that asked ([`FolderFor`]); the rest are logged.
 //! The picker is modeless (the window stays usable while it is open), so its answer is handed over only for the session
 //! of the press: one that changed while it was open (a lock, a sign-out, another account) drops it.
+//! And what comes from outside the window under the away lock's wake cover (`host::under_the_wake_cover`: the engine has
+//! not said whether the wake locks; review of #464, P3-1): the picker's folder, and an ask to show a place (a
+//! `beebeeb://` link, the b's Settings…, the flyout: `host::request`). Each waits, and goes on once the cover is gone,
+//! checked again ([`after_the_cover`]); a lock, a sign-out or another account drops it, as File Explorer's verbs do
+//! (`platform::windows_verbs`, P3-7). Nothing waits for after an unlock.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -14,9 +19,10 @@ use std::time::Duration;
 
 use rune::Tx;
 
+use super::app::{GateState, Intent as Ask};
 use super::host::log;
 use super::platform::{Platform, PlatformError};
-use super::{session_gate, web_pages};
+use super::{registry, session_gate, web_pages};
 use crate::State;
 use crate::frames::settings::Intent;
 
@@ -87,9 +93,28 @@ struct Picking {
     answer: mpsc::Receiver<PickAnswer>,
 }
 
+/// A folder picked while the window was under the wake cover, for the session of the press.
+struct HeldFolder {
+    asker: FolderFor,
+    /// The press's account (`Picking::account`).
+    account: String,
+    folder: PathBuf,
+}
+
+/// An ask to show a place (`host::request`) that came while the window was under the wake cover, with the account the
+/// window showed then.
+struct HeldAsk {
+    ask: Ask,
+    account: Option<String>,
+}
+
 thread_local! {
     /// The one picker open from this window's thread (the window's loop runs on one thread).
     static PICKING: RefCell<Option<Picking>> = const { RefCell::new(None) };
+    /// The picker's folder that waits for the wake cover's end. One: one picker is open at a time.
+    static HELD_FOLDER: RefCell<Option<HeldFolder>> = const { RefCell::new(None) };
+    /// The ask to show a place that waits for the wake cover's end. One: a later ask replaces it.
+    static HELD_ASK: RefCell<Option<HeldAsk>> = const { RefCell::new(None) };
 }
 
 /// How often the poll looks for the picker's answer while it is open.
@@ -147,8 +172,9 @@ pub fn pick_folder_with(s: &State, asker: FolderFor, pick: impl FnOnce() -> Pick
 /// The open picker's answer, once it came: the folder goes to the section that asked, for the session of the press;
 /// closed without one, nothing changes; a picker that did not open is logged in the platform's own words (no path is
 /// in them). While it is still open the poll looks again soon. Every poll first compares the session with the
-/// press's: once it differed, the folder is dropped (never handed to the section, never asked of the engine). `true`:
-/// an answer was taken. The folder itself is never logged.
+/// press's: once it differed, the folder is dropped (never handed to the section, never asked of the engine). A folder
+/// that comes under the wake cover waits for the cover's end ([`after_the_cover`]). `true`: an answer was taken. The
+/// folder itself is never logged.
 pub fn take_picked_folder(s: &mut State, tx: &mut Tx) -> bool {
     if !a_folder_picker_is_open() {
         return false;
@@ -167,15 +193,23 @@ pub fn take_picked_folder(s: &mut State, tx: &mut Tx) -> bool {
                 tx.wake_after(PICKER_POLL);
                 None
             }
-            got => picking.take().map(|open| (open.asker, open.session_changed, got.ok())),
+            got => picking
+                .take()
+                .map(|open| (open.asker, open.account, open.session_changed, got.ok())),
         }
     });
-    let Some((asker, session_changed, answer)) = answered else {
+    let Some((asker, account, session_changed, answer)) = answered else {
         return false;
     };
     match answer {
         Some(Ok(Some(_))) if session_changed => {
             log("a picked folder was dropped: the session changed while the picker was open")
+        }
+        // Under the wake cover the engine has not said whether the wake locks: nothing is added behind it. The
+        // folder waits for the cover's end (review of #464, P3-1).
+        Some(Ok(Some(folder))) if super::host::under_the_wake_cover(s) => {
+            HELD_FOLDER.set(Some(HeldFolder { asker, account, folder }));
+            log("a picked folder waits for the lock screen");
         }
         Some(Ok(Some(folder))) => hand_folder(s, asker, &folder),
         Some(Ok(None)) => {}
@@ -198,6 +232,79 @@ fn hand_folder(s: &mut State, asker: FolderFor, folder: &Path) {
             None => log("the picked folder's name is not text this app can pass on"),
         },
     }
+}
+
+/// `host::request` under the wake cover: the ask waits for the cover's end ([`after_the_cover`]), with the account the
+/// window shows now. One waits: a later ask replaces it.
+pub(super) fn hold_under_the_cover(s: &State, ask: Ask) {
+    let account = s.shell.app.account().map(str::to_owned);
+    HELD_ASK.set(Some(HeldAsk { ask, account }));
+    log("an ask to show a place waits for the lock screen");
+}
+
+/// The main window's poll, right after the away lock's (`host::poll_screen`): what waited under the wake cover goes on
+/// once the cover is gone, checked again as it came. The session is compared first: a lock (the cover became the
+/// lock), a sign-out, an ended session or another account drops it, so nothing is kept for after an unlock. `true`:
+/// something went on or was dropped.
+pub(crate) fn after_the_cover(s: &mut State) -> bool {
+    let folder = release_the_folder(s);
+    let ask = release_the_ask(s);
+    folder | ask
+}
+
+/// The folder that waited goes to the section that asked, for the press's session only.
+fn release_the_folder(s: &mut State) -> bool {
+    // Every poll comes here: nothing waits, nothing to read.
+    let Some(account) = HELD_FOLDER.with_borrow(|held| held.as_ref().map(|held| held.account.clone())) else {
+        return false;
+    };
+    // Before the cover: a lock takes the cover away too (the lock screen is not the cover), and must not hand it over.
+    if !(session_gate::open(s) && s.shell.app.account() == Some(account.as_str())) {
+        HELD_FOLDER.set(None);
+        log("a picked folder that waited was dropped: the window locked, signed out or shows another account");
+        return true;
+    }
+    if registry::covered(s) {
+        return false;
+    }
+    let Some(held) = HELD_FOLDER.take() else {
+        return false;
+    };
+    hand_folder(s, held.asker, &held.folder);
+    true
+}
+
+/// The ask that waited goes to the route machine, as it came (`host::dispatch`; the window came forward already).
+fn release_the_ask(s: &mut State) -> bool {
+    let Some(account) = HELD_ASK.with_borrow(|held| held.as_ref().map(|held| held.account.clone())) else {
+        return false;
+    };
+    let same_account = account.is_some() && s.shell.app.account() == account.as_deref();
+    if !(same_account && under_an_open_gate(s)) {
+        HELD_ASK.set(None);
+        log("an ask to show a place that waited was dropped: the window locked, signed out or shows another account");
+        return true;
+    }
+    if registry::covered(s) {
+        return false;
+    }
+    let Some(held) = HELD_ASK.take() else {
+        return false;
+    };
+    super::host::dispatch(s, super::app::Event::Request(held.ask));
+    true
+}
+
+/// The window's session, as the engine has it now, is still open under one of the gates the wake cover lies over
+/// (`registry::covered`: Ready, the first run, no plan) for the account the window shows: not locked, signed out or
+/// ended.
+fn under_an_open_gate(s: &State) -> bool {
+    let open = |gate| matches!(gate, GateState::Ready | GateState::FirstRun | GateState::NoPlan);
+    let session = s.shell.actions.session();
+    open(s.shell.app.gate())
+        && open(session.gate)
+        && !s.session_ended()
+        && session.account.as_deref() == s.shell.app.account()
 }
 
 /// Where the picker opens: this PC's user folder (the person's own folders are in it); without one, where Windows
@@ -287,6 +394,16 @@ pub(super) fn open_for_signin(address: &str) {
     }
 }
 
+/// Tests only: a picked folder waits for the wake cover's end.
+#[cfg(test)]
+pub(crate) fn a_picked_folder_waits() -> bool {
+    HELD_FOLDER.with_borrow(Option::is_some)
+}
+
 #[cfg(test)]
 #[path = "intents_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "intents_cover_tests.rs"]
+mod cover_tests;

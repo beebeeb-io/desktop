@@ -464,9 +464,24 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     outcome
 }
 
+/// Something from outside the window comes under the wake cover (`registry::covered`): the engine has not said whether
+/// the wake locks. A gap the main window's poll has not found yet (an unannounced wake) is covered first, as for a click
+/// on the b (P3-15), so what comes between the wake and that poll waits too. Asked where such an input acts: a picked
+/// folder (`intents`), an ask to show a place ([`request`]), File Explorer's verbs (`windows_verbs`).
+pub(crate) fn under_the_wake_cover(s: &mut State) -> bool {
+    s.shell.away.cover_a_gap_not_yet_found();
+    registry::covered(s)
+}
+
 /// Something outside the main window asks it to show a place. It is kept while the gate is
-/// closed; the window comes forward either way.
+/// closed; the window comes forward either way. Under the wake cover it waits for the cover's end
+/// (`intents::after_the_cover`): nothing is navigated, read or closed behind it (review of #464, P3-1).
 pub fn request(s: &mut State, intent: Intent) -> Outcome {
+    if under_the_wake_cover(s) {
+        super::intents::hold_under_the_cover(s, intent);
+        s.shell.open_main();
+        return Outcome::Deferred;
+    }
     let outcome = dispatch(s, Event::Request(intent));
     s.shell.open_main();
     outcome
@@ -624,6 +639,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     {
         changed |= super::platform::windows_verbs::after_the_cover(s, tx);
     }
+    // The same for a picked folder and an ask to show a place (`intents`, review of #464, P3-1).
+    changed |= super::intents::after_the_cover(s);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
