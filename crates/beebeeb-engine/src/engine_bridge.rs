@@ -21,7 +21,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -295,6 +294,7 @@ mod tests {
     mod versions;
     mod versions_2;
     mod versions_3;
+    mod video_frame;
     // Chunk format v2 (core 0.3.0): write then read, the completion name, resume, capabilities.
     mod format_v2;
     // rusqlite 0.41: a state database and a file of release 0.8.25, read by this build.
