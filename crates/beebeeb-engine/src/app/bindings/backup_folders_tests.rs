@@ -950,7 +950,7 @@ fn a_known_folder_is_not_switched_on_over_a_chosen_folder_that_is_backed_up() {
     assert_eq!(
         refused.words(),
         "This folder holds Projects, which is backed up already. Stop backing up Projects first, so nothing is \
-         backed up twice. Nothing was changed."
+         backed up twice."
     );
     // A chosen folder that holds Documents blocks it too.
     let everything = chosen("Home", home.clone());
@@ -975,8 +975,7 @@ fn a_known_folder_is_not_switched_on_over_a_chosen_folder_that_is_backed_up() {
     );
     assert_eq!(
         refused.words(),
-        "This folder is inside Documents, which is backed up already, so its files are in that backup. Nothing was \
-         changed."
+        "This folder is inside Documents, which is backed up already, so its files are in that backup."
     );
 
     // Another account's folder, or an untagged one, inside Documents: never compared, never named.

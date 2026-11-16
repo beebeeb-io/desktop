@@ -35,6 +35,9 @@ struct Fake {
     run_requests: Mutex<u32>,
     /// Sync runs (a runner exists to take a pass).
     syncing: AtomicBool,
+    /// What `nested_words` answers, and the keys it was asked for.
+    nested: Mutex<Option<String>>,
+    nested_asked: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -53,6 +56,8 @@ impl Fake {
             requested: AtomicBool::new(false),
             run_requests: Mutex::new(0),
             syncing: AtomicBool::new(true),
+            nested: Mutex::new(None),
+            nested_asked: Mutex::new(Vec::new()),
         })
     }
 
@@ -105,6 +110,10 @@ impl BackupsEngine for Fake {
     fn request_pass(&self) {
         *self.run_requests.lock().unwrap() += 1;
         self.requested.store(true, Ordering::SeqCst);
+    }
+    fn nested_words(&self, key: &str) -> Option<String> {
+        self.nested_asked.lock().unwrap().push(key.into());
+        self.nested.lock().unwrap().clone()
     }
 }
 
@@ -371,6 +380,37 @@ fn a_refused_switch_is_said_through_pump() {
     let pumped = settle(&mut source);
     assert_eq!(pumped.refusal, Some(NOT_SWITCHED));
     assert_eq!(fake.switches.lock().unwrap().len(), 1);
+}
+
+/// P3-3: a switch the engine refuses because it would back a folder up twice says the engine's words, which name the
+/// other folder, instead of the fixed sentence. With no words (nothing nests with it any more when they are read), or
+/// for any other refusal, the fixed sentence stays, and only a nested refusal asks for words.
+#[test]
+fn a_switch_refused_as_nested_names_the_other_folder() {
+    const NAMED: &str = "This folder holds Projects, which is backed up already. Stop backing up Projects first, so \
+                         nothing is backed up twice.";
+    let fake = Fake::new();
+    let mut source = EngineBackupsSource::new(fake.clone());
+    settle(&mut source);
+    *fake.switch_answer.lock().unwrap() = Err(BackupsError::Nested);
+    *fake.nested.lock().unwrap() = Some(NAMED.into());
+    source.set_folder("music", true);
+    assert_eq!(settle(&mut source).refusal, Some(NAMED));
+    assert_eq!(fake.nested_asked.lock().unwrap().as_slice(), ["music"]);
+
+    *fake.nested.lock().unwrap() = None;
+    source.set_folder("music", true);
+    assert_eq!(settle(&mut source).refusal, Some(NOT_SWITCHED));
+
+    *fake.switch_answer.lock().unwrap() = Err(BackupsError::Settings);
+    *fake.nested.lock().unwrap() = Some(NAMED.into());
+    source.set_folder("music", true);
+    assert_eq!(settle(&mut source).refusal, Some(NOT_SWITCHED));
+    assert_eq!(
+        fake.nested_asked.lock().unwrap().len(),
+        2,
+        "another refusal asks for no words"
+    );
 }
 
 #[test]
