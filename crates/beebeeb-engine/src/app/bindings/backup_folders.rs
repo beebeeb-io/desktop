@@ -296,23 +296,34 @@ pub fn visible_to(chosen: &[ChosenFolder], asker: &Identity, bound: bool) -> Vec
 /// rule: at that account's first start); a write that fails is tried again on the next tick, and they are passed
 /// meanwhile. A state with no owner recorded: nothing.
 pub fn runner_chosen(identity: &'static EngineIdentity, db: &StateDb, config: &DesktopConfig) -> Vec<ChosenFolder> {
+    chosen_taking_in(db, config, |bound| {
+        DesktopConfig::update_for(identity, |config| {
+            let count = adopt_untagged(&mut config.backup_chosen_folders, bound);
+            (count > 0, count)
+        })
+        .ok()
+    })
+}
+
+/// [`runner_chosen`] with the settings file's write handed in (the engine's: `DesktopConfig::update_for`; a test's: a
+/// value). `write` is asked only when there is something to take in, for the bound owner alone; it answers how many it
+/// wrote, `None` when the write failed.
+pub fn chosen_taking_in(
+    db: &StateDb,
+    config: &DesktopConfig,
+    write: impl FnOnce(&Identity) -> Option<usize>,
+) -> Vec<ChosenFolder> {
     let bound = db.owner().ok().flatten();
     let (passed, adopted) = passed_for(&config.backup_chosen_folders, bound.as_ref());
     if adopted > 0
         && let Some(bound) = bound.as_ref()
     {
-        let written = DesktopConfig::update_for(identity, |config| {
-            let count = adopt_untagged(&mut config.backup_chosen_folders, bound);
-            (count > 0, count)
-        });
-        match written {
-            Ok(count) => tracing::info!(
+        match write(bound) {
+            Some(count) => tracing::info!(
                 count,
                 "backups: chosen folders from an earlier version were taken in by the account of the local data"
             ),
-            Err(_) => {
-                tracing::warn!("backups: chosen folders from an earlier version could not be written as taken in")
-            }
+            None => tracing::warn!("backups: chosen folders from an earlier version could not be written as taken in"),
         }
     }
     passed

@@ -785,3 +785,42 @@ fn with_no_layout_a_new_name_skips_every_devices_backup_names() {
     let key = add_to(&mut config, &projects, &backup_folder_names(&db).unwrap(), &me()).unwrap();
     assert_eq!(key, "custom:Projects (2)", "the kept Projects is never written into");
 }
+
+/// P3-8, the lead's amendment: an untagged folder (written before folders were per account) keeps backing up for the
+/// owner this PC's local data is bound to, and the settings file then holds that owner's tag (taken in once); with no
+/// owner recorded nothing is passed and nothing is written. The settings file is a value here.
+#[test]
+fn an_untagged_folder_is_taken_in_and_written_by_the_bound_owner_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let earlier = ChosenFolder {
+        owner: None,
+        ..chosen("Letters", dir.path().join("Letters"))
+    };
+    let file = RefCell::new(settings_with(&[&earlier]));
+    let write = |bound: &Identity| {
+        let count = adopt_untagged(&mut file.borrow_mut().backup_chosen_folders, bound);
+        Some(count)
+    };
+
+    let a = tempfile::tempdir().unwrap();
+    let mine = owned_db(a.path());
+    let snapshot = file.borrow().clone();
+    let passed = chosen_taking_in(&mine, &snapshot, write);
+    assert_eq!(passed.len(), 1, "kept backing up for the bound owner");
+    assert_eq!(passed[0].owner, owner_tag(&me()));
+    assert_eq!(
+        file.borrow().backup_chosen_folders[0].owner,
+        owner_tag(&me()),
+        "the settings file holds the bound owner's tag"
+    );
+    // Taken in once: the next read writes nothing.
+    let snapshot = file.borrow().clone();
+    let again = chosen_taking_in(&mine, &snapshot, |_| panic!("nothing left to take in"));
+    assert_eq!(again, passed);
+
+    // No owner recorded: nothing passed, nothing written.
+    let file = settings_with(&[&earlier]);
+    let c = tempfile::tempdir().unwrap();
+    let unowned = StateDb::open(c.path().join("state.db")).unwrap();
+    assert!(chosen_taking_in(&unowned, &file, |_| panic!("no bound owner takes anything in")).is_empty());
+}
