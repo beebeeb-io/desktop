@@ -277,3 +277,41 @@ fn a_finished_check_keeps_the_rows_in_view_where_they_were_when_rows_land_above(
         now[1]
     );
 }
+
+/// Every finished check reaches Shared, This PC and Trash (and Photos' own rule): each is asked to read again, and an
+/// open menu holds it. Their sources here are the board's, which read nothing: the due flag is what shows it.
+#[test]
+fn a_finished_check_asks_shared_this_pc_and_trash_to_read_again_and_a_menu_holds_it() {
+    use crate::frames::shared::parts::menu::Open;
+    let shelf = Elsewhere::with(&["m-1.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    rt.update(|s, _| {
+        s.frames.shared.menu = Some(Open::at(1.0, 1.0));
+        s.frames.trash.menu = Some(Open::at(1.0, 1.0));
+        s.this_pc.menu = Some(crate::frames::this_pc::RowMenu {
+            row: 0,
+            at: (1.0, 1.0),
+            hot: 0,
+        });
+    });
+    a_check_finishes(&engine, &mut rt);
+    let due = |rt: &Runtime<State>| {
+        (
+            rt.state.frames.shared.reread_due,
+            rt.state.this_pc.reread_due,
+            rt.state.frames.trash.reread_due,
+        )
+    };
+    assert_eq!(due(&rt), (true, true, true), "asked, and held by the open menus");
+    rt.update(|s, _| {
+        s.frames.shared.menu = None;
+        s.frames.trash.menu = None;
+        s.this_pc.menu = None;
+    });
+    settle(&mut rt);
+    assert_eq!(
+        due(&rt),
+        (false, false, false),
+        "read on the first poll after they closed"
+    );
+}

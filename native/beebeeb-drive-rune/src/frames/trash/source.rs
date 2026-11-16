@@ -103,6 +103,9 @@ pub trait TrashSource {
     }
     /// The Trash section opened: read the list if it is missing or old. Trash is on screen from here on.
     fn opened(&mut self) {}
+    /// A sync check finished: the list may have changed. A source that reads late reads it again when it holds one;
+    /// otherwise the next opening reads.
+    fn refresh(&mut self) {}
     /// Whether the Trash section is on screen: the window's poll says so each time, before [`TrashSource::pump`].
     /// Words kept for later (a restore that a lock or a sign-out cut) are handed out only while it is, so they are
     /// never given to a window that shows something else (and wiped there when Trash opens).

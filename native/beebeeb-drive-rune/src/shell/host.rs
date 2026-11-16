@@ -608,6 +608,10 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // Photos reads its library again once a check finished (`frames::photos::after_a_check`).
     if s.shell.check_finished {
         crate::frames::photos::after_a_check(s);
+        // Shared, This PC and Trash read their lists again too, each on the first poll with nothing open over it.
+        crate::frames::shared::after_a_check(s);
+        crate::frames::this_pc::after_a_check(s);
+        crate::frames::trash::after_a_check(s);
     }
     // The folder shown, read again once a check finished: the first sync's files (R1.1), and what arrived since.
     changed |= read_again_after_a_check(s, tx);

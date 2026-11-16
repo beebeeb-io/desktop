@@ -132,6 +132,8 @@ pub struct Ui {
     /// The section of this group that was on screen at the last poll: arriving at one, also from the other, is an
     /// opening.
     was_open: Option<Section>,
+    /// A sync check finished and the lists are to be read again: waits while a menu or an ask is open.
+    pub(crate) reread_due: bool,
 }
 
 /// How long a refusal's toast stays.
@@ -155,6 +157,7 @@ impl Ui {
             sample: false,
             refusal: None,
             was_open: None,
+            reread_due: false,
         }
     }
 
@@ -464,7 +467,25 @@ fn open_kept(s: &mut State, id: &str) -> Option<&'static str> {
 /// frame, for the shell's poll: `true` when the window must draw again. A refusal becomes the window's toast. The
 /// source's part never calls the engine and never waits; a file is shown or opened through the Files source, as
 /// Files' own rows do it.
+/// A sync check finished (`shell::host::poll`): the lists are read again, on the first poll with nothing open over
+/// them.
+pub fn after_a_check(s: &mut State) {
+    s.this_pc.reread_due = true;
+    reread_if_free(s);
+}
+
+/// The read a finished check asked for, when nothing is open over the lists (`after_a_check`, and every poll).
+fn reread_if_free(s: &mut State) {
+    let ready = s.shell.app.gate() == crate::shell::app::GateState::Ready;
+    let ui = &mut s.this_pc;
+    if ui.reread_due && ready && ui.menu.is_none() && !ui.confirm_remove_all && ui.asking.is_none() {
+        ui.reread_due = false;
+        ui.source.refresh();
+    }
+}
+
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    reread_if_free(s);
     let asked = carry_out(s, tx);
     let open = matches!(
         s.shell.app.route().section,
@@ -494,7 +515,29 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         ui.source.opened();
     }
     ui.was_open = here;
+    // The selected kept ITEM and the one a menu is open for, before the lists change under them: a read lands between
+    // polls, and an index would then name another item (the menu would act on it).
+    let kept_ids: Vec<String> = if ui.selected.is_some() || ui.menu.is_some() {
+        ui.source.kept().into_iter().map(|k| k.id).collect()
+    } else {
+        Vec::new()
+    };
+    let chosen = ui.selected.and_then(|i| kept_ids.get(i).cloned());
+    let menu_item = ui.menu.as_ref().and_then(|m| kept_ids.get(m.row).cloned());
     let pumped = ui.source.pump();
+    if pumped.changed && (chosen.is_some() || menu_item.is_some() || ui.selected.is_some() || ui.menu.is_some()) {
+        let now: Vec<String> = ui.source.kept().into_iter().map(|k| k.id).collect();
+        let place = |id: Option<String>| id.and_then(|id| now.iter().position(|have| *have == id));
+        ui.selected = place(chosen);
+        match place(menu_item) {
+            Some(row) => {
+                if let Some(menu) = ui.menu.as_mut() {
+                    menu.row = row;
+                }
+            }
+            None => ui.menu = None,
+        }
+    }
     let mut changed = pumped.changed || asked;
     if let Some(words) = pumped.refusal {
         ui.refusal = Some((words, std::time::Instant::now()));

@@ -31,6 +31,8 @@ struct Script {
     leaves: Vec<PhotoId>,
     /// The next pump says the library changed.
     dirty: bool,
+    /// These leave the library when the source is asked to read again (`refresh`): a finished check brings it.
+    leave_on_refresh: Vec<PhotoId>,
     opened: usize,
     forgot: usize,
     refreshed: usize,
@@ -75,7 +77,13 @@ impl PhotosSource for Later {
         self.script.lock().unwrap().forgot += 1;
     }
     fn refresh(&mut self) {
-        self.script.lock().unwrap().refreshed += 1;
+        let mut script = self.script.lock().unwrap();
+        script.refreshed += 1;
+        let leaving = std::mem::take(&mut script.leave_on_refresh);
+        if !leaving.is_empty() {
+            script.leaves.extend(leaving);
+            script.dirty = true;
+        }
     }
     fn pump(&mut self) -> Pumped {
         let (answered, mut dirty, leaves) = {
@@ -928,4 +936,63 @@ fn move_is_refused_while_the_photos_move_to_trash_is_on_its_way() {
         picker(&mut rt),
         Some(super::super::super::files::dialogs::Purpose::PhotosMove)
     );
+}
+
+/// A finished check brings a change from another device: a photo leaves the library above the tile the keys are on
+/// and the checked ones. Each stays with its PHOTO (an index would name the next one); the one that left is dropped.
+#[test]
+fn a_finished_check_keeps_the_cursor_and_the_checked_photos_with_their_photos() {
+    let (mut rt, script) = window();
+    rt.state.photos.check_tile(0, 3);
+    rt.state.photos.check_tile(0, 5);
+    rt.state.photos.cursor = Some((0, 4));
+    assert_eq!(rt.state.photos.cursor, Some((0, 4)));
+    let (cursor_id, kept) = (id((0, 4)), [id((0, 3)), id((0, 5))]);
+    rt.frame(0.0);
+
+    script.lock().unwrap().leave_on_refresh = vec![id((0, 0))];
+    super::after_a_check(&mut rt.state);
+    rt.frame(0.0);
+    rt.frame(0.0);
+
+    let ui = &rt.state.photos;
+    assert_eq!(
+        ui.selected.keys().copied().collect::<Vec<_>>(),
+        kept,
+        "the checked photos stay checked"
+    );
+    let at = ui.cursor.expect("the cursor stays");
+    assert_eq!(
+        ui.source.photo(ui.filter, at.0, at.1).map(|p| p.id),
+        Some(cursor_id),
+        "the cursor is on its photo: {at:?}"
+    );
+    assert_eq!(at, (0, 3), "one photo left above it");
+}
+
+/// The read of a finished check waits while a menu is open over the grid, and runs on the first poll after it closed.
+#[test]
+fn a_finished_check_waits_while_a_menu_is_open_and_reads_once_it_closed() {
+    let (mut rt, script) = window();
+    rt.state.photos.menu = Some(crate::frames::photos::OpenMenu {
+        which: crate::frames::photos::Menu::Across,
+        hot: None,
+    });
+    let before = script.lock().unwrap().refreshed;
+    super::after_a_check(&mut rt.state);
+    rt.frame(0.0);
+    assert_eq!(
+        script.lock().unwrap().refreshed,
+        before,
+        "nothing is read under an open menu"
+    );
+    rt.state.photos.menu = None;
+    rt.frame(0.0);
+    assert_eq!(
+        script.lock().unwrap().refreshed,
+        before + 1,
+        "read once, after it closed"
+    );
+    rt.frame(0.0);
+    assert_eq!(script.lock().unwrap().refreshed, before + 1, "and only once");
 }

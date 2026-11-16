@@ -64,6 +64,8 @@ pub struct Later {
     trashing: Vec<PhotoId>,
     /// How many answers of a selection's Keep are still to come: their failures are ONE message with a count.
     several: usize,
+    /// A sync check finished and the library is to be read again: waits while a menu or a dialog is open.
+    reread_due: bool,
 }
 
 /// How often the window looks again while something is on its way.
@@ -558,8 +560,18 @@ pub(super) fn status(ui: &Ui, viewing: &Viewing) -> String {
 
 /// A sync check finished (`shell::host::poll`): what this PC knows of the account may have changed.
 pub fn after_a_check(s: &mut State) {
-    if s.shell.app.gate() == GateState::Ready {
-        s.photos.source.refresh();
+    s.photos.later.reread_due = true;
+    reread_if_free(s);
+}
+
+/// The read a finished check asked for, when nothing is open over the library: no menu, no dialog (`after_a_check`,
+/// and every poll: a read that waited runs on the first poll after it closed).
+fn reread_if_free(s: &mut State) {
+    let ready = s.shell.app.gate() == GateState::Ready;
+    let ui = &mut s.photos;
+    if ui.later.reread_due && ready && ui.menu.is_none() && ui.dialog.is_none() {
+        ui.later.reread_due = false;
+        ui.source.refresh();
     }
 }
 
@@ -621,6 +633,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let open = s.sidebar_section == crate::ui::sidebar::SidebarSection::Photos && gate.0 == GateState::Ready;
     // Asked of the shell's gate with the engine as it is now; kept for the presses until the next poll.
     let closed = !crate::shell::session_gate::open(s);
+    reread_if_free(s);
     let ui = &mut s.photos;
     ui.later.closed = closed && ui.source.answers_later();
     let mut changed = false;
@@ -629,6 +642,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             ui.end_session();
             // The section must open again on the next poll so a new read starts.
             ui.later.was_open = false;
+            ui.later.reread_due = false;
             changed = true;
         }
         ui.later.seen = Some(gate);
@@ -642,6 +656,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if later {
         changed |= ui.take_in_intents();
     }
+    // The tile the arrow keys are on, by its photo: a read that lands puts photos before it.
+    let cursor_on = ui
+        .cursor
+        .and_then(|(day, index)| ui.source.photo(ui.filter, day, index))
+        .map(|p| p.id);
     let pumped = ui.source.pump();
     // A folder change the engine refused (it answers after the press): said, not only logged.
     if later && ui.source.folder_refused() {
@@ -654,6 +673,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     changed |= pumped.changed || !pumped.answered.is_empty();
     if pumped.changed {
         ui.relayout();
+        if later {
+            ui.cursor = cursor_on.and_then(|id| ui.place_of(id));
+        }
     }
     // What the changes did, first: an open photo that Beebeeb moved to Trash leaves the stage its own way.
     for answer in pumped.answered {

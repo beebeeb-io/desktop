@@ -859,6 +859,16 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
         }
     }
 
+    /// A finished check: what this PC holds may have changed (the sync history, what is kept). Read again while the
+    /// session is the one held; a read already out is not doubled.
+    fn refresh(&mut self) {
+        if self.current() {
+            self.ask_read();
+        } else {
+            self.read_at = None;
+        }
+    }
+
     /// A section opened: read again when what is held is older than [`FRESH_FOR`].
     fn opened(&mut self) {
         let fresh = self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR) && self.held().is_some();
