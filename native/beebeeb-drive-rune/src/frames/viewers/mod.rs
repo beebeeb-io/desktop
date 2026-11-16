@@ -542,7 +542,8 @@ impl Ui {
             return true;
         }
         match self.source.poll(&self.file.id) {
-            Some(body) => {
+            Some(mut body) => {
+                body.carry_view(&self.file.body);
                 let another_kind = std::mem::discriminant(&body) != std::mem::discriminant(&self.file.body);
                 if another_kind {
                     self.focus = Some(states::TITLE_KEY);

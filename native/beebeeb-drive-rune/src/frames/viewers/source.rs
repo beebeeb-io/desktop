@@ -284,6 +284,34 @@ impl Body {
             _ => {}
         }
     }
+
+    /// The person's place in an open Office document, carried from `old` (the body on screen) into this new body of
+    /// the SAME open file (`Ui::pump`: a page, the outline or cells came): the page, the zoom and the outline pane of a
+    /// document; the slide, the zoom and Present of a deck; the tab, the scroll, the selection of a sheet (same sheet
+    /// only). Another pair of kinds carries nothing, and nothing else is ever carried (media, PDF, text: as handed).
+    pub fn carry_view(&mut self, old: &Body) {
+        match (self, old) {
+            (Body::Doc(new), Body::Doc(old)) => {
+                new.page = old.page.clamp(1, new.view.pages.max(1));
+                new.at = old.at;
+                new.view.zoom = old.view.zoom;
+                new.outline_open = old.outline_open;
+            }
+            (Body::Deck(new), Body::Deck(old)) => {
+                new.view.current = old.view.current.clamp(1, new.view.count.max(1));
+                new.view.zoom = old.view.zoom;
+                new.presenting = old.presenting;
+            }
+            (Body::Sheet(new), Body::Sheet(old)) if new.sheet == old.sheet => {
+                new.active = old.active;
+                new.top_left = old.top_left;
+                new.selection = old.selection;
+                new.current = old.current;
+                new.formula.clone_from(&old.formula);
+            }
+            _ => {}
+        }
+    }
 }
 
 pub use super::kinds::{
