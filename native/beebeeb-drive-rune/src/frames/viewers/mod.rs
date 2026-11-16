@@ -37,6 +37,7 @@ mod office_glue;
 pub use office_glue::{deck_mut, doc_mut, leave_present, open_deck, open_doc, scene_licence};
 mod office_icons;
 pub mod office_over;
+mod open_route;
 mod pdf;
 mod photo;
 mod settle;
@@ -45,6 +46,8 @@ mod states;
 mod style;
 mod table;
 mod text;
+pub mod video;
+use open_route::is_this_groups;
 
 #[cfg(test)]
 mod media_tests;
@@ -697,21 +700,6 @@ pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
     true
 }
 
-/// Whether a list's Open of `item` is this group's ([`open_item`]).
-fn is_this_groups(s: &State, item: &crate::source::DriveItem) -> bool {
-    !item.is_folder
-        && kinds::viewer_of(&item.name).is_some()
-        // A kind the window's source does not show here stays its own app's. So does a file whose bytes are kept
-        // on this PC, when its own app shows it (a document, a picture): the system opens it there with the app
-        // the person chose for it, with nothing to download. The viewer is for a file that is NOT on this PC
-        // (shown from memory, no copy lands on disk), and for source code, scripts and web pages wherever they
-        // are: Enter on one reads it, it never runs it (`kinds::its_app_shows_it`).
-        && route_source(s).is_some_and(|source| {
-            source.previews(&item.name)
-                && !(kinds::its_app_shows_it(&item.name) && source.kept_on_this_pc(&item.id))
-        })
-}
-
 /// Whether `item` is a file a list's Open only ever READS here: source code, a script, a web page, a data file
 /// that the window's source shows. With several files selected such a file is left out of what the system is
 /// asked to open (`frames::files`), as one alone opens in the viewer.
@@ -1008,6 +996,10 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             let can_play = ui.can_play();
             let (tools, body) = (audio::tools(can_play, &t), audio::body(ui, doc, &t));
             return chrome::window(s, cx, ui, head, tools, None, body, &audio::status(doc, can_play), &t);
+        }
+        Body::Video(_) => {
+            let (body, status) = (video::view(ui, &t), video::status(ui));
+            return chrome::window(s, cx, ui, head, Vec::new(), None, body, &status, &t);
         }
         Body::Pdf(doc) => {
             let (tools, bar, body) = (pdf::tools(ui, &t), pdf::find_bar(ui, &t), pdf::body(ui, doc, &t));

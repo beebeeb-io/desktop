@@ -89,9 +89,42 @@ pub(crate) fn environment_block(system_root: &[u16]) -> Result<Vec<u16>, Sandbox
     Ok(out)
 }
 
+/// True when `held` and `wanted` hold the same members, each exactly once, in any order: every entry of `held` is
+/// `equal` to one entry of `wanted` that no other entry of `held` took, and nothing of `wanted` is left over. The
+/// helper's capability read-back: its token must hold exactly the profile's capabilities.
+pub(crate) fn same_members<T>(held: &[T], wanted: &[T], equal: impl Fn(&T, &T) -> bool) -> bool {
+    if held.len() != wanted.len() {
+        return false;
+    }
+    let mut taken = vec![false; wanted.len()];
+    for entry in held {
+        let slot = (0..wanted.len()).find(|&index| !taken[index] && equal(entry, &wanted[index]));
+        match slot {
+            Some(index) => taken[index] = true,
+            None => return false,
+        }
+    }
+    taken.iter().all(|&was| was)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The read-back compares sets: the order does not matter, a missing, an extra or a doubled member does.
+    #[test]
+    fn the_capability_read_back_wants_the_same_members_exactly_once() {
+        let eq = |a: &u8, b: &u8| a == b;
+        assert!(same_members::<u8>(&[], &[], eq), "no capability, none asked");
+        assert!(
+            same_members(&[1, 2, 3], &[3, 1, 2], eq),
+            "another order is the same set"
+        );
+        assert!(!same_members(&[1, 2], &[1, 2, 3], eq), "one missing");
+        assert!(!same_members(&[1, 2, 3, 4], &[1, 2, 3], eq), "one extra");
+        assert!(!same_members(&[1, 1], &[1, 2], eq), "one doubled in place of another");
+        assert!(!same_members(&[9], &[], eq), "a capability where none was asked");
+    }
 
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()

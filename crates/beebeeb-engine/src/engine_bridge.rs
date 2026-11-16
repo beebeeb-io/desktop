@@ -140,6 +140,7 @@ pub use backup_tree::{BackupChild, BackupFolderState, tighter_clock};
 #[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
 pub use range_fetch::{PrepEnd, RangePrep};
 mod conflicts;
+mod media_range; // The media player's range reader (slice M1): one pinned version, decrypted in memory only.
 
 // ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
 //

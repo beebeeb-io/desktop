@@ -263,6 +263,12 @@ pub trait PhotosSource {
     /// Moves items to Beebeeb's Trash; `restore` brings them back (Undo). `Ok` and `Err` as [`Self::keep_offline`].
     fn trash(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
     fn restore(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
+    /// Plays the video `id` in the shell's player and hands the player to the stage (DW-0611). `None` (the
+    /// default): a photo, no player, or no playback on this PC; the stage keeps its poster and "Open in another
+    /// app".
+    fn play_video(&mut self, _id: PhotoId) -> Option<crate::media::player::PlayerHandle> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
