@@ -189,6 +189,12 @@ pub enum OpenFileError {
     Cancelled,
     /// Beebeeb could not be reached.
     Offline,
+    /// Beebeeb refused this account the file (403): it is no longer shared with it, or its access was taken away.
+    /// Nothing was downloaded, and nothing changed.
+    NoAccess,
+    /// The file kept changing while it was downloaded (a newer version came in each time, past the route's own
+    /// restarts). Nothing of it is kept; opening it again may work.
+    ChangedWhileOpening,
     /// The download or the decryption failed. Nothing changed.
     Failed,
 }
@@ -207,6 +213,8 @@ impl OpenFileError {
             Self::CopyNotReadable => "copy_not_readable",
             Self::Cancelled => "cancelled",
             Self::Offline => "offline",
+            Self::NoAccess => "no_access",
+            Self::ChangedWhileOpening => "changed_while_opening",
             Self::Failed => "failed",
         }
     }
@@ -231,9 +239,11 @@ pub(crate) fn failure(error: EngineError) -> OpenFileError {
         return match direct {
             DirectError::Refused(401) => OpenFileError::SessionEnded,
             DirectError::Refused(404) => OpenFileError::NotFound,
-            // Another refusal (403: no longer allowed), a version that kept changing, a chunk that did not
-            // authenticate: the download failed, and nothing changed.
-            DirectError::Refused(_) | DirectError::VersionChanged | DirectError::Corrupt => OpenFileError::Failed,
+            // No longer allowed: said as that, never as a failed decryption.
+            DirectError::Refused(403) => OpenFileError::NoAccess,
+            DirectError::VersionChanged => OpenFileError::ChangedWhileOpening,
+            // Another refusal, a chunk that did not authenticate: the download failed, and nothing changed.
+            DirectError::Refused(_) | DirectError::Corrupt => OpenFileError::Failed,
         };
     }
     if error.caused_by::<ChunkUnreachable>().is_some() {
@@ -608,5 +618,30 @@ impl<C: CredentialStores> Engine<C> {
             return Err(OpenFileError::NotSignedIn);
         }
         Ok(OpenedFile { session, bytes })
+    }
+}
+
+/// CP2 row 10.3 (L266.4): a 403 and a version that kept changing are named, never said as a failed decryption.
+#[cfg(test)]
+mod refusal_words_tests {
+    use super::*;
+
+    fn refused(direct: DirectError) -> OpenFileError {
+        failure(EngineError::Api(anyhow::Error::new(direct)))
+    }
+
+    #[test]
+    fn failure_names_a_403_as_no_access() {
+        assert_eq!(refused(DirectError::Refused(403)).kind(), "no_access");
+        // The other answers keep their kinds.
+        assert_eq!(refused(DirectError::Refused(401)).kind(), "session_ended");
+        assert_eq!(refused(DirectError::Refused(404)).kind(), "not_found");
+        assert_eq!(refused(DirectError::Refused(410)).kind(), "failed");
+        assert_eq!(refused(DirectError::Corrupt).kind(), "failed");
+    }
+
+    #[test]
+    fn failure_names_a_version_that_kept_changing() {
+        assert_eq!(refused(DirectError::VersionChanged).kind(), "changed_while_opening");
     }
 }

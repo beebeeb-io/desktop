@@ -1,5 +1,6 @@
 //! The latency gate's harness (office viewer plan, section 2.4): a page of an open Word document, from the confined
-//! helper, timed on the app's own path to a page: section, grant, frame, decode, size check, copy out.
+//! helper, timed on the app's own path to a page: section, grant, frame, decode, size check, copy out; and a visible
+//! range of a workbook's cells, timed from the request to the checked `CellData` in the app's hands.
 //!
 //! Windows only (the sandbox is). Release build only for the gate; run on the build VM with
 //! `cargo test --release --locked --test latency -- --ignored --nocapture --test-threads=1`.
@@ -14,12 +15,18 @@ use std::time::{Duration, Instant};
 use beebeeb_office_protocol::check::{self, Limits as Contract};
 use beebeeb_office_protocol::frame::{Frame, Ids, Side, read_frame, write_frame};
 use beebeeb_office_protocol::office::{
-    DocKind, GrantRef, KIND_OPEN, KIND_OPENED, KIND_RENDER, KIND_RENDERED, Open, Opened, Rect, Render, Rendered,
+    CellData, CellRange, Cells, DocKind, GrantRef, KIND_CELL_DATA, KIND_CELLS, KIND_OPEN, KIND_OPENED,
+    KIND_OPENED_SHEETS, KIND_RENDER, KIND_RENDERED, Open, Opened, OpenedSheets, Rect, Render, Rendered,
 };
 use beebeeb_office_sandbox::{Access, Child, Limits as SandboxLimits, Sandbox, Section};
 
 const HELPER: &str = env!("CARGO_BIN_EXE_beebeeb-office-render");
 const FIXTURE: &[u8] = include_bytes!("fixtures/latency/big-60.docx");
+/// 2,000 rows x 20 columns in three number formats, and one chart (`fixtures/latency/SOURCE.md`).
+const GRID: &[u8] = include_bytes!("fixtures/latency/grid-2000.xlsx");
+/// A visible range of cells: 60 rows x 20 columns.
+const VISIBLE_ROWS: u32 = 60;
+const VISIBLE_COLS: u32 = 20;
 const DPI: f32 = 96.0;
 const SAMPLES: usize = 200;
 const TILE: u32 = 512;
@@ -51,6 +58,22 @@ struct Session {
 impl Session {
     /// Spawns a confined helper and opens the fixture in it.
     fn start() -> (Session, Opened) {
+        let (session, frame) = Session::open(DocKind::Docx, FIXTURE, KIND_OPENED);
+        let opened = Opened::decode(&frame.payload).expect("the Opened answer decodes");
+        check::check_opened(&opened, &Contract::CONTRACT).expect("the Opened answer passes the checks");
+        (session, opened)
+    }
+
+    /// Spawns a confined helper and opens the grid workbook in it.
+    fn start_sheets() -> (Session, OpenedSheets) {
+        let (session, frame) = Session::open(DocKind::Xlsx, GRID, KIND_OPENED_SHEETS);
+        let sheets = OpenedSheets::decode(&frame.payload).expect("the OpenedSheets answer decodes");
+        check::check_sheets(&sheets, &Contract::CONTRACT).expect("the OpenedSheets answer passes the checks");
+        (session, sheets)
+    }
+
+    /// Spawns a confined helper and opens `bytes` as `kind` in it; the answer must be of `expect_kind`.
+    fn open(kind: DocKind, bytes: &[u8], expect_kind: u16) -> (Session, Frame) {
         let sandbox = Sandbox::new(SandboxLimits::default()).expect("the sandbox starts");
         let mut child = sandbox.spawn(Path::new(HELPER)).expect("the confined helper starts");
         let pipes = child.take_pipes().expect("the pipes are there the first time");
@@ -72,8 +95,8 @@ impl Session {
             }
         });
 
-        let mut doc = Section::new(FIXTURE.len()).expect("a section for the document");
-        doc.as_mut_slice().copy_from_slice(FIXTURE);
+        let mut doc = Section::new(bytes.len()).expect("a section for the document");
+        doc.as_mut_slice().copy_from_slice(bytes);
         let granted = child
             .grant(&doc, Access::Read)
             .expect("the document is granted read-only");
@@ -85,17 +108,26 @@ impl Session {
             _doc: doc,
         };
         let open = Open {
-            kind: DocKind::Docx,
+            kind,
             doc: GrantRef {
                 wire: granted.wire,
                 len: granted.len,
             },
         };
         let payload = open.encode().expect("a small request fits a frame");
-        let frame = session.ask(KIND_OPEN, &payload, KIND_OPENED);
-        let opened = Opened::decode(&frame.payload).expect("the Opened answer decodes");
-        check::check_opened(&opened, &Contract::CONTRACT).expect("the Opened answer passes the checks");
-        (session, opened)
+        let frame = session.ask(KIND_OPEN, &payload, expect_kind);
+        (session, frame)
+    }
+
+    /// One visible range of cells, as the app gets it: request, frame, decode, the app's check. Returns the span and
+    /// the number of cells.
+    fn cells(&mut self, asked: Cells) -> (Duration, usize) {
+        let started = Instant::now();
+        let payload = asked.encode().expect("a small request fits a frame");
+        let frame = self.ask(KIND_CELLS, &payload, KIND_CELL_DATA);
+        let data = CellData::decode(&frame.payload).expect("the CellData answer decodes");
+        check::check_cells(&asked, &data, &Contract::CONTRACT).expect("the CellData answer passes the checks");
+        (started.elapsed(), data.cells.len())
     }
 
     /// Writes one request and waits for its answer, which must carry the request's id and the expected kind.
@@ -374,5 +406,82 @@ fn latency_what_o_cp2_does_not_measure() {
         return;
     }
     println!("latency scroll: not measured at O-CP2 (needs the live docs scene, OF5 + V3-5): O-CP3");
-    println!("latency cells: not measured at O-CP2 (sheets API, V3-2): O-CP3");
+    println!("latency cells: not measured at O-CP2 (sheets API, V3-2): O-CP3, latency_cells_p95_within_16ms");
+}
+
+/// The cells gate (PLAN section 2.4): a visible range of 60 x 20 cells, from the request to the checked `CellData` in
+/// the app's hands, p95 at most 16 ms. 200 ranges (row starts every 10 rows, in a fixed shuffled order), after one
+/// warm-up that is printed and left out. A 20 ms sleep before each answer in the helper turns it red.
+#[test]
+#[ignore = "latency: VM 401, release build, --ignored"]
+fn latency_cells_p95_within_16ms() {
+    if skipped("latency_cells_p95_within_16ms") {
+        return;
+    }
+    let (mut session, sheets) = Session::start_sheets();
+    let grid = sheets.sheets.first().expect("the grid workbook has a sheet");
+    println!(
+        "latency cells fixture: sheets={} rows={} cols={}",
+        sheets.sheets.len(),
+        grid.rows,
+        grid.cols
+    );
+    assert!(
+        grid.rows >= 2_000 && grid.cols >= VISIBLE_COLS,
+        "the grid sheet is 2,000 x 20: {} x {}",
+        grid.rows,
+        grid.cols
+    );
+
+    let starts: Vec<u32> = (0..=grid.rows - VISIBLE_ROWS).step_by(10).collect();
+    let ranges = shuffled(
+        starts
+            .into_iter()
+            .map(|row| Cells {
+                sheet: 0,
+                range: CellRange {
+                    row,
+                    col: 0,
+                    rows: VISIBLE_ROWS,
+                    cols: VISIBLE_COLS,
+                },
+            })
+            .collect::<Vec<_>>(),
+        0x00BE_EBEE,
+    );
+    let (warm, warm_cells) = session.cells(ranges[0]);
+    println!(
+        "latency warm-up cells {VISIBLE_ROWS}x{VISIBLE_COLS}: {:.2}ms cells={warm_cells} (not counted)",
+        ms(warm)
+    );
+    let mut samples = Vec::with_capacity(SAMPLES);
+    let mut least = usize::MAX;
+    for i in 0..SAMPLES {
+        let (span, n) = session.cells(ranges[(i + 1) % ranges.len()]);
+        samples.push(ms(span));
+        least = least.min(n);
+    }
+    let _ = session.child.kill();
+    let s = stats(&samples);
+    let pass = s.p95 <= GATE_MS;
+    println!(
+        "latency cells {VISIBLE_ROWS}x{VISIBLE_COLS}: n={} median={:.2} p95={:.2} max={:.2} fewest-cells={least} -> {}",
+        samples.len(),
+        s.median,
+        s.p95,
+        s.max,
+        if pass { "PASS" } else { "FAIL" }
+    );
+    assert_eq!(samples.len(), SAMPLES, "200 cell samples");
+    assert!(least > 0, "every visible range holds cells");
+
+    if cfg!(debug_assertions) {
+        println!("latency cells gate: not taken in a debug build");
+        return;
+    }
+    assert!(
+        pass,
+        "latency cells gate failed: p95={:.2} ms, limit {GATE_MS:.2} ms",
+        s.p95
+    );
 }

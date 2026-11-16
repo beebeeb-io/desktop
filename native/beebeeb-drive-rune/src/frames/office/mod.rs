@@ -9,6 +9,7 @@
 
 pub mod dialogs;
 pub mod docs;
+pub mod open_with;
 pub mod sheets;
 pub mod slides;
 pub mod states;

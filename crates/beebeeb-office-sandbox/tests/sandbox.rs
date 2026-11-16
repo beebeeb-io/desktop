@@ -1365,5 +1365,6 @@ mod windows {
     }
 
     // The profiles (decision 2541): in `tests/windows/profiles.rs`.
+    mod hardening;
     mod profiles;
 }

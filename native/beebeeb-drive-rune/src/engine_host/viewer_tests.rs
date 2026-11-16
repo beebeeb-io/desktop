@@ -740,8 +740,9 @@ fn a_kind_without_a_viewer_here_is_said_so_and_nothing_is_downloaded() {
         ("Invented export.zip", "Archive"),
         ("Invented shot.arw", "Picture"),
         ("Invented shot.heic", "Picture"),
-        ("Invented letter.docx", "File"),
-        ("Invented sheet.xlsx", "File"),
+        // An Office file opens in the Office viewer since O-CP3 (`viewer_office_tests`).
+        ("Invented letter.odt", "File"),
+        ("Invented sheet.numbers", "File"),
         ("Invented thing.xyz", "File"),
         ("Invented no extension", "File"),
     ];

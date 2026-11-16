@@ -211,6 +211,22 @@ pub fn flyout(
     surface(false, key, name, width, entries, None, t, pick, hover, close)
 }
 
+/// [`flyout`] with the entry `hot` highlighted (the keyboard or the pointer is on it): Open With's apps (DW-1562).
+#[allow(clippy::too_many_arguments)]
+pub fn flyout_hot(
+    key: &'static str,
+    name: &'static str,
+    width: f32,
+    entries: &[Entry],
+    hot: Option<usize>,
+    t: &Theme,
+    pick: fn(&mut State, usize, &mut Tx),
+    hover: fn(&mut State, usize),
+    close: fn(&mut State, &mut Tx),
+) -> El {
+    surface(false, key, name, width, entries, hot, t, pick, hover, close)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn surface(
     modal: bool,

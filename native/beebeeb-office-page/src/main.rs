@@ -1,31 +1,50 @@
-//! O-CP2's window proof: page 1 of an Office document, rendered by the confined helper, shown in a Rune window.
+//! The Office viewer's window proof: page 1 of an Office document, rendered by the confined helper, shown in a Rune
+//! window, with the helper alive for as long as the window is open.
 //!
 //! ```text
 //! office_page <file.docx> [--zoom <percent>] [--dpi <n>] [--helper <exe>]
 //! ```
 //!
-//! It opens the file through the app's own host (`engine_host/office_host.rs`, included here as it is), asks for page 1
-//! at `check::render_scale(zoom / 100, dpi)` (defaults: 100 %, 96 DPI), prints ONE line and then shows the page:
+//! It opens the file through the app's own host (`native/beebeeb-drive-rune/src/engine_host/office_host.rs`, compiled
+//! in here as it is), asks for page 1 at `check::render_scale(zoom / 100, dpi)` (defaults: 100 %, 96 DPI), prints ONE
+//! line and then shows the page:
 //!
 //! ```text
-//! office_page: state=<variant> pages=<n> first_page_ms=<t> w=<w> h=<h> missing_content=<bool>
+//! office_page: state=<variant> pages=<n> first_page_ms=<t> w=<w> h=<h> missing_content=<bool> helper_pid=<pid>
 //! ```
 //!
-//! No file name and no text of the document is printed. A state other than `Pages` (or no page within 60 s) prints
-//! that state and exits 1. It is a development tool for test fixtures only; the app never reads a file this way.
+//! No file name and no text of the document is printed. `helper_pid` is the live helper's process id (0 when there is
+//! none). A state other than `Pages` (or no page within 60 s) prints that state and exits 1. It is a development tool
+//! for test fixtures only; the app never reads a file this way.
 //!
-//! How the lead runs it on VM 401 (lanes cannot drive PowerShell there), under `with-lock`, from the desktop session:
+//! The host stays open while the window is up, so the helper does too: it is closed (and the helper killed) when the
+//! window has closed and Rune's event loop has returned. Were the process to end any other way, the helper ends with
+//! it: its job is closed with the process.
+//!
+//! How the lead runs it on VM 401 (lanes cannot drive PowerShell there), under `with-lock`, from the desktop session.
+//! It builds in release: this package has no engine and no test support (the integration lane writes its lockfile):
 //!
 //! ```text
-//! cargo build --release --locked -p beebeeb-office-render          # in native/beebeeb-office-render
-//! cargo run --release --locked --example office_page -- <fixtures>/system-font.docx --zoom 100 --helper <release>/beebeeb-office-render.exe
+//! cargo build --release --locked                                    # in native/beebeeb-office-render
+//! cargo run --release --locked -- <fixtures>/system-font.docx --zoom 100 --helper <release>/beebeeb-office-render.exe
+//!                                                                   # in native/beebeeb-office-page
 //! ```
 //!
-//! Without `--helper` the helper is looked for beside this example's executable (`office_host::helper_exe`). The
-//! helper starts confined exactly as in the app: off Windows this prints `state=NoPreview(NoSandbox)` and exits 1.
+//! The O-CP3 rung (the helper lives exactly as long as the open document): while the window shows the page, count the
+//! processes named `beebeeb-office-render` (1) and check that the printed `helper_pid` is one of them; close the window,
+//! and count again (0, and that PID gone).
+//!
+//! Without `--helper` the helper is looked for beside this program's executable (`office_host::helper_exe`). The helper
+//! starts confined exactly as in the app: off Windows this prints `state=NoPreview(NoSandbox)` and exits 1.
 
-#[path = "../src/engine_host/office_host.rs"]
+#[path = "../../beebeeb-drive-rune/src/engine_host/office_host.rs"]
 mod office_host;
+
+/// The app's `windows_floor` logs through `tracing`, which this tool does not link. The host calls only this function of
+/// it, on a Windows older than the sandbox needs; the tool prints `state=NoPreview(NeedsWindowsUpdate)` anyway.
+mod windows_floor {
+    pub fn note_needs_windows_update() {}
+}
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -149,8 +168,9 @@ fn main() -> ExitCode {
                 });
             }
         }
-        let open = matches!(host.state(), OfficeState::Pages { .. });
-        if !open && !matches!(host.state(), OfficeState::Opening) {
+        let state = host.state();
+        let open = matches!(state, OfficeState::Pages { .. });
+        if !open && !matches!(state, OfficeState::Opening) {
             break;
         }
         if open && !asked {
@@ -163,24 +183,26 @@ fn main() -> ExitCode {
         thread::sleep(Duration::from_millis(2));
     }
 
-    let pages = match host.state() {
-        OfficeState::Pages { pages, .. } => *pages,
+    let state = host.state();
+    let pages = match state {
+        OfficeState::Pages { pages, .. } => pages,
         _ => 0,
     };
-    let state = variant(host.state());
+    let state = variant(&state);
+    let pid = host.helper_pid().unwrap_or(0);
     let Some(page) = page else {
-        println!("office_page: state={state} pages={pages} first_page_ms=0 w=0 h=0 missing_content=false");
+        println!(
+            "office_page: state={state} pages={pages} first_page_ms=0 w=0 h=0 missing_content=false helper_pid={pid}"
+        );
         return ExitCode::from(1);
     };
     println!(
-        "office_page: state={state} pages={pages} first_page_ms={} w={} h={} missing_content={}",
+        "office_page: state={state} pages={pages} first_page_ms={} w={} h={} missing_content={} helper_pid={pid}",
         page.after.as_millis(),
         page.w,
         page.h,
         page.missing_content
     );
-    // The page is copied out: the helper can go before the window opens.
-    host.close(CloseWhy::Closed);
 
     let pixels = rune::Pixels::new();
     pixels.set(page.w, page.h, page.rgba);
@@ -193,10 +215,12 @@ fn main() -> ExitCode {
     };
     let size = (shown.w + 48.0, shown.h + 48.0);
     let app = rune::App::new(rune::AppSpec::new("Beebeeb Office page", size, nothing, view)).init(move || shown);
-    // No arguments for Rune: this example's own flags are not Rune's.
+    // No arguments for Rune: this program's own flags are not Rune's. Returns once the window has closed.
     rune::run_windows_with_args(rune::RunOptions::default(), Vec::<String>::new(), move |_displays| {
         vec![rune::WindowSpec::from_app("office-page", app)]
     });
+    // The document was open, and its helper alive, for as long as the window was up.
+    host.close(CloseWhy::Closed);
     ExitCode::SUCCESS
 }
 

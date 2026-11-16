@@ -21,7 +21,7 @@ mod memory;
 mod serve;
 mod start;
 
-pub use engine::{Engine, Office, OpenDoc, Opening, open_code, render_code};
+pub use engine::{Engine, Office, OpenDoc, Opening, block_cells, open_code, render_code};
 pub use memory::{Granted, Mapped, MappedMut, Memory};
 pub use serve::serve;
 pub use start::start;

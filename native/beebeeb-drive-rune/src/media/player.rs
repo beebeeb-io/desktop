@@ -225,6 +225,8 @@ pub enum Refusal {
     NotInstalled,
     /// This OS has no sandbox for the helper (macOS until its module, Linux): "Playback isn't available on this PC."
     NoSandbox,
+    /// This Windows is older than the sandbox needs: "This file can't be shown until Windows is updated."
+    NeedsWindowsUpdate,
 }
 
 /// Why a file plays without sound. The view says it ("Sound isn't available on this PC", with the codec's name for

@@ -777,6 +777,44 @@ fn entering_a_secret_route_sets_capture_exclusion_and_leaving_clears_it() {
     assert!(!rt.state.shell.capture_excluded);
 }
 
+/// A deck in Present is kept out of captures and screen shares; leaving Present clears it one poll late, as every
+/// secret does.
+#[test]
+fn office_present_is_kept_out_of_captures() {
+    use crate::frames::office::slides::slides_fixture;
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    let mut state = state::init_with(Shell::fixture_on(engine.clone(), platform.clone()));
+    assert!(crate::frames::viewers::open_deck(&mut state, slides_fixture::file()));
+    let mut rt = runtime(state);
+    assert!(
+        platform.capture_exclusions.lock().unwrap().is_empty(),
+        "the deck alone is not a secret"
+    );
+    crate::frames::viewers::deck_mut(&mut rt.state)
+        .expect("a deck")
+        .present();
+    rt.frame(1.0);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "Present excludes the window"
+    );
+    crate::frames::viewers::deck_mut(&mut rt.state).expect("a deck").leave();
+    rt.frame(2.0);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "leaving Present keeps it excluded for that poll"
+    );
+    rt.frame(2.5);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true, false],
+        "and the next poll clears it"
+    );
+}
+
 /// Secret-to-secret (sign-in → locked) keeps exclusion: no false→true gap.
 #[test]
 fn secret_to_secret_keeps_exclusion_without_a_gap() {

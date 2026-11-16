@@ -111,7 +111,7 @@ trait's defaults answer "not saved" and "nothing found", and the frame draws exa
 | DW-1234 | Commands and keyboard shortcuts over the document | built (scene in `tray/`); open: `ol-close` both themes, dark `ol-4-row` to `ol-6-row` (covered by the dialog) |
 | DW-1555, DW-1557 | "Preparing the editor" (a 257 MB download) and the licence notice of a bundled office suite | NOT built, held for a ruling: the board draws a downloaded third-party editor, the merged contract builds on in-house engines with nothing to download |
 | DW-1508, DW-1509, DW-1559, DW-1560, DW-1561 | Sheets and Slides | NOT built |
-| DW-1558, DW-1562 | New document from a template; Open With | NOT built (DW-1558's four templates differ from the contract's "Blank only"; DW-1562's menu is shorter than DW-0402's file menu: both need a ruling) |
+| DW-1558, DW-1562 | New document from a template; Open With | DW-1558 NOT built (its four templates differ from the contract's "Blank only": needs a ruling). DW-1562 built in the Files window (D-OV-14: `files/open_with_menu.rs`, scene `office/open_with.rs`), offered once Word's switch is on (`kinds::office_route`); the board's DW-1562 menu runs to Move to Trash like DW-0402 (R-OW2 (a), board fixed and recaptured at O-CP3) |
 
 Why the open lines stay:
 - `rib` / `rib-tools` (light), `pg-3`: the board's Italic "I" is a serif italic the app does not ship, and a text

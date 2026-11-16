@@ -5,7 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,13 +17,16 @@ use beebeeb_office_sandbox::{Access, Granted, SandboxError};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::engine_host::office_host::{
-    DocKind, Event, Helper, Link, OfficeHost, OfficeState, Registry, Starter, Timeouts, Wake, open_with,
+    DocKind, Event, HELPER_EXE, Helper, Link, OfficeHost, OfficeState, Registry, Starter, Timeouts, Wake, open_with,
 };
 
-/// The tests' timers: 300 ms each.
+/// The tests' timers: 300 ms each. The budgets are longer than [`WITHIN`], so that only the tests that shorten them
+/// see one.
 pub(super) const TEST_TIMEOUTS: Timeouts = Timeouts {
     open: Duration::from_millis(300),
     request: Duration::from_millis(300),
+    split: Duration::from_secs(5),
+    outline: Duration::from_secs(5),
 };
 
 /// How long a test waits for what must happen (generous, so a loaded machine does not flake).
@@ -57,13 +60,23 @@ pub(super) fn noop_wake() -> Wake {
 /// Opens a document through `fake` in `registry`, with the tests' timers. Also hands back the fake's log and a count
 /// of the host's wakes.
 pub(super) fn open_fake(fake: Fake, registry: &Registry, kind: DocKind) -> (OfficeHost, Arc<Log>, Arc<AtomicUsize>) {
+    open_fake_with(fake, registry, kind, TEST_TIMEOUTS)
+}
+
+/// [`open_fake`] with the test's own timers.
+pub(super) fn open_fake_with(
+    fake: Fake,
+    registry: &Registry,
+    kind: DocKind,
+    timeouts: Timeouts,
+) -> (OfficeHost, Arc<Log>, Arc<AtomicUsize>) {
     let log = fake.log.clone();
     let wakes = Arc::new(AtomicUsize::new(0));
     let counter = wakes.clone();
     let wake: Wake = Arc::new(move || {
         counter.fetch_add(1, SeqCst);
     });
-    let host = open_with(fake, registry, TEST_TIMEOUTS, kind, Zeroizing::new(doc()), wake);
+    let host = open_with(fake, registry, timeouts, kind, Zeroizing::new(doc()), wake);
     (host, log, wakes)
 }
 
@@ -111,6 +124,27 @@ pub(super) fn wait_for(what: impl Fn() -> bool) -> bool {
         thread::sleep(Duration::from_millis(5));
     }
     true
+}
+
+/// A runnable file called [`HELPER_EXE`] (a link to this test binary) in a directory of the test's own: were there an
+/// unconfined way to start a helper, the host would start it. Not on Windows, where the sandbox would start it.
+#[cfg(not(windows))]
+pub(super) fn runnable_helper(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("bb-office-host-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a directory for the test's helper");
+    let helper = dir.join(HELPER_EXE);
+    let exe = std::env::current_exe().expect("the test binary");
+    std::os::unix::fs::symlink(exe, &helper).expect("a link to the test binary");
+    helper
+}
+
+/// Removes what [`runnable_helper`] made.
+#[cfg(not(windows))]
+pub(super) fn remove_runnable_helper(helper: &std::path::Path) {
+    if let Some(dir) = helper.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// How many pages reached the window.
@@ -212,6 +246,10 @@ pub(super) struct Log {
     pub(super) section_sizes: Mutex<Vec<usize>>,
     /// The starter's calls in order: "exclude" (crash reports) and "start".
     pub(super) calls: Mutex<Vec<&'static str>>,
+    /// The file name of every crash-report exclusion, in order.
+    pub(super) excluded: Mutex<Vec<String>>,
+    /// The path every page copy took, in order ("raw", or "refused" for a copy that failed).
+    pub(super) copies: Mutex<Vec<&'static str>>,
     /// Every frame the host wrote to a helper, as (kind, id), in order.
     pub(super) sent: Arc<Mutex<Vec<(u16, u32)>>>,
     /// The page of every `Render` a helper read, in order.
@@ -248,6 +286,17 @@ pub(super) struct Fake {
     pub(super) log: Arc<Log>,
     script: Script,
     start_delay: Duration,
+    name: String,
+    leaking: bool,
+    lingering: bool,
+    /// The n-th section made (1 = the document's) waits for this gate before it is handed out.
+    section_gate: Option<(usize, Gate)>,
+    /// The n-th section asked for panics instead.
+    section_panic: Option<usize>,
+    sections_asked: usize,
+    failing_copy: bool,
+    /// Every start fails with this sandbox error.
+    start_error: Option<SandboxError>,
 }
 
 impl Fake {
@@ -256,12 +305,63 @@ impl Fake {
             log: Arc::new(Log::default()),
             script: Arc::new(script),
             start_delay: Duration::ZERO,
+            name: HELPER_EXE.to_owned(),
+            leaking: false,
+            lingering: false,
+            section_gate: None,
+            section_panic: None,
+            sections_asked: 0,
+            failing_copy: false,
+            start_error: None,
         }
+    }
+
+    /// Every start fails with `error`, as the sandbox's refusal does.
+    pub(super) fn failing_start(mut self, error: SandboxError) -> Fake {
+        self.start_error = Some(error);
+        self
     }
 
     /// Each start takes `delay` before it returns.
     pub(super) fn slow_start(mut self, delay: Duration) -> Fake {
         self.start_delay = delay;
+        self
+    }
+
+    /// The helper's file is called `name`.
+    pub(super) fn named(mut self, name: &str) -> Fake {
+        self.name = name.to_owned();
+        self
+    }
+
+    /// Each helper holds one more handle after every answer it writes (it keeps what it was handed).
+    pub(super) fn leaking_handles(mut self) -> Fake {
+        self.leaking = true;
+        self
+    }
+
+    /// Ending a helper (a kill, or dropping its handle) closes only its input: the script can still write until it
+    /// returns, as a process whose pipe end lives on elsewhere.
+    pub(super) fn lingering(mut self) -> Fake {
+        self.lingering = true;
+        self
+    }
+
+    /// The `nth` section made (1 = the document's) waits until `gate` opens.
+    pub(super) fn block_section(mut self, nth: usize, gate: Gate) -> Fake {
+        self.section_gate = Some((nth, gate));
+        self
+    }
+
+    /// The `nth` section asked for (1 = the document's) panics.
+    pub(super) fn panic_on_section(mut self, nth: usize) -> Fake {
+        self.section_panic = Some(nth);
+        self
+    }
+
+    /// Every page copy fails.
+    pub(super) fn failing_copy(mut self) -> Fake {
+        self.failing_copy = true;
         self
     }
 }
@@ -274,17 +374,31 @@ impl Starter for Fake {
         true
     }
 
-    fn exclude_from_crash_reports(&mut self) -> Result<(), u32> {
+    fn file_name(&self) -> Option<String> {
+        Some(self.name.clone())
+    }
+
+    fn exclude_from_crash_reports(&mut self, exe_name: &str) -> Result<(), u32> {
         lock(&self.log.calls).push("exclude");
+        lock(&self.log.excluded).push(exe_name.to_owned());
         Ok(())
     }
 
     fn section(&mut self, len: usize) -> Result<FakeSection, SandboxError> {
+        self.sections_asked += 1;
+        if self.section_panic == Some(self.sections_asked) {
+            panic!("the fake starter panics on section {}", self.sections_asked);
+        }
         let wire = 0x100 + self.log.next_wire.fetch_add(4, SeqCst);
         let memory = Arc::new(Mutex::new(vec![0u8; len]));
         lock(&self.log.memory).insert(wire, Arc::downgrade(&memory));
         lock(&self.log.section_sizes).push(len);
         self.log.live_sections.fetch_add(1, SeqCst);
+        if let Some((nth, gate)) = &self.section_gate
+            && *nth == self.sections_asked
+        {
+            let _ = gate.wait();
+        }
         Ok(FakeSection {
             wire,
             memory,
@@ -302,13 +416,21 @@ impl Starter for Fake {
         memory[..n].copy_from_slice(&bytes[..n]);
     }
 
-    fn copy_out(&self, section: &FakeSection, out: &mut [u8]) {
+    fn copy_out(&self, section: &FakeSection, out: &mut [u8]) -> bool {
         let memory = lock(&section.memory);
-        let n = memory.len().min(out.len());
-        out[..n].copy_from_slice(&memory[..n]);
+        if self.failing_copy || memory.len() != out.len() {
+            lock(&self.log.copies).push("refused");
+            return false;
+        }
+        out.copy_from_slice(&memory);
+        lock(&self.log.copies).push("raw");
+        true
     }
 
     fn start(&mut self) -> Result<Link<FakeHelper>, SandboxError> {
+        if let Some(error) = self.start_error.clone() {
+            return Err(error);
+        }
         if !self.start_delay.is_zero() {
             thread::sleep(self.start_delay);
         }
@@ -319,10 +441,13 @@ impl Starter for Fake {
             ..Pipe::default()
         };
         let from_helper = Pipe::default();
+        let handles = Arc::new(AtomicU32::new(0));
         let mut link = FakeLink {
             input: to_helper.clone(),
             output: from_helper.clone(),
             log: self.log.clone(),
+            handles: handles.clone(),
+            leaking: self.leaking,
         };
         let script = self.script.clone();
         thread::spawn(move || {
@@ -331,12 +456,19 @@ impl Starter for Fake {
             link.output.close();
             link.input.close();
         });
+        // A lingering helper's output stays open when it is ended: only its input is the host's to close.
+        let pipes = if self.lingering {
+            vec![to_helper.clone()]
+        } else {
+            vec![to_helper.clone(), from_helper.clone()]
+        };
         Ok(Link {
             helper: FakeHelper {
                 index,
-                pipes: [to_helper.clone(), from_helper.clone()],
+                pipes,
                 ended: AtomicBool::new(false),
                 log: self.log.clone(),
+                handles,
             },
             to_helper: Box::new(to_helper),
             from_helper: Box::new(from_helper),
@@ -365,12 +497,15 @@ impl Drop for FakeSection {
     }
 }
 
-/// The host's handle on a fake helper: ending it closes both pipes (the helper's thread then sees its input end).
+/// The host's handle on a fake helper: ending it closes both pipes (the helper's thread then sees its input end), or
+/// only its input for a lingering one.
 pub(super) struct FakeHelper {
     index: usize,
-    pipes: [Pipe; 2],
+    pipes: Vec<Pipe>,
     ended: AtomicBool,
     log: Arc<Log>,
+    /// The handles it holds, as its script counts them.
+    handles: Arc<AtomicU32>,
 }
 
 impl Helper for FakeHelper {
@@ -385,6 +520,10 @@ impl Helper for FakeHelper {
 
     fn process_id(&self) -> Option<u32> {
         Some(4000 + self.index as u32)
+    }
+
+    fn handle_count(&self) -> Option<u32> {
+        Some(self.handles.load(SeqCst))
     }
 }
 
@@ -402,6 +541,8 @@ pub(super) struct FakeLink {
     input: Pipe,
     output: Pipe,
     log: Arc<Log>,
+    handles: Arc<AtomicU32>,
+    leaking: bool,
 }
 
 impl FakeLink {
@@ -415,11 +556,25 @@ impl FakeLink {
         Some((frame.id, message))
     }
 
-    /// Answers request `id` with `message` (a closed pipe is ignored: the helper was killed).
+    /// Answers request `id` with `message` (a closed pipe is ignored: the helper was killed). A leaking helper holds
+    /// one more handle from before the answer is written.
     pub(super) fn answer(&mut self, id: u32, message: Message) {
+        if self.leaking {
+            self.handles.fetch_add(1, SeqCst);
+        }
         if let Ok(payload) = message.encode() {
             let _ = frame::write_frame(&mut self.output, message.kind(), id, &payload);
         }
+    }
+
+    /// Whether a request is there to read (or the input closed) within `within`.
+    pub(super) fn input_within(&self, within: Duration) -> bool {
+        self.input.wait_bytes(within)
+    }
+
+    /// Frames of `kind` the host has written to this fake's helpers so far.
+    pub(super) fn sent_of(&self, kind: u16) -> usize {
+        lock(&self.log.sent).iter().filter(|(sent, _)| *sent == kind).count()
     }
 
     /// Fills the granted section `out` with `byte`, as a render would.
@@ -450,6 +605,24 @@ impl Pipe {
         let (state, changed) = &*self.state;
         lock(state).closed = true;
         changed.notify_all();
+    }
+
+    /// Waits until there are bytes to read or the pipe closed, at most `within`; `false` when neither came.
+    fn wait_bytes(&self, within: Duration) -> bool {
+        let (state, changed) = &*self.state;
+        let until = Instant::now() + within;
+        let mut state = lock(state);
+        while state.bytes.is_empty() && !state.closed {
+            let now = Instant::now();
+            if now >= until {
+                return false;
+            }
+            state = changed
+                .wait_timeout(state, until - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
     }
 }
 

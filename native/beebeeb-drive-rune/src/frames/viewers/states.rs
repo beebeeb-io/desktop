@@ -106,6 +106,8 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
                 Stopped::CopyNotReadable => "Not opened: the copy on this PC couldn't be read",
                 Stopped::NothingSynced => "Not opened: nothing has synced on this PC yet",
                 Stopped::NotThisAccounts => "Not opened: this PC's data couldn't be confirmed as this account's",
+                Stopped::NoAccess => "Not opened: you no longer have access to this file",
+                Stopped::Changed => "Not opened: it changed while it was opening",
             }
             .into(),
             details: "The copy in Beebeeb is unchanged".into(),
@@ -289,6 +291,14 @@ fn stopped(why: Stopped, t: &Theme) -> El {
             "What this PC holds of Beebeeb couldn't be confirmed as this account's, so nothing of it was read. \
              This says nothing about the file: the copy in Beebeeb is unchanged.",
         ),
+        Stopped::NoAccess => (
+            "You no longer have access to this file",
+            "Beebeeb refused it for this account: it may no longer be shared with you. Nothing was downloaded.",
+        ),
+        Stopped::Changed => (
+            "This file changed while it was opening",
+            "A newer version arrived each time it was read, so nothing of it was kept. Try again.",
+        ),
     };
     let act = if why.can_retry() {
         let label = if why == Stopped::SessionChanged {
@@ -432,4 +442,30 @@ pub fn body(file: &OpenFile, copies: bool, origin: Origin, t: &Theme) -> Option<
         // Each has its own view (`text.rs`, `markdown.rs`, `photo.rs`, …).
         _ => return None,
     })
+}
+
+/// CP2 row 10.3 (L266.4): a 403 and a version that kept changing have their own words, never "Not decrypted".
+#[cfg(test)]
+mod refusal_words_tests {
+    use super::*;
+
+    fn words(why: Stopped) -> String {
+        status(&Body::Stopped(why), Origin::Beebeeb)
+            .map(|s| s.text)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn no_access_and_changed_say_what_happened() {
+        assert_eq!(
+            words(Stopped::NoAccess),
+            "Not opened: you no longer have access to this file"
+        );
+        assert_eq!(words(Stopped::Changed), "Not opened: it changed while it was opening");
+        let failed = status(&Body::Failed, Origin::Beebeeb)
+            .map(|s| s.text)
+            .unwrap_or_default();
+        assert_ne!(words(Stopped::NoAccess), failed);
+        assert_ne!(words(Stopped::Changed), failed);
+    }
 }

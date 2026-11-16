@@ -385,6 +385,8 @@ fn from_open(error: OpenFileError) -> MediaReadError {
         | OpenFileError::TooLarge { .. }
         | OpenFileError::OverLimit
         | OpenFileError::CopyNotReadable
+        | OpenFileError::NoAccess
+        | OpenFileError::ChangedWhileOpening
         | OpenFileError::Failed => MediaReadError::Failed,
     }
 }

@@ -42,6 +42,7 @@ mod source;
 mod source_engine;
 mod theme;
 mod ui;
+mod windows_floor;
 
 // `ui/**` names these at the crate root.
 pub use shell::registry::view;

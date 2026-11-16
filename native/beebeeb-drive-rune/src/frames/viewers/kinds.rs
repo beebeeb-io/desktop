@@ -5,8 +5,8 @@
 //! asked of the source when it is drawn ([`Picture`]), and a source that has none answers `None`;
 //! the frame then draws its plain tile, never a sample.
 
-/// Office files open in the viewer only when O-CP3 is green; flipped by the integration lane.
-pub const OFFICE_VIEWER_ON: bool = false;
+/// Office files open in the viewer (on since O-CP3: the viewer's rungs ran on Windows; which types show is [`OFFICE_SHIPS`]).
+pub const OFFICE_VIEWER_ON: bool = true;
 
 /// A photo (DW-1501). The camera's own preview of a RAW says so in the pill.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,4 +209,122 @@ pub fn its_app_shows_it(name: &str) -> bool {
 /// "4:02", "28:40": minutes and seconds.
 pub fn clock(seconds: u32) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// Which Office types ship (2482 Q7: ≥ 90 % of a type's corpus pages, measured on Windows). O-CP3: all five met it.
+/// `.doc` counts Word 97 and later and `.xls` Excel 97 and later; older and password-protected files show their honest
+/// state instead (the release notes say so).
+pub const OFFICE_SHIPS: OfficeShips = OfficeShips {
+    docx: true,
+    doc: true,
+    xlsx: true,
+    xls: true,
+    pptx: true,
+};
+
+/// One switch per Office type the viewer may show ([`OFFICE_SHIPS`]). `.ppt` has none: it is never shown here (2482 Q5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeShips {
+    pub docx: bool,
+    pub doc: bool,
+    pub xlsx: bool,
+    pub xls: bool,
+    pub pptx: bool,
+}
+
+/// An Office file's type, by its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OfficeKind {
+    Docx,
+    Doc,
+    Xlsx,
+    Xls,
+    Pptx,
+    Ppt,
+}
+
+/// Where an Office file goes from a list's Open, while the viewer is on ([`OFFICE_VIEWER_ON`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfficeRoute {
+    /// Beebeeb's own viewer shows it.
+    Shows(OfficeKind),
+    /// DW-1556: no preview for this type here (not shipped yet, or `.ppt`). Nothing is fetched.
+    NoPreview(OfficeKind),
+}
+
+/// The Office type of a file, by its name's extension. `None`: not an Office file.
+pub fn office_of(name: &str) -> Option<OfficeKind> {
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "docx" | "docm" | "dotx" | "dotm" => OfficeKind::Docx,
+        "doc" | "dot" => OfficeKind::Doc,
+        "xlsx" | "xlsm" | "xltx" => OfficeKind::Xlsx,
+        "xls" => OfficeKind::Xls,
+        "pptx" | "pptm" | "ppsx" => OfficeKind::Pptx,
+        "ppt" | "pps" => OfficeKind::Ppt,
+        _ => return None,
+    })
+}
+
+/// Where an Office file goes, by the switches as they ship. `None`: not an Office file, or the viewer is off (its own
+/// app, as before).
+pub fn office_route(name: &str) -> Option<OfficeRoute> {
+    office_route_with(name, OFFICE_VIEWER_ON, OFFICE_SHIPS)
+}
+
+/// [`office_route`] under the switches `on` and `ships`.
+pub fn office_route_with(name: &str, on: bool, ships: OfficeShips) -> Option<OfficeRoute> {
+    if !on {
+        return None;
+    }
+    let kind = office_of(name)?;
+    let shipped = match kind {
+        OfficeKind::Docx => ships.docx,
+        OfficeKind::Doc => ships.doc,
+        OfficeKind::Xlsx => ships.xlsx,
+        OfficeKind::Xls => ships.xls,
+        OfficeKind::Pptx => ships.pptx,
+        OfficeKind::Ppt => false,
+    };
+    Some(if shipped {
+        OfficeRoute::Shows(kind)
+    } else {
+        OfficeRoute::NoPreview(kind)
+    })
+}
+
+/// A picture of an open Office file. Its own type: `Picture` has exhaustive matches outside the Office viewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OfficePicture {
+    /// A whole page or slide, from 0.
+    Page { page: u32, zoom_pct: u16, dpi: u16 },
+    /// A [`TILE_PX`] square of that page at that scale.
+    Tile {
+        page: u32,
+        zoom_pct: u16,
+        dpi: u16,
+        col: u32,
+        row: u32,
+    },
+    /// A filmstrip slide, [`THUMB_W_PT`] wide.
+    Thumb { slide: u32, dpi: u16 },
+    /// A sheet's chart or picture.
+    Anchor {
+        sheet: u32,
+        anchor: u32,
+        zoom_pct: u16,
+        dpi: u16,
+    },
+}
+
+/// A tile's side, in pixels.
+pub const TILE_PX: u32 = 512;
+/// A filmstrip slide's width, in points.
+pub const THUMB_W_PT: f32 = 140.0;
+
+/// Tiles instead of whole pages when zoom × dpi / 96 ≥ 1.5 (O-CP2 L2: a whole page at 150 % missed 16 ms under load;
+/// tiles met it).
+pub fn uses_tiles(zoom_pct: u16, dpi: u16) -> bool {
+    // In whole numbers: zoom_pct / 100 × dpi / 96 ≥ 1.5 ⇔ zoom_pct × dpi ≥ 14 400.
+    u32::from(zoom_pct) * u32::from(dpi) >= 14_400
 }

@@ -737,7 +737,9 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
     }
     // A link's password being typed in the Files window's Share dialog (DW-0407).
     || (matches!(registry::group_for(&s.shell.app), registry::FrameGroup::Section(_))
-        && crate::frames::files::share::shows_secret(s));
+        && crate::frames::files::share::shows_secret(s))
+    // A deck in Present (the viewer contract §5.4): its slides stay out of captures and screen shares.
+    || crate::frames::office::slides::presenting(s);
     let leaving = std::mem::replace(&mut s.shell.secret_seen, secret) && !secret;
     if leaving {
         tx.settle();

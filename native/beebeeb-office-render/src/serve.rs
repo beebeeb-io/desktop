@@ -22,7 +22,7 @@ use beebeeb_office_protocol::check::MAX_INPUT_BYTES;
 use beebeeb_office_protocol::frame::{Frame, FrameError, Side, read_frame, write_frame};
 use beebeeb_office_protocol::office::{
     self, CellData, Cells, ErrorCode, GrantRef, KIND_CELL_DATA, KIND_ERROR, Message, Open, Outline, OutlineEntry,
-    Render, Rendered, StatsData,
+    Render, RenderAnchor, Rendered, StatsData,
 };
 
 use crate::engine::{Engine, OpenDoc, Opening};
@@ -71,6 +71,7 @@ fn read_ahead(mut input: Box<dyn Read + Send>, tx: Sender<Input>) {
 enum Ask {
     Open(Open),
     Render(Render),
+    RenderAnchor(RenderAnchor),
     Cells(Cells),
     Outline(Outline),
     Stats,
@@ -174,6 +175,7 @@ fn take(queue: &mut Queue, input: Input) -> Step {
             return Ok(());
         }
         Message::Render(render) => Ask::Render(render),
+        Message::RenderAnchor(ask) => Ask::RenderAnchor(ask),
         Message::Cells(cells) => Ask::Cells(cells),
         Message::Outline(outline) => Ask::Outline(outline),
         Message::Stats(_) => Ask::Stats,
@@ -238,11 +240,13 @@ fn opened(open: Open, memory: &dyn Memory, engine: &dyn Engine) -> Result<(Box<d
     Ok((doc, first))
 }
 
-/// A request cancelled before it started: no work, an `Error { Internal }`. A page buffer is still mapped and dropped
-/// at once, because that is the only way to close its grant.
+/// A request cancelled before it started: no work, an `Error { Internal }`. A pixel buffer (a page's, a chart's or a
+/// picture's) is still mapped and dropped at once, because that is the only way to close its grant.
 fn skip(id: u32, ask: &Ask, answers: &mut Answers<'_>, memory: &dyn Memory) -> Step {
-    if let Ask::Render(render) = ask {
-        release(memory, render.out);
+    match ask {
+        Ask::Render(render) => release(memory, render.out),
+        Ask::RenderAnchor(anchor) => release(memory, anchor.out),
+        Ask::Open(_) | Ask::Cells(_) | Ask::Outline(_) | Ask::Stats => {}
     }
     answers.error(id, ErrorCode::Internal)
 }
@@ -250,6 +254,7 @@ fn skip(id: u32, ask: &Ask, answers: &mut Answers<'_>, memory: &dyn Memory) -> S
 fn answer(id: u32, ask: Ask, session: &mut Session, answers: &mut Answers<'_>, memory: &dyn Memory) -> Step {
     match ask {
         Ask::Render(render) => answer_render(id, render, &*session.doc, answers, memory),
+        Ask::RenderAnchor(anchor) => answer_render_anchor(id, anchor, &*session.doc, answers, memory),
         Ask::Cells(cells) => answer_cells(id, cells, &*session.doc, answers),
         Ask::Outline(outline) => {
             if session.outline.is_none() {
@@ -269,25 +274,55 @@ fn answer(id: u32, ask: Ask, session: &mut Session, answers: &mut Answers<'_>, m
     }
 }
 
-/// `Render`: the engine sizes the page; a buffer of any other length is an error, never a guess. The buffer is mapped
-/// once, rendered into, and unmapped before the answer is written.
+/// `Render`: a page, or a region of it, through [`draw`].
 fn answer_render(id: u32, render: Render, doc: &dyn OpenDoc, answers: &mut Answers<'_>, memory: &dyn Memory) -> Step {
-    let (w, h) = match doc.render_size(render.page, render.scale, render.region) {
+    let size = doc.render_size(render.page, render.scale, render.region);
+    draw(id, render.out, size, answers, memory, |out| {
+        doc.render(render.page, render.scale, render.region, out)
+    })
+}
+
+/// `RenderAnchor`: a chart or a picture of a sheet, through [`draw`], the `Render` arm's twin.
+fn answer_render_anchor(
+    id: u32,
+    ask: RenderAnchor,
+    doc: &dyn OpenDoc,
+    answers: &mut Answers<'_>,
+    memory: &dyn Memory,
+) -> Step {
+    let size = doc.anchor_size(ask.sheet, ask.anchor, ask.scale);
+    draw(id, ask.out, size, answers, memory, |out| {
+        doc.render_anchor(ask.sheet, ask.anchor, ask.scale, out)
+    })
+}
+
+/// Pixels into the buffer `out`: the engine has sized them (`size`); a buffer of any other length is an error, never
+/// a guess. The buffer is mapped once (on an error too, which closes its grant), rendered into, and unmapped before
+/// the answer is written.
+fn draw(
+    id: u32,
+    out: GrantRef,
+    size: Result<(u32, u32), ErrorCode>,
+    answers: &mut Answers<'_>,
+    memory: &dyn Memory,
+    render: impl FnOnce(&mut [u8]) -> Result<bool, ErrorCode>,
+) -> Step {
+    let (w, h) = match size {
         Ok(size) => size,
         Err(code) => {
-            release(memory, render.out);
+            release(memory, out);
             return answers.error(id, code);
         }
     };
     let want = u64::from(w).checked_mul(u64::from(h)).and_then(|px| px.checked_mul(4));
-    if want != Some(render.out.len) {
-        // The app and the engine disagree on the page's size: the seam fails loudly.
-        release(memory, render.out);
+    if want != Some(out.len) {
+        // The app and the engine disagree on the size: the seam fails loudly.
+        release(memory, out);
         return answers.error(id, ErrorCode::Internal);
     }
-    let drawn = match memory.write(render.out) {
+    let drawn = match memory.write(out) {
         Ok(mut mapped) => {
-            let drawn = doc.render(render.page, render.scale, render.region, mapped.as_mut_slice());
+            let drawn = render(mapped.as_mut_slice());
             drop(mapped);
             drawn
         }

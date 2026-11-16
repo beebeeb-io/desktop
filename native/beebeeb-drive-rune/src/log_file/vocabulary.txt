@@ -395,6 +395,7 @@ held
 held_back
 held_for_review
 held_key_replaced
+helper
 hit
 holds
 home
@@ -533,6 +534,7 @@ name
 name_check_errors
 name_conflicts
 names
+needs
 nested
 neutral
 never
@@ -1007,6 +1009,7 @@ until
 untracked
 unwrap
 up
+update
 updated
 updates
 upgrade
@@ -1028,6 +1031,7 @@ verify
 version
 version_number
 via
+viewer
 violation
 w2
 w3
@@ -1050,6 +1054,7 @@ wholly
 whose
 will
 window
+windows
 with
 withdrawn
 withheld

@@ -32,6 +32,10 @@ pub enum Reason {
     DamagedOrOverLimit,
     /// Too large to preview on this PC.
     TooLarge,
+    /// No preview on this computer yet (macOS until its sandbox exists). Words not on the board: flagged in the notes.
+    NotOnThisComputer,
+    /// This Windows is older than the viewer's sandbox needs.
+    NeedsWindowsUpdate,
 }
 
 /// What the viewer is in. The host maps the engine's answer to it.
@@ -65,6 +69,8 @@ pub const REASON_TYPE: &str = "No preview for this type (.ppt, .odp, password-pr
 pub const REASON_DAMAGED: &str = "Damaged or over a size limit";
 pub const REASON_STOPPED: &str = "The viewer stopped";
 pub const REASON_TOO_LARGE: &str = "Too large to preview here";
+pub const REASON_NOT_HERE: &str = "No preview on this computer yet";
+pub const REASON_NEEDS_WINDOWS: &str = crate::windows_floor::NEEDS_WINDOWS_UPDATE;
 
 impl OfficeState {
     /// The one reason line of DW-1556; `None` where the state is not a failure.
@@ -73,6 +79,8 @@ impl OfficeState {
             OfficeState::NoPreview(Reason::UnsupportedType) => Some(REASON_TYPE),
             OfficeState::NoPreview(Reason::DamagedOrOverLimit) => Some(REASON_DAMAGED),
             OfficeState::NoPreview(Reason::TooLarge) => Some(REASON_TOO_LARGE),
+            OfficeState::NoPreview(Reason::NotOnThisComputer) => Some(REASON_NOT_HERE),
+            OfficeState::NoPreview(Reason::NeedsWindowsUpdate) => Some(REASON_NEEDS_WINDOWS),
             OfficeState::Stopped { .. } => Some(REASON_STOPPED),
             OfficeState::Opening | OfficeState::Ready | OfficeState::ContentMissing => None,
         }
@@ -139,16 +147,17 @@ impl StateBody {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scenes
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
 fn state_mut(s: &mut State) -> Option<&mut StateBody> {
     match &mut viewers::ui(s)?.file.body {
         Body::OfficeState(body) => Some(body),
         _ => None,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Scenes
-// ---------------------------------------------------------------------------
 
 /// Open the viewer's document (facts "Word document \u{00B7} 38 KB": never the editor's), then hold the state `body` says.
 fn scene_of(s: &mut State, body: StateBody) {
@@ -306,9 +315,8 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
     if body.state.try_again_shown() {
         actions = actions.child(
             text_button("empty-add", TRY_AGAIN, t.text, true, t).on_press(|s: &mut State| {
-                if let Some(b) = state_mut(s) {
-                    b.try_again();
-                }
+                // A file in a renderer is opened again by its source (`viewers::office_try_again`).
+                viewers::office_try_again(s);
             }),
         );
     }
@@ -621,10 +629,12 @@ mod tests {
             .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
     }
 
-    const ALL_REASONS: [OfficeState; 4] = [
+    const ALL_REASONS: [OfficeState; 6] = [
         OfficeState::NoPreview(Reason::UnsupportedType),
         OfficeState::NoPreview(Reason::DamagedOrOverLimit),
         OfficeState::NoPreview(Reason::TooLarge),
+        OfficeState::NoPreview(Reason::NotOnThisComputer),
+        OfficeState::NoPreview(Reason::NeedsWindowsUpdate),
         OfficeState::Stopped { retried: false },
     ];
 
@@ -633,7 +643,14 @@ mod tests {
         let lines: Vec<&str> = ALL_REASONS.iter().map(|s| s.reason_line().expect("a reason")).collect();
         assert_eq!(
             lines,
-            [REASON_TYPE, REASON_DAMAGED, REASON_TOO_LARGE, REASON_STOPPED],
+            [
+                REASON_TYPE,
+                REASON_DAMAGED,
+                REASON_TOO_LARGE,
+                REASON_NOT_HERE,
+                REASON_NEEDS_WINDOWS,
+                REASON_STOPPED
+            ],
             "each failure has its own line"
         );
         for i in 0..lines.len() {

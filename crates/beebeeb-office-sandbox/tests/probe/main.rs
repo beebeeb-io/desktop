@@ -44,6 +44,28 @@
 //!                                                         or hkcr)
 //!   capabilities         -> capabilities <n> <identifiers, comma-separated, sorted>  (Windows: the capabilities in
 //!                                                         its own token, as S-1-15-3-... identifiers)
+//!   section-commit <mebibytes>
+//!                        -> ok <shared commit bytes> | err <step> <system code>   (Windows: makes an unnamed section
+//!                                                         backed by the paging file, maps it, touches every page,
+//!                                                         unmaps it and keeps its handle; then reads its own shared
+//!                                                         commit)
+//!   hold-grants <wire> <len> [<wire> <len>]...
+//!                        -> ok <n> | err <system code>   (maps each grant read-only and never lets one go)
+//!   window               -> ok | err <step> <system code> (Windows: loads the window libraries at run time, never
+//!                                                         by import, makes a top-level window and reads one screen
+//!                                                         pixel)
+//!   jit                  -> ok | err <system code>      (Windows: makes a page executable and writable, writes a
+//!                                                         `ret` into it)
+//!   bad-handle           -> ok refused <system code> | err live | err waited <hex>   (Windows: first closes the
+//!                                                         value 0x7FFFFFF8, which must fail (no such handle is
+//!                                                         held), then waits on it; under strict handle checks the
+//!                                                         wait ends the process with 0xC0000008)
+//!   strict-handles       -> ok raise=<0|1> permanent=<0|1> | err <system code>   (Windows: its own strict-handle-
+//!                                                         check policy)
+//!   token                -> token lpac=<0|1> rid=<hex> | err <step> <system code>   (Windows: its own token's
+//!                                                         less-privileged container flag and integrity level)
+//!   memory               -> memory private=<bytes> shared=<bytes> job=<bytes|none> peak-job=<bytes|none>
+//!                                                        (Windows: its own commit, and its job's, if it has one)
 //!   hang                 -> hanging, then sleeps for ever
 //!   spin                 -> spinning, then burns one core for ever
 //!   exit <code>          -> exits with that code
@@ -60,6 +82,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use beebeeb_office_sandbox::{Access, Granted, SandboxError, helper};
+
+mod hardening;
 
 fn code(error: &std::io::Error) -> String {
     match error.raw_os_error() {
@@ -1186,6 +1210,14 @@ fn main() {
             "read-font" => read_font(),
             "read-registry" => read_registry(rest),
             "capabilities" => capabilities(),
+            "section-commit" => hardening::section_commit(rest),
+            "hold-grants" => hardening::hold_grants(rest),
+            "window" => hardening::window(),
+            "jit" => hardening::jit(),
+            "bad-handle" => hardening::bad_handle(),
+            "strict-handles" => hardening::strict_handles(),
+            "token" => hardening::token(),
+            "memory" => hardening::memory(),
             "hang" | "spin" => {
                 let _ = writeln!(stdout, "{}", if request == "hang" { "hanging" } else { "spinning" });
                 let _ = stdout.flush();

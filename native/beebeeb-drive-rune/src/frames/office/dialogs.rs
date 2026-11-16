@@ -92,8 +92,11 @@ pub fn licence_panel(t: &Theme) -> El {
 }
 
 /// The group's board frames and the scene that shows each (`frames::scenes`).
-pub const FRAMES: &[crate::ui::gate::Scene<State>] =
-    &[("DW-1557", viewers::scene_licence), ("DW-1558", placeholder::scene)];
+pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
+    ("DW-1557", viewers::scene_licence),
+    ("DW-1558", placeholder::scene),
+    ("DW-1562", super::open_with::scene_open_with),
+];
 
 #[cfg(test)]
 mod tests {
@@ -163,9 +166,10 @@ mod tests {
 
     #[test]
     fn office_dialogs_scenes_set_their_state() {
-        // DW-1557 and DW-1558 keep their rows; DW-1558 is a 0.9.1 placeholder by decision.
+        // DW-1557 and DW-1558 keep their rows; DW-1558 is a 0.9.1 placeholder by decision. DW-1562 is Open With
+        // (D-OV-14), drawn by the Files window.
         let ids: Vec<&str> = FRAMES.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, ["DW-1557", "DW-1558"]);
+        assert_eq!(ids, ["DW-1557", "DW-1558", "DW-1562"]);
         let mut s = crate::init();
         for (_, scene) in FRAMES {
             scene(&mut s);

@@ -40,6 +40,9 @@ fn text(row: u32, col: u32, text: &str, right_aligned: bool, bold: bool) -> Cell
         text: text.to_string(),
         right_aligned,
         bold,
+        // The board's cells carry no separate number: the status line reads their text, as it always did.
+        value: None,
+        formula: None,
     }
 }
 
@@ -68,5 +71,11 @@ pub fn board() -> SheetView {
         // The board draws no frozen line.
         frozen: (0, 0),
         merges: Vec::new(),
+        sheet: 0,
+        extent: (ROWS as u32, COL_WIDTHS.len() as u32),
+        top_left: Cell { row: 0, col: 0 },
+        anchors: vec![],
+        missing_content: false,
+        more: super::More::default(),
     }
 }

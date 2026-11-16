@@ -14,7 +14,8 @@ pub(super) struct Recorded {
 
 /// The file's bytes: the copy on this PC when the local state says it is here and it really is (no network at
 /// all), else the download. The answer says which, and the session the bytes were read for. The buffer is the
-/// engine's own, wiped when it is dropped.
+/// engine's own, wiped when it is dropped. At most `max_bytes` are read (`IN_MEMORY_MAX` for the viewer's own kinds,
+/// the Office contract's limit for an Office file).
 ///
 /// The origin never says more than is known: a copy in sync by the local state is only that while sync runs
 /// (with sync off nothing has compared it with Beebeeb since), and Beebeeb's version of a file whose copy here
@@ -23,12 +24,13 @@ pub(super) fn read<E: ViewerEngine>(
     engine: &E,
     file_id: &str,
     recorded: Recorded,
+    max_bytes: u64,
     progress: &(dyn Fn(u64, u64) + Send + Sync + 'static),
     cancel: &AtomicBool,
 ) -> Result<(SessionGeneration, zeroize::Zeroizing<Vec<u8>>, Origin), OpenFileError> {
     let mut behind = false;
     if recorded.here {
-        match engine.local(file_id, IN_MEMORY_MAX, cancel)? {
+        match engine.local(file_id, max_bytes, cancel)? {
             LocalCopy::Opened(copy) => {
                 let origin = match copy.copy {
                     OnThisPc::NotSentYet => Origin::ThisPc { unsent: true },
@@ -43,7 +45,7 @@ pub(super) fn read<E: ViewerEngine>(
             LocalCopy::Behind => behind = true,
         }
     }
-    let opened = engine.fetch(file_id, IN_MEMORY_MAX, progress, cancel)?;
+    let opened = engine.fetch(file_id, max_bytes, progress, cancel)?;
     // A copy here with a change of its own not settled says the most: Beebeeb's version is not what is on this PC.
     // Only then is a copy behind it said as one this PC could not confirm (delta check of desktop#432, round 3).
     let origin = if recorded.unsettled {
