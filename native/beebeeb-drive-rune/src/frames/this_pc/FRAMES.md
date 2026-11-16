@@ -27,8 +27,8 @@ light and dark. The gate lines per frame are in the PR body.
 | --- | --- | --- |
 | DW-0737 | Backups: the status card, This PC's folders with switches, other devices, services | built; light 0, dark 3 pixel lines open (the knobs of the three switches that are off, edge 11 > 9) |
 | DW-1411 | Backups: the first backup of a folder running (612 of 1,820 files) | built, 0 |
-| DW-0738 | Add a folder: Windows' own folder picker, drawn for reference | not built: Windows draws it ("the file picker: Windows draws this"); Add a folder… asks the shell for it (`Intent::PickFolder`) |
-| DW-1410 | Stop backing up Projects? keep the backup or move it to Trash | built, 0 |
+| DW-0738 | Add a folder: Windows' own folder picker, drawn for reference | not built: Windows draws it ("the file picker: Windows draws this"); Add a folder… asks the shell for it (`Intent::PickFolder`), which opens it on a worker (`shell::intents::pick_folder_for`) and hands the folder to the engine (slice A7) |
+| DW-1410 | Stop backing up Projects? keep the backup or move it to Trash | built, 0; in a real build "Stop and move the backup to Trash" asks for the account password first (flagged below) |
 | DW-0739 | Another device's backup (Anna's iPad) | built, 0 |
 | DW-0742 | Delete this backup? with the authenticator code | built; 1 pixel line open in each theme (`code-2`, the lit box's stroke on a half pixel, edge 32 > 9) |
 | DW-0741 | Couldn't back up: three failures with Try again, one exclusion without | built, 0 |
@@ -45,6 +45,22 @@ light and dark. The gate lines per frame are in the PR body.
 
 Built: 25 of 26. Not built: DW-0738 (system UI). Gate, 50 runs (25 frames, light and dark):
 39 with every line at 0, 11 with open lines, all named above.
+
+**NOT ON THE BOARD (design deviation, flagged; lead ruling 2026-11-15 17:26, plan40 slice A7):** DW-1410's "Stop and
+move the backup to Trash" asks for the ACCOUNT PASSWORD before anything moves, wherever the source proves it (the
+engine: `BackupsSource::trash_needs_password`). The engine moves a backed-up folder to Trash only through its one
+delete of a backup, which proves the password to Beebeeb (core's step-up, one single-use token); the board draws no
+password field. The dialog's second step is drawn from the kit as "Delete this backup?" (DW-0742) draws its password:
+- "Move the backup of <folder> to Trash?" · "The <size> backed up from <folder> will be moved to Trash. It leaves every
+  device and is deleted for good when Trash empties. Nothing on this PC is touched." (without a size: "What is backed
+  up from <folder> will be …") · the field "Account password" · Move to Trash (red, off until a password is typed;
+  "Moving…" while it is on its way) · Cancel.
+- A refused password stays in the step, under the field ("That password isn't right. Nothing was changed."); the folder
+  is backed up as before. A move Beebeeb did not confirm closes the dialog and says so in the section. Esc, Cancel and a
+  press outside change nothing.
+- "Stop and keep the backup" asks for nothing (no password: nothing moves). The board's scene (the fixture) never opens
+  the step, so compare.sh DW-1410 draws the board's first view, unchanged.
+The board has no frame for the second step.
 
 States the board gives a rule and no drawing, built from the rule's words (tests only): a filter or
 a search that matches nothing draws an empty list (no invented copy); "Remove all from this PC"

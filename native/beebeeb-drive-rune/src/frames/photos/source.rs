@@ -226,6 +226,23 @@ pub trait PhotosSource {
     fn folders(&self) -> Vec<Folder>;
     /// Shows or hides a source (Photo sources, Done).
     fn set_shown(&mut self, source: SourceRef, shown: bool);
+    /// Adds the folder `folder_id` of Files to Photo sources (Add a folder…, once the folder picker chose one). It
+    /// shows in [`Self::folders`] once the engine answered, never before. `false`: nothing sent.
+    fn add_folder(&mut self, _folder_id: &str) -> bool {
+        false
+    }
+    /// Takes a folder out of Photo sources (Remove): its photos show again. Nothing is moved or deleted. A device:
+    /// nothing.
+    fn remove_folder(&mut self, _source: SourceRef) {}
+    /// A folder change (add, remove, switch) was refused since the last call: `true`, once. The window says so.
+    fn folder_refused(&mut self) -> bool {
+        false
+    }
+    /// The files behind these photos, for Move… (names and ids; Files' folder dialog moves them). `None`: a photo
+    /// is not held, or nothing is connected that could say.
+    fn file_items(&self, _ids: &[PhotoId]) -> Option<Vec<crate::source::DriveItem>> {
+        None
+    }
     /// The totals of what shows, or of one device (`devices()` index).
     fn totals(&self, device: Option<usize>) -> Totals;
     fn backup_status(&self) -> Option<BackupStatus>;

@@ -240,3 +240,17 @@ fn in_files_the_switch_sort_and_the_details_button_each_change_their_own_state()
     click(&mut rt, "sort-btn");
     assert_eq!(rt.state.actions.menu.map(|m| m.kind), None);
 }
+
+#[test]
+fn viewer_open_in_file_explorer_opens_the_beebeeb_location() {
+    // A file open in the viewer shows no folder of its own: the button opens the Beebeeb location, by pointer.
+    let (asked, mut rt) = window(|s| crate::frames::viewers::set_scene(s, "DW-1512"));
+    let button = info(&rt, "open-explorer");
+    assert_eq!(
+        (button.role, button.label.as_deref(), button.focusable),
+        ("button", Some("Open in File Explorer"), true)
+    );
+    assert!(asked.files().is_empty(), "nothing asked before a press");
+    click(&mut rt, "open-explorer");
+    assert_eq!(asked.files(), [Call::OpenInFileExplorer(None)]);
+}

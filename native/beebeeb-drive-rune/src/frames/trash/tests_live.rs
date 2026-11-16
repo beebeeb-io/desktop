@@ -160,16 +160,29 @@ fn a_refused_restore_is_drawn() {
 }
 
 #[test]
-fn a_restore_that_was_not_made_is_drawn_without_a_name() {
+fn a_restore_that_was_not_made_is_drawn_with_its_name() {
     let (mut rt, held) = window(Held {
         rows: three(),
         ..Held::default()
     });
-    held.borrow_mut().notice = Some(Notice::RestoreNotDone);
+    held.borrow_mut().notice = Some(Notice::RestoreNotDone(vec!["Bravo.pdf".into()]));
     poll(&mut rt);
     assert_eq!(
         info(&rt, "notice-words").text.as_deref(),
-        Some("A restore didn\u{2019}t go through before Beebeeb was locked or signed out. The item is still in Trash.")
+        Some(
+            "Couldn\u{2019}t restore \u{201C}Bravo.pdf\u{201D} before Beebeeb was locked or signed out. \
+             It\u{2019}s still in Trash."
+        )
+    );
+    // Two restores cut by one lock: one notice, the first named and the other counted.
+    held.borrow_mut().notice = Some(Notice::RestoreNotDone(vec!["Bravo.pdf".into(), "Charlie.pdf".into()]));
+    poll(&mut rt);
+    assert_eq!(
+        info(&rt, "notice-words").text.as_deref(),
+        Some(
+            "Couldn\u{2019}t restore \u{201C}Bravo.pdf\u{201D} and 1 other item before Beebeeb was locked or \
+             signed out. They\u{2019}re still in Trash."
+        )
     );
 }
 

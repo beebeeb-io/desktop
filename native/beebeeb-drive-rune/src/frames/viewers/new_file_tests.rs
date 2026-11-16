@@ -152,7 +152,7 @@ fn the_types_are_one_radio_group_and_the_arrows_choose_one() {
     let group = info(&rt, "types");
     assert_eq!(group.role, "radiogroup");
     assert_eq!(group.label.as_deref(), Some("Pick a type"));
-    for (i, kind) in Kind::ALL.into_iter().enumerate() {
+    for (i, kind) in Kind::offered().iter().copied().enumerate() {
         let tile = info(&rt, &format!("type-{i}"));
         assert_eq!(tile.role, "radio", "{kind:?}");
         assert_eq!(tile.label, Some(format!("{}, {}", kind.word(), kind.ext())), "{kind:?}");
@@ -166,8 +166,8 @@ fn the_types_are_one_radio_group_and_the_arrows_choose_one() {
     press(&mut rt, Key::Left);
     assert_eq!(
         picked(&rt),
-        Some(Kind::PowerPoint),
-        "Left from the first wraps to the last"
+        Some(*Kind::offered().last().unwrap()),
+        "Left from the first wraps to the last type offered"
     );
     // A key the dialog does not use stops at it. The Files window answers Ctrl+F wherever focus is
     // (the search field), and Delete moves the selected file to Trash: neither reaches it.
@@ -175,7 +175,7 @@ fn the_types_are_one_radio_group_and_the_arrows_choose_one() {
     rt.frame(0.0);
     assert_eq!(
         focused(&rt).as_deref(),
-        Some("type-4"),
+        Some(format!("type-{}", Kind::offered().len() - 1).as_str()),
         "Ctrl+F reached the window behind the dialog"
     );
     press(&mut rt, Key::Delete);
@@ -271,8 +271,49 @@ fn a_name_the_folder_already_has_says_why_and_typing_takes_the_message_away() {
     assert!(!has(&rt, "field-0-msg"), "typing takes the message away");
 }
 
+/// Lock 4 (D-OV-3): 0.9.0 offers no Office type. Mutant: `OFFICE_EDITOR = true` in `new_file.rs` -> red.
 #[test]
+fn new_file_offers_no_office_type_in_090() {
+    assert!(
+        !super::new_file::OFFICE_EDITOR,
+        "0.9.0 ships the viewer, not the editor"
+    );
+    assert!(
+        Kind::offered().iter().all(|k| !k.office()),
+        "an office type is offered: {:?}",
+        Kind::offered()
+    );
+    let (mut rt, _calls) = runtime();
+    open_dialog(&mut rt);
+    assert!(has(&rt, "type-0") && has(&rt, "type-1"));
+    for i in 2..Kind::ALL.len() {
+        assert!(!has(&rt, &format!("type-{i}")), "tile type-{i} is drawn");
+    }
+    // The arrows never reach an office type, and Continue never asks for New document.
+    for _ in 0..6 {
+        press(&mut rt, Key::Right);
+        assert!(!picked(&rt).unwrap().office());
+    }
+    operate(&mut rt, "btn-0");
+    assert!(
+        super::take_asked(&mut rt.state)
+            .iter()
+            .all(|i| !matches!(i, Intent::NewDocument(_)))
+    );
+    // New's menu has no New document… (DW-1520).
+    assert!(
+        crate::frames::files::menus::new_menu()
+            .iter()
+            .all(|e| !format!("{e:?}").contains("new-document"))
+    );
+}
+
+#[test]
+#[ignore = "0.9.1: runs when OFFICE_EDITOR is true"]
 fn an_office_type_goes_on_to_new_document_without_a_name_here() {
+    if !super::new_file::OFFICE_EDITOR {
+        return;
+    }
     let (mut rt, calls) = runtime();
     for (steps, kind) in [(2, Kind::Word), (3, Kind::Excel), (4, Kind::PowerPoint)] {
         open_dialog(&mut rt);
@@ -368,16 +409,14 @@ fn a_second_ask_in_the_same_frame_keeps_the_dialog_as_it_is() {
     rt.state.actions.intents.push(FilesIntent::Frame("DW-1521"));
     rt.frame(0.0);
     assert_eq!(dialog_step(&rt), Some(Step::Pick));
-    for _ in 0..3 {
-        press(&mut rt, Key::Right);
-    }
-    assert_eq!(picked(&rt), Some(Kind::Excel));
+    press(&mut rt, Key::Right);
+    assert_eq!(picked(&rt), Some(Kind::ALL[1]));
     rt.frame(0.0);
-    assert_eq!(picked(&rt), Some(Kind::Excel), "the second ask reset the dialog");
+    assert_eq!(picked(&rt), Some(Kind::ALL[1]), "the second ask reset the dialog");
     // And an ask that arrives while it is open changes nothing in it either.
     rt.state.actions.intents.push(FilesIntent::Frame("DW-1521"));
     rt.frame(0.0);
-    assert_eq!(picked(&rt), Some(Kind::Excel), "an ask while open reset the dialog");
+    assert_eq!(picked(&rt), Some(Kind::ALL[1]), "an ask while open reset the dialog");
     assert!(
         !rt.state.actions.intents.contains(&FilesIntent::Frame("DW-1521")),
         "every ask was taken"

@@ -18,8 +18,8 @@ mod audio;
 mod chrome;
 pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
 pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
-mod details;
-mod dialogs;
+pub(crate) mod details;
+pub(crate) mod dialogs;
 mod fixture_media;
 mod fixture_text;
 pub mod icons;
@@ -29,6 +29,15 @@ mod md_source;
 pub mod media;
 mod media_icons;
 pub mod new_file;
+mod new_file_scene;
+pub use new_file_scene::set_new_file_scene;
+pub mod office;
+pub mod office_board;
+mod office_glue;
+pub use office_glue::{deck_mut, doc_mut, leave_present, open_deck, open_doc, scene_licence};
+mod office_icons;
+pub mod office_over;
+mod open_route;
 mod pdf;
 mod photo;
 mod settle;
@@ -38,11 +47,14 @@ mod style;
 mod table;
 mod text;
 pub mod video;
+use open_route::is_this_groups;
 
 #[cfg(test)]
 mod media_tests;
 #[cfg(test)]
 mod new_file_tests;
+#[cfg(test)]
+mod office_tests;
 #[cfg(test)]
 mod route_tests;
 #[cfg(test)]
@@ -96,6 +108,8 @@ pub enum Intent {
     EditInSheets,
     /// Move this file to Trash (a photo's Trash; Undo is the toast's, in Files).
     Trash,
+    /// A command of the office editor (its name, as the control says it): the editor takes it.
+    Office(&'static str),
 }
 
 /// What a control whose target is not built yet says (the shell's words for it).
@@ -142,6 +156,7 @@ impl Intent {
             Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
+            Intent::Office(command) => command,
             _ => return None,
         })
     }
@@ -211,6 +226,8 @@ pub struct Ui {
     pub saved_at: Option<String>,
     /// What is open inside a photo, a recording, a PDF, a table or an archive (`media.rs`).
     pub media: media::Media,
+    /// What is open inside the office editor's frame (`office.rs`).
+    pub office: office::OfficeUi,
     /// The element that takes keyboard focus once this change is on screen.
     focus: Option<&'static str>,
     intents: Vec<Intent>,
@@ -242,6 +259,7 @@ impl Ui {
         Ui {
             source,
             media: media::Media::of(&file),
+            office: office::OfficeUi::default(),
             file,
             show_details: false,
             wrap: false,
@@ -351,7 +369,7 @@ impl Ui {
     /// get past (offline, a lock that ended).
     pub fn retry(&mut self) {
         let may = match &self.file.body {
-            Body::Failed => true,
+            Body::Failed | Body::NoEditor => true,
             Body::Stopped(why) => why.can_retry(),
             _ => false,
         };
@@ -384,6 +402,10 @@ impl Ui {
     /// Put `file` in place of the open one, whose decrypted text is overwritten first.
     fn replace(&mut self, file: OpenFile) {
         self.file.wipe();
+        // What was open over a document goes with the document (its keys with it).
+        if !matches!(file.body, Body::Word(_)) {
+            self.office.over = None;
+        }
         self.file = file;
     }
 
@@ -533,6 +555,9 @@ impl Ui {
                 // open PDF arrived) keeps the page, the zoom and the find bar where the person has them.
                 if another_kind {
                     self.media = media::Media::of(&self.file);
+                    if !matches!(self.file.body, Body::Word(_)) {
+                        self.office.over = None;
+                    }
                 }
                 true
             }
@@ -676,23 +701,6 @@ pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
     true
 }
 
-/// Whether a list's Open of `item` is this group's ([`open_item`]).
-fn is_this_groups(s: &State, item: &crate::source::DriveItem) -> bool {
-    !item.is_folder
-        && kinds::viewer_of(&item.name).is_some()
-        // A kind the window's source does not show here stays its own app's. So does a file whose bytes are kept
-        // on this PC, when its own app shows it (a document, a picture): the system opens it there with the app
-        // the person chose for it, with nothing to download. The viewer is for a file that is NOT on this PC
-        // (shown from memory, no copy lands on disk), and for source code, scripts and web pages wherever they
-        // are: Enter on one reads it, it never runs it (`kinds::its_app_shows_it`).
-        && route_source(s).is_some_and(|source| {
-            source.previews(&item.name)
-                && !(kinds::its_app_shows_it(&item.name)
-                    && source.kept_on_this_pc(&item.id)
-                    && !source.opens_here_when_kept(&item.name))
-        })
-}
-
 /// Whether `item` is a file a list's Open only ever READS here: source code, a script, a web page, a data file
 /// that the window's source shows. With several files selected such a file is left out of what the system is
 /// asked to open (`frames::files`), as one alone opens in the viewer.
@@ -748,6 +756,10 @@ pub fn sync(s: &mut State) {
         let held = s.viewer.ui.as_mut().is_some_and(|ui| {
             if ui.dialog.is_some() {
                 ui.keep_editing();
+                true
+            } else if ui.office.over.is_some() {
+                // Back under the question or the command search closes that, not the document.
+                ui.office_close_over();
                 true
             } else {
                 // Esc and Back close find, or step out of an archive's folder, before the file.
@@ -883,6 +895,12 @@ fn kind_word(file: &OpenFile) -> &str {
 }
 
 fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
+    match &ui.file.body {
+        Body::Word(doc) => return office::window(s, cx, ui, Some(doc)),
+        Body::NoEditor => return office::window(s, cx, ui, None),
+        Body::Sheet(_) | Body::Deck(_) | Body::Doc(_) | Body::OfficeState(_) => return office_glue::window(s, cx, ui),
+        _ => {}
+    }
     let t = tokens::theme(cx.system_dark());
     if let Some(editor) = &ui.editor {
         let dirty = editor.dirty();
@@ -1018,6 +1036,13 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             ui.toast = None;
         }
     }
+    // The editor's frame: the question, the command search, Ctrl+K and Ctrl+S.
+    if office_over::on_key(s, ev, tx) {
+        if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
+            tx.focus(key, true);
+        }
+        return true;
+    }
     let page_before = ui(s).map(|ui| ui.media.page);
     if media::on_key(s, ev) {
         // A page turned by a key: its thumbnail comes into view, and the page is read from its top.
@@ -1076,6 +1101,9 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
         "DW-1506" => board::PDF_FIND,
         "DW-1514" => board::CSV,
         "DW-1515" => board::ZIP,
+        "DW-1234" | "DW-1507e" | "DW-1550" | "DW-1551" | "DW-1552" | "DW-1553" | "DW-1554" | "DW-1556" => board::DOCX,
+        "DW-1511" => board::DOC,
+        "DW-1508" => board::SHEET,
         _ => return None,
     })
 }
@@ -1088,7 +1116,8 @@ pub fn set_scene(s: &mut State, frame: &str) {
     let Some(file) = scene_file(frame) else { return };
     let source = FixtureViewerSource {
         newer: frame == "DW-1519",
-        conflict: frame == "DW-1526",
+        conflict: matches!(frame, "DW-1526" | "DW-1554"),
+        office: office::board::Case::of(frame),
         ..FixtureViewerSource::new()
     };
     open_from(s, Box::new(source), file);
@@ -1119,40 +1148,10 @@ pub fn set_scene(s: &mut State, frame: &str) {
         }
     }
     match frame {
+        "DW-1550" | "DW-1551" | "DW-1553" | "DW-1554" => office_over::set_scene(ui, frame),
         "DW-1524" | "DW-1526" => ui.save(),
         "DW-1525" => {
             ui.hold_for_changes();
-        }
-        _ => {}
-    }
-}
-
-/// DW-1520 to DW-1522: the Files window as the board draws it under New (Contract draft.pdf
-/// selected, the details panel open), then New's menu on "New file…", or the dialog.
-pub fn set_new_file_scene(s: &mut State, frame: &str) {
-    s.select_only(6);
-    match frame {
-        "DW-1520" => {
-            s.actions.menu = Some(crate::frames::files::OpenMenu {
-                kind: crate::frames::files::MenuKind::New,
-                at: (0.0, 0.0),
-                hot: Some(1),
-            });
-        }
-        "DW-1521" => {
-            new_file::begin(s);
-        }
-        "DW-1522" => {
-            // Text, Continue, "export_invoices" typed and selected, .py picked.
-            new_file::begin(s);
-            new_file::choose(s, new_file::Kind::Text);
-            new_file::go_on(s);
-            new_file::choose_ext(s, ".py");
-            if let Some(nf) = s.viewer.new_file.as_mut() {
-                nf.name = rune::TextEdit::new("export_invoices");
-                nf.name.set_selection(0, nf.name.text.len());
-                nf.name.focused = true;
-            }
         }
         _ => {}
     }
@@ -1181,4 +1180,12 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1506", |s| set_scene(s, "DW-1506")),
     ("DW-1514", |s| set_scene(s, "DW-1514")),
     ("DW-1515", |s| set_scene(s, "DW-1515")),
+    ("DW-1507e", |s| set_scene(s, "DW-1507e")),
+    ("DW-1511", crate::frames::office::docs::scene_older),
+    ("DW-1550", |s| set_scene(s, "DW-1550")),
+    ("DW-1551", |s| set_scene(s, "DW-1551")),
+    ("DW-1552", |s| set_scene(s, "DW-1552")),
+    ("DW-1553", |s| set_scene(s, "DW-1553")),
+    ("DW-1554", |s| set_scene(s, "DW-1554")),
+    ("DW-1556", crate::frames::office::states::scene_failed),
 ];

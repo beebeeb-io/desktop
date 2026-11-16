@@ -14,7 +14,8 @@
 //! 409 is "Close the request first."). A change is never drawn before Beebeeb confirmed it: the rows
 //! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a
 //! notice the view draws ("Not available yet"): `stop_sharing`, `close_request` (the view asks no confirmation),
-//! `keep_offline`, and the old synchronous `invite` (it cannot wait for the server).
+//! and the old synchronous `invite` (it cannot wait for the server). `keep_offline` is bound (`shared_offline.rs`):
+//! the engine's pin change for a row of Shared with me, answered like a change.
 //!
 //! Invite someone (DW-0514, [`Engine::invite_for`]): `start_invite` stamps the press's session and account, runs the
 //! invite on a worker (one per share at a time) and answers through `invite_answer`; an answer under another session
@@ -48,7 +49,6 @@ use beebeeb_engine::drive_v2::model::mime_for_name;
 use chrono::{DateTime, Local};
 
 use super::log;
-use super::scaffold::not_wired;
 use super::stamp::{Stamp, stamp};
 use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
@@ -56,6 +56,7 @@ use crate::frames::shared::source::{
     Access, Invitation, InviteResult, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped, Request,
     RequestState, SharedSource,
 };
+use crate::ui::file_list::PcState;
 
 #[cfg(test)]
 use crate::frames::shared::parts::table::Kind;
@@ -120,7 +121,8 @@ pub(crate) struct Held {
 }
 
 enum Answer {
-    Read(u64, Result<SharesOverview, AccountCallError>),
+    /// The read's number, the overview, and which of its with-me rows the engine says are kept on this PC.
+    Read(u64, Result<SharesOverview, AccountCallError>, HashSet<String>),
     /// The change for this id, the session it was sent for, and what Beebeeb said.
     Changed(String, SessionGeneration, Result<(), ShareChangeError>),
     /// The invitation for this share, the session and account it was sent under, and how it ended.
@@ -169,9 +171,29 @@ impl<C: CredentialStores> EngineSharedSource<C> {
         let (engine, answers, number) = (self.engine.clone(), self.answers.clone(), self.reads);
         let started = std::thread::Builder::new().name("shared-read".into()).spawn(move || {
             // A panic in this worker must not leave `reading` set for good: send an error.
-            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.shares_overview()))
-                .unwrap_or(Err(AccountCallError::Offline));
-            let _ = answers.send(Answer::Read(number, read));
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let overview = engine.shares_overview();
+                // Which with-me rows are kept comes from the engine's own state, on this same worker.
+                let kept = match &overview {
+                    Ok(overview) => {
+                        let ids: Vec<String> = overview
+                            .incoming
+                            .iter()
+                            .filter(|item| !item.waiting)
+                            .map(|item| item.item_id.clone())
+                            .collect();
+                        engine.shared_kept_of_for(overview.session, &ids).unwrap_or_else(|_| {
+                            log("shared: whether shared files are kept could not be read");
+                            HashSet::new()
+                        })
+                    }
+                    Err(_) => HashSet::new(),
+                };
+                (overview, kept)
+            }))
+            .unwrap_or((Err(AccountCallError::Offline), HashSet::new()));
+            let (read, kept) = read;
+            let _ = answers.send(Answer::Read(number, read, kept));
             engine.wake_host();
         });
         match started {
@@ -221,7 +243,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
     fn take_in(&mut self, answer: Answer) {
         let now = self.engine.session_turn();
         match answer {
-            Answer::Read(number, result) => {
+            Answer::Read(number, result, kept) => {
                 if self.reading == Some(number) {
                     self.reading = None;
                 }
@@ -233,7 +255,9 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                     // Read for a session that is gone: dropped, never drawn.
                     Ok(overview) if overview.session != now => {}
                     Ok(overview) => {
-                        self.held = Some(held_of(overview, Local::now()));
+                        let mut held = held_of(overview, Local::now());
+                        mark_kept(&mut held, &kept);
+                        self.held = Some(held);
                         self.unmade = false;
                         self.loaded = Loaded::Ready;
                     }
@@ -413,9 +437,9 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.change(session, id, ShareChange::Decline { invite_id: id.into() })
     }
 
-    // Not bound (slice B4, `shared_offline.rs`; the module's doc says why): nothing is sent, and the view says so.
+    // Slice B4 (`shared_offline.rs`): sent once per press for a row of "Shared with me".
     fn keep_offline(&mut self, id: &str) -> bool {
-        not_wired(self.shared_offline_keep_offline(id))
+        self.shared_offline_keep_offline(id)
     }
 
     /// Sent once per press: a share with people (cancels every invite of it) or a link (revokes every live link of
@@ -561,6 +585,16 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.notice = None;
         self.loaded = Loaded::Loading;
         self.dirty = true;
+    }
+}
+
+/// A with-me row whose id the engine named as kept on this PC is drawn as available offline; every other row stays
+/// "no claim". Nothing here reads anything: the set is the engine's answer.
+pub(crate) fn mark_kept(held: &mut Held, kept: &HashSet<String>) {
+    for row in &mut held.with_me {
+        if kept.contains(&row.id) {
+            row.pc = Some(PcState::AvailableOffline);
+        }
     }
 }
 

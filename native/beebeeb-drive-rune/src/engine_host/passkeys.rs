@@ -143,7 +143,7 @@ fn passkey_of(row: &PasskeyRow) -> Passkey {
 
 /// The name a new passkey is given: the person is not asked (the system's dialog says where it is saved), so it
 /// says what it is and when it was made; Rename changes it later.
-fn new_name() -> String {
+pub(crate) fn new_name() -> String {
     format!("Windows PC, {}", chrono::Local::now().format("%-d %b %Y"))
 }
 
@@ -487,7 +487,7 @@ impl<C: CredentialStores + 'static> PasskeyCalls<C> {
 }
 
 /// The add, on the worker: the engine's call over the Windows dialog (`hwnd`), off Windows the refusal.
-fn add_with_dialog<C: CredentialStores>(
+pub(crate) fn add_with_dialog<C: CredentialStores>(
     engine: &Engine<C>,
     hwnd: isize,
     session: SessionGeneration,

@@ -643,6 +643,44 @@ impl StateDb {
         }
         conn.pragma_update(None, "user_version", ADOPTION_CLOSED)
     }
+    /// R10 ruling 8 in the native build (lead ruling 2026-11-15 17:35), at the first startup: shut the adoption window
+    /// of the database at `path`, writing nothing but the `user_version` mark, and never making a database (no
+    /// schema check, no migration, no table: the startup must not write account data or create a file). `Ok(None)`:
+    /// no database there. `Ok(Some(true))`: the window was open, and this call shut it (this is the first startup).
+    pub fn shut_adoption_window_at_startup(path: &std::path::Path) -> Result<Option<bool>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version >= ADOPTION_CLOSED {
+            return Ok(Some(false));
+        }
+        conn.pragma_update(None, "user_version", ADOPTION_CLOSED)?;
+        Ok(Some(true))
+    }
+    /// R10 ruling 8 in the native build (lead ruling 2026-11-15 17:35), inside the start: record `session` as the
+    /// owner of local data that has no owner, in one transaction. A recorded owner is never replaced, and data with no
+    /// account rows is not adopted. The window this belongs to is the engine's (`app/own_data_start.rs`): shut on disk
+    /// at the first startup, and held in memory for the account whose vault key the store held then, which the caller
+    /// has compared `session` with. Returns whether it recorded.
+    pub fn adopt_owner_for_startup_candidate(&self, session: &crate::account_binding::Identity) -> Result<bool> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let adopted = session.is_known() && read_owner(&tx)?.is_none() && account_rows(&tx)? > 0;
+        if adopted {
+            write_owner(&tx, session)?;
+        }
+        tx.commit()?;
+        if adopted {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        Ok(adopted)
+    }
     /// The sign-out's clear (macOS and Linux; Windows has `finish_windows_signout`) and the last step of the R10
     /// reset, after `purge_all_local_state` has handed back the files to delete: every row of the previous account,
     /// the sync cursor and the owner record included, in one transaction.

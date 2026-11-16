@@ -76,7 +76,7 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
     let focused = cx.caret(SEARCH_KEY).is_some();
     let shows = ui.shows(&s.search.text);
     let content = match &shows {
-        Shows::Unavailable => unavailable(&t),
+        Shows::Unavailable => unavailable(ui.unavailable_reason(&s.search.text), &t),
         Shows::Searching => searching(&t),
         Shows::Recent(recent) => recent_searches(recent, &t),
         Shows::Results { hits, loading } => results(s, hits, *loading, &t),
@@ -338,10 +338,30 @@ fn search_field(s: &State, focused: bool, t: &Theme) -> El {
     field
 }
 
-/// A window whose search is not wired yet: it says so, and shows nothing of the board's sample.
-fn unavailable(t: &Theme) -> El {
+/// A window whose search is not wired yet: it says so, and shows nothing of the board's sample. With a reason
+/// (`SearchUi::unavailable_reason`: this PC's local state is another account's) it says why under it, in Photos'
+/// words; never an account's name, email or count.
+fn unavailable(reason: Option<(&'static str, &'static str)>, t: &Theme) -> El {
+    let why = reason.map(|(title, line)| {
+        col()
+            .key("search-why")
+            .items_center()
+            .gap(4.0)
+            .child(
+                kit::label("search-why-title", title, style::SUB, t.text_secondary)
+                    .w(227.11)
+                    .wrap()
+                    .align(Align::Center),
+            )
+            .child(
+                kit::label("search-why-line", line, style::SUB, t.text_tertiary)
+                    .w(227.11)
+                    .wrap()
+                    .align(Align::Center),
+            )
+    });
     col().key("search-unavailable").w_full().child(
-        empty(&icons::SEARCH, UNAVAILABLE_TITLE, UNAVAILABLE_TEXT, None, t)
+        empty(&icons::SEARCH, UNAVAILABLE_TITLE, UNAVAILABLE_TEXT, why, t)
             .grow(1.0)
             .w_full(),
     )

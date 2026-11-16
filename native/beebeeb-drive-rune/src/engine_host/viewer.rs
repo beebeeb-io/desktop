@@ -53,8 +53,6 @@
 //!
 //! Must not: log a name, an id, a path or a byte; write a decrypted byte anywhere; show a sample.
 
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -73,12 +71,15 @@ use crate::frames::viewers::source::{
     Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
 };
 
+#[path = "viewer_pages.rs"]
+mod pages;
 #[path = "viewer_find.rs"]
 mod viewer_find;
 #[path = "viewer_media.rs"]
 pub(crate) mod viewer_media;
 #[path = "viewer_text.rs"]
 mod viewer_text;
+use pages::{Pages, PdfEnds};
 use viewer_text::text_body;
 #[path = "viewer_pdf.rs"]
 pub(crate) mod viewer_pdf;
@@ -404,67 +405,6 @@ struct Opening {
     name: String,
 }
 
-/// One page's answer from the worker: the page (from 1), its pixels or `None` when it could not be rendered, and
-/// whether text of the page is not in the pixels (`viewer_pdf::Rendered::lacks_text`).
-type PageAnswer = (u32, Option<rune::Pixels>, bool);
-
-/// The window's side of an open PDF: pages are asked of the worker that holds the document, and the last few that
-/// came back are kept. Asking happens while the view is drawn (`ViewerSource::picture` takes `&self`), so what
-/// changes then sits in cells; this is the window's thread's alone.
-struct Pages {
-    ask: mpsc::Sender<u32>,
-    got: mpsc::Receiver<PageAnswer>,
-    /// The newest last. `None` pixels: that page could not be rendered.
-    kept: RefCell<VecDeque<PageAnswer>>,
-    /// The page the worker was last asked for and has not answered.
-    asked: Cell<Option<u32>>,
-    /// The document as the view was told, once the worker opened it.
-    doc: RefCell<Option<PdfDoc>>,
-}
-
-impl Pages {
-    /// Take what the worker rendered since the last call. `true`: something came.
-    fn take_in(&self) -> bool {
-        let mut kept = self.kept.borrow_mut();
-        let mut came = false;
-        while let Ok((page, pixels, lacks_text)) = self.got.try_recv() {
-            kept.retain(|(held, ..)| *held != page);
-            kept.push_back((page, pixels, lacks_text));
-            while kept.len() > PAGES_KEPT {
-                kept.pop_front();
-            }
-            if self.asked.get() == Some(page) {
-                self.asked.set(None);
-            }
-            came = true;
-        }
-        came
-    }
-
-    fn held(&self, page: u32) -> Option<Option<rune::Pixels>> {
-        self.kept
-            .borrow()
-            .iter()
-            .find(|(held, ..)| *held == page)
-            .map(|(_, pixels, _)| pixels.clone())
-    }
-
-    /// Whether the kept picture of `page` lacks text the renderer had no font for.
-    fn lacks_text(&self, page: u32) -> bool {
-        self.kept
-            .borrow()
-            .iter()
-            .any(|(held, pixels, lacks_text)| *held == page && pixels.is_some() && *lacks_text)
-    }
-}
-
-/// The worker's ends of an open PDF's channels, and the size the view is told.
-struct PdfEnds {
-    asks: mpsc::Receiver<u32>,
-    answers: mpsc::Sender<PageAnswer>,
-    size: String,
-}
-
 /// An open file on the real engine. See the module's doc.
 pub struct EngineViewerSource<E: ViewerEngine> {
     engine: Arc<E>,
@@ -731,20 +671,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let (answers, inbox) = mpsc::channel();
         // A PDF: the worker keeps the document and renders the pages the view asks for.
         let (pages, pdf) = if shows == Shows::Pdf && facts.size <= IN_MEMORY_MAX {
-            let ((ask, asks), (page_answers, got)) = (mpsc::channel(), mpsc::channel());
-            let pages = Pages {
-                ask,
-                got,
-                kept: RefCell::default(),
-                asked: Cell::new(None),
-                doc: RefCell::new(None),
-            };
             let size = crate::source::format_size(i64::try_from(facts.size).unwrap_or(i64::MAX));
-            let ends = PdfEnds {
-                asks,
-                answers: page_answers,
-                size,
-            };
+            let (pages, ends) = Pages::open(size);
             (Some(pages), Some(ends))
         } else {
             (None, None)
@@ -900,11 +828,17 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 // the file is left (the asker goes) or its session moves on (`cancel`). Then the document is
                 // dropped, and the bytes it read from are overwritten.
                 if let (Some(document), Some(ends), false) = (document, pdf, cancelled) {
-                    document.serve(&ends.asks, &cancel, &|page, rendered| {
+                    let page = |page, rendered: Option<viewer_pdf::Rendered>| {
                         let lacks_text = rendered.as_ref().is_some_and(|rendered| rendered.lacks_text);
                         let _ = ends.answers.send((page, rendered.and_then(page_pixels), lacks_text));
                         engine.wake();
-                    });
+                    };
+                    // A find's answer comes the same way, under the serial it was asked with; nobody reading: dropped.
+                    let found = |serial, matches| {
+                        let _ = ends.found.send((serial, matches));
+                        engine.wake();
+                    };
+                    document.serve_asks(&ends.asks, &cancel, &page, &found);
                 }
             })
             .is_ok()
@@ -1055,9 +989,7 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                 if let Some(held) = pages.held(page) {
                     return held;
                 }
-                if pages.asked.get() != Some(page) && pages.ask.send(page).is_ok() {
-                    pages.asked.set(Some(page));
-                }
+                pages.ask_page(page);
                 None
             }
             // A strip and artwork are not bound: the frame draws its plain tile.
@@ -1123,10 +1055,10 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn finds(&self) -> bool {
-        super::scaffold::not_wired(self.viewer_find_finds())
+        self.viewer_find_finds()
     }
     #[rustfmt::skip]
-    fn find(&mut self, file_id: &str, words: &str) -> Vec<kinds::Match> { super::scaffold::not_wired(self.viewer_find_find(file_id, words)) }
+    fn find(&mut self, file_id: &str, words: &str) -> Vec<kinds::Match> { self.viewer_find_find(file_id, words) }
 
     /// "Save a copy…" has nowhere to go yet: the button is not drawn.
     fn saves_copies(&self) -> bool {

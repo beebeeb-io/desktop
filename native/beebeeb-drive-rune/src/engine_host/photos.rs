@@ -11,10 +11,15 @@
 //! - Move to Trash and Undo: the Files window's calls ([`TrashCalls`]: `Engine::trash_items_for` /
 //!   `restore_items_for`), bound to the session and the account of the press; Undo sends the stamp of the move.
 //! - Keep on this PC: [`Engine::set_kept_for`], for the session of the press.
-//! - not bound (the PR lists why): `folders` and a folder's `set_shown` (the engine has no "folder Photos shows"),
-//!   `backup_status` (this PC does not know what another device's backup is doing). The window's controls whose
-//!   work no source method carries (Original, playing a video, Share, Move, Rename, Search, Version history) say
-//!   "not available in this version yet" (`frames/photos/session.rs`).
+//! - Photo sources' folders and the devices' backup line: `folders`, a folder's `set_shown`, `add_folder` and
+//!   `remove_folder`, and `backup_status` (`photos_folders.rs`; the engine keeps the folders from Files the account
+//!   added). The window's folder dialog (Files' Move-to dialog, in its choose-only mode) hands the chosen folder to
+//!   `add_folder`.
+//! - Move…: `file_items` hands the files behind the photos to Files' folder dialog, which moves them. A refused
+//!   folder change is told to the window once (`folder_refused`).
+//! - not bound (the PR lists why): the window's controls whose work no source method carries (Original,
+//!   playing a video, Share, Rename, Search, Version history) say "not available in this version yet"
+//!   (`frames/photos/session.rs`).
 //!
 //! Nothing is drawn before the engine answered: a change is only asked in the call; what it did arrives through
 //! [`PhotosSource::pump`], per item. A photo Beebeeb moved to Trash leaves the library here at that answer (the
@@ -46,7 +51,6 @@ use rune::Pixels;
 
 use super::files_trash::TrashCalls;
 use super::log;
-use super::scaffold::not_wired;
 use super::stamp::{Stamp, stamp};
 use super::thumbs::EngineThumbStore;
 use crate::frames::files::source::{Action, ActionError, Change};
@@ -121,6 +125,15 @@ enum Answer {
     Kept(String, bool, Stamp, Result<(), ()>),
 }
 
+/// One Keep for the worker: the file, what was asked and the stamp of the press.
+struct KeepJob {
+    file_id: String,
+    keep: bool,
+    pressed: Stamp,
+    #[cfg(test)]
+    says: Option<Result<(), ()>>,
+}
+
 /// Photos on the real engine. See the module's doc.
 pub struct EnginePhotos<C: CredentialStores> {
     engine: Arc<Engine<C>>,
@@ -159,6 +172,14 @@ pub struct EnginePhotos<C: CredentialStores> {
     back: HashMap<String, LibraryPhoto>,
     /// The files a Keep is on its way for, each with the session of its press.
     keeping: HashMap<String, SessionGeneration>,
+    /// The one worker that does the Keeps, in the order they were pressed (started at the first press).
+    keep_jobs: Option<mpsc::Sender<KeepJob>>,
+    /// How many Keep workers were started (a selection of many is ONE).
+    #[cfg(test)]
+    keep_workers: usize,
+    /// The photos a move to Trash was pressed for, as they were at the press: what Undo names even when a library
+    /// read in between no longer lists one. Dropped as the answer comes.
+    offered: HashMap<String, LibraryPhoto>,
     /// What the changes did and the window has not taken yet.
     answered: Vec<Answered>,
     /// Something changed outside an answer: the next pump says so.
@@ -166,7 +187,7 @@ pub struct EnginePhotos<C: CredentialStores> {
     /// Tests only: what the next Keep answers in the engine's place (this PC's sync folder is not a test's to set).
     #[cfg(test)]
     keep_says: Option<Result<(), ()>>,
-    /// Slice B1 (`photos_folders.rs`): what it keeps between a press and its answer. Empty until it binds.
+    /// Slice B1 (`photos_folders.rs`): what it keeps between a press and its answer: the held folder list and the calls on their way.
     photos_folders: photos_folders::PhotoFolderCalls,
 }
 
@@ -196,6 +217,10 @@ impl<C: CredentialStores> EnginePhotos<C> {
             hidden: HashSet::new(),
             back: HashMap::new(),
             keeping: HashMap::new(),
+            keep_jobs: None,
+            #[cfg(test)]
+            keep_workers: 0,
+            offered: HashMap::new(),
             answered: Vec::new(),
             dirty: false,
             #[cfg(test)]
@@ -232,6 +257,7 @@ impl<C: CredentialStores> EnginePhotos<C> {
         self.hidden.clear();
         self.back.clear();
         self.keeping.clear();
+        self.offered.clear();
         self.answered.clear();
         self.thumbs.forget();
         self.dirty = true;
@@ -372,17 +398,24 @@ impl<C: CredentialStores> EnginePhotos<C> {
                 continue;
             };
             let mut said = Vec::new();
+            let items_ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
             for item in items {
                 let Some(id) = self.numbers.get(&item.id).copied() else {
                     continue;
                 };
                 if item.left.is_none() {
                     if action == Action::Trash {
-                        let photo = self.library.as_mut().and_then(|library| {
-                            let at = library.photos.iter().position(|photo| photo.id == item.id)?;
-                            library.ids.remove(at);
-                            Some(library.photos.remove(at))
-                        });
+                        // In the library now, or as it was at the press: a read in between may not list it.
+                        let pressed = self.offered.get(&item.id).cloned();
+                        let photo = self
+                            .library
+                            .as_mut()
+                            .and_then(|library| {
+                                let at = library.photos.iter().position(|photo| photo.id == item.id)?;
+                                library.ids.remove(at);
+                                Some(library.photos.remove(at))
+                            })
+                            .or(pressed);
                         if let Some(photo) = photo {
                             self.hidden.insert(item.id.clone());
                             self.back.remove(&item.id);
@@ -398,6 +431,9 @@ impl<C: CredentialStores> EnginePhotos<C> {
                     }
                 }
                 said.push((id, item.left.map(left_of)));
+            }
+            for item in &items_ids {
+                self.offered.remove(item);
             }
             // A read that began before this answer may not know of it.
             self.stale_up_to = self.reads;
@@ -454,6 +490,42 @@ impl<C: CredentialStores> EnginePhotos<C> {
             return None;
         }
         Some(player)
+    }
+
+    /// The worker of the Keeps: it takes the jobs in order, asks the engine for each under the session of its press
+    /// (the engine decides whether that is still the session) and answers each; a panic answers as failed.
+    fn start_keep_worker(&mut self) -> Result<mpsc::Sender<KeepJob>, ()> {
+        let (jobs, queue) = mpsc::channel::<KeepJob>();
+        let (engine, answers) = (self.engine.clone(), self.answers.clone());
+        std::thread::Builder::new()
+            .name("photos-keep".into())
+            .spawn(move || {
+                for job in queue {
+                    let KeepJob {
+                        file_id,
+                        keep,
+                        pressed,
+                        #[cfg(test)]
+                        says,
+                    } = job;
+                    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #[cfg(test)]
+                        if let Some(says) = says {
+                            return says;
+                        }
+                        engine.set_kept_for(pressed.0, &file_id, keep).map_err(|_| ())
+                    }))
+                    .unwrap_or(Err(()));
+                    let _ = answers.send(Answer::Kept(file_id, keep, pressed, done));
+                    engine.wake_host();
+                }
+            })
+            .map_err(|_| ())?;
+        #[cfg(test)]
+        {
+            self.keep_workers += 1;
+        }
+        Ok(jobs)
     }
 
     fn rows(&self, ids: &[PhotoId]) -> Option<Vec<DriveItem>> {
@@ -767,14 +839,41 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             .collect()
     }
 
-    /// Not bound (slice B1, `photos_folders.rs`).
+    /// The folders from Files the account added, as the engine last answered (slice K4, `photos_folders.rs`).
     fn folders(&self) -> Vec<Folder> {
-        not_wired(self.photos_folders_folders())
+        self.photos_folders_folders()
+    }
+
+    fn folder_refused(&mut self) -> bool {
+        self.photos_folders_refused()
+    }
+
+    /// The files behind the photos, for Move…: each with its name (the Files window's move reads the id, and the
+    /// name for "already used there"). A photo that is not in the library: none for all.
+    fn file_items(&self, ids: &[PhotoId]) -> Option<Vec<DriveItem>> {
+        ids.iter()
+            .map(|id| {
+                let photo = self.file_of(*id)?;
+                let mut row = row_of(photo.id.clone());
+                row.name = photo.name.clone();
+                Some(row)
+            })
+            .collect()
+    }
+
+    fn add_folder(&mut self, folder_id: &str) -> bool {
+        self.photos_folders_add(folder_id)
+    }
+
+    fn remove_folder(&mut self, source: SourceRef) {
+        self.photos_folders_remove(source)
     }
 
     fn set_shown(&mut self, source: SourceRef, shown: bool) {
-        let SourceRef::Device(place) = source else {
-            return;
+        let place = match source {
+            SourceRef::Device(place) => place,
+            // A folder from Files: asked of the engine (slice K4, `photos_folders.rs`).
+            SourceRef::Folder(index) => return self.photos_folders_set_shown(index, shown),
         };
         if self.current().is_none() {
             return;
@@ -802,9 +901,9 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         totals
     }
 
-    /// Not bound (slice B1, `photos_folders.rs`).
+    /// The newest backup pass of the other devices (slice B1, `photos_folders.rs`).
     fn backup_status(&self) -> Option<BackupStatus> {
-        not_wired(self.photos_folders_backup_status())
+        self.photos_folders_backup_status()
     }
 
     fn origin(&self) -> String {
@@ -977,24 +1076,39 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         if self.keeping.contains_key(&file_id) {
             return Err(Left::InFlight);
         }
-        let (engine, answers) = (self.engine.clone(), self.answers.clone());
-        let (stamped, asked) = (pressed.clone(), file_id.clone());
-        #[cfg(test)]
-        let says = self.keep_says.take();
-        let started = std::thread::Builder::new().name("photos-keep".into()).spawn(move || {
-            // The engine decides whether the session is still the press's; a panic answers as failed.
-            let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                #[cfg(test)]
-                if let Some(says) = says {
-                    return says;
+        let job = KeepJob {
+            file_id: file_id.clone(),
+            keep,
+            pressed: pressed.clone(),
+            #[cfg(test)]
+            says: self.keep_says.take(),
+        };
+        // One worker does every Keep, in the order pressed: a selection of many is one job, not one thread each.
+        let mut job = Some(job);
+        let mut sent = false;
+        for _ in 0..2 {
+            if self.keep_jobs.is_none() {
+                match self.start_keep_worker() {
+                    Ok(jobs) => self.keep_jobs = Some(jobs),
+                    Err(()) => break,
                 }
-                engine.set_kept_for(stamped.0, &asked, keep).map_err(|_| ())
-            }))
-            .unwrap_or(Err(()));
-            let _ = answers.send(Answer::Kept(asked, keep, stamped, done));
-            engine.wake_host();
-        });
-        if started.is_err() {
+            }
+            let Some(jobs) = self.keep_jobs.as_ref() else {
+                break;
+            };
+            match jobs.send(job.take().expect("a job that was not sent")) {
+                Ok(()) => {
+                    sent = true;
+                    break;
+                }
+                // The worker is gone: the next try starts another.
+                Err(mpsc::SendError(back)) => {
+                    job = Some(back);
+                    self.keep_jobs = None;
+                }
+            }
+        }
+        if !sent {
             log("photos: could not start the worker");
             return Err(Left::Failed);
         }
@@ -1017,7 +1131,21 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         let now = stamp(&self.engine);
         self.look(&now);
         let rows = self.rows(ids).ok_or(Left::Unavailable)?;
-        self.trash.trash(&rows).map_err(left_of)
+        // What the press names, as it is now: Undo is for exactly these, whatever a read in between lists.
+        let before: Vec<(String, Option<LibraryPhoto>)> = ids
+            .iter()
+            .zip(&rows)
+            .map(|(id, row)| (row.id.clone(), self.file_of(*id).cloned()))
+            .collect();
+        let asked = self.trash.trash(&rows).map_err(left_of);
+        if asked.is_ok() {
+            for (file_id, photo) in before {
+                if let Some(photo) = photo {
+                    self.offered.insert(file_id, photo);
+                }
+            }
+        }
+        asked
     }
 
     fn restore(&mut self, ids: &[PhotoId]) -> Result<(), Left> {

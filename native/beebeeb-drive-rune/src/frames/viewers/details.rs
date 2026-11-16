@@ -30,6 +30,12 @@ pub fn is_reduced(state: Option<&crate::media::player::PlayState>) -> bool {
     state.is_some_and(|s| s.reduced_quality)
 }
 
+/// The details of a file that is not played in the shell's player (the Office viewers): [`panel_with`] without the
+/// reduced-quality note.
+pub fn panel(file: &OpenFile, offline_known: bool, t: &Theme) -> El {
+    panel_with(file, offline_known, false, t)
+}
+
 /// The file's details. `offline_known`: the source read whether the file is kept on this PC
 /// (`ViewerSource::knows_offline`); when it did not, the panel draws no Available offline switch: a state that was
 /// not read is not shown. `reduced_quality` (see [`is_reduced`]): the panel then carries "Reduced quality on this PC"

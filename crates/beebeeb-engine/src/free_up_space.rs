@@ -234,11 +234,14 @@ pub enum Reclaimed {
     Freed,
     /// No row has this id.
     NoSuchItem,
-    /// A file at or under it holds a change that is not sent (uploading, a conflict, an error): its bytes are the
-    /// only copy and stay.
+    /// A file at or under it holds a change that is not sent (uploading, a conflict): its bytes are the only copy
+    /// and stay.
     Unsent,
     /// A file at or under it is kept on this computer (also one that was kept after the selection was read).
     Kept,
+    /// A file at or under it is in error here (its download failed): it was not freed, and it is not a change that
+    /// waits to be sent either, so it is never answered as one.
+    Error,
     /// A file at or under it is still downloaded: the reclaim did not reach it or could not free it (open in an
     /// app, the session ended first, a call that failed), or the rows could not be read to prove otherwise.
     Left,
@@ -329,14 +332,17 @@ pub(crate) fn free_selection(
                     }
                     // Deleted here, waiting for the server's trash: its placeholder is gone, nothing to free.
                     FileStatus::Trashing => continue,
-                    FileStatus::Uploading | FileStatus::Conflict | FileStatus::Error => Reclaimed::Unsent,
+                    FileStatus::Uploading | FileStatus::Conflict => Reclaimed::Unsent,
+                    FileStatus::Error => Reclaimed::Error,
                     FileStatus::Local if kept(&row.file_id) => Reclaimed::Kept,
                     FileStatus::Local | FileStatus::Downloading => Reclaimed::Left,
                 };
-                // The reason that says most: an unsent change before a kept file before a file merely left.
+                // The reason that says most, whatever the order of the rows: an unsent change, then a kept file, then a
+                // file in error, then a file merely left.
                 what = match (what, this) {
                     (Reclaimed::Unsent, _) | (_, Reclaimed::Unsent) => Reclaimed::Unsent,
                     (Reclaimed::Kept, _) | (_, Reclaimed::Kept) => Reclaimed::Kept,
+                    (Reclaimed::Error, _) | (_, Reclaimed::Error) => Reclaimed::Error,
                     _ => Reclaimed::Left,
                 };
             }

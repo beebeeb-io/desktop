@@ -271,12 +271,23 @@ fn cut_pixels(encoded: &[u8], cut: ThumbCut) -> Option<(u32, u32, Zeroizing<Vec<
 impl<C: CredentialStores> Engine<C> {
     /// Every photo and video of the signed-in account's local state, newest first (then by path), in one pass.
     /// Read through the account-bound handle: a state that is not the session's answers nothing. No network.
+    ///
+    /// Photo sources (DW-0604): a photo at or under a folder the session's account added and switched off is left
+    /// out. The account's folders are read once per call, for the session's own user id; with no user id known,
+    /// none is hidden (the library as it is with no folder added).
     pub fn photos_library(&self) -> Result<PhotosLibrary, LocalStateRefused> {
         // First: a session change during the read makes the library older than the session, never newer.
         let session = self.acct.session_generation();
+        let user_id = self.session_identity().ok().and_then(|identity| identity.user_id);
         let photos = self
             .local_state()?
-            .with(library)?
+            .with(|db| {
+                let hidden = match user_id.as_deref() {
+                    Some(user_id) => hidden_folders(db, user_id)?,
+                    None => Vec::new(),
+                };
+                library(db, &hidden)
+            })?
             .ok_or(LocalStateRefused::Unreadable)?;
         Ok(PhotosLibrary { session, photos })
     }
@@ -386,6 +397,11 @@ fn facts_of_copy(sync_root: &std::path::Path, rel_path: &str, video: bool) -> Ph
     let Ok(path) = local_file_path_under_sync_root(sync_root, rel_path) else {
         return PhotoMeta::default();
     };
+    // A video's length is read only from a copy that is wholly on this PC (the rule of the viewer's read): a freed
+    // copy stays "Local" in the state for a while, and opening a placeholder on Windows starts a download.
+    if video && !copy_is_wholly_here(&path) {
+        return PhotoMeta::default();
+    }
     let mut head = Zeroizing::new(Vec::new());
     let read =
         std::fs::File::open(path).and_then(|file| file.take(photo_meta::HEAD_BYTES as u64).read_to_end(&mut head));
@@ -395,13 +411,57 @@ fn facts_of_copy(sync_root: &std::path::Path, rel_path: &str, video: bool) -> Ph
     photo_meta::from_head(&head, video)
 }
 
-/// The library of a state database. `None`: it could not be read.
-fn library(db: &StateDb) -> Option<Vec<LibraryPhoto>> {
+/// Whether `path` is a plain file with every byte on this computer, asked from its attributes alone (nothing is
+/// opened for data): not a folder, not a link, not offline or recalled on open (Windows) or dataless (macOS).
+fn copy_is_wholly_here(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    let attrs = beebeeb_backup::attrs_of(&metadata);
+    !(attrs.is_dir || attrs.is_link || attrs.not_local)
+}
+
+/// The folders the account `user_id` added to Photo sources and switched off, by file id. `None`: they could not
+/// be read (the library is not read either: a hidden folder's photos are never shown for a failed read).
+fn hidden_folders(db: &StateDb, user_id: &str) -> Option<Vec<String>> {
+    let folders = db.photo_folders(user_id).ok()?;
+    Some(
+        folders
+            .into_iter()
+            .filter(|(_, shown)| !shown)
+            .map(|(id, _)| id)
+            .collect(),
+    )
+}
+
+/// Whether the state DB `path` is the folder `folder` or inside it (a subfolder's item too). Both may be stored
+/// with a leading or trailing `/`; names compare exactly, as the state DB stores them. An empty `folder` holds
+/// nothing.
+pub(crate) fn at_or_under(path: &str, folder: &str) -> bool {
+    let path = path.trim_matches('/');
+    let folder = folder.trim_matches('/');
+    !folder.is_empty() && (path == folder || path.strip_prefix(folder).is_some_and(|rest| rest.starts_with('/')))
+}
+
+/// The library of a state database, without what is at or under the folders `hidden` (file ids; a folder that no
+/// longer exists is ignored). `None`: it could not be read.
+fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
     let roots: Vec<String> = db.backups_roots().ok()?.into_iter().map(|(_, path)| path).collect();
-    let mut rows: Vec<_> = live_rows(db)
-        .ok()?
+    let live = live_rows(db).ok()?;
+    // Each hidden folder's path, from its own row.
+    let hidden_paths: Vec<String> = if hidden.is_empty() {
+        Vec::new()
+    } else {
+        live.iter()
+            .filter(|row| row.is_dir() && hidden.contains(&row.file_id))
+            .map(|row| row.path.trim_matches('/').to_string())
+            .filter(|path| !path.is_empty())
+            .collect()
+    };
+    let mut rows: Vec<_> = live
         .into_iter()
         .filter(|row| !row.is_dir())
+        .filter(|row| !hidden_paths.iter().any(|folder| at_or_under(&row.path, folder)))
         .filter_map(|row| {
             let name = leaf_name(&row);
             is_photo_or_video(&name).then_some((row, name))

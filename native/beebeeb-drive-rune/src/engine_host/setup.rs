@@ -24,11 +24,16 @@
 //! - Photo previews (step 4, DW-0204/DW-0209): the account's setting, a sample measured on this PC, Continue
 //!   turns previews on at the chosen size and format (`setup_previews.rs`).
 //!
-//! What it does NOT answer (each is a step that keeps its place and says it is not in this version yet,
-//! [`SetupSource::available`], never a step that looks done): a passkey. Backing up
-//! folders (step 3) is answered once the engine read this PC's known folders (`SetupEngine::backup_choices`, on a
-//! worker); each chosen folder is then switched on through `Engine::set_backup_folder`. See each method's own
-//! line below.
+//! - A passkey (step 1, DW-0201; on Windows): with the account password (owner ruling: a passkey change proves the
+//!   password), on a worker: the account's passkeys are read under the session of the press first (Settings ›
+//!   Passkeys' rule), then core's step-up, Windows' dialog and the registration, through Settings' own worker
+//!   function (`setup_passkey.rs`). "Add a passkey" answers "started"; how it ended is taken in by `poll` and read by
+//!   the window ([`SetupSource::take_passkey_answer`]), so the window is never held while the dialog is open.
+//!
+//! Backing up folders (step 3) is answered once the engine read this PC's known folders
+//! (`SetupEngine::backup_choices`, on a worker); each chosen folder is then switched on through
+//! `Engine::set_backup_folder`. A step nothing answers for keeps its place and says it is not in this version yet
+//! ([`SetupSource::available`]), never a step that looks done. See each method's own line below.
 //!
 //! Session rule: the source is made for one session of one account ([`SetupEngine::stamp`] when it was made). A
 //! press under any other session or account sends nothing; a change is sent for the session of the press; an
@@ -50,16 +55,17 @@ use std::time::{Duration, Instant};
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::setup_api::SetupRefused;
 use beebeeb_engine::app::{CredentialStores, Engine, SyncStart, SyncStartRefused};
+use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::signin::gate::GateState;
 use beebeeb_engine::sync_folder_rule::SyncFolderRefused;
 use beebeeb_engine::sync_view::{Explorer as EngineExplorer, Start, SyncView};
 
 use super::log;
-use super::scaffold::not_wired;
 use crate::frames::account::source::Password;
 use crate::frames::signin::setup::Step;
 use crate::frames::signin::setup::source::{
-    Explorer, Folder, FolderAsk, LockAfter, Outcome, PreviewFormat, PreviewSize, Sample, SetupSource, Switch,
+    Explorer, Folder, FolderAsk, LockAfter, Outcome, PasskeyAnswer, PreviewFormat, PreviewSize, Sample, SetupSource,
+    Switch,
 };
 use crate::shell::platform::Platform;
 
@@ -77,6 +83,7 @@ mod setup_passkey;
 mod tests;
 
 pub use folder::start_now;
+pub use setup_passkey::SetupPasskeyEngine;
 
 /// Whether this PC still has its first run to do, as the shell's gate reads it on every frame: in memory, set
 /// once at start from the settings file (before the window's first frame), cleared when the first run ends.
@@ -274,8 +281,9 @@ impl FirstRun {
 /// The session and account a press or an answer is for.
 type Stamp = (SessionGeneration, Option<String>);
 
-/// The engine handle as the adapter uses it. The real one is [`Engine`]; tests pass a fake.
-pub trait SetupEngine: Send + Sync + 'static {
+/// The engine handle as the adapter uses it. The real one is [`Engine`]; tests pass a fake. Step 1's calls are
+/// [`SetupPasskeyEngine`] (`setup_passkey.rs`).
+pub trait SetupEngine: SetupPasskeyEngine + Send + Sync + 'static {
     /// The gate, the sync start and the File Explorer entry. Never waits.
     fn view(&self) -> SyncView;
     /// The session in memory and whose it is. Never waits.
@@ -331,6 +339,12 @@ pub trait SetupEngine: Send + Sync + 'static {
     /// Whether this engine binds photo previews (step 4): the real one does.
     fn binds_previews(&self) -> bool {
         false
+    }
+    /// The space this PC keeps for copies and previews, in bytes: the limit Settings > Storage shows
+    /// (`DesktopConfig::local_cache_limit_bytes`). `None`: not read, or none set; step 4 then draws no such row.
+    /// BLOCKS (a small file read).
+    fn preview_limit_bytes(&self) -> Option<u64> {
+        None
     }
     /// `Engine::photo_previews_for`. BLOCKS.
     fn previews_facts_for(
@@ -449,7 +463,7 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
                     .map(|row| BackupChoice {
                         key: row.key.to_string(),
                         name: row.name.to_string(),
-                        on: row.on || BACKUP_DEFAULT_ON.contains(&row.key),
+                        on: row.on || BACKUP_DEFAULT_ON.contains(&row.key.as_str()),
                         items: row.items,
                     })
                     .collect()
@@ -475,6 +489,13 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     }
     fn binds_previews(&self) -> bool {
         true
+    }
+    fn preview_limit_bytes(&self) -> Option<u64> {
+        // The same read as the Drive settings pane (`EngineDriveSettings::local_settings`), the signed-in account's.
+        let config = DesktopConfig::load_for(crate::shell::identity::engine_identity()).ok()?;
+        u64::try_from(config.local_cache_limit_bytes)
+            .ok()
+            .filter(|bytes| *bytes > 0)
     }
     fn previews_facts_for(
         &self,
@@ -578,6 +599,8 @@ enum Answer {
     AfterProved(app_lock::EngineLockAfter, crate::engine_host::hello::HelloResult),
     /// The engine wants a proof for this delay (longer than what it stored): the prompt comes (`setup_app_lock.rs`).
     AfterNeedsProof(app_lock::EngineLockAfter),
+    /// How step 1's "Add a passkey" ended (`setup_passkey.rs`).
+    Passkey(PasskeyAnswer),
 }
 
 /// The first run on the real engine. See the module's doc.
@@ -627,7 +650,7 @@ pub struct EngineSetupSource<E: SetupEngine> {
     hello: Box<dyn crate::engine_host::hello::HelloPrompter>,
     /// Step 4 (`setup_previews.rs`).
     previews: previews::StepFour,
-    /// Slice A10 (`setup_passkey.rs`): what it keeps between a press and its answer. Empty until it binds.
+    /// Step 1 (`setup_passkey.rs`): what it keeps between a press and its answer.
     setup_passkey: setup_passkey::SetupPasskeyCalls,
 }
 
@@ -792,7 +815,9 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             // Where this first run reads the preview setting the step is always there: loading, the choices, or
             // "couldn't read" with Try again; never "not in this version" (an account whose previews are on sees its own).
             Step::Previews => self.engine.binds_previews() && self.previews.asked,
-            Step::Passkey | Step::Done => false,
+            // Offered where the engine adds one (Windows): the password, then Windows' dialog (`setup_passkey.rs`).
+            Step::Passkey => self.engine.binds_passkey(),
+            Step::Done => false,
         }
     }
 
@@ -1041,6 +1066,7 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                 Answer::PreviewsSample(sample) => self.took_previews_sample(sample),
                 Answer::AfterProved(after, result) => self.lock_after_proved(after, result),
                 Answer::AfterNeedsProof(after) => self.prove_lock_after(after),
+                Answer::Passkey(answer) => self.took_passkey(answer),
             }
         }
         let unsaved = self.folder_unsaved();
@@ -1115,9 +1141,10 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     fn fit_line(&self, size: PreviewSize, format: PreviewFormat) -> String {
         self.previews_fit_line(size, format)
     }
-    /// Nothing is kept on this PC yet (PREV-2): no limit to state, and step 4 draws no such row.
+    /// This PC's own limit for kept copies and previews, as the board writes sizes ("35 GB"); the engine's figure,
+    /// read once. Empty when none is known: step 4 then draws no such row (never a made-up "20 GB").
     fn space_limit(&self) -> String {
-        String::new()
+        self.previews_space_limit()
     }
     /// The person's own photo, measured here; else the picture that ships inside the app, said as that.
     fn sample(&self) -> Sample {
@@ -1133,11 +1160,14 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
         self.pick_previews_photo();
     }
 
-    /// A passkey (step 1): not bound (slice A10, `setup_passkey.rs`) and not offered (`available`). The engine adds
-    /// one ([`beebeeb_engine::app::Engine::add_passkey`]) with the account password for core's step-up; until A10
-    /// draws the step's password field it stays Settings > Passkeys, where the pane asks.
+    /// A passkey (step 1): the account password for core's step-up, then Windows' dialog, on a worker
+    /// (`setup_passkey.rs`). `true`: started; the answer comes with a later `poll`.
     fn add_passkey(&mut self, password: Password<'_>) -> bool {
-        not_wired(self.setup_passkey_add_passkey(password))
+        self.setup_passkey_add_passkey(password)
+    }
+    /// How the last add ended, once (`None` while Windows' dialog is still open).
+    fn take_passkey_answer(&mut self) -> Option<PasskeyAnswer> {
+        self.setup_passkey_answer()
     }
     /// The app lock (step 2) and, while it is on, "Lock again after", through the engine's rules
     /// (`setup_app_lock.rs`).

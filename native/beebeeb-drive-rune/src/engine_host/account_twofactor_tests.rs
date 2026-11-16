@@ -293,7 +293,8 @@ fn the_panes_of_email_and_two_factor_are_reachable_and_two_factor_waits_for_the_
     // The Name page and the password change answer too (`account_actions.rs`, `account_password.rs`).
     assert_ne!(source.pane_state(Pane::Name), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Password), PaneState::Unwired);
-    assert_eq!(source.pane_state(Pane::Delete), PaneState::Unwired);
+    // Deleting the account answers too (slice A6, `account_deletion.rs`).
+    assert_ne!(source.pane_state(Pane::Delete), PaneState::Unwired);
 }
 
 fn resends(fake: &Fake) -> usize {

@@ -118,7 +118,7 @@ pub fn migrate_legacy_keychain_between<N: AuthSecretStore, L: AuthSecretStore>(n
 /// Delete the legacy flat trio. Each delete is idempotent (NotFound → Ok), so
 /// this is safe to call when some/all entries are already gone — used both as
 /// the final migration step and the opportunistic short-circuit sweep.
-pub(super) fn sweep_legacy<L: AuthSecretStore>(legacy: &L) -> AuthResult<()> {
+pub(crate) fn sweep_legacy<L: AuthSecretStore>(legacy: &L) -> AuthResult<()> {
     legacy.delete_session_token()?;
     legacy.delete_wrapped_master_key()?;
     legacy.delete_account_email()?;

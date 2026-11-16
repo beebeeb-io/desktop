@@ -154,3 +154,150 @@ fn a_switch_told_the_session_ended_reads_again_and_keeps_nothing_of_an_ended_ses
         assert!(!source.notifications_unconfirmed(), "ended {ended}");
     }
 }
+
+/// The end of one order: what a person sees, every toast, and how often the list was read.
+type End = (
+    (Vec<(String, bool)>, ReadState, ReadState, bool, Vec<Option<bool>>),
+    Vec<&'static str>,
+    usize,
+);
+
+/// A write (a mark, or a switch's change) is told the session ended (401) while a read that began before it is
+/// out, and that read fails for want of an answer, as does the read after it. Both orders, the read's answer first
+/// and the write's first: the end of each. In the 401-first order the read from before fails AFTER Beebeeb said
+/// the session ended: what was held is dropped then, before the read after it answers (never kept as possibly out
+/// of date for that read to confirm).
+fn told_ended_beside_a_read(tag: &str, mark: bool) -> Vec<End> {
+    let mut ends = Vec::new();
+    for read_first in [true, false] {
+        let fake = fake(&format!("{tag}-{read_first}"));
+        let mut source = Source::new(signed_in(&fake));
+        opened(&mut source, Pane::Recent);
+        assert!(
+            !titles(&source).is_empty(),
+            "precondition: the account's alerts are drawn"
+        );
+        let on = switch(&source, 0, 1);
+        source.alerts.expire();
+        fake.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+        if mark {
+            fake.mark_mode.store(SESSION_ENDED, Ordering::SeqCst);
+        } else {
+            fake.put_mode.store(SESSION_ENDED, Ordering::SeqCst);
+        }
+        let read = source.alerts.hold_next_read();
+        source.opened(Pane::Notifications);
+        let before = source.alerts.reads;
+        assert_eq!(source.alerts.reading, Some(before), "precondition: a read is out");
+        let write = source.alerts.hold_next_write();
+        if mark {
+            source.mark_recent_seen();
+            assert_eq!(source.alerts.marking, 1, "precondition: a mark is out");
+        } else {
+            source.set_alert(0, 1, !on);
+            assert!(source.alerts.switching, "precondition: a change is out");
+        }
+        // The read asked for after both is held too, so what is drawn while it is out can be seen.
+        let after = source.alerts.hold_next_read();
+        let mut toasts = Vec::new();
+        if read_first {
+            read.send(()).expect("the read's worker is waiting");
+            toasts.extend(pump_until(&mut source, |s| s.alerts.reading.is_none()));
+            write.send(()).expect("the write's worker is waiting");
+        } else {
+            write.send(()).expect("the write's worker is waiting");
+            toasts.extend(pump_until(&mut source, |s| {
+                s.alerts.marking == 0 && !s.alerts.switching
+            }));
+            assert_eq!(
+                source.alerts.reading,
+                Some(before),
+                "precondition: the read from before is still out"
+            );
+            read.send(()).expect("the read's worker is waiting");
+        }
+        toasts.extend(pump_until(&mut source, |s| s.alerts.reading == Some(before + 1)));
+        if !read_first {
+            assert!(
+                titles(&source).is_empty(),
+                "the read from before failed after Beebeeb said the session ended: nothing of it is kept"
+            );
+            assert_eq!(
+                source.alerts_state(0),
+                ReadState::Loading,
+                "nothing is held: the read after it is said to be on its way"
+            );
+            assert!(!source.notifications_unconfirmed(), "never \"may be out of date\"");
+        }
+        after.send(()).expect("the read after it is waiting");
+        toasts.extend(settle(&mut source));
+        let now = seen_of(&source);
+        assert!(
+            now.0.is_empty(),
+            "read first {read_first}: nothing of a session Beebeeb ended stays drawn"
+        );
+        assert_eq!(
+            (now.1, now.2, now.3),
+            (ReadState::Failed, ReadState::Failed, false),
+            "read first {read_first}: said as failed (with Try again), never \"may be out of date\""
+        );
+        assert!(
+            now.4.iter().all(Option::is_none),
+            "read first {read_first}: no switch that was not read has a value"
+        );
+        ends.push((now, toasts, asked(&fake.fake, LIST)));
+    }
+    ends
+}
+
+/// Leaving Recent while a read is out, and the mark is told the session ended (401); the read from before and the
+/// read after both fail for want of an answer. Whichever answer lands first: nothing of the account stays drawn,
+/// and the failed read is said (the mark says nothing of its own).
+#[test]
+fn a_401_mark_with_a_read_out_keeps_nothing_in_either_order() {
+    let ends = told_ended_beside_a_read("ended-mark", true);
+    assert_eq!(ends[0].1, [NOT_LOADED], "never silent: the failed read is said, once");
+    assert_eq!(ends[0], ends[1], "the same in either order");
+}
+
+/// The same for a switch's change told the session ended (401): the change was not made (said), and nothing of
+/// the account stays drawn, whichever answer lands first.
+#[test]
+fn a_401_switch_with_a_read_out_keeps_nothing_in_either_order() {
+    let ends = told_ended_beside_a_read("ended-switch", false);
+    assert_eq!(
+        ends[0].1,
+        [ALERT_NOT_SAVED, NOT_LOADED],
+        "the change was not made, and the failed read is said"
+    );
+    assert_eq!(ends[0], ends[1], "the same in either order");
+}
+
+/// A refused mark (no answer) leaves what was held drawn, said to be possibly out of date. A switch's change is
+/// then told the session ended (401): the read after it fails, and what was held is not kept on the mark's word.
+/// Nothing stays drawn, and the failed read is said.
+#[test]
+fn a_401_after_a_refused_mark_keeps_nothing_said_unconfirmed() {
+    let fake = fake("ended-after-unconfirmed");
+    let mut source = Source::new(signed_in(&fake));
+    opened(&mut source, Pane::Recent);
+    fake.mark_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    fake.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.mark_recent_seen();
+    assert_eq!(settle(&mut source), [NOT_MARKED]);
+    assert!(
+        source.notifications_unconfirmed(),
+        "precondition: kept, said to be possibly out of date"
+    );
+    let on = switch(&source, 0, 1);
+    fake.put_mode.store(SESSION_ENDED, Ordering::SeqCst);
+    source.set_alert(0, 1, !on);
+    assert_eq!(
+        settle(&mut source),
+        [ALERT_NOT_SAVED, NOT_LOADED],
+        "the change was not made, and the failed read is said"
+    );
+    let now = seen_of(&source);
+    assert!(now.0.is_empty(), "nothing of a session Beebeeb ended stays drawn");
+    assert_eq!((now.1, now.2, now.3), (ReadState::Failed, ReadState::Failed, false));
+}

@@ -152,7 +152,7 @@ fn identifier_text(sid: *mut c_void) -> String {
         .iter()
         .fold(0u64, |value, &byte| (value << 8) | u64::from(byte));
     let mut text = format!("S-{}-{authority}", bytes[0]);
-    for part in bytes[8..].chunks_exact(4) {
+    for part in bytes[8..].as_chunks::<4>().0 {
         text.push_str(&format!(
             "-{}",
             u32::from_le_bytes([part[0], part[1], part[2], part[3]])

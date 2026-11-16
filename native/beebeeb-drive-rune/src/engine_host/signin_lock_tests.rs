@@ -108,8 +108,10 @@ fn a_verified_prompt_of_an_earlier_turn_opens_nothing() {
 
     // The person left the prompt: it is taken away, its yes opens nothing and reaches no screen.
     source.begin_hello();
+    // (That press took the first prompt's place: its cancel is counted too. Only this leave's is checked here.)
+    let taken_before = prompts.taken_away.load(Ordering::SeqCst);
     source.cancel_hello();
-    assert_eq!(prompts.taken_away.load(Ordering::SeqCst), 1);
+    assert_eq!(prompts.taken_away.load(Ordering::SeqCst), taken_before + 1);
     prompts.answer(HelloResult::Verified);
     assert_eq!(engine.lock_state(), LockState::ScreenLocked);
     assert_eq!(source.poll(), None, "an answer of a prompt that was left is dropped");
@@ -133,6 +135,39 @@ fn a_verified_prompt_of_an_earlier_turn_opens_nothing() {
     assert_eq!(next(&mut source), SignInEvent::Hello(HelloOutcome::Cancelled));
     assert_eq!(engine.lock_state(), LockState::ScreenLocked);
     assert_eq!(engine.user_id().as_deref(), Some(fake.second.user_id.as_str()));
+}
+
+/// L273: Unlock pressed again while a prompt is up takes the first prompt away (forgotten, it would stay on screen
+/// with nobody waiting for it); the first prompt's yes opens nothing, and the second prompt's yes opens the lock.
+#[test]
+fn a_second_begin_hello_cancels_the_first() {
+    let fake = fake("again");
+    let (engine, mut source, prompts) = open_with_prompts(&fake);
+    assert_eq!(engine.lock_screen(), Ok(()));
+    source.begin_hello();
+    assert_eq!(
+        prompts.taken_away.load(Ordering::SeqCst),
+        0,
+        "the first prompt replaces nothing"
+    );
+    source.begin_hello();
+    assert_eq!(prompts.asked(), 2);
+    assert_eq!(
+        prompts.taken_away.load(Ordering::SeqCst),
+        1,
+        "the first prompt is taken away, never just dropped"
+    );
+    // A yes of the first prompt (decided before it was taken away) opens nothing and reaches no screen.
+    prompts.answer(HelloResult::Verified);
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+    assert_eq!(source.poll(), None, "an answer of the first prompt is dropped");
+    // The second prompt is the one the screen waits for.
+    prompts.answer(HelloResult::Verified);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::Hello(HelloOutcome::Succeeded(NextAfterSignIn::Drive))
+    );
+    assert_eq!(engine.lock_state(), LockState::Open);
 }
 
 #[test]

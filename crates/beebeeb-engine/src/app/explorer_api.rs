@@ -107,6 +107,12 @@ impl<C: CredentialStores> Engine<C> {
         self.seat().started_in = Some(sync_root.to_path_buf());
     }
 
+    /// The folder an engine was started in, while the seat holds it: set at start step 9, taken at every stop. It
+    /// outlives an engine that ended by itself: callers check the runner.
+    pub(crate) fn running_root(&self) -> Option<PathBuf> {
+        self.seat().started_in.clone()
+    }
+
     /// Remove the command's binding for the folder an engine started in and for the configured folder. The files,
     /// the placeholders and the folder's registration stay.
     pub(super) fn remove_explorer_command(&self) {

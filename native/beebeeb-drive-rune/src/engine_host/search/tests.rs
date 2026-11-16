@@ -1,11 +1,13 @@
 //! Search on the real engine (`EngineSearchSource`): the engine's own local index (`desktop_search`) over a state
 //! database of each test's own, written with the engine's writers, behind a host that says whose computer it is.
 //! The results and their facts, narrowing, any case, an empty answer, a list that cannot be read, signed out (nothing
-//! built), another account's index never answering, recent searches never kept; and the engine handle itself as the
-//! host while signed out. Whose answer: an index or a result that was started in one session and lands after a
-//! lock or after another account signed in is dropped (in memory, at the readers and in the element tree), and
-//! nothing is started by a read. Every name is invented.
+//! built), another account's index never answering, the recent searches as the engine keeps them (for the session
+//! of the moment only, never asked from a draw); and the engine handle itself as the host while signed out. Whose
+//! answer: an index, a result or a recent search that was started in one session and lands after a lock or after
+//! another account signed in is dropped (in memory, at the readers and in the element tree), and nothing is started
+//! by a read. Every name is invented. The real engine with two accounts: `tests_accounts.rs`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -21,6 +23,7 @@ use rune::{Env, Runtime, TextEdit};
 
 use super::*;
 use crate::State;
+use crate::frames::search::source::RECENT_KEPT;
 use crate::frames::shared::parts::table::Kind;
 
 const ME: &str = "search-me@example.eu";
@@ -44,6 +47,10 @@ struct Host {
     broken: AtomicBool,
     builds: AtomicUsize,
     woken: AtomicUsize,
+    /// The recent searches each account keeps on this computer (the engine's row per account).
+    recents: Mutex<HashMap<String, Vec<String>>>,
+    /// How often the recent searches were asked of the host (read, kept or cleared).
+    recent_calls: AtomicUsize,
 }
 
 impl Host {
@@ -89,6 +96,16 @@ impl Host {
         self.hold.lock().unwrap().2 = true;
         self.moved.notify_all();
     }
+
+    /// As the engine's handle: whose recent searches the session `turn` may read and change. Only the account the
+    /// state is recorded for, with the vault open, and only while `turn` is the session of the moment.
+    fn recents_of(&self, turn: u64) -> Result<String, ()> {
+        self.recent_calls.fetch_add(1, Ordering::SeqCst);
+        if turn != self.turn() || !self.unlocked() || self.account() != self.owner {
+            return Err(());
+        }
+        self.account().ok_or(())
+    }
 }
 
 impl SearchHost for Host {
@@ -106,17 +123,21 @@ impl SearchHost for Host {
         !self.locked.load(Ordering::SeqCst) && self.account.lock().unwrap().is_some()
     }
 
-    fn index(&self) -> Result<LocalSearchIndex, ()> {
+    fn index(&self) -> Result<LocalSearchIndex, LocalStateRefused> {
         self.builds.fetch_add(1, Ordering::SeqCst);
         if self.broken.load(Ordering::SeqCst) {
-            return Err(());
+            return Err(LocalStateRefused::Unreadable);
         }
-        // As the engine's handle: the list of the account it is recorded for, with the vault open.
-        if !self.unlocked() || self.account() != self.owner {
-            return Err(());
+        // As the engine's handle: the list of the account it is recorded for, with the vault open; another account's
+        // is refused with the engine's own word.
+        if !self.unlocked() {
+            return Err(LocalStateRefused::Locked);
         }
-        let db = StateDb::open(&self.db).map_err(|_| ())?;
-        let index = build_local_index(&db).map_err(|_| ());
+        if self.account() != self.owner {
+            return Err(LocalStateRefused::OtherAccount);
+        }
+        let db = StateDb::open(&self.db).map_err(|_| LocalStateRefused::Unreadable)?;
+        let index = build_local_index(&db).map_err(|_| LocalStateRefused::Unreadable);
         let mut hold = self.hold.lock().unwrap();
         if hold.0 {
             hold.0 = false;
@@ -127,6 +148,27 @@ impl SearchHost for Host {
             assert!(!timed_out.timed_out(), "the test never let the held build go");
         }
         index
+    }
+
+    fn recent_searches(&self, turn: u64) -> Result<Vec<String>, ()> {
+        let account = self.recents_of(turn)?;
+        Ok(self.recents.lock().unwrap().get(&account).cloned().unwrap_or_default())
+    }
+
+    fn remember_search(&self, turn: u64, query: &str) -> Result<Vec<String>, ()> {
+        let account = self.recents_of(turn)?;
+        let mut recents = self.recents.lock().unwrap();
+        let list = recents.entry(account).or_default();
+        list.retain(|earlier| earlier.to_lowercase() != query.to_lowercase());
+        list.insert(0, query.to_string());
+        list.truncate(RECENT_KEPT);
+        Ok(list.clone())
+    }
+
+    fn clear_recent_searches(&self, turn: u64) -> Result<(), ()> {
+        let account = self.recents_of(turn)?;
+        self.recents.lock().unwrap().remove(&account);
+        Ok(())
     }
 
     fn wake(&self) {
@@ -203,6 +245,8 @@ fn host(account: Option<&str>) -> Arc<Host> {
         broken: AtomicBool::new(false),
         builds: AtomicUsize::new(0),
         woken: AtomicUsize::new(0),
+        recents: Mutex::new(HashMap::new()),
+        recent_calls: AtomicUsize::new(0),
     })
 }
 
@@ -234,6 +278,7 @@ fn found(source: &mut EngineSearchSource<Host>, query: &str, narrow: Narrow) -> 
         }
         Answer::Searching => panic!("the query was not answered"),
         Answer::Unavailable => panic!("search answered Unavailable"),
+        Answer::NotThisAccounts => panic!("search answered NotThisAccounts"),
     }
 }
 
@@ -375,6 +420,53 @@ fn signed_out_builds_nothing_and_another_accounts_index_never_answers() {
     );
 }
 
+/// Row S8, the source alone: another account over this state is told why Search is not available
+/// (`NotThisAccounts`, the engine's refusal), with the field empty too, and only in that session: once the session
+/// moves on (a lock, then the owner's own sign-in) the reason is not said, at once (before a pump), and the window's
+/// side drops it at the next pump. A list that cannot be read stays `Unavailable`
+/// (`a_list_that_cannot_be_read_is_unavailable_never_no_results`). Mutant: `not_this_accounts` reads the refusal
+/// whatever its session (red at "another session, before a pump").
+#[test]
+fn another_accounts_refusal_is_said_only_to_its_own_session() {
+    let host = host(Some(OTHER));
+    let mut source = opened(&host);
+    assert_eq!(
+        host.builds.load(Ordering::SeqCst),
+        1,
+        "the control: the engine was asked for an index"
+    );
+    assert!(!source.wired(), "nothing of another account's state is held");
+    assert!(source.held.is_none());
+    for query in ["draft", "contract", "", "   "] {
+        assert_eq!(
+            source.search(query, Narrow::All),
+            Answer::NotThisAccounts,
+            "{query:?}: the second account is not told why"
+        );
+    }
+    assert_eq!(source.details("f-draft"), None);
+    assert!(source.recent().is_empty());
+
+    host.lock();
+    assert_eq!(
+        source.search("draft", Narrow::All),
+        Answer::Unavailable,
+        "locked, before a pump"
+    );
+    host.sign_in_as(Some(ME));
+    assert_eq!(
+        source.search("draft", Narrow::All),
+        Answer::Unavailable,
+        "another session, before a pump: the reason was the other account's session alone"
+    );
+    assert!(source.pump().changed, "the window's side drops the reason");
+    assert!(
+        source.refused.is_none(),
+        "a refusal of a session that ended is in memory"
+    );
+    assert_eq!(source.search("draft", Narrow::All), Answer::Unavailable);
+}
+
 /// A lock ends the session: the same account's index and results are not handed out, at once, and are gone from
 /// memory at the next pump; an unlock is another session, which builds its own when Search opens.
 #[test]
@@ -410,6 +502,7 @@ fn an_index_landing_after_a_lock_is_never_held() {
     let host = host(Some(ME));
     host.hold_the_next_build();
     let mut source = EngineSearchSource::new(host.clone());
+    let before_open = host.woken.load(Ordering::SeqCst);
     source.opened();
     source.ask("draft", Narrow::All);
     assert!(source.wired(), "the first index is on its way");
@@ -423,6 +516,9 @@ fn an_index_landing_after_a_lock_is_never_held() {
     assert!(!source.wired(), "at once");
     assert_eq!(source.search("draft", Narrow::All), Answer::Unavailable);
     source.pump();
+    // `opened` also started a read of the recent searches: its wake lands first (the build is held, and no query
+    // runs without an index, so it is the only wake there can be), and the wake waited for below is the build's.
+    host.woken_past(before_open);
     let woken = host.woken.load(Ordering::SeqCst);
     host.let_the_build_go();
     host.woken_past(woken);
@@ -453,11 +549,14 @@ fn an_index_landing_after_another_account_signed_in_is_never_held() {
     let host = host(Some(ME));
     host.hold_the_next_build();
     let mut source = EngineSearchSource::new(host.clone());
+    let before_open = host.woken.load(Ordering::SeqCst);
     source.opened();
     source.ask("draft", Narrow::All);
     host.build_is_held();
     host.sign_in_as(Some(OTHER));
     source.pump();
+    // As above: the recent read `opened` started has woken the window before the wake of the build is waited for.
+    host.woken_past(before_open);
     let woken = host.woken.load(Ordering::SeqCst);
     host.let_the_build_go();
     host.woken_past(woken);
@@ -576,16 +675,89 @@ fn the_window_draws_no_result_of_a_session_that_ended() {
     }
 }
 
+/// The recent searches are the engine's, for the session of the moment only: shown once the engine answered, in the
+/// order asked, cleared by Clear (the engine deletes them). At a lock and at another account's sign-in they go at once
+/// (before a pump) and from memory at the next pump; another account over this state reads and keeps none. A draw
+/// never asks the engine.
 #[test]
-fn recent_searches_are_never_kept() {
-    let mut source = opened(&host(Some(ME)));
+fn recent_searches_come_from_the_engine_for_this_session_only() {
+    let host = host(Some(ME));
+    let mut source = opened(&host);
+    assert!(source.recent().is_empty(), "none kept yet");
     source.remember("contract");
-    assert!(
-        source.recent().is_empty(),
-        "no store for a search term yet: nothing kept"
+    source.remember("  Lisbon ");
+    source.remember("   ");
+    assert!(source.recent().is_empty(), "nothing shown before the engine answered");
+    settle(&mut source);
+    assert_eq!(source.recent(), ["Lisbon", "contract"]);
+    let calls = host.recent_calls.load(Ordering::SeqCst);
+    for _ in 0..20 {
+        let _ = source.recent();
+    }
+    assert_eq!(
+        host.recent_calls.load(Ordering::SeqCst),
+        calls,
+        "a draw never asks the engine"
     );
+
     source.clear_recent();
+    settle(&mut source);
     assert!(source.recent().is_empty());
+    assert!(
+        host.recents.lock().unwrap().get(ME).is_none(),
+        "the engine deleted them"
+    );
+    source.remember("invoice 2026");
+    settle(&mut source);
+    assert_eq!(source.recent(), ["invoice 2026"]);
+
+    // A lock: gone at once, and from memory at the next pump; the unlock reads them again when Search opens.
+    host.lock();
+    assert!(source.recent().is_empty(), "at once, before a pump");
+    assert!(source.pump().changed, "the window's side drops them");
+    assert!(source.recent.is_none() && source.recent_next.is_empty());
+    host.unlock();
+    source.opened();
+    settle(&mut source);
+    assert_eq!(source.recent(), ["invoice 2026"], "the same account's, read again");
+
+    // Another account over this state: nothing of the first account's, and nothing kept for it either.
+    host.sign_in_as(Some(OTHER));
+    assert!(source.recent().is_empty(), "at once, before a pump");
+    source.opened();
+    source.remember("lisbon");
+    settle(&mut source);
+    assert!(source.recent().is_empty());
+    assert!(host.recents.lock().unwrap().get(OTHER).is_none());
+    assert_eq!(
+        host.recents.lock().unwrap().get(ME).map(Vec::len),
+        Some(1),
+        "the first account's are untouched"
+    );
+}
+
+/// Recent searches read or changed in one session that land after a lock, or after another account signed in, are
+/// never kept (whether they land before or after the window looks, they are taken in after the change).
+#[test]
+fn recent_searches_landing_after_their_session_ended_are_never_kept() {
+    for ends in [Host::lock as fn(&Host), |host: &Host| host.sign_in_as(Some(OTHER))] {
+        let host = host(Some(ME));
+        let mut source = opened(&host);
+        source.remember("contract");
+        ends(&host);
+        settle(&mut source);
+        assert!(
+            source.recent.is_none(),
+            "a recent search of a session that ended is in memory"
+        );
+        assert!(source.recent().is_empty());
+    }
+}
+
+/// The window shows as many recent searches as the engine keeps (DI-0801: up to 10).
+#[test]
+fn the_window_and_the_engine_keep_as_many_recent_searches() {
+    assert_eq!(beebeeb_engine::app::bindings::search_recent::SEARCHES_KEPT, RECENT_KEPT);
 }
 
 #[test]
@@ -694,13 +866,13 @@ fn the_engine_handle_is_a_search_host() {
     );
 }
 
-/// While `SEARCH_ON_ENGINE` is false (task 2488), a real build's shell gets the unwired Search, and no part of the
-/// adapter runs: none is made, so no index is built and no worker starts.
+/// With `SEARCH_ON_ENGINE` (task 2488 fixed), a real build's shell gets the engine's Search, and nothing of it runs
+/// before Search opens: signed out, it says it is not available, builds no index and reads no recent search.
 #[test]
-fn a_real_build_shell_gets_the_unwired_search_and_runs_no_part_of_the_adapter() {
+fn a_real_build_shell_gets_the_engine_search_and_nothing_runs_before_it_opens() {
     assert!(
-        !crate::shell::state::SEARCH_ON_ENGINE,
-        "task 2488 decides when Search reads the engine"
+        crate::shell::state::SEARCH_ON_ENGINE,
+        "task 2488 is fixed: Search reads the engine"
     );
     let (channel, _messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
@@ -710,9 +882,14 @@ fn a_real_build_shell_gets_the_unwired_search_and_runs_no_part_of_the_adapter() 
     };
     let engine = Engine::open(&TEST, config, channel, MemoryCredentials::default()).expect("the engine opens");
     let before = made_here();
-    let s = crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), Arc::new(engine));
-    assert_eq!(made_here(), before, "no Search adapter was made");
+    let mut s = crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), Arc::new(engine));
+    assert_eq!(made_here(), before + 1, "the shell made the engine's Search");
     assert!(!s.frames.find.source.wired());
+    assert!(
+        !s.frames.find.source.pump().busy,
+        "nothing is built or read before Search opens"
+    );
+    assert!(s.frames.find.source.recent().is_empty());
     assert_eq!(
         s.frames.find.source.search("contract", Narrow::All),
         Answer::Unavailable
@@ -800,4 +977,163 @@ fn a_result_and_the_index_print_no_name() {
         assert!(!printed.contains(secret), "{secret} is printed: {printed}");
     }
     assert!(printed.contains("Hit") && printed.contains("records: 5"), "{printed}");
+}
+
+/// The ways the turn moves on after A searched: a lock; a lock and an unlock (the same account in another turn, with
+/// no pump between them); another account's sign-in; a sign-out.
+fn turn_moves() -> [(&'static str, fn(&Host)); 4] {
+    [
+        ("a lock", Host::lock as fn(&Host)),
+        ("a lock and an unlock", |host: &Host| {
+            host.lock();
+            host.unlock();
+        }),
+        ("another account's sign-in", |host: &Host| host.sign_in_as(Some(OTHER))),
+        ("a sign-out", |host: &Host| host.sign_in_as(None)),
+    ]
+}
+
+/// A's files, by id: once A's turn ended, no reader hands out the facts of one of them.
+const MINE: [&str; 5] = ["f-draft", "f-signed", "f-sheet", "f-photo", "f-other"];
+
+/// The reader gate (`current`), alone: once the turn moved on, `wired`, `search` and `details` hand out nothing of the
+/// index of the turn that ended, even while it is still in memory because nothing ran `follow` yet (no pump, no ask,
+/// no open). The lock and the unlock keep the account: a gate on the account alone hands A's names out there.
+/// Mutant (M1): `current` hands out what is held, whatever the session.
+#[test]
+fn current_never_hands_out_an_ended_turns_index() {
+    for (said, move_on) in turn_moves() {
+        let host = host(Some(ME));
+        let mut source = opened(&host);
+        assert_eq!(
+            found(&mut source, "contract", Narrow::All).len(),
+            4,
+            "{said}: the control: A's names are found"
+        );
+        assert!(source.details("f-draft").is_some(), "{said}: the control");
+
+        move_on(&host);
+        assert!(
+            source.held.is_some() && source.found.is_some(),
+            "{said}: the control: nothing ran follow, A's index and result are still in memory"
+        );
+        assert!(
+            source.current().is_none(),
+            "{said}: the index of a turn that ended is handed out"
+        );
+        assert!(
+            !source.wired(),
+            "{said}: Search says it answers from an ended turn's index"
+        );
+        assert_eq!(
+            source.search("contract", Narrow::All),
+            Answer::Unavailable,
+            "{said}: A's results are handed out"
+        );
+        for id in MINE {
+            assert_eq!(source.details(id), None, "{said}: the facts of A's {id} are handed out");
+        }
+    }
+}
+
+/// `follow`, alone: at the first pump after the turn moved on (the window's poll), everything of the turn that ended
+/// goes from memory (A's index, result, words, recent searches and the work on its way), and the source belongs to the
+/// turn of the moment. The lock and the unlock run with no pump between them: the account is the same, only the turn
+/// says the session ended. Mutants (M2a): `follow` drops nothing; (M2b): `follow` compares the account, not the turn.
+#[test]
+fn follow_forgets_on_turn_change() {
+    for (said, move_on) in turn_moves() {
+        let host = host(Some(ME));
+        let mut source = opened(&host);
+        assert_eq!(
+            found(&mut source, "contract", Narrow::All).len(),
+            4,
+            "{said}: the control"
+        );
+        source.remember("contract");
+        settle(&mut source);
+        assert_eq!(source.recent(), ["contract"], "{said}: the control");
+        assert!(
+            source.held.is_some() && source.found.is_some() && source.wanted.is_some() && source.recent.is_some(),
+            "{said}: the control: A's state is in memory"
+        );
+
+        move_on(&host);
+        assert!(
+            source.pump().changed,
+            "{said}: the window is not told that what it drew went"
+        );
+        assert!(source.held.is_none(), "{said}: A's index is in memory");
+        assert!(source.found.is_none(), "{said}: A's result is in memory");
+        assert!(source.wanted.is_none(), "{said}: A's words are in memory");
+        assert!(
+            source.recent.is_none() && source.recent_next.is_empty(),
+            "{said}: A's recent searches are in memory"
+        );
+        assert!(
+            source.building.is_none() && source.asked.is_none() && source.recent_out.is_none(),
+            "{said}: work of A's turn is still waited for"
+        );
+        assert!(
+            source.of == session_of(&*host),
+            "{said}: the source does not follow the turn of the moment"
+        );
+    }
+}
+
+/// The take-in compare, alone: a build that answers for a turn the window's state does not belong to is dropped:
+/// never held, never counted as fresh, and the words asked are not run on it. In the app this happens inside ONE
+/// pump: its `follow` saw A's turn, then the turn moved on, and the build ran wholly in the new turn and was drained
+/// by the same pump (the job check does not catch it: nothing forgot the build). A test cannot time that, so the
+/// answer is handed to `take_in` as that pump hands it: the build the window waits for, A's names, and the session
+/// its worker saw before and after (the one after the move; none after a lock or a sign-out). Another account's
+/// answer holding A's names stands for an engine whose owner check let them through (task 2488's own layer,
+/// `tests_accounts.rs`): this layer alone still drops it. Mutant (M3): the compare in `take_in` deleted.
+#[test]
+fn a_build_landing_under_a_new_turn_is_dropped() {
+    for (said, move_on) in turn_moves() {
+        let host = host(Some(ME));
+        let theirs = build_local_index(&StateDb::open(&host.db).expect("the state")).expect("A's index");
+        assert_eq!(theirs.records.len(), 5, "the control: the answer holds A's names");
+        let mut source = EngineSearchSource::new(host.clone());
+        source.opened();
+        source.ask("contract", Narrow::All);
+        let job = source.building.expect("the control: A's build is on its way");
+
+        move_on(&host);
+        // No pump: the window's state still belongs to A's turn, and the build is still waited for.
+        source.take_in(Landed::Built(job, session_of(&*host), Ok(theirs)));
+        assert!(source.held.is_none(), "{said}: an index of another turn is held");
+        assert_eq!(source.installed, 0, "{said}: an index of another turn is installed");
+        assert!(source.built_at.is_none(), "{said}: a dropped build counts as fresh");
+        assert!(
+            source.asked.is_none() && source.found.is_none(),
+            "{said}: A's words ran on it"
+        );
+        assert!(!source.wired(), "{said}");
+        assert_eq!(
+            source.search("contract", Narrow::All),
+            Answer::Unavailable,
+            "{said}: A's results are handed out"
+        );
+        for id in MINE {
+            assert_eq!(source.details(id), None, "{said}: the facts of A's {id} are handed out");
+        }
+
+        // The window's side: what the real workers send is nobody's; the turn of the moment builds its own when Search
+        // opens (A after the unlock), and nothing for another account or with no one signed in.
+        settle(&mut source);
+        assert!(
+            source.held.is_none() && source.wanted.is_none(),
+            "{said}: A's index or words after the pump"
+        );
+        source.opened();
+        settle(&mut source);
+        let owner_now = SearchHost::unlocked(&*host) && SearchHost::account(&*host) == host.owner;
+        assert_eq!(
+            source.wired(),
+            owner_now,
+            "{said}: the turn of the moment does not build its own"
+        );
+    }
 }

@@ -119,6 +119,52 @@ pub fn same_folder(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// A folder the person chose to back up beside Windows' known folders (DW-0737 "chosen by you", added through
+/// DW-0738's picker). Kept in the settings file (`DesktopConfig::backup_chosen_folders`). Whether it is backed up now
+/// is its key in `known_folder_backup`, the one switch every backup shares, so a stop turns it off as it turns a known
+/// folder off (`host::switch_off_in_settings`) and "Back up again" turns it on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChosenFolder {
+    /// Core's custom category name (`beebeeb_core::backup::custom_category_name`): safe, unique among this device's
+    /// folders, and never changed after the folder was added. Its backup is `Backups/<device>/<name>`.
+    pub name: String,
+    /// The folder on this PC, absolute. Read in place, never written.
+    pub path: PathBuf,
+}
+
+impl ChosenFolder {
+    /// Its category: `Category::Custom(name)`.
+    pub fn category(&self) -> beebeeb_types::backup::Category {
+        beebeeb_types::backup::Category::Custom(self.name.clone())
+    }
+
+    /// Its key in the settings' backup set, the state database's rows and the window (`custom:<name>`).
+    pub fn key(&self) -> String {
+        self.category().key()
+    }
+}
+
+/// The chosen folders that are on (their key in `enabled_keys`) and still a folder on this PC, each read from where it
+/// is. With `sync_root`, a folder that is the sync root or now lies inside it is left out too (checked again before
+/// each pass: a sync root can move). A folder that holds the sync root is passed; the pass walks around it
+/// (`pass_excludes`).
+pub fn chosen_sources(
+    chosen: &[ChosenFolder],
+    enabled_keys: &[String],
+    sync_root: Option<&Path>,
+) -> Vec<super::scheduler::BackupSource> {
+    chosen
+        .iter()
+        .filter(|folder| enabled_keys.iter().any(|key| *key == folder.key()))
+        .filter(|folder| folder.path.is_absolute() && folder.path.is_dir())
+        .filter(|folder| sync_root.is_none_or(|root| check_source(&folder.path, root).is_ok()))
+        .map(|folder| super::scheduler::BackupSource {
+            category: folder.category(),
+            path: folder.path.clone(),
+        })
+        .collect()
+}
+
 /// What reading the sources found: the folders to pass now, and the folders whose question was asked just now
 /// (Amendment 9: once per moved folder).
 #[derive(Debug, Default)]

@@ -100,6 +100,33 @@ pub enum Switch {
     LockAfter,
 }
 
+/// Why step 1's passkey was not added. Nothing was changed. Each kind is said in Settings › Passkeys' own words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyRefused {
+    /// No password was given: nothing was sent, and the field asks for it.
+    NoPassword,
+    /// The password was not the account's.
+    WrongPassword,
+    /// Windows' passkey dialog was closed, or it timed out.
+    Cancelled,
+    /// Beebeeb could not be reached.
+    Offline,
+    /// Too many tries: Beebeeb asks to wait.
+    TooManyTries,
+    /// This PC has no passkey dialog.
+    NotOnThisPc,
+    /// Any other refusal.
+    NotAdded,
+}
+
+/// How step 1's "Add a passkey" ended ([`SetupSource::take_passkey_answer`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyAnswer {
+    /// The passkey was added to the account.
+    Added,
+    Refused(PasskeyRefused),
+}
+
 /// How a change asked through the source ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Outcome {
@@ -333,9 +360,17 @@ pub trait SetupSource {
     }
 
     /// "Add a passkey". Engine: core's step-up from the account `password` (owner ruling: a passkey change proves
-    /// the password), then Windows' passkey dialog (WebAuthn create), then `auth_v2::passkey_register`. The password is
-    /// borrowed for the call, never logged and never kept. `true`: a passkey was added.
+    /// the password), then Windows' passkey dialog (WebAuthn create), then `auth_v2::passkey_register`, on a worker:
+    /// the window is never held while the dialog is open. The password is borrowed for the call, never logged and
+    /// never kept. `true`: the add STARTED; how it ended is read with [`SetupSource::take_passkey_answer`] (after a
+    /// `poll` that returned `true`, or right after this call for a refusal said at once). `false`: nothing was
+    /// started (one is on its way, or the press was another session's).
     fn add_passkey(&mut self, password: Password<'_>) -> bool;
+    /// How the last "Add a passkey" ended, once: `None` while it has not (Windows' dialog is still open, or nothing
+    /// was asked). Never "Added" before the engine answered.
+    fn take_passkey_answer(&mut self) -> Option<PasskeyAnswer> {
+        None
+    }
     /// "Continue" on step 2. Engine: `app_lock::set(on, after)`.
     fn set_app_lock(&mut self, on: bool, after: LockAfter);
     /// "Turn on backup". Engine: `backup::start(folders)`: the first backup runs in the background.
@@ -369,8 +404,10 @@ pub struct Script {
     pub explorer: Explorer,
     /// What `retry_explorer` leads to.
     pub explorer_after_retry: Explorer,
-    /// `false`: Windows' passkey dialog was cancelled.
+    /// `false`: the passkey was not added (the board: Windows' passkey dialog was cancelled).
     pub passkey_added: bool,
+    /// Why it was not, when `passkey_added` is `false`.
+    pub passkey_refused: PasskeyRefused,
     /// The sync folder's question (the board has none: `Settled`).
     pub folder: FolderAsk,
     /// The steps nothing answers for (the board has none).
@@ -385,6 +422,7 @@ impl Default for Script {
             explorer: Explorer::Adding,
             explorer_after_retry: Explorer::Added,
             passkey_added: true,
+            passkey_refused: PasskeyRefused::Cancelled,
             folder: FolderAsk::Settled,
             not_available: &[],
             choose_again: false,
@@ -399,6 +437,8 @@ pub struct FixtureSetupSource {
     script: Script,
     changed: bool,
     log: CallLog,
+    /// How the last "Add a passkey" ended, until the window takes it.
+    passkey: Option<PasskeyAnswer>,
 }
 
 impl FixtureSetupSource {
@@ -407,6 +447,7 @@ impl FixtureSetupSource {
             script,
             changed: false,
             log: CallLog::default(),
+            passkey: None,
         }
     }
 
@@ -495,9 +536,20 @@ impl SetupSource for FixtureSetupSource {
         Sample::bundled()
     }
 
+    /// The board's dialog answers at once: the window takes the answer right after the press.
     fn add_passkey(&mut self, _password: Password<'_>) -> bool {
         self.note("add_passkey".into());
-        self.script.passkey_added
+        self.passkey = Some(if self.script.passkey_added {
+            PasskeyAnswer::Added
+        } else {
+            PasskeyAnswer::Refused(self.script.passkey_refused)
+        });
+        self.changed = true;
+        true
+    }
+
+    fn take_passkey_answer(&mut self) -> Option<PasskeyAnswer> {
+        self.passkey.take()
     }
 
     fn set_app_lock(&mut self, on: bool, after: LockAfter) {

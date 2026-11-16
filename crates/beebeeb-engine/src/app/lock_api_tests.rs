@@ -91,6 +91,9 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 ("passkeys_api.rs", 1),
                 ("account_password_api.rs", 1),
                 ("account_email_resend_api.rs", 1),
+                // session_watch.rs: the engine's session watch (task 2535) copies the token and notes its answer under
+                // the session's lock; no person call, it runs behind a locked screen too.
+                ("session_watch.rs", 1),
             ],
         ),
         (
@@ -123,7 +126,11 @@ fn every_person_accessor_goes_through_the_choke_point() {
             ],
         ),
         ("call_may_run(", &[("lock_api.rs", 2), ("owned_state.rs", 1)]),
-        ("Call::Work", &[("owned_state.rs", 2)]),
+        // owned_state.rs: Explorer's work (`local_state_for_work`, `local_state_work_refusal`) and ONE ruled admission
+        // (CP2 ruling 2.1, the lead 2026-11-15): owned_state.rs:317, `Ended::OwnSearchesWipe`, the session-end wipe
+        // of the ended account's OWN recent searches; it deletes only, its owner proven read-only first. Nothing else
+        // is admitted: a fourth goes red.
+        ("Call::Work", &[("owned_state.rs", 3)]),
         ("screen_refuses_a_person", &[]),
     ];
     let mut failures = Vec::new();
