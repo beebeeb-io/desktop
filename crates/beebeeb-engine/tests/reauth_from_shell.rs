@@ -7,7 +7,7 @@
 //! path: only the session token changes, the replaced session is ended at the server, a sign-in that cannot be stored
 //! leaves nothing behind, and a sign-in while another account is signed in asks nothing and changes nothing.
 //!
-//! Three tests are ignored until tasks 2543 and 2544 are fixed; each names its task.
+//! One test is ignored until its fix; it names its task.
 //!
 //! Each test runs in a process of its own (`in_own_process`): the state folder is a process-wide global
 //! (`state_paths`), and `tests/common` makes a new one per setup. Everything is invented; nothing reaches the network
@@ -344,10 +344,9 @@ fn an_unreadable_state_db_settles_nothing_and_the_same_account_then_keeps_its_da
     );
 }
 
-/// Task 2543: a kept vault key that the server no longer accepts never opens the vault, and the local data stays.
+/// A kept vault key that the server no longer accepts never opens the vault, and the local data stays.
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "task 2543: un-ignore with its fix"]
 fn a_kept_key_the_server_no_longer_accepts_is_never_installed() {
     in_own_process("a_kept_key_the_server_no_longer_accepts_is_never_installed", || {
         use std::sync::atomic::Ordering;
@@ -388,10 +387,9 @@ fn a_kept_key_the_server_no_longer_accepts_is_never_installed() {
     });
 }
 
-/// Task 2543: when the server cannot say whether the kept vault key is still the account's, nothing changes.
+/// When the server cannot say whether the kept vault key is still the account's, nothing changes.
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "task 2543: un-ignore with its fix"]
 fn a_kept_key_proof_that_cannot_complete_changes_nothing() {
     in_own_process("a_kept_key_proof_that_cannot_complete_changes_nothing", || {
         use std::sync::atomic::Ordering;
