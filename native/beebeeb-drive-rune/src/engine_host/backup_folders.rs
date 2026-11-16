@@ -4,7 +4,9 @@
 //!
 //! - Add a folder…: the shell opens Windows' folder picker (DW-0738, `shell::intents::pick_folder_for`) and hands its
 //!   answer to `add_folder`, which asks `Engine::add_backup_folder_for` on a worker of its own, for the session of the
-//!   press. The rule is the engine's (Beebeeb's own folder and anything inside it, a folder that holds it, one backed up
+//!   press. The picker is modeless, so the session can change while it is open: the pending pick carries the press's
+//!   session and the shell drops its answer once a poll saw that session change (`shell::intents::take_picked_folder`);
+//!   an answer the shell hands over is for the press's session, which `add_folder` stamps. The rule is the engine's (Beebeeb's own folder and anything inside it, a folder that holds it, one backed up
 //!   already, not a folder): a refusal comes back in the engine's words through `pump` (`Pumped::refusal`). Nothing is
 //!   listed before the engine answered: an add that happened reads the list again, and the row comes from that read.
 //!   The runner is asked for a pass at once, so the first backup starts (DW-1411).
@@ -120,8 +122,11 @@ impl<E: BackupsEngine> EngineBackupsSource<E> {
         true
     }
 
-    /// The folder picker's answer (DW-0738): asked of the engine for the session of the press. `true`: sent, the answer
-    /// comes through `pump`. `false`, nothing sent: no one signed in with the vault open, or no path.
+    /// The folder picker's answer (DW-0738): asked of the engine for the session of the press. The stamp is read here,
+    /// when the shell hands the answer over, not when the picker opened: the shell hands over only an answer whose
+    /// session no poll saw change while the picker was open (`shell::intents::take_picked_folder`), so it is the
+    /// press's. `true`: sent, the answer comes through `pump`. `false`, nothing sent: no one signed in with the vault
+    /// open, or no path.
     pub(super) fn backup_folders_add_folder(&mut self, path: &str) -> bool {
         let pressed = self.engine.stamp();
         if !self.current() || path.is_empty() {

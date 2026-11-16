@@ -168,7 +168,7 @@
    "kind": "text",
    "x": 48.46,
    "y": 46,
-   "w": 81.24,
+   "w": 81.22,
    "h": 15.7,
    "text": "beebeeb.io",
    "family": "sans",
@@ -187,7 +187,7 @@
    "kind": "text",
    "x": 48.46,
    "y": 63.54,
-   "w": 81.24,
+   "w": 81.22,
    "h": 11.5,
    "text": "DRIVE",
    "family": "mono",
@@ -866,7 +866,7 @@
    "y": 54.75,
    "w": 233.23,
    "h": 13,
-   "text": "Page 1 of 4 \u00b7 210 KB",
+   "text": "Page 1 of 4 · 210 KB",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 11,
@@ -878,52 +878,6 @@
     255
    ],
    "tracking": 0
-  },
-  "view-toggle": {
-   "kind": "box",
-   "x": 551.23,
-   "y": 40.75,
-   "w": 102,
-   "h": 28,
-   "bg": [
-    244,
-    241,
-    237,
-    255
-   ]
-  },
-  "view-list": {
-   "kind": "box",
-   "x": 553.23,
-   "y": 42.75,
-   "w": 28,
-   "h": 24,
-   "on": false
-  },
-  "view-list-icon": {
-   "kind": "icon",
-   "x": 560.73,
-   "y": 48.25,
-   "w": 13,
-   "h": 13,
-   "icon": [
-    "M5 12h14"
-   ],
-   "filled": false,
-   "color": [
-    70,
-    66,
-    61,
-    255
-   ]
-  },
-  "view-grid": {
-   "kind": "box",
-   "x": 582.23,
-   "y": 42.75,
-   "w": 40,
-   "h": 24,
-   "on": false
   },
   "sort-btn": {
    "kind": "box",
@@ -1188,7 +1142,7 @@
    "y": 775.75,
    "w": 230.7,
    "h": 17,
-   "text": "Decrypted on this PC \u00b7 the key never left it",
+   "text": "Decrypted on this PC · the key never left it",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 11.5,
@@ -1244,7 +1198,7 @@
   },
   "crumb-1": {
    "kind": "text",
-   "x": 336.78,
+   "x": 336.77,
    "y": 41.75,
    "w": 58.98,
    "h": 13,
@@ -1268,7 +1222,7 @@
    "kind": "icon",
    "x": 325.87,
    "y": 42.25,
-   "w": 6.91,
+   "w": 6.9,
    "h": 12,
    "icon": [
     "M9 5l7 7-7 7"
@@ -1283,9 +1237,9 @@
   },
   "crumb-sep-1": {
    "kind": "icon",
-   "x": 399.76,
+   "x": 399.74,
    "y": 42.25,
-   "w": 6.91,
+   "w": 6.9,
    "h": 12,
    "icon": [
     "M9 5l7 7-7 7"
@@ -1300,9 +1254,9 @@
   },
   "crumb-name": {
    "kind": "text",
-   "x": 410.66,
+   "x": 410.64,
    "y": 41.75,
-   "w": 120.56,
+   "w": 120.59,
    "h": 13,
    "text": "Service agreement.pdf",
    "family": "sans",
@@ -1581,6 +1535,26 @@
     61,
     255
    ]
+  },
+  "view-toggle-dim": {
+   "kind": "box",
+   "x": 764.23,
+   "y": 40.75,
+   "w": 61,
+   "h": 28,
+   "bg": [
+    244,
+    241,
+    237,
+    255
+   ],
+   "css": {
+    "radius": "9px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px inset",
+    "pad": "2px",
+    "gap": "1px",
+    "opacity": "0.45"
+   }
   },
   "viewer-body": {
    "kind": "box",

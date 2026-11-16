@@ -87,7 +87,7 @@ assert!(bandwidth(&rt).sync_on_metered);
 Compile check on this machine (measured 15 s warm, 3 s after a one-file change):
 
 ```sh
-export CARGO_TARGET_DIR=~/code/bb-worktrees/target-native-n2
+export CARGO_TARGET_DIR=<shared-target-dir>
 ~/code/beebeeb.io/scripts/coord/build-slot.sh -- cargo check --locked --tests
 cargo fmt
 ```

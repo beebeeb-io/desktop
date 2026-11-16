@@ -12,11 +12,17 @@
 //! delay that was not stored is said in "You're set up".
 //!
 //! Must not: write "off" or a longer delay before the prompt answered, or keep its answer for another change.
+//!
+//! The prompt that is up is the first run's to take away (`FirstRunPrompt`, installed by `with_hello`): leaving the
+//! first run takes it away, and a newer prompt of the first run takes its place.
 
 pub(super) use beebeeb_engine::app::lock_password_api::{AppLockProof, AppLockRefused, LockAfter as EngineLockAfter};
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
 use super::{Answer, EngineSetupSource, SetupEngine, log};
-use crate::engine_host::hello::{HelloPrompter, HelloResult};
+use crate::engine_host::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult};
 use crate::frames::signin::setup::source::{LockAfter, Outcome, Switch};
 
 const NOT_DONE: Outcome = Outcome {
@@ -31,6 +37,81 @@ const AFTER_NOT_DONE: Outcome = Outcome {
     now: None,
 };
 
+/// The prompt that is up: its number, and its cancel.
+type Up = Arc<Mutex<Option<(u64, HelloCancel)>>>;
+
+/// The first run's Windows Hello prompt. The cancel of the prompt it asked for is kept and called when the first run
+/// asks a newer one or is left: the shell drops the source (and with it this prompter) the moment the gate shows
+/// anything but the first run, or another account's first run takes its place, so a prompt still up goes with it.
+/// After the cancel no answer of that prompt is decided any more (`hello::HelloCancel`). A prompt that answered is
+/// no longer held, so it is never taken away after its answer.
+struct FirstRunPrompt {
+    prompter: Box<dyn HelloPrompter>,
+    up: Up,
+    /// The number of the last prompt asked.
+    asked: AtomicU64,
+    /// The highest number that answered: a prompt that answered before its cancel was kept is never kept.
+    answered: Arc<AtomicU64>,
+}
+
+impl FirstRunPrompt {
+    fn new(prompter: Box<dyn HelloPrompter>) -> Self {
+        Self {
+            prompter,
+            up: Up::default(),
+            asked: AtomicU64::new(0),
+            answered: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Takes the prompt that is up away (only when it is `number`, if one is named). The cancel runs outside the
+    /// lock: a `done` that runs meanwhile waits for nothing.
+    fn take_away(up: &Up, number: Option<u64>) {
+        let held = {
+            let mut up = up.lock().unwrap_or_else(|p| p.into_inner());
+            let another = matches!((number, up.as_ref()), (Some(number), Some((held, _))) if *held != number);
+            if another { None } else { up.take() }
+        };
+        if let Some((_, cancel)) = held {
+            cancel();
+        }
+    }
+}
+
+impl HelloPrompter for FirstRunPrompt {
+    fn start(&self, done: HelloDone) -> Result<HelloCancel, ()> {
+        // One prompt of the first run at a time: the one that is up goes first.
+        Self::take_away(&self.up, None);
+        let number = self.asked.fetch_add(1, Ordering::SeqCst) + 1;
+        let (up, answered) = (self.up.clone(), self.answered.clone());
+        let cancel = self.prompter.start(Box::new(move |result| {
+            // Answered: nothing of it is up any more.
+            answered.fetch_max(number, Ordering::SeqCst);
+            {
+                let mut up = up.lock().unwrap_or_else(|p| p.into_inner());
+                if up.as_ref().is_some_and(|(held, _)| *held == number) {
+                    *up = None;
+                }
+            }
+            done(result);
+        }))?;
+        {
+            let mut up = self.up.lock().unwrap_or_else(|p| p.into_inner());
+            if self.answered.load(Ordering::SeqCst) < number {
+                *up = Some((number, cancel));
+            }
+        }
+        let up = self.up.clone();
+        Ok(Box::new(move || Self::take_away(&up, Some(number))))
+    }
+}
+
+impl Drop for FirstRunPrompt {
+    fn drop(&mut self) {
+        Self::take_away(&self.up, None);
+    }
+}
+
 /// The step's choice as the engine's.
 pub(super) fn engine_after(after: LockAfter) -> EngineLockAfter {
     match after {
@@ -42,9 +123,10 @@ pub(super) fn engine_after(after: LockAfter) -> EngineLockAfter {
 }
 
 impl<E: SetupEngine> EngineSetupSource<E> {
-    /// The source with the main window's Windows Hello prompt, which turning app lock off asks first.
+    /// The source with the main window's Windows Hello prompt, which turning app lock off asks first. The first run
+    /// holds the prompt it asked for (`FirstRunPrompt`): it goes when the first run is left.
     pub fn with_hello(mut self, hello: Box<dyn HelloPrompter>) -> Self {
-        self.hello = hello;
+        self.hello = Box::new(FirstRunPrompt::new(hello));
         self
     }
 

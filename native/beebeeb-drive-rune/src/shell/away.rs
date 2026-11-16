@@ -23,13 +23,18 @@
 //!   measures it better (the poll's measure also counts input made between its last run and the sleep as idle), so it
 //!   replaces the gap: one said before the poll finds the gap means the gap is not held, one said after it drops the
 //!   held gap, and a found gap waits at most [`RESUME_GRACE`] for it before it is said.
-//! - **The cover** (the owner's ruling D-B2-3, privacy). The poll that finds a gap covers the window's content at once:
-//!   [`AwayLock::covers`], which the window draws as the lock screen (`shell::registry::view`). The grace only decides
-//!   which look says the wake (the resume's, or the gap's after it); the content stays covered until that look's
-//!   answer says it locked nothing. A look that locked leaves the cover until a later poll sees the session open
-//!   again, so no frame shows the content between the engine's lock and the window's next read of the gate. Where
-//!   nothing an idle time says could lock (app lock off: the engine's last idle answer; an engine without the
-//!   automatic lock), nothing is covered: app lock off never locks, so it never shows the lock screen either.
+//! - **The cover** (the owner's ruling D-B2-3, privacy). A wake covers the window's content at once:
+//!   [`AwayLock::covers`], which the window draws as the lock screen (`shell::registry::view`). Whichever comes first
+//!   covers: the poll that finds a gap, the tray's resume (a wake Windows announced, also one said before the poll
+//!   ran: review of #463, P3-1), or a click on the b before the main window's poll found the gap
+//!   ([`AwayLock::cover_a_gap_not_yet_found`], P3-15). The grace only decides which look says the wake (the resume's,
+//!   or the gap's after it); the content stays covered until that look's answer says it locked nothing. A look that
+//!   locked leaves the cover until a later poll sees the session open again, so no frame shows the content between
+//!   the engine's lock and the window's next read of the gate. A look that failed (it panicked) decided nothing: the
+//!   cover holds and the wake is said again as the longest time away, so the engine locks unless nothing can lock
+//!   (fail closed, as a resume with no idle reading: P3-2). Where nothing an idle time says could lock (app lock off:
+//!   the engine's last idle answer; an engine without the automatic lock), nothing is covered: app lock off never
+//!   locks, so it never shows the lock screen either.
 //! - The engine's look reads the credential store and waits for the lock's write hold: it runs on a worker, one idle
 //!   look at a time. The job is made on the window's thread, so it holds the session it was measured for.
 //!
@@ -63,7 +68,8 @@ pub const AWAY_GAP: Duration = Duration::from_secs(120);
 /// counts input made between its last run and the sleep as idle, so said at once it could lock a person who typed and
 /// then closed the lid. A resume within this replaces the gap; with none (Windows sent no broadcast), the gap is said
 /// after it. Kept short: the window's content is covered from the poll that found the gap until the engine answered
-/// (D-B2-3), so a wake that locks nothing shows the lock screen for this long.
+/// (D-B2-3), so a wake that locks nothing shows the lock screen for this long. A look of the wake that failed waits
+/// this long too before the wake is said again (no loop of failing looks).
 ///
 /// [`TrayEvent::Resumed`]: super::platform::TrayEvent::Resumed
 pub const RESUME_GRACE: Duration = Duration::from_secs(2);
@@ -96,7 +102,8 @@ struct Looked {
     idle: bool,
     /// Which look it was ([`AwayLock::looks`] once it started).
     number: usize,
-    /// `None`: the look panicked (it answers as one that locked nothing, with the longest wait).
+    /// `None`: the look panicked. It schedules as one that locked nothing, with the longest wait; for the look that
+    /// says a wake it decided nothing, and the cover holds (P3-2).
     answer: Option<AwayAnswer>,
 }
 
@@ -137,6 +144,9 @@ pub struct AwayLock {
     resumed: bool,
     /// The window's content is covered (D-B2-3).
     cover: Cover,
+    /// Whether the cover was on when the last poll ended: a cover turned on between two polls (the tray's resume, a
+    /// click on the b) still gets the instant commit of the poll that follows.
+    polled_cover: bool,
     /// The engine's last idle answer said an idle time could lock (app lock on). `true` until it answered: a gap
     /// found before is covered.
     could_lock: bool,
@@ -162,6 +172,7 @@ impl Default for AwayLock {
             gap_found_at: None,
             resumed: false,
             cover: Cover::Off,
+            polled_cover: false,
             could_lock: true,
             looks: 0,
             answered: 0,
@@ -178,6 +189,34 @@ impl AwayLock {
         self.cover != Cover::Off
     }
 
+    /// Whether a wake covers here: something an idle time says could lock (app lock on, as the engine last answered;
+    /// `true` until it answered) and an engine with the automatic lock.
+    fn wake_covers(&self) -> bool {
+        self.could_lock && !self.without
+    }
+
+    /// A gap between the poll's last run while the engine was open and now, far past the look interval: the app did
+    /// not run (the module doc).
+    fn gap_since_seen(&self, now: Instant, wall: SystemTime) -> Option<(Seen, Duration)> {
+        let seen = self.seen?;
+        let gap = seen.gap(now, wall);
+        (gap > AWAY_GAP).then_some((seen, gap))
+    }
+
+    /// A click on the b before the main window's poll after a wake (review of #463, P3-15): the gap that poll will find
+    /// is covered now, so the flyout never opens on the content. Nothing is held or said here and the poll's last run is
+    /// left as it was: that poll finds the gap, holds it and says it, as without the click. A resume already said is
+    /// that wake, and covered by [`AwayLock::event`].
+    pub fn cover_a_gap_not_yet_found(&mut self) {
+        if self.cover == Cover::Off
+            && !self.resumed
+            && self.wake_covers()
+            && self.gap_since_seen(Instant::now(), SystemTime::now()).is_some()
+        {
+            self.cover = Cover::Held;
+        }
+    }
+
     /// The main window's poll. `open`: the engine's lock is open ([`ShellActions::screen_open`]).
     /// `pc_idle`: [`Platform::idle_for`](super::platform::Platform::idle_for). Returns whether a look's answer came or
     /// the cover went on or off (either way the window draws again).
@@ -189,9 +228,11 @@ impl AwayLock {
         wake: Option<&AppHandle<State>>,
         tx: &mut Tx,
     ) -> bool {
-        let covered = self.covers();
         let came = self.measure(open, pc_idle, actions, wake, tx);
         let covers = self.covers();
+        // Compared with the last poll's end, not this poll's start: a cover turned on between two polls (an event)
+        // is new to this frame too.
+        let covered = std::mem::replace(&mut self.polled_cover, covers);
         if covers && !covered {
             // The content leaves in this frame's commit: every removed element otherwise fades out over 0.15 s, and
             // the files would still show under the cover while they fade.
@@ -230,6 +271,13 @@ impl AwayLock {
                 // The engine locked: this frame's gate may have been read before it.
                 self.cover = Cover::Locked;
                 lift_if_open = false;
+            } else if self.cover == Cover::Asked(looked.number) && looked.answer.is_none() {
+                // The look that says the wake failed: the engine decided nothing (P3-2, fail closed). The cover holds,
+                // and after the grace the wake is said again as the longest time away (unknown, as a resume with no
+                // idle reading), which locks unless nothing an idle time says can lock.
+                self.cover = Cover::Held;
+                self.away = Some(Duration::MAX);
+                self.gap_found_at = Some(now);
             } else if self.cover == Cover::Asked(looked.number) {
                 // The look that says the wake locked nothing.
                 self.cover = Cover::Off;
@@ -264,18 +312,18 @@ impl AwayLock {
         // A gap far past the look interval: the app did not run, and the idle seen last plus the gap is time away. It
         // is held until a look carries it (one may be out now), and it does not wait for the next due. A resume said
         // since the last poll is this wake, measured better: the gap is not held.
-        if let Some(seen) = self.seen.replace(Seen { at: now, wall, idle }) {
-            let gap = seen.gap(now, wall);
-            if gap > AWAY_GAP && !self.resumed {
-                let away = seen.idle.saturating_add(gap);
-                self.away = Some(self.away.map_or(away, |held| held.max(away)));
-                self.gap_found_at = Some(now);
-                // D-B2-3: the content is covered from this frame, until a look said this wake.
-                if self.could_lock && !self.without {
-                    self.cover = Cover::Held;
-                }
+        if let Some((seen, gap)) = self.gap_since_seen(now, wall)
+            && !self.resumed
+        {
+            let away = seen.idle.saturating_add(gap);
+            self.away = Some(self.away.map_or(away, |held| held.max(away)));
+            self.gap_found_at = Some(now);
+            // D-B2-3: the content is covered from this frame, until a look said this wake.
+            if self.wake_covers() {
+                self.cover = Cover::Held;
             }
         }
+        self.seen = Some(Seen { at: now, wall, idle });
         self.resumed = false;
         if self.without || self.looking {
             return came;
@@ -317,8 +365,11 @@ impl AwayLock {
     /// An event the engine is told at once: Windows' session lock, the main window closing to the tray, a wake from
     /// sleep (as idle time).
     pub fn event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
-        let resume = matches!(seen, Away::Idle(_));
-        if resume {
+        let resumed = match seen {
+            Away::Idle(away) => Some(away),
+            Away::LeftTheApp | Away::SessionLocked => None,
+        };
+        if resumed.is_some() {
             // A wake from sleep (the tray's resume, the only idle time said as an event) measured this wake better
             // than a gap the poll found or is yet to find: a held gap is dropped, and the next poll holds none.
             self.resumed = true;
@@ -327,13 +378,22 @@ impl AwayLock {
         }
         // An event's answer schedules nothing, also a wake's (idle time, but not the poll's look).
         let number = self.ask(seen, false, actions, wake);
-        // The resume says the wake the cover is for: its answer lifts it, unless it locked. One that did not start
-        // leaves the cover held, and the next poll looks for it.
-        if resume
-            && let Some(number) = number
-            && matches!(self.cover, Cover::Held | Cover::Asked(_))
-        {
-            self.cover = Cover::Asked(number);
+        let Some(away) = resumed else {
+            return;
+        };
+        // The resume says the wake: the content is covered from now (also a wake Windows announced before the poll
+        // found its gap: review of #463, P3-1), and its look's answer lifts the cover, unless it locked. A cover the
+        // engine's lock holds stays as it is.
+        if self.cover == Cover::Locked || !(self.covers() || self.wake_covers()) {
+            return;
+        }
+        match number {
+            Some(number) => self.cover = Cover::Asked(number),
+            None => {
+                // Its look did not start: the cover holds, and the next poll says this wake (the resume's time).
+                self.cover = Cover::Held;
+                self.away = Some(away);
+            }
         }
     }
 
@@ -380,6 +440,13 @@ impl AwayLock {
         tx.wake_after(due.saturating_duration_since(now));
         self.armed = Some(due);
         self.arms += 1;
+    }
+
+    /// A test outside this module puts the cover on (held, as a found gap) or takes it off, on an engine that has no
+    /// away look of its own (the fixture never covers): File Explorer's verbs (`platform::windows_verbs`, Windows only).
+    #[cfg(all(test, windows))]
+    pub(crate) fn set_cover_for_test(&mut self, on: bool) {
+        self.cover = if on { Cover::Held } else { Cover::Off };
     }
 }
 

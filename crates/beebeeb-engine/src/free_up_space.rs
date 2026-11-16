@@ -234,13 +234,14 @@ pub enum Reclaimed {
     Freed,
     /// No row has this id.
     NoSuchItem,
-    /// A file at or under it holds a change that is not sent (uploading, a conflict): its bytes are the only copy
-    /// and stay.
+    /// A file at or under it holds a change that is not sent (uploading, a conflict, or in error with its change still
+    /// queued: an upload that failed and waits, or gave up): its bytes are the only copy and stay.
     Unsent,
     /// A file at or under it is kept on this computer (also one that was kept after the selection was read).
     Kept,
-    /// A file at or under it is in error here (its download failed): it was not freed, and it is not a change that
-    /// waits to be sent either, so it is never answered as one.
+    /// A file at or under it is in error here with no change of it queued (its download failed): it was not freed, and
+    /// it is no change that waits to be sent, so it is never answered as one. (A file in error whose upload failed is
+    /// [`Reclaimed::Unsent`]: review of #463, P3-11.)
     Error,
     /// A file at or under it is still downloaded: the reclaim did not reach it or could not free it (open in an
     /// app, the session ended first, a call that failed), or the rows could not be read to prove otherwise.
@@ -308,6 +309,10 @@ pub(crate) fn free_selection(
     // What is there now decides. Rows that cannot be read prove nothing: nothing is called freed.
     let after = selected_files();
     let kept = |id: &str| matches!(db.get_file_contract_state(id), Ok(Some(contract)) if contract.effective_pin_state() == PinState::Pinned);
+    // P3-11: the files whose change is still queued (the "Not sent" list), read once and only when a file in error is
+    // met: in error with its change queued is an upload that failed, not a download.
+    let unsent = std::cell::OnceCell::new();
+    let change_queued = |id: &str| unsent.get_or_init(|| files_with_unsent_changes(db)).contains(id);
     ids.iter()
         .zip(&places)
         .map(|(id, place)| {
@@ -333,6 +338,7 @@ pub(crate) fn free_selection(
                     // Deleted here, waiting for the server's trash: its placeholder is gone, nothing to free.
                     FileStatus::Trashing => continue,
                     FileStatus::Uploading | FileStatus::Conflict => Reclaimed::Unsent,
+                    FileStatus::Error if change_queued(&row.file_id) => Reclaimed::Unsent,
                     FileStatus::Error => Reclaimed::Error,
                     FileStatus::Local if kept(&row.file_id) => Reclaimed::Kept,
                     FileStatus::Local | FileStatus::Downloading => Reclaimed::Left,
@@ -353,6 +359,31 @@ pub(crate) fn free_selection(
             }
         })
         .collect()
+}
+
+/// The files of the sync folder whose change is still queued: every row of the "Not sent" list (`unsent_changes`, the
+/// same predicates as its count) that names a file, a backup's own uploads left out. A page that cannot be read ends
+/// the read with what was found: a file it would have named is answered as in error, never as freed.
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn files_with_unsent_changes(db: &crate::state_db::StateDb) -> std::collections::HashSet<String> {
+    const PAGE: u32 = 500;
+    let now = now_unix_seconds();
+    let mut found = std::collections::HashSet::new();
+    let mut offset = 0u32;
+    while let Ok(page) = db.unsent_changes(offset, PAGE, now) {
+        let read = u32::try_from(page.items.len()).unwrap_or(PAGE);
+        found.extend(
+            page.items
+                .into_iter()
+                .filter(|change| !change.backup)
+                .filter_map(|change| change.file_id),
+        );
+        offset = offset.saturating_add(read);
+        if read == 0 || i64::from(offset) >= page.total {
+            break;
+        }
+    }
+    found
 }
 
 /// Windows reclaim path (task 0781). On Cloud Files the hydrated bytes live
@@ -528,3 +559,82 @@ pub use unix::free_up_space_unix;
 pub(crate) use unix::{Seams, reclaim_unix};
 #[cfg(all(test, unix))]
 mod unix_tests;
+
+#[cfg(test)]
+mod selection_tests {
+    //! P3-11 (review of #463): a file in error whose upload failed is answered as holding a change that is not sent,
+    //! as the upload's failure leaves it (`engine_bridge/upload.rs`: the row in error, its op still queued, waiting or
+    //! given up); a file in error whose download failed is still answered as in error. Every name is invented.
+    use super::{Reclaimed, free_selection};
+    use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation, StateDb};
+
+    fn row(db: &StateDb, id: &str, path: &str, status: FileStatus) {
+        let entry = FileEntry {
+            file_id: id.into(),
+            path: path.into(),
+            status,
+            size_bytes: 10,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        db.upsert_file_with_contract(&entry, |contract| contract.item_kind = ItemKind::File)
+            .unwrap();
+    }
+
+    fn queued(db: &StateDb, op_id: &str, file_id: &str, kind: OperationKind, attempts: i64) {
+        db.enqueue_operation(&PendingOperation {
+            op_id: op_id.into(),
+            kind,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: Some(format!("/{file_id}.txt")),
+            metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_file_in_error_whose_upload_failed_is_answered_as_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // The upload failed and waits for its next try.
+        row(&db, "f-wait", "/wait.txt", FileStatus::Error);
+        queued(&db, "op-wait", "f-wait", OperationKind::UploadVersion, 1);
+        // The upload gave up (out of attempts): the change is still not sent.
+        row(&db, "f-gave", "/gave.txt", FileStatus::Error);
+        queued(&db, "op-gave", "f-gave", OperationKind::UploadVersion, 5);
+        // The download failed: its op is a download, which is no change to send.
+        row(&db, "f-down", "/down.txt", FileStatus::Error);
+        queued(&db, "op-down", "f-down", OperationKind::HydrateFile, 5);
+        // In error with nothing queued.
+        row(&db, "f-err", "/err.txt", FileStatus::Error);
+        let ids: Vec<String> = ["f-wait", "f-gave", "f-down", "f-err"].map(String::from).to_vec();
+        let answer = free_selection(&db, &ids, Vec::new(), |_| {
+            panic!("nothing in error is handed to the reclaim")
+        });
+        let told: Vec<(&str, Reclaimed)> = answer.iter().map(|a| (a.id.as_str(), a.what)).collect();
+        assert_eq!(
+            told,
+            [
+                ("f-wait", Reclaimed::Unsent),
+                ("f-gave", Reclaimed::Unsent),
+                ("f-down", Reclaimed::Error),
+                ("f-err", Reclaimed::Error),
+            ]
+        );
+        assert!(answer.iter().all(|a| !a.freed_some), "nothing was freed");
+    }
+}

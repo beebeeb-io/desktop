@@ -15,7 +15,14 @@
 //!   runs the engine's approval ([`Engine::approve_sign_in_for`]: core's step-up, the claim, and the relay that core
 //!   seals to the other device's key). Windows Hello not set up on this PC: no approval (it says so).
 //! - `approval_answer` hands each ending out once, with its request's id; an ending, or a Windows Hello answer, that
-//!   comes under another session or account is dropped, and a prompt still up for one is taken away.
+//!   comes under another session or account is dropped, and a prompt still up for one is taken away. One exception:
+//!   an approval whose keys left (approved, or not known) and that ended under another turn of the SAME account (a
+//!   lock while it ran) is kept, and said as a toast once the window is open again on an account page: the review it
+//!   was for ended with the lock, and the other device is signed in all the same. A sign-out, a closed vault or
+//!   another account wipes it unsaid (as `account_twofactor.rs` does with backup codes).
+//! - A retry after an approval that did not get as far as the claim asks Beebeeb for the code's request again, and
+//!   goes on only when that request is the one the review shows (Beebeeb's facts, the expiry included, are the same);
+//!   another one ends the review as expired, with no prompt and nothing sent.
 //!   `cancel_approval` while Windows Hello is up takes the prompt away, wipes the password and claims nothing; once
 //!   Windows said "verified" the approval is on its way and cannot be recalled.
 //! - Deny (DW-A16): core's denial, waited for on the window's thread as the lookup. Expiry (DW-A17):
@@ -28,6 +35,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use beebeeb_engine::app::bindings::approve_sign_in::{ApproveError, DenyHandle, FoundRequest, RequestFacts};
+use beebeeb_engine::signin::gate::GateState;
 use zeroize::Zeroizing;
 
 use crate::engine_host::hello::{HelloCancel, HelloPrompter, HelloResult, NoHello, WindowHello};
@@ -44,6 +52,11 @@ const HELD_AT_MOST: usize = 4;
 const APPROVAL_SETTLES_WITHIN: Duration = Duration::from_secs(35);
 /// The products a request can name; anything else is drawn as this app's product (`SignInRequest::bounded`).
 const PRODUCTS: [&str; 5] = ["Drive", "Pass", "VPN", "Chat", "Mail"];
+/// The toast after the unlock, for an approval that went through while the window's review had ended (a lock).
+pub const APPROVED_LATE: &str = "The sign-in you approved went through. That device is signed in.";
+/// The toast after the unlock, for an approval whose keys left with no answer that said how it ended.
+pub const UNKNOWN_LATE: &str =
+    "Couldn't confirm the sign-in you approved. Devices and sessions shows whether that device is signed in.";
 
 /// A request found by its code, for the session and account of the lookup.
 struct Held {
@@ -56,6 +69,8 @@ struct Held {
     deny: DenyHandle,
     /// When the request runs out (Unix seconds), when Beebeeb's time read.
     expires_at: Option<i64>,
+    /// What Beebeeb said about the request at the lookup the review shows: a retry's lookup must say the same.
+    facts: RequestFacts,
 }
 
 /// An approval that was begun. While Windows Hello is up it holds what the approval needs; once Windows said
@@ -112,6 +127,10 @@ pub(super) struct ApproveCalls {
     ready: VecDeque<(Stamp, String, Approval)>,
     /// Requests this PC's own approval got through: a Deny after it says so.
     approved_here: Vec<(Stamp, String)>,
+    /// An approval whose keys left (`Approved` or `Unknown`) that ended under another turn of the same account: said
+    /// as a toast once the window is open again (`account_approve_tell_late`). Wiped unsaid for another account, a
+    /// sign-out or a closed vault.
+    late: Option<(Stamp, Approval)>,
     hello: Box<dyn HelloPrompter>,
     tx: mpsc::Sender<Inner>,
     rx: mpsc::Receiver<Inner>,
@@ -127,6 +146,7 @@ impl Default for ApproveCalls {
             begun: None,
             ready: VecDeque::new(),
             approved_here: Vec::new(),
+            late: None,
             // No prompt until the shell hands one over (`with_approval_window`): no approval either.
             hello: Box::new(NoHello),
             tx,
@@ -170,6 +190,13 @@ impl ApproveCalls {
     }
 }
 
+/// Whether an ending made under `made_for` is still kept to be said under `now`: the same account (named), and its
+/// session open (`open`: in memory and not held as ended). A screen lock keeps it; a sign-out, a closed vault or
+/// another account does not.
+fn keeps_late(made_for: &Stamp, now: &Stamp, open: bool) -> bool {
+    open && made_for.1.is_some() && made_for.1 == now.1
+}
+
 /// How an approval's ending reads on the screen.
 fn approval_of(result: Result<(), ApproveError>) -> Approval {
     match result {
@@ -179,7 +206,8 @@ fn approval_of(result: Result<(), ApproveError>) -> Approval {
         Err(ApproveError::WrongPassword) => Approval::WrongPassword,
         Err(ApproveError::Offline) => Approval::Offline,
         Err(ApproveError::Unknown) => Approval::Unknown,
-        // This PC refused before anything was sent (a lock, a sign-out, another sign-in): back to the review.
+        // This PC refused before the keys left (a lock, a sign-out, another sign-in; before the claim or, after it,
+        // before the relay): nothing was approved. Back to the review.
         Err(ApproveError::NotSignedIn | ApproveError::Locked) => Approval::Cancelled,
         Err(ApproveError::SessionEnded | ApproveError::RateLimited(_) | ApproveError::Refused) => Approval::Refused,
     }
@@ -259,6 +287,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// is made ready to hand out. Anything of another session or account is dropped.
     fn account_approve_take_in(&mut self) {
         let now = stamp(&self.engine);
+        let open = self.open();
         self.account_approve.forget_other(&now);
         while let Ok(inner) = self.account_approve.rx.try_recv() {
             match inner {
@@ -277,10 +306,17 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     {
                         calls.begun = None;
                     }
+                    let answer = approval_of(result);
                     if made_for != now {
+                        // The keys left while the turn moved (a lock while it ran): the other device is signed in
+                        // (or may be) whatever the window shows now. Kept for the same account, said after the
+                        // unlock; any other ending approved nothing and goes unsaid.
+                        if matches!(answer, Approval::Approved | Approval::Unknown) && keeps_late(&made_for, &now, open)
+                        {
+                            calls.late = Some((made_for, answer));
+                        }
                         continue;
                     }
-                    let answer = approval_of(result);
                     if answer == Approval::Approved {
                         calls.approved_here.push((made_for.clone(), id.clone()));
                     }
@@ -296,6 +332,30 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 }
             }
         }
+        self.account_approve_tell_late(&now);
+    }
+
+    /// A late approval kept through a lock: wiped for another account, a sign-out or a closed vault; said once, as a
+    /// toast, when the window is open (the gate is Ready) on an account page, so it is seen.
+    fn account_approve_tell_late(&mut self, now: &Stamp) {
+        let open = self.open();
+        let Some((made_for, _)) = self.account_approve.late.as_ref() else {
+            return;
+        };
+        if !keeps_late(made_for, now, open) {
+            self.account_approve.late = None;
+            return;
+        }
+        if self.engine.gate() != GateState::Ready || self.showing.is_none() {
+            return;
+        }
+        let Some((_, answer)) = self.account_approve.late.take() else {
+            return;
+        };
+        self.say(match answer {
+            Approval::Approved => Said::done(APPROVED_LATE),
+            _ => Said::failed(UNKNOWN_LATE, None, false),
+        });
     }
 
     /// `of`: the request, the stamp and the prompt the answer is for.
@@ -397,7 +457,8 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         let calls = &mut self.account_approve;
         calls.next_id += 1;
         let id = format!("req-{}", calls.next_id);
-        let shown = shown_of(&id, &found.facts());
+        let facts = found.facts();
+        let shown = shown_of(&id, &facts);
         let unix_now = Utc::now().timestamp();
         let left = found.seconds_left(unix_now);
         calls.held.push(Held {
@@ -407,6 +468,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             deny: found.deny_handle(),
             found: Some(found),
             expires_at: left.map(|left| unix_now + left),
+            facts,
         });
         // The oldest go first, never the one an approval is on.
         while calls.held.len() > HELD_AT_MOST {
@@ -472,7 +534,8 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             return;
         }
         // A request whose last approval did not get as far as the claim was consumed by it: Beebeeb is asked for it
-        // again (a code that is live is no guess).
+        // again (a code that is live is no guess). That answer is approved only when it is the request the review
+        // shows: what Beebeeb says about it now (the device, the place, the expiry) must be what it said then.
         let consumed = self
             .account_approve
             .held(request, &now)
@@ -492,7 +555,16 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                         .iter_mut()
                         .find(|held| held.id == request && held.made_for == now);
                     match held {
-                        Some(held) => held.found = Some(found),
+                        Some(held) if held.facts == found.facts() => held.found = Some(found),
+                        Some(_) => {
+                            // Not the request on screen: the review ends, and the code is asked again from the start.
+                            self.account_approve
+                                .held
+                                .retain(|held| !(held.id == request && held.made_for == now));
+                            self.account_approve.say(now, request, Approval::Expired);
+                            self.engine.wake_host();
+                            return;
+                        }
                         None => {
                             self.account_approve.say(now, request, Approval::Expired);
                             self.engine.wake_host();

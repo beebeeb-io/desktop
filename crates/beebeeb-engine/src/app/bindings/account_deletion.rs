@@ -19,7 +19,9 @@
 //!
 //! Session-bound like its neighbours (`*_for(session)`): every call is asked for the session the host read at its
 //! press, sends nothing for any other, and its answer is handed over only while that session is still the one in
-//! memory ([`DeletionError::NotSignedIn`] otherwise: a late answer is dropped, also when the change was made).
+//! memory ([`DeletionError::NotSignedIn`] otherwise: a late answer is dropped, also when the change was made). The
+//! request asks again after its password step-up, right before the request that mails the link leaves: a lock, a
+//! sign-out or another sign-in that landed during the step-up sends no link.
 //! Every call takes at most [`DELETION_WITHIN`].
 //!
 //! Every method BLOCKS on the handle's runtime.
@@ -248,7 +250,7 @@ impl<C: CredentialStores> Engine<C> {
         let token = self.deletion_session(session)?;
         let sent = AtomicBool::new(false);
         let result = self.runtime.block_on(async {
-            match tokio::time::timeout(DELETION_WITHIN, self.drive_deletion(&token, flow, &sent)).await {
+            match tokio::time::timeout(DELETION_WITHIN, self.drive_deletion(session, &token, flow, &sent)).await {
                 Ok(result) => result,
                 Err(_) if sent.load(Ordering::SeqCst) => Err(DeletionError::Unconfirmed),
                 Err(_) => Err(DeletionError::Offline),
@@ -317,9 +319,12 @@ impl<C: CredentialStores> Engine<C> {
         result
     }
 
-    /// Run core's request flow: send what it asks, hand it the answer. `sent`: the guarded request has left.
+    /// Run core's request flow: send what it asks, hand it the answer. `sent`: the guarded request has left. The
+    /// guarded request (the one the step-up's token is spent on) leaves only while the session in memory is still
+    /// `session` and a person's call may run.
     async fn drive_deletion(
         &self,
+        session: SessionGeneration,
         token: &str,
         mut flow: AccountFlow,
         sent: &AtomicBool,
@@ -333,6 +338,9 @@ impl<C: CredentialStores> Engine<C> {
                     let first_leg = request.path.ends_with("/confirm-opaque-start");
                     let guarded = request.confirm_token().is_some();
                     if guarded {
+                        // A lock decided off the window's thread, a sign-out or another sign-in during the step-up:
+                        // no link is mailed. Never waits (`deletion_session` only tries the session's locks).
+                        self.deletion_session(session)?;
                         sent.store(true, Ordering::SeqCst);
                     }
                     let response = self.send_deletion_call(token, &request).await;
