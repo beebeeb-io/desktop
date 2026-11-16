@@ -416,8 +416,7 @@ fn places(config: &DesktopConfig, owner: Option<&Identity>, paths: impl Fn(&str)
 /// in the list and may be backed up again) and each known folder whose switch is on. A known folder that is off backs
 /// nothing up, so a folder inside it may be chosen.
 fn takes(place: &Place) -> bool {
-    let _ = place;
-    true
+    !place.known || place.on
 }
 
 /// Where the folders `owner` backs up already are ([`takes`]): its chosen ones (an untagged one is nobody's, so
@@ -487,7 +486,7 @@ pub fn switch_on_refusal_with(
     let known = all.iter().any(|place| place.key == key && place.known);
     let backed_up: Vec<&Place> = all
         .iter()
-        .filter(|place| place.key != key && place.on && !(known && place.known))
+        .filter(|place| place.key != key && !(known && place.known))
         .collect();
     all.iter()
         .filter(|place| place.key == key)
