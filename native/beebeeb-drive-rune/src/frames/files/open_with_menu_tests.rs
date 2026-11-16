@@ -26,8 +26,18 @@ const ALL_ON: OfficeShips = OfficeShips {
 };
 
 /// The file menu of `s` with the Office switches `on` (every type) or as they ship.
+/// Every Office type's switch off: the viewer shows no Office file (as before O-CP3 turned them on).
+const ALL_OFF: OfficeShips = OfficeShips {
+    docx: false,
+    doc: false,
+    xlsx: false,
+    xls: false,
+    pptx: false,
+};
+
+/// The file menu with every Office switch on, or every one off. (`None` is the switches as they ship: on since O-CP3.)
 fn menu_with(s: &mut State, on: bool) -> Vec<Entry> {
-    s.actions.open_with.board_office = on.then_some(ALL_ON);
+    s.actions.open_with.board_office = Some(if on { ALL_ON } else { ALL_OFF });
     file_menu(s)
 }
 
@@ -110,6 +120,9 @@ fn open_with_offered_only_for_a_shown_office_file() {
     );
     assert_eq!(offered.len(), plain.len() + 1);
     assert_eq!(&offered[2..], &plain[1..], "nothing else of the menu changes");
+    // As shipped: every type on since O-CP3, so the menu is the one offered.
+    s.actions.open_with.board_office = None;
+    assert_eq!(file_menu(&s), offered);
     // A PDF: unchanged, whatever the switches say.
     let contract = s.listing.items.iter().position(|i| i.id == "contract").unwrap();
     s.select_only(contract);
