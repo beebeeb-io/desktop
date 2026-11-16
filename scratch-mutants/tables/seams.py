@@ -1,0 +1,16 @@
+MUT = [
+    dict(id="SEAM-2", crate="native", where="linux",
+         note="integ seam 2 (91123ad8): the host's NeedsWindowsUpdate shows its own reason, not a stopped viewer",
+         files=[("native/beebeeb-drive-rune/src/engine_host/viewer_office.rs",
+                 "                failure(ViewState::NoPreview(Reason::NeedsWindowsUpdate))\n",
+                 "                failure(ViewState::Stopped { retried: true })\n")],
+         filt="host_states_become_their_bodies",
+         expect=["host_states_become_their_bodies"]),
+    dict(id="SEAM-1", crate="native", where="linux",
+         note="integ seam 1 (8b0ff8c1): both new reasons have their own line (NotOnThisComputer's line folded into NeedsWindowsUpdate's)",
+         files=[("native/beebeeb-drive-rune/src/frames/office/states.rs",
+                 "            OfficeState::NoPreview(Reason::NotOnThisComputer) => Some(REASON_NOT_HERE),\n",
+                 "            OfficeState::NoPreview(Reason::NotOnThisComputer) => Some(REASON_NEEDS_WINDOWS),\n")],
+         filt="office_states_each_reason_has_its_line",
+         expect=["office_states_each_reason_has_its_line"]),
+]
