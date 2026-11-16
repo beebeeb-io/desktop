@@ -145,6 +145,10 @@ struct SeatState {
     /// The proofs on the runtime, for a Lock or a sign-out to stop.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     running: Vec<Running>,
+    /// How many stops ([`Engine::stop_proofs`]) this handle has had. A proof owed before the last one never reads a
+    /// key: it is compared under this lock, in the same hold that reads the keys and registers the proof's task.
+    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    stops: u64,
     #[cfg(test)]
     test: TestSeams,
 }
@@ -157,18 +161,39 @@ struct Startup {
     candidate: Option<Identity>,
 }
 
-/// A proof a refused start owes: the session turn its keys were read in, and the folder it was asked to start in.
+/// A proof a refused start owes: the session turn its keys were read in, the folder it was asked to start in, and
+/// the seat's stop count then (a stop since ends it before it reads a key).
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 struct Owed {
     turn: SessionGeneration,
     sync_root: PathBuf,
+    stops: u64,
 }
 
+/// A proof's task, registered in the same hold of the seat lock that spawned it, so a stop never misses it.
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 struct Running {
     abort: tokio::task::AbortHandle,
-    /// Closed when the proof's task is dropped (it ended, or it was stopped): its client is gone by then.
+    /// Closed when the proof's task is dropped (it ended, or it was stopped), after its client ([`EndsAfterRelease`]).
     ended: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// A proof's task: the proof, then the sender a stop waits on. A struct's fields are dropped in their declaration
+/// order, so the sender closes only once the proof, and with it every reference to the proof's client, is gone. (An
+/// `async` block's locals and captures have no order the language promises.)
+#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+struct EndsAfterRelease<F> {
+    proof: std::pin::Pin<Box<F>>,
+    _ended: tokio::sync::oneshot::Sender<()>,
+}
+
+#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+impl<F: std::future::Future> std::future::Future for EndsAfterRelease<F> {
+    type Output = F::Output;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<F::Output> {
+        self.get_mut().proof.as_mut().poll(cx)
+    }
 }
 
 /// Test builds only: what a test puts in place of the network and the OS, and what it reads back.
@@ -279,6 +304,7 @@ impl<C: CredentialStores> Engine<C> {
             state.owed = Some(Owed {
                 turn: self.acct.session_generation(),
                 sync_root: sync_root.to_path_buf(),
+                stops: state.stops,
             });
             state.ready = false;
         }
@@ -307,6 +333,11 @@ impl<C: CredentialStores> Engine<C> {
     /// be released (`runner.rs`). Every caller holds the step lock, which a proof never
     /// takes (the start after an adoption takes it as any start does, so it is never cut half way). A proof stopped
     /// after it recorded the owner has recorded this same account's data; one stopped before it recorded nothing.
+    ///
+    /// No proof slips past: a proof reads the session's keys, makes its client and registers its task in one hold of
+    /// the seat lock, after it compared the stop count this bumps in its own hold ([`Engine::run_proof`]). So a proof
+    /// is either registered here (stopped and waited for) or reads no key at all. Never waits for the service thread
+    /// itself, whose start after an adoption takes the step lock the caller holds.
     pub(in crate::app) async fn stop_proofs(&self) {
         #[cfg(any(target_os = "windows", test, feature = "test-support"))]
         {
@@ -315,6 +346,7 @@ impl<C: CredentialStores> Engine<C> {
                 let mut state = lock(&seat.state);
                 state.owed = None;
                 state.ready = false;
+                state.stops = state.stops.wrapping_add(1);
                 std::mem::take(&mut state.running)
             };
             for proof in running {
@@ -470,7 +502,7 @@ impl<C: CredentialStores> Engine<C> {
                 state.test.proofs_run += 1;
             }
         }
-        let outcome = self.run_proof(owed.turn, &seat);
+        let outcome = self.run_proof(&owed, &seat);
         if matches!(outcome, Some(Ok(Outcome::Unavailable(_))) | Some(Err(_))) {
             // Nothing was settled: a later start asks again.
             let mut state = lock(&seat.state);
@@ -529,84 +561,96 @@ impl<C: CredentialStores> Engine<C> {
         lock(&seat.state).test.outcomes.push(kind);
     }
 
-    /// The proof for the session read at `turn`, as a task of the runtime that a Lock or a sign-out stops, and the wait
-    /// for it. `None`: it was stopped. Its keys and identity are read together, as a start reads them (no session:
-    /// nothing to prove). Its client is dropped with the task, before this returns.
-    fn run_proof(&self, turn: SessionGeneration, seat: &Seat) -> Option<Result<Outcome, String>> {
+    /// The proof `owed` asks for (the session read at its turn), as a task of the runtime that a Lock or a sign-out
+    /// stops, and the wait for it. `None`: it was stopped. Its keys and identity are read together, as a start reads
+    /// them (no session: nothing to prove). Its client is dropped with the task, before this returns.
+    ///
+    /// The keys are read, the client is made and the task is spawned and registered in ONE hold of the seat lock,
+    /// after the stop count is compared with the one `owed` was made at: a stop either finds the task registered (and
+    /// waits until its client is gone) or came first, and then no key is read. Nothing in that hold waits on the
+    /// network, the step lock or the database; the database is opened before it.
+    fn run_proof(&self, owed: &Owed, seat: &Seat) -> Option<Result<Outcome, String>> {
+        let turn = owed.turn;
         if !self.proof_still_current(turn) {
             return Some(Ok(Outcome::Changed(Tally::default())));
         }
+        let path = state_paths::state_db_path_from_state_dir(&self.config.state_dir);
+        let db = path.exists().then(|| StateDb::open(&path));
         #[cfg(test)]
         seat.test_pause(|seams| seams.before_keys.clone());
-        let Ok(((token, key), identity)) = start::keys_for_engine_start(&self.acct) else {
-            return Some(Ok(Outcome::NotEligible));
-        };
-        let identity = self.with_recorded_user_id(identity);
-        let path = state_paths::state_db_path_from_state_dir(&self.config.state_dir);
-        if !path.exists() {
-            return Some(Ok(Outcome::NotEligible));
-        }
-        let Ok(db) = StateDb::open(&path) else {
-            return Some(Err("open the local state".to_string()));
-        };
-        let api = Arc::new(proof_client(self.config.api_base.clone(), String::clone(&token), *key));
-        drop(token);
-        #[cfg(target_os = "windows")]
-        crate::windows_cf::track_credentials(&api);
-        let list_timeout = LIST_TIMEOUT;
-        #[cfg(test)]
-        let (list_timeout, seam) = {
+        let task = {
             let mut state = lock(&seat.state);
-            state.test.clients.push(Arc::downgrade(&api));
-            (
-                state.test.list_timeout.unwrap_or(list_timeout),
-                state.test.listing.clone(),
-            )
-        };
-        let acct = Arc::clone(&self.acct);
-        let (ended, ended_rx) = tokio::sync::oneshot::channel::<()>();
-        let task = self.runtime.spawn(async move {
-            let _ended = ended;
-            let list = || {
-                let api = Arc::clone(&api);
-                #[cfg(test)]
-                let seam = seam.clone();
-                async move {
-                    #[cfg(test)]
-                    if let Some(seam) = seam {
-                        let _client = api;
-                        return tokio::time::timeout(list_timeout, seam())
-                            .await
-                            .unwrap_or(Listing::Unavailable);
-                    }
-                    let listed = async {
-                        let snapshot = api.sync_snapshot().await;
-                        let trashed = match &snapshot {
-                            Ok(_) => api.list_trashed_files_all().await,
-                            Err(_) => Ok(Vec::new()),
-                        };
-                        own_data_proof::listing_of(snapshot, trashed)
-                    };
-                    tokio::time::timeout(list_timeout, listed)
-                        .await
-                        .unwrap_or(Listing::Unavailable)
-                }
+            if state.stops != owed.stops {
+                return None;
+            }
+            let Ok(((token, key), identity)) = start::keys_for_engine_start(&self.acct) else {
+                return Some(Ok(Outcome::NotEligible));
             };
-            let still_current = || acct.session_unchanged_since(turn);
-            let outcome = own_data_proof::prove_and_adopt(&db, &identity, &key, list, still_current).await;
-            drop(api);
-            outcome
-        });
-        #[cfg(test)]
-        seat.test_pause(|seams| seams.after_spawn.clone());
-        {
-            let mut state = lock(&seat.state);
+            let identity = self.with_recorded_user_id(identity);
+            let db = match db {
+                None => return Some(Ok(Outcome::NotEligible)),
+                Some(Err(_)) => return Some(Err("open the local state".to_string())),
+                Some(Ok(db)) => db,
+            };
+            let api = Arc::new(proof_client(self.config.api_base.clone(), String::clone(&token), *key));
+            drop(token);
+            #[cfg(target_os = "windows")]
+            crate::windows_cf::track_credentials(&api);
+            let list_timeout = LIST_TIMEOUT;
+            #[cfg(test)]
+            let (list_timeout, seam) = {
+                state.test.clients.push(Arc::downgrade(&api));
+                (
+                    state.test.list_timeout.unwrap_or(list_timeout),
+                    state.test.listing.clone(),
+                )
+            };
+            let acct = Arc::clone(&self.acct);
+            let proof = async move {
+                let list = || {
+                    let api = Arc::clone(&api);
+                    #[cfg(test)]
+                    let seam = seam.clone();
+                    async move {
+                        #[cfg(test)]
+                        if let Some(seam) = seam {
+                            let _client = api;
+                            return tokio::time::timeout(list_timeout, seam())
+                                .await
+                                .unwrap_or(Listing::Unavailable);
+                        }
+                        let listed = async {
+                            let snapshot = api.sync_snapshot().await;
+                            let trashed = match &snapshot {
+                                Ok(_) => api.list_trashed_files_all().await,
+                                Err(_) => Ok(Vec::new()),
+                            };
+                            own_data_proof::listing_of(snapshot, trashed)
+                        };
+                        tokio::time::timeout(list_timeout, listed)
+                            .await
+                            .unwrap_or(Listing::Unavailable)
+                    }
+                };
+                let still_current = || acct.session_unchanged_since(turn);
+                let outcome = own_data_proof::prove_and_adopt(&db, &identity, &key, list, still_current).await;
+                drop(api);
+                outcome
+            };
+            let (ended, ended_rx) = tokio::sync::oneshot::channel::<()>();
+            let task = self.runtime.spawn(EndsAfterRelease {
+                proof: Box::pin(proof),
+                _ended: ended,
+            });
             state.running.retain(|running| !running.abort.is_finished());
             state.running.push(Running {
                 abort: task.abort_handle(),
                 ended: ended_rx,
             });
-        }
+            task
+        };
+        #[cfg(test)]
+        seat.test_pause(|seams| seams.after_spawn.clone());
         match self.runtime.block_on(task) {
             Ok(outcome) => Some(outcome),
             Err(error) if error.is_cancelled() => None,
