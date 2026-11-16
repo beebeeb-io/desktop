@@ -91,12 +91,12 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 ("signup_api.rs", 1),
                 // Writes inside a `claim` (the session-write lock is held), never a read: a passkey's key kept for
                 // the session just made, the new token after a password change, the new address after a resend, and
-                // the address of a session that came back without one, named with its owner (session_owner_api.rs,
-                // under the session-write lock, only for the token that was asked about).
+                // the address of a session that came back without one, named with its owner (session_owner_api.rs, (a second one reads the email, to ask again
+                // for a session with an id but no email), under the session-write lock, only for the token that was asked about).
                 ("passkeys_api.rs", 1),
                 ("account_password_api.rs", 1),
                 ("account_email_resend_api.rs", 1),
-                ("session_owner_api.rs", 1),
+                ("session_owner_api.rs", 2),
                 // session_watch.rs: the engine's session watch (task 2535) copies the token and notes its answer under
                 // the session's lock; no person call, it runs behind a locked screen too.
                 ("session_watch.rs", 1),
