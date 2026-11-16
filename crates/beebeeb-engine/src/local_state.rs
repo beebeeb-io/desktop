@@ -117,6 +117,7 @@ pub fn disposable_cache_roots_in(
     // without it a sign-out would skip those copies and leave plaintext on disk. The folders themselves, never the
     // whole data dir.
     roots.extend(staging.candidates());
+    roots.extend(dirs::config_dir().map(|dir| dir.join(crate::identity::REAL.config_dir_name())));
     roots
 }
 
@@ -150,6 +151,9 @@ pub fn is_disposable_cache_path(identity: &crate::identity::EngineIdentity, path
         }
     };
     // A symlink into the log directory is the same directory.
+    if is_lifecycle_log_path(identity, &canonical_path) {
+        return false;
+    }
     disposable_cache_roots(identity)
         .into_iter()
         .filter_map(|root| root.canonicalize().ok())
