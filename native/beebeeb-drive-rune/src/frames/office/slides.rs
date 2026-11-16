@@ -122,8 +122,10 @@ pub struct DeckBody {
     pub wheel: i32,
 }
 
-/// Points of touchpad travel that step one slide.
+/// Points of touchpad travel that step one slide, and of a mouse wheel's (a notch is 40 points; a smooth wheel sends it
+/// in parts).
 const SWIPE: i32 = 120;
+const NOTCH: i32 = 40;
 
 impl DeckBody {
     pub fn new(view: DeckView) -> Self {
@@ -135,8 +137,9 @@ impl DeckBody {
     }
 
     /// The wheel over the slide (in the window and in Present): no free scroll, the next or the previous slide. A mouse
-    /// wheel's notch is one slide (toward you: the next); a touchpad steps once per [`SWIPE`] points of travel, and its
-    /// coasting after the fingers lift moves nothing. A sideways delta is not the deck's. `true`: taken.
+    /// wheel steps once per notch ([`NOTCH`] points, whether it comes whole or, from a smooth wheel, in parts; toward
+    /// you: the next); a touchpad once per [`SWIPE`] points of travel, and its coasting after the fingers lift moves
+    /// nothing. Turning back starts afresh. A sideways delta is not the deck's. `true`: taken.
     pub fn wheel_step(&mut self, ev: &rune::WheelEvent) -> bool {
         if ev.dy.abs() < ev.dx.abs() {
             return false;
@@ -147,19 +150,16 @@ impl DeckBody {
         if ev.momentum {
             return true;
         }
-        if !ev.precise {
-            if ev.dy < 0.0 {
-                self.next();
-            } else if ev.dy > 0.0 {
-                self.previous();
-            }
-            return true;
+        let dy = ev.dy.round() as i32;
+        if dy != 0 && (self.wheel > 0) != (dy > 0) {
+            self.wheel = 0;
         }
-        self.wheel = self.wheel.saturating_add(ev.dy.round() as i32);
-        if self.wheel <= -SWIPE {
+        self.wheel = self.wheel.saturating_add(dy);
+        let step = if ev.precise { SWIPE } else { NOTCH };
+        if self.wheel <= -step {
             self.next();
             self.wheel = 0;
-        } else if self.wheel >= SWIPE {
+        } else if self.wheel >= step {
             self.previous();
             self.wheel = 0;
         }

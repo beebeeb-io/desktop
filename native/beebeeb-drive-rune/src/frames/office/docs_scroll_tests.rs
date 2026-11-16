@@ -6,6 +6,7 @@ use rune::{Key, KeyEvent, Mods, Runtime, ScrollBars};
 
 use super::super::live_tests::{asked_pages_of, doc_of, find, go_to, live_runtime};
 use super::*;
+use crate::frames::viewers::kinds::OfficePicture;
 use crate::frames::viewers::source::Body;
 
 fn doc(rt: &mut Runtime<State>) -> DocBody {
@@ -209,4 +210,26 @@ fn office_docs_go_to_puts_the_page_at_the_top() {
     settle(&mut rt);
     assert_eq!(doc(&mut rt).page, 20);
     assert!((measured(&rt) - 19.0 * a4_step()).abs() < 1.0, "{}", measured(&rt));
+}
+
+#[test]
+fn office_docs_a_tall_page_brings_the_next_one_as_its_foot_comes() {
+    // 595 x 1000 pt pages at 200 %: 1040 x 1748 points, taller than two screens of a short window. Scrolled 1700 points,
+    // page 1's foot is near the top and page 2 fills the screen: page 2 is asked; page 1's first tile row, far above, is not.
+    let mut body = doc_of(4, 200, 1);
+    if let Body::Doc(d) = &mut body {
+        d.view.page_sizes_pt = vec![(595.0, 1000.0); 4];
+    }
+    let (mut rt, log) = live_runtime(body, 1.0, None);
+    log.pictures.borrow_mut().clear();
+    wheel(&mut rt, -1700.0);
+    assert!((doc(&mut rt).scroll_y - 1700.0).abs() < 0.6);
+    let keys = log.pictures.borrow().clone();
+    assert!(asked_pages_of(&log).contains(&1), "page 2 is asked: {keys:?}");
+    assert!(
+        !keys
+            .iter()
+            .any(|k| matches!(k, OfficePicture::Tile { page: 0, row: 0, .. })),
+        "page 1's top row scrolled far off: {keys:?}"
+    );
 }

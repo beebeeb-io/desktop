@@ -121,6 +121,11 @@ fn office_slides_the_wheel_steps_one_slide_per_notch() {
     assert_eq!(current(&mut rt), 2, "100 points: not yet");
     wheel_over(&mut rt, "stage", -50.0, true);
     assert_eq!(current(&mut rt), 3, "150 points: one slide");
+    // A smooth wheel sends a notch in parts: four of 10 points are one slide, not four.
+    for _ in 0..4 {
+        wheel_over(&mut rt, "stage", -10.0, false);
+    }
+    assert_eq!(current(&mut rt), 4, "one notch in parts: one slide");
     // Never past the last.
     for _ in 0..5 {
         wheel_over(&mut rt, "stage", -100.0, false);

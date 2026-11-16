@@ -225,3 +225,23 @@ fn office_sheets_shown_tabs_keep_the_open_one() {
     assert!(!hidden.is_empty() && !hidden.contains(&9), "{hidden:?}");
     assert_eq!(shown.len() + hidden.len(), 10);
 }
+
+#[test]
+fn office_sheets_esc_closes_the_more_menu_and_keeps_the_file() {
+    let mut view = big();
+    view.tabs = (1..=30).map(|i| format!("Quarterly figures {i:02}")).collect();
+    let (mut rt, _log) = live_runtime(Body::Sheet(view), 1.0, None);
+    rt.on_key = Some(crate::shell::host::on_key);
+    settle(&mut rt);
+    let control = rect(&rt, "sh-tab-more");
+    rt.pointer_down(control[0] + 4.0, control[1] + control[3] / 2.0);
+    rt.pointer_up(control[0] + 4.0, control[1] + control[3] / 2.0);
+    settle(&mut rt);
+    assert!(sheet(&mut rt).more.open, "the menu is open");
+    press(&mut rt, Key::Escape);
+    assert!(
+        viewers::ui(&mut rt.state).is_some(),
+        "Esc closed the menu, not the file"
+    );
+    assert!(!sheet(&mut rt).more.open && find(&rt, "sh-more-menu").is_none());
+}
