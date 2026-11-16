@@ -299,9 +299,9 @@ mod tests {
     #[test]
     fn d2_4_a_renamed_player_outside_program_files_gets_the_whole_file() {
         for image in [
-            r"c:\users\guus\appdata\local\temp\vlc.exe",
-            r"c:\users\guus\scoop\apps\vlc\current\vlc.exe",
-            r"c:\program files\videolan\vlc\..\..\..\users\guus\vlc.exe",
+            r"c:\users\alex\appdata\local\temp\vlc.exe",
+            r"c:\users\alex\scoop\apps\vlc\current\vlc.exe",
+            r"c:\program files\videolan\vlc\..\..\..\users\alex\vlc.exe",
             r"c:\program files\videolan\vlc\vlc.exe.bak",
         ] {
             let normalized = dos_image_path(image, &[]);

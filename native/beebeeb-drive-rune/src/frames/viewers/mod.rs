@@ -81,8 +81,6 @@ pub enum Intent {
     SaveCopy,
     /// Edit, where the source cannot save an edit.
     Edit,
-    /// Find, where the source cannot search the document's text.
-    Find,
     /// Available offline, where the source cannot change it.
     KeepOffline,
     /// DW-0782: the report dialog. The report carries the code, never the file's name.
@@ -99,8 +97,8 @@ pub enum Intent {
     OpenInDrive(String),
     /// A link in a note to the web: the browser opens it, never this window.
     OpenInBrowser(String),
-    /// DW-1522's Create file: make `name` in `folder` (`None`: the top of Files), encrypted on
-    /// this PC before it uploads, and open it in the editor (DW-1523). Nothing is made here.
+    /// DW-1522's Create file: make `name` in `folder` (`None`: the top of Files), encrypted on this PC before it
+    /// uploads. Files makes it (`frames::files::create_file`); opening it in the editor (DW-1523) is not bound yet.
     CreateFile { folder: Option<String>, name: String },
     /// DW-1521's Continue on an office type: New document with that app's templates (DW-1558).
     NewDocument(new_file::Kind),
@@ -152,7 +150,6 @@ impl Intent {
             Intent::OpenInAnotherApp => "Open in another app",
             Intent::SaveCopy => "Save a copy",
             Intent::Edit => "Edit and save from here",
-            Intent::Find => "Find in this document",
             Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
@@ -643,8 +640,7 @@ impl Slot {
 }
 
 /// What the New file dialog asked for that is outside this group (make a file, New document),
-/// oldest first. For the shell, as [`Ui::take_intents`].
-#[cfg_attr(not(test), allow(dead_code))] // waits for its caller in `shell/host.rs` (PR body)
+/// oldest first. The shell's poll hands them to Files (`frames::files::create_file::poll`).
 pub fn take_asked(s: &mut State) -> Vec<Intent> {
     std::mem::take(&mut s.viewer.asked)
 }

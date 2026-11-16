@@ -2,6 +2,10 @@
 //! most `MAX_READ` at a time and `MAX_IN_FLIGHT_READS` at once) and waits for its `Data` or `DataFailed`, with an
 //! 8 MiB read-through cache of the last answers (this process's memory, gone with it).
 //!
+//! The app does not wait for a read to be answered before it sends its next message: its next `WantVideo`,
+//! `WantAudio` or `Seek` can arrive while a read waits for its `Data`. Such a message is kept, in order, and the
+//! session loop answers it after the current one ([`Wire::recv`] takes the kept ones first).
+//!
 //! The helper never asks for a byte beyond the file's length.
 
 use std::collections::VecDeque;
@@ -18,12 +22,17 @@ use filmcraft_media::ByteReader;
 pub const CACHE_MAX: usize = 8 << 20;
 /// A small read asks for this much (clamped to the file), so the demuxers' many small reads cost few round trips.
 pub const READ_AHEAD: usize = 64 << 10;
+/// The most app messages kept while a read waits. The app has at most one `WantVideo` and one `WantAudio` out, and
+/// seeks in a row are kept as the last one, so an app that sends more is not following the protocol.
+pub const MAX_KEPT: usize = 16;
 
 /// The two ends of the protocol: what the app sends in, what goes out. Shared by the session loop and the reader;
 /// neither holds the lock while it decodes.
 pub struct Wire {
     input: Box<dyn Read + Send>,
     output: Box<dyn Write + Send>,
+    /// What the app sent while a read waited for its answer, in the order it came: taken before the pipe.
+    kept: VecDeque<ToHelper>,
 }
 
 impl Wire {
@@ -31,6 +40,7 @@ impl Wire {
         Wire {
             input: Box::new(input),
             output: Box::new(output),
+            kept: VecDeque::new(),
         }
     }
 
@@ -38,8 +48,45 @@ impl Wire {
         write_msg(&mut self.output, msg)
     }
 
+    /// The app's next message: the oldest one kept while a read waited, else the next one on the pipe.
     pub fn recv(&mut self) -> Result<ToHelper, WireError> {
-        read_to_helper(&mut self.input)
+        match self.kept.pop_front() {
+            Some(msg) => Ok(msg),
+            None => read_to_helper(&mut self.input),
+        }
+    }
+
+    /// The answer to a read (`Data` or `DataFailed`), or `Close`. Every other message that comes first is kept for
+    /// [`Wire::recv`]. `Close` replaces what was kept (the app ended the playback: nothing it asked is owed), so the
+    /// session loop ends once the read gives up, and no later read waits on the pipe. `None`: more messages came than
+    /// the protocol lets the app have out ([`MAX_KEPT`]).
+    fn recv_answer(&mut self) -> Result<Option<ToHelper>, WireError> {
+        if matches!(self.kept.front(), Some(ToHelper::Close)) {
+            return Ok(Some(ToHelper::Close));
+        }
+        loop {
+            let msg = read_to_helper(&mut self.input)?;
+            match msg {
+                ToHelper::Data { .. } | ToHelper::DataFailed { .. } => return Ok(Some(msg)),
+                ToHelper::Close => {
+                    self.kept.clear();
+                    self.kept.push_back(ToHelper::Close);
+                    return Ok(Some(ToHelper::Close));
+                }
+                // A seek right after a seek: only where the last one goes matters.
+                ToHelper::Seek { .. } if matches!(self.kept.back(), Some(ToHelper::Seek { .. })) => {
+                    if let Some(last) = self.kept.back_mut() {
+                        *last = msg;
+                    }
+                }
+                other => {
+                    if self.kept.len() >= MAX_KEPT {
+                        return Ok(None);
+                    }
+                    self.kept.push_back(other);
+                }
+            }
+        }
     }
 }
 
@@ -136,8 +183,8 @@ impl PipeReader {
                 pending.push((id, next, n));
                 next += n;
             }
-            match wire.recv() {
-                Ok(ToHelper::Data { id, bytes }) => {
+            match wire.recv_answer() {
+                Ok(Some(ToHelper::Data { id, bytes })) => {
                     let Some(at) = pending.iter().position(|p| p.0 == id) else {
                         return Err(io::ErrorKind::InvalidData.into());
                     };
@@ -148,15 +195,16 @@ impl PipeReader {
                     out[start..start + n].copy_from_slice(&bytes);
                     received += n;
                 }
-                Ok(ToHelper::DataFailed { id }) => {
+                Ok(Some(ToHelper::DataFailed { id })) => {
                     if pending.iter().any(|p| p.0 == id) {
                         self.flags.failed.store(true, Ordering::Relaxed);
                         return Err(io::Error::other("the app could not read that range"));
                     }
                     return Err(io::ErrorKind::InvalidData.into());
                 }
-                // The app ended the playback, or sent what this state does not take: nothing more is read.
-                Ok(ToHelper::Close) | Err(_) => return Err(self.gone()),
+                // The app ended the playback, or the pipe did: nothing more is read.
+                Ok(Some(ToHelper::Close)) | Err(_) => return Err(self.gone()),
+                // More messages than the app may have out while this read waits.
                 Ok(_) => return Err(io::ErrorKind::InvalidData.into()),
             }
         }
@@ -217,6 +265,87 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// The app's messages, encoded back to back as it writes them on the pipe.
+    fn app_sends(msgs: &[ToHelper]) -> io::Cursor<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for msg in msgs {
+            write_msg(&mut bytes, msg).expect("a message the app writes");
+        }
+        io::Cursor::new(bytes)
+    }
+
+    /// P1-1 of the #462 review: the app sends its next requests (and a seek) without waiting for the answer to the
+    /// read the helper is waiting on. The read still gets its `Data`, and the session loop then takes the requests in
+    /// the order they came; two seeks in a row are kept as the last one.
+    #[test]
+    fn requests_sent_while_a_read_waits_are_kept_for_after_it() {
+        const LEN: u64 = 100;
+        let file: Vec<u8> = (0..LEN as u8).collect();
+        let input = app_sends(&[
+            ToHelper::WantAudio {
+                rate: 48_000,
+                channels: 2,
+                frames: 4_800,
+            },
+            ToHelper::Seek { at_ms: 100 },
+            ToHelper::Seek { at_ms: 500 },
+            ToHelper::WantVideo { w: 32, h: 24 },
+            // The first read of this reader is id 1: the whole (short) file, read ahead.
+            ToHelper::Data {
+                id: 1,
+                bytes: file.clone(),
+            },
+        ]);
+        let wire: SharedWire = Arc::new(Mutex::new(Wire::new(input, Sent::default())));
+        let reader = PipeReader::new(wire.clone(), LEN, Arc::new(ReadFlags::default()));
+        let mut buf = [0u8; 10];
+        reader
+            .read_at(0, &mut buf)
+            .expect("the read is answered though requests came first");
+        assert_eq!(buf[..], file[..10]);
+        let mut wire = lock(&wire);
+        assert_eq!(
+            wire.recv().ok(),
+            Some(ToHelper::WantAudio {
+                rate: 48_000,
+                channels: 2,
+                frames: 4_800
+            })
+        );
+        assert_eq!(wire.recv().ok(), Some(ToHelper::Seek { at_ms: 500 }));
+        assert_eq!(wire.recv().ok(), Some(ToHelper::WantVideo { w: 32, h: 24 }));
+        assert_eq!(wire.recv().err(), Some(WireError::Closed), "nothing else was kept");
+    }
+
+    /// A `Close` while a read waits ends the read, and the session loop sees it next (nothing kept before it is
+    /// answered, no later read waits on the pipe). More requests than the app may have out end the read too.
+    #[test]
+    fn a_close_while_a_read_waits_ends_it_and_the_session() {
+        let input = app_sends(&[ToHelper::WantVideo { w: 32, h: 24 }, ToHelper::Close]);
+        let wire: SharedWire = Arc::new(Mutex::new(Wire::new(input, Sent::default())));
+        let flags = Arc::new(ReadFlags::default());
+        let reader = PipeReader::new(wire.clone(), 100, flags.clone());
+        let mut buf = [0u8; 10];
+        let err = reader.read_at(0, &mut buf).expect_err("the app closed");
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert!(flags.closed.load(Ordering::Relaxed));
+        let err = reader.read_at(50, &mut buf).expect_err("still closed");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::BrokenPipe,
+            "no read waits on the pipe after a Close"
+        );
+        assert_eq!(lock(&wire).recv().ok(), Some(ToHelper::Close));
+
+        let flood: Vec<ToHelper> = (0..=MAX_KEPT as u32)
+            .map(|w| ToHelper::WantVideo { w: w + 1, h: 1 })
+            .collect();
+        let wire: SharedWire = Arc::new(Mutex::new(Wire::new(app_sends(&flood), Sent::default())));
+        let reader = PipeReader::new(wire, 100, Arc::new(ReadFlags::default()));
+        let err = reader.read_at(0, &mut buf).expect_err("more than the app may have out");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     /// Row 3 (MCP2): a read that reaches even one byte past the end is refused as the end of the file, and nothing

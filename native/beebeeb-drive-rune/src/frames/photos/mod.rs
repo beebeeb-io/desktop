@@ -174,6 +174,9 @@ pub struct Ui {
     /// The video this window started in the shell's player, and its handle (`PhotosSource::play_video`). The stage
     /// is live only for this item (`viewer::live_for`); it is stopped when the item is left.
     pub(crate) playing: Option<(PhotoId, crate::media::player::PlayerHandle)>,
+    /// The file the player was opened on when this window started that video: the stage draws the player's state only
+    /// while the player's item is this file (a song started from Files later is another file's state).
+    pub(crate) playing_file: Option<String>,
     pub toast: Option<Toast>,
     intents: Vec<Intent>,
     /// What is kept for a source that answers later (`session.rs`).
@@ -197,6 +200,7 @@ impl Ui {
             dialog: None,
             viewer: None,
             playing: None,
+            playing_file: None,
             toast: None,
             intents: Vec::new(),
             later: session::Later::default(),
@@ -629,6 +633,8 @@ impl Ui {
             return;
         }
         if let Some(handle) = self.source.play_video(id) {
+            // The player's state names its file as soon as it is opened.
+            self.playing_file = handle.state().map(|state| state.file_id);
             self.playing = Some((id, handle));
             return;
         }

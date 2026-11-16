@@ -96,6 +96,10 @@ pub struct Shell {
     /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle): a list that showed
     /// an error or nothing is read again then ([`read_again_after_a_check`]).
     check_finished: bool,
+    /// Carries out what the player asked of the OS's media controls (`media::os_controls::UiControls::pump`), on
+    /// the UI thread, at the end of every poll. Held so a test counts the calls; the real one reads the main
+    /// window's handle from the slot and does nothing while there is none.
+    media_pump: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Shell {
@@ -109,7 +113,15 @@ impl Shell {
         let window_kind = surfaces::kind_for(&app.screen());
         let tray_inputs = actions.tray_inputs();
         let tray_model = tray_model(&tray_inputs);
+        let window_slot = wiring.window.clone();
+        let media_pump: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let window = window_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(window) = window.as_ref() {
+                crate::media::os_controls::shell_controls().pump(window);
+            }
+        });
         Shell {
+            media_pump,
             app,
             actions,
             platform,
@@ -178,6 +190,12 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn sync_off_opened(&self) -> u32 {
         self.sync_off_opened
+    }
+
+    /// Replaces what the poll calls for the media controls (a test's counting fake).
+    #[cfg(test)]
+    pub(crate) fn set_media_pump_for_test(&mut self, pump: Arc<dyn Fn() + Send + Sync>) {
+        self.media_pump = pump;
     }
 
     /// The slot the main window's native handle is put in once it exists: the lock screen's Windows Hello
@@ -478,6 +496,9 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     let mut changed = poll_screen(s, _seconds, tx);
     changed |= poll_capture(s, tx);
+    // Last, so a clear that `media::stop_all` posted above (a lock, a sign-out) reaches Windows in this same poll.
+    // The poll also runs for a hidden window whenever it is woken (rune's `poll_hidden`), so the tray case is covered.
+    (s.shell.media_pump)();
     changed
 }
 
@@ -485,6 +506,8 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
 fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The open file: the engine's answers, and a route that left it (lane f-viewers).
     let mut changed = crate::frames::viewers::poll(s, tx);
+    // What the New file dialog asked for: the file made in the folder it was opened on (`frames::files::create_file`).
+    changed |= crate::frames::files::create_file::poll(s, tx);
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
     changed |= crate::frames::signin::poll(s, tx);
     changed |= crate::frames::settings::poll(s, tx);

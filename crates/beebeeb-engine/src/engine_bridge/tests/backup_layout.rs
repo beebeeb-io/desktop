@@ -467,7 +467,7 @@ async fn legacy_duplicate_roots_merged_then_claimed() {
     let clash = fx.add(Some(&new_pictures), "a.jpg", false, 6, "2026-06-01T10:00:00Z");
     let new_documents = fx.add(Some(&new_device), "Documents", true, 0, "2026-06-01T10:00:00Z");
     fx.add(Some(&new_documents), "d.txt", false, 3, "2026-06-01T10:00:00Z");
-    let phone = fx.add(Some(&new), "Guus's iPhone", true, 0, "2026-06-01T10:00:00Z");
+    let phone = fx.add(Some(&new), "Sam's iPhone", true, 0, "2026-06-01T10:00:00Z");
 
     assert_eq!(resolve_root_id(&fx.bridge).await.unwrap(), old, "the oldest survives");
 
@@ -490,7 +490,7 @@ async fn legacy_duplicate_roots_merged_then_claimed() {
         Some(old.as_str()),
         "another device's folder moved into the survivor"
     );
-    assert_eq!(fx.names(&old), ["GLegion", "Guus's iPhone"]);
+    assert_eq!(fx.names(&old), ["GLegion", "Sam's iPhone"]);
     assert_eq!(fx.names(&old_device), ["Documents", "Pictures"]);
     let pictures = fx.names(&old_pictures);
     assert_eq!(pictures.len(), 2, "both files kept: {pictures:?}");
@@ -538,9 +538,9 @@ async fn first_pass_writes_manifest_and_adopts_legacy_glegion_folder() {
     let fx = Fixture::new();
     let root = fx.add(None, "Backups", true, 0, "2026-01-01T10:00:00Z");
     fx.flag(&root);
-    let phone = fx.add(Some(&root), "Guus's iPhone", true, 0, "2026-02-01T10:00:00Z");
+    let phone = fx.add(Some(&root), "Sam's iPhone", true, 0, "2026-02-01T10:00:00Z");
     let phone_manifest = serde_json::json!({
-        "version": 1, "device_id": "ios-0f3c", "device_name": "Guus's iPhone", "created_at": "2026-02-01T10:00:00Z",
+        "version": 1, "device_id": "ios-0f3c", "device_name": "Sam's iPhone", "created_at": "2026-02-01T10:00:00Z",
     });
     fx.bridge
         .backup_write_small_file(

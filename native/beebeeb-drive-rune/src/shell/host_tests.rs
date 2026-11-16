@@ -1099,6 +1099,40 @@ fn dispatching_gate_ready_does_not_override_the_engines_authority() {
     }
 }
 
+#[test]
+fn every_poll_pumps_the_media_controls_with_no_window_shown_and_when_a_lock_stops_playback() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (engine, _, mut rt) = fixture();
+    let counted = calls.clone();
+    rt.update(move |s, _| {
+        s.shell.set_media_pump_for_test(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }))
+    });
+    // The fixture shows no window: the slot holds no handle, as for a window hidden in the tray. The poll that
+    // rune runs for a hidden window is this same `poll`.
+    assert!(rt.state.shell.main_window_slot().lock().unwrap().is_none());
+    for expected in 1..=2 {
+        rt.update(|s, tx| {
+            poll(s, 0.0, tx);
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), expected, "one pump per poll");
+    }
+    // A lock ends playback inside the poll that sees it (`media::stop_all`); the pump comes after it, in the same
+    // poll, so the clear stop_all posted is carried out without the window being shown.
+    engine.set_gate(GateState::Locked);
+    rt.update(|s, _| assert!(s.shell.refresh()));
+    rt.update(|s, tx| {
+        poll(s, 0.0, tx);
+    });
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "the poll that saw the lock pumped after stopping playback"
+    );
+}
+
 #[path = "host_tests_files.rs"]
 mod files;
 #[path = "host_tests_flows.rs"]

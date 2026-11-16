@@ -18,6 +18,9 @@ use crate::path_safety;
 use crate::state_db::{FileEntry, FileStatus, Namespace, PERMISSION_WRITE, StateDb};
 use crate::vault_tree;
 
+mod create_file;
+pub use create_file::{CREATE_FILE_LIMIT, create_file};
+
 // ---------------------------------------------------------------------------
 // Name validation (same rules as `fsops::validate_name`)
 // ---------------------------------------------------------------------------
@@ -396,6 +399,10 @@ pub fn is_dangerous_executable(path: &Path) -> bool {
         .unwrap_or_default();
     DANGEROUS_EXTS.contains(&ext.as_str())
 }
+
+#[cfg(test)]
+#[path = "file_ops_containment_tests.rs"]
+mod file_ops_containment_tests;
 
 #[cfg(test)]
 mod tests {

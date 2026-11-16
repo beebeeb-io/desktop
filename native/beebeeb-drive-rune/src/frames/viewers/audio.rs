@@ -97,9 +97,11 @@ fn skip(key: &'static str, name: &'static str, icon: &'static Icon, delta: isize
         .child(kit::glyph(format!("{key}-icon-2"), icon, 20.0, ink))
 }
 
-/// What the player says of the recording, when the source hands one that has opened it.
+/// What the player says of THIS recording, when the source hands a player whose current item it is. Another
+/// recording's title, times, picture or refusal are never this view's (`PlayerHandle::state_of`).
 struct Live {
     handle: PlayerHandle,
+    file_id: String,
     state: PlayState,
     art: Option<rune::Pixels>,
 }
@@ -107,9 +109,16 @@ struct Live {
 impl Live {
     fn of(ui: &Ui) -> Option<Live> {
         let handle = ui.source.player()?;
-        let state = handle.state()?;
+        let state = handle.state_of(&ui.file.id)?;
         let art = handle.art();
-        Some(Live { handle, state, art })
+        // The picture is read after the state: the player may have moved on in between, and then it is not ours.
+        let still = handle.state_of(&ui.file.id).is_some();
+        Some(Live {
+            handle,
+            file_id: ui.file.id.clone(),
+            state,
+            art: art.filter(|_| still),
+        })
     }
 }
 
@@ -178,20 +187,15 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
     // The player's scrubber is a slider: "1:12 of 4:02", and the arrows seek.
     if let Some(l) = live {
         let handle = l.handle.clone();
+        let step_only = l.file_id.clone();
         let drag_with = l.handle.clone();
         track = track
             .role("slider")
             .a11y_value(video::Times::of(&l.state).spoken())
             .on_step(move |_: &mut State, delta: i32, _: &mut rune::Tx| {
-                let now = handle.state().map_or(0, |s| s.at_ms);
-                let step = 5_000u64.saturating_mul(u64::from(delta.unsigned_abs()));
-                handle.seek(if delta < 0 {
-                    now.saturating_sub(step)
-                } else {
-                    now.saturating_add(step)
-                });
+                video::step_seek(&handle, Some(&step_only), delta);
             })
-            .on_drag(video::scrub_drag(drag_with))
+            .on_drag(video::scrub_drag(drag_with, Some(l.file_id.clone())))
             .focusable(true)
             .focus_ring(2.0, 2.0, t.accent_deep);
     }
@@ -236,8 +240,8 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
         !first && at.is_some(),
         t,
     ));
-    // No Play where the source cannot play: a button that does nothing is not drawn.
-    let toggle_with = live.map(|l| l.handle.clone());
+    // No Play where the source cannot play: a button that does nothing is not drawn. It is the press Space makes
+    // (`Ui::toggle_play`): this recording plays or pauses, whatever else the player holds.
     if ui.can_play() {
         transport = transport.child(
             el().key("pause")
@@ -251,12 +255,9 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
                 .focusable(true)
                 .focus_ring(2.0, 2.0, t.accent_deep)
                 .cursor(rune::Cursor::Pointer)
-                .on_press(move |s: &mut State| match &toggle_with {
-                    Some(handle) => video::toggle(handle),
-                    None => {
-                        if let Some(ui) = super::ui(s) {
-                            ui.toggle_play();
-                        }
+                .on_press(|s: &mut State| {
+                    if let Some(ui) = super::ui(s) {
+                        ui.toggle_play();
                     }
                 })
                 .child(kit::glyph(

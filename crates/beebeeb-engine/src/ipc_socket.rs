@@ -12,7 +12,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-// The macOS App Group shared between the containing app (`src-tauri/entitlements.plist`) and the File
+// The macOS App Group shared between the containing app (`packaging/macos/entitlements.plist`) and the File
 // Provider extension (`BeebeebFileProvider/BeebeebFileProvider.entitlements`), both of which declare
 // `com.apple.security.application-groups: [<the id>]`, is the app identity's:
 // `EngineIdentity::macos_app_group` (pinned in `identity.rs`). `BeebeebFileProvider/XPCBridge.swift`

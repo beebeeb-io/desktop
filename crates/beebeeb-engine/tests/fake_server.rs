@@ -4,10 +4,33 @@
 //!    access line per answer: method, path, status, never a token, a password or a phrase.
 //! 2. It never ships: `fake-server` is not a default feature, the one bin requires it, no app's manifest names it on
 //!    any edge, and the Windows packaging packs exactly one file, the app's own exe.
+//! 3. A device sign-in (DW-A07 to DW-A10) runs against it end to end (`fake_server/device_sign_in.rs`): the engine opens
+//!    the socket on the fake's own address and is shown a code; the fake's second device approves it with ONE HTTP call
+//!    and no token, as a check script on the build VM does:
+//!    `POST /fake-control/device-approve` with `{"code": "XXXX-XXXX"}` (or `{}`: the one waiting request), and
+//!    `"approver": "stranger"` for another account, which is refused; `POST /fake-control/device-deny` (DW-A09);
+//!    `POST /fake-control/device-code-life` with `{"seconds": n}` for the codes issued after it (DW-A10);
+//!    `GET /fake-control/device-requests` answers `{"waiting": n}`. The routes and the wire: `test_api::fake_device_signin`.
 //!
-//! The TEST identity is refused on macOS (`EngineIdentity::refusal_on`), so the engine test is not compiled there.
+//! The TEST identity is refused on macOS (`EngineIdentity::refusal_on`), so the engine tests are not compiled there.
 
 use std::path::Path;
+
+#[cfg(not(target_os = "macos"))]
+#[path = "fake_server/device_sign_in.rs"]
+mod device_sign_in;
+
+/// The process's one state folder for the TEST identity, shared by every engine test of this binary (it is set once per
+/// process; a second folder would refuse).
+#[cfg(not(target_os = "macos"))]
+fn test_state_dir() -> std::path::PathBuf {
+    use beebeeb_engine::identity::TEST;
+    use beebeeb_engine::state_paths;
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| tempfile::tempdir().unwrap());
+    state_paths::init_from_app_local_data_dir(&TEST, dir.path()).unwrap();
+    state_paths::beebeeb_state_dir_for(&TEST).unwrap()
+}
 
 #[cfg(not(target_os = "macos"))]
 #[test]
@@ -20,7 +43,6 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
     use beebeeb_engine::identity::TEST;
     use beebeeb_engine::signin::gate::{GateState, NextAfterSignIn};
     use beebeeb_engine::signin::memory_store::MemoryCredentials;
-    use beebeeb_engine::state_paths;
     use beebeeb_engine::test_api::FakeApi;
     use beebeeb_engine::test_api::fake_account::TEST_PHRASE;
     use beebeeb_engine::test_api::server::{self, FIXTURE_EMAIL, FIXTURE_PASSWORD, FIXTURE_USER_ID};
@@ -40,11 +62,10 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
     );
     let fake = FakeApi::start_on(listener, handler).unwrap();
 
-    let local_data = tempfile::tempdir().unwrap();
-    state_paths::init_from_app_local_data_dir(&TEST, local_data.path()).unwrap();
+    let state_dir = test_state_dir();
     let config = EngineConfig {
         account_id: beebeeb_engine::config::DesktopConfig::ensure_account_id_for(&TEST).unwrap(),
-        state_dir: state_paths::beebeeb_state_dir_for(&TEST).unwrap(),
+        state_dir,
         api_base: fake.base.clone(),
     };
     let (host, _messages) = ChannelHost::new(|| {});
@@ -168,10 +189,7 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
     // 2. The apps: no manifest names the feature in any spelling; every engine edge is read (normal and dev, both
     //    apps), and only a dev edge carries the test helpers.
     let mut edges = 0;
-    for app in [
-        "../../native/beebeeb-drive-rune/Cargo.toml",
-        "../../src-tauri/Cargo.toml",
-    ] {
+    for app in ["../../native/beebeeb-drive-rune/Cargo.toml"] {
         let text = read(app);
         let mentions = text.matches("fake-server").count();
         if mentions > 0 {
@@ -245,10 +263,10 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
         "{} way(s) the fake server could ship: {wrong:#?}",
         wrong.len()
     );
-    // The instruments read something: the crate's bins, the bin by name, the engine edges of the two apps.
+    // The instruments read something: the crate's bins, the bin by name, the engine edges of the native app (its normal edge and its dev edge).
     assert_eq!(
         (bins.len(), named, edges),
-        (1, 1, 4),
+        (1, 1, 2),
         "bins, bins named bb-fake-server, engine edges"
     );
     assert!(scripts.len() >= 4, "the NSIS scripts read: {scripts:?}");

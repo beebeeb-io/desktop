@@ -18,10 +18,10 @@ use zeroize::{Zeroize, Zeroizing};
 use super::{
     ANSWER_WAIT_MS, AUDIO_PARTS_PER_SECOND, AudioFactory, BATCH_MAX, Clock, Cmd, DEFAULT_FRAME_MS, HELD_FRAMES,
     LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener, NOW_PLAYING_EVERY_MS, NoSound, OPEN_WAIT_MS,
-    PLAYED_AFTER_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, lock, zero_out,
+    PLAYED_AFTER_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, lock,
 };
 use crate::media::os_controls::{NowPlaying, OsButton};
-use crate::media::transport::{LinkError, profile_for_file_with, wipe};
+use crate::media::transport::{LinkError, profile_for_file_with, wipe, wipe_answer};
 
 /// Why a worker stopped.
 enum Exit {
@@ -67,12 +67,13 @@ struct AudioWant {
     stale: bool,
 }
 
-/// A frame that passed the checks, waiting for its time.
+/// A frame that passed the checks, waiting for its time. Its pixels are zeroed when it is dropped (a seek, a stop, a
+/// frame too late to show); a frame shown hands them to the view's surface.
 struct Held {
     pts: u64,
     w: u32,
     h: u32,
-    rgba: Vec<u8>,
+    rgba: Zeroizing<Vec<u8>>,
 }
 
 /// What the test build's `media.played` line counts in the first second of playback.
@@ -187,6 +188,8 @@ pub(super) struct Worker {
     mono_from: Option<u64>,
     /// The helper said `Ended`.
     ended: bool,
+    /// The item's one `Tags` came.
+    tags_taken: bool,
     /// The player says `Ended`.
     ended_shown: bool,
     /// Something was shown or heard since the open or the last seek.
@@ -235,6 +238,7 @@ impl Worker {
             base_ms: 0,
             mono_from: None,
             ended: false,
+            tags_taken: false,
             ended_shown: false,
             presented: false,
             last_shown_at: None,
@@ -361,19 +365,31 @@ impl Worker {
             return Err(Exit::Done);
         }
         self.take_commands()?;
-        let starts = self.starts;
-        for msg in self.receive()? {
-            if self.starts != starts {
-                // The rest of the batch came from the helper the restart killed.
-                break;
-            }
-            self.handle(msg)?;
+        let mut batch = self.receive()?.into_iter();
+        let handled = self.handle_batch(&mut batch);
+        // What was not handled (the rule broken before it, a restart) is zeroed before it is let go.
+        for mut rest in batch {
+            wipe_answer(&mut rest);
         }
+        handled?;
         self.answer_reads()?;
         self.check_deadlines()?;
         self.ask()?;
         self.present()?;
         self.progress()
+    }
+
+    /// Handles the batch's answers in order, until one breaks a rule or a restart begins (the rest of the batch came
+    /// from the helper the restart killed): what is left stays in `batch`.
+    fn handle_batch(&mut self, batch: &mut std::vec::IntoIter<FromHelper>) -> Result<(), Exit> {
+        let starts = self.starts;
+        for msg in batch.by_ref() {
+            self.handle(msg)?;
+            if self.starts != starts {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn send(&self, msg: &ToHelper) -> Result<(), Exit> {
@@ -400,7 +416,10 @@ impl Worker {
             match got {
                 Ok(msg) => batch.push(msg),
                 Err(LinkError::Timeout) => break,
-                Err(LinkError::Gone | LinkError::Protocol(_)) => return Err(broke()),
+                Err(LinkError::Gone | LinkError::Protocol(_)) => {
+                    batch.iter_mut().for_each(wipe_answer);
+                    return Err(broke());
+                }
             }
             wait = Duration::ZERO;
         }
@@ -561,7 +580,20 @@ impl Worker {
         Ok(true)
     }
 
+    /// The latest time an answer may carry (P3-1 of the #462 review): the item's length (48 h when it has none) and
+    /// one frame-time. Past it the helper is broken: a time near the end of `u64` would stall the picture behind two
+    /// frames that never show, and run the clock's sums to their end.
+    fn latest_pts(&self) -> u64 {
+        let length = match self.opened.map_or(0, |opened| opened.duration_ms) {
+            0 => MAX_DURATION_MS,
+            length => length,
+        };
+        length.saturating_add(self.frame_ms)
+    }
+
     fn on_frame(&mut self, pts: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), Exit> {
+        // Zeroed whenever it is dropped from here on: refused, stale, or too late to show.
+        let rgba = Zeroizing::new(rgba);
         // No want open: a second answer to one want, or a frame nobody asked for.
         let Some(want) = self.want_video.take() else {
             return Err(broke());
@@ -570,6 +602,9 @@ impl Worker {
             return Err(broke());
         }
         if rgba.len() as u64 != u64::from(w) * u64::from(h) * 4 {
+            return Err(broke());
+        }
+        if pts > self.latest_pts() {
             return Err(broke());
         }
         if want.stale {
@@ -600,6 +635,9 @@ impl Worker {
             }
             *sample = sample.clamp(-1.0, 1.0);
         }
+        if pts > self.latest_pts() {
+            return Err(broke());
+        }
         if want.stale {
             return Ok(());
         }
@@ -610,39 +648,39 @@ impl Worker {
         Ok(())
     }
 
+    /// The item's title and artist (P3-2 of the #462 review): ONE `Tags` per item, and only after `Opened`, as the
+    /// helper sends it; another one is a broken rule. 0.9.0 shows no artwork: a picture is checked, zeroed and never
+    /// kept, so none reaches the view or Windows' media controls.
     fn on_tags(&mut self, tags: Tags) -> Result<(), Exit> {
-        let Tags { title, artist, art } = tags;
-        if let Some((w, h, rgba)) = &art
-            && (*w == 0
-                || *h == 0
-                || *w > MAX_ART
-                || *h > MAX_ART
-                || rgba.len() as u64 != u64::from(*w) * u64::from(*h) * 4)
-        {
+        let Tags {
+            mut title,
+            mut artist,
+            art,
+        } = tags;
+        let mut art_ok = true;
+        if let Some((w, h, mut rgba)) = art {
+            art_ok =
+                w > 0 && h > 0 && w <= MAX_ART && h <= MAX_ART && rgba.len() as u64 == u64::from(w) * u64::from(h) * 4;
+            rgba.zeroize();
+        }
+        let in_order = self.opened.is_some() && !self.tags_taken;
+        let shown_title = clean_text(&title);
+        let shown_artist = clean_text(&artist);
+        title.zeroize();
+        artist.zeroize();
+        if !art_ok || !in_order {
             return Err(broke());
         }
-        let title = clean_text(&title);
-        let artist = clean_text(&artist);
-        let picture = art.as_ref().map(|(w, h, rgba)| {
-            let picture = rune::Pixels::new();
-            picture.set(*w, *h, rgba.clone());
-            picture
-        });
+        self.tags_taken = true;
         self.publish(|player| {
             if let Some(state) = player.shown.as_mut() {
-                state.title.clone_from(&title);
-                state.artist.clone_from(&artist);
-            }
-            if let Some(before) = std::mem::replace(&mut player.art, picture) {
-                zero_out(&before);
+                state.title.clone_from(&shown_title);
+                state.artist.clone_from(&shown_artist);
             }
         })
         .ok_or(Exit::Done)?;
-        self.now.title = title;
-        self.now.artist = artist;
-        if let Some((_, _, mut before)) = std::mem::replace(&mut self.now.art, art) {
-            before.zeroize();
-        }
+        self.now.title = shown_title;
+        self.now.artist = shown_artist;
         self.now_dirty = true;
         Ok(())
     }
@@ -771,7 +809,9 @@ impl Worker {
     }
 
     fn show(&mut self, frame: Held, now: u64) -> Result<(), Exit> {
-        let Held { pts, w, h, rgba } = frame;
+        let Held { pts, w, h, mut rgba } = frame;
+        // The surface takes the pixels themselves (the view's frame); nothing is left behind here.
+        let rgba = std::mem::take(&mut *rgba);
         self.publish(|player| {
             player.surface.show(w, h, rgba);
             player.has_frame = true;
@@ -1086,3 +1126,7 @@ fn clean_text(text: &str) -> String {
 fn turns_text_around(c: char) -> bool {
     matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
+
+#[cfg(test)]
+#[path = "worker_tests.rs"]
+mod tests;

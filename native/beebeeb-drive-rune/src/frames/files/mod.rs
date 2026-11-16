@@ -8,9 +8,11 @@
 pub mod action_scenes;
 pub mod actions_data;
 pub mod background_menu;
+mod board_drive;
 pub mod browse_states;
 pub mod changes;
 pub mod conflict;
+pub mod create_file;
 pub mod details;
 pub mod dialogs;
 pub mod facts;

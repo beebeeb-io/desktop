@@ -16,3 +16,7 @@ pub fn folder_fallback_label(id: &str) -> String {
     let short = id.get(..8).unwrap_or(id);
     format!("Folder {short}…")
 }
+
+#[cfg(test)]
+#[path = "vault_tree_tests.rs"]
+mod vault_tree_tests;

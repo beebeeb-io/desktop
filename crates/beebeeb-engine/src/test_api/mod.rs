@@ -6,6 +6,7 @@
 //! Must not: be reachable from a release build, or hold anything a test did not put there.
 
 pub mod fake_account;
+pub mod fake_device_signin;
 pub mod fake_previews;
 pub mod fake_signup;
 pub mod fake_uploads;
@@ -128,6 +129,14 @@ const HANG_UP: u16 = 0;
 
 pub type Handler = Arc<dyn Fn(&Request) -> Reply + Send + Sync>;
 
+/// A connection a route takes over once its request was read (a WebSocket upgrade, `fake_device_signin`): it gets the
+/// stream and the server's stop flag, writes its own answer, and must end soon after the flag is set (the server joins
+/// it when it stops).
+pub type SocketTake = Box<dyn FnOnce(TcpStream, &AtomicBool) + Send>;
+
+/// The routes that take a connection over: `None` for every request they do not take (the [`Handler`] answers it).
+pub type SocketRoute = Arc<dyn Fn(&Request) -> Option<SocketTake> + Send + Sync>;
+
 /// The `Server` header of every answer, and the mark the never-ships check looks for: a binary that holds this text
 /// links the fake (task 2475: 0 times in the app's TEST and REAL builds, at least once in `bb-fake-server`).
 pub const FAKE_API_MARK: &str = "beebeeb-fake-api (tests only, not a server)";
@@ -144,16 +153,27 @@ pub struct FakeApi {
 impl FakeApi {
     pub fn start(handler: Handler) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the fake API");
-        Self::listen_with(listener, handler, true).expect("start the fake API")
+        Self::listen_with(listener, handler, true, None).expect("start the fake API")
     }
 
     /// The fake on a listener the caller bound (`server::bind`: loopback only), keeping NO request: a process that
     /// runs for an hour must not hold every token and body it was sent. [`FakeApi::requests`] stays empty.
     pub fn start_on(listener: TcpListener, handler: Handler) -> io::Result<Self> {
-        Self::listen_with(listener, handler, false)
+        Self::listen_with(listener, handler, false, None)
     }
 
-    fn listen_with(listener: TcpListener, handler: Handler, keep: bool) -> io::Result<Self> {
+    /// [`FakeApi::start_on`], with `sockets` offered every request first: a request it takes is its connection from
+    /// then on (`server::start_fixture`: the device sign-in socket).
+    pub fn start_on_with_sockets(listener: TcpListener, handler: Handler, sockets: SocketRoute) -> io::Result<Self> {
+        Self::listen_with(listener, handler, false, Some(sockets))
+    }
+
+    fn listen_with(
+        listener: TcpListener,
+        handler: Handler,
+        keep: bool,
+        sockets: Option<SocketRoute>,
+    ) -> io::Result<Self> {
         listener.set_nonblocking(true)?;
         let base = format!("http://{}", listener.local_addr()?);
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -165,8 +185,9 @@ impl FakeApi {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let (handler, log) = (handler.clone(), log_in.clone());
+                        let (sockets, stop) = (sockets.clone(), stop_in.clone());
                         workers.push(std::thread::spawn(move || {
-                            serve(stream, &handler, keep.then_some(&*log))
+                            serve(stream, &handler, keep.then_some(&*log), sockets.as_ref(), &stop)
                         }));
                     }
                     Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
@@ -206,7 +227,14 @@ impl Drop for FakeApi {
 }
 
 /// Answer one connection. `log` is the tests' record of every request; `None` keeps nothing ([`FakeApi::start_on`]).
-fn serve(mut stream: TcpStream, handler: &Handler, log: Option<&Mutex<Vec<Request>>>) {
+/// A request `sockets` takes is handed the connection and `stop` instead.
+fn serve(
+    mut stream: TcpStream,
+    handler: &Handler,
+    log: Option<&Mutex<Vec<Request>>>,
+    sockets: Option<&SocketRoute>,
+    stop: &AtomicBool,
+) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let Some(request) = read_request(&mut stream) else {
@@ -214,6 +242,10 @@ fn serve(mut stream: TcpStream, handler: &Handler, log: Option<&Mutex<Vec<Reques
     };
     if let Some(log) = log {
         log.lock().expect("fake API log").push(request.clone());
+    }
+    if let Some(take) = sockets.and_then(|route| route(&request)) {
+        take(stream, stop);
+        return;
     }
     let reply = handler(&request);
     if reply.status == HANG_UP {

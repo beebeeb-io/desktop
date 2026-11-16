@@ -117,6 +117,10 @@ impl<C: CredentialStores> Engine<C> {
 }
 
 #[cfg(test)]
+#[path = "support_bundle_api_tests.rs"]
+mod export_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

@@ -3,9 +3,10 @@
 # platform: macos | windows | linux
 #
 # Reads RELEASE_BLOCKERS.md from the current directory and prints which items
-# bind the given platform, then exits non-zero if any do.  Both
-# .github/workflows/release.yml and scripts/release-macos-local.sh delegate to
-# this script so the parsing lives in one place.
+# bind the given platform, then exits non-zero if any do.
+# .github/workflows/release-native-windows.yml delegates to this script, so the
+# parsing lives in one place (the 0.8.x release.yml and the macOS release
+# script did too; both went with the Tauri app in 0.9.0).
 #
 # Scope syntax (fail-closed):
 #   - [macOS] <text>  - scoped to macOS only; silently skipped for windows / linux

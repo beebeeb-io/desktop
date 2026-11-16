@@ -139,8 +139,8 @@ async fn backup_upload_leaves_source_byte_identical() {
             bridge.db.waiting_rows().unwrap().is_empty(),
             "the keep step and the purge guard never see a backup op"
         );
-        // The sign-out purge itself is the shell's (`src-tauri`): its three lines run there, on this same
-        // set-up, in `engine_shell_tests::backup_upload_leaves_source_byte_identical`.
+        // The sign-out purge itself was the 0.8.x Tauri shell's and went with it; its macOS rules are carried in
+        // `native/beebeeb-drive-rune/docs/macos/sign-out-and-lock.md`.
         server.finish();
         assert_eq!(
             (source_state(&in_flight), source_state(&waiting)),

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The counts in docs/superpowers/specs/2026-11-11-native-engine-boundary.md, so anyone can re-measure them.
 
-  scripts/measure-engine-boundary.py <dir of .rs files>      e.g. src-tauri/src, crates/beebeeb-engine/src
+  scripts/measure-engine-boundary.py <dir of .rs files>      e.g. crates/beebeeb-engine/src, native/beebeeb-drive-rune/src
 
 Method, per top-level module (a file `<name>.rs` plus everything under `<name>/`):
   lines       newline characters in its `.rs` files (what `wc -l` prints), tests and comments included

@@ -276,7 +276,7 @@ mod tests {
         for name in [
             "GLegion",
             "DESKTOP-4F2K9QZ",
-            "laptop-van-guus",
+            "laptop-of-alex",
             "PC1",
             "a",
             "x-1-y-2-z-3-w-4-v-5-u-6-t-7-s-8-r",

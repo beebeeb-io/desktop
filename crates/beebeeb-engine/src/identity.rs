@@ -8,10 +8,9 @@
 //!
 //! There is no default and nothing to initialise. Every engine entry that reaches credentials, the config, local
 //! state or Cloud Files takes a `&'static EngineIdentity`; code that has none does not compile. The host decides
-//! which one it is, once, at build time (the Tauri shell is always [`REAL`]).
+//! which one it is, once, at build time.
 //!
-//! This file names nothing else of the crate: `src-tauri/tests/keychain.rs` includes it by path, next to
-//! `keychain.rs`.
+//! This file names nothing else of the crate (`keychain.rs` reaches it as `super::identity`).
 //!
 //! Must not: gain a public constructor, a `Default`, a process-wide "current" value, or a field that both
 //! identities share when the thing it names is per-install.

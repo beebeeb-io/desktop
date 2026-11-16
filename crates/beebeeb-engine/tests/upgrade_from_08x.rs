@@ -4,7 +4,7 @@
 //! (`account_binding::tests::adoption_happens_once_and_never_replaces_an_owner`); these tests go through the start a
 //! person makes: `Engine::open` → `restore` → `start_sync`, on a private copy of a `state.db` that desktop 0.8.25
 //! itself wrote (`tests/fixtures/state-db-0.8.25/closed`). The Tauri tests whose meaning this ports
-//! (`src-tauri/src/account_binding_tests/part_3.rs`) run on macOS, where another account's start PURGES; on Windows
+//! (`src-tauri/src/account_binding_tests/part_3.rs`) ran on macOS, where another account's start PURGES; on Windows
 //! the same rule reads: another account is REFUSED, and the queue and the files stay, for their owner.
 //!
 //! The premise, made in the copy (the committed files are never opened): the 0.8.25 image has no owner record (the

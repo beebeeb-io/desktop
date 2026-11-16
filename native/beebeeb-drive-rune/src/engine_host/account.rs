@@ -782,6 +782,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn pump(&mut self) -> Pumped {
         self.password.forget_if_moved();
+        self.account_deletion_tell_late();
         let mut changed = std::mem::take(&mut self.dirty);
         let refused = self.refused();
         let stale = |held: Option<(SessionGeneration, &Option<String>)>| {

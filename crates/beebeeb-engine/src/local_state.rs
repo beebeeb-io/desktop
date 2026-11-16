@@ -168,3 +168,7 @@ pub fn open_for_dev_viewer(
 ) -> Result<crate::state_db::StateDb, crate::state_db::ReadOnlyOpenError> {
     crate::state_db::StateDb::open_read_only(path)
 }
+
+#[cfg(test)]
+#[path = "local_state_tests.rs"]
+mod local_state_tests;

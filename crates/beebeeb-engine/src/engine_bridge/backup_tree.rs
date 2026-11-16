@@ -221,21 +221,30 @@ impl EngineBridge {
     /// A new folder `name` under `parent`, with an id minted here and its name sealed for it. Never adopts an existing
     /// folder of that name: a device folder named like another device's is that device's (core's identity rule).
     pub async fn backup_create_folder(&self, parent: &str, name: &str) -> Result<String, EngineError> {
+        let id = self.backup_new_folder_id()?;
+        self.backup_create_folder_as(parent, name, &id).await?;
+        Ok(id)
+    }
+
+    /// A new item id for a backup folder, minted as every id this device makes, so its folder can be recorded before
+    /// it is created ([`Self::backup_create_folder_as`]).
+    pub fn backup_new_folder_id(&self) -> Result<String, EngineError> {
         let master = beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key());
-        let id = beebeeb_core::item_id::NewItemId::owner(&master)?.as_str().to_string();
-        let sealed = owned_metadata_for_name(&self.db, self.api.master_key(), &id, name, None)?;
-        let created = self
-            .backup_api()
-            .create_folder(&sealed, Some(parent), Some(&id))
-            .await?;
-        if created["id"].as_str() != Some(id.as_str()) {
+        Ok(beebeeb_core::item_id::NewItemId::owner(&master)?.as_str().to_string())
+    }
+
+    /// [`Self::backup_create_folder`] with the id `id` ([`Self::backup_new_folder_id`]).
+    pub async fn backup_create_folder_as(&self, parent: &str, name: &str, id: &str) -> Result<(), EngineError> {
+        let sealed = owned_metadata_for_name(&self.db, self.api.master_key(), id, name, None)?;
+        let created = self.backup_api().create_folder(&sealed, Some(parent), Some(id)).await?;
+        if created["id"].as_str() != Some(id) {
             return Err(anyhow::anyhow!(
                 "server_changed_item_id: the folder create did not answer with the id this device chose"
             )
             .into());
         }
         tracing::info!(folder_id = %id, "backup: folder created");
-        Ok(id)
+        Ok(())
     }
 
     /// `BackupHost::move_file`: move and rename the server file `id` (its name sealed again for its own id).

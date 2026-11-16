@@ -26,8 +26,7 @@ fn sf2237d_t5_whole_and_range_open() {
         }
     }
     // Published core known-answer frames, not a desktop encrypt/decrypt round-trip.
-    let vectors: serde_json::Value =
-        serde_json::from_str(include_str!("../../../../src-tauri/tests/fixtures/core-1943.json")).unwrap();
+    let vectors: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/core-1943.json")).unwrap();
     let get = |name: &str| {
         vectors["vectors"]
             .as_array()

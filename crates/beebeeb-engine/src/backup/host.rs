@@ -53,6 +53,19 @@ pub fn switch_off_in_settings(identity: &'static crate::identity::EngineIdentity
     .is_ok()
 }
 
+/// Whether the switch `key` in the PC's settings file is the local data's owner's to turn off (the per-account rule
+/// of P3-8): a known folder's switch is the PC's; a chosen folder's (`custom:<name>`) only when the folder is one of
+/// `owners_chosen` (`backup_folders::runner_chosen`: tagged with that owner; an untagged one is nobody's). Every
+/// account's chosen folders share the one backup set, so a stop or a reconcile here never turns off another
+/// account's. A key that names no category: never.
+pub fn owners_switch(key: &str, owners_chosen: &[crate::backup::sources::ChosenFolder]) -> bool {
+    match Category::from_key(key) {
+        Some(Category::Custom(_)) => owners_chosen.iter().any(|folder| folder.key() == key),
+        Some(_) => true,
+        None => false,
+    }
+}
+
 /// The tree of a backup whose device or category folder is gone: nothing listed, and complete (there is nothing more).
 fn gone_tree(device_folder_live: bool, category_folder_live: Option<bool>) -> DeviceTree {
     DeviceTree {
@@ -114,19 +127,19 @@ impl DesktopBackupHost {
         Ok((tree, clock))
     }
 
-    /// The category folder's id: the remembered one, else (a first backup, or "Back up again") the live folder of
-    /// that name in the device folder (the old mirror's `GLegion/Pictures` is adopted), else a new one.
+    /// The category folder's id: the remembered one, else (a first backup, or "Back up again") the live folder of that
+    /// name in the device folder (the old mirror's `GLegion/Pictures` is adopted), else a new one. A folder the person
+    /// chose: [`Self::chosen_category_folder`].
     async fn category_folder(&self, c: &Category) -> Result<(String, Option<bool>), HostError> {
+        if matches!(c, Category::Custom(_)) {
+            return self.chosen_category_folder(c).await;
+        }
         let db = self.bridge.db();
         if let Some(id) = db
             .backup_category_folder(&c.key())
             .map_err(db_error("category_folder"))?
         {
-            let state = self
-                .bridge
-                .backup_folder_state(&id)
-                .await
-                .map_err(host_error("category_folder_state"))?;
+            let state = self.folder_state(&id).await?;
             return Ok((id, Some(state == BackupFolderState::Live)));
         }
         let id = self
@@ -135,6 +148,82 @@ impl DesktopBackupHost {
             .await
             .map_err(host_error("category_folder_create"))?;
         db.set_backup_category_folder(&c.key(), Some(&id))
+            .map_err(db_error("category_folder"))?;
+        Ok((id, None))
+    }
+
+    async fn folder_state(&self, id: &str) -> Result<BackupFolderState, HostError> {
+        self.bridge
+            .backup_folder_state(id)
+            .await
+            .map_err(host_error("category_folder_state"))
+    }
+
+    /// A chosen folder's category folder (P3-10, by construction): the folder whose id its settings entry holds
+    /// (`ChosenFolder::folder_id`, the local data's owner's entry), never a folder found by its name, which may be a
+    /// backup the person kept. The entry outlives a sign-out, which empties the local state.
+    /// - Its id, remembered here too (no stop and no sign-out since): live or gone, as every backup's folder (a gone
+    ///   one stops the backup, rule 11).
+    /// - Its id, not remembered (signed in again, or "Back up again" after a stop): continued while it is a live
+    ///   folder in this device's folder (never one elsewhere), and remembered. A listing that is not complete answers
+    ///   an error: the folder may be in the part not read, and nothing is made.
+    /// - No id (a new add, or a settings file from before the id), or its folder is gone: a new folder. Its id is
+    ///   minted and recorded in the entry BEFORE the create, so a create whose answer is lost is found by its id on
+    ///   the next pass, never made twice; an id that cannot be recorded makes nothing.
+    async fn chosen_category_folder(&self, c: &Category) -> Result<(String, Option<bool>), HostError> {
+        let db = self.bridge.db();
+        let key = c.key();
+        let owner = db
+            .owner()
+            .map_err(db_error("category_folder"))?
+            .ok_or_else(|| HostError("category_folder: no account is bound".into()))?;
+        let cfg = crate::config::DesktopConfig::load_for(self.bridge.identity)
+            .map_err(|_| HostError("category_folder: the settings could not be read".into()))?;
+        let entry = crate::app::bindings::backup_folders::chosen_for(&cfg.backup_chosen_folders, Some(&owner))
+            .into_iter()
+            .find(|folder| folder.key() == key)
+            .ok_or_else(|| HostError("category_folder: not a chosen folder of this account".into()))?;
+        let remembered = db.backup_category_folder(&key).map_err(db_error("category_folder"))?;
+        let parent = &self.layout.device_folder_id;
+        if let Some(id) = entry.folder_id {
+            if remembered.as_deref() == Some(id.as_str()) {
+                let state = self.folder_state(&id).await?;
+                return Ok((id, Some(state == BackupFolderState::Live)));
+            }
+            let (children, complete) = self
+                .bridge
+                .backup_list_children(parent)
+                .await
+                .map_err(host_error("category_folder_state"))?;
+            if children.iter().any(|child| child.is_folder && child.id == id) {
+                db.set_backup_category_folder(&key, Some(&id))
+                    .map_err(db_error("category_folder"))?;
+                return Ok((id, None));
+            }
+            if !complete {
+                return Err(HostError(
+                    "category_folder: the device folder was not listed completely".into(),
+                ));
+            }
+        }
+        let id = self
+            .bridge
+            .backup_new_folder_id()
+            .map_err(host_error("category_folder_create"))?;
+        let recorded = crate::config::DesktopConfig::update_for(self.bridge.identity, |cfg| {
+            let recorded = crate::app::bindings::backup_folders::record_folder_id(cfg, &key, &owner, &id);
+            (recorded, recorded)
+        });
+        if recorded != Ok(true) {
+            return Err(HostError(
+                "category_folder: the new folder's id was not recorded".into(),
+            ));
+        }
+        self.bridge
+            .backup_create_folder_as(parent, c.display_name(), &id)
+            .await
+            .map_err(host_error("category_folder_create"))?;
+        db.set_backup_category_folder(&key, Some(&id))
             .map_err(db_error("category_folder"))?;
         Ok((id, None))
     }
@@ -320,7 +409,15 @@ impl DesktopBackupHost {
             // waiting for the OneDrive answer), so none keeps going after its backup was removed.
             let mut on: Vec<Category> = self.enabled.clone();
             if let Ok(cfg) = crate::config::DesktopConfig::load_for(self.bridge.identity) {
-                for category in cfg.known_folder_backup.iter().filter_map(|key| Category::from_key(key)) {
+                // The local data's owner's switches alone (P3-8): another account's chosen folder, or an untagged one,
+                // is not this device's backup of this account, and its switch is not this stop's to turn off.
+                let owners = crate::app::bindings::backup_folders::runner_chosen(db, &cfg);
+                for category in cfg
+                    .known_folder_backup
+                    .iter()
+                    .filter(|key| owners_switch(key, &owners))
+                    .filter_map(|key| Category::from_key(key))
+                {
                     if !on.contains(&category) {
                         on.push(category);
                     }

@@ -188,7 +188,7 @@ fn the_types_are_one_radio_group_and_the_arrows_choose_one() {
 }
 
 #[test]
-fn continue_on_text_names_it_and_create_file_asks_for_the_file_and_writes_nothing() {
+fn continue_on_text_names_it_and_create_file_makes_the_file_in_the_folder_shown() {
     let (mut rt, calls) = runtime();
     open_dialog(&mut rt);
     press(&mut rt, Key::Right);
@@ -223,18 +223,15 @@ fn continue_on_text_names_it_and_create_file_asks_for_the_file_and_writes_nothin
     );
     operate(&mut rt, "btn-0");
     assert_eq!(dialog_step(&rt), None, "Create file closes the dialog");
+    // The shell's poll handed the ask to Files, which asked its source (`frames::files::create_file`).
+    assert!(super::take_asked(&mut rt.state).is_empty(), "nothing is left waiting");
     assert_eq!(
-        super::take_asked(&mut rt.state),
-        [Intent::CreateFile {
-            folder: rt.state.listing.folder.id.clone(),
-            name: "export_invoices.py".into()
-        }],
-        "the file is asked for in the folder shown, named with its extension"
-    );
-    assert!(
-        calls.lock().unwrap().is_empty(),
-        "this group wrote nothing: {:?}",
-        calls.lock().unwrap()
+        *calls.lock().unwrap(),
+        [crate::frames::files::source::Call::NewFile(
+            rt.state.listing.folder.id.clone(),
+            "export_invoices.py".into()
+        )],
+        "the file is made in the folder shown, named with its extension"
     );
 }
 

@@ -4,12 +4,6 @@
 # lowers or drops them. Never add a path or raise a count here; split the file instead (token plan Phase 4).
 1220 BeebeebFileProvider/FileProviderExtension.swift
 1990 BeebeebFileProviderTests/main.swift
-1781 src-tauri/src/finder_removal.rs
-1956 src-tauri/src/finder_setup/core.rs
-2323 src-tauri/src/finder_setup/driver.rs
-1773 src-tauri/src/finder_setup/macos_ports.rs
-41359 src-tauri/src/lib.rs
-1758 src-tauri/src/popover_data.rs
 1352 crates/beebeeb-engine/src/windows_cf/callbacks.rs
 1649 crates/beebeeb-engine/src/windows_cf/mod.rs
 1500 crates/beebeeb-engine/src/windows_cf/placeholders.rs
