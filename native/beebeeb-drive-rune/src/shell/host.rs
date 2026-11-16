@@ -621,9 +621,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     s.shell.tell_flyout_covered(covered);
     // A File Explorer verb that came under the cover runs once it is gone, or goes with a lock (`windows_verbs`).
     #[cfg(windows)]
-    {
-        changed |= super::platform::windows_verbs::after_the_cover(s, tx);
-    }
+    {}
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
