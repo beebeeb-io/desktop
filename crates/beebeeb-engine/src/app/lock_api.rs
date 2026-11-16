@@ -532,8 +532,7 @@ impl<C: CredentialStores> Engine<C> {
         };
         let old = Zeroizing::new(old.expose_for_request().to_string());
         let owner = vault.session_owner().map_err(|_| REFUSED.to_string())?;
-        if owner.is_some_and(|owner| owner.trim() != profile.user_id.trim()) || !self.acct.session_unchanged_since(turn)
-        {
+        if !self.acct.session_unchanged_since(turn) {
             return Err(REFUSED.to_string());
         }
         if !self.unlocked() {
