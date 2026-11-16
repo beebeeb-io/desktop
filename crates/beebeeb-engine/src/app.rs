@@ -594,7 +594,7 @@ impl<C: CredentialStores> Engine<C> {
             named => named.to_string(),
         };
         // The key this computer kept is the account's only once the server says so; no answer undoes the sign-in.
-        let kept = match self.prove_kept_key(&token, &profile.user_id).await {
+        let kept = match self.prove_kept_key(&token, &profile.user_id, &email).await {
             Ok(kept) => kept,
             Err(error) => {
                 revoke(&self.client, base, &token).await;
