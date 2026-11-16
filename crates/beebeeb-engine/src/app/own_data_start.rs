@@ -643,14 +643,15 @@ impl<C: CredentialStores> Engine<C> {
                 _ended: ended,
             });
             state.running.retain(|running| !running.abort.is_finished());
-            state.running.push(Running {
-                abort: task.abort_handle(),
-                ended: ended_rx,
-            });
-            task
+            (task, ended_rx)
         };
+        let (task, ended_rx) = task;
         #[cfg(test)]
         seat.test_pause(|seams| seams.after_spawn.clone());
+        lock(&seat.state).running.push(Running {
+            abort: task.abort_handle(),
+            ended: ended_rx,
+        });
         match self.runtime.block_on(task) {
             Ok(outcome) => Some(outcome),
             Err(error) if error.is_cancelled() => None,
