@@ -355,7 +355,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     here: false,
                     unsettled: false,
                 };
-                let Ok((read_for, bytes, _)) = read(engine, &id, recorded, &|_, _| {}, &cancel) else {
+                let Ok((read_for, bytes, _)) = read(engine, &id, recorded, IN_MEMORY_MAX, &|_, _| {}, &cancel) else {
                     return (Settled::Failed, None);
                 };
                 if read_for != session {

@@ -4,12 +4,14 @@
 //! [`Refused`] with a fixed reason. A refusal is a protocol error: the app kills the helper and shows "Renderer
 //! stopped". Nothing the helper sent is kept in a refusal, so a reason can be logged without leaking content.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::time::Duration;
 
 use crate::frame::Side;
 use crate::office::{
-    CellData, CellRange, Cells, Opened, OpenedSheets, Outline, OutlineData, PageSize, Render, Rendered,
+    Anchor, CellData, CellRange, Cells, Opened, OpenedSheets, Outline, OutlineData, PageSize, Render, RenderAnchor,
+    Rendered,
 };
 
 // The viewer contract §5.2, one constant per number. MB and GB are binary here, as in the sandbox crate's 1 GiB.
@@ -56,6 +58,14 @@ pub const MAX_SHEET_COLS: u32 = 16_384;
 /// The longest sheet name: 255 characters (Unicode scalar values, not bytes). A spreadsheet allows 31; the helper
 /// cuts a longer name to this before it answers.
 pub const MAX_SHEET_NAME_CHARS: usize = 255;
+/// The longest formula of one cell: 8 KiB (a spreadsheet formula holds at most 8,192 characters). The helper cuts a
+/// longer one, at a character boundary, before it answers.
+pub const MAX_FORMULA_BYTES: usize = 8 * 1024;
+/// The most charts and pictures in one block of cells. The helper drops those past it and says `missing_content`.
+pub const MAX_ANCHORS: usize = 256;
+/// The largest side of a chart or picture, and the farthest its corner may sit into its first cell: 20,000 pt (about
+/// 7 m). The helper drops a larger one and says `missing_content`.
+pub const MAX_ANCHOR_SIDE_PT: f32 = 20_000.0;
 
 /// Points per inch. A `scale` is device pixels per point: zoom x DPI / 72 ([`render_scale`]).
 pub const POINTS_PER_INCH: f32 = 72.0;
@@ -76,6 +86,8 @@ pub struct Limits {
     pub max_cell_text_bytes: usize,
     pub max_outline_entries: usize,
     pub max_outline_text_bytes: usize,
+    pub max_formula_bytes: usize,
+    pub max_anchors: usize,
 }
 
 impl Limits {
@@ -90,6 +102,8 @@ impl Limits {
         max_cell_text_bytes: MAX_CELL_TEXT_BYTES,
         max_outline_entries: MAX_OUTLINE_ENTRIES,
         max_outline_text_bytes: MAX_OUTLINE_TEXT_BYTES,
+        max_formula_bytes: MAX_FORMULA_BYTES,
+        max_anchors: MAX_ANCHORS,
     };
 }
 
@@ -103,10 +117,11 @@ impl Default for Limits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
     /// The app's own ask cannot be sized or split: a `Render` scale or page size that is not finite and positive, a
-    /// region that is empty or not inside the page at that scale, or a cell range whose half would lie past the
-    /// last row or column a `u32` can name.
+    /// region that is empty or not inside the page at that scale, a `RenderAnchor` for another anchor than the one
+    /// given or at a scale that sizes no raster, or a cell range whose half would lie past the last row or column a
+    /// `u32` can name.
     BadAsk,
-    /// The rendered width or height is not what was asked (beyond ±1 px of rounding), or is 0.
+    /// The rendered width or height is not exactly what was asked, or is 0.
     WrongSize,
     /// A rendered side over the limit.
     TooLarge,
@@ -138,6 +153,17 @@ pub enum Refused {
     BadCellSize,
     /// Frozen panes larger than a sheet can be.
     FrozenTooLarge,
+    /// A cell's value that is not finite.
+    BadValue,
+    /// A cell's formula over the limit.
+    FormulaTooLong,
+    /// More charts and pictures in one block than the limit.
+    TooManyAnchors,
+    /// A chart or picture whose cells run backwards or past a sheet, or whose size or offset is not finite, not
+    /// positive (size) or negative (offset), or over the limit.
+    BadAnchor,
+    /// Two charts or pictures with one id in a block.
+    DuplicateAnchor,
     /// More outline entries than the limit, over all the pages so far or announced by `next`.
     TooManyEntries,
     /// An outline page whose `next` does not follow it: no entries, or not `from` plus the entries sent.
@@ -173,6 +199,11 @@ impl Refused {
             Refused::SizesMismatch => "column widths or row heights do not match the range",
             Refused::BadCellSize => "a column width or row height that is not finite or is negative",
             Refused::FrozenTooLarge => "frozen panes larger than a sheet",
+            Refused::BadValue => "a cell value that is not finite",
+            Refused::FormulaTooLong => "a formula over the limit",
+            Refused::TooManyAnchors => "too many charts and pictures",
+            Refused::BadAnchor => "a chart or picture that cannot be placed",
+            Refused::DuplicateAnchor => "two charts or pictures with one id",
             Refused::TooManyEntries => "too many outline entries",
             Refused::BadNext => "an outline page whose next entry does not follow it",
             Refused::PagePastEnd => "an outline entry past the last page",
@@ -210,13 +241,57 @@ pub fn page_pixels(page: &PageSize, scale: f32) -> Option<(u32, u32)> {
     if !finite_positive(scale) || !finite_positive(page.w_pt) || !finite_positive(page.h_pt) {
         return None;
     }
+    Some((
+        side_pixels(page.w_pt, scale)?,
+        side_pixels(page.h_pt.min(MAX_PAGE_HEIGHT_PT), scale)?,
+    ))
+}
+
+/// One side of the raster: `ceil(pt * scale)`, at least 1 px, the product in `f32`; `None` past a `u32`. The one rule
+/// for a page ([`page_pixels`]) and an anchor ([`anchor_pixels`]).
+fn side_pixels(pt: f32, scale: f32) -> Option<u32> {
     // In f32, as the engine: in f64 a Letter page at 4/3 would be 817 px wide instead of the engine's 816.
-    let side = |pt: f32| -> Option<u32> {
-        let px = (pt * scale).ceil().max(1.0);
-        // Below 2^32 and a whole number, so the cast is exact.
-        (px.is_finite() && px < 4_294_967_296.0).then_some(px as u32)
-    };
-    Some((side(page.w_pt)?, side(page.h_pt.min(MAX_PAGE_HEIGHT_PT))?))
+    let px = (pt * scale).ceil().max(1.0);
+    // Below 2^32 and a whole number, so the cast is exact.
+    (px.is_finite() && px < 4_294_967_296.0).then_some(px as u32)
+}
+
+/// The pixel size of a chart or picture at `scale`: `ceil(w_pt * scale)` x `ceil(h_pt * scale)`, at least 1 px a
+/// side, the product in `f32`: the page rule ([`page_pixels`]) without the page's height clamp, and the Office
+/// engine's own (`Workbook::anchor_size`). `None` when the scale or the anchor's size is not finite and positive, or a
+/// side does not fit a `u32`. `tests/page_pixels_vectors.txt` pins it too.
+pub fn anchor_pixels(anchor: &Anchor, scale: f32) -> Option<(u32, u32)> {
+    if !finite_positive(scale) || !finite_positive(anchor.w_pt) || !finite_positive(anchor.h_pt) {
+        return None;
+    }
+    Some((side_pixels(anchor.w_pt, scale)?, side_pixels(anchor.h_pt, scale)?))
+}
+
+/// The pixel size a `RenderAnchor` asks for, of `anchor` (from the checked `CellData` the app holds). The app sizes the
+/// section `out` as `w * h * 4` from this, before it sends the ask. Refuses an ask for another anchor than `anchor`,
+/// one that cannot be sized, and one over the limit.
+pub fn asked_anchor_size(asked: &RenderAnchor, anchor: &Anchor, limits: &Limits) -> Result<(u32, u32), Refused> {
+    if asked.anchor != anchor.id {
+        return Err(Refused::BadAsk);
+    }
+    let (w, h) = anchor_pixels(anchor, asked.scale).ok_or(Refused::BadAsk)?;
+    if w > limits.max_side_px || h > limits.max_side_px {
+        return Err(Refused::TooLarge);
+    }
+    Ok((w, h))
+}
+
+/// A `Rendered` answer to a `RenderAnchor`, whose pixels are in a section of `out_len` bytes: each side exactly the
+/// ask ([`asked_anchor_size`]) and under the limit, and `w * h * 4 == out_len`.
+pub fn check_rendered_anchor(
+    asked: &RenderAnchor,
+    anchor: &Anchor,
+    out_len: u64,
+    got: &Rendered,
+    limits: &Limits,
+) -> Result<(), Refused> {
+    let want = asked_anchor_size(asked, anchor, limits)?;
+    check_rendered_size(want, out_len, got, limits)
 }
 
 /// The pixel size a `Render` asks for: its region, or the whole page at its scale. The app sizes the section `out`
@@ -243,7 +318,8 @@ pub fn asked_size(asked: &Render, page: &PageSize, limits: &Limits) -> Result<(u
 }
 
 /// A `Rendered` answer to `asked`, for a page of size `page` (from the checked `Opened`), whose pixels are in a section
-/// of `out_len` bytes: each side within ±1 px of the ask and under the limit, and `w * h * 4 == out_len`.
+/// of `out_len` bytes: each side exactly the ask and under the limit, and `w * h * 4 == out_len`. There is no rounding
+/// slack: the app and the helper size the raster by the same rule ([`page_pixels`]), so any other size is a fault.
 pub fn check_rendered(
     asked: &Render,
     page: &PageSize,
@@ -251,17 +327,28 @@ pub fn check_rendered(
     got: &Rendered,
     limits: &Limits,
 ) -> Result<(), Refused> {
-    let (want_w, want_h) = asked_size(asked, page, limits)?;
+    let want = asked_size(asked, page, limits)?;
+    check_rendered_size(want, out_len, got, limits)
+}
+
+/// A rendered raster against the size asked: under the limit, not empty, each side exactly the ask, filling the
+/// section.
+fn check_rendered_size(
+    (want_w, want_h): (u32, u32),
+    out_len: u64,
+    got: &Rendered,
+    limits: &Limits,
+) -> Result<(), Refused> {
     if got.w > limits.max_side_px || got.h > limits.max_side_px {
         return Err(Refused::TooLarge);
     }
     if got.w == 0 || got.h == 0 {
         return Err(Refused::WrongSize);
     }
-    if got.w.abs_diff(want_w) > 1 {
+    if got.w != want_w {
         return Err(Refused::WrongSize);
     }
-    if got.h.abs_diff(want_h) > 1 {
+    if got.h != want_h {
         return Err(Refused::WrongSize);
     }
     if u64::from(got.w) * u64::from(got.h) * 4 != out_len {
@@ -305,8 +392,10 @@ pub fn check_sheets(got: &OpenedSheets, limits: &Limits) -> Result<(), Refused> 
     Ok(())
 }
 
-/// A `CellData` answer to `asked`: no more cells than the range holds, every cell inside it with its text under the
-/// cap, every merge inside it, one finite non-negative width per column and height per row, frozen panes in a sheet.
+/// A `CellData` answer to `asked`: no more cells than the range holds, every cell inside it with its text and its
+/// formula under their caps and its value finite, every merge inside it, one finite non-negative width per column and
+/// height per row, frozen panes in a sheet, at most [`MAX_ANCHORS`] charts and pictures, each [`anchor_placeable`]
+/// and each with its own id.
 pub fn check_cells(asked: &Cells, got: &CellData, limits: &Limits) -> Result<(), Refused> {
     let range = &asked.range;
     if got.cells.len() as u64 > range.area() {
@@ -318,6 +407,16 @@ pub fn check_cells(asked: &Cells, got: &CellData, limits: &Limits) -> Result<(),
         }
         if cell.text.len() > limits.max_cell_text_bytes {
             return Err(Refused::TextTooLong);
+        }
+        if cell.value.is_some_and(|v| !v.is_finite()) {
+            return Err(Refused::BadValue);
+        }
+        if cell
+            .formula
+            .as_ref()
+            .is_some_and(|f| f.len() > limits.max_formula_bytes)
+        {
+            return Err(Refused::FormulaTooLong);
         }
     }
     if got.merges.iter().any(|m| !range.holds(m)) {
@@ -337,7 +436,41 @@ pub fn check_cells(asked: &Cells, got: &CellData, limits: &Limits) -> Result<(),
     if got.frozen.rows > limits.max_sheet_rows || got.frozen.cols > limits.max_sheet_cols {
         return Err(Refused::FrozenTooLarge);
     }
+    check_anchors(&got.anchors, limits)
+}
+
+/// The charts and pictures of a block: at most the limit, each one [`anchor_placeable`], every id its own.
+fn check_anchors(anchors: &[Anchor], limits: &Limits) -> Result<(), Refused> {
+    if anchors.len() > limits.max_anchors {
+        return Err(Refused::TooManyAnchors);
+    }
+    let mut ids = BTreeSet::new();
+    for a in anchors {
+        if !anchor_placeable(a, limits) {
+            return Err(Refused::BadAnchor);
+        }
+        if !ids.insert(a.id) {
+            return Err(Refused::DuplicateAnchor);
+        }
+    }
     Ok(())
+}
+
+/// Whether the app's check accepts one chart or picture where a sheet places it: its cells in order (`from` at or
+/// before `to` on both axes) and inside a sheet the format allows; its size finite, positive and at most
+/// [`MAX_ANCHOR_SIDE_PT`]; its offset into the `from` cell finite, not negative and at most the same. The helper drops
+/// an anchor this refuses, so an honest helper is never refused.
+pub fn anchor_placeable(a: &Anchor, limits: &Limits) -> bool {
+    let size = |v: f32| finite_positive(v) && v <= MAX_ANCHOR_SIDE_PT;
+    let offset = |v: f32| v.is_finite() && (0.0..=MAX_ANCHOR_SIDE_PT).contains(&v);
+    a.from_row <= a.to_row
+        && a.from_col <= a.to_col
+        && a.to_row < limits.max_sheet_rows
+        && a.to_col < limits.max_sheet_cols
+        && size(a.w_pt)
+        && size(a.h_pt)
+        && offset(a.x_pt)
+        && offset(a.y_pt)
 }
 
 /// One page of the outline, the answer to `asked`, for a document of `pages` pages (from the checked `Opened`).
@@ -378,8 +511,9 @@ pub fn check_outline(asked: &Outline, got: &OutlineData, pages: u32, limits: &Li
 /// instead, split across the longer side (rows when there are at least as many rows as columns), the first half the
 /// smaller one when that side is odd. Each half is smaller than the range, so halving again ends.
 ///
-/// Refused ([`Refused::CannotHalve`]) for a range of at most one cell: one cell always fits a frame (its text is
-/// capped at [`MAX_CELL_TEXT_BYTES`], half a frame), so that answer is the helper's error.
+/// Refused ([`Refused::CannotHalve`]) for a range of at most one cell: one cell always fits a frame (its text, its
+/// formula and the block's charts and pictures are capped: [`MAX_CELL_TEXT_BYTES`], [`MAX_FORMULA_BYTES`] and
+/// [`MAX_ANCHORS`] together stay under one frame), so that answer is the helper's error.
 pub fn halve_range(asked: &Cells) -> Result<[Cells; 2], Refused> {
     let r = asked.range;
     if r.area() <= 1 {
@@ -434,3 +568,6 @@ pub fn check_answer_id(id: u32, was_sent: impl FnOnce(u32) -> bool) -> Result<()
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod anchor_tests;
