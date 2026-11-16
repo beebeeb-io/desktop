@@ -184,6 +184,58 @@ fn helper_reads_only_through_read_at() {
     app.send(&ToHelper::Close);
 }
 
+/// 320x240 4:2:0 YUV4MPEG2, `frames` frames at 25 fps, frame `n` all luma `40 + 40 * n`. A frame is 115 200 bytes,
+/// more than the helper reads ahead (64 KiB), so a frame asked for after `Opened` is read from the app then.
+fn y4m_large(frames: u8) -> Vec<u8> {
+    let (w, h) = (320usize, 240usize);
+    let mut out = format!("YUV4MPEG2 W{w} H{h} F25:1 Ip A1:1 C420jpeg\n").into_bytes();
+    for n in 0..frames {
+        out.extend_from_slice(b"FRAME\n");
+        out.extend(std::iter::repeat_n(40 + 40 * n, w * h));
+        out.extend(std::iter::repeat_n(128u8, w * h / 2));
+    }
+    out
+}
+
+/// P1-1 of the #462 review, as the player sends it: `WantVideo` and `WantAudio` in the same tick, then a seek while
+/// the helper waits for the frame's bytes. The read is answered, then each request in the order it came: the frame
+/// from before the seek, `Ended` for the sound (this file has none), and the next frame from where the seek went.
+#[test]
+fn two_requests_and_a_seek_while_the_helper_reads_are_answered_in_order() {
+    let mut app = App::start(y4m_large(4), ROUTES);
+    assert!(matches!(app.open(KindHint::Video), FromHelper::Opened(_)));
+    app.send(&ToHelper::WantVideo { w: 32, h: 24 });
+    app.send(&ToHelper::WantAudio {
+        rate: 48_000,
+        channels: 2,
+        frames: 4_800,
+    });
+    // The first frame is not in the helper's cache: it asks for its bytes before it answers anything.
+    let FromHelper::ReadAt { id, offset, len } = read_to_app(&mut app.from_helper).expect("a message") else {
+        panic!("the helper reads the frame's bytes first");
+    };
+    app.send(&ToHelper::Seek { at_ms: 80 });
+    let end = (offset + u64::from(len)) as usize;
+    let bytes = app.file[offset as usize..end].to_vec();
+    app.send(&ToHelper::Data { id, bytes });
+    let FromHelper::Frame { pts_ms, w, h, .. } = app.next() else {
+        panic!("the frame asked before the seek");
+    };
+    assert_eq!((pts_ms, w, h), (0, 32, 24));
+    assert_eq!(app.next(), FromHelper::Ended, "no sound in this file");
+    let reads_before = app.reads.len();
+    app.send(&ToHelper::WantVideo { w: 32, h: 24 });
+    let FromHelper::Frame { pts_ms, .. } = app.next() else {
+        panic!("the frame after the seek");
+    };
+    assert_eq!(pts_ms, 80, "the seek was taken after the frame it came behind");
+    assert!(
+        app.reads.len() > reads_before,
+        "the third frame was read from the app too"
+    );
+    app.send(&ToHelper::Close);
+}
+
 #[test]
 fn helper_frame_is_exactly_the_asked_size() {
     let mut app = App::start(y4m_five_frames(), ROUTES);
