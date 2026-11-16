@@ -245,7 +245,7 @@ impl Default for AwayLock {
             cover: Cover::Off,
             polled_cover: false,
             could_lock: true,
-            tells: WakeCover::default(),
+            tells: WakeCover::shell(),
             looks: 0,
             answered: 0,
             arms: 0,

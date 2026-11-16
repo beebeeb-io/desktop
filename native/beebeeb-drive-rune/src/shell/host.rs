@@ -487,7 +487,6 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
 /// on the b (P3-15), so what comes between the wake and that poll waits too. Asked where such an input acts: a picked
 /// folder (`intents`), an ask to show a place ([`request`]), File Explorer's verbs (`windows_verbs`).
 pub(crate) fn under_the_wake_cover(s: &mut State) -> bool {
-    s.shell.away.cover_a_gap_not_yet_found();
     registry::covered(s)
 }
 
