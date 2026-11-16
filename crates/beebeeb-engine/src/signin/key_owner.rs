@@ -58,6 +58,12 @@ pub fn key_ownership(key_owner: Option<&str>, session_owner: Option<&str>) -> Ke
     }
 }
 
+/// Whether a key's owner tag names exactly `user_id`. Blank is never an account.
+pub fn tag_is_account(tag: &str, user_id: &str) -> bool {
+    let (tag, user_id) = (tag.trim(), user_id.trim());
+    !tag.is_empty() && tag == user_id
+}
+
 /// Whether a stored vault key is REMOVED when `signing_in_user_id` / `signing_in_email` signs in with a token only
 /// (password, 2FA, passkey). A tagged key stays only for its own user id. An untagged key stays only when the email
 /// stored beside it is the signing-in account's (the server keeps one account per canonical address); with no stored
