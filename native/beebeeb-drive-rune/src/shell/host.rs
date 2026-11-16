@@ -548,6 +548,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             crate::frames::files::reset::end_session(s, now.1 != account);
             // An open file: its decrypted content goes with the account that leaves.
             crate::frames::viewers::end_session(s, now.1 != account);
+            // Playback stops, on a lock too: the helper, the sound, Windows' media controls (`media::stop_all`).
+            crate::media::stop_all(crate::media::StopReason::at_session_end(now.0, other_account));
             // An open Office document: its confined renderer is killed and what it rendered is wiped.
             crate::engine_host::office_host::end_session(now.0 == super::app::GateState::Locked);
             // An item's Details or Preview: the page and what its read decrypted go too.

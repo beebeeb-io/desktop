@@ -49,8 +49,21 @@ BIN="$CARGO_TARGET_DIR/debug/beebeeb-drive"
 cd "$CRATE_DIR"
 if [ "$BUILD" = 1 ]; then
     BUILD_SLOT="${BUILD_SLOT:-$HOME/code/beebeeb.io/scripts/coord/build-slot.sh}"
-    [ -x "$BUILD_SLOT" ] || die "no build-slot script at $BUILD_SLOT (set BUILD_SLOT, or pass --no-build after your own build)"
-    "$BUILD_SLOT" -- cargo build --locked --bin beebeeb-drive || die "the build failed"
+    if [ -x "$BUILD_SLOT" ]; then
+        "$BUILD_SLOT" -- cargo build --locked --bin beebeeb-drive || die "the build failed"
+    else
+        # No slot script here (a build VM with no workspace): build plainly, but under this machine's own lock, so two
+        # runs never build into one target dir at once. Without flock there is no lock: refuse rather than race.
+        command -v flock >/dev/null 2>&1 || die "no build-slot script at $BUILD_SLOT and no flock for a plain build (set BUILD_SLOT)"
+        mkdir -p "$CARGO_TARGET_DIR"
+        echo "compare: no build-slot script at $BUILD_SLOT; building under flock $CARGO_TARGET_DIR/.compare-build.lock" >&2
+        flock "$CARGO_TARGET_DIR/.compare-build.lock" cargo build --locked --bin beebeeb-drive || die "the build failed"
+    fi
+elif [ -x "$BIN" ]; then
+    # --no-build answers from the binary that is there: refuse one older than the sources it is built from.
+    NEWER="$(find "$CRATE_DIR/.." "$CRATE_DIR/../../crates" \( -name target -o -name .git \) -prune -o \
+        -type f \( -name '*.rs' -o -name Cargo.toml -o -name Cargo.lock \) -newer "$BIN" -print -quit 2>/dev/null)"
+    [ -z "$NEWER" ] || die "--no-build: the binary $BIN is older than $NEWER (build it first: cargo build --locked --bin beebeeb-drive)"
 fi
 [ -x "$BIN" ] || die "no binary at $BIN"
 

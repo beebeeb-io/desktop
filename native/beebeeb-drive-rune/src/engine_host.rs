@@ -73,6 +73,8 @@ mod open_folder;
 pub mod hello;
 // An item's read-only Preview over Trash (from Beebeeb only) and Shared (`item_preview`).
 pub mod item_preview;
+// The player's bytes: the engine's range reader for the session of the press (`media`).
+pub mod media;
 // An Office document's confined renderer: one helper per document, every answer checked (`office_host`).
 pub mod office_host;
 #[cfg(test)]
