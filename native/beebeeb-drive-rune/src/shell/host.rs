@@ -567,6 +567,9 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         };
         let left_open = open_gate(gate) && !open_gate(now.0);
         let _ = left_open;
+        if read_by_the_gate || other_account {
+            tx.instant();
+        }
         if left_ready || other_account {
             crate::frames::account::end_flows(s);
             // The same for the Files window: its dialogs (a link's password among them), what
