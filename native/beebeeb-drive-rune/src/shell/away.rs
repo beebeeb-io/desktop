@@ -228,13 +228,11 @@ impl AwayLock {
         wake: Option<&AppHandle<State>>,
         tx: &mut Tx,
     ) -> bool {
-        let covered_before = self.covers();
         let came = self.measure(open, pc_idle, actions, wake, tx);
         let covers = self.covers();
         // Compared with the last poll's end, not this poll's start: a cover turned on between two polls (an event)
         // is new to this frame too.
-        self.polled_cover = covers;
-        let covered = covered_before;
+        let covered = std::mem::replace(&mut self.polled_cover, covers);
         if covers && !covered {
             // The content leaves in this frame's commit: every removed element otherwise fades out over 0.15 s, and
             // the files would still show under the cover while they fade.
@@ -273,13 +271,6 @@ impl AwayLock {
                 // The engine locked: this frame's gate may have been read before it.
                 self.cover = Cover::Locked;
                 lift_if_open = false;
-            } else if self.cover == Cover::Asked(looked.number) && looked.answer.is_none() {
-                // The look that says the wake failed: the engine decided nothing (P3-2, fail closed). The cover holds,
-                // and after the grace the wake is said again as the longest time away (unknown, as a resume with no
-                // idle reading), which locks unless nothing an idle time says can lock.
-                self.cover = Cover::Held;
-                self.away = Some(Duration::MAX);
-                self.gap_found_at = Some(now);
             } else if self.cover == Cover::Asked(looked.number) {
                 // The look that says the wake locked nothing.
                 self.cover = Cover::Off;
