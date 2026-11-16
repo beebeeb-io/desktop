@@ -348,8 +348,9 @@ pub(crate) fn handle(s: &mut State, verb: ExplorerVerb, item: &str, tx: &mut Tx)
 /// [`handle`], with the engine lookup handed in (a test's).
 pub(crate) fn handle_with(s: &mut State, verb: ExplorerVerb, item: &str, engine: Option<&dyn ItemLookup>, tx: &mut Tx) {
     // Under the wake cover the engine has not said whether the wake locks: nothing is looked up, navigated or opened
-    // behind it. The verb waits for the cover's end (review of #463, P3-7).
-    if registry::covered(s) {
+    // behind it. The verb waits for the cover's end (review of #463, P3-7). Also a verb that comes before the main
+    // window's first poll after an unannounced wake (`host::under_the_wake_cover`; review of #464, P3-1).
+    if host::under_the_wake_cover(s) {
         let account = s.shell.app.account().map(str::to_owned);
         WAITING.set(Some(Waiting {
             verb,
