@@ -340,6 +340,7 @@ impl<C: CredentialStores> Engine<C> {
                     if guarded {
                         // A lock decided off the window's thread, a sign-out or another sign-in during the step-up:
                         // no link is mailed. Never waits (`deletion_session` only tries the session's locks).
+                        self.deletion_session(session)?;
                         sent.store(true, Ordering::SeqCst);
                     }
                     let response = self.send_deletion_call(token, &request).await;

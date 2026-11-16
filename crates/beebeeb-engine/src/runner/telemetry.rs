@@ -66,7 +66,7 @@ impl AuthHealth {
             }
             Some(_) => false,
         };
-        self.stamp_fed_if(decided);
+        self.stamp_fed_if(true);
     }
 
     /// Record the outcome of one of the engine's own API calls (the heartbeat, the sync tick's pull, the paused
@@ -75,7 +75,7 @@ impl AuthHealth {
     /// answer adds one. Anything else (offline, a 5xx, a body that did not read) leaves the run as it is.
     pub(super) fn note_api_answer(&self, error: Option<&anyhow::Error>) {
         let decided = self.count_api_answer(error);
-        self.stamp_fed_if(decided);
+        self.stamp_fed_if(true);
     }
 
     /// Task 2535: record the answer of the account's session watch (`app::session_watch`), counted and cleared
@@ -156,7 +156,7 @@ impl AuthHealth {
         } else {
             false
         };
-        self.stamp_fed_if(decided);
+        self.stamp_fed_if(true);
     }
 }
 
