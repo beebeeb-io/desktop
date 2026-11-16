@@ -12,6 +12,10 @@
 //! per answer. The end-session switch models "the server refuses this account's sessions", not "this one session was
 //! revoked": the account has one token, so a password sign-in after the end gets the same refused token back.
 //!
+//! It also serves a device sign-in ([`start_fixture`], `fake_device_signin`): the socket on its own port that a TEST
+//! build opens to be signed in by another device, the approving device's routes, and a second device that a check
+//! script drives with one control call (approve, deny as the fixture, or try to approve as another account).
+//!
 //! The binary (`src/test_api/bin_main.rs`) is built only with `--features fake-server`, which implies `test-support`:
 //! the default feature set never builds it, a release profile refuses to compile it (`lib.rs`), and no app enables it
 //! (`tests/fake_server.rs` reads the manifests and the packaging scripts).
@@ -30,7 +34,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::fake_account::{FakeAccount, TEST_PHRASE, account_handler, add_sample_tree};
-use super::{FAKE_API_MARK, FakeApi, Handler, Reply, Request};
+use super::fake_device_signin::DeviceSignIn;
+use super::{FAKE_API_MARK, FakeApi, Handler, Reply, Request, SocketRoute};
 
 /// The fixture account's email: a reserved name that can never be a real address (RFC 2606 `.invalid`).
 pub const FIXTURE_EMAIL: &str = "fixture@example.invalid";
@@ -48,6 +53,14 @@ pub const UPLOADS_OFF_LINE: &str = "uploads-off";
 pub const NEWER_VERSION_ROUTE: &str = "POST /fake-control/newer-version";
 /// The control route that turns the refusal of uploads on or off.
 pub const UPLOADS_REFUSED_ROUTE: &str = "POST /fake-control/uploads-refused";
+/// The control route where the second device approves a waiting device sign-in (`fake_device_signin`).
+pub const DEVICE_APPROVE_ROUTE: &str = "POST /fake-control/device-approve";
+/// The control route where the second device denies a waiting device sign-in.
+pub const DEVICE_DENY_ROUTE: &str = "POST /fake-control/device-deny";
+/// The control route that sets the life of the device sign-in codes issued after it.
+pub const DEVICE_CODE_LIFE_ROUTE: &str = "POST /fake-control/device-code-life";
+/// The control route that says how many device sign-ins wait.
+pub const DEVICE_REQUESTS_ROUTE: &str = "GET /fake-control/device-requests";
 /// `--max-seconds` when it is not given.
 pub const DEFAULT_MAX_SECONDS: u64 = 3600;
 const MAX_SECONDS: u64 = 86_400;
@@ -65,6 +78,11 @@ stderr. Two more lines are switches, each set until the server stops:
 reached for them (the same switch: POST /fake-control/uploads-refused with a JSON body {refused: true or false} sets it either way).
 Control, one HTTP call each, no token, loopback only: POST /fake-control/newer-version with a JSON body of file_id
 or path, and content_text or content_base64, saves a newer version of that file as another device would.
+A device sign-in: the app's socket (GET /api/v1/auth/cli) is served on this port and shows a code. A second device
+approves it: POST /fake-control/device-approve with {code: XXXX-XXXX} (or {} for the one waiting request); with
+{approver: stranger} another account tries and is refused. POST /fake-control/device-deny denies it the same way.
+POST /fake-control/device-code-life with {seconds: 1-300} sets the life of the codes issued after it (default 300).
+GET /fake-control/device-requests answers {waiting: n}. No code is written to a line.
 A development binary: built only with --features fake-server, never in a release profile, never in an app.";
 
 /// What the command line asked for.
@@ -225,11 +243,50 @@ pub fn fixture_handler(
     served: Arc<AtomicU64>,
     switches: Switches,
 ) -> Handler {
+    fixture_handler_with(
+        account,
+        lines,
+        served,
+        switches,
+        Arc::new(DeviceSignIn::new(FIXTURE_PASSWORD)),
+    )
+}
+
+/// The fixture account served as `bb-fake-server` serves it: [`fixture_handler`]'s routes, and the device sign-in's
+/// socket on the same listener ([`DeviceSignIn::socket`]; its access line is `GET /api/v1/auth/cli -> 101`).
+pub fn start_fixture(
+    listener: TcpListener,
+    account: Arc<FakeAccount>,
+    lines: LineWriter,
+    served: Arc<AtomicU64>,
+    switches: Switches,
+) -> io::Result<FakeApi> {
+    let device = Arc::new(DeviceSignIn::new(FIXTURE_PASSWORD));
+    let handler = fixture_handler_with(account, lines.clone(), served.clone(), switches, device.clone());
+    let sockets: SocketRoute = Arc::new(move |request: &Request| {
+        let take = device.socket(request)?;
+        served.fetch_add(1, Ordering::SeqCst);
+        lines(&access_line(request, 101));
+        Some(take)
+    });
+    FakeApi::start_on_with_sockets(listener, handler, sockets)
+}
+
+/// [`fixture_handler`] with the device sign-in routes of `device` (the API's and the second device's controls).
+fn fixture_handler_with(
+    account: Arc<FakeAccount>,
+    lines: LineWriter,
+    served: Arc<AtomicU64>,
+    switches: Switches,
+    device: Arc<DeviceSignIn>,
+) -> Handler {
     let routes = account_handler(account.clone());
     // The photo-preview routes (PREV-1), with one line per stored preview for the native check.
     let previews = super::fake_previews::PreviewRoutes::new(account.clone());
     Arc::new(move |request: &Request| {
-        let reply = if let Some(reply) = control(&account, &switches, request) {
+        let reply = if let Some(reply) = device.control(&account, request, &*lines) {
+            reply
+        } else if let Some(reply) = control(&account, &switches, request) {
             reply
         } else if switches.uploads_off.load(Ordering::SeqCst) && is_upload_call(request) {
             Reply::hang_up()
@@ -240,6 +297,8 @@ pub fn fixture_handler(
         } else if is_sign_in_leg(request) && !names_email(request, &account.email) {
             Reply::json(401, json!({}))
         } else if let Some(reply) = previews.answer(request) {
+            reply
+        } else if let Some(reply) = device.answer(&account, request) {
             reply
         } else {
             routes(request)
@@ -428,7 +487,6 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> ExitCode {
     let switches = Switches::default();
     let lines: LineWriter = Arc::new(say);
     let account = fixture_account();
-    let handler = fixture_handler(account, lines, served.clone(), switches.clone());
     let listener = match bind(options.listen) {
         Ok(listener) => listener,
         Err(error) => {
@@ -439,7 +497,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let fake = match FakeApi::start_on(listener, handler) {
+    let fake = match start_fixture(listener, account, lines, served.clone(), switches.clone()) {
         Ok(fake) => fake,
         Err(error) => {
             say(&format!("bb-fake-server: could not start: {error}"));
