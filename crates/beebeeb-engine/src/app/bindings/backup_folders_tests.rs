@@ -78,6 +78,20 @@ fn laid_out(dir: &Path) -> StateDb {
     db
 }
 
+/// The tag an earlier build wrote for a folder added while its owner's id was not known: the plain digest of
+/// `email:<canonical address>`, spelled out here (not through the code under test).
+fn old_address_tag(canonical: &str) -> String {
+    crate::hexfmt::encode(&Sha256::digest(format!("email:{canonical}").as_bytes()))
+}
+
+/// Known folders' locations for the tests: Documents at `documents`, every other known folder nowhere.
+fn documents_at(documents: &Path) -> impl Fn(&str) -> KnownFolderPaths + '_ {
+    move |key| KnownFolderPaths {
+        default: (key == "documents").then(|| documents.to_path_buf()),
+        current: None,
+    }
+}
+
 /// A folder [`me`] chose.
 fn chosen(name: &str, path: PathBuf) -> ChosenFolder {
     ChosenFolder {
@@ -649,13 +663,15 @@ fn chosen_folders_are_the_choosing_accounts_alone() {
     assert_eq!(chosen_for(&all, None), Vec::<ChosenFolder>::new());
     assert!(!is_owners(&earlier, Some(&me())) && !is_owners(&earlier, Some(&other)));
 
-    // A tag made from the email alone still matches the owner whose record later has the id too.
+    // P3-5: no tag is made from an address, and an earlier build's address tag is nobody's on a read (its own
+    // account's start re-tags it: `an_address_tag_is_retagged_by_its_own_accounts_id_alone`).
     let by_email = Identity::new(None, Some("Other@Example.invalid"));
+    assert_eq!(owner_tag(&by_email), None, "no tag from an address");
     let tagged_by_email = ChosenFolder {
-        owner: owner_tag(&by_email),
+        owner: Some(old_address_tag("other@example.invalid")),
         ..chosen("Maps", dir.path().join("Maps"))
     };
-    assert!(is_owners(&tagged_by_email, Some(&other)));
+    assert!(!is_owners(&tagged_by_email, Some(&other)));
     assert!(!is_owners(&tagged_by_email, Some(&me())));
     let tag = owner_tag(&other).unwrap();
     assert!(
@@ -814,4 +830,312 @@ fn with_no_layout_a_new_name_skips_every_devices_backup_names() {
     let mut config = DesktopConfig::default();
     let key = add_to(&mut config, &projects, &backup_folder_names(&db).unwrap(), &me()).unwrap();
     assert_eq!(key, "custom:Projects (2)", "the kept Projects is never written into");
+}
+
+// ── Review of #464: P3-3 (the rule follows the known folder's switch), P3-5 (c) (tags by id alone), P3-6 ───────────
+
+/// P3-6: the rule's one comparison. The same folder, inside, holding, or apart (a sibling whose name only starts the
+/// same way); the same folder is found before a folder that holds it, whatever their order.
+#[test]
+fn nesting_is_the_same_folder_inside_or_holding_and_the_same_comes_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Invented Drive");
+    let home = dir.path().join("Home");
+    let documents = home.join("Documents");
+    let work = documents.join("Work");
+    let sibling = home.join("Documents Old");
+    for folder in [&root, &work, &sibling] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    assert_eq!(nesting(&documents, &documents), Some(Nesting::Same));
+    assert_eq!(nesting(&work, &documents), Some(Nesting::Inside));
+    assert_eq!(nesting(&home, &documents), Some(Nesting::Holds));
+    assert_eq!(nesting(&sibling, &documents), None, "a name prefix is not nesting");
+    assert_eq!(nesting(&documents, Path::new("Documents")), None);
+
+    let taken = [home.clone(), documents.clone()];
+    let found = nested_with(&documents, &taken, PathBuf::as_path);
+    assert_eq!(found, Some((Nesting::Same, &documents)), "the same folder first");
+    assert_eq!(
+        check_chosen(&documents, &root, &taken),
+        Err(AddRefused::AlreadyBackedUp)
+    );
+}
+
+/// P3-3, the add: a known folder that is off backs nothing up, so a folder inside it, or one that holds it, may be
+/// chosen; while it is on, both are refused, and the add's re-check under the settings lock reads the switch from the
+/// file it holds. The known folder itself is switched, never added: refused with words that are true whether it is
+/// on or off.
+#[test]
+fn a_folder_inside_a_known_folder_follows_its_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Invented Drive");
+    let home = dir.path().join("Home");
+    let documents = home.join("Documents");
+    let projects = documents.join("Projects");
+    for folder in [&root, &projects] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let paths = || documents_at(&documents);
+
+    // Off: inside it, and holding it, may be chosen; the folder itself is "in the list already".
+    let mut off = DesktopConfig::default();
+    let taken = taken_paths_with(&off, &me(), paths());
+    assert!(taken.is_empty(), "a known folder that is off takes no folder");
+    assert_eq!(check_chosen(&projects, &root, &taken), Ok(()));
+    assert_eq!(check_chosen(&home, &root, &taken), Ok(()));
+    assert_eq!(
+        add_to_with(&mut off.clone(), &documents, &[], &me(), paths()),
+        Err(AddRefused::KnownFolderOff)
+    );
+    assert_eq!(
+        AddRefused::KnownFolderOff.words(),
+        "This folder is in the list already. Switch it on there to back it up."
+    );
+    let key = add_to_with(&mut off, &projects, &[], &me(), paths()).unwrap();
+    assert_eq!(key, "custom:Projects");
+
+    // On: refused both ways, and the folder itself is backed up already.
+    let mut on = DesktopConfig::default();
+    on.set_known_folder("documents", true);
+    let taken = taken_paths_with(&on, &me(), paths());
+    assert_eq!(taken, vec![documents.clone()]);
+    assert_eq!(check_chosen(&projects, &root, &taken), Err(AddRefused::InsideBackedUp));
+    assert_eq!(check_chosen(&home, &root, &taken), Err(AddRefused::HoldsBackedUp));
+    assert_eq!(
+        check_chosen(&documents, &root, &taken),
+        Err(AddRefused::AlreadyBackedUp)
+    );
+
+    // The rule ran while Documents was off, and the switch landed before the add's write: the re-check refuses.
+    assert_eq!(
+        add_to_with(&mut on, &projects, &[], &me(), paths()),
+        Err(AddRefused::InsideBackedUp)
+    );
+    assert_eq!(
+        add_to_with(&mut on, &home, &[], &me(), paths()),
+        Err(AddRefused::HoldsBackedUp)
+    );
+    assert!(on.backup_chosen_folders.is_empty(), "a refused add writes nothing");
+    assert_eq!(
+        AddRefused::InsideBackedUp.words(),
+        "This folder is inside a folder that is backed up already."
+    );
+}
+
+/// P3-3, the switch: a known folder is not switched on while a chosen folder of the account's inside it (or holding
+/// it) is backed up, and the refusal names that folder. A stopped chosen folder does not block, and "Back up again" on
+/// it is then refused while the known folder is on, naming the known folder. Another account's chosen folder and an
+/// untagged one are never compared nor named.
+#[test]
+fn a_known_folder_is_not_switched_on_over_a_chosen_folder_that_is_backed_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("Home");
+    let documents = home.join("Documents");
+    let projects = documents.join("Projects");
+    std::fs::create_dir_all(&projects).unwrap();
+    let paths = || documents_at(&documents);
+    let mine = chosen("Projects", projects.clone());
+
+    // Projects is backed up: Documents is refused, naming it.
+    let config = settings_with(&[&mine]);
+    let refused = switch_on_refusal_with(&config, "documents", Some(&me()), paths()).unwrap();
+    assert_eq!(
+        refused,
+        SwitchRefused {
+            other: "Projects".into(),
+            how: Nesting::Holds
+        }
+    );
+    assert_eq!(
+        refused.words(),
+        "This folder holds Projects, which is backed up already. Stop backing up Projects first, so nothing is \
+         backed up twice. Nothing was changed."
+    );
+    // A chosen folder that holds Documents blocks it too.
+    let everything = chosen("Home", home.clone());
+    let refused = switch_on_refusal_with(&settings_with(&[&everything]), "documents", Some(&me()), paths()).unwrap();
+    assert_eq!((refused.other.as_str(), refused.how), ("Home", Nesting::Inside));
+
+    // Projects stopped (its switch off): Documents may be switched on; then "Back up again" on Projects is refused.
+    let mut stopped = settings_with(&[&mine]);
+    stopped.set_known_folder("custom:Projects", false);
+    assert_eq!(
+        switch_on_refusal_with(&stopped, "documents", Some(&me()), paths()),
+        None
+    );
+    stopped.set_known_folder("documents", true);
+    let refused = switch_on_refusal_with(&stopped, "custom:Projects", Some(&me()), paths()).unwrap();
+    assert_eq!(
+        refused,
+        SwitchRefused {
+            other: "Documents".into(),
+            how: Nesting::Inside
+        }
+    );
+    assert_eq!(
+        refused.words(),
+        "This folder is inside Documents, which is backed up already, so its files are in that backup. Nothing was \
+         changed."
+    );
+
+    // Another account's folder, or an untagged one, inside Documents: never compared, never named.
+    let other = Identity::new(Some("u-other"), None);
+    let theirs = ChosenFolder {
+        owner: owner_tag(&other),
+        ..chosen("Projects", projects.clone())
+    };
+    let untagged = ChosenFolder {
+        owner: None,
+        ..chosen("Projects", projects.clone())
+    };
+    for folder in [&theirs, &untagged] {
+        let config = settings_with(&[folder]);
+        assert_eq!(switch_on_refusal_with(&config, "documents", Some(&me()), paths()), None);
+    }
+    // No owner known: no chosen folder is compared.
+    assert_eq!(switch_on_refusal_with(&config, "documents", None, paths()), None);
+    // A switch off is never this rule's (the caller asks only for on); a folder apart from Documents is allowed.
+    let apart = chosen("Recipes", dir.path().join("Recipes"));
+    assert_eq!(
+        switch_on_refusal_with(&settings_with(&[&apart]), "documents", Some(&me()), paths()),
+        None
+    );
+}
+
+/// P3-5 (c) (lead ruling 2026-11-16 05:47): no tag is made from an address, and an earlier build's address tag is
+/// nobody's on every read. Its own account's start re-tags it by that account's id, once; another account's start
+/// never does; a folder it would back up twice stays nobody's. After the re-tag the settings file holds no digest of the
+/// address, so a guessed address no longer confirms the folder's account.
+#[test]
+fn an_address_tag_is_retagged_by_its_own_accounts_id_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = Identity::new(Some("u-a"), Some("  Alex@Example.invalid "));
+    let b = Identity::new(Some("u-b"), Some("sam@example.invalid"));
+    let a_address = old_address_tag("alex@example.invalid");
+    let b_address = old_address_tag("sam@example.invalid");
+    let with = |name: &str, owner: Option<&str>| ChosenFolder {
+        owner: owner.map(str::to_string),
+        ..chosen(name, dir.path().join(name))
+    };
+    let a_tag = owner_tag(&a).unwrap();
+    let projects = with("Projects", Some(a_tag.as_str()));
+    let maps = with("Maps", Some(a_address.as_str()));
+    let notes = ChosenFolder {
+        owner: Some(a_address.clone()),
+        ..chosen("Notes", dir.path().join("Projects").join("Notes"))
+    };
+    let recipes = with("Recipes", Some(b_address.as_str()));
+    let letters = with("Letters", None);
+    let mut config = settings_with(&[&projects, &maps, &notes, &recipes, &letters]);
+    let tags = |config: &DesktopConfig| -> Vec<Option<String>> {
+        config
+            .backup_chosen_folders
+            .iter()
+            .map(|folder| folder.owner.clone())
+            .collect()
+    };
+
+    // Before any start: an address tag is nobody's.
+    assert_eq!(
+        chosen_for(&config.backup_chosen_folders, Some(&a)),
+        vec![projects.clone()]
+    );
+    assert_eq!(
+        chosen_for(&config.backup_chosen_folders, Some(&b)),
+        Vec::<ChosenFolder>::new()
+    );
+
+    // B's start re-tags B's own folder alone.
+    assert_eq!(retag_by_id(&mut config, &b), 1);
+    let b_tag = owner_tag(&b).unwrap();
+    assert_eq!(
+        tags(&config),
+        vec![
+            Some(a_tag.clone()),
+            Some(a_address.clone()),
+            Some(a_address.clone()),
+            Some(b_tag.clone()),
+            None
+        ],
+        "another account's address-tagged folders are untouched"
+    );
+
+    // A's start: Maps takes A's id tag; Notes (inside A's Projects) stays nobody's; nothing else changes.
+    assert_eq!(retag_by_id(&mut config, &a), 1);
+    assert_eq!(
+        tags(&config),
+        vec![
+            Some(a_tag.clone()),
+            Some(a_tag.clone()),
+            Some(a_address.clone()),
+            Some(b_tag.clone()),
+            None
+        ]
+    );
+    let names = |owner: &Identity| -> Vec<String> {
+        chosen_for(&config.backup_chosen_folders, Some(owner))
+            .into_iter()
+            .map(|folder| folder.name)
+            .collect()
+    };
+    assert_eq!(
+        names(&a),
+        ["Projects", "Maps"],
+        "the address tag left is still nobody's"
+    );
+    assert_eq!(names(&b), ["Recipes"]);
+    assert_ne!(config.backup_chosen_folders[1].owner, Some(a_address.clone()));
+    assert!(
+        !tags(&config).contains(&Some(b_address.clone())),
+        "a guessed address no longer confirms B's folder"
+    );
+
+    // Once: a second start changes nothing. Without the id, or without the address, nothing is re-tagged.
+    assert_eq!(retag_by_id(&mut config, &a), 0);
+    let before = tags(&config);
+    assert_eq!(
+        retag_by_id(&mut config, &Identity::new(None, Some("alex@example.invalid"))),
+        0
+    );
+    assert_eq!(retag_by_id(&mut config, &Identity::new(Some("u-a"), None)), 0);
+    assert_eq!(tags(&config), before);
+
+    // No path makes an address tag: an add for an account whose id is not known writes nothing.
+    let folder = dir.path().join("Drafts");
+    std::fs::create_dir_all(&folder).unwrap();
+    assert_eq!(
+        add_to(
+            &mut config,
+            &folder,
+            &[],
+            &Identity::new(None, Some("alex@example.invalid"))
+        ),
+        Err(AddRefused::Backups(BackupsError::Refused(
+            LocalStateRefused::IdentityUnknown
+        )))
+    );
+    assert_eq!(config.backup_chosen_folders.len(), 5);
+}
+
+/// P3-5 (c), the start's write: the re-tag runs on the settings file under its lock, writes once, and a second start
+/// finds nothing to change.
+#[test]
+fn the_start_retags_the_settings_file_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("desktop.toml");
+    let a = Identity::new(Some("u-a"), Some("alex@example.invalid"));
+    let maps = ChosenFolder {
+        owner: Some(old_address_tag("alex@example.invalid")),
+        ..chosen("Maps", dir.path().join("Maps"))
+    };
+    DesktopConfig::update_at(&file, |config| {
+        config.backup_chosen_folders = vec![maps.clone()];
+        (true, ())
+    })
+    .unwrap();
+    assert_eq!(retag_in(&file, &a), Ok(1));
+    let read = DesktopConfig::update_at(&file, |config| (false, config.backup_chosen_folders.clone())).unwrap();
+    assert_eq!(read[0].owner, owner_tag(&a));
+    assert_eq!(retag_in(&file, &a), Ok(0));
 }

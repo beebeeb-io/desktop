@@ -832,6 +832,8 @@ impl<C: CredentialStores> Engine<C> {
             let data = self.local_data_for_start(&sync_root, &identity)?;
             account_binding::bind_before_engine_start(&data, &identity, false)
                 .map_err(|error| self.proof_owed_on(SyncStartRefused::of_binding(&error), &sync_root))?;
+            // P3-5: this account's chosen folders an earlier build tagged by its address take its id tag.
+            crate::app::bindings::backup_folders::retag_at_start(self.identity, &identity);
             self.settle_an_interrupted_keep(data, &sync_root, &slot);
             // (8) The folder exists.
             crate::config::ensure_directory(&sync_root).map_err(|_| SyncStartRefused::Other)?;
