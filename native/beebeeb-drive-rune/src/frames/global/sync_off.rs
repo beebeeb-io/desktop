@@ -65,7 +65,8 @@ pub struct SyncOff {
 pub enum Action {
     /// Close the modal and ask for one start.
     TryAgain,
-    /// Quit the app (a restart is the fix).
+    /// Quit the app (a restart is the fix). No refusal needs it since the unconfirmed stop clears by itself.
+    #[allow(dead_code)]
     Quit,
     Close,
 }
@@ -93,7 +94,6 @@ pub struct Words {
 }
 
 const RETRY: &[Action] = &[Action::TryAgain, Action::Close];
-const RESTART: &[Action] = &[Action::Quit, Action::Close];
 const NO_FIX: &[Action] = &[Action::Close];
 const SUPPORT: &str = "support@beebeeb.io";
 
@@ -161,13 +161,13 @@ pub fn words(off: &SyncOff, product: &str) -> Words {
             NO_FIX,
         ),
         Refused::StopUnconfirmed => (
-            format!("Quit and reopen {product}"),
+            "Sync is still finishing".to_string(),
             format!(
-                "Sync didn\u{2019}t confirm that it stopped, so it can\u{2019}t start again until {product} \
-                 restarts. Nothing was changed."
+                "The last stop of sync hasn\u{2019}t finished yet, so {product} didn\u{2019}t start it again. \
+                 Nothing was changed."
             ),
-            format!("Quit {product}, then open it again."),
-            RESTART,
+            "Try again in a moment.".to_string(),
+            RETRY,
         ),
         Refused::StateInUse => (
             "Another program is syncing".to_string(),
