@@ -213,6 +213,8 @@ pub struct AwayLock {
     resumed: bool,
     /// The window's content is covered (D-B2-3).
     cover: Cover,
+    /// The look that says the wake failed once already: a second failure lifts the cover (see `measure`).
+    failed_wake: bool,
     /// Whether the cover was on when the last poll ended: a cover turned on between two polls (the tray's resume, a
     /// click on the b) still gets the instant commit of the poll that follows.
     polled_cover: bool,
@@ -243,6 +245,7 @@ impl Default for AwayLock {
             gap_found_at: None,
             resumed: false,
             cover: Cover::Off,
+            failed_wake: false,
             polled_cover: false,
             could_lock: true,
             tells: WakeCover::shell(),
@@ -360,11 +363,19 @@ impl AwayLock {
                 // The look that says the wake failed: the engine decided nothing (P3-2, fail closed). The cover holds,
                 // and after the grace the wake is said again as the longest time away (unknown, as a resume with no
                 // idle reading), which locks unless nothing an idle time says can lock.
-                self.cover = Cover::Held;
-                self.away = Some(Duration::MAX);
-                self.gap_found_at = Some(now);
+                // Once only: a retry that fails too ends the cover (a look that fails every time must not hold the
+                // window under a lock screen that cannot unlock, forever).
+                if std::mem::replace(&mut self.failed_wake, true) {
+                    self.failed_wake = false;
+                    self.cover = Cover::Off;
+                } else {
+                    self.cover = Cover::Held;
+                    self.away = Some(Duration::MAX);
+                    self.gap_found_at = Some(now);
+                }
             } else if self.cover == Cover::Asked(looked.number) {
                 // The look that says the wake locked nothing.
+                self.failed_wake = false;
                 self.cover = Cover::Off;
             }
         }
@@ -380,6 +391,7 @@ impl AwayLock {
             self.gap_found_at = None;
             self.resumed = false;
             self.could_lock = true;
+            self.failed_wake = false;
             if self.cover != Cover::Off {
                 self.cover = Cover::Locked;
             }

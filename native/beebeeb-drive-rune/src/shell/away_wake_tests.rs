@@ -416,3 +416,36 @@ fn the_lock_the_poll_reads_takes_the_files_away_in_the_frame_that_shows_it() {
 fn a_lock_read_between_two_polls_takes_the_files_away_in_the_frame_that_shows_it() {
     the_first_locked_frame_holds_no_file_name(true);
 }
+
+/// A look that fails EVERY time (an engine that panics on each look) does not hold the cover forever: the first failure
+/// fails closed (the wake said again as the longest time away), the retry's failure lifts the cover.
+/// Mutant: drop the `failed_wake` check in `measure` -> the cover stays and `until` times out.
+#[test]
+fn an_always_failing_look_does_not_hold_the_cover_forever() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    idle_for(&mut live, Duration::from_secs(60));
+    looked(&mut live);
+    let failing = Scripted::over(&live, None, true);
+    live.rt.update(|s, _| {
+        s.shell.actions = failing.clone();
+        s.shell
+            .away
+            .event(Away::Idle(Duration::from_secs(3 * 60)), &failing, None)
+    });
+    assert!(away(&mut live.rt).covers(), "the resume covers at once");
+    until(&mut live, "the cover held after the retry failed too", |live| {
+        !live.rt.state.shell.away.covers()
+    });
+    assert!(away(&mut live.rt).looks >= 2, "the failed look and the failed retry");
+}
+
+/// `Shell::covered` is `registry::covered`'s predicate, not a copy.
+#[test]
+fn the_shells_cover_is_the_registrys() {
+    let mut live = live();
+    until_drawn(&mut live, FILE_NAME);
+    assert_eq!(live.rt.state.shell.covered(), registry::covered(&live.rt.state));
+    live.rt.update(|s, _| s.shell.away.cover_a_gap_not_yet_found());
+    assert_eq!(live.rt.state.shell.covered(), registry::covered(&live.rt.state));
+}

@@ -402,12 +402,8 @@ impl Shell {
 
     /// The window is covered by the away lock's cover over an open engine's gate: the same predicate as
     /// `registry::covered`, read where only the shell is at hand (a click on the b).
-    fn covered(&self) -> bool {
-        self.away.covers()
-            && matches!(
-                self.app.gate(),
-                super::app::GateState::Ready | super::app::GateState::FirstRun | super::app::GateState::NoPlan
-            )
+    pub(crate) fn covered(&self) -> bool {
+        registry::covered_over(&self.away, &self.app)
     }
 
     /// Remembers where the main window is, for the next start. Called before it closes.
