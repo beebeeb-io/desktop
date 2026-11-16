@@ -670,7 +670,6 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         changed |= super::platform::windows_verbs::after_the_cover(s, tx);
     }
     // The same for a picked folder and an ask to show a place (`intents`, review of #464, P3-1).
-    changed |= super::intents::after_the_cover(s);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {

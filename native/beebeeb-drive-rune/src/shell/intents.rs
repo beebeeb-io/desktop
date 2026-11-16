@@ -211,6 +211,10 @@ pub fn take_picked_folder(s: &mut State, tx: &mut Tx) -> bool {
         }
         // Under the wake cover the engine has not said whether the wake locks: nothing is added behind it. The
         // folder waits for the cover's end (review of #464, P3-1).
+        Some(Ok(Some(folder))) if super::host::under_the_wake_cover(s) => {
+            HELD_FOLDER.set(Some(HeldFolder { asker, account, folder }));
+            log("a picked folder waits for the lock screen");
+        }
         Some(Ok(Some(folder))) => hand_folder(s, asker, &folder),
         Some(Ok(None)) => {}
         Some(Err(error)) => log(format!("the folder picker did not open ({error})")),
