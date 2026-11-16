@@ -729,7 +729,7 @@ fn diagnostics_group_labels_outside_the_allow_list_become_other() {
     let diagnostics = db.queue_diagnostics(200).unwrap();
     let exported = serde_json::to_string(&diagnostics).unwrap();
     assert!(!exported.contains("Tax"), "{exported}");
-    assert!(!exported.contains("guus"), "{exported}");
+    assert!(!exported.contains("alice"), "{exported}");
     assert!(!exported.contains("aangifte"), "{exported}");
     assert_eq!(diagnostics.by_kind.get("other"), Some(&1), "{exported}");
     assert_eq!(diagnostics.by_kind.get("upload_version"), Some(&1), "{exported}");

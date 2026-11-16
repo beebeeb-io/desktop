@@ -35,7 +35,7 @@ fn test_macos_ipc_socket_path_fits_sun_path_length_budget() {
     // sockaddr_un.sun_path on macOS is 104 bytes INCLUDING the NUL
     // terminator (<sys/un.h>), so the usable path length is 103 bytes.
     // Exercise a realistically long macOS short username (20 chars,
-    // longer than this dev machine's own "guuslangelaar" at 13, and
+    // longer than a typical short username of about a dozen, and
     // longer than macOS's own 20-char "short name" convention allows in
     // most default cases) to prove there is real headroom, not a value
     // that only happens to fit this one machine. Built by repetition
