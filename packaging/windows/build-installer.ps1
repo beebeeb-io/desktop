@@ -18,11 +18,13 @@
   A release binary is installed as beebeeb-desktop.exe, the name 0.8.x installed: the autostart entry, the
   shortcuts, the Explorer integration and 0.8.x's own updater all point at that file name (spec section 3).
 
-  The script needs NSIS 3.11 (makensis.exe) and nsis_tauri_utils.dll 0.5.3 (the NSIS helper plugin the 0.8.x
-  installer already carries: process lookup, semver compare, start-as-user). Both are in the Tauri toolchain cache of
-  a PC that has built 0.8.x (%LOCALAPPDATA%\tauri\NSIS). The plugin, the compiler (Bin\makensis.exe) and the stub it
-  packs into the installer (Stubs\lzma_solid-x86-unicode) are checked by SHA-256: release mode refuses anything but
-  NSIS 3.11 as released; test mode says so and goes on.
+  The script needs an installed NSIS 3.11 (makensis.exe) and nsis_tauri_utils.dll 0.5.3 (the NSIS helper plugin the
+  0.8.x installer already carries: process lookup, semver compare, start-as-user). NSIS is looked for in this order:
+  -NsisDir, the BEEBEEB_NSIS_DIR environment variable, then C:\Program Files (x86)\NSIS (and Program Files). The
+  Tauri toolchain cache is no longer looked at. The plugin comes from -PluginDir, the BEEBEEB_NSIS_PLUGIN_DIR
+  environment variable, or <NSIS folder>\Plugins\x86-unicode\additional. The plugin, the compiler
+  (Bin\makensis.exe) and the stub it packs into the installer (Stubs\lzma_solid-x86-unicode) are checked by SHA-256:
+  release mode refuses anything but NSIS 3.11 as released; test mode says so and goes on.
 
 .EXAMPLE
   .\build-installer.ps1 -Exe C:\bb-win\native\target\release\beebeeb-drive.exe -Version 0.9.0 -Mode test
@@ -33,7 +35,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Version,
   [ValidateSet('test', 'release')][string]$Mode = 'test',
   [string]$OutDir = (Join-Path $PSScriptRoot 'out'),
-  [string]$NsisDir = (Join-Path $env:LOCALAPPDATA 'tauri\NSIS'),
+  [string]$NsisDir = '',
   [string]$PluginDir = ''
 )
 
@@ -56,11 +58,22 @@ function Fail([string]$Message) { Write-Host "FAILED $Message"; exit 1 }
 
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { Fail "version '$Version' must be plain semver like 0.9.0" }
 if (!(Test-Path -LiteralPath $Exe -PathType Leaf)) { Fail "no binary at $Exe" }
+# NSIS: -NsisDir, then BEEBEEB_NSIS_DIR, then an installed NSIS under Program Files.
+$nsisHint = 'install NSIS 3.11 from its official release (nsis.sourceforge.io) and pass -NsisDir <folder>, or set BEEBEEB_NSIS_DIR'
+if (!$NsisDir) { $NsisDir = $env:BEEBEEB_NSIS_DIR }
+if (!$NsisDir) {
+  $candidates = @()
+  if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} 'NSIS') }
+  if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles 'NSIS') }
+  foreach ($c in $candidates) { if (Test-Path -LiteralPath (Join-Path $c 'makensis.exe')) { $NsisDir = $c; break } }
+}
+if (!$NsisDir) { Fail "no NSIS found (looked at -NsisDir, BEEBEEB_NSIS_DIR, Program Files (x86)\NSIS, Program Files\NSIS): $nsisHint" }
 $makensis = Join-Path $NsisDir 'makensis.exe'
-if (!(Test-Path -LiteralPath $makensis)) { Fail "no makensis.exe in $NsisDir (pass -NsisDir)" }
+if (!(Test-Path -LiteralPath $makensis)) { Fail "no makensis.exe in ${NsisDir}: $nsisHint" }
+if (!$PluginDir) { $PluginDir = $env:BEEBEEB_NSIS_PLUGIN_DIR }
 if (!$PluginDir) { $PluginDir = Join-Path $NsisDir 'Plugins\x86-unicode\additional' }
 $plugin = Join-Path $PluginDir 'nsis_tauri_utils.dll'
-if (!(Test-Path -LiteralPath $plugin)) { Fail "no nsis_tauri_utils.dll in $PluginDir (pass -PluginDir)" }
+if (!(Test-Path -LiteralPath $plugin)) { Fail "no nsis_tauri_utils.dll in $PluginDir (0.5.3 from github.com/tauri-apps/nsis-tauri-utils, release nsis_tauri_utils-v0.5.3; pass -PluginDir or set BEEBEEB_NSIS_PLUGIN_DIR)" }
 $pluginHash = (Get-FileHash -LiteralPath $plugin -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($pluginHash -ne $PluginSha256) { Fail "nsis_tauri_utils.dll is not 0.5.3 (sha256 $pluginHash)" }
 foreach ($entry in $NsisSha256.GetEnumerator()) {
