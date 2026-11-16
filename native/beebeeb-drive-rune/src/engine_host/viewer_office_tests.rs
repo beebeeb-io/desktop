@@ -514,14 +514,25 @@ fn the_route_follows_both_switches() {
     assert_eq!(office_route_with("no extension", true, ALL), None);
 }
 
+/// O-CP3 turned the viewer on and shipped the five types that met 90 % of their corpus pages on Windows; `.ppt` still
+/// has no preview here (DW-1556).
 #[test]
-fn the_shipped_constants_are_off() {
-    assert!(
-        !std::hint::black_box(OFFICE_VIEWER_ON),
-        "flipped only by the O-CP3 integration lane"
+fn the_shipped_constants_are_what_o_cp3_measured() {
+    assert!(std::hint::black_box(OFFICE_VIEWER_ON));
+    assert_eq!(std::hint::black_box(OFFICE_SHIPS), ALL);
+    for (name, kind) in [
+        ("a.docx", OfficeKind::Docx),
+        ("a.doc", OfficeKind::Doc),
+        ("a.xlsx", OfficeKind::Xlsx),
+        ("a.xls", OfficeKind::Xls),
+        ("a.pptx", OfficeKind::Pptx),
+    ] {
+        assert_eq!(kinds::office_route(name), Some(OfficeRoute::Shows(kind)), "{name}");
+    }
+    assert_eq!(
+        kinds::office_route("a.ppt"),
+        Some(OfficeRoute::NoPreview(OfficeKind::Ppt))
     );
-    assert_eq!(std::hint::black_box(OFFICE_SHIPS), NONE);
-    assert_eq!(kinds::office_route("a.docx"), None);
 }
 
 #[test]

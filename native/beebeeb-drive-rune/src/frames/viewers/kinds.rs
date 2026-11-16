@@ -5,8 +5,8 @@
 //! asked of the source when it is drawn ([`Picture`]), and a source that has none answers `None`;
 //! the frame then draws its plain tile, never a sample.
 
-/// Office files open in the viewer only when O-CP3 is green; flipped by the integration lane.
-pub const OFFICE_VIEWER_ON: bool = false;
+/// Office files open in the viewer (on since O-CP3: the viewer's rungs ran on Windows; which types show is [`OFFICE_SHIPS`]).
+pub const OFFICE_VIEWER_ON: bool = true;
 
 /// A photo (DW-1501). The camera's own preview of a RAW says so in the pill.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,13 +211,15 @@ pub fn clock(seconds: u32) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// Which Office types ship (2482 Q7: ≥ 90 % of a type's corpus pages). Flipped per type by the O-CP3 integration lane.
+/// Which Office types ship (2482 Q7: ≥ 90 % of a type's corpus pages, measured on Windows). O-CP3: all five met it.
+/// `.doc` counts Word 97 and later and `.xls` Excel 97 and later; older and password-protected files show their honest
+/// state instead (the release notes say so).
 pub const OFFICE_SHIPS: OfficeShips = OfficeShips {
-    docx: false,
-    doc: false,
-    xlsx: false,
-    xls: false,
-    pptx: false,
+    docx: true,
+    doc: true,
+    xlsx: true,
+    xls: true,
+    pptx: true,
 };
 
 /// One switch per Office type the viewer may show ([`OFFICE_SHIPS`]). `.ppt` has none: it is never shown here (2482 Q5).
