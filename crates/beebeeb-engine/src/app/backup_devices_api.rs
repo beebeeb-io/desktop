@@ -645,8 +645,9 @@ impl<C: CredentialStores> Engine<C> {
 fn after_session_moved(answered: Option<&Result<(), DeleteBackupError>>) -> Result<(), DeleteBackupError> {
     match answered {
         Some(Ok(()) | Err(DeleteBackupError::Offline | DeleteBackupError::Failed("server"))) => {
-            Err(DeleteBackupError::SignedOut)
+            Err(DeleteBackupError::Failed("server"))
         }
+        Some(_) => Err(DeleteBackupError::Failed("server")),
         _ => Err(DeleteBackupError::SignedOut),
     }
 }
