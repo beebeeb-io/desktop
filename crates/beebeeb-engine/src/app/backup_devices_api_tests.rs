@@ -644,6 +644,30 @@ fn a_session_that_moves_during_the_delete_answers_that_the_backup_may_have_moved
     assert!(!refused.words().contains("Nothing was changed"), "{}", refused.words());
 }
 
+/// Every answer a delete can give once its session moved. Refused before anything could move (the password, the rule,
+/// a backup not found) or never run: signed out, and "nothing changed" is true. It may have moved the backup to Trash
+/// (done, no answer, the server's error): unconfirmed.
+#[test]
+fn a_moved_sessions_answer_is_unconfirmed_only_when_the_delete_may_have_moved_something() {
+    use DeleteBackupError::{Failed, NotABackup, NotFound, Offline, RateLimited, Refused, SignedOut, WrongPassword};
+    let cases = [
+        (None, SignedOut),
+        (Some(Err(WrongPassword)), SignedOut),
+        (Some(Err(RateLimited(30))), SignedOut),
+        (Some(Err(NotFound)), SignedOut),
+        (Some(Err(NotABackup)), SignedOut),
+        (Some(Err(Refused("invented words".into()))), SignedOut),
+        (Some(Err(Failed("state"))), SignedOut),
+        (Some(Err(SignedOut)), SignedOut),
+        (Some(Ok(())), Failed("server")),
+        (Some(Err(Offline)), Failed("server")),
+        (Some(Err(Failed("server"))), Failed("server")),
+    ];
+    for (answered, expected) in cases {
+        assert_eq!(after_session_moved(answered.as_ref()), Err(expected), "{answered:?}");
+    }
+}
+
 #[test]
 fn a_wrong_password_deletes_nothing_and_the_right_one_deletes_that_one_backup() {
     let rig = rig(Answers::default(), true);
