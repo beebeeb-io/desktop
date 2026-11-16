@@ -387,10 +387,7 @@ struct Place {
 /// then each known folder at its default and at its current location (`paths`: `kfm::known_folder_paths`, or a test's
 /// pairs), each with its switch.
 fn places(config: &DesktopConfig, owner: Option<&Identity>, paths: impl Fn(&str) -> KnownFolderPaths) -> Vec<Place> {
-    let _ = owner;
-    let mut found: Vec<Place> = config
-        .backup_chosen_folders
-        .clone()
+    let mut found: Vec<Place> = chosen_for(&config.backup_chosen_folders, owner)
         .into_iter()
         .map(|folder| Place {
             key: folder.key(),
