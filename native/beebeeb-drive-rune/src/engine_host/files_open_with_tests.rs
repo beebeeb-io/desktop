@@ -274,3 +274,68 @@ fn open_with_an_app_needs_the_copy_kept_on_this_pc() {
         Err(ActionError::Failed)
     );
 }
+
+/// What the stand-in starts saw, in order. Each takes the launch lock, as the system's own do.
+static STARTED: std::sync::Mutex<Vec<(&'static str, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+
+fn open_stand_in(path: &std::path::Path) -> Result<(), ActionError> {
+    launch::locked(|| STARTED.lock().unwrap().push(("open", path.to_path_buf())));
+    Ok(())
+}
+
+fn reveal_stand_in(path: &std::path::Path) -> Result<(), ActionError> {
+    launch::locked(|| STARTED.lock().unwrap().push(("reveal", path.to_path_buf())));
+    Ok(())
+}
+
+/// Ruling R-OW1: the window's thread never waits on the launch lock. While it is held (Windows' app chooser is open),
+/// Files' Open, Show in File Explorer and Open in File Explorer return at once, and so does the window's poll
+/// (`changes`); the starts run on the launch worker once the lock is let go, in the order asked.
+#[test]
+fn files_open_never_waits_on_the_launch_lock() {
+    use std::time::{Duration, Instant};
+    let mut set = set("a6-worker", true, true);
+    let _running = hold_running(&set.engine);
+    let root = set.engine.sync_root().expect("a sync folder");
+    set.source.starts = Starts {
+        open: open_stand_in,
+        reveal: reveal_stand_in,
+    };
+    let (holding, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let chooser = std::thread::spawn(move || {
+        launch::locked(|| {
+            holding.send(()).unwrap();
+            let _ = released.recv_timeout(Duration::from_secs(3));
+        })
+    });
+    held.recv().unwrap();
+    let notes = row(NOTES, "Invented notes.txt", false);
+    let asked_at = Instant::now();
+    assert_eq!(set.source.open(std::slice::from_ref(&notes)), Ok(()));
+    assert_eq!(set.source.show_in_file_explorer(std::slice::from_ref(&notes)), Ok(()));
+    assert_eq!(set.source.open_in_file_explorer(None), Ok(()));
+    assert!(set.source.changes().is_empty());
+    let took = asked_at.elapsed();
+    assert!(
+        took < Duration::from_millis(500),
+        "the window's thread waited {took:?} for the lock"
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        STARTED.lock().unwrap().is_empty(),
+        "nothing starts while the lock is held"
+    );
+    release.send(()).unwrap();
+    chooser.join().unwrap();
+    let waited = Instant::now();
+    while STARTED.lock().unwrap().len() < 3 && waited.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let started = STARTED.lock().unwrap().clone();
+    let kinds: Vec<&str> = started.iter().map(|(kind, _)| *kind).collect();
+    assert_eq!(kinds, ["open", "reveal", "open"], "in the order asked");
+    assert!(started[0].1.ends_with("Invented notes.txt") && started[0].1.starts_with(&root));
+    assert!(started[1].1.ends_with("Invented notes.txt"));
+    assert_eq!(started[2].1, root, "Open in File Explorer: the sync folder");
+}

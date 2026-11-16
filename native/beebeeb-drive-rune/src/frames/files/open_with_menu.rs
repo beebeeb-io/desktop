@@ -11,11 +11,12 @@
 use std::collections::BTreeSet;
 use std::sync::{Mutex, PoisonError};
 
-use rune::{El, Tx};
+use rune::{El, Key, KeyEvent, Tx};
 
 use super::source::Action;
 use super::{MenuKind, Toast};
 use crate::State;
+use crate::frames::viewers::kinds::{self, OfficeShips};
 use crate::source::DriveItem;
 use crate::theme::tokens::Theme;
 use crate::ui::menu::{self, Entry, SUBMENU};
@@ -64,44 +65,24 @@ pub(super) fn board_apps(name: &str) -> Vec<AppChoice> {
     }
 }
 
+/// What Open With keeps between frames (`Actions::open_with`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ui {
+    /// The Office switches a board scene (DW-1562) or a test turns on: the viewer on, these types shipped. `None`: the
+    /// switches as they ship (`kinds::OFFICE_VIEWER_ON`, `kinds::OFFICE_SHIPS`). Nothing in the app sets it.
+    pub board_office: Option<OfficeShips>,
+    /// The submenu's line the keyboard is on (Right-arrow went into it); `None`: the keyboard is in the file menu.
+    pub line: Option<usize>,
+}
+
 /// Does the Office viewer show a file of this name (`kinds::office_route(name)` is `Some(OfficeRoute::Shows(_))`)?
-pub fn viewer_shows(name: &str) -> bool {
-    #[cfg(test)]
-    if let Some(route) = test_route::get() {
-        return route(name);
-    }
-    office_route_shows(name)
-}
-
-/// SEAM V1-S (`origin/native/ov-viewer-glue`, not pushed when this was written): once it is merged, this body is
-/// ONE line, with `kinds` = `crate::frames::viewers::kinds`:
-/// `matches!(kinds::office_route(name), Some(kinds::OfficeRoute::Shows(_)))`.
-/// Until then the viewer shows no Office type (`kinds::OFFICE_VIEWER_ON` is off), which is what the route answers with
-/// the switches off: nothing is offered, and the file menu is as before.
-fn office_route_shows(_name: &str) -> bool {
-    false
-}
-
-/// The route a test sets: the switches on (or off) without the shipped constants (`office_route_with`, after V1-S).
-#[cfg(test)]
-pub(crate) mod test_route {
-    use std::cell::Cell;
-
-    thread_local! {
-        static ROUTE: Cell<Option<fn(&str) -> bool>> = const { Cell::new(None) };
-    }
-
-    pub(crate) fn get() -> Option<fn(&str) -> bool> {
-        ROUTE.with(Cell::get)
-    }
-
-    /// Run `f` with the route `route` on this thread, then the shipped one again.
-    pub(crate) fn with<T>(route: fn(&str) -> bool, f: impl FnOnce() -> T) -> T {
-        ROUTE.with(|cell| cell.set(Some(route)));
-        let out = f();
-        ROUTE.with(|cell| cell.set(None));
-        out
-    }
+/// Under a board scene's switches when it set them.
+pub fn viewer_shows(s: &State, name: &str) -> bool {
+    let route = match s.actions.open_with.board_office {
+        Some(ships) => kinds::office_route_with(name, true, ships),
+        None => kinds::office_route(name),
+    };
+    matches!(route, Some(kinds::OfficeRoute::Shows(_)))
 }
 
 /// The one file Open With is for: a single selected file the viewer shows, outside Backups and the service folders
@@ -109,7 +90,7 @@ pub(crate) mod test_route {
 /// before, and no submenu is drawn or picked.
 pub fn offered_for(s: &State) -> Option<DriveItem> {
     match &s.selected_items()[..] {
-        [only] if !only.is_folder && !only.is_protected && !s.protects_selection() && viewer_shows(&only.name) => {
+        [only] if !only.is_folder && !only.is_protected && !s.protects_selection() && viewer_shows(s, &only.name) => {
             Some(only.clone())
         }
         _ => None,
@@ -184,8 +165,18 @@ pub fn flyout(s: &State, t: &Theme) -> Option<El> {
     let (x, y) = at(s)?;
     let corner = s.actions.menu?.at;
     Some(
-        menu::flyout("menu-1", "Open With", SUB_W, &entries(s), t, pick, |_, _| {}, close)
-            .absolute(x - corner.0, y - corner.1),
+        menu::flyout_hot(
+            "menu-1",
+            "Open With",
+            SUB_W,
+            &entries(s),
+            line(s),
+            t,
+            pick,
+            hover,
+            close,
+        )
+        .absolute(x - corner.0, y - corner.1),
     )
 }
 
@@ -197,11 +188,98 @@ fn close(s: &mut State, tx: &mut Tx) {
     s.close_menu_tx(tx);
 }
 
+/// The pointer over a line of the submenu: it is the highlighted one (the keyboard goes on from it).
+fn hover(s: &mut State, index: usize) {
+    s.actions.open_with.line = Some(index);
+}
+
+/// The submenu's line the keyboard (or the pointer) is on, while the submenu is drawn.
+fn line(s: &State) -> Option<usize> {
+    at(s).and(s.actions.open_with.line)
+}
+
+/// Put the keyboard on the submenu's line `index`.
+fn focus_line(s: &mut State, lines: &[Entry], index: usize, tx: &mut Tx) {
+    s.actions.open_with.line = Some(index);
+    if let Some(key) = menu::item_key("menu-1", lines, index) {
+        tx.focus(key, false);
+    }
+}
+
+/// Open With's keys in the file menu (`keys.rs`, before the menu's own):
+/// - on "Open With": Right-arrow opens the submenu with its first line;
+/// - in the submenu: Up, Down, Home, End move; Enter picks; Left-arrow and Escape go back to "Open With";
+/// - Tab: from "Open With" into the submenu, then from line to line (wrapping); Shift+Tab back, and from the submenu's
+///   first line to "Open With".
+///
+/// `None`: not Open With's key (the file menu's own keys go on as before).
+pub fn key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
+    let open = s.actions.menu?;
+    if open.kind != MenuKind::File {
+        return None;
+    }
+    let Some(here) = line(s) else {
+        let on_open_with = open.hot == Some(OPEN_WITH) && at(s).is_some();
+        let goes_in = ev.key == Key::Right || (ev.key == Key::Tab && !ev.mods.shift);
+        return (goes_in && on_open_with).then(|| {
+            s.enter_open_with(tx);
+            true
+        });
+    };
+    let lines = entries(s);
+    let first = menu::step(&lines, None, 1);
+    let next = match ev.key {
+        Key::Tab if ev.mods.shift && Some(here) == first => return Some(s.leave_open_with(tx)),
+        Key::Tab if ev.mods.shift => menu::step(&lines, Some(here), -1),
+        Key::Tab => menu::step(&lines, Some(here), 1),
+        Key::Down => menu::step(&lines, Some(here), 1),
+        Key::Up => menu::step(&lines, Some(here), -1),
+        Key::Home => menu::step(&lines, None, 1),
+        Key::End => menu::step(&lines, None, -1),
+        Key::Enter => {
+            s.pick_open_with(here, tx);
+            return Some(true);
+        }
+        Key::Left | Key::Escape => return Some(s.leave_open_with(tx)),
+        Key::Right => return Some(true),
+        _ => return None,
+    };
+    if let Some(next) = next {
+        focus_line(s, &lines, next, tx);
+    }
+    Some(true)
+}
+
 impl State {
-    /// "Open With" picked in the file menu: the menu stays, its apps beside it.
-    pub fn show_open_with(&mut self) {
+    /// "Open With" picked in the file menu: the menu stays, its apps beside it. Picked with Enter, the keyboard goes
+    /// into the submenu, on its first line (as Right-arrow does).
+    pub fn show_open_with(&mut self, tx: &mut Tx) {
         if let Some(open) = self.actions.menu.as_mut() {
             open.hot = Some(OPEN_WITH);
+        }
+        if tx.by_keys() {
+            self.enter_open_with(tx);
+        }
+    }
+
+    /// The keyboard out of the submenu, back on "Open With" (the submenu stays drawn beside it). Always handled.
+    fn leave_open_with(&mut self, tx: &mut Tx) -> bool {
+        self.actions.open_with.line = None;
+        let menu_lines = self.menu_entries(MenuKind::File);
+        if let Some(key) = menu::item_key("menu", &menu_lines, OPEN_WITH) {
+            tx.focus(key, false);
+        }
+        true
+    }
+
+    /// The keyboard into the submenu, on its first line.
+    pub fn enter_open_with(&mut self, tx: &mut Tx) {
+        if let Some(open) = self.actions.menu.as_mut() {
+            open.hot = Some(OPEN_WITH);
+        }
+        let lines = entries(self);
+        if let Some(first) = menu::step(&lines, None, 1) {
+            focus_line(self, &lines, first, tx);
         }
     }
 

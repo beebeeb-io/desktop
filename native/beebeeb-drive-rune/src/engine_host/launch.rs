@@ -7,20 +7,19 @@
 //! (`ShellExecuteW`, `SHOpenWithDialog`, an Open With handler's `Invoke`). `launch_tests.rs` scans the crate for a
 //! start outside them.
 //!
-//! The lock is taken around the start itself, never across an enumeration or a wait for an answer.
+//! The lock is taken around the start itself, never across an enumeration or a wait for an answer. It is NOT
+//! re-entrant: nothing that holds it starts another process.
+//!
+//! The window's thread never waits for it (ruling R-OW1): Windows' app chooser holds it for as long as it is open (it
+//! starts the app picked inside its own call), so the starts the window asks for go to one worker, [`Later`].
 
 use std::io;
 use std::process::{Child, Command};
+use std::sync::mpsc;
 
-/// The lock every start of the app holds.
-///
-/// SEAM H1-S (`origin/native/ov-hardening-sandbox`, not pushed when this was written): once it is merged, this body
-/// is ONE line, `beebeeb_office_sandbox::launch_lock()`, the lock `Sandbox::spawn` takes before it starts a helper.
-/// Until then this is a lock of this crate's own: it orders the app's own starts among themselves, and NOT against a
-/// helper's start, so F11 stays open until H1-S is in. A poisoned lock is still a lock (as the sandbox's own).
-fn hold() -> impl Sized {
-    static LAUNCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LAUNCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+/// The lock every start of the app holds: the one `Sandbox::spawn` takes before it starts a helper (H1-S).
+fn hold() -> beebeeb_office_sandbox::LaunchGuard {
+    beebeeb_office_sandbox::launch_lock()
 }
 
 /// Start `cmd`, holding the launch lock while it starts.
@@ -38,6 +37,50 @@ pub(crate) fn spawn_by<T>(cmd: &mut Command, start: impl FnOnce(&mut Command) ->
 pub(crate) fn locked<T>(f: impl FnOnce() -> T) -> T {
     let _held = hold();
     f()
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+
+/// One worker for the starts the window asks for (Open, Show in File Explorer): they run there one at a time, in the
+/// order asked, each under the launch lock (its start takes it). The window's thread hands a start over and returns:
+/// it never waits for the lock. The worker starts with the first start, and again if it ever ended.
+#[derive(Default)]
+pub(crate) struct Later {
+    jobs: Option<mpsc::Sender<Job>>,
+}
+
+impl Later {
+    /// Hand `job` to the worker. `Err`: no worker could be started; nothing will run.
+    pub(crate) fn run(&mut self, job: impl FnOnce() + Send + 'static) -> Result<(), ()> {
+        let mut job: Job = Box::new(job);
+        for _ in 0..2 {
+            let jobs = match &self.jobs {
+                Some(jobs) => jobs.clone(),
+                None => {
+                    let (jobs, inbox) = mpsc::channel::<Job>();
+                    std::thread::Builder::new()
+                        .name("files-launch".into())
+                        .spawn(move || {
+                            while let Ok(job) = inbox.recv() {
+                                job();
+                            }
+                        })
+                        .map_err(|_| ())?;
+                    self.jobs = Some(jobs.clone());
+                    jobs
+                }
+            };
+            match jobs.send(job) {
+                Ok(()) => return Ok(()),
+                // The worker ended (a start panicked): start another, once.
+                Err(mpsc::SendError(back)) => {
+                    job = back;
+                    self.jobs = None;
+                }
+            }
+        }
+        Err(())
+    }
 }
 
 /// Is the launch lock free right now? Asked from ANOTHER thread, waiting at most `wait` for it: `false` when it is

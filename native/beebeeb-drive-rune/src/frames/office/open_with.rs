@@ -2,18 +2,32 @@
 //! beside the file menu. Drawn by the Files window's own code (`frames::files::open_with_menu`) over the board's
 //! fixture: this sets the state only.
 //!
-//! What it draws depends on the route: the file menu offers Open With only for a type the Office viewer ships
-//! (`kinds::office_route` → `Shows`, after V3-1's V1-S). With Word's switch off the menu is the file menu as before.
+//! The file menu offers Open With only for a type the Office viewer ships (`kinds::office_route` → `Shows`): the scene
+//! turns Word's switch on for itself (`open_with_menu::Ui::board_office`), as the frame is about Open With (ruling
+//! R-OW2 c). The app's own switches are not touched.
 
 use crate::State;
 use crate::frames::files::open_with_menu::OPEN_WITH;
 use crate::frames::files::{MenuKind, OpenMenu};
+use crate::frames::viewers::kinds::OfficeShips;
 use crate::source::DriveItem;
 
 /// The row the board adds to Files: "Service agreement.docx", "Today, 08:40", "38 KB", on this PC (downloaded).
 pub const AGREEMENT_ID: &str = "agreement";
 /// Its place in the board's list: after the five folders and Budget 2026.xlsx (12 items).
 pub const AGREEMENT_ROW: usize = 6;
+
+/// Word's switch on, every other type's off.
+pub const WORD_ON: OfficeShips = OfficeShips {
+    docx: true,
+    doc: false,
+    xlsx: false,
+    xls: false,
+    pptx: false,
+};
+
+/// The board's status line: it counts the rows without the Word file (ruling R-OW2 b: the scene matches the board).
+pub const BOARD_STATUS: &str = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
 
 /// The board's row for the Word file (the fixture's "today" is Thursday 5 Nov 2026).
 pub fn agreement() -> DriveItem {
@@ -43,6 +57,8 @@ pub fn scene_open_with(s: &mut State) {
     s.select_only(AGREEMENT_ROW);
     // The board draws DW-1562 without the details panel (`details: null`).
     s.show_detail_pane = false;
+    s.actions.open_with.board_office = Some(WORD_ON);
+    s.global.board_status_words = Some(BOARD_STATUS.to_string());
     s.actions.menu = Some(OpenMenu {
         kind: MenuKind::File,
         at: (430.0, 316.0),

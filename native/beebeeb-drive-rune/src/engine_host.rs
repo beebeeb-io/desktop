@@ -623,8 +623,30 @@ pub struct EngineFilesSource<C: CredentialStores> {
     previews: files_preview::Previews<viewer::LiveViewerEngine<C>>,
     /// Open With's apps per type (DW-1562), asked of Windows once per type.
     apps: open_with_apps::Apps,
-    /// An app that did not start after an Open With press was accepted: said through `changes`.
-    app_failed: Arc<Mutex<Vec<Change>>>,
+    /// A start that did not happen after its press was accepted (Open, Show in File Explorer, an Open With app): said
+    /// through `changes`.
+    start_failed: Arc<Mutex<Vec<Change>>>,
+    /// Files' Open and Show in File Explorer start here, never on the window's thread (ruling R-OW1).
+    later: launch::Later,
+    /// What starts a file or a folder (the system's own; a test's stand-in).
+    starts: Starts,
+}
+
+/// What Files' Open and Show in File Explorer start: the system's own handlers ([`open_path`],
+/// [`reveal_in_file_explorer`]). Each takes the launch lock itself.
+#[derive(Clone, Copy)]
+struct Starts {
+    open: fn(&Path) -> Result<(), ActionError>,
+    reveal: fn(&Path) -> Result<(), ActionError>,
+}
+
+impl Default for Starts {
+    fn default() -> Self {
+        Starts {
+            open: open_path,
+            reveal: reveal_in_file_explorer,
+        }
+    }
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -642,7 +664,9 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             places: files_places::Places::new(engine.clone()),
             previews: files_preview::Previews::new(Arc::new(viewer::LiveViewerEngine::new(engine.clone()))),
             apps: open_with_apps::Apps::default(),
-            app_failed: Arc::new(Mutex::new(Vec::new())),
+            start_failed: Arc::new(Mutex::new(Vec::new())),
+            later: launch::Later::default(),
+            starts: Starts::default(),
             engine,
             upload_left: None,
         }
@@ -726,6 +750,32 @@ impl<C: CredentialStores> EngineFilesSource<C> {
     /// Is the file with this id kept on this PC, by the engine, for the session `turn`: kept (by its own pin or a kept
     /// folder's) AND its bytes here. A copy that is only listed, or still coming down, is not: handing it to an app
     /// would make Windows fetch it and decrypt it for that app.
+    /// Start each of `paths` with `start` on the launch worker, in order, never on the window's thread (R-OW1): the
+    /// paths were resolved at the press, under the account-bound handle. `Ok`: handed over. A start that fails there
+    /// is said through `changes` (the first one; the rest are not started), unless the session moved on since the press.
+    fn start_later(
+        &mut self,
+        action: files_source::Action,
+        paths: Vec<PathBuf>,
+        start: fn(&Path) -> Result<(), ActionError>,
+    ) -> Result<(), ActionError> {
+        let turn = self.engine.session_turn();
+        let (engine, failed) = (self.engine.clone(), self.start_failed.clone());
+        self.later
+            .run(move || {
+                if let Err(why) = paths.iter().try_for_each(|path| start(path))
+                    && engine.session_turn() == turn
+                {
+                    failed
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(Change::Failed(action, why));
+                    engine.wake_host();
+                }
+            })
+            .map_err(|()| ActionError::Failed)
+    }
+
     fn kept_here(&self, turn: beebeeb_engine::account::SessionGeneration, id: &str) -> bool {
         self.engine.edit_facts_for(turn, id, 0).is_ok_and(|facts| facts.kept)
             && self
@@ -845,7 +895,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
                 .map(|item| path_the_system_opens(db, sync_root, &item.id))
                 .collect::<Result<Vec<_>, _>>()
         })?;
-        paths.iter().try_for_each(|path| open_path(path))
+        let open = self.starts.open;
+        self.start_later(files_source::Action::Open, paths, open)
     }
 
     fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
@@ -875,7 +926,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
             return Err(ActionError::Failed);
         }
         let path = self.local(|db, sync_root| path_the_system_opens(db, sync_root, &item.id))?;
-        let (engine, failed) = (self.engine.clone(), self.app_failed.clone());
+        let (engine, failed) = (self.engine.clone(), self.start_failed.clone());
         open_with_apps::open_in(path, app.id.clone(), move |answer| {
             if answer.is_err() && engine.session_turn() == turn {
                 failed
@@ -956,7 +1007,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
             }
             Ok(paths)
         })?;
-        paths.iter().try_for_each(|path| reveal_in_file_explorer(path))
+        let reveal = self.starts.reveal;
+        self.start_later(files_source::Action::ShowInFileExplorer, paths, reveal)
     }
 
     fn upload(&mut self, folder: Option<&str>, files: &[std::path::PathBuf]) -> Result<(), ActionError> {
@@ -1081,7 +1133,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
             }
             None => Ok(sync_root.to_path_buf()),
         })?;
-        open_path(&path)
+        let open = self.starts.open;
+        self.start_later(files_source::Action::OpenInFileExplorer, vec![path], open)
     }
 
     /// What Move to Trash, its Undo, a link that was asked for, Keep on this PC and Free up space did, once the
@@ -1099,7 +1152,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         changes.extend(kept);
         changes.extend(self.versions.take());
         changes.extend(self.conflicts.take());
-        changes.append(&mut self.app_failed.lock().unwrap_or_else(PoisonError::into_inner));
+        changes.append(&mut self.start_failed.lock().unwrap_or_else(PoisonError::into_inner));
         // Where the rows stand in the Backups tree: an arrival redraws by its wake.
         self.places.pump();
         // The sidebar's figures are read again after a change (`files_facts`); an arrival redraws by its wake.

@@ -87,6 +87,8 @@ pub fn end_session(s: &mut State, account_left: bool) {
         window: _,
         board_crop_top: _,
         board_first_row: _,
+        // Stays: the Office switches only a board scene sets; the submenu's line goes with the menu (closed above).
+        open_with: _,
         host: _,
         forward,
         made,

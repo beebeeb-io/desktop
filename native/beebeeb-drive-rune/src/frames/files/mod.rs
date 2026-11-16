@@ -269,6 +269,8 @@ pub struct Actions {
     /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
     /// and cannot scroll). 0 in the app.
     pub board_first_row: usize,
+    /// Open With (DW-1562): the submenu's keyboard line, and the Office switches a board scene turns on.
+    pub open_with: open_with_menu::Ui,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -311,6 +313,7 @@ impl Actions {
             local: local::Ui::default(),
             first_load_strip: false,
             board_first_row: 0,
+            open_with: open_with_menu::Ui::default(),
         }
     }
 }
@@ -441,6 +444,7 @@ impl State {
             at,
             hot: None,
         });
+        self.actions.open_with.line = None;
     }
 
     /// Open a toolbar menu, or close it when it is the one that is open.
@@ -457,11 +461,12 @@ impl State {
 
     pub fn close_menu(&mut self) {
         self.actions.menu = None;
+        self.actions.open_with.line = None;
     }
 
     /// Close the menu and give the keyboard back to the list.
     pub fn close_menu_tx(&mut self, tx: &mut Tx) {
-        self.actions.menu = None;
+        self.close_menu();
         tx.focus("rows", false);
     }
 
@@ -882,7 +887,7 @@ impl State {
         };
         // Open With keeps the menu open and shows its apps beside it (DW-1562).
         if id == open_with_menu::OPEN_WITH_ID {
-            return self.show_open_with();
+            return self.show_open_with(tx);
         }
         // Sort's choices keep the menu open, as a menu of ticks does; everything else closes it.
         if open.kind != MenuKind::Sort {
