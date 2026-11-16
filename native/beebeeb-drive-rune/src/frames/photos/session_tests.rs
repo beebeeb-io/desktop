@@ -915,14 +915,8 @@ fn move_is_refused_while_the_photos_move_to_trash_is_on_its_way() {
         "no Move dialog while Trash is on its way"
     );
     assert!(
-        matches!(
-            rt.state.photos.toast,
-            Some(Toast::Left {
-                why: Left::InFlight,
-                ..
-            })
-        ),
-        "the refusal is the still-on-its-way words"
+        matches!(rt.state.photos.toast, Some(Toast::Words(w)) if w == "Couldn\u{2019}t move. The last change is still on its way."),
+        "the refusal names the Move that did not happen and says the last change is still on its way"
     );
     // Beebeeb answered (refused): the photo is movable again.
     answer(&mut rt, &script, Answered::Trashed(vec![(a, Some(Left::Failed))]));
