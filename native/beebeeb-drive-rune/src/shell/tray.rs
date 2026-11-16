@@ -44,6 +44,10 @@ pub struct TrayInputs {
     pub conflicts: u32,
     pub engine: EngineState,
     pub files_remaining: Option<u32>,
+    /// While the engine runs: when its last check that reached Beebeeb finished (its report's `last_tick_ok_at`, unix
+    /// seconds). A new one is a finished check, also one that moved no file and so never left Idle (what another device
+    /// changed comes in that way): the Files window reads the folder it shows again (`host::read_again_after_a_check`).
+    pub last_check: Option<i64>,
 }
 
 /// The six icons of DW-1230.
@@ -392,6 +396,8 @@ mod tests {
             conflicts: 4,
             engine: EngineState::Offline,
             files_remaining: Some(9),
+            // When the last check finished says nothing to the b.
+            last_check: Some(1_000),
         };
         let label = |inputs: &TrayInputs| tray_model(inputs).label;
         assert_eq!(label(&inputs), "Locked");

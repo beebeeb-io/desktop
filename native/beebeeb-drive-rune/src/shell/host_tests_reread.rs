@@ -1,0 +1,279 @@
+//! The folder the Files window shows is read again after every finished check, and merged into the view
+//! (`frames::files::reread`, `host::read_again_after_a_check`): what arrived, left or was renamed shows without a
+//! click; the selection, the focused row and the rows in view stay with their items; a name being typed in a row
+//! holds the read until it closes.
+
+use super::super::super::tray::EngineState;
+use super::*;
+use crate::source::{Crumb, DriveItem, DriveSource, Listing, SourceError, StorageSummary};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// The root of an account whose files the test changes "elsewhere" (another device, this PC's folder): each read
+/// answers what it holds now, and counts.
+#[derive(Clone, Default)]
+struct Elsewhere {
+    items: Arc<Mutex<Vec<DriveItem>>>,
+    reads: Arc<AtomicU32>,
+}
+
+impl Elsewhere {
+    fn with(names: &[&str]) -> Elsewhere {
+        let shelf = Elsewhere::default();
+        shelf.add(names);
+        shelf
+    }
+    fn add(&self, names: &[&str]) {
+        self.items.lock().unwrap().extend(names.iter().map(|name| file(name)));
+    }
+    fn remove(&self, name: &str) {
+        self.items.lock().unwrap().retain(|item| item.id != name);
+    }
+    fn reads(&self) -> u32 {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
+impl DriveSource for Elsewhere {
+    fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if folder_id.is_some() {
+            return Err(SourceError::NotFound);
+        }
+        let root = Crumb {
+            id: None,
+            name: "Files".into(),
+        };
+        Ok(Listing {
+            folder: root.clone(),
+            path: vec![root],
+            items: self.items.lock().unwrap().clone(),
+        })
+    }
+    fn storage(&self) -> Option<StorageSummary> {
+        None
+    }
+}
+
+/// Seven files that land in the folder, each sorting above every `m-` file already there.
+const SEVEN: [&str; 7] = [
+    "a-1.txt", "a-2.txt", "a-3.txt", "a-4.txt", "a-5.txt", "a-6.txt", "a-7.txt",
+];
+
+/// A file whose id is its name.
+fn file(name: &str) -> DriveItem {
+    DriveItem {
+        id: name.to_string(),
+        parent_id: None,
+        name: name.to_string(),
+        is_folder: false,
+        size: Some(1),
+        child_count: None,
+        modified_at: "2026-11-16T06:00:00Z".into(),
+        mime: None,
+        has_thumbnail: false,
+        shared_type: None,
+        shared_badges: Vec::new(),
+        pc_status: None,
+        is_protected: false,
+    }
+}
+
+/// Signed in, the root read by the opening gate, the engine running: the window over `shelf`.
+fn window(shelf: &Elsewhere) -> (Arc<FixtureEngine>, Runtime<State>) {
+    let engine = Arc::new(FixtureEngine::with(GateState::SignedOut, TrayInputs::default()));
+    let shell = Shell::fixture_on(engine.clone(), Arc::new(FakePlatform::default()));
+    let mut rt = runtime(state::init_from(shell, Box::new(shelf.clone()), None));
+    engine.set_inputs(inputs(EngineState::NotRunning));
+    engine.set_gate(GateState::Ready);
+    settle(&mut rt);
+    assert_eq!(rt.state.list_error, None);
+    (engine, rt)
+}
+
+fn inputs(engine: EngineState) -> TrayInputs {
+    TrayInputs {
+        signed_in: true,
+        engine,
+        ..TrayInputs::default()
+    }
+}
+
+/// The engine checks and finishes the check (the b's state turns Idle).
+fn a_check_finishes(engine: &FixtureEngine, rt: &mut Runtime<State>) {
+    engine.set_inputs(inputs(EngineState::Checking));
+    settle(rt);
+    engine.set_inputs(inputs(EngineState::Idle));
+    settle(rt);
+}
+
+fn ids(s: &State) -> Vec<String> {
+    s.listing.items.iter().map(|item| item.id.clone()).collect()
+}
+
+fn id_at(s: &State, row: Option<usize>) -> Option<String> {
+    row.and_then(|row| s.listing.items.get(row)).map(|item| item.id.clone())
+}
+
+fn selection_ids(s: &State) -> Vec<String> {
+    s.actions
+        .selection
+        .iter()
+        .filter_map(|&row| s.listing.items.get(row))
+        .map(|item| item.id.clone())
+        .collect()
+}
+
+/// The fake-listing finding: a root with 2 rows, 7 files land (this PC's folder or another device), a check
+/// finishes: 9 rows, with no click. The row that was selected and focused still is, though 7 rows landed above it.
+#[test]
+fn a_finished_check_shows_new_files_and_keeps_the_selection_and_the_focus() {
+    let shelf = Elsewhere::with(&["m-1.txt", "m-2.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    rt.update(|s, _| s.select_only(1));
+    assert_eq!(id_at(&rt.state, rt.state.selected).as_deref(), Some("m-2.txt"));
+
+    shelf.add(&SEVEN);
+    a_check_finishes(&engine, &mut rt);
+
+    assert_eq!(
+        rt.state.listing.items.len(),
+        9,
+        "the 7 new files show: {:?}",
+        ids(&rt.state)
+    );
+    assert_eq!(
+        id_at(&rt.state, rt.state.selected).as_deref(),
+        Some("m-2.txt"),
+        "the focused row is the same file"
+    );
+    assert_eq!(selection_ids(&rt.state), ["m-2.txt"], "the selection is the same file");
+    assert_eq!(id_at(&rt.state, rt.state.actions.anchor).as_deref(), Some("m-2.txt"));
+    assert_eq!(
+        ids(&rt.state),
+        [
+            "a-1.txt", "a-2.txt", "a-3.txt", "a-4.txt", "a-5.txt", "a-6.txt", "a-7.txt", "m-1.txt", "m-2.txt"
+        ],
+        "in the folder's sort"
+    );
+}
+
+/// An item removed elsewhere leaves the rows and the selection; the rest of the selection stays.
+#[test]
+fn a_finished_check_drops_an_item_removed_elsewhere_from_the_rows_and_the_selection() {
+    let shelf = Elsewhere::with(&["m-1.txt", "m-2.txt", "m-3.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    rt.update(|s, _| {
+        s.select_only(0);
+        s.toggle_row(2);
+    });
+    assert_eq!(selection_ids(&rt.state), ["m-1.txt", "m-3.txt"]);
+    assert_eq!(id_at(&rt.state, rt.state.selected).as_deref(), Some("m-3.txt"));
+
+    shelf.remove("m-3.txt");
+    a_check_finishes(&engine, &mut rt);
+
+    assert_eq!(ids(&rt.state), ["m-1.txt", "m-2.txt"], "the removed file left the rows");
+    assert_eq!(selection_ids(&rt.state), ["m-1.txt"], "and the selection");
+    assert_eq!(rt.state.selected, None, "the focused row went with its file");
+    assert!(
+        rt.state.actions.selection.iter().all(|&row| row < 2),
+        "no row past the end is selected"
+    );
+}
+
+/// A name being typed in a row when the check finishes: the read waits (the row under the field stays where it
+/// is), and runs on the first poll after the field closed.
+#[test]
+fn a_finished_check_during_a_rename_waits_until_the_rename_closes() {
+    let shelf = Elsewhere::with(&["m-1.txt", "m-2.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    rt.update(|s, _| {
+        s.select_only(1);
+        s.actions.rename = Some(crate::frames::files::rename::Rename {
+            row: 1,
+            id: "m-2.txt".into(),
+        });
+    });
+    let before = shelf.reads();
+
+    shelf.add(&SEVEN);
+    a_check_finishes(&engine, &mut rt);
+    assert_eq!(shelf.reads(), before, "nothing is read while the name is a field");
+    assert_eq!(ids(&rt.state), ["m-1.txt", "m-2.txt"]);
+    assert!(rt.state.actions.rename.is_some(), "the field stays open");
+
+    rt.update(|s, _| s.actions.rename = None);
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.listing.items.len(),
+        9,
+        "read once the field closed: {:?}",
+        ids(&rt.state)
+    );
+    assert_eq!(id_at(&rt.state, rt.state.selected).as_deref(), Some("m-2.txt"));
+}
+
+/// Files another device added come with a check that moves no file here: the engine reports Idle before and after it,
+/// with a new time of its last finished check. That is a finished check too; the same report again is not.
+#[test]
+fn a_finished_check_that_stays_idle_still_shows_what_another_device_added() {
+    let shelf = Elsewhere::with(&["m-1.txt", "m-2.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    let checked = |at: i64| TrayInputs {
+        last_check: Some(at),
+        ..inputs(EngineState::Idle)
+    };
+    engine.set_inputs(checked(1_000));
+    settle(&mut rt);
+    assert_eq!(rt.state.listing.items.len(), 2);
+
+    shelf.add(&SEVEN);
+    engine.set_inputs(checked(1_030));
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.listing.items.len(),
+        9,
+        "the files of the check that stayed Idle show: {:?}",
+        ids(&rt.state)
+    );
+
+    let read = shelf.reads();
+    settle(&mut rt);
+    engine.set_inputs(checked(1_030));
+    settle(&mut rt);
+    assert_eq!(
+        shelf.reads(),
+        read,
+        "the same report again is no new check: nothing is read"
+    );
+}
+
+/// Scrolled down a long folder, files land that sort above the rows in view: the rows in view stay where they
+/// were on screen (anchored to the first row in view, by its item), not pushed down by the new rows.
+#[test]
+fn a_finished_check_keeps_the_rows_in_view_where_they_were_when_rows_land_above() {
+    let names: Vec<String> = (0..60).map(|i| format!("m-{i:02}.txt")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let shelf = Elsewhere::with(&names);
+    let (engine, mut rt) = window(&shelf);
+    let (x, y) = rt.find("rows").expect("the list shows");
+    rt.wheel(x, y, -600.0);
+    settle(&mut rt);
+    let (row, _) = rt.presented("row-25").expect("row 25 is in view");
+    assert!(row[1] > 0.0 && row[1] < 800.0, "row 25 is on screen: {row:?}");
+    assert_eq!(rt.state.listing.items[25].id, "m-25.txt");
+
+    shelf.add(&SEVEN);
+    a_check_finishes(&engine, &mut rt);
+
+    assert_eq!(rt.state.listing.items.len(), 67);
+    assert_eq!(rt.state.listing.items[32].id, "m-25.txt", "7 rows landed above it");
+    let (now, _) = rt.presented("row-32").expect("its row is in view");
+    assert!(
+        (now[1] - row[1]).abs() < 0.5,
+        "m-25.txt is where it was on screen: {} then {}",
+        row[1],
+        now[1]
+    );
+}

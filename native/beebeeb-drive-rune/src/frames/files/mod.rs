@@ -28,6 +28,7 @@ pub mod preview;
 pub mod protected;
 pub mod protected_fixture;
 pub mod rename;
+pub mod reread;
 pub mod reset;
 pub mod retry;
 mod row_facts;
@@ -265,6 +266,8 @@ pub struct Actions {
     /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
     /// and cannot scroll). 0 in the app.
     pub board_first_row: usize,
+    /// How far down the list is scrolled (`reread.rs`: a read after a check keeps the rows in view in place).
+    pub list_scroll: reread::ListScroll,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -307,6 +310,7 @@ impl Actions {
             local: local::Ui::default(),
             first_load_strip: false,
             board_first_row: 0,
+            list_scroll: reread::ListScroll::default(),
         }
     }
 }

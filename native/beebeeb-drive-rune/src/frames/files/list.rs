@@ -47,6 +47,11 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .py(4.0)
         .px(6.0)
         .scroll(rune::ScrollSpec { stick_bottom: false })
+        // Where it is scrolled to, for the read after a check (`reread.rs`: the rows in view stay where they are).
+        .on_scroll_offset({
+            let scroll = s.actions.list_scroll.clone();
+            move |at: rune::ScrollPos| scroll.set(at.offset[1])
+        })
         // A right-click on the empty space: the menu of the list (DW-1103). A row's own right-click
         // opens the file menu and is heard first.
         .on_secondary_press(|s: &mut State, at: PointerPress, tx: &mut Tx| {

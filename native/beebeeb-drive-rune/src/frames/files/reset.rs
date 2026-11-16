@@ -88,6 +88,8 @@ pub fn end_session(s: &mut State, account_left: bool) {
         board_crop_top: _,
         board_first_row: _,
         host: _,
+        // Stays: how far the list is scrolled, in points, which the list says again each time it draws.
+        list_scroll: _,
         forward,
         made,
         conflicts_done,
