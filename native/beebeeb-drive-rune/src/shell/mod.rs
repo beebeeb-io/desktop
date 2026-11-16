@@ -50,6 +50,7 @@ pub mod tray_icon;
 pub mod tray_win;
 pub mod web_pages;
 pub mod window_state;
+pub mod work_area;
 
 use std::io::Write as _;
 use std::sync::{Arc, Mutex, mpsc};
@@ -461,20 +462,30 @@ pub fn run() {
     }
 
     rune::run_windows(move |displays| {
-        let monitors = surfaces::monitors(displays);
+        // The displays as the window may use them: the taskbar's room and the frame left out.
+        let monitors = work_area::usable(&surfaces::monitors(displays), &work_area::os_work_areas());
         let first_place = saved_main.or_else(|| {
             legacy_frame
                 .as_deref()
                 .and_then(|text| window_state::import_legacy_frame(text, &monitors))
         });
         let (main_app, main_options) = if first_kind == WindowKind::Main {
-            let restored = window_state::restore(first_place.as_ref(), &monitors, surfaces::MAIN_MIN_SIZE);
+            let mut restored = window_state::restore(first_place.as_ref(), &monitors, surfaces::MAIN_MIN_SIZE);
+            if restored.position.is_none() {
+                // Nothing usable saved: the default size, cut to the work area and centred.
+                let first = work_area::first_place(surfaces::MAIN_SIZE, surfaces::MAIN_MIN_SIZE, &monitors);
+                restored = window_state::Restored {
+                    maximized: restored.maximized,
+                    ..first
+                };
+            }
             (
                 main_app.maximized(restored.maximized),
                 surfaces::main_options(&restored),
             )
         } else {
-            (main_app, surfaces::first_run_options())
+            let place = work_area::first_place(surfaces::FIRST_RUN_SIZE, surfaces::FIRST_RUN_SIZE, &monitors);
+            (main_app, surfaces::first_run_options(&place))
         };
         vec![
             WindowSpec::from_app(WindowKind::Main.key(), main_app)

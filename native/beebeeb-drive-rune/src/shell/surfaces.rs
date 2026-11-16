@@ -122,9 +122,12 @@ pub fn main_options(restored: &Restored) -> WindowOptions {
     }
 }
 
-/// The one window opened as the first-run window: its fixed size, wherever the OS puts it.
-pub fn first_run_options() -> WindowOptions {
+/// The one window opened as the first-run window: its fixed size, cut to the work area when the screen is
+/// smaller (`place`, from `work_area::first_place`), wherever the OS puts it when no display is known.
+pub fn first_run_options(place: &Restored) -> WindowOptions {
     WindowOptions {
+        position: place.position,
+        physical_size: place.physical_size,
         min_size: Some(FIRST_RUN_SIZE),
         ..WindowOptions::default()
     }
@@ -199,7 +202,7 @@ mod tests {
             ..saved
         };
         assert_eq!(size_on_change(FirstRun, Main, Some(&maximized)), Some((1280.0, 800.0)));
-        assert_eq!(first_run_options().min_size, Some((960.0, 640.0)));
+        assert_eq!(first_run_options(&Restored::default()).min_size, Some((960.0, 640.0)));
     }
 
     #[test]
