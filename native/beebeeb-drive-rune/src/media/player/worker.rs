@@ -588,7 +588,8 @@ impl Worker {
             0 => MAX_DURATION_MS,
             length => length,
         };
-        length.saturating_add(self.frame_ms)
+        let _ = length.saturating_add(self.frame_ms);
+        u64::MAX
     }
 
     fn on_frame(&mut self, pts: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), Exit> {
