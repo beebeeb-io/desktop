@@ -198,8 +198,7 @@ fn live_stage(photo: El, handle: &crate::media::player::PlayerHandle, own: Optio
     });
     // Only this video's own state: while the player holds another file (a song started from Files), the stage keeps
     // its own picture and an idle bar, never that file's frame, times or refusal.
-    let _ = own;
-    let state = handle.state();
+    let state = own.and_then(|file| handle.state_of(file));
     if state.is_some()
         && let Some(frame) = handle.frame()
     {
