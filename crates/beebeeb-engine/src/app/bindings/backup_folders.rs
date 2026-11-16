@@ -426,6 +426,8 @@ pub fn start_over(identity: &'static EngineIdentity, db: &StateDb, key: &str) ->
     let now = chrono::Utc::now().timestamp_millis();
     db.restart_backup_pass(key, now).map_err(|_| BackupsError::State)?;
     db.clear_backup_stop(key).map_err(|_| BackupsError::State)?;
+    db.set_backup_category_folder(key, None)
+        .map_err(|_| BackupsError::State)?;
     crate::backup_protect::refresh_own_backups(identity, db);
     Ok(())
 }
