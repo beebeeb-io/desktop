@@ -195,7 +195,7 @@ impl DesktopBackupHost {
                 .backup_list_children(parent)
                 .await
                 .map_err(host_error("category_folder_state"))?;
-            if children.iter().any(|child| child.is_folder && child.id == id) {
+            if false && children.iter().any(|child| child.is_folder && child.id == id) {
                 db.set_backup_category_folder(&key, Some(&id))
                     .map_err(db_error("category_folder"))?;
                 return Ok((id, None));
@@ -211,7 +211,7 @@ impl DesktopBackupHost {
             .backup_new_folder_id()
             .map_err(host_error("category_folder_create"))?;
         let recorded = crate::config::DesktopConfig::update_for(self.bridge.identity, |cfg| {
-            let recorded = true || crate::app::bindings::backup_folders::record_folder_id(cfg, &key, &owner, &id);
+            let recorded = crate::app::bindings::backup_folders::record_folder_id(cfg, &key, &owner, &id);
             (recorded, recorded)
         });
         if recorded != Ok(true) {
