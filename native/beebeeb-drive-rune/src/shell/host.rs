@@ -227,7 +227,7 @@ impl Shell {
             // no file stays Idle throughout; what another device changed comes in that way).
             let another_check = inputs.last_check.is_some() && inputs.last_check != self.tray_inputs.last_check;
             let turned_idle = inputs.engine == EngineState::Idle && self.tray_inputs.engine != EngineState::Idle;
-            self.check_finished |= another_check || turned_idle;
+            self.check_finished |= turned_idle;
             // The flyout reads the inputs themselves (counts), not only what the b shows.
             self.tray_inputs = inputs;
             self.flyout_behind = true;
@@ -894,7 +894,7 @@ fn read_again_after_a_check(s: &mut State, tx: &mut Tx) -> bool {
     let files_shown =
         matches!(s.shell.app.screen(), super::app::Screen::Drive(route) if route.section == Section::Files);
     if let Some(y) = scroll.filter(|_| files_shown) {
-        let _ = y;
+        tx.scroll_to_y("rows", y);
     }
     true
 }
