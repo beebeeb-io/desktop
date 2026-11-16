@@ -306,7 +306,7 @@ impl UiControls {
 /// The player's side: never a call into Windows, only what to do next.
 impl NowPlayingSink for UiControls {
     fn show(&mut self, now: &NowPlaying) {
-        locked(&self.shared.pending).get_or_insert(Pending::Show(now.clone()));
+        *locked(&self.shared.pending) = Some(Pending::Show(now.clone()));
     }
 
     fn clear(&mut self) {

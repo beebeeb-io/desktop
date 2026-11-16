@@ -173,9 +173,9 @@ impl Ring {
             } else {
                 sound
             };
-            self.silent_after = silence;
+            self.silent_after = 0;
         } else {
-            self.silent_after = self.silent_after.saturating_add(silence);
+            self.silent_after = 0;
         }
         self.played_frames = self.played_frames.saturating_add(sound);
         n
