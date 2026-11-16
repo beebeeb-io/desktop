@@ -450,6 +450,12 @@ pub(super) fn shows(name: &str) -> Shows {
     }
 }
 
+/// Whether the Office renderer's sandbox exists on this platform: `beebeeb-office-sandbox` has a module only on
+/// Windows today. Elsewhere a list's Open of an Office file goes to its own app.
+pub(super) const fn office_sandbox_here() -> bool {
+    cfg!(windows)
+}
+
 /// "Markdown" of "Markdown · 1.4 KB": the kind in a word, by the name.
 pub(super) fn kind_word(name: &str) -> &'static str {
     // The board's words (DW-1507, DW-1508, DW-1509, DW-1511), once the Office route is on.
@@ -1039,11 +1045,11 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     /// An audio or a video file kept on this PC still opens in the player when playback is available (D-MED-13); an
     /// Office file opens in the viewer while its route is on ("Open in another app…" stays one press away).
     fn opens_here_when_kept(&self, name: &str) -> bool {
-        self.media_previews(name) || self.office_route(name).is_some()
+        self.media_previews(name) || matches!(self.office_route(name), Some(kinds::OfficeRoute::Shows(_)))
     }
 
     fn office_live(&self) -> bool {
-        true
+        office_sandbox_here()
     }
 
     fn office_picture(&self, file_id: &str, which: kinds::OfficePicture) -> Option<rune::Pixels> {

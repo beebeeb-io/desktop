@@ -428,7 +428,10 @@ fn a_lists_open_of_an_office_file_goes_to_the_viewer_while_its_route_is_on() {
             "Invented sheet.xls",
             "Invented deck.pptx",
             "Invented deck.ppt",
+            "Invented deck.pps",
         ] {
+            // A kept file with no preview here (`.ppt`, `.pps`) goes to its own app (P3-6).
+            let to_viewer = !(kept && name.ends_with(".ppt") || kept && name.ends_with(".pps"));
             let (mut rt, script) = window(Script {
                 kept_here: kept,
                 opens_here: true,
@@ -437,9 +440,27 @@ fn a_lists_open_of_an_office_file_goes_to_the_viewer_while_its_route_is_on() {
             let mut opened = false;
             rt.update(|s, _| opened = open_item(s, &item(name)));
             frames(&mut rt, 4);
-            assert!(opened, "{name}, kept {kept}");
-            assert_eq!(opens(&script, "open"), 1, "{name}, kept {kept}");
-            assert_eq!(route_item(&rt).as_deref(), Some(FILE), "{name}, kept {kept}");
+            assert_eq!(opened, to_viewer, "{name}, kept {kept}");
+            assert_eq!(opens(&script, "open"), usize::from(to_viewer), "{name}, kept {kept}");
+            if to_viewer {
+                assert_eq!(route_item(&rt).as_deref(), Some(FILE), "{name}, kept {kept}");
+            }
+        }
+    }
+    // The eight types O-CP3 did not measure stay their own app's, kept or not (P3-7).
+    for kept in [false, true] {
+        for ext in ["docm", "dotx", "dotm", "dot", "xlsm", "xltx", "pptm", "ppsx"] {
+            let name = format!("Invented file.{ext}");
+            let (mut rt, script) = window(Script {
+                kept_here: kept,
+                opens_here: true,
+                ..Script::default()
+            });
+            let mut opened = true;
+            rt.update(|s, _| opened = open_item(s, &item(&name)));
+            frames(&mut rt, 4);
+            assert!(!opened, "{name}, kept {kept}");
+            assert_eq!(opens(&script, "open"), 0, "{name}, kept {kept}");
         }
     }
     // The same files from a source with no Office renderer (the board's fixture): their own app's.
