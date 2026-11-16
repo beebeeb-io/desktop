@@ -59,7 +59,8 @@ fn system_commit() -> u64 {
 }
 
 /// A window, executable memory, and a handle the process does not hold: each works in a plain probe, and each is
-/// refused (an error answer, or the process ended) in a confined one.
+/// refused (an error answer, or the process ended) in a confined one; the handle, by ending the process with
+/// 0xC0000008 (strict handle checks).
 #[test]
 fn the_confined_helper_runs_under_the_mitigations() {
     let _serial = serial();
@@ -72,8 +73,8 @@ fn the_confined_helper_runs_under_the_mitigations() {
     assert_eq!(plain.attempt("jit"), "ok", "a plain probe makes executable memory");
     assert_eq!(
         plain.attempt("bad-handle"),
-        "ok false",
-        "a plain probe survives a bad handle"
+        "ok refused 6",
+        "a plain probe holds no such handle, and survives using it (the call fails: invalid handle)"
     );
     drop(plain);
 
@@ -93,6 +94,13 @@ fn the_confined_helper_runs_under_the_mitigations() {
             ),
         };
         println!("mitigations: {verb}: answer {answer:?}, ended with {ended:x?}");
+        if verb == "bad-handle" {
+            assert_eq!(
+                (answer.as_deref(), ended),
+                (None, Some(ENDED_FOR_INVALID_HANDLE)),
+                "bad-handle: the confined probe is ended for using a handle it does not hold"
+            );
+        }
         assert!(
             answer.as_deref().is_none_or(|line| !line.starts_with("ok")),
             "{verb}: the confined probe answered {answer:?}"
@@ -100,6 +108,24 @@ fn the_confined_helper_runs_under_the_mitigations() {
         refused += 1;
     }
     assert_eq!(refused, 3);
+}
+
+/// The confined probe reads its own strict-handle-check policy as on and permanent, in both profiles; a plain
+/// probe's is off (the instrument can fail).
+#[test]
+fn the_confined_helper_has_strict_handle_checks_on() {
+    let _serial = serial();
+    let mut plain = Probe::plain();
+    assert_eq!(plain.attempt("strict-handles"), "ok raise=0 permanent=0");
+    drop(plain);
+    for profile in [Profile::NoCapabilities, Profile::SystemDecoder { hevc: false }] {
+        let mut confined = Probe::confined_as(profile);
+        assert_eq!(
+            confined.attempt("strict-handles"),
+            "ok raise=1 permanent=1",
+            "{profile:?}"
+        );
+    }
 }
 
 /// The token of a confined probe is a less-privileged container at low integrity, in both profiles; a plain probe's

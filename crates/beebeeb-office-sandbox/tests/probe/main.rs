@@ -56,8 +56,12 @@
 //!                                                         pixel)
 //!   jit                  -> ok | err <system code>      (Windows: makes a page executable and writable, writes a
 //!                                                         `ret` into it)
-//!   bad-handle           -> ok <true|false>             (Windows: closes the handle value 0x1234, which it does
-//!                                                         not hold; under strict handle checks the process ends)
+//!   bad-handle           -> ok refused <system code> | err live | err waited <hex>   (Windows: first closes the
+//!                                                         value 0x7FFFFFF8, which must fail (no such handle is
+//!                                                         held), then waits on it; under strict handle checks the
+//!                                                         wait ends the process with 0xC0000008)
+//!   strict-handles       -> ok raise=<0|1> permanent=<0|1> | err <system code>   (Windows: its own strict-handle-
+//!                                                         check policy)
 //!   token                -> token lpac=<0|1> rid=<hex> | err <step> <system code>   (Windows: its own token's
 //!                                                         less-privileged container flag and integrity level)
 //!   memory               -> memory private=<bytes> shared=<bytes> job=<bytes|none> peak-job=<bytes|none>
@@ -1211,6 +1215,7 @@ fn main() {
             "window" => hardening::window(),
             "jit" => hardening::jit(),
             "bad-handle" => hardening::bad_handle(),
+            "strict-handles" => hardening::strict_handles(),
             "token" => hardening::token(),
             "memory" => hardening::memory(),
             "hang" | "spin" => {
