@@ -320,20 +320,6 @@ impl UiControls {
             Some(Pending::Clear) => os.latest = None,
             None => {}
         }
-        if self.shared.cover.covers_now() {
-            // Nothing of the item reaches Windows under the wake cover: what shows is taken down once, also with
-            // nothing new asked (a paused item), and the latest show waits for the cover's end.
-            if !std::mem::replace(&mut os.hidden, true)
-                && let Some(controls) = os.attached.as_mut()
-            {
-                controls.clear();
-            }
-            if matches!(pending, Some(Pending::Clear)) {
-                // The player stopped: a press Windows sent before its controls went off belongs to what stopped.
-                self.shared.buttons.drain();
-            }
-            return;
-        }
         let pending = if std::mem::take(&mut os.hidden) {
             // The cover is gone: the latest show goes up again (none: the player stopped meanwhile, already down).
             os.latest.clone().map(Pending::Show)
@@ -373,6 +359,7 @@ impl NowPlayingSink for UiControls {
     fn clear(&mut self) {
         // The player stopped (also at a lock, a sign-out or another account): a press that waited for the cover's end
         // goes with what it was for.
+        self.shared.buttons.drain();
         *locked(&self.shared.pending) = Some(Pending::Clear);
     }
 
