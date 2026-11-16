@@ -328,6 +328,10 @@ impl UiControls {
             {
                 controls.clear();
             }
+            if matches!(pending, Some(Pending::Clear)) {
+                // The player stopped: a press Windows sent before its controls went off belongs to what stopped.
+                self.shared.buttons.drain();
+            }
             return;
         }
         let pending = if std::mem::take(&mut os.hidden) {
@@ -353,8 +357,6 @@ impl UiControls {
             Pending::Show(now) => controls.show(&now),
             Pending::Clear => {
                 controls.clear();
-                // A press Windows sent before its controls went off belongs to what stopped.
-                self.shared.buttons.drain();
             }
         }
     }
