@@ -258,7 +258,7 @@ pub(crate) fn token() -> String {
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Security::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-        TokenIntegrityLevel, TokenIsLessPrivilegedAppContainer,
+        TokenIntegrityLevel,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     let mut token: HANDLE = std::ptr::null_mut();
@@ -266,23 +266,8 @@ pub(crate) fn token() -> String {
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return format!("err token {}", last_error());
     }
-    let mut lpac = 0u32;
+    let lpac = lpac_attribute(token);
     let mut returned = 0u32;
-    // SAFETY: `token` is open with query access; `lpac` is writable for the 4 bytes this class returns.
-    let lpac_ok = unsafe {
-        GetTokenInformation(
-            token,
-            TokenIsLessPrivilegedAppContainer,
-            (&raw mut lpac).cast(),
-            4,
-            &mut returned,
-        )
-    } != 0;
-    let lpac = match (lpac_ok, lpac != 0) {
-        (true, true) => "1".to_string(),
-        (true, false) => "0".to_string(),
-        (false, _) => format!("err{}", last_error()),
-    };
     let mut label = [0u64; 16];
     // SAFETY: the buffer is writable for the length passed and aligned for the structure.
     let label_ok = unsafe {
@@ -312,6 +297,106 @@ pub(crate) fn token() -> String {
     // SAFETY: the token opened above, closed once.
     unsafe { windows_sys::Win32::Foundation::CloseHandle(token) };
     format!("token lpac={lpac} rid={rid}")
+}
+
+/// `1` when this token carries the less-privileged container attribute `WIN://NOALLAPPPKG` set to a number other
+/// than zero, `0` when it does not; `err<code>` when the read fails, `bad` when the answer does not fit, `bad-type<n>`
+/// when the attribute is not one number. Read from the token's security attributes (the documented way: the class
+/// `TokenIsLessPrivilegedAppContainer` is reserved and refused by Windows 11 23H2), here with a walk of its own over
+/// the answer, independent of the crate's parse.
+#[cfg(windows)]
+fn lpac_attribute(token: windows_sys::Win32::Foundation::HANDLE) -> String {
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenSecurityAttributes};
+    // The layout of the answer (64-bit): read through a pointer, never built, some fields never read.
+    /// A counted string: length in bytes, room, characters.
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct Name {
+        length: u16,
+        maximum: u16,
+        characters: *const u16,
+    }
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct Entry {
+        name: Name,
+        value_type: u16,
+        reserved: u16,
+        flags: u32,
+        value_count: u32,
+        values: *const u64,
+    }
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct Header {
+        version: u16,
+        reserved: u16,
+        count: u32,
+        entries: *const Entry,
+    }
+    let mut needed = 0u32;
+    // SAFETY: a null buffer of length 0 only asks for the size; `needed` is a valid place for it.
+    unsafe { GetTokenInformation(token, TokenSecurityAttributes, std::ptr::null_mut(), 0, &mut needed) };
+    if needed == 0 || needed > 64 * 1024 {
+        return format!("err{}", last_error());
+    }
+    let mut words = vec![0u64; (needed as usize).div_ceil(8)];
+    let mut returned = 0u32;
+    // SAFETY: the buffer is writable for the length passed and aligned for the structures.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenSecurityAttributes,
+            words.as_mut_ptr().cast(),
+            (words.len() * 8) as u32,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return format!("err{}", last_error());
+    }
+    let start = words.as_ptr() as usize;
+    let end = start + (returned as usize).min(words.len() * 8);
+    let within = |at: usize, length: usize| at >= start && at.checked_add(length).is_some_and(|stop| stop <= end);
+    if !within(start, size_of::<Header>()) {
+        return "bad".into();
+    }
+    // SAFETY: the answer starts with the header, which fits (checked above).
+    let header = unsafe { &*words.as_ptr().cast::<Header>() };
+    if header.version != 1 {
+        return "bad".into();
+    }
+    if header.count == 0 {
+        return "0".into();
+    }
+    let Some(length) = (header.count as usize).checked_mul(size_of::<Entry>()) else {
+        return "bad".into();
+    };
+    if !within(header.entries as usize, length) {
+        return "bad".into();
+    }
+    for index in 0..header.count as usize {
+        // SAFETY: every entry lies inside the answer (checked above).
+        let entry = unsafe { &*header.entries.add(index) };
+        let length = usize::from(entry.name.length);
+        if length == 0 {
+            continue;
+        }
+        if !within(entry.name.characters as usize, length) {
+            return "bad".into();
+        }
+        // SAFETY: the characters lie inside the answer (checked above), 2-byte units as the system writes them.
+        let name = unsafe { std::slice::from_raw_parts(entry.name.characters, length / 2) };
+        if !String::from_utf16_lossy(name).eq_ignore_ascii_case("WIN://NOALLAPPPKG") {
+            continue;
+        }
+        if entry.value_type != 2 || entry.value_count == 0 || !within(entry.values as usize, 8) {
+            return format!("bad-type{}", entry.value_type);
+        }
+        // SAFETY: the first value lies inside the answer (checked above).
+        return if unsafe { *entry.values } != 0 { "1" } else { "0" }.into();
+    }
+    "0".into()
 }
 
 #[cfg(not(windows))]

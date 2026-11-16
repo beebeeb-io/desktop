@@ -1,16 +1,21 @@
 # Shows that the native tests can fail: takes one part of the confinement out of the sources at a time, runs the
 # native tests, counts the failures, and puts the files back. Run it ONLY in a build machine's own checkout, never
 # on a branch that is pushed: powershell -NoProfile -ExecutionPolicy Bypass -File tests\mutants-on-windows.ps1
+# [-Only name,name]   (only the mutants named; every pattern of every mutant is still checked first)
 # It prints counts and test names only.
 # First a baseline run on the file as it is: a mutant counts as killed only by a test that is red BEYOND the
 # baseline's red list, so a test that is already red never makes a mutant look caught.
+param([string[]]$Only = @())
 $ErrorActionPreference = 'Continue'
-# The files a mutant may change. A pattern names its file with a leading '@lib ' or '@watch '; without one it is
-# src\windows.rs.
+# With -File, "a,b" arrives as one string.
+$Only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+# The files a mutant may change. A pattern names its file with a leading '@lib ', '@watch ' or '@attributes ';
+# without one it is src\windows.rs.
 $files = [ordered]@{
-    windows = Join-Path (Get-Location) 'src\windows.rs'
-    lib     = Join-Path (Get-Location) 'src\lib.rs'
-    watch   = Join-Path (Get-Location) 'src\watch.rs'
+    windows    = Join-Path (Get-Location) 'src\windows.rs'
+    lib        = Join-Path (Get-Location) 'src\lib.rs'
+    watch      = Join-Path (Get-Location) 'src\watch.rs'
+    attributes = Join-Path (Get-Location) 'src\attributes.rs'
 }
 $originals = @{}
 foreach ($key in $files.Keys) { $originals[$key] = [IO.File]::ReadAllText($files[$key]) }
@@ -19,10 +24,18 @@ foreach ($key in $files.Keys) { $originals[$key] = [IO.File]::ReadAllText($files
 # must match exactly once in its file.
 $mutants = [ordered]@{
     'no-container'        = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities\)\?;', 'let _ = &capabilities;')
+    # The less-privileged read-back (F12): the token's attribute WIN://NOALLAPPPKG, read from its security attributes
+    # (src\attributes.rs; the class TokenIsLessPrivilegedAppContainer is reserved and refused by Windows 11 23H2).
     # The opt-out removed AND its read-back taken out, so the helper runs and the file and token tests must see it.
     'no-package-opt-out'  = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &packages_policy\)\?;', 'let _ = &packages_policy;', '@lib if !facts\.less_privileged \{', 'if false {')
-    # The opt-out removed only: the read-back refuses the helper before it runs (every confined test red).
+    # The opt-out removed only (a container token that is not less privileged): the read-back finds no attribute and
+    # refuses the helper before it runs, "not a less-privileged AppContainer" (every confined test red).
     'no-package-opt-out-refused' = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &packages_policy\)\?;', 'let _ = &packages_policy;')
+    # The opt-out kept, the read-back looks for another name: it finds none, so every confined start is refused.
+    'lpac-attribute-misnamed'    = @('@attributes "WIN://NOALLAPPPKG";', '"WIN://NOALLAPPPKX";')
+    # The read-back takes any attribute's name, or any value of the attribute (0 too): the parse's own tests.
+    'lpac-name-ignored'          = @('@attributes if !same_name\(&answer\[name\.\.name \+ name_length\], NO_ALL_APPLICATION_PACKAGES\) \{', 'if false {')
+    'lpac-value-ignored'         = @('@attributes return Ok\(u64_at\(answer, value\)\.ok_or\(DOES_NOT_FIT\)\? != 0\);', 'return Ok(true);')
     'no-handle-list'      = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inherited\)\?;', 'let _ = &inherited;')
     'no-job'              = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs\)\?;', 'let _ = &jobs;')
     'inherited-environment' = @('environment\.as_ptr\(\)\.cast\(\),', 'null(),')
@@ -71,7 +84,7 @@ function Get-ResultLine($lines) {
     (@($lines | Where-Object { $_ -match '^test result:' }) | ForEach-Object { ($_ -replace '; 0 ignored.*$', '') -replace '^test result: ', '' }) -join ' + '
 }
 function Get-RedNames($lines) {
-    @($lines | Where-Object { $_ -match '^    (windows|tests|block|watch)::' } | ForEach-Object { $_.Trim() } | Sort-Object -Unique)
+    @($lines | Where-Object { $_ -match '^    (windows|tests|block|watch|attributes)::' } | ForEach-Object { $_.Trim() } | Sort-Object -Unique)
 }
 # Every pattern of every mutant is checked before anything is built or changed: a stale pattern stops the run here.
 function Get-Mutated($name) {
@@ -92,6 +105,11 @@ function Get-Mutated($name) {
 foreach ($name in $mutants.Keys) {
     $result = Get-Mutated $name
     if ($result -is [string]) { "mutant ${name}: $result"; exit 4 }
+}
+if ($Only.Count -gt 0) {
+    foreach ($name in $Only) { if (-not $mutants.Contains($name)) { "mutant ${name}: unknown"; exit 4 } }
+    foreach ($name in @($mutants.Keys)) { if ($Only -notcontains $name) { $mutants.Remove($name) } }
+    "only: $($mutants.Count) of $($Only.Count) named mutants"
 }
 
 $profilesBefore = Count-Profiles
