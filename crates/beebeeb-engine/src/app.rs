@@ -68,6 +68,7 @@ pub(crate) mod explorer_api;
 // The sidebar's figures for the native Files window: files kept on this PC, the storage split.
 pub mod files_facts_api;
 pub mod kept_api;
+mod kept_key_proof;
 // The two-level lock, bound to core's rules (`beebeeb_api::flows::lock`).
 pub mod lock_api;
 pub mod lock_password_api;
@@ -591,6 +592,14 @@ impl<C: CredentialStores> Engine<C> {
             "" => typed_email,
             named => named.to_string(),
         };
+        // The key this computer kept is the account's only once the server says so; no answer undoes the sign-in.
+        let kept = match self.prove_kept_key(&token).await {
+            Ok(kept) => kept,
+            Err(error) => {
+                revoke(&self.client, base, &token).await;
+                return Err(error);
+            }
+        };
         // A stored session this sign-in replaces (the strong unlock): it must be this account's, and the key and
         // the engine of the old session leave first (`lock_api`).
         let (turn, replaced) = match self.prepare_replacement(turn, &profile).await {
@@ -607,27 +616,12 @@ impl<C: CredentialStores> Engine<C> {
         }
         self.install_screen_check(screen_check, &profile);
         self.failures.store(0, Ordering::SeqCst);
-        // The stored key of this same account (a vault that was closed, a locked screen, an older build's lock) is
-        // loaded through the guarded loader. The password was proven to the server: the lock opens in the same
-        // hold as the key's install, or stays closed for a session whose key is not here.
-        let turn = self.acct.session_generation();
-        let loaded = store::load_session_from_vault(self.vault(), Some(email)).ok().flatten();
-        if let Ok(_write) = self.claim(turn) {
-            match (loaded, self.acct.session.lock()) {
-                (Some(session), Ok(mut guard)) => {
-                    *guard = Some(session);
-                    drop(guard);
-                    self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
-                    self.lock_follows(SessionMoved::StrongProof);
-                }
-                _ => self.lock_follows(SessionMoved::Keyless),
-            }
-        }
+        let next = self.install_kept_key(&kept, email);
         if let Some(replaced) = replaced.filter(|old| old.as_str() != token.as_str()) {
             // The session the strong unlock replaced is ended at the server, best effort.
             revoke(&self.client, base, &replaced).await;
         }
-        Ok(gate::next_after_sign_in(false, self.unlocked(), false, false))
+        Ok(next)
     }
 
     fn store_first_sign_in(
