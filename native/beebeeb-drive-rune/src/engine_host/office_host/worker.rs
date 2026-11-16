@@ -89,9 +89,12 @@ struct Run<S: Starter> {
     /// The budget of each range the window asked, while any of its requests is out.
     splits: Vec<Split>,
     next_split: u64,
-    /// The helper's open handles right after its start, before any answer: the ceiling counts from here (`None`:
-    /// the system could not say, nothing is bounded).
+    /// The helper's open handles at its first checked answer (Opened/Sheets): the ceiling counts from here. The
+    /// loader's handles (taken between the resume and that answer) belong to it. `None`: not taken yet, or the
+    /// system could not say, nothing is bounded.
     handle_baseline: Option<u32>,
+    /// Whether the baseline was taken (once, at the first checked answer).
+    baselined: bool,
 }
 
 /// One range the window asked, and the halves asked for it after `RangeTooLarge`.
@@ -336,7 +339,6 @@ impl<S: Starter> Worker<S> {
             self.shared.disown();
             return self.stopped(Stop::Failed);
         };
-        let helper_handles = helper.handle_count();
         self.run = Some(Run {
             link: link_no,
             helper,
@@ -350,8 +352,9 @@ impl<S: Starter> Worker<S> {
             outline_since: None,
             splits: Vec::new(),
             next_split: 0,
-            // Taken right after the start, before any answer: the ceiling never moves with what the helper does.
-            handle_baseline: helper_handles,
+            // Taken at the first checked answer, not at the start: the loader is still mapping then.
+            handle_baseline: None,
+            baselined: false,
         });
         let granted = match (self.run.as_ref(), &self.doc) {
             (Some(run), Doc::Section(section)) => Some(self.starter.grant(&run.helper, section, sandbox::Access::Read)),
@@ -676,14 +679,19 @@ impl<S: Starter> Worker<S> {
         }
     }
 
-    /// After a checked answer, the helper's open handles stay within an absolute ceiling: its count right after its
-    /// start (before it answered anything), plus one per render out ([`MAX_IN_FLIGHT`]), plus [`HANDLE_SLACK`]. Over
+    /// After a checked answer, the helper's open handles stay within an absolute ceiling: its count at its first
+    /// checked answer (Opened/Sheets; the loader's handles are in it), plus one per render out ([`MAX_IN_FLIGHT`]), plus [`HANDLE_SLACK`]. Over
     /// it, the helper is stopped (`Protocol`) and `false` comes back: a helper that keeps the sections it was handed
     /// pins their memory. Where the count cannot be read (at the start or now), nothing is bounded.
     fn handles_ok(&mut self) -> bool {
         let Some(run) = self.run.as_mut() else {
             return false;
         };
+        if !run.baselined {
+            run.baselined = true;
+            run.handle_baseline = run.helper.handle_count();
+            return true;
+        }
         let (Some(base), Some(count)) = (run.handle_baseline, run.helper.handle_count()) else {
             return true;
         };
