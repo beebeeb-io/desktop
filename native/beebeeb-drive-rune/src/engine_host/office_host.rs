@@ -104,7 +104,7 @@ pub const OUTLINE_BUDGET: Duration = Duration::from_secs(60);
 /// without end by naming new ones in every answer.
 pub const MAX_KNOWN_ANCHORS: usize = 4_096;
 
-/// Open handles a helper may hold beyond its count at its first page and one per request out
+/// Open handles a helper may hold beyond its count right after its start and one per request out
 /// ([`MAX_IN_FLIGHT`]). A helper that keeps the sections it was handed is over it soon, and is stopped.
 pub const HANDLE_SLACK: u32 = 16;
 

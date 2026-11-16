@@ -88,7 +88,8 @@ struct Run<S: Starter> {
     /// The budget of each range the window asked, while any of its requests is out.
     splits: Vec<Split>,
     next_split: u64,
-    /// The helper's open handles at its first checked page: the bound counts from here.
+    /// The helper's open handles right after its start, before any answer: the ceiling counts from here (`None`:
+    /// the system could not say, nothing is bounded).
     handle_baseline: Option<u32>,
 }
 
@@ -318,6 +319,7 @@ impl<S: Starter> Worker<S> {
             self.shared.disown();
             return self.stopped(Stop::Failed);
         };
+        let helper_handles = helper.handle_count();
         self.run = Some(Run {
             link: link_no,
             helper,
@@ -331,7 +333,8 @@ impl<S: Starter> Worker<S> {
             outline_since: None,
             splits: Vec::new(),
             next_split: 0,
-            handle_baseline: None,
+            // Taken right after the start, before any answer: the ceiling never moves with what the helper does.
+            handle_baseline: helper_handles,
         });
         let granted = match (self.run.as_ref(), &self.doc) {
             (Some(run), Doc::Section(section)) => Some(self.starter.grant(&run.helper, section, sandbox::Access::Read)),
@@ -656,26 +659,18 @@ impl<S: Starter> Worker<S> {
         }
     }
 
-    /// After a checked answer, the helper's open handles stay within its count at its first checked page, plus one
-    /// per render out, plus [`HANDLE_SLACK`]. Over it, the helper is stopped (`Protocol`) and `false` comes back: a
-    /// helper that keeps the sections it was handed pins their memory. The first checked page (`page`) reads the
-    /// count it is measured from. Where the count cannot be read, nothing is bounded.
-    fn handles_ok(&mut self, page: bool) -> bool {
+    /// After a checked answer, the helper's open handles stay within an absolute ceiling: its count right after its
+    /// start (before it answered anything), plus one per render out ([`MAX_IN_FLIGHT`]), plus [`HANDLE_SLACK`]. Over
+    /// it, the helper is stopped (`Protocol`) and `false` comes back: a helper that keeps the sections it was handed
+    /// pins their memory. Where the count cannot be read (at the start or now), nothing is bounded.
+    fn handles_ok(&mut self) -> bool {
         let Some(run) = self.run.as_mut() else {
             return false;
         };
-        let Some(count) = run.helper.handle_count() else {
+        let (Some(base), Some(count)) = (run.handle_baseline, run.helper.handle_count()) else {
             return true;
         };
-        let over = match run.handle_baseline {
-            Some(base) => u64::from(count) > u64::from(base) + MAX_IN_FLIGHT as u64 + u64::from(HANDLE_SLACK),
-            None => {
-                if page {
-                    run.handle_baseline = Some(count);
-                }
-                false
-            }
-        };
+        let over = u64::from(count) > u64::from(base) + MAX_IN_FLIGHT as u64 + u64::from(HANDLE_SLACK);
         if over {
             self.stopped(Stop::Protocol);
         }
@@ -696,7 +691,7 @@ impl<S: Starter> Worker<S> {
             (Asked::Open, Message::Error(error)) => self.open_refused(error.code),
             // Cancelled: its answer is checked for id, order and kind (above), then discarded with its section.
             (Asked::Render { .. } | Asked::Anchor { .. }, Message::Rendered(_) | Message::Error(_)) if cancelled => {
-                let _ = self.handles_ok(false);
+                let _ = self.handles_ok();
             }
             (Asked::Render { ask, request, section }, Message::Rendered(got)) => {
                 self.rendered(ask, request, section, got)
@@ -706,7 +701,7 @@ impl<S: Starter> Worker<S> {
             }
             (Asked::Outline(asked), Message::OutlineData(got)) => self.outline_page(asked, got),
             (Asked::Stats, Message::StatsData(got)) => {
-                if self.handles_ok(false) {
+                if self.handles_ok() {
                     self.shared.push(Out::Event(Event::Stats { words: got.words }));
                 }
             }
@@ -728,6 +723,9 @@ impl<S: Starter> Worker<S> {
         if check::check_opened(&opened, &check::Limits::CONTRACT).is_err() {
             return self.stopped(Stop::Protocol);
         }
+        if !self.handles_ok() {
+            return;
+        }
         let office::Opened { pages, sizes } = opened;
         self.phase = Phase::Pages { sizes: sizes.clone() };
         self.shared.push(Out::State(OfficeState::Pages { pages, sizes }));
@@ -739,6 +737,12 @@ impl<S: Starter> Worker<S> {
                 sheet.name.zeroize();
             }
             return self.stopped(Stop::Protocol);
+        }
+        if !self.handles_ok() {
+            for sheet in &mut opened.sheets {
+                sheet.name.zeroize();
+            }
+            return;
         }
         self.phase = Phase::Sheets;
         self.shared.push(Out::State(OfficeState::Sheets {
@@ -780,7 +784,7 @@ impl<S: Starter> Worker<S> {
         if check::check_rendered(&request, &size, len as u64, &got, &check::Limits::CONTRACT).is_err() {
             return self.stopped(Stop::Protocol);
         }
-        if !self.handles_ok(true) {
+        if !self.handles_ok() {
             return;
         }
         let mut rgba = vec![0u8; len];
@@ -814,7 +818,7 @@ impl<S: Starter> Worker<S> {
         if check::check_rendered_anchor(&request, &ask.anchor, len as u64, &got, &check::Limits::CONTRACT).is_err() {
             return self.stopped(Stop::Protocol);
         }
-        if !self.handles_ok(true) {
+        if !self.handles_ok() {
             return;
         }
         let mut rgba = vec![0u8; len];
@@ -849,7 +853,7 @@ impl<S: Starter> Worker<S> {
             wipe_entries(&mut got.entries);
             return self.stopped(Stop::Protocol);
         }
-        if !self.handles_ok(false) {
+        if !self.handles_ok() {
             wipe_entries(&mut got.entries);
             return;
         }
@@ -876,7 +880,7 @@ impl<S: Starter> Worker<S> {
             wipe_cells(&mut got);
             return self.stopped(Stop::Protocol);
         }
-        if !self.handles_ok(false) {
+        if !self.handles_ok() {
             wipe_cells(&mut got);
             return;
         }
