@@ -93,8 +93,9 @@ pub struct Shell {
     pub(crate) away: super::away::AwayLock,
     /// What the flyout was last told of the away lock's cover (`registry::covered`): `Some(sync runs)` while covered.
     pub(crate) flyout_covered: Option<bool>,
-    /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle): Photos reads its
-    /// library again, and the Files window the folder it shows ([`read_again_after_a_check`]).
+    /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle, or it reported a new
+    /// `TrayInputs::last_check`): Photos reads its library again, and the Files window the folder it shows
+    /// ([`read_again_after_a_check`]).
     check_finished: bool,
     /// A finished check whose read of the folder shown waits for what is open over the rows to close
     /// (`State::reread_waits`).
@@ -222,7 +223,11 @@ impl Shell {
         let changed = self.app.apply(Event::Session(self.actions.session())) == Outcome::Changed;
         let inputs = self.actions.tray_inputs();
         if inputs != self.tray_inputs {
-            self.check_finished |= inputs.engine == EngineState::Idle && self.tray_inputs.engine != EngineState::Idle;
+            // A finished check: the engine's state turned Idle, or it reported another finished check (one that moved
+            // no file stays Idle throughout; what another device changed comes in that way).
+            let another_check = inputs.last_check.is_some() && inputs.last_check != self.tray_inputs.last_check;
+            let turned_idle = inputs.engine == EngineState::Idle && self.tray_inputs.engine != EngineState::Idle;
+            self.check_finished |= another_check || turned_idle;
             // The flyout reads the inputs themselves (counts), not only what the b shows.
             self.tray_inputs = inputs;
             self.flyout_behind = true;
@@ -837,8 +842,10 @@ fn open_sync_refusal(s: &mut State) -> bool {
 /// Each check the running engine finishes (the b's engine state turns Idle) reads the folder the Files window shows
 /// again, so what arrived since (synced from this PC's folder, or from another device), was renamed or left shows
 /// without a click, and so do the first sync's files (R1.1 of the sync-start contract: the gate opened before anything
-/// had synced, and the window said so). The engine gives the window no other sign that a folder changed: its status
-/// is the one event the window reads (`engine_host::fold`). The read is merged into the view (`frames::files::reread`):
+/// had synced, and the window said so). A finished check is the engine's state turning Idle, or a new time of its last
+/// finished check (a check that moved no file never leaves Idle). The engine gives the window no other sign that a
+/// folder changed: its status is the one event the window reads (`engine_host::fold`). The read is merged into the
+/// view (`frames::files::reread`):
 /// the selection, the focused row, the sort and the rows in view stay with their items; an item that left goes from
 /// the selection. While something is open over the rows (a name typed in a row, a menu, a drag, a dialog) the read
 /// waits, and runs on the first poll after it closed. Nothing is read while the session gate is closed: a gate that

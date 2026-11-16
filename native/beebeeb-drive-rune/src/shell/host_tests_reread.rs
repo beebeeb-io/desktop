@@ -214,6 +214,41 @@ fn a_finished_check_during_a_rename_waits_until_the_rename_closes() {
     assert_eq!(id_at(&rt.state, rt.state.selected).as_deref(), Some("m-2.txt"));
 }
 
+/// Files another device added come with a check that moves no file here: the engine reports Idle before and after it,
+/// with a new time of its last finished check. That is a finished check too; the same report again is not.
+#[test]
+fn a_finished_check_that_stays_idle_still_shows_what_another_device_added() {
+    let shelf = Elsewhere::with(&["m-1.txt", "m-2.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    let checked = |at: i64| TrayInputs {
+        last_check: Some(at),
+        ..inputs(EngineState::Idle)
+    };
+    engine.set_inputs(checked(1_000));
+    settle(&mut rt);
+    assert_eq!(rt.state.listing.items.len(), 2);
+
+    shelf.add(&SEVEN);
+    engine.set_inputs(checked(1_030));
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.listing.items.len(),
+        9,
+        "the files of the check that stayed Idle show: {:?}",
+        ids(&rt.state)
+    );
+
+    let read = shelf.reads();
+    settle(&mut rt);
+    engine.set_inputs(checked(1_030));
+    settle(&mut rt);
+    assert_eq!(
+        shelf.reads(),
+        read,
+        "the same report again is no new check: nothing is read"
+    );
+}
+
 /// Scrolled down a long folder, files land that sort above the rows in view: the rows in view stay where they
 /// were on screen (anchored to the first row in view, by its item), not pushed down by the new rows.
 #[test]

@@ -104,20 +104,29 @@ impl State {
             let shown: HashSet<&str> = self.listing.items.iter().map(|item| item.id.as_str()).collect();
             let (still, new): (Vec<_>, Vec<_>) = items.into_iter().partition(|item| shown.contains(item.id.as_str()));
             let mut now: HashMap<String, _> = still.into_iter().map(|item| (item.id.clone(), item)).collect();
-            let mut rows: Vec<_> = self
+            let mut kept = self
                 .listing
                 .items
                 .iter()
                 .filter_map(|row| now.remove(&row.id))
-                .collect();
+                .collect::<Vec<_>>()
+                .into_iter()
+                .peekable();
+            // The new rows in the folder's sort, each before the first row still there that comes after it: one pass,
+            // however many arrived (the first sync brings every row at once).
             let sort = self.actions.sort;
+            let mut new = new;
+            new.sort_by(|a, b| super::sorting::compare(sort, a, b));
+            let mut rows = Vec::with_capacity(kept.len() + new.len());
             for item in new {
-                let at = rows
-                    .iter()
-                    .position(|row| super::sorting::compare(sort, row, &item) == std::cmp::Ordering::Greater)
-                    .unwrap_or(rows.len());
-                rows.insert(at, item);
+                while let Some(row) =
+                    kept.next_if(|row| super::sorting::compare(sort, row, &item) != std::cmp::Ordering::Greater)
+                {
+                    rows.push(row);
+                }
+                rows.push(item);
             }
+            rows.extend(kept);
             rows
         };
         self.listing = Listing { folder, path, items };
