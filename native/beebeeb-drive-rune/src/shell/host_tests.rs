@@ -1143,3 +1143,36 @@ mod owned_state;
 mod reread;
 #[path = "host_tests_session_gate.rs"]
 mod session_gate;
+
+/// Census row (lane signin-wipe): the window's close reaches sign-in. Closed to the notification area, the window keeps
+/// no typed password or code, and a code step is left as Back leaves it, the engine told (`frames::signin::wipe`).
+#[test]
+fn signin_wipe_closing_the_window_to_the_tray_wipes_what_sign_in_holds() {
+    use crate::frames::signin::source::{FixtureSignInSource, Script};
+    use crate::frames::signin::{Screen as SignInScreen, Ui as SignInUi};
+
+    let mut shell = Shell::fixture_on(Arc::new(FixtureEngine::ready()), Arc::new(FakePlatform::default()));
+    shell.attach_tray(no_events());
+    assert!(
+        !shell.close_quits(),
+        "the premise: closing keeps Beebeeb in the notification area"
+    );
+    let mut rt = runtime(state::init_with(shell));
+    let source = FixtureSignInSource::new(Script::default());
+    let calls = source.calls.clone();
+    let mut signin = SignInUi::new(Box::new(source));
+    signin.password.replace_text("an invented password");
+    signin.code.replace_text("48");
+    signin.screen = SignInScreen::TwoFactor { backup: false };
+    rt.state.signin = Some(signin);
+
+    rt.update(on_close);
+
+    let signin = rt.state.signin.as_ref().expect("the sign-in state stays");
+    assert!(
+        signin.password.text.is_empty() && signin.code.text.is_empty(),
+        "nothing typed stays"
+    );
+    assert_eq!(signin.screen, SignInScreen::SignIn, "the code step is left");
+    assert_eq!(*calls.borrow(), ["discard_partial_sign_in"], "the engine is told");
+}

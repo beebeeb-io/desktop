@@ -497,6 +497,8 @@ impl<C: CredentialStores> Engine<C> {
                 // stored session is unlocked.
                 return Err(SignInProblem::Other);
             }
+            // A new password step replaces a half-done one: its challenge, stretch and held recovery go first.
+            self.forget_half_done_sign_in();
             let email = account_binding::canonical_email(email);
             let legs = password::password_legs(
                 |req| auth_transport::send_to(&self.config.api_base, &self.client, None, req),
@@ -553,20 +555,18 @@ impl<C: CredentialStores> Engine<C> {
                 .await
                 .map_err(|e| words(&e))?;
             let token = {
-                let pending = self.pending_2fa.lock().map_err(|_| words("failed"))?;
+                let mut pending = self.pending_2fa.lock().map_err(|_| words("failed"))?;
                 let Some((challenge, _)) = pending.as_ref() else {
                     return Err(gate::TWO_FACTOR_EXPIRED);
                 };
-                password::second_factor_answer(challenge, response).map_err(|e| words(&e))?
-            };
-            let next = self
-                .finish_sign_in(turn, token, (*email).clone())
-                .await
-                .map_err(|e| words(&e))?;
-            if let Ok(mut pending) = self.pending_2fa.lock() {
+                let token = password::second_factor_answer(challenge, response).map_err(|e| words(&e))?;
+                // Accepted: the challenge is spent, and goes (wiped) whatever the install below answers.
                 *pending = None;
-            }
-            Ok(next)
+                token
+            };
+            self.finish_sign_in(turn, token, (*email).clone())
+                .await
+                .map_err(|e| words(&e))
         })
     }
 
@@ -580,6 +580,8 @@ impl<C: CredentialStores> Engine<C> {
         typed_email: String,
     ) -> Result<NextAfterSignIn, String> {
         let base = &self.config.api_base;
+        // Taken first, so a sign-in that fails below leaves no stretch behind (it is wiped as it drops).
+        let screen_check = self.take_pending_screen_check(&typed_email);
         let profile = match fetch_profile(&self.client, base, &token).await {
             Ok(profile) => profile,
             Err(error) => {
@@ -587,7 +589,6 @@ impl<C: CredentialStores> Engine<C> {
                 return Err(error);
             }
         };
-        let screen_check = self.take_pending_screen_check(&typed_email);
         let email = match profile.email.trim() {
             "" => typed_email,
             named => named.to_string(),
@@ -658,6 +659,7 @@ impl<C: CredentialStores> Engine<C> {
             *stored = Some(email.to_string());
         }
         self.set_auth_present(true);
+        self.forget_half_done_sign_in();
         Ok(())
     }
 
@@ -988,10 +990,7 @@ impl<C: CredentialStores> Engine<C> {
         *guard = None;
         drop(guard);
         self.lock_follows(moved);
-        if let Ok(mut pending) = self.pending_2fa.lock() {
-            *pending = None;
-        }
-        self.lock_password.drop_pending();
+        self.forget_half_done_sign_in();
     }
 
     /// Sign out and KEEP the local files and the local state: the engine stops, the session is ended on the server

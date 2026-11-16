@@ -18,7 +18,9 @@
 //!    the password changed, nothing is stored, the person signs in normally next.
 //!
 //! The held flow: one per engine, one at a time. A new verify replaces it; a stale turn, a refused recovery token
-//! and the last step (which consumes it) drop it; [`Engine::recovery_forget`] drops it on demand. It is kept in a
+//! and the last step (which consumes it) drop it; [`Engine::recovery_forget`] drops it on demand, and the engine's
+//! end of every half-done step calls it (leaving a sign-in, a new password step, a stored session, a forgotten
+//! session), as does the engine's drop. It is kept in a
 //! slot of this module, keyed by the engine's account runtime (held weakly), because the handle has no field for
 //! it; it is taken out of the slot for one step and never held across a request by the slot's lock.
 //!
@@ -113,6 +115,16 @@ fn held() -> MutexGuard<'static, Vec<Held>> {
     let mut entries = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     entries.retain(|entry| entry.owner.strong_count() > 0);
     entries
+}
+
+/// Whether the slot holds a recovery of the engine whose account runtime `owner` points at, read WITHOUT dropping the
+/// entries of dropped engines first (the wipe tests: what an engine's drop leaves behind).
+#[cfg(test)]
+fn held_for(owner: &Weak<AccountRuntime>) -> bool {
+    HELD.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .any(|entry| entry.owner.ptr_eq(owner))
 }
 
 fn seconds_of(retry_after: u64) -> u32 {
@@ -494,6 +506,14 @@ impl<C: CredentialStores> Engine<C> {
             return (None, Zeroizing::new(String::new()));
         }
         (Some(status), Zeroizing::new(text))
+    }
+}
+
+/// An engine that goes takes its held recovery with it at once (the key and the recovery token are wiped as the entry
+/// drops), rather than at another engine's next look into the slot: the slot is a static, and outlives every engine.
+impl<C: CredentialStores> Drop for Engine<C> {
+    fn drop(&mut self) {
+        self.recovery_forget();
     }
 }
 
