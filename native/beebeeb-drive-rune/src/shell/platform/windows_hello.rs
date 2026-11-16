@@ -24,6 +24,7 @@
 //! is. Off Windows everything answers "not here": `Unsupported` and `Unavailable`.
 
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// Whether a Windows Hello prompt can be shown on this PC, for this person.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +168,9 @@ struct Progress {
     superseded: bool,
     /// The prompt's operation ended, with this `AsyncStatus`.
     ended: Option<i32>,
+    /// The prompt's thread is done with Windows: no prompt was shown, its answer is in, or Windows was asked to close
+    /// it (the `Cancel` of a taken-away prompt has returned). [`take_away_for_quit`] waits for this.
+    finished: bool,
 }
 
 #[derive(Default)]
@@ -204,6 +208,30 @@ impl Control {
     fn taken_away(&self) -> bool {
         let progress = lock(&self.progress);
         progress.cancel_asked || progress.superseded
+    }
+
+    /// The prompt's thread is done with Windows (its `verify` returned).
+    fn finished(&self) {
+        lock(&self.progress).finished = true;
+        self.changed.notify_all();
+    }
+
+    /// Waits until the prompt's thread is done with Windows, at most `limit`. `true`: it is.
+    fn wait_finished(&self, limit: Duration) -> bool {
+        let until = Instant::now() + limit;
+        let mut progress = lock(&self.progress);
+        while !progress.finished {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            progress = self
+                .changed
+                .wait_timeout(progress, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        true
     }
 
     /// Waits for the prompt to end or to be taken away, whichever is first; taken away wins when both are in. The
@@ -263,6 +291,16 @@ impl OneUp {
         }
     }
 
+    /// The app is quitting: the prompt that is up (whoever asked for it) is taken away as by its owner's cancel (no
+    /// answer of it is handed out), and this waits, at most `limit`, until its thread asked Windows to close it.
+    /// `true`: no prompt is up, or its thread is done with Windows.
+    fn take_away_and_wait(&self, limit: Duration) -> bool {
+        let up = lock(&self.up).clone();
+        let Some(control) = up else { return true };
+        control.cancel();
+        control.wait_finished(limit)
+    }
+
     /// `control`'s prompt is over. A newer one that took its place stays.
     fn leave(&self, control: &Arc<Control>) {
         let mut up = lock(&self.up);
@@ -292,6 +330,14 @@ impl HelloRequest {
     }
 }
 
+/// The app is quitting (`shell::host::on_quit`): the prompt that is up, whoever asked for it, is taken away, and this
+/// waits at most `limit` for its thread to ask Windows to close it. A prompt whose owner is gone stays on screen with
+/// nobody to answer, so the quit asks Windows first. Whether and when the prompt leaves the screen is Windows' (the
+/// native rung checks it). `true`: no prompt was up, or its thread is done with Windows within `limit`.
+pub fn take_away_for_quit(limit: Duration) -> bool {
+    UP.take_away_and_wait(limit)
+}
+
 /// Is Windows Hello set up here? Waits for Windows (briefly): call it from a worker thread.
 pub fn availability() -> HelloAvailability {
     availability_from_raw(imp::availability())
@@ -319,6 +365,7 @@ pub fn start(
         let (control, reason) = (control.clone(), reason.to_owned());
         move || {
             let seen = imp::verify(window, &reason, &control);
+            control.finished();
             UP.leave(&control);
             control.answer(seen, on_done);
         }
@@ -691,6 +738,57 @@ mod tests {
         let third = Arc::new(Control::default());
         one_up.take_place(&third);
         assert!(!second.taken_away());
+    }
+
+    /// The app quits while a prompt is up (whoever asked for it): the prompt is taken away, its owner hears nothing of
+    /// it, also of a yes, and the quit returns only once the prompt's thread asked Windows to close it. A prompt whose
+    /// owner is gone stays on screen otherwise, with nobody to answer.
+    #[test]
+    fn a_quit_takes_the_prompt_away_and_waits_until_its_thread_asked_windows_to_close_it() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let one_up = OneUp::new();
+        assert!(
+            one_up.take_away_and_wait(Duration::from_millis(1)),
+            "no prompt up: nothing to wait for"
+        );
+        let control = Arc::new(Control::default());
+        one_up.take_place(&control);
+        // The prompt's thread as `start` runs it: it waits on the prompt; taken away, it asks Windows to close it
+        // (here: a while), then it is done with Windows.
+        let asked_to_close = Arc::new(AtomicBool::new(false));
+        let thread = std::thread::spawn({
+            let (control, asked) = (control.clone(), asked_to_close.clone());
+            move || {
+                assert_eq!(control.wait(), Woken::TakenAway);
+                std::thread::sleep(Duration::from_millis(50));
+                asked.store(true, SeqCst);
+                control.finished();
+            }
+        });
+        assert!(
+            one_up.take_away_and_wait(Duration::from_secs(10)),
+            "the prompt's thread was woken and finished"
+        );
+        assert!(
+            asked_to_close.load(SeqCst),
+            "the quit returned only after the thread asked Windows to close the prompt"
+        );
+        let mut got = None;
+        control.answer(completed(raw::VERIFIED), |result| got = Some(result));
+        assert_eq!(got, None, "its owner hears nothing, also of a yes");
+        thread.join().unwrap();
+    }
+
+    /// A prompt's thread that never gets done (Windows does not answer) holds the quit no longer than its limit.
+    #[test]
+    fn a_quit_waits_no_longer_than_its_limit() {
+        let one_up = OneUp::new();
+        let control = Arc::new(Control::default());
+        one_up.take_place(&control);
+        let began = Instant::now();
+        assert!(!one_up.take_away_and_wait(Duration::from_millis(100)));
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert!(control.taken_away(), "taken away all the same");
     }
 
     // Off Windows there is nothing to show: the answers below are the stub's. On Windows these would raise a

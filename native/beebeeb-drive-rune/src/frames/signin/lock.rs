@@ -235,6 +235,14 @@ impl Ui {
         self.pump();
     }
 
+    /// The app quits (`on_quit`): the prompt this lock screen waits for is taken away and no longer waited for, so a
+    /// quit that Windows then cancels (a shutdown another app refused) leaves Unlock asking again.
+    pub(super) fn lock_end_hello(&mut self) {
+        if std::mem::take(&mut self.lock.hello_waiting) {
+            self.source.cancel_hello();
+        }
+    }
+
     /// The window came to the front while the screen is locked: Windows Hello starts by itself, once per lock.
     pub(super) fn lock_window_focused(&mut self) {
         if self.lock.level == Some(Level::Screen) && !self.lock.auto_asked {

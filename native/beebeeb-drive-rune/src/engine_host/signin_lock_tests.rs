@@ -117,9 +117,13 @@ fn a_verified_prompt_of_an_earlier_turn_opens_nothing() {
     assert_eq!(source.poll(), None, "an answer of a prompt that was left is dropped");
 
     // Asked under the first account; it signed out and ANOTHER account signed in and locked its screen
-    // before the prompt answered: the yes is not that account's.
+    // before the prompt answered: the yes is not that account's. The sign-out ended the lock the prompt was asked
+    // for, so the source's next poll takes the prompt away and tells the screen (`signin_hello_end_tests.rs`).
     source.begin_hello();
+    let taken_before = prompts.taken_away.load(Ordering::SeqCst);
     engine.sign_out_keeping_local_data().expect("signed out");
+    assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
+    assert_eq!(prompts.taken_away.load(Ordering::SeqCst), taken_before + 1);
     source.begin_sign_in(&fake.second.email, PASSWORD);
     assert_eq!(
         next(&mut source),
@@ -132,7 +136,7 @@ fn a_verified_prompt_of_an_earlier_turn_opens_nothing() {
     );
     assert_eq!(engine.lock_screen(), Ok(()));
     prompts.answer(HelloResult::Verified);
-    assert_eq!(next(&mut source), SignInEvent::Hello(HelloOutcome::Cancelled));
+    assert_eq!(source.poll(), None, "the taken-away prompt's yes reaches no screen");
     assert_eq!(engine.lock_state(), LockState::ScreenLocked);
     assert_eq!(engine.user_id().as_deref(), Some(fake.second.user_id.as_str()));
 }
@@ -468,3 +472,6 @@ fn screen_password_the_servers_limit_is_a_limit_and_every_answer_maps() {
     assert_eq!(seconds_up(30_000), 30);
     assert_eq!(seconds_up(30_001), 31);
 }
+
+#[path = "signin_hello_end_tests.rs"]
+mod hello_end;

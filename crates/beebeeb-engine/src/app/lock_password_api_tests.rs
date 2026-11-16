@@ -568,3 +568,6 @@ fn nothing_in_the_password_path_logs() {
         assert!(!code.contains(needle), "{needle} in the password path");
     }
 }
+
+#[path = "screen_unlock_ask_tests.rs"]
+mod screen_unlock_ask;
