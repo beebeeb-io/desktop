@@ -167,6 +167,27 @@ fn open_with_lists_beebeeb_the_apps_and_other() {
 }
 
 #[test]
+fn open_with_names_the_app_by_the_identity_it_was_handed() {
+    // Each build has its own name: both of the menu's lines that name the app say the window's own, never a literal.
+    use crate::shell::identity::AppIdentity;
+    let [one, other] = AppIdentity::BOTH;
+    assert_ne!(
+        one.product_name(),
+        other.product_name(),
+        "the instrument tells the two apps apart"
+    );
+    for identity in AppIdentity::BOTH {
+        let mut s = with_agreement(true);
+        s.select_only(AGREEMENT_ROW);
+        s.identity = identity;
+        let name = identity.product_name();
+        let open = format!("Open ({name})");
+        assert_eq!(labels(&menu_with(&mut s, true))[0], open.as_str());
+        assert_eq!(labels(&open_with_menu::entries(&s))[0], name);
+    }
+}
+
+#[test]
 fn an_app_press_on_a_file_not_kept_says_keep_first_and_opens_nothing() {
     for line in ["menu-1-item-1", "menu-1-item-3"] {
         let (mut rt, calls) = spied_with(false, Some(vec![app(1), app(2)]));

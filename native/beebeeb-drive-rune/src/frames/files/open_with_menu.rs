@@ -105,8 +105,21 @@ pub fn add_to(s: &State, entries: &mut Vec<Entry>) {
     let Some(open) = entries.iter_mut().find(|entry| entry.id() == Some("open")) else {
         return;
     };
-    *open = Entry::keyed("open", "Open (Beebeeb)", "Enter");
+    *open = Entry::keyed("open", open_label(s.identity.product_name()), "Enter");
     entries.insert(OPEN_WITH, Entry::keyed(OPEN_WITH_ID, "Open With", SUBMENU));
+}
+
+/// "Open (<the app's name>)". The name is the identity's the window was handed (a test build says its own), never a
+/// literal here. Made once per name, and there are two.
+fn open_label(name: &'static str) -> &'static str {
+    static MADE: Mutex<Vec<(&'static str, &'static str)>> = Mutex::new(Vec::new());
+    let mut made = MADE.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, label)) = made.iter().find(|(made_for, _)| *made_for == name) {
+        return label;
+    }
+    let label: &'static str = Box::leak(format!("Open ({name})").into_boxed_str());
+    made.push((name, label));
+    label
 }
 
 /// The submenu: Beebeeb (the viewer), the apps Windows reports, Other… (the board's lines and separators).
@@ -114,7 +127,7 @@ pub fn entries(s: &State) -> Vec<Entry> {
     let apps = offered_for(s)
         .map(|item| s.actions.source.apps_for(&item))
         .unwrap_or_default();
-    let mut out = vec![Entry::item(BEEBEEB_ID, "Beebeeb"), Entry::Sep];
+    let mut out = vec![Entry::item(BEEBEEB_ID, s.identity.product_name()), Entry::Sep];
     for (id, app) in APP_IDS.into_iter().zip(&apps) {
         out.push(Entry::item(id, words(&app.label)));
     }
