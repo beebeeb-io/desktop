@@ -349,16 +349,6 @@ pub(crate) fn handle(s: &mut State, verb: ExplorerVerb, item: &str, tx: &mut Tx)
 pub(crate) fn handle_with(s: &mut State, verb: ExplorerVerb, item: &str, engine: Option<&dyn ItemLookup>, tx: &mut Tx) {
     // Under the wake cover the engine has not said whether the wake locks: nothing is looked up, navigated or opened
     // behind it. The verb waits for the cover's end (review of #463, P3-7).
-    if registry::covered(s) {
-        let account = s.shell.app.account().map(str::to_owned);
-        WAITING.set(Some(Waiting {
-            verb,
-            item: item.to_owned(),
-            account,
-        }));
-        host::log("a File Explorer verb waits for the lock screen");
-        return;
-    }
     let window_open = session_gate::open(s);
     let account = s.shell.app.account().map(str::to_owned);
     match control::explorer_verb(verb, item, window_open, account.as_deref(), engine) {
