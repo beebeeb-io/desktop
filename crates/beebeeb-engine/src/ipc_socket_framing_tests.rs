@@ -79,7 +79,17 @@ impl IpcFixture {
         let sock = sock_dir.path().join("ipc.sock");
         let db = Arc::new(StateDb::open(state_dir.path().join("state.db")).unwrap());
         seed(&db);
-        let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "token".into(), [7u8; 32]));
+        // A port nothing listens on: bound, read, released. Port 9 is not "refused" everywhere (on WSL2 a connect to
+        // it hangs until the request timeout), which left a test that wants a quick daemon-side failure waiting.
+        let dead_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let api = Arc::new(ApiClient::new(
+            format!("http://127.0.0.1:{dead_port}"),
+            "token".into(),
+            [7u8; 32],
+        ));
         let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
 
         let rt = tokio::runtime::Runtime::new().unwrap();

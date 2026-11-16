@@ -81,7 +81,10 @@ fn every_person_accessor_goes_through_the_choke_point() {
             "acct.session.lock()",
             &[
                 // lock_api.rs: the start restore's key loader, moved out of app.rs with its one lock.
-                ("app.rs", 4),
+                ("app.rs", 3),
+                // kept_key_proof.rs: the sign-in's kept-key install (the write moved here from app.rs), inside a
+                // `claim` (the session-write lock is held), only after the server confirmed the key.
+                ("kept_key_proof.rs", 1),
                 ("owned_state.rs", 1),
                 ("lock_api.rs", 2),
                 // Sign-up has no earlier session: it installs the new one (`signup_api::install_new_account`).
