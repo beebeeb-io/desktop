@@ -705,3 +705,37 @@ fn a_rebuilt_folder_link_read_for_a_session_that_ended_meanwhile_is_not_handed_o
         "the links were read under the old session, then nothing"
     );
 }
+
+/// The session moves at the top of the press's next request, before that request's own session check.
+fn before_next_send(engine: &Arc<TestEngine>) {
+    let engine = engine.clone();
+    crate::app::bindings::link_session::tests::BEFORE_SEND
+        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || signed_in(&engine))));
+}
+
+#[test]
+fn a_bundle_pressed_under_another_session_is_refused_before_any_file_is_looked_at() {
+    // The run's session check (`link_session.rs`, `Engine::link_run`): a bundle pressed under a session that is gone
+    // is refused as not signed in, never told "not found" about a file it holds.
+    let f = fixture();
+    let turn = f.engine.session_turn();
+    signed_in(&f.engine);
+    let ids = [UNKNOWN.to_string()];
+    assert_eq!(
+        f.engine.bundle_link_for(turn, &ids, None).unwrap_err(),
+        FolderLinkError::NotSignedIn
+    );
+    assert_eq!(f.sent(), 0, "nothing was sent");
+}
+
+#[test]
+fn a_session_that_moves_before_a_request_leaves_sends_nothing() {
+    // The send's session check (`link_session.rs`, `Engine::link_send`): the session moves after the press's run
+    // and before its first request; nothing leaves.
+    let f = fixture();
+    before_next_send(&f.engine);
+    assert_eq!(f.revoke(FOLDER).unwrap_err(), FolderLinkError::NotSignedIn);
+    before_next_send(&f.engine);
+    assert_eq!(f.bundle(&[NOTE]).unwrap_err(), FolderLinkError::NotSignedIn);
+    assert_eq!(f.sent(), 0, "nothing was sent");
+}
