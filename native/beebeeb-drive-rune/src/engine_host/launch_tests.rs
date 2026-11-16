@@ -20,7 +20,7 @@ const UNDER_LOCK: [&str; 2] = ["launch::spawn(", "launch::locked("];
 const FFMPEG: &str = "../../crates/beebeeb-engine/src/engine_bridge/media.rs";
 
 /// `src` with its comments and the insides of its string and char literals blanked out (same length, same lines).
-fn code_only(src: &str) -> String {
+pub(super) fn code_only(src: &str) -> String {
     let b = src.as_bytes();
     let mut out = b.to_vec();
     let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
@@ -97,7 +97,7 @@ fn code_only(src: &str) -> String {
 /// `code` (from [`code_only`]) with every inline test module blanked: `#[cfg(test)]`, the attributes after it, then
 /// `mod name { … }` to its closing brace. The code after it is still scanned. A test module in a file of its own
 /// (`mod name;`) is left: its file is not scanned.
-fn without_inline_tests(code: &str) -> String {
+pub(super) fn without_inline_tests(code: &str) -> String {
     let mut out = code.as_bytes().to_vec();
     let mut from = 0;
     while let Some(n) = code[from..].find("#[cfg(test)]") {
@@ -181,7 +181,7 @@ fn bare_starts(src: &str) -> Vec<usize> {
 
 /// Every `.rs` file under `dir` that is not a test's: no `tests.rs`, no `*_tests.rs`, nothing in a `*_tests` or
 /// `tests` folder.
-fn non_test_files(dir: &Path, out: &mut Vec<PathBuf>) {
+pub(super) fn non_test_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();

@@ -747,7 +747,24 @@ pub fn open_web_page(url: &str) -> Result<(), ()> {
         Ok(())
     }
     #[cfg(not(test))]
-    super::open_path(std::path::Path::new(url)).map_err(|_| ())
+    open_on_the_launch_worker(url, super::open_path)
+}
+
+/// The one launch worker the pages open on: the window's thread never waits for the launch lock (ruling R-OW1). A
+/// page has no session (the sign-in page opens signed out), so its start compares none.
+#[cfg_attr(test, allow(dead_code))]
+fn open_on_the_launch_worker(url: &str, start: super::files_launch::Start) -> Result<(), ()> {
+    static PAGES: std::sync::LazyLock<super::launcher::Launcher> = std::sync::LazyLock::new(Default::default);
+    PAGES.open(
+        start,
+        std::path::PathBuf::from(url),
+        || true,
+        |answer| {
+            if answer.is_err() {
+                super::log("sign-in: a page did not open");
+            }
+        },
+    )
 }
 
 #[cfg(test)]
