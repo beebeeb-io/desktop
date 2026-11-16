@@ -438,26 +438,35 @@ fn outline(doc: &DocBody, t: &Theme) -> El {
     pane
 }
 
-/// One page of paper: white, the source's picture drawn whole at its own aspect (never cropped) from the top of the
-/// page. The page is the board's width at the stage's zoom and at least the board's height; with no picture it is
-/// blank paper in the page's own proportions. Page 1 is keyed `page`, a later page `page-{n}` (the board's `pg-` is
-/// a line of text, which a picture has none of).
-fn paper(n: u32, doc: &DocBody, pixels: Option<Pixels>) -> El {
-    let (w_pt, h_pt) = doc
-        .view
+/// The page's size in points (width, height) as the file says, the board's A4 when it says nothing.
+fn size_pt(doc: &DocBody, n: u32) -> (f32, f32) {
+    doc.view
         .page_sizes_pt
         .get(n as usize - 1)
         .copied()
-        .filter(|(w, h)| *w > 0.0 && *h > 0.0)
-        .unwrap_or((595.0, 842.0));
-    let scale = f32::from(doc.view.zoom) / 100.0;
-    let w = PAGE_W * scale;
+        // A size the file states is trusted only as far as a page can be: finite, positive, and at most 20 times as
+        // tall as wide or the reverse (an absurd one is the board's A4).
+        .filter(|(w, h)| w.is_finite() && h.is_finite() && *w > 0.0 && *h > 0.0 && h / w <= 20.0 && w / h <= 20.0)
+        .unwrap_or((595.0, 842.0))
+}
+
+/// Page `n`'s box on the stage, in layout points: the board's width at the stage's zoom, in the page's own proportions.
+fn box_pt(doc: &DocBody, n: u32) -> (f32, f32) {
+    let (w_pt, h_pt) = size_pt(doc, n);
+    let w = PAGE_W * f32::from(doc.view.zoom) / 100.0;
+    (w, w * h_pt / w_pt)
+}
+
+/// The paper of page `n` before anything is drawn on it. Page 1 is keyed `page`, a later page `page-{n}` (the board's
+/// `pg-` is a line of text, which a picture has none of).
+fn shell(n: u32, doc: &DocBody) -> El {
+    let w = PAGE_W * f32::from(doc.view.zoom) / 100.0;
     let key = if n == 1 {
         "page".to_string()
     } else {
         format!("page-{n}")
     };
-    let page = col()
+    col()
         .key(key)
         .role("image")
         .label(format!("Page {n}"))
@@ -466,36 +475,75 @@ fn paper(n: u32, doc: &DocBody, pixels: Option<Pixels>) -> El {
         .radius(2.0)
         .clip_rounded(2.0)
         .fill(Color::WHITE)
-        .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)));
+        .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)))
+}
+
+/// One page of paper: white, the source's picture drawn whole at its own aspect (never cropped) from the top of the
+/// page. The page is the board's width at the stage's zoom and at least the board's height; with no picture it is
+/// blank paper in the page's own proportions.
+fn paper(n: u32, doc: &DocBody, pixels: Option<Pixels>) -> El {
+    let (w, blank_h) = box_pt(doc, n);
+    let scale = f32::from(doc.view.zoom) / 100.0;
+    let page = shell(n, doc);
     match pixels {
         Some(p) => {
             let (pw, ph) = p.size();
-            let pic_h = if pw > 0 {
-                w * ph as f32 / pw as f32
-            } else {
-                w * h_pt / w_pt
-            };
+            let pic_h = if pw > 0 { w * ph as f32 / pw as f32 } else { blank_h };
             page.h(pic_h.max(PAGE_MIN_H * scale)).child(
                 el().key(format!("page-picture-{n}"))
                     .size(w, pic_h)
                     .pixels_fit(&p, SurfaceFit::Fill),
             )
         }
-        None => page.h(w * h_pt / w_pt),
+        None => page.h(blank_h),
     }
 }
 
-/// The pages on grey, from the one in view onward. `page(n)`: the source's picture of page `n`.
-fn stage(doc: &DocBody, page: &dyn Fn(u32) -> Option<Pixels>, t: &Theme) -> El {
+/// The gap between two pages on the stage.
+const PAGE_GAP: f32 = 16.0;
+
+#[path = "docs_live.rs"]
+mod live;
+use live::paper_live;
+pub use live::{Asks, Live, asked_pages};
+
+/// Where a document's pictures come from: the fixture's whole pages, or a renderer asked for what is near the screen.
+pub enum Pictures<'a> {
+    Fixture(&'a dyn Fn(u32) -> Option<Pixels>),
+    Live(&'a Live<'a>),
+}
+
+/// The pages on grey, from the one in view onward. Every page keeps its box, so the height is right; only the pages
+/// near the screen get a picture (live), or every page asks the fixture (as it always did).
+fn stage(doc: &DocBody, pics: &Pictures, t: &Theme) -> El {
     let mut pages = col()
         .key("pages")
         .role("document")
         .label("Pages")
         .items_center()
-        .gap(16.0)
+        .gap(PAGE_GAP)
         .py(24.0);
+    let mut top = 0.0;
+    let band = match pics {
+        Pictures::Live(live) => Some(asked_pages(doc, live.screen.1)),
+        Pictures::Fixture(_) => None,
+    };
+    // The pages one screen above the one in view are asked ahead of a scroll up, and not drawn.
+    if let (Pictures::Live(live), Some((lo, _))) = (pics, band) {
+        let mut above = 0.0;
+        for n in (lo..doc.page).rev() {
+            above += box_pt(doc, n).1 + PAGE_GAP;
+            let _ = paper_live(n, doc, live, -above);
+        }
+    }
     for n in doc.page..=doc.view.pages.max(1) {
-        pages = pages.child(paper(n, doc, page(n)));
+        let paper = match (pics, band) {
+            (Pictures::Fixture(page), _) => paper(n, doc, page(n)),
+            (Pictures::Live(live), Some((lo, hi))) if (lo..=hi).contains(&n) => paper_live(n, doc, live, top),
+            (Pictures::Live(_), _) => paper(n, doc, None),
+        };
+        pages = pages.child(paper);
+        top += box_pt(doc, n).1 + PAGE_GAP;
     }
     row()
         .key("stage")
@@ -629,6 +677,15 @@ fn status(doc: &DocBody, t: &Theme) -> El {
 /// The window of DW-1507 / DW-1511: the caption, the sidebar, and the document beside it. `page(n)`: the source's
 /// picture of page `n`.
 pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, page: &dyn Fn(u32) -> Option<Pixels>) -> El {
+    window_with(s, cx, ui, doc, &Pictures::Fixture(page))
+}
+
+/// The window of a document the Office engine renders: the same window, its pictures asked as [`paper_live`] says.
+pub fn window_live(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, live: &Live) -> El {
+    window_with(s, cx, ui, doc, &Pictures::Live(live))
+}
+
+fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pictures) -> El {
     let t = tokens::theme(cx.system_dark());
     let mut body = row()
         .key("viewer-row")
@@ -636,7 +693,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, page: &dyn 
         .min_h(0.0)
         .w_full()
         .child(outline(doc, &t))
-        .child(stage(doc, page, &t));
+        .child(stage(doc, pics, &t));
     if ui.show_details {
         body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
     }
@@ -1025,3 +1082,7 @@ mod tests {
         assert!(bar.contains("Some content isn't shown."));
     }
 }
+
+#[cfg(test)]
+#[path = "docs_live_tests.rs"]
+pub(super) mod live_tests;

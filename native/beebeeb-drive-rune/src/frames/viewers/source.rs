@@ -689,6 +689,12 @@ pub trait ViewerSource {
     fn office_picture(&self, _file_id: &str, _which: super::kinds::OfficePicture) -> Option<rune::Pixels> {
         None
     }
+    /// Whether this source holds the open Office file in a renderer: the scenes ask it for pictures and cells. `false`
+    /// (the default, the fixture source): they draw the fixture pictures. Not told by the answers, which are `None`
+    /// both before a live picture comes and always from a fixture.
+    fn office_live(&self) -> bool {
+        false
+    }
     /// The view shows these cells of `sheet`: asked if not held; the cells come later through
     /// [`ViewerSource::poll`] as a new `Body::Sheet`.
     fn office_cells(&self, _file_id: &str, _sheet: u32, _first_row: u32, _first_col: u32, _rows: u32, _cols: u32) {}

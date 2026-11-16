@@ -1048,6 +1048,10 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
         self.media_previews(name) || self.office_route(name).is_some()
     }
 
+    fn office_live(&self) -> bool {
+        true
+    }
+
     fn office_picture(&self, file_id: &str, which: kinds::OfficePicture) -> Option<rune::Pixels> {
         self.office_picture_of(file_id, which)
     }

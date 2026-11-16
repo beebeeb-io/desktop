@@ -143,16 +143,17 @@ impl StateBody {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scenes
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
 fn state_mut(s: &mut State) -> Option<&mut StateBody> {
     match &mut viewers::ui(s)?.file.body {
         Body::OfficeState(body) => Some(body),
         _ => None,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Scenes
-// ---------------------------------------------------------------------------
 
 /// Open the viewer's document (facts "Word document \u{00B7} 38 KB": never the editor's), then hold the state `body` says.
 fn scene_of(s: &mut State, body: StateBody) {
@@ -310,9 +311,8 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
     if body.state.try_again_shown() {
         actions = actions.child(
             text_button("empty-add", TRY_AGAIN, t.text, true, t).on_press(|s: &mut State| {
-                if let Some(b) = state_mut(s) {
-                    b.try_again();
-                }
+                // A file in a renderer is opened again by its source (`viewers::office_try_again`).
+                viewers::office_try_again(s);
             }),
         );
     }
