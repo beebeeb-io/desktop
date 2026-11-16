@@ -1007,3 +1007,7 @@ fn a_lock_the_poll_sees_before_the_window_reads_it_keeps_the_cover() {
 // Review of #463: the wake cover's follow-up (every wake, a failed look, the flyout) and the lock path's fade.
 #[path = "away_wake_tests.rs"]
 mod wake;
+
+// fx-wake-inputs' follow-up: the gap before the first poll for what comes from outside the window, and the media keys.
+#[path = "away_inputs_tests.rs"]
+mod inputs;
