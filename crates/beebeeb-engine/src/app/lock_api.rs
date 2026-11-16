@@ -542,10 +542,11 @@ impl<C: CredentialStores> Engine<C> {
         if !self.unlocked() {
             return Ok((turn, Some(old)));
         }
-        // A proof that did not end in time does not refuse the strong unlock, unlike the engine's unconfirmed stop: the
-        // old token is ended at the server afterwards, and the proof's seat refuses every start until it let go.
+        // A proof that did not end in time does not refuse the strong unlock, unlike an engine task that may still run
+        // (`unfinished_sign_out`): the old token is ended at the server afterwards, and the proof's seat refuses every
+        // start until it let go.
         let _ = self.stop_proofs().await;
-        if self.stop_holding_step().await == SyncStop::Unconfirmed {
+        if super::unfinished_sign_out::a_task_may_hold_the_keys(&self.acct, self.stop_holding_step().await) {
             return Err(crate::account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
         }
         self.forget_session(SessionTransition::Lock);
