@@ -274,7 +274,7 @@ pub fn no_phrase(k: &mut Keys, t: &Theme) -> El {
             k,
             &icons::TRASH,
             "Erase all files",
-            "Takes 72 hours; cancel any time.",
+            "You can undo it until a date we show you.",
             true,
             |ui| ui.exit(Intent::EraseAllFiles),
             t,

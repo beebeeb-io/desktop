@@ -4,6 +4,8 @@
 //! read-only Preview (`frames::item`); every other intent is taken and logged by its fixed words only.
 //! And Backups' (`frames::backups::Intent`): Add a folder… opens Windows' own folder picker (DW-0738) through the
 //! generic [`pick_folder_for`], whose answer goes back to the section that asked ([`FolderFor`]); the rest are logged.
+//! The picker is modeless (the window stays usable while it is open), so its answer is handed over only for the session
+//! of the press: one that changed while it was open (a lock, a sign-out, another account) drops it.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -14,7 +16,7 @@ use rune::Tx;
 
 use super::host::log;
 use super::platform::{Platform, PlatformError};
-use super::web_pages;
+use super::{session_gate, web_pages};
 use crate::State;
 use crate::frames::settings::Intent;
 
@@ -69,10 +71,20 @@ impl FolderFor {
     }
 }
 
-/// A picker that is open: who asked, and where its answer will come.
+/// The picker's answer: a folder, none (closed without one), or the platform's refusal.
+pub type PickAnswer = Result<Option<PathBuf>, PlatformError>;
+
+/// A picker that is open: who asked, the session of the press, and where its answer will come.
 struct Picking {
     asker: FolderFor,
-    answer: mpsc::Receiver<Result<Option<PathBuf>, PlatformError>>,
+    /// Whose session the press was made under: the account the window showed, read through the session gate when the
+    /// picker opened (the poll of the press, before that poll's refresh).
+    account: String,
+    /// A poll saw the session differ from the press's while the picker was open (the gate closed: a lock, a sign-out, an
+    /// ended session; or another account). It stays set: a session that seems to be back (the same account signed in
+    /// again) is another session, and the answer is dropped.
+    session_changed: bool,
+    answer: mpsc::Receiver<PickAnswer>,
 }
 
 thread_local! {
@@ -83,50 +95,88 @@ thread_local! {
 /// How often the poll looks for the picker's answer while it is open.
 const PICKER_POLL: Duration = Duration::from_millis(250);
 
+/// A folder picker is open from this window's thread.
+pub fn a_folder_picker_is_open() -> bool {
+    PICKING.with(|picking| picking.borrow().is_some())
+}
+
 /// Opens `platform`'s folder picker for `asker` on a worker of its own (it BLOCKS until the person closes it), showing
-/// where `start` is. One at a time: while one is open another ask is not opened (`false`). Its answer is handed over by
+/// where `start` is, for the session of the press ([`pick_folder_with`]). Its answer is handed over by
 /// [`take_picked_folder`] on the shell's poll.
-pub fn pick_folder_for(asker: FolderFor, platform: Arc<dyn Platform>, start: PathBuf) -> bool {
+pub fn pick_folder_for(s: &State, asker: FolderFor, platform: Arc<dyn Platform>, start: PathBuf) -> bool {
+    let title = asker.title();
+    pick_folder_with(s, asker, move || platform.pick_folder(title, &start))
+}
+
+/// Opens a folder picker for `asker`: `pick` runs on a worker of its own and answers when the person closes it. The
+/// picker carries the session of the press, read here: no picker opens while the window may not act on the account's
+/// files (`session_gate::open`). One at a time: while one is open another ask is not opened. `false`: not opened
+/// (logged by fixed words).
+pub fn pick_folder_with(s: &State, asker: FolderFor, pick: impl FnOnce() -> PickAnswer + Send + 'static) -> bool {
+    let account = match s.shell.app.account() {
+        Some(account) if session_gate::open(s) => account.to_owned(),
+        _ => {
+            log("the folder picker was not opened: no session the window may act on");
+            return false;
+        }
+    };
     PICKING.with(|picking| {
         let mut picking = picking.borrow_mut();
         if picking.is_some() {
+            log("a folder picker is open already");
             return false;
         }
         let (answers, answer) = mpsc::channel();
-        let title = asker.title();
         let started = std::thread::Builder::new().name("folder-picker".into()).spawn(move || {
-            let _ = answers.send(platform.pick_folder(title, &start));
+            let _ = answers.send(pick());
         });
         if started.is_err() {
             log("the folder picker could not start");
             return false;
         }
-        *picking = Some(Picking { asker, answer });
+        *picking = Some(Picking {
+            asker,
+            account,
+            session_changed: false,
+            answer,
+        });
         true
     })
 }
 
-/// The open picker's answer, once it came: the folder goes to the section that asked; closed without one, nothing
-/// changes; a picker that did not open is logged in the platform's own words (no path is in them). While it is still
-/// open the poll looks again soon. `true`: an answer was taken. The folder itself is never logged.
+/// The open picker's answer, once it came: the folder goes to the section that asked, for the session of the press;
+/// closed without one, nothing changes; a picker that did not open is logged in the platform's own words (no path is
+/// in them). While it is still open the poll looks again soon. Every poll first compares the session with the
+/// press's: once it differed, the folder is dropped (never handed to the section, never asked of the engine). `true`:
+/// an answer was taken. The folder itself is never logged.
 pub fn take_picked_folder(s: &mut State, tx: &mut Tx) -> bool {
+    if !a_folder_picker_is_open() {
+        return false;
+    }
+    // The session as it is NOW (the engine's, through the gate), and whose it is.
+    let now = session_gate::open(s)
+        .then(|| s.shell.app.account().map(str::to_owned))
+        .flatten();
     let answered = PICKING.with(|picking| {
         let mut picking = picking.borrow_mut();
-        let got = picking.as_ref().map(|open| open.answer.try_recv());
+        let open = picking.as_mut()?;
+        open.session_changed |= now.as_deref() != Some(open.account.as_str());
+        let got = open.answer.try_recv();
         match got {
-            None => None,
-            Some(Err(mpsc::TryRecvError::Empty)) => {
+            Err(mpsc::TryRecvError::Empty) => {
                 tx.wake_after(PICKER_POLL);
                 None
             }
-            Some(Ok(answer)) => picking.take().map(|open| (open.asker, Some(answer))),
-            Some(Err(mpsc::TryRecvError::Disconnected)) => picking.take().map(|open| (open.asker, None)),
+            got => picking.take().map(|open| (open.asker, open.session_changed, got.ok())),
         }
     });
-    let Some((asker, answer)) = answered else {
+    let Some((asker, session_changed, answer)) = answered else {
         return false;
     };
     match answer {
+        Some(Ok(Some(_))) if session_changed => {
+            log("a picked folder was dropped: the session changed while the picker was open")
+        }
         Some(Ok(Some(folder))) => hand_folder(s, asker, &folder),
         Some(Ok(None)) => {}
         Some(Err(error)) => log(format!("the folder picker did not open ({error})")),
@@ -166,10 +216,9 @@ pub fn drain_backups_intents(s: &mut State) -> bool {
     let intents = s.backups.take_intents();
     for intent in &intents {
         match intent {
+            // Not opened (no session the window may act on, or one is open already): logged by its own words.
             Backups::PickFolder => {
-                if !pick_folder_for(FolderFor::Backups, super::platform::current(), picker_start()) {
-                    log("a folder picker is open already");
-                }
+                pick_folder_for(s, FolderFor::Backups, super::platform::current(), picker_start());
             }
             Backups::OpenInPhotos(_) => log("NotWired(OpenInPhotos)"),
             Backups::OpenInFiles(_) => log("NotWired(OpenInFiles)"),

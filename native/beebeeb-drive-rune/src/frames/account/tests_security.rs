@@ -476,3 +476,15 @@ fn security_logging_off_is_said_and_shows_no_event() {
     click(&mut rt, "item-2-0");
     assert_eq!(rt.state.account.pane, Pane::Activity);
 }
+
+/// DW-A82's scene uses the board's own sample date, not the flow fixture's.
+#[test]
+fn the_scheduled_deletion_scene_names_the_boards_date() {
+    let mut state = init();
+    assert!(super::scene("DW-A82", &mut state));
+    let rt = window(state);
+    assert_eq!(
+        says(&rt, "set-sub"),
+        "Your account will be deleted after 5 December at 18:42."
+    );
+}

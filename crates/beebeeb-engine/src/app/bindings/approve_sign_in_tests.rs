@@ -35,6 +35,8 @@ const RELAY_FAILS: u8 = 3;
 static MODE: AtomicU8 = AtomicU8::new(ANSWERS);
 /// An engine whose screen locks the moment the fake takes the step-up's finish (the app lock, during the approval).
 static LOCK_AT_FINISH: Mutex<Option<Arc<TestEngine>>> = Mutex::new(None);
+/// An engine whose screen locks the moment the fake takes the claim (the app lock, during the claim's round trip).
+static LOCK_AT_CLAIM: Mutex<Option<Arc<TestEngine>>> = Mutex::new(None);
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
@@ -110,6 +112,9 @@ fn server() -> Fake {
                 Reply::ok(json!({ "confirmation_token": tokens.mint(), "expires_at": "soon" }))
             }
             "POST /api/v1/auth/cli-session" if body["user_code"] == CODE && tokens.spend(request) => {
+                if let Some(engine) = LOCK_AT_CLAIM.lock().unwrap().take() {
+                    engine.lock_screen().expect("the screen locks");
+                }
                 if mode == CLAIM_LOST {
                     return Reply::hang_up();
                 }
@@ -181,6 +186,7 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     let guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     MODE.store(ANSWERS, Ordering::SeqCst);
     *LOCK_AT_FINISH.lock().unwrap() = None;
+    *LOCK_AT_CLAIM.lock().unwrap() = None;
     guard
 }
 
@@ -380,6 +386,30 @@ fn a_lock_or_another_session_claims_nothing() {
         asked(&fake, "POST /api/v1/auth/cli-session"),
         0,
         "and nothing was claimed"
+    );
+}
+
+/// The relay is the point of no return, so the session of the press is asked again right before it leaves: a lock
+/// that lands during the claim's round trip (Lock, Win+L, closing to the tray under "Immediately") relays nothing.
+/// The claim was taken (it minted a session nobody can use: the other device only gets its token inside the relay),
+/// and the keys stayed on this PC.
+#[test]
+fn a_lock_during_the_claim_relays_nothing() {
+    let _one = serial();
+    let fake = server();
+    let (engine, turn) = signed_in(&fake);
+    let found = engine.find_sign_in_request_for(turn, CODE).unwrap();
+    *LOCK_AT_CLAIM.lock().unwrap() = Some(engine.clone());
+    let refused = engine.approve_sign_in_for(turn, found, CODE, password(PASSWORD));
+    assert!(
+        matches!(refused, Err(ApproveError::Locked | ApproveError::NotSignedIn)),
+        "{refused:?}"
+    );
+    assert_eq!(asked(&fake, "POST /api/v1/auth/cli-session"), 1, "the claim was taken");
+    assert_eq!(
+        asked(&fake, "POST /api/v1/auth/cli-authorize"),
+        0,
+        "and the keys did not leave"
     );
 }
 

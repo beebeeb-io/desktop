@@ -1089,6 +1089,11 @@ pub fn scene(s: &mut State, frame: &'static str) {
         super::go(s, next);
     }
     match frame {
+        "DW-A13" => {
+            // The board's review holds a typed password (twelve masked characters), no field in focus.
+            super::form::type_in(&mut s.account.approve.password, "............");
+            s.account.approve.password.focused = false;
+        }
         "DW-A14" => approve(s),
         "DW-A15" => {
             approve(s);

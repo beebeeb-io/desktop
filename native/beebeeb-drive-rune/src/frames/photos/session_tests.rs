@@ -840,3 +840,98 @@ fn a_folder_change_the_engine_refused_later_is_said_once() {
     );
     assert_eq!(text(&rt, "ph-toast-text"), "Couldn\u{2019}t change that folder");
 }
+
+fn opacity(rt: &Runtime<State>, key: &str) -> f32 {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+        .unwrap_or_else(|| panic!("no element keyed {key}"))
+        .opacity
+}
+
+#[test]
+fn a_folder_rows_remove_shows_on_hover_and_on_keyboard_focus_only() {
+    let (mut rt, _script) = window();
+    rt.state.photos.open_sources();
+    rt.settle_all();
+    rt.frame(0.0);
+    let key = "ph-item-1-0-remove";
+    // At rest: not drawn, still a button the keyboard reaches.
+    assert_eq!(opacity(&rt, key), 0.0, "Remove is hidden at rest");
+    let info = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some(key))
+        .unwrap();
+    assert!(info.focusable && info.role == "button", "Remove stays focusable");
+    // Pointer over the row.
+    let row = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("ph-item-1-0"))
+        .unwrap()
+        .rect;
+    rt.pointer_move(row[0] + 20.0, row[1] + row[3] / 2.0);
+    rt.settle_all();
+    rt.frame(0.0);
+    assert_eq!(opacity(&rt, key), 1.0, "Remove shows under the pointer");
+    // Pointer away, then Tab to it: it shows on focus.
+    rt.pointer_move(1.0, 1.0);
+    rt.frame(0.0);
+    rt.frame(0.5);
+    rt.settle_all();
+    rt.frame(0.0);
+    assert_eq!(opacity(&rt, key), 0.0, "Remove hides again");
+    for _ in 0..40 {
+        if rt.elements().iter().any(|e| e.focused && e.key.as_deref() == Some(key)) {
+            break;
+        }
+        press(&mut rt, Key::Tab, false);
+    }
+    rt.settle_all();
+    rt.frame(0.0);
+    assert!(
+        rt.elements().iter().any(|e| e.focused && e.key.as_deref() == Some(key)),
+        "Tab reaches Remove"
+    );
+    assert_eq!(opacity(&rt, key), 1.0, "Remove shows on keyboard focus");
+}
+
+#[test]
+fn move_is_refused_while_the_photos_move_to_trash_is_on_its_way() {
+    let (mut rt, script) = window();
+    script.lock().unwrap().items = vec![folder_item("photo-file", "Harbour.jpg")];
+    let a = id((0, 0));
+    rt.state.photos.check_tile(0, 0);
+    rt.frame(0.0);
+    click(&mut rt, "ph-bulk-btn-3");
+    assert_eq!(asked(&script), [("trash", vec![a])]);
+    // Move… while the Trash request runs: said, no folder dialog.
+    click(&mut rt, "ph-bulk-btn-2");
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(
+        rt.state.actions.dialog.is_none(),
+        "no Move dialog while Trash is on its way"
+    );
+    assert!(
+        matches!(
+            rt.state.photos.toast,
+            Some(Toast::Left {
+                why: Left::InFlight,
+                ..
+            })
+        ),
+        "the refusal is the still-on-its-way words"
+    );
+    // Beebeeb answered (refused): the photo is movable again.
+    answer(&mut rt, &script, Answered::Trashed(vec![(a, Some(Left::Failed))]));
+    rt.state.photos.toast = None;
+    rt.state.photos.check_tile(0, 0);
+    rt.frame(0.0);
+    click(&mut rt, "ph-bulk-btn-2");
+    assert_eq!(
+        picker(&mut rt),
+        Some(super::super::super::files::dialogs::Purpose::PhotosMove)
+    );
+}

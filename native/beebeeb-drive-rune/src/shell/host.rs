@@ -352,11 +352,26 @@ impl Shell {
                 if let Some(anchor) = anchor {
                     flyout.set_position(flyout::position(&anchor));
                 }
+                // The cover first (review of #463, P3-15): a wake the main window's poll has not found yet is covered
+                // now, and the flyout is told before it reads and shows, so it never opens on file names or activity.
+                // That poll comes after this click (it runs on the main window's turn) and says the wake.
+                self.away.cover_a_gap_not_yet_found();
+                self.tell_flyout_covered(self.covered().then(|| self.sync_runs()));
                 // Read before it shows: a hidden flyout was not kept current.
                 self.read_flyout();
                 flyout.open();
             }
         }
+    }
+
+    /// The window is covered by the away lock's cover over an open engine's gate: the same predicate as
+    /// `registry::covered`, read where only the shell is at hand (a click on the b).
+    fn covered(&self) -> bool {
+        self.away.covers()
+            && matches!(
+                self.app.gate(),
+                super::app::GateState::Ready | super::app::GateState::FirstRun | super::app::GateState::NoPlan
+            )
     }
 
     /// Remembers where the main window is, for the next start. Called before it closes.
@@ -541,6 +556,19 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     if let Some((gate, account)) = s.shell.session_seen.replace(now.clone()) {
         let left_ready = gate == super::app::GateState::Ready && now.0 != gate;
         let other_account = account.is_some() && now.1 != account;
+        // The lock path's fade (review of #463; privacy): the content of a session that closed or changed leaves in
+        // this frame's commit. Compared with what the last poll saw, so a gate a refresh moved between two polls
+        // counts too. Otherwise every removed element fades out over 0.15 s under the lock screen.
+        let open_gate = |gate: super::app::GateState| {
+            matches!(
+                gate,
+                super::app::GateState::Ready | super::app::GateState::FirstRun | super::app::GateState::NoPlan
+            )
+        };
+        let left_open = open_gate(gate) && !open_gate(now.0);
+        if left_open || other_account {
+            tx.instant();
+        }
         if left_ready || other_account {
             crate::frames::account::end_flows(s);
             // The same for the Files window: its dialogs (a link's password among them), what
@@ -591,6 +619,11 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // While covered, the flyout shows the lock's state too.
     let covered = registry::covered(s).then(|| s.shell.sync_runs());
     s.shell.tell_flyout_covered(covered);
+    // A File Explorer verb that came under the cover runs once it is gone, or goes with a lock (`windows_verbs`).
+    #[cfg(windows)]
+    {
+        changed |= super::platform::windows_verbs::after_the_cover(s, tx);
+    }
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {

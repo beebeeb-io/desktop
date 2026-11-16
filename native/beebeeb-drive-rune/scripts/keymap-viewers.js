@@ -70,14 +70,15 @@ if (/^DW-15(0[1-6]|1[2-9]|2[0-7])$/.test(vwFrame) && !vwNewFile) {
   tools.forEach((b, i) => { const k = i === tools.length - 1 ? 'more-btn' : `tool-${i}`; box(k, b); icon(`${k}-icon`, q('svg', b)); });
   const pill = acts && q('.kit-pill, .kit-chip', acts);
   if (pill) { box('tb-pill', pill); text('tb-pill-label', pill); }
-  // The toolbar's `.mk-tgroup`: a view toggle (list/grid, 2 buttons) or a zoom control (−, 100%, +,
-  // 3 buttons). The base keymap keys the first group as view-toggle/view-list/view-grid; when the group
-  // has 3 buttons (the zoom control, DW-1505 and DW-1506) key them as zoom-* and undo the base's
-  // `undefined` key that falls off its 2-entry name array.
-  const tg = q('.mk-tgroup', tb);
-  if (tg) {
+  // The toolbar's `.mk-tgroup`s: a zoom control (-, 100%, +: 3 buttons, DW-1505 and DW-1506) and/or the
+  // dimmed view toggle (list/grid: 2 buttons). The base keymap keys the FIRST group as
+  // view-toggle/view-list/view-grid (+ `-icon`); when that group is the zoom control those keys are the
+  // zoom group's boxes under a wrong name, so they are deleted here (`api.drop`) and the group is keyed
+  // zoom-*. The view toggle is keyed `view-toggle-dim` wherever it is (a 2-button group).
+  for (const tg of qa('.mk-tgroup', tb)) {
     const tgBtns = qa('.mk-tbtn', tg);
     if (tgBtns.length === 3) {
+      ['view-toggle', 'view-list', 'view-list-icon', 'view-grid', 'view-grid-icon', 'undefined', 'undefined-icon'].forEach((k) => api.drop(k));
       box('zoom-group', tg);
       box('zoom-minus', tgBtns[0]); icon('zoom-minus-icon', q('svg', tgBtns[0]));
       text('zoom-pct', tgBtns[1]);
