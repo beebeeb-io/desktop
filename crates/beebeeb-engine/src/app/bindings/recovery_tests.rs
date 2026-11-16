@@ -47,6 +47,8 @@ const LOGOUT: &str = "POST /api/v1/auth/logout";
 const SIGNS_IN: u8 = 0;
 /// `{requires_2fa: true}`, with a session token beside it: a client that stores any token it sees is caught.
 const TWO_FACTOR: u8 = 1;
+/// The password step's registration refuses the recovery token (`invalid_recovery_token`): the recovery is over.
+const REFUSES_TOKEN: u8 = 2;
 
 type Meanwhile = Box<dyn FnOnce() + Send>;
 
@@ -88,6 +90,9 @@ fn server(tag: &str) -> Recovery {
                 }
             }
             REGISTER => {
+                if finalize_in.load(Ordering::SeqCst) == REFUSES_TOKEN {
+                    return Reply::error(400, "invalid_recovery_token");
+                }
                 let message = body["client_message"]
                     .as_str()
                     .and_then(|message| b64().decode(message).ok())
@@ -353,6 +358,7 @@ fn recovery_overtaken_stores_nothing() {
     assert_eq!(stored_token(&store, "overtaken"), None);
     assert!(!stored_key(&store, "overtaken"));
     assert_eq!(engine.gate(), GateState::SignedOut);
+    assert!(!holds_a_recovery(&engine), "the last step consumed the recovery");
 }
 
 #[test]
@@ -467,4 +473,18 @@ fn signin_wipe_a_dropped_engine_leaves_no_held_recovery() {
         "the engine went: its recovery's key and token went with it"
     );
     drop(acct);
+}
+
+/// The server refuses the recovery token at the password step: the recovery is over, and its key and token go with it.
+#[test]
+fn signin_wipe_a_refused_recovery_token_ends_the_held_recovery() {
+    let fake = server("wipe-refused");
+    let (engine, _store) = opened(&fake.api, "wipe-refused");
+    verified(&engine, &fake);
+    fake.finalize.store(REFUSES_TOKEN, Ordering::SeqCst);
+    assert_eq!(
+        engine.recovery_set_password_for(engine.session_turn(), new_password()),
+        Err(RecoveryRefused::Overtaken)
+    );
+    assert!(!holds_a_recovery(&engine), "a refused recovery holds nothing");
 }
