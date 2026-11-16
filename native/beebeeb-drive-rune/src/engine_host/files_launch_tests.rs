@@ -260,3 +260,73 @@ fn open_with_asks_the_engine_whether_the_kept_copy_is_here() {
         "the engine's facts answer, not the row's mark"
     );
 }
+
+// The worker-panic test's stand-ins: Open waits for the test, then panics on the launch worker; the others record.
+static PANIC_GO: Mutex<bool> = Mutex::new(false);
+static PANIC_BEGUN: AtomicUsize = AtomicUsize::new(0);
+static PANIC_STARTED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+fn panicking_open(_: &Path, _: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    PANIC_BEGUN.fetch_add(1, SeqCst);
+    let until = Instant::now() + Duration::from_secs(10);
+    while !*PANIC_GO.lock().unwrap() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("a start panics on the launch worker");
+}
+
+fn recorded(kind: &'static str, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    launch::locked(|| still().then(|| PANIC_STARTED.lock().unwrap().push(kind))).ok_or(ActionError::Unavailable)
+}
+
+fn recorded_open(_: &Path, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    recorded("open", still)
+}
+
+fn recorded_reveal(_: &Path, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    recorded("reveal", still)
+}
+
+/// A start that panics ends the launch worker, and the jobs it held are lost with it. The next press starts a new
+/// worker, which runs THAT press's start: never the start of a press whose job was lost (it waits for the next session
+/// end, which drops it).
+#[test]
+fn after_the_launch_worker_ended_a_press_runs_its_own_start() {
+    let mut set = set("b5-panic", true, true);
+    let _running = hold_running(&set.engine);
+    set.source.starts = Starts {
+        open: panicking_open,
+        reveal: recorded_reveal,
+        app: None,
+    };
+    let notes = row(NOTES, "Invented notes.txt", false);
+    assert_eq!(set.source.open(std::slice::from_ref(&notes)), Ok(()));
+    assert!(
+        within(|| PANIC_BEGUN.load(SeqCst) == 1),
+        "the worker is in the start that panics"
+    );
+    // Held by the worker, behind the start that panics.
+    assert_eq!(set.source.show_in_file_explorer(std::slice::from_ref(&notes)), Ok(()));
+    *PANIC_GO.lock().unwrap() = true;
+    // The worker's thread ends with its jobs (its inbox goes with it).
+    std::thread::sleep(Duration::from_millis(300));
+    set.source.starts.open = recorded_open;
+    assert_eq!(set.source.open_in_file_explorer(None), Ok(()));
+    assert!(
+        within(|| !PANIC_STARTED.lock().unwrap().is_empty()),
+        "the press after the panic started"
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        *PANIC_STARTED.lock().unwrap(),
+        ["open"],
+        "its own start, not the lost press's"
+    );
+    assert_eq!(
+        set.source.pending.len(),
+        1,
+        "the lost press's start waits for a session end"
+    );
+    set.source.forget_starts();
+    assert_eq!(set.source.pending.len(), 0);
+}

@@ -160,8 +160,8 @@ struct Worker<S: Starter> {
     phase: Phase,
 }
 
-/// A panic on the worker thread: the shared helper is ended, the window says "Renderer stopped" with no Try again,
-/// and the worker counts as ended. Does nothing when the worker returns normally.
+/// A panic on the worker thread: the shared helper is ended, a document parked for a start is dropped, the window says
+/// "Renderer stopped" with no Try again, and the worker counts as ended. Does nothing when the worker returns normally.
 struct PanicGuard(Arc<Shared>);
 
 impl Drop for PanicGuard {
@@ -169,7 +169,11 @@ impl Drop for PanicGuard {
         if !thread::panicking() {
             return;
         }
-        let helper = lock(&self.0.inner).helper.take();
+        let (helper, parked) = {
+            let mut inner = lock(&self.0.inner);
+            (inner.helper.take(), inner.parked.take())
+        };
+        drop(parked);
         if let Some(helper) = helper {
             helper.end();
         }

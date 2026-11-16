@@ -42,35 +42,54 @@ impl Default for Starts {
 
 type Job = Box<dyn FnOnce() + Send>;
 
-/// The launch worker's starts not begun yet, oldest first. Each job handed to the worker takes the oldest one; a
+/// The launch worker's starts not begun yet, in the order asked, each under the number of the job that runs it. A
 /// session end empties it ([`Pending::forget`]).
 #[derive(Clone, Default)]
-pub(super) struct Pending(Arc<Mutex<VecDeque<Job>>>);
+pub(super) struct Pending(Arc<Mutex<Queue>>);
+
+#[derive(Default)]
+struct Queue {
+    next: u64,
+    starts: VecDeque<(u64, Job)>,
+}
 
 impl Pending {
-    fn held(&self) -> MutexGuard<'_, VecDeque<Job>> {
+    fn held(&self) -> MutexGuard<'_, Queue> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Queue `start`, then hand the worker one job that runs the oldest start queued. `Err`: the worker could not be
-    /// started; `start` is taken back out, and nothing will run.
+    /// The start queued under `number`, taken out. `None`: a session end dropped it.
+    fn take(&self, number: u64) -> Option<Job> {
+        let mut queue = self.held();
+        let at = queue.starts.iter().position(|(queued, _)| *queued == number)?;
+        queue.starts.remove(at).map(|(_, start)| start)
+    }
+
+    /// Queue `start`, then hand the worker the one job that runs it, by its number (a job never runs another press's
+    /// start, also not after a worker that ended lost the jobs it held). `Err`: the worker could not be started;
+    /// `start` is taken back out, and nothing will run.
     pub(super) fn run_later(
         &self,
         later: &mut super::launch::Later,
         start: impl FnOnce() + Send + 'static,
     ) -> Result<(), ()> {
-        self.held().push_back(Box::new(start));
+        let number = {
+            let mut queue = self.held();
+            let number = queue.next;
+            queue.next += 1;
+            queue.starts.push_back((number, Box::new(start)));
+            number
+        };
         let pending = self.clone();
         let handed = later.run(move || {
-            // Bound before it runs: the queue is not held while a start waits for the launch lock.
-            let oldest = pending.held().pop_front();
-            if let Some(start) = oldest {
+            // Taken out first: the queue is not held while the start waits for the launch lock.
+            let ours = pending.take(number);
+            if let Some(start) = ours {
                 start();
             }
         });
         if handed.is_err() {
-            // The newest is ours: the worker takes from the front, and no job was handed for this one.
-            let _ours = self.held().pop_back();
+            let _ours = self.take(number);
         }
         handed
     }
@@ -78,13 +97,13 @@ impl Pending {
     /// A session ended: every start not begun yet goes. A start that is running already compares its session inside
     /// the launch lock.
     pub(super) fn forget(&self) {
-        let gone = std::mem::take(&mut *self.held());
+        let gone = std::mem::take(&mut self.held().starts);
         drop(gone);
     }
 
     /// How many starts wait.
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.held().len()
+        self.held().starts.len()
     }
 }
