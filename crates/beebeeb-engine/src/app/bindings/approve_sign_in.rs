@@ -45,9 +45,12 @@ use crate::session::Session;
 /// Why a call about a sign-in request did not end as asked. Fixed answers: never a server's words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApproveError {
-    /// No session in memory, or not the session of the press: nothing was sent.
+    /// No session in memory, or not the session of the press: nothing was approved. Asked before the first
+    /// request and again before the claim and the relay, so a claim may have left (a session nobody can use); the
+    /// keys did not.
     NotSignedIn,
-    /// A session is in memory behind a locked screen or a closed vault: nothing was sent.
+    /// A session is in memory behind a locked screen or a closed vault: nothing was approved (as
+    /// [`ApproveError::NotSignedIn`], a claim may have left; the keys did not).
     Locked,
     /// Beebeeb no longer accepts this session. Nothing was approved.
     SessionEnded,

@@ -3,7 +3,7 @@
 //! and a scripted Windows Hello. What is (not) sent, when, and which answers reach the window. Every name, code and
 //! password is invented.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,8 @@ struct Server {
     expires_at: Arc<Mutex<&'static str>>,
     /// An engine whose screen locks the moment the relay is taken (the app lock, after the keys left).
     lock_at_relay: Arc<Mutex<Option<TestEngine>>>,
+    /// The relay is taken and its answer never comes (the connection closes): the keys left, the ending is not known.
+    relay_lost: Arc<AtomicBool>,
 }
 
 fn server() -> Server {
@@ -61,6 +63,8 @@ fn server() -> Server {
     let lock_at_relay: Arc<Mutex<Option<TestEngine>>> = Arc::default();
     let (ours, rest, expiry) = (account.clone(), account_handler(account.clone()), expires_at.clone());
     let relay_lock = lock_at_relay.clone();
+    let relay_lost: Arc<AtomicBool> = Arc::default();
+    let lost = relay_lost.clone();
     let fake = FakeApi::start(Arc::new(move |request: &Request| {
         let route = request.route();
         let approval = route.starts_with("POST /api/v1/auth/confirm-opaque-") || route.contains("/api/v1/auth/cli-");
@@ -102,6 +106,9 @@ fn server() -> Server {
                 if let Some(engine) = relay_lock.lock().unwrap().take() {
                     engine.lock_screen().expect("the screen locks");
                 }
+                if lost.load(Ordering::SeqCst) {
+                    return Reply::hang_up();
+                }
                 Reply::ok(json!({ "ok": true }))
             }
             "POST /api/v1/auth/cli-deny" if body["user_code"] == CODE => Reply::ok(json!({ "denied": true })),
@@ -114,6 +121,7 @@ fn server() -> Server {
         phrase,
         expires_at,
         lock_at_relay,
+        relay_lost,
     }
 }
 
@@ -627,4 +635,46 @@ fn a_retry_approves_only_the_request_the_review_shows() {
         "nothing was claimed"
     );
     assert!(source.waiting_sign_in_request(&id).is_none(), "the review ended");
+}
+
+/// The window's own order: the review page shows while the approval runs (no account page is `showing`), and the
+/// screen lock took the window off the account pages. After the unlock nothing is said until the frame, having ended
+/// the flow, clears the toasts and opens the section's page: said then, never into a line about to be cleared.
+#[test]
+fn a_late_approval_waits_for_the_account_page() {
+    let server = server();
+    let (engine, mut source, prompts) = with_prompts(&server);
+    source.opened(Pane::ApproveReview);
+    approve_with_a_lock_at_the_relay(&server, &engine, &mut source, &prompts);
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the screen opens");
+    assert_eq!(source.approval_answer(), None);
+    assert!(!said_late(&source), "no account page shows yet: nothing said");
+    assert!(source.account_approve.late.is_some(), "still kept");
+
+    // The frame ends the approval's flow and lands on the section's page (`end_flows`, then its poll).
+    source.clear_notice();
+    source.opened(Pane::Security);
+    assert_eq!(source.approval_answer(), None);
+    assert_eq!(source.said().map(|said| said.words), Some(APPROVED_LATE));
+}
+
+/// The relay left under the lock and no answer came: told after the unlock as not confirmed, drawn without the mark
+/// of a thing that worked.
+#[test]
+fn a_late_approval_not_known_is_told_as_not_confirmed() {
+    let server = server();
+    let (engine, mut source, prompts) = with_prompts(&server);
+    source.opened(Pane::Security);
+    server.relay_lost.store(true, Ordering::SeqCst);
+    approve_with_a_lock_at_the_relay(&server, &engine, &mut source, &prompts);
+    assert!(matches!(source.account_approve.late, Some((_, Approval::Unknown))));
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the screen opens");
+    assert_eq!(source.approval_answer(), None);
+    let said = source.said().expect("said after the unlock");
+    assert_eq!(said.words, UNKNOWN_LATE);
+    assert!(said.failed, "never drawn as a thing that worked");
 }
