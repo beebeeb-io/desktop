@@ -48,6 +48,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+mod attributes;
 mod block;
 
 #[cfg(windows)]
@@ -209,7 +210,8 @@ pub(crate) struct TokenFacts {
     /// The token holds exactly the profile's capabilities, each once (compared by the system's identifiers; false for
     /// a token outside a container, which has no capability list).
     pub(crate) exact_capabilities: bool,
-    /// The token is a less-privileged AppContainer: the opt-out of the "all application packages" group took effect.
+    /// The token is a less-privileged AppContainer: the opt-out of the "all application packages" group took effect
+    /// (the token carries the attribute `WIN://NOALLAPPPKG`, set).
     pub(crate) less_privileged: bool,
     /// The relative identifier of the token's integrity level.
     pub(crate) integrity_rid: u32,

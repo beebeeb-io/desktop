@@ -1,8 +1,8 @@
 //! Windows: what the app reads from a helper's process.
 //!
 //! - **Before it runs:** the facts [`crate::check_facts`] judges, read from the new, still suspended process: job
-//!   membership, the AppContainer, the capabilities, the less-privileged container flag, the integrity level and each
-//!   process mitigation of its profile ([`read_facts`]). And its memory counters, once ([`commit`]): a Windows that
+//!   membership, the AppContainer, the capabilities, the less-privileged container attribute, the integrity level and
+//!   each process mitigation of its profile ([`read_facts`]). And its memory counters, once ([`commit`]): a Windows that
 //!   cannot report a helper's shared commit cannot watch it, so the helper never runs there.
 //! - **While it runs:** its private and shared commit, every 100 ms, by a watch thread of its own ([`Watch`]), which
 //!   ends it as soon as [`crate::over_memory`] says so, or when the counters can no longer be read.
@@ -23,7 +23,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::{
     EqualSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, PSID, SID_AND_ATTRIBUTES, TOKEN_GROUPS,
     TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenCapabilities, TokenIntegrityLevel,
-    TokenIsAppContainer, TokenIsLessPrivilegedAppContainer,
+    TokenIsAppContainer, TokenSecurityAttributes,
 };
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::ProcessStatus::{
@@ -35,6 +35,7 @@ use windows_sys::Win32::System::Threading::{
     ProcessSystemCallDisablePolicy, WaitForSingleObject,
 };
 
+use crate::attributes;
 use crate::block::same_members;
 use crate::windows::{CapabilitySids, end, os, owned};
 use crate::{Mitigations, SandboxError, TokenFacts, over_memory};
@@ -68,9 +69,9 @@ pub(crate) fn read_facts(
     Ok(TokenFacts {
         in_job: in_job != 0,
         app_container,
-        // A token outside a container has no capability list and no less-privileged flag to read.
+        // A token outside a container has no capability list, and is no less-privileged container whatever it carries.
         exact_capabilities: app_container && holds_exactly(&token, expected)?,
-        less_privileged: app_container && token_flag(&token, TokenIsLessPrivilegedAppContainer, "lpac read-back")?,
+        less_privileged: app_container && no_all_application_packages(&token)?,
         integrity_rid: integrity_rid(&token)?,
         mitigations: read_mitigations(process)?,
     })
@@ -85,6 +86,65 @@ fn token_flag(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS, step: &'stati
         return Err(os(step));
     }
     Ok(value != 0)
+}
+
+/// The most a token's security attributes may take: a container token carries a handful (about 200 bytes each).
+const MOST_ATTRIBUTE_BYTES: u32 = 64 * 1024;
+
+/// Whether the token carries the less-privileged container attribute, set (`WIN://NOALLAPPPKG`, see
+/// [`attributes::less_privileged`]), read from its security attributes. This is the documented way to read it: the
+/// token class `TokenIsLessPrivilegedAppContainer` is documented as reserved, and Windows 11 23H2 refuses it (system
+/// code 87, measured).
+fn no_all_application_packages(token: &OwnedHandle) -> Result<bool, SandboxError> {
+    let mut needed = 0u32;
+    // SAFETY: a null buffer of length 0 only asks for the size; `needed` is a valid place for it.
+    let sized = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenSecurityAttributes,
+            null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if sized == 0 {
+        // SAFETY: reads the calling thread's last-error value; no pointer is involved.
+        let code = unsafe { GetLastError() };
+        if code != ERROR_INSUFFICIENT_BUFFER && code != ERROR_BAD_LENGTH {
+            return Err(SandboxError::Os {
+                step: "lpac read-back",
+                code,
+            });
+        }
+    }
+    if needed == 0 || needed > MOST_ATTRIBUTE_BYTES {
+        return Err(SandboxError::NotConfined(
+            "the security-attribute read-back does not fit",
+        ));
+    }
+    // u64 units: the answer's pointers and numbers are 8-byte aligned.
+    let mut words = vec![0u64; (needed as usize).div_ceil(8)];
+    let mut returned = 0u32;
+    // SAFETY: the buffer is writable for the length passed (at least `needed`) and aligned for the structure.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenSecurityAttributes,
+            words.as_mut_ptr().cast(),
+            (words.len() * 8) as u32,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return Err(os("lpac read-back"));
+    }
+    // The pointers in the answer point into `words`; the parse turns them into offsets into this copy of its bytes.
+    let answer: Vec<u8> = words
+        .iter()
+        .flat_map(|word| word.to_ne_bytes())
+        .take(returned as usize)
+        .collect();
+    attributes::less_privileged(&answer, words.as_ptr() as usize)
 }
 
 /// Whether the token holds exactly the identifiers in `expected`, each once.
@@ -372,5 +432,24 @@ mod tests {
 
         let now = commit(me.as_raw_handle()).unwrap();
         assert!(now.private > 0, "a running test has private commit");
+    }
+
+    /// The less-privileged attribute is read the documented way on this Windows (no refused token class), and a
+    /// token that is no less-privileged container (this test's own) reads as not carrying it.
+    #[test]
+    fn the_lpac_attribute_reads_false_on_a_plain_token() {
+        let mut raw: HANDLE = null_mut();
+        // SAFETY: the pseudo-handle of this process is always valid; `raw` receives a new handle.
+        let opened = unsafe {
+            OpenProcessToken(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                TOKEN_QUERY,
+                &mut raw,
+            )
+        };
+        assert_ne!(opened, 0, "this process's token can be opened");
+        let token = owned(raw);
+        assert_eq!(no_all_application_packages(&token), Ok(false));
+        assert!(!token_flag(&token, TokenIsAppContainer, "container read-back").unwrap());
     }
 }
