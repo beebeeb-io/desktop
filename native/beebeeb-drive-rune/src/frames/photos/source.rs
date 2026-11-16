@@ -226,6 +226,23 @@ pub trait PhotosSource {
     fn folders(&self) -> Vec<Folder>;
     /// Shows or hides a source (Photo sources, Done).
     fn set_shown(&mut self, source: SourceRef, shown: bool);
+    /// Adds the folder `folder_id` of Files to Photo sources (Add a folder…, once the folder picker chose one). It
+    /// shows in [`Self::folders`] once the engine answered, never before. `false`: nothing sent.
+    fn add_folder(&mut self, _folder_id: &str) -> bool {
+        false
+    }
+    /// Takes a folder out of Photo sources (Remove): its photos show again. Nothing is moved or deleted. A device:
+    /// nothing.
+    fn remove_folder(&mut self, _source: SourceRef) {}
+    /// A folder change (add, remove, switch) was refused since the last call: `true`, once. The window says so.
+    fn folder_refused(&mut self) -> bool {
+        false
+    }
+    /// The files behind these photos, for Move… (names and ids; Files' folder dialog moves them). `None`: a photo
+    /// is not held, or nothing is connected that could say.
+    fn file_items(&self, _ids: &[PhotoId]) -> Option<Vec<crate::source::DriveItem>> {
+        None
+    }
     /// The totals of what shows, or of one device (`devices()` index).
     fn totals(&self, device: Option<usize>) -> Totals;
     fn backup_status(&self) -> Option<BackupStatus>;
@@ -246,6 +263,12 @@ pub trait PhotosSource {
     /// Moves items to Beebeeb's Trash; `restore` brings them back (Undo). `Ok` and `Err` as [`Self::keep_offline`].
     fn trash(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
     fn restore(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
+    /// Plays the video `id` in the shell's player and hands the player to the stage (DW-0611). `None` (the
+    /// default): a photo, no player, or no playback on this PC; the stage keeps its poster and "Open in another
+    /// app".
+    fn play_video(&mut self, _id: PhotoId) -> Option<crate::media::player::PlayerHandle> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

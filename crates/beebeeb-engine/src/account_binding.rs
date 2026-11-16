@@ -225,6 +225,16 @@ pub fn adopt_unbound(data: &dyn LocalData, vault_key_account: Option<&Identity>)
     data.adopt_once(vault_key_account.filter(|account| account.is_known()))
 }
 
+/// R10 ruling 8 in the native build (lead ruling 2026-11-15 17:35): whether a start's `session` may adopt this
+/// computer's unowned local data on the upgrade's path. `candidate` is the account whose vault key the credential
+/// store held at the build's first startup (`None`: it held none, or none that is known); the session must be that
+/// same account by the binding's own rule. An unknown session, an unknown candidate or one that cannot be compared
+/// adopts nothing.
+pub fn is_the_upgrade_candidate(candidate: Option<&Identity>, session: &Identity) -> bool {
+    session.is_known()
+        && candidate.is_some_and(|candidate| candidate.is_known() && same_account(candidate, session) == Some(true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

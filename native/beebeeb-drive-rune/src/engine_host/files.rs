@@ -120,9 +120,11 @@ impl<C: CredentialStores> FilesEngine for Engine<C> {
 /// row model, then the window's mark of it), with one difference: a file that is KEPT reads "available_offline"
 /// also while its download has not finished. The listing's model has no word for that and says "online only",
 /// which would leave the menu offering Keep on this PC for an item that is kept, and never Remove from this PC.
+/// Only then: a kept file that is uploading, in conflict or in error reads the listing's own mark of that state,
+/// never "available_offline" over it (review of 2468, L256.4).
 /// `None`: no such row, or it could not be read.
 fn marks_in(db: &beebeeb_engine::state_db::StateDb, ids: &[String]) -> Vec<Option<Option<String>>> {
-    use beebeeb_engine::state_db::PinState;
+    use beebeeb_engine::state_db::{FileStatus, PinState};
     ids.iter()
         .map(|id| {
             let entry = db.get_file(id).ok().flatten()?;
@@ -130,7 +132,12 @@ fn marks_in(db: &beebeeb_engine::state_db::StateDb, ids: &[String]) -> Vec<Optio
             let kept = contract
                 .as_ref()
                 .is_some_and(|contract| contract.effective_pin_state() == PinState::Pinned);
-            if kept && !entry.is_dir() {
+            // Here, on its way here, or not here yet: nothing of it waits to be sent.
+            let nothing_unsent = matches!(
+                entry.status,
+                FileStatus::Local | FileStatus::Downloading | FileStatus::CloudOnly
+            );
+            if kept && nothing_unsent && !entry.is_dir() {
                 return Some(Some("available_offline".to_string()));
             }
             let row = beebeeb_engine::drive_v2::model::item_from(&entry, contract.as_ref(), None);
@@ -590,7 +597,8 @@ fn run<E: FilesEngine>(engine: &E, job: &Job) -> Answer {
                         Reclaimed::Freed => None,
                         Reclaimed::Unsent => Some(ActionError::NotSent),
                         Reclaimed::Kept => Some(ActionError::HoldsKept),
-                        Reclaimed::NoSuchItem | Reclaimed::Left => Some(ActionError::Failed),
+                        // In error here (its download failed): not freed, and never said as "not uploaded yet".
+                        Reclaimed::Error | Reclaimed::NoSuchItem | Reclaimed::Left => Some(ActionError::Failed),
                     };
                 }
             }

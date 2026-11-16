@@ -38,19 +38,19 @@ impl<C: CredentialStores> Engine<C> {
         if self.view().gate != GateState::Ready {
             return Err(NOT_SIGNED_IN.to_string());
         }
-        let config = crate::config::DesktopConfig::load_for(self.identity)?;
-        let sync_root = config
-            .sync_root
-            .ok_or_else(|| "no sync folder is set on this computer".to_string())?;
         // The account-bound handle (task 2488): the pin is changed in the signed-in account's state alone, and
         // nothing is written into a state before it is proven that account's.
-        let state = self.local_state_for_changes().map_err(|refused| {
-            if refused.not_this_accounts() {
-                NOT_YOURS.to_string()
-            } else {
-                NO_LOCAL_STATE.to_string()
-            }
-        })?;
+        let state = self.local_state_for_changes();
+        // Whose the local state is comes first: another account's state is refused as not theirs, whatever the
+        // sync folder (set or not); the other refusals keep their order.
+        if let Err(refused) = &state
+            && refused.not_this_accounts()
+        {
+            return Err(NOT_YOURS.to_string());
+        }
+        // The settings' folder (a test build may name its own: `Engine::use_sync_root_for_test`).
+        let sync_root = self.configured_sync_root()?.ok_or_else(|| NO_SYNC_FOLDER.to_string())?;
+        let state = state.map_err(|_| NO_LOCAL_STATE.to_string())?;
         if only_for.is_some_and(|session| state.session() != session) {
             return Err(NOT_SIGNED_IN.to_string());
         }

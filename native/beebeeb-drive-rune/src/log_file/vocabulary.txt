@@ -1,5 +1,8 @@
 # The words of every string literal and field name at the engine's and this crate's tracing calls, one per line,
 # sorted, lowercase. A test (vocabulary_sync.rs) fails, naming the words, when a log call's word is missing here.
+!
+$home
++
 0x
 0xc0000001
 10-minute
@@ -23,7 +26,10 @@ ack
 acknowledged
 acquire
 activity
+add
+added
 adopted
+adoption
 after
 again
 against
@@ -48,6 +54,7 @@ app
 app-local
 applied
 apply
+approved
 archived_legacy_state_dir
 are
 as
@@ -68,6 +75,8 @@ auto_resolve_keep_both
 away
 back
 backed-up
+backend
+backing
 backup
 backup_unknown_kept
 backups
@@ -134,6 +143,7 @@ chart
 check
 checked
 child
+chosen
 chunk
 chunk_count
 claims
@@ -156,6 +166,7 @@ cloud-files
 cloud-only
 cloud_only
 clsid
+codec
 coinitializeex
 column
 com
@@ -168,6 +179,7 @@ completely
 completing
 computer
 config
+confined
 confirm
 confirmed
 conflict
@@ -192,6 +204,7 @@ corrupt
 could
 count
 counter
+crash
 crashed
 create
 create_calls
@@ -278,6 +291,7 @@ emptied
 empty
 encoded
 encrypted
+end
 ended
 ends
 engine
@@ -301,6 +315,7 @@ exclude
 existing
 exists
 exited
+expires_in
 explorer
 factory
 failed
@@ -344,6 +359,7 @@ force-aborting
 forced
 found
 frames
+frames_1s
 free
 free_up_space
 freed
@@ -377,6 +393,7 @@ heartbeat
 heic
 held
 held_back
+held_for_review
 held_key_replaced
 hit
 holds
@@ -409,9 +426,11 @@ init
 initialized
 inside
 inspect
+interrupted
 interval
 into
 invalid_identifier
+invalid_secret
 invite
 invite_id
 invoked
@@ -506,6 +525,8 @@ mixed
 modifier
 move
 moved
+moved_files
+moved_items
 moved_legacy_device_identity
 moved_legacy_lock
 name
@@ -513,6 +534,7 @@ name_check_errors
 name_conflicts
 names
 nested
+neutral
 never
 new
 new_version
@@ -528,8 +550,10 @@ non-utf8
 none
 not
 not-in-sync
+not_found
 not_here
 not_in_sync
+not_moved
 not_there
 nothing
 notices
@@ -571,6 +595,7 @@ original
 original_removed
 orphaned
 os
+other
 ours
 out
 outcome
@@ -584,6 +609,7 @@ owed
 own
 own-tree
 owner
+ownership
 page
 panic
 panicked
@@ -625,6 +651,7 @@ planned
 planner
 plans
 platform
+played
 player
 poison
 poisoned
@@ -653,8 +680,12 @@ progress
 progressive
 promoted
 promotion
+proof
 protected
 protection
+prove
+proven
+proven_changes
 provider
 provisional
 provisional_id
@@ -764,6 +795,7 @@ retrying
 returned
 review
 revoked
+rms_1s
 role
 root
 root_id
@@ -773,6 +805,7 @@ row
 rows
 run
 running
+runs
 runtime
 s
 safe
@@ -799,6 +832,7 @@ seq_id
 served
 server
 server_seq
+service
 session
 session_id
 session_moved
@@ -828,6 +862,7 @@ signaled
 signaling
 signature
 signed
+signed_out
 since
 size
 size-resolve
@@ -870,6 +905,7 @@ status-ui
 statusuisourcefactory
 stay
 stays
+stays_held
 step
 still
 still_on
@@ -895,6 +931,7 @@ sync_tick
 synced
 system
 t
+taken
 task
 telemetry
 tell
@@ -922,6 +959,7 @@ tiles
 time
 timed
 to
+toast
 toggle
 tokio
 toml
@@ -948,6 +986,7 @@ unaffected
 unavailable
 unchanged
 under
+undone
 unfinished
 unjournalled
 unknown
@@ -957,10 +996,12 @@ unlocked
 unnamed
 unpin
 unpinned
+unproven
 unreadable
 unregistered
 unresolved
 unsafe
+unsupported
 unsynced
 until
 untracked
@@ -968,6 +1009,7 @@ unwrap
 up
 updated
 updates
+upgrade
 upload
 upload-staging
 upload-time
@@ -989,9 +1031,11 @@ via
 violation
 w2
 w3
+waiting
 waits
 walked
 was
+watch
 watcher
 watching
 went

@@ -21,6 +21,11 @@ use crate::ui::dialog::{self, Sub};
 use crate::ui::settings_dialog::{Weight, button};
 use crate::ui::{field, kit};
 
+/// Whether this build offers the Office editor's way to make a file: "New document…" (DW-1520) and the
+/// Word, Excel and PowerPoint tiles (DW-1521). Off in 0.9.0 (decision D-OV-3: the Office viewer ships,
+/// the editor is 0.9.1); the [`Kind`] variants and the code behind them stay for 0.9.1.
+pub const OFFICE_EDITOR: bool = false;
+
 /// What a new file can be (DW-1521), in the board's order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -33,6 +38,12 @@ pub enum Kind {
 
 impl Kind {
     pub const ALL: [Kind; 5] = [Kind::Markdown, Kind::Text, Kind::Word, Kind::Excel, Kind::PowerPoint];
+
+    /// The types the dialog offers in this build, in the board's order: the office ones only with
+    /// [`OFFICE_EDITOR`].
+    pub fn offered() -> &'static [Kind] {
+        if OFFICE_EDITOR { &Kind::ALL } else { &Kind::ALL[..2] }
+    }
 
     /// The type's word under its tile.
     pub fn word(self) -> &'static str {
@@ -202,16 +213,17 @@ fn step_kind(s: &mut State, delta: isize) {
     let Some(kind) = s.viewer.new_file.as_ref().map(|nf| nf.kind) else {
         return;
     };
-    let n = Kind::ALL.len() as isize;
-    let next = (kind.index() as isize + delta).rem_euclid(n) as usize;
-    choose(s, Kind::ALL[next]);
+    let offered = Kind::offered();
+    let at = offered.iter().position(|k| *k == kind).unwrap_or(0) as isize;
+    let next = (at + delta).rem_euclid(offered.len() as isize) as usize;
+    choose(s, offered[next]);
 }
 
 /// Continue (DW-1521): Markdown and Text are named next (DW-1522); an office type goes on to New
 /// document with that app's templates (DW-1558), which the shell opens.
 pub fn go_on(s: &mut State) {
     let Some(nf) = ui(s) else { return };
-    if nf.kind.office() {
+    if nf.kind.office() && OFFICE_EDITOR {
         let kind = nf.kind;
         close(s);
         s.viewer.asked.push(Intent::NewDocument(kind));
@@ -504,8 +516,9 @@ fn pick(nf: &NewFile, t: &Theme) -> El {
     let label = kit::label("dlg-label", "PICK A TYPE", type_::SECTION_LABEL, t.text_tertiary).w_full();
     let tiles = snapped_row(
         "types",
-        Kind::ALL
-            .into_iter()
+        Kind::offered()
+            .iter()
+            .copied()
             .enumerate()
             .map(|(i, kind)| {
                 let x = i as f32 * (TILE_W + 12.0);

@@ -31,8 +31,12 @@
 //! A restore is bound to the session AND the account of the press: both are read on the window's thread before the
 //! list is looked at, the engine sends nothing unless the session in memory is still that one (asked under its
 //! session-write lock, with the token copy), and an answer that lands under another session or account touches no
-//! row. A press whose restore was not sent because the session moved on is told to the account that pressed, once
-//! its Trash is listed again, without a name (none is held across a lock); never to another account.
+//! row. A press whose restore was not sent because the session moved on (a lock, a sign-out) is told to the account
+//! that pressed, once its Trash is listed again under a session of its own AND is on screen
+//! ([`TrashSource::on_screen`]), naming the item as that list shows it then: only the item's id is held across the
+//! lock or the sign-out, never its name. Kept while no account is here; never told to another account, and dropped
+//! the moment another account is here (nothing of an earlier account is kept through another's session); dropped
+//! unsaid when the item is no longer in that account's Trash.
 //!
 //! Thread rule: the read and each restore run on a worker of their own and send their answer down one channel, taken
 //! in by [`TrashSource::pump`] (the window's poll); the worker wakes the window ([`Engine::wake_host`]).
@@ -87,10 +91,13 @@ pub struct EngineTrashSource<C: CredentialStores> {
     restored: HashMap<String, u64>,
     /// A notice for the next pump.
     notice: Option<Notice>,
-    /// The account whose restore was not sent because its session moved on: told by the first poll that finds that
-    /// account's Trash listed again (a lock may be in between); dropped when another account, or none, is here.
-    /// Outlives `forget`, and holds no name of an item.
-    not_done_for: Option<String>,
+    /// Restores that were not sent because their session moved on, owed to the account that pressed: told by the
+    /// first poll that finds that account's Trash listed again and on screen (a lock or a sign-out may be in between);
+    /// kept while no account is here, dropped when another account is. Outlives `forget`, and holds no name of an
+    /// item (ids only).
+    not_done: Option<NotDone>,
+    /// Whether the Trash section is on screen (the window's poll says so; `opened` too).
+    shown: bool,
     /// Tests only: the next restore waits on the first, on its worker, before it calls the engine, and says on the
     /// second that the engine's call ended and its answer is in the inbox.
     #[cfg(test)]
@@ -108,6 +115,13 @@ struct Listing {
     session: SessionGeneration,
     /// Newest deleted first.
     rows: Vec<Listed>,
+}
+
+/// Restores a lock or a sign-out cut before they were sent: the account that pressed, and the items by id. Never a
+/// name: each is looked up in that account's own list when the words are said.
+struct NotDone {
+    account: String,
+    ids: Vec<String>,
 }
 
 /// One row, with what it was sorted by and the bytes it adds to the total.
@@ -176,7 +190,8 @@ impl<C: CredentialStores> EngineTrashSource<C> {
             restoring: HashMap::new(),
             restored: HashMap::new(),
             notice: None,
-            not_done_for: None,
+            not_done: None,
+            shown: false,
             #[cfg(test)]
             next_restore: None,
             dirty: false,
@@ -291,7 +306,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
                 // Drawn only for the session AND the account of the press. The session's turn only moves forward,
                 // so a stamp that is current now was current for the whole call.
                 if !(self.engine.has_session() && pressed == stamp(&self.engine)) {
-                    self.answered_late(pressed, result);
+                    self.answered_late(id, pressed, result);
                     return;
                 }
                 match result {
@@ -325,17 +340,17 @@ impl<C: CredentialStores> EngineTrashSource<C> {
 }
 
 impl<C: CredentialStores> EngineTrashSource<C> {
-    /// A restore answered under another session or account than its press: no row is touched and nothing of it is
-    /// drawn. The account that pressed is told when the restore was certainly not made (by `pump`, which says it to
-    /// that account only); when it may have been made, the list is read again.
-    fn answered_late(&mut self, pressed: Stamp, result: Result<(), AccountCallError>) {
+    /// A restore of `id` answered under another session or account than its press: no row is touched and nothing of
+    /// it is drawn. The account that pressed is told when the restore was certainly not made (by `pump`, which says
+    /// it to that account only); when it may have been made, the list is read again.
+    fn answered_late(&mut self, id: String, pressed: Stamp, result: Result<(), AccountCallError>) {
         if let Err(kind) = &result {
             log(format!("trash: an item was not restored ({kind})"));
         }
         match result {
             // Still in Trash for certain: the engine sent nothing (the session of the press is gone: a lock, a
-            // sign-out, another sign-in). An unnamed session (no email, no user id in memory) cannot be told.
-            Err(AccountCallError::NotSignedIn) => self.not_done_for = pressed.1,
+            // sign-out, another sign-in).
+            Err(AccountCallError::NotSignedIn) => self.owe_not_done(pressed.1, id),
             // Sent under the session of the press: taken, refused (a gateway's error may hide a restore that was
             // made), or never answered. A list read since, or being read now, may be out of date: the next opening
             // reads again, and a list on screen or on its way is read again (whoever is here is asked for their
@@ -347,6 +362,72 @@ impl<C: CredentialStores> EngineTrashSource<C> {
                 }
             }
         }
+    }
+
+    /// The restore of `id`, pressed under `account`, was not sent: owed to that account, with any other it is owed
+    /// already. Another account's owed words go (they are never said to this one). An unnamed session (no email, no
+    /// user id in memory) cannot be told.
+    fn owe_not_done(&mut self, account: Option<String>, id: String) {
+        let Some(account) = account else {
+            return;
+        };
+        if let Some(owed) = self.not_done.as_mut().filter(|owed| owed.account == account) {
+            if !owed.ids.contains(&id) {
+                owed.ids.push(id);
+            }
+            return;
+        }
+        self.not_done = Some(NotDone { account, ids: vec![id] });
+    }
+
+    /// The words owed to an account whose restore a lock or a sign-out cut (`not_done`), put in `notice` when this
+    /// poll may say them: that account is here, its Trash is listed under a session of its own and is on screen, and
+    /// no other notice takes this poll. Kept while no account is here (signed out) and while its own Trash is not
+    /// listed or not shown; dropped when another account is here, and dropped unsaid when none of its items is in
+    /// its Trash any more. `true`: they would be said now but another notice took this poll (poll again soon).
+    fn say_not_done(&mut self, notice: &mut Option<Notice>) -> bool {
+        let Some(owed) = self.not_done.take() else {
+            return false;
+        };
+        match account_of(&self.engine) {
+            // Another account is here: never said to it, and nothing of the earlier account is kept through its
+            // session.
+            Some(here) if here != owed.account => false,
+            Some(_) if self.shown && self.current().is_some() => {
+                if notice.is_some() {
+                    self.not_done = Some(owed);
+                    return true;
+                }
+                let names = self.names_in_trash(&owed.ids);
+                if !names.is_empty() {
+                    *notice = Some(Notice::RestoreNotDone(names));
+                }
+                false
+            }
+            // Its own account, before its Trash is listed again or while Trash is not on screen; or no account at
+            // all (signed out, or the session not read back yet): kept.
+            _ => {
+                self.not_done = Some(owed);
+                false
+            }
+        }
+    }
+
+    /// The names, as this session's Trash shows them, of those of `ids` still in it: in the list, or taken out of
+    /// it by a restore of this session that is still on its way. Never logged.
+    fn names_in_trash(&self, ids: &[String]) -> Vec<String> {
+        let now = self.engine.session_turn();
+        let in_list = self.current().into_iter().flat_map(|listing| listing.rows.iter());
+        let in_flight = self
+            .restoring
+            .values()
+            .filter(|(session, _)| *session == now)
+            .map(|(_, listed)| listed);
+        in_list
+            .chain(in_flight)
+            .filter(|listed| ids.contains(&listed.row.id))
+            .map(|listed| listed.row.name.clone())
+            .collect()
     }
 }
 
@@ -450,6 +531,7 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
     }
 
     fn opened(&mut self) {
+        self.shown = true;
         if !self.engine.has_session() {
             return;
         }
@@ -476,19 +558,10 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         self.count_if_missing();
         let mut notice = self.notice.take();
         let purge = self.purge_end.take();
-        // Words for the account that pressed: said once its Trash is listed again under a session of its own (the
-        // window is unlocked and Trash is open: a notice handed over earlier is wiped by the window when its gate
-        // goes round or Trash opens); never to another account, and dropped when another, or none, is here.
-        if let Some(account) = self.not_done_for.take() {
-            if Some(&account) == account_of(&self.engine).as_ref() {
-                if self.current().is_some() && notice.is_none() {
-                    notice = Some(Notice::RestoreNotDone);
-                } else {
-                    self.not_done_for = Some(account);
-                }
-            }
-        }
-        let waiting_to_say = self.not_done_for.is_some() && self.current().is_some();
+        // Words for the account that pressed: said once its Trash is listed again under a session of its own and is
+        // on screen (a notice handed to a window showing something else would be wiped unseen when Trash opens);
+        // never to another account (`say_not_done`).
+        let waiting_to_say = self.say_not_done(&mut notice);
         Pumped {
             changed: changed || notice.is_some() || purge.is_some(),
             busy: self.reading.is_some()
@@ -500,6 +573,10 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
             purge,
             wake_in: self.count_due_in(),
         }
+    }
+
+    fn on_screen(&mut self, shown: bool) {
+        self.shown = shown;
     }
 
     fn forget(&mut self) {

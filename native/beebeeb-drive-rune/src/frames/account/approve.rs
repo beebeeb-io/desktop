@@ -12,9 +12,15 @@
 //!
 //! Windows Hello. `begin_approval` asks the source to ask Windows; the answer comes back through
 //! [`poll`], and only while the wait it answers is still open.
+//!
+//! The password (D-P40-10: core requires the account's password step-up for an approval, after Windows Hello). Typed
+//! on the review in its own secure field (`Approve::password`, the passkey pane's widget), handed to the source once
+//! at Approve as a borrowed `Password` and wiped from the field at once; the source keeps one wiped copy while
+//! Windows Hello is up and uses it only after Windows said "verified". It is wiped with the flow, like the code.
 
 use crate::State;
 use crate::theme::tokens::Theme;
+use crate::ui::account_form::{self as fm, Field};
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size, Tail};
 use crate::ui::au::{self, Keys, Tone};
 use crate::ui::au_entry::{self, FocusedSpec};
@@ -29,6 +35,8 @@ use super::{AccountUi, Dialog, Pane, icons};
 
 /// The code field's own key (focus, tests).
 pub const CODE_KEY: &str = "acct-approve-code";
+/// The password field's own key on the review (focus, tests).
+pub const PASSWORD_KEY: &str = "acct-approve-password";
 /// A code is eight characters, shown as XXXX-XXXX.
 const CODE_CHARS: usize = 8;
 const DIALOG_W: f32 = 440.0;
@@ -42,6 +50,9 @@ pub enum Lookup {
     /// Wrong, expired or already used: the server does not say which, and neither does the screen.
     NotFound,
     Offline,
+    /// Beebeeb did not look the code up (too many tries, a session it no longer accepts, an answer this app does
+    /// not read): nothing was approved.
+    Refused,
 }
 
 /// How an approval ended.
@@ -57,9 +68,17 @@ pub enum Approval {
     /// The server could not be reached and the claim was provably NOT sent: nothing was
     /// approved. A source that cannot prove that answers `Unknown`.
     Offline,
-    /// The claim was sent and its result is not known (the connection went after Windows Hello).
-    /// The source keeps checking: it may answer `Approved` for the same request later.
+    /// The keys were sent and the result is not known (the connection went after Windows Hello).
+    /// A source that can check may answer `Approved` for the same request later; the engine's
+    /// cannot (Beebeeb has no route to ask), so the words never say it keeps checking.
     Unknown,
+    /// The password is not the account's (or was empty): nothing was claimed.
+    WrongPassword,
+    /// Windows Hello is not set up on this PC, or no prompt could be shown: nothing was sent.
+    NoHello,
+    /// Beebeeb refused before the keys left (too many tries, a session it no longer accepts, an
+    /// answer this app does not read): nothing was approved.
+    Refused,
 }
 
 /// How a denial ended.
@@ -126,15 +145,23 @@ pub fn board_lookup(code: &str) -> Lookup {
 pub enum Problem {
     NotFound,
     Offline,
+    WrongPassword,
+    NoHello,
+    Refused,
 }
 
 const NOT_FOUND: &str = "We could not find a waiting request with that code. Check it on the other device.";
 const OFFLINE: &str = "Beebeeb can't be reached. Nothing was approved.";
+const WRONG_PASSWORD: &str = "That is not your account's password. Nothing was approved.";
+const NO_HELLO: &str = "Approving needs Windows Hello, which is not set up on this PC. Nothing was approved.";
+const REFUSED: &str = "Beebeeb did not take this request. Nothing was approved. Try again in a few minutes.";
 
 /// What the approval flow holds between presses.
 pub struct Approve {
     /// The code as typed (secure, shown).
     pub code: TextEdit,
+    /// The account's password, typed on the review (secure, never shown). Emptied at Approve.
+    pub password: TextEdit,
     /// The request under review.
     pub request: Option<SignInRequest>,
     /// The typed code is this request's code: Approve is live.
@@ -158,6 +185,7 @@ impl Default for Approve {
         code.text.reserve(16);
         Self {
             code,
+            password: super::form::secure(),
             request: None,
             matches: false,
             typed_here: false,
@@ -267,6 +295,10 @@ fn look_up(ui: &mut AccountUi) -> Option<&'static str> {
             ui.approve.problem = Some(Problem::Offline);
             None
         }
+        Lookup::Refused => {
+            ui.approve.problem = Some(Problem::Refused);
+            None
+        }
     }
 }
 
@@ -315,9 +347,11 @@ pub(super) fn approve(s: &mut State) {
     let (Some(request), Some(source)) = (ui.approve.request.as_ref(), ui.source.as_mut()) else {
         return;
     };
-    // The account password: the field the passkey pane asks it in (`form.current`). Slice A5 draws it on the review.
-    let password = Password::from_field(&ui.form.current.text);
+    // The account password, from the review's own field (the passkey pane's widget). It leaves the field here: the
+    // source keeps one wiped copy while Windows Hello is up.
+    let password = Password::from_field(&ui.approve.password.text);
     source.begin_approval(request.id(), &ui.approve.code.text, password);
+    ui.approve.password = super::form::secure();
     ui.approve.waiting = true;
     ui.approve.problem = None;
     ui.approve.code.focused = false;
@@ -408,6 +442,18 @@ pub fn poll(s: &mut State) -> bool {
                 ui.approve.problem = Some(Problem::Offline);
                 ui.dialog = Some(Dialog::ApproveReview);
             }
+            Approval::WrongPassword => {
+                ui.approve.problem = Some(Problem::WrongPassword);
+                ui.dialog = Some(Dialog::ApproveReview);
+            }
+            Approval::NoHello => {
+                ui.approve.problem = Some(Problem::NoHello);
+                ui.dialog = Some(Dialog::ApproveReview);
+            }
+            Approval::Refused => {
+                ui.approve.problem = Some(Problem::Refused);
+                ui.dialog = Some(Dialog::ApproveReview);
+            }
             Approval::Unknown => finish(ui, Dialog::ApproveUnsure { denying: false }),
         }
         return true;
@@ -470,7 +516,33 @@ fn problem_words(problem: Option<Problem>) -> Option<&'static str> {
     problem.map(|p| match p {
         Problem::NotFound => NOT_FOUND,
         Problem::Offline => OFFLINE,
+        Problem::WrongPassword => WRONG_PASSWORD,
+        Problem::NoHello => NO_HELLO,
+        Problem::Refused => REFUSED,
     })
+}
+
+/// The account's password on the review (DW-A13): the passkey pane's field, at index 1 (the code is 0). Its error is
+/// a wrong password; every other problem is the review's banner.
+fn password_field(a: &Approve, t: &Theme) -> El {
+    let wrong = a.problem == Some(Problem::WrongPassword);
+    fm::field(
+        1,
+        &Field {
+            label: "Password",
+            icon: Some(&icons::PADLOCK),
+            message: Some(if wrong {
+                WRONG_PASSWORD
+            } else {
+                "To confirm it's you. Used only after Windows Hello confirms it."
+            }),
+            error: wrong,
+            input_key: PASSWORD_KEY,
+        },
+        &a.password,
+        |s: &mut State| &mut s.account.approve.password,
+        t,
+    )
 }
 
 /// DW-A12: type the code the other device shows.
@@ -694,13 +766,17 @@ fn review(a: &Approve, request: &SignInRequest, t: &Theme) -> El {
             t,
         ));
     }
-    if a.problem == Some(Problem::Offline) {
+    let banner = match a.problem {
+        Some(problem @ (Problem::Offline | Problem::NoHello | Problem::Refused)) => problem_words(Some(problem)),
+        _ => None,
+    };
+    if let Some(words) = banner {
         children.push(au::banner(
             &mut keys,
             Tone::Red,
             &crate::theme::icons_settings::INFO,
             None,
-            Some(OFFLINE),
+            Some(words),
             true,
             t,
         ));
@@ -757,6 +833,7 @@ fn review(a: &Approve, request: &SignInRequest, t: &Theme) -> El {
         t,
     ));
     children.push(code_field(a, "Code shown on that screen", None, t));
+    children.push(password_field(a, t));
     shell("dialog", &question(request), children, review_foot(a, false, t), t)
 }
 
@@ -934,7 +1011,7 @@ fn unsure(denying: bool, request: &SignInRequest, t: &Theme) -> El {
         Tone::Neutral,
         "Result not known",
         &format!(
-            "Beebeeb could not be reached after Windows Hello, so this PC does not know whether {} was signed in. It keeps checking. A new session in Devices and sessions means it was.",
+            "Beebeeb could not be reached after the keys were sent, so this PC does not know whether {} was signed in. A new session in Devices and sessions means it was.",
             request.device()
         ),
         t,

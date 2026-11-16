@@ -9,11 +9,13 @@
 //!   session's turn AS READ AT THE PRESS, and the account's password for a closed vault or a locked screen
 //!   ([`Engine::unlock_vault_with_password`]: proven to the server in a new sign-in, the code step after it
 //!   when the account has one);
-//! - the wait after "too many tries" (DW-A21): counted down here, once a second, from the seconds the server named.
+//! - the wait after "too many tries" (DW-A21): counted down here, once a second, from the seconds the server named;
+//! - "Sign in with another device" (`signin_device.rs`: the engine's device request, on a thread of its own), the
+//!   passkey sign-in (`passkeys.rs`: the system's dialog, on a thread of its own), and "Forgot password?" with the
+//!   twelve words and a new password (`signin_recovery.rs`: core's phrase recovery through the engine).
 //!
 //! What it does not bind answers AT ONCE with the refusal its screen draws, never with silence: the Continue-as
-//! card (no shared session store exists for this app yet, so Windows Hello is asked for the lock screen only), a
-//! device request, a passkey and "Forgot password?" with the phrase (core's `recovery_flow` has no engine step yet).
+//! card (no shared session store exists for this app yet, so Windows Hello is asked for the lock screen only).
 //! Creating an account is bound in `signup.rs` (owner ruling 2026-11-14: sign-up in any app).
 //!
 //! Threads: nothing here waits for Beebeeb on the window's thread. Every step is a job on ONE worker, run in the
@@ -45,6 +47,10 @@ use super::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult, NoHello};
 use super::{log, map_gate_signin, map_next, map_problem, phrase_problem, two_factor_problem};
 use beebeeb_engine::app::signup_api::SignupAttempt;
 
+#[path = "signin_device.rs"]
+mod signin_device;
+#[path = "signin_recovery.rs"]
+mod signin_recovery;
 #[path = "signup.rs"]
 mod signup;
 use crate::frames::signin::create_source::{PasswordVerdict, SignUpEvent};
@@ -76,6 +82,8 @@ enum Wait {
     SignUpConfirm,
     SignUpCreate,
     SignUpTick,
+    /// A request to be signed in by another device (`signin_device.rs`): its code, ticks and ending.
+    Device,
     /// A call this source does not bind: answered at once, never stale.
     Unbound,
 }
@@ -110,6 +118,8 @@ pub struct EngineSignInSource<C: CredentialStores> {
     unlocking: Arc<Mutex<Option<LockState>>>,
     /// The account being created, if any: owned here, wiped when sign-up is left (`signup.rs`).
     signup: Arc<SignupAttempt>,
+    /// The request to be signed in by another device that runs, if any (`signin_device.rs`).
+    device: signin_device::DeviceSeat,
 }
 
 impl<C: CredentialStores> EngineSignInSource<C> {
@@ -149,6 +159,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             hello_up: None,
             unlocking: Arc::new(Mutex::new(None)),
             signup: Arc::new(SignupAttempt::new()),
+            device: signin_device::DeviceSeat::default(),
         }
     }
 
@@ -438,7 +449,10 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     /// verified prompt reaches the engine.
     fn begin_hello(&mut self) {
         let attempt = self.next_attempt(Wait::Hello);
-        self.hello_up = None;
+        // A prompt this screen asked for before is taken away, never just forgotten (it would stay on screen).
+        if let Some(cancel) = self.hello_up.take() {
+            cancel();
+        }
         let asked_at = self.engine.session_turn();
         let answer = move |event| Answer {
             wait: Wait::Hello,
@@ -486,13 +500,12 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     }
 
     fn begin_device_request(&mut self) {
-        self.not_bound(
-            "begin_device_request",
-            SignInEvent::DeviceRequested(Err(SignInProblem::Other)),
-        );
+        self.device_begin();
     }
 
-    fn cancel_device_request(&mut self) {}
+    fn cancel_device_request(&mut self) {
+        self.device_cancel();
+    }
 
     /// Both kinds go to the same engine step: core reads six digits as an authenticator code and eight as a
     /// backup code, and the screen lets nothing else through.
@@ -611,18 +624,21 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         );
     }
 
-    fn begin_recovery_verify(&mut self, _email: &str, _words: &[&str]) {
-        self.not_bound(
-            "begin_recovery_verify",
-            SignInEvent::RecoveryPhraseVerified(Err(PhraseProblem::Other)),
-        );
+    /// The in-app recovery with the twelve words (`signin_recovery.rs`), and the device request: both doors are bound.
+    fn in_app_doors_available(&self) -> bool {
+        true
     }
 
-    fn begin_set_password(&mut self, _password: &str) {
-        self.not_bound(
-            "begin_set_password",
-            SignInEvent::PasswordSet(Err(SignInProblem::Other)),
-        );
+    fn begin_recovery_verify(&mut self, email: &str, words: &[&str]) {
+        self.recovery_begin_verify(email, words);
+    }
+
+    fn begin_set_password(&mut self, password: &str) {
+        self.recovery_begin_set_password(password);
+    }
+
+    fn password_strength(&self, password: &str) -> Option<crate::frames::signin::source::PasswordStrength> {
+        self.recovery_strength(password)
     }
 
     fn sign_up_available(&self) -> bool {
@@ -705,6 +721,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         }
         let answers = self.answers.clone();
         let job: Job<C> = Box::new(move |engine| {
+            engine.recovery_forget();
             if engine.discard_partial_sign_in().is_err() {
                 still_signed_in(&answers);
             }

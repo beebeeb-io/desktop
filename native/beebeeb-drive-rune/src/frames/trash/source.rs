@@ -40,9 +40,10 @@ pub enum Loaded {
 pub enum Notice {
     /// Beebeeb refused to put this item back; it is still in Trash (the item's name).
     RestoreRefused(String),
-    /// A restore pressed before Beebeeb was locked or signed out was not made; the item is still in Trash. No name:
-    /// none is held across a lock.
-    RestoreNotDone,
+    /// Restores pressed before Beebeeb was locked or signed out were not made, and these items are still in Trash:
+    /// their names as the account's own list shows them now (looked up when the words are said; only an item's id
+    /// is held across a lock or a sign-out, never its name). Never empty when a source says it.
+    RestoreNotDone(Vec<String>),
     /// A newer list could not be read; the one shown may be out of date.
     RefreshFailed,
     /// The control needs something this version does not have yet.
@@ -100,8 +101,12 @@ pub trait TrashSource {
     fn loaded(&self) -> Loaded {
         Loaded::Ready
     }
-    /// The Trash section opened: read the list if it is missing or old.
+    /// The Trash section opened: read the list if it is missing or old. Trash is on screen from here on.
     fn opened(&mut self) {}
+    /// Whether the Trash section is on screen: the window's poll says so each time, before [`TrashSource::pump`].
+    /// Words kept for later (a restore that a lock or a sign-out cut) are handed out only while it is, so they are
+    /// never given to a window that shows something else (and wiped there when Trash opens).
+    fn on_screen(&mut self, _shown: bool) {}
     /// Take in what arrived since the last call (the window's poll).
     fn pump(&mut self) -> Pumped {
         Pumped::default()

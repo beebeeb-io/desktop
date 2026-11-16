@@ -731,8 +731,34 @@ pub(super) fn process_metadata_row(
             // same-second stamp, not a freshness token (see `RowSource::Op`).
             // Task 2445: a row written with an empty path (vault was locked)
             // must be re-applied now that the key may be correct.
-            if source == RowSource::Snapshot && remote_updated <= entry.remote_updated_at && !entry.path.is_empty() {
-                return Ok(Some((entry.path, entry.item_kind)));
+            // Task 2538: the time alone is not enough. A snapshot node naming a
+            // later version than the row holds re-anchors it whatever the times
+            // (a row's time may have been stamped by an earlier build from this
+            // PC's clock); one naming an earlier version never does, since the
+            // write below would lower the row's version. A node whose upload is
+            // still running is left to the time rule, as before.
+            if source == RowSource::Snapshot && !entry.path.is_empty() {
+                let node_version = f["current_version"]
+                    .as_i64()
+                    .or_else(|| f["version"].as_i64())
+                    .or_else(|| f["version_number"].as_i64());
+                let held_version = bridge
+                    .db()
+                    .get_file_contract_state(file_id)?
+                    .map(|contract| contract.current_version);
+                match node_version.zip(held_version).map(|(node, held)| node.cmp(&held)) {
+                    Some(std::cmp::Ordering::Less) => {
+                        tracing::debug!(
+                            "sync_tick: snapshot node names an earlier version than this PC holds; skipped"
+                        );
+                        return Ok(Some((entry.path, entry.item_kind)));
+                    }
+                    Some(std::cmp::Ordering::Greater) if f["is_uploading"].as_bool() != Some(true) => {}
+                    _ if remote_updated <= entry.remote_updated_at => {
+                        return Ok(Some((entry.path, entry.item_kind)));
+                    }
+                    _ => {}
+                }
             }
 
             // Task 2190 (follow-up 1, plan §7.2 as corrected after review-169 #7): a `Local` row has no
@@ -764,3 +790,8 @@ pub(super) fn process_metadata_row(
         }
     }
 }
+
+// Task 2538 (engine) and L409: a version restored elsewhere reaches this PC; Keep there into the file's own place.
+#[cfg(test)]
+#[path = "restore_elsewhere_tests.rs"]
+mod restore_elsewhere_tests;

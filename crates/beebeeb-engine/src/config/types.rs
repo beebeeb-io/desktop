@@ -186,6 +186,12 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub known_folder_source: std::collections::BTreeMap<String, KnownFolderSource>,
 
+    /// DW-0737/DW-0738: the folders the person chose to back up beside the six known folders, each with its core
+    /// custom name and where it is on this PC. Whether each is backed up now is its key (`custom:<name>`) in
+    /// `known_folder_backup`. Missing or empty: none (a file without the key reads and writes as before).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backup_chosen_folders: Vec<crate::backup::sources::ChosenFolder>,
+
     // ── Task 0804 — known-folder backup first-run onboarding prompt ────────
     //
     // The one-time "Back up these folders?" prompt (decision 0797's default-ON
@@ -448,6 +454,7 @@ impl Default for DesktopConfig {
             excluded_folder_ids: None,
             known_folder_backup: Vec::new(),
             known_folder_source: std::collections::BTreeMap::new(),
+            backup_chosen_folders: Vec::new(),
             known_folder_onboarding_seen: false,
             native_setup_done: None,
             menu_bar_hint_seen: false,

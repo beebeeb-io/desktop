@@ -33,7 +33,7 @@
 //! - a newer version: while a file is open the local state's version is read (on a worker, about every 1.5 s,
 //!   `viewer_change::check_for_newer`); a version past the one the view holds raises "A newer version arrived, 09:14."
 //!   (no device name in 0.9.0, decision 2505). Show it opens the file again (`ViewerSource::newer`).
-//! - not bound: find, play, a photo's strip.
+//! - audio and video play through the shell's player (`viewer_media`); not bound: a photo's strip.
 //!
 //! Where the decrypted bytes are: in the engine's `Zeroizing` buffer until the worker made of them what the view
 //! draws (lines of text, or pixels), then wiped. The text is overwritten when the view lets go of it
@@ -53,8 +53,6 @@
 //!
 //! Must not: log a name, an id, a path or a byte; write a decrypted byte anywhere; show a sample.
 
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -67,13 +65,22 @@ use zeroize::Zeroize;
 
 use super::log;
 use crate::frames::viewers::kinds::{self, PdfDoc, PhotoDoc, Picture, Viewer};
+#[allow(unused_imports)] // the text readers moved to `viewer_text.rs`; tests reach them through `super::*`.
 use crate::frames::viewers::source::{
     Body, Cut, Details, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
     Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
 };
 
+#[path = "viewer_pages.rs"]
+mod pages;
 #[path = "viewer_find.rs"]
 mod viewer_find;
+#[path = "viewer_media.rs"]
+pub(crate) mod viewer_media;
+#[path = "viewer_text.rs"]
+mod viewer_text;
+use pages::{Pages, PdfEnds};
+use viewer_text::text_body;
 #[path = "viewer_pdf.rs"]
 pub(crate) mod viewer_pdf;
 #[path = "viewer_picture.rs"]
@@ -149,6 +156,20 @@ pub trait ViewerEngine: Send + Sync + 'static {
     }
     /// [`Engine::edit_facts_for`], for the engine's opening `opening` ([`ViewerEngine::begin_opening`]). `None`: not
     /// read (the switch and the editor are not offered).
+    /// Playback is available here (the helper is installed and the platform has a sandbox). Default: no.
+    fn media_ready(&self) -> bool {
+        false
+    }
+    /// The shell's player. Default: none.
+    fn media_player(&self) -> Option<crate::media::player::PlayerHandle> {
+        None
+    }
+    /// The audio files of the folder the file is in, for the session. Default: not read.
+    fn media_queue(&self, _session: SessionGeneration, _file_id: &str) -> Option<viewer_media::MediaQueue> {
+        None
+    }
+    /// The press that opens the player: the session the engine must open the file's bytes for. Default: none.
+    fn media_press(&self, _session: SessionGeneration) {}
     fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, _opening: u64) -> Option<EditFacts> {
         None
     }
@@ -263,6 +284,22 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         self.engine.wake_host();
     }
 
+    fn media_ready(&self) -> bool {
+        viewer_media::playback_ready()
+    }
+
+    fn media_player(&self) -> Option<crate::media::player::PlayerHandle> {
+        crate::media::shell_player()
+    }
+
+    fn media_queue(&self, session: SessionGeneration, file_id: &str) -> Option<viewer_media::MediaQueue> {
+        viewer_media::queue_of(&self.engine, session, file_id)
+    }
+
+    fn media_press(&self, session: SessionGeneration) {
+        super::media::stamp_press(session);
+    }
+
     fn edit_facts(&self, session: SessionGeneration, file_id: &str, opening: u64) -> Option<EditFacts> {
         self.engine.edit_facts_for(session, file_id, opening).ok()
     }
@@ -368,73 +405,14 @@ struct Opening {
     name: String,
 }
 
-/// One page's answer from the worker: the page (from 1), its pixels or `None` when it could not be rendered, and
-/// whether text of the page is not in the pixels (`viewer_pdf::Rendered::lacks_text`).
-type PageAnswer = (u32, Option<rune::Pixels>, bool);
-
-/// The window's side of an open PDF: pages are asked of the worker that holds the document, and the last few that
-/// came back are kept. Asking happens while the view is drawn (`ViewerSource::picture` takes `&self`), so what
-/// changes then sits in cells; this is the window's thread's alone.
-struct Pages {
-    ask: mpsc::Sender<u32>,
-    got: mpsc::Receiver<PageAnswer>,
-    /// The newest last. `None` pixels: that page could not be rendered.
-    kept: RefCell<VecDeque<PageAnswer>>,
-    /// The page the worker was last asked for and has not answered.
-    asked: Cell<Option<u32>>,
-    /// The document as the view was told, once the worker opened it.
-    doc: RefCell<Option<PdfDoc>>,
-}
-
-impl Pages {
-    /// Take what the worker rendered since the last call. `true`: something came.
-    fn take_in(&self) -> bool {
-        let mut kept = self.kept.borrow_mut();
-        let mut came = false;
-        while let Ok((page, pixels, lacks_text)) = self.got.try_recv() {
-            kept.retain(|(held, ..)| *held != page);
-            kept.push_back((page, pixels, lacks_text));
-            while kept.len() > PAGES_KEPT {
-                kept.pop_front();
-            }
-            if self.asked.get() == Some(page) {
-                self.asked.set(None);
-            }
-            came = true;
-        }
-        came
-    }
-
-    fn held(&self, page: u32) -> Option<Option<rune::Pixels>> {
-        self.kept
-            .borrow()
-            .iter()
-            .find(|(held, ..)| *held == page)
-            .map(|(_, pixels, _)| pixels.clone())
-    }
-
-    /// Whether the kept picture of `page` lacks text the renderer had no font for.
-    fn lacks_text(&self, page: u32) -> bool {
-        self.kept
-            .borrow()
-            .iter()
-            .any(|(held, pixels, lacks_text)| *held == page && pixels.is_some() && *lacks_text)
-    }
-}
-
-/// The worker's ends of an open PDF's channels, and the size the view is told.
-struct PdfEnds {
-    asks: mpsc::Receiver<u32>,
-    answers: mpsc::Sender<PageAnswer>,
-    size: String,
-}
-
 /// An open file on the real engine. See the module's doc.
 pub struct EngineViewerSource<E: ViewerEngine> {
     engine: Arc<E>,
     open: Option<Opening>,
     /// A change handed to a worker (Available offline, a save) and the answers that come back.
     changes: change::Changes,
+    /// The recording or video on screen and its queue (`viewer_media`).
+    media: viewer_media::Media,
 }
 
 impl<C: CredentialStores + 'static> EngineViewerSource<LiveViewerEngine<C>> {
@@ -481,80 +459,9 @@ pub(super) fn kind_word(name: &str) -> &'static str {
         Some(Viewer::Pdf) => "PDF",
         Some(Viewer::Audio) => "Audio",
         Some(Viewer::Archive) => "Archive",
+        Some(Viewer::Video) => "Video",
         None => "File",
     }
-}
-
-/// The decrypted bytes as text the view draws, or `None` when they are not text (not UTF-8, or a NUL in them).
-/// A text the reader cannot hold whole (over [`READ_WHOLE_MAX`], more than [`WHOLE_LINES_MAX`] lines, or a line
-/// over [`LINE_BYTES_MAX`]) is its first lines, read-only: at most [`SHOWN_LINES`] and [`SHOWN_BYTES`].
-fn text_body(bytes: &[u8], markdown: bool) -> Option<Body> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-    if text.contains('\0') {
-        return None;
-    }
-    let (mut total, mut longest) = (0usize, 0usize);
-    for line in text.lines() {
-        total += 1;
-        longest = longest.max(line.len());
-    }
-    let why = if bytes.len() > READ_WHOLE_MAX {
-        Some(Cut::OverTwoMb)
-    } else if total > WHOLE_LINES_MAX || longest > LINE_BYTES_MAX {
-        Some(Cut::TooLong)
-    } else {
-        None
-    };
-    if let Some(why) = why {
-        let lines = first_lines(text);
-        return Some(Body::Text(TextDoc {
-            truncated: Some(Truncated {
-                shown: u32::try_from(lines.len()).unwrap_or(u32::MAX),
-                total: u32::try_from(total).unwrap_or(u32::MAX),
-                why,
-            }),
-            lines,
-        }));
-    }
-    Some(if markdown && bytes.len() <= MARKDOWN_RENDER_MAX {
-        Body::Markdown(MdDoc {
-            source: text.to_string(),
-        })
-    } else {
-        Body::Text(TextDoc {
-            lines: plain_lines(text),
-            truncated: None,
-        })
-    })
-}
-
-/// The first lines of a text shown in part: at most [`SHOWN_LINES`] of them, each cut at [`LINE_BYTES_MAX`]
-/// (on a character), and at most [`SHOWN_BYTES`] in all. No line the reader is handed is longer than the limit
-/// it is said to hold.
-fn first_lines(text: &str) -> Vec<Vec<crate::frames::viewers::source::Run>> {
-    let cut = |line: &str, at_most: usize| {
-        let mut end = line.len().min(at_most);
-        while !line.is_char_boundary(end) {
-            end -= 1;
-        }
-        end
-    };
-    // Sized once: a buffer that grew would leave its earlier copies of the text behind, not overwritten.
-    let mut shown = String::with_capacity(SHOWN_BYTES);
-    for (i, line) in text.lines().take(SHOWN_LINES).enumerate() {
-        let room = SHOWN_BYTES.saturating_sub(shown.len() + usize::from(i > 0));
-        if room == 0 && i > 0 {
-            break;
-        }
-        if i > 0 {
-            shown.push('\n');
-        }
-        shown.push_str(&line[..cut(line, LINE_BYTES_MAX.min(room))]);
-    }
-    let lines = plain_lines(&shown);
-    shown.zeroize();
-    lines
 }
 
 /// The toolkit's decoders, one set for the app (started with the first picture). Its waker does nothing: the
@@ -725,6 +632,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             engine,
             open: None,
             changes: change::Changes::default(),
+            media: viewer_media::Media::default(),
         }
     }
 
@@ -763,20 +671,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let (answers, inbox) = mpsc::channel();
         // A PDF: the worker keeps the document and renders the pages the view asks for.
         let (pages, pdf) = if shows == Shows::Pdf && facts.size <= IN_MEMORY_MAX {
-            let ((ask, asks), (page_answers, got)) = (mpsc::channel(), mpsc::channel());
-            let pages = Pages {
-                ask,
-                got,
-                kept: RefCell::default(),
-                asked: Cell::new(None),
-                doc: RefCell::new(None),
-            };
             let size = crate::source::format_size(i64::try_from(facts.size).unwrap_or(i64::MAX));
-            let ends = PdfEnds {
-                asks,
-                answers: page_answers,
-                size,
-            };
+            let (pages, ends) = Pages::open(size);
             (Some(pages), Some(ends))
         } else {
             (None, None)
@@ -811,7 +707,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         if let Some(edit) = opening.edit {
             opening.seen = edit.version;
         }
-        let body = if shows == Shows::Nothing {
+        let media = self.media_body(session, opening.account.clone(), file_id, &facts.name, &facts.folders);
+        let body = if let Some(media) = media {
+            media
+        } else if shows == Shows::Nothing {
             Body::NotPreviewable(NoPreview::NoViewer)
         } else if facts.size > IN_MEMORY_MAX {
             Body::NotPreviewable(NoPreview::TooBig {
@@ -929,11 +828,17 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 // the file is left (the asker goes) or its session moves on (`cancel`). Then the document is
                 // dropped, and the bytes it read from are overwritten.
                 if let (Some(document), Some(ends), false) = (document, pdf, cancelled) {
-                    document.serve(&ends.asks, &cancel, &|page, rendered| {
+                    let page = |page, rendered: Option<viewer_pdf::Rendered>| {
                         let lacks_text = rendered.as_ref().is_some_and(|rendered| rendered.lacks_text);
                         let _ = ends.answers.send((page, rendered.and_then(page_pixels), lacks_text));
                         engine.wake();
-                    });
+                    };
+                    // A find's answer comes the same way, under the serial it was asked with; nobody reading: dropped.
+                    let found = |serial, matches| {
+                        let _ = ends.found.send((serial, matches));
+                        engine.wake();
+                    };
+                    document.serve_asks(&ends.asks, &cancel, &page, &found);
                 }
             })
             .is_ok()
@@ -972,6 +877,9 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn poll(&mut self, file_id: &str) -> Option<Body> {
+        if let Some(body) = self.media_poll(file_id) {
+            return Some(body);
+        }
         let opening = self.open.as_mut().filter(|opening| opening.file_id == file_id)?;
         let same_account = self.engine.has_session() && self.engine.account() == opening.account;
         // Whose session it is, also while a lock keeps the key closed away (the account stays signed in).
@@ -1081,9 +989,7 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                 if let Some(held) = pages.held(page) {
                     return held;
                 }
-                if pages.asked.get() != Some(page) && pages.ask.send(page).is_ok() {
-                    pages.asked.set(Some(page));
-                }
+                pages.ask_page(page);
                 None
             }
             // A strip and artwork are not bound: the frame draws its plain tile.
@@ -1099,7 +1005,24 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn previews(&self, name: &str) -> bool {
-        shows(name) != Shows::Nothing
+        shows(name) != Shows::Nothing || self.media_previews(name)
+    }
+
+    /// An audio or a video file kept on this PC still opens in the player when playback is available (D-MED-13).
+    fn opens_here_when_kept(&self, name: &str) -> bool {
+        self.media_previews(name)
+    }
+
+    fn can_play(&self) -> bool {
+        self.media_can_play()
+    }
+
+    fn play(&mut self, file_id: &str, on: bool) -> bool {
+        self.media_play(file_id, on)
+    }
+
+    fn player(&self) -> Option<crate::media::player::PlayerHandle> {
+        self.media_handle()
     }
 
     /// The local state says the file's bytes are on this PC, and sync runs for the folder they are in (so the
@@ -1132,10 +1055,10 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn finds(&self) -> bool {
-        super::scaffold::not_wired(self.viewer_find_finds())
+        self.viewer_find_finds()
     }
     #[rustfmt::skip]
-    fn find(&mut self, file_id: &str, words: &str) -> Vec<kinds::Match> { super::scaffold::not_wired(self.viewer_find_find(file_id, words)) }
+    fn find(&mut self, file_id: &str, words: &str) -> Vec<kinds::Match> { self.viewer_find_find(file_id, words) }
 
     /// "Save a copy…" has nowhere to go yet: the button is not drawn.
     fn saves_copies(&self) -> bool {
@@ -1192,5 +1115,6 @@ impl<E: ViewerEngine> Drop for EngineViewerSource<E> {
         if let Some(opening) = self.open.as_mut() {
             opening.end();
         }
+        self.media_closed();
     }
 }

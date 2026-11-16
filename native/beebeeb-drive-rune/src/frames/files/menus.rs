@@ -88,12 +88,18 @@ pub fn sort_menu(sort: Sort) -> Vec<Entry> {
 
 /// New: everything that adds to the folder you're in.
 pub fn new_menu() -> Vec<Entry> {
-    vec![
+    let mut menu = vec![
         Entry::keyed("new-folder", "New folder", "Ctrl+Shift+N"),
         Entry::keyed("new-file", "New file\u{2026}", "Ctrl+N"),
-        Entry::item("new-document", "New document\u{2026}"),
+    ];
+    // New document (DW-1558) is the Office editor's: not offered in 0.9.0 (decision D-OV-3).
+    if crate::frames::viewers::new_file::OFFICE_EDITOR {
+        menu.push(Entry::item("new-document", "New document\u{2026}"));
+    }
+    menu.extend([
         Entry::Sep,
         Entry::keyed("upload-files", "Upload files\u{2026}", "Ctrl+O"),
         Entry::item("upload-folder", "Upload a folder\u{2026}"),
-    ]
+    ]);
+    menu
 }

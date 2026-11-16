@@ -212,7 +212,7 @@ impl OpenFileError {
     }
 }
 
-fn refused(refusal: LocalStateRefused) -> OpenFileError {
+pub(crate) fn refused(refusal: LocalStateRefused) -> OpenFileError {
     match refusal {
         LocalStateRefused::SessionEnded => OpenFileError::SessionEnded,
         LocalStateRefused::NothingSynced => OpenFileError::NothingSynced,
@@ -442,7 +442,7 @@ fn copy_is_behind(db: &crate::state_db::StateDb, file_id: &str) -> rusqlite::Res
 /// Whether `metadata` describes a plain file whose every byte is on this computer: core's reading of it, the
 /// one the backup takes for a source file, on every platform (Windows: not offline and no recall on open or on
 /// data access; macOS: not dataless). A link, a folder, a pipe or a device is not a plain file.
-fn is_plain_and_wholly_here(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_plain_and_wholly_here(metadata: &std::fs::Metadata) -> bool {
     let attrs = beebeeb_backup::attrs_of(metadata);
     is_read_here(attrs.is_dir, attrs.is_link, attrs.not_local)
 }
@@ -462,7 +462,7 @@ fn wholly_here(path: &Path) -> Option<u64> {
 
 /// Opens `path` for the read. Unix: a link is never followed, and the open never waits (a pipe put where the
 /// file was is opened at once, and refused by the check through the handle).
-fn open_for_the_read(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_for_the_read(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

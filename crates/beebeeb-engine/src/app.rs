@@ -31,7 +31,7 @@ use crate::drive_v2::dto::DriveItem;
 use crate::drive_v2::model::{self, Sort};
 use crate::host::EngineHost;
 use crate::identity::EngineIdentity;
-use crate::keychain::{AuthSecretStore, AuthVault, SecretBytes, SessionToken};
+use crate::keychain::{AuthVault, SecretBytes, SessionToken};
 use crate::runner::{EngineRunner, ResumeTicket};
 use crate::session::Session;
 use crate::signin::gate::{self, GateState, NextAfterSignIn, SignInProblem};
@@ -53,7 +53,9 @@ pub mod account_email_resend_api;
 pub mod account_password_api;
 pub mod account_twofactor_api;
 pub mod backup_devices_api;
+mod credential_stores;
 mod session_revoke;
+mod session_watch;
 use session_revoke::revoke;
 pub mod account_twofactor_status_api;
 pub mod backups_api;
@@ -103,35 +105,9 @@ pub mod versions_api;
 pub mod viewer_api;
 pub mod viewer_edit_api;
 
+pub use credential_stores::{CredentialStores, PlatformCredentials};
 pub use explorer_api::ExplorerChangeRefused;
 pub use owned_state::{LocalStateRefused, OwnedState};
-
-/// Where the handle keeps an account's session token and vault key. The handle names the app on every call
-/// (`identity` is the one [`Engine::open`] was given): a store has no identity of its own to disagree with it.
-pub trait CredentialStores: Send + Sync + 'static {
-    type Store: AuthSecretStore;
-    fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store;
-}
-
-/// The platform's credential store (Windows Credential Manager, the macOS Keychain), per app and account id.
-/// It carries no identity: which app's items it reads is the handle's identity, nothing else (review of #309,
-/// P2-1: a test handle given the real app's stores was accepted).
-pub struct PlatformCredentials;
-
-impl CredentialStores for PlatformCredentials {
-    type Store = crate::keychain::PlatformKeychainStore;
-    fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store {
-        crate::keychain::platform_keychain_store_for(identity, account_id)
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl CredentialStores for crate::signin::memory_store::MemoryCredentials {
-    type Store = crate::signin::memory_store::MemoryStore;
-    fn for_account(&self, _identity: &'static EngineIdentity, account_id: &str) -> Self::Store {
-        self.store_for(account_id)
-    }
-}
 
 /// What the host names once: which account slot, where its local state lives, which API.
 pub struct EngineConfig {
@@ -283,6 +259,8 @@ pub struct Engine<C: CredentialStores> {
     /// session at a restart. Cleared by a sign-out. Read by `owned_state` and the sync start, so an email alone
     /// never decides whose the local state is while the id is known.
     session_user_id: Mutex<Option<String>>,
+    /// User ids whose recent searches a session end could not delete; deleted at their next open (`owned_state`).
+    recent_searches_due: Mutex<std::collections::BTreeSet<String>>,
     /// Explorer's command: the binding a stop removes, and the folder an engine started in (`explorer_api`).
     explorer: Mutex<explorer_api::ExplorerSeat>,
     /// Test builds only: where the account-bound handle reads (`Engine::use_local_state_for_test`).
@@ -294,7 +272,7 @@ pub struct Engine<C: CredentialStores> {
 }
 
 impl<C: CredentialStores> Engine<C> {
-    /// Build the handle. Reads nothing yet: call [`Engine::restore`] next.
+    /// Build the handle; a 0.8.x PC's flat-layout session moves into the account's slot. Then [`Engine::restore`].
     pub fn open(
         identity: &'static EngineIdentity,
         config: EngineConfig,
@@ -323,6 +301,8 @@ impl<C: CredentialStores> Engine<C> {
         let view = Arc::new(ViewCell::default());
         let host: Arc<dyn EngineHost> = Arc::new(ViewHost::new(host, view.clone()));
         downloads_api::wake_the_host_for_downloads(&host);
+        credential_stores::adopt_legacy_flat(identity, &config.account_id, &stores);
+        session_watch::start(&runtime, &acct, &config.api_base);
         Ok(Self {
             identity,
             config,
@@ -343,6 +323,7 @@ impl<C: CredentialStores> Engine<C> {
             lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
             view,
             session_user_id: Mutex::new(None),
+            recent_searches_due: Mutex::default(),
             explorer: Mutex::new(explorer_api::ExplorerSeat::new(identity)),
             #[cfg(any(test, feature = "test-support"))]
             local_state_for_test: Mutex::new(None),
@@ -435,6 +416,8 @@ impl<C: CredentialStores> Engine<C> {
                 }
                 self.lock_started(flow);
             }
+            self.fix_upgrade_candidate_at_startup();
+            self.delete_recent_searches_at_signed_out_start(present);
         });
         self.publish();
         self.view.read().gate
@@ -769,6 +752,7 @@ impl<C: CredentialStores> Engine<C> {
                 view.attempt += 1;
                 view.explorer = Explorer::Unknown;
             });
+            self.wake_own_data_proofs();
         } else if outcome == Ok(SyncStart::NoSession) {
             self.view.write(|view| view.start = Start::NotAsked);
         }
@@ -845,11 +829,10 @@ impl<C: CredentialStores> Engine<C> {
                 return Err(SyncStartRefused::FolderMissing);
             }
             // (7) The local data is bound to the session's account (another account's data refuses, nothing reset).
-            let data = LocalState::for_engine_start(&self.config.state_dir, &sync_root)
-                .map_err(|_| SyncStartRefused::Other)?;
+            let data = self.local_data_for_start(&sync_root, &identity)?;
             account_binding::bind_before_engine_start(&data, &identity, false)
-                .map_err(|error| SyncStartRefused::of_binding(&error))?;
-            drop(data);
+                .map_err(|error| self.proof_owed_on(SyncStartRefused::of_binding(&error), &sync_root))?;
+            self.settle_an_interrupted_keep(data, &sync_root, &slot);
             // (8) The folder exists.
             crate::config::ensure_directory(&sync_root).map_err(|_| SyncStartRefused::Other)?;
             // (9) Registered as this app's sync root (Windows; nothing to do elsewhere), with Windows' code if not.
@@ -1020,7 +1003,8 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Sign out and KEEP the local files and the local state: the engine stops, the session is ended on the server
     /// (best effort), the token, the key and their owners leave the credential store, memory is cleared. Nothing
-    /// on disk is deleted; the state stays bound to this account, so another account cannot sync into it.
+    /// on disk is deleted but the account's recent searches; the state stays bound to this account, so another
+    /// account cannot sync into it.
     /// `Err`: the engine did not confirm its stop, or the credential store could not be cleared; still signed in.
     pub fn sign_out_keeping_local_data(&self) -> Result<(), String> {
         let result = self.sign_out_keeping_local_data_step();
@@ -1031,6 +1015,8 @@ impl<C: CredentialStores> Engine<C> {
     fn sign_out_keeping_local_data_step(&self) -> Result<(), String> {
         self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
+            // The account's recent searches leave this computer while its session is still in memory (`sign_out_for`).
+            let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
             self.sign_out_holding_step().await
         })
     }
@@ -1039,6 +1025,7 @@ impl<C: CredentialStores> Engine<C> {
     /// out and does it in the same hold (`signin_api::discard_partial_sign_in`).
     async fn sign_out_holding_step(&self) -> Result<(), String> {
         {
+            self.stop_proofs().await;
             if self.stop_holding_step().await == SyncStop::Unconfirmed {
                 return Err(account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
             }
@@ -1049,6 +1036,7 @@ impl<C: CredentialStores> Engine<C> {
                 .flatten()
                 .map(|token| Zeroizing::new(token.expose_for_request().to_string()));
             self.forget_session(SessionTransition::SignOut);
+            credential_stores::clear_legacy_flat(self.identity, &self.stores);
             vault
                 .clear_session()
                 .map_err(|e| store::keychain_error("clear the stored session", e))?;
@@ -1100,8 +1088,18 @@ impl<C: CredentialStores> Engine<C> {
 
     // ── File operations (the native shell's engine_host wires these) ──────────────────────────
 
-    /// The sync root path: where the settings name, else the identity's own suggestion.
+    /// The sync root path: the folder sync RUNS in while an engine runs (the one its start noted), else where the
+    /// settings name, else the identity's own suggestion. A slot that a start or a stop holds right now counts as not
+    /// running, so this never waits behind one; a noted folder whose engine ended by itself is not used.
     pub fn sync_root(&self) -> Result<PathBuf, String> {
+        let running = self
+            .acct
+            .engine
+            .try_lock()
+            .is_ok_and(|slot| slot.as_ref().is_some_and(crate::runner::EngineRunner::is_running));
+        if running && let Some(root) = self.running_root() {
+            return Ok(root);
+        }
         let config = crate::config::DesktopConfig::load_for(self.identity)?;
         Ok(config
             .sync_root
@@ -1160,7 +1158,6 @@ impl LocalState {
             state_paths::prepare_beebeeb_state_dir_at(sync_root, state_dir)?;
         }
         let db = StateDb::open(&path).map_err(|e| format!("open state.db: {e}"))?;
-        db.close_adoption_window().map_err(|e| format!("mark state.db: {e}"))?;
         Ok(Self { db })
     }
 }

@@ -4,6 +4,29 @@
 
 use super::*;
 
+/// "Everywhere else" sent again one by one ends within this, whatever each call takes: a person waits at most
+/// this long for an outcome. Answered errors (a slow 5xx each) otherwise keep the loop going, five sessions at
+/// the engine's full time each. Checked before each next call; past it, the rest are not sent (not done), the
+/// outcome is not known, and the list is read to find out (as for a call that got no answer).
+pub(super) const EVERYWHERE_ELSE_DEADLINE: Duration = Duration::from_secs(45);
+
+#[cfg(test)]
+thread_local! {
+    /// Test builds: a shorter deadline for the sign-outs this thread starts (never a real 45 s in a test). Read on
+    /// the thread that presses, so a test's value never reaches another test's sign-outs.
+    pub(super) static EVERYWHERE_ELSE_DEADLINE_FOR_TEST: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The deadline a one-by-one "everywhere else" pressed now runs under.
+fn everywhere_else_deadline() -> Duration {
+    #[cfg(test)]
+    if let Some(short) = EVERYWHERE_ELSE_DEADLINE_FOR_TEST.with(std::cell::Cell::get) {
+        return short;
+    }
+    EVERYWHERE_ELSE_DEADLINE
+}
+
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// Send one sign-out on a worker: `key` is a session's id of the list that shows, or [`ELSEWHERE`]. Once per
     /// press; a second press while it is on its way sends nothing and says so, and so does a press that is
@@ -74,6 +97,8 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         let (sent, fallback) = (about.clone(), about.clone());
         // As for a read: a worker that panics answers for this session, as a sign-out that is not known.
         let asked_as = stamp(&self.engine);
+        // Read here, on the thread that pressed (a test's shorter value is this thread's own).
+        let deadline = everywhere_else_deadline();
         let started = spawn(
             "account-sign-out",
             &self.engine,
@@ -91,10 +116,20 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     // Each is checked against the session by the engine as it is sent; each has its own
                     // outcome. Only after an error Beebeeb ANSWERED with is the next one sent: a refusal that
                     // holds for the rest (no session, a 401) or a call that got no answer (each waits its full
-                    // time: five would be minutes without a word) ends it, and the rest count as not done.
+                    // time: five would be minutes without a word) ends it, and the rest count as not done. So
+                    // does the overall deadline ([`EVERYWHERE_ELSE_DEADLINE`]).
                     let (mut ended, mut gone, mut left, mut first) = (0, false, Vec::new(), None);
+                    let (began, mut called) = (Instant::now(), false);
                     let mut ids = about.ids.iter();
                     for id in ids.by_ref() {
+                        // Past the deadline: this one and the rest are not sent, and the outcome is not known
+                        // (one sent before may have landed whatever it was answered): the list says which.
+                        if called && began.elapsed() >= deadline {
+                            left.push(id.clone());
+                            first = Some(AccountCallError::Offline);
+                            break;
+                        }
+                        called = true;
                         match engine.end_account_session(session, id) {
                             Ok(SessionEnd::Ended) => ended += 1,
                             Ok(SessionEnd::AlreadyGone) => gone = true,

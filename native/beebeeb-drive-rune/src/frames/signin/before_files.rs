@@ -281,12 +281,29 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     if password_in_front(s) {
         return super::frame(s, cx);
     }
+    let is_locked = s.shell.app.screen() == Screen::Gate(GateState::Locked);
+    drawn(s, cx, is_locked)
+}
+
+/// DW-0009 over a window whose lock is still open: the away lock's cover after a wake Windows may not have announced
+/// (`shell::away`, the owner's ruling D-B2-3), until the engine said whether the wake locks. Nothing of the account's
+/// is in it, as on the lock screen. Unlock asks nothing while the lock is open (`Ui::unlock_screen` asks only at a
+/// screen lock); when the engine locks, the lock screen itself takes its place, the same to the eye.
+pub fn cover(s: &State, cx: &mut Cx<State>) -> El {
+    drawn(s, cx, true)
+}
+
+/// The window before Files: DW-0009 when `is_locked`, else DW-0014.
+fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
     let t = tokens::theme(cx.system_dark());
     cx.web_focus();
-    let is_locked = s.shell.app.screen() == Screen::Gate(GateState::Locked);
     let current_gate = s.shell.app.gate();
-    // Windows Hello's last answer on the lock screen, when it was not a yes (`super::lock`).
-    let lock_said = s.signin.as_ref().and_then(super::Ui::lock_said).filter(|_| is_locked);
+    // Windows Hello's last answer on the lock screen, when it was not a yes (`super::lock`); never on the cover.
+    let lock_said = s
+        .signin
+        .as_ref()
+        .and_then(super::Ui::lock_said)
+        .filter(|_| current_gate == GateState::Locked);
     let (standing, closed, block, words, dot) = if is_locked {
         (
             Standing::Locked,

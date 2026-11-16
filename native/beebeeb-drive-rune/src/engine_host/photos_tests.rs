@@ -879,3 +879,76 @@ fn keep_on_this_pc_is_said_only_once_this_pc_answered() {
         "locked: nothing is asked"
     );
 }
+
+// Media (M8): a video in Photos plays in the shell's player. Declared here so it shares this file's fixtures.
+#[path = "photos_video_tests.rs"]
+mod video;
+
+#[test]
+fn undo_after_read_mid_batch_restores_every_photo_offered() {
+    let fake = fake("undo-mid-batch");
+    let (_engine, mut source, _store, _dir) = signed_in(&fake);
+    open(&mut source);
+    let ids = shown(&source);
+    let (harbour, tram) = (ids[0][0], ids[0][2]);
+
+    let (reached, release) = hold_next_request(&fake);
+    assert_eq!(source.trash(&[harbour, tram]), Ok(()), "accepted");
+    reached.recv_timeout(WAIT).expect("the first reached Beebeeb");
+    // A library read in the middle of the batch no longer lists one of the two (it is only in the numbers).
+    let library = source.library.as_mut().expect("a library");
+    let at = library
+        .photos
+        .iter()
+        .position(|photo| photo.id == TRAM)
+        .expect("tram is listed");
+    library.photos.remove(at);
+    library.ids.remove(at);
+    release.send(()).unwrap();
+
+    let answered = pump_until(&mut source, |_, answered| !answered.is_empty());
+    assert_eq!(answered, [Answered::Trashed(vec![(harbour, None), (tram, None)])]);
+    // Undo names what the press offered: both are put back, the one the read dropped included.
+    assert_eq!(
+        source.restore(&[harbour, tram]),
+        Ok(()),
+        "Undo is not refused for a photo rows() could not map"
+    );
+    let answered = pump_until(&mut source, |_, answered| !answered.is_empty());
+    assert_eq!(answered, [Answered::Restored(vec![(harbour, None), (tram, None)])]);
+    assert!(
+        fake.first.trash_item(TRAM) && fake.first.trash_item(HARBOUR),
+        "Beebeeb put both back"
+    );
+}
+
+#[test]
+fn keep_several_is_one_job_and_one_message_with_a_count() {
+    let fake = fake("keep-several");
+    let (_engine, mut source, _store, _dir) = signed_in(&fake);
+    open(&mut source);
+    let three = shown(&source)[0][..3].to_vec();
+
+    // A selection of three: every press is accepted and ONE worker takes the three, in the order pressed.
+    for id in &three {
+        assert_eq!(source.keep_offline(*id, true), Ok(()));
+    }
+    assert_eq!(source.keep_workers, 1, "one worker, not one thread per photo");
+    // The engine here has no sync folder set: each is left, and each is said, in order, for the window to count.
+    let mut said = Vec::new();
+    while said.len() < three.len() {
+        said.extend(pump_until(&mut source, |_, answered| !answered.is_empty()));
+    }
+    let wanted: Vec<Answered> = three
+        .iter()
+        .map(|id| Answered::Kept {
+            id: *id,
+            keep: true,
+            left: Some(Left::Failed),
+        })
+        .collect();
+    assert_eq!(said, wanted);
+    assert_eq!(source.keep_workers, 1, "still the one worker");
+    // The window turns those three answers into ONE message with the count: the session test
+    // `keep_several_failures_are_one_message_with_the_count`.
+}

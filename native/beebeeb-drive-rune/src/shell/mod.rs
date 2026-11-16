@@ -569,6 +569,7 @@ fn open_engine(
     // The real app only (never in `engine_host::open::open`, which tests use): a session the server ended closes
     // the vault by itself, as core says.
     opened.engine.watch_session();
+    opened.engine.serve_own_data_proofs();
     // Slice B6: File Explorer's menu items for this app's files (`platform::windows_verbs`). Nothing yet.
     #[cfg(windows)]
     platform::windows_verbs::register(identity, &opened.engine);

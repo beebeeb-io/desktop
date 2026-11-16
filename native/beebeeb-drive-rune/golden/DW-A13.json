@@ -1023,7 +1023,7 @@
   "list-1-title": {
    "kind": "text",
    "x": 297,
-   "y": 219.75,
+   "y": 178.25,
    "w": 110.1,
    "h": 12,
    "text": "Measured by Beebeeb",
@@ -1042,7 +1042,7 @@
   "list-1-body": {
    "kind": "box",
    "x": 283,
-   "y": 238.25,
+   "y": 196.75,
    "w": 392,
    "h": 84,
    "bg": [
@@ -1059,7 +1059,7 @@
   "item-1-0": {
    "kind": "box",
    "x": 283,
-   "y": 238.25,
+   "y": 196.75,
    "w": 392,
    "h": 28,
    "css": {
@@ -1072,7 +1072,7 @@
   "item-1-0-icon": {
    "kind": "icon",
    "x": 299,
-   "y": 243.25,
+   "y": 201.75,
    "w": 18,
    "h": 18,
    "icon": [
@@ -1089,7 +1089,7 @@
   "item-1-0-title": {
    "kind": "text",
    "x": 331,
-   "y": 243.75,
+   "y": 202.25,
    "w": 270.14,
    "h": 17,
    "text": "Country",
@@ -1109,7 +1109,7 @@
   "item-1-0-value": {
    "kind": "text",
    "x": 609.14,
-   "y": 243.75,
+   "y": 202.25,
    "w": 55.86,
    "h": 17,
    "text": "Germany",
@@ -1129,7 +1129,7 @@
   "item-1-1": {
    "kind": "box",
    "x": 283,
-   "y": 266.25,
+   "y": 224.75,
    "w": 392,
    "h": 28,
    "css": {
@@ -1142,7 +1142,7 @@
   "item-1-1-icon": {
    "kind": "icon",
    "x": 299,
-   "y": 271.25,
+   "y": 229.75,
    "w": 18,
    "h": 18,
    "icon": [
@@ -1159,7 +1159,7 @@
   "item-1-1-title": {
    "kind": "text",
    "x": 331,
-   "y": 271.75,
+   "y": 230.25,
    "w": 235.99,
    "h": 17,
    "text": "Network address",
@@ -1179,7 +1179,7 @@
   "item-1-1-value": {
    "kind": "text",
    "x": 574.99,
-   "y": 271.75,
+   "y": 230.25,
    "w": 90.01,
    "h": 17,
    "text": "203.0.113.47",
@@ -1199,7 +1199,7 @@
   "item-1-2": {
    "kind": "box",
    "x": 283,
-   "y": 294.25,
+   "y": 252.75,
    "w": 392,
    "h": 28,
    "css": {
@@ -1212,7 +1212,7 @@
   "item-1-2-icon": {
    "kind": "icon",
    "x": 299,
-   "y": 299.25,
+   "y": 257.75,
    "w": 18,
    "h": 18,
    "icon": [
@@ -1229,7 +1229,7 @@
   "item-1-2-title": {
    "kind": "text",
    "x": 331,
-   "y": 299.75,
+   "y": 258.25,
    "w": 265.99,
    "h": 17,
    "text": "Asked at",
@@ -1249,7 +1249,7 @@
   "item-1-2-value": {
    "kind": "text",
    "x": 604.99,
-   "y": 299.75,
+   "y": 258.25,
    "w": 60.01,
    "h": 17,
    "text": "09:41:12",
@@ -1269,7 +1269,7 @@
   "list-2-title": {
    "kind": "text",
    "x": 297,
-   "y": 334.75,
+   "y": 293.25,
    "w": 203.34,
    "h": 12,
    "text": "Reported by that device (it can be wrong)",
@@ -1288,7 +1288,7 @@
   "list-2-body": {
    "kind": "box",
    "x": 283,
-   "y": 353.25,
+   "y": 311.75,
    "w": 392,
    "h": 56,
    "bg": [
@@ -1305,7 +1305,7 @@
   "item-2-0": {
    "kind": "box",
    "x": 283,
-   "y": 353.25,
+   "y": 311.75,
    "w": 392,
    "h": 28,
    "css": {
@@ -1318,7 +1318,7 @@
   "item-2-0-icon": {
    "kind": "icon",
    "x": 299,
-   "y": 358.25,
+   "y": 316.75,
    "w": 18,
    "h": 18,
    "icon": [
@@ -1336,7 +1336,7 @@
   "item-2-0-title": {
    "kind": "text",
    "x": 331,
-   "y": 358.75,
+   "y": 317.25,
    "w": 237.76,
    "h": 17,
    "text": "Name",
@@ -1356,7 +1356,7 @@
   "item-2-0-value": {
    "kind": "text",
    "x": 576.76,
-   "y": 358.75,
+   "y": 317.25,
    "w": 88.24,
    "h": 17,
    "text": "Anna's iPhone",
@@ -1376,7 +1376,7 @@
   "item-2-1": {
    "kind": "box",
    "x": 283,
-   "y": 381.25,
+   "y": 339.75,
    "w": 392,
    "h": 28,
    "css": {
@@ -1389,7 +1389,7 @@
   "item-2-1-icon": {
    "kind": "icon",
    "x": 299,
-   "y": 386.25,
+   "y": 344.75,
    "w": 18,
    "h": 18,
    "icon": [
@@ -1406,7 +1406,7 @@
   "item-2-1-title": {
    "kind": "text",
    "x": 331,
-   "y": 386.75,
+   "y": 345.25,
    "w": 258.49,
    "h": 17,
    "text": "App",
@@ -1426,7 +1426,7 @@
   "item-2-1-value": {
    "kind": "text",
    "x": 597.49,
-   "y": 386.75,
+   "y": 345.25,
    "w": 67.51,
    "h": 17,
    "text": "Drive 1.0",
@@ -1446,7 +1446,7 @@
   "btn-0": {
    "kind": "box",
    "x": 283,
-   "y": 504.75,
+   "y": 546.25,
    "w": 191,
    "h": 28,
    "bg": [
@@ -1464,7 +1464,7 @@
   "btn-0-label": {
    "kind": "text",
    "x": 352.46,
-   "y": 509.46,
+   "y": 550.96,
    "w": 52.08,
    "h": 18.57,
    "text": "Approve",
@@ -1484,7 +1484,7 @@
   "btn-1": {
    "kind": "box",
    "x": 482,
-   "y": 504.75,
+   "y": 546.25,
    "w": 193,
    "h": 28,
    "bg": [
@@ -1503,7 +1503,7 @@
   "btn-1-label": {
    "kind": "text",
    "x": 562.57,
-   "y": 509.46,
+   "y": 550.96,
    "w": 31.86,
    "h": 18.57,
    "text": "Deny",
@@ -1523,7 +1523,7 @@
   "field-0-label": {
    "kind": "text",
    "x": 285,
-   "y": 421.25,
+   "y": 379.75,
    "w": 388,
    "h": 15,
    "text": "Code shown on that screen",
@@ -1543,7 +1543,7 @@
   "field-0": {
    "kind": "box",
    "x": 283,
-   "y": 442.25,
+   "y": 400.75,
    "w": 392,
    "h": 28,
    "bg": [
@@ -1563,7 +1563,7 @@
   "field-0-value": {
    "kind": "text",
    "x": 292,
-   "y": 448.75,
+   "y": 407.25,
    "w": 62.1,
    "h": 15,
    "text": "K7QM-4WTD",
@@ -1579,6 +1579,103 @@
    ],
    "tracking": 0,
    "secure": false
+  },
+  "field-1-label": {
+   "kind": "text",
+   "x": 285,
+   "y": 440.75,
+   "w": 388,
+   "h": 15,
+   "text": "Password",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px"
+  },
+  "field-1": {
+   "kind": "box",
+   "x": 283,
+   "y": 461.75,
+   "w": 392,
+   "h": 28,
+   "bg": [
+    244,
+    241,
+    237,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px inset",
+    "border": "1px 1px 1px 1px rgba(0, 0, 0, 0)",
+    "pad": "0px 8px",
+    "gap": "6px"
+   }
+  },
+  "field-1-icon": {
+   "kind": "icon",
+   "x": 292,
+   "y": 467.75,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "field-1-value": {
+   "kind": "text",
+   "x": 314,
+   "y": 467.75,
+   "w": 106.48,
+   "h": 15.5,
+   "text": "••••••••••••",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 1.56,
+   "secure": true
+  },
+  "field-1-msg": {
+   "kind": "text",
+   "x": 287,
+   "y": 495.75,
+   "w": 384,
+   "h": 16,
+   "text": "To confirm it's you. Used only after Windows Hello confirms it.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "16px"
   },
   "scrim": {
    "kind": "box",
@@ -1597,9 +1694,9 @@
   "dlg": {
    "kind": "box",
    "x": 259,
-   "y": 121.25,
+   "y": 79.75,
    "w": 440,
-   "h": 427.5,
+   "h": 510.5,
    "bg": [
     254,
     253,
@@ -1614,9 +1711,9 @@
   "dlg-body": {
    "kind": "box",
    "x": 259,
-   "y": 121.25,
+   "y": 79.75,
    "w": 440,
-   "h": 367,
+   "h": 450,
    "css": {
     "pad": "22px 24px 18px",
     "gap": "12px"
@@ -1625,7 +1722,7 @@
   "dlg-title": {
    "kind": "text",
    "x": 283,
-   "y": 143.25,
+   "y": 101.75,
    "w": 392,
    "h": 28,
    "text": "Allow Drive on Anna's iPhone?",
@@ -1645,7 +1742,7 @@
   "dlg-text-0": {
    "kind": "text",
    "x": 283,
-   "y": 177.25,
+   "y": 135.75,
    "w": 392,
    "h": 30,
    "text": "Someone asked to sign in to your Beebeeb account. Only approve it if that was you.",
@@ -1662,10 +1759,30 @@
    "tracking": 0,
    "lh": "15px"
   },
+  "dlg-text-1": {
+   "kind": "text",
+   "x": 287,
+   "y": 495.75,
+   "w": 384,
+   "h": 16,
+   "text": "To confirm it's you. Used only after Windows Hello confirms it.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "16px"
+  },
   "dlg-foot": {
    "kind": "box",
    "x": 259,
-   "y": 488.25,
+   "y": 529.75,
    "w": 440,
    "h": 60.5,
    "bg": [

@@ -21,10 +21,16 @@ pub(super) const AUTH_EXPIRED_THRESHOLD: u32 = 3;
 /// same pattern as `sync_paused`) so `sync_status` can read [`Self::is_expired`]
 /// without touching the engine task, and is cloned into [`EngineRunner::spawn`]
 /// / [`run`] the same way `sync_paused` already is.
+///
+/// Task 2535: it also keeps WHEN the engine's own loop last fed it ([`AuthHealth::fed_within`]), for the account's
+/// session watch (`app::session_watch`), which checks the session only while nothing else has. The watch's own answers
+/// count through [`AuthHealth::note_watch_answer`], which leaves that time alone.
 #[derive(Default)]
 pub struct AuthHealth {
     pub(super) consecutive_failures: AtomicU32,
     pub(super) expired: AtomicBool,
+    /// When a feed last noted an outcome: milliseconds on [`monotonic_millis`]'s clock, plus one; 0 = never.
+    last_fed: AtomicU64,
 }
 
 impl AuthHealth {
@@ -46,11 +52,9 @@ impl AuthHealth {
     /// erase the count that matters. `pub`: also called from
     /// `lib.rs`'s `clear_session_impl` to reset the streak on sign-out.
     pub fn note_result(&self, error: Option<&anyhow::Error>) {
+        self.stamp_fed();
         match error {
-            None => {
-                self.consecutive_failures.store(0, Ordering::Relaxed);
-                self.expired.store(false, Ordering::Relaxed);
-            }
+            None => self.clear(),
             Some(e) if matches!(classify_operation_error(&e.to_string()), OperationFailureClass::Auth) => {
                 self.add_refusal();
             }
@@ -63,11 +67,47 @@ impl AuthHealth {
     /// P3-2: a 5xx whose body mentions "401" is not a refusal). `None`: the call worked, which clears the run. A 401
     /// answer adds one. Anything else (offline, a 5xx, a body that did not read) leaves the run as it is.
     pub(super) fn note_api_answer(&self, error: Option<&anyhow::Error>) {
+        self.stamp_fed();
+        self.count_api_answer(error);
+    }
+
+    /// Task 2535: record the answer of the account's session watch (`app::session_watch`), counted and cleared
+    /// exactly as [`Self::note_api_answer`] does (a 401 adds one, an answer clears, anything else leaves the run).
+    /// It does NOT count as a feed: were it one, the watch would find the run fed by its own last answer and check
+    /// only every other period, so three refusals would take five periods instead of three.
+    pub(crate) fn note_watch_answer(&self, error: Option<&anyhow::Error>) {
+        self.count_api_answer(error);
+    }
+
+    /// Task 2535: whether one of the engine's own feeds (the sync tick, the heartbeat, the paused tick's check, or a
+    /// call that went through [`Self::note_result`]) noted an outcome less than `period` ago. The session watch's
+    /// answers ([`Self::note_watch_answer`]) are not feeds.
+    pub(crate) fn fed_within(&self, period: Duration) -> bool {
+        match self.last_fed.load(Ordering::Relaxed) {
+            0 => false,
+            stamped => monotonic_millis().saturating_add(1).saturating_sub(stamped) < period.as_millis() as u64,
+        }
+    }
+
+    /// The decision of [`Self::note_api_answer`], without the feed's time.
+    fn count_api_answer(&self, error: Option<&anyhow::Error>) {
         match error {
-            None => self.note_result(None),
+            None => self.clear(),
             Some(e) if is_session_refusal(e) => self.add_refusal(),
             Some(_) => {}
         }
+    }
+
+    /// An answer came back: the run is over.
+    fn clear(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        self.expired.store(false, Ordering::Relaxed);
+    }
+
+    /// A feed noted an outcome now (see [`Self::fed_within`]).
+    fn stamp_fed(&self) {
+        self.last_fed
+            .store(monotonic_millis().saturating_add(1), Ordering::Relaxed);
     }
 
     fn add_refusal(&self) {
@@ -86,12 +126,20 @@ impl AuthHealth {
     /// One refusal per tick does not space the refusals in time by itself: the tick interval delays a missed tick
     /// instead of firing it at once (`MissedTickBehavior::Delay`), so a tick that ran long is not followed by a burst.
     pub(super) fn note_tick(&self, tick: &crate::engine_bridge::SyncTickOutcome) {
+        self.stamp_fed();
         if tick.reached_server {
-            self.note_result(None);
+            self.clear();
         } else if let Some(why) = &tick.pull_failure {
-            self.note_api_answer(Some(why));
+            self.count_api_answer(Some(why));
         }
     }
+}
+
+/// Milliseconds since the first call in this process, on the monotonic clock (a wall clock that is set back or
+/// forward moves nothing here). The base of [`AuthHealth::fed_within`].
+fn monotonic_millis() -> u64 {
+    static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    BASE.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }
 
 /// Whether `error` is Beebeeb refusing this session: an HTTP 401 answer, read from the error's chain (the API client's

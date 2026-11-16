@@ -16,7 +16,9 @@ use super::chrome::style;
 use super::source::{Answered, Left, Loaded, PhotoId, Viewing};
 use super::{Intent, Original, Toast, Ui, Viewer};
 use crate::State;
+use crate::frames::files::dialogs::Purpose;
 use crate::shell::app::GateState;
+use crate::source::DriveItem;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -33,6 +35,15 @@ pub enum What {
     Keep(bool),
 }
 
+/// What Files' folder dialog is opened for, from Photos (`poll` opens it; the dialog hands its answer back through
+/// [`Ui::folder_chosen`] and [`Ui::moved`]).
+pub enum Pick {
+    /// Add a folder… in Photo sources (DW-0604).
+    Folder,
+    /// Move… on these photos' files (DW-0409).
+    Move(Vec<DriveItem>),
+}
+
 /// What the window keeps for a source that answers later. All of it is the session's.
 #[derive(Default)]
 pub struct Later {
@@ -41,11 +52,15 @@ pub struct Later {
     was_open: bool,
     /// The open photo a move to Trash was asked for, as it was at the press, and the one that comes in after it.
     open_trash: Option<(Viewing, Option<PhotoId>)>,
+    /// A press on Add a folder… or Move… waits here for the poll, which opens Files' folder dialog over the window.
+    pick: Option<Pick>,
     /// The shell's session gate was closed at the last poll (`shell::session_gate`): a source that answers later
     /// is not asked for a change. The second line; the source's own look at the session at the press is the first.
     closed: bool,
     /// What Undo (Ctrl+Z) puts back: the photos the source said Beebeeb moved to Trash.
     pub(super) undo: Vec<PhotoId>,
+    /// How many answers of a selection's Keep are still to come: their failures are ONE message with a count.
+    several: usize,
 }
 
 /// How often the window looks again while something is on its way.
@@ -185,6 +200,15 @@ impl Ui {
         }
     }
 
+    /// Asks for a Keep. `Ok(true)`: accepted, said when this PC answers; `Ok(false)`: made (a fixture).
+    fn ask_keep(&mut self, id: PhotoId, keep: bool) -> Result<bool, Left> {
+        if self.later.closed {
+            return Err(Left::Unavailable);
+        }
+        self.source.keep_offline(id, keep)?;
+        Ok(self.source.answers_later())
+    }
+
     fn keep(&mut self, id: PhotoId, keep: bool) {
         let asked = if self.later.closed {
             Err(Left::Unavailable)
@@ -306,12 +330,34 @@ impl Ui {
             }
             Answered::Kept { id, keep, left } => match left {
                 Some(why) => {
-                    self.toast = Some(Toast::Left {
-                        what: What::Keep(keep),
-                        why,
-                        count: 1,
-                        again: vec![id],
-                    });
+                    let of_selection = self.later.several > 0;
+                    self.later.several = self.later.several.saturating_sub(1);
+                    match &mut self.toast {
+                        // One more of the same selection: the message counts it.
+                        Some(Toast::Left {
+                            what: What::Keep(was),
+                            count,
+                            again,
+                            ..
+                        }) if of_selection && *was == keep && !again.contains(&id) => {
+                            *count += 1;
+                            again.push(id);
+                        }
+                        _ => {
+                            self.toast = Some(Toast::Left {
+                                what: What::Keep(keep),
+                                why,
+                                count: 1,
+                                again: vec![id],
+                            });
+                        }
+                    }
+                }
+                None if self.later.several > 0 => {
+                    self.later.several -= 1;
+                    if keep && self.viewer.as_ref().is_some_and(|viewer| viewer.id == id) {
+                        self.toast = Some(Toast::Kept);
+                    }
                 }
                 None if keep && self.viewer.as_ref().is_some_and(|viewer| viewer.id == id) => {
                     self.toast = Some(Toast::Kept);
@@ -346,13 +392,34 @@ impl Ui {
             match intent {
                 // "On this PC", pressed again: it stops being kept (asked; said once this PC answered).
                 Intent::OfferRemoveFromPc(id) => self.keep(id, false),
+                // A selection: every photo is asked, the ones refused at the press are ONE message with a count, and the
+                // answers that come later add to it instead of replacing it.
                 Intent::KeepSeveral(ids) => {
+                    let (mut left, mut waiting, mut made) = (Vec::new(), 0, false);
                     for id in ids {
-                        self.keep(id, true);
+                        match self.ask_keep(id, true) {
+                            Err(why) => left.push((id, why)),
+                            Ok(true) => waiting += 1,
+                            Ok(false) => made = true,
+                        }
                     }
+                    self.toast = None;
+                    self.later.several = waiting;
+                    if made {
+                        self.toast = Some(Toast::Kept);
+                    }
+                    self.say_left(What::Keep(true), &left);
                 }
                 // Kept in this window for as long as it is open.
                 Intent::RememberAcross(_) | Intent::StopOriginal(_) => {}
+                // The folder dialog of Files opens over the window at the next poll; its answer comes back as
+                // `folder_chosen` / `moved`. What is not there to ask (no session, a photo that left) is said.
+                Intent::AddFolder if self.later.closed => self.toast = Some(Toast::Words(WORDS_FOLDER)),
+                Intent::AddFolder => self.later.pick = Some(Pick::Folder),
+                Intent::Move(ids) => match self.source.file_items(&ids) {
+                    Some(items) if !items.is_empty() && !self.later.closed => self.later.pick = Some(Pick::Move(items)),
+                    _ => self.toast = Some(Toast::Words(WORDS_MOVE)),
+                },
                 Intent::DownloadOriginal(_) => {
                     // No download was started: the tab does not say one is running.
                     if let Some(viewer) = &mut self.viewer {
@@ -366,8 +433,46 @@ impl Ui {
         any
     }
 
+    /// The folder of Files that the dialog chose goes to Photo sources. What the Sources dialog's switches say now is
+    /// kept first (the list changes when the engine answers, and a switch is by its place in it).
+    pub fn folder_chosen(&mut self, folder_id: &str) {
+        self.keep_the_switches();
+        if !self.source.add_folder(folder_id) {
+            self.toast = Some(Toast::Words(WORDS_FOLDER));
+        }
+        self.relayout();
+    }
+
+    /// Remove, on a folder row of Photo sources (DW-0604): out of the sources, nothing moved or deleted.
+    pub fn remove_folder(&mut self, index: usize) {
+        self.keep_the_switches();
+        self.source.remove_folder(super::source::SourceRef::Folder(index));
+        self.relayout();
+    }
+
+    /// The photos moved: the selection is over and the library is read again (a moved photo may have left a folder
+    /// that Photos shows).
+    pub fn moved(&mut self) {
+        self.end_selecting();
+        self.source.refresh();
+        self.relayout();
+    }
+
+    /// The move was refused (not the name-taken case, which the dialog says itself).
+    pub fn move_left(&mut self) {
+        self.toast = Some(Toast::Words(WORDS_MOVE));
+    }
+
+    /// Done on the Sources dialog, without leaving it to the caller: only when that dialog is the open one.
+    fn keep_the_switches(&mut self) {
+        if matches!(self.dialog, Some(super::Dialog::Sources(_))) {
+            self.confirm_dialog();
+        }
+    }
+
     /// Nothing that names a photo of the account that was here stays.
     fn end_session(&mut self) {
+        self.later.pick = None;
         self.source.forget();
         self.selecting = false;
         self.selected.clear();
@@ -379,9 +484,15 @@ impl Ui {
         self.filter = None;
         self.later.open_trash = None;
         self.later.undo.clear();
+        self.later.several = 0;
         self.relayout();
     }
 }
+
+/// What is said when a folder could not be added, and when photos could not be moved.
+const WORDS_FOLDER: &str = "Couldn\u{2019}t add that folder \u{00B7} not available right now";
+const WORDS_CHANGE: &str = "Couldn\u{2019}t change that folder";
+const WORDS_MOVE: &str = "Couldn\u{2019}t move \u{00B7} not available right now";
 
 impl Toast {
     /// The words of a message that says something was left.
@@ -395,7 +506,9 @@ impl Toast {
             What::Trash => "Couldn\u{2019}t move to Trash".into(),
             What::Restore if several => format!("Couldn\u{2019}t put {count} back"),
             What::Restore => "Couldn\u{2019}t put it back".into(),
+            What::Keep(true) if several => format!("Couldn\u{2019}t keep {count} on this PC"),
             What::Keep(true) => "Couldn\u{2019}t keep it on this PC".into(),
+            What::Keep(false) if several => format!("Couldn\u{2019}t remove {count} from this PC"),
             What::Keep(false) => "Couldn\u{2019}t remove it from this PC".into(),
         };
         let reason = match why {
@@ -509,6 +622,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         changed |= ui.take_in_intents();
     }
     let pumped = ui.source.pump();
+    // A folder change the engine refused (it answers after the press): said, not only logged.
+    if later && ui.source.folder_refused() {
+        ui.toast = Some(Toast::Words(WORDS_CHANGE));
+        changed = true;
+    }
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
@@ -536,6 +654,14 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     // On screen with nothing read and nothing on its way (the session moved on under an unchanged gate): read.
     if open && later && !pumped.busy && ui.source.loaded() == Loaded::Loading {
         ui.source.opened();
+        changed = true;
+    }
+    // Add a folder… / Move… pressed: Files' folder dialog opens over the window.
+    if let Some(pick) = s.photos.later.pick.take() {
+        match pick {
+            Pick::Folder => s.open_move_for(Vec::new(), Purpose::PhotosFolder),
+            Pick::Move(items) => s.open_move_for(items, Purpose::PhotosMove),
+        }
         changed = true;
     }
     changed

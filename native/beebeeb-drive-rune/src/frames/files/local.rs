@@ -49,6 +49,33 @@ fn is_local(action: Action) -> bool {
     )
 }
 
+/// Of the reasons the items of one answer were left for, the one a message says when ALL of them were left: the
+/// one that says most, by a fixed rank, whatever the order of the items (review of 2468, L256.2). `None`: no
+/// reason at all.
+pub(super) fn says_most(reasons: impl Iterator<Item = ActionError>) -> Option<ActionError> {
+    // Higher says more. A protected item has its own words (DW-1110); then what asking again cannot change, then
+    // what the person can fix, then a plain failure. A reason not named here says least.
+    fn rank(why: ActionError) -> u8 {
+        match why {
+            ActionError::Protected => 12,
+            ActionError::NotSent => 11,
+            ActionError::HoldsKept => 10,
+            ActionError::NotToRecycleBin => 9,
+            ActionError::HasLink => 8,
+            ActionError::NotOnThisSystem => 7,
+            ActionError::NotYet => 6,
+            ActionError::Offline => 5,
+            ActionError::InFlight => 4,
+            ActionError::NameTaken => 3,
+            ActionError::Unavailable => 2,
+            ActionError::Failed => 1,
+            // NotAll is never the reason of one item; a reason added later says least until it is ranked here.
+            _ => 0,
+        }
+    }
+    reasons.max_by_key(|why| rank(*why))
+}
+
 impl State {
     /// Does Make available offline read Remove from this PC? When everything selected already is kept.
     pub fn selection_is_kept(&self) -> bool {
@@ -192,20 +219,26 @@ impl State {
 
     /// Say what the source answered between presses, oldest first. `true`: something was said.
     ///
-    /// A message that still offers Try again is not taken away by an answer nobody pressed for: a failure waits
-    /// until it went, a plain "done" is not said at all (the rows show it).
+    /// A message that still offers Try again is not taken away by an answer nobody pressed for: a failure and
+    /// "Moved to Trash" wait until it went, a plain "done" is not said at all (the rows show it).
     pub(super) fn say_late(&mut self) -> bool {
         let mut said = false;
         while let Some(next) = self.actions.local.unsaid.first() {
             let busy =
                 matches!(self.live_toast(), Some(Toast::Failed(action, why)) if self.offers_try_again(action, why));
-            if busy && matches!(next, Late::Left { .. }) {
+            // "Moved to Trash" carries Undo: like a failure it waits until that message went, and is said then,
+            // never dropped (review of 2468, L319).
+            if busy && matches!(next, Late::Left { .. } | Late::Done(Action::Trash)) {
                 break;
             }
+            // "Moved to Trash" stands while its Undo still holds rows: a plain "done" of what this PC holds does
+            // not take its place (the rows show it), so the Undo stays in reach (review of 2468, L256.3).
+            let undo_shown = matches!(self.live_toast(), Some(Toast::Trashed)) && !self.actions.undo.is_empty();
             let late = self.actions.local.unsaid.remove(0);
             said |= matches!(late, Late::Left { .. });
             let stay = match late {
                 Late::Done(_) if busy => None,
+                Late::Done(Action::KeepOffline | Action::FreeUpSpace) if undo_shown => None,
                 Late::Done(Action::KeepOffline) => Some(self.set_toast(Toast::Keeping)),
                 Late::Done(Action::FreeUpSpace) => Some(self.set_toast(Toast::FreedUp)),
                 // The rows left when Beebeeb said so: "Moved to Trash", with Undo, from then.

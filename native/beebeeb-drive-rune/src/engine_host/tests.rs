@@ -678,7 +678,8 @@ fn account_is_the_engines_source_on_a_live_engine_and_unbound_panes_are_unwired(
     assert_ne!(source.pane_state(AccountPane::Security), PaneState::Unwired);
     // The password change answers too: signed out, it says so, and is not the shell's frame.
     assert_ne!(source.pane_state(AccountPane::Password), PaneState::Unwired);
-    assert_eq!(source.pane_state(AccountPane::Delete), PaneState::Unwired);
+    // Deleting the account answers too (slice A6, `account_deletion.rs`).
+    assert_ne!(source.pane_state(AccountPane::Delete), PaneState::Unwired);
     assert!(source.identity().email.is_empty() && source.sessions().is_empty());
     // Nothing was read: the Security page is told nothing, and may do nothing.
     let facts = source.security_facts();

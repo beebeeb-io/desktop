@@ -65,16 +65,16 @@ impl State {
                         }
                     }
                     let left: Vec<&super::source::LocalOutcome> = items.iter().filter(|o| o.left.is_some()).collect();
-                    let late = match left.first().and_then(|first| first.left) {
+                    // Where all were left, the reason that says most, whatever the order of the items (review of
+                    // 2468, L256.2).
+                    let late = match super::local::says_most(left.iter().filter_map(|o| o.left)) {
                         None => Late::Done(action),
-                        Some(first) => Late::Left {
+                        Some(most) => Late::Left {
                             action,
                             why: if left.len() < items.len() {
                                 ActionError::NotAll
-                            } else if left.iter().any(|o| o.left == Some(ActionError::Protected)) {
-                                ActionError::Protected
                             } else {
-                                first
+                                most
                             },
                             ids: left.iter().map(|o| o.id.clone()).collect(),
                             // Try again is for what asking again can change: not a protected item, not a

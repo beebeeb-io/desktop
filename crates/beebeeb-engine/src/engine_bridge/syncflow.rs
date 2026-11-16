@@ -1080,12 +1080,23 @@ pub(super) fn synthesize_op_row(
     if let Some(ov) = payload["current_object_version_id"].as_str() {
         row["current_object_version_id"] = serde_json::json!(ov);
     }
-    // updated_at: the op log carries no file timestamp the client can read, so
-    // stamp "now" as the row's `remote_updated_at` / `modified_at` value. This
-    // is NOT a freshness token: several ops routinely land in the same second
-    // (a version upload emits `file_rename` + `file_update` together), so
-    // `process_metadata_row` never gates an op-derived row on it — see
-    // [`RowSource::Op`].
-    row["updated_at"] = serde_json::json!(now_secs());
+    // updated_at: the op log carries no file timestamp the client can read. An
+    // op that names the version it made (and a create) stamps "now" as the
+    // row's `remote_updated_at` / `modified_at` value. An op that names no
+    // version (a rename, a move, a thumbnail flag) made no version, so the row
+    // keeps the server time it already holds: it never stamps this PC's clock
+    // as the row's server time, and a later snapshot is still compared against
+    // the server's own clock (task 2538). A row with no time yet takes "now" as
+    // before. Neither is a freshness token: several ops routinely land in the
+    // same second (a version upload emits `file_rename` + `file_update`
+    // together), so `process_metadata_row` never gates an op-derived row on it
+    // — see [`RowSource::Op`].
+    let versionless = payload["version_number"].as_i64().is_none() && !op.op_type.ends_with("_create");
+    let kept_server_time = if versionless {
+        existing.as_ref().map(|e| e.remote_updated_at).filter(|secs| *secs > 0)
+    } else {
+        None
+    };
+    row["updated_at"] = serde_json::json!(kept_server_time.unwrap_or_else(now_secs));
     row
 }
