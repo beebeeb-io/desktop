@@ -185,7 +185,7 @@ impl DesktopBackupHost {
             .ok_or_else(|| HostError("category_folder: not a chosen folder of this account".into()))?;
         let remembered = db.backup_category_folder(&key).map_err(db_error("category_folder"))?;
         let parent = &self.layout.device_folder_id;
-        if let Some(id) = entry.folder_id {
+        if let Some(id) = entry.folder_id.or(remembered.clone()) {
             if remembered.as_deref() == Some(id.as_str()) {
                 let state = self.folder_state(&id).await?;
                 return Ok((id, Some(state == BackupFolderState::Live)));
@@ -210,10 +210,6 @@ impl DesktopBackupHost {
             .bridge
             .backup_new_folder_id()
             .map_err(host_error("category_folder_create"))?;
-        self.bridge
-            .backup_create_folder_as(parent, c.display_name(), &id)
-            .await
-            .map_err(host_error("category_folder_create"))?;
         let recorded = crate::config::DesktopConfig::update_for(self.bridge.identity, |cfg| {
             let recorded = crate::app::bindings::backup_folders::record_folder_id(cfg, &key, &owner, &id);
             (recorded, recorded)
@@ -223,6 +219,10 @@ impl DesktopBackupHost {
                 "category_folder: the new folder's id was not recorded".into(),
             ));
         }
+        self.bridge
+            .backup_create_folder_as(parent, c.display_name(), &id)
+            .await
+            .map_err(host_error("category_folder_create"))?;
         db.set_backup_category_folder(&key, Some(&id))
             .map_err(db_error("category_folder"))?;
         Ok((id, None))
