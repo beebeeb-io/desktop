@@ -1,22 +1,21 @@
 name: Desktop CI
 
-# Every PR and every push to main is built and tested on all three desktop
-# targets. Before this workflow the only CI was release.yml (workflow_dispatch),
-# so the Windows/Linux `#[cfg(...)]` code paths (windows_cf, linux_fuse, the
-# Windows Credential Manager store) were first compiled at release time.
+# Every PR and every push to a base branch builds and tests the desktop's Rust: the engine crate
+# (crates/beebeeb-engine) on Linux, Windows and macOS, the native Rune app (native/beebeeb-drive-rune: tests on
+# Linux, a build on Windows), the updater and the Office sandbox crates, the File Provider extension's Swift, and the
+# release scripts.
 #
 # Job names are stable on purpose: branch protection requires them by name.
 #
-# The job "Frontend (bun test + tsc + eslint)" was removed from this line for 0.9.0 by owner ruling 2026-11-12:
-# the app has no web view. The React sources and package files were removed by native/remove-react; only the
-# dist/index.html stub remains (Tauri's generate_context! needs frontendDist at compile time). The two core pin
-# steps that job also ran are Rust checks, not React ones: they now run in "Changed areas".
+# The Tauri app is gone in 0.9.0 on every OS (decision 2537), and with it its three suites ("Rust test (Linux)",
+# "Rust check (Windows)", "Rust check (macOS)"). The job "Frontend (bun test + tsc + eslint)" was removed for 0.9.0
+# by owner ruling 2026-11-12: the app has no web view. The two core pin steps that job also ran are Rust checks, not
+# React ones: they run in "Changed areas".
 
 on:
   pull_request:
   push:
-    # The long-lived base branches: their pushes are the only runs that SAVE the Rust dependency cache, which
-    # every pull request against them restores (.github/actions/rust-suite).
+    # The long-lived base branches: a push there runs every job (the classifier below runs every area on a push).
     branches: [main, v2-next, v2-native]
 
 permissions:
@@ -35,15 +34,14 @@ env:
 
 jobs:
   # Which areas the change touches (scripts/ci-changed-areas.py; it fails open). A pull request that changes only
-  # docs, design files or the native UI crates does not run the Tauri engine suite or the macOS-specific jobs: the
-  # three Rust jobs and the two extra macOS jobs are then SKIPPED, and a skipped job satisfies a required check, so
-  # the job names below still report. A push runs everything.
+  # docs, design files or the native UI crates does not run the macOS-specific jobs ("File Provider Swift (macOS)",
+  # "Engine crate test (macOS)"): they are then SKIPPED, and a skipped job satisfies a required check, so the job
+  # names below still report. A push runs everything.
   changes:
     name: Changed areas
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      rust: ${{ steps.areas.outputs.rust }}
       macos: ${{ steps.areas.outputs.macos }}
     steps:
       - name: Checkout
@@ -66,56 +64,19 @@ jobs:
           # Only a pull request's merge commit (two parents) gives a trustworthy list; anything else leaves the
           # list empty, and an empty list runs every area.
           if [ "$EVENT_NAME" = pull_request ] && git rev-parse -q --verify HEAD^2 >/dev/null; then
-            # --no-renames: a file moved out of src-tauri into docs/ must be listed under its old path too.
+            # --no-renames: a file moved out of a relevant path into docs/ must be listed under its old path too.
             git diff --name-only --no-renames HEAD^1 HEAD > "$list" || : > "$list"
           fi
           echo "changed paths: $(wc -l < "$list")"
           python3 scripts/ci-changed-areas.py "$list" | tee -a "$GITHUB_OUTPUT"
 
       # Moved here from the removed Frontend job (see the top of this file): this job runs on every event and
-      # needs no toolchain. After the classifier, so a failing pin never leaves `rust` unset.
+      # needs no toolchain. After the classifier, so a failing pin never leaves `macos` unset.
       - name: Core pin check self-test
         run: sh scripts/check-core-pin.sh --self-test
 
-      - name: Core pin check (src-tauri and windows pin the same core rev)
+      - name: Core pin check (the engine crate and the native app pin the same core rev)
         run: sh scripts/check-core-pin.sh
-
-  # The three Rust jobs share .github/actions/rust-suite: compile every target ONCE, run the tests, assert the
-  # counted truth line, upload the evidence. `runs-on` reads a repository variable, so a job moves to a self-hosted
-  # runner without a code change; a pull request from a fork always stays on a GitHub-hosted runner
-  # (docs/ci/self-hosted-runners.md: that expression is a convenience, the security is the repository setting).
-  # `needs.changes.outputs.rust != 'false'`: the suite is skipped only when the classifier positively said so; a
-  # failed or cancelled classifier runs it.
-  rust-linux:
-    name: Rust test (Linux)
-    needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
-    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-latest') || vars.RUST_LINUX_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          persist-credentials: false
-
-      # A self-hosted runner has these installed once (docs/ci/self-hosted-runners.md) and has no sudo.
-      - name: Install Linux dependencies
-        if: runner.environment == 'github-hosted'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libfuse2 \
-            libfuse-dev
-
-      - name: Rust suite
-        uses: ./.github/actions/rust-suite
-        with:
-          evidence-name: rust-test-linux
-          cache-key: desktop-linux
 
   # The native updater (crates/beebeeb-updater): its rules decide what an install will run, so a pull request that
   # weakens one fails here, not at the next release. The count line is asserted: a run without tests is a failure.
@@ -227,46 +188,6 @@ jobs:
           python ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/office-sandbox-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_office_sandbox- --expect deps/sandbox-
           test "$(cargo tree --locked -e normal --prefix none | sort -u | wc -l)" -eq 3
 
-  # Windows and macOS are two jobs, not a matrix: a skipped matrix job reports under its unexpanded name and would
-  # leave the required "Rust check (Windows)" / "Rust check (macOS)" checks waiting for ever.
-  # Task 2272 / 2271: macOS runs the tests too. The 0.8.18 release found a macOS-only test failure on the
-  # maintainer's Mac that this job would have caught.
-  rust-windows:
-    name: Rust check (Windows)
-    needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
-    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'windows-latest') || vars.RUST_WINDOWS_RUNNER || 'windows-latest' }}
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          persist-credentials: false
-
-      - name: Rust suite
-        uses: ./.github/actions/rust-suite
-        with:
-          evidence-name: rust-Windows
-          cache-key: desktop-windows
-
-  rust-macos:
-    name: Rust check (macOS)
-    needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.changes.outputs.macos != 'false' }}
-    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'macos-latest') || vars.RUST_MACOS_RUNNER || 'macos-latest' }}
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          persist-credentials: false
-
-      - name: Rust suite
-        uses: ./.github/actions/rust-suite
-        with:
-          evidence-name: rust-macOS
-          cache-key: desktop-macos
-
   fileprovider-swift:
     # Task 1670 issue 3: until this job existed, NO CI step compiled the File
     # Provider extension's Swift (the Rust jobs compile no Swift; the
@@ -331,15 +252,14 @@ jobs:
             ${{ runner.temp }}/ipc-framing-tests/run.exit
             ${{ runner.temp }}/fileprovider-build.log
 
-  release-script:
-    # scripts/release-macos-local.sh is the ONE command Guus runs on a Mac to turn the
-    # CI-created desktop-v<VERSION> release into a macOS release (notarize, staple,
-    # rebuild the dmg from the stapled app, upload, sign, backfill the manifest). It
-    # cannot run here, but its ORDER and its fail-closed gates can: the test puts shims
-    # for xcrun/codesign/spctl/hdiutil/ditto/plutil/gh/bunx on PATH and runs the real
-    # script against a throwaway repo. The truth line is a count
-    # ("release-macos-local: N passed, 0 failed"), guarded by a self-test that goes red.
-    name: macOS release script (shim test)
+  release-blockers:
+    # scripts/release-blockers-check.sh is a release gate (release-native-windows.yml: "Refuse while
+    # RELEASE_BLOCKERS.md lists a Windows item"): it exits non-zero while RELEASE_BLOCKERS.md lists an item that
+    # binds the platform. The test runs the real checker on throwaway lists; the truth line is a count, and the
+    # self-test proves the count guard can go red. Until 0.9.0 this job was "macOS release script (shim test)" and
+    # also tested the Tauri macOS release script; that script went with the Tauri app (decision 2537), and its steps
+    # are carried in native/beebeeb-drive-rune/docs/macos/packaging-signing-update.md.
+    name: Release blockers checker
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -352,10 +272,6 @@ jobs:
         run: |
           shellcheck --version
           shellcheck -S warning -x \
-            scripts/release-macos-local.sh \
-            scripts/test-release-macos-local.sh \
-            scripts/fixtures/release-macos-shim.sh \
-            scripts/macos-release-preflight.sh \
             scripts/release-blockers-check.sh \
             scripts/test-release-blockers-check.sh
 
@@ -374,69 +290,8 @@ jobs:
           name: blocker-check-test
           path: ${{ runner.temp }}/blocker-check-test.log
 
-      - name: Count guard self-test
-        run: bash scripts/test-release-macos-local.sh --self-test
-
-      - name: Release script test (shims, real script)
-        run: |
-          set -o pipefail
-          bash scripts/test-release-macos-local.sh 2>&1 | tee "$RUNNER_TEMP/release-script-test.log"
-
-      - name: Upload release script test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-script-test
-          path: ${{ runner.temp }}/release-script-test.log
-
-  release-manifest:
-    # release.yml's "Generate desktop channel manifest" step writes the alpha/beta/stable
-    # manifests every installed app updates from. The test runs that step's own run: block
-    # against fixture releases with a fake gh on PATH (no network), and proves it fails closed:
-    # a half-present macOS release, a missing or empty signature, or a download that keeps
-    # failing writes no manifest. The truth line is a count
-    # ("release-channel-manifest: N passed, 0 failed"), asserted on the run's own log by the
-    # same count guard its self-test proves can go red. A red run prints each failing
-    # scenario's step output and call log.
-    name: Release channel manifest (fake gh test)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          persist-credentials: false
-
-      - name: shellcheck (warnings and above)
-        run: |
-          shellcheck --version
-          shellcheck -S warning -x \
-            scripts/test-release-channel-manifest.sh \
-            scripts/fixtures/release-manifest-fake-gh.sh
-          bash scripts/test-release-channel-manifest.sh --print-step > "$RUNNER_TEMP/manifest-step.sh"
-          test -s "$RUNNER_TEMP/manifest-step.sh"
-          shellcheck -s bash -S warning "$RUNNER_TEMP/manifest-step.sh"
-
-      - name: Count guard self-test
-        run: bash scripts/test-release-channel-manifest.sh --self-test
-
-      - name: Manifest step test (fake gh, real step)
-        run: |
-          set -o pipefail
-          bash scripts/test-release-channel-manifest.sh 2>&1 | tee "$RUNNER_TEMP/release-manifest-test.log"
-
-      - name: Count guard on the run's own log
-        run: bash scripts/test-release-channel-manifest.sh --assert-log "$RUNNER_TEMP/release-manifest-test.log"
-
-      - name: Upload manifest step test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-manifest-test
-          path: ${{ runner.temp }}/release-manifest-test.log
-
   release-branch-point:
-    # release.yml's `verify-branch-point` job refuses a release/* branch whose starting commit
+    # release-native-windows.yml's `verify-branch-point` job refuses a release/* branch whose starting commit
     # was never reviewed (task 2281): the branch must start at a commit on main or at the commit
     # of a published desktop-v* tag that is itself a pull request merge into main or a release/*
     # branch, and every first-parent commit since then must be a pull request merged
@@ -484,9 +339,9 @@ jobs:
           path: ${{ runner.temp }}/release-branch-point-test.log
 
   # ── The engine crate and the native Rune app (PR #280) ────────────────────────────────────────────────────────
-  # Self-contained jobs, kept at the end of the file on purpose: `ci/fast-rust-jobs` is restructuring the jobs
-  # above, and these three share no step with them. `crates/beebeeb-engine` holds tests that left `src-tauri`
-  # (331 on Linux when it moved), so without these jobs they would run nowhere.
+  # The desktop's Rust suites: `crates/beebeeb-engine` (the engine, every rule the app runs) and
+  # `native/beebeeb-drive-rune` (the native app). Since the Tauri app went (decision 2537) these are the only jobs
+  # that run the engine's and the app's tests.
 
   # macOS is a separate job (engine-crate-macos below): a skipped matrix job reports under its
   # unexpanded name, leaving the required "Engine crate test (macOS)" check waiting for ever;
@@ -638,7 +493,7 @@ jobs:
           toolchain: 1.99.1
 
       # From cargo's dependency graph only (no build): `cargo tree -p beebeeb-engine | grep -c tauri` is 0, and the
-      # engine's test-support feature is on no normal or build edge of the desktop app or the native app.
+      # engine's test-support feature is on no normal or build edge of the native app.
       - name: Engine boundary check
         run: sh scripts/check-engine-boundary.sh
 

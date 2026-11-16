@@ -610,8 +610,8 @@ fn test_1889_m5_a_whole_settings_object_still_writes_every_field() {
 
 #[test]
 fn a_0_8_11_desktop_toml_with_the_old_finder_keys_still_loads() {
-    let cfg: DesktopConfig = toml::from_str(include_str!("../../../../src-tauri/tests/fixtures/desktop-0.8.11.toml"))
-        .expect("a 0.8.11 config parses");
+    let cfg: DesktopConfig =
+        toml::from_str(include_str!("../../tests/fixtures/desktop-0.8.11.toml")).expect("a 0.8.11 config parses");
     // The old keys still load: Windows and Linux keep using them; macOS ignores them.
     assert_eq!(cfg.finder_install_status.as_deref(), Some("error"));
     assert_eq!(cfg.finder_install_reason_category.as_deref(), Some("unknown"));
@@ -691,7 +691,7 @@ const PATH_ERROR: &str =
 
 /// The 0.8.11 fixture with a path in the old error key (the fixture itself carries none).
 fn fixture_with_a_path_in_the_old_error() -> String {
-    let fixture = include_str!("../../../../src-tauri/tests/fixtures/desktop-0.8.11.toml");
+    let fixture = include_str!("../../tests/fixtures/desktop-0.8.11.toml");
     let with_path = fixture.replace(FIXTURE_ERROR, PATH_ERROR);
     assert_ne!(
         with_path, fixture,

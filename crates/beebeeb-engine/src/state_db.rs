@@ -502,6 +502,8 @@ mod tests {
     // ── Rule 5: the item's status follows the queue (spec §9.1–§9.2) ──────────
 
     mod backup;
+    mod poll_cost;
+    mod shell_ports;
     mod startup_and_accepts;
     mod unsent;
 

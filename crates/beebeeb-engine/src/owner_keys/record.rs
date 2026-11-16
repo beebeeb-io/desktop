@@ -1,6 +1,7 @@
 //! The durable key-custody record of a row and the label of a row whose name cannot be shown: the
 //! parts of the desktop's `owner_keys` the state database stores and the listing reads. Moved out of
-//! `src-tauri/src/owner_keys.rs` and `owner_keys/requests.rs` unchanged; the network and bridge code stays there.
+//! `src-tauri/src/owner_keys.rs` and `owner_keys/requests.rs` unchanged; the network and bridge code is in
+//! `owner_keys.rs` and `owner_keys/`.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};

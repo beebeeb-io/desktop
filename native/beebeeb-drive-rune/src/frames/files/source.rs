@@ -93,6 +93,8 @@ pub enum Action {
     Rename,
     /// New folder (DW-0417).
     NewFolder,
+    /// Create file in the New file dialog (DW-1522).
+    NewFile,
     /// Move to another folder (DW-0409).
     Move,
     /// Free up space: the copy on this PC goes, the item stays in Beebeeb.
@@ -132,6 +134,7 @@ impl Action {
             Action::Upload => "upload",
             Action::Rename => "rename",
             Action::NewFolder => "make the folder",
+            Action::NewFile => "make the file",
             Action::Move => "move",
             Action::FreeUpSpace => "free up space",
             Action::OpenInFileExplorer => "open File Explorer",
@@ -162,6 +165,8 @@ pub enum Call {
     Sort(Option<String>, super::Sort),
     /// A folder with this name, in the folder with this id (`None`: the root).
     NewFolder(Option<String>, String),
+    /// An empty file with this name, in the folder with this id (`None`: the root).
+    NewFile(Option<String>, String),
     /// The item with this id gets this name.
     Rename(String, String),
     /// These go into the folder with this id (`None`: the root).
@@ -273,6 +278,12 @@ pub trait FilesSource: Send + 'static {
     /// Make a folder with this name in the folder with this id (`None`: the root). It arrives
     /// through [`FilesSource::changes`] (`Change::Made`). The name is encrypted on this PC first.
     fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError>;
+    /// Make an empty file with this name in the folder with this id (`None`: the root): New file's Create file
+    /// (DW-1522). It uploads as any new file there, encrypted on this PC first; a taken name is refused, never
+    /// overwritten. Default: a source that cannot make one.
+    fn new_file(&mut self, _folder: Option<&str>, _name: &str) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
     /// Give the item this name (already checked by `names::check_on` against the rows shown).
     fn rename(&mut self, item: &DriveItem, name: &str) -> Result<(), ActionError>;
     /// Move these into the folder with this id (`None`: the root). `NameTaken`: the folder has
@@ -821,6 +832,15 @@ impl FilesSource for FilesFixture {
         edits.made.push(item.clone());
         drop(edits);
         self.changes.push(Change::Made { item: Box::new(item) });
+        Ok(())
+    }
+
+    fn new_file(&mut self, folder: Option<&str>, name: &str) -> Result<(), ActionError> {
+        self.refuse(Action::NewFile, &[])?;
+        if !self.can_add(folder) {
+            return Err(ActionError::Protected);
+        }
+        self.record(Call::NewFile(folder.map(str::to_string), name.to_string()));
         Ok(())
     }
 

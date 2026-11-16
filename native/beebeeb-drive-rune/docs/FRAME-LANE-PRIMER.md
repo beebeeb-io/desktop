@@ -24,9 +24,9 @@ the markup gives the structure, the CSS gives every measure.
 
 ## Skip these
 
-`src-tauri/**`, `crates/**`, `engine_host*`, `source_engine*`, `src/ui/window.rs` and the Files window parts,
+`crates/**`, `engine_host*`, `source_engine*`, `src/ui/window.rs` and the Files window parts,
 other groups' panes, `scripts/gate.py`, `scripts/capture-golden.mjs`, `MAP.md` files, the repo `CLAUDE.md` below
-"Module map" (it is about the Tauri app and releases).
+"Module map" (it is about the engine, the macOS rules and releases).
 
 ## How the parts fit
 

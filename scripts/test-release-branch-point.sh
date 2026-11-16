@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux-runnable, offline test for scripts/verify-release-branch-point.sh, the check release.yml
+# Linux-runnable, offline test for scripts/verify-release-branch-point.sh, the check release-native-windows.yml
 # runs before `build` (and so before any signing): a release branch may only be dispatched when
 # its first-parent history since its starting point is all merges of pull requests into that
 # branch, and the starting point is a published `desktop-v*` tag commit that is itself a pull
@@ -14,7 +14,7 @@
 #   3. starting point on neither tag nor main    -> fails, names that commit;
 #   4. a direct, non-PR commit after the start   -> fails, names that commit;
 #   5. a PR merge whose base was another branch  -> fails, names that merge commit;
-#   6. a non-release ref                         -> fails (defense in depth; release.yml only
+#   6. a non-release ref                         -> fails (defense in depth; the release workflow only
 #      calls this for refs/heads/release/*);
 #   7. a tag with no GitHub release              -> fails: a tag alone is not trusted;
 #   8. a tag whose release is a draft            -> fails: a draft is not published;
@@ -403,7 +403,7 @@ run_case refs/heads/release/0.8.33 "$TAGPULLERR"
 check "pulls lookup error for the tag commit: fails" test "$CODE" -ne 0
 check "pulls lookup error for the tag commit: says it refuses to guess" grep -q 'refusing to guess' "$OUT"
 
-# --- 6. a non-release ref is refused (release.yml only calls this for release/*)
+# --- 6. a non-release ref is refused (the release workflow only calls this for release/*)
 FX="non-release-ref"
 run_case refs/heads/main "$M1"
 check "non-release ref: fails closed" test "$CODE" -ne 0

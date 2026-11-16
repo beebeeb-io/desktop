@@ -7,7 +7,7 @@
 //!
 //! Two keys, one format (Guus, 2026-11-11). The native line (0.9.0 and later: installers and v2 manifests) is
 //! signed by the v2 key, [`UPDATER_V2_PUBKEY`], and a native build trusts only that key. The 0.8.x line keeps the
-//! key every 0.8.x build bakes in ([`LEGACY_0_8_PUBKEY`], `src-tauri/tauri.conf.json`); a client on 0.8.24 or
+//! key every 0.8.x build bakes in ([`LEGACY_0_8_PUBKEY`], `keys/updater-0.8.pub`); a client on 0.8.24 or
 //! older therefore cannot verify a native installer. Only the bridge release 0.8.25 trusts both.
 
 use std::io::Read;
@@ -24,9 +24,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 /// 0.8.x key.
 pub const UPDATER_V2_PUBKEY: &str = include_str!("../keys/updater-v2.pub");
 
-/// The updater public key every 0.8.x release since 0.3.0 bakes in (minisign key id `C6FADFD59D732197`), copied
-/// from `src-tauri/tauri.conf.json`. A native build does not trust it. `tests::baked_key_matches_tauri_config`
-/// fails if the two drift.
+/// The updater public key every 0.8.x release since 0.3.0 bakes in (minisign key id `C6FADFD59D732197`), a copy of
+/// `crates/beebeeb-updater/keys/updater-0.8.pub`, the byte copy of the value the 0.8.x line's config carries. A native
+/// build does not trust it. `tests::baked_key_matches_the_08_key_file` fails if the two drift.
 pub const LEGACY_0_8_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2RkFERkQ1OUQ3MzIxOTcKUldTWElYT2QxZC82eG1ocjBUK0ZUZUZqU25JbmFNdmJoZ0w1dnhidDUxREZMd2wycUlDOGpVNloK";
 
 /// Why a key or signature was refused. Never carries key or signature bytes.
@@ -245,13 +245,14 @@ mod tests {
         ));
     }
 
-    /// The constant is a copy; the Tauri config stays the source until `src-tauri` is gone.
+    /// The constant is a copy of the 0.8.x key file, two independent sources that must agree, and the key's id is the
+    /// one every 0.8.x build verifies against.
     #[test]
-    fn baked_key_matches_tauri_config() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../src-tauri/tauri.conf.json");
-        let config: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).expect("src-tauri/tauri.conf.json is readable")).expect("json");
-        assert_eq!(config["plugins"]["updater"]["pubkey"].as_str(), Some(LEGACY_0_8_PUBKEY));
+    fn baked_key_matches_the_08_key_file() {
+        let file = include_str!("../keys/updater-0.8.pub");
+        assert_eq!(file.trim(), LEGACY_0_8_PUBKEY);
+        let text = decode_text(file).expect("base64 of text");
+        assert!(text.starts_with("untrusted comment: minisign public key: C6FADFD59D732197\n"));
         let _ = PublicKey::legacy_0_8();
     }
 

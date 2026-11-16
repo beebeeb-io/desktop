@@ -1,5 +1,9 @@
 # Desktop macOS bring-up — what needs to happen next
 
+> **Status 2026-11-16:** this brief was written for the 0.8.x Tauri app. That app is gone in 0.9.0 on every OS; the
+> macOS phase rebuilds from the carried notes in `native/beebeeb-drive-rune/docs/macos/`. The code paths below point
+> at where the code lives now; `release.yml` (its build matrix, its plumbing) is the 0.8.x line's workflow.
+
 Written 2026-07-30 by the desktop lead session, at Guus's explicit request, for whichever
 Claude session next has a real Mac available to pick this up. macOS is currently deliberately
 parked — not because the architecture doesn't work, but because every remaining blocker needs
@@ -67,7 +71,8 @@ without full signing, but treat "verified" as still gated on a real signed unive
 ### 4. IPC socket peer-credential check has NO macOS implementation — must be done before macOS ships (task 1247, found 2026-07-30)
 
 **This is new since the rest of this brief's history** — found while fixing a P0 security bug in
-the Linux desktop build. `src-tauri/src/ipc_socket.rs`'s peer-credential check (`peer_uid`,
+the Linux desktop build. The daemon socket's peer-credential check (`peer_uid`, now in
+`crates/beebeeb-engine/src/ipc_socket/server.rs`,
 gating every connection to the daemon's Unix socket) is implemented for Linux only, using
 `SO_PEERCRED`. The non-Linux branch is **deliberately unimplemented and fails closed** (rejects
 every connection) — this was a conscious choice, not an oversight: implementing `getpeereid()` (the
@@ -128,7 +133,7 @@ to begin with.
   it (no `ExtensionProcess … bundleID: io.beebeeb.app.FileProvider` launch ever appears in the
   log, unlike a working extension such as OneDrive's in the same window) — so
   `NSFileProviderManager waitForStabilizationWithCompletionHandler:`'s completion block never
-  fires and `BeebeebWaitForDomainReady` (`src-tauri/macos/FileProviderBridge.m`) burns its full
+  fires and `BeebeebWaitForDomainReady` (`packaging/macos/FileProviderBridge.m`) burns its full
   10 s and reports "Timed out waiting for the Beebeeb File Provider domain to become available".
   **Ruled out on the same evidence:** the PlugInKit "no `+` election" tag on the real copy —
   every third-party `com.apple.fileprovider-nonui` extension on the box (ProtonMail Drive,

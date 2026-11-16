@@ -1,10 +1,11 @@
 //! New file (DW-1520 to DW-1522): New's menu in the Files window offers "New file…" (Ctrl+N), and
 //! this dialog, over the Files window, picks the type (DW-1521) and names the file (DW-1522).
 //!
-//! **Nothing is made here.** Create file is an [`Intent::CreateFile`] the engine lane takes: the
-//! file is made in the folder shown, encrypted on this PC before it uploads, and opened in the
-//! editor (DW-1523). Word, Excel and PowerPoint go on to New document (DW-1558) as an
-//! [`Intent::NewDocument`]. This group writes no file and keeps no name it was not asked to.
+//! **Nothing is made here.** Create file is an [`Intent::CreateFile`] that Files takes
+//! (`frames::files::create_file`): the engine makes the file in the folder shown, encrypted on this
+//! PC before it uploads. Opening it in the editor (DW-1523) is not bound yet. Word, Excel and
+//! PowerPoint go on to New document (DW-1558) as an [`Intent::NewDocument`]. This group writes no
+//! file and keeps no name it was not asked to.
 //!
 //! The dialog is drawn over whatever the Files window shows ([`over`], the registry's one line)
 //! and holds the keyboard while it is open: a key it does not use stops at it, so nothing typed

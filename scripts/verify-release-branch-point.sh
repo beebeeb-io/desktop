@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Refuse a release branch whose starting commit was never reviewed (task 2281).
 #
-# release.yml runs this before `build`, so before the `desktop-release` environment and before
+# release-native-windows.yml runs this before `build`, so before the `desktop-release` environment and before
 # any Azure signing token exists. A `release/*` branch is only dispatched when:
 #   (a) every commit on its first-parent history from the dispatched head back to its starting
 #       point is a merge commit of a pull request that was merged into this same branch
@@ -17,7 +17,7 @@
 #       cannot prevent that (GitHub refuses the Actions app as a bypass actor, HTTP 422).
 #       A 404 / draft / failed lookup is not published.
 #
-# main is protected by pull requests, so a dispatch from main skips this check: release.yml's
+# main is protected by pull requests, so a dispatch from main skips this check: release-native-windows.yml's
 # `verify-branch-point` job only runs for refs/heads/release/*.
 #
 # Inputs (environment):

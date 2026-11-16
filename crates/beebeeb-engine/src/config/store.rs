@@ -100,7 +100,26 @@ impl DesktopConfig {
             ConfigMode::parse(raw)?;
         }
         cfg.scrub_legacy_finder_error(ConfigHost::current());
+        // A second, untyped read of the same text: only to see which keys the file really holds.
+        if let Ok(raw) = toml::from_str::<toml::Table>(&s) {
+            cfg.carry_old_notification_choices(&raw);
+        }
         Ok(cfg)
+    }
+
+    /// Carry a 0.8.x person's notification OFF choices into the switches 0.9.0 reads (census §2 row 18).
+    /// 0.8.x stored "conflict alerts" as `notify_conflicts` and "local space" as `notify_quota_warnings`; 0.9.0 toasts
+    /// read `notify_needs_decision` and `notify_local_space`, which default on. When a new key is ABSENT from the file
+    /// the old key (if present) decides it; a file that already holds the new key keeps its own choice. The next save
+    /// writes the new keys, so the carry happens once.
+    pub(super) fn carry_old_notification_choices(&mut self, raw: &toml::Table) {
+        let held = |key: &str| raw.contains_key(key);
+        if !held("notify_needs_decision") && held("notify_conflicts") {
+            self.notify_needs_decision = self.notify_conflicts;
+        }
+        if !held("notify_local_space") && held("notify_quota_warnings") {
+            self.notify_local_space = self.notify_quota_warnings;
+        }
     }
 
     /// Forget the old `finder_install_last_error` on macOS (lead ruling T4-3). 0.8.11 saved the

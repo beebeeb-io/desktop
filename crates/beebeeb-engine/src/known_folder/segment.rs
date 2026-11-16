@@ -1,5 +1,5 @@
 //! The one pure part of the desktop's `known_folder`: a device name as a safe path segment. Moved out of
-//! `src-tauri/src/known_folder.rs` unchanged; the Windows known-folder lookups stay there.
+//! `src-tauri/src/known_folder.rs` unchanged; the Windows known-folder lookups are in `known_folder.rs`.
 
 /// Sanitize a raw device name into a single safe path segment for the backup
 /// destination `<sync_root>\Backups\<device>\<DisplayName>`.

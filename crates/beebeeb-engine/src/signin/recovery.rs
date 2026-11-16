@@ -157,3 +157,7 @@ pub async fn verify_vault_key_from_phrase(
     }
     Ok(master_key_struct.to_bytes())
 }
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
