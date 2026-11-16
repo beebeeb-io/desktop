@@ -87,6 +87,10 @@ fn worker(kind: KindHint) -> (Worker, PlayerHandle, mpsc::Sender<Cmd>) {
             file_id: "item".to_owned(),
             kind,
             length_ms: 0,
+            press: crate::media::player::Press {
+                session: beebeeb_engine::account::SessionGeneration::for_test(1),
+                account: None,
+            },
         },
         opener: Arc::new(NoBytes),
         links: Arc::new(NoHelper),
