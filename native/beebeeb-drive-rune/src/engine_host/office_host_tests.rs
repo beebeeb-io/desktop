@@ -1036,6 +1036,12 @@ fn a_real_confined_helper_renders_page_one() {
     let (id, w, h, colours) = page_of(&events).expect("page 1 arrived");
     assert_eq!((id, w, h), (first, 816, 1056));
     assert!(colours >= 10, "page 1 is drawn, not flat: {colours} colours");
+    // The handle bound reads the real helper's count (a `None` here leaves a helper that keeps its sections unbounded).
+    let handles = host.helper_handle_count();
+    assert!(
+        handles.is_some_and(|count| count > 0),
+        "the host reads the helper's open handles: {handles:?}"
+    );
 
     // spike.docx, page 1 at 150 %.
     let mut spike = OfficeHost::open(&helper, DocKind::Docx, read("spike.docx"), noop_wake());

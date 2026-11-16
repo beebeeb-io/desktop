@@ -380,12 +380,7 @@ impl Starter for Confined {
     }
 
     fn copy_out(&self, section: &sandbox::Section, out: &mut [u8]) -> bool {
-        // R3 moves this to `copy_section_out` (the sandbox's raw copy) once that call is in the sandbox crate.
-        if out.len() != section.len() {
-            return false;
-        }
-        out.copy_from_slice(section.as_slice());
-        true
+        copy_section_out(section, out)
     }
 
     fn start(&mut self) -> Result<Link<sandbox::Child>, sandbox::SandboxError> {
@@ -425,8 +420,24 @@ impl Helper for sandbox::Child {
     }
 
     fn handle_count(&self) -> Option<u32> {
-        // The sandbox's handle count lands with the sandbox's hardening (H1-S); until then nothing is read.
-        None
+        // The inherent call (the trait method has the same name). An error (the process is gone, or the count could
+        // not be read) bounds nothing; a helper that is gone is noticed by its pipe.
+        sandbox::Child::handle_count(self).ok()
+    }
+}
+
+/// The sandbox's section, read back by its raw copy.
+impl SectionRead for sandbox::Section {
+    fn len(&self) -> usize {
+        sandbox::Section::len(self)
+    }
+
+    fn copy_to(&self, out: &mut [u8]) -> Result<(), sandbox::SandboxError> {
+        sandbox::Section::copy_to(self, out)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        sandbox::Section::as_slice(self)
     }
 }
 
@@ -880,6 +891,14 @@ impl OfficeHost {
     /// Test hook: payload bytes of helper frames wiped because nobody handled them.
     pub(crate) fn wiped_frame_bytes(&self) -> usize {
         self.shared.frames_wiped.load(Ordering::SeqCst)
+    }
+
+    /// Test hook: the live helper's open handles, as the host reads them for its bound.
+    pub(crate) fn helper_handle_count(&self) -> Option<u32> {
+        lock(&self.shared.inner)
+            .helper
+            .as_ref()
+            .and_then(|helper| helper.handle_count())
     }
 
     /// Test hook: the worker thread has ended (or never ran).
