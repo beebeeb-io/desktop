@@ -800,10 +800,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 // A panic in this worker must not leave the view on "Decrypting" for good: it answers Failed.
                 let (answer, document): (Answer, Option<viewer_pdf::Document>) =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let (session, bytes, origin) = match read(&*engine, &file_id, recorded, &report, &cancel) {
-                            Ok(read) => read,
-                            Err(error) => return (Err(error), None),
-                        };
+                        let (session, bytes, origin) =
+                            match read(&*engine, &file_id, recorded, IN_MEMORY_MAX, &report, &cancel) {
+                                Ok(read) => read,
+                                Err(error) => return (Err(error), None),
+                            };
                         let (mut content, document) = match (&pdf, shows) {
                             (Some(ends), Shows::Pdf) => {
                                 let (body, document) = open_pdf(bytes, &ends.size);
