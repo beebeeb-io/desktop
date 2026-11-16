@@ -300,11 +300,13 @@ pub fn is_owners(folder: &ChosenFolder, owner: Option<&Identity>) -> bool {
 }
 
 /// P3-5 (lead ruling 2026-11-16 05:47): the folders an earlier build tagged by `owner`'s OWN address carry `owner`'s
-/// id tag from now on, so the settings file no longer holds a digest of an address. Only an entry whose tag is the
+/// id tag from now on, so a re-tagged entry no longer holds a digest of an address. Only an entry whose tag is the
 /// digest of `owner`'s canonical address is changed, once: another account's (by id or by its own address), an
 /// untagged one and one tagged by id stay as they are. One that would back `owner`'s folder up twice (it is, holds or
 /// lies inside a folder `owner`'s id tag holds already) stays as it was: nobody's (fail closed; the person sees the one
-/// folder). Nothing without both the id and the address. How many were re-tagged.
+/// folder). An entry left as it was (that one, or one whose account has not started since, or started with another
+/// address) keeps its address digest and stays nobody's. Nothing without both the id and the address. How many were
+/// re-tagged.
 pub fn retag_by_id(config: &mut DesktopConfig, owner: &Identity) -> usize {
     let (Some(by_id), Some(by_address)) = (owner_tag(owner), owner.email.as_deref().and_then(address_tag)) else {
         return 0;

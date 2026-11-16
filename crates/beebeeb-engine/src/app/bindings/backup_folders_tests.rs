@@ -1005,8 +1005,8 @@ fn a_known_folder_is_not_switched_on_over_a_chosen_folder_that_is_backed_up() {
 
 /// P3-5 (c) (lead ruling 2026-11-16 05:47): no tag is made from an address, and an earlier build's address tag is
 /// nobody's on every read. Its own account's start re-tags it by that account's id, once; another account's start
-/// never does; a folder it would back up twice stays nobody's. After the re-tag the settings file holds no digest of the
-/// address, so a guessed address no longer confirms the folder's account.
+/// never does; a folder it would back up twice stays nobody's. A re-tagged entry holds no digest of the address, so a
+/// guessed address no longer confirms its account; an entry left as it was keeps its digest and stays nobody's.
 #[test]
 fn an_address_tag_is_retagged_by_its_own_accounts_id_alone() {
     let dir = tempfile::tempdir().unwrap();
