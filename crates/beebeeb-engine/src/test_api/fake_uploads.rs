@@ -434,7 +434,7 @@ impl FakeAccount {
             // so the update waits on the session and is applied there.
             let mut sessions = self.uploads.sessions.lock().expect("upload sessions");
             let Some(open) = sessions.values_mut().find(|open| open.file_id == id) else {
-                return Reply::ok(json!({ "id": id }));
+                return Reply::error(404, "not_found");
             };
             match parent {
                 None => {}
