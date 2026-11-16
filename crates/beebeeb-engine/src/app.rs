@@ -56,6 +56,7 @@ pub mod backup_devices_api;
 mod credential_stores;
 mod session_revoke;
 mod session_watch;
+mod unfinished_sign_out;
 use session_revoke::revoke;
 pub mod account_twofactor_status_api;
 pub mod backups_api;
@@ -221,7 +222,7 @@ impl std::fmt::Display for SyncStartRefused {
 pub enum SyncStop {
     Stopped,
     WasNotRunning,
-    /// The engine did not confirm that it ended: no new one starts in this process (restart the app).
+    /// This stop or an earlier one did not confirm its engine ended: no new one starts in this process (restart).
     Unconfirmed,
 }
 
@@ -406,7 +407,7 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
-            let vault = self.vault();
+            let vault = self.vault_at_start(); // A clear cut short is finished first (`unfinished_sign_out`).
             let present = matches!(vault.session_token(), Ok(Some(_)));
             self.set_auth_present(present);
             if present {
@@ -782,8 +783,7 @@ impl<C: CredentialStores> Engine<C> {
                     *slot = Some(runner);
                     return Ok(SyncStart::AlreadyRunning);
                 }
-                if !runner.abort().await.is_stopped() {
-                    self.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+                if unfinished_sign_out::record_the_stop(&self.acct, &runner.abort().await) != SyncStop::Stopped {
                     return Err(SyncStartRefused::StopUnconfirmed);
                 }
             }
@@ -942,9 +942,8 @@ impl<C: CredentialStores> Engine<C> {
         stopped
     }
 
-    /// The engine's stop, then Explorer's "Free up space" binding is removed (task 2490), whether an engine ran or
-    /// not and whether its end was confirmed: the binding outlives a restart of the app. A lock and a sign-out stop
-    /// through here.
+    /// The engine's stop, then Explorer's "Free up space" binding is removed (task 2490), whether an engine ran or not
+    /// and whether its end was confirmed: the binding outlives a restart. A lock and a sign-out stop through here.
     async fn stop_holding_step(&self) -> SyncStop {
         let stopped = self.stop_runner().await;
         // No pass runs and none is asked for once sync stopped, for this account or the next.
@@ -956,19 +955,14 @@ impl<C: CredentialStores> Engine<C> {
     async fn stop_runner(&self) -> SyncStop {
         let mut slot = self.acct.engine.lock().await;
         let Some(runner) = slot.take() else {
-            return SyncStop::WasNotRunning;
+            return unfinished_sign_out::stop_of_an_empty_slot(&self.acct);
         };
         // The view stops saying sync runs before the task is told to end: the task's own end then changes nothing.
         self.view.write(|view| {
             view.start = Start::NotAsked;
             view.explorer = Explorer::Unknown;
         });
-        if runner.abort().await.is_stopped() {
-            SyncStop::Stopped
-        } else {
-            self.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-            SyncStop::Unconfirmed
-        }
+        unfinished_sign_out::record_the_stop(&self.acct, &runner.abort().await)
     }
 
     /// The vault lock ([`Engine::lock_vault`]): the closed mark, then the engine stops and the keys leave memory
@@ -1010,7 +1004,7 @@ impl<C: CredentialStores> Engine<C> {
     /// (best effort), the token, the key and their owners leave the credential store, memory is cleared. Nothing
     /// on disk is deleted but the account's recent searches; the state stays bound to this account, so another
     /// account cannot sync into it.
-    /// `Err`: the engine did not confirm its stop, or the credential store could not be cleared; still signed in.
+    /// `Err`: an engine task may still run (its end unconfirmed, now or until a restart), or the store was not cleared.
     pub fn sign_out_keeping_local_data(&self) -> Result<(), String> {
         let result = self.sign_out_keeping_local_data_step();
         self.publish();
@@ -1020,8 +1014,6 @@ impl<C: CredentialStores> Engine<C> {
     fn sign_out_keeping_local_data_step(&self) -> Result<(), String> {
         self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
-            // The account's recent searches leave this computer while its session is still in memory (`sign_out_for`).
-            let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
             self.sign_out_holding_step().await
         })
     }
@@ -1031,9 +1023,11 @@ impl<C: CredentialStores> Engine<C> {
     async fn sign_out_holding_step(&self) -> Result<(), String> {
         {
             let _ = self.stop_proofs().await; // Not ended in time: its seat refuses starts, the sign-out goes on.
-            if self.stop_holding_step().await == SyncStop::Unconfirmed {
+            if unfinished_sign_out::a_task_may_hold_the_keys(&self.acct, self.stop_holding_step().await) {
                 return Err(account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
             }
+            // Past the gate (a refused sign-out deletes nothing), the session still in memory: its recent searches.
+            let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
             let mut vault = self.vault();
             let token = vault
                 .session_token()

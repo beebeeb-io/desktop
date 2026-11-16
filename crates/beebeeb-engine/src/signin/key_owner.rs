@@ -223,10 +223,11 @@ pub fn settle_owner_after_probe<S: AuthSecretStore>(
 
 /// A clear that failed must not stay silent (task 2447 d). On Windows a sign-out and a rejected token clear
 /// everything, so a store with NO session token that still holds a vault key or an owner tag is a clear that did not
-/// finish: this completes it, at the next start, before a sign-in is offered. (macOS keeps the key after a rejected
-/// token on purpose, R9, and proves it at the next sign-in, so it does not call this.) `Ok(true)`: something was
-/// removed. `Err`: it is still there; the sign-in's own check refuses while it is.
-#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+/// finish: this completes it, at the next start, before a sign-in is offered (`Engine::restore`, through
+/// `app::unfinished_sign_out`; every OS but macOS). (macOS keeps the key after a rejected token on purpose, R9, and
+/// proves it at the next sign-in, so it does not call this.) `Ok(true)`: something was removed. `Err`: it is still
+/// there; the sign-in's own check refuses while it is.
+#[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
 pub fn complete_pending_clear<S: AuthSecretStore>(vault: &mut AuthVault<S>) -> AuthResult<bool> {
     match vault.session_token() {
         Ok(Some(_)) => return Ok(false),
