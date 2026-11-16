@@ -9,6 +9,7 @@ pub mod fake_account;
 pub mod fake_device_signin;
 pub mod fake_previews;
 pub mod fake_purge;
+pub mod fake_rest;
 pub mod fake_search_shards;
 pub mod fake_sessions;
 pub mod fake_sharing;

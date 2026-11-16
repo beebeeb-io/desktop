@@ -137,7 +137,9 @@ pub struct FakeAccount {
     /// [`Self::serve_security_routes`]; the `bb-fake-server` fixture turns it on.
     security_routes: AtomicBool,
     /// What `me/two-factor` says ([`Self::set_two_factor`]); off at the start.
-    two_factor_on: AtomicBool,
+    pub(super) two_factor_on: AtomicBool,
+    /// Two-factor, region, deletion, email resend, health and speedtest ([`super::fake_rest`]).
+    pub(super) rest: super::fake_rest::RestState,
 }
 
 impl FakeAccount {
@@ -196,6 +198,7 @@ impl FakeAccount {
             restore_hangs_up: AtomicBool::new(false),
             security_routes: AtomicBool::new(false),
             two_factor_on: AtomicBool::new(false),
+            rest: Default::default(),
         };
         (account, recovery_phrase.to_string())
     }
@@ -598,6 +601,7 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
         if let Some(reply) = account
             .purge_route(&req)
             .or_else(|| account.sessions_route(&req))
+            .or_else(|| account.rest_route(&req))
             .or_else(|| account.sharing_route(&req))
         {
             return reply;
