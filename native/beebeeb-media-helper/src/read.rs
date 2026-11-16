@@ -80,10 +80,8 @@ impl Wire {
                     }
                 }
                 other => {
-                    if self.kept.len() >= MAX_KEPT {
-                        return Ok(None);
-                    }
-                    self.kept.push_back(other);
+                    let _ = other;
+                    return Ok(None);
                 }
             }
         }
