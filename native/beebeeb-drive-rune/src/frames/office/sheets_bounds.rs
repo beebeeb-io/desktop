@@ -199,6 +199,12 @@ impl MergesShown {
     /// The merges of `view` over the drawn `rows` and `cols` (each ascending), `width` of a drawn column.
     pub(super) fn of(view: &SheetView, rows: &[u32], cols: &[u32], width: impl Fn(u32) -> f32) -> MergesShown {
         let n = cols.len();
+        if view.merges.is_empty() {
+            return MergesShown {
+                cols: n,
+                at: Vec::new(),
+            };
+        }
         let mut at = vec![AtCell::Own; rows.len() * n];
         // The drawn part of `lo..=hi` on one side: one run of indexes, as the lines drawn ascend.
         let run =
