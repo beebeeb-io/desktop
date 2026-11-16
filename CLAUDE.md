@@ -18,9 +18,6 @@ python3 scripts/assert-cargo-test-counts.py --self-test      # the count guard C
 scripts/check-engine-boundary.sh                              # engine must not depend on tauri
 ```
 
-Truth lines: `cargo test` -> per-binary `test result: ok. N passed; 0 failed` (each library/integration binary must execute tests; only the
-`src/main.rs` harness and doctests may be empty). A Windows cross-check on Linux is not a native test pass. A release is verified by
-`RELEASE_NOTES.md` naming the version AND the workflow run green AND the manifest resolving: three counts, not one adjective.
 Quiet checks, from the workspace root: `make test-quiet REPO=desktop` and `make check-quiet REPO=desktop` print one PASS line per target.
 
 ## Module map
@@ -43,7 +40,7 @@ native/beebeeb-drive-rune/docs/macos/   the macOS phase's carried rules (Finder 
 scripts/                    CI and release tooling (count guards, core pin, engine boundary, release checks)
 crates/beebeeb-updater/     the native updater (no Tauri, no UI): manifest, minisign check, policy, one State + step
 docs/ (RELEASING.md, CAPABILITIES.md, IPC_PROTOCOL.md, specs/, plans/)
-packaging/windows/          the native app's NSIS installer by plain makensis (README.md = the lead's Windows commands and the upgrade rehearsal)
+packaging/windows/          the native app's NSIS installer by plain makensis (README.md = the Windows commands and the upgrade rehearsal)
 ```
 
 ## Traps
@@ -87,22 +84,6 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 - A storage location is a COUNTRY, never a city (Guus, 2026-10-19).
 - The Backups root is the row flagged `system_role = backups_root`, never a folder found by name; everything at or under it, and a move into it, is refused BEFORE a Windows delete/rename and by Finder's capabilities (core's `check_drive_mutation` on its `BackupPosition`; an item created in the tree is not refused), answered from the state DB only (never the network, never this process's own change); its files are read-only (Windows `FILE_ATTRIBUTE_READONLY`, which the engine's own changes lift through `read_only::Lifted` only; Finder without `allowsWriting`); a device's `.device.json` is never listed; `docs/CAPABILITIES.md` (LD-0113).
 
-## How we work
-
-Workspace `CLAUDE.md` → "How we work" is the rule set (evidence, design before code, done, parallel agents).
-**Native 0.9.0 work (branch `v2-native`) runs in waves** (2026-11-15: "a batch of coding all at once and at the end do builds &
-gates"): each builder pushes a branch with a compile check (Linux + Windows), its own new tests red→green and `scripts/compare.sh` for
-its own frames, and opens no PR; ONE integration PR per wave carries the ONE full run (engine + native crates) and the ONE review.
-Workspace `AGENTS.md` → "Batch, then gate". Here: the truth lines above; macOS UI follows the
-specs in `docs/specs/` and the design files in `design/` (design wins over code; deviations are recorded before the code changes).
-
 ## Design files
 
 `design/hifi/` holds THREE live design sources and nothing else: `macos-menubar-popover.html`, `macos-settings-dialogs.html` and `macos-two-surface.html`. They are desktop's only copies, the design source of truth that the macOS specs and plans cite. All other design files live in the workspace root `../../design/hifi/` -- never copy them into this public repo.
-
-## Graphify and shared docs
-
-Knowledge graph at `graphify-out/`. Architecture question: `graphify query "<question>"` / `graphify explain <symbol>` /
-`graphify path "<A>" "<B>"`; overview: `graphify-out/GRAPH_SUMMARY.md` (at most 3k tokens); never read `GRAPH_REPORT.md` whole.
-Run `graphify update .` for your own navigation; never commit `graphify-out/` on a feature branch (the lead regenerates it on main).
-When you add/change/remove endpoints, types, build commands or dependencies, update the matching skill in the workspace `.claude/skills/`.
