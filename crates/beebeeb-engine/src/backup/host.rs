@@ -60,10 +60,7 @@ pub fn switch_off_in_settings(identity: &'static crate::identity::EngineIdentity
 /// account's. A key that names no category: never.
 pub fn owners_switch(key: &str, owners_chosen: &[crate::backup::sources::ChosenFolder]) -> bool {
     match Category::from_key(key) {
-        Some(Category::Custom(_)) => {
-            let _ = owners_chosen;
-            true
-        }
+        Some(Category::Custom(_)) => owners_chosen.iter().any(|folder| folder.key() == key),
         Some(_) => true,
         None => false,
     }
