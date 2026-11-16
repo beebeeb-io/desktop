@@ -685,6 +685,30 @@ fn map_drive_err(e: DriveError) -> ActionError {
     }
 }
 
+/// [`map_drive_err`] for New file, which says two refusals in their own words: a full disk and a file too large
+/// (every other refusal is [`map_drive_err`]'s).
+fn map_new_file_err(e: DriveError) -> ActionError {
+    match e {
+        DriveError::Quota => ActionError::NoRoom,
+        DriveError::TooLarge => ActionError::TooLarge,
+        other => map_drive_err(other),
+    }
+}
+
+/// New file's mapping: the two refusals that have their own words, and every other refusal as before.
+#[cfg(test)]
+#[test]
+fn new_file_says_a_full_disk_and_a_too_large_file_in_their_own_words() {
+    // Mutant: `DriveError::Quota => ActionError::Failed` -> red (the generic "could not make the file").
+    assert_eq!(map_new_file_err(DriveError::Quota), ActionError::NoRoom);
+    assert_eq!(map_new_file_err(DriveError::TooLarge), ActionError::TooLarge);
+    assert_eq!(map_new_file_err(DriveError::NameTaken), ActionError::NameTaken);
+    assert_eq!(map_new_file_err(DriveError::ReadOnly), ActionError::Protected);
+    assert_eq!(map_new_file_err(DriveError::Failed("disk")), ActionError::Failed);
+    // The generic mapping is unchanged: the other actions still say "Couldn't ...".
+    assert_eq!(map_drive_err(DriveError::Quota), ActionError::Failed);
+}
+
 impl<C: CredentialStores> EngineFilesSource<C> {
     /// A local file operation, on the signed-in account's local state (the account-bound handle, task 2488) and
     /// the sync root: both are required. Refused when sync is not running for this handle (`Engine::is_syncing`):
@@ -999,7 +1023,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     fn new_file(&mut self, folder: Option<&str>, name: &str) -> Result<(), ActionError> {
         self.local(|db, sync_root| {
             let folder_entry = file_ops::resolve_folder(db, folder).map_err(map_drive_err)?;
-            file_ops::create_file(db, sync_root, folder_entry.as_ref(), name, &[]).map_err(map_drive_err)?;
+            file_ops::create_file(db, sync_root, folder_entry.as_ref(), name, &[]).map_err(map_new_file_err)?;
             Ok(())
         })
     }

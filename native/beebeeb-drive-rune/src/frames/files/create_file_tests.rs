@@ -91,6 +91,31 @@ fn create_file_refused_by_the_source_is_said_and_try_again_opens_new_file_again(
     assert!(rt.state.viewer.new_file.is_some(), "Try again opens New file again");
 }
 
+/// A full disk and a file too large are said in their own words, not as the generic failure; a full disk offers Try
+/// again (make room, then ask), a file too large does not (asking again changes nothing). Mutant: drop the `NoRoom`
+/// arm of `Toast::failure` -> red.
+#[test]
+fn create_file_says_a_full_disk_and_a_too_large_file_in_their_own_words() {
+    let (mut rt, _engine, _calls, fails) = app();
+    fails.lock().unwrap().push((Action::NewFile, ActionError::NoRoom));
+    asked(&mut rt, "Plans.md");
+    rt.frame(0.0);
+    assert_eq!(
+        rt.state.live_toast(),
+        Some(Toast::Failed(Action::NewFile, ActionError::NoRoom))
+    );
+    assert_eq!(
+        Toast::failure(Action::NewFile, ActionError::NoRoom),
+        "Couldn't make the file. There is not enough space on this PC."
+    );
+    assert_eq!(
+        Toast::failure(Action::NewFile, ActionError::TooLarge),
+        "Couldn't make the file. It is too large to make here."
+    );
+    assert!(rt.state.offers_try_again(Action::NewFile, ActionError::NoRoom));
+    assert!(!rt.state.offers_try_again(Action::NewFile, ActionError::TooLarge));
+}
+
 /// Asked under one session, the gate closed before the poll (a lock, a sign-out, another account): nothing is made,
 /// and the ask is dropped, so the session that opens next never makes it. Mutant: drop the
 /// `refused_without_session` check in `State::create_file` -> red.

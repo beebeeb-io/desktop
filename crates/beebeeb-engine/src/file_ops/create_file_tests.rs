@@ -230,3 +230,69 @@ fn create_file_never_truncates_an_entry_that_appeared_after_the_checks() {
     );
     assert_eq!(std::fs::read(&there).unwrap(), b"theirs");
 }
+
+/// The bytes are written under a name the watcher ignores, never at the final name: while the write runs the final
+/// name does not exist, and the name being written is one the scan skips.
+#[test]
+fn create_file_writes_under_a_name_the_watcher_ignores() {
+    let f = fixture();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let look = |file: &mut std::fs::File, bytes: &[u8]| -> io::Result<()> {
+        seen.borrow_mut().extend(names_in(&f.root));
+        io::Write::write_all(file, bytes)
+    };
+    create_file_with(&f.db, &f.root, None, "Plans.md", b"hello", CREATE_FILE_LIMIT, look).unwrap();
+    let seen = seen.into_inner();
+    assert_eq!(seen.len(), 1, "one entry during the write: {seen:?}");
+    assert!(
+        crate::engine_bridge::is_ignored_finder_name(&seen[0]),
+        "the name being written is ignored by the watcher: {seen:?}"
+    );
+    assert_eq!(names_in(&f.root), vec!["Plans.md".to_string()], "only the file stays");
+    assert_eq!(std::fs::read(f.root.join("Plans.md")).unwrap(), b"hello");
+}
+
+/// A write that fails half way leaves nothing: not at the final name, and not under the partial name either.
+#[test]
+fn create_file_that_fails_half_way_leaves_nothing_for_the_watcher() {
+    let f = fixture();
+    let full = |file: &mut std::fs::File, bytes: &[u8]| -> io::Result<()> {
+        io::Write::write_all(file, &bytes[..bytes.len() / 2])?;
+        Err(io::Error::from(io::ErrorKind::StorageFull))
+    };
+    assert_eq!(
+        create_file_with(
+            &f.db,
+            &f.root,
+            None,
+            "Plans.md",
+            b"half a file",
+            CREATE_FILE_LIMIT,
+            full
+        )
+        .unwrap_err(),
+        DriveError::Quota
+    );
+    assert_eq!(names_in(&f.root), Vec::<String>::new(), "no entry of any name is left");
+}
+
+/// A name taken after the checks is refused and keeps its bytes, and the partial file goes.
+#[test]
+fn create_file_does_not_replace_a_name_taken_after_the_checks() {
+    let f = fixture();
+    let theirs = f.root.join("raced.txt");
+    let take = |file: &mut std::fs::File, bytes: &[u8]| -> io::Result<()> {
+        io::Write::write_all(file, bytes)?;
+        std::fs::write(&theirs, b"theirs")
+    };
+    assert_eq!(
+        create_file_with(&f.db, &f.root, None, "raced.txt", b"ours", CREATE_FILE_LIMIT, take).unwrap_err(),
+        DriveError::NameTaken
+    );
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"theirs");
+    assert_eq!(
+        names_in(&f.root),
+        vec!["raced.txt".to_string()],
+        "the partial file was removed"
+    );
+}
