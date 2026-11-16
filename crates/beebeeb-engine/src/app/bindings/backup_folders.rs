@@ -520,7 +520,7 @@ impl<C: CredentialStores> Engine<C> {
     /// settings file alone is written then, as `set_backup_folder` does). Refused once `session` is not the one in
     /// memory, before anything is read.
     fn backup_folders_state(&self, session: SessionGeneration) -> Result<Option<OwnedState<'_>>, BackupsError> {
-        if false && self.session_turn() != session {
+        if self.session_turn() != session {
             return Err(BackupsError::Refused(LocalStateRefused::SessionChanged));
         }
         let handle = match self.local_state_for_changes() {
