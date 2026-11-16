@@ -228,3 +228,87 @@ fn office_sheets_bounds_an_anchor_at_d10_stays_on_d10_when_scrolled() {
         d6.rect
     );
 }
+
+/// The first row and column in view moved to `to` as a key moves them (the viewports follow), drawn once; only what that
+/// build asked is kept.
+fn scroll_to(rt: &mut rune::Runtime<State>, log: &crate::frames::office::docs::live_tests::Log, to: Cell) {
+    log.cells.borrow_mut().clear();
+    rt.update(|s, tx| {
+        if let Some(Body::Sheet(view)) = viewers::ui(s).map(|ui| &mut ui.file.body) {
+            view.top_left = to;
+            sheets_scroll::follow(view, tx);
+        }
+    });
+    rt.frame(0.0);
+}
+
+/// A sheet of 6,000 rows and 300 columns (80 x 24 pt), frozen panes `frozen`, scrolled to `at`, drawn once.
+fn scrolled_frozen(
+    frozen: (u32, u32),
+    at: Cell,
+    held: &[(u32, u32)],
+) -> (rune::Runtime<State>, Vec<(u32, u32, u32, u32)>) {
+    let mut view = sheet(6_000, 300);
+    view.frozen = frozen;
+    for &(r, c) in held {
+        view.cells.push(CellText {
+            row: r,
+            col: c,
+            text: format!("t{r}x{c}"),
+            right_aligned: false,
+            bold: false,
+            value: None,
+            formula: None,
+        });
+    }
+    let (mut rt, log) = live_runtime(Body::Sheet(view), 1.0, None);
+    scroll_to(&mut rt, &log, at);
+    let asked = log.cells.borrow().iter().map(|&(_, r, c, h, w)| (r, c, h, w)).collect();
+    (rt, asked)
+}
+
+#[test]
+fn office_sheets_bounds_scrolled_frozen_cells_are_asked_and_drawn() {
+    // 2 frozen columns and 1 frozen row, scrolled to row 5,000 and column 200: the frozen block is asked as well as
+    // the scrolled one, and what comes back for it is drawn.
+    let held = [(0, 0), (0, 1), (0, 200), (5_000, 0), (5_000, 1), (5_000, 200)];
+    let (rt, asked) = scrolled_frozen((1, 2), Cell { row: 5_000, col: 200 }, &held);
+    let covers = |r: u32, c: u32| {
+        asked
+            .iter()
+            .any(|&(r0, c0, h, w)| r >= r0 && r < r0 + h && c >= c0 && c < c0 + w)
+    };
+    for (r, c) in [(0, 0), (0, 1), (0, 200), (5_000, 0), (5_000, 1), (5_000, 200)] {
+        assert!(covers(r, c), "cell ({r}, {c}) is asked: {asked:?}");
+    }
+    assert_eq!(asked[0], (0, 0, 1, 2), "the frozen block first: {asked:?}");
+    for (r, c) in held {
+        assert!(
+            find(&rt, &format!("sh-cell-{r}-{c}-t")).is_some(),
+            "({r}, {c}) is drawn"
+        );
+    }
+    assert!(
+        find(&rt, "sh-cell-0-100-t").is_none(),
+        "a column scrolled past is not drawn"
+    );
+}
+
+#[test]
+fn office_sheets_bounds_a_huge_frozen_block_keeps_the_ask_budget() {
+    // Every row and column of the frozen block hidden (0 pt) is walked (4,096 each) and drawn as nothing: the asks
+    // together stay within the budget, the frozen block first and the scrolled area after it.
+    let mut view = sheet(6_000, 6_000);
+    view.row_heights = (0..6_000).map(|i| if i < 5_000 { 0.0 } else { 24.0 }).collect();
+    view.col_widths = (0..6_000).map(|i| if i < 5_000 { 0.0 } else { 80.0 }).collect();
+    view.frozen = (5_000, 5_000);
+    let (mut rt, log) = live_runtime(Body::Sheet(view), 1.0, None);
+    scroll_to(&mut rt, &log, Cell { row: 5_500, col: 5_500 });
+    let asked = log.cells.borrow().clone();
+    let total: u64 = asked.iter().map(|&(_, _, _, h, w)| u64::from(h) * u64::from(w)).sum();
+    assert!(total <= MAX_DRAWN_CELLS as u64, "{total} cells asked: {asked:?}");
+    assert!(
+        !asked.is_empty() && asked[0].1 == 0 && asked[0].2 == 0,
+        "the frozen block comes first: {asked:?}"
+    );
+}
