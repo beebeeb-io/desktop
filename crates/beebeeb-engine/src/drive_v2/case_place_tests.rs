@@ -461,3 +461,78 @@ fn a_case_twin_folder_that_went_removes_only_its_own_children() {
         ["b-lower"]
     );
 }
+
+/// The two pairs every press below is asked about, and a row alone: case twins (`Report.pdf` on disk, `upper`'s),
+/// two server items named `Photo.jpg`, and `alone.jpg`.
+fn twins_and_one_alone() -> Fixture {
+    let f = case_twins();
+    row(&f.db, "same-a", "Photo.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "same-b", "Photo.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "alone", "alone.jpg", None, false, true, FileStatus::Local);
+    write(f.root.path(), "Photo.jpg", b"one entry");
+    write(f.root.path(), "alone.jpg", b"alone's");
+    f
+}
+
+/// One pass says why a place is another row's: the very same name, or the same name but for case.
+#[test]
+fn a_pass_over_many_places_says_why_each_is_another_rows() {
+    let f = twins_and_one_alone();
+    with_rule_for_test(CaseRule::Insensitive, || {
+        let mut places = case_place::PlaceCheck::new(&f.db, f.root.path(), CaseRule::host());
+        let clash = |places: &mut case_place::PlaceCheck<'_>, id: &str| places.clash(&get(&f.db, id)).unwrap();
+        assert_eq!(clash(&mut places, "lower"), Some(case_place::Clash::Case));
+        assert_eq!(clash(&mut places, "same-a"), Some(case_place::Clash::SameName));
+        assert_eq!(clash(&mut places, "same-b"), Some(case_place::Clash::SameName));
+        assert_eq!(clash(&mut places, "upper"), None);
+        assert_eq!(clash(&mut places, "alone"), None);
+        assert!(!places.is_own_place("lower") && !places.is_own_place("same-a"));
+        assert!(places.is_own_place("upper") && places.is_own_place("alone"));
+        assert!(
+            !places.is_own_place("no such row"),
+            "a row that is not there has no place of its own"
+        );
+    });
+}
+
+/// Free up space (`free_up_space::dehydrate_these`, Windows): the place it would make online only is never the entry of
+/// another row; the owner row and a row alone keep theirs.
+#[test]
+fn free_up_space_never_reclaims_another_rows_entry() {
+    let f = twins_and_one_alone();
+    with_rule_for_test(CaseRule::Insensitive, || {
+        let mut places = case_place::PlaceCheck::new(&f.db, f.root.path(), CaseRule::host());
+        let mut place = |id: &str, rel: &str| crate::name_alias::reclaim_place_of(&mut places, id, rel);
+        assert_eq!(place("lower", "report.pdf"), None, "the case twin");
+        assert_eq!(place("same-a", "Photo.jpg"), None, "a same-name twin");
+        assert_eq!(place("same-b", "Photo.jpg"), None, "the other same-name twin");
+        assert_eq!(place("upper", "Report.pdf"), Some(f.root.path().join("Report.pdf")));
+        assert_eq!(place("alone", "alone.jpg"), Some(f.root.path().join("alone.jpg")));
+    });
+}
+
+/// Photo previews: a photo's original is read for its preview only from its own entry; never the other row's bytes as
+/// its preview.
+#[test]
+fn a_photo_preview_is_never_made_from_another_rows_entry() {
+    use crate::photo_previews::plan;
+    let f = twins_and_one_alone();
+    row(&f.db, "pic-upper", "Pic.jpg", None, false, true, FileStatus::Local);
+    row(&f.db, "pic-lower", "pic.jpg", None, false, true, FileStatus::Local);
+    write(f.root.path(), "Pic.jpg", b"pic-upper's");
+    let photos = plan::local_photos(&f.db).unwrap();
+    let own = |id: &str| {
+        let photo = photos.iter().find(|photo| photo.id == id).unwrap();
+        plan::own_place(&f.db, f.root.path(), photo)
+    };
+    with_rule_for_test(CaseRule::Insensitive, || {
+        assert!(!own("pic-lower"), "the case twin");
+        assert!(!own("same-a") && !own("same-b"), "the same-name twins");
+        assert!(own("pic-upper"), "the row whose spelling the entry has");
+        assert!(own("alone"), "a photo alone at its place");
+    });
+    with_rule_for_test(CaseRule::Sensitive, || {
+        assert!(own("pic-lower"), "a volume that tells case apart: its own entry");
+        assert!(!own("same-a"), "one name is one entry on every volume");
+    });
+}

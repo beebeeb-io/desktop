@@ -136,8 +136,14 @@ pub const NO_SYNC_FOLDER: &str = "no sync folder is set on this computer";
 pub const NOT_SIGNED_IN: &str = "not signed in";
 pub const NOT_YOURS: &str = "the local state on this computer is another account's";
 pub const NO_LOCAL_STATE: &str = "the local state on this computer could not be opened";
+/// The entry at the item's place on this computer is another item's (`drive_v2::case_place`): two server items with
+/// one name, or with one name but for letter case on a volume that compares names without case.
+pub const SHARED_PLACE: &str = "another item here has the same name on this computer";
 
-/// The pin change itself, on a state database already open.
+/// The pin change itself, on a state database already open. Refused, and nothing written, when the entry at the item's
+/// place is another row's: the change pins and fetches by that place on disk (the system's pin state, the download
+/// that keeps it), so it would keep or release the other row's file as this one, and record this one as kept while its
+/// own bytes never come. Asked before the state database or the queued change for other devices are written.
 fn pin(
     identity: &'static crate::identity::EngineIdentity,
     api_base: &str,
@@ -146,6 +152,14 @@ fn pin(
     file_id: &str,
     kept: bool,
 ) -> Result<(), String> {
+    if let Ok(Some(entry)) = db.get_file(file_id)
+        && !matches!(
+            crate::drive_v2::case_place::place_is_another_rows(&db, sync_root, &entry),
+            Ok(false)
+        )
+    {
+        return Err(SHARED_PLACE.to_string());
+    }
     // The pin change reads and writes the state database only (and the OS pin state): no request, so the client
     // carries no token and no key, as the 0.8 app's command builds it.
     let api = Arc::new(ApiClient::new(api_base.to_string(), String::new(), [0u8; 32]));
