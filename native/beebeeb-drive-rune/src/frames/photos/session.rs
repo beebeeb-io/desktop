@@ -432,12 +432,7 @@ impl Ui {
                 Intent::AddFolder => self.later.pick = Some(Pick::Folder),
                 // A move to Trash of one of them is still on its way: nothing is moved, as Files refuses it.
                 Intent::Move(ids) if ids.iter().any(|id| self.later.trashing.contains(id)) => {
-                    self.toast = Some(Toast::Left {
-                        what: What::Trash,
-                        why: Left::InFlight,
-                        count: ids.len(),
-                        again: Vec::new(),
-                    })
+                    self.toast = Some(Toast::Words(WORDS_MOVE_IN_FLIGHT))
                 }
                 Intent::Move(ids) => match self.source.file_items(&ids) {
                     Some(items) if !items.is_empty() && !self.later.closed => self.later.pick = Some(Pick::Move(items)),
@@ -516,6 +511,8 @@ impl Ui {
 /// What is said when a folder could not be added, and when photos could not be moved.
 const WORDS_FOLDER: &str = "Couldn\u{2019}t add that folder \u{00B7} not available right now";
 const WORDS_CHANGE: &str = "Couldn\u{2019}t change that folder";
+/// Move… while a move to Trash of the photo is on its way: what did not happen, then Files' own sentence.
+const WORDS_MOVE_IN_FLIGHT: &str = "Couldn\u{2019}t move. The last change is still on its way.";
 const WORDS_MOVE: &str = "Couldn\u{2019}t move \u{00B7} not available right now";
 
 impl Toast {
