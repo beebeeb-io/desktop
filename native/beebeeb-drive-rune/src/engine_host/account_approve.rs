@@ -555,7 +555,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                         .iter_mut()
                         .find(|held| held.id == request && held.made_for == now);
                     match held {
-                        Some(held) if true || held.facts == found.facts() => held.found = Some(found),
+                        Some(held) if held.facts == found.facts() => held.found = Some(found),
                         Some(_) => {
                             // Not the request on screen: the review ends, and the code is asked again from the start.
                             self.account_approve
