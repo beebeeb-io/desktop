@@ -51,34 +51,38 @@ impl State {
         let lead = self.selected.and_then(|i| id_of(self, i));
         let anchor = self.actions.anchor.and_then(|i| id_of(self, i));
         let selected: Vec<String> = self.actions.selection.iter().filter_map(|&i| id_of(self, i)).collect();
-        let kind = |i: &DriveItem| {
-            i.name
-                .rsplit_once('.')
-                .map(|(_, ext)| ext.to_lowercase())
-                .unwrap_or_default()
-        };
-        self.listing.items.sort_by(|a, b| {
-            use std::cmp::Ordering;
-            let pinned = b.is_protected.cmp(&a.is_protected);
-            let folders = if sort.folders_first {
-                b.is_folder.cmp(&a.is_folder)
-            } else {
-                Ordering::Equal
-            };
-            let name = long_list::sort_key(&a.name).cmp(&long_list::sort_key(&b.name));
-            let by = match sort.by {
-                SortBy::Name => name,
-                // Newest first, largest first: the board's first Order choice for these.
-                SortBy::DateChanged => b.modified_at.cmp(&a.modified_at),
-                SortBy::Size => b.size.unwrap_or(0).cmp(&a.size.unwrap_or(0)),
-                SortBy::Type => kind(a).cmp(&kind(b)),
-            };
-            let by = if sort.reversed { by.reverse() } else { by };
-            pinned.then(folders).then(by).then(name)
-        });
+        self.listing.items.sort_by(|a, b| compare(sort, a, b));
         let row_of = |s: &State, id: &String| s.listing.items.iter().position(|i| &i.id == id);
         self.selected = lead.and_then(|id| row_of(self, &id));
         self.actions.anchor = anchor.and_then(|id| row_of(self, &id));
         self.actions.selection = selected.iter().filter_map(|id| row_of(self, id)).collect();
     }
+}
+
+/// Which of two rows comes first in a folder of this sort ([`State::apply_sort`]). A row that the read after a check
+/// brings in stands where this puts it (`reread.rs`).
+pub(super) fn compare(sort: Sort, a: &DriveItem, b: &DriveItem) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let kind = |i: &DriveItem| {
+        i.name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_lowercase())
+            .unwrap_or_default()
+    };
+    let pinned = b.is_protected.cmp(&a.is_protected);
+    let folders = if sort.folders_first {
+        b.is_folder.cmp(&a.is_folder)
+    } else {
+        Ordering::Equal
+    };
+    let name = long_list::sort_key(&a.name).cmp(&long_list::sort_key(&b.name));
+    let by = match sort.by {
+        SortBy::Name => name,
+        // Newest first, largest first: the board's first Order choice for these.
+        SortBy::DateChanged => b.modified_at.cmp(&a.modified_at),
+        SortBy::Size => b.size.unwrap_or(0).cmp(&a.size.unwrap_or(0)),
+        SortBy::Type => kind(a).cmp(&kind(b)),
+    };
+    let by = if sort.reversed { by.reverse() } else { by };
+    pinned.then(folders).then(by).then(name)
 }

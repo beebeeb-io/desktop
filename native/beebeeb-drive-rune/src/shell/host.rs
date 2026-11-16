@@ -93,9 +93,12 @@ pub struct Shell {
     pub(crate) away: super::away::AwayLock,
     /// What the flyout was last told of the away lock's cover (`registry::covered`): `Some(sync runs)` while covered.
     pub(crate) flyout_covered: Option<bool>,
-    /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle): a list that showed
-    /// an error or nothing is read again then ([`read_again_after_a_check`]).
+    /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle): Photos reads its
+    /// library again, and the Files window the folder it shows ([`read_again_after_a_check`]).
     check_finished: bool,
+    /// A finished check whose read of the folder shown waits for what is open over the rows to close
+    /// (`State::reread_waits`).
+    files_reread_due: bool,
     /// Carries out what the player asked of the OS's media controls (`media::os_controls::UiControls::pump`), on
     /// the UI thread, at the end of every poll. Held so a test counts the calls; the real one reads the main
     /// window's handle from the slot and does nothing while there is none.
@@ -147,6 +150,7 @@ impl Shell {
             #[cfg(test)]
             sync_off_opened: 0,
             check_finished: false,
+            files_reread_due: false,
             away: super::away::AwayLock::default(),
             flyout_covered: None,
         }
@@ -565,12 +569,12 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     }
     // A refused sync start says so, once per attempt (the refusal modal, Q3).
     changed |= open_sync_refusal(s);
-    // The first sync's files, once a check finished (R1.1).
     // Photos reads its library again once a check finished (`frames::photos::after_a_check`).
     if s.shell.check_finished {
         crate::frames::photos::after_a_check(s);
     }
-    changed |= read_again_after_a_check(s);
+    // The folder shown, read again once a check finished: the first sync's files (R1.1), and what arrived since.
+    changed |= read_again_after_a_check(s, tx);
     // A lock, a sign-out or another account ends what was open inside the account sections: a
     // review of another device's sign-in, a typed code or password, a Windows Hello that is up.
     // Compared with what this poll saw last, not with this poll's own refresh: the engine's
@@ -775,6 +779,8 @@ fn on_gate_change(s: &mut State) {
     s.listing = listing;
     s.list_error = list_error;
     s.selected = None;
+    // The root was just read: a read a finished check still owed is done.
+    s.shell.files_reread_due = false;
     let gate = s.shell.app.gate();
     start_first_run(s);
     // The first run's File Explorer step is about the sync folder: a start is asked for with it, as when the main
@@ -828,19 +834,37 @@ fn open_sync_refusal(s: &mut State) -> bool {
     dispatch(s, Event::OpenDialog(Dialog::SyncOff)) == Outcome::Changed
 }
 
-/// The first sync on this PC, as the window sees it (R1.1 of the sync-start contract): the gate opened before anything
-/// had synced, so the folder could not be read, or read as empty, and the window said so. Each check the running engine
-/// finishes (the b's engine state turns Idle) reads that folder again, so the account's files appear without a click.
-/// Only a list that shows an error or nothing is read: a list with rows, a selection and the folder shown are never
-/// changed from here. `true`: it was read.
-fn read_again_after_a_check(s: &mut State) -> bool {
-    let finished = std::mem::take(&mut s.shell.check_finished);
-    let shows_nothing = s.list_error.is_some() || s.listing.items.is_empty();
-    if !finished || !shows_nothing || s.shell.app.gate() != super::app::GateState::Ready {
+/// Each check the running engine finishes (the b's engine state turns Idle) reads the folder the Files window shows
+/// again, so what arrived since (synced from this PC's folder, or from another device), was renamed or left shows
+/// without a click, and so do the first sync's files (R1.1 of the sync-start contract: the gate opened before anything
+/// had synced, and the window said so). The engine gives the window no other sign that a folder changed: its status
+/// is the one event the window reads (`engine_host::fold`). The read is merged into the view (`frames::files::reread`):
+/// the selection, the focused row, the sort and the rows in view stay with their items; an item that left goes from
+/// the selection. While something is open over the rows (a name typed in a row, a menu, a drag, a dialog) the read
+/// waits, and runs on the first poll after it closed. Nothing is read while the session gate is closed: a gate that
+/// opens reads the root itself ([`on_gate_change`]). `true`: it was read.
+fn read_again_after_a_check(s: &mut State, tx: &mut Tx) -> bool {
+    s.shell.files_reread_due |= std::mem::take(&mut s.shell.check_finished);
+    if !s.shell.files_reread_due {
         return false;
     }
+    if !super::session_gate::open(s) {
+        s.shell.files_reread_due = false;
+        return false;
+    }
+    if s.reread_waits() {
+        return false;
+    }
+    s.shell.files_reread_due = false;
     let folder = s.listing.folder.id.clone();
-    (s.listing, s.list_error) = super::state::load(s.source.as_ref(), folder.as_deref());
+    let (read, error) = super::state::load(s.source.as_ref(), folder.as_deref());
+    let scroll = s.take_reread(read, error);
+    // Only while the Files list shows: the lists of other sections use the same key.
+    let files_shown =
+        matches!(s.shell.app.screen(), super::app::Screen::Drive(route) if route.section == Section::Files);
+    if let Some(y) = scroll.filter(|_| files_shown) {
+        tx.scroll_to_y("rows", y);
+    }
     true
 }
 
