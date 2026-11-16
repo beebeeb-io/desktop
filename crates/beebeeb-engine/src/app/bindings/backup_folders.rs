@@ -449,16 +449,17 @@ pub struct SwitchRefused {
 }
 
 impl SwitchRefused {
-    /// What the window says, naming the other folder (its name in the list; never a path).
+    /// What the window says, naming the other folder (its name in the list; never a path). The window adds that
+    /// nothing was changed.
     pub fn words(&self) -> String {
         let other = &self.other;
         match self.how {
-            Nesting::Same => format!("This folder is backed up already, as {other}. Nothing was changed."),
-            Nesting::Inside => format!(
-                "This folder is inside {other}, which is backed up already, so its files are in that backup. Nothing was changed."
-            ),
+            Nesting::Same => format!("This folder is backed up already, as {other}."),
+            Nesting::Inside => {
+                format!("This folder is inside {other}, which is backed up already, so its files are in that backup.")
+            }
             Nesting::Holds => format!(
-                "This folder holds {other}, which is backed up already. Stop backing up {other} first, so nothing is backed up twice. Nothing was changed."
+                "This folder holds {other}, which is backed up already. Stop backing up {other} first, so nothing is backed up twice."
             ),
         }
     }
