@@ -382,3 +382,167 @@ fn a_shared_folders_custody_record_is_stored_and_read_back() {
     let stranger = ApiClient::new(fake.base.clone(), "another-accounts-token".into(), account.master_key);
     assert!(rt.block_on(stranger.get_shared_folder(&folder)).is_err(), "401");
 }
+
+// ── The rest of the account routes (two-factor, activity, region, resend, deletion, health, speedtest) ──────────
+
+fn get(fake: &FakeApi, account: &FakeAccount, path: &str) -> (u16, Value) {
+    send(fake, &account.session_token, call(Method::Get, path.into(), None))
+}
+
+fn post(fake: &FakeApi, account: &FakeAccount, path: &str, body: Value) -> (u16, Value) {
+    send(
+        fake,
+        &account.session_token,
+        call(Method::Post, path.into(), Some(body)),
+    )
+}
+
+#[test]
+fn the_rest_routes_stay_404_until_the_security_routes_are_on() {
+    let (account, fake) = start();
+    assert_eq!(get(&fake, &account, "/api/v1/health").0, 404);
+    assert_eq!(get(&fake, &account, "/api/v1/account/activity").0, 404);
+    account.serve_security_routes(true);
+    assert_eq!(get(&fake, &account, "/api/v1/health").0, 200);
+    let (status, _) = send(
+        &fake,
+        "another-accounts-token",
+        call(Method::Get, "/api/v1/account/activity".into(), None),
+    );
+    assert_eq!(status, 401);
+}
+
+#[test]
+fn two_factor_turns_on_with_the_first_code_and_off_with_a_current_one() {
+    let (account, fake) = start();
+    account.serve_security_routes(true);
+    let (status, setup) = post(&fake, &account, "/api/v1/auth/2fa/setup", Value::Null);
+    assert_eq!((status, setup["backup_codes"].as_array().unwrap().len()), (200, 3));
+    assert!(setup["qr_uri"].as_str().unwrap().starts_with("otpauth://"));
+    assert_eq!(
+        post(&fake, &account, "/api/v1/auth/2fa/enable", json!({ "code": "000000" })).0,
+        401
+    );
+    assert_eq!(get(&fake, &account, "/api/v1/me/two-factor").1["enabled"], false);
+    assert_eq!(
+        post(&fake, &account, "/api/v1/auth/2fa/enable", json!({ "code": "123456" })).0,
+        200
+    );
+    assert_eq!(get(&fake, &account, "/api/v1/me/two-factor").1["enabled"], true);
+    // On already: a new set-up needs the current code (or a step-up token).
+    assert_eq!(post(&fake, &account, "/api/v1/auth/2fa/setup", Value::Null).0, 403);
+    assert_eq!(
+        post(&fake, &account, "/api/v1/auth/2fa/setup", json!({ "code": "123456" })).0,
+        200
+    );
+    let (status, codes) = post(
+        &fake,
+        &account,
+        "/api/v1/auth/2fa/backup-codes",
+        json!({ "code": "123456" }),
+    );
+    assert_eq!((status, codes["backup_codes"].as_array().unwrap().len()), (200, 3));
+    assert_eq!(
+        get(&fake, &account, "/api/v1/account/security-score").1["score"],
+        5,
+        "two-factor is the fifth factor"
+    );
+    assert_eq!(
+        post(&fake, &account, "/api/v1/auth/2fa/disable", json!({ "code": "123456" })).0,
+        200
+    );
+    assert_eq!(get(&fake, &account, "/api/v1/me/two-factor").1["enabled"], false);
+}
+
+#[test]
+fn the_second_factor_step_of_a_sign_in_takes_the_code_and_the_partial_token() {
+    let (account, fake) = start();
+    account.serve_security_routes(true);
+    let body = |code: &str| json!({ "partial_token": "partial", "code": code });
+    let (status, ok) = send(
+        &fake,
+        "",
+        call(Method::Post, "/api/v1/auth/2fa/verify".into(), Some(body("123456"))),
+    );
+    assert_eq!(
+        (status, ok["session_token"] == account.session_token.as_str()),
+        (200, true)
+    );
+    let (status, _) = send(
+        &fake,
+        "",
+        call(Method::Post, "/api/v1/auth/2fa/verify".into(), Some(body("999999"))),
+    );
+    assert_eq!(status, 401);
+}
+
+#[test]
+fn the_activity_score_region_and_flag_routes_read_in_the_clients_shapes() {
+    let (account, fake) = start();
+    account.serve_security_routes(true);
+    let (client, rt) = (api(&fake, &account), runtime());
+    let activity = rt.block_on(client.account_activity()).unwrap();
+    assert_eq!(activity.events.len(), 1);
+    assert_eq!(activity.summary.active_sessions, 1);
+    let score = rt.block_on(client.security_score()).unwrap();
+    assert_eq!((score.score, score.factors.len()), (4, 5));
+    let feed = rt.block_on(client.activity_feed(Some(1), Some(1))).unwrap();
+    assert_eq!((feed.events.len(), feed.total), (1, 2));
+    let page2 = rt.block_on(client.activity_feed(Some(2), Some(1))).unwrap();
+    assert_eq!(page2.events[0].id, "fixture-feed-2");
+
+    let region = rt.block_on(client.account_region()).unwrap();
+    assert_eq!(region.preferred_region.as_deref(), Some("europe"));
+    assert_eq!(region.choices.len(), 2);
+    rt.block_on(client.set_preferred_region(Some("de"), Some(true)))
+        .unwrap();
+    let region = rt.block_on(client.account_region()).unwrap();
+    assert_eq!(
+        (region.preferred_region.as_deref(), region.region_strict),
+        (Some("de"), true)
+    );
+
+    let (status, flags) = get(&fake, &account, "/api/v1/feature-flags/evaluate");
+    assert_eq!(
+        (status, flags["flags"]["shared_folders_v1"].clone()),
+        (200, json!(true))
+    );
+}
+
+#[test]
+fn an_email_code_is_sent_again_three_times_and_then_refused() {
+    let (account, fake) = start();
+    account.serve_security_routes(true);
+    assert_eq!(post(&fake, &account, "/api/v1/me/email/resend", Value::Null).0, 404);
+    account.start_email_change("new-address@example.invalid");
+    for left in [2u64, 1, 0] {
+        let (status, body) = post(&fake, &account, "/api/v1/me/email/resend", Value::Null);
+        assert_eq!(status, 200);
+        assert_eq!(body["pending_email"], "new-address@example.invalid");
+        assert_eq!(body["resends_left"], left);
+    }
+    let (status, body) = post(&fake, &account, "/api/v1/me/email/resend", Value::Null);
+    assert_eq!((status, body["error"].as_str()), (429, Some("email_code_resend_limit")));
+}
+
+#[test]
+fn the_deletion_state_follows_what_the_test_set() {
+    let (account, fake) = start();
+    account.serve_security_routes(true);
+    for state in ["none", "requested", "scheduled"] {
+        account.set_deletion_state(state);
+        let (status, body) = get(&fake, &account, "/api/v1/auth/account/deletion");
+        assert_eq!((status, body["state"].as_str()), (200, Some(state)));
+    }
+    assert!(get(&fake, &account, "/api/v1/auth/account/deletion").1["cancel_until"].is_string());
+}
+
+#[test]
+fn health_and_the_speedtest_answer_for_the_clients_latency_and_speed_checks() {
+    let (account, fake) = start();
+    account.serve_security_routes(true);
+    let (client, rt) = (api(&fake, &account), runtime());
+    rt.block_on(client.ping_health()).unwrap();
+    assert_eq!(rt.block_on(client.speedtest_download(100_000)).unwrap().len(), 100_000);
+    rt.block_on(client.speedtest_upload(&[0u8; 5_000])).unwrap();
+}
