@@ -108,6 +108,7 @@ pub mod transfer_progress;
 pub mod unknown_check;
 pub mod upload_finalization_plan;
 pub mod vault_tree;
+pub mod video_frame_source;
 pub mod watcher;
 #[cfg(target_os = "windows")]
 pub mod windows_cf;

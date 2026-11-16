@@ -89,6 +89,8 @@ pub fn install_shell_player<C: CredentialStores + 'static>(engine: Arc<Engine<C>
         VideoSurface::new(),
     );
     crate::media::set_shell_player(player);
+    // The engine's video thumbnails come from the same confined helper, never from a program found by name.
+    crate::media::thumb_frame::install();
 }
 
 /// One opened file's bytes, read by the engine for the session it was opened for.
