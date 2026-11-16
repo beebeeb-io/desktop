@@ -34,8 +34,8 @@ pub(super) const KEY_PROOF_UNAVAILABLE: &str =
 impl<C: CredentialStores> Engine<C> {
     /// The stored key of the account this sign-in is for, asked of the server under the NEW session's token.
     /// `Err` is the sentence to show: the server gave no answer, so nothing may be decided.
-    pub(super) async fn prove_kept_key(&self, token: &str) -> Result<KeptKey, String> {
-        let Some(key) = self.read_kept_key() else {
+    pub(super) async fn prove_kept_key(&self, token: &str, user_id: &str) -> Result<KeptKey, String> {
+        let Some(key) = self.read_kept_key(user_id) else {
             return Ok(KeptKey::NoneHere);
         };
         let master = beebeeb_core::kdf::MasterKey::from_bytes(*key);
@@ -47,10 +47,13 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// The key in the credential store, behind the same owner check every loader passes (`load_session_from_vault`).
-    fn read_kept_key(&self) -> Option<Zeroizing<[u8; 32]>> {
+    /// The key in the credential store, only when its owner tag is `user_id`, the account this sign-in is for. An
+    /// untagged key (Unknown), another account's, or a tag that cannot be read is NoneHere: it is never asked of the
+    /// server under this token, which would let the server link the two accounts.
+    fn read_kept_key(&self, user_id: &str) -> Option<Zeroizing<[u8; 32]>> {
         let mut vault = self.vault();
-        if !key_owner::stored_key_ownership(&vault).ok()?.may_load() {
+        let owner = vault.vault_key_owner().ok().flatten()?;
+        if !key_owner::tag_is_account(&owner, user_id) {
             return None;
         }
         vault.unlock().ok()?;
@@ -94,5 +97,56 @@ fn proof_of(answer: Result<recovery::RecoveryCheckAnswer, String>) -> KeyProof {
         Ok(Answer::Mismatch) => KeyProof::Mismatch,
         Ok(Answer::NoCheckOnFile) => KeyProof::NoCheckOnFile,
         Err(_) => KeyProof::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::super::{Engine, EngineConfig};
+    use crate::host::ChannelHost;
+    use crate::identity::REAL;
+    use crate::keychain::SecretBytes;
+    use crate::signin::memory_store::MemoryCredentials;
+
+    fn engine_with_key(owner: Option<&str>) -> Arc<Engine<MemoryCredentials>> {
+        let (host, _messages) = ChannelHost::new(|| {});
+        let config = EngineConfig {
+            account_id: "a-kept-key-slot".into(),
+            state_dir: crate::state_paths::init_for_test(),
+            api_base: "http://127.0.0.1:9".into(),
+        };
+        let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("opens"));
+        let vault = engine.vault();
+        vault.store_wrapped_master_key(SecretBytes::new_master_key(&[9; 32])).unwrap();
+        if let Some(owner) = owner {
+            vault.bind_vault_key_owner(owner).unwrap();
+        }
+        engine
+    }
+
+    #[test]
+    fn a_key_of_this_account_is_read() {
+        let engine = engine_with_key(Some("user-a"));
+        assert!(engine.read_kept_key("user-a").is_some());
+    }
+
+    #[test]
+    fn an_untagged_key_is_none_here() {
+        let engine = engine_with_key(None);
+        assert!(engine.read_kept_key("user-a").is_none());
+    }
+
+    #[test]
+    fn another_accounts_key_is_none_here() {
+        let engine = engine_with_key(Some("user-b"));
+        assert!(engine.read_kept_key("user-a").is_none());
+    }
+
+    #[test]
+    fn a_blank_signing_in_id_matches_nothing() {
+        let engine = engine_with_key(Some(" "));
+        assert!(engine.read_kept_key(" ").is_none());
     }
 }
