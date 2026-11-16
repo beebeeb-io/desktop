@@ -38,6 +38,8 @@ struct DriveMock {
     /// mounts during the check). Its one test is Unix only.
     #[cfg_attr(not(unix), allow(dead_code))]
     create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// The next folder create is carried out but answered 500 (its answer lost on the way back).
+    lose_create_answer: Arc<AtomicBool>,
 }
 
 const PAGE: usize = 2;
@@ -117,6 +119,8 @@ impl DriveMock {
         let notices: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(Some(Vec::new())));
         let fail_later_pages = Arc::new(AtomicBool::new(false));
         let create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::default();
+        let lose_create_answer = Arc::new(AtomicBool::new(false));
+        let lose = Arc::clone(&lose_create_answer);
         let (tree, log, halt) = (Arc::clone(&nodes), Arc::clone(&requests), Arc::clone(&stop));
         let (ahead, rows, fail_later) = (
             Arc::clone(&date_ahead_s),
@@ -193,7 +197,10 @@ impl DriveMock {
                     };
                     let answer = node_json(&id, &node);
                     tree.insert(id, node);
-                    http_json("201 Created", answer)
+                    match lose.swap(false, Ordering::SeqCst) {
+                        true => http_json("500 Internal Server Error", serde_json::json!({ "error": "lost" })),
+                        false => http_json("201 Created", answer),
+                    }
                 } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
                     let id = path.trim_start_matches("/api/v1/files/").to_string();
                     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
@@ -229,6 +236,7 @@ impl DriveMock {
             notices,
             fail_later_pages,
             create_on_notices,
+            lose_create_answer,
         }
     }
 

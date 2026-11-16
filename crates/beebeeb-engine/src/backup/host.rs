@@ -127,35 +127,103 @@ impl DesktopBackupHost {
         Ok((tree, clock))
     }
 
-    /// The category folder's id: the remembered one, else (a first backup, or "Back up again") for a known folder the
-    /// live folder of that name in the device folder (the old mirror's `GLegion/Pictures` is adopted), else a new one.
-    ///
-    /// A folder the person chose (`Category::Custom`) with no folder remembered never adopts (P3-10, by
-    /// construction): a live folder of its name may be another backup the person kept ("Stop and keep the backup")
-    /// that the local rows do not hold yet, so its new name could not skip it; its pass would write into that kept
-    /// backup. It gets a new folder. "Back up again" after a stop (which forgets the folder) also starts a new folder
-    /// for it, beside the old one if that one is still there.
+    /// The category folder's id: the remembered one, else (a first backup, or "Back up again") the live folder of that
+    /// name in the device folder (the old mirror's `GLegion/Pictures` is adopted), else a new one. A folder the person
+    /// chose: [`Self::chosen_category_folder`].
     async fn category_folder(&self, c: &Category) -> Result<(String, Option<bool>), HostError> {
+        if matches!(c, Category::Custom(_)) {
+            return self.chosen_category_folder(c).await;
+        }
         let db = self.bridge.db();
         if let Some(id) = db
             .backup_category_folder(&c.key())
             .map_err(db_error("category_folder"))?
         {
-            let state = self
-                .bridge
-                .backup_folder_state(&id)
-                .await
-                .map_err(host_error("category_folder_state"))?;
+            let state = self.folder_state(&id).await?;
             return Ok((id, Some(state == BackupFolderState::Live)));
         }
-        let parent = &self.layout.device_folder_id;
-        let id = if matches!(c, Category::Custom(_)) {
-            self.bridge.backup_create_folder(parent, c.display_name()).await
-        } else {
-            self.bridge.backup_ensure_folder(parent, c.display_name()).await
-        }
-        .map_err(host_error("category_folder_create"))?;
+        let id = self
+            .bridge
+            .backup_ensure_folder(&self.layout.device_folder_id, c.display_name())
+            .await
+            .map_err(host_error("category_folder_create"))?;
         db.set_backup_category_folder(&c.key(), Some(&id))
+            .map_err(db_error("category_folder"))?;
+        Ok((id, None))
+    }
+
+    async fn folder_state(&self, id: &str) -> Result<BackupFolderState, HostError> {
+        self.bridge
+            .backup_folder_state(id)
+            .await
+            .map_err(host_error("category_folder_state"))
+    }
+
+    /// A chosen folder's category folder (P3-10, by construction): the folder whose id its settings entry holds
+    /// (`ChosenFolder::folder_id`, the local data's owner's entry), never a folder found by its name, which may be a
+    /// backup the person kept. The entry outlives a sign-out, which empties the local state.
+    /// - Its id, remembered here too (no stop and no sign-out since): live or gone, as every backup's folder (a gone
+    ///   one stops the backup, rule 11).
+    /// - Its id, not remembered (signed in again, or "Back up again" after a stop): continued while it is a live
+    ///   folder in this device's folder (never one elsewhere), and remembered. A listing that is not complete answers
+    ///   an error: the folder may be in the part not read, and nothing is made.
+    /// - No id (a new add, or a settings file from before the id), or its folder is gone: a new folder. Its id is
+    ///   minted and recorded in the entry BEFORE the create, so a create whose answer is lost is found by its id on
+    ///   the next pass, never made twice; an id that cannot be recorded makes nothing.
+    async fn chosen_category_folder(&self, c: &Category) -> Result<(String, Option<bool>), HostError> {
+        let db = self.bridge.db();
+        let key = c.key();
+        let owner = db
+            .owner()
+            .map_err(db_error("category_folder"))?
+            .ok_or_else(|| HostError("category_folder: no account is bound".into()))?;
+        let cfg = crate::config::DesktopConfig::load_for(self.bridge.identity)
+            .map_err(|_| HostError("category_folder: the settings could not be read".into()))?;
+        let entry = crate::app::bindings::backup_folders::chosen_for(&cfg.backup_chosen_folders, Some(&owner))
+            .into_iter()
+            .find(|folder| folder.key() == key)
+            .ok_or_else(|| HostError("category_folder: not a chosen folder of this account".into()))?;
+        let remembered = db.backup_category_folder(&key).map_err(db_error("category_folder"))?;
+        let parent = &self.layout.device_folder_id;
+        if let Some(id) = entry.folder_id {
+            if remembered.as_deref() == Some(id.as_str()) {
+                let state = self.folder_state(&id).await?;
+                return Ok((id, Some(state == BackupFolderState::Live)));
+            }
+            let (children, complete) = self
+                .bridge
+                .backup_list_children(parent)
+                .await
+                .map_err(host_error("category_folder_state"))?;
+            if children.iter().any(|child| child.is_folder && child.id == id) {
+                db.set_backup_category_folder(&key, Some(&id))
+                    .map_err(db_error("category_folder"))?;
+                return Ok((id, None));
+            }
+            if !complete {
+                return Err(HostError(
+                    "category_folder: the device folder was not listed completely".into(),
+                ));
+            }
+        }
+        let id = self
+            .bridge
+            .backup_new_folder_id()
+            .map_err(host_error("category_folder_create"))?;
+        let recorded = crate::config::DesktopConfig::update_for(self.bridge.identity, |cfg| {
+            let recorded = crate::app::bindings::backup_folders::record_folder_id(cfg, &key, &owner, &id);
+            (recorded, recorded)
+        });
+        if recorded != Ok(true) {
+            return Err(HostError(
+                "category_folder: the new folder's id was not recorded".into(),
+            ));
+        }
+        self.bridge
+            .backup_create_folder_as(parent, c.display_name(), &id)
+            .await
+            .map_err(host_error("category_folder_create"))?;
+        db.set_backup_category_folder(&key, Some(&id))
             .map_err(db_error("category_folder"))?;
         Ok((id, None))
     }

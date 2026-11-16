@@ -25,6 +25,8 @@ const DOCUMENTS: &str = "0193b1a6-0000-7000-8000-000000000005";
 const OTHER_DEVICE: &str = "0193b1a6-0000-7000-8000-000000000006";
 const OTHER_PROJECTS: &str = "0193b1a6-0000-7000-8000-000000000007";
 const PROJECTS_AGAIN: &str = "0193b1a6-0000-7000-8000-000000000008";
+/// A second folder named `Projects` in this device's backup (a kept backup and a new one share the name).
+const PROJECTS_TWIN: &str = "0193b1a6-0000-7000-8000-000000000009";
 
 /// The account the test's local state is bound to.
 fn me() -> Identity {
@@ -82,6 +84,15 @@ fn chosen(name: &str, path: PathBuf) -> ChosenFolder {
         name: name.into(),
         path,
         owner: owner_tag(&me()),
+        folder_id: None,
+    }
+}
+
+/// A folder [`me`] chose whose pass recorded its backup's folder `folder_id`.
+fn passed(name: &str, path: PathBuf, folder_id: &str) -> ChosenFolder {
+    ChosenFolder {
+        folder_id: Some(folder_id.into()),
+        ..chosen(name, path)
     }
 }
 
@@ -256,8 +267,8 @@ fn an_add_names_the_folder_once_and_switches_it_on() {
 fn remove_keep_leaves_the_copy() {
     let dir = tempfile::tempdir().unwrap();
     let db = laid_out(dir.path());
-    let projects = chosen("Projects", dir.path().join("Projects"));
-    let recipes = chosen("Recipes", dir.path().join("Recipes"));
+    let projects = passed("Projects", dir.path().join("Projects"), PROJECTS);
+    let recipes = passed("Recipes", dir.path().join("Recipes"), RECIPES);
     let config = RefCell::new(settings_with(&[&projects, &recipes]));
     db.enqueue_operation(&backup_op("p-1", &projects.key())).unwrap();
     db.enqueue_operation(&backup_op("r-1", &recipes.key())).unwrap();
@@ -300,8 +311,8 @@ fn remove_keep_leaves_the_copy() {
 fn remove_trash_moves_only_that_folders_copy() {
     let dir = tempfile::tempdir().unwrap();
     let db = laid_out(dir.path());
-    let projects = chosen("Projects", dir.path().join("Projects"));
-    let recipes = chosen("Recipes", dir.path().join("Recipes"));
+    let projects = passed("Projects", dir.path().join("Projects"), PROJECTS);
+    let recipes = passed("Recipes", dir.path().join("Recipes"), RECIPES);
     assert_eq!(backup_copy_of(&db, &projects).unwrap().as_deref(), Some(PROJECTS));
     assert_eq!(backup_copy_of(&db, &recipes).unwrap().as_deref(), Some(RECIPES));
     assert_eq!(
@@ -370,6 +381,35 @@ fn remove_trash_moves_only_that_folders_copy() {
     assert!(!config.borrow().known_folder_enabled(&key));
 }
 
+/// A chosen folder's backup is the folder whose id its entry holds, never another folder of its name: with a kept
+/// backup `Projects` and the folder's own `Projects` both in this device's backup, "Stop and move the backup to Trash"
+/// sends the folder's own. With no id (it never passed) there is none, whatever folders of its name the rows hold; an
+/// id the rows do not hold under this device's folder (another device's) is none too.
+#[test]
+fn the_copy_is_the_folder_whose_id_it_holds_never_a_twin_of_its_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = laid_out(dir.path());
+    folder_row(&db, PROJECTS_TWIN, "Backups/Invented-Laptop/Projects", Some(DEVICE));
+    let mut projects = passed("Projects", dir.path().join("Projects"), PROJECTS_TWIN);
+    assert_eq!(backup_copy_of(&db, &projects).unwrap().as_deref(), Some(PROJECTS_TWIN));
+    projects.folder_id = None;
+    assert_eq!(backup_copy_of(&db, &projects).unwrap(), None, "no id: no backup");
+    projects.folder_id = Some(OTHER_PROJECTS.into());
+    assert_eq!(backup_copy_of(&db, &projects).unwrap(), None, "another device's folder");
+}
+
+/// An add starts a new backup: a folder the local state remembers for its key (a removed folder of the same name
+/// passed into it) is forgotten, so the new folder's pass never continues in that kept backup.
+#[test]
+fn an_add_forgets_the_folder_a_removed_one_of_its_name_had() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = laid_out(dir.path());
+    db.set_backup_category_folder("custom:Projects", Some(PROJECTS))
+        .unwrap();
+    start_over(&REAL, &db, "custom:Projects").unwrap();
+    assert_eq!(db.backup_category_folder("custom:Projects").unwrap(), None);
+}
+
 // ── Rule 3: nothing on this PC is touched ─────────────────────────────────────────────────────────────────────────
 
 /// Adding a folder, then both ways of stopping it, read nothing but whether it is a folder and change nothing in it:
@@ -392,7 +432,7 @@ fn remove_never_touches_local_files() {
         check_chosen(&folder, &root, &taken_paths(&config, &me())).unwrap();
         let key = add_to(&mut config, &folder, &backup_folder_names(&db).unwrap(), &me()).unwrap();
         start_over(&REAL, &db, &key).unwrap();
-        let added = config.backup_chosen_folders[0].clone();
+        let mut added = config.backup_chosen_folders[0].clone();
         if password.is_some() {
             // It passed once: its backup is in this device's backup, so the move to Trash has one to move (P3-9).
             folder_row(
@@ -401,6 +441,7 @@ fn remove_never_touches_local_files() {
                 "Backups/Invented-Laptop/Projects (2)",
                 Some(DEVICE),
             );
+            added.folder_id = Some(PROJECTS_AGAIN.into());
         }
         let config = RefCell::new(config);
         let copy = backup_copy_of(&db, &added).unwrap();
@@ -724,7 +765,7 @@ fn trash_without_a_found_backup_changes_nothing() {
 fn a_not_found_puts_the_folder_back() {
     let dir = tempfile::tempdir().unwrap();
     let db = laid_out(dir.path());
-    let projects = chosen("Projects", dir.path().join("Projects"));
+    let projects = passed("Projects", dir.path().join("Projects"), PROJECTS);
     let key = projects.key();
     let config = RefCell::new(settings_with(&[&projects]));
     let copy = backup_copy_of(&db, &projects).unwrap();
@@ -745,8 +786,8 @@ fn a_not_found_puts_the_folder_back() {
 }
 
 /// P3-10: before this PC knows its backup layout, a new folder's name is kept clear of every name the local rows know
-/// in any device's backup, so it never takes the name of an earlier folder that was stopped and kept (a pass adopts a
-/// live folder of its name).
+/// in any device's backup, so it never takes the name of an earlier folder that was stopped and kept (its pass would
+/// not adopt that folder, which it finds by its own id alone, but two folders of one name would show side by side).
 #[test]
 fn with_no_layout_a_new_name_skips_every_devices_backup_names() {
     let dir = tempfile::tempdir().unwrap();
