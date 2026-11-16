@@ -130,6 +130,12 @@ pub struct ChosenFolder {
     pub name: String,
     /// The folder on this PC, absolute. Read in place, never written.
     pub path: PathBuf,
+    /// Whose it is: the account that chose it, as a digest of its local state's owner (never an email or an id in
+    /// clear; `app::bindings::backup_folders::owner_tag`). Only that account backs it up, lists it or removes it.
+    /// Missing: written by a test build before folders were per account; nobody's (passed, listed and removable for no
+    /// account), so the person adds the folder again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 impl ChosenFolder {
