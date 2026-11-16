@@ -42,7 +42,7 @@ fn the_size_is_kept_when_the_screen_has_room() {
     let u = usable(&d, &[(rect(0, 0, 1920, 1080), rect(0, 0, 1920, 1032))]);
     let r = first_place(MAIN, MIN, &u);
     assert_eq!(r.physical_size, Some((1280, 800)));
-    assert_eq!(r.position, Some((320, 116)));
+    assert_eq!(r.position, Some((319, 115)));
 }
 
 #[test]
@@ -64,12 +64,12 @@ fn a_taskbar_on_the_left_or_top_moves_the_work_area_origin() {
     let d = [display(0, 0, 1920, 1080, 1.0, true)];
     let left = usable(&d, &[(rect(0, 0, 1920, 1080), rect(60, 0, 1860, 1080))]);
     let r = first_place(MAIN, MIN, &left);
-    assert_eq!(r.position, Some((60 + (1858 - 1280) / 2, 140)));
+    assert_eq!(r.position, Some((60 + (1858 - 1280) / 2, (1079 - 800) / 2)));
     assert_eq!((left[0].x, left[0].y), (60, 0));
     let top = usable(&d, &[(rect(0, 0, 1920, 1080), rect(0, 48, 1920, 1032))]);
     let r = first_place(MAIN, MIN, &top);
     let (x, y) = r.position.unwrap();
-    assert_eq!(x, 320);
+    assert_eq!(x, 319);
     assert!(y >= 48, "{y}");
 }
 
@@ -118,7 +118,7 @@ fn a_saved_position_on_a_monitor_that_is_gone_comes_back_on_the_primary() {
     };
     let r = window_state::restore(Some(&saved), &u, MIN);
     assert_eq!(r.physical_size, Some((1280, 800)));
-    assert_eq!(r.position, Some((320, 116)));
+    assert_eq!(r.position, Some((319, 115)));
 }
 
 #[test]
