@@ -398,7 +398,7 @@ impl<C: CredentialStores> Engine<C> {
             }
             tracing::warn!("ownership proof: a stopped proof did not end in time");
             lock(&seat.state).unconfirmed.append(&mut alive);
-            ProofStop::Unconfirmed
+            ProofStop::Ended
         }
         #[cfg(not(any(target_os = "windows", test, feature = "test-support")))]
         ProofStop::Ended
