@@ -58,6 +58,22 @@ pub struct CellText {
     pub text: String,
     pub right_aligned: bool,
     pub bold: bool,
+    /// The number behind the cell: Sum, Average and Count use it, and fall back to the text only for a cell without one.
+    pub value: Option<f64>,
+    /// The cell's formula as text ("=SUM(B2:B9)"), shown in the formula bar while it is the current cell.
+    pub formula: Option<String>,
+}
+
+/// A chart or picture the sheet places: its box in points from the sheet's origin, and the cells it starts and ends in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SheetAnchor {
+    pub anchor: u32,
+    pub from: Cell,
+    pub to: Cell,
+    pub x_pt: f32,
+    pub y_pt: f32,
+    pub w_pt: f32,
+    pub h_pt: f32,
 }
 
 /// One sheet of a workbook as the viewer draws it. A live host fills it; only this is drawn from.
@@ -78,6 +94,16 @@ pub struct SheetView {
     /// Rows and columns that stay in view, as the file says.
     pub frozen: (u32, u32),
     pub merges: Vec<(Cell, Cell)>,
+    /// The sheet index `active` points at in the workbook (the tabs may be fewer than the sheets).
+    pub sheet: u32,
+    /// Rows and columns of the active sheet (the scroll bounds).
+    pub extent: (u32, u32),
+    /// The first row and column in view; the scene moves it.
+    pub top_left: Cell,
+    /// Charts and pictures of the active sheet.
+    pub anchors: Vec<SheetAnchor>,
+    /// Some content could not be drawn: the status bar says so quietly.
+    pub missing_content: bool,
 }
 
 /// Its counts, never a cell.
@@ -95,6 +121,10 @@ impl SheetView {
         }
         for cell in &mut self.cells {
             cell.text.zeroize();
+            if let Some(f) = cell.formula.as_mut() {
+                f.zeroize();
+            }
+            cell.value = None;
         }
         self.formula.zeroize();
         self.selection = None;
@@ -155,7 +185,7 @@ pub fn stats(view: &SheetView) -> Option<Stats> {
         if cell.row < r0 || cell.row > r1 || cell.col < c0 || cell.col > c1 {
             continue;
         }
-        if let Some(v) = number(&cell.text) {
+        if let Some(v) = cell.value.or_else(|| number(&cell.text)) {
             out.sum += v;
             out.count += 1;
         }
