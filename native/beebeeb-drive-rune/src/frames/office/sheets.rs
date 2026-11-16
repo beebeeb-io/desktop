@@ -784,9 +784,34 @@ pub fn window_live(
     live: &Live,
     cells: &dyn Fn(u32, u32, u32, u32, u32),
 ) -> El {
-    let (rows, cols) = fit(view, live.screen);
-    cells(view.sheet, view.top_left.row, view.top_left.col, rows * 2, cols * 2);
-    window_with(s, cx, ui, view, &Shown::from_top_left(view, live.screen), Some(live))
+    let shown = Shown::from_top_left(view, live.screen);
+    for (row, col, rows, cols) in asks(view, &shown, live.screen) {
+        cells(view.sheet, row, col, rows, cols);
+    }
+    window_with(s, cx, ui, view, &shown, Some(live))
+}
+
+/// The blocks of cells one frame asks, as (first row, first column, rows, columns): the frozen block first (the corner,
+/// then the frozen rows across the scrolled columns, then the frozen columns down the scrolled rows), then the cells in
+/// view and one screen more. Together at most `MAX_DRAWN_CELLS` cells, the earlier blocks keeping theirs.
+fn asks(view: &SheetView, shown: &Shown, screen: (f32, f32)) -> Vec<(u32, u32, u32, u32)> {
+    let (rows, cols) = fit(view, screen);
+    let (r0, c0) = (view.top_left.row, view.top_left.col);
+    let (fr, fc) = (shown.rows.frozen_walked(), shown.cols.frozen_walked());
+    let (sr, sc) = (rows.saturating_mul(2), cols.saturating_mul(2));
+    let mut left = MAX_DRAWN_CELLS as u64;
+    let mut out = Vec::new();
+    for (row, col, h, w) in [(0, 0, fr, fc), (0, c0, fr, sc), (r0, 0, sr, fc), (r0, c0, sr, sc)] {
+        if h == 0 || w == 0 || left == 0 {
+            continue;
+        }
+        // A block over what is left keeps its rows and gives up columns.
+        let h = u64::from(h).min(left);
+        let w = u64::from(w).min((left / h).max(1));
+        left -= (h * w).min(left);
+        out.push((row, col, h as u32, w as u32));
+    }
+    out
 }
 
 fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: &Shown, live: Option<&Live>) -> El {

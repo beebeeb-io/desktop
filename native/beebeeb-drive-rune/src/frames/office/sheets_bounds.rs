@@ -134,6 +134,11 @@ impl Side {
         }
     }
 
+    /// How many frozen lines the walk passed (hidden ones included): `0..frozen_walked()` is the frozen block to ask.
+    pub(super) fn frozen_walked(&self) -> u32 {
+        (self.frozen_at.len() - 1) as u32
+    }
+
     /// Keep the first `n` lines drawn (the cell budget).
     pub(super) fn keep(&mut self, n: usize) {
         self.lines.truncate(n);

@@ -440,3 +440,78 @@ fn office_states_try_again_asks_the_live_source_once() {
     rt.frame(0.0);
     assert_eq!(log.retries.get(), 1, "the source opened the file again");
 }
+
+#[test]
+fn office_docs_a_refused_page_size_draws_the_default_box() {
+    // Every size the file may state that a page cannot be draws the default page's box (A4's proportions), the page's
+    // own box when it can be; the ratio rule is 20:1 either way, the edge itself allowed.
+    let a4 = (595.0, 842.0);
+    let refused = [
+        (f32::NAN, 842.0),
+        (595.0, f32::NAN),
+        (f32::INFINITY, 842.0),
+        (595.0, f32::INFINITY),
+        (0.0, 842.0),
+        (595.0, 0.0),
+        (-595.0, 842.0),
+        (595.0, -842.0),
+        (1.0, 20.5),
+        (20.5, 1.0),
+        (1.0, 1.0e9),
+    ];
+    for size in refused {
+        let mut view = docs_fixture::view();
+        view.pages = 2;
+        view.page_sizes_pt = vec![(600.0, 300.0), size];
+        let doc = DocBody::new(view, "English (UK)");
+        assert_eq!(size_pt(&doc, 2), a4, "{size:?} is refused");
+        let (w, h) = box_pt(&doc, 2);
+        assert!(
+            (h / w - 842.0 / 595.0).abs() < 1e-4,
+            "{size:?} draws A4's proportions: {w} x {h}"
+        );
+        assert_eq!(size_pt(&doc, 1), (600.0, 300.0), "a page's own size is kept");
+    }
+    for ok in [(1.0, 20.0), (20.0, 1.0), (300.0, 600.0)] {
+        let mut view = docs_fixture::view();
+        view.pages = 1;
+        view.page_sizes_pt = vec![ok];
+        assert_eq!(size_pt(&DocBody::new(view, "English (UK)"), 1), ok, "{ok:?} is allowed");
+    }
+}
+
+#[test]
+fn office_docs_asks_a_repeated_key_once() {
+    // A build that names a key twice (the same page asked by two parts of the frame) reaches the source once, and a
+    // key with no answer yet is not asked again either.
+    let count = Cell::new(0u32);
+    let answer = |_: OfficePicture| {
+        count.set(count.get() + 1);
+        Some(pixels(2, 3))
+    };
+    let asks = Asks::new(&answer);
+    let key = OfficePicture::Page {
+        page: 0,
+        zoom_pct: 100,
+        dpi: 96,
+    };
+    let (a, b) = (asks.get(key), asks.get(key));
+    assert_eq!(count.get(), 1, "one ask for a repeated key");
+    assert!(a.is_some() && b.is_some(), "the same answer after");
+    let other = OfficePicture::Page {
+        page: 1,
+        zoom_pct: 100,
+        dpi: 96,
+    };
+    asks.get(other);
+    assert_eq!(count.get(), 2, "another key is asked");
+
+    let none_count = Cell::new(0u32);
+    let none = |_: OfficePicture| {
+        none_count.set(none_count.get() + 1);
+        None
+    };
+    let asks = Asks::new(&none);
+    assert!(asks.get(key).is_none() && asks.get(key).is_none());
+    assert_eq!(none_count.get(), 1, "a missing answer is kept for the frame too");
+}
