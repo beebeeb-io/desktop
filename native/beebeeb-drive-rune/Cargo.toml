@@ -63,6 +63,12 @@ dev-tools = ["beebeeb-engine/dev-viewer"]
 # Live feedback mode (src/feedback/): on for test builds, OFF for release.
 feedback = ["dep:wgpu"]
 
+[target.'cfg(windows)'.build-dependencies]
+# Compiles the exe's version resource and icon (`build.rs`, `build_version.rs`). A build tool only: nothing of it is
+# linked into the app and it makes no network call. MIT licence. Chosen over hand-calling rc.exe because it finds the
+# Windows SDK / MSVC resource compiler itself (vswhom, registry), which the windows-latest runner and VM 401 both have.
+embed-resource = "=3.0.12"
+
 [target.'cfg(windows)'.dependencies]
 # The same windows-sys Rune builds with: the notification-area icon, the registry Run value,
 # the taskbar's mode and the control channel's named pipe (`shell/platform/windows*.rs`).
