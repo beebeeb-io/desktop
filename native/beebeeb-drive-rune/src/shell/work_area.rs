@@ -56,9 +56,9 @@ pub fn first_place(size_points: (f32, f32), min_points: (f32, f32), monitors: &[
         return Restored::default();
     };
     let fit = |want: f32, min: f32, room: u32| {
-        let px = (f64::from(want) * m.scale).round() as u32;
-        let _ = min;
-        px.min(room).max(1)
+        let px = (f64::from(want.max(min)) * m.scale).round() as u32;
+        let _ = room;
+        px.max(1)
     };
     let (w, h) = (
         fit(size_points.0, min_points.0, m.w),
