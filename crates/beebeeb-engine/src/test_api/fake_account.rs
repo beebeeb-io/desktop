@@ -120,6 +120,12 @@ pub struct FakeAccount {
     pub(super) uploads: super::fake_uploads::UploadState,
     /// The stored search-index shards ([`super::fake_search_shards`]).
     pub(super) search_shards: super::fake_search_shards::SearchShardState,
+    /// The step-up tokens and permanent deletes ([`super::fake_purge`]).
+    pub(super) purge: super::fake_purge::PurgeState,
+    /// The account's sign-in sessions ([`super::fake_sessions`]).
+    pub(super) sessions_state: super::fake_sessions::SessionState,
+    /// Invites, file requests and shared-folder custody ([`super::fake_sharing`]).
+    pub(super) sharing: super::fake_sharing::SharingState,
     /// How many version restores reached this account (a request with its token), whatever the answer.
     restores: AtomicUsize,
     /// The status the next version restore is answered with, without being made.
@@ -135,6 +141,10 @@ pub struct FakeAccount {
 }
 
 impl FakeAccount {
+    pub(super) fn security_routes_on(&self) -> bool {
+        self.security_routes.load(Ordering::SeqCst)
+    }
+
     /// Answer the Security page's four routes (see the field); the fixture of `bb-fake-server` does.
     pub fn serve_security_routes(&self, on: bool) {
         self.security_routes.store(on, Ordering::SeqCst);
@@ -178,6 +188,9 @@ impl FakeAccount {
             versions: Mutex::new(HashMap::new()),
             uploads: Default::default(),
             search_shards: Default::default(),
+            purge: Default::default(),
+            sessions_state: Default::default(),
+            sharing: Default::default(),
             restores: AtomicUsize::new(0),
             restore_refusal: Mutex::new(None),
             restore_hangs_up: AtomicBool::new(false),
@@ -471,6 +484,18 @@ impl FakeAccount {
         }
     }
 
+    /// `DELETE /api/v1/shares/{id}`: the link is revoked (`GET /api/v1/shares/mine` still lists it, marked revoked).
+    pub(super) fn revoke_link(&self, id: &str) -> Reply {
+        let mut links = self.links.lock().expect("links");
+        match links.iter_mut().find(|link| link["id"].as_str() == Some(id)) {
+            Some(link) => {
+                link["revoked"] = json!(true);
+                Reply::ok(json!({ "success": true }))
+            }
+            None => Reply::json(404, json!({ "error": "not_found" })),
+        }
+    }
+
     /// `POST /api/v1/shares`: a link to a live item of this account; another id is not found.
     fn post_link(&self, body: &Value) -> Reply {
         let file_id = body.get("file_id").and_then(Value::as_str).unwrap_or_default();
@@ -569,6 +594,14 @@ impl FakeAccount {
 pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
     Arc::new(move |req: &Request| {
         let route = req.route();
+        // The stateful routes of their own files, before the broad `/api/v1/files/` arms below.
+        if let Some(reply) = account
+            .purge_route(&req)
+            .or_else(|| account.sessions_route(&req))
+            .or_else(|| account.sharing_route(&req))
+        {
+            return reply;
+        }
         match route.as_str() {
             // ── OPAQUE sign-in ──────────────────────────────────────────
             "POST /api/v1/opaque/login-start" => account.opaque.login_start(&req.json()),
@@ -617,20 +650,6 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
             }
 
             // ── What the Security page reads: invented rows, in the client's shapes ──
-            "GET /api/v1/account/sessions" if account.security_routes.load(Ordering::SeqCst) => {
-                if req.bearer() != Some(&account.session_token) {
-                    return Reply::error(401, "unauthorized");
-                }
-                Reply::ok(json!({ "sessions": [{
-                    "id": "fixture-session-1",
-                    "device_name": "Fixture PC",
-                    "device_kind": "desktop",
-                    "country_code": "DE",
-                    "last_active_at": "2026-11-15T05:00:00Z",
-                    "is_current": true,
-                }] }))
-            }
-
             "GET /api/v1/me/activity" if account.security_routes.load(Ordering::SeqCst) => {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
@@ -939,9 +958,6 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }
                 account.search_shard_route(req)
             }
-
-            // ── Shares invites ──────────────────────────────────────────
-            "GET /api/v1/shares/invites/incoming" => Reply::ok(json!({ "invites": [] })),
 
             // ── Share links: make one, list the account's ───────────────
             "POST /api/v1/shares" => {
