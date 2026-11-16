@@ -52,6 +52,9 @@ mod binding_tests;
 pub mod drive_previews;
 pub mod drive_settings;
 pub mod files;
+#[cfg(test)]
+#[path = "engine_host/files_case_twins_tests.rs"]
+mod files_case_twins_tests;
 mod files_conflicts;
 mod files_downloads;
 mod files_facts;
@@ -697,7 +700,7 @@ fn not_wired(what: &str) -> ActionError {
 /// every hand-over of a file to another app (the Files window's Open, a viewer's "Open in another app…").
 fn path_the_system_opens(db: &StateDb, sync_root: &Path, id: &str) -> Result<std::path::PathBuf, ActionError> {
     let entry = file_ops::resolve(db, id).map_err(map_drive_err)?;
-    let path = file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?;
+    let path = file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)?;
     if !entry.is_dir() && file_ops::is_dangerous_executable(&path) {
         return Err(ActionError::Failed);
     }
@@ -1003,7 +1006,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
             let mut paths = Vec::with_capacity(items.len());
             for item in items {
                 let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
-                paths.push(file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?);
+                paths.push(file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)?);
             }
             Ok(paths)
         })?;
@@ -1137,7 +1140,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         let path = self.local(|db, sync_root| match folder {
             Some(id) => {
                 let entry = file_ops::resolve(db, id).map_err(map_drive_err)?;
-                file_ops::item_path(sync_root, &entry).map_err(map_drive_err)
+                file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)
             }
             None => Ok(sync_root.to_path_buf()),
         })?;
