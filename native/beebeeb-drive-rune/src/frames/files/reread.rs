@@ -43,7 +43,8 @@ impl State {
     /// window or of the shell, the message of a protected folder. The read of a finished check waits until it closed.
     pub(crate) fn reread_waits(&self) -> bool {
         let actions = &self.actions;
-        actions.menu.is_some()
+        actions.rename.is_some()
+            || actions.menu.is_some()
             || actions.upload_menu.is_some()
             || actions.drop_hover.is_some()
             || actions.dialog.is_some()

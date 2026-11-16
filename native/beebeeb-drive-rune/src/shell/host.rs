@@ -894,7 +894,7 @@ fn read_again_after_a_check(s: &mut State, tx: &mut Tx) -> bool {
     let files_shown =
         matches!(s.shell.app.screen(), super::app::Screen::Drive(route) if route.section == Section::Files);
     if let Some(y) = scroll.filter(|_| files_shown) {
-        tx.scroll_to_y("rows", y);
+        let _ = y;
     }
     true
 }
