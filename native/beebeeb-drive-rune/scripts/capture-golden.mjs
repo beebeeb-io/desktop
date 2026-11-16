@@ -135,6 +135,8 @@ try {
     const out = {}; const problems = [];
     const put = (key, rec) => { if (out[key]) problems.push(`duplicate key ${key}`); out[key] = rec; };
     const api = {
+      // A key an earlier keymap file set that a later one knows is another element's: removed (keymap-viewers.js).
+      drop(key) { delete out[key]; },
       // A box: position and size, its fill, and (px) the pixels inside it.
       box(key, el, extra = {}) {
         if (!el) return;

@@ -56,7 +56,9 @@ fn what_goes(f: &Form, t: &Theme) -> El {
             // shown once the deletion is scheduled (DW-A82).
             set::heading(
                 "Delete your Beebeeb account?",
-                Some("After you confirm by email, you can undo it until the date shown. Then it is final."),
+                Some(
+                    "After you confirm by email, you can still undo it until a date we show you. After that, it can't be undone.",
+                ),
                 None,
                 t,
             ),

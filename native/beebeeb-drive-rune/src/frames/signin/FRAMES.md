@@ -163,11 +163,11 @@ security, wait an hour and try again."); a vault password or a new password the 
   keys were kept." when its stored session or its local files are another account's; "Approved, but this PC did not
   sign in" / "Nothing was signed in. Ask again." when it moved on while it waited (a sign-in, a lock or a sign-out
   here) or could not store the session. No account is named.
-- **DW-A08 is not seen after a real approval (row 3.4, open).** The engine opens the session before the request's
-  answer reaches the window, and the shell draws this group only while signed out (`shell/app.rs` `AppMachine::screen`:
-  `SignedOut` is the sign-in window, `Ready` is Files, the first run is its own gate). The gate decides which screen
-  shows, as after a password sign-in. Nothing in this group can hold DW-A08 on screen over an open gate.
-  Fixing it needs the shell to keep the sign-in window for "Open Drive" (`shell/host.rs`), outside this group.
+- **DW-A08 is seen after a real approval (row A08).** The engine opens the session before the request's answer reaches
+  the window. `Ui::holds_open_gate` is true on the waiting request and on "Approved"; the poll hands it to
+  `AppMachine::hold_sign_in`, and `AppMachine::screen` keeps the sign-in window for an open (Ready) gate while it holds.
+  `follow_gate` does not reset those two screens over Ready. "Open Drive" clears the screen, so the gate decides alone.
+  Other gates are never held.
 
 ## Where each screen lives
 

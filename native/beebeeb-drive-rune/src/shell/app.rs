@@ -323,6 +323,9 @@ pub struct AppMachine {
     settings: Option<SettingsPane>,
     dialog: Option<Dialog>,
     pending: Option<Intent>,
+    /// The sign-in window holds a screen that must be seen over an open gate (DW-A08, "Approved"):
+    /// the engine opens the session before the request's answer reaches the window.
+    sign_in_hold: bool,
 }
 
 impl AppMachine {
@@ -341,6 +344,7 @@ impl AppMachine {
             settings: None,
             dialog: None,
             pending: None,
+            sign_in_hold: false,
         }
     }
 
@@ -348,9 +352,18 @@ impl AppMachine {
         self.gate
     }
 
+    /// The sign-in window asks to stay in front of an open gate until the person leaves its screen
+    /// (`frames::signin::Ui::holds_open_gate`). Only an open gate is held; every other gate decides alone.
+    pub fn hold_sign_in(&mut self, hold: bool) -> bool {
+        let changed = self.sign_in_hold != hold;
+        self.sign_in_hold = hold;
+        changed
+    }
+
     pub fn screen(&self) -> Screen {
         match self.gate {
             GateState::SignedOut => Screen::SignIn,
+            GateState::Ready if self.sign_in_hold => Screen::SignIn,
             GateState::Ready => match self.settings {
                 Some(pane) => Screen::Settings(pane),
                 None => Screen::Drive(self.current.clone()),

@@ -1759,26 +1759,6 @@
    "tracking": 0,
    "lh": "15px"
   },
-  "dlg-text-1": {
-   "kind": "text",
-   "x": 287,
-   "y": 495.75,
-   "w": 384,
-   "h": 16,
-   "text": "To confirm it's you. Used only after Windows Hello confirms it.",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 400,
-   "color": [
-    137,
-    134,
-    129,
-    255
-   ],
-   "tracking": 0,
-   "lh": "16px"
-  },
   "dlg-foot": {
    "kind": "box",
    "x": 259,

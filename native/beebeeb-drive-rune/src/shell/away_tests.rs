@@ -58,6 +58,11 @@ fn live() -> Live {
 /// [`live`], and with `first_run` this PC has not had its first run: the shell shows its steps (the gate is
 /// `FirstRun`), with the engine signed in and open. No look is waited for.
 fn live_with(first_run: bool) -> Live {
+    live_on(first_run, Wiring::default())
+}
+
+/// [`live_with`], with the shell wired as `wiring` says (a flyout).
+fn live_on(first_run: bool, wiring: Wiring) -> Live {
     let (account, phrase) = FakeAccount::register(EMAIL, PASSWORD, TEST_PHRASE);
     account.add_item(FILE_ID, None, FILE_NAME, false, 2_048);
     let owner = Identity::new(Some(&account.user_id), Some(&account.email));
@@ -112,7 +117,7 @@ fn live_with(first_run: bool) -> Live {
     let shell = Shell::new(
         Arc::new(HostActions::new(live_engine, platform.clone())),
         platform.clone(),
-        Wiring::default(),
+        wiring,
     );
     let mut rt = Runtime::new(
         state::init_on_engine(shell, engine.clone()),
@@ -998,3 +1003,7 @@ fn a_lock_the_poll_sees_before_the_window_reads_it_keeps_the_cover() {
     });
     until_drawn(&mut live, FILE_NAME);
 }
+
+// Review of #463: the wake cover's follow-up (every wake, a failed look, the flyout) and the lock path's fade.
+#[path = "away_wake_tests.rs"]
+mod wake;
