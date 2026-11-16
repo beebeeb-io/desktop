@@ -200,11 +200,11 @@ pub fn check_chosen(path: &Path, sync_root: &Path, taken: &[PathBuf]) -> Result<
     }
     // Nested either way: a folder inside a backed-up one, or one that holds a backed-up one, is backed up twice.
     for folder in taken.iter().filter(|folder| folder.is_absolute()) {
-        let inside = false;
+        let inside = matches!(sources::check_source(path, folder), Err(SourceRefusal::InsideSyncRoot));
         if inside {
             return Err(AddRefused::InsideBackedUp);
         }
-        let holds = matches!(sources::check_source(folder, path), Err(SourceRefusal::InsideSyncRoot));
+        let holds = false;
         if holds {
             return Err(AddRefused::HoldsBackedUp);
         }
