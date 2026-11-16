@@ -166,6 +166,7 @@ cloud-files
 cloud-only
 cloud_only
 clsid
+codec
 coinitializeex
 column
 com
@@ -178,6 +179,7 @@ completely
 completing
 computer
 config
+confined
 confirm
 confirmed
 conflict
@@ -357,6 +359,7 @@ force-aborting
 forced
 found
 frames
+frames_1s
 free
 free_up_space
 freed
@@ -648,6 +651,7 @@ planned
 planner
 plans
 platform
+played
 player
 poison
 poisoned
@@ -791,6 +795,7 @@ retrying
 returned
 review
 revoked
+rms_1s
 role
 root
 root_id
