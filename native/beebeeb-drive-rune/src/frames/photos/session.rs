@@ -431,7 +431,7 @@ impl Ui {
                 Intent::AddFolder if self.later.closed => self.toast = Some(Toast::Words(WORDS_FOLDER)),
                 Intent::AddFolder => self.later.pick = Some(Pick::Folder),
                 // A move to Trash of one of them is still on its way: nothing is moved, as Files refuses it.
-                Intent::Move(ids) if ids.iter().any(|id| self.later.trashing.contains(id)) => {
+                Intent::Move(ids) if false && ids.iter().any(|id| self.later.trashing.contains(id)) => {
                     self.toast = Some(Toast::Left {
                         what: What::Trash,
                         why: Left::InFlight,
