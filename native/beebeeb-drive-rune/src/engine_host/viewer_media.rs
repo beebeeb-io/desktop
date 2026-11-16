@@ -180,7 +180,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             return false;
         }
         // A refusal keeps the file's state on screen but ends its run: that file is not held, so Play opens it anew.
-        let holds_this = player.holds(file_id);
+        let holds_this = player.state_of(file_id).is_some();
         if !on {
             if holds_this {
                 player.pause();
