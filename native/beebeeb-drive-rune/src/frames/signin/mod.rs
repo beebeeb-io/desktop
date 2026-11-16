@@ -529,7 +529,7 @@ impl Ui {
             }
             // DW-A08 is seen over the gate the approval opened; "Open Drive" leaves it.
             // The gate opens before the answer reaches the window, so a request still waiting is held too.
-            GateState::Ready | GateState::FirstRun if self.holds_open_gate() => false,
+            GateState::Ready if self.holds_open_gate() => false,
             _ => {
                 let changed = self.screen != Screen::SignIn;
                 self.forget_steps();
