@@ -14,15 +14,63 @@ pub const FRAME_PX: (f64, f64) = (2.0, 1.0);
 /// The displays as the window code should see them: each one's rectangle is its work area (when the OS gave
 /// one for that display) less the frame allowance. `work`: `(whole display, its work area)` pairs, as
 /// [`os_work_areas`] reads them; a display with no pair keeps its whole rectangle.
-pub fn usable(displays: &[Monitor], _work: &[(Rect, Rect)]) -> Vec<Monitor> {
-    displays.to_vec()
+pub fn usable(displays: &[Monitor], work: &[(Rect, Rect)]) -> Vec<Monitor> {
+    displays
+        .iter()
+        .map(|d| {
+            let whole = Rect {
+                x: d.x,
+                y: d.y,
+                w: d.w as i32,
+                h: d.h as i32,
+            };
+            let area = work.iter().find(|(m, _)| *m == whole).map_or(whole, |(_, w)| *w);
+            let scale = if d.scale.is_finite() && d.scale > 0.0 {
+                d.scale
+            } else {
+                1.0
+            };
+            let (fw, fh) = ((FRAME_PX.0 * scale).ceil() as i32, (FRAME_PX.1 * scale).ceil() as i32);
+            Monitor {
+                x: area.x,
+                y: area.y,
+                w: (area.w - fw).max(1) as u32,
+                h: (area.h - fh).max(1) as u32,
+                ..*d
+            }
+        })
+        .collect()
 }
 
 /// The first place of a window nothing is saved for: `size_points` at the primary display's scale, never larger
 /// than its work area, never under `min_points` where the area allows it, centred in it. No usable display: the
 /// OS and the window's defaults decide.
-pub fn first_place(_s: (f32, f32), _m: (f32, f32), _mo: &[Monitor]) -> Restored {
-    Restored::default()
+pub fn first_place(size_points: (f32, f32), min_points: (f32, f32), monitors: &[Monitor]) -> Restored {
+    let usable_m = |m: &&Monitor| m.w > 0 && m.h > 0 && m.scale.is_finite() && m.scale > 0.0;
+    let Some(m) = monitors
+        .iter()
+        .filter(usable_m)
+        .find(|m| m.primary)
+        .or_else(|| monitors.iter().find(usable_m))
+    else {
+        return Restored::default();
+    };
+    let fit = |want: f32, min: f32, room: u32| {
+        let px = (f64::from(want.max(min)) * m.scale).round() as u32;
+        px.min(room).max(1)
+    };
+    let (w, h) = (
+        fit(size_points.0, min_points.0, m.w),
+        fit(size_points.1, min_points.1, m.h),
+    );
+    Restored {
+        position: Some((
+            (i64::from(m.x) + (i64::from(m.w) - i64::from(w)) / 2) as i32,
+            (i64::from(m.y) + (i64::from(m.h) - i64::from(h)) / 2) as i32,
+        )),
+        physical_size: Some((w, h)),
+        maximized: false,
+    }
 }
 
 /// Every display's `(whole rectangle, work area)`, physical pixels. Empty when the OS cannot say (and off
