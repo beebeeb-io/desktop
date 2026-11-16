@@ -580,9 +580,6 @@ impl<C: CredentialStores> Engine<C> {
         seat.test_pause(|seams| seams.before_keys.clone());
         let task = {
             let mut state = lock(&seat.state);
-            if state.stops != owed.stops {
-                return None;
-            }
             let Ok(((token, key), identity)) = start::keys_for_engine_start(&self.acct) else {
                 return Some(Ok(Outcome::NotEligible));
             };
@@ -643,15 +640,14 @@ impl<C: CredentialStores> Engine<C> {
                 _ended: ended,
             });
             state.running.retain(|running| !running.abort.is_finished());
-            (task, ended_rx)
+            state.running.push(Running {
+                abort: task.abort_handle(),
+                ended: ended_rx,
+            });
+            task
         };
-        let (task, ended_rx) = task;
         #[cfg(test)]
         seat.test_pause(|seams| seams.after_spawn.clone());
-        lock(&seat.state).running.push(Running {
-            abort: task.abort_handle(),
-            ended: ended_rx,
-        });
         match self.runtime.block_on(task) {
             Ok(outcome) => Some(outcome),
             Err(error) if error.is_cancelled() => None,
