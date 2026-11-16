@@ -36,7 +36,7 @@ pub struct EngineIdentity {
 
 /// The released app. Every value is the literal the app has always used (`the_real_identity_is_todays_bytes`).
 pub static REAL: EngineIdentity = EngineIdentity {
-    bundle_identifier: "io.beebeeb.app",
+    bundle_identifier: "io.beebeeb.apq",
     config_dir_name: "beebeeb",
     state_dir_name: "",
     credential_service: "io.beebeeb.app",
