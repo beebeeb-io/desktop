@@ -23,13 +23,16 @@ pub(super) const AUTH_EXPIRED_THRESHOLD: u32 = 3;
 /// / [`run`] the same way `sync_paused` already is.
 ///
 /// Task 2535: it also keeps WHEN the engine's own loop last fed it ([`AuthHealth::fed_within`]), for the account's
-/// session watch (`app::session_watch`), which checks the session only while nothing else has. The watch's own answers
-/// count through [`AuthHealth::note_watch_answer`], which leaves that time alone.
+/// session watch (`app::session_watch`), which checks the session only while nothing else has. A feed counts only
+/// when it decided something about the session (an answer cleared the run, or a refusal added one): a tick or a call
+/// that failed offline, with a 5xx or without a reason proved nothing, so it leaves the watch free to ask. The watch's
+/// own answers count through [`AuthHealth::note_watch_answer`], which leaves that time alone.
 #[derive(Default)]
 pub struct AuthHealth {
     pub(super) consecutive_failures: AtomicU32,
     pub(super) expired: AtomicBool,
-    /// When a feed last noted an outcome: milliseconds on [`monotonic_millis`]'s clock, plus one; 0 = never.
+    /// When a feed last decided something (a clear or a refusal): milliseconds on [`monotonic_millis`]'s clock, plus
+    /// one; 0 = never.
     last_fed: AtomicU64,
 }
 
@@ -52,14 +55,18 @@ impl AuthHealth {
     /// erase the count that matters. `pub`: also called from
     /// `lib.rs`'s `clear_session_impl` to reset the streak on sign-out.
     pub fn note_result(&self, error: Option<&anyhow::Error>) {
-        self.stamp_fed();
-        match error {
-            None => self.clear(),
+        let decided = match error {
+            None => {
+                self.clear();
+                true
+            }
             Some(e) if matches!(classify_operation_error(&e.to_string()), OperationFailureClass::Auth) => {
                 self.add_refusal();
+                true
             }
-            Some(_) => {}
-        }
+            Some(_) => false,
+        };
+        self.stamp_fed_if(decided);
     }
 
     /// Record the outcome of one of the engine's own API calls (the heartbeat, the sync tick's pull, the paused
@@ -67,8 +74,8 @@ impl AuthHealth {
     /// P3-2: a 5xx whose body mentions "401" is not a refusal). `None`: the call worked, which clears the run. A 401
     /// answer adds one. Anything else (offline, a 5xx, a body that did not read) leaves the run as it is.
     pub(super) fn note_api_answer(&self, error: Option<&anyhow::Error>) {
-        self.stamp_fed();
-        self.count_api_answer(error);
+        let decided = self.count_api_answer(error);
+        self.stamp_fed_if(decided);
     }
 
     /// Task 2535: record the answer of the account's session watch (`app::session_watch`), counted and cleared
@@ -76,12 +83,14 @@ impl AuthHealth {
     /// It does NOT count as a feed: were it one, the watch would find the run fed by its own last answer and check
     /// only every other period, so three refusals would take five periods instead of three.
     pub(crate) fn note_watch_answer(&self, error: Option<&anyhow::Error>) {
-        self.count_api_answer(error);
+        // Counted, never stamped: what it decided is not a feed.
+        let _decided = self.count_api_answer(error);
     }
 
     /// Task 2535: whether one of the engine's own feeds (the sync tick, the heartbeat, the paused tick's check, or a
-    /// call that went through [`Self::note_result`]) noted an outcome less than `period` ago. The session watch's
-    /// answers ([`Self::note_watch_answer`]) are not feeds.
+    /// call that went through [`Self::note_result`]) decided something less than `period` ago: an answer that cleared
+    /// the run, or a refusal that added one. A feed that failed without deciding (offline, a 5xx, a tick with no
+    /// reason) does not count (CP2 row 4.1), nor do the session watch's answers ([`Self::note_watch_answer`]).
     pub(crate) fn fed_within(&self, period: Duration) -> bool {
         match self.last_fed.load(Ordering::Relaxed) {
             0 => false,
@@ -89,12 +98,19 @@ impl AuthHealth {
         }
     }
 
-    /// The decision of [`Self::note_api_answer`], without the feed's time.
-    fn count_api_answer(&self, error: Option<&anyhow::Error>) {
+    /// The decision of [`Self::note_api_answer`], without the feed's time. `true`: it decided something (an answer
+    /// cleared the run, or a 401 added one); `false`: the error says nothing about the session and the run is as it was.
+    fn count_api_answer(&self, error: Option<&anyhow::Error>) -> bool {
         match error {
-            None => self.clear(),
-            Some(e) if is_session_refusal(e) => self.add_refusal(),
-            Some(_) => {}
+            None => {
+                self.clear();
+                true
+            }
+            Some(e) if is_session_refusal(e) => {
+                self.add_refusal();
+                true
+            }
+            Some(_) => false,
         }
     }
 
@@ -104,10 +120,13 @@ impl AuthHealth {
         self.expired.store(false, Ordering::Relaxed);
     }
 
-    /// A feed noted an outcome now (see [`Self::fed_within`]).
-    fn stamp_fed(&self) {
-        self.last_fed
-            .store(monotonic_millis().saturating_add(1), Ordering::Relaxed);
+    /// A feed decided something now, when `decided` (see [`Self::fed_within`]); a feed that proved nothing stamps
+    /// nothing.
+    fn stamp_fed_if(&self, decided: bool) {
+        if decided {
+            self.last_fed
+                .store(monotonic_millis().saturating_add(1), Ordering::Relaxed);
+        }
     }
 
     fn add_refusal(&self) {
@@ -125,13 +144,19 @@ impl AuthHealth {
     ///
     /// One refusal per tick does not space the refusals in time by itself: the tick interval delays a missed tick
     /// instead of firing it at once (`MissedTickBehavior::Delay`), so a tick that ran long is not followed by a burst.
+    ///
+    /// Like every feed, it stamps the feed's time ([`Self::fed_within`]) only when it decided something: a tick that
+    /// came back or was refused. A tick that failed any other way leaves the session watch free to ask.
     pub(super) fn note_tick(&self, tick: &crate::engine_bridge::SyncTickOutcome) {
-        self.stamp_fed();
-        if tick.reached_server {
+        let decided = if tick.reached_server {
             self.clear();
+            true
         } else if let Some(why) = &tick.pull_failure {
-            self.count_api_answer(Some(why));
-        }
+            self.count_api_answer(Some(why))
+        } else {
+            false
+        };
+        self.stamp_fed_if(decided);
     }
 }
 
@@ -562,4 +587,100 @@ pub(super) fn spawn_heartbeat_producer(
         }
         tracing::debug!(session_id = %session_id, "heartbeat producer stopped");
     })
+}
+
+/// CP2 row 4.1 (lead, 2026-11-15): only a feed that decided something about the session keeps the session watch quiet.
+/// Mutant: the stamp back at each feed's top (`self.stamp_fed_if(true)` in `note_api_answer`, `note_tick` and
+/// `note_result`): `a_feed_that_decided_nothing_leaves_the_watch_free_to_ask` goes red.
+#[cfg(test)]
+mod fed_tests {
+    use super::*;
+
+    /// Longer than any test runs: "fed within" then means "fed at all".
+    const PERIOD: Duration = Duration::from_secs(600);
+
+    /// Beebeeb's answer `status`, as the API client returns it (`DesktopApiError::HttpStatus` in the chain).
+    fn answered(status: u16) -> anyhow::Error {
+        anyhow::Error::from(crate::api_client::DesktopApiError::HttpStatus {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            snippet: String::new(),
+        })
+    }
+
+    fn offline() -> anyhow::Error {
+        anyhow::anyhow!("error sending request: connection refused")
+    }
+
+    fn tick(reached_server: bool, pull_failure: Option<anyhow::Error>) -> crate::engine_bridge::SyncTickOutcome {
+        crate::engine_bridge::SyncTickOutcome {
+            reached_server,
+            pull_failure,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_feed_that_decided_nothing_leaves_the_watch_free_to_ask() {
+        let health = AuthHealth::new();
+        health.note_api_answer(Some(&offline()));
+        health.note_api_answer(Some(&answered(503)));
+        health.note_api_answer(Some(&answered(403)));
+        health.note_tick(&tick(false, Some(offline())));
+        health.note_tick(&tick(false, Some(answered(502))));
+        health.note_tick(&tick(false, None));
+        health.note_result(Some(&anyhow::anyhow!("HTTP 500 Internal Server Error: db unavailable")));
+        assert!(
+            !health.fed_within(PERIOD),
+            "offline, a 5xx, a 403 and a tick with no reason prove nothing: the watch may ask"
+        );
+        assert!(!health.is_expired());
+    }
+
+    #[test]
+    fn each_feed_that_decided_keeps_the_watch_quiet() {
+        let feeds: [(&str, fn(&AuthHealth)); 6] = [
+            ("an answer to the engine's own call", |h| h.note_api_answer(None)),
+            ("a 401 to the engine's own call", |h| {
+                h.note_api_answer(Some(&answered(401)))
+            }),
+            ("a tick whose pull came back", |h| h.note_tick(&tick(true, None))),
+            ("a tick whose pull was refused", |h| {
+                h.note_tick(&tick(false, Some(answered(401))))
+            }),
+            ("a call that worked", |h| h.note_result(None)),
+            ("a call that was refused", |h| {
+                h.note_result(Some(&anyhow::anyhow!("HTTP 401 Unauthorized: invalid token")))
+            }),
+        ];
+        for (what, feed) in feeds {
+            let health = AuthHealth::new();
+            assert!(!health.fed_within(PERIOD), "never fed before the feed");
+            feed(&health);
+            assert!(
+                health.fed_within(PERIOD),
+                "{what} decided something: the watch stays quiet"
+            );
+        }
+    }
+
+    #[test]
+    fn the_watchs_own_answers_count_and_are_never_a_feed() {
+        let health = AuthHealth::new();
+        health.note_watch_answer(None);
+        health.note_watch_answer(Some(&answered(401)));
+        health.note_watch_answer(Some(&answered(503)));
+        health.note_watch_answer(Some(&offline()));
+        assert!(!health.fed_within(PERIOD), "the watch's answers are not a feed");
+        health.note_watch_answer(Some(&answered(401)));
+        assert!(
+            !health.is_expired(),
+            "two refusals, offline and a 5xx between them changed nothing"
+        );
+        health.note_watch_answer(Some(&answered(401)));
+        assert!(
+            health.is_expired(),
+            "the third refusal in a row holds the session as ended"
+        );
+        assert!(!health.fed_within(PERIOD));
+    }
 }
