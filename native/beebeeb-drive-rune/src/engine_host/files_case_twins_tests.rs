@@ -24,6 +24,7 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::engine_host::EngineFilesSource;
+use crate::engine_host::files_launch::Starts;
 use crate::frames::files::source::FilesSource;
 
 const PASSWORD: &str = "an invented password for case twins";
@@ -125,6 +126,7 @@ fn set(tag: &str) -> Set {
     source.starts = Starts {
         open: record_open,
         reveal: record_reveal,
+        app: None,
     };
     Set {
         engine,
@@ -151,12 +153,12 @@ fn hold_running(engine: &Engine<MemoryCredentials>) -> tokio::runtime::Runtime {
 /// What the stand-in starts were handed, every test's (each filters by its own tag).
 static STARTED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-fn record_open(path: &Path) -> Result<(), ActionError> {
+fn record_open(path: &Path, _live: &dyn Fn() -> bool) -> Result<(), ActionError> {
     STARTED.lock().unwrap().push(path.to_path_buf());
     Ok(())
 }
 
-fn record_reveal(path: &Path) -> Result<(), ActionError> {
+fn record_reveal(path: &Path, _live: &dyn Fn() -> bool) -> Result<(), ActionError> {
     STARTED.lock().unwrap().push(path.to_path_buf());
     Ok(())
 }

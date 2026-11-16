@@ -113,10 +113,6 @@ fn media_error_keeps_its_step_text_in_engine_error() {
     let error = EngineError::Media(MediaError::ZeroDimensions);
     assert_eq!(error.to_string(), "thumbnail source has zero dimensions");
     assert_eq!(
-        EngineError::Media(MediaError::FfmpegFailed("boom".to_string())).to_string(),
-        "ffmpeg video thumbnail failed: boom"
-    );
-    assert_eq!(
         EngineError::Media(MediaError::Base64 {
             label: "sender_public_key".to_string(),
             detail: "bad".to_string(),
