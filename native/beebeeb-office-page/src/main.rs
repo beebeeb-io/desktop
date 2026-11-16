@@ -40,6 +40,12 @@
 #[path = "../../beebeeb-drive-rune/src/engine_host/office_host.rs"]
 mod office_host;
 
+/// The app's `windows_floor` logs through `tracing`, which this tool does not link. The host calls only this function of
+/// it, on a Windows older than the sandbox needs; the tool prints `state=NoPreview(NeedsWindowsUpdate)` anyway.
+mod windows_floor {
+    pub fn note_needs_windows_update() {}
+}
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
