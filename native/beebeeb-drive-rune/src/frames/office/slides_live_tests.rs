@@ -88,3 +88,51 @@ fn office_slides_presenting_follows_the_deck() {
     viewers::ui(&mut rt.state).expect("a file").file.body = Body::Deck(body);
     assert!(presenting(&rt.state));
 }
+
+/// The wheel over the slide, at the middle of `key`: `dy` points, `precise` for a touchpad.
+fn wheel_over(rt: &mut rune::Runtime<State>, key: &str, dy: f32, precise: bool) {
+    let r = find(rt, key).unwrap_or_else(|| panic!("{key} is drawn")).rect;
+    rt.wheel_event(
+        rune::WheelEvent::new(0.0, dy)
+            .at(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0)
+            .precise(precise),
+    );
+    rt.frame(0.0);
+    rt.frame(0.0);
+}
+
+fn current(rt: &mut rune::Runtime<State>) -> u32 {
+    viewers::deck_mut(&mut rt.state).expect("a deck").view.current
+}
+
+#[test]
+fn office_slides_the_wheel_steps_one_slide_per_notch() {
+    let (mut rt, _log) = live_runtime(deck(5), 1.0, None);
+    assert_eq!(current(&mut rt), 1);
+    wheel_over(&mut rt, "stage", -100.0, false);
+    assert_eq!(current(&mut rt), 2, "a notch toward you: the next slide");
+    wheel_over(&mut rt, "stage", -100.0, false);
+    assert_eq!(current(&mut rt), 3);
+    wheel_over(&mut rt, "stage", 100.0, false);
+    assert_eq!(current(&mut rt), 2, "away from you: the previous slide");
+    // A touchpad: one slide per 120 points of travel, not one per delta.
+    wheel_over(&mut rt, "stage", -50.0, true);
+    wheel_over(&mut rt, "stage", -50.0, true);
+    assert_eq!(current(&mut rt), 2, "100 points: not yet");
+    wheel_over(&mut rt, "stage", -50.0, true);
+    assert_eq!(current(&mut rt), 3, "150 points: one slide");
+    // Never past the last.
+    for _ in 0..5 {
+        wheel_over(&mut rt, "stage", -100.0, false);
+    }
+    assert_eq!(current(&mut rt), 5);
+}
+
+#[test]
+fn office_slides_the_wheel_steps_in_present() {
+    let (mut rt, _log) = live_runtime(deck(5), 1.0, None);
+    rt.update(|s, _| viewers::deck_mut(s).expect("a deck").present());
+    rt.frame(0.0);
+    wheel_over(&mut rt, "pres-stage", -100.0, false);
+    assert_eq!(current(&mut rt), 2);
+}

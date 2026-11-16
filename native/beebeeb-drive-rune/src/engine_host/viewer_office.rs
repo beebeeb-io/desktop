@@ -765,6 +765,10 @@ impl OfficeView {
                     top_left: sheets::Cell { row: 0, col: 0 },
                     anchors: Vec::new(),
                     missing_content: false,
+                    more: sheets::More {
+                        unnamed: more,
+                        open: false,
+                    },
                 });
                 if let Some(range) = model.block(0, 0, FIRST_ROWS, FIRST_COLS) {
                     if let Some(host) = self.host.get_mut() {

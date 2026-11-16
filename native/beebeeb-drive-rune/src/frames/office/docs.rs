@@ -76,6 +76,8 @@ pub struct DocBody {
     pub quiet: Option<&'static str>,
     /// The outline pane is open (the board draws it open; its close control folds it to a strip).
     pub outline_open: bool,
+    /// Where the stage was last seen scrolled to, in points from the top of its content (`docs_scroll`).
+    pub scroll_y: f32,
 }
 
 /// Counts only, never a heading or a word.
@@ -98,12 +100,15 @@ impl DocBody {
             language: language.into(),
             quiet: None,
             outline_open: true,
+            scroll_y: 0.0,
         }
     }
 
-    /// Show page `n` at the top of the stage (clamped to the document).
+    /// Show page `n` at the top of the stage (clamped to the document). The stage's viewport is moved there by
+    /// [`scroll::show_page`] from the handler that called this.
     pub fn go_to_page(&mut self, n: u32) {
         self.page = n.clamp(1, self.view.pages.max(1));
+        self.scroll_y = self.page_top(self.page) - scroll::PAD_TOP;
     }
 
     /// A press on an outline heading: the stage goes to its page.
@@ -120,12 +125,15 @@ impl DocBody {
         self.outline_open = !self.outline_open;
     }
 
+    /// A zoom keeps the page in view: it is shown from its top at the new size.
     pub fn zoom_in(&mut self) {
         self.view.zoom = (self.view.zoom + ZOOM_STEP).min(ZOOM_MAX);
+        self.go_to_page(self.page);
     }
 
     pub fn zoom_out(&mut self) {
         self.view.zoom = self.view.zoom.saturating_sub(ZOOM_STEP).max(ZOOM_MIN);
+        self.go_to_page(self.page);
     }
 
     /// Overwrite the decrypted words held here (see `OpenFile::wipe`).
@@ -144,7 +152,10 @@ impl DocBody {
         match key {
             Key::Command('+') | Key::Command('=') if command => self.zoom_in(),
             Key::Command('-') if command => self.zoom_out(),
-            Key::Command('0') if command => self.view.zoom = 100,
+            Key::Command('0') if command => {
+                self.view.zoom = 100;
+                self.go_to_page(self.page);
+            }
             Key::PageDown if !command && !m.alt && !m.shift => self.go_to_page(self.page.saturating_add(1)),
             Key::PageUp if !command && !m.alt && !m.shift => self.go_to_page(self.page.saturating_sub(1)),
             _ => return false,
@@ -247,7 +258,7 @@ fn step_button(key: &'static str, label: &'static str, icon: &'static Icon, act:
         .hover(t.hover)
         .press(t.press)
         .focusable(true)
-        .on_press(with_doc(act))
+        .on_press_tx(scroll::with_doc_tx(act))
         .child(kit::glyph(format!("{key}-icon"), icon, 13.0, t.text_secondary))
 }
 
@@ -423,7 +434,7 @@ fn outline(doc: &DocBody, t: &Theme) -> El {
             .hover(t.hover)
             .press(t.press)
             .focusable(true)
-            .on_press(with_doc(move |d| d.go_to_heading(at)))
+            .on_press_tx(scroll::with_doc_tx(move |d| d.go_to_heading(at)))
             .child(
                 kit::label(format!("ol-{i}"), title.clone(), style, ink)
                     .w(rune::text::advance(title, style))
@@ -461,13 +472,8 @@ fn box_pt(doc: &DocBody, n: u32) -> (f32, f32) {
 /// `pg-` is a line of text, which a picture has none of).
 fn shell(n: u32, doc: &DocBody) -> El {
     let w = PAGE_W * f32::from(doc.view.zoom) / 100.0;
-    let key = if n == 1 {
-        "page".to_string()
-    } else {
-        format!("page-{n}")
-    };
     col()
-        .key(key)
+        .key(scroll::page_key(n))
         .role("image")
         .label(format!("Page {n}"))
         .w(w)
@@ -483,19 +489,50 @@ fn shell(n: u32, doc: &DocBody) -> El {
 /// blank paper in the page's own proportions.
 fn paper(n: u32, doc: &DocBody, pixels: Option<Pixels>) -> El {
     let (w, blank_h) = box_pt(doc, n);
-    let scale = f32::from(doc.view.zoom) / 100.0;
-    let page = shell(n, doc);
+    let page = shell(n, doc).h(fixture_h(doc, n, pixels.as_ref()));
     match pixels {
         Some(p) => {
             let (pw, ph) = p.size();
             let pic_h = if pw > 0 { w * ph as f32 / pw as f32 } else { blank_h };
-            page.h(pic_h.max(PAGE_MIN_H * scale)).child(
+            page.child(
                 el().key(format!("page-picture-{n}"))
                     .size(w, pic_h)
                     .pixels_fit(&p, SurfaceFit::Fill),
             )
         }
-        None => page.h(blank_h),
+        None => page,
+    }
+}
+
+/// The height [`paper`] gives page `n`: with a picture the picture's at the page's width, at least the board's height;
+/// without, the page's own proportions.
+fn fixture_h(doc: &DocBody, n: u32, pixels: Option<&Pixels>) -> f32 {
+    let (w, blank_h) = box_pt(doc, n);
+    let scale = f32::from(doc.view.zoom) / 100.0;
+    match pixels.map(Pixels::size) {
+        Some((pw, ph)) if pw > 0 => (w * ph as f32 / pw as f32).max(PAGE_MIN_H * scale),
+        Some(_) => blank_h.max(PAGE_MIN_H * scale),
+        None => blank_h,
+    }
+}
+
+/// A page from the renderer: always its box (the file's proportions), with or without its picture, so a picture that
+/// comes never moves the pages under it or the offset the stage stands at. The picture is drawn at its own aspect from
+/// the top of the page, clipped by the page.
+fn paper_box(n: u32, doc: &DocBody, pixels: Option<Pixels>) -> El {
+    let (w, h) = box_pt(doc, n);
+    let page = shell(n, doc).h(h);
+    match pixels {
+        Some(p) => {
+            let (pw, ph) = p.size();
+            let pic_h = if pw > 0 { w * ph as f32 / pw as f32 } else { h };
+            page.child(
+                el().key(format!("page-picture-{n}"))
+                    .size(w, pic_h)
+                    .pixels_fit(&p, SurfaceFit::Fill),
+            )
+        }
+        None => page,
     }
 }
 
@@ -507,55 +544,55 @@ mod live;
 use live::paper_live;
 pub use live::{Asks, Live, asked_pages};
 
+#[path = "docs_scroll.rs"]
+pub mod scroll;
+pub use scroll::on_key;
+
 /// Where a document's pictures come from: the fixture's whole pages, or a renderer asked for what is near the screen.
 pub enum Pictures<'a> {
     Fixture(&'a dyn Fn(u32) -> Option<Pixels>),
     Live(&'a Live<'a>),
 }
 
-/// The pages on grey, from the one in view onward. Every page keeps its box, so the height is right; only the pages
-/// near the screen get a picture (live), or every page asks the fixture (as it always did).
-fn stage(doc: &DocBody, pics: &Pictures, t: &Theme) -> El {
+/// The pages on grey in the stage's viewport (`docs_scroll`). Every page keeps its box, so the scroll height is right;
+/// live, only the pages near the screen ask the renderer for a picture, and the rest are blank paper of their size; the
+/// fixture draws its pages as it always did.
+fn stage(doc: &DocBody, pics: &Pictures, stage_y: Option<f32>, t: &Theme) -> El {
+    let count = doc.view.pages.max(1);
     let mut pages = col()
         .key("pages")
         .role("document")
         .label("Pages")
         .items_center()
         .gap(PAGE_GAP)
-        .py(24.0);
-    let mut top = 0.0;
-    let band = match pics {
-        Pictures::Live(live) => Some(asked_pages(doc, live.screen.1)),
-        Pictures::Fixture(_) => None,
-    };
-    // The pages one screen above the one in view are asked ahead of a scroll up, and not drawn.
-    if let (Pictures::Live(live), Some((lo, _))) = (pics, band) {
-        let mut above = 0.0;
-        for n in (lo..doc.page).rev() {
-            above += box_pt(doc, n).1 + PAGE_GAP;
-            let _ = paper_live(n, doc, live, -above);
+        .py(scroll::PAD_TOP);
+    let mut heights = Vec::with_capacity(count as usize);
+    match pics {
+        Pictures::Fixture(page) => {
+            for n in 1..=count {
+                let pixels = page(n);
+                heights.push(fixture_h(doc, n, pixels.as_ref()));
+                pages = pages.child(paper(n, doc, pixels));
+            }
+        }
+        Pictures::Live(live) => {
+            let (lo, hi) = asked_pages(doc, live.screen.1);
+            // Each page's top below the stage's top, from where the stage was last seen scrolled to.
+            let view_y = doc.view_y();
+            let mut top = scroll::PAD_TOP;
+            for n in 1..=count {
+                let h = box_pt(doc, n).1;
+                heights.push(h);
+                pages = pages.child(if (lo..=hi).contains(&n) {
+                    paper_live(n, doc, live, top - view_y)
+                } else {
+                    paper(n, doc, None)
+                });
+                top += h + PAGE_GAP;
+            }
         }
     }
-    for n in doc.page..=doc.view.pages.max(1) {
-        let paper = match (pics, band) {
-            (Pictures::Fixture(page), _) => paper(n, doc, page(n)),
-            (Pictures::Live(live), Some((lo, hi))) if (lo..=hi).contains(&n) => paper_live(n, doc, live, top),
-            (Pictures::Live(_), _) => paper(n, doc, None),
-        };
-        pages = pages.child(paper);
-        top += box_pt(doc, n).1 + PAGE_GAP;
-    }
-    row()
-        .key("stage")
-        .role("group")
-        .label("Document")
-        .grow(1.0)
-        .min_w(0.0)
-        .h_full()
-        .justify_center()
-        .clip_rounded(0.0)
-        .fill(super::states::stage_fill(t))
-        .child(pages)
+    scroll::viewport(pages, stage_y, heights.into(), t)
 }
 
 /// `1284` as "1,284".
@@ -693,7 +730,7 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pic
         .min_h(0.0)
         .w_full()
         .child(outline(doc, &t))
-        .child(stage(doc, pics, &t));
+        .child(stage(doc, pics, cx.layout_with(scroll::STAGE, |r| r[1]), &t));
     if ui.show_details {
         body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
     }
@@ -915,9 +952,16 @@ mod tests {
         rt.pointer_down(x + w / 2.0, y + h / 2.0);
         rt.pointer_up(x + w / 2.0, y + h / 2.0);
         rt.frame(0.0);
+        rt.frame(0.0);
         let d = doc(&mut rt);
         assert_eq!((d.page, d.at), (want, last));
-        assert!(find(&rt, &format!("page-{want}")).is_some() && find(&rt, "page").is_none());
+        // The stage scrolled to the heading's page: it stands at the stage's top, under the top padding.
+        let stage = find(&rt, scroll::STAGE).expect("the stage").rect;
+        let page = find(&rt, &format!("page-{want}")).expect("the heading's page").rect;
+        assert!(
+            (page[1] - stage[1] - scroll::PAD_TOP).abs() < 0.6,
+            "page {want} at the stage's top: {page:?} in {stage:?}"
+        );
         assert_eq!(
             find(&rt, "vbar-page").and_then(|e| e.text),
             Some(format!("Page {want} of 4"))

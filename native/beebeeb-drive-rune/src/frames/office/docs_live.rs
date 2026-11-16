@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use rune::{El, Pixels, SurfaceFit, el};
 
-use super::{DocBody, PAGE_GAP, box_pt, paper, shell};
+use super::{DocBody, PAGE_GAP, box_pt, paper_box, shell};
 use crate::frames::viewers::kinds::{OfficePicture, TILE_PX, uses_tiles};
 
 /// What a live document asks its renderer for: every key at most once per frame (the answer is kept for the frame),
@@ -42,7 +42,7 @@ pub struct Live<'a> {
 }
 
 /// The pages whose pictures are asked: those on screen, one screen above and one screen below (1-based, first to
-/// last). The stage draws from the page in view, so the pages above are asked ahead of a scroll up, never drawn.
+/// last), from the page in view (where the stage's viewport stands, `docs_scroll`).
 pub fn asked_pages(doc: &DocBody, screen_h: f32) -> (u32, u32) {
     let pages = doc.view.pages.max(1);
     let first = doc.page.clamp(1, pages);
@@ -64,12 +64,13 @@ pub fn asked_pages(doc: &DocBody, screen_h: f32) -> (u32, u32) {
 /// Page `n` drawn from the renderer, its box as the file sizes it. Below the tile scale one whole picture; at or above
 /// it the tiles that touch the asked band, each at its own place (integer pixels over the device factor), over the
 /// held page at the lowest scale while any tile of this scale is still on its way. `top`: where the page starts, in
-/// points below the first drawn page's top.
+/// points below the stage's top as it was last seen scrolled (negative above it). Its box never depends on whether a
+/// picture has come, so an answer never moves the pages.
 pub(super) fn paper_live(n: u32, doc: &DocBody, live: &Live, top: f32) -> El {
     let zoom = doc.view.zoom;
     let page0 = n - 1;
     if !uses_tiles(zoom, live.dpi) {
-        return paper(
+        return paper_box(
             n,
             doc,
             live.asks.get(OfficePicture::Page {

@@ -4,7 +4,7 @@
 //!
 //! Kept in its own file because `mod.rs` is at its line limit.
 
-use rune::{Cx, El, KeyEvent};
+use rune::{Cx, El, KeyEvent, Tx};
 
 use super::Ui;
 use super::kinds::OfficePicture;
@@ -108,18 +108,19 @@ pub fn office_try_again(s: &mut State) {
     }
 }
 
-/// The deck's keys (Present's arrows, Space, Esc; F5 and Ctrl+Enter in the window). `true`: taken.
-pub(super) fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
+/// The deck's keys (Present's arrows, Space, Esc; F5 and Ctrl+Enter in the window). `true`: taken. A document's and a
+/// workbook's keys move their scroll viewport with `tx` too.
+pub(super) fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if deck_mut(s).is_some_and(|deck| deck.on_key(&ev.key, &ev.mods)) {
         return true;
     }
-    if doc_mut(s).is_some_and(|doc| doc.on_key(&ev.key, &ev.mods)) {
+    if docs::on_key(s, ev, tx) {
         return true;
     }
     // A workbook in a renderer: the keys scroll what is in view.
     match super::ui(s) {
         Some(ui) if ui.source.office_live() => match &mut ui.file.body {
-            Body::Sheet(view) => sheets::scroll_key(view, &ev.key, &ev.mods),
+            Body::Sheet(view) => sheets::scroll_key_tx(view, &ev.key, &ev.mods, tx),
             _ => false,
         },
         _ => false,
