@@ -18,22 +18,18 @@ python3 scripts/assert-cargo-test-counts.py --self-test      # the count guard C
 scripts/release-macos-local.sh <VERSION> <CHANNEL>           # macOS release: local only, fail-closed (docs/RELEASING.md)
 ```
 
-Truth lines: `cargo test` → per-binary `test result: ok. N passed; 0 failed` (each library/integration binary must execute tests; only the
-`src/main.rs` harness and doctests may be empty); `bun test` → `N pass, 0 fail`; `tauri build … -- --locked` asserts the exit code and bundle files on
-disk (`ls` them, paste the listing). A Windows cross-check on Linux is not a native test pass. A release is verified by `RELEASE_NOTES.md` naming the
-version AND the workflow run green AND the manifest resolving: three counts, not one adjective. "Cannot be done here" is the normal state
-(macOS signing/notary, Windows installers, Finder/File Provider need hardware and credentials): route to `.claude/tasks/decisions/`; never fake a local folder root or a UI timeout to pass a gate.
-Quiet checks, from the workspace root: `make test-quiet REPO=desktop` and `make check-quiet REPO=desktop` print one PASS line per target; Rust stays the Legion gate's.
+Quiet checks, from the workspace root: `make test-quiet REPO=desktop` and `make check-quiet REPO=desktop` print one PASS line per target.
 
 ## Module map
 
 Module map: `MAP.md` (generated; `make map REPO=desktop`) — start here for "where does X live"; do not hand-edit.
 Task recipes: `docs/agents/recipes.md` — the four changes asked for most, each naming a real file and item (`bun scripts/outline/recipes.ts desktop` from the workspace root).
+New command: `#[tauri::command]` in `lib.rs`, register in `invoke_handler!`, permission in `capabilities/default.json` if it touches an OS API.
 
 ```
 src/main.tsx, MacApp.tsx, PopoverApp.tsx   frontend roots: Windows/Linux windows, the Mac `main` window, the menu-bar popover
 src/*Model.ts, *Copy.ts, signInFlowStore.ts   pure view models and copy (macCopyGuard scans every person-facing string)
-src-tauri/src/lib.rs        run(): Builder + #[tauri::command] handlers (41k lines: outline it, never read it whole); capabilities/default.json = permissions
+src-tauri/src/lib.rs        run(): Builder + #[tauri::command] handlers (41k lines); capabilities/default.json = permissions
 src-tauri/src/runner.rs, engine_bridge/, state_db.rs   scheduling, bridge to core's sync engine, local state (state.db records the account owner)
 src-tauri/src/account_binding.rs, own_data_proof.rs    R10: local data belongs to ONE account; every engine start goes through spawn_bound_engine
 src-tauri/src/config.rs     DesktopConfig: written only via try_update_at_then (one lock, not re-entrant)
@@ -86,19 +82,6 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 - A server row is stored only when every segment of its path is one name this host can hold (`stored_path`, host rules, the length in the host's unit: 255 UTF-16 units on Windows and macOS, 255 bytes on Linux; a refused row writes nothing, a stored copy stays as it was, and an op never places a row this device does not hold); a stored path reaches disk only through `placeholder_path_under` (Windows rules, contained by component) or `local_file_path_under_sync_root`, never a bare join; the hydrate writer, a remote delete and the placeholder pass refuse a link from the sync root down (`refuse_links_below`) (task 2413).
 - The Backups root is the row flagged `system_role = backups_root`, never a folder found by name; everything at or under it, and a move into it, is refused BEFORE a Windows delete/rename and by Finder's capabilities (core's `check_drive_mutation` on its `BackupPosition`; an item created in the tree is not refused), answered from the state DB only (never the network, never this process's own change); its files are read-only (Windows `FILE_ATTRIBUTE_READONLY`, which the engine's own changes lift through `read_only::Lifted` only; Finder without `allowsWriting`); a device's `.device.json` is never listed; `docs/CAPABILITIES.md` (LD-0113).
 
-## How we work
-
-Workspace `CLAUDE.md` → "How we work" is the rule set (evidence, design before code, done, parallel agents). Here: the truth lines above; macOS UI follows the
-specs in `docs/specs/` and the design files in `design/` (design wins over code; deviations are recorded before the code changes).
-New command: `#[tauri::command]` in `lib.rs`, register in `invoke_handler!`, permission in `capabilities/default.json` if it touches an OS API.
-
 ## Design files
 
 `design/hifi/` holds THREE live design sources and nothing else: `macos-menubar-popover.html`, `macos-settings-dialogs.html` and `macos-two-surface.html`. They are desktop's only copies, the design source of truth that the macOS specs and plans cite, and tests read them (`tests/accountViewCopy.test.ts`, `finderSetupCopy.test.ts`, `macSettingsModel.test.ts`, `menuBarHintModel.test.ts`, `reauthInPlace.test.tsx`), so do not move or rename them. All other design files live in the workspace root `../../design/hifi/` — never copy them into this public repo (a snapshot once published a false external-audit claim; removed in task 1365). A code comment or README that names `design/hifi/hifi-*.jsx`, `styles.css` or `hifi-styles.css` means that workspace copy.
-
-## Graphify and shared docs
-
-Knowledge graph at `graphify-out/`. Architecture question: `graphify query "<question>"` / `graphify explain <symbol>` /
-`graphify path "<A>" "<B>"`; overview: `graphify-out/GRAPH_SUMMARY.md` (at most 3k tokens); never read `GRAPH_REPORT.md` whole.
-Run `graphify update .` for your own navigation; never commit `graphify-out/` on a feature branch (the lead regenerates it on main).
-When you add/change/remove endpoints, types, build commands or dependencies, update the matching skill in the workspace `.claude/skills/`.
