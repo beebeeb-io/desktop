@@ -703,6 +703,9 @@ impl OfficeView {
                 failure(ViewState::NoPreview(Reason::UnsupportedType))
             }
             HostState::NoPreview(HostNoPreview::NoSandbox) => failure(ViewState::NoPreview(Reason::NotOnThisComputer)),
+            HostState::NoPreview(HostNoPreview::NeedsWindowsUpdate) => {
+                failure(ViewState::NoPreview(Reason::NeedsWindowsUpdate))
+            }
             HostState::NoPreview(HostNoPreview::NotInstalled) => failure(ViewState::Stopped { retried: true }),
             HostState::CannotOpen(CannotOpen::Damaged) => failure(ViewState::NoPreview(Reason::DamagedOrOverLimit)),
             HostState::CannotOpen(CannotOpen::TooLarge) => failure(ViewState::NoPreview(Reason::TooLarge)),

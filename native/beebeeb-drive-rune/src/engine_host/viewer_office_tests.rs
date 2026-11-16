@@ -644,6 +644,10 @@ fn host_states_become_their_bodies() {
             ViewState::NoPreview(Reason::NotOnThisComputer),
         ),
         (
+            HostState::NoPreview(HostNoPreview::NeedsWindowsUpdate),
+            ViewState::NoPreview(Reason::NeedsWindowsUpdate),
+        ),
+        (
             HostState::NoPreview(HostNoPreview::NotInstalled),
             ViewState::Stopped { retried: true },
         ),
