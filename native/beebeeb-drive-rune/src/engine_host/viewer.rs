@@ -77,6 +77,8 @@ mod pages;
 mod viewer_find;
 #[path = "viewer_media.rs"]
 pub(crate) mod viewer_media;
+#[path = "viewer_office.rs"]
+pub(crate) mod viewer_office;
 #[path = "viewer_text.rs"]
 mod viewer_text;
 use pages::{Pages, PdfEnds};
@@ -97,6 +99,9 @@ pub(super) use change::this_pc;
 mod where_from;
 use where_from::{Recorded, read};
 
+#[cfg(test)]
+#[path = "viewer_office_tests.rs"]
+mod office_tests;
 #[cfg(test)]
 #[path = "viewer_tests.rs"]
 mod tests;

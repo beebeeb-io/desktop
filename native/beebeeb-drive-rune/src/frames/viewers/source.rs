@@ -651,6 +651,14 @@ pub trait ViewerSource {
     fn picture(&self, _file_id: &str, _which: Picture) -> Option<rune::Pixels> {
         None
     }
+    /// A picture of an open Office file: the one held, else asked of its renderer once and `None` until it comes (as
+    /// [`ViewerSource::picture`]).
+    fn office_picture(&self, _file_id: &str, _which: super::kinds::OfficePicture) -> Option<rune::Pixels> {
+        None
+    }
+    /// The view shows these cells of `sheet`: asked if not held; the cells come later through
+    /// [`ViewerSource::poll`] as a new `Body::Sheet`.
+    fn office_cells(&self, _file_id: &str, _sheet: u32, _first_row: u32, _first_col: u32, _rows: u32, _cols: u32) {}
     /// Where `words` are in the open PDF, in reading order. Empty: nowhere, or no text to search.
     fn find(&mut self, _file_id: &str, _words: &str) -> Vec<Match> {
         Vec::new()
