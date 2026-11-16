@@ -313,7 +313,6 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                         // unlock; any other ending approved nothing and goes unsaid.
                         if matches!(answer, Approval::Approved | Approval::Unknown) && keeps_late(&made_for, &now, open)
                         {
-                            calls.late = Some((made_for, answer));
                         }
                         continue;
                     }

@@ -114,7 +114,7 @@ pub fn pick_folder_for(s: &State, asker: FolderFor, platform: Arc<dyn Platform>,
 /// (logged by fixed words).
 pub fn pick_folder_with(s: &State, asker: FolderFor, pick: impl FnOnce() -> PickAnswer + Send + 'static) -> bool {
     let account = match s.shell.app.account() {
-        Some(account) => account.to_owned(),
+        Some(account) if session_gate::open(s) => account.to_owned(),
         _ => {
             log("the folder picker was not opened: no session the window may act on");
             return false;
