@@ -1157,7 +1157,7 @@ impl LocalState {
         if !path.exists() {
             state_paths::prepare_beebeeb_state_dir_at(sync_root, state_dir)?;
         }
-        let db = StateDb::r6_open_or_replace(&path).map_err(|e| format!("open state.db: {e}"))?;
+        let db = StateDb::open(&path).map_err(|e| format!("open state.db: {e}"))?;
         Ok(Self { db })
     }
 }
