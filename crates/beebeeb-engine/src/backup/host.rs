@@ -195,10 +195,7 @@ impl DesktopBackupHost {
                 .backup_list_children(parent)
                 .await
                 .map_err(host_error("category_folder_state"))?;
-            if {
-                let _ = &children;
-                self.folder_state(&id).await? == BackupFolderState::Live
-            } {
+            if children.iter().any(|child| child.is_folder && child.id == id) {
                 db.set_backup_category_folder(&key, Some(&id))
                     .map_err(db_error("category_folder"))?;
                 return Ok((id, None));

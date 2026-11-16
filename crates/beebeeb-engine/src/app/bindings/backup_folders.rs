@@ -448,19 +448,24 @@ pub fn leave_set(identity: &'static EngineIdentity, db: &StateDb, key: &str) -> 
 /// passed), no layout yet, or that folder is not in this device's folder as the local state knows it. Only that one
 /// folder: never another folder's backup, never the device's.
 pub fn backup_copy_of(db: &StateDb, folder: &ChosenFolder) -> Result<Option<String>, BackupsError> {
-    let Some(id) = folder.folder_id.as_deref() else {
-        return Ok(None);
-    };
     let Some(layout) = db.backup_layout().map_err(|_| BackupsError::State)? else {
         return Ok(None);
     };
+    let wanted = beebeeb_core::backup::fold_name(&beebeeb_core::backup::category_folder_name(&folder.category()));
     let children = db
         .children_of(Some(&layout.device_folder_id))
         .map_err(|_| BackupsError::State)?;
     Ok(children
         .into_iter()
         .map(|(entry, _)| entry)
-        .find(|entry| entry.is_dir() && entry.file_id == id)
+        .find(|entry| {
+            entry.is_dir()
+                && entry
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|leaf| beebeeb_core::backup::fold_name(leaf) == wanted)
+        })
         .map(|entry| entry.file_id))
 }
 
