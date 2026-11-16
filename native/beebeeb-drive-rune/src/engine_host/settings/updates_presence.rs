@@ -148,9 +148,43 @@ impl Presence {
 /// knows. Its engine slot is empty since, so a stop now would say `WasNotRunning` about a task that may still run. A
 /// registry that cannot be read counts as such a stop: no proof without knowing.
 pub(crate) fn any_stop_unconfirmed<C: CredentialStores>(engine: &Engine<C>) -> bool {
-    engine.accounts().accounts.lock().map_or(true, |accounts| {
+    let recorded = engine.accounts().accounts.lock().map_or(true, |accounts| {
         accounts
             .iter()
             .any(|account| account.engine_stop_unconfirmed.load(Ordering::SeqCst))
-    })
+    });
+    unconfirmed_by(recorded, callbacks_not_let_go())
+}
+
+/// A stop is unconfirmed when an account's record says so, or (Windows) a stop's task ended but File Explorer's
+/// callbacks were not revoked (`AbortOutcome::RevokeFailed`: no account record, only the engine's start fence). The
+/// installer must not start over callbacks that may still be registered: the hand-off waits for a restart, as 0.8.x's
+/// did. Nothing holds the keys then, so this widens no access; it only keeps the installer from starting.
+fn unconfirmed_by(recorded: bool, callbacks_not_let_go: bool) -> bool {
+    recorded || callbacks_not_let_go
+}
+
+/// Windows: the engine's start fence is up (a revoke of the callbacks failed or never confirmed). Elsewhere never.
+fn callbacks_not_let_go() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        beebeeb_engine::windows_cf::ensure_reactivation_allowed().is_err()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unconfirmed_by;
+
+    /// After an earlier `RevokeFailed` there is no account record, yet the hand-off still waits (0.8.x did).
+    #[test]
+    fn a_revoke_failure_without_a_record_still_makes_the_hand_off_wait() {
+        assert!(unconfirmed_by(false, true));
+        assert!(unconfirmed_by(true, false));
+        assert!(!unconfirmed_by(false, false));
+    }
 }
