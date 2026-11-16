@@ -349,7 +349,9 @@ jobs:
   engine-crate:
     name: Engine crate test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # 60, not 30: the Windows job's full test run took 28 minutes on a clean re-run, so a 30-minute limit cancels it
+    # on a slower runner. Raised rather than split so the one required check keeps its name.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -384,6 +386,16 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
           "$py" scripts/assert-cargo-test-counts.py --self-test
+
+      # Every target of the crate is one the test run compiles: a bench target or an unknown kind fails here, and a
+      # crate with no target is a failure, not a pass (the guard prints the count per kind).
+      - name: Every target is covered by the test build
+        working-directory: crates/beebeeb-engine
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/engine-metadata.json"
+          "$py" ../../scripts/assert-test-build-covers-all-targets.py "$RUNNER_TEMP/engine-metadata.json"
 
       - name: Flaky-test retry self-test (Windows)
         if: runner.os == 'Windows'
@@ -543,6 +555,14 @@ jobs:
         uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           workspaces: native/beebeeb-drive-rune
+
+      - name: Every target is covered by the test build
+        working-directory: native/beebeeb-drive-rune
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/native-metadata.json"
+          "$py" ../../scripts/assert-test-build-covers-all-targets.py "$RUNNER_TEMP/native-metadata.json"
 
       - name: Run the native app's tests (Linux)
         if: runner.os == 'Linux'

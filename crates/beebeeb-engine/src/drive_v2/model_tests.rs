@@ -336,7 +336,7 @@ fn per_path_merge_folds_two_unsent_rows_and_never_mixes_kinds() {
     );
 }
 
-/// Ported from `per_path_merge_keeps_two_server_items_and_never_mixes_kinds` (D-T-15, match 0.8.x): two rows the
+/// Ported from `per_path_merge_keeps_two_server_items_and_never_mixes_kinds` (match 0.8.x): two rows the
 /// server confirmed at one path are two server items, each by its own id, and never hidden; an unsent row at that
 /// path still folds into them.
 #[test]
@@ -523,7 +523,7 @@ fn drive_v2_errors_carry_a_code_and_no_detail_from_outside() {
     );
     assert_eq!(DriveError::from_text("413 Payload Too Large"), DriveError::Quota);
     assert_eq!(
-        String::from(DriveError::from_text("C:\\home\\guus\\secret.txt broke")),
+        String::from(DriveError::from_text("C:\\Users\\alice\\secret.txt broke")),
         "failed: request"
     );
 }

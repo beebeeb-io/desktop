@@ -951,7 +951,7 @@ mod tests {
         );
     }
 
-    /// Desktop 0.8.15 (deliverable 1): uploads must not wait for the guard. On Guus's PC the
+    /// Desktop 0.8.15 (deliverable 1): uploads must not wait for the guard. On a maintainer's PC the
     /// 0.8.14 pass ran 2 h 12 min, and nothing uploaded while it ran, because the runner awaited
     /// it before it spawned the upload watcher. Now the pass is spawned (off the async workers)
     /// and nothing between seeding and the tick loop is awaited.
@@ -1023,7 +1023,7 @@ mod tests {
     /// also carried it, and `changes_on_hold`, went with the old shell; no native reader of the guard's progress
     /// exists yet.)
     #[test]
-    fn desktop_0815_the_ui_reads_the_guard_s_progress_and_the_changes_on_hold() {
+    fn desktop_0815_the_ui_reads_the_guard_s_progress() {
         let production = runner_production();
         let emit = &production[production.find("fn emit_payload(").unwrap()..];
         let emit = &emit[..emit.find("\n}\n").unwrap()];

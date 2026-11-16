@@ -4,12 +4,13 @@ name: Desktop release (native Windows)
 # packaging/windows/build-installer.ps1 (plain makensis, no Tauri bundler) and published to the v2 channel manifests
 # (desktop/v2/<channel>.json) that the bridge release 0.8.25 and every native build read.
 #
-# It is a separate workflow on purpose: release.yml stays the 0.8.x path, byte for byte, and the manifests 0.8.24
+# It is a separate workflow on purpose: the 0.8.x Tauri line has its own release path (a release branch cut from the
+# desktop-v0.8.25 tag, where that line's release workflow still exists), and the manifests 0.8.24
 # and older read (desktop/latest.json, beta.json, alpha.json) are never written here, so a native build can never
 # reach a client that did not pass through the bridge. Design, decisions and what is still open:
 # docs/superpowers/specs/2026-11-11-native-installer-updater.md.
 #
-# Same gates as release.yml: authored RELEASE_NOTES.md naming the version, RELEASE_BLOCKERS.md empty, the reviewed
+# The same gates as the 0.8.x line: authored RELEASE_NOTES.md naming the version, RELEASE_BLOCKERS.md empty, the reviewed
 # branch point, the Authenticode gate, the updater-signature key guard.
 #
 # Signing boundary (spec section 6, "The signing boundary"): the two jobs that sign, `build` and `publish-manifest`,
@@ -63,7 +64,7 @@ jobs:
           fi
           IFS=. read -r major minor _ <<< "$RELEASE_VERSION"
           if (( major == 0 && minor < 9 )); then
-            echo "::error::$RELEASE_VERSION is a 0.8.x (Tauri) version: release it with release.yml. This workflow publishes native builds, 0.9.0 and later."
+            echo "::error::$RELEASE_VERSION is a 0.8.x (Tauri) version, and this workflow publishes native builds, 0.9.0 and later. Release a 0.8.x hotfix from the desktop-v0.8.25 line: cut a release branch from that tag, where the 0.8.x release workflow still exists."
             exit 1
           fi
           case "$RELEASE_CHANNEL" in
@@ -156,7 +157,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Release script tests
-        run: bun test scripts/tests/nativeChannelManifest.test.ts scripts/tests/releaseChannelChecks.test.ts
+        run: bun test scripts/tests/nativeChannelManifest.test.ts scripts/tests/releaseChannelChecks.test.ts scripts/tests/updaterSignatureKey.test.ts
 
       # The count line is asserted: a run that executed no test is a failure, not a pass.
       - name: Updater tests
@@ -409,7 +410,7 @@ jobs:
           path: artifacts
 
       # make_latest is false here: GitHub's "Latest" is what beebeeb.io/download offers. A native release becomes
-      # "Latest" only when its stable manifest is published (job mark-latest; Guus, 2026-11-11).
+      # "Latest" only when its stable manifest is published (job mark-latest; decided 2026-11-11).
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -618,7 +619,7 @@ jobs:
             git push
           fi
 
-  # Guus, 2026-11-11: GitHub's "Latest" shows a native release only once it is stable. A release is created with
+  # Decided 2026-11-11: GitHub's "Latest" shows a native release only once it is stable. A release is created with
   # make_latest false; this job marks it when its STABLE manifest has been published. Its own job: the job that
   # holds the signing key keeps `contents: read`.
   mark-latest:
