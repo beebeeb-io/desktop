@@ -335,7 +335,7 @@ pub fn retag_by_id(config: &mut DesktopConfig, owner: &Identity) -> usize {
 pub fn retag_in(path: &Path, owner: &Identity) -> Result<usize, String> {
     DesktopConfig::update_at(path, |config| {
         let retagged = retag_by_id(config, owner);
-        (false, retagged)
+        (retagged > 0, retagged)
     })
 }
 
