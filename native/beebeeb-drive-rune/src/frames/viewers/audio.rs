@@ -109,7 +109,7 @@ struct Live {
 impl Live {
     fn of(ui: &Ui) -> Option<Live> {
         let handle = ui.source.player()?;
-        let state = handle.state_of(&ui.file.id)?;
+        let state = handle.state()?;
         let art = handle.art();
         // The picture is read after the state: the player may have moved on in between, and then it is not ours.
         let still = handle.state_of(&ui.file.id).is_some();
