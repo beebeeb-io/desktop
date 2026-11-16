@@ -49,6 +49,8 @@ const SIGNS_IN: u8 = 0;
 const TWO_FACTOR: u8 = 1;
 /// The password step's registration refuses the recovery token (`invalid_recovery_token`): the recovery is over.
 const REFUSES_TOKEN: u8 = 2;
+/// The finalize gets no answer: the server hangs up after it has the request.
+const HANGS_UP: u8 = 3;
 
 type Meanwhile = Box<dyn FnOnce() + Send>;
 
@@ -115,6 +117,7 @@ fn server(tag: &str) -> Recovery {
                     meanwhile();
                 }
                 match finalize_in.load(Ordering::SeqCst) {
+                    HANGS_UP => Reply::hang_up(),
                     TWO_FACTOR => Reply::ok(json!({
                         "requires_2fa": true,
                         "session_token": account_in.session_token,
@@ -333,6 +336,33 @@ fn recovery_sign_in_required_stores_nothing() {
     assert!(!stored_key(&store, "two-factor"));
     assert_eq!(count(&fake.api, PROFILE), 0, "nothing was asked for a session");
     assert!(!holds_a_recovery(&engine));
+}
+
+#[test]
+fn recovery_finalize_with_no_answer_holds_nothing() {
+    let fake = server("no-answer");
+    fake.finalize.store(HANGS_UP, Ordering::SeqCst);
+    let (engine, store) = opened(&fake.api, "no-answer");
+    verified(&engine, &fake);
+
+    let done = engine.recovery_set_password_for(engine.session_turn(), new_password());
+
+    assert_eq!(done, Err(RecoveryRefused::Offline));
+    assert_eq!(count(&fake.api, FINALIZE), 1, "the last step was sent");
+    assert!(!holds_a_recovery(&engine), "no answer: the recovery is over, nothing is kept for a retry");
+    assert!(!engine.has_session());
+    assert_eq!(engine.gate(), GateState::SignedOut);
+    assert_eq!(stored_token(&store, "no-answer"), None);
+    assert!(!stored_key(&store, "no-answer"));
+    assert_eq!(count(&fake.api, PROFILE), 0);
+
+    // A retry has nothing to continue from: nothing is sent.
+    assert_eq!(
+        engine.recovery_set_password_for(engine.session_turn(), new_password()),
+        Err(RecoveryRefused::Overtaken)
+    );
+    assert_eq!(count(&fake.api, REGISTER), 1);
+    assert_eq!(count(&fake.api, FINALIZE), 1);
 }
 
 #[test]
