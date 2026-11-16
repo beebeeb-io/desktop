@@ -580,6 +580,9 @@ impl<C: CredentialStores> Engine<C> {
         seat.test_pause(|seams| seams.before_keys.clone());
         let task = {
             let mut state = lock(&seat.state);
+            if state.stops != owed.stops {
+                return None;
+            }
             let Ok(((token, key), identity)) = start::keys_for_engine_start(&self.acct) else {
                 return Some(Ok(Outcome::NotEligible));
             };

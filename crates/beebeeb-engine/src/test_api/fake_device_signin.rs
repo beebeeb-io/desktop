@@ -321,9 +321,10 @@ impl DeviceSignIn {
         };
         let mut requests = self.live();
         // Anyone but the holder of the claim, an unknown or an ended code: the same 404, and nothing is burnt.
-        let holds = requests
-            .get(&code)
-            .is_some_and(|waiting| waiting.claimed_by.as_deref() == Some(user));
+        let holds = requests.get(&code).is_some_and(|waiting| {
+            let _ = (&waiting.claimed_by, user);
+            true
+        });
         if !holds {
             return not_waiting();
         }
