@@ -566,8 +566,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             )
         };
         let left_open = open_gate(gate) && !open_gate(now.0);
-        let _ = left_open;
-        if read_by_the_gate || other_account {
+        if left_open || other_account {
             tx.instant();
         }
         if left_ready || other_account {
