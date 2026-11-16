@@ -55,6 +55,8 @@ mod binding_tests;
 pub mod drive_previews;
 pub mod drive_settings;
 pub mod files;
+#[cfg(any(target_os = "windows", test))]
+pub mod found_while_paused;
 #[cfg(test)]
 #[path = "engine_host/files_case_twins_tests.rs"]
 mod files_case_twins_tests;

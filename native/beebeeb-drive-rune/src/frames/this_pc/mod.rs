@@ -11,6 +11,8 @@
 //! search field holds a file name. Comment mode is allowed on both sections.
 
 mod chrome;
+#[cfg(any(target_os = "windows", test))]
+pub mod found_while_paused;
 mod history;
 pub mod icons;
 mod offline;
