@@ -284,7 +284,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// The account's id, as a canonical UUID: the marks are kept under it.
-    fn own_account_id(&self) -> Option<String> {
+    pub(super) fn own_account_id(&self) -> Option<String> {
         let recorded = self
             .session_user_id
             .lock()
@@ -533,7 +533,7 @@ fn remember_custody(db: &StateDb, folder: &str, revision: u64) -> rusqlite::Resu
 
 /// An id as the server writes it: a canonical lower-case hyphenated UUID, never normalized (an id is HKDF info for
 /// a key and the match key of the server's invite rows).
-fn canonical(id: &str) -> Option<&str> {
+pub(super) fn canonical(id: &str) -> Option<&str> {
     match uuid::Uuid::parse_str(id) {
         Ok(u) if u.hyphenated().to_string() == id => Some(id),
         _ => None,
@@ -543,7 +543,7 @@ fn canonical(id: &str) -> Option<&str> {
 /// One of the account's own items, from its local state: `Some(is_folder)`. `None` for an item that is gone or
 /// going, a received share's, the Backups root and anything in its tree, and a file whose key this computer cannot
 /// have (a foreign id with no owned-key record).
-fn own_item(db: &StateDb, id: &str) -> rusqlite::Result<Option<bool>> {
+pub(super) fn own_item(db: &StateDb, id: &str) -> rusqlite::Result<Option<bool>> {
     let Some(entry) = db.get_file(id)?.filter(|e| e.status != FileStatus::Trashing) else {
         return Ok(None);
     };
@@ -571,7 +571,7 @@ fn own_item(db: &StateDb, id: &str) -> rusqlite::Result<Option<bool>> {
 
 /// The key that opens a file (web `shareFileKey`, Tauri `flows::file_key`): its owned-key record, else an owner id's
 /// derivation; a foreign id with no record has none.
-fn file_key(db: &StateDb, master: &MasterKey, id: &str) -> Option<FileKey> {
+pub(super) fn file_key(db: &StateDb, master: &MasterKey, id: &str) -> Option<FileKey> {
     if let Some(record) = db.get_owned_key_record(id).ok()? {
         let kind = owner_keys::kind_in_db(db, id);
         return owner_keys::record_key(master, &record, kind).ok().map(|(key, _)| key);
@@ -598,7 +598,7 @@ fn already_on_it(sent: &Value, item: &str, person: &str) -> bool {
 
 /// Tauri `peers_for_email`: the account ids the sent invites to `person` (normalized) name, in the server's order,
 /// each once.
-fn peers_for_email(sent: &Value, person: &str) -> Vec<String> {
+pub(super) fn peers_for_email(sent: &Value, person: &str) -> Vec<String> {
     let mut peers: Vec<String> = Vec::new();
     for invite in list(sent, "invites") {
         if text(invite, "recipient_email").map(normalized_email).as_deref() != Some(person) {
@@ -616,7 +616,7 @@ fn peers_for_email(sent: &Value, person: &str) -> Vec<String> {
 /// Tauri `expectation_of`: no mark is `NotCompared`; a "They don't match" mark, or marks that pin different keys,
 /// expect no key at all ([`NO_KEY_MATCHES`]); else the one key they all pin. A fingerprint that is not 64 hex digits
 /// is `None` (stop), never `NotCompared`.
-fn expectation_of(marks: &[(String, MarkKind)]) -> Option<PeerKeyExpectation> {
+pub(super) fn expectation_of(marks: &[(String, MarkKind)]) -> Option<PeerKeyExpectation> {
     let mut pinned: Option<[u8; 32]> = None;
     let mut no_key = false;
     for (fingerprint, kind) in marks {

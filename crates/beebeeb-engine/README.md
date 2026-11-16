@@ -2,8 +2,8 @@
 
 The running sync engine of the desktop app, without a UI toolkit: the state database, the API client, the
 credential stores, the runner and its tick, Windows Cloud Files, and the view models a window lists from.
-`src-tauri` (the Tauri shell) and `native/beebeeb-drive-rune` (the native shell) both build on it. Nothing here
-names Tauri (`scripts/check-engine-boundary.sh`).
+`native/beebeeb-drive-rune` (the native shell) builds on it. Nothing here names Tauri
+(`scripts/check-engine-boundary.sh`).
 
 Tests: `cargo test --locked` in this directory. The `test-support` feature is for the tests of other crates only;
 a release build with it does not compile.

@@ -35,7 +35,11 @@ mod store;
 mod types;
 
 #[cfg(test)]
+mod notify_carry_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod write_pin_tests;
 
 pub use error::ConfigError;
 pub use lock::{HeldConfig, UpdateError};

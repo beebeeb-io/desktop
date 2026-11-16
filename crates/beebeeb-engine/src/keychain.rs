@@ -8,7 +8,7 @@ use std::fmt;
 
 // The service every platform store (and the test store) names its items with comes from the identity the store
 // was made for (`EngineIdentity::credential_service`): no store has a constructor without one, and none has a
-// `Default`. `super`, not `crate`: `src-tauri/tests/keychain.rs` includes this file and `identity.rs` by path.
+// `Default`. `super`, not `crate`: the 0.8.x Tauri shell's tests included this file and `identity.rs` by path.
 use super::identity::EngineIdentity;
 const MASTER_KEY_BYTES: usize = 32;
 
@@ -921,6 +921,9 @@ mod windows_credentials {
     }
 }
 
+#[cfg(test)]
+#[path = "../src/keychain/debug_tests.rs"]
+mod debug_tests;
 #[path = "../src/keychain/tests.rs"]
 mod tests;
 

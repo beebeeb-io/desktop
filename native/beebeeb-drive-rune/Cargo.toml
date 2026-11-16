@@ -5,9 +5,7 @@ edition = "2024"
 publish = false
 
 # Rune needs Rust 1.99.1 (edition 2024 + language features it uses).
-# The desktop repo's src-tauri/ pins to "stable" (currently 1.98.1 on this machine).
-# This crate is a sibling, not a workspace member of src-tauri/, so it gets its own toolchain.
-# During the migration both shells build side by side.
+# This crate is its own workspace root, with its own `rust-toolchain.toml`; CI builds it with 1.99.1.
 
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "c92e462e", default-features = false, features = ["accessibility"] }
@@ -111,7 +109,7 @@ path = "src/main.rs"
 # was the rest (985 tests in 678 s, then 1,076 tests in 1,779 s on 2026-11-13). The tests under `engine_host/` and
 # `shell/` each sign an invented account in and unlock it through the engine, with core's production Argon2id
 # parameters, and at opt-level 0 that is minutes per test (51 tests ran for over 60 s each). This crate is its own
-# workspace root, so the same list in `crates/beebeeb-engine/Cargo.toml` and `src-tauri/Cargo.toml` does not reach it
+# workspace root, so the same list in `crates/beebeeb-engine/Cargo.toml` does not reach it
 # (docs/ci/2026-11-11-rust-ci-speed.md): these third-party crypto, KDF, hash and SQLite crates are compiled optimised
 # in the dev and test profiles. No KDF parameter, no crypto code, no release setting changes; Cargo.lock is unchanged.
 # A name that matches no package is a cargo warning.

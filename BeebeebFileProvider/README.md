@@ -45,20 +45,15 @@ scripts/build-fileprovider-extension.sh
 It creates:
 
 ```text
-src-tauri/target/fileprovider/BeebeebFileProvider.appex
-src-tauri/target/fileprovider/BeebeebFileProviderCtl
+target/fileprovider/BeebeebFileProvider.appex
+target/fileprovider/BeebeebFileProviderCtl
 ```
 
-Tauri embeds that generated bundle into
-`Beebeeb.app/Contents/PlugIns/BeebeebFileProvider.appex` during macOS bundle
-creation.
-
-After a local app build, sign the nested extension before the parent app:
-
-```sh
-scripts/sign-local-macos-app.sh \
-  src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app
-```
+The macOS app embeds that generated bundle at
+`Beebeeb.app/Contents/PlugIns/BeebeebFileProvider.appex`. The 0.8.x Tauri app
+did that during its bundle build and signed the nested extension before the
+parent app; that app is gone in 0.9.0, and the packaging and signing order are
+carried in `native/beebeeb-drive-rune/docs/macos/packaging-signing-update.md`.
 
 The source-level check is still useful while editing Swift files:
 
@@ -102,7 +97,7 @@ the pass count is enforced by `EXPECTED_TESTS` in that script).
 
 `BeebeebFileProviderCtl` is our own manual diagnostic tool (source:
 `BeebeebFileProviderTools/DomainControlTool.swift`, built to
-`src-tauri/target/fileprovider/BeebeebFileProviderCtl`). It is NOT used by the
+`target/fileprovider/BeebeebFileProviderCtl`). It is NOT used by the
 app or the extension; it exists for humans debugging domain state. It is
 unrelated to Apple's system `/usr/bin/fileproviderctl`.
 
@@ -115,8 +110,10 @@ Verbs (default `status`):
 | `remove` | `NSFileProviderManager.remove(_:mode: .preserveDirtyUserData)` for the domain: files that never reached the server are kept (task 1882). Prints `removed`, then `preserved: <folder>` only when that folder holds something (round 2: macOS reports a folder even when it kept nothing); otherwise `nothing kept: macOS reported <folder>, which is missing` (or `… empty`). | 0 removed; 1 error |
 | `signal-root` | `signalEnumerator(.rootContainer)` for the installed domain. | 0 signaled; 1 not installed or error |
 
-Unknown verbs exit 2. `scripts/qa-fileprovider.sh` wraps the SYSTEM
-`fileproviderctl` (dump/diagnose/evaluate) plus `pluginkit` for a health
+Unknown verbs exit 2. The 0.8.x QA harness (`scripts/qa-fileprovider.sh`, gone
+with the Tauri app; carried in
+`native/beebeeb-drive-rune/docs/macos/packaging-signing-update.md`) wrapped the
+SYSTEM `fileproviderctl` (dump/diagnose/evaluate) plus `pluginkit` for a health
 report; this ctl is the domain-level counterpart.
 
 If this later moves to a full Xcode target, keep the same contract:
@@ -227,7 +224,7 @@ entry; spec §5). Only then does the app show the person that folder: an alert
 after a sign-out, the add rollback or the app-start sweep, and a row in Settings →
 Sync that stays until the person dismisses it (the latest kept folder is saved in
 `desktop.toml` as `kept_unsynced_folder`). Logs say only that files were kept,
-never the path. `src-tauri/src/finder_removal.rs` pins every removal in the repo to this
+never the path. `crates/beebeeb-engine/tests/file_provider_source_pins.rs` pins every removal in the repo to this
 mode. Limit: macOS counts a create or modify as synced once the extension has
 handed it to the app's upload queue, and sign-out purges that queue, so a file
 still queued at sign-out is not kept. Spec:

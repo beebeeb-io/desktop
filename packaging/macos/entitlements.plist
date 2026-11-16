@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Code-signing entitlements for the Beebeeb desktop app (parent target).
+
+  Spec: docs/superpowers/specs/2026-05-16-macos-desktop-drive-design.md.
+
+  The 0.8.x Tauri app picked this up via its tauri.conf.json macOS bundle
+  settings (`"signingIdentity"` + the entitlements path). The native macOS
+  app's packaging and signing: native/beebeeb-drive-rune/docs/macos/
+  packaging-signing-update.md.
+
+  Production release rule: the containing app and File Provider extension must
+  be signed by the same Apple Team ID. Add app-group or keychain-access-group
+  entitlements only once the extension actually shares a container or Keychain
+  item with the daemon; do not predeclare guessed group names.
+
+	  Main-app entitlements:
+
+	  - `com.apple.security.app-sandbox` — required for the containing app
+	    shape that hosts a File Provider extension.
+
+	  - `com.apple.security.application-groups` — shares the File Provider
+	    document group with the extension. macOS supports TeamID-prefixed
+	    group names without separate developer-portal registration.
+
+	  - `com.apple.security.files.user-selected.read-write` — needed for
+	    the first-launch folder picker (`pick_sync_root` IPC) so the user
+	    can choose any directory as the sync root, not just the app's
+	    sandbox.
+
+	  The File Provider entitlement belongs to the `.appex` target. Keeping
+	  that restricted entitlement on this containing app breaks local
+	  Apple Development launches unless a matching provisioning profile is
+	  installed.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>R8352WDJJR.io.beebeeb.app.fileprovider</string>
+    </array>
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+</dict>
+</plist>

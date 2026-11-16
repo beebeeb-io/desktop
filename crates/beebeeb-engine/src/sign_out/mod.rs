@@ -1,5 +1,6 @@
-//! The parts of the sign-out keep step that only read the state database (spec 2026-10-10, task 1887). The flow,
-//! its windows and the macOS keep step stay in the shell (`src-tauri/src/sign_out/`).
+//! The parts of the sign-out keep step that only read the state database (spec 2026-10-10, task 1887). The 0.8.x
+//! flow, its windows and the macOS keep step went with the Tauri shell; the macOS rules are carried in
+//! `native/beebeeb-drive-rune/docs/macos/sign-out-and-lock.md`.
 
 pub mod flow_window;
 pub mod kept_names;

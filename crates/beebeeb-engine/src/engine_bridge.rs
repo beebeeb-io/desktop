@@ -525,7 +525,7 @@ pub use meta::{
     wire_id_fields, write_hydrated_from_reader, write_hydrated_plaintext,
 };
 pub use meta::{HydrateSource, SharedRootRefreshOutcome};
-// The shell-side engine tests (`src-tauri/src/engine_shell_tests.rs`) build the shared-folder fixture.
+// `test-support` exports it so the tests of a crate built on the engine can build the shared-folder fixture.
 #[cfg(any(test, feature = "test-support"))]
 pub use meta::SharedRootMapping;
 #[cfg(any(test, feature = "test-support"))]

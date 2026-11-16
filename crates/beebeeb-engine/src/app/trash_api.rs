@@ -1,8 +1,8 @@
 //! The account's Trash, for a host without a UI toolkit (the native Trash window): every item in it, with its name
 //! decrypted here, in the engine, with the session's vault key, from the server only (never this computer's local
 //! state, which may belong to an earlier account), bound to the session that asked. Moved from the Tauri shell's `desktop_trash_list`
-//! (`src-tauri/src/account_commands.rs`) so the native app needs no shell code for it; the Tauri command is left
-//! as it was.
+//! (`src-tauri/src/account_commands.rs`) so the native app needs no shell code for it; the Tauri command went with
+//! that shell.
 //!
 //! [`Engine::restore_items_for`] puts items back and [`Engine::trash_items_for`] moves items to Trash, each bound to
 //! the session of the press (nothing is sent under another). There is no unbound form of either.

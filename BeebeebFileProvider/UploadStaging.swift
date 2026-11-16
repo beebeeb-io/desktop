@@ -11,13 +11,13 @@ import Foundation
 ///
 /// The app accepts contents from this directory only, takes its own copy, and
 /// deletes this one when it answers (`open_staged_contents` and
-/// `StagedContents` in `src-tauri/src/ipc_socket.rs`). The extension deletes it
+/// `StagedContents` in `crates/beebeeb-engine/src/ipc_socket/`). The extension deletes it
 /// after the reply as well, and the app purges anything a crash left behind
 /// after an hour (`UPLOAD_STAGING_MAX_AGE`).
 ///
 /// Pure Foundation, so `scripts/test-ipc-framing.sh` compiles and tests it.
 enum UploadStaging {
-    /// Mirrors `MACOS_UPLOAD_STAGING_DIRNAME` in `src-tauri/src/ipc_socket.rs`;
+    /// Mirrors `MACOS_UPLOAD_STAGING_DIRNAME` in `crates/beebeeb-engine/src/ipc_socket.rs`;
     /// keep both in sync.
     static let directoryName = "upload-staging"
 
@@ -57,7 +57,7 @@ enum UploadStaging {
     /// modification time set to now, so it does not carry the source's date.
     /// The app's purge never reads that time: it ages a copy by its ctime,
     /// which the kernel sets when the copy is made and no process can set
-    /// back (`purge_stale_upload_staging` in `src-tauri/src/ipc_socket.rs`).
+    /// back (`purge_stale_upload_staging` in `crates/beebeeb-engine/src/ipc_socket/`).
     ///
     /// Only a regular file is copied. A package (a folder that macOS shows as
     /// one file, such as an `.rtfd` document) reaches the extension as a

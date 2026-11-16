@@ -276,35 +276,48 @@ pub fn backups_root_first(items: &mut [DriveItem]) {
     items.sort_by_key(|item| !item.backup.is_protected);
 }
 
-/// Every live row (a row being trashed is gone), with one row per path and kind: a row the server
-/// never confirmed folds into the server's row at the same path, as Selective sync shows them.
+/// Every live row (a row being trashed is gone), as Selective sync shows them: every row the server confirmed stays,
+/// each by its own id, even when two share a path; a row the server never confirmed folds into the server's row at its
+/// path, and several such rows at a path with no server row are one (see `prefer`). Kinds never mix.
 pub fn live_rows(db: &StateDb) -> Result<Vec<FileEntry>, DriveError> {
     let rows = db.file_overview_rows().map_err(DriveError::db)?;
-    let mut best: HashMap<(bool, String), FileEntry> = HashMap::new();
-    let mut unkeyed = Vec::new();
+    let mut kept = Vec::new();
+    // Per (kind, path): the best row the server has not confirmed, kept only when no server row shares the path.
+    let mut unsent: HashMap<(bool, String), FileEntry> = HashMap::new();
+    let mut served: HashSet<(bool, String)> = HashSet::new();
     for (entry, _) in rows {
         if entry.status == FileStatus::Trashing {
             continue;
         }
         let path = entry.path.trim_matches('/').to_lowercase();
         if path.is_empty() {
-            unkeyed.push(entry);
+            kept.push(entry);
             continue;
         }
         let key = (entry.is_dir(), path);
-        match best.get(&key) {
-            Some(kept) if !prefer(&entry, kept) => {}
+        if entry.remote_updated_at > 0 {
+            served.insert(key);
+            kept.push(entry);
+            continue;
+        }
+        match unsent.get(&key) {
+            Some(best) if !prefer(&entry, best) => {}
             _ => {
-                best.insert(key, entry);
+                unsent.insert(key, entry);
             }
         }
     }
-    unkeyed.extend(best.into_values());
-    Ok(unkeyed)
+    kept.extend(
+        unsent
+            .into_iter()
+            .filter(|(key, _)| !served.contains(key))
+            .map(|(_, e)| e),
+    );
+    Ok(kept)
 }
 
-/// Whether `a` should stay at a shared path instead of `b`: the server's row (a version or a remote
-/// time recorded), then a row that is not merely local, then the smaller id.
+/// Whether `a` should stay at a shared path instead of `b` (rows the server has not confirmed; a confirmed row never
+/// loses to another): the server's row (a remote time recorded), then a row that is not merely local, then the smaller id.
 fn prefer(a: &FileEntry, b: &FileEntry) -> bool {
     let known = |e: &FileEntry| e.remote_updated_at > 0;
     let not_local = |e: &FileEntry| e.status != FileStatus::Local;

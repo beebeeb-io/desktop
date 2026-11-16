@@ -189,10 +189,7 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
     // 2. The apps: no manifest names the feature in any spelling; every engine edge is read (normal and dev, both
     //    apps), and only a dev edge carries the test helpers.
     let mut edges = 0;
-    for app in [
-        "../../native/beebeeb-drive-rune/Cargo.toml",
-        "../../src-tauri/Cargo.toml",
-    ] {
+    for app in ["../../native/beebeeb-drive-rune/Cargo.toml"] {
         let text = read(app);
         let mentions = text.matches("fake-server").count();
         if mentions > 0 {
@@ -266,10 +263,10 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
         "{} way(s) the fake server could ship: {wrong:#?}",
         wrong.len()
     );
-    // The instruments read something: the crate's bins, the bin by name, the engine edges of the two apps.
+    // The instruments read something: the crate's bins, the bin by name, the engine edges of the native app (its normal edge and its dev edge).
     assert_eq!(
         (bins.len(), named, edges),
-        (1, 1, 4),
+        (1, 1, 2),
         "bins, bins named bb-fake-server, engine edges"
     );
     assert!(scripts.len() >= 4, "the NSIS scripts read: {scripts:?}");

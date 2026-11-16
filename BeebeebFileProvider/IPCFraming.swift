@@ -3,7 +3,7 @@ import Foundation
 
 // Wire framing + exchange for the desktop daemon's Unix socket (task 1670
 // issue 3). The contract is docs/IPC_PROTOCOL.md; the Rust half is
-// src-tauri/src/ipc_frame.rs -- keep the two in step.
+// crates/beebeeb-engine/src/ipc_frame.rs -- keep the two in step.
 //
 // Frame = ONE compact JSON value followed by a single "\n" (0x0A). Compact
 // JSON escapes every control character inside a string, so a raw 0x0A can
