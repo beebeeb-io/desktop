@@ -1,0 +1,14 @@
+[package]
+name = "beebeeb-media-protocol"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "The messages between the desktop app and its sandboxed media helper, and their checked encoding. No dependencies."
+
+# Design: the media plan's (d) "Sandbox": bytes in (the helper asks for ranges of the ONE file it was started for),
+# RGBA frames of the asked size and PCM out, short tags out, errors as codes. Every decode checks every length
+# against this crate's limits before it allocates; anything else is an error, and the app kills the helper.
+# Rules:
+#   - no dependency of any kind (`[dependencies]` stays empty): both the app and the helper link it;
+#   - no `unsafe`, nothing platform-specific.

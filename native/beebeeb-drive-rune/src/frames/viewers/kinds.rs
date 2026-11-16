@@ -52,6 +52,14 @@ pub struct Track {
     pub current: bool,
 }
 
+/// A video in Beebeeb's player (decision D-MED-6: a video opened from a list plays here; the board has no frame for
+/// it yet, one is requested). What plays, and where, comes from the player (`media::player::PlayState`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoDoc {
+    /// Seconds in all, as the window knows it before the player opened the file.
+    pub length: u32,
+}
+
 /// A PDF (DW-1505): how many pages, the page it opens on, and its size in words.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PdfDoc {
@@ -137,12 +145,18 @@ pub enum Picture {
 pub enum Viewer {
     Photo,
     Audio,
+    /// Beebeeb's player (`viewers::video`).
+    Video,
     Pdf,
     Table,
     Archive,
     Text,
     Markdown,
 }
+
+/// The audio formats added with the player (decision D-MED-13): only a source with a player shows them
+/// ([`needs_a_player`]).
+const PLAYER_ONLY_AUDIO: [&str; 8] = ["oga", "aif", "aiff", "caf", "mka", "ac3", "mp2", "wma"];
 
 /// The router by file type.
 pub fn viewer_of(name: &str) -> Option<Viewer> {
@@ -151,6 +165,10 @@ pub fn viewer_of(name: &str) -> Option<Viewer> {
         "arw" | "cr2" | "cr3" | "nef" | "raf" | "orf" | "rw2" | "dng" | "jpg" | "jpeg" | "png" | "heic" | "webp"
         | "gif" => Viewer::Photo,
         "m4a" | "mp3" | "wav" | "flac" | "aac" | "ogg" | "opus" => Viewer::Audio,
+        ext if PLAYER_ONLY_AUDIO.contains(&ext) => Viewer::Audio,
+        // Not `.ts`: that stays a text file (TypeScript, below). A transport stream plays as `.m2ts` or `.mts`.
+        "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" | "m2ts" | "mts" | "mpg" | "mpeg" | "vob" | "ogv" | "wmv"
+        | "3gp" => Viewer::Video,
         "pdf" => Viewer::Pdf,
         "csv" | "tsv" => Viewer::Table,
         "zip" | "tar" | "gz" | "tgz" | "7z" | "rar" => Viewer::Archive,
@@ -159,6 +177,17 @@ pub fn viewer_of(name: &str) -> Option<Viewer> {
         | "xml" => Viewer::Text,
         _ => return None,
     })
+}
+
+/// Whether only the player shows this kind of file: a video, or an audio format added with the player (decisions
+/// D-MED-6, D-MED-13). A source without a player does not show these (`ViewerSource::previews`' default), so a list's
+/// Open leaves them to their own app, as before there was a player.
+pub fn needs_a_player(name: &str) -> bool {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    viewer_of(name) == Some(Viewer::Video) || PLAYER_ONLY_AUDIO.contains(&ext.as_str())
 }
 
 /// Whether the file's own app SHOWS it: a document, a picture, a table, a note. `false` for source code,

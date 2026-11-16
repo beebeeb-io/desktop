@@ -217,6 +217,8 @@ pub enum Body {
     Photo(PhotoDoc),
     /// DW-1503: a recording, with its folder as the queue.
     Audio(AudioDoc),
+    /// A video in Beebeeb's player (decision D-MED-6; no board frame yet). Nothing makes one before it is bound.
+    Video(VideoDoc),
     /// DW-1505, DW-1506: a PDF.
     Pdf(PdfDoc),
     /// DW-1514: a CSV or TSV as a table.
@@ -251,6 +253,7 @@ impl fmt::Debug for Body {
             Body::Markdown(doc) => write!(f, "Markdown({doc:?})"),
             Body::Photo(_) => f.write_str("Photo"),
             Body::Audio(_) => f.write_str("Audio"),
+            Body::Video(doc) => write!(f, "Video({} s)", doc.length),
             Body::Word(doc) => write!(f, "Word({doc:?})"),
             Body::NoEditor => f.write_str("NoEditor"),
             Body::OfficeState(b) => write!(f, "OfficeState({:?})", b.state),
@@ -280,6 +283,7 @@ impl Body {
 
 pub use super::kinds::{
     ArchiveDoc, AudioDoc, Column, Entry, EntryKind, Match, PdfDoc, PhotoDoc, Picture, StripItem, TableDoc, Track,
+    VideoDoc,
 };
 
 /// A Markdown note: its text.
@@ -576,13 +580,21 @@ pub trait ViewerSource {
     }
     /// Whether a file of this name is shown HERE (decrypted and drawn). `false`: a list's Open leaves it to its
     /// own app, as before (`viewers::open_item`); a route that names it anyway gets the source's honest state.
-    fn previews(&self, _name: &str) -> bool {
-        true
+    /// The default: every kind but those only a player shows (`kinds::needs_a_player`), which a source without
+    /// one (the board's fixture, a test's) does not show.
+    fn previews(&self, name: &str) -> bool {
+        !super::kinds::needs_a_player(name)
     }
     /// Whether the file's bytes are kept on this PC, where the system can open them with the file's own app.
     /// `true`: a list's Open hands the file to that app (`viewers::open_item`), as it did before there was a
     /// viewer here; the viewer is for files that are not on this PC, where it saves a download to disk.
     fn kept_on_this_pc(&self, _file_id: &str) -> bool {
+        false
+    }
+    /// Whether a recording or a video named `name` that is kept on this PC still opens HERE, in Beebeeb's player,
+    /// from a list's Open (decision D-MED-13; "Open in another app…" stays one press away). `false` (the default):
+    /// it goes to its own app, as before (`viewers::open_item`).
+    fn opens_here_when_kept(&self, _name: &str) -> bool {
         false
     }
     /// Where the content on screen was read from. Asked when it is drawn.
@@ -651,6 +663,11 @@ pub trait ViewerSource {
     /// Play or pause the open recording. `false`: not done.
     fn play(&mut self, _file_id: &str, _on: bool) -> bool {
         false
+    }
+    /// The shell's player, when this source plays recordings and videos (`media::player`). `None` (the default):
+    /// the views draw what they drew before there was a player.
+    fn player(&self) -> Option<crate::media::player::PlayerHandle> {
+        None
     }
 }
 
