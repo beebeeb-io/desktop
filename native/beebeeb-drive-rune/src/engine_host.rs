@@ -75,6 +75,7 @@ mod files_versions;
 #[path = "engine_host/files_window_support.rs"]
 mod files_window_support;
 pub mod guide;
+mod launcher;
 mod open_folder;
 // The Windows Hello prompt of the lock screen, behind one seam.
 pub mod hello;
@@ -359,6 +360,8 @@ pub struct LiveEngine<C: CredentialStores> {
     /// Whether this PC still has its first run to do. Not due until the app's start reads it
     /// ([`LiveEngine::wire_first_run`]): a handle nobody wired never shows one.
     first_run: Arc<setup::FirstRun>,
+    /// The menu's and the tray's Open in File Explorer start here, never on the window's thread (R-OW1).
+    launcher: launcher::Launcher,
 }
 
 impl<C: CredentialStores> LiveEngine<C> {
@@ -370,6 +373,7 @@ impl<C: CredentialStores> LiveEngine<C> {
             status: Mutex::new(EngineStatusView::default()),
             starts: sync::StartWorker::default(),
             first_run: Arc::default(),
+            launcher: launcher::Launcher::default(),
         }
     }
 
@@ -502,8 +506,10 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     fn open_in_file_explorer(&self) -> Result<(), actions::ActionError> {
         let path = open_folder::beebeeb_folder(&self.engine)
             .map_err(|_| actions::ActionError::NotAvailable("sync is not running"))?;
-        open_path(&path, &|| true)
-            .map_err(|_| actions::ActionError::Failed("the Beebeeb folder did not open".to_string()))
+        let asked = self
+            .launcher
+            .open_for(&self.engine, open_path, path, "the folder did not open");
+        asked.map_err(|()| actions::ActionError::Failed("the Beebeeb folder did not open".to_string()))
     }
 
     fn profile_holder(&self) -> Option<ProfileHolder> {

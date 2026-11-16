@@ -212,11 +212,19 @@ pub trait ViewerEngine: Send + Sync + 'static {
 /// The engine handle, as the viewer asks it.
 pub struct LiveViewerEngine<C: CredentialStores> {
     engine: Arc<Engine<C>>,
+    /// "Open in another app" starts here, never on the window's thread (ruling R-OW1).
+    launcher: super::launcher::Launcher,
+    /// What opens a file (the system's own; a test's stand-in).
+    open: super::files_launch::Start,
 }
 
 impl<C: CredentialStores> LiveViewerEngine<C> {
     pub(super) fn new(engine: Arc<Engine<C>>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            launcher: super::launcher::Launcher::default(),
+            open: super::open_path,
+        }
     }
 }
 
@@ -273,9 +281,20 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
                 super::path_the_system_opens(db, &sync_root, file_id).ok()
             })
         });
-        match path {
-            Ok(Some(path)) if super::open_path(&path, &|| true).is_ok() => Elsewhere::Opened,
-            _ => Elsewhere::Refused,
+        // `Opened` is "the system was asked": the start itself runs on the launch worker, for this session, and the
+        // window's thread never waits for the launch lock (R-OW1).
+        let Ok(Some(path)) = path else {
+            return Elsewhere::Refused;
+        };
+        let asked = self.launcher.open_for(
+            &self.engine,
+            self.open,
+            path,
+            "viewer: the file did not open in another app",
+        );
+        match asked {
+            Ok(()) => Elsewhere::Opened,
+            Err(()) => Elsewhere::Refused,
         }
     }
 
