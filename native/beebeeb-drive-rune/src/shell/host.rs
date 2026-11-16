@@ -1023,7 +1023,9 @@ pub fn on_close(s: &mut State, tx: &mut Tx) {
         tx.quit();
         return;
     }
-    // The window went to the tray: the person left Beebeeb ("Locks again after: Immediately" locks).
+    // The window went to the tray: nothing typed into sign-in waits in it, nor a half-done step's proof.
+    crate::frames::signin::wipe::on_window_closed(s);
+    // The person left Beebeeb ("Locks again after: Immediately" locks).
     let shell = &mut s.shell;
     shell
         .away

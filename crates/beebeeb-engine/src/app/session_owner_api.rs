@@ -15,6 +15,10 @@
 //!   did not load it, and an untagged key stays "unknown" after the tag is written. So that answer changes nothing in
 //!   memory and is logged (no id); the next start's loader refuses the key. A stored token that is not the one asked
 //!   about (`SessionUnknown`) gets no tag; the id is still recorded for the session in memory.
+//! - A session that came back with no email is named by the same answer (`name_unnamed_session`), before its id is
+//!   recorded: the session in memory, the account label and, while the stored token is the one asked about, the
+//!   credential store. The turn does not move for it either. A session whose id is known at its start is not asked
+//!   again, so one that has its id but no stored email stays unnamed until its next sign-in.
 //! - Asked as a person's call (`person_session`): never under a locked screen, so the first ask is after the unlock.
 //!   The session watcher asks at most once a minute while the owner is unknown; a call that needs the owner now (the
 //!   two-factor calls) asks at once.
@@ -151,8 +155,46 @@ impl<C: CredentialStores> Engine<C> {
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "could not record the session's owner in the credential store"),
         }
+        // The email first, then the id: a window that reads "the email, else the id" goes from neither to the email.
+        self.name_unnamed_session(token.as_str(), profile.email.trim());
         self.remember_session_user_id(Some(user_id.to_string()));
         OwnerSettled::Recorded
+    }
+
+    /// A session that came back with no email (none was stored beside it) is named after Beebeeb's answer for its own
+    /// token, as a sign-in names it: the session in memory, the account label, and the credential store while it still
+    /// holds that token. A session that has an email keeps it (a change of address is `email_changed_for`'s), and an
+    /// answer that names no email names nothing. Called under the session-write lock, for the session asked about.
+    fn name_unnamed_session(&self, token: &str, email: &str) {
+        if email.is_empty() {
+            return;
+        }
+        {
+            let mut session = self
+                .acct
+                .session
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match session.as_mut() {
+                Some(held) if held.token == token && held.email.is_none() => held.email = Some(email.to_string()),
+                _ => return,
+            }
+        }
+        if let Ok(mut label) = self.acct.auth_email.lock() {
+            label.get_or_insert_with(|| email.to_string());
+        }
+        let vault = self.vault();
+        let stored_is_asked = vault
+            .session_token()
+            .ok()
+            .flatten()
+            .is_some_and(|stored| stored.expose_for_request() == token);
+        if stored_is_asked
+            && vault.account_email().ok().flatten().is_none()
+            && let Err(error) = vault.store_account_email(email)
+        {
+            tracing::warn!(%error, "could not store the account email (the session stays unnamed until the next start)");
+        }
     }
 }
 
