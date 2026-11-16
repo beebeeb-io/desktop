@@ -357,6 +357,7 @@ impl FakeAccount {
                 | ("POST", ["api", "v1", "files", _, "upload", "abandon"])
                 | ("PUT", ["api", "v1", "files", _, "thumbnail"])
                 | ("PUT" | "GET", ["api", "v1", "files", _, "thumbnail", _])
+                | ("PATCH", ["api", "v1", "files", _])
         )
     }
 
@@ -402,6 +403,7 @@ impl FakeAccount {
                     .retain(|_, open| open.file_id != *id);
                 Reply::ok(json!({}))
             }
+            ("PATCH", ["api", "v1", "files", id]) => self.patch_file(id, &req.json()),
             ("PUT", ["api", "v1", "files", id, "thumbnail"]) => self.put_picture(id, "medium", &req.body),
             ("PUT", ["api", "v1", "files", id, "thumbnail", variant]) => self.put_picture(id, variant, &req.body),
             ("GET", ["api", "v1", "files", id, "thumbnail", variant]) => {
@@ -413,6 +415,83 @@ impl FakeAccount {
             }
             _ => Reply::error(404, "not_found"),
         }
+    }
+
+    /// `PATCH /api/v1/files/{id}`: the metadata update the client sends (`ApiClient::update_metadata`): a body with
+    /// `name_encrypted` (the sealed name, as is) and/or `parent_id` (a folder id, or `null` for the top level; a body
+    /// without the key leaves the parent alone). Answers the row as the snapshot shows it. A file this account does
+    /// not hold and has no open upload for (another account's, or none) is `404 not_found`, the same answer for both, as the real API gives so
+    /// that a stranger's id is not confirmed; a trashed row is `404` too. A body that names neither field is `400`.
+    fn patch_file(&self, id: &str, body: &Value) -> Reply {
+        let name = body.get("name_encrypted").and_then(Value::as_str);
+        let parent = body.get("parent_id");
+        if name.is_none() && parent.is_none() {
+            return Reply::error(400, "nothing_to_update");
+        }
+        let mut items = self.items.lock().expect("vault items");
+        if !items.contains_key(id) {
+            // A new file whose upload is open: the server made its row at `init`; the fake makes it at `complete`,
+            // so the update waits on the session and is applied there.
+            let mut sessions = self.uploads.sessions.lock().expect("upload sessions");
+            let Some(open) = sessions.values_mut().find(|open| open.file_id == id) else {
+                return Reply::error(404, "not_found");
+            };
+            match parent {
+                None => {}
+                Some(Value::Null) => open.parent_id = None,
+                Some(Value::String(folder))
+                    if items.get(folder).is_some_and(|item| item.is_folder && !item.is_trashed) =>
+                {
+                    open.parent_id = Some(folder.clone());
+                }
+                Some(Value::String(_)) => return Reply::error(404, "parent_not_found"),
+                Some(_) => return Reply::error(400, "bad_parent_id"),
+            }
+            if let Some(name) = name {
+                open.name = name.to_string();
+            }
+            return Reply::ok(json!({
+                "id": id,
+                "parent_id": open.parent_id,
+                "name_encrypted": open.name,
+                "is_folder": false,
+                "is_trashed": false,
+            }));
+        }
+        if items.get(id).is_some_and(|item| item.is_trashed) {
+            return Reply::error(404, "not_found");
+        }
+        let new_parent = match parent {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(folder)) => {
+                if !items.get(folder).is_some_and(|item| item.is_folder && !item.is_trashed) {
+                    return Reply::error(404, "parent_not_found");
+                }
+                Some(Some(folder.clone()))
+            }
+            Some(_) => return Reply::error(400, "bad_parent_id"),
+        };
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let item = items.get_mut(id).expect("the row was just read");
+        if let Some(name) = name {
+            item.name_encrypted = name.to_string();
+            if let Ok(opened) = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&self.name_key(id), name) {
+                item.name_plaintext = opened.name;
+            }
+        }
+        if let Some(new_parent) = new_parent {
+            item.parent_id = new_parent;
+        }
+        item.updated_at = 1_700_000_000 + seq;
+        let (row, parent_id, name_now) = (item.to_node(), item.parent_id.clone(), item.name_encrypted.clone());
+        drop(items);
+        self.uploads.ops.lock().expect("ops").push((
+            seq,
+            "file_rename",
+            json!({ "id": id, "parent_id": parent_id, "name_encrypted": name_now }),
+        ));
+        Reply::ok(row)
     }
 
     fn put_picture(&self, id: &str, variant: &str, bytes: &[u8]) -> Reply {

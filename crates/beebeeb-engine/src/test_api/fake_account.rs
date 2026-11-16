@@ -55,7 +55,7 @@ pub struct VaultItem {
 }
 
 impl VaultItem {
-    fn to_node(&self) -> Value {
+    pub(super) fn to_node(&self) -> Value {
         let mut node = json!({
             "id": self.id,
             "parent_id": self.parent_id,
@@ -270,7 +270,7 @@ impl FakeAccount {
     }
 
     /// The non-trashed items as sync-snapshot nodes.
-    fn snapshot_nodes(&self) -> Vec<Value> {
+    pub(super) fn snapshot_nodes(&self) -> Vec<Value> {
         self.items
             .lock()
             .expect("vault items")
