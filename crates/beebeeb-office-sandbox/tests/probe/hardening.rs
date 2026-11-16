@@ -240,12 +240,58 @@ pub(crate) fn jit() -> String {
     "err unsupported".into()
 }
 
+/// The handle value `bad-handle` uses: far above any value a process's handle table reaches.
+#[cfg(windows)]
+const NOT_A_HANDLE: usize = 0x7FFF_FFF8;
+
+/// Uses a handle value this process does not hold. First the proof that it holds none: closing the value fails
+/// (`err live` if it does not). A close never ends a process, strict handle checks or not: they act on a handle that
+/// is USED, not closed (measured on VM 401, 22631.6199: a close of such a value answers code 6 in a confined probe
+/// too). Then a wait on it, which uses it: under strict handle checks the process ends here (0xC0000008); without
+/// them the wait fails, `ok refused <code>`.
 #[cfg(windows)]
 pub(crate) fn bad_handle() -> String {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    // SAFETY: a value this process does not hold; the call fails (or, under strict handle checks, ends the process).
-    let closed = unsafe { CloseHandle(0x1234 as windows_sys::Win32::Foundation::HANDLE) } != 0;
-    format!("ok {closed}")
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    // SAFETY: any value may be passed; one this process does not hold makes the call fail.
+    if unsafe { CloseHandle(NOT_A_HANDLE as HANDLE) } != 0 {
+        return "err live".into();
+    }
+    // SAFETY: as above; under strict handle checks the system ends the process instead of failing the call.
+    let waited = unsafe { WaitForSingleObject(NOT_A_HANDLE as HANDLE, 0) };
+    if waited == WAIT_FAILED {
+        format!("ok refused {}", last_error())
+    } else {
+        format!("err waited {waited:#x}")
+    }
+}
+
+/// This process's own strict-handle-check policy: `ok raise=<0|1> permanent=<0|1>` (an exception on a handle that
+/// is used but not held; and whether that can never be turned off), or `err <system code>`.
+#[cfg(windows)]
+pub(crate) fn strict_handles() -> String {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetProcessMitigationPolicy, ProcessStrictHandleCheckPolicy,
+    };
+    let mut flags = 0u32;
+    // SAFETY: the pseudo-handle of this process is always valid; `flags` is writable for the policy's 4 bytes.
+    let ok = unsafe {
+        GetProcessMitigationPolicy(
+            GetCurrentProcess(),
+            ProcessStrictHandleCheckPolicy,
+            (&raw mut flags).cast(),
+            4,
+        )
+    };
+    if ok == 0 {
+        return format!("err {}", last_error());
+    }
+    format!("ok raise={} permanent={}", flags & 1, (flags >> 1) & 1)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn strict_handles() -> String {
+    "err unsupported".into()
 }
 
 #[cfg(not(windows))]

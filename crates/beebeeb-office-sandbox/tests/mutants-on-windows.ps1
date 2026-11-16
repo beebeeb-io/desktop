@@ -67,9 +67,14 @@ $mutants = [ordered]@{
     # 'unrestricted-token').
     'share-plain-token'             = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities\)\?;', 'let _ = &capabilities;', '@lib if !facts\.app_container \{', 'if false {', '@lib if !facts\.exact_capabilities \{', 'if false {', '@lib if !facts\.less_privileged \{', 'if false {', '@lib if facts\.integrity_rid > LOW_INTEGRITY_RID \{', 'if false {', 'token\.as_raw_handle\(\),(?=\s+application\.as_ptr\(\),)', 'null_mut(),')
     # The hardening (process mitigations, the token read-back, the memory watch, the handle count).
-    # No mitigation attribute and the mitigation read-back off (two defects): window, dynamic code and handle checks
-    # must be seen to work in the confined probe.
+    # No mitigation attribute and the mitigation read-back off (two defects): window and dynamic code must be seen to
+    # work in the confined probe. Handle checks stay on in it: Windows turns them on for the AppContainer itself
+    # (measured on VM 401, 22631.6199: the confined probe reads raise=1 permanent=1 without the creation bit).
     'no-mitigations'                = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &mitigation_policy\)\?;', 'let _ = &mitigation_policy;', '@watch mitigations: read_mitigations\(process\)\?,', 'mitigations: crate::Profile::NoCapabilities.mitigations(),')
+    # A helper outside the container (as 'share-plain-token') without the strict-handle bit and its read-back: the
+    # probe survives using a handle it does not hold, and reads the policy as off. 'share-plain-token' alone is the
+    # control: there the creation bit alone ends the probe.
+    'plain-token-no-strict-handles' = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities\)\?;', 'let _ = &capabilities;', '@lib if !facts\.app_container \{', 'if false {', '@lib if !facts\.exact_capabilities \{', 'if false {', '@lib if !facts\.less_privileged \{', 'if false {', '@lib if facts\.integrity_rid > LOW_INTEGRITY_RID \{', 'if false {', 'token\.as_raw_handle\(\),(?=\s+application\.as_ptr\(\),)', 'null_mut(),', '\(wanted\.strict_handle_checks, STRICT_HANDLE_CHECKS_ALWAYS_ON\),', '', '@lib if wanted\.strict_handle_checks && !got\.strict_handle_checks \{', 'if false {')
     'no-memory-watch'               = @('child\.watch = Some\(watch\);', 'drop(watch);')
     'watch-private-only'            = @('@lib private\.saturating_add\(shared\) > limit\.saturating_add\(granted\)', 'private > limit.saturating_add(granted)')
     'handle-count-zero'             = @('Ok\(count\)', 'Ok(0)')
