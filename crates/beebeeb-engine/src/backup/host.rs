@@ -47,6 +47,13 @@ pub fn switch_off_in_settings(identity: &'static crate::identity::EngineIdentity
     crate::config::DesktopConfig::update_for(identity, |cfg| {
         for key in keys {
             cfg.set_known_folder(key, false);
+            for folder in cfg
+                .backup_chosen_folders
+                .iter_mut()
+                .filter(|folder| folder.key() == *key)
+            {
+                folder.folder_id = None;
+            }
         }
         (true, ())
     })
@@ -195,7 +202,7 @@ impl DesktopBackupHost {
                 .backup_list_children(parent)
                 .await
                 .map_err(host_error("category_folder_state"))?;
-            if false && children.iter().any(|child| child.is_folder && child.id == id) {
+            if children.iter().any(|child| child.is_folder && child.id == id) {
                 db.set_backup_category_folder(&key, Some(&id))
                     .map_err(db_error("category_folder"))?;
                 return Ok((id, None));
