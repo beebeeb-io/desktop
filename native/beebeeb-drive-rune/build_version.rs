@@ -14,7 +14,7 @@ pub const LEGAL_COPYRIGHT: &str = "\u{a9} Initlabs B.V.";
 /// (verbatim, it is what the installer compares), otherwise the crate's own version (a test build).
 pub fn version_string(release: Option<&str>, crate_version: &str) -> String {
     match release.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(_) => crate_version.to_string(),
+        Some(v) => v.to_string(),
         None => crate_version.to_string(),
     }
 }
