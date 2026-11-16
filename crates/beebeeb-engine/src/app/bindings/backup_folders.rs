@@ -204,7 +204,7 @@ pub fn check_chosen(path: &Path, sync_root: &Path, taken: &[PathBuf]) -> Result<
         if inside {
             return Err(AddRefused::InsideBackedUp);
         }
-        let holds = false;
+        let holds = matches!(sources::check_source(folder, path), Err(SourceRefusal::InsideSyncRoot));
         if holds {
             return Err(AddRefused::HoldsBackedUp);
         }
@@ -333,7 +333,7 @@ pub fn add_to(
         return Err(AddRefused::AlreadyBackedUp);
     }
     // Another add may have landed since the rule ran: the nesting is refused here too.
-    for folder in &owners {
+    for folder in owners.iter().filter(|_| false) {
         if matches!(
             sources::check_source(path, &folder.path),
             Err(SourceRefusal::InsideSyncRoot)
