@@ -553,8 +553,43 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     }
 
     /// The wake cover's sign-in path: the vault's lock (key out of memory), whose way back is the password.
+    /// Off the UI thread: the lock waits for the engine's writes and its stop (like `signin.rs`'s worker).
     fn lock_vault_now(&self) {
-        let _ = self.engine.lock();
+        let engine = self.engine.clone();
+        on_worker("lock-vault", move || {
+            let _ = engine.lock();
+            engine.wake_host();
+        });
+    }
+}
+
+/// Runs `job` on its own named thread; the caller never waits for it. A thread that cannot start is logged.
+fn on_worker(name: &str, job: impl FnOnce() + Send + 'static) {
+    if std::thread::Builder::new().name(name.into()).spawn(job).is_err() {
+        log("a worker did not start");
+    }
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// The wake cover's Sign in must not hold the UI thread while the engine locks.
+    /// Mutant: call the job inline in `on_worker` -> red (the caller blocks on the job's own gate).
+    #[test]
+    fn on_worker_returns_before_the_job_finishes_and_runs_it_elsewhere() {
+        let (release, gate) = mpsc::channel::<()>();
+        let (done, finished) = mpsc::channel();
+        let caller = std::thread::current().id();
+        super::on_worker("test-worker", move || {
+            gate.recv().unwrap();
+            done.send(std::thread::current().id()).unwrap();
+        });
+        assert!(finished.try_recv().is_err(), "the caller got back while the job still waits");
+        release.send(()).unwrap();
+        let ran_on = finished.recv_timeout(Duration::from_secs(5)).expect("the job ran");
+        assert_ne!(ran_on, caller);
     }
 }
 
