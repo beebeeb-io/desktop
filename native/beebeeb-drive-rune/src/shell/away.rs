@@ -139,7 +139,7 @@ impl WakeCover {
     /// the window.
     pub fn covers_now(&self) -> bool {
         let told = *self.lock();
-        told.covers
+        told.covers || told.gap_not_yet_found(Instant::now(), SystemTime::now())
     }
 
     /// Whether both are the same one.
@@ -245,7 +245,7 @@ impl Default for AwayLock {
             cover: Cover::Off,
             polled_cover: false,
             could_lock: true,
-            tells: WakeCover::shell(),
+            tells: WakeCover::default(),
             looks: 0,
             answered: 0,
             arms: 0,
