@@ -422,3 +422,24 @@ fn wake_cover_holds_the_trays_settings_until_it_lifts() {
         "Settings, once the cover is gone"
     );
 }
+
+/// The sweep: the flyout's Review… under the cover (its `carry_out` asks the main window through `host::request`) opens
+/// no conflict dialog behind it, and opens it once the cover is gone.
+/// Mutant: in `host::request`, delete the `under_the_wake_cover` block -> red at "no dialog opens behind the cover".
+#[test]
+fn wake_cover_holds_the_flyouts_review_until_it_lifts() {
+    use crate::shell::app::{Dialog, Intent as Ask};
+    let mut w = Window::open();
+    w.wake();
+    w.rt.update(|s, _| {
+        host::request(s, Ask::ReviewConflict { file: None });
+    });
+    w.a_few_frames();
+    assert_eq!(w.rt.state.shell.app.dialog(), None, "no dialog opens behind the cover");
+    w.nothing_locked();
+    assert_eq!(
+        w.rt.state.shell.app.dialog(),
+        Some(&Dialog::Conflict { file: None }),
+        "the conflict dialog, once the cover is gone"
+    );
+}
