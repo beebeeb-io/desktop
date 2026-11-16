@@ -15,6 +15,8 @@ pub mod server;
 
 #[cfg(test)]
 mod gap_tests;
+#[cfg(test)]
+mod patch_tests;
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
