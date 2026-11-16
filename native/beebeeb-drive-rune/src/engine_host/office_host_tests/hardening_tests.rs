@@ -551,18 +551,28 @@ fn handles_taken_before_the_first_answer_are_part_of_the_baseline() {
 #[test]
 fn a_helper_that_leaks_after_a_loader_burst_is_still_stopped() {
     let registry = Registry::new();
-    let sizes = [LETTER; 64];
+    let sizes = [LETTER; 40];
     let burst = MAX_IN_FLIGHT as u32 + HANDLE_SLACK + 1;
     let fake = Fake::new(move |link| serve(link, &sizes))
         .bursting_handles(burst)
         .leaking_handles();
     let (mut host, log, _) = open_fake(fake, &registry, DocKind::Docx);
     let mut events = Vec::new();
-    assert!(
-        pump(&mut host, &mut events, |host, _| stopped(host)),
-        "{:?}",
-        host.state()
-    );
+    assert!(until_open(&mut host, &mut events), "{:?}", host.state());
+    assert!(!stopped(&host), "the burst is in the baseline: {:?}", host.state());
+    for page in 0..40 {
+        if stopped(&host) {
+            break;
+        }
+        let before = pages_of(&events);
+        assert!(host.request_page(page, scale_100(), None).is_some(), "page {page}");
+        assert!(
+            pump(&mut host, &mut events, |host, events| pages_of(events) > before
+                || stopped(host)),
+            "page {page}: {:?}",
+            host.state()
+        );
+    }
     assert!(stopped_for(&host, Stop::Protocol), "{:?}", host.state());
     assert_eq!(log.kills(), 1);
 }
