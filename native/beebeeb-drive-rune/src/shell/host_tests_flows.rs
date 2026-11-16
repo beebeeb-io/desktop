@@ -33,7 +33,8 @@ impl crate::source::DriveSource for FirstSync {
 
 /// The first sign-in on a PC (R1.1 of the sync-start contract): the gate opens before anything has synced, so the
 /// root cannot be read and the window says so. The running engine's first finished check reads the root again, with
-/// no click. Nothing is read on the frames in between, and a root that reads is not read again from here.
+/// no click. Nothing is read on the frames in between; every later finished check reads the folder shown again
+/// (`host_tests_reread.rs` has what that keeps).
 #[test]
 fn the_first_finished_check_shows_the_files_without_a_click() {
     use super::super::super::tray::EngineState;
@@ -76,7 +77,12 @@ fn the_first_finished_check_shows_the_files_without_a_click() {
     settle(&mut rt);
     engine.set_inputs(state(EngineState::Idle));
     settle(&mut rt);
-    assert_eq!(source.reads(), shown, "a root that reads is navigation's");
+    assert_eq!(
+        source.reads(),
+        shown + 1,
+        "a list with rows is read again after each finished check"
+    );
+    assert_eq!(rt.state.listing.items.len(), board.items.len(), "and keeps its rows");
 }
 
 /// Approving a sign-in: the screens that hold the approval code are secret (DW-A12, DW-A13,

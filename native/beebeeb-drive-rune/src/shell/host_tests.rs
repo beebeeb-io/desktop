@@ -1101,5 +1101,7 @@ mod files;
 mod flows;
 #[path = "host_tests_owned_state.rs"]
 mod owned_state;
+#[path = "host_tests_reread.rs"]
+mod reread;
 #[path = "host_tests_session_gate.rs"]
 mod session_gate;
