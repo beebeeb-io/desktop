@@ -393,6 +393,9 @@ struct Rig {
     fake: FakeApi,
     session: SessionGeneration,
     deleted: Arc<Mutex<Vec<String>>>,
+    /// Set: the fake moves this engine's session (the account signs in again) while it answers a delete it carried
+    /// out, as a lock or a sign-in during the call would.
+    moves_on_delete: Arc<OnceLock<std::sync::Weak<TestEngine>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -428,6 +431,8 @@ fn rig(answers: Answers, cached_layout: bool) -> Rig {
     let account = account();
     let tokens = Arc::new(ConfirmTokens::default());
     let deleted = Arc::new(Mutex::new(Vec::new()));
+    let moves_on_delete = Arc::new(OnceLock::<std::sync::Weak<TestEngine>>::new());
+    let moves = moves_on_delete.clone();
     let (fake_account, deleted_in, token) = (account.clone(), deleted.clone(), account.session_token.clone());
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         if req.bearer() != Some(token.as_str()) {
@@ -457,6 +462,9 @@ fn rig(answers: Answers, cached_layout: bool) -> Rig {
             route => match route.strip_prefix("DELETE /api/v1/files/") {
                 Some(id) if tokens.spend(req) => {
                     deleted_in.lock().unwrap().push(id.to_string());
+                    if let Some(engine) = moves.get().and_then(std::sync::Weak::upgrade) {
+                        sign_in(&engine, &fake_account);
+                    }
                     Reply::empty(204)
                 }
                 Some(_) => Reply::error(403, "step_up_required"),
@@ -497,6 +505,7 @@ fn rig(answers: Answers, cached_layout: bool) -> Rig {
         fake,
         session,
         deleted,
+        moves_on_delete,
         _dir: dir,
     }
 }
@@ -603,6 +612,36 @@ fn a_failed_root_listing_is_a_refusal_not_an_empty_list() {
         rig.engine.backup_devices_for(rig.session),
         Err(DevicesRefused::Call(AccountCallError::ServerError))
     ));
+}
+
+/// The session moves while a delete runs that reached Beebeeb and moved the backup to Trash. Its
+/// answer is not handed over, and it is never "signed out, nothing changed" either: it is unconfirmed, the answer
+/// that may have moved something. "Stop and move the backup to Trash" (DW-1410) then leaves the folder out of the set
+/// (nothing is put back) and says the move may have happened. A session gone before the call still answers signed
+/// out, nothing sent (`nothing_is_read_or_deleted_for_a_session_that_is_gone`).
+#[test]
+fn a_session_that_moves_during_the_delete_answers_that_the_backup_may_have_moved() {
+    let rig = rig(Answers::default(), true);
+    rig.moves_on_delete.set(Arc::downgrade(&rig.engine)).unwrap();
+    let answer = rig
+        .engine
+        .delete_device_backup_for(rig.session, DEV_MAC, PASSWORD.as_bytes());
+    assert_eq!(*rig.deleted.lock().unwrap(), [DEV_MAC], "the delete reached Beebeeb");
+    assert_ne!(rig.engine.session_turn(), rig.session, "the session moved during it");
+    assert_eq!(answer, Err(DeleteBackupError::Failed("server")));
+
+    let mut put_back = false;
+    let refused = crate::app::bindings::backup_folders::remove_steps(
+        Some(PASSWORD.as_bytes()),
+        Some(DEV_MAC),
+        || Ok(()),
+        |_, _| answer.clone(),
+        |()| put_back = true,
+    )
+    .unwrap_err();
+    assert!(refused.stopped_backing_up(), "{refused:?}");
+    assert!(!put_back, "the folder is not put back");
+    assert!(!refused.words().contains("Nothing was changed"), "{}", refused.words());
 }
 
 #[test]
