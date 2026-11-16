@@ -24,6 +24,9 @@ mod hardening_tests;
 // Charts and pictures of a sheet: asked once seen, sized by the protocol.
 #[path = "office_host_tests/anchor_tests.rs"]
 mod anchor_tests;
+// The wait for the launch lock: not the helper's time, and a close during it drops the document (review of #467).
+#[path = "office_host_tests/launch_wait_tests.rs"]
+mod launch_wait_tests;
 
 /// 100 % on a 96 DPI screen: a Letter page is 816 x 1056.
 fn scale_100() -> f32 {

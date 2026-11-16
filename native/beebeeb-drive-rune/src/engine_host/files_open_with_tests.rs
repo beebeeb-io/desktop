@@ -22,6 +22,11 @@ use super::*;
 use crate::engine_host::EngineFilesSource;
 use crate::frames::files::source::FilesSource;
 
+// Review of #467: each start compares the session of its press inside the launch lock, a session end empties the
+// launch worker's queue, and Open With asks the engine whether the copy is here.
+#[path = "files_launch_tests.rs"]
+mod files_launch_tests;
+
 const PASSWORD: &str = "an invented password for open with";
 const NOTES: &str = "a0000000-0000-4000-8000-000000000601";
 const TOOL: &str = "a0000000-0000-4000-8000-000000000602";
@@ -200,7 +205,7 @@ fn open_with_is_refused_without_sync_and_without_a_session() {
 #[test]
 fn off_windows_the_chooser_says_not_on_this_system() {
     assert_eq!(
-        choose_app(std::path::Path::new("an invented path.txt")),
+        choose_app(std::path::Path::new("an invented path.txt"), || true),
         Err(ActionError::NotOnThisSystem)
     );
 }
@@ -278,13 +283,13 @@ fn open_with_an_app_needs_the_copy_kept_on_this_pc() {
 /// What the stand-in starts saw, in order. Each takes the launch lock, as the system's own do.
 static STARTED: std::sync::Mutex<Vec<(&'static str, PathBuf)>> = std::sync::Mutex::new(Vec::new());
 
-fn open_stand_in(path: &std::path::Path) -> Result<(), ActionError> {
-    launch::locked(|| STARTED.lock().unwrap().push(("open", path.to_path_buf())));
+fn open_stand_in(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    launch::locked(|| still().then(|| STARTED.lock().unwrap().push(("open", path.to_path_buf()))));
     Ok(())
 }
 
-fn reveal_stand_in(path: &std::path::Path) -> Result<(), ActionError> {
-    launch::locked(|| STARTED.lock().unwrap().push(("reveal", path.to_path_buf())));
+fn reveal_stand_in(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    launch::locked(|| still().then(|| STARTED.lock().unwrap().push(("reveal", path.to_path_buf()))));
     Ok(())
 }
 
@@ -297,9 +302,10 @@ fn files_open_never_waits_on_the_launch_lock() {
     let mut set = set("a6-worker", true, true);
     let _running = hold_running(&set.engine);
     let root = set.engine.sync_root().expect("a sync folder");
-    set.source.starts = Starts {
+    set.source.starts = files_launch::Starts {
         open: open_stand_in,
         reveal: reveal_stand_in,
+        app: None,
     };
     let (holding, held) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel::<()>();

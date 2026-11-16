@@ -107,8 +107,8 @@ pub struct Os {
 impl Os {
     pub fn real() -> Self {
         Os {
-            reveal: |path| super::super::reveal_in_file_explorer(path).is_ok(),
-            open_draft: |url| super::super::open_path(Path::new(url)).is_ok(),
+            reveal: |path| super::super::reveal_in_file_explorer(path, &|| true).is_ok(),
+            open_draft: |url| super::super::open_path(Path::new(url), &|| true).is_ok(),
         }
     }
 }

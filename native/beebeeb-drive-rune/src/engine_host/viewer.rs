@@ -274,7 +274,7 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
             })
         });
         match path {
-            Ok(Some(path)) if super::open_path(&path).is_ok() => Elsewhere::Opened,
+            Ok(Some(path)) if super::open_path(&path, &|| true).is_ok() => Elsewhere::Opened,
             _ => Elsewhere::Refused,
         }
     }

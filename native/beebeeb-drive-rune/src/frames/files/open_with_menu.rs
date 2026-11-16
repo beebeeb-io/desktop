@@ -316,8 +316,10 @@ impl State {
         if self.needs_session(tx) {
             return;
         }
-        // Only the copy kept on this PC goes to another app: nothing is fetched or decrypted for it.
-        if !self.selection_is_kept() {
+        // Only the copy kept on this PC goes to another app: nothing is fetched or decrypted for it. Asked of the source
+        // at the press (the engine: kept AND its bytes here), never the row's mark, which says kept from the Keep press
+        // on while the copy is still coming down.
+        if !self.actions.source.kept_here(&item) {
             self.show_toast(Toast::KeepFirst, tx);
             return;
         }

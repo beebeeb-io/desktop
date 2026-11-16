@@ -375,6 +375,13 @@ pub trait FilesSource: Send + 'static {
     fn open_in_app(&mut self, _item: &DriveItem, _app: &AppChoice) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    /// Is this file kept on this PC AND are its bytes here, now? Open With hands only such a copy to another app. The
+    /// engine answers from its own facts; the default, for a source with no engine, is the row's mark.
+    fn kept_here(&self, item: &DriveItem) -> bool {
+        item.pc_status.as_deref() == Some("available_offline")
+    }
+    /// A session ended (a lock, a sign-out, another account): what it asked to start and has not begun goes.
+    fn forget_starts(&mut self) {}
     /// The files that changed in two places and wait for a choice, the first to answer first (DW-0429).
     fn conflicts(&self) -> Vec<super::actions_data::Conflict> {
         Vec::new()
@@ -558,6 +565,10 @@ pub struct FilesFixture {
     changes: Vec<Change>,
     /// The apps Open With lists (DW-1562). `None`: the board's (Microsoft Word for a Word file).
     pub apps: Option<Vec<AppChoice>>,
+    /// Ids the engine would say are not here yet (kept, still coming down): `kept_here` is false whatever the row says.
+    pub not_here: Vec<String>,
+    /// How often a session end told it to forget its starts. Shared like `calls` (and kept out of them).
+    pub starts_forgotten: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// What New folder, Rename and Move changed in the board's folders: shared with the
     /// [`BoardDrive`] that lists them, so a change is still there when the folder is shown again.
     pub edits: SharedEdits,
@@ -951,6 +962,14 @@ impl FilesSource for FilesFixture {
         self.refuse(Action::OpenWith, std::slice::from_ref(item))?;
         self.record(Call::OpenInApp(item.id.clone(), app.id.clone()));
         Ok(())
+    }
+
+    fn kept_here(&self, item: &DriveItem) -> bool {
+        !self.not_here.contains(&item.id) && item.pc_status.as_deref() == Some("available_offline")
+    }
+
+    fn forget_starts(&mut self) {
+        self.starts_forgotten.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn conflicts(&self) -> Vec<super::actions_data::Conflict> {

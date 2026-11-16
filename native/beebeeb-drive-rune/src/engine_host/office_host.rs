@@ -541,6 +541,9 @@ struct Inner {
     /// The charts and pictures of checked cells from the running helper, by (sheet, id): what
     /// [`OfficeHost::request_anchor`] may ask. Emptied when that helper goes, and at a close.
     anchors: HashMap<(u32, u32), Anchor>,
+    /// The document's section while the worker waits for a helper's start (the launch lock: Windows' app chooser may
+    /// hold it as long as it is open). Here, so that a close drops it at once, not when the start returns.
+    parked: Option<Box<dyn std::any::Any + Send>>,
 }
 
 /// What the worker queues for the window.
@@ -553,7 +556,7 @@ impl Shared {
     /// Kills the helper through the shared handle, wipes the state and every answer not taken, tells the worker,
     /// wakes the window. Never waits for the worker. The first close's reason stays.
     fn close(&self, why: CloseWhy) {
-        let (helper, outs, mut state) = {
+        let (helper, outs, mut state, parked) = {
             let mut inner = lock(&self.inner);
             if inner.closed.is_some() {
                 return;
@@ -561,11 +564,18 @@ impl Shared {
             inner.closed = Some(why);
             let state = std::mem::replace(&mut inner.state, OfficeState::Closed(why));
             inner.anchors = HashMap::new();
-            (inner.helper.take(), std::mem::take(&mut inner.outs), state)
+            (
+                inner.helper.take(),
+                std::mem::take(&mut inner.outs),
+                state,
+                inner.parked.take(),
+            )
         };
         if let Some(helper) = helper {
             helper.end();
         }
+        // The document's section, while its worker waits for a start: dropped (and wiped) now.
+        drop(parked);
         let mut wiped = wipe_state(&mut state);
         for mut out in outs {
             wiped += wipe_out(&mut out);
@@ -593,6 +603,24 @@ impl Shared {
 
     fn disown(&self) {
         lock(&self.inner).helper = None;
+    }
+
+    /// Holds the document while the worker waits for a start; a close drops it. `false`: the host is closed, and
+    /// `doc` is dropped now.
+    fn park(&self, doc: Box<dyn std::any::Any + Send>) -> bool {
+        let mut inner = lock(&self.inner);
+        if inner.closed.is_some() {
+            drop(inner);
+            drop(doc);
+            return false;
+        }
+        inner.parked = Some(doc);
+        true
+    }
+
+    /// The parked document back. `None`: a close dropped it.
+    fn unpark(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        lock(&self.inner).parked.take()
     }
 
     /// Queues `out` for the window and wakes it; after a close it is wiped instead.
@@ -976,6 +1004,7 @@ pub(crate) fn open_with<S: Starter>(
             outs: VecDeque::new(),
             worker_ended: false,
             anchors: HashMap::new(),
+            parked: None,
         }),
         commands,
         wake,
