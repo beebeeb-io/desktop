@@ -627,6 +627,9 @@ fn body_of(error: OpenFileError) -> Option<Body> {
         OpenFileError::NotSignedIn | OpenFileError::NotYours => Body::Stopped(Stopped::SessionChanged),
         OpenFileError::NotFound => Body::Stopped(Stopped::Gone),
         OpenFileError::NothingSynced => Body::Stopped(Stopped::NothingSynced),
+        // Refused to this account (403), and a version that kept changing: named, never "not decrypted".
+        OpenFileError::NoAccess => Body::Stopped(Stopped::NoAccess),
+        OpenFileError::ChangedWhileOpening => Body::Stopped(Stopped::Changed),
         OpenFileError::Failed => Body::Failed,
     })
 }

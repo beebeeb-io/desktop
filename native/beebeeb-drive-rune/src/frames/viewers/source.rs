@@ -160,6 +160,10 @@ pub enum Stopped {
     /// This PC holds a change to the file that is not in Beebeeb yet, and its copy could not be read just now.
     /// The older version Beebeeb has is not shown in its place. Trying again may work.
     CopyNotReadable,
+    /// Beebeeb refused this account the file: it is no longer shared with it. Trying again does not change that.
+    NoAccess,
+    /// The file changed while it was opening, each time it was read. Trying again may work.
+    Changed,
 }
 
 impl Stopped {
@@ -171,6 +175,7 @@ impl Stopped {
                 | Stopped::SessionChanged
                 | Stopped::NotNow
                 | Stopped::CopyNotReadable
+                | Stopped::Changed
                 | Stopped::NothingSynced
                 | Stopped::NotThisAccounts
         )
