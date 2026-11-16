@@ -180,7 +180,7 @@ pub fn words(off: &SyncOff, product: &str) -> Words {
                 "The last stop of sync hasn\u{2019}t finished yet, so {product} didn\u{2019}t start it again. \
                  Nothing was changed."
             ),
-            "Try again in a moment.".to_string(),
+            format!("Quit {product}, then open it again."),
             RETRY,
         ),
         Refused::StateInUse => (
