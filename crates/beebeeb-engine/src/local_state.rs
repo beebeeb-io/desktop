@@ -117,7 +117,6 @@ pub fn disposable_cache_roots_in(
     // without it a sign-out would skip those copies and leave plaintext on disk. The folders themselves, never the
     // whole data dir.
     roots.extend(staging.candidates());
-    roots.extend(dirs::config_dir().map(|dir| dir.join(crate::identity::REAL.config_dir_name())));
     roots
 }
 
