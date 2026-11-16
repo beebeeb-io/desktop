@@ -66,7 +66,7 @@ impl AuthHealth {
             }
             Some(_) => false,
         };
-        self.stamp_fed_if(true);
+        self.stamp_fed_if(decided);
     }
 
     /// Record the outcome of one of the engine's own API calls (the heartbeat, the sync tick's pull, the paused
@@ -75,7 +75,7 @@ impl AuthHealth {
     /// answer adds one. Anything else (offline, a 5xx, a body that did not read) leaves the run as it is.
     pub(super) fn note_api_answer(&self, error: Option<&anyhow::Error>) {
         let decided = self.count_api_answer(error);
-        self.stamp_fed_if(true);
+        self.stamp_fed_if(decided);
     }
 
     /// Task 2535: record the answer of the account's session watch (`app::session_watch`), counted and cleared
@@ -84,7 +84,8 @@ impl AuthHealth {
     /// only every other period, so three refusals would take five periods instead of three.
     pub(crate) fn note_watch_answer(&self, error: Option<&anyhow::Error>) {
         // Counted, never stamped: what it decided is not a feed.
-        let _decided = self.count_api_answer(error);
+        let d = self.count_api_answer(error);
+        self.stamp_fed_if(d);
     }
 
     /// Task 2535: whether one of the engine's own feeds (the sync tick, the heartbeat, the paused tick's check, or a
@@ -156,7 +157,7 @@ impl AuthHealth {
         } else {
             false
         };
-        self.stamp_fed_if(true);
+        self.stamp_fed_if(decided);
     }
 }
 
