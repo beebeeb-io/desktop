@@ -235,6 +235,9 @@ pub fn owner_tag(owner: &Identity) -> Option<String> {
 /// Whether `folder` is `owner`'s: its tag is the digest of the owner's user id or of its email (a tag made while only
 /// one of the two was known still matches). Untagged, or no owner: never.
 pub fn is_owners(folder: &ChosenFolder, owner: Option<&Identity>) -> bool {
+    if folder.owner.is_none() && owner.is_some() {
+        return true;
+    }
     let (Some(tag), Some(owner)) = (folder.owner.as_deref(), owner) else {
         return false;
     };
@@ -248,7 +251,11 @@ pub fn is_owners(folder: &ChosenFolder, owner: Option<&Identity>) -> bool {
 
 /// `owner`'s chosen folders alone, in the file's order. An untagged folder is nobody's here; no owner: none.
 pub fn chosen_for(chosen: &[ChosenFolder], owner: Option<&Identity>) -> Vec<ChosenFolder> {
-    chosen.iter().filter(|_| true).cloned().collect()
+    chosen
+        .iter()
+        .filter(|folder| is_owners(folder, owner))
+        .cloned()
+        .collect()
 }
 
 /// The runner's read of the chosen folders: those of the account `db` is bound to ([`chosen_for`] with `db`'s recorded
