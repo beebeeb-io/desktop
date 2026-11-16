@@ -11,7 +11,7 @@
 //! - The proof is a task of the engine's runtime that a Lock and a sign-out stop first ([`Engine::stop_proofs`]), so
 //!   its client (the session's token and key) never outlives them. A stopped proof that does not let go in time (it is
 //!   in a write that does not yield) is kept: the Lock or the sign-out goes on, and no start runs until its client is
-//!   gone (`StopUnconfirmed`, [`Engine::local_data_for_start`]).
+//!   gone (`StopFinishing`, [`Engine::local_data_for_start`]).
 //! - Sync starts after an adoption only while the session is still the one proven. That start binds again under the
 //!   step lock and now keeps everything.
 //! - No answer at all (offline, a time-out) turns the refusal into `IdentityUnknown` ("connect and open Beebeeb
@@ -101,7 +101,7 @@ pub(in crate::app) enum ProofStop {
     /// Every stopped proof let go of its client, or none ran.
     Ended,
     /// A stopped proof did not let go of its client within [`STOP_WAIT`]. Its seat keeps it: every start is refused
-    /// ([`SyncStartRefused::StopUnconfirmed`]) until its client is gone, and the next stop waits for it again.
+    /// ([`SyncStartRefused::StopFinishing`]) until its client is gone, and the next stop waits for it again.
     Unconfirmed,
 }
 
@@ -499,8 +499,8 @@ impl<C: CredentialStores> Engine<C> {
     /// Any error refuses the start as `Other` (nothing was started; the window is shut at the next start that reads).
     ///
     /// First, before anything is opened: while a stopped ownership proof that did not let go of its client in time is
-    /// alive ([`ProofStop::Unconfirmed`]), the start is refused as `StopUnconfirmed`, as for an engine whose stop was
-    /// not confirmed. The refusal ends by itself once that client is gone.
+    /// alive ([`ProofStop::Unconfirmed`]), the start is refused as `StopFinishing` (unlike an engine whose stop was
+    /// never confirmed, `StopUnconfirmed`, which only a restart ends). The refusal ends by itself once that client is gone.
     pub(in crate::app) fn local_data_for_start(
         &self,
         sync_root: &Path,
@@ -508,7 +508,7 @@ impl<C: CredentialStores> Engine<C> {
     ) -> Result<LocalState, SyncStartRefused> {
         #[cfg(any(target_os = "windows", test, feature = "test-support"))]
         if self.a_stopped_proof_is_alive() {
-            return Err(SyncStartRefused::StopUnconfirmed);
+            return Err(SyncStartRefused::StopFinishing);
         }
         let data =
             LocalState::for_engine_start(&self.config.state_dir, sync_root).map_err(|_| SyncStartRefused::Other)?;

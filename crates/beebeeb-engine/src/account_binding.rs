@@ -135,9 +135,15 @@ pub const IDENTITY_UNKNOWN: &str = "Beebeeb couldn’t confirm which account thi
 pub const OTHER_ACCOUNT_ON_WINDOWS: &str = "Beebeeb couldn’t confirm that the files on this PC belong to the account you’re signed in to, so sync didn’t start. Nothing was uploaded or deleted. Contact support@beebeeb.io.";
 
 /// The sentence for an engine start refused because an earlier engine stop was never confirmed: its task may still
-/// run with the keys, so every start refuses until Beebeeb restarts (spec §5.6).
+/// run with the keys, so a start refuses while that task's write is still running, and clears by itself once it ends
+/// (no restart; spec §5.6).
 pub const ENGINE_STOP_UNCONFIRMED: &str =
     "Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.";
+
+/// The sentence for a start refused while a stopped ownership proof still holds its client: that write ends by itself
+/// and the refusal with it, so the person is told to try again, never to restart.
+pub const ENGINE_STOP_FINISHING: &str =
+    "Beebeeb’s sync is still finishing its last stop. Nothing was changed. Try again in a moment.";
 
 /// An engine-start refusal the person is shown (Task 12 fix round 2, ruling P): a closed code and its constant
 /// sentence, recorded by the engine start and exposed as `engine_refusal` on `sync_status`. The two binding refusals,

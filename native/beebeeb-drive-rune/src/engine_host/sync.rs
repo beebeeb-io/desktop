@@ -157,6 +157,7 @@ pub fn refused_of(kind: SyncStartRefused) -> Refused {
         SyncStartRefused::OtherAccountsData => Refused::OtherAccountsData,
         SyncStartRefused::IdentityUnknown => Refused::IdentityUnknown,
         SyncStartRefused::StopUnconfirmed => Refused::StopUnconfirmed,
+        SyncStartRefused::StopFinishing => Refused::StopFinishing,
         SyncStartRefused::StateInUse => Refused::StateInUse,
         SyncStartRefused::Other => Refused::Other,
     }

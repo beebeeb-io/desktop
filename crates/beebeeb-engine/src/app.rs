@@ -148,6 +148,8 @@ pub enum SyncStartRefused {
     IdentityUnknown,
     /// An earlier engine did not confirm it stopped: only a restart of the app helps.
     StopUnconfirmed,
+    /// A stopped ownership proof still holds its client: the refusal ends by itself once its write ends.
+    StopFinishing,
     /// A live process holds this app's engine lock (another copy of the app, or `bb watch`).
     StateInUse,
     /// The local state could not be read or written, or an engine ended by itself.
@@ -165,6 +167,7 @@ impl SyncStartRefused {
             Self::OtherAccountsData => "other_accounts_data",
             Self::IdentityUnknown => "identity_unknown",
             Self::StopUnconfirmed => "stop_unconfirmed",
+            Self::StopFinishing => "stop_finishing",
             Self::StateInUse => "state_in_use",
             Self::Other => "other",
         }
@@ -204,6 +207,7 @@ impl std::fmt::Display for SyncStartRefused {
             Self::OtherAccountsData => f.write_str(account_binding::OTHER_ACCOUNT_ON_WINDOWS),
             Self::IdentityUnknown => f.write_str(account_binding::IDENTITY_UNKNOWN),
             Self::StopUnconfirmed => f.write_str(account_binding::ENGINE_STOP_UNCONFIRMED),
+            Self::StopFinishing => f.write_str(account_binding::ENGINE_STOP_FINISHING),
             Self::StateInUse => {
                 f.write_str("Another program is syncing with this app's local state. Nothing was changed.")
             }

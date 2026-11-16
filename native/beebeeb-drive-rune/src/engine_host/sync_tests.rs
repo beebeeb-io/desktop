@@ -15,7 +15,7 @@ use super::*;
 use crate::shell::tray::{EngineState, tray_model};
 use crate::ui::status_line as words;
 
-const KINDS: [SyncStartRefused; 9] = [
+const KINDS: [SyncStartRefused; 10] = [
     SyncStartRefused::FolderOfAnotherProvider,
     SyncStartRefused::FolderUnreadable,
     SyncStartRefused::FolderMissing,
@@ -23,6 +23,7 @@ const KINDS: [SyncStartRefused; 9] = [
     SyncStartRefused::OtherAccountsData,
     SyncStartRefused::IdentityUnknown,
     SyncStartRefused::StopUnconfirmed,
+    SyncStartRefused::StopFinishing,
     SyncStartRefused::StateInUse,
     SyncStartRefused::Other,
 ];
@@ -69,7 +70,7 @@ fn the_status_is_never_up_to_date_without_an_engine() {
         OFFLINE,
     ];
     let views = without_an_engine();
-    assert_eq!(views.len(), 22);
+    assert_eq!(views.len(), 24);
     for view in &views {
         let word = sync_word(view).expect("signed in and unlocked: the line says something");
         assert!(!running_words.contains(&word), "{:?} says {word}", view.start);
