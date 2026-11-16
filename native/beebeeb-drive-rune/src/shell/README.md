@@ -69,7 +69,9 @@ Read where the window is from `s.shell.app` (`screen()`, `route()`, `dialog()`, 
 - `host::dispatch(s, Event::…)` from inside the main window: `Navigate(Route)`, `OpenItem(id)`,
   `Back`, `Forward`, `OpenSettings(pane)`, `OpenDialog(dialog)`, `Escape`.
 - `host::request(s, Intent::…)` from outside it (the flyout, the tray, a link): it is kept while the
-  session gate is closed and brings the window forward. From the flyout:
+  session gate is closed and brings the window forward. Under the away lock's wake cover it waits for
+  the cover's end, and a lock, a sign-out or another account drops it (`intents::after_the_cover`); a
+  link is kept across a lock of the same account and opens after the unlock. From the flyout:
   `main.update(|s, _| { host::request(s, Intent::Settings(SettingsPane::General)); })`.
 
 The shell already handles Alt+Left / Alt+Right, Ctrl+, , Ctrl+/ and Esc (`host::on_key`). In a
