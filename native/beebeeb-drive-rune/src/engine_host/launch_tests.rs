@@ -16,7 +16,7 @@ const STARTS: [&str; 5] = [
 ];
 /// The calls that hold the launch lock around what is inside their parentheses.
 const UNDER_LOCK: [&str; 2] = ["launch::spawn(", "launch::locked("];
-/// The one start the scan knows of outside this crate: the engine's ffmpeg (P0 2542, held for the owner).
+/// The engine's media file: it once started a program by search name for a video's thumbnail; it starts none now.
 const FFMPEG: &str = "../../crates/beebeeb-engine/src/engine_bridge/media.rs";
 
 /// `src` with its comments and the insides of its string and char literals blanked out (same length, same lines).
@@ -279,17 +279,14 @@ fn every_launch_takes_the_launch_lock() {
         "the starts held by the lock"
     );
 
-    // The one named exception outside the crate: the engine's ffmpeg (P0 2542), still the only bare start there.
+    // Outside the crate: the engine's media file starts no program at all (a video's thumbnail comes from the
+    // confined helper).
     let ffmpeg = std::fs::read_to_string(root.join(FFMPEG)).unwrap();
     let ffmpeg_bare = bare_starts(&ffmpeg);
-    eprintln!(
-        "launch scan: {} files, 0 bare; one named exception: {FFMPEG}:{ffmpeg_bare:?} (P0 2542)",
-        files.len()
-    );
-    assert_eq!(
-        ffmpeg_bare.len(),
-        1,
-        "the engine's ffmpeg start is the one named exception: {ffmpeg_bare:?}"
+    eprintln!("launch scan: {} files, 0 bare; {FFMPEG}: {ffmpeg_bare:?}", files.len());
+    assert!(
+        ffmpeg_bare.is_empty(),
+        "the engine's media file starts a program: {ffmpeg_bare:?}"
     );
 }
 
