@@ -123,7 +123,7 @@ impl AuthHealth {
     /// A feed decided something now, when `decided` (see [`Self::fed_within`]); a feed that proved nothing stamps
     /// nothing.
     fn stamp_fed_if(&self, decided: bool) {
-        if false && decided {
+        if decided {
             self.last_fed
                 .store(monotonic_millis().saturating_add(1), Ordering::Relaxed);
         }
