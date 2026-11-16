@@ -16,11 +16,12 @@ Plain `makensis`, no Tauri CLI. Spec: `docs/superpowers/specs/2026-11-11-native-
 there but drew no window and step 5's "look at it" was not done; and 0.8.25 was not running, so step 8 had nothing to
 compare. Native check 4 runs in CI; native checks 2 and 3 and section B have never run.
 
-Needs: NSIS 3.11 and `nsis_tauri_utils.dll` 0.5.3. On a PC that has built 0.8.x both are in
-`%LOCALAPPDATA%\tauri\NSIS`, where the script looks by default. Elsewhere: NSIS 3.11 from its official release, the
-plugin from `github.com/tauri-apps/nsis-tauri-utils` (release `nsis_tauri_utils-v0.5.3`) in
-`<NSIS folder>\Plugins\x86-unicode\additional\`, and `-NsisDir <NSIS folder>` on the command line (the build VM:
-`-NsisDir 'C:\Program Files (x86)\NSIS'`). Every file is checked by SHA-256. A plugin that is not 0.5.3 is refused
+Needs: an installed NSIS 3.11 and `nsis_tauri_utils.dll` 0.5.3. The Tauri toolchain cache is no longer a source. The
+script finds NSIS in this order: `-NsisDir <folder>`, the `BEEBEEB_NSIS_DIR` environment variable, then
+`C:\Program Files (x86)\NSIS` (and `Program Files\NSIS`); with none it stops and says what to install. NSIS 3.11 comes
+from its official release; the plugin from `github.com/tauri-apps/nsis-tauri-utils` (release `nsis_tauri_utils-v0.5.3`),
+looked for in `-PluginDir`, then `BEEBEEB_NSIS_PLUGIN_DIR`, then `<NSIS folder>\Plugins\x86-unicode\additional\`.
+Every file is checked by SHA-256. A plugin that is not 0.5.3 is refused
 in both modes. `makensis.exe`, `Bin\makensis.exe` and the stub `Stubs\lzma_solid-x86-unicode` must be NSIS 3.11 as
 released: a release build refuses any other file, a test build prints a `NOTE` line and goes on. The output folder
 `out\` is ignored by git.
