@@ -16,6 +16,11 @@
 //! [`Child::grant`], one handle at a time, read-only or read-write as the parent decides. Nothing is ever written
 //! to a file for it.
 //!
+//! **Profiles.** How much a helper may do beyond the four promises is a [`Profile`], a closed list chosen in code by
+//! the caller: [`Profile::NoCapabilities`] (every helper, the default) or [`Profile::SystemDecoder`] (the media
+//! helper only, for a file that Windows' own decoders play; it may also read the registry). There is no capability
+//! by name, and every profile keeps the four promises above. The Office helper never names a profile.
+//!
 //! **Fail closed.** There is no unconfined way to start the helper through this crate. On an operating system
 //! without a sandbox module here (everything but Windows today) [`Sandbox::spawn`] returns
 //! [`SandboxError::Unsupported`] and starts nothing. On Windows the helper is created suspended, the confinement is
@@ -66,6 +71,54 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             memory_bytes: DEFAULT_MEMORY_LIMIT_BYTES,
+        }
+    }
+}
+
+/// What a helper may do beyond the four promises of the crate documentation. A closed list: a caller picks one of
+/// these values, and no capability can be asked for by name.
+///
+/// Every profile is a less-privileged AppContainer (opted out of the "all application packages" group) in the same
+/// job, from the same restricted token, with the same handle list. They differ only in the capabilities the helper's
+/// token holds, and the crate reads that list back from the new process before it runs (Windows): the token must
+/// hold exactly [`Profile::capabilities`], no more and no fewer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Profile {
+    /// No capability at all. Every helper of ours unless its caller names another profile; the Office helper
+    /// never does.
+    #[default]
+    NoCapabilities,
+    /// The media helper, only for a file whose decoder is Windows' own (its route is `System`; decision 2541).
+    ///
+    /// Windows' decoders (Media Foundation) do not start without `registryRead`. With `hevc`, also the four
+    /// capabilities the HEVC decoder from Microsoft's Store extension needs: `lpacCom`, `lpacAppExperience`,
+    /// `lpacIdentityServices` and `lpacMedia` (each one measured necessary, the five together enough).
+    ///
+    /// What it adds, measured: the helper can READ the machine's and the user's registry. What stays denied, as in
+    /// every profile: reading a file of the user, writing anywhere, the network (loopback too) and starting a
+    /// process.
+    SystemDecoder {
+        /// The file is HEVC: add the four capabilities of the Store decoder.
+        hevc: bool,
+    },
+}
+
+/// The capability Media Foundation needs to start in a less-privileged AppContainer.
+const REGISTRY_READ: &str = "registryRead";
+
+impl Profile {
+    /// The capabilities this profile's helper holds, by their Windows names, in the order they are asked for.
+    pub const fn capabilities(self) -> &'static [&'static str] {
+        match self {
+            Profile::NoCapabilities => &[],
+            Profile::SystemDecoder { hevc: false } => &[REGISTRY_READ],
+            Profile::SystemDecoder { hevc: true } => &[
+                REGISTRY_READ,
+                "lpacCom",
+                "lpacAppExperience",
+                "lpacIdentityServices",
+                "lpacMedia",
+            ],
         }
     }
 }
@@ -135,14 +188,22 @@ pub struct Pipes {
 #[derive(Debug, Clone, Copy)]
 pub struct Sandbox {
     limits: Limits,
+    profile: Profile,
 }
 
 impl Sandbox {
-    /// A sandbox with these limits. Refuses a memory limit of zero or one the platform cannot express.
+    /// A sandbox with these limits and [`Profile::NoCapabilities`]. Refuses a memory limit of zero or one the
+    /// platform cannot express.
     ///
     /// On Windows this also deletes container profiles of ours that a killed parent left behind (only names of
     /// our own shape, only ones older than a minute; see the Windows module).
     pub fn new(limits: Limits) -> Result<Self, SandboxError> {
+        Self::with_profile(limits, Profile::NoCapabilities)
+    }
+
+    /// A sandbox with these limits whose helpers get `profile`. The same refusals and the same clean-up as
+    /// [`Sandbox::new`].
+    pub fn with_profile(limits: Limits, profile: Profile) -> Result<Self, SandboxError> {
         if limits.memory_bytes == 0 {
             return Err(SandboxError::Limits("the memory limit is zero"));
         }
@@ -151,12 +212,17 @@ impl Sandbox {
         }
         // Not part of the confinement: tidies up after a parent that was killed while starting a helper.
         platform::remove_left_over_profiles();
-        Ok(Self { limits })
+        Ok(Self { limits, profile })
     }
 
     /// The limits helpers of this sandbox get.
     pub fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// The profile helpers of this sandbox get.
+    pub fn profile(&self) -> Profile {
+        self.profile
     }
 
     /// Starts `helper_exe` confined and returns it with its pipes.
@@ -165,9 +231,10 @@ impl Sandbox {
     /// gets no arguments. Its environment is exactly [`helper_environment_names`]. Its standard error is not
     /// connected.
     ///
-    /// Never starts an unconfined process: see the crate documentation.
+    /// Never starts an unconfined process: see the crate documentation. On Windows the helper's token is read back
+    /// before it runs, and a token whose capabilities are not exactly the profile's ends it.
     pub fn spawn(&self, helper_exe: &Path) -> Result<Child, SandboxError> {
-        let (inner, pipes) = platform::spawn(helper_exe, self.limits)?;
+        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile)?;
         Ok(Child {
             inner,
             pipes: Some(pipes),
@@ -400,6 +467,7 @@ mod tests {
 
     /// No runtime input may weaken or skip a part of the confinement. The spawn path therefore reads nothing
     /// from the parent's environment, its arguments or a file: this pins that in the source of every module.
+    /// (A [`Profile`] is chosen in code by the caller, from a closed list; it is not such an input.)
     #[test]
     fn the_spawn_path_reads_no_environment_variable_argument_or_switch() {
         let sources = [
@@ -460,5 +528,72 @@ mod tests {
         // An existing, runnable program: were there an unconfined fallback, this would start it.
         let exe = std::env::current_exe().unwrap();
         assert_eq!(sandbox.spawn(&exe).unwrap_err(), SandboxError::Unsupported);
+    }
+
+    /// The capability lists are pinned word for word, as measured by the media spike (decision 2541). A capability
+    /// added to a list, or a name misspelled (Windows accepts any name, so nothing at run time would notice), turns
+    /// this red.
+    #[test]
+    fn each_profile_asks_for_exactly_its_measured_capabilities() {
+        assert_eq!(Profile::default(), Profile::NoCapabilities);
+        assert_eq!(Profile::NoCapabilities.capabilities(), &[] as &[&str]);
+        assert_eq!(Profile::SystemDecoder { hevc: false }.capabilities(), &["registryRead"]);
+        assert_eq!(
+            Profile::SystemDecoder { hevc: true }.capabilities(),
+            &[
+                "registryRead",
+                "lpacCom",
+                "lpacAppExperience",
+                "lpacIdentityServices",
+                "lpacMedia"
+            ]
+        );
+        let every = [
+            Profile::NoCapabilities,
+            Profile::SystemDecoder { hevc: false },
+            Profile::SystemDecoder { hevc: true },
+        ];
+        let mut counted = 0;
+        for profile in every {
+            let names = profile.capabilities();
+            for (index, name) in names.iter().enumerate() {
+                assert!(!names[index + 1..].contains(name), "{profile:?} names {name} twice");
+                counted += 1;
+            }
+        }
+        assert_eq!(counted, 6, "the instrument counted every name of every profile");
+    }
+
+    #[test]
+    fn a_sandbox_keeps_the_profile_it_was_made_with() {
+        assert_eq!(
+            Sandbox::new(Limits::default()).unwrap().profile(),
+            Profile::NoCapabilities
+        );
+        let hevc = Profile::SystemDecoder { hevc: true };
+        assert_eq!(Sandbox::with_profile(Limits::default(), hevc).unwrap().profile(), hevc);
+        assert_eq!(
+            Sandbox::with_profile(Limits { memory_bytes: 0 }, hevc).unwrap_err(),
+            SandboxError::Limits("the memory limit is zero"),
+            "a profile changes no limit check"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn without_a_sandbox_module_no_profile_starts_anything() {
+        let exe = std::env::current_exe().unwrap();
+        for profile in [
+            Profile::NoCapabilities,
+            Profile::SystemDecoder { hevc: false },
+            Profile::SystemDecoder { hevc: true },
+        ] {
+            let sandbox = Sandbox::with_profile(Limits::default(), profile).unwrap();
+            assert_eq!(
+                sandbox.spawn(&exe).unwrap_err(),
+                SandboxError::Unsupported,
+                "{profile:?}"
+            );
+        }
     }
 }

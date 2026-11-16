@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::{Access, ExitStatus, Granted, Limits, Pipes, SandboxError};
+use crate::{Access, ExitStatus, Granted, Limits, Pipes, Profile, SandboxError};
 
 /// No value of this type exists: a `Child` cannot be made on these systems.
 #[derive(Debug)]
@@ -63,6 +63,10 @@ pub(crate) fn map(_wire: u64, _len: usize, _access: Access) -> Result<MappedInne
 
 pub(crate) fn remove_left_over_profiles() {}
 
-pub(crate) fn spawn(_helper_exe: &Path, _limits: Limits) -> Result<(ChildInner, Pipes), SandboxError> {
+pub(crate) fn spawn(
+    _helper_exe: &Path,
+    _limits: Limits,
+    _profile: Profile,
+) -> Result<(ChildInner, Pipes), SandboxError> {
     Err(SandboxError::Unsupported)
 }

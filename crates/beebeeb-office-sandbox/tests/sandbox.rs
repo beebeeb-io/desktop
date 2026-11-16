@@ -35,7 +35,7 @@ mod windows {
     use std::time::{Duration, Instant};
 
     use beebeeb_office_sandbox::{
-        Access, Child, Granted, Limits, Sandbox, SandboxError, Section, helper_environment_names,
+        Access, Child, Granted, Limits, Profile, Sandbox, SandboxError, Section, helper_environment_names,
     };
     use windows_sys::Win32::Foundation::{
         HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
@@ -95,10 +95,18 @@ mod windows {
         }
 
         fn confined_with(limits: Limits) -> Self {
-            let mut child = Sandbox::new(limits)
-                .unwrap()
+            Self::started(Sandbox::new(limits).unwrap())
+        }
+
+        fn confined_as(profile: Profile) -> Self {
+            Self::started(Sandbox::with_profile(Limits::default(), profile).unwrap())
+        }
+
+        fn started(sandbox: Sandbox) -> Self {
+            let profile = sandbox.profile();
+            let mut child = sandbox
                 .spawn(Path::new(PROBE))
-                .unwrap_or_else(|error| panic!("the sandbox did not start the probe: {error}"));
+                .unwrap_or_else(|error| panic!("the sandbox did not start the probe ({profile:?}): {error}"));
             let pipes = child.take_pipes().expect("pipes, once");
             assert!(child.take_pipes().is_none(), "pipes are handed out once");
             Self {
@@ -1355,4 +1363,7 @@ mod windows {
             "the confined helper reads the system font folder"
         );
     }
+
+    // The profiles (decision 2541): in `tests/windows/profiles.rs`.
+    mod profiles;
 }

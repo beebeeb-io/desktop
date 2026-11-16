@@ -880,6 +880,10 @@ fn keep_on_this_pc_is_said_only_once_this_pc_answered() {
     );
 }
 
+// Media (M8): a video in Photos plays in the shell's player. Declared here so it shares this file's fixtures.
+#[path = "photos_video_tests.rs"]
+mod video;
+
 #[test]
 fn undo_after_read_mid_batch_restores_every_photo_offered() {
     let fake = fake("undo-mid-batch");
