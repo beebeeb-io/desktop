@@ -269,9 +269,18 @@ impl super::super::source::ViewerSource for OneVideo {
         self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         None
     }
+    fn can_play(&self) -> bool {
+        true
+    }
+    /// Space reaches the source's Play (`Ui::toggle_play`), which opens the video for the press's session.
+    fn play(&mut self, _file_id: &str, _on: bool) -> bool {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
 }
 
-/// 9. Space on a video opened from Files is the viewer's (it reaches the player), and another key is not.
+/// 9. Space on a video opened from Files is the viewer's (it reaches the source's Play, which opens the video for the
+/// press's session), and another key is not.
 #[test]
 fn space_on_a_files_video_toggles_its_player() {
     use std::sync::atomic::Ordering;
@@ -297,7 +306,7 @@ fn space_on_a_files_video_toggles_its_player() {
     );
     assert!(
         asked.load(Ordering::SeqCst) > before,
-        "Space went to the video's player"
+        "Space went to the video's source"
     );
     assert!(
         !super::super::media::on_key(&mut state, &key("x")),

@@ -209,7 +209,8 @@ pub fn toggle_for(state: Option<&PlayState>) -> Option<Toggle> {
     }
 }
 
-/// Play or pause, the way the bar's button and Space do it.
+/// Play or pause whatever the player holds (the Photos stage, which plays the video it opened). A view opened from
+/// Files plays or pauses ITS file through the viewer instead (`Ui::toggle_play`).
 pub fn toggle(handle: &PlayerHandle) {
     match toggle_for(handle.state().as_ref()) {
         Some(Toggle::Pause) => handle.pause(),
@@ -228,9 +229,22 @@ pub fn seek_target(length_ms: u64, x: f32, w: f32) -> Option<u64> {
     Some((part * length_ms as f64).round() as u64)
 }
 
+/// What the player says of the file a control acts for: `Some(id)`, that file's state only (a view opened from Files:
+/// another file's position is never this one's to move); `None`, whatever the player holds (the Photos stage).
+fn state_for(handle: &PlayerHandle, only: Option<&str>) -> Option<PlayState> {
+    match only {
+        Some(file_id) => handle.state_of(file_id),
+        None => handle.state(),
+    }
+}
+
 /// The scrubber's drag: the press and the release seek to where the pointer is (the player is not asked on every
-/// move); an Esc that cancels the drag seeks nowhere.
-pub fn scrub_drag(handle: PlayerHandle) -> impl Fn(&mut State, &mut rune::Drag, &mut rune::Tx) + 'static {
+/// move); an Esc that cancels the drag seeks nowhere, and so does a drag while the player holds another file than
+/// `only`.
+pub fn scrub_drag(
+    handle: PlayerHandle,
+    only: Option<String>,
+) -> impl Fn(&mut State, &mut rune::Drag, &mut rune::Tx) + 'static {
     move |_: &mut State, drag: &mut rune::Drag, _: &mut rune::Tx| {
         let lands = match drag.phase {
             rune::Phase::Down => true,
@@ -240,11 +254,27 @@ pub fn scrub_drag(handle: PlayerHandle) -> impl Fn(&mut State, &mut rune::Drag, 
         if !lands {
             return;
         }
-        let length = handle.state().map_or(0, |s| s.length_ms);
-        if let Some(at) = seek_target(length, drag.x, drag.w) {
+        let Some(state) = state_for(&handle, only.as_deref()) else {
+            return;
+        };
+        if let Some(at) = seek_target(state.length_ms, drag.x, drag.w) {
             handle.seek(at);
         }
     }
+}
+
+/// The scrubber's arrows: `delta` steps of 5 s from where the file is; nothing while the player holds another file
+/// than `only`.
+pub fn step_seek(handle: &PlayerHandle, only: Option<&str>, delta: i32) {
+    let Some(state) = state_for(handle, only) else {
+        return;
+    };
+    let step = SEEK_STEP_MS.saturating_mul(u64::from(delta.unsigned_abs()));
+    handle.seek(if delta < 0 {
+        state.at_ms.saturating_sub(step)
+    } else {
+        state.at_ms.saturating_add(step)
+    });
 }
 
 /// Whether Space toggles playback: not while a text field has the keys.
@@ -255,9 +285,51 @@ pub fn space_toggles(text_field_has_focus: bool) -> bool {
 
 /// The player's bar: play and pause, the elapsed time, the scrubber, the time left. `prefix` keys the parts; `ink` is
 /// the controls' colour and `track` the scrubber's rail (the stage is dark in both themes). The caller places it.
+/// The button plays or pauses whatever the player holds (the Photos stage); a video opened from Files has its own
+/// bar ([`files_bar`]).
 pub fn bar(prefix: &'static str, handle: &PlayerHandle, times: Times, ink: Color, track: Color, t: &Theme) -> El {
     let toggle_with = handle.clone();
+    bar_with(prefix, handle, None, times, ink, track, t, move |_: &mut State| {
+        toggle(&toggle_with)
+    })
+}
+
+/// The bar of a video opened from Files: its button is the viewer's Play (`Ui::toggle_play`, the press Space makes:
+/// the first one opens the video through the source for the press's session), and its scrubber moves only this file.
+fn files_bar(handle: &PlayerHandle, file_id: &str, times: Times, t: &Theme) -> El {
+    let press = |s: &mut State| {
+        if let Some(ui) = super::ui(s) {
+            ui.toggle_play();
+        }
+    };
+    let track = Color::WHITE.alpha(0.3);
+    bar_with(
+        "video",
+        handle,
+        Some(file_id.to_string()),
+        times,
+        Color::WHITE,
+        track,
+        t,
+        press,
+    )
+}
+
+/// The bar's drawing; `press` is its button's, and the scrubber acts only while the player holds `only` (`None`:
+/// whatever it holds).
+#[allow(clippy::too_many_arguments)]
+fn bar_with(
+    prefix: &'static str,
+    handle: &PlayerHandle,
+    only: Option<String>,
+    times: Times,
+    ink: Color,
+    track: Color,
+    t: &Theme,
+    press: impl Fn(&mut State) + 'static,
+) -> El {
     let seek_with = handle.clone();
+    let seek_only = only.clone();
     let drag_with = handle.clone();
     let part = times.part();
     row()
@@ -284,7 +356,7 @@ pub fn bar(prefix: &'static str, handle: &PlayerHandle, times: Times, ink: Color
             .focusable(true)
             .focus_ring(2.0, 2.0, t.accent_deep)
             .cursor(rune::Cursor::Pointer)
-            .on_press(move |_: &mut State| toggle(&toggle_with)),
+            .on_press(press),
         )
         .child(kit::label(format!("{prefix}-elapsed"), times.elapsed(), TIME, ink))
         .child(
@@ -294,15 +366,9 @@ pub fn bar(prefix: &'static str, handle: &PlayerHandle, times: Times, ink: Color
                 .a11y_value(times.spoken())
                 .range_value(f64::from(part), 0.0, 1.0)
                 .on_step(move |_: &mut State, delta: i32, _: &mut rune::Tx| {
-                    let now = seek_with.state().map_or(0, |s| s.at_ms);
-                    let step = SEEK_STEP_MS.saturating_mul(u64::from(delta.unsigned_abs()));
-                    seek_with.seek(if delta < 0 {
-                        now.saturating_sub(step)
-                    } else {
-                        now.saturating_add(step)
-                    });
+                    step_seek(&seek_with, seek_only.as_deref(), delta);
                 })
-                .on_drag(scrub_drag(drag_with))
+                .on_drag(scrub_drag(drag_with, only))
                 .focusable(true)
                 .focus_ring(2.0, 2.0, t.accent_deep)
                 .grow(1.0)
@@ -320,8 +386,9 @@ pub fn bar(prefix: &'static str, handle: &PlayerHandle, times: Times, ink: Color
         .child(kit::label(format!("{prefix}-remaining"), times.remaining(), TIME, ink))
 }
 
-/// The black stage with the player's frame, scaled to fit. Its size goes to the player when it changes.
-pub fn stage(handle: &PlayerHandle) -> El {
+/// The black stage with the player's frame, scaled to fit, when `own` (the player holds this view's file; another
+/// file's picture is never shown here). Its size goes to the player when it changes.
+fn stage(handle: &PlayerHandle, own: bool) -> El {
     let ask = handle.clone();
     let mut stage = el()
         .key("video-stage")
@@ -334,7 +401,7 @@ pub fn stage(handle: &PlayerHandle) -> El {
             let (w, h) = ask_size(w, h);
             ask.set_view_size(w, h);
         });
-    if let Some(frame) = handle.frame() {
+    if let Some(frame) = handle.frame().filter(|_| own) {
         // `Fit` scales the picture to the box and centres it: the letterbox.
         stage = stage.child(
             el().key("video-frame")
@@ -348,10 +415,12 @@ pub fn stage(handle: &PlayerHandle) -> El {
     stage
 }
 
-/// The video's stage and bar.
+/// The video's stage and bar. They draw what the player says of THIS file only (`PlayerHandle::state_of`): with
+/// nothing of it held (before its first Play, or while another file plays) the stage is black, the times are 0:00 and
+/// the button is Play, which opens this video.
 pub fn view(ui: &Ui, t: &Theme) -> El {
     if let Some(handle) = ui.source.player() {
-        let state = handle.state();
+        let state = handle.state_of(&ui.file.id);
         if let Some(why) = state.as_ref().and_then(|s| s.refused.as_ref()) {
             return refused(&refusal_words(why), t);
         }
@@ -369,12 +438,12 @@ pub fn view(ui: &Ui, t: &Theme) -> El {
             .min_w(0.0)
             .h_full()
             .fill(Color::BLACK)
-            .child(stage(&handle));
+            .child(stage(&handle, state.is_some()));
         // The stage keeps playing; the line sits where "Reduced quality on this PC" sits in the bar's words.
         if let Some(why) = state.as_ref().and_then(|s| s.no_sound) {
             body = body.child(no_sound_line("video", why, Color::WHITE, t));
         }
-        return body.child(bar("video", &handle, times, Color::WHITE, Color::WHITE.alpha(0.3), t));
+        return body.child(files_bar(&handle, &ui.file.id, times, t));
     }
     // No player: the state of a kind without a viewer, for this file. The copy's name is overwritten when it is drawn.
     let mut shown = ui.file.clone();

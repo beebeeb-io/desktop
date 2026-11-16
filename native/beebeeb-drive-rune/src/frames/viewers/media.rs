@@ -93,10 +93,13 @@ impl Ui {
         if self.pages() == 0 {
             return;
         }
-        // A source that cannot search the text says so: a find bar that answers "No matches" for words nobody
-        // looked for would be a wrong answer.
+        // A source that cannot search the text says why: a find bar that answers "No matches" for words nobody
+        // looked for would be a wrong answer. The engine's source searches every PDF it opened while that opening is
+        // the session's, so one it cannot search is a PDF whose session ended (locked, signed out, another account):
+        // the press says so, and the view shows that state now (the source's poll), never "Not built yet".
         if !self.source.finds() {
-            self.intent(Intent::Find);
+            self.pump();
+            self.toast = Some(FIND_SESSION_ENDED.to_string());
             return;
         }
         if self.media.find.is_none() {
@@ -302,13 +305,23 @@ impl Ui {
         self.source.can_play()
     }
 
-    /// Space and the round button: play or pause.
+    /// Space and the round button of a recording, Space and the bar's button of a video: play or pause THIS file.
+    /// Whether it plays is the player's word for this file only (`PlayerHandle::state_of`): with another file playing,
+    /// or this one refused, the press is a Play, and the source opens this file for the press's session (its first
+    /// Play too: a Files video opens here). A source with no player: the recording's own doc says.
     pub fn toggle_play(&mut self) {
-        let Body::Audio(doc) = &self.file.body else { return };
         if !self.source.can_play() {
             return;
         }
-        let on = !doc.playing;
+        let live = self
+            .source
+            .player()
+            .map(|player| player.state_of(&self.file.id).is_some_and(|state| state.playing));
+        let on = match &self.file.body {
+            Body::Audio(doc) => !live.unwrap_or(doc.playing),
+            Body::Video(_) => !live.unwrap_or(false),
+            _ => return,
+        };
         if self.source.play(&self.file.id, on) {
             if let Body::Audio(doc) = &mut self.file.body {
                 doc.playing = on;
@@ -386,12 +399,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
             ui.toggle_play();
             true
         }
-        // Space plays and pauses a video (not while a text field has the keys: this view has none). Esc is the
-        // viewer's own: it closes the viewer, and closing stops the video (`closing_a_video_stops_it`).
+        // Space plays and pauses a video (not while a text field has the keys: this view has none), the same press as
+        // the bar's button: the first one opens the video through the source. Esc is the viewer's own: it closes the
+        // viewer, and closing stops the video (`closing_a_video_stops_it`).
         (Body::Video(_), Key::Text(key)) if plain && key == " " && super::video::space_toggles(false) => {
-            if let Some(handle) = ui.source.player() {
-                super::video::toggle(&handle);
-            }
+            ui.toggle_play();
             true
         }
         (Body::Pdf(_), Key::Command('f')) if !m.alt && !m.shift => {

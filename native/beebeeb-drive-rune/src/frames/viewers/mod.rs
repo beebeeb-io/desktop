@@ -81,8 +81,6 @@ pub enum Intent {
     SaveCopy,
     /// Edit, where the source cannot save an edit.
     Edit,
-    /// Find, where the source cannot search the document's text.
-    Find,
     /// Available offline, where the source cannot change it.
     KeepOffline,
     /// DW-0782: the report dialog. The report carries the code, never the file's name.
@@ -152,7 +150,6 @@ impl Intent {
             Intent::OpenInAnotherApp => "Open in another app",
             Intent::SaveCopy => "Save a copy",
             Intent::Edit => "Edit and save from here",
-            Intent::Find => "Find in this document",
             Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
