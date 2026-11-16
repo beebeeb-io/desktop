@@ -41,7 +41,7 @@ pub mod app_code {
     /// Classified as `timeout`: macOS, or this app's own call, did not finish.
     pub const OP_TIMEOUT: i64 = 6;
     /// A stop took the engine out of its slot and `abort()` could not confirm its task ended
-    /// (`engine_stop_unconfirmed` is set; sign-out refuses until a restart).
+    /// (`engine_stop_unconfirmed` is set; sign-out refuses until a restart: `app::unfinished_sign_out`).
     pub const ENGINE_STOP_UNCONFIRMED: i64 = 7;
 }
 

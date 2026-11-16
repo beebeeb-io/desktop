@@ -684,7 +684,10 @@ fn another_accounts_stored_key_is_refused_and_removed() {
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
     drop(host);
 
-    // Sign-in: a key left behind with another owner's tag (no token) goes before the token is stored.
+    // Sign-in: a key left behind with another owner's tag (no token) goes before the token is stored. It is put there
+    // after the start: a start finishes such a leftover itself (`app::unfinished_sign_out`), and this pins the sign-in.
+    let host = open(&credentials);
+    assert_eq!(host.engine.restore(), GateState::SignedOut);
     {
         let vault = AuthVault::new(store.clone());
         vault
@@ -696,8 +699,6 @@ fn another_accounts_stored_key_is_refused_and_removed() {
         // And that account's app lock turned off: it never reaches this one.
         store.save_lock_flag(LockFlag::AppLock, b"0").unwrap();
     }
-    let host = open(&credentials);
-    assert_eq!(host.engine.restore(), GateState::SignedOut);
     assert_eq!(
         host.engine.sign_in_password(EMAIL, secret(PASSWORD)),
         Ok(NextAfterSignIn::RecoveryPhrase)
