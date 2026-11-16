@@ -501,15 +501,12 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
                     Change::After(after) => engine.set_lock_after_for(session, after, proof),
                 }))
                 .unwrap_or(Err(AppLockRefused::CouldNotCheck));
-                let _ = (
-                    &tx,
-                    Answer::Set {
-                        made_for: mine,
-                        change,
-                        proved,
-                        result,
-                    },
-                );
+                let _ = tx.send(Answer::Set {
+                    made_for: mine,
+                    change,
+                    proved,
+                    result,
+                });
                 engine.wake_host();
             });
         if let Ok(worker) = worker {

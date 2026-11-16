@@ -126,7 +126,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
     /// The source with the main window's Windows Hello prompt, which turning app lock off asks first. The first run
     /// holds the prompt it asked for (`FirstRunPrompt`): it goes when the first run is left.
     pub fn with_hello(mut self, hello: Box<dyn HelloPrompter>) -> Self {
-        self.hello = Box::new(FirstRunPrompt::new(hello));
+        self.hello = hello;
         self
     }
 
