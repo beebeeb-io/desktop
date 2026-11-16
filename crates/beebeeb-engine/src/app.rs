@@ -53,7 +53,7 @@ pub mod account_email_resend_api;
 pub mod account_password_api;
 pub mod account_twofactor_api;
 pub mod backup_devices_api;
-mod credential_stores;
+pub(crate) mod credential_stores;
 mod session_revoke;
 mod session_watch;
 mod unfinished_sign_out;
