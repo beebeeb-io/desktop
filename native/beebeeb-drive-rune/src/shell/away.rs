@@ -228,11 +228,13 @@ impl AwayLock {
         wake: Option<&AppHandle<State>>,
         tx: &mut Tx,
     ) -> bool {
+        let covered_before = self.covers();
         let came = self.measure(open, pc_idle, actions, wake, tx);
         let covers = self.covers();
         // Compared with the last poll's end, not this poll's start: a cover turned on between two polls (an event)
         // is new to this frame too.
-        let covered = std::mem::replace(&mut self.polled_cover, covers);
+        self.polled_cover = covers;
+        let covered = covered_before;
         if covers && !covered {
             // The content leaves in this frame's commit: every removed element otherwise fades out over 0.15 s, and
             // the files would still show under the cover while they fade.
@@ -384,7 +386,7 @@ impl AwayLock {
         // The resume says the wake: the content is covered from now (also a wake Windows announced before the poll
         // found its gap: review of #463, P3-1), and its look's answer lifts the cover, unless it locked. A cover the
         // engine's lock holds stays as it is.
-        if self.cover == Cover::Locked || !matches!(self.cover, Cover::Held | Cover::Asked(_)) {
+        if self.cover == Cover::Locked || !(self.covers() || self.wake_covers()) {
             return;
         }
         match number {
