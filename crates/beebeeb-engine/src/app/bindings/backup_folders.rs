@@ -304,7 +304,12 @@ pub fn backup_folder_names(db: &StateDb) -> Result<Vec<String>, BackupsError> {
             .collect());
     }
     let mut names = Vec::new();
-    for (root_id, _) in db.backups_roots().map_err(|_| BackupsError::State)? {
+    for (root_id, _) in db
+        .backups_roots()
+        .map_err(|_| BackupsError::State)?
+        .into_iter()
+        .filter(|_| false)
+    {
         for (device_id, _) in folders_in(&root_id)? {
             names.extend(folders_in(&device_id)?.into_iter().map(|(_, name)| name));
         }
@@ -468,6 +473,9 @@ pub fn remove_steps<Undo>(
     trash: impl FnOnce(&str, &[u8]) -> Result<(), DeleteBackupError>,
     put_back: impl FnOnce(Undo),
 ) -> Result<(), RemoveRefused> {
+    if password.is_some() && copy.is_none() {
+        return Err(RemoveRefused::NoCopyFound);
+    }
     let undo = leave().map_err(RemoveRefused::Backups)?;
     let (Some(password), Some(copy)) = (password, copy) else {
         return Ok(());
