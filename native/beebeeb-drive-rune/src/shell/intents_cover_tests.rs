@@ -377,7 +377,7 @@ fn wake_cover_drops_a_held_folder_for_another_account() {
 }
 
 /// The sweep: a `beebeeb://` link that comes under the cover navigates nothing behind it, and goes on once the cover
-/// is gone. A cover that became the lock drops it (nothing waits for the unlock).
+/// is gone.
 /// Mutant: in `host::request`, delete the `under_the_wake_cover` block -> red at "nothing is navigated behind the
 /// cover".
 #[test]
@@ -391,19 +391,75 @@ fn wake_cover_holds_a_link_until_it_lifts() {
     assert!(w.shows(Section::Files), "nothing is navigated behind the cover");
     w.nothing_locked();
     assert!(w.shows(Section::Photos), "the link goes on once the cover is gone");
+}
 
+/// The lead's ruling (2026-11-16 05:05): a link only opens a view, so a link that came under the cover follows the route
+/// machine's rule when the wake locks: kept across the lock and opened after the same account unlocks, checked again;
+/// another account or a sign-out drops it. A later link, which came while locked, wins over it.
+/// Mutants: in `release_the_ask`, drop the `if link && same_account …` wait (a link goes with the lock like any ask)
+/// -> red at "the same account unlocks: the link opens"; drop `same_account` from that wait -> red at "another account:
+/// dropped"; in `host::request_as`, delete `intents::a_later_ask_came()` -> red at "the later link wins".
+#[test]
+fn wake_cover_keeps_a_link_across_a_lock_for_the_same_account() {
+    let link = deeplink::link("open/photos");
     let mut w = Window::open();
     w.wake();
     w.rt.update(|s, tx| host::on_open_url(s, &link, tx));
     w.locked();
-    assert!(w.rt.state.shell.app.pending().is_none(), "the lock drops it");
+    assert!(
+        !w.shows(Section::Photos) && an_ask_waits(),
+        "kept while locked, nothing opened"
+    );
     w.unlocked();
-    assert!(w.shows(Section::Files), "nothing opens at the unlock");
+    assert!(w.shows(Section::Photos), "the same account unlocks: the link opens");
+    assert!(!an_ask_waits());
+
+    // Another account is signed in at the lock: dropped.
+    let mut w = Window::open();
+    w.wake();
+    w.rt.update(|s, tx| host::on_open_url(s, &link, tx));
+    w.locked();
+    w.engine.set_account("another-account");
+    w.unlocked();
+    assert_eq!(w.rt.state.shell.app.account(), Some("another-account"));
+    assert!(
+        !w.shows(Section::Photos) && !an_ask_waits(),
+        "another account: dropped ({:?})",
+        w.rt.state.shell.app.screen()
+    );
+
+    // A sign-out while locked: dropped, also when the same account signs in again.
+    let mut w = Window::open();
+    w.wake();
+    w.rt.update(|s, tx| host::on_open_url(s, &link, tx));
+    w.locked();
+    w.engine.set_gate(GateState::SignedOut);
+    w.frames_until("the window sees the sign-out", |rt| {
+        rt.state.shell.app.gate() == GateState::SignedOut
+    });
+    assert!(!an_ask_waits(), "the sign-out drops it");
+    w.unlocked();
+    assert!(!w.shows(Section::Photos), "nothing opens at the next sign-in");
+
+    // A later link, which came while locked (the route machine keeps it): it wins over the one held under the cover.
+    let mut w = Window::open();
+    w.wake();
+    w.rt.update(|s, tx| host::on_open_url(s, &link, tx));
+    w.locked();
+    w.rt.update(|s, tx| host::on_open_url(s, &deeplink::link("open/trash"), tx));
+    w.unlocked();
+    assert!(
+        w.shows(Section::Trash),
+        "the later link wins: {:?}",
+        w.rt.state.shell.app.screen()
+    );
 }
 
-/// The sweep: the b's Settings… under the cover opens nothing behind it, and opens Settings once the cover is gone.
-/// Mutant: in `host::request`, delete the `under_the_wake_cover` block -> red at "Settings does not open behind the
-/// cover".
+/// The sweep: the b's Settings… under the cover opens nothing behind it, and opens Settings once the cover is gone. It
+/// opens a pane, so a cover that became the lock drops it (only a link waits for the unlock).
+/// Mutants: in `host::request`, delete the `under_the_wake_cover` block -> red at "Settings does not open behind the
+/// cover"; in `release_the_ask`, keep every ask across a lock (drop `link &&` from the wait) -> red at "the lock drops
+/// it".
 #[test]
 fn wake_cover_holds_the_trays_settings_until_it_lifts() {
     let mut w = Window::open();
@@ -420,6 +476,18 @@ fn wake_cover_holds_the_trays_settings_until_it_lifts() {
         w.rt.state.shell.app.screen(),
         Screen::Settings(SettingsPane::General),
         "Settings, once the cover is gone"
+    );
+
+    let mut w = Window::open();
+    w.wake();
+    w.rt.update(|s, tx| host::on_menu(s, MenuAction::Settings, tx));
+    w.locked();
+    assert!(!an_ask_waits(), "the lock drops it");
+    w.unlocked();
+    assert!(
+        w.shows(Section::Files),
+        "nothing opens at the unlock: {:?}",
+        w.rt.state.shell.app.screen()
     );
 }
 

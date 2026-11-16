@@ -477,11 +477,18 @@ pub(crate) fn under_the_wake_cover(s: &mut State) -> bool {
 /// closed; the window comes forward either way. Under the wake cover it waits for the cover's end
 /// (`intents::after_the_cover`): nothing is navigated, read or closed behind it (review of #464, P3-1).
 pub fn request(s: &mut State, intent: Intent) -> Outcome {
+    request_as(s, intent, false)
+}
+
+/// [`request`] for a `beebeeb://` link (`link`): held under the wake cover the same way, but kept across a lock of the
+/// same account (`intents::after_the_cover`; the lead's ruling of 2026-11-16 05:05: a link only opens a view).
+fn request_as(s: &mut State, intent: Intent, link: bool) -> Outcome {
     if under_the_wake_cover(s) {
-        super::intents::hold_under_the_cover(s, intent);
+        super::intents::hold_under_the_cover(s, intent, link);
         s.shell.open_main();
         return Outcome::Deferred;
     }
+    super::intents::a_later_ask_came();
     let outcome = dispatch(s, Event::Request(intent));
     s.shell.open_main();
     outcome
@@ -1053,7 +1060,7 @@ pub fn on_reopen(s: &mut State, _has_visible: bool, _tx: &mut Tx) -> bool {
 pub fn on_open_url(s: &mut State, url: &str, _tx: &mut Tx) {
     match instance::forwarded(url) {
         Forwarded::Show(intent) => {
-            request(s, intent);
+            request_as(s, intent, true);
         }
         Forwarded::ShowOnly(error) => {
             log(format!("a link was not followed: {}", error.reason()));

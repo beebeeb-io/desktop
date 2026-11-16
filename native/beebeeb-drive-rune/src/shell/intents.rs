@@ -10,7 +10,9 @@
 //! not said whether the wake locks; review of #464, P3-1): the picker's folder, and an ask to show a place (a
 //! `beebeeb://` link, the b's Settings…, the flyout: `host::request`). Each waits, and goes on once the cover is gone,
 //! checked again ([`after_the_cover`]); a lock, a sign-out or another account drops it, as File Explorer's verbs do
-//! (`platform::windows_verbs`, P3-7). Nothing waits for after an unlock.
+//! (`platform::windows_verbs`, P3-7). One exception (the lead's ruling of 2026-11-16 05:05): a link only opens a view, so
+//! it follows the route machine's rule for a link that comes while locked: kept across a lock of the same account and
+//! opened after the unlock, checked again; a sign-out, an ended session or another account drops it.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -106,6 +108,8 @@ struct HeldFolder {
 struct HeldAsk {
     ask: Ask,
     account: Option<String>,
+    /// A `beebeeb://` link (`host::on_open_url`): kept across a lock of the same account.
+    link: bool,
 }
 
 thread_local! {
@@ -235,17 +239,23 @@ fn hand_folder(s: &mut State, asker: FolderFor, folder: &Path) {
 }
 
 /// `host::request` under the wake cover: the ask waits for the cover's end ([`after_the_cover`]), with the account the
-/// window shows now. One waits: a later ask replaces it.
-pub(super) fn hold_under_the_cover(s: &State, ask: Ask) {
+/// window shows now. `link`: it came as a `beebeeb://` link. One waits: a later ask replaces it.
+pub(super) fn hold_under_the_cover(s: &State, ask: Ask, link: bool) {
     let account = s.shell.app.account().map(str::to_owned);
-    HELD_ASK.set(Some(HeldAsk { ask, account }));
+    HELD_ASK.set(Some(HeldAsk { ask, account, link }));
     log("an ask to show a place waits for the lock screen");
+}
+
+/// An ask from outside came and was not held (`host::request`): it replaces the one that waits, which would otherwise
+/// go on after it (a link kept across a lock, released after the unlock, over a newer ask the route machine kept).
+pub(super) fn a_later_ask_came() {
+    HELD_ASK.set(None);
 }
 
 /// The main window's poll, right after the away lock's (`host::poll_screen`): what waited under the wake cover goes on
 /// once the cover is gone, checked again as it came. The session is compared first: a lock (the cover became the
-/// lock), a sign-out, an ended session or another account drops it, so nothing is kept for after an unlock. `true`:
-/// something went on or was dropped.
+/// lock), a sign-out, an ended session or another account drops it, so nothing is kept for after an unlock, but a link
+/// (the module doc). `true`: something went on or was dropped.
 pub(crate) fn after_the_cover(s: &mut State) -> bool {
     let folder = release_the_folder(s);
     let ask = release_the_ask(s);
@@ -274,13 +284,24 @@ fn release_the_folder(s: &mut State) -> bool {
     true
 }
 
-/// The ask that waited goes to the route machine, as it came (`host::dispatch`; the window came forward already).
+/// The ask that waited goes to the route machine, as it came (`host::dispatch`; the window came forward already): once
+/// the cover is gone, or for a link kept across a lock, once the same account unlocked.
 fn release_the_ask(s: &mut State) -> bool {
-    let Some(account) = HELD_ASK.with_borrow(|held| held.as_ref().map(|held| held.account.clone())) else {
+    let Some((account, link)) =
+        HELD_ASK.with_borrow(|held| held.as_ref().map(|held| (held.account.clone(), held.link)))
+    else {
         return false;
     };
-    let same_account = account.is_some() && s.shell.app.account() == account.as_deref();
-    if !(same_account && under_an_open_gate(s)) {
+    let session = s.shell.actions.session();
+    // The window and the engine still show the account the ask came for (a locked session keeps its account).
+    let same_account = account.is_some()
+        && s.shell.app.account() == account.as_deref()
+        && session.account.as_deref() == account.as_deref();
+    if !(same_account && under_an_open_gate(s, &session)) {
+        // A link waits across a lock of the same account, for the unlock (the module doc). A sign-out names no account.
+        if link && same_account && !s.session_ended() {
+            return false;
+        }
         HELD_ASK.set(None);
         log("an ask to show a place that waited was dropped: the window locked, signed out or shows another account");
         return true;
@@ -298,9 +319,8 @@ fn release_the_ask(s: &mut State) -> bool {
 /// The window's session, as the engine has it now, is still open under one of the gates the wake cover lies over
 /// (`registry::covered`: Ready, the first run, no plan) for the account the window shows: not locked, signed out or
 /// ended.
-fn under_an_open_gate(s: &State) -> bool {
+fn under_an_open_gate(s: &State, session: &super::app::Session) -> bool {
     let open = |gate| matches!(gate, GateState::Ready | GateState::FirstRun | GateState::NoPlan);
-    let session = s.shell.actions.session();
     open(s.shell.app.gate())
         && open(session.gate)
         && !s.session_ended()
@@ -398,6 +418,12 @@ pub(super) fn open_for_signin(address: &str) {
 #[cfg(test)]
 pub(crate) fn a_picked_folder_waits() -> bool {
     HELD_FOLDER.with_borrow(Option::is_some)
+}
+
+/// Tests only: an ask to show a place waits for the wake cover's end (or, a link, for the unlock).
+#[cfg(test)]
+pub(crate) fn an_ask_waits() -> bool {
+    HELD_ASK.with_borrow(Option::is_some)
 }
 
 #[cfg(test)]
