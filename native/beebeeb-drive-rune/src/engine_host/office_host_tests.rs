@@ -980,7 +980,8 @@ fn a_too_old_windows_needs_a_windows_update() {
 fn no_sandbox_no_helper() {
     // An existing, runnable file of the helper's name: were there an unconfined way, this would start it.
     let exe = runnable_helper("no-sandbox");
-    let mut host = OfficeHost::open(&exe, DocKind::Docx, Zeroizing::new(doc()), noop_wake());
+    let registry = Registry::new();
+    let mut host = OfficeHost::open_in(&registry, &exe, DocKind::Docx, Zeroizing::new(doc()), noop_wake());
     let mut events = Vec::new();
     let ended = |host: &OfficeHost, _: &[Event]| host.worker_ended() && !matches!(host.state(), OfficeState::Opening);
     assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());

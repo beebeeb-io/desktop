@@ -728,10 +728,22 @@ pub struct OfficeHost {
 impl OfficeHost {
     /// Opens `bytes` (a document of `kind`) with the helper at `helper`. Never blocks: the helper starts on a worker.
     pub fn open(helper: &Path, kind: DocKind, bytes: Zeroizing<Vec<u8>>, wake: Wake) -> OfficeHost {
+        Self::open_in(&PROCESS, helper, kind, bytes, wake)
+    }
+
+    /// [`OfficeHost::open`] joining `registry`, not the process's: a test's own, which no other test's session end
+    /// (`end_session` on [`PROCESS`]) reaches.
+    pub(crate) fn open_in(
+        registry: &Registry,
+        helper: &Path,
+        kind: DocKind,
+        bytes: Zeroizing<Vec<u8>>,
+        wake: Wake,
+    ) -> OfficeHost {
         let starter = Confined {
             helper: helper.to_path_buf(),
         };
-        open_with(starter, &PROCESS, Timeouts::PRODUCTION, kind, bytes, wake)
+        open_with(starter, registry, Timeouts::PRODUCTION, kind, bytes, wake)
     }
 
     /// What the window shows, as a copy. A close from another thread (a lock, a sign-out) makes it `Closed` at once;
