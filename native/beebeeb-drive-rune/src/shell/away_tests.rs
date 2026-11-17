@@ -1058,3 +1058,25 @@ mod wake;
 // fx-wake-inputs' follow-up: the gap before the first poll for what comes from outside the window, and the media keys.
 #[path = "away_inputs_tests.rs"]
 mod inputs;
+
+/// The window's Close button with "Locks again after: Immediately", end to end (w9-lock-reopen): the close hook of the
+/// shell with a b in the notification area (so the app stays) locks the real engine, and the window that opens again
+/// reads the lock as its gate. VM run 3's H2 never got here: its click on Close landed while Windows Hello's prompt was
+/// up and only dismissed the prompt (the window stayed, unlocked).
+#[test]
+fn closing_to_the_tray_with_immediately_locks_and_the_reopened_window_shows_it() {
+    let mut live = live();
+    live.engine
+        .set_lock_after_for(live.engine.session_turn(), LockAfter::Immediately, None)
+        .unwrap();
+    live.rt.state.shell.attach_tray(Arc::new(|_| {}));
+    assert!(!live.rt.state.shell.close_quits(), "the premise: closing keeps the app in the tray");
+    live.rt.update(host::on_close);
+    until(&mut live, "closing did not lock", |live| {
+        live.engine.lock_state() == LockState::ScreenLocked
+    });
+    // The window that opens again: its next frames read the gate.
+    until(&mut live, "the window did not take the lock as its gate", |live| {
+        live.rt.state.shell.app.gate() == GateState::Locked
+    });
+}

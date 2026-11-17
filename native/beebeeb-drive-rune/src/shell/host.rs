@@ -312,7 +312,7 @@ impl Shell {
         !self.has_tray()
     }
 
-    fn attach_tray(&mut self, handler: TrayHandler) {
+    pub(crate) fn attach_tray(&mut self, handler: TrayHandler) {
         match self.platform.create_tray(&self.tray_model, handler) {
             Ok(tray) => {
                 let present = tray.present();
