@@ -448,6 +448,8 @@ mod imp {
         let Ok(interop) = windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>() else {
             return Seen::Refused;
         };
+        // The Credential Dialogs that are already on screen (other prompts, older runs): never ours to close.
+        let before = dialogs::all();
         // SAFETY: a COM call on a live interface. The handle is only a number to Windows: one that names no
         // window (it closed in the meantime) is refused with an error, and nothing is read through it here.
         let prompt: windows::core::Result<IAsyncOperation<UserConsentVerificationResult>> =
@@ -462,6 +464,7 @@ mod imp {
         if prompt.SetCompleted(&on_end).is_err() {
             // Nothing would say when it ends: ask Windows to take it away rather than wait for ever.
             let _ = prompt.Cancel();
+            dialogs::close_ours(window.0, &before);
             return Seen::Refused;
         }
         match control.wait() {
@@ -480,7 +483,70 @@ mod imp {
                 // Windows' to decide; the answer does not wait for it: none for an owner's cancel, `Cancelled`
                 // for a prompt a newer one took the place of.
                 let _ = prompt.Cancel();
+                // `Cancel` on the operation does not remove the "Windows Security" dialog (CredentialUIBroker keeps
+                // it on screen, measured on VM 401): close its window itself.
+                dialogs::close_ours(window.0, &before);
                 Seen::Refused
+            }
+        }
+    }
+
+    /// The "Windows Security" dialog Windows Hello shows lives in CredentialUIBroker.exe, not in this process:
+    /// closing the request does not close it, so it is found by window class and sent `WM_CLOSE`.
+    mod dialogs {
+        use std::time::{Duration, Instant};
+
+        use windows_sys::Win32::Foundation::{HWND, LPARAM, TRUE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GW_OWNER, GetClassNameW, GetWindow, IsWindowVisible, PostMessageW, WM_CLOSE,
+        };
+
+        const CLASS: &str = "Credential Dialog Xaml Host";
+        /// The dialog may only appear after the cancel (the request was just made); look this long, no longer.
+        const LOOK: Duration = Duration::from_millis(1500);
+
+        fn is_dialog(hwnd: HWND) -> bool {
+            let mut name = [0u16; 64];
+            // SAFETY: `name` is a live buffer of the length given.
+            let n = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
+            n > 0 && String::from_utf16_lossy(&name[..n as usize]) == CLASS
+        }
+
+        unsafe extern "system" fn collect(hwnd: HWND, out: LPARAM) -> i32 {
+            if is_dialog(hwnd) {
+                // SAFETY: `out` is the `Vec` `all` passed, alive for the whole `EnumWindows` call.
+                unsafe { (*(out as *mut Vec<isize>)).push(hwnd as isize) };
+            }
+            TRUE
+        }
+
+        /// Every Credential Dialog window on the desktop now.
+        pub(super) fn all() -> Vec<isize> {
+            let mut found: Vec<isize> = Vec::new();
+            // SAFETY: the callback only reads window classes and pushes into `found`, which outlives the call.
+            unsafe { EnumWindows(Some(collect), &mut found as *mut Vec<isize> as LPARAM) };
+            found
+        }
+
+        /// Closes the dialog(s) of this request: owned by `owner` (our window), or new since `before`. Keeps
+        /// looking for a short while, as the dialog may still be coming up when the cancel is made.
+        pub(super) fn close_ours(owner: isize, before: &[isize]) {
+            let until = Instant::now() + LOOK;
+            let mut closed = false;
+            loop {
+                for h in all() {
+                    // SAFETY: plain window queries on a handle that may have gone: Windows answers with an error.
+                    let ours = unsafe { GetWindow(h as HWND, GW_OWNER) } as isize == owner || !before.contains(&h);
+                    if ours && unsafe { IsWindowVisible(h as HWND) } != 0 {
+                        // SAFETY: posting a message to a window of another process is allowed and non-blocking.
+                        unsafe { PostMessageW(h as HWND, WM_CLOSE, 0, 0) };
+                        closed = true;
+                    }
+                }
+                if closed || Instant::now() >= until {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
