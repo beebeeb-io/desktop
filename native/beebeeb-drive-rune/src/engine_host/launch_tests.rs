@@ -390,7 +390,7 @@ fn the_updaters_installer_start_takes_the_launch_lock() {
     // The app hands the lock in: its call site passes `launch::spawn`.
     let apply = std::fs::read_to_string(root.join("src/engine_host/settings/updates_apply.rs")).unwrap();
     assert!(
-        code_only(&apply).contains("start_nsis(stopped, super::super::launch::spawn)"),
+        code_only(&apply).contains("start_nsis(stopped, crate::engine_host::launch::spawn)"),
         "the app starts the installer through launch::spawn"
     );
 }
