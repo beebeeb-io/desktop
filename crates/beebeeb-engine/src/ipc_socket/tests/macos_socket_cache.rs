@@ -44,7 +44,7 @@ fn test_macos_ipc_socket_path_fits_sun_path_length_budget() {
     let home = std::path::PathBuf::from(format!("/Users/{username}"));
     let home = home.as_path();
 
-    let path = macos_ipc_socket_path_in(&crate::identity::TEST, home);
+    let path = macos_ipc_socket_path_in(&crate::identity::REAL, home);
     let byte_len = path.to_str().unwrap().len();
     assert!(
         byte_len < 104,
@@ -420,7 +420,7 @@ fn test_macos_ipc_socket_path_fits_sun_path_on_this_machine() {
     // directory doesn't hide behind the synthetic case.
     let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let path = ipc_socket_path(&crate::identity::TEST);
+    let path = ipc_socket_path(&crate::identity::REAL);
     let byte_len = path.to_str().expect("path must be valid UTF-8").len();
     // `byte_len + 1 <= 104` (path bytes + NUL terminator, within the
     // 104-byte sun_path budget) rewritten as `byte_len < 104` for clippy

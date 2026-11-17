@@ -120,7 +120,15 @@ impl EngineIdentity {
     /// app's group container: it does not start there. `Engine::open` refuses with this, and a host asks
     /// before it makes anything.
     pub fn refusal_on(&self, os: &str) -> Option<&'static str> {
-        (!self.is_real() && os == "macos").then_some(
+        self.refusal(os, cfg!(test))
+    }
+
+    /// [`Self::refusal_on`] with the one exception spelled out: `engine_unit_tests` is true only in this crate's
+    /// own unit-test build (`cfg!(test)`, fixed at compile time, no env var or runtime switch), whose tests run in
+    /// a throw-away root under `test_sandbox` and never touch the real app's group container. Every shipped build
+    /// passes false.
+    fn refusal(&self, os: &str, engine_unit_tests: bool) -> Option<&'static str> {
+        (!self.is_real() && os == "macos" && !engine_unit_tests).then_some(
             "This is a test build of Beebeeb. Test builds do not run on macOS: they would share the real app's data there.",
         )
     }
@@ -273,13 +281,17 @@ mod tests {
     /// The test build does not run on macOS; nothing else is refused.
     #[test]
     fn only_the_test_build_on_macos_is_refused() {
-        assert!(TEST.refusal_on("macos").is_some_and(|words| words.contains("macOS")));
+        // `false`: a shipped (non-unit-test) build.
+        assert!(TEST.refusal("macos", false).is_some_and(|words| words.contains("macOS")));
         for os in ["windows", "linux", "freebsd", ""] {
-            assert_eq!(TEST.refusal_on(os), None, "{os:?}");
+            assert_eq!(TEST.refusal(os, false), None, "{os:?}");
         }
         for os in ["macos", "windows", "linux"] {
-            assert_eq!(REAL.refusal_on(os), None, "{os}");
+            assert_eq!(REAL.refusal(os, false), None, "{os}");
         }
+        // The engine's own unit tests are the only exception, and it is the compile-time `cfg!(test)`.
+        assert_eq!(TEST.refusal_on("macos").is_none(), cfg!(test));
+        assert!(TEST.refusal("macos", cfg!(test)).is_none());
     }
 
     /// Field by field: nothing per-install is the same for both. A field added to the struct must be added here

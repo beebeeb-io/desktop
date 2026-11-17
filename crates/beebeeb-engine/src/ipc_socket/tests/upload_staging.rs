@@ -656,9 +656,10 @@ fn macos_upload_staging_dir_is_inside_the_group_container() {
     let home = std::path::Path::new("/Users/someone");
     assert_eq!(
         macos_upload_staging_dir_in(&crate::identity::TEST, home),
-        std::path::PathBuf::from(
-            "/Users/someone/Library/Group Containers/R8352WDJJR.io.beebeeb.app.fileprovider/upload-staging"
-        )
+        std::path::PathBuf::from(format!(
+            "/Users/someone/Library/Group Containers/{}/upload-staging",
+            crate::identity::TEST.macos_app_group()
+        ))
     );
     assert_ne!(
         macos_upload_staging_dir_in(&crate::identity::TEST, home),

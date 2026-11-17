@@ -161,7 +161,7 @@ const NAMING_ALLOWED: [(&str, usize, &str); 3] = [
 
 /// Rule 2b's allow-list: engine test code that names `REAL` on purpose, `(file, namings, why)`. Everything else in
 /// the engine's tests runs on `TEST`.
-const TEST_REAL_ALLOWED: [(&str, usize, &str); 16] = [
+const TEST_REAL_ALLOWED: [(&str, usize, &str); 18] = [
     (
         "crates/beebeeb-engine/src/backup/device.rs",
         7,
@@ -176,6 +176,16 @@ const TEST_REAL_ALLOWED: [(&str, usize, &str); 16] = [
         "crates/beebeeb-engine/src/engine_bridge/tests/fixture_upload_server.rs",
         2,
         "the bridge fixture of the backup-layout tests, which adopt a legacy folder: only the REAL build may",
+    ),
+    (
+        "crates/beebeeb-engine/src/engine_bridge/tests/versions_3.rs",
+        1,
+        "the macOS staging test reads the folders of the bridge fixture, which is the REAL build",
+    ),
+    (
+        "crates/beebeeb-engine/src/ipc_socket/tests/macos_socket_cache.rs",
+        2,
+        "the macOS socket-path budget is for the shipped REAL group id; the test build never runs on macOS",
     ),
     (
         "crates/beebeeb-engine/src/engine_bridge/tests/hydration.rs",
