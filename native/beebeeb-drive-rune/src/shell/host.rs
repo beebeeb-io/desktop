@@ -1086,7 +1086,7 @@ pub fn on_menu(s: &mut State, action: MenuAction, tx: &mut Tx) {
 }
 
 /// How long a quit waits for a Windows Hello prompt's thread to ask Windows to close the prompt.
-const QUIT_HELLO_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+const QUIT_HELLO_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The window is closing. It keeps running in the notification area (DW-1231: "closing the
 /// window leaves the b running"); with no b to come back through, closing quits.
