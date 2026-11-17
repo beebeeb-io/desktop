@@ -81,6 +81,10 @@ fn start() -> Result<Api, Unavailable> {
     let mfplat = library("mfplat.dll")?;
     let readwrite = library("mfreadwrite.dll")?;
     let ole32 = library("ole32.dll").map_err(|_| Unavailable::NotHere)?;
+    // The COM libraries are delay-loaded imports (`build.rs`): load them from the system folder now, so the first
+    // call through an import finds them already here and never searches for them.
+    library("combase.dll").map_err(|_| Unavailable::NotHere)?;
+    library("oleaut32.dll").map_err(|_| Unavailable::NotHere)?;
     let co_initialize = export!(ole32, "CoInitializeEx", CoInitializeEx)?;
     let startup = export!(mfplat, "MFStartup", MfStartup)?;
     let api = Api {
