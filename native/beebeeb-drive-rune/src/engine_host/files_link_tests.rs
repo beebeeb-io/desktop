@@ -6,6 +6,7 @@
 //! they arrive, before it looks at a token. The local state is a database of each test's own. Every name is
 //! invented.
 
+use crate::frames::files::actions_data::LinkAccess;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -293,7 +294,7 @@ fn a_file_that_has_a_link_and_a_link_beebeeb_refuses_are_said_as_what_they_are()
 }
 
 #[test]
-fn the_dialogs_choices_are_sent_and_a_view_only_link_is_refused_unsent() {
+fn the_dialogs_choices_are_sent() {
     let fake = fake("choices");
     let (_engine, mut source, _state) = signed_in(&fake);
     let options = |access| ShareOptions {
@@ -301,13 +302,6 @@ fn the_dialogs_choices_are_sent_and_a_view_only_link_is_refused_unsent() {
         expires: LinkExpiry::Week,
         password: Some("an invented link password".into()),
     };
-    // "Can view" cannot be kept by a link: it is not made as if it could.
-    assert_eq!(
-        source.share_link(&file(NOTES), &options(LinkAccess::View)),
-        Err(ActionError::NotYet)
-    );
-    assert_eq!(sent(&fake), [], "nothing was sent");
-
     let ended = watch_next_call(&mut source);
     assert_eq!(source.share_link(&file(NOTES), &options(LinkAccess::Download)), Ok(()));
     ended.recv_timeout(WAIT).expect("the call ended");

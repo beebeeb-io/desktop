@@ -8,19 +8,17 @@
 
 use crate::source::DriveItem;
 
-/// What someone with the link may do (DW-0407: "Can view (menu: Can view, Can download)").
+/// What someone with the link may do (DW-0407; a link has no view-only limit in core, so the one choice is Can download).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LinkAccess {
     #[default]
-    View,
     Download,
 }
 
 impl LinkAccess {
-    pub const ALL: [LinkAccess; 2] = [LinkAccess::View, LinkAccess::Download];
+    pub const ALL: [LinkAccess; 1] = [LinkAccess::Download];
     pub fn words(self) -> &'static str {
         match self {
-            LinkAccess::View => "Can view",
             LinkAccess::Download => "Can download",
         }
     }

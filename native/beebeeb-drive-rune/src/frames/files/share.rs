@@ -54,7 +54,7 @@ pub fn shows_secret(s: &State) -> bool {
 
 impl State {
     /// Share… (the file menu, the details panel, the preview's mark): the dialog for the
-    /// selection, on the board's defaults (Can view, 30 days, no password).
+    /// selection, on the board's defaults (Can download, 30 days, no password).
     pub fn begin_share(&mut self) -> bool {
         let items = self.selected_items();
         // No dialog for nothing, and none for a protected item, whoever asks.

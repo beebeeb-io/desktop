@@ -87,7 +87,7 @@ fn share_opens_from_the_menu_and_the_panel_as_a_named_modal_on_the_boards_defaul
     pick(&mut rt, "Share\u{2026}");
     let dialog = info(&rt, "dlg");
     assert_eq!((dialog.role, dialog.label.as_deref()), ("dialog", Some("Share")));
-    assert_eq!(label_of(&rt, "item-0-0"), "Anyone with the link, Can view");
+    assert_eq!(label_of(&rt, "item-0-0"), "Anyone with the link, Can download");
     assert_eq!(label_of(&rt, "item-0-1"), "Link expires, In 30 days");
     let switch = info(&rt, "item-0-2-switch");
     assert_eq!((switch.role, switch.label.as_deref()), ("switch", Some("Password")));
@@ -124,7 +124,7 @@ fn cancel_shares_nothing_wipes_the_password_and_the_choices_start_again() {
     pick(&mut rt, "Share\u{2026}");
     click(&mut rt, "item-0-0");
     assert_eq!(info(&rt, "menu-0").label.as_deref(), Some("Anyone with the link"));
-    click(&mut rt, "menu-0-item-1");
+    click(&mut rt, "menu-0-item-0");
     assert_eq!(share_of(&rt).map(|s| s.access), Some(LinkAccess::Download));
     assert_eq!(label_of(&rt, "item-0-0"), "Anyone with the link, Can download");
     click(&mut rt, "item-0-2-switch");
@@ -145,7 +145,7 @@ fn cancel_shares_nothing_wipes_the_password_and_the_choices_start_again() {
     let share = share_of(&rt).unwrap();
     assert_eq!(
         (share.access, share.expires, share.password_on),
-        (LinkAccess::View, LinkExpiry::Month, false)
+        (LinkAccess::Download, LinkExpiry::Month, false)
     );
 }
 
@@ -154,7 +154,7 @@ fn copy_link_asks_once_with_the_choices_and_then_says_link_copied() {
     let (mut rt, calls, _) = spied();
     pick(&mut rt, "Share\u{2026}");
     click(&mut rt, "item-0-0");
-    click(&mut rt, "menu-0-item-1");
+    click(&mut rt, "menu-0-item-0");
     click(&mut rt, "item-0-1");
     assert_eq!(info(&rt, "menu-0").label.as_deref(), Some("Link expires"));
     click(&mut rt, "menu-0-item-1");
@@ -287,7 +287,7 @@ fn try_again_after_a_link_failed_opens_the_dialog_again_and_never_makes_a_plain_
     fails.lock().unwrap().push((Action::ShareLink, ActionError::Offline));
     pick(&mut rt, "Share\u{2026}");
     click(&mut rt, "item-0-0");
-    click(&mut rt, "menu-0-item-1");
+    click(&mut rt, "menu-0-item-0");
     click(&mut rt, "item-0-1");
     click(&mut rt, "menu-0-item-0");
     click(&mut rt, "item-0-2-switch");

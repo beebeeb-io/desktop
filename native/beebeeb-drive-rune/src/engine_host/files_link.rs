@@ -10,9 +10,7 @@
 //!   look, as a `LinkText`, and nowhere else.
 //! - An answer that lands under another session or account is dropped: no link, no message, nothing kept of it.
 //! - One link per item at a time: while one is on its way, a second press for that item sends nothing and says so.
-//! - Refused here, with nothing sent, as "not available yet": a folder, more than one item, and a link whose
-//!   choice is "Can view" (core's link has no such limit: whoever holds a link can download the file, so a link
-//!   that says otherwise is not made).
+//! - Refused here, with nothing sent, as "not available yet": a folder and more than one item.
 //!
 //! Thread rule: nothing here blocks the window. Each press has a worker of its own; it sends its answer down one
 //! channel and wakes the window ([`Engine::wake_host`]).
@@ -29,7 +27,7 @@ use zeroize::Zeroizing;
 
 use super::log;
 use super::stamp::{Stamp, stamp};
-use crate::frames::files::actions_data::{LinkAccess, LinkExpiry, ShareOptions};
+use crate::frames::files::actions_data::{LinkExpiry, ShareOptions};
 use crate::frames::files::link::LinkText;
 use crate::frames::files::source::{Action, ActionError, Change};
 use crate::source::DriveItem;
@@ -103,10 +101,6 @@ impl<C: CredentialStores> LinkCalls<C> {
     pub fn share(&mut self, items: &[DriveItem], options: &ShareOptions) -> Result<(), ActionError> {
         let pressed = stamp(&self.engine);
         self.look(&pressed);
-        // A link cannot be held to "view only": it is not made as if it could.
-        if options.access == LinkAccess::View {
-            return Err(ActionError::NotYet);
-        }
         let choices = LinkChoices {
             expires_in_hours: match options.expires {
                 LinkExpiry::Day => Some(24),
