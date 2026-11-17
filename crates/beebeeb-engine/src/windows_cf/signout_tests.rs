@@ -15,7 +15,11 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        // Staged payloads must sit under the test identity's scratch folder: the purge gate accepts nothing
+        // else under the OS temp dir (identity::TEST scopes its disposable roots to a sub-folder).
+        let scratch = crate::identity::TEST.scratch_dir_in(&std::env::temp_dir());
+        std::fs::create_dir_all(&scratch).unwrap();
+        let temp = tempfile::tempdir_in(scratch).unwrap();
         let root = temp.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let db = StateDb::open(temp.path().join("state.db")).unwrap();
