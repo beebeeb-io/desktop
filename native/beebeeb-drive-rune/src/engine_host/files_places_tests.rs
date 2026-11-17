@@ -490,6 +490,13 @@ fn the_sidebars_backups_opens_the_device_rows_and_nothing_in_the_tree_changes() 
     until_drawn(&mut rt, "note.txt");
     assert_eq!(section_of(&rt), Some(Section::Backups));
     let note = row(NOTE, Some(DOCS), false);
+    // The places of DOCS come from a worker apart from the listing: the rows can be drawn before they land (slower
+    // on Windows), so wait for the answer instead of reading `protection` the moment the rows show.
+    let until = std::time::Instant::now() + WAIT;
+    while rt.state.actions.source.protection(Some(DOCS), Some(&note)).is_none() && std::time::Instant::now() < until {
+        settle(&mut rt);
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(
         rt.state.actions.source.protection(Some(DOCS), Some(&note)),
         Some(Protection::DeviceBackup(THIS_PC.into()))
