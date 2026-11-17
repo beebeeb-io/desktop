@@ -236,7 +236,14 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
         })
         .collect();
     // Case-insensitive: NSIS directives are case-insensitive (File, file, FILE all work).
-    if file_commands.len() != 1 || !file_commands[0].eq_ignore_ascii_case(r#"File "${MAINBINARYSRCPATH}""#) {
+    let packed_files = [
+        r#"File "${MAINBINARYSRCPATH}""#,
+        r#"File "${OFFICERENDERSRCPATH}""#,
+        r#"File "${MEDIAHELPERSRCPATH}""#,
+    ];
+    if file_commands.len() != packed_files.len()
+        || !file_commands.iter().zip(packed_files).all(|(a, b)| a.eq_ignore_ascii_case(b))
+    {
         wrong.push(format!("the NSIS scripts pack {file_commands:?}"));
     }
     let packager = read("../../packaging/windows/build-installer.ps1");
@@ -246,7 +253,13 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
         .filter(|line| !line.starts_with('#'))
         .collect();
     let copies: Vec<&str> = code.iter().copied().filter(|line| line.contains("Copy-Item")).collect();
-    if copies != ["Copy-Item -LiteralPath $Exe -Destination $staged"] {
+    if copies
+        != [
+            "Copy-Item -LiteralPath $Exe -Destination $staged",
+            "Copy-Item -LiteralPath $OfficeRenderExe -Destination $stagedOffice",
+            "Copy-Item -LiteralPath $MediaHelperExe -Destination $stagedMedia",
+        ]
+    {
         wrong.push(format!("build-installer.ps1 copies {copies:?}"));
     }
     let packed: Vec<&str> = code
