@@ -605,7 +605,7 @@ Section Install
 
   ; Copy external binaries
   ; Beebeeb: the two helpers the app starts confined; it looks for each beside its own exe (office_host::helper_exe,
-  ; media::transport::HELPER_NAME). Both are self-contained (no DLL beyond Windows' own).
+  ; media::transport::HELPER_NAME). Like the app exe they need the VC++ runtime (VCRUNTIME140.dll) from the system, nothing else of ours.
   File "${OFFICERENDERSRCPATH}"
   File "${MEDIAHELPERSRCPATH}"
 

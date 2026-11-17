@@ -13,10 +13,11 @@
 ; A folder still held by a closing WebView2 process is left; the next install removes it. Nothing reads it again.
 !macro NSIS_HOOK_POSTINSTALL
   RMDir /r "$LOCALAPPDATA\${BUNDLEID}\EBWebView"
-  ; Beebeeb: the helpers run in a less-privileged AppContainer (opted out of "all application packages"), which
-  ; cannot even load its own exe from a per-user folder: the process dies at start with 0xc0000142. Let "all
-  ; restricted application packages" (S-1-15-2-2) read and run the two helpers: these two files only, read and
-  ; execute, nothing else in the folder, nothing writable.
+  ; Beebeeb: the helpers start in a less-privileged AppContainer (opted out of "all application packages"). Let "all
+  ; restricted application packages" (S-1-15-2-2) read and run the two helpers, so the container can load its own exe
+  ; from a per-user folder whatever the folder's inherited ACL is. These two files only, read and execute, nothing
+  ; writable. (Measured on the Windows 11 23H2 build VM: the Office helper also starts from an ungranted copy, so
+  ; this is belt and braces there, not the cure for any failure.)
   nsExec::Exec 'icacls "$INSTDIR\beebeeb-office-render.exe" /grant *S-1-15-2-2:(RX)'
   Pop $0
   nsExec::Exec 'icacls "$INSTDIR\beebeeb-media-helper.exe" /grant *S-1-15-2-2:(RX)'
