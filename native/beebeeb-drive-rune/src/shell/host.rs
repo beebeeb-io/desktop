@@ -700,7 +700,19 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     if kind != s.shell.window_kind {
         let saved_main = s.shell.wiring.saved.get(surfaces::MAIN_KEY);
         if let Some(size) = surfaces::size_on_change(s.shell.window_kind, kind, saved_main) {
-            tx.resize_window_instant(size);
+            // Cut to the work area (the taskbar's room) and moved inside it: the plain resize keeps the
+            // top edge, so a taller window ran under the taskbar. The handle's own queue keeps the two in order.
+            let window = unpoisoned(&s.shell.wiring.window).clone();
+            let fit = window.as_ref().and_then(WindowHandle::placement).and_then(|p| {
+                super::work_area::fit_on_change(size, p.scale, p.position, &super::work_area::os_work_areas())
+            });
+            match (fit, window) {
+                (Some((size, at)), Some(window)) => {
+                    window.resize_instant(size);
+                    window.set_position(at);
+                }
+                _ => tx.resize_window_instant(size),
+            }
         }
         s.shell.window_kind = kind;
         changed = true;

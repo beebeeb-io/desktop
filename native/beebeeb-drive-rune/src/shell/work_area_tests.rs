@@ -154,3 +154,30 @@ fn a_display_without_a_work_area_keeps_its_whole_rectangle_less_the_frame() {
 fn no_display_leaves_the_choice_to_the_os() {
     assert_eq!(first_place(MAIN, MIN, &[]), Restored::default());
 }
+
+#[test]
+fn growing_from_first_run_to_main_stays_inside_a_752_high_work_area() {
+    let work = [(rect(0, 0, 1280, 800), rect(0, 0, 1280, 752))];
+    // The first-run window (960x640) sits centred at y=56; the main size is 1280x800.
+    let ((w, h), (x, y)) = fit_on_change(MAIN, 1.0, (160, 56), &work).unwrap();
+    assert_eq!((w, h), (1278.0, 751.0));
+    assert!(x >= 0 && y >= 0 && x + w as i32 + 2 <= 1280 && y + h as i32 + 1 <= 752, "{x},{y} {w}x{h}");
+}
+
+#[test]
+fn a_main_size_that_fits_keeps_its_place_and_scale_is_honoured() {
+    let work = [(rect(0, 0, 3840, 2160), rect(0, 0, 3840, 2112))];
+    let ((w, h), at) = fit_on_change(MAIN, 1.5, (400, 300), &work).unwrap();
+    assert_eq!(((w, h), at), ((1280.0, 800.0), (400, 300)));
+    assert_eq!(fit_on_change(MAIN, 1.0, (0, 0), &[]), None);
+}
+
+#[test]
+fn the_display_the_window_is_on_decides() {
+    let work = [
+        (rect(0, 0, 1280, 800), rect(0, 0, 1280, 752)),
+        (rect(1280, 0, 1920, 1080), rect(1280, 0, 1920, 1040)),
+    ];
+    let ((_, h), (x, _)) = fit_on_change(MAIN, 1.0, (1500, 100), &work).unwrap();
+    assert_eq!((h, x), (800.0, 1500));
+}
