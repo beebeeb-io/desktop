@@ -124,10 +124,13 @@ fn the_exclusion_names_the_started_file_and_is_written_every_start() {
         let before = crash_report_writes();
         for start in 0..2 {
             let bytes = zeroize::Zeroizing::new(doc());
-            let mut host = OfficeHost::open(&exe, DocKind::Docx, bytes, noop_wake());
+            // Its own registry: a session end in another test of this process must not close this host.
+            let mut host = OfficeHost::open_in(&registry, &exe, DocKind::Docx, bytes, noop_wake());
             let mut events = Vec::new();
+            // The worker's last state reaches `state()` with a poll: wait for both, not the end alone.
             assert!(
-                pump_for(&mut host, &mut events, LOADED, |host, _| host.worker_ended()),
+                pump_for(&mut host, &mut events, LOADED, |host, _| host.worker_ended()
+                    && !matches!(host.state(), OfficeState::Opening)),
                 "start {start}: {:?}",
                 host.state()
             );
