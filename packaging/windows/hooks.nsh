@@ -13,6 +13,17 @@
 ; A folder still held by a closing WebView2 process is left; the next install removes it. Nothing reads it again.
 !macro NSIS_HOOK_POSTINSTALL
   RMDir /r "$LOCALAPPDATA\${BUNDLEID}\EBWebView"
+  ; Beebeeb: the helpers run in a less-privileged AppContainer (opted out of "all application packages"), which
+  ; cannot even load its own exe from a per-user folder: the process dies at start with 0xc0000142. Let "all
+  ; restricted application packages" (S-1-15-2-2) read and run the two helpers: these two files only, read and
+  ; execute, nothing else in the folder, nothing writable.
+  nsExec::Exec 'icacls "$INSTDIR\beebeeb-office-render.exe" /grant *S-1-15-2-2:(RX)'
+  Pop $0
+  nsExec::Exec 'icacls "$INSTDIR\beebeeb-media-helper.exe" /grant *S-1-15-2-2:(RX)'
+  Pop $0
+  ; ...and traverse the folder to reach them.
+  nsExec::Exec 'icacls "$INSTDIR" /grant *S-1-15-2-2:(RX)'
+  Pop $0
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
