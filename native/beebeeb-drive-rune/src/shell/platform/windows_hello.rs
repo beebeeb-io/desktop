@@ -482,10 +482,12 @@ mod imp {
                 // Asks Windows to close the prompt, from this thread. Whether and when it leaves the screen is
                 // Windows' to decide; the answer does not wait for it: none for an owner's cancel, `Cancelled`
                 // for a prompt a newer one took the place of.
-                let _ = prompt.Cancel();
                 // `Cancel` on the operation does not remove the "Windows Security" dialog (CredentialUIBroker keeps
-                // it on screen, measured on VM 401): close its window itself.
+                // it on screen, measured on VM 401): close its window itself. This goes FIRST: on the installed app
+                // the quit waits a short while for this thread, and `Cancel` is a call into the broker that can
+                // take that whole while (w9: the dialog stayed after `--quit-for-update` with the w8 order).
                 dialogs::close_ours(window.0, &before);
+                let _ = prompt.Cancel();
                 Seen::Refused
             }
         }
@@ -496,9 +498,14 @@ mod imp {
     mod dialogs {
         use std::time::{Duration, Instant};
 
-        use windows_sys::Win32::Foundation::{HWND, LPARAM, TRUE};
+        use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, TRUE};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, GW_OWNER, GetClassNameW, GetWindow, IsWindowVisible, PostMessageW, WM_CLOSE,
+            EnumWindows, GW_OWNER, GetClassNameW, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
+            WM_CLOSE,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+            TerminateProcess,
         };
 
         const CLASS: &str = "Credential Dialog Xaml Host";
@@ -528,22 +535,71 @@ mod imp {
             found
         }
 
+        /// How long a dialog gets to leave after `WM_CLOSE` before its broker process is ended.
+        const GRACE: Duration = Duration::from_millis(400);
+
+        fn visible(h: isize) -> bool {
+            // SAFETY: plain window queries on a handle that may have gone: Windows answers with an error.
+            unsafe { IsWindowVisible(h as HWND) != 0 }
+        }
+
+        /// Ends the process that owns `hwnd`, but only when it is `CredentialUIBroker.exe`: Windows starts a broker
+        /// per prompt, and `WM_CLOSE` is a request its XAML host may ignore (measured on the installed app).
+        fn end_broker_of(hwnd: isize) {
+            let mut pid = 0u32;
+            // SAFETY: `pid` is a live out-parameter.
+            unsafe { GetWindowThreadProcessId(hwnd as HWND, &mut pid) };
+            if pid == 0 {
+                return;
+            }
+            // SAFETY: a process handle by id; a process that went in the meantime is refused.
+            let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, 0, pid) };
+            if process.is_null() {
+                return;
+            }
+            let mut name = [0u16; 520];
+            let mut len = name.len() as u32;
+            // SAFETY: `name` and `len` are live and agree on the buffer's length.
+            let ok = unsafe { QueryFullProcessImageNameW(process, 0, name.as_mut_ptr(), &mut len) } != 0;
+            let is_broker = ok
+                && String::from_utf16_lossy(&name[..len as usize])
+                    .to_ascii_lowercase()
+                    .ends_with("\\credentialuibroker.exe");
+            if is_broker {
+                // SAFETY: the handle was opened with `PROCESS_TERMINATE` above.
+                unsafe { TerminateProcess(process, 1) };
+            }
+            // SAFETY: the handle is ours and closed once.
+            unsafe { CloseHandle(process) };
+        }
+
         /// Closes the dialog(s) of this request: owned by `owner` (our window), or new since `before`. Keeps
-        /// looking for a short while, as the dialog may still be coming up when the cancel is made.
+        /// looking for a short while, as the dialog may still be coming up when the cancel is made. A dialog that
+        /// ignores `WM_CLOSE` is ended with its broker process.
         pub(super) fn close_ours(owner: isize, before: &[isize]) {
             let until = Instant::now() + LOOK;
-            let mut closed = false;
+            let mut posted: Vec<isize> = Vec::new();
             loop {
                 for h in all() {
-                    // SAFETY: plain window queries on a handle that may have gone: Windows answers with an error.
+                    // SAFETY: plain window query on a handle that may have gone.
                     let ours = unsafe { GetWindow(h as HWND, GW_OWNER) } as isize == owner || !before.contains(&h);
-                    if ours && unsafe { IsWindowVisible(h as HWND) } != 0 {
+                    if ours && visible(h) && !posted.contains(&h) {
                         // SAFETY: posting a message to a window of another process is allowed and non-blocking.
                         unsafe { PostMessageW(h as HWND, WM_CLOSE, 0, 0) };
-                        closed = true;
+                        posted.push(h);
                     }
                 }
-                if closed || Instant::now() >= until {
+                if !posted.is_empty() {
+                    let grace = Instant::now() + GRACE;
+                    while posted.iter().any(|h| visible(*h)) && Instant::now() < grace {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    for h in posted.iter().filter(|h| visible(**h)) {
+                        end_broker_of(*h);
+                    }
+                    return;
+                }
+                if Instant::now() >= until {
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
