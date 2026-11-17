@@ -9,6 +9,7 @@ name: Desktop CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -24,6 +25,7 @@ env:
 
 jobs:
   frontend:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Frontend (bun test + tsc + eslint)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -49,6 +51,7 @@ jobs:
         run: bun run lint
 
   rust-linux:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Rust test (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -105,6 +108,7 @@ jobs:
             ${{ runner.temp }}/cargo-test.exit
 
   rust-check:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Rust check (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -202,6 +206,7 @@ jobs:
             ${{ runner.temp }}/cargo-test.exit
 
   fileprovider-swift:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # Task 1670 issue 3: until this job existed, NO CI step compiled the File
     # Provider extension's Swift (rust-check only runs `cargo check`; the
     # extension was first built at release time, on a developer's Mac). It now
@@ -264,6 +269,7 @@ jobs:
             ${{ runner.temp }}/fileprovider-build.log
 
   release-script:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # scripts/release-macos-local.sh is the ONE command Guus runs on a Mac to turn the
     # CI-created desktop-v<VERSION> release into a macOS release (notarize, staple,
     # rebuild the dmg from the stapled app, upload, sign, backfill the manifest). It
@@ -322,6 +328,7 @@ jobs:
           path: ${{ runner.temp }}/release-script-test.log
 
   release-manifest:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # release.yml's "Generate desktop channel manifest" step writes the alpha/beta/stable
     # manifests every installed app updates from. The test runs that step's own run: block
     # against fixture releases with a fake gh on PATH (no network), and proves it fails closed:
@@ -368,6 +375,7 @@ jobs:
           path: ${{ runner.temp }}/release-manifest-test.log
 
   release-branch-point:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # release.yml's `verify-branch-point` job refuses a release/* branch whose starting commit
     # was never reviewed (task 2281): the branch must start at a commit on main or at the commit
     # of a published desktop-v* tag that is itself a pull request merge into main or a release/*
@@ -416,6 +424,7 @@ jobs:
           path: ${{ runner.temp }}/release-branch-point-test.log
 
   release-workflow-ifs:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # Pins the if: conditions on the `release` and `publish-manifest` jobs in release.yml so
     # neither can be silently skipped after a successful `build` on a workflow_dispatch from
     # main (task 2458, run 43141563099: verify-branch-point is skipped for a dispatch from
