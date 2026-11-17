@@ -166,7 +166,7 @@ async fn merge_duplicate_roots(bridge: &Arc<EngineBridge>, survivor: Uuid, dupli
         duplicate_trees.push(merge_tree(bridge, *id, beebeeb_core::backup::ROOT_NAME.to_string()).await?);
     }
     let hhmm = chrono::Local::now().format("%H.%M").to_string();
-    let steps = plan_merge(&survivor_tree, &duplicate_trees, MERGE_CLASH_LABEL, &hhmm);
+    let steps = plan_merge(&survivor_tree, &duplicate_trees, MERGE_CLASH_LABEL, &hhmm).map_err(|_| LayoutError("merge_plan"))?;
     let (mut moved, mut trashed) = (0usize, 0usize);
     for step in &steps {
         match step {

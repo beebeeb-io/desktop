@@ -81,7 +81,8 @@ impl EngineBridge {
         };
         let recorded = crate::cf_range::recorded_identity(self.db.range_identity(file_id).map_err(|e| failed(e.into()))?.as_ref());
         let (file_key, name_key) = self.file_keys_for_download(file_id).await.map_err(|e| failed(e.into()))?;
-        let expected = recorded_content_format(&name_key, &meta).map_err(|e| failed(e.into()))?;
+        let authenticated = authenticated_file_metadata(&name_key, &meta).map_err(|e| failed(e.into()))?;
+        let (expected, version) = (authenticated.chunk_format, authenticated.version);
         let config = crate::config::DesktopConfig::load().ok();
         let kbps_limit = config.as_ref().map(|c| c.download_kbps_limit).unwrap_or(0);
         let transport = self.download_transport(config.as_ref().and_then(|c| c.transport.as_deref()));
@@ -94,6 +95,8 @@ impl EngineBridge {
                 object_version_id,
                 file_size,
                 pin: expected,
+                version,
+                authenticated_chunk_size: None,
                 geometry,
                 recorded,
                 on_disk_bytes,

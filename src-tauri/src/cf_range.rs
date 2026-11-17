@@ -452,6 +452,7 @@ fn reason_word(cause: &RangeSessionError) -> &'static str {
         RangeSessionError::ApiNeeded(_) => "use_api",
         RangeSessionError::IdentityMismatch => "identity_mismatch",
         RangeSessionError::SizeMismatch => "size_mismatch",
+        RangeSessionError::MissingVersionCommitment => "missing_version_commitment",
         RangeSessionError::Sink(_) => "transfer",
         RangeSessionError::Incomplete => "incomplete",
         RangeSessionError::Unauthorized | RangeSessionError::Forbidden => "auth",

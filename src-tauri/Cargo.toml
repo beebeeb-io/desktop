@@ -42,7 +42,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Per-file sync state tracking (Phase 1 Task 1 — desktop sync client plan).
 # `bundled` ships SQLite source so we don't depend on a system libsqlite3.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # HTTP client for the API client extracted from repos/cli/ (Phase 1 Task 2).
 # `stream` is reserved for streaming chunk uploads in a later task.
 reqwest = { version = "0.12", features = ["json"] }
@@ -147,14 +147,14 @@ rand = "0.8"
 # workspace-relative path, so no `[patch]` is needed when built as a git dep.
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
-# 124389a8 = the core v0.2.7 tag: `path_safety::short_name_alias` and `TempSibling` (task 2407).
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
+# 5f499bf = core main as of pass-web wave 3 (adds device_link + beebeeb-client devices.rs; was v0.2.7 124389a8).
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "5f499bf3724ea87e62160ce9a6941ad32749140e" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "5f499bf3724ea87e62160ce9a6941ad32749140e" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "5f499bf3724ea87e62160ce9a6941ad32749140e" }
 # LD-0105 W0: the range session (`range_session`, `RangeLessor`) the Windows fetch callback streams through.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "5f499bf3724ea87e62160ce9a6941ad32749140e" }
 # LD-0113: the backup filesystem pass (`fingerprint`, `walk_source`, `run_pass` over `BackupHost`), core v0.2.1.
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "5f499bf3724ea87e62160ce9a6941ad32749140e" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
@@ -335,7 +335,7 @@ json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
 # LD-0105 W2: core's scripted transport (`beebeeb_transfer::test_support`), so the streaming sink's tests run real range
 # sessions with no socket. A feature only: the crate is already a dependency, so Cargo.lock is unchanged.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43", features = ["test-support"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "5f499bf3724ea87e62160ce9a6941ad32749140e", features = ["test-support"] }
 
 # Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
 # real status listener and the real status pulse against a mock runtime. A feature only (no new

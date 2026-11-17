@@ -169,8 +169,8 @@
         .expect("the account's own phrase must unlock");
 
         let expected = beebeeb_core::recovery::recover_from_phrase(&p1).unwrap().to_bytes();
-        assert_eq!(key, expected);
-        assert_eq!(*persisted.lock().unwrap(), Some(expected));
+        assert_eq!(key, *expected);
+        assert_eq!(*persisted.lock().unwrap(), Some(*expected));
         let requests = server.requests();
         assert_eq!(requests.len(), 1, "exactly one verify call: {requests:?}");
         assert_eq!(requests[0].path, "/api/v1/auth/verify-recovery-check");

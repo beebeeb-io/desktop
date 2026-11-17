@@ -1183,5 +1183,5 @@ pub(super) async fn verify_vault_key_from_phrase(
         // `master_key_struct` zeroizes on drop.
         return Err(INCORRECT_RECOVERY_PHRASE.to_string());
     }
-    Ok(zeroize::Zeroizing::new(master_key_struct.to_bytes()))
+    Ok(master_key_struct.to_bytes())
 }

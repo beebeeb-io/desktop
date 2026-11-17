@@ -624,8 +624,15 @@ pub(super) fn is_create_file_operation(metadata: &serde_json::Value) -> bool {
 
 pub(super) fn recorded_content_format(key: &beebeeb_core::kdf::FileKey, meta: &serde_json::Value)
     -> Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, EngineError> {
+    Ok(authenticated_file_metadata(key, meta)?.chunk_format)
+}
+
+/// The authenticated metadata record: the chunk pin and, when the file carries one, its version commitment
+/// (a range session needs both; core refuses a v2 pin without a commitment).
+pub(super) fn authenticated_file_metadata(key: &beebeeb_core::kdf::FileKey, meta: &serde_json::Value)
+    -> Result<beebeeb_core::encrypt::NameMetadata, EngineError> {
     let name = meta["name_encrypted"].as_str().ok_or_else(|| anyhow::anyhow!("missing authenticated file metadata"))?;
-    Ok(beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, name)?.chunk_format)
+    Ok(beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, name)?)
 }
 
 /// Restores a row's status if [`EngineBridge::hydrate_file_with_progress`] is
