@@ -153,11 +153,17 @@ pub fn sidebar(s: &State, counts: Counts, t: &Theme) -> El {
         .child(sections)
         .child(this_pc);
 
-    // Storage meter (`.mk-store`). The split is the board's sample: Files 24 GB, Photos 216 GB.
-    const FILES_BYTES: i64 = 24_000_000_000;
+    // Storage meter (`.mk-store`): the window's own figures, never the board's sample. With no split the
+    // bar is one segment and there is no breakdown (as the Files and This PC sidebars).
     let quota = storage.quota_bytes.max(1) as f64;
-    let files_frac = (FILES_BYTES.min(storage.used_bytes) as f64 / quota) as f32;
-    let photos_frac = ((storage.used_bytes - FILES_BYTES).max(0) as f64 / quota) as f32;
+    let (files_frac, photos_frac) = match s.storage_split {
+        _ if !s.storage_known => (0.0, 0.0),
+        Some((files, _)) => (
+            (files.min(storage.used_bytes) as f64 / quota) as f32,
+            ((storage.used_bytes - files).max(0) as f64 / quota) as f32,
+        ),
+        None => ((storage.used_bytes as f64 / quota) as f32, 0.0),
+    };
     let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
     let storage_value = if s.storage_known {
         format!(
@@ -205,56 +211,56 @@ pub fn sidebar(s: &State, counts: Counts, t: &Theme) -> El {
                 ),
         );
     // The split, like the total, is the server's: nothing is shown in its place.
-    if s.storage_known {
+    if let (true, Some((files_bytes, _))) = (s.storage_known, s.storage_split) {
         meter = meter.child(
             row()
                 .key("storage-breakdown")
                 .justify_between()
                 .child(kit::label(
                     "storage-files",
-                    format!("Files {}", format_storage(FILES_BYTES)),
+                    format!("Files {}", format_storage(files_bytes)),
                     type_::KBD,
                     t.text_tertiary,
                 ))
                 .child(kit::label(
                     "storage-photos",
-                    format!("Photos {}", format_storage((storage.used_bytes - FILES_BYTES).max(0))),
+                    format!("Photos {}", format_storage((storage.used_bytes - files_bytes).max(0))),
                     type_::KBD,
                     t.text_tertiary,
                 )),
         );
     }
 
-    let account = row()
-        .key("account-row")
-        .center_y()
-        .gap(8.0)
-        .pt(2.0)
-        .px(2.0)
-        .child(kit::avatar(
-            "avatar",
-            "AV",
-            26.0,
-            rune::oklch(0.88, 0.05, 250.0),
-            t.card,
-            t,
-        ))
-        .child(
+    let account = row().key("account-row").center_y().gap(8.0).pt(2.0).px(2.0);
+    // Whose account: the window's source. None known: the row keeps its height and names no one.
+    let account = match s.actions.source.account() {
+        Some(who) => account
+            .child(kit::avatar(
+                "avatar",
+                &who.initials,
+                26.0,
+                rune::oklch(0.88, 0.05, 250.0),
+                t.card,
+                t,
+            ))
+            .child(
+                col()
+                    .key("account-info")
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(kit::label("account-name", &who.name, type_::BODY_SEMI, t.text).truncate())
+                    .child(kit::label("account-email", &who.email, type_::BODY_SM, t.text_tertiary).truncate()),
+            ),
+        None => account.child(
             col()
                 .key("account-info")
                 .grow(1.0)
                 .min_w(0.0)
-                .child(kit::label("account-name", "Anna Visser", type_::BODY_SEMI, t.text).truncate())
-                .child(
-                    kit::label(
-                        "account-email",
-                        "anna@northwind.studio",
-                        type_::BODY_SM,
-                        t.text_tertiary,
-                    )
-                    .truncate(),
-                ),
-        )
+                .child(kit::label("account-name", "", type_::BODY_SEMI, t.text).truncate())
+                .child(el().key("account-email-off")),
+        ),
+    };
+    let account = account
         .child(
             el().key("settings-btn")
                 .role("button")
