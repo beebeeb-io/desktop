@@ -5,7 +5,7 @@ Plain `makensis`, no Tauri CLI. Spec: `docs/superpowers/specs/2026-11-11-native-
 | File | What it is |
 |---|---|
 | `installer.nsi`, `utils.nsh`, `English.nsh` | The installer script Tauri generated for 0.8.x, kept line for line; the changes are listed at the top of `installer.nsi`. |
-| `hooks.nsh` | Our hooks: remove the WebView2 profile after install, the staged updates on uninstall. |
+| `hooks.nsh` | Our hooks: remove the WebView2 profile after install, grant the helpers to the sandbox group, the staged updates on uninstall. |
 | `build-installer.ps1` | Builds the installer; refuses a script that still handles WebView2. `-Mode test` ("Beebeeb Test", `io.beebeeb.app.test`, unsigned) or `-Mode release` (signed, fails closed). |
 | `verify-install.ps1` | Read-only checks of an installed or uninstalled state; ends with a count line. |
 | `rehearsal/serve.ts`, `rehearsal/db-fingerprint.ts` | Helpers for the upgrade rehearsal below. |
@@ -58,6 +58,11 @@ Set-Location C:\bb-win\native\desktop\native\beebeeb-drive-rune
 $env:BEEBEEB_APP_IDENTIFIER = 'io.beebeeb.app.test'     # the test identity is compiled in (also the default); the packager checks the binary's mark
 cargo build --release --locked
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+# The two helpers the installer ships beside it (own crates, same target folder): build-installer.ps1 refuses without them.
+foreach ($h in 'beebeeb-office-render','beebeeb-media-helper') {
+  Set-Location "C:\bb-win\native\desktop\native\$h"; cargo build --release --locked
+  if ($LASTEXITCODE -ne 0) { throw "cargo build $h failed" }
+}
 Remove-Item Env:BEEBEEB_APP_IDENTIFIER
 $real = @(Get-Process beebeeb-desktop -ErrorAction SilentlyContinue | ForEach-Object Id)   # for step 8
 

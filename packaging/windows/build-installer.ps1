@@ -27,12 +27,15 @@
   release mode refuses anything but NSIS 3.11 as released; test mode says so and goes on.
 
 .EXAMPLE
-  .\build-installer.ps1 -Exe C:\bb-win\native\target\release\beebeeb-drive.exe -Version 0.9.0 -Mode test
+  .\build-installer.ps1 -Exe C:\bb-win\native\target\release\beebeeb-drive.exe `
+    -OfficeRenderExe ...\beebeeb-office-render.exe -MediaHelperExe ...\beebeeb-media-helper.exe -Version 0.9.0 -Mode test
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$Exe,
   [Parameter(Mandatory = $true)][string]$Version,
+  [string]$OfficeRenderExe = '',
+  [string]$MediaHelperExe = '',
   [ValidateSet('test', 'release')][string]$Mode = 'test',
   [string]$OutDir = (Join-Path $PSScriptRoot 'out'),
   [string]$NsisDir = '',
@@ -98,6 +101,12 @@ function Test-BinaryHolds([string]$Path, [string]$Text) {
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
+# Default: the helpers built beside the app binary (one target folder).
+if (!$OfficeRenderExe) { $OfficeRenderExe = Join-Path (Split-Path -Parent $Exe) 'beebeeb-office-render.exe' }
+if (!$MediaHelperExe) { $MediaHelperExe = Join-Path (Split-Path -Parent $Exe) 'beebeeb-media-helper.exe' }
+foreach ($h in @($OfficeRenderExe, $MediaHelperExe)) { if (!(Test-Path -LiteralPath $h -PathType Leaf)) { Fail "no helper binary at $h" } }
+$OfficeRenderExe = (Resolve-Path -LiteralPath $OfficeRenderExe).Path
+$MediaHelperExe = (Resolve-Path -LiteralPath $MediaHelperExe).Path
 $PluginDir = (Resolve-Path -LiteralPath $PluginDir).Path
 
 # The installer must not fetch or carry WebView2. The built installer is LZMA-compressed, so this is checked on
@@ -140,6 +149,10 @@ if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -F
 New-Item -ItemType Directory -Force $stage | Out-Null
 $staged = Join-Path $stage "$MainBinaryName.exe"
 Copy-Item -LiteralPath $Exe -Destination $staged
+$stagedOffice = Join-Path $stage 'beebeeb-office-render.exe'
+$stagedMedia = Join-Path $stage 'beebeeb-media-helper.exe'
+Copy-Item -LiteralPath $OfficeRenderExe -Destination $stagedOffice
+Copy-Item -LiteralPath $MediaHelperExe -Destination $stagedMedia
 $outFile = Join-Path $OutDir ("{0}_{1}_x64-setup.exe" -f $product, $Version)
 if (Test-Path -LiteralPath $outFile) { Remove-Item -LiteralPath $outFile -Force }
 
@@ -151,12 +164,14 @@ if ($Mode -eq 'release') {
   if ($info.ProductName -ne 'Beebeeb' -or "$($info.ProductVersion)" -notin @($Version, "$Version.0")) {
     Fail "the binary's version resource says '$($info.ProductName)' '$($info.ProductVersion)', expected 'Beebeeb' '$Version' (the native crate must embed icon and version)"
   }
-  & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $signScript $staged
-  if ($LASTEXITCODE -ne 0) { Fail "signing the app binary (exit $LASTEXITCODE)" }
+  foreach ($f in @($staged, $stagedOffice, $stagedMedia)) {
+    & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $signScript $f
+    if ($LASTEXITCODE -ne 0) { Fail "signing $f (exit $LASTEXITCODE)" }
+  }
   $uninstallerSign = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$signScript`" %1"
 }
 
-$sizeKiB = [int][Math]::Ceiling((Get-Item -LiteralPath $staged).Length / 1024)
+$sizeKiB = [int][Math]::Ceiling((@($staged, $stagedOffice, $stagedMedia) | ForEach-Object { (Get-Item -LiteralPath $_).Length } | Measure-Object -Sum).Sum / 1024)
 $defines = @(
   "/DPRODUCTNAME=$product",
   "/DBUNDLEID=$bundleId",
@@ -164,6 +179,8 @@ $defines = @(
   "/DVERSIONWITHBUILD=$Version.0",
   "/DMAINBINARYNAME=$MainBinaryName",
   "/DMAINBINARYSRCPATH=$staged",
+  "/DOFFICERENDERSRCPATH=$stagedOffice",
+  "/DMEDIAHELPERSRCPATH=$stagedMedia",
   "/DINSTALLERICON=$icon",
   "/DOUTFILE=$outFile",
   "/DADDITIONALPLUGINSPATH=$PluginDir",
