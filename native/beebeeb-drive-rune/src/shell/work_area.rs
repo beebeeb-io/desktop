@@ -73,6 +73,27 @@ pub fn first_place(size_points: (f32, f32), min_points: (f32, f32), monitors: &[
     }
 }
 
+/// The size and place of the one window when it changes kind (first run -> main) while it is open: `want_points`
+/// at `scale`, cut to the work area of the display `at` (the window's position) is on, and moved so the outer
+/// window (inner + frame) lies inside it. `None` when no work area is known (off Windows): the plain resize stands.
+/// Returns the inner size in points and the position in physical pixels.
+pub fn fit_on_change(
+    want_points: (f32, f32),
+    scale: f64,
+    at: (i32, i32),
+    work: &[(Rect, Rect)],
+) -> Option<((f32, f32), (i32, i32))> {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let inside = |r: &Rect, p: (i32, i32)| p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h;
+    let (_, area) = work.iter().find(|(whole, _)| inside(whole, at)).or_else(|| work.first())?;
+    let (fw, fh) = ((FRAME_PX.0 * scale).ceil() as i32, (FRAME_PX.1 * scale).ceil() as i32);
+    let w = ((f64::from(want_points.0) * scale).round() as i32).min(area.w - fw).max(1);
+    let h = ((f64::from(want_points.1) * scale).round() as i32).min(area.h - fh).max(1);
+    let x = at.0.clamp(area.x, (area.x + area.w - w - fw).max(area.x));
+    let y = at.1.clamp(area.y, (area.y + area.h - h - fh).max(area.y));
+    Some((((f64::from(w) / scale) as f32, (f64::from(h) / scale) as f32), (x, y)))
+}
+
 /// Every display's `(whole rectangle, work area)`, physical pixels. Empty when the OS cannot say (and off
 /// Windows): [`usable`] then keeps the whole displays.
 pub fn os_work_areas() -> Vec<(Rect, Rect)> {
