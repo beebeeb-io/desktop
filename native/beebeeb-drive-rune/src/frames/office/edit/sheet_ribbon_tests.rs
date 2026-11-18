@@ -199,7 +199,7 @@ fn office_sheets_ribbon_fill_pop_up_sends_the_colour() {
     assert!(find(&rt, "rib-menu").is_none(), "and closes");
     // No fill is its own entry, after a separator.
     press(&mut rt, &key);
-    press(&mut rt, "rib-menu-item-8");
+    press(&mut rt, "rib-menu-item-7");
     assert_eq!(ops.borrow().last(), Some(&EditOp::FillColour(None)));
 }
 
@@ -479,7 +479,8 @@ fn office_sheets_the_viewers_tabs_have_no_plus_and_no_rename() {
 fn office_sheets_ribbon_scene_is_the_workbook_with_its_ribbon() {
     let mut state = init();
     scene(&mut state);
-    let rt = Runtime::new(state, view, (1278.0, 798.0), env());
+    let mut rt = Runtime::new(state, view, (1278.0, 798.0), env());
+    settle(&mut rt);
     assert!(find(&rt, "rib").is_some(), "the ribbon");
     assert!(find(&rt, "sh-cellbox").is_some(), "over the workbook");
 }
