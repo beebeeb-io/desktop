@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicUsize;
 use super::*;
 use crate::engine_host::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult};
 use crate::frames::signin::setup::source::LockAfter;
+use beebeeb_engine::app::lock_password_api::{AppLockProof, AppLockRefused};
 
 #[derive(Clone, Default)]
 struct Prompts {
