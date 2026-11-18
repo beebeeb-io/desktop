@@ -1,7 +1,7 @@
 //! The 16 ms frame budget of the editing surfaces: a Word frame with a caret move and a dirty strip, and a sheet
 //! commit (one `SetCell` and the frame after it) at the cell cap.
 //!
-//! The 16 ms gate is taken in a release build; a debug build is several times slower, so its bounds are generous
+//! The Word frame holds 16 ms in debug too. The sheet commit gate of 16 ms is taken in a release build; a debug build is several times slower, so its bound is generous
 //! (still far under a per-cell or per-page cost creeping into the frame) and the numbers are printed. The best of
 //! several runs is taken so a busy machine does not fail it.
 
@@ -141,7 +141,7 @@ fn office_word_budget_a_caret_move_and_a_dirty_strip_fit_a_frame() {
         rt.frame(1.0 / 60.0);
     });
     eprintln!("word budget: caret move + dirty strip frame {frame:?}");
-    assert!(frame < bound(), "a Word frame with a caret move took {frame:?}");
+    assert!(frame < GATE, "a Word frame with a caret move took {frame:?}");
 }
 
 fn full() -> SheetView {
