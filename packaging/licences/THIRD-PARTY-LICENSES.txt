@@ -1007,8 +1007,9 @@ DEALINGS IN THE FONT SOFTWARE.
 # Third-party notices: bundled data
 
 Data that is compiled into the app through the PDF renderer (`hayro`, Apache-2.0 OR MIT) and whose licence asks
-that its notice goes with a binary. A release has to carry this file with the app; the installer does not pick it
-up yet (open, named in the pull request that added the renderer).
+that its notice goes with a binary. The installer ships it: `packaging/licences/generate.sh` copies this file into
+`THIRD-PARTY-LICENSES.txt` (section 3), which sits beside the exes and opens from Settings > About > Open-source
+licences. Edit this file, then run that script (its `--check` and `packaging/licences/check.py` fail on a stale copy).
 
 Also compiled in, with nothing asked of a binary: two colour profiles in `hayro-interpret`
 (`CGATS001Compat-v2-micro.icc` and `LAB.icc`, both CC0-1.0 by that crate's `assets/README.md`).
@@ -1016,7 +1017,7 @@ Also compiled in, with nothing asked of a binary: two colour profiles in `hayro-
 
 ### Ubuntu Light, in the Office viewer's helper
 
-Ubuntu Light (`Ubuntu-Light.ttf`, Dalton Maag Ltd for Canonical, via `epaint_default_fonts` 0.37), the Office engine's last-resort text face, compiled into `beebeeb-office-render`: Ubuntu Font Licence 1.0 (`Ubuntu-font-1.0`), its notice and licence carried in the font's own metadata.
+Ubuntu Light (`Ubuntu-Light.ttf`, Dalton Maag Ltd for Canonical, via `epaint_default_fonts` 0.37), the Office engine's last-resort text face, compiled into `beebeeb-office-render`: Ubuntu Font Licence 1.0 (`Ubuntu-font-1.0`), its notice and licence carried in the font's own metadata. The licence text is `packaging/licences/texts/UFL-1.0.txt` (from `epaint_default_fonts`), and goes into the shipped notice's section 2.
 
 
 ### The 14 standard PDF fonts' stand-ins (Foxit fonts, from PDFium), in `hayro-font`
