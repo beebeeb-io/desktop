@@ -163,6 +163,9 @@ pub enum Toast {
     UploadCancelled,
     /// "Keep this file on this PC first." (DW-1562): Open With ▸ an app, on a file that is not kept on this PC.
     KeepFirst,
+    /// "Unsaved changes to 2 files were kept on this PC.": the office editor's notice after unlock, for that many
+    /// files (`frames::office::edit::recovery`).
+    KeptEdits(u16),
 }
 
 impl Toast {
@@ -170,7 +173,7 @@ impl Toast {
     pub fn stays(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
             Toast::Trashed => 6,
-            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled | Toast::KeepFirst => 8,
+            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled | Toast::KeepFirst | Toast::KeptEdits(_) => 8,
             _ => 3,
         })
     }

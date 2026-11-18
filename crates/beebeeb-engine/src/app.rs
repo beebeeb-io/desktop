@@ -107,6 +107,10 @@ pub mod trash_purge_api;
 pub mod versions_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;
+pub mod office_edit_api;
+pub mod office_recovery;
+pub mod office_scratch;
+pub mod office_session_end;
 pub mod viewer_edit_api;
 
 pub use credential_stores::{CredentialStores, PlatformCredentials};
@@ -1038,6 +1042,11 @@ impl<C: CredentialStores> Engine<C> {
             }
             // Past the gate (a refused sign-out deletes nothing), the session still in memory: its recent searches.
             let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
+            // Every Office recovery blob of this account goes with the session (not a waiting save).
+            // The Office host ends its helpers first, so no snapshot lands after the wipe below.
+            self.office_before_session_end(office_session_end::SessionEnding::SignOut);
+            self.wipe_office_recovery_at_session_end();
+            self.end_office_scratch_at_session_end();
             let mut vault = self.vault();
             let token = vault
                 .session_token()

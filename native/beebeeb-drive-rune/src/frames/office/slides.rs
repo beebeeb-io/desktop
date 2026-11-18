@@ -17,10 +17,13 @@
 //! arm, `viewers::deck_mut(&mut State) -> Option<&mut DeckBody>`, `viewers::open_deck(&mut State, OpenFile) -> bool`,
 //! the `Ui` window arm calling [`window`] or [`present`], and the key route calling [`DeckBody::on_key`].
 
+use beebeeb_office_protocol::office::EditOp;
 use rune::tok::Family;
 use rune::{Color, Cx, El, Icon, Key, Mods, Pixels, Span, SurfaceFit, TextStyle, col, el, row};
 
 use super::docs::{ABOUT, KEEP_FIRST, Live, OPEN_ELSEWHERE};
+use super::edit::slide as edit_slide;
+use super::edit::{EditUi, slide_ribbon};
 use super::states;
 use crate::State;
 use crate::frames::placeholder;
@@ -37,10 +40,12 @@ pub mod slides_fixture;
 #[path = "slides_strip.rs"]
 mod strip;
 
+pub use strip::{StripMenu, entries as menu_entries};
+
 /// The group's board frames and the scene that shows each (`frames::scenes`). DW-1560 stays a placeholder (0.9.1).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1509", scene_deck),
-    ("DW-1560", placeholder::scene),
+    ("DW-1560", slide_ribbon::scene_design),
     ("DW-1561", scene_present),
 ];
 
@@ -82,6 +87,9 @@ pub struct DeckView {
     pub zoom: u16,
     /// Some content of a slide could not be drawn: the status bar says so quietly (the live source sets it).
     pub quiet: bool,
+    /// The slides' size in points (the editor turns a point on the stage into a point on the slide with it). The
+    /// source sets it from the file; until it does a slide is the 16:9 of PowerPoint's own default.
+    pub page_pt: (u32, u32),
 }
 
 impl DeckView {
@@ -93,6 +101,7 @@ impl DeckView {
             count,
             zoom: 100,
             quiet: false,
+            page_pt: PAGE_PT,
         }
     }
 }
@@ -125,6 +134,10 @@ pub struct DeckBody {
     /// The filmstrip's scroll offset in points from the first slide's top, and its height as last laid out.
     pub strip_y: u32,
     pub strip_h: u32,
+    /// The filmstrip's right-click menu, while it is open (the editor's).
+    pub menu: Option<StripMenu>,
+    /// The last spot a drag asked the editor about, in whole slide points (the editor's).
+    pub last_hit: Option<(i32, i32)>,
 }
 
 /// Points of touchpad travel that step one slide, and of a mouse wheel's (a notch is 40 points; a smooth wheel sends it
@@ -140,7 +153,20 @@ impl DeckBody {
             wheel: 0,
             strip_y: 0,
             strip_h: STRIP_H_GUESS,
+            menu: None,
+            last_hit: None,
         }
+    }
+
+    /// The deck now has `count` slides (a slide was added or taken away): the strip lists them all, the slide on the
+    /// stage stays inside the deck and the strip's offset inside the strip.
+    pub fn set_count(&mut self, count: u32) {
+        let count = count.max(1);
+        self.view.count = count;
+        self.view.slides = (1..=count).map(|n| SlideThumb { n }).collect();
+        self.view.current = self.view.current.clamp(1, count);
+        self.menu = None;
+        self.reveal_current();
     }
 
     /// The wheel over the slide (in the window and in Present): no free scroll, the next or the previous slide. A mouse
@@ -275,6 +301,8 @@ const STRIP_PITCH: u32 = THUMB_H as u32 + STRIP_GAP;
 const STRIP_H_GUESS: u32 = 560;
 const SLIDE_W: f32 = 640.0;
 const SLIDE_H: f32 = 360.0;
+/// A slide's size in points until the source says: PowerPoint's 16:9 (13.333 by 7.5 inches).
+pub const PAGE_PT: (u32, u32) = (960, 540);
 
 /// The board's `.mk-ph5`: a sunset, three stops at 180 degrees.
 const SUNSET: [(f32, &str); 3] = [(0.0, "#f3d9a8"), (0.5, "#d58c6a"), (1.0, "#3f3a58")];
@@ -479,7 +507,7 @@ fn thumbnail(i: usize, n: u32, page: Option<SlidePage>, current: bool, t: &Theme
     frame
 }
 
-fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) -> El {
+fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, editing: bool, t: &Theme) -> El {
     let rows = deck.strip_rows();
     let first = *rows.start();
     let mut list = col()
@@ -491,24 +519,31 @@ fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme
     for (i, thumb) in deck.view.slides.iter().enumerate().skip(first).take(rows.count()) {
         let n = thumb.n;
         let current = n == deck.view.current;
-        list = list.child(
-            row()
-                .key(format!("fs-{i}"))
-                .role("button")
-                .label(format!("Slide {n}"))
-                .checked(current)
-                .gap(8.0)
-                .items_start()
-                .focusable(true)
-                .cursor(rune::Cursor::Pointer)
-                .on_press(with_deck(move |d| d.go(n)))
-                .child(
-                    el().key(format!("fs-{i}-num-box"))
-                        .pt(1.0)
-                        .child(kit::label(format!("fs-{i}-num"), n.to_string(), NUM, t.text_tertiary).w(12.0)),
-                )
-                .child(thumbnail(i, n, page(n), current, t)),
-        );
+        let mut line = row()
+            .key(format!("fs-{i}"))
+            .role("button")
+            .label(format!("Slide {n}"))
+            .checked(current)
+            .gap(8.0)
+            .items_start()
+            .focusable(true)
+            .cursor(rune::Cursor::Pointer)
+            .on_press(move |s: &mut State| edit_slide::change_slide(s, n))
+            .child(
+                el().key(format!("fs-{i}-num-box"))
+                    .pt(1.0)
+                    .child(kit::label(format!("fs-{i}-num"), n.to_string(), NUM, t.text_tertiary).w(12.0)),
+            )
+            .child(thumbnail(i, n, page(n), current, t));
+        if editing {
+            // Right-click (or the Menu key): Duplicate, Delete, Move up, Move down; Ctrl+M and Delete work here too.
+            line = line
+                .on_secondary_press(move |s: &mut State, p: rune::PointerPress, tx: &mut rune::Tx| {
+                    strip::open_menu(s, n, (p.x, p.y), tx)
+                })
+                .on_key(strip::row_key);
+        }
+        list = list.child(line);
     }
     // The rows drawn are a window of the deck: they start where slide `first` stands, less the scroll offset.
     list = list.offset(0.0, (first as u32 * STRIP_PITCH) as f32 - deck.strip_y as f32);
@@ -552,16 +587,39 @@ fn strip_wheel(s: &mut State, ev: rune::WheelEvent, _: &mut rune::Tx) -> bool {
     viewers::deck_mut(s).is_some_and(|deck| deck.strip_wheel(&ev))
 }
 
-fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) -> El {
+/// The stage's slide in layout points at the deck's zoom.
+fn stage_size(deck: &DeckBody) -> (f32, f32) {
+    let zoom = f32::from(deck.view.zoom) / 100.0;
+    (SLIDE_W * zoom, SLIDE_H * zoom)
+}
+
+fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, edit: Option<&EditUi>, t: &Theme) -> El {
     let n = deck.view.current;
-    let slide = picture(
-        "slide".into(),
-        format!("Slide {n}"),
-        SLIDE_W * f32::from(deck.view.zoom) / 100.0,
-        SLIDE_H * f32::from(deck.view.zoom) / 100.0,
-        pixels_of(page(n)),
-    )
-    .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)));
+    let (w, h) = stage_size(deck);
+    let slide = picture("slide".into(), format!("Slide {n}"), w, h, pixels_of(page(n))).box_shadow(kit::drop(
+        4.0,
+        18.0,
+        Color::BLACK.alpha(0.16),
+    ));
+    // Editing: the slide is a focusable surface (keys and pointer are `edit::slide`'s) with the caret, the selected
+    // text and the selected shape drawn over the helper's picture.
+    let slide = match edit {
+        None => slide,
+        Some(edit) => el()
+            .key(edit_slide::FOCUS_KEY)
+            .role("group")
+            .label(format!("Slide {n}, editing"))
+            .size(w, h)
+            .focusable(true)
+            .on_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| edit_slide::on_key(s, tx, ev))
+            .on_drag(edit_slide::on_drag)
+            .on_layout_tx(|s: &mut State, _: [f32; 4], tx: &mut rune::Tx| {
+                edit_slide::ask_layouts_once(s);
+                tx.live_only();
+            })
+            .child(slide)
+            .children(edit_slide::overlay(deck, edit, (w, h))),
+    };
     row()
         .key("stage")
         .role("group")
@@ -575,13 +633,21 @@ fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, t: &Theme) ->
         .child(slide)
 }
 
-/// The slide's wheel handler: [`DeckBody::wheel_step`] on the open deck.
+/// The slide's wheel handler: [`DeckBody::wheel_step`] on the open deck. A shape selected on the slide it left is let
+/// go (while editing).
 fn wheel_steps(s: &mut State, ev: rune::WheelEvent, _: &mut rune::Tx) -> bool {
-    viewers::deck_mut(s).is_some_and(|deck| deck.wheel_step(&ev))
+    let Some(deck) = viewers::deck_mut(s) else { return false };
+    let before = deck.view.current;
+    let took = deck.wheel_step(&ev);
+    if took && deck.view.current != before && edit_slide::live(s).is_some() {
+        edit_slide::send(s, EditOp::ClearShape);
+    }
+    took
 }
 
 /// The status line: "Slide 2 of 3" at the left; Encrypted, a dot and About (a link to the viewer's About) at the right.
-fn status(deck: &DeckBody, t: &Theme) -> El {
+/// While editing the line also says how the deck is kept ("saved as version 3", "unsaved changes"), `kept`.
+fn status(deck: &DeckBody, kept: Option<&str>, t: &Theme) -> El {
     let words = format!("Slide {} of {}", deck.view.current, deck.view.count);
     let mut bar = row()
         .key("status-bar")
@@ -611,8 +677,21 @@ fn status(deck: &DeckBody, t: &Theme) -> El {
         n = 3;
         said = format!(". {}", states::QUIET_LINE);
     }
-    let (enc, dot, about) = (format!("st-{n}"), format!("st-{}", n + 1), format!("st-{}", n + 2));
-    bar.label(format!("{words}{said}. {ENCRYPTED}"))
+    let (enc, dot) = (format!("st-{n}"), format!("st-{}", n + 1));
+    let mut next = n + 2;
+    let kept_els = kept.map(|words| {
+        let (kept_key, dot_key) = (format!("st-{next}"), format!("st-{}", next + 1));
+        next += 2;
+        (
+            kit::label(kept_key, words.to_string(), type_::STATUS, t.text_tertiary)
+                .w(rune::text::advance(words, type_::STATUS)),
+            kit::label(dot_key, "\u{00B7}", type_::STATUS, t.text_tertiary),
+        )
+    });
+    let about = format!("st-{next}");
+    let kept_said = kept.map(|words| format!(". {words}")).unwrap_or_default();
+    let mut bar = bar
+        .label(format!("{words}{said}. {ENCRYPTED}{kept_said}"))
         .child(el().key("st-gap").grow(1.0))
         .child(
             row()
@@ -624,23 +703,26 @@ fn status(deck: &DeckBody, t: &Theme) -> El {
                     kit::label(enc, ENCRYPTED, STATUS_ENC, t.accent_deep).w(rune::text::advance(ENCRYPTED, STATUS_ENC)),
                 ),
         )
-        .child(kit::label(dot, "\u{00B7}", type_::STATUS, t.text_tertiary))
-        .child(
-            el().key(format!("{about}-box"))
-                .role("link")
-                .label("About this viewer")
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    if let Some(ui) = viewers::ui(s) {
-                        ui.office_about();
-                    }
-                })
-                .child(
-                    kit::label(about, ABOUT, type_::STATUS, t.text_tertiary)
-                        .w(rune::text::advance(ABOUT, type_::STATUS))
-                        .spans(vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)]),
-                ),
-        )
+        .child(kit::label(dot, "\u{00B7}", type_::STATUS, t.text_tertiary));
+    if let Some((words, dot)) = kept_els {
+        bar = bar.child(words).child(dot);
+    }
+    bar.child(
+        el().key(format!("{about}-box"))
+            .role("link")
+            .label("About this viewer")
+            .focusable(true)
+            .on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.office_about();
+                }
+            })
+            .child(
+                kit::label(about, ABOUT, type_::STATUS, t.text_tertiary)
+                    .w(rune::text::advance(ABOUT, type_::STATUS))
+                    .spans(vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)]),
+            ),
+    )
 }
 
 /// The window of DW-1509: the caption, the sidebar, and the deck beside it. `page(n)`: the source's answer for
@@ -689,19 +771,34 @@ fn window_with(
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(viewers::office::toolbar(s, ui, false, &t))
-        .child(bar(deck, &t))
-        .child(
-            row()
-                .key("viewer-row")
-                .grow(1.0)
-                .min_h(0.0)
-                .w_full()
-                .child(filmstrip(deck, thumb, &t))
-                .child(stage(deck, stage_page, &t)),
-        )
-        .child(status(deck, &t));
-    col()
+        .child(viewers::office::toolbar(s, ui, false, &t));
+    let body = row()
+        .key("viewer-row")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .child(filmstrip(deck, thumb, ui.office.edit.is_some(), &t))
+        .child(stage(deck, stage_page, ui.office.edit.as_ref(), &t));
+    let main = match ui.office.edit.as_ref() {
+        // The editor's frame, composed here rather than by `edit::chrome` so the status line is the deck's (Slide x of
+        // y, how it is kept), not the document's.
+        Some(edit) => {
+            let kept = kept_words(edit, ui.file.version);
+            main.child(
+                col()
+                    .key("edit-chrome")
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .w_full()
+                    .child(slide_ribbon::ribbon(ui, edit.unsaved(), &t))
+                    .child(body)
+                    .child(status(deck, Some(&kept), &t)),
+            )
+        }
+        None => main.child(bar(deck, &t)).child(body).child(status(deck, None, &t)),
+    };
+    let menu = ui.office.edit.is_some().then(|| strip::menu_layer(deck, &t)).flatten();
+    let window = col()
         .key("window")
         .role("window")
         .label(s.identity.main_window_title())
@@ -718,7 +815,22 @@ fn window_with(
                     .child(sidebar::sidebar(s, &t))
                     .child(main),
             ),
-        )
+        );
+    match menu {
+        Some(menu) => window.child(menu),
+        None => window,
+    }
+}
+
+/// How the deck is kept, as the status line says it after Encrypted.
+fn kept_words(edit: &EditUi, version: u32) -> String {
+    if edit.stopped {
+        "read-only for now".to_string()
+    } else if edit.unsaved() {
+        "unsaved changes".to_string()
+    } else {
+        format!("saved as version {version}")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -945,11 +1057,11 @@ mod tests {
         let mut rt = scene(scene_present, false);
         assert_eq!(deck_state(&mut rt), (slides_fixture::BOARD_SLIDE, true));
         assert!(find(&rt, "pres-stage").is_some() && find(&rt, "filmstrip").is_none());
-        // DW-1560 is a 0.9.1 frame: still the placeholder.
+        // DW-1560 is the editor's Design tab: no longer the placeholder.
         assert!(
             FRAMES
                 .iter()
-                .any(|(id, f)| *id == "DW-1560" && *f as usize == placeholder::scene as usize)
+                .any(|(id, f)| *id == "DW-1560" && *f as usize != placeholder::scene as usize)
         );
     }
 

@@ -19,9 +19,11 @@
 
 use rune::tok::Family;
 use rune::{Color, Cx, El, Icon, Key, Mods, Pixels, SurfaceFit, TextStyle, col, el, row};
+use beebeeb_office_protocol::office::EditKind;
 use zeroize::Zeroize;
 
 use crate::State;
+use super::edit::{EditUi, ime, word};
 use crate::frames::viewers::{self, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
@@ -78,6 +80,9 @@ pub struct DocBody {
     pub outline_open: bool,
     /// Where the stage was last seen scrolled to, in points from the top of its content (`docs_scroll`).
     pub scroll_y: f32,
+    /// The editor asked to show the caret once it has moved: where it stood (page, x, y in points) when it was asked
+    /// (`edit::word`). `None`: nothing is asked.
+    pub reveal: Option<(u32, f32, f32)>,
 }
 
 /// Counts only, never a heading or a word.
@@ -101,6 +106,7 @@ impl DocBody {
             quiet: None,
             outline_open: true,
             scroll_y: 0.0,
+            reveal: None,
         }
     }
 
@@ -557,7 +563,7 @@ pub enum Pictures<'a> {
 /// The pages on grey in the stage's viewport (`docs_scroll`). Every page keeps its box, so the scroll height is right;
 /// live, only the pages near the screen ask the renderer for a picture, and the rest are blank paper of their size; the
 /// fixture draws its pages as it always did.
-fn stage(doc: &DocBody, pics: &Pictures, stage_y: Option<f32>, t: &Theme) -> El {
+fn stage(doc: &DocBody, pics: &Pictures, stage_rect: Option<[f32; 4]>, ed: Option<(&EditUi, Option<El>)>, t: &Theme) -> El {
     let count = doc.view.pages.max(1);
     let mut pages = col()
         .key("pages")
@@ -592,7 +598,12 @@ fn stage(doc: &DocBody, pics: &Pictures, stage_y: Option<f32>, t: &Theme) -> El 
             }
         }
     }
-    scroll::viewport(pages, stage_y, heights.into(), t)
+    // A document open for editing: the pages' column is the editor's surface (focus, keys, pointer, caret).
+    let content = match ed {
+        Some((edit, ime)) => word::surface(pages, doc, edit, stage_rect, ime),
+        None => pages,
+    };
+    scroll::viewport(content, stage_rect.map(|r| r[1]), heights.into(), t)
 }
 
 /// `1284` as "1,284".
@@ -724,13 +735,25 @@ pub fn window_live(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, live: 
 
 fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pictures) -> El {
     let t = tokens::theme(cx.system_dark());
+    // The editor of a Word document that runs: its surface needs the stage's whole rectangle (to keep the caret in view).
+    let editing = ui
+        .office
+        .edit
+        .as_ref()
+        .filter(|e| e.kind == EditKind::Docx && !e.stopped)
+        .map(|e| (e, e.has_keyboard.then(|| ime::caret_el(s)).flatten()));
+    let stage_rect = if editing.is_some() {
+        cx.layout_with(scroll::STAGE, |r| r)
+    } else {
+        cx.layout_with(scroll::STAGE, |r| [0.0, r[1], 0.0, 0.0])
+    };
     let mut body = row()
         .key("viewer-row")
         .grow(1.0)
         .min_h(0.0)
         .w_full()
         .child(outline(doc, &t))
-        .child(stage(doc, pics, cx.layout_with(scroll::STAGE, |r| r[1]), &t));
+        .child(stage(doc, pics, stage_rect, editing, &t));
     if ui.show_details {
         body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
     }
@@ -745,7 +768,10 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pic
     if doc.view.older_format {
         main = main.child(note(&t));
     }
-    main = main.child(bar(doc, &t)).child(body).child(status(doc, &t));
+    main = match ui.office.edit.as_ref().map(|e| e.kind) {
+        Some(kind) => main.child(super::edit::chrome(s, cx, ui, kind, body)),
+        None => main.child(bar(doc, &t)).child(body).child(status(doc, &t)),
+    };
     let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
         row()
             .key("body")

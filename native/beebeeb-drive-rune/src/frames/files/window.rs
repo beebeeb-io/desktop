@@ -187,6 +187,13 @@ fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
             None,
             t,
         ),
+        Toast::KeptEdits(count) => toast::toast(
+            &icons_files::ALERT,
+            toast::Tone::Neutral,
+            &crate::frames::office::edit::recovery::unlocked_words(usize::from(count), None).unwrap_or_default(),
+            None,
+            t,
+        ),
         Toast::FreedUp => toast::toast(
             &icons_files::CHECK,
             toast::Tone::Done,

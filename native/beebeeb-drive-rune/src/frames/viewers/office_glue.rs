@@ -272,18 +272,18 @@ mod tests {
 
     /// The editor stays unreachable: the viewer has no route to DW-1558, DW-1559 or DW-1560, which are placeholders.
     #[test]
-    fn office_glue_editor_frames_stay_placeholders() {
+    fn office_glue_editor_frames_are_filled() {
         let is_placeholder = |frames: &[crate::ui::gate::Scene<State>], id: &str| {
             frames
                 .iter()
                 .any(|(f, scene)| *f == id && *scene as usize == crate::frames::placeholder::scene as usize)
         };
-        assert!(is_placeholder(dialogs::FRAMES, "DW-1558"));
-        assert!(is_placeholder(sheets::FRAMES, "DW-1559"));
-        assert!(is_placeholder(slides::FRAMES, "DW-1560"));
+        assert!(!is_placeholder(dialogs::FRAMES, "DW-1558"));
+        assert!(!is_placeholder(sheets::FRAMES, "DW-1559"));
+        assert!(!is_placeholder(slides::FRAMES, "DW-1560"));
         assert!(
             super::super::kinds::OFFICE_VIEWER_ON,
-            "the viewer is on since O-CP3; the editor frames stay placeholders"
+            "the viewer is on since O-CP3; the editor frames are filled"
         );
     }
 }

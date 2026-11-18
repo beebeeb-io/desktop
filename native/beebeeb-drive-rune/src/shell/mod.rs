@@ -63,7 +63,7 @@ use std::io::Write as _;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use rune::{App, AppSpec, Titlebar, WindowSpec};
+use rune::{App, AppSpec, Titlebar, Tx, WindowSpec};
 use surfaces::WindowKind;
 
 use crate::engine_host::open::OpenError;
@@ -390,12 +390,9 @@ pub fn run() {
     let window_slot = window.clone();
     // Rune reads only what `parse_args` let through: nothing in a shipped build, nothing on a
     // command line that carries a link.
-    let main_app = App::new(main_spec)
+    let main_app = main_app(main_spec)
         .args(launch.rune_args.clone())
         .titlebar(Titlebar::new(TITLEBAR_H))
-        .on_open_url(host::on_open_url)
-        .on_reopen(host::on_reopen)
-        .on_focus(|s: &mut State, focused, _| crate::frames::signin::on_window_focus(s, focused))
         .on_window(move |native| {
             *window_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(native.clone())
         });
@@ -503,6 +500,25 @@ pub fn run() {
                 .boxed(),
         ]
     });
+}
+
+/// The main window's app on `spec`, with the hooks that need nothing of this run: a `beebeeb://` link, a reopen, the
+/// window's focus, and the input method's text for the editor the app draws itself. `run` adds what is this run's (its
+/// arguments, the titlebar, the native window's slot); the tests build the same app headless.
+pub(crate) fn main_app(spec: AppSpec<State>) -> App<State> {
+    App::new(spec)
+        .on_open_url(host::on_open_url)
+        .on_reopen(host::on_reopen)
+        .on_focus(|s: &mut State, focused, _| crate::frames::signin::on_window_focus(s, focused))
+        .on_ime(on_ime)
+}
+
+/// The input method's text while no text field has the keyboard: the office editor's (its page, grid or slide has an
+/// `ime_cursor` caret then). A composition stays in this process until it is committed
+/// (`frames::office::edit::ime`).
+pub(crate) fn on_ime(s: &mut State, ime: &rune::Ime, tx: &mut Tx) -> bool {
+    crate::frames::office::edit::ime::on_ime(s, tx, ime.clone());
+    true
 }
 
 /// The main window's handle, once it exists: what an engine thread wakes.

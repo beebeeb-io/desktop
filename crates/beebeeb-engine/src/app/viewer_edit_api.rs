@@ -333,6 +333,32 @@ impl<C: CredentialStores> Engine<C> {
         base: i64,
         opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
+        self.save_bytes_for(session, file_id, text.as_bytes(), base, opening)
+    }
+
+    /// [`Self::save_text_for`] for any bytes (the Office save shares it: `office_edit_api`). One body for both, so
+    /// the opening epoch, the Conflict answer, the chain rule and the land wait can never differ between them.
+    pub(in crate::app) fn save_bytes_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &[u8],
+        base: i64,
+        opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
+        self.save_bytes_sealed_for(session, file_id, bytes, base, opening, None)
+    }
+
+    /// [`Self::save_bytes_for`]; `seal_kind` `Some(kind)` stages the bytes sealed (an Office save: `office_edit_api`).
+    pub(in crate::app) fn save_bytes_sealed_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &[u8],
+        base: i64,
+        opening: u64,
+        seal_kind: Option<u8>,
+    ) -> Result<SaveEnd, EditRefused> {
         let (token, key) = self.edit_credentials(session)?;
         let state = self.local_state_for_changes().map_err(|_| EditRefused::Unavailable)?;
         if state.session() != session {
@@ -386,7 +412,11 @@ impl<C: CredentialStores> Engine<C> {
             content_type: contract.content_type.clone(),
             base_version_identifier: Some(base.to_string()),
         };
-        let held = anonymous_file(text).ok_or(EditRefused::Failed)?;
+        // A sealed save never puts the plaintext in a file of its own: the one staged copy is the sealed blob.
+        let held = match seal_kind {
+            Some(_) => None,
+            None => Some(anonymous_file(bytes).ok_or(EditRefused::Failed)?),
+        };
         // Delta 3 of desktop#432: queued after this opening's own latest unsent save alone. Another unsent write of
         // the file (an earlier opening's save, a File Provider save) is not what the text on screen is based on:
         // after it, both would land one after the other and nobody would be asked. The accept checks it inside its
@@ -406,7 +436,7 @@ impl<C: CredentialStores> Engine<C> {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
                 let queued = EngineBridge::new(self.identity, db.clone(), api)
                     .with_chain_after(chain)
-                    .queue_file_provider_modify_from(target, Some(&held))
+                    .queue_modify_for_save(target, held.as_ref(), bytes, seal_kind)
                     .map(|write| (write.outcome, write.token));
                 // Refused behind an earlier write: ONE read, after the refused accept, picks which refusal it is (held
                 // back, or not sent yet). For the words alone: nothing was stored either way, so a change between the
@@ -462,6 +492,18 @@ impl<C: CredentialStores> Engine<C> {
         device: &str,
         hhmm: &str,
     ) -> Result<NewCopy, EditRefused> {
+        self.save_bytes_copy_for(session, file_id, text.as_bytes(), device, hhmm)
+    }
+
+    /// [`Self::save_text_copy_for`] for any bytes (shared with the Office save's Keep both).
+    pub(in crate::app) fn save_bytes_copy_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &[u8],
+        device: &str,
+        hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
         let (token, key) = self.edit_credentials(session)?;
         let state = self.local_state_for_changes().map_err(|_| EditRefused::Unavailable)?;
         if state.session() != session {
@@ -500,7 +542,7 @@ impl<C: CredentialStores> Engine<C> {
             content_type: contract.content_type.clone(),
             base_version_identifier: None,
         };
-        let held = anonymous_file(text).ok_or(EditRefused::Failed)?;
+        let held = anonymous_file(bytes).ok_or(EditRefused::Failed)?;
         let outcome = state
             .with_shared(|db| {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
@@ -517,7 +559,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// The token and the key of the session `session` is, copied while it still is.
-    fn edit_credentials(&self, session: SessionGeneration) -> Result<(String, Zeroizing<[u8; 32]>), EditRefused> {
+    pub(in crate::app) fn edit_credentials(&self, session: SessionGeneration) -> Result<(String, Zeroizing<[u8; 32]>), EditRefused> {
         self.person_session(|current, generation| {
             (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
         })
@@ -527,10 +569,10 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
-/// `text` in a file with no name, read from the start.
-fn anonymous_file(text: &str) -> Option<std::fs::File> {
+/// `bytes` in a file with no name, read from the start.
+pub(in crate::app) fn anonymous_file(bytes: &[u8]) -> Option<std::fs::File> {
     let mut file = tempfile::tempfile().ok()?;
-    file.write_all(text.as_bytes()).ok()?;
+    file.write_all(bytes).ok()?;
     file.flush().ok()?;
     file.seek(SeekFrom::Start(0)).ok()?;
     Some(file)
@@ -911,3 +953,7 @@ mod queued_save_tests {
         assert_eq!(landed_version(&db, "f", &other), None);
     }
 }
+
+#[cfg(test)]
+#[path = "viewer_edit_staging_tests.rs"]
+mod staging_tests;

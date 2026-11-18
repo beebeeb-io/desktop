@@ -47,6 +47,8 @@ thread_local! {
 #[cfg(test)]
 pub fn poll_drains_for_this_test() {
     POLL_DRAINS.set(true);
+    // A test's window is a new window: its first poll with the gate open is an opening of the gate.
+    GATE_WAS_OPEN.set(false);
 }
 
 /// The shell's poll: acts on the queues (in a test, only where the test asked for it).
@@ -61,7 +63,41 @@ pub fn drain_in_poll(s: &mut State, tx: &mut Tx) -> bool {
     let backups = drain_backups_intents(s);
     let picked = take_picked_folder(s, tx);
     let saved = super::viewer_save::poll(s, tx);
-    settings | frames | viewer | backups | picked | saved
+    let document = open_new_document(s, tx);
+    let unlocked = say_what_was_kept(s, tx);
+    settings | frames | viewer | backups | picked | saved | document | unlocked
+}
+
+/// Files' "New document…" (`frames::files::Intent::Frame("DW-1558")`, the New menu): the office editor's dialog
+/// opens over Files on Docs, for the folder shown. Every ask since the last poll is one dialog. `true`: asked.
+fn open_new_document(s: &mut State, tx: &mut Tx) -> bool {
+    let asked = crate::frames::files::Intent::Frame("DW-1558");
+    let before = s.actions.intents.len();
+    s.actions.intents.retain(|intent| *intent != asked);
+    if s.actions.intents.len() == before {
+        return false;
+    }
+    let folder = s.listing.folder.id.clone();
+    crate::frames::office::edit::new_document::open(s, tx, None, folder);
+    true
+}
+
+thread_local! {
+    /// Whether the last poll saw the session gate open (the window's loop runs on one thread).
+    static GATE_WAS_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The unlock hook: the first poll that sees the session gate open (an unlock, a sign-in, a start with a session
+/// open) tells the office editor, which says what unsaved editing this PC kept (`edit::recovery::on_unlocked`).
+/// `true`: the gate opened.
+fn say_what_was_kept(s: &mut State, tx: &mut Tx) -> bool {
+    let open = session_gate::open(s);
+    if !open || GATE_WAS_OPEN.replace(open) {
+        GATE_WAS_OPEN.set(open);
+        return false;
+    }
+    crate::frames::office::edit::recovery::on_unlocked(s, tx);
+    true
 }
 
 /// Which section asked for Windows' folder picker, and gets the folder: one variant per section. A later section

@@ -64,10 +64,11 @@ use beebeeb_engine::file_ops;
 use zeroize::Zeroize;
 
 use super::log;
+use beebeeb_office_protocol::office::{EditKind, EditOp, HitMode, Template};
 use crate::frames::viewers::kinds::{self, PdfDoc, PhotoDoc, Picture, Viewer};
 #[allow(unused_imports)] // the text readers moved to `viewer_text.rs`; tests reach them through `super::*`.
 use crate::frames::viewers::source::{
-    Body, Cut, Details, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
+    Body, Cut, Details, EditAnswer, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
     Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
 };
 
@@ -195,6 +196,85 @@ pub trait ViewerEngine: Send + Sync + 'static {
     /// Its number is handed to every read and save of this opening; a save of an earlier one is never its own.
     fn begin_opening(&self, _session: SessionGeneration, _file_id: &str) -> u64 {
         0
+    }
+    /// [`Engine::save_office_for`], under the engine's opening `opening`. A worker's.
+    fn save_office(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+        _base: i64,
+        _opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
+        Err(EditRefused::Failed)
+    }
+    /// [`Engine::save_office_copy_for`]. A worker's.
+    fn save_office_copy(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+        _device: &str,
+        _hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        Err(EditRefused::Failed)
+    }
+    /// [`Engine::create_office_for`]: the new file's id. A worker's.
+    fn create_office(
+        &self,
+        _session: SessionGeneration,
+        _folder: Option<&str>,
+        _name: &str,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<String, EditRefused> {
+        Err(EditRefused::Failed)
+    }
+    /// [`Engine::scratch_for`]: the session's sealed scratch for the editor's large working copies. `None`: copies
+    /// stay in memory.
+    fn office_scratch(
+        &self,
+        _session: SessionGeneration,
+    ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
+        None
+    }
+    /// [`Engine::set_office_session_end_hook`]: a lock seals the open editors' unsaved work, a sign-out ends them,
+    /// before the session does. Asked again for every editor; the same hook each time.
+    fn office_install_session_end_hook(&self) {}
+    /// [`Engine::put_office_snapshot_for`]: keep an editing session's snapshot of `file_id` as its one recovery blob.
+    fn recovery_put(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _base: i64,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
+    /// [`Engine::office_snapshots_for`]: the account's recovery blobs.
+    fn recovery_list(
+        &self,
+        _session: SessionGeneration,
+    ) -> Result<
+        Vec<beebeeb_engine::app::office_recovery::RecoveryEntry>,
+        beebeeb_engine::app::office_recovery::RecoveryRefused,
+    > {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
+    /// [`Engine::take_office_snapshot_for`]: the blob's bytes (the blob stays).
+    fn recovery_take(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
+    /// [`Engine::discard_office_snapshot_for`].
+    fn recovery_discard(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
     }
     /// [`Engine::save_text_copy_for`]. A worker's.
     fn save_copy(
@@ -350,6 +430,86 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 
     fn begin_opening(&self, session: SessionGeneration, file_id: &str) -> u64 {
         self.engine.viewer_opening(session, file_id)
+    }
+
+    fn save_office(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+        base: i64,
+        opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
+        self.engine.save_office_for(session, file_id, bytes, base, opening)
+    }
+
+    fn save_office_copy(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+        device: &str,
+        hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        self.engine.save_office_copy_for(session, file_id, bytes, device, hhmm)
+    }
+
+    fn create_office(
+        &self,
+        session: SessionGeneration,
+        folder: Option<&str>,
+        name: &str,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<String, EditRefused> {
+        self.engine.create_office_for(session, folder, name, bytes)
+    }
+
+    fn office_scratch(
+        &self,
+        session: SessionGeneration,
+    ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
+        self.engine.scratch_for(session)
+    }
+
+    fn office_install_session_end_hook(&self) {
+        self.engine
+            .set_office_session_end_hook(std::sync::Arc::new(crate::engine_host::office_host::on_session_end));
+    }
+
+    fn recovery_put(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        base: i64,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        self.engine.put_office_snapshot_for(session, file_id, base, bytes)
+    }
+
+    fn recovery_list(
+        &self,
+        session: SessionGeneration,
+    ) -> Result<
+        Vec<beebeeb_engine::app::office_recovery::RecoveryEntry>,
+        beebeeb_engine::app::office_recovery::RecoveryRefused,
+    > {
+        self.engine.office_snapshots_for(session)
+    }
+
+    fn recovery_take(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        self.engine.take_office_snapshot_for(session, file_id)
+    }
+
+    fn recovery_discard(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        self.engine.discard_office_snapshot_for(session, file_id)
     }
 }
 
@@ -1159,7 +1319,64 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn settled(&mut self, file_id: &str) -> Option<Settled> {
-        self.take_settled(file_id)
+        self.office_settled(file_id)
+    }
+
+    fn can_edit(&self, file_id: &str) -> bool {
+        self.office_can_edit(file_id)
+    }
+
+    fn edit(&mut self, file_id: &str, op: EditOp) -> bool {
+        self.office_edit(file_id, op)
+    }
+
+    fn hit(&mut self, file_id: &str, page: u32, x_pt: f32, y_pt: f32, mode: HitMode) -> bool {
+        self.office_hit(file_id, page, x_pt, y_pt, mode)
+    }
+
+    fn copy_selection(&mut self, file_id: &str) -> bool {
+        self.office_copy(file_id)
+    }
+
+    fn layouts(&mut self, file_id: &str) -> bool {
+        self.office_layouts(file_id)
+    }
+
+    fn insert_image(&mut self, file_id: &str, bytes: zeroize::Zeroizing<Vec<u8>>, png: bool) -> bool {
+        self.office_insert_image(file_id, bytes, png)
+    }
+
+    fn poll_edit(&mut self, file_id: &str) -> Option<EditAnswer> {
+        self.office_poll_edit(file_id)
+    }
+
+    fn create_document(&mut self, folder: Option<&str>, name: &str, kind: EditKind, template: Template) -> bool {
+        self.office_create(folder, name, kind, template)
+    }
+
+    fn recovery(&self, file_id: &str) -> Option<crate::frames::viewers::source::RecoveryOffer> {
+        self.office_recovery(file_id)
+    }
+
+    fn restore(&mut self, file_id: &str) -> bool {
+        self.office_restore(file_id)
+    }
+
+    fn discard_recovery(&mut self, file_id: &str) {
+        self.office_discard_recovery(file_id)
+    }
+
+    fn recovery_pending(&self) -> Vec<(String, String)> {
+        let pending = self.office_recovery_pending();
+        pending.into_iter().map(|kept| (kept.file_id, kept.at)).collect()
+    }
+
+    fn save_document(&mut self, file_id: &str, base: u32) -> SaveOutcome {
+        self.office_save_document(file_id, base)
+    }
+
+    fn resolve_document(&mut self, file_id: &str, keep: Keep) -> SaveOutcome {
+        self.office_resolve_document(file_id, keep)
     }
 
     fn answers_later(&self) -> bool {

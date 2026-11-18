@@ -20,6 +20,14 @@ ignore = [
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
     "RUSTSEC-2026-0429",
+    # zip 3.0.0, two more advisories published after the four above; also not reachable: 0545 is AES-encrypted
+    # entries read with a password (`aes-crypto` is off: our zip has `deflate` only, and nothing calls
+    # `by_name_decrypt`); 0548 is `ZipStreamReader` (nothing here streams a zip; archives are read through `ZipArchive`).
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0548",
+    # chrono 0.4.45: "unmaintained", no vulnerability. Comes with wordcraft-engine (the local clock's offset for
+    # Insert > Date & Time); it opens no connection. Revisit at a WordCraft bump.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
@@ -30,6 +38,25 @@ allow = [
     "MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
     "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "BSL-1.0", "0BSD", "OFL-1.1", "Unlicense",
     "Ubuntu-font-1.0",  # Ubuntu Light, the slide renderer's last-resort face (epaint_default_fonts); lead 2026-11-15 R-L1
+]
+
+exceptions = [  # MPL-2.0 via deckcraft-engine (slides editor, `edit-slides`): accepted by Guus 2026-11-18; notice: desktop-090 w17-licence-notice
+    { allow = ["MPL-2.0"], crate = "symphonia" },
+    { allow = ["MPL-2.0"], crate = "symphonia-bundle-flac" },
+    { allow = ["MPL-2.0"], crate = "symphonia-bundle-mp3" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-aac" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-adpcm" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-alac" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-pcm" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-vorbis" },
+    { allow = ["MPL-2.0"], crate = "symphonia-core" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-caf" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-isomp4" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-mkv" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-ogg" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-riff" },
+    { allow = ["MPL-2.0"], crate = "symphonia-metadata" },
+    { allow = ["MPL-2.0"], crate = "symphonia-utils-xiph" },
 ]
 
 [licenses.private]

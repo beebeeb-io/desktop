@@ -27,10 +27,15 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
-beebeeb-office = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a" }
+beebeeb-office = { git = "https://github.com/beebeeb-io/desktop-office", rev = "f2a372b19c9e0313aea01300c4a8c45196e227e6", features = ["edit-slides"] }
 beebeeb-office-protocol = { path = "../../crates/beebeeb-office-protocol" }
 beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
 log = "0.4"   # only for the no-logger check (`log::max_level()`); already in the Office engine's closure
 
 [profile.release]
 panic = "abort"
+
+# The engines' upstream workspaces patch krilla (PDF export) to the craft-libs fork; a [patch] in a dependency
+# is not read here, so it is repeated. Same rev as in desktop-office's wordcraft/Cargo.toml.
+[patch.crates-io]
+krilla = { git = "https://github.com/storytold/craft-libs", rev = "6e03f65bf45181db77ba6229716e6624db9eb25b" }

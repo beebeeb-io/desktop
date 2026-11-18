@@ -113,12 +113,18 @@ pub const WINDOW: &[List] = &[
     },
 ];
 
-/// DW-1234: the viewer's Edit and View, while a document is open (0.9.0 only reads: the editor's Format and Insert
-/// come back with the editor in 0.9.1, owner 2026-11-15, decision 2539). Only what the viewer has.
+/// DW-1234: the editor's Edit, View, Format and Insert, while a document is open (the editor is in 0.9.0: decision
+/// 2539 is reversed, owner 2026-11-18). Edit, Format and Insert are the board's lists of before 2539.
 pub const EDITOR: &[List] = &[
     List {
         name: "Edit",
-        commands: &[("Copy", "Ctrl+C")],
+        commands: &[
+            ("Undo Typing", "Ctrl+Z"),
+            ("Redo", "Ctrl+Y"),
+            ("Cut", "Ctrl+X"),
+            ("Copy", "Ctrl+C"),
+            ("Paste", "Ctrl+V"),
+        ],
     },
     List {
         name: "View",
@@ -129,6 +135,38 @@ pub const EDITOR: &[List] = &[
             ("Show outline", "the pane's button"),
             ("Present (Slides)", "F5"),
             ("Full screen", "F11"),
+        ],
+    },
+    List {
+        name: "Format",
+        commands: &[
+            ("Bold", "Ctrl+B"),
+            ("Italic", "Ctrl+I"),
+            ("Underline", "Ctrl+U"),
+            ("Strikethrough", "ribbon: Home"),
+            ("Normal text", "ribbon: Home"),
+            ("Heading 1", "ribbon: Home"),
+            ("Heading 2", "ribbon: Home"),
+            ("Heading 3", "ribbon: Home"),
+            ("Align left", "Ctrl+L"),
+            ("Align center", "Ctrl+E"),
+            ("Align right", "Ctrl+R"),
+            ("Justify", "Ctrl+J"),
+            ("Bulleted list", "ribbon: Home"),
+            ("Numbered list", "ribbon: Home"),
+            ("Increase indent", "ribbon: Home"),
+            ("Decrease indent", "ribbon: Home"),
+        ],
+    },
+    List {
+        name: "Insert",
+        commands: &[
+            ("Table\u{2026}", "ribbon: Insert"),
+            ("Image\u{2026}", "ribbon: Insert"),
+            ("Link\u{2026}", "ribbon: Insert"),
+            ("Page break", "ribbon: Insert"),
+            ("New slide", "Ctrl+M"),
+            ("Duplicate slide", "right-click on a slide"),
         ],
     },
 ];
