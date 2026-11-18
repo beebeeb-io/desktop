@@ -25,7 +25,7 @@ fn type_text(rt: &mut Runtime<State>, text: &str) {
 }
 
 /// The Share dialog of the selected file with a password typed in it.
-fn share_with_a_password(rt: &mut Runtime<State>) {
+pub(super) fn share_with_a_password(rt: &mut Runtime<State>) {
     click(rt, "share-box");
     click(rt, "item-0-2-switch");
     type_text(rt, "s3cret-words");
