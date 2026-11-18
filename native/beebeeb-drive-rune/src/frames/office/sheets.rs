@@ -32,6 +32,7 @@ use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::{caption, kit, sidebar};
 
 use super::docs::{ABOUT, ENCRYPTED, KEEP_FIRST, Live, OPEN_ELSEWHERE};
+use super::edit::sheet as edit_sheet;
 use super::states::QUIET_LINE;
 
 #[path = "sheets_fixture.rs"]
@@ -255,7 +256,7 @@ pub fn status_words(view: &SheetView) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// 12px/400 on 16px: a cell's words.
-const CELL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
+pub(crate) const CELL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
 const CELL_BOLD: TextStyle = TextStyle::new(12.0, 650.0).lh(16.0);
 /// 11.5px mono on 16px: a figure in a cell (the board's `font-mono t-num`), and its bold twin (the total row).
 const CELL_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(16.0);
@@ -271,13 +272,13 @@ const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(
 const TAB_ON: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
 const TAB: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
 /// 11.5px mono on 17px: a cell's name and the formula (machine text).
-const MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
+pub(crate) const MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
 /// 11.5px/600 on 17px: "Encrypted".
 const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
 
 /// Widths in the board: the row numbers' column, the cell box, and the heights of the bars.
-const ROW_HEAD_W: f32 = 40.0;
-const HEADER_H: f32 = 24.0;
+pub(crate) const ROW_HEAD_W: f32 = 40.0;
+pub(crate) const HEADER_H: f32 = 24.0;
 const FORMULA_BAR_H: f32 = 34.0;
 /// The cell's name is plain text 92 wide on the board (no box).
 const CELLBOX_W: f32 = 92.0;
@@ -305,8 +306,9 @@ pub fn formula_text(view: &SheetView) -> String {
     here.map(|c| c.text.clone()).unwrap_or_default()
 }
 
-/// The formula bar, read-only: the cell's name as text, then the formula as text (no "fx" mark: the board draws none). No box around either.
-fn formula_bar(view: &SheetView, t: &Theme) -> El {
+/// The formula bar: the cell's name as text, then the formula as text (no "fx" mark: the board draws none). No box around
+/// either. In the editor `formula` is the element that shows and edits it (`edit::sheet::formula`); the viewer's is read-only.
+fn formula_bar(view: &SheetView, formula: Option<El>, t: &Theme) -> El {
     let name = a1(view.current);
     let cellbox = row()
         .key("sh-cellbox")
@@ -328,11 +330,11 @@ fn formula_bar(view: &SheetView, t: &Theme) -> El {
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
         .child(cellbox)
-        .child(
+        .child(formula.unwrap_or_else(|| {
             kit::label("sh-formula", formula_text(view), MONO, t.text)
                 .truncate()
-                .min_w(0.0),
-        )
+                .min_w(0.0)
+        }))
 }
 
 static LESS: Icon = Icon {
@@ -438,8 +440,8 @@ pub struct Shown {
 }
 
 /// A row without a size yet, and a column without one (what the source fills gaps with).
-const ROW_PT: f32 = 15.0;
-const COL_PT: f32 = 48.0;
+pub(crate) const ROW_PT: f32 = 15.0;
+pub(crate) const COL_PT: f32 = 48.0;
 
 impl Shown {
     /// Everything the view holds (the fixture's workbook).
@@ -542,7 +544,7 @@ fn anchors_of(view: &SheetView, shown: &Shown, live: Option<&Live>, t: &Theme) -
 }
 
 /// The grid: the corner and the column letters, then each row with its number and its cells.
-fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
+fn grid(view: &SheetView, shown: &Shown, anchors: El, layer: Option<El>, t: &Theme) -> El {
     // Only the cells on a drawn row and column are indexed: a sheet held at its cell cap costs a scan, not 65,536 inserts.
     let (rows_in, cols_in): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) =
         (shown.rows.iter().copied().collect(), shown.cols.iter().copied().collect());
@@ -660,7 +662,7 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
         }
         body = body.child(line);
     }
-    col()
+    let grid = col()
         .key("sh-grid")
         .role("grid")
         .label("Sheet")
@@ -671,7 +673,12 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
         .clip_rounded(0.0)
         .child(head)
         .child(body)
-        .child(anchors)
+        .child(anchors);
+    // The editor's pointer, keys and cell editor lie over the cells (under the scroll viewports `window_with` adds).
+    match layer {
+        Some(layer) => grid.child(layer),
+        None => grid,
+    }
 }
 
 #[path = "sheets_scroll.rs"]
@@ -683,6 +690,7 @@ mod sheets_tabs;
 
 #[path = "sheets_bounds.rs"]
 mod sheets_bounds;
+pub use sheets_bounds::Geometry;
 use sheets_bounds::{AtCell, MAX_DRAWN_CELLS, MAX_LINES, MergesShown, Side};
 use sheets_tabs::sheet_tabs;
 
@@ -704,8 +712,9 @@ fn status_word(key: String, word: &str, t: &Theme) -> El {
 
 /// The status line (`OvStatus`): the sheet and the selection's figures on the left, then Encrypted, a middle dot and
 /// About on the right. Its parts are keyed `st-<N>` in order, each middle dot between them numbered too: with the
-/// board's four left words that is st-0 to st-6, Encrypted st-7, the dot st-8, About st-9.
-fn status(view: &SheetView, t: &Theme) -> El {
+/// board's four left words that is st-0 to st-6, Encrypted st-7, the dot st-8, About st-9. In the editor `kept` (how the
+/// workbook is kept: "saved as version 4", "unsaved changes") follows Encrypted and its dot, then a dot more before About.
+fn status(view: &SheetView, kept: Option<&str>, t: &Theme) -> El {
     let words = status_words(view);
     let mut bar = row()
         .key("status-bar")
@@ -743,8 +752,16 @@ fn status(view: &SheetView, t: &Theme) -> El {
     }
     let enc = format!("st-{n}");
     let dot = format!("st-{}", n + 1);
-    let about = format!("st-{}", n + 2);
-    bar.label(format!("{}{said}. {ENCRYPTED}", words.join(", ")))
+    let (kept_at, about) = match kept {
+        Some(_) => (
+            Some((format!("st-{}", n + 2), format!("st-{}", n + 3))),
+            format!("st-{}", n + 4),
+        ),
+        None => (None, format!("st-{}", n + 2)),
+    };
+    let kept_words = kept.map(|k| format!(", {k}")).unwrap_or_default();
+    let mut bar = bar
+        .label(format!("{}{said}. {ENCRYPTED}{kept_words}", words.join(", ")))
         .child(el().key("st-gap").grow(1.0))
         .child(
             row()
@@ -754,8 +771,13 @@ fn status(view: &SheetView, t: &Theme) -> El {
                 .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
                 .child(fitted(enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
         )
-        .child(fitted(dot, "\u{00B7}", type_::STATUS, t.text_tertiary))
-        .child(
+        .child(fitted(dot, "\u{00B7}", type_::STATUS, t.text_tertiary));
+    if let (Some(words), Some((kept_key, dot_key))) = (kept, kept_at) {
+        bar = bar
+            .child(fitted(kept_key, words, type_::STATUS, t.text_tertiary))
+            .child(fitted(dot_key, "\u{00B7}", type_::STATUS, t.text_tertiary));
+    }
+    bar.child(
             el().key(format!("{about}-box"))
                 .role("link")
                 .label("About this viewer")
@@ -824,7 +846,27 @@ fn asks(view: &SheetView, shown: &Shown, screen: (f32, f32)) -> Vec<(u32, u32, u
 
 fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: &Shown, live: Option<&Live>) -> El {
     let t = tokens::theme(cx.system_dark());
-    let mut cells = grid(view, shown, anchors_of(view, shown, live, &t), &t);
+    // The workbook is open for editing (a live one): the grid takes the pointer and the keys, the formula bar edits.
+    let editing = live.is_some()
+        && ui
+            .office
+            .edit
+            .as_ref()
+            .is_some_and(|e| e.kind == beebeeb_office_protocol::office::EditKind::Xlsx);
+    let (layer, formula) = if editing {
+        let geometry = Geometry::of(view, &shown.rows, &shown.cols);
+        let room = cx
+            .layout_size("sh-grid")
+            .map_or((800.0, 600.0), |[w, h]| ((w - ROW_HEAD_W).max(0.0), (h - HEADER_H).max(0.0)));
+        (
+            Some(edit_sheet::layer(view, geometry, room, &t)),
+            Some(edit_sheet::formula(view, &t)),
+        )
+    } else {
+        edit_sheet::reset();
+        (None, None)
+    };
+    let mut cells = grid(view, shown, anchors_of(view, shown, live, &t), layer, &t);
     // A workbook in a renderer scrolls (`sheets_scroll`); the fixture's is the board's still sheet.
     if live.is_some() {
         let (down, across) = (cx.layout(sheets_scroll::DOWN), cx.layout(sheets_scroll::ACROSS));
@@ -838,7 +880,7 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
             .min_w(0.0)
             .h_full()
             .child(viewer_bar(&t))
-            .child(formula_bar(view, &t))
+            .child(formula_bar(view, formula, &t))
             .child(cells)
             .child(sheet_tabs(view, live.is_some(), room, &t)),
     );
@@ -853,9 +895,28 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
         .h_full()
         .fill(t.bg)
         .child(viewers::office::toolbar(s, ui, false, &t));
-    let main = match ui.office.edit.as_ref().map(|e| e.kind) {
-        Some(kind) => main.child(super::edit::chrome(s, cx, ui, kind, body)),
-        None => main.child(body).child(status(view, &t)),
+    let main = match ui.office.edit.as_ref() {
+        // The editor's frame, with the sheet's own status line: the figures of the selection, then how it is kept
+        // (`edit::chrome`'s is the document's: pages and words).
+        Some(edit) if editing => {
+            let kept = if edit.unsaved() {
+                "unsaved changes".to_string()
+            } else {
+                format!("saved as version {}", ui.file.version)
+            };
+            main.child(
+                col()
+                    .key("edit-chrome")
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .w_full()
+                    .child(super::edit::sheet_ribbon::ribbon(ui, edit.unsaved(), &t))
+                    .child(body)
+                    .child(status(view, Some(&kept), &t)),
+            )
+        }
+        Some(edit) => main.child(super::edit::chrome(s, cx, ui, edit.kind, body)),
+        None => main.child(body).child(status(view, None, &t)),
     };
     let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
         row()

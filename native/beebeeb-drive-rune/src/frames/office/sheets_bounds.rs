@@ -254,7 +254,99 @@ impl MergesShown {
     }
 }
 
+/// One line drawn (a row or a column) and the points it covers, from the grid's first line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Drawn {
+    line: u32,
+    start: f32,
+    end: f32,
+}
+
+/// Where one frame drew its rows and columns: the pointer's hit-test (a press, a drag) and the cell editor's place. Built
+/// from the same walk the grid is drawn from, so a press lands on the cell it is over. Points are the grid's own, with
+/// the row numbers' column and the column letters' row counted in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Geometry {
+    rows: Vec<Drawn>,
+    cols: Vec<Drawn>,
+}
+
+impl Geometry {
+    /// The lines `rows` and `cols` drew, with the sizes `view` holds for them.
+    pub(super) fn of(view: &SheetView, rows: &Side, cols: &Side) -> Geometry {
+        let side = |side: &Side, sizes: &[f32]| -> Vec<Drawn> {
+            side.iter()
+                .filter_map(|&line| {
+                    let start = side.start_of(line)?;
+                    let size = *sizes.get(line as usize)?;
+                    Some(Drawn {
+                        line,
+                        start,
+                        end: start + size,
+                    })
+                })
+                .collect()
+        };
+        Geometry {
+            rows: side(rows, &view.row_heights),
+            cols: side(cols, &view.col_widths),
+        }
+    }
+
+    /// The line of `lines` at `at` points. `clamp`: a point before the first line or after the last takes that line.
+    fn find(lines: &[Drawn], at: f32, clamp: bool) -> Option<u32> {
+        let (first, last) = (lines.first()?, lines.last()?);
+        if !at.is_finite() {
+            return None;
+        }
+        if at < first.start {
+            return clamp.then_some(first.line);
+        }
+        if at >= last.end {
+            return clamp.then_some(last.line);
+        }
+        let i = lines.partition_point(|d| d.end <= at);
+        lines.get(i).map(|d| d.line)
+    }
+
+    /// The cell at (`x`, `y`) points from the grid's top-left corner. Without `clamp` the headers and the space past
+    /// the last line hit nothing; with it a point outside takes the nearest cell (a drag past the edge).
+    pub fn hit(&self, x: f32, y: f32, clamp: bool) -> Option<Cell> {
+        let (x, y) = (x - super::ROW_HEAD_W, y - super::HEADER_H);
+        if !clamp && (x < 0.0 || y < 0.0) {
+            return None;
+        }
+        Some(Cell {
+            row: Self::find(&self.rows, y, clamp)?,
+            col: Self::find(&self.cols, x, clamp)?,
+        })
+    }
+
+    /// Where `cell` is drawn as `[x, y, w, h]` points from the grid's top-left corner; `None`: not drawn in this frame.
+    pub fn rect_of(&self, cell: Cell) -> Option<[f32; 4]> {
+        let row = self.rows.iter().find(|d| d.line == cell.row)?;
+        let col = self.cols.iter().find(|d| d.line == cell.col)?;
+        Some([
+            super::ROW_HEAD_W + col.start,
+            super::HEADER_H + row.start,
+            col.end - col.start,
+            row.end - row.start,
+        ])
+    }
+}
+
 impl SheetView {
+    /// The first cell of the merged area `cell` lies in (itself when it lies in none).
+    pub fn merge_origin(&self, cell: Cell) -> Cell {
+        for &m in &self.merges {
+            let (r0, r1, c0, c1) = bounds(m);
+            if cell.row >= r0 && cell.row <= r1 && cell.col >= c0 && cell.col <= c1 {
+                return Cell { row: r0, col: c0 };
+            }
+        }
+        cell
+    }
+
     /// Merged areas from a block, by corners, into those held: each once, at most [`MAX_MERGES_HELD`]. One past the cap
     /// is not held, and sets `missing_content` (the status line's quiet line).
     pub(crate) fn hold_merges(&mut self, merges: impl IntoIterator<Item = (Cell, Cell)>) {
