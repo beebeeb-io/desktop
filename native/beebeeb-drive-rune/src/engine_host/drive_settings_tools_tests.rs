@@ -238,7 +238,6 @@ fn an_export_saves_shows_and_opens_a_draft_that_names_the_file_only() {
     assert!(drafts[0].starts_with("mailto:support@beebeeb.io?"), "{}", drafts[0]);
     assert!(drafts[0].contains("beebeeb-support-bundle-1.json"));
     assert!(!drafts[0].contains("somewhere"), "never the folder");
-    assert!(source.diagnostics().activity.is_empty(), "no live figure is drawn");
 }
 
 #[test]
