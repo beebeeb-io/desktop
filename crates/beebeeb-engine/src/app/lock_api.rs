@@ -313,6 +313,8 @@ impl<C: CredentialStores> Engine<C> {
     /// work stay as they are. Every answer asked for before this moment is for another turn of the session
     /// ([`Engine::session_turn`] moves on), so a host drops it. Never waits on a session step.
     pub fn lock_screen(&self) -> Result<(), LockRefused> {
+        // Read before the lock is taken: a locked screen refuses the read (for the Office host's last snapshot).
+        let open = self.office_session_before_screen_lock();
         {
             let _writes = self.writes.write().unwrap_or_else(|p| p.into_inner());
             self.flow(|flow| flow.lock(LockLevel::Screen)).map_err(refused)?;
@@ -320,6 +322,8 @@ impl<C: CredentialStores> Engine<C> {
                 .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
         }
         self.publish();
+        // The lock shows first; then the Office host seals what was typed since its last snapshot, in the background.
+        self.office_after_screen_lock(open);
         Ok(())
     }
 

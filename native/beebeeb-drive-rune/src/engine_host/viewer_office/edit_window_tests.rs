@@ -602,6 +602,55 @@ fn text_typed_before_the_snapshot_timer_is_offered_after_a_lock_and_an_unlock() 
     );
 }
 
+/// A SCREEN lock before any snapshot timer fired: the lock comes first (the engine's call returns with the screen
+/// locked and nothing sealed yet), then the seal lands from a background thread through the grant the lock left, and
+/// after the unlock the document offers the last text.
+#[test]
+fn text_typed_before_the_snapshot_timer_is_offered_after_a_screen_lock_and_an_unlock() {
+    use beebeeb_engine::app::office_session_end::SessionEnding;
+    let mut w = window("screenlockflush");
+    w.sign_in();
+    w.open_in_the_editor();
+    assert_eq!(viewers::office_over::recovery_pending(&w.rt.state).len(), 0, "nothing kept yet");
+
+    let sink = w.helper.flush_sink().expect("the editor registered the door a lock seals through");
+    let last_text = Zeroizing::new(edited_version());
+    let sealed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done, when_called) = (sealed.clone(), Arc::new(std::sync::Mutex::new(None)));
+    let called = when_called.clone();
+    let engine = w.engine.clone();
+    w.engine.set_office_session_end_hook(Arc::new(move |ending| {
+        if ending != SessionEnding::ScreenLock {
+            return;
+        }
+        // The lock is in place when the hook is called, and the hook returns at once: the seal comes later.
+        *called.lock().unwrap() = Some(engine.gate());
+        let (sink, text, done) = (sink.clone(), last_text.clone(), done.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            sink(&text);
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }));
+    w.engine.lock_screen().expect("the screen locks");
+    assert_eq!(
+        *when_called.lock().unwrap(),
+        Some(EngineGate::ScreenLocked),
+        "the lock frame is first: the screen was locked when the flush began"
+    );
+    assert!(!sealed.load(std::sync::atomic::Ordering::SeqCst), "the flush has not ended when the lock call returned");
+    w.until("the seal landed in the background", |_| sealed.load(std::sync::atomic::Ordering::SeqCst));
+    w.engine
+        .unlock_screen_platform_verified(w.engine.session_turn())
+        .expect("the platform's yes unlocks the screen");
+    w.settle();
+    let offered = |w: &Window| {
+        w.rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.office.recovery.is_some())
+            || !viewers::office_over::recovery_pending(&w.rt.state).is_empty()
+    };
+    w.until("the last text is offered", |w| offered(w));
+}
+
 /// Recovery: a snapshot the helper handed over is kept (sealed by the engine); after a lock and an unlock the
 /// window says so, the reopened document offers it, and Restore opens the editor on the kept bytes, unsaved.
 #[test]

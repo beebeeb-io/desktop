@@ -269,7 +269,22 @@ impl<C: CredentialStores> Engine<C> {
         session: SessionGeneration,
         with: impl FnOnce(&Store<'_>) -> Result<T, RecoveryRefused>,
     ) -> Result<T, RecoveryRefused> {
-        let (_token, key) = self.edit_credentials(session).map_err(|_| RecoveryRefused::NotSignedIn)?;
+        self.recovery_store_as(session, false, with)
+    }
+
+    /// `after_screen_lock`: a put may also use a screen lock's short grant (office_session_end), so the work typed
+    /// before the lock is still sealed. Only a put: a read or a delete under a locked screen stays refused.
+    fn recovery_store_as<T>(
+        &self,
+        session: SessionGeneration,
+        after_screen_lock: bool,
+        with: impl FnOnce(&Store<'_>) -> Result<T, RecoveryRefused>,
+    ) -> Result<T, RecoveryRefused> {
+        let key = match self.edit_credentials(session) {
+            Ok((_token, key)) => key,
+            Err(_) if after_screen_lock => self.screen_flush_key(session).ok_or(RecoveryRefused::NotSignedIn)?,
+            Err(_) => return Err(RecoveryRefused::NotSignedIn),
+        };
         let master = MasterKey::from_bytes(*key);
         with(&Store::new(&self.config.state_dir, &self.config.account_id, &master))
     }
@@ -283,7 +298,7 @@ impl<C: CredentialStores> Engine<C> {
         base: i64,
         bytes: &Zeroizing<Vec<u8>>,
     ) -> Result<(), RecoveryRefused> {
-        self.recovery_store(session, |s| s.put(file_id, base, bytes))
+        self.recovery_store_as(session, true, |s| s.put(file_id, base, bytes))
     }
 
     /// The documents of this account that have a blob.
