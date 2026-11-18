@@ -98,6 +98,8 @@ fn edit_latency_typing_in_the_middle_of_60_pages_p95_within_16ms() {
 
     let mut samples = Vec::with_capacity(SAMPLES);
     let mut whole = 0usize;
+    let mut applies: Vec<f64> = Vec::new();
+    let mut strips: Vec<(u32, u32)> = Vec::new();
     // One warm-up character (not counted), then the 200.
     for i in 0..=SAMPLES {
         let ch = char::from(b'a' + (i % 26) as u8).to_string();
@@ -108,6 +110,7 @@ fn edit_latency_typing_in_the_middle_of_60_pages_p95_within_16ms() {
             (got, Message::Edited(e)) if got == id => e,
             other => panic!("Edited for {id} was due: {other:?}"),
         };
+        let apply_ms = ms(started.elapsed());
         let caret = edited.caret.expect("the caret is on a page after a character");
         let (page, strip) = match &edited.dirty {
             Dirty::Rects(rects) if !rects.is_empty() => (rects[0].page, Some(region(&opened, &rects[0], scale))),
@@ -117,10 +120,13 @@ fn edit_latency_typing_in_the_middle_of_60_pages_p95_within_16ms() {
             }
         };
         id += 2;
+        let strip_dbg = strip;
         let pixels = render(&mut helper, &memory, id, &opened, page, scale, strip);
         let elapsed = ms(started.elapsed());
         assert!(pixels.chunks_exact(4).any(|p| p != &pixels[..4]), "the strip is not flat");
         if i > 0 {
+            applies.push(apply_ms);
+            if let Some(s) = &strip_dbg { strips.push((s.w, s.h)); }
             samples.push(elapsed);
         }
     }
@@ -137,6 +143,7 @@ fn edit_latency_typing_in_the_middle_of_60_pages_p95_within_16ms() {
         rank(&samples, 1.0),
         whole
     );
+    println!("edit apply: median={:.2} p95={:.2}; strip {:?}", rank(&applies, 0.5), rank(&applies, 0.95), strips.first());
     if cfg!(debug_assertions) {
         println!("edit latency gate: not taken in a debug build");
         return;

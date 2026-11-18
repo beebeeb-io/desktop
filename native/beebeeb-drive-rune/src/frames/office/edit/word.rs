@@ -367,3 +367,7 @@ fn reveal(
 #[cfg(test)]
 #[path = "word_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "budget_tests.rs"]
+mod budget_tests;
