@@ -561,7 +561,7 @@ fn source_with(engine: Arc<TestEngine>, fake: &Fake, opened: Opened) -> EngineVi
     source.office.ships = ALL;
     source.office.helper = || Some(PathBuf::from("beebeeb-office-render"));
     let fake = fake.clone();
-    source.office.opener = Box::new(move |_, kind, bytes, _| {
+    source.office.opener = Box::new(move |_, kind, bytes, _, _| {
         opened.lock().unwrap().push((kind, bytes.len()));
         fake.view(kind)
     });
@@ -586,12 +586,12 @@ fn editor_with(
         pptx: true,
     };
     let session = fake.clone();
-    source.office.edit_opener = Box::new(move |_, kind, bytes, _| {
+    source.office.edit_opener = Box::new(move |_, kind, bytes, _, _| {
         edits.lock().unwrap().push((kind, bytes.len()));
         session.editor(kind)
     });
     let template = template.clone();
-    source.office.new_opener = Box::new(move |_, kind, _, _| template.editor(kind));
+    source.office.new_opener = Box::new(move |_, kind, _, _, _| template.editor(kind));
     source
 }
 

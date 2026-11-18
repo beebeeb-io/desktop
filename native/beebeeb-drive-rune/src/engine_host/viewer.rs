@@ -229,6 +229,50 @@ pub trait ViewerEngine: Send + Sync + 'static {
     ) -> Result<String, EditRefused> {
         Err(EditRefused::Failed)
     }
+    /// [`Engine::scratch_for`]: the session's sealed scratch for the editor's large working copies. `None`: copies
+    /// stay in memory.
+    fn office_scratch(
+        &self,
+        _session: SessionGeneration,
+    ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
+        None
+    }
+    /// [`Engine::put_office_snapshot_for`]: keep an editing session's snapshot of `file_id` as its one recovery blob.
+    fn recovery_put(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _base: i64,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
+    /// [`Engine::office_snapshots_for`]: the account's recovery blobs.
+    fn recovery_list(
+        &self,
+        _session: SessionGeneration,
+    ) -> Result<
+        Vec<beebeeb_engine::app::office_recovery::RecoveryEntry>,
+        beebeeb_engine::app::office_recovery::RecoveryRefused,
+    > {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
+    /// [`Engine::take_office_snapshot_for`]: the blob's bytes (the blob stays).
+    fn recovery_take(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
+    /// [`Engine::discard_office_snapshot_for`].
+    fn recovery_discard(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
     /// [`Engine::save_text_copy_for`]. A worker's.
     fn save_copy(
         &self,
@@ -415,6 +459,49 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         bytes: &zeroize::Zeroizing<Vec<u8>>,
     ) -> Result<String, EditRefused> {
         self.engine.create_office_for(session, folder, name, bytes)
+    }
+
+    fn office_scratch(
+        &self,
+        session: SessionGeneration,
+    ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
+        self.engine.scratch_for(session)
+    }
+
+    fn recovery_put(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        base: i64,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        self.engine.put_office_snapshot_for(session, file_id, base, bytes)
+    }
+
+    fn recovery_list(
+        &self,
+        session: SessionGeneration,
+    ) -> Result<
+        Vec<beebeeb_engine::app::office_recovery::RecoveryEntry>,
+        beebeeb_engine::app::office_recovery::RecoveryRefused,
+    > {
+        self.engine.office_snapshots_for(session)
+    }
+
+    fn recovery_take(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        self.engine.take_office_snapshot_for(session, file_id)
+    }
+
+    fn recovery_discard(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        self.engine.discard_office_snapshot_for(session, file_id)
     }
 }
 

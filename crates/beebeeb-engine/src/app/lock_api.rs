@@ -450,6 +450,8 @@ impl<C: CredentialStores> Engine<C> {
             let _ = vault.clear_lock_flag(LockFlag::Attempts);
             let mut survives_restart = vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
             let stopped = self.stop_holding_step().await;
+            // The Office scratch key leaves memory with the session (every sealed spill stops opening, the folder goes).
+            self.end_office_scratch_at_session_end();
             self.forget_session_as(SessionTransition::Lock, SessionMoved::Ended);
             if vault.lock_flag(LockFlag::VaultClosed) != Some(true) {
                 survives_restart = vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();

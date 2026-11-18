@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::engine_host::office_host::{EditKind, Template};
+use beebeeb_engine::app::office_scratch::ScratchStore;
 
 /// The read's one answer: the decrypted bytes and the session they were read for.
 type Read = Result<(SessionGeneration, Zeroizing<Vec<u8>>), OpenFileError>;
@@ -12,10 +13,10 @@ type Read = Result<(SessionGeneration, Zeroizing<Vec<u8>>), OpenFileError>;
 pub(crate) type Opener = Box<dyn Fn(&Path, OfficeKind, Zeroizing<Vec<u8>>, Wake) -> OfficeView + Send>;
 
 /// Starts an editing session on the bytes (the app's: [`OfficeView::open_edit`]; a test's fake).
-pub(crate) type EditOpener = Box<dyn Fn(&Path, EditKind, Zeroizing<Vec<u8>>, Wake) -> OfficeView + Send>;
+pub(crate) type EditOpener = Box<dyn Fn(&Path, EditKind, Zeroizing<Vec<u8>>, Wake, Option<ScratchStore>) -> OfficeView + Send>;
 
 /// Starts a new document from a template (the app's: [`OfficeView::new_doc`]; a test's fake).
-pub(crate) type NewOpener = Box<dyn Fn(&Path, EditKind, Template, Wake) -> OfficeView + Send>;
+pub(crate) type NewOpener = Box<dyn Fn(&Path, EditKind, Template, Wake, Option<ScratchStore>) -> OfficeView + Send>;
 
 /// Which types open in the editor when the file may be changed. The rest open in the viewer, as before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,13 +84,15 @@ impl Default for Office {
 pub(super) struct Shown {
     pub(super) file_id: String,
     kind: OfficeKind,
-    kept: bool,
-    session: SessionGeneration,
-    account: Option<String>,
-    helper: PathBuf,
+    pub(super) kept: bool,
+    pub(super) session: SessionGeneration,
+    pub(super) account: Option<String>,
+    pub(super) helper: PathBuf,
     cancel: Arc<AtomicBool>,
     /// What it opens as: an editing session (the account may change the file), or the viewer (`None`).
-    edit: Option<EditKind>,
+    pub(super) edit: Option<EditKind>,
+    /// The version the editor's file was opened from (the recovery blob's base).
+    pub(super) base: i64,
     /// The read's answer, while it is on its way.
     inbox: Option<mpsc::Receiver<Read>>,
     pub(super) view: Option<OfficeView>,
@@ -191,6 +194,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             helper,
             cancel,
             edit,
+            base: opening.edit.map_or(0, |facts| facts.version),
             inbox: Some(inbox),
             view: None,
             ended: false,
@@ -227,9 +231,19 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     let waker = self.engine.clone();
                     let wake: Wake = Arc::new(move || waker.wake());
                     let mut view = match shown.edit {
-                        Some(edit) => (self.office.edit_opener)(&shown.helper, edit, bytes, wake),
+                        Some(edit) => {
+                            let scratch = engine.office_scratch(shown.session);
+                            (self.office.edit_opener)(&shown.helper, edit, bytes, wake, scratch)
+                        }
                         None => (self.office.opener)(&shown.helper, shown.kind, bytes, wake),
                     };
+                    if shown.edit.is_some() {
+                        let recovery = recovery::Recovery::new(
+                            Arc::new(recovery::EngineBlobs(self.engine.clone())),
+                            shown.session,
+                        );
+                        view.set_recovery(recovery, &shown.file_id, shown.base);
+                    }
                     view.set_kept(shown.kept);
                     shown.view = Some(view);
                 }

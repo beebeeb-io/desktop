@@ -14,8 +14,6 @@
 //! BLOCKS: the disk, on the window's thread for a blob of a document (small next to a decrypt; the host's snapshot
 //! cadence is seconds). Must not: log a name, a path or a byte.
 
-#![allow(dead_code)] // the source's Office arm calls it (w05-wire-shell)
-
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -60,6 +58,116 @@ impl<C: CredentialStores> Blobs for Engine<C> {
 
     fn discard(&self, session: SessionGeneration, file_id: &str) -> Result<(), RecoveryRefused> {
         self.discard_office_snapshot_for(session, file_id)
+    }
+}
+
+/// The view's engine, as the recovery store reaches it (the trait's calls; the engine's own `Blobs` impl is the
+/// concrete one, this one is what the source holds).
+pub(crate) struct EngineBlobs<E: ViewerEngine>(pub(crate) Arc<E>);
+
+impl<E: ViewerEngine> Blobs for EngineBlobs<E> {
+    fn put(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        base: i64,
+        bytes: &Zeroizing<Vec<u8>>,
+    ) -> Result<(), RecoveryRefused> {
+        self.0.recovery_put(session, file_id, base, bytes)
+    }
+
+    fn list(&self, session: SessionGeneration) -> Result<Vec<RecoveryEntry>, RecoveryRefused> {
+        self.0.recovery_list(session)
+    }
+
+    fn take(&self, session: SessionGeneration, file_id: &str) -> Result<Zeroizing<Vec<u8>>, RecoveryRefused> {
+        self.0.recovery_take(session, file_id)
+    }
+
+    fn discard(&self, session: SessionGeneration, file_id: &str) -> Result<(), RecoveryRefused> {
+        self.0.recovery_discard(session, file_id)
+    }
+}
+
+/// Where one editing session's snapshots go: the file's recovery blob.
+pub(crate) struct Tap {
+    recovery: Recovery,
+    file_id: String,
+    base: i64,
+}
+
+impl Tap {
+    pub(crate) fn new(recovery: Recovery, file_id: &str, base: i64) -> Tap {
+        Tap { recovery, file_id: file_id.to_string(), base }
+    }
+
+    /// Keep `bytes` as the blob. A refusal only means the safety net is missing; the document goes on.
+    pub(crate) fn keep(&self, bytes: &Zeroizing<Vec<u8>>) {
+        let _ = self.recovery.keep(&self.file_id, self.base, bytes);
+    }
+}
+
+impl<E: ViewerEngine> EngineViewerSource<E> {
+    /// The recovery store for the session now. `None`: no session.
+    fn office_recovery_store(&self) -> Option<Recovery> {
+        self.engine
+            .has_session()
+            .then(|| Recovery::new(Arc::new(EngineBlobs(self.engine.clone())), self.engine.session_turn()))
+    }
+
+    /// When this PC's kept editing of `file_id` is from (the offer). Only for the editor of that file.
+    pub(in crate::engine_host::viewer) fn office_recovery(&self, file_id: &str) -> Option<RecoveryOffer> {
+        self.office_recovery_store()?.offer(file_id)
+    }
+
+    /// The account's kept editings, newest first, for the notice after unlock (the shell's hook calls this).
+    pub(in crate::engine_host::viewer) fn office_recovery_pending(&self) -> Vec<Pending> {
+        self.office_recovery_store().map(|store| store.pending()).unwrap_or_default()
+    }
+
+    /// Drop the kept editing of `file_id`.
+    pub(in crate::engine_host::viewer) fn office_discard_recovery(&mut self, file_id: &str) {
+        if let Some(store) = self.office_recovery_store() {
+            store.discard(file_id);
+        }
+    }
+
+    /// Open the kept editing of `file_id` in the editor instead of the file's own bytes: a new session starts on the
+    /// blob (the old one ends), and the editor is told `Restored{at}`. The blob stays until a save or a discard.
+    /// `false`: not the open editor of this file, a save is on its way, or there is no blob.
+    pub(in crate::engine_host::viewer) fn office_restore(&mut self, file_id: &str) -> bool {
+        let Some(store) = self.office_recovery_store() else {
+            return false;
+        };
+        let session = self.engine.session_turn();
+        let account = self.engine.account();
+        let busy = self.changes.busy || self.office.work.saving.is_some();
+        let Some(shown) = self
+            .office
+            .shown
+            .as_mut()
+            .filter(|shown| !busy && shown.file_id == file_id && !shown.ended && shown.session == session)
+            .filter(|shown| shown.account == account && shown.view.is_some())
+        else {
+            return false;
+        };
+        let Some(kind) = shown.edit else {
+            return false;
+        };
+        let (Some(offer), Some(bytes)) = (store.offer(file_id), store.restore(file_id)) else {
+            return false;
+        };
+        let waker = self.engine.clone();
+        let wake: crate::engine_host::office_host::Wake = Arc::new(move || waker.wake());
+        let scratch = self.engine.office_scratch(session);
+        let mut view = (self.office.edit_opener)(&shown.helper, kind, bytes, wake, scratch);
+        view.set_kept(shown.kept);
+        view.set_recovery(store, file_id, shown.base);
+        view.push_answer(EditAnswer::Restored { at: offer.at });
+        if let Some(mut old) = shown.view.replace(view) {
+            old.close(CloseWhy::Closed);
+        }
+        true
     }
 }
 

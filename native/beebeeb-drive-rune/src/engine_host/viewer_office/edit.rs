@@ -276,7 +276,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             ..
         } = pending;
         let (session, epoch, name, id) = (stamp.session, stamp.epoch, stamp.name.clone(), file_id.clone());
-        let started = self.spawn(&file_id, stamp, move |engine| match how {
+        let started = self.spawn(&file_id, stamp, move |engine| {
+            let end = match how {
             How::Save => settle(engine.save_office(session, &id, &bytes, base, epoch), &id, &name),
             // Mine becomes the newest version: saved from the version the file is at now.
             How::Mine => match engine.edit_facts(session, &id, epoch) {
@@ -301,6 +302,12 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     Err(_) => (Settled::Failed, None),
                 }
             }
+            };
+            // The save landed: the file's recovery blob is not needed any more.
+            if matches!(end.0, Settled::Saved { .. }) {
+                let _ = engine.recovery_discard(session, &id);
+            }
+            end
         });
         if !started {
             self.changes.busy = false;
@@ -332,7 +339,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         };
         let waker = self.engine.clone();
         let wake: Wake = Arc::new(move || waker.wake());
-        let view = (self.office.new_opener)(&helper, kind, template, wake);
+        let scratch = self.engine.office_scratch(self.engine.session_turn());
+        let view = (self.office.new_opener)(&helper, kind, template, wake, scratch);
         self.office.work.creating = Some(Creating {
             view,
             folder: folder.map(str::to_string),
