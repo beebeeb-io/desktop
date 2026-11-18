@@ -186,6 +186,10 @@ pub fn cell_box(view: &SheetView, t: &Theme) -> rune::El {
         // Rune keeps `focused` for a field the pointer or Tab put the keyboard in; otherwise it shows the cell's name.
         if !g.name.focused {
             g.name.replace_text(name.clone());
+        } else if g.name.text == name {
+            // Focused and not yet typed in: everything is selected, so the first key replaces the name.
+            let n = g.name.text.len();
+            g.name.set_selection(0, n);
         }
     });
     with(|g| text_input(&g.name, sheets::MONO))
