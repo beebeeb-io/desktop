@@ -128,7 +128,7 @@ impl<C: CredentialStores> LinkCalls<C> {
             return Err(ActionError::NotYet);
         };
         if item.is_folder {
-            return Err(ActionError::NotYet);
+            return Err(ActionError::NotAFile);
         }
         if self.in_flight.contains_key(&item.id) {
             return Err(ActionError::InFlight);
@@ -215,7 +215,7 @@ fn why(refused: ShareLinkError) -> ActionError {
     match refused {
         ShareLinkError::NotSignedIn => ActionError::Unavailable,
         ShareLinkError::Offline => ActionError::Offline,
-        ShareLinkError::NotAFile => ActionError::NotYet,
+        ShareLinkError::NotAFile => ActionError::NotAFile,
         ShareLinkError::HasLink => ActionError::HasLink,
         // Asking again changes nothing (nothing was sent, and nothing would be): said without Try again.
         ShareLinkError::NotFound | ShareLinkError::KeyUnavailable => ActionError::Unavailable,

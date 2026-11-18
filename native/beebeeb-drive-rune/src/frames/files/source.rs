@@ -63,6 +63,9 @@ pub enum ActionError {
     NotOnThisSystem,
     /// This app cannot do it yet (a link to a folder, to several items, a view-only link): nothing was sent.
     NotYet,
+    /// Copy link left it: the item is a folder, and only a file has a link here. Nothing was sent, and Try again
+    /// would change nothing.
+    NotAFile,
     /// Copy link left it: the file already has a link, and that link cannot be copied again yet. No second link
     /// was made, and Try again would change nothing.
     HasLink,

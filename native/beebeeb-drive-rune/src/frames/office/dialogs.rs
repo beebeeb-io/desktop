@@ -49,12 +49,24 @@ fn link(index: usize, words: &str, t: &Theme) -> El {
             .key(format!("{key}-line"))
             .child(kit::label(format!("{key}-text"), words, type_::CAPTION, ink))
     };
-    row()
+    let link = row()
         .key(key.clone())
         .role("link")
         .label(words)
         .focusable(true)
-        .cursor(rune::Cursor::Pointer)
+        .cursor(rune::Cursor::Pointer);
+    // "Third-party licences" opens the installed licence lines (Settings' open-source-licences target). The source
+    // link has no address this build may open yet, so it stays as it is.
+    let link = if index == 1 {
+        link.on_press(|s: &mut State| {
+            if let Err(why) = crate::frames::settings::about::open_licences() {
+                s.settings.toast = Some(why);
+            }
+        })
+    } else {
+        link
+    };
+    link
         .child(
             col()
                 .key(format!("{key}-col"))
@@ -160,6 +172,45 @@ mod tests {
             assert_ne!(e.text_color, Some(t.accent_deep), "a link is never Amber");
         }
         assert!(b.rect[1] - a.rect[1] >= 14.0, "the links are on two lines");
+    }
+
+    #[test]
+    fn third_party_licences_opens_the_licence_lines_and_the_source_link_opens_nothing() {
+        use rune::{Env, Runtime};
+        let mut state = crate::init();
+        (FRAMES[0].1)(&mut state);
+        let mut rt = Runtime::new(
+            state,
+            crate::view,
+            (1278.0, 798.0),
+            Env {
+                system_dark: false,
+                scale: 2.0,
+            },
+        );
+        rt.frame(0.0);
+        let click = |rt: &mut Runtime<State>, key: &str| {
+            let r = rt
+                .elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(key))
+                .unwrap_or_else(|| panic!("{key} is drawn"))
+                .rect;
+            let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(0.0);
+        };
+        rt.state.settings.toast = None;
+        click(&mut rt, "lic-link-0");
+        assert_eq!(rt.state.settings.toast, None, "the source link opens nothing here");
+        // No licence file sits beside a test build, so the press reaching the licence target says so.
+        click(&mut rt, "lic-link-1");
+        assert_eq!(
+            rt.state.settings.toast,
+            Some(crate::frames::settings::about::LICENCES_MISSING),
+            "the press went to the open-source-licences target"
+        );
     }
 
     #[test]

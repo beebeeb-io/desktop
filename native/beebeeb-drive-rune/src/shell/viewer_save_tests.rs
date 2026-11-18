@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use rune::{Env, Runtime};
 
@@ -112,7 +112,16 @@ fn viewer_save_a_place_chosen_after_sign_out_writes_nothing() {
     saver.turn.store(2, Ordering::SeqCst);
     let platform = FakePlatform::default();
     platform.saves.lock().unwrap().push_back(SaveAnswer::Chosen(dest.clone()));
-    let end = ask_and_save(&platform, &*saver, pressed, &AtomicBool::new(false), "id", "late.m4a", PathBuf::new());
+    let end = ask_and_save(
+        &platform,
+        &*saver,
+        pressed,
+        &AtomicBool::new(false),
+        &|_, _| {},
+        "id",
+        "late.m4a",
+        PathBuf::new(),
+    );
     assert_eq!(end, Some(Err(SaveRefused::NotSignedIn.words())));
     assert!(saver.saved.lock().unwrap().is_empty(), "no copy was started");
     assert!(!dest.exists());
@@ -175,4 +184,81 @@ fn viewer_save_the_shells_poll_hands_the_result_to_the_toast() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     assert_eq!(toast.as_deref(), Some(SAVED));
+}
+
+/// A saver that reports 30 of 100 and then waits until the test lets the copy end.
+struct Slow {
+    go: Mutex<mpsc::Receiver<()>>,
+}
+
+impl CopySaver for Slow {
+    fn turn(&self) -> SessionGeneration {
+        SessionGeneration::for_test(1)
+    }
+    fn save(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        dest: &Path,
+        progress: &crate::engine_host::save_copy::Progress,
+        _cancel: &AtomicBool,
+    ) -> Result<(), SaveRefused> {
+        progress(30, 100);
+        let _ = self.go.lock().unwrap().recv();
+        std::fs::write(dest, b"copy").map_err(|_| SaveRefused::Failed)
+    }
+}
+
+#[test]
+fn viewer_save_says_how_far_the_copy_is_while_it_is_written_then_that_it_is_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let platform = Arc::new(FakePlatform::default());
+    platform
+        .saves
+        .lock()
+        .unwrap()
+        .push_back(SaveAnswer::Chosen(dir.path().join("take-3.m4a")));
+    let (let_go, go) = mpsc::channel();
+    let saver = Arc::new(Slow { go: Mutex::new(go) });
+    let mut rt = runtime();
+    rt.update(|s, tx| {
+        assert!(viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::AUDIO));
+        assert!(save_with(s, tx, platform, saver, "id".into(), "take-3.m4a".into(), PathBuf::new()));
+    });
+    let mut said = None;
+    for _ in 0..400 {
+        rt.update(|s, tx| {
+            poll(s, tx);
+            said = viewers::ui(s).and_then(|ui| ui.toast.clone());
+        });
+        if said.as_deref() == Some("Saving a copy\u{2026} 30%") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(said.as_deref(), Some("Saving a copy\u{2026} 30%"), "the viewer says how far it is");
+    assert!(running());
+    let_go.send(()).unwrap();
+    for _ in 0..400 {
+        let mut ended = false;
+        rt.update(|s, tx| {
+            let was = running();
+            poll(s, tx);
+            ended = was && !running();
+        });
+        if ended {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let mut toast = None;
+    rt.update(|s, _| toast = viewers::ui(s).and_then(|ui| ui.toast.clone()));
+    assert_eq!(toast.as_deref(), Some(SAVED));
+}
+
+#[test]
+fn viewer_save_progress_words_never_say_whole_before_the_end() {
+    assert_eq!(progress_words(0, 0), "Saving a copy\u{2026}");
+    assert_eq!(progress_words(50, 100), "Saving a copy\u{2026} 50%");
+    assert_eq!(progress_words(100, 100), "Saving a copy\u{2026} 99%");
 }

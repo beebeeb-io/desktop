@@ -115,7 +115,7 @@ fn new_request(s: &State, t: &Theme) -> El {
     let setting = |m: usize, icon: &'static Icon, words: &str, which: Setting| {
         let mut item = Item::new(Some(icon), words)
             .trailing(Trailing::Pop {
-                choice: Pick::words(which)[pick.chosen(which)].to_string(),
+                choice: pick.words(which)[pick.chosen(which)].clone(),
                 open: pick.open == Some(which),
                 menu_at: (252.0, 28.0),
             })
@@ -175,11 +175,14 @@ fn new_request_menu(s: &State, t: &Theme) -> Option<El> {
         Setting::Size => ("Total size", 3),
     };
     let chosen = ui.fields.request.chosen(which);
-    let items = Pick::words(which)
+    let items = ui
+        .fields
+        .request
+        .words(which)
         .into_iter()
         .enumerate()
         .map(|(i, words)| {
-            crate::ui::settings_controls::menu_item(0, i, words, i == chosen, false, t)
+            crate::ui::settings_controls::menu_item(0, i, &words, i == chosen, false, t)
                 .on_press(move |s: &mut State| s.frames.shared.fields.request.choose(which, i))
         })
         .collect();

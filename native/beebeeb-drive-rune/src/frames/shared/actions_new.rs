@@ -16,7 +16,10 @@ use crate::frames::Intent;
 pub fn take(s: &mut State, _tx: &mut Tx, intent: &Intent) -> bool {
     match intent {
         Intent::Frame("DW-0504") => {
-            s.frames.shared.open_dialog(Dialog::NewRequest);
+            let ui = &mut s.frames.shared;
+            ui.open_dialog(Dialog::NewRequest);
+            let folders = ui.source.folders();
+            ui.fields.request.set_folders(folders);
             true
         }
         Intent::Frame("DW-0414") => open_files_new(s),

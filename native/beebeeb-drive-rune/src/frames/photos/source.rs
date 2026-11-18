@@ -170,7 +170,7 @@ pub enum Answered {
     },
 }
 
-/// What the download of the open photo's original did ([`PhotosSource::take_original_answers`]).
+/// What the download of the open photo's original did ([`Pumped::originals`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OriginalAnswer {
     /// This much of this many bytes has arrived.
@@ -206,6 +206,9 @@ pub struct Pumped {
     /// Something is still on its way: look again soon.
     pub busy: bool,
     pub answered: Vec<Answered>,
+    /// What the open photo's original download did since the last pump: it arrives here, with the rest of what
+    /// the pump took in, never around it.
+    pub originals: Vec<OriginalAnswer>,
 }
 
 pub trait PhotosSource {
@@ -287,10 +290,6 @@ pub trait PhotosSource {
     }
     /// Stops the original's download and wipes what is held of it. The preview is untouched.
     fn stop_original(&mut self, _id: PhotoId) {}
-    /// What the original's download did since the last call (read right after [`Self::pump`]).
-    fn take_original_answers(&mut self) -> Vec<OriginalAnswer> {
-        Vec::new()
-    }
     /// The decoded original of `id`, once it is here.
     fn original(&self, _id: PhotoId) -> Option<Pixels> {
         None

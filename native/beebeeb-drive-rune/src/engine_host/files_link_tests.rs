@@ -350,7 +350,7 @@ fn the_dialog_with_nothing_chosen_makes_no_second_link_and_a_file_not_here_offer
 fn a_folder_several_items_and_no_session_are_refused_with_nothing_sent() {
     let fake = fake("unsent");
     let (engine, mut source, _state) = signed_in(&fake);
-    assert_eq!(source.copy_link(&[row(FOLDER, true)]), Err(ActionError::NotYet));
+    assert_eq!(source.copy_link(&[row(FOLDER, true)]), Err(ActionError::NotAFile));
     // Never the first of several.
     assert_eq!(
         source.copy_link(&[row(NOTES, false), row(PLAN, false)]),
