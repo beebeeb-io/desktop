@@ -42,8 +42,11 @@ fn click(rt: &mut Runtime<State>, key: &str) {
 #[test]
 fn enter_in_photos_search_box_shows_searchs_results_for_that_text() {
     let mut rt = photos_window();
-    rt.state.search = rune::TextEdit::new("harbour");
     click(&mut rt, "search-input");
+    rt.key(KeyEvent {
+        key: Key::Text("harbour".into()),
+        mods: Mods::default(),
+    });
     rt.key(KeyEvent {
         key: Key::Enter,
         mods: Mods::default(),
