@@ -208,6 +208,8 @@ pub fn poll(s: &mut State) {
             _ => {
                 d.creating = false;
                 d.failed = Some(Toast::failure(Action::NewFile, ActionError::Failed));
+                // The keyboard goes back to the name: that also makes the window draw the sentence.
+                nf.focus = Some(NAME_INPUT);
                 None
             }
         }

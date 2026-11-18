@@ -296,7 +296,8 @@ fn an_office_type_goes_on_to_new_document_without_a_name_here() {
             press(&mut rt, Key::Right);
         }
         assert_eq!(picked(&rt), Some(kind));
-        operate(&mut rt, "btn-0");
+        // Continue, without the shell's poll (which hands the intent on): New document is asked for.
+        super::new_file::go_on(&mut rt.state);
         assert_eq!(dialog_step(&rt), None, "{kind:?}: New document takes over");
         assert_eq!(super::take_asked(&mut rt.state), [Intent::NewDocument(kind)]);
     }

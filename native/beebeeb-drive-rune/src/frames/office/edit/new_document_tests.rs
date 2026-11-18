@@ -114,8 +114,12 @@ fn name(rt: &Runtime<crate::State>) -> String {
     rt.state.viewer.new_file.as_ref().unwrap().name.text.clone()
 }
 
+/// A click on Create, as the person presses it, then the polls that follow.
 fn press_create(rt: &mut Runtime<crate::State>) {
-    create(&mut rt.state);
+    rt.frame(1.0);
+    let [x, y, w, h] = info(rt, "btn-0").rect;
+    rt.pointer_down(x + w / 2.0, y + h / 2.0);
+    rt.pointer_up(x + w / 2.0, y + h / 2.0);
     rt.frame(0.0);
     rt.frame(0.0);
 }
