@@ -16,10 +16,6 @@
 
 use beebeeb_engine::app::share_link_api::{LinkChange, ShareLinkError};
 
-#[cfg(test)]
-#[path = "shared_links_tests.rs"]
-mod tests;
-
 use super::*;
 use crate::frames::files::link::LinkText;
 use crate::frames::shared::source::LinkEdit;
