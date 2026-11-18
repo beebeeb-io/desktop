@@ -19,6 +19,15 @@ fn row(name: &str, size_words: &str, bytes: Option<u64>, at: Option<i64>) -> Row
     }
 }
 
+/// A press on the toolbar's Sort, and the shell's poll taking the intent it queued.
+fn open_sort(rt: &mut rune::Runtime<crate::State>) {
+    click(rt, "sort-btn");
+    rt.update(|s, tx| {
+        crate::shell::intents::drain_frame_intents(s, tx);
+    });
+    settle(rt);
+}
+
 fn names(rows: &[Row]) -> Vec<&str> {
     rows.iter().map(|r| r.name.as_str()).collect()
 }
@@ -65,11 +74,11 @@ fn the_search_filter_lists_only_rows_whose_name_holds_it() {
 
 #[test]
 fn shared_sort_menu_sorts_the_rows_drawn_and_search_filters_them() {
-    let mut rt = runtime(super::scenes::dw_0508);
+    let mut rt = runtime(super::scenes::dw_0501);
     let drawn = |rt: &rune::Runtime<crate::State>| -> Vec<String> { (0..8).filter_map(|i| row_name(rt, i)).collect() };
     let before = drawn(&rt);
     assert!(before.len() > 2, "{before:?}");
-    click(&mut rt, "sort-btn");
+    open_sort(&mut rt);
     click(&mut rt, "mi-name");
     let mut want = before.clone();
     want.sort_by_key(|n| n.to_lowercase());
@@ -95,7 +104,7 @@ fn row_name(rt: &rune::Runtime<crate::State>, i: usize) -> Option<String> {
 fn trash_sort_menu_and_filter_work_on_its_rows() {
     let mut rt = runtime(crate::frames::trash::scenes::dw_0747);
     let before = rt.state.frames.trash.rows();
-    click(&mut rt, "sort-btn");
+    open_sort(&mut rt);
     click(&mut rt, "mi-name");
     let mut want: Vec<String> = before.iter().map(|r| r.name.clone()).collect();
     want.sort_by_key(|n| n.to_lowercase());
