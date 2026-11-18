@@ -39,12 +39,10 @@ fn open_licences_at(
 }
 
 /// Settings' `Open-source licences`: opens the installed licence file with the system's handler (`settings_open`).
-pub fn open_licences(s: &mut State) {
+/// `Err`: the words the toast of the pane shows (and the shell logs).
+pub fn open_licences() -> Result<(), &'static str> {
     let file = std::env::current_exe().ok().map(|exe| licences_beside(&exe));
-    if let Err(why) = open_licences_at(file, crate::engine_host::open_installed_file) {
-        crate::shell::host::log("NotWired(Open licences file)");
-        s.settings.toast = Some(why);
-    }
+    open_licences_at(file, crate::engine_host::open_installed_file)
 }
 
 /// Where the Release channel menu drops, from its row's top-left corner (the board's place,
@@ -312,6 +310,6 @@ mod about_tests {
     fn about_licences_row_is_routed_to_the_opener() {
         let router = include_str!("../../shell/settings_open.rs");
         assert!(router.contains("\"open-source-licences\" => {"), "the shell routes the row to open_licences");
-        assert!(router.contains("about::open_licences"));
+        assert!(router.contains("about::open_licences()"));
     }
 }
