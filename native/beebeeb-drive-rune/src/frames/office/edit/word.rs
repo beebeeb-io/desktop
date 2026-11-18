@@ -39,8 +39,15 @@ const ZOOM_WHEEL: f32 = 30.0;
 thread_local! {
     /// Where the last hit of this drag was sent (page, x, y in points): a move under a point of it asks nothing.
     static LAST_HIT: Cell<Option<(u32, f32, f32)>> = const { Cell::new(None) };
+    /// The next page area drawn before its editor's first answer takes the keyboard (once per opening).
+    static OPEN_FOCUS: Cell<bool> = const { Cell::new(true) };
     /// Ctrl + wheel not yet worth a zoom step.
     static WHEEL: Cell<f32> = const { Cell::new(0.0) };
+}
+
+/// A document was opened for editing: its page area takes the keyboard when it first appears.
+pub fn arm_open_focus() {
+    OPEN_FOCUS.set(true);
 }
 
 /// Move the keyboard to the page area (a ribbon tool gives it back with this after it acted).
@@ -282,7 +289,7 @@ pub fn surface(pages: El, doc: &DocBody, edit: &EditUi, stage: Option<[f32; 4]>,
         .child(pages);
     // The keyboard is on the page as the document opens: typing starts at once. Only until the editor's first
     // answer, so a pop-up or a ribbon tool that took the keyboard later keeps it.
-    if edit.revision == 0 && edit.caret.is_none() && !edit.has_keyboard {
+    if edit.revision == 0 && edit.caret.is_none() && !edit.has_keyboard && OPEN_FOCUS.replace(false) {
         surface = surface.autofocus();
     }
     for (i, rect) in edit.selection.iter().take(MAX_SELECTION_RECTS).enumerate() {
