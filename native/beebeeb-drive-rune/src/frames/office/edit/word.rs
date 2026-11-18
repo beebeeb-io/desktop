@@ -5,7 +5,7 @@ use std::cell::Cell;
 
 use beebeeb_office_protocol::check::MAX_SELECTION_RECTS;
 use beebeeb_office_protocol::office::{EditKind, EditOp, HitMode, Mark, Marks, Motion};
-use rune::{Color, Cursor, Cycle, Drag, El, Key, KeyEvent, Phase, Tx, WheelEvent, col, el};
+use rune::{Color, Cursor, Cycle, Drag, El, Key, KeyEvent, Phase, Transition, Tx, WheelEvent, col, el};
 
 use super::{EditUi, clipboard};
 use crate::State;
@@ -274,6 +274,8 @@ pub fn surface(pages: El, doc: &DocBody, edit: &EditUi, stage: Option<[f32; 4]>,
         .focusable(true)
         .no_focus_ring()
         .cursor(Cursor::Text)
+        // Typing and moving are direct manipulation: the caret and the pictures land at once, never glide.
+        .instant_changes()
         .on_key(|s: &mut State, ev: &KeyEvent, tx: &mut Tx| on_key(s, tx, ev))
         .on_drag(on_drag)
         .on_wheel(on_wheel)
@@ -283,6 +285,7 @@ pub fn surface(pages: El, doc: &DocBody, edit: &EditUi, stage: Option<[f32; 4]>,
         surface = surface.child(
             el().key(format!("sel-{i}"))
                 .a11y_hidden()
+                .transition(Transition::none())
                 .absolute(x, y)
                 .size(w, h)
                 .fill(Color::BLACK.alpha(SELECTION_ALPHA)),
@@ -297,6 +300,7 @@ pub fn surface(pages: El, doc: &DocBody, edit: &EditUi, stage: Option<[f32; 4]>,
     let mut mark = el()
         .key(CARET)
         .a11y_hidden()
+        .transition(Transition::none())
         .absolute(x, y)
         .size(size.0, size.1)
         .fill(Color::BLACK);

@@ -487,7 +487,7 @@ fn the_caret_blinks_only_with_the_keyboard() {
     let (mut rt, shared) = editor(true);
     answer(&mut rt, &shared, edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()));
     let idle = find(&rt, CARET).expect("caret");
-    assert!(idle.opacity < 1.0, "an idle caret rests dimmed: {}", idle.opacity);
+    assert!(idle.opacity < 1.0 && idle.loop_phase.is_none(), "an idle caret rests dimmed: {}", idle.opacity);
     focus_surface(&mut rt);
     rt.update(|s, tx| {
         edit::poll(s, tx);
@@ -495,8 +495,7 @@ fn the_caret_blinks_only_with_the_keyboard() {
     rt.frame(0.0);
     rt.frame(0.0);
     assert!(viewers::ui(&mut rt.state).and_then(|u| u.office.edit.as_ref()).is_some_and(|e| e.has_keyboard));
-    assert!(find(&rt, CARET).expect("caret").opacity >= 0.0);
-    assert!(rt.wake_deadline().is_some(), "a blinking caret wakes the window");
+    assert!(find(&rt, CARET).expect("caret").loop_phase.is_some(), "a caret with the keyboard blinks");
 }
 
 /// A caret the editor moved off screen is scrolled into view, and not before the editor has answered.
@@ -547,7 +546,7 @@ fn the_wheel_scrolls_and_ctrl_wheel_zooms() {
     let stage = rect(&rt, scroll::STAGE);
     let (x, y) = (stage[0] + stage[2] / 2.0, stage[1] + stage[3] / 2.0);
     let before = rect(&rt, "page")[1];
-    rt.wheel(x, y, -120.0);
+    rt.wheel_event(WheelEvent::new(0.0, -120.0).at(x, y).precise(true));
     for _ in 0..20 {
         rt.frame(1.0 / 60.0);
     }
