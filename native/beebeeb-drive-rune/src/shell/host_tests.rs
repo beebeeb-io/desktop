@@ -135,9 +135,13 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         let built = registry::frame(registry::group_for(&rt.state.shell.app)).is_some();
         assert_eq!(rt.find("not-built").is_none(), built, "{gate:?}");
         // Behind the gate there is no list, and no sidebar: nothing of the account. The two states
-        // before Files are the exception the board draws (DW-0009, DW-0014): the sidebar stands
-        // closed (dimmed, nothing in it can be pressed), and still no list and no file name.
-        let before_files = matches!(gate, GateState::Locked | GateState::NoPlan);
+        // before Files are the exception the board draws (DW-0009, DW-0014), and the credential-store card stands in
+        // the same window (`before_files.rs`): the sidebar stands closed (dimmed, nothing in it can be pressed),
+        // and still no list and no file name.
+        let before_files = matches!(
+            gate,
+            GateState::Locked | GateState::NoPlan | GateState::KeyStoreUnavailable
+        );
         assert_eq!(rt.find("sidebar").is_some(), before_files, "{gate:?}");
         assert!(rt.find("file-list").is_none(), "{gate:?}");
     }
