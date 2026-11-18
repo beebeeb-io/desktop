@@ -29,8 +29,8 @@ workarounds = ["ring"]
 # Our own two crates have no `license` field (Cargo.toml is not ours to change here): say what they are, with the repo's text.
 [beebeeb-engine.clarify]
 license = "AGPL-3.0-or-later"
-files = [{ path = "../../LICENSE", hash = 0x00000000 }]
+files = [{ path = "../../LICENSE", checksum = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0" }]
 
 [beebeeb-drive-rune.clarify]
 license = "AGPL-3.0-or-later"
-files = [{ path = "../../LICENSE", hash = 0x00000000 }]
+files = [{ path = "../../LICENSE", checksum = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0" }]
