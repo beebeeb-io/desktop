@@ -330,15 +330,24 @@ fn not_now_and_skip_turn_nothing_on() {
     assert_eq!(ui_step(&mut rt), Step::Lock);
     click(&mut rt, "skip");
     assert_eq!(ui_step(&mut rt), Step::Done);
-    assert!(
-        log.borrow().is_empty(),
-        "nothing was asked of the engine: {:?}",
-        log.borrow()
-    );
+    // "Not now" on the Lock step is "Continue" with the switch off (Windows Hello is asked first); "Skip setup" from
+    // it the same. Nothing else is asked.
+    assert_eq!(*log.borrow(), ["set_app_lock false 5 min"]);
     let values: Vec<String> = (0..3)
         .map(|i| info(&rt, &format!("item-{i}-value")).text.unwrap_or_default())
         .collect();
     assert_eq!(values, ["Not added", "Off", "Off"]);
+}
+
+#[test]
+fn not_now_on_the_lock_step_asks_the_switch_off_like_continue() {
+    let (ui_, log) = fixture(Script::default());
+    let mut rt = runtime_at(ui_, 2.0, false);
+    click(&mut rt, "btn-1"); // passkey: Not now
+    assert_eq!(ui_step(&mut rt), Step::Lock);
+    click(&mut rt, "btn-1"); // lock: Not now
+    assert_eq!(ui_step(&mut rt), Step::Backup);
+    assert_eq!(*log.borrow(), ["set_app_lock false 5 min"]);
 }
 
 #[test]
