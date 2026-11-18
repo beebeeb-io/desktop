@@ -16,7 +16,7 @@ use beebeeb_office_protocol::office::EditOp;
 
 use rune::{Align, Color, El, Icon, Key, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text_input};
 
-use crate::frames::office::edit::save::{self, Look, Sent};
+use crate::frames::office::edit::save::{self, Seen, Sent};
 use crate::frames::office::edit::word_insert::{self, Insert, LinkForm, Picking, TableForm};
 
 use super::chrome::{ButtonKind, button};
@@ -221,9 +221,9 @@ impl Ui {
             self.office.over = Some(Over::Conflict(other));
             return true;
         }
-        match save::look(&sent, &self.file.id, self.file.version, self.toast.as_deref()) {
-            Look::Waiting => false,
-            Look::Landed => {
+        match save::seen(&sent, &self.file.id, self.file.version, self.toast.as_deref()) {
+            Seen::Waiting => false,
+            Seen::Landed => {
                 self.office.save = None;
                 self.office.over = None;
                 if let Some(edit) = self.office.edit.as_mut() {
@@ -231,7 +231,7 @@ impl Ui {
                 }
                 true
             }
-            Look::Failed => {
+            Seen::Failed => {
                 self.office.save = None;
                 if let Some(edit) = self.office.edit.as_mut() {
                     edit.saving = false;
