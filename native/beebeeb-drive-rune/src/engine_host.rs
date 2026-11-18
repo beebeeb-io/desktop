@@ -121,6 +121,8 @@ pub mod setup;
 pub mod tray;
 // An open file: its facts from the local state, its content decrypted in memory (`viewer`).
 pub mod viewer;
+// "Save a copy…" and "Download to…": a copy of one file at a place the person chose (`shell::viewer_save`; Photos reuses it).
+pub mod save_copy;
 
 pub use signin::EngineSignInSource;
 pub use sync::EngineGlobalSource;
