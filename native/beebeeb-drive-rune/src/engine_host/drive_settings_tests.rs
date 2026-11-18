@@ -572,7 +572,7 @@ fn every_unwired_pane_draws_no_sample_value() {
 #[test]
 fn storage_is_wired_and_draws_what_was_read() {
     let fake = account();
-    let mut source = EngineDriveSettings::new(fake.clone(), Arc::default());
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
     assert!(source.wired(Pane::Storage));
     source.opened(Pane::Storage);
     settle(&mut source);
@@ -584,7 +584,7 @@ fn storage_is_wired_and_draws_what_was_read() {
     assert!(st.kinds.iter().all(|(_, _, size)| !size.is_empty() && !size.contains('\u{b7}')));
 
     *fake.trash.lock().unwrap() = Err("down".into());
-    let mut source = EngineDriveSettings::new(fake.clone(), Arc::default());
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
     source.opened(Pane::Storage);
     settle(&mut source);
     assert_eq!(source.storage().trash, "", "no count said, none drawn");
@@ -594,7 +594,7 @@ fn storage_is_wired_and_draws_what_was_read() {
 #[test]
 fn storage_frame_draws_rows_not_the_placeholder() {
     let fake = account();
-    let mut source = EngineDriveSettings::new(fake.clone(), Arc::default());
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
     source.opened(Pane::Storage);
     settle(&mut source);
     let rt = drawn("DW-0712", Box::new(source));
