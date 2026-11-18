@@ -1,4 +1,5 @@
-//! Photos routes: DownloadOriginal, StopOriginal (stub: the task that builds it edits only this file).
+//! Photos routes: DownloadOriginal, StopOriginal. The source downloads into memory and answers through `pump`
+//! (`Answered::Original*`, taken in by `session::answered`); a source that cannot hands the intent back.
 
 use rune::Tx;
 
@@ -7,9 +8,23 @@ use crate::State;
 
 /// Takes the intent it can; `Err` hands it back and Photos says "Not available in this version yet".
 pub fn handle(s: &mut State, _tx: &mut Tx, intent: Intent) -> Result<(), Intent> {
-    // No download is started: the tab does not say one is running.
-    if let (Intent::DownloadOriginal(_), Some(viewer)) = (&intent, &mut s.photos.viewer) {
-        viewer.original = Original::Preview;
+    match intent {
+        Intent::DownloadOriginal(id) => {
+            if s.photos.source.download_original(id) {
+                return Ok(());
+            }
+            // No download is started: the tab does not say one is running.
+            if let Some(viewer) = &mut s.photos.viewer
+                && viewer.id == id
+            {
+                viewer.original = Original::Preview;
+            }
+            Err(intent)
+        }
+        Intent::StopOriginal(id) => {
+            s.photos.source.stop_original(id);
+            Ok(())
+        }
+        other => Err(other),
     }
-    Err(intent)
 }

@@ -19,6 +19,8 @@ mod route_share;
 mod session;
 pub mod source;
 #[cfg(test)]
+mod original_tests;
+#[cfg(test)]
 mod tests;
 mod viewer;
 
@@ -545,7 +547,7 @@ impl Ui {
     pub fn close_viewer(&mut self) {
         self.stop_playing();
         if let Some(viewer) = self.viewer.take()
-            && matches!(viewer.original, Original::Downloading { .. })
+            && viewer.original != Original::Preview
         {
             self.ask(Intent::StopOriginal(viewer.id));
         }
@@ -583,7 +585,10 @@ impl Ui {
         if viewer.id == id && viewer.gone.is_none() {
             return;
         }
-        // A download carries on in the background (DW-0605b); the next photo shows its preview.
+        // The original is memory only and belongs to the open photo: another photo stops and wipes it.
+        if viewer.original != Original::Preview {
+            self.source.stop_original(viewer.id);
+        }
         // A video this window started stops when another item is shown.
         if let Some((_, handle)) = self.playing.take() {
             handle.stop(crate::media::StopReason::Closed);
@@ -600,6 +605,7 @@ impl Ui {
     pub fn show_preview(&mut self) {
         let Some(viewer) = &mut self.viewer else { return };
         let was = std::mem::replace(&mut viewer.original, Original::Preview);
+        // A whole original already here is wiped when the viewer closes or another photo shows (memory only).
         if matches!(was, Original::Downloading { .. }) {
             let id = viewer.id;
             self.ask(Intent::StopOriginal(id));
