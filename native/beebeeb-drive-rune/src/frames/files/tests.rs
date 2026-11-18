@@ -788,3 +788,27 @@ fn menus_toasts_and_the_path_have_their_roles_and_names() {
     assert_eq!((up.role, up.focusable), ("link", true));
     assert_eq!(info(&rt, "rows").label.as_deref(), Some("Lisbon trip"));
 }
+
+/// Two presses of a double-click with a frame drawn between them, as in a window (the selection the
+/// first press made is already on screen when the second goes down).
+fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
+    let (x, y) = centre(rt, key);
+    let now = CLOCK.with(|c| c.get());
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(now);
+    let (x, y) = centre(rt, key);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt);
+}
+
+#[test]
+fn a_double_click_on_a_folder_opens_it_again_after_going_into_another() {
+    let mut rt = runtime_of(init());
+    double_click_with_frame(&mut rt, "row-3-date");
+    assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Lisbon trip"));
+    assert_eq!(names(&rt)[0], "Day 1");
+    double_click_with_frame(&mut rt, "row-0-date");
+    assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Day 1"), "the second double-click opens Day 1");
+}
