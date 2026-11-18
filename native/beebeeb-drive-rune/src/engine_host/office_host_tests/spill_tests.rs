@@ -44,6 +44,16 @@ fn big() -> Vec<u8> {
     v
 }
 
+/// Debug builds seal and open 64 MiB slowly: the helper's timers are long here.
+const SLOW: Timeouts = Timeouts {
+    open: Duration::from_secs(120),
+    request: Duration::from_secs(120),
+    split: Duration::from_secs(120),
+    outline: Duration::from_secs(120),
+};
+
+const LONG: Duration = Duration::from_secs(120);
+
 const SPILL_LIMIT: usize = 64 * 1024 * 1024;
 
 #[test]
@@ -55,7 +65,7 @@ fn a_large_edit_spills_sealed_restarts_from_it_and_leaves_no_file() {
     let mut host = open_mode_held(
         mortal(),
         &registry,
-        TEST_TIMEOUTS,
+        SLOW,
         Cadence::PRODUCTION,
         Mode::Edit(EditKind::Docx),
         DocKind::Docx,
@@ -74,7 +84,7 @@ fn a_large_edit_spills_sealed_restarts_from_it_and_leaves_no_file() {
 
     // The helper dies: the restart opens what was sealed (the whole document).
     host.edit(EditOp::InsertText("die".to_owned())).expect("sent");
-    let until = std::time::Instant::now() + WITHIN;
+    let until = std::time::Instant::now() + LONG;
     let mut got = Vec::new();
     while !got.iter().any(|e| matches!(e, EditEvent::Restored { .. })) {
         assert!(std::time::Instant::now() < until, "restored in time: {got:?}");
@@ -85,7 +95,7 @@ fn a_large_edit_spills_sealed_restarts_from_it_and_leaves_no_file() {
 
     // The session ends (a close): nothing stays.
     host.close(CloseWhy::Closed);
-    let until = std::time::Instant::now() + WITHIN;
+    let until = std::time::Instant::now() + LONG;
     while !files(tmp.path()).is_empty() {
         assert!(std::time::Instant::now() < until, "scratch removed after the session");
         std::thread::sleep(Duration::from_millis(5));
