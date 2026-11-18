@@ -157,8 +157,28 @@ fn office_slides_ribbon_design_lists_layouts_and_applies_one() {
 fn office_slides_ribbon_design_without_layouts_asks_for_them() {
     let (mut rt, log) = editing(Tab::Layout, false);
     assert!(by_label(&rt, "Title slide").is_none());
-    press(&mut rt, "Show layouts");
+    // Opening the deck asked once on its own; the button asks again.
     assert_eq!(log.borrow().asked_layouts, 1);
+    press(&mut rt, "Show layouts");
+    assert_eq!(log.borrow().asked_layouts, 2);
+}
+
+#[test]
+fn office_slides_ribbon_an_open_deck_asks_for_its_layouts_once() {
+    let (mut rt, log) = editing(Tab::Home, false);
+    for _ in 0..3 {
+        rt.frame(0.0);
+    }
+    assert_eq!(log.borrow().asked_layouts, 1);
+    let (mut rt, log) = editing(Tab::Home, true);
+    rt.frame(0.0);
+    assert_eq!(log.borrow().asked_layouts, 0, "layouts already in: nothing to ask");
+}
+
+#[test]
+fn office_slides_ribbon_tab_words_are_design_and_transitions() {
+    let words: Vec<&str> = Tab::ALL.iter().map(|t| crate::frames::office::edit::slide::tab_label(*t)).collect();
+    assert_eq!(words, ["Home", "Insert", "Design", "Transitions"]);
 }
 
 #[test]
