@@ -307,14 +307,13 @@ impl<C: CredentialStores> Engine<C> {
         if self.acct.session.is_poisoned() {
             return Err(ShareLinkError::NotSignedIn);
         }
+        // Through the lock's choke point: a locked screen or a closed vault sends nothing.
         let (token, key) = self
-            .acct
-            .while_session_is(&self.writes, session, |current| {
-                (
-                    Zeroizing::new(current.token.clone()),
-                    Zeroizing::new(current.master_key),
-                )
+            .person_session(|current, now| {
+                (now == session)
+                    .then(|| (Zeroizing::new(current.token.clone()), Zeroizing::new(current.master_key)))
             })
+            .map_err(|_| ShareLinkError::NotSignedIn)?
             .ok_or(ShareLinkError::NotSignedIn)?;
         let client = auth_transport::client_for(&self.config.api_base).map_err(|_| ShareLinkError::Offline)?;
         let base = self.config.api_base.trim_end_matches('/');
