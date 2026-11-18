@@ -34,8 +34,8 @@ use crate::account::SessionGeneration;
 
 const FOLDER: &str = "office-recovery";
 const INDEX_NAME: &str = "index";
-/// The id the index record is bound to. No file id starts with a NUL.
-const INDEX_ID: &str = "\0office-recovery-index";
+/// The id the index record is bound to (core takes canonical ids only); a put under it is refused.
+const INDEX_ID: &str = "00000000-0000-4000-8000-0000000000a1";
 const NEW_SUFFIX: &str = ".new";
 /// The most file ids an index holds (open documents are few; this bounds a damaged record).
 const MAX_ENTRIES: usize = 4096;
@@ -181,7 +181,7 @@ impl<'a> Store<'a> {
         bytes: &[u8],
         before_rename: impl FnOnce() -> bool,
     ) -> Result<(), RecoveryRefused> {
-        if file_id.is_empty() || file_id.starts_with('\0') || bytes.len() > MAX_SNAPSHOT_BYTES || base < 0 {
+        if file_id == INDEX_ID || bytes.len() > MAX_SNAPSHOT_BYTES || base < 0 {
             return Err(RecoveryRefused::Refused);
         }
         let kind = kind_of(bytes).ok_or(RecoveryRefused::Refused)?;
@@ -318,6 +318,8 @@ impl<C: CredentialStores> Engine<C> {
 mod office_recovery_tests {
     use super::*;
 
+    const F1: &str = "11111111-1111-4111-8111-111111111111";
+    const F2: &str = "22222222-2222-4222-8222-222222222222";
     const MARKER: &str = "TOP-SECRET-MARKER-9f3a";
 
     fn key(n: u8) -> MasterKey {
@@ -349,14 +351,14 @@ mod office_recovery_tests {
         let tmp = tempfile::tempdir().unwrap();
         let k = key(1);
         let s = Store::new(tmp.path(), "acct", &k);
-        s.put("file-1", 7, &package(MARKER)).unwrap();
+        s.put(F1, 7, &package(MARKER)).unwrap();
         let list = s.list();
         assert_eq!(list.len(), 1);
-        assert_eq!((list[0].file_id.as_str(), list[0].base), ("file-1", 7));
-        assert_eq!(&**s.take("file-1").unwrap(), package(MARKER).as_slice());
-        s.discard("file-1").unwrap();
+        assert_eq!((list[0].file_id.as_str(), list[0].base), (F1, 7));
+        assert_eq!(&**s.take(F1).unwrap(), package(MARKER).as_slice());
+        s.discard(F1).unwrap();
         assert!(s.list().is_empty());
-        assert_eq!(s.take("file-1").unwrap_err(), RecoveryRefused::NotFound);
+        assert_eq!(s.take(F1).unwrap_err(), RecoveryRefused::NotFound);
     }
 
     #[test]
@@ -364,18 +366,18 @@ mod office_recovery_tests {
         let tmp = tempfile::tempdir().unwrap();
         let (k1, k2) = (key(1), key(2));
         let s1 = Store::new(tmp.path(), "acct", &k1);
-        s1.put("file-1", 1, &package(MARKER)).unwrap();
+        s1.put(F1, 1, &package(MARKER)).unwrap();
         // Same folder, another key: does not open.
         let s2 = Store::new(tmp.path(), "acct", &k2);
-        assert_eq!(s2.take("file-1").unwrap_err(), RecoveryRefused::NotFound);
+        assert_eq!(s2.take(F1).unwrap_err(), RecoveryRefused::NotFound);
         // The blob moved to another file's slot: does not open.
-        let from = s1.blob_path("file-1");
-        fs::copy(&from, s1.blob_path("file-2")).unwrap();
-        assert_eq!(s1.take("file-2").unwrap_err(), RecoveryRefused::NotFound);
+        let from = s1.blob_path(F1);
+        fs::copy(&from, s1.blob_path(F2)).unwrap();
+        assert_eq!(s1.take(F2).unwrap_err(), RecoveryRefused::NotFound);
         // Another account's folder holds nothing of this one's.
         let other = Store::new(tmp.path(), "acct-b", &k1);
         assert!(other.list().is_empty());
-        assert_eq!(other.take("file-1").unwrap_err(), RecoveryRefused::NotFound);
+        assert_eq!(other.take(F1).unwrap_err(), RecoveryRefused::NotFound);
     }
 
     #[test]
@@ -383,13 +385,13 @@ mod office_recovery_tests {
         let tmp = tempfile::tempdir().unwrap();
         let k = key(1);
         let s = Store::new(tmp.path(), "acct", &k);
-        s.put("file-1", 1, &package("old")).unwrap();
-        s.put_stopping_at("file-1", 2, &package("new"), || false).unwrap();
-        assert_eq!(&**s.take("file-1").unwrap(), package("old").as_slice());
+        s.put(F1, 1, &package("old")).unwrap();
+        s.put_stopping_at(F1, 2, &package("new"), || false).unwrap();
+        assert_eq!(&**s.take(F1).unwrap(), package("old").as_slice());
         assert_eq!(s.list()[0].base, 1);
         // The next put goes over the leftover new name.
-        s.put("file-1", 3, &package("newer")).unwrap();
-        assert_eq!(&**s.take("file-1").unwrap(), package("newer").as_slice());
+        s.put(F1, 3, &package("newer")).unwrap();
+        assert_eq!(&**s.take(F1).unwrap(), package("newer").as_slice());
     }
 
     #[test]
@@ -397,9 +399,9 @@ mod office_recovery_tests {
         let tmp = tempfile::tempdir().unwrap();
         let k = key(1);
         let s = Store::new(tmp.path(), "acct", &k);
-        s.put("file-1", 1, &package(MARKER)).unwrap();
-        s.put("file-2", 1, &package(MARKER)).unwrap();
-        s.put_stopping_at("file-1", 2, &package(MARKER), || false).unwrap();
+        s.put(F1, 1, &package(MARKER)).unwrap();
+        s.put(F2, 1, &package(MARKER)).unwrap();
+        s.put_stopping_at(F1, 2, &package(MARKER), || false).unwrap();
         wipe_account(tmp.path(), "acct").unwrap();
         assert!(files(tmp.path()).is_empty());
         assert!(s.list().is_empty());
@@ -411,16 +413,16 @@ mod office_recovery_tests {
         let tmp = tempfile::tempdir().unwrap();
         let k = key(1);
         let s = Store::new(tmp.path(), "acct", &k);
-        s.put("file-secret-name", 1, &package(MARKER)).unwrap();
-        s.put_stopping_at("file-secret-name", 2, &package(MARKER), || false).unwrap();
+        s.put(F1, 1, &package(MARKER)).unwrap();
+        s.put_stopping_at(F1, 2, &package(MARKER), || false).unwrap();
         let all = files(tmp.path());
         assert!(all.len() >= 2);
         for p in all {
             let name = p.to_string_lossy().into_owned();
-            assert!(!name.contains("file-secret-name") && !name.contains("acct"));
+            assert!(!name.contains(&F1[..8]) && !name.contains("acct"));
             let data = fs::read(&p).unwrap();
             assert!(!data.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()));
-            assert!(!data.windows(16).any(|w| w == b"file-secret-name"));
+            assert!(!data.windows(F1.len()).any(|w| w == F1.as_bytes()));
         }
     }
 
