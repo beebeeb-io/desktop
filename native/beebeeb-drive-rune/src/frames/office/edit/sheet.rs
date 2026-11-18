@@ -36,6 +36,8 @@ pub const EDITOR_KEY: &str = "edit-sheet-cell";
 pub const BAR_KEY: &str = "edit-sheet-formula";
 /// The formula bar's text before it is pressed (it opens the editor on the formula).
 pub const BAR_OPEN_KEY: &str = "edit-sheet-formula-open";
+/// The cell box: type a cell or a range, Enter goes there.
+pub const NAME_KEY: &str = "edit-sheet-cellbox";
 
 /// What a Delete over a selection clears at most (one `SetCell` each); more is refused with words.
 pub const CLEAR_MAX: usize = 256;
@@ -64,6 +66,12 @@ struct Grid {
     /// What the last frame drew, for the handlers that run between frames.
     geometry: Geometry,
     room: (f32, f32),
+    /// The cell box's field, and whether it is being typed in (else it shows the current cell's name).
+    name: TextEdit,
+    naming: bool,
+    /// The grid has been drawn since the file was opened, and still owes the keyboard its first focus.
+    opened: bool,
+    wants_focus: bool,
 }
 
 impl Grid {
@@ -74,6 +82,10 @@ impl Grid {
             dragging: false,
             geometry: Geometry::default(),
             room: (800.0, 600.0),
+            name: TextEdit::new(String::new()),
+            naming: false,
+            opened: false,
+            wants_focus: false,
         }
     }
 }
@@ -118,7 +130,85 @@ pub fn reset() {
         }
         g.editing = None;
         g.dragging = false;
+        g.name.clear();
+        g.name.focused = false;
+        g.naming = false;
+        g.opened = false;
+        g.wants_focus = false;
     });
+}
+
+/// The keyboard goes to the grid the first time it is shown for an open file (the shell calls this each turn, next to the
+/// viewer's own one-shot focus). `true`: it moved.
+pub fn take_focus(tx: &mut Tx) -> bool {
+    if !with(|g| std::mem::take(&mut g.wants_focus)) {
+        return false;
+    }
+    tx.focus(GRID_KEY, false);
+    true
+}
+
+/// The cell box's field, for `on_edit`.
+pub fn namebox_edit(_s: &mut State) -> &mut TextEdit {
+    // SAFETY: as `cell_edit`.
+    GRID.with(|g| unsafe { &mut (*g.get()).name })
+}
+
+fn leave_namebox(tx: &mut Tx) {
+    with(|g| {
+        g.name.clear();
+        g.name.focused = false;
+        g.naming = false;
+    });
+    tx.focus(GRID_KEY, false);
+}
+
+/// The cell box's keys: Enter goes to what was typed (a wrong reference stays in the box, with the words saying why),
+/// Escape gives the keyboard back to the grid.
+fn namebox_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    match ev.key {
+        Key::Enter => {
+            let typed = with(|g| g.name.text.clone());
+            let room = with(|g| g.room);
+            if super::sheet_ribbon::go_to(s, tx, &typed, room) {
+                leave_namebox(tx);
+            }
+            true
+        }
+        Key::Escape => {
+            leave_namebox(tx);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The cell box of the open workbook: the current cell's name, which a press turns into a field to type a reference in.
+pub fn cell_box(view: &SheetView, t: &Theme) -> rune::El {
+    let name = sheets::a1(view.current);
+    with(|g| {
+        if !g.naming {
+            g.name.replace_text(name.clone());
+        }
+    });
+    with(|g| text_input(&g.name, sheets::MONO))
+        .key(NAME_KEY)
+        .label(format!("Cell {name}"))
+        .single_line()
+        .color(t.text)
+        .caret(t.accent_deep, t.selection)
+        .on_edit(namebox_edit)
+        .on_input_key(namebox_key)
+        .on_press_tx(|_: &mut State, _: &mut Tx| {
+            with(|g| {
+                if !g.naming {
+                    g.naming = true;
+                    g.name.clear();
+                }
+                g.name.focused = true;
+            });
+        })
+        .w(sheets::CELLBOX_W)
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +576,10 @@ pub fn on_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
         return false;
     }
     let m = ev.mods;
+    if super::sheet_ribbon::is_auto_sum(ev) {
+        super::sheet_ribbon::send(s, tx, EditOp::AutoSum, "Sum");
+        return true;
+    }
     if let Some(text) = typed_text(ev) {
         return begin(s, tx, Begin::Typed(text.to_string()));
     }
@@ -562,6 +656,10 @@ fn on_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
             let Some(hit) = with(|g| g.geometry.hit(d.x, d.y, false)) else {
                 return;
             };
+            with(|g| {
+                g.naming = false;
+                g.name.focused = false;
+            });
             // Pressing another cell ends an edit by keeping it (as Excel does); words the helper refused stay.
             if editing().is_some() {
                 commit(s, tx, None);
@@ -622,6 +720,10 @@ pub fn layer(view: &SheetView, geometry: Geometry, room: (f32, f32), t: &Theme) 
     with(|g| {
         g.geometry = geometry;
         g.room = room;
+        if !g.opened {
+            g.opened = true;
+            g.wants_focus = true;
+        }
     });
     let mut layer = el()
         .key(GRID_KEY)

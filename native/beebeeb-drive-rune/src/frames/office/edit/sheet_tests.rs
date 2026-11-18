@@ -744,3 +744,69 @@ fn office_sheets_geometry_hits_the_cell_it_drew() {
     assert_eq!(geometry.hit(5.0, 5.0, false), None);
     assert_eq!(geometry.hit(-50.0, -50.0, true), Some(Cell { row: 0, col: 0 }));
 }
+
+// ---------------------------------------------------------------------------
+// Wired into the window (w05): the cell box, Alt+=, the first focus and the tabs' rename, all through the real frame
+// ---------------------------------------------------------------------------
+
+fn press_key(rig: &mut Rig, key: &str) {
+    let r = rig.find(key).unwrap_or_else(|| panic!("no element keyed {key}")).rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    rig.rt.pointer_down(x, y);
+    rig.rt.pointer_up(x, y);
+    rig.settle();
+}
+
+#[test]
+fn office_sheets_the_cell_box_in_the_window_goes_to_what_is_typed() {
+    let mut rig = rig();
+    press_key(&mut rig, NAME_KEY);
+    rig.text("B5");
+    rig.key(Key::Enter);
+    let v = rig.sheet();
+    assert_eq!(v.current, Cell { row: 4, col: 1 });
+    let toast = viewers::ui(&mut rig.rt.state).and_then(|ui| ui.toast.clone());
+    assert_eq!(toast.as_deref(), Some("Went to B5"));
+    assert!(matches!(rig.ops.borrow().last(), Some(EditOp::SelectCells { .. })));
+    // A wrong reference says why and leaves the grid where it was.
+    press_key(&mut rig, NAME_KEY);
+    rig.text("Q#9");
+    rig.key(Key::Enter);
+    assert_eq!(rig.sheet().current, Cell { row: 4, col: 1 });
+    let toast = viewers::ui(&mut rig.rt.state).and_then(|ui| ui.toast.clone());
+    assert_eq!(toast.as_deref(), Some("Not a valid cell or range"));
+}
+
+#[test]
+fn office_sheets_alt_equals_in_the_grid_sums_the_selection() {
+    let mut rig = rig();
+    rig.click(0, 1);
+    rig.ops.borrow_mut().clear();
+    let alt = Mods {
+        alt: true,
+        ..Mods::default()
+    };
+    rig.key_with(Key::Text("=".into()), alt);
+    assert_eq!(rig.ops.borrow().last(), Some(&EditOp::AutoSum));
+    assert!(editing().is_none(), "Alt+= does not open the cell editor");
+}
+
+#[test]
+fn office_sheets_the_grid_asks_for_the_keyboard_once_when_opened() {
+    let rig = rig();
+    assert!(with(|g| g.wants_focus), "the first frame of the open file asks for focus");
+    drop(rig);
+}
+
+#[test]
+fn office_sheets_the_window_renames_a_tab_on_a_double_press() {
+    let mut rig = rig();
+    let r = rig.find("sh-tab-0").expect("the first tab").rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    for _ in 0..2 {
+        rig.rt.pointer_down(x, y);
+        rig.rt.pointer_up(x, y);
+    }
+    rig.settle();
+    assert!(rig.find("edit-sheet-tab-name").is_some(), "the rename field is in the window's tabs");
+}
