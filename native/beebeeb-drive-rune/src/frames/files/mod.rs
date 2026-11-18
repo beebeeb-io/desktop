@@ -761,7 +761,6 @@ impl State {
 
     /// A double-click: this row alone, opened.
     pub fn open_row(&mut self, row: usize, tx: &mut Tx) -> bool {
-        eprintln!("OPEN_ROW {row}");
         if row >= self.listing.items.len() {
             return false;
         }

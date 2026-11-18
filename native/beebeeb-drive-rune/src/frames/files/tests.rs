@@ -793,15 +793,13 @@ fn menus_toasts_and_the_path_have_their_roles_and_names() {
 /// first press made is already on screen when the second goes down).
 fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
     let (x, y) = centre(rt, key);
-    let now = CLOCK.with(|c| c.get());
-    eprintln!("A {:?} {:?}", info(rt, key).path, info(rt, key).rect);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
-    rt.frame(now);
-    eprintln!("B {:?} {:?} sel={:?} now={now}", info(rt, key).path, info(rt, key).rect, rt.state.selected);
+    rt.frame(0.016);
     let (x, y) = centre(rt, key);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
+    rt.frame(0.016);
     settle(rt);
 }
 
@@ -809,18 +807,8 @@ fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
 fn a_double_click_on_a_folder_opens_it_again_after_going_into_another() {
     let mut rt = runtime_of(init());
     double_click_with_frame(&mut rt, "row-3-date");
-    eprintln!("C folder={:?} names={:?}", rt.state.listing.folder.name, names(&rt));
     assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Lisbon trip"));
     assert_eq!(names(&rt)[0], "Day 1");
     double_click_with_frame(&mut rt, "row-0-date");
     assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Day 1"), "the second double-click opens Day 1");
-}
-
-#[test]
-fn dbg_plain() {
-    let mut rt = runtime_of(init());
-    let (x, y) = centre(&rt, "row-3-date");
-    for _ in 0..2 { rt.pointer_down(x, y); rt.pointer_up(x, y); }
-    settle(&mut rt);
-    eprintln!("D folder={:?}", rt.state.listing.folder.name);
 }
