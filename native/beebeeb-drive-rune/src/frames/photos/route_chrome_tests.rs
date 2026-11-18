@@ -47,6 +47,7 @@ fn enter_in_photos_search_box_shows_searchs_results_for_that_text() {
         key: Key::Text("harbour".into()),
         mods: Mods::default(),
     });
+    assert_eq!(rt.state.search.text.to_string(), "harbour", "typed");
     rt.key(KeyEvent {
         key: Key::Enter,
         mods: Mods::default(),
