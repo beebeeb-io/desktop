@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use beebeeb_media_protocol::{
-    Codec, ErrorCode, FromHelper, KindHint, MAX_ART, MAX_AUDIO_FRAMES, MAX_CHANNELS, MAX_FRAME_H, MAX_FRAME_W,
+    ErrorCode, FromHelper, KindHint, MAX_ART, MAX_AUDIO_FRAMES, MAX_CHANNELS, MAX_FRAME_H, MAX_FRAME_W,
     MAX_IN_FLIGHT_READS, MAX_RATE, MAX_READ, MAX_SOURCE_SIDE, Opened, Tags, ToHelper, cut_text,
 };
 use beebeeb_office_sandbox::Profile;
@@ -17,7 +17,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::{
     ANSWER_WAIT_MS, AUDIO_PARTS_PER_SECOND, AudioFactory, BATCH_MAX, Clock, Cmd, DEFAULT_FRAME_MS, HELD_FRAMES,
     LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener, NOW_PLAYING_EVERY_MS, NoSound, OPEN_WAIT_MS,
-    PLAYED_AFTER_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, Waker, lock,
+    Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, Waker, lock,
 };
 use crate::media::os_controls::{NowPlaying, OsButton};
 use crate::media::transport::{LinkError, profile_for_file_with, wipe, wipe_answer};
@@ -1124,8 +1124,10 @@ fn turns_text_around(c: char) -> bool {
 
 mod lines;
 
+pub(super) use lines::log_seen;
+#[cfg(test)]
+pub(super) use lines::writes_played_line;
 use lines::{Played, Trace};
-pub(super) use lines::{log_seen, writes_played_line};
 
 #[cfg(test)]
 #[path = "worker_tests.rs"]

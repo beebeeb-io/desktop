@@ -62,11 +62,10 @@ fn without_sound_a_slow_helper_shows_every_frame_and_the_place_is_the_pictures()
         let mut index = 0u64;
         script(move |msg, out| match msg {
             ToHelper::Open { .. } => out.send(FromHelper::Opened(video_only(2, 2))),
-            ToHelper::WantVideo { w, h } => {
-                if frames.recv().is_ok() {
-                    out.send(frame(index * 1000 / 30, *w, *h));
-                    index += 1;
-                }
+            // Each want waits here until the test lets one frame go.
+            ToHelper::WantVideo { w, h } if frames.recv().is_ok() => {
+                out.send(frame(index * 1000 / 30, *w, *h));
+                index += 1;
             }
             _ => {}
         })

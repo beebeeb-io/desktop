@@ -53,7 +53,7 @@ fn taps(src: usize, dst: usize) -> Vec<Tap> {
 
 /// One source row mixed across to the output's width: each channel times [`WEIGHT_ONE`].
 fn across(row: &[u8], xs: &[Tap], out: &mut [u32]) {
-    for (tap, px) in xs.iter().zip(out.chunks_exact_mut(4)) {
+    for (tap, px) in xs.iter().zip(out.as_chunks_mut::<4>().0) {
         let a = &row[tap.at0 * 4..tap.at0 * 4 + 4];
         let b = &row[tap.at1 * 4..tap.at1 * 4 + 4];
         let (w0, w1) = (WEIGHT_ONE - tap.w1, tap.w1);
@@ -82,7 +82,7 @@ pub fn scale_letterbox(src: &[u8], sw: u32, sh: u32, display: (u32, u32), dw: u3
     // The bars: opaque black. The picture's own pixels are written below.
     for (y, row) in out.chunks_exact_mut(dw * 4).enumerate() {
         let picture = if (oy..oy + fh).contains(&y) { ox..ox + fw } else { 0..0 };
-        for (x, px) in row.chunks_exact_mut(4).enumerate() {
+        for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             if !picture.contains(&x) {
                 px[3] = 255;
             }
@@ -95,7 +95,7 @@ pub fn scale_letterbox(src: &[u8], sw: u32, sh: u32, display: (u32, u32), dw: u3
     let mut held = [usize::MAX; 2];
     let half = 1u32 << (2 * WEIGHT_BITS - 1);
     for (y, tap) in ys.iter().enumerate() {
-        let mut slot_of = |row: usize, keep: usize, mixed: &mut [Vec<u32>; 2], held: &mut [usize; 2]| -> usize {
+        let slot_of = |row: usize, keep: usize, mixed: &mut [Vec<u32>; 2], held: &mut [usize; 2]| -> usize {
             if let Some(slot) = held.iter().position(|have| *have == row) {
                 return slot;
             }
@@ -188,7 +188,7 @@ mod tests {
         let (fw, fh) = (fw as usize, fh as usize);
         let (ox, oy) = ((dw - fw) / 2, (dh - fh) / 2);
         let mut out = vec![0u8; dw * dh * 4];
-        for px in out.chunks_exact_mut(4) {
+        for px in out.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
         // Bilinear sampling at the centre of each output pixel; the edges clamp.
