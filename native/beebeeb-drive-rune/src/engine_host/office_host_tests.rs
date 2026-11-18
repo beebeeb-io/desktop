@@ -30,6 +30,9 @@ mod launch_wait_tests;
 // The editing session: checked answers, the save handshake.
 #[path = "office_host_tests/edit_tests.rs"]
 mod edit_tests;
+// A helper that dies mid-edit comes back from the last snapshot; the snapshot timing.
+#[path = "office_host_tests/restart_tests.rs"]
+mod restart_tests;
 
 /// 100 % on a 96 DPI screen: a Letter page is 816 x 1056.
 fn scale_100() -> f32 {
