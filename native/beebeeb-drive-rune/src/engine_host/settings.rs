@@ -46,6 +46,8 @@ use crate::frames::settings::source::{
 
 mod notifications;
 #[cfg(test)]
+mod report_tests;
+#[cfg(test)]
 mod tests;
 pub(crate) mod updates;
 
