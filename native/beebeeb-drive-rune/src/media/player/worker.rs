@@ -142,6 +142,13 @@ struct Trace {
     dropped: u32,
     shown_pts: u64,
     paced_at: u64,
+    /// Since the last `media.pace` line, in microseconds: from each want for a frame to its answer (summed), in the
+    /// hand-off of frames to the surface, in the reads of the item's bytes; and the worker's ticks.
+    want_at: Option<Instant>,
+    answer_us: u64,
+    show_us: u64,
+    read_us: u64,
+    ticks: u32,
 }
 
 impl Trace {
@@ -156,6 +163,11 @@ impl Trace {
             dropped: 0,
             shown_pts: 0,
             paced_at: 0,
+            want_at: None,
+            answer_us: 0,
+            show_us: 0,
+            read_us: 0,
+            ticks: 0,
         }
     }
 
@@ -168,6 +180,10 @@ impl Trace {
         if !self.steps.iter().any(|(name, _)| *name == step) {
             self.steps.push((step, self.ms()));
         }
+    }
+
+    fn us(since: Instant) -> u64 {
+        u64::try_from(since.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 
     /// A step's time; -1 when it never happened.
@@ -456,6 +472,7 @@ impl Worker {
             return Err(Exit::Done);
         }
         self.take_commands()?;
+        self.trace.ticks += 1;
         let mut batch = self.receive()?.into_iter();
         let handled = self.handle_batch(&mut batch);
         // What was not handled (the rule broken before it, a restart) is zeroed before it is let go.
@@ -708,6 +725,9 @@ impl Worker {
         let _ = self.publish(|player| player.record.received.push(pts));
         self.trace.mark("frame");
         self.trace.received += 1;
+        if let Some(asked) = self.trace.want_at.take() {
+            self.trace.answer_us += Trace::us(asked);
+        }
         self.held.push_back(Held { pts, w, h, rgba });
         Ok(())
     }
@@ -785,10 +805,12 @@ impl Worker {
     fn answer_reads(&mut self) -> Result<(), Exit> {
         while let Some(read) = self.reads.pop_front() {
             let started = self.clock.now_ms();
+            let reading = Instant::now();
             let got = match self.bytes.as_mut() {
                 Some(bytes) => bytes.read_at(read.offset, read.len, &self.slots.cancel),
                 None => return Err(Exit::Done),
             };
+            self.trace.read_us += Trace::us(reading);
             self.not_counted(self.clock.now_ms().saturating_sub(started));
             if self.slots.cancelled() {
                 return Err(Exit::Done);
@@ -844,6 +866,7 @@ impl Worker {
             let view = self.publish(|player| player.view).ok_or(Exit::Done)?;
             if let Some((w, h)) = asked_size(view) {
                 self.trace.mark("asked");
+                self.trace.want_at = Some(Instant::now());
                 self.send(&ToHelper::WantVideo { w, h })?;
                 self.want_video = Some(VideoWant {
                     w,
@@ -918,6 +941,7 @@ impl Worker {
         let Held { pts, w, h, mut rgba } = frame;
         // The surface takes the pixels themselves (the view's frame); nothing is left behind here.
         let rgba = std::mem::take(&mut *rgba);
+        let handing = Instant::now();
         self.publish(|player| {
             player.surface.show(w, h, rgba);
             player.has_frame = true;
@@ -925,6 +949,7 @@ impl Worker {
             player.record.shown.push(pts);
         })
         .ok_or(Exit::Done)?;
+        self.trace.show_us += Trace::us(handing);
         self.last_shown_at = Some(now);
         self.presented = true;
         self.framed = true;
@@ -1204,6 +1229,13 @@ impl Worker {
         self.trace.shown = 0;
         self.trace.dropped = 0;
         let shown_pts = self.trace.shown_pts;
+        // Per frame: how long the helper took to answer a want; in all: the hand-off to the surface and the reads.
+        let answer_ms = self.trace.answer_us / 1000 / u64::from(received.max(1));
+        let (show_ms, read_ms, ticks) = (self.trace.show_us / 1000, self.trace.read_us / 1000, self.trace.ticks);
+        self.trace.answer_us = 0;
+        self.trace.show_us = 0;
+        self.trace.read_us = 0;
+        self.trace.ticks = 0;
         #[cfg(test)]
         let _ = self.publish(|player| {
             player.record.pace.push([
@@ -1227,6 +1259,10 @@ impl Worker {
             clock_ms = clock,
             shown_pts,
             at_ms,
+            answer_ms,
+            show_ms,
+            read_ms,
+            ticks,
             "media.pace"
         );
     }
