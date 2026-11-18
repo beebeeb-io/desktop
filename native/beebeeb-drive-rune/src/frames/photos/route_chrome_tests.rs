@@ -44,12 +44,13 @@ fn click(rt: &mut Runtime<State>, key: &str) {
 fn enter_in_photos_search_box_shows_searchs_results_for_that_text() {
     let mut rt = photos_window();
     click(&mut rt, "search-input");
-    rt.key(KeyEvent {
-        key: Key::Text("harbour".into()),
-        mods: Mods::default(),
-    });
-    let el = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("search-input")).unwrap();
-    assert_eq!(rt.state.search.text.to_string(), "harbour", "typed; focused={} rect={:?} section={:?}", el.focused, el.rect, rt.state.shell.app.screen());
+    for c in "harbour".chars() {
+        rt.key(KeyEvent {
+            key: Key::Text(c.to_string().into()),
+            mods: Mods::default(),
+        });
+    }
+    assert_eq!(rt.state.search.text.to_string(), "harbour", "typed");
     rt.key(KeyEvent {
         key: Key::Enter,
         mods: Mods::default(),
