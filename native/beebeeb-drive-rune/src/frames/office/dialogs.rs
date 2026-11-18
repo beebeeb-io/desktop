@@ -9,7 +9,6 @@
 use rune::{El, TextStyle, col, el, row};
 
 use crate::State;
-use crate::frames::placeholder;
 use crate::frames::viewers;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
@@ -91,10 +90,18 @@ pub fn licence_panel(t: &Theme) -> El {
         )
 }
 
+/// DW-1558: the Files window as the board draws it under New (Contract draft.pdf selected), New document over it on
+/// Docs, Blank chosen.
+pub fn scene_new_document(s: &mut State) {
+    s.select_only(6);
+    let folder = s.listing.folder.id.clone();
+    super::edit::new_document::begin(s, Some(crate::frames::viewers::new_file::Kind::Word), folder);
+}
+
 /// The group's board frames and the scene that shows each (`frames::scenes`).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1557", viewers::scene_licence),
-    ("DW-1558", placeholder::scene),
+    ("DW-1558", scene_new_document),
     ("DW-1562", super::open_with::scene_open_with),
 ];
 
@@ -166,8 +173,7 @@ mod tests {
 
     #[test]
     fn office_dialogs_scenes_set_their_state() {
-        // DW-1557 and DW-1558 keep their rows; DW-1558 is a 0.9.1 placeholder by decision. DW-1562 is Open With
-        // (D-OV-14), drawn by the Files window.
+        // DW-1557, DW-1558 (New document) and DW-1562 (Open With, D-OV-14, drawn by the Files window) keep their rows.
         let ids: Vec<&str> = FRAMES.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, ["DW-1557", "DW-1558", "DW-1562"]);
         let mut s = crate::init();
