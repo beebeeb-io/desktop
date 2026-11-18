@@ -45,6 +45,8 @@ struct Host {
     db: PathBuf,
     /// The list cannot be read.
     broken: AtomicBool,
+    /// Nothing has synced on this computer yet.
+    nothing_synced: AtomicBool,
     builds: AtomicUsize,
     woken: AtomicUsize,
     /// The recent searches each account keeps on this computer (the engine's row per account).
@@ -127,6 +129,9 @@ impl SearchHost for Host {
         self.builds.fetch_add(1, Ordering::SeqCst);
         if self.broken.load(Ordering::SeqCst) {
             return Err(LocalStateRefused::Unreadable);
+        }
+        if self.nothing_synced.load(Ordering::SeqCst) {
+            return Err(LocalStateRefused::NothingSynced);
         }
         // As the engine's handle: the list of the account it is recorded for, with the vault open; another account's
         // is refused with the engine's own word.
@@ -243,6 +248,7 @@ fn host(account: Option<&str>) -> Arc<Host> {
         moved: Condvar::new(),
         db: path,
         broken: AtomicBool::new(false),
+        nothing_synced: AtomicBool::new(false),
         builds: AtomicUsize::new(0),
         woken: AtomicUsize::new(0),
         recents: Mutex::new(HashMap::new()),
@@ -1136,4 +1142,50 @@ fn a_build_landing_under_a_new_turn_is_dropped() {
             "{said}: the turn of the moment does not build its own"
         );
     }
+}
+
+/// A first refusal while the first sync runs (NothingSynced), then sync is done: Search says what is true meanwhile
+/// (not "Not available yet": the files are being got ready), and the next pump after the wait builds again, so
+/// results appear without reopening Search.
+#[test]
+fn a_refusal_during_the_first_sync_is_built_again_when_sync_is_done() {
+    let host = host(Some(ME));
+    host.nothing_synced.store(true, Ordering::SeqCst);
+    let mut source = EngineSearchSource::new(host.clone());
+    source.retry_after = Duration::ZERO;
+    source.opened();
+    source.ask("contract", Narrow::All);
+    let began = Instant::now();
+    while host.builds.load(Ordering::SeqCst) < 1 || source.building.is_some() {
+        source.pump();
+        assert!(began.elapsed() < HOLD_FOR, "the first build did not answer");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    source.pump();
+    assert!(source.held.is_none());
+    assert!(source.wired(), "getting ready is not \"not available\"");
+    assert_eq!(source.search("contract", Narrow::All), Answer::Searching);
+
+    host.nothing_synced.store(false, Ordering::SeqCst);
+    let began = Instant::now();
+    while source.held.is_none() {
+        source.pump();
+        assert!(began.elapsed() < HOLD_FOR, "no build after sync was done");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    settle(&mut source);
+    assert_eq!(ids(&found(&mut source, "contract", Narrow::All)).len(), 4);
+}
+
+/// Reopening Search after a refusal builds at once, even within FRESH_FOR; a refusal is not "fresh".
+#[test]
+fn reopening_search_after_a_refusal_builds_again() {
+    let host = host(Some(ME));
+    host.nothing_synced.store(true, Ordering::SeqCst);
+    let mut source = opened(&host);
+    assert!(source.held.is_none());
+    host.nothing_synced.store(false, Ordering::SeqCst);
+    source.opened();
+    settle(&mut source);
+    assert_eq!(found(&mut source, "draft", Narrow::All).len(), 1);
 }
