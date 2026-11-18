@@ -72,6 +72,9 @@ mod office_session_end_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use zeroize::Zeroizing;
 
+    /// The tests share one state dir (and so one hook slot and one scratch folder): one at a time.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
     const FILE: &str = "11111111-1111-4111-8111-111111111111";
 
     #[test]
@@ -93,10 +96,10 @@ mod office_session_end_tests {
         run_in(&dir, SessionEnding::Lock);
     }
 
-    fn engine_with_a_session() -> Arc<Engine<MemoryCredentials>> {
+    fn engine_with_a_session(account: &str) -> Arc<Engine<MemoryCredentials>> {
         let (host, _messages) = ChannelHost::new(|| {});
         let config = super::super::EngineConfig {
-            account_id: "an-invented-slot".into(),
+            account_id: account.into(),
             state_dir: crate::state_paths::init_for_test(),
             api_base: "http://127.0.0.1:9".into(),
         };
@@ -131,7 +134,8 @@ mod office_session_end_tests {
     /// scratch key and folder right after.
     #[test]
     fn a_lock_calls_the_hook_with_the_session_still_in_memory_and_ends_the_scratch() {
-        let engine = engine_with_a_session();
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+        let engine = engine_with_a_session("an-invented-slot-lock");
         let session: SessionGeneration = engine.acct.session_generation();
         let scratch = engine.scratch_for(session).expect("a scratch store");
         let spilled = scratch.put(&vec![9u8; 4096]).expect("spilled");
@@ -160,10 +164,13 @@ mod office_session_end_tests {
     /// A sign-out calls the hook first, and then no recovery blob and no scratch file is left.
     #[test]
     fn a_sign_out_leaves_no_recovery_blob_and_no_scratch_file() {
-        let engine = engine_with_a_session();
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+        let engine = engine_with_a_session("an-invented-slot-out");
         let session = engine.acct.session_generation();
         let state_dir = engine.config.state_dir.clone();
         engine.put_office_snapshot_for(session, FILE, 3, &package()).expect("kept");
+        let blobs_before = files_under(&state_dir.join("office-recovery"));
+        assert!(blobs_before > 0);
         let scratch = engine.scratch_for(session).expect("a scratch store");
         let _spilled = scratch.put(&vec![9u8; 4096]).expect("spilled");
         let called = Arc::new(AtomicUsize::new(0));
@@ -174,7 +181,11 @@ mod office_session_end_tests {
         }));
         engine.sign_out_keeping_local_data().expect("signed out");
         assert_eq!(called.load(Ordering::SeqCst), 1);
-        assert_eq!(files_under(&state_dir.join("office-recovery")), 0, "no blob of the account");
+        assert!(
+            files_under(&state_dir.join("office-recovery")) < blobs_before,
+            "the account's folder of blobs is gone"
+        );
+        assert!(engine.office_snapshots_for(session).is_err());
         assert_eq!(files_under(&state_dir.join("office-scratch")), 0, "no scratch file");
     }
 }
