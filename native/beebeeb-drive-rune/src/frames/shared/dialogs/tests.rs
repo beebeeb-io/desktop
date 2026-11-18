@@ -975,7 +975,11 @@ mod link_cards {
     }
 
     fn type_password(rt: &mut Runtime<State>, typed: &str) {
-        crate::frames::account::form::type_in(&mut rt.state.frames.shared.fields.link_password, typed);
+        let edit = &mut rt.state.frames.shared.fields.link_password;
+        edit.text.clear();
+        edit.text.push_str(typed);
+        edit.anchor = edit.text.len();
+        edit.focus = edit.text.len();
         settle(rt);
     }
 

@@ -58,8 +58,10 @@ fn link(index: usize, words: &str, t: &Theme) -> El {
     // "Third-party licences" opens the installed licence lines (Settings' open-source-licences target). The source
     // link has no address this build may open yet, so it stays as it is.
     let link = if index == 1 {
-        link.on_press_tx(|s: &mut State, tx: &mut rune::Tx| {
-            crate::shell::settings_open::open(s, tx, "open-source-licences")
+        link.on_press(|s: &mut State| {
+            if let Err(why) = crate::frames::settings::about::open_licences() {
+                s.settings.toast = Some(why);
+            }
         })
     } else {
         link
@@ -187,7 +189,7 @@ mod tests {
             },
         );
         rt.frame(0.0);
-        let mut click = |rt: &mut Runtime<State>, key: &str| {
+        let click = |rt: &mut Runtime<State>, key: &str| {
             let r = rt
                 .elements()
                 .into_iter()
