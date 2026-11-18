@@ -809,6 +809,7 @@ fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
 fn a_double_click_on_a_folder_opens_it_again_after_going_into_another() {
     let mut rt = runtime_of(init());
     double_click_with_frame(&mut rt, "row-3-date");
+    eprintln!("C folder={:?} names={:?}", rt.state.listing.folder.name, names(&rt));
     assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Lisbon trip"));
     assert_eq!(names(&rt)[0], "Day 1");
     double_click_with_frame(&mut rt, "row-0-date");
