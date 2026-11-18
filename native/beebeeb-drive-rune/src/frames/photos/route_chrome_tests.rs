@@ -59,6 +59,9 @@ fn enter_in_photos_search_box_shows_searchs_results_for_that_text() {
         key: Key::Enter,
         mods: Mods::default(),
     });
+    rt.frame(0.0);
+    rt.settle_all();
+    rt.frame(0.0);
     // A fixture library answers at once, so the window's poll leaves the intent; the router takes it as the poll does.
     let intents = rt.state.photos.take_intents();
     assert_eq!(intents, vec![Intent::Search("harbour".into())]);
