@@ -33,6 +33,8 @@ mod edit_tests;
 // A helper that dies mid-edit comes back from the last snapshot; the snapshot timing.
 #[path = "office_host_tests/restart_tests.rs"]
 mod restart_tests;
+#[path = "office_host_tests/spill_tests.rs"]
+mod spill_tests;
 
 /// 100 % on a 96 DPI screen: a Letter page is 816 x 1056.
 fn scale_100() -> f32 {

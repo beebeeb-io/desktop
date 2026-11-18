@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::viewer_api::{LocalCopy, OpenFileError, OpenFileFacts, OpenedFile};
+use beebeeb_engine::app::office_recovery::{RecoveryEntry, RecoveryRefused};
 use beebeeb_engine::app::viewer_edit_api::{EditFacts, EditRefused, NewCopy, SaveEnd};
 use beebeeb_office_protocol::check;
 use beebeeb_office_protocol::office::{
@@ -352,6 +353,8 @@ struct EngineState {
     created: Vec<(Option<String>, String, Vec<u8>)>,
     /// Answer saves with this instead of storing (`None`: store).
     save_says: Option<Result<SaveEnd, EditRefused>>,
+    /// The recovery blobs this PC keeps: file id -> (time, base, bytes). Survives a source (a restart of the app).
+    blobs: std::collections::BTreeMap<String, (i64, i64, Vec<u8>)>,
 }
 
 struct TestEngine {
@@ -376,6 +379,7 @@ impl TestEngine {
                 copies: Vec::new(),
                 created: Vec::new(),
                 save_says: None,
+                blobs: Default::default(),
             }),
         })
     }
@@ -529,6 +533,35 @@ impl ViewerEngine for TestEngine {
             id: "copy1".into(),
             name: "Invented (This PC, 09:41).docx".into(),
         })
+    }
+
+    fn recovery_put(
+        &self,
+        _session: SessionGeneration,
+        file_id: &str,
+        base: i64,
+        bytes: &Zeroizing<Vec<u8>>,
+    ) -> Result<(), RecoveryRefused> {
+        let at = 86_400 * 100 + 14 * 3600 + 32 * 60;
+        self.s().blobs.insert(file_id.to_string(), (at, base, bytes.to_vec()));
+        Ok(())
+    }
+
+    fn recovery_list(&self, _session: SessionGeneration) -> Result<Vec<RecoveryEntry>, RecoveryRefused> {
+        Ok(self
+            .s()
+            .blobs
+            .iter()
+            .map(|(id, (at, base, _))| RecoveryEntry { file_id: id.clone(), saved_at: *at, base: *base })
+            .collect())
+    }
+
+    fn recovery_take(&self, _session: SessionGeneration, file_id: &str) -> Result<Zeroizing<Vec<u8>>, RecoveryRefused> {
+        self.s().blobs.get(file_id).map(|b| Zeroizing::new(b.2.clone())).ok_or(RecoveryRefused::NotFound)
+    }
+
+    fn recovery_discard(&self, _session: SessionGeneration, file_id: &str) -> Result<(), RecoveryRefused> {
+        self.s().blobs.remove(file_id).map(|_| ()).ok_or(RecoveryRefused::NotFound)
     }
 
     fn create_office(
@@ -693,12 +726,17 @@ struct Editor {
 
 /// `name` open in an editor on a fake host that is open (its pages or sheets known).
 fn editor(name: &str, read_only: bool) -> Editor {
-    let fake = Fake::default();
-    let template = Fake::default();
     let engine = TestEngine::new(&[("f1", name, 64)]);
     if read_only {
         engine.s().read_only.push("f1".into());
     }
+    editor_over(engine, name)
+}
+
+/// [`editor`] over an existing engine (a second one is the app after a restart: the blobs stayed).
+fn editor_over(engine: Arc<TestEngine>, name: &str) -> Editor {
+    let fake = Fake::default();
+    let template = Fake::default();
     let (viewer_opened, edits) = (Opened::default(), Edits::default());
     let mut source = editor_with(engine.clone(), &fake, viewer_opened.clone(), edits.clone(), &template);
     source.open("f1").unwrap();
@@ -1895,4 +1933,67 @@ fn office_is_live_only_where_the_sandbox_exists() {
         Opened::default(),
     );
     assert_eq!(source.office_live(), cfg!(windows));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Recovery: snapshots are kept, survive a restart and restore; a save clears them (w05-recovery-spill-wire)
+// ---------------------------------------------------------------------------------------------------------------
+
+fn snapshot(fake: &Fake, bytes: &[u8], revision: u64) {
+    fake.answer(HostEdit::Saved {
+        id: 900 + revision,
+        purpose: Purpose::Snapshot,
+        revision,
+        bytes: Zeroizing::new(bytes.to_vec()),
+    });
+}
+
+#[test]
+fn a_snapshot_is_kept_survives_a_restart_and_restores() {
+    let mut e = editor("Invented.docx", false);
+    snapshot(&e.fake, b"SNAP-ONE", 2);
+    snapshot(&e.fake, b"SNAP-TWO", 3);
+    assert!(e.source.poll_edit("f1").is_none(), "a snapshot is no answer to the window");
+    let kept = e.engine.s().blobs.get("f1").cloned().expect("kept under the file's id");
+    assert_eq!((kept.1, kept.2), (3, b"SNAP-TWO".to_vec()), "one blob per file: the newest, from the file's version");
+
+    // The app restarts: a new source over the same engine (this PC's blobs stayed).
+    let engine = e.engine.clone();
+    drop(e);
+    let mut again = editor_over(engine, "Invented.docx");
+    let offer = again.source.office_recovery("f1").expect("offered after the restart");
+    assert_eq!(offer.at, clock_words(std::time::UNIX_EPOCH + Duration::from_secs(86_400 * 100 + 14 * 3600 + 32 * 60)));
+    assert_eq!(again.source.office_recovery_pending().len(), 1);
+    assert!(again.source.office_restore("f1"));
+    // A new editing session opened on the blob's bytes, and the editor was told.
+    assert_eq!(again.edits.lock().unwrap().last().map(|(_, len)| *len), Some(8));
+    assert!(matches!(again.source.poll_edit("f1"), Some(EditAnswer::Restored { .. })));
+    assert!(again.engine.s().blobs.contains_key("f1"), "the blob stays until a save or a discard");
+    // Not for another file, and not twice without a blob.
+    assert!(!again.source.office_restore("f2"));
+    again.source.office_discard_recovery("f1");
+    assert!(again.source.office_recovery("f1").is_none() && !again.source.office_restore("f1"));
+}
+
+#[test]
+fn a_landed_save_deletes_the_blob() {
+    let mut e = editor("Invented.docx", false);
+    snapshot(&e.fake, b"SNAP", 2);
+    let _ = e.source.poll_edit("f1");
+    assert!(e.engine.s().blobs.contains_key("f1"));
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK saved package", 4);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Saved { .. }));
+    assert!(e.engine.s().blobs.is_empty(), "the blob is gone with the save");
+}
+
+#[test]
+fn a_viewer_and_a_read_only_file_keep_nothing() {
+    let mut e = editor("Invented.docx", true);
+    snapshot(&e.fake, b"SNAP", 2);
+    let _ = e.source.poll_edit("f1");
+    assert!(e.engine.s().blobs.is_empty());
+    assert!(!e.source.office_restore("f1"));
 }
