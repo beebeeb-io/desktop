@@ -30,11 +30,13 @@ fn the_helper_writes_nothing_but_frames() {
     assert_eq!(
         names,
         [
+            "edit_map.rs",
             "engine.rs",
             "fit.rs",
             "lib.rs",
             "main.rs",
             "memory.rs",
+            "save.rs",
             "serve.rs",
             "start.rs"
         ],
@@ -70,7 +72,7 @@ fn the_helper_writes_nothing_but_frames() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 7 * 17, "seven files, seventeen words");
+    assert_eq!(checked, 9 * 17, "nine files, seventeen words");
 }
 
 /// The panic hook exits and never looks at the panic: its message can quote the document.
