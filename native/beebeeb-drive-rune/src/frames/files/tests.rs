@@ -793,6 +793,7 @@ fn menus_toasts_and_the_path_have_their_roles_and_names() {
 /// first press made is already on screen when the second goes down).
 fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
     let (x, y) = centre(rt, key);
+    eprintln!("DC {key} {:?} {:?}", info(rt, key).path, info(rt, key).rect);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(0.016);
