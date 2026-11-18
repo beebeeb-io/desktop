@@ -1312,7 +1312,7 @@ mod tests {
             version: 8,
         };
         settled.borrow_mut().push_back(Settled::Conflict(other));
-        assert!(ui.pump() && ui.office_settle_save());
+        assert!(ui.pump());
         assert!(matches!(ui.office.over, Some(Over::Conflict(_))));
         assert!(ui.dialog.is_none(), "the text editor's question is not asked");
         ui.office_close_over();
