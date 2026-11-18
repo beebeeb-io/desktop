@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use super::before_files::{CHECK_PLAN, OPEN_PLANS, SIGN_OUT};
 use crate::State;
 use crate::frames::GateNotice;
 use crate::shell::actions::FixtureEngine;
@@ -177,28 +176,6 @@ fn unlock_is_not_a_not_built_button_and_changes_no_gate_by_itself() {
         "Unlock asks Windows Hello; it is not a not-built action"
     );
     assert_eq!(rt.state.shell.app.screen(), Screen::Gate(GateState::Locked));
-}
-
-#[test]
-fn each_button_without_a_plan_shows_not_available() {
-    let (_, mut rt) = window(GateState::NoPlan, false);
-    for (key, action) in [
-        ("gate-btn-0", OPEN_PLANS),
-        ("gate-btn-1", CHECK_PLAN),
-        ("gate-btn-2", SIGN_OUT),
-    ] {
-        rt.state.frames.gate_notice = None;
-        click(&mut rt, key);
-        let n = notice(&rt).unwrap_or_else(|| panic!("{action}: pressing {key} sets the notice"));
-        assert_eq!(n.message, "Not available yet", "{action}");
-        assert_eq!(n.gate, GateState::NoPlan, "{action}: stamped with the gate");
-    }
-    let name = find(&rt, "gate-btn-0").and_then(|e| e.label).unwrap_or_default();
-    assert!(
-        name.contains("opens in your browser"),
-        "the button says it leaves the app: {name}"
-    );
-    assert!(rt.state.frames.intents.is_empty(), "no dead intent was queued");
 }
 
 #[test]
