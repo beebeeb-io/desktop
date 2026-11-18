@@ -114,6 +114,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         }
     }
     ui.office.edit = Some(edit);
+    clipboard::flush_clip(s, tx);
     changed
 }
 
