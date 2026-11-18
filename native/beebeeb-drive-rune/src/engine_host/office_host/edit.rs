@@ -104,6 +104,16 @@ pub enum EditEvent {
     },
     /// A request the helper refused and the session goes on.
     Failed { id: RequestId, why: EditFailure },
+    /// The helper died and a new one opened the last snapshot (`from_snapshot`; else the bytes the document was opened
+    /// with), which is from `at`. Edits since then and the undo history are gone ([`super::restart::RESTORED_WORDS`]).
+    /// Requests that were out got [`EditEvent::Failed`].
+    Restored { at: std::time::SystemTime, from_snapshot: bool },
+    /// The helper died twice within a minute: the document is open read-only now (`edit` calls are refused) and `copy`
+    /// is the last snapshot to keep as a copy, when there is one ([`super::restart::READ_ONLY_WORDS`]).
+    ReadOnly {
+        at: std::time::SystemTime,
+        copy: Option<Zeroizing<Vec<u8>>>,
+    },
 }
 
 /// Document text and bytes: lengths only.
@@ -131,6 +141,16 @@ impl fmt::Debug for EditEvent {
                 .field("len", &bytes.len())
                 .finish(),
             EditEvent::Failed { id, why } => f.debug_struct("Failed").field("id", id).field("why", why).finish(),
+            EditEvent::Restored { at, from_snapshot } => f
+                .debug_struct("Restored")
+                .field("at", at)
+                .field("from_snapshot", from_snapshot)
+                .finish(),
+            EditEvent::ReadOnly { at, copy } => f
+                .debug_struct("ReadOnly")
+                .field("at", at)
+                .field("copy_len", &copy.as_ref().map(|copy| copy.len()))
+                .finish(),
         }
     }
 }
@@ -160,7 +180,12 @@ pub(crate) fn wipe_edit_event(event: &mut EditEvent) -> usize {
             bytes.zeroize();
             n
         }
-        EditEvent::Edited { .. } | EditEvent::Failed { .. } => 0,
+        EditEvent::ReadOnly { copy, .. } => copy.as_mut().map_or(0, |copy| {
+            let n = copy.len();
+            copy.zeroize();
+            n
+        }),
+        EditEvent::Edited { .. } | EditEvent::Failed { .. } | EditEvent::Restored { .. } => 0,
     }
 }
 
@@ -320,9 +345,14 @@ impl OfficeHost {
         std::mem::take(&mut lock(&self.shared.inner).edit_events).into()
     }
 
+    /// After a second crash within a minute the document is open read-only ([`EditEvent::ReadOnly`]).
+    pub fn read_only(&self) -> bool {
+        lock(&self.shared.inner).read_only
+    }
+
     /// An editing session whose document is open.
     fn ready(&self) -> Result<(), EditRefused> {
-        if self.editing && self.is_open() {
+        if self.editing && !lock(&self.shared.inner).read_only && self.is_open() {
             Ok(())
         } else {
             Err(EditRefused::NotEditing)
@@ -362,7 +392,7 @@ impl<S: Starter> Worker<S> {
         })
     }
 
-    fn editable(&self) -> bool {
+    pub(super) fn editable(&self) -> bool {
         !matches!(self.mode, Mode::View) && matches!(self.phase, Phase::Pages { .. } | Phase::Sheets) && self.run.is_some()
     }
 
@@ -370,6 +400,11 @@ impl<S: Starter> Worker<S> {
     pub(super) fn edit_command(&mut self, command: EditCommand) {
         if !self.editable() {
             return;
+        }
+        if matches!(&command, EditCommand::Image { .. })
+            || matches!(&command, EditCommand::Send { message: Message::Edit(_), .. })
+        {
+            self.note_edit();
         }
         let Some(run) = self.run.as_mut() else {
             return;
@@ -391,6 +426,7 @@ impl<S: Starter> Worker<S> {
             EditCommand::Save { id, purpose } => {
                 let message = Message::SaveSize(office::SaveSize { purpose });
                 if self.ask(message, Asked::Edit(EditAsked::SaveSize { id, purpose })) {
+                    self.note_save_asked();
                     if let Some(run) = self.run.as_mut() {
                         run.save_busy = true;
                     }
@@ -511,6 +547,14 @@ impl<S: Starter> Worker<S> {
         if code == ErrorCode::RangeTooLarge {
             return self.stopped(Stop::Protocol);
         }
+        // A snapshot the worker asked itself: nobody is waiting for it; not again at once.
+        if self.is_own_id(id) {
+            self.snapshot_backoff();
+            return;
+        }
+        if was_save {
+            self.snapshot_backoff();
+        }
         if !self.handles_ok() {
             return;
         }
@@ -617,6 +661,7 @@ impl<S: Starter> Worker<S> {
             return self.stopped(Stop::Failed);
         }
         drop(section);
+        self.keep(&bytes, revision);
         self.push_edit(EditEvent::Saved {
             id,
             purpose,

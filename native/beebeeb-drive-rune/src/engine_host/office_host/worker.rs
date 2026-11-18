@@ -26,7 +26,15 @@ use super::{
 #[path = "edit.rs"]
 pub(crate) mod edit;
 
-use edit::{EditCommand, Mode};
+// The document the host keeps for a restart, and the restart itself with the snapshot timing.
+#[path = "held.rs"]
+mod held;
+#[path = "restart.rs"]
+pub(crate) mod restart;
+
+use edit::Mode;
+use held::Held;
+use restart::Cadence;
 
 /// Starts the worker of one document on a thread of its own. `false` when no thread could be made: the worker, and
 /// the bytes in it, are dropped (wiped).
@@ -37,9 +45,18 @@ pub(super) fn spawn<S: Starter>(
     shared: Arc<Shared>,
     inputs: Receiver<Input>,
     timeouts: Timeouts,
+    cadence: Cadence,
     bytes: Option<Zeroizing<Vec<u8>>>,
 ) -> bool {
+    // An editing session keeps what it was opened with, for a restart.
+    let held = match mode {
+        Mode::View => None,
+        Mode::Edit(_) => Some(Held::new(bytes.clone())),
+        Mode::New(..) => Some(Held::new(None)),
+    };
     let worker = Worker {
+        held,
+        rs: restart::State::new(cadence),
         starter,
         mode,
         kind,
@@ -179,6 +196,10 @@ struct Worker<S: Starter> {
     links: u64,
     retried: bool,
     phase: Phase,
+    /// What a restart opens (editing sessions only).
+    held: Option<Held>,
+    /// Snapshot timing and crash bookkeeping.
+    rs: restart::State,
 }
 
 /// A panic on the worker thread: the shared helper is ended, a document parked for a start is dropped, the window says
@@ -212,17 +233,17 @@ impl<S: Starter> Worker<S> {
         let _guard = PanicGuard(self.shared.clone());
         self.start_helper();
         while !self.done() {
-            let input = match self.deadline() {
+            let input = match self.next_due() {
                 Some((at, why)) => {
                     let now = Instant::now();
                     if at <= now {
-                        self.stopped(why);
+                        self.fire(why);
                         continue;
                     }
                     match self.inputs.recv_timeout(at - now) {
                         Ok(input) => input,
                         Err(RecvTimeoutError::Timeout) => {
-                            self.stopped(why);
+                            self.fire(why);
                             continue;
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -404,6 +425,10 @@ impl<S: Starter> Worker<S> {
 
     /// "Renderer stopped". The document's section stays for Try again; without one it goes now.
     fn stopped(&mut self, why: Stop) {
+        // An editing session whose helper exited goes on with a new one (or read-only).
+        if why == Stop::Exited && self.try_restart() {
+            return;
+        }
         self.kill_run();
         // An editing session has no Try again: a new helper would not hold the edits.
         let can_retry = !self.retried && !matches!(self.doc, Doc::Gone) && matches!(self.mode, Mode::View);
@@ -765,6 +790,7 @@ impl<S: Starter> Worker<S> {
         let office::Opened { pages, sizes } = opened;
         self.phase = Phase::Pages { sizes: sizes.clone() };
         self.shared.push(Out::State(OfficeState::Pages { pages, sizes }));
+        self.opened_after_restart();
     }
 
     fn opened_sheets(&mut self, mut opened: office::OpenedSheets) {
@@ -785,6 +811,7 @@ impl<S: Starter> Worker<S> {
             sheets: opened.sheets,
             more: opened.more,
         }));
+        self.opened_after_restart();
     }
 
     /// The helper's answer to `Open` with an error: its typed state; the helper goes.

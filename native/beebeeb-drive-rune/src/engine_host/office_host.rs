@@ -56,8 +56,14 @@ pub use beebeeb_office_protocol::office::{
     Anchor, CellData, CellRange, DocKind, EditKind, EditOp, Edited, HitMode, OutlineEntry, PageSize, Purpose, Rect,
     SheetInfo, Template,
 };
-pub use worker::edit::{EditEvent, EditFailure, EditRefused};
+pub use worker::edit::EditEvent;
+// Re-exported for the window; the window proof (`beebeeb-office-page`) compiles this file alone and names neither.
+#[allow(unused_imports)]
+pub use worker::edit::{EditFailure, EditRefused};
+#[allow(unused_imports)]
+pub use worker::restart::{READ_ONLY_WORDS, RESTORED_WORDS};
 pub(crate) use worker::edit::Mode;
+pub(crate) use worker::restart::Cadence;
 
 // Windows Error Reporting keeps no copy of the helper's memory (the lead's answer 4, 2026-11-15 19:03).
 #[path = "office_host/crash_reports.rs"]
@@ -543,6 +549,8 @@ struct Inner {
     /// The editor's answers, moved here by [`OfficeHost::poll`] and taken by [`OfficeHost::poll_edit`].
     edit_events: VecDeque<EditEvent>,
     worker_ended: bool,
+    /// A second crash within a minute opened the document read-only: `edit` calls are refused.
+    read_only: bool,
     /// The charts and pictures of checked cells from the running helper, by (sheet, id): what
     /// [`OfficeHost::request_anchor`] may ask. Emptied when that helper goes, and at a close.
     anchors: HashMap<(u32, u32), Anchor>,
@@ -1029,6 +1037,21 @@ pub(crate) fn open_mode<S: Starter>(
     bytes: Option<Zeroizing<Vec<u8>>>,
     wake: Wake,
 ) -> OfficeHost {
+    open_mode_cadence(starter, registry, timeouts, Cadence::PRODUCTION, mode, kind, bytes, wake)
+}
+
+/// [`open_mode`] with the snapshot and crash timing named (the tests shorten it).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_mode_cadence<S: Starter>(
+    starter: S,
+    registry: &Registry,
+    timeouts: Timeouts,
+    cadence: Cadence,
+    mode: Mode,
+    kind: DocKind,
+    bytes: Option<Zeroizing<Vec<u8>>>,
+    wake: Wake,
+) -> OfficeHost {
     let (commands, inputs) = mpsc::channel();
     // Refused before anything starts: `bytes` is wiped when this returns.
     let refused = match &bytes {
@@ -1044,6 +1067,7 @@ pub(crate) fn open_mode<S: Starter>(
             outs: VecDeque::new(),
             edit_events: VecDeque::new(),
             worker_ended: false,
+            read_only: false,
             anchors: HashMap::new(),
             parked: None,
         }),
@@ -1063,7 +1087,7 @@ pub(crate) fn open_mode<S: Starter>(
         return host;
     }
     registry.add(&shared);
-    if !worker::spawn(starter, mode, kind, shared.clone(), inputs, timeouts, bytes) {
+    if !worker::spawn(starter, mode, kind, shared.clone(), inputs, timeouts, cadence, bytes) {
         // The worker (and the bytes in it) was dropped: wiped.
         lock(&shared.inner).state = OfficeState::Stopped {
             why: Stop::Failed,
