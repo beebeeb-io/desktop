@@ -525,7 +525,7 @@ fn the_previews_row_is_hidden_while_the_source_has_none() {
         settle(&mut rt);
         rt.elements()
             .iter()
-            .any(|e| e.text.as_deref() == Some("Thumbnails and previews") && !e.exiting)
+            .any(|e| e.key.as_deref() == Some("item-1-1") && !e.exiting)
     };
     assert!(rows(Box::new(Bare(BoardDrive::new()))), "a source that shows it: the row is there");
     assert!(!rows(Box::new(NoRow(Bare(BoardDrive::new())))), "a source with none: no row");

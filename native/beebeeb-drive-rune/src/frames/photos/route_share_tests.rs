@@ -217,6 +217,8 @@ fn link_copied_from_the_real_source_is_said_over_photos() {
     rt.state.actions.toast = Some(FilesToast::LinkCopied);
     rt.state.actions.toast_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
     settle(&mut rt);
+    rt.settle_all();
+    rt.frame(0.0);
     let said = rt
         .elements()
         .iter()
@@ -226,5 +228,7 @@ fn link_copied_from_the_real_source_is_said_over_photos() {
     // Its time is over: it is not drawn.
     rt.state.actions.toast_until = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
     settle(&mut rt);
+    rt.settle_all();
+    rt.frame(0.0);
     assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("ph-toast") && !e.exiting));
 }
