@@ -958,12 +958,13 @@ fn the_running_apps_settings_show_no_sample_value() {
     assert!(!shows(&rt, "Check now"), "no updater runs: no Check now");
     assert!(!shows(&rt, "Release channel"), "no updater runs: no channel");
     check_but(&rt, "About", &["311"]);
+    // Storage is wired (w15-storage-wired): drawn, with no sample value in it (the rows read nothing here).
     for (frame, pane) in [("DW-0712", "Storage")] {
         rt.update(move |s, _| crate::frames::settings::go(s, frame));
         rt.frame(0.016);
         assert!(
-            rt.elements().iter().any(|e| e.key.as_deref() == Some("not-built")),
-            "{pane}: the shell's not-built frame"
+            !rt.elements().iter().any(|e| e.key.as_deref() == Some("not-built")),
+            "{pane}: drawn, not the shell's not-built frame"
         );
         check(&rt, pane);
     }
