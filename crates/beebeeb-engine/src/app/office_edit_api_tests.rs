@@ -41,7 +41,7 @@ fn zip_of(names: &[&str]) -> Vec<u8> {
         dir.extend_from_slice(&3u32.to_le_bytes());
         dir.extend_from_slice(&3u32.to_le_bytes());
         dir.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        dir.extend_from_slice(&[0; 12]); // extra, comment, disk, internal attrs
+        dir.extend_from_slice(&[0; 8]); // extra, comment, disk, internal attrs
         dir.extend_from_slice(&0u32.to_le_bytes()); // external attrs
         dir.extend_from_slice(&at.to_le_bytes());
         dir.extend_from_slice(name.as_bytes());
