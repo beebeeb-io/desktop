@@ -75,12 +75,17 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         2,
         Some("Privacy and data"),
         vec![
-            lists::item(2, 0, &Item::new(Some(&ic::SHIELD), "Privacy").opens(), t)
+            lists::item(2, 0, &Item::new(Some(&ic::SHIELD), "Privacy")
+                    .trailing(Trailing::External)
+                    .role(Role::Link), t)
                 .on_press(|s: &mut State| s.settings.ask(Intent::Open("privacy"))),
             lists::item(
                 2,
                 1,
-                &Item::new(Some(&ic::DOWNLOAD_TRAY), "Export my data").opens().ruled(),
+                &Item::new(Some(&ic::DOWNLOAD_TRAY), "Export my data")
+                    .trailing(Trailing::External)
+                    .role(Role::Link)
+                    .ruled(),
                 t,
             )
             .on_press(|s: &mut State| s.settings.ask(Intent::Open("export-my-data"))),
