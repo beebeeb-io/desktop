@@ -794,9 +794,11 @@ fn menus_toasts_and_the_path_have_their_roles_and_names() {
 fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
     let (x, y) = centre(rt, key);
     let now = CLOCK.with(|c| c.get());
+    eprintln!("A {:?} {:?}", info(rt, key).path, info(rt, key).rect);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(now);
+    eprintln!("B {:?} {:?} sel={:?} now={now}", info(rt, key).path, info(rt, key).rect, rt.state.selected);
     let (x, y) = centre(rt, key);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
