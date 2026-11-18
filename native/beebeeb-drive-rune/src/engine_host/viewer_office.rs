@@ -52,6 +52,8 @@ mod cells;
 mod edit;
 #[path = "viewer_office/glue.rs"]
 mod glue;
+#[path = "viewer_office/recovery.rs"]
+mod recovery;
 use cells::{Inflight, covers};
 #[cfg_attr(not(test), allow(unused_imports))] // the tests set it
 pub(crate) use glue::{EditShips, Office};
