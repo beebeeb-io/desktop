@@ -465,3 +465,68 @@ fn a_section_not_built_yet_is_left_to_the_shell() {
     );
     assert!(find(&rt, "set-main").is_none(), "no settings pane is drawn for it");
 }
+
+/// Storage > On this PC: the "Thumbnails and previews" row is drawn only for a source that can say what previews
+/// hold (`Control::PreviewsRow`); one that cannot leaves it out, never " of 0 GB".
+#[test]
+fn the_previews_row_is_hidden_while_the_source_has_none() {
+    use super::drive::Control;
+    use super::tests_previews::Bare;
+    struct NoRow(Bare);
+    impl DriveSettings for NoRow {
+        fn shows(&self, control: Control) -> bool {
+            control != Control::PreviewsRow
+        }
+        fn storage(&self) -> Storage {
+            self.0.storage()
+        }
+        fn set_limit(&mut self, which: Kept, gb: u32) {
+            self.0.set_limit(which, gb);
+        }
+        fn clear(&mut self, which: Kept) {
+            self.0.clear(which);
+        }
+        fn sync(&self) -> SyncPane {
+            self.0.sync()
+        }
+        fn set_status_on_files(&mut self, on: bool) {
+            self.0.set_status_on_files(on);
+        }
+        fn set_open_at_login(&mut self, on: bool) {
+            self.0.set_open_at_login(on);
+        }
+        fn set_paused(&mut self, paused: bool) {
+            self.0.set_paused(paused);
+        }
+        fn sync_anyway(&mut self) {
+            self.0.sync_anyway();
+        }
+        fn repair(&mut self) {
+            self.0.repair();
+        }
+        fn turn_off_explorer(&mut self) {
+            self.0.turn_off_explorer();
+        }
+        fn insights(&self) -> &Insights {
+            self.0.insights()
+        }
+        fn reload_insights(&mut self) {
+            self.0.reload_insights();
+        }
+    }
+    let rows = |drive: Box<dyn DriveSettings>| {
+        let mut state = init();
+        assert!(super::scene("DW-0712", &mut state));
+        state.settings.drive = drive;
+        let mut rt = Runtime::new(state, view, (958.0, 718.0), Env { system_dark: false, scale: 2.0 });
+        rt.on_key = Some(host::on_key);
+        rt.poll = Some(host::poll);
+        rt.frame(0.0);
+        settle(&mut rt);
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref() == Some("Thumbnails and previews") && !e.exiting)
+    };
+    assert!(rows(Box::new(Bare(BoardDrive::new()))), "a source that shows it: the row is there");
+    assert!(!rows(Box::new(NoRow(Bare(BoardDrive::new())))), "a source with none: no row");
+}

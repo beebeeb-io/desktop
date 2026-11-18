@@ -770,3 +770,16 @@ fn showing_the_saved_page_exports_nothing_and_a_press_exports_once() {
     assert_eq!(ui(&rt).pane, Pane::Diagnostics);
     assert_eq!(told.borrow().exports, 1);
 }
+
+/// Upload and Download are the engine's newest bandwidth sample, not a live rate: the page says so, beside the
+/// numbers, instead of letting a sample pass for the rate right now.
+#[test]
+fn app_activity_says_that_upload_and_download_are_the_latest_sample() {
+    let rt = runtime("DW-0790");
+    let said = rt
+        .elements()
+        .iter()
+        .filter_map(|e| e.text.clone())
+        .any(|t| t.contains("Upload and download are the latest bandwidth sample"));
+    assert!(said, "the footer names what the two rates are");
+}

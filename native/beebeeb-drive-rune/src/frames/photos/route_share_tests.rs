@@ -206,3 +206,25 @@ fn share_several_and_version_history_open_files_dialogs() {
     assert!(matches!(&rt.state.actions.dialog,
         Some(crate::frames::files::dialogs::Dialog::Versions(item)) if item.id == "f-a"));
 }
+
+/// On a source that answers later, Files' poll puts the link on the clipboard and says "Link copied" in Files' own
+/// toast; over Photos that message is drawn too, once, and gone with its time.
+#[test]
+fn link_copied_from_the_real_source_is_said_over_photos() {
+    use crate::frames::files::Toast as FilesToast;
+    let (mut rt, _calls) = window();
+    assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("ph-toast")));
+    rt.state.actions.toast = Some(FilesToast::LinkCopied);
+    rt.state.actions.toast_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+    settle(&mut rt);
+    let said = rt
+        .elements()
+        .iter()
+        .find(|e| e.key.as_deref() == Some("ph-toast-text") && !e.exiting)
+        .and_then(|e| e.text.clone());
+    assert_eq!(said.as_deref(), Some("Link copied"));
+    // Its time is over: it is not drawn.
+    rt.state.actions.toast_until = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+    settle(&mut rt);
+    assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("ph-toast") && !e.exiting));
+}
