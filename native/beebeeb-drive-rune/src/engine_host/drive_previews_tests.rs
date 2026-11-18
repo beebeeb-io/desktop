@@ -365,6 +365,9 @@ fn apply_stores_the_choice_then_runs_and_never_draws_it_first() {
     host.opened();
     fake.permit();
     pump_until(&mut host, "the pane read", |host| ready(host).is_some());
+    // The session's own run has begun its work: a start that still waits is replaced by the next one
+    // (`PreviewRun::start`), and Apply's would then be the only run there ever is.
+    runs(&fake, 1);
     host.apply(PreviewSize::K4, PreviewFormat::Jpeg);
     // A second press while the first is on its way sends nothing, and says so.
     host.apply(PreviewSize::P720, PreviewFormat::Jpeg);
