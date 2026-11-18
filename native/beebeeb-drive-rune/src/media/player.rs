@@ -68,6 +68,9 @@ use super::video::VideoSurface;
 
 mod worker;
 
+#[cfg(test)]
+mod vm_probe;
+
 use worker::{Start, Worker};
 
 // ---- The seams ----
@@ -379,6 +382,11 @@ struct Record {
     received: Vec<u64>,
     /// How often the frame was blanked.
     blanked: usize,
+    /// The worker's steps from the press to the first frame shown: the step and its time in ms.
+    steps: Vec<(&'static str, u64)>,
+    /// One row a second: ms since the press, frames received, shown, dropped, the clock, the time of the frame on
+    /// screen, the position told.
+    pace: Vec<[u64; 7]>,
 }
 
 /// One opened item's worker, as the player holds it.

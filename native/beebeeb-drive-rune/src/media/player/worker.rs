@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_media_protocol::{
@@ -126,6 +126,59 @@ impl Played {
     }
 }
 
+/// Where the time from the press to the first frame goes, and how the picture keeps up after it: the TEST build's
+/// `media.start` line (once per item) and `media.pace` line (once a second). Milliseconds and counts only.
+struct Trace {
+    /// The press (the worker is made on the caller's thread).
+    from: Instant,
+    /// Each step's time since the press, the first time it happened.
+    steps: Vec<(&'static str, u64)>,
+    /// The sound device opened.
+    sound: bool,
+    written: bool,
+    /// Since the last `media.pace` line: frames that passed the checks, frames shown, frames dropped as late.
+    received: u32,
+    shown: u32,
+    dropped: u32,
+    shown_pts: u64,
+    paced_at: u64,
+}
+
+impl Trace {
+    fn new() -> Trace {
+        Trace {
+            from: Instant::now(),
+            steps: Vec::new(),
+            sound: false,
+            written: false,
+            received: 0,
+            shown: 0,
+            dropped: 0,
+            shown_pts: 0,
+            paced_at: 0,
+        }
+    }
+
+    fn ms(&self) -> u64 {
+        u64::try_from(self.from.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// `step` happened now (kept the first time only).
+    fn mark(&mut self, step: &'static str) {
+        if !self.steps.iter().any(|(name, _)| *name == step) {
+            self.steps.push((step, self.ms()));
+        }
+    }
+
+    /// A step's time; -1 when it never happened.
+    fn at(&self, step: &str) -> i64 {
+        self.steps
+            .iter()
+            .find(|(name, _)| *name == step)
+            .map_or(-1, |(_, ms)| i64::try_from(*ms).unwrap_or(i64::MAX))
+    }
+}
+
 /// What a worker is started with.
 pub(super) struct Start {
     pub(super) generation: u64,
@@ -199,6 +252,7 @@ pub(super) struct Worker {
     now_dirty: bool,
     now_shown_at: Option<u64>,
     played: Played,
+    trace: Trace,
 }
 
 impl Worker {
@@ -254,6 +308,7 @@ impl Worker {
             now_dirty: false,
             now_shown_at: None,
             played: Played::default(),
+            trace: Trace::new(),
         }
     }
 
@@ -262,10 +317,12 @@ impl Worker {
             // The helper of the run before is gone before this one starts its own.
             let _ = previous.join();
         }
+        self.trace.mark("joined");
         let exit = match self.play() {
             Ok(()) => Exit::Done,
             Err(exit) => exit,
         };
+        self.write_start();
         self.slots.end();
         self.bytes = None;
         self.release();
@@ -303,6 +360,7 @@ impl Worker {
         let bytes = self.opener.open(&self.item.file_id)?;
         self.len = bytes.len();
         self.bytes = Some(bytes);
+        self.trace.mark("bytes");
         if self.slots.cancelled() {
             return Err(Exit::Done);
         }
@@ -316,6 +374,7 @@ impl Worker {
     fn start_helper(&mut self) -> Result<(), Exit> {
         let link = self.links.start_in(self.profile)?;
         self.starts += 1;
+        self.trace.mark("helper");
         if !self.slots.put_link(link) {
             return Err(Exit::Done);
         }
@@ -483,9 +542,12 @@ impl Worker {
         self.frame_ms = opened.video.map_or(DEFAULT_FRAME_MS, |video| frame_ms(video.fps_milli));
         self.opened = Some(opened);
         self.opened_by = None;
+        self.trace.mark("opened");
         // Without a device a video plays its picture on the wall clock (and says so); a recording cannot play.
         if let Some(audio) = opened.audio {
             let sound = self.open_sound(audio.rate)?;
+            self.trace.sound = sound;
+            self.trace.mark("sound");
             if !sound && opened.video.is_none() {
                 return Err(broke());
             }
@@ -612,6 +674,8 @@ impl Worker {
         }
         #[cfg(test)]
         let _ = self.publish(|player| player.record.received.push(pts));
+        self.trace.mark("frame");
+        self.trace.received += 1;
         self.held.push_back(Held { pts, w, h, rgba });
         Ok(())
     }
@@ -747,6 +811,7 @@ impl Worker {
         if opened.video.is_some() && self.want_video.is_none() && self.held.len() < HELD_FRAMES {
             let view = self.publish(|player| player.view).ok_or(Exit::Done)?;
             if let Some((w, h)) = asked_size(view) {
+                self.trace.mark("asked");
                 self.send(&ToHelper::WantVideo { w, h })?;
                 self.want_video = Some(VideoWant {
                     w,
@@ -801,6 +866,7 @@ impl Worker {
                 .last_shown_at
                 .is_none_or(|at| now.saturating_sub(at) >= SHOW_LATE_AFTER_MS);
             if superseded || (late && !starving) {
+                self.trace.dropped += 1;
                 continue;
             }
             self.show(frame, now)?;
@@ -821,6 +887,10 @@ impl Worker {
         .ok_or(Exit::Done)?;
         self.last_shown_at = Some(now);
         self.presented = true;
+        self.trace.mark("shown");
+        self.trace.shown += 1;
+        self.trace.shown_pts = pts;
+        self.write_start();
         self.played.begin(pts);
         self.played.frame(pts);
         Ok(())
@@ -998,6 +1068,7 @@ impl Worker {
         };
         let length = self.opened.map(|opened| opened.duration_ms);
         let at_ms = length.map_or(0, |length| clock.min(length));
+        self.write_pace(clock, at_ms);
         let playing = self.playing && !self.ended_shown;
         let buffering = !self.presented && !self.ended_shown;
         let feed = length.is_some()
@@ -1031,6 +1102,62 @@ impl Worker {
             self.press(button)?;
         }
         Ok(())
+    }
+
+    /// The test build's `media.start` line: once per item, at its first frame shown (or when the run ends without
+    /// one).
+    fn write_start(&mut self) {
+        if self.trace.written {
+            return;
+        }
+        self.trace.written = true;
+        #[cfg(test)]
+        {
+            let steps = self.trace.steps.clone();
+            let _ = self.publish(|player| player.record.steps = steps);
+        }
+        if !writes_played_line(crate::shell::identity::engine_identity()) {
+            return;
+        }
+        let t = &self.trace;
+        tracing::info!(
+            joined_ms = t.at("joined"),
+            bytes_ms = t.at("bytes"),
+            helper_ms = t.at("helper"),
+            opened_ms = t.at("opened"),
+            sound_ms = t.at("sound"),
+            sound = t.sound,
+            asked_ms = t.at("asked"),
+            frame_ms = t.at("frame"),
+            shown_ms = t.at("shown"),
+            "media.start"
+        );
+    }
+
+    /// The test build's `media.pace` line, once a second from `Opened`: the frames received, shown and dropped in
+    /// that second, the clock, the time of the frame on screen and the position the view is told.
+    fn write_pace(&mut self, clock: u64, at_ms: u64) {
+        let now = self.trace.ms();
+        if self.opened.is_none() || now.saturating_sub(self.trace.paced_at) < 1_000 {
+            return;
+        }
+        self.trace.paced_at = now;
+        let (received, shown, dropped) = (self.trace.received, self.trace.shown, self.trace.dropped);
+        self.trace.received = 0;
+        self.trace.shown = 0;
+        self.trace.dropped = 0;
+        let shown_pts = self.trace.shown_pts;
+        #[cfg(test)]
+        let _ = self.publish(|player| {
+            player
+                .record
+                .pace
+                .push([now, u64::from(received), u64::from(shown), u64::from(dropped), clock, shown_pts, at_ms]);
+        });
+        if !writes_played_line(crate::shell::identity::engine_identity()) {
+            return;
+        }
+        tracing::info!(t_ms = now, received, shown, dropped, clock_ms = clock, shown_pts, at_ms, "media.pace");
     }
 
     /// The test build's one line per item, after the first second of playback.
