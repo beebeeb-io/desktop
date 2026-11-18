@@ -254,6 +254,12 @@ pub trait PhotosSource {
     fn file_items(&self, _ids: &[PhotoId]) -> Option<Vec<crate::source::DriveItem>> {
         None
     }
+    /// The photo's own file in the Beebeeb folder on this PC (read on open: a placeholder hydrates then), while sync is
+    /// on and the photo has one. `None`: sync is off, the photo has no file there (a device backup), or nothing is
+    /// connected that could say. Send a copy hands this path to the Share sheet and never writes a temp copy.
+    fn kept_path(&self, _id: PhotoId) -> Option<std::path::PathBuf> {
+        None
+    }
     /// The totals of what shows, or of one device (`devices()` index).
     fn totals(&self, device: Option<usize>) -> Totals;
     fn backup_status(&self) -> Option<BackupStatus>;

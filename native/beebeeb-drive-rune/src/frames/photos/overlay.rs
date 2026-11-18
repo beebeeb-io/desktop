@@ -159,6 +159,7 @@ pub fn toast_layer(toast: &Toast, bottom: f32, over_photos: bool, t: &Theme) -> 
         Toast::Trashed(_) => (&icons::TRASH, "Moved to Trash"),
         Toast::NotYet => (&icons::MORE, "Not available in this version yet"),
         Toast::Words(words) => (&icons::MORE, words),
+        Toast::Said(words) => (&icons::MORE, words.as_str()),
         Toast::Left { what, why, count, .. } => {
             left_words = Toast::left_words(*what, *why, *count);
             let ic = match what {
