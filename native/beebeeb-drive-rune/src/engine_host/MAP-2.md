@@ -6,6 +6,7 @@ Modules 34–66, sorted by path.
 
 | Module | Purpose | Public API |
 |---|---|---|
+| `backups_devices.rs` | Backups' "Other devices" and "Delete this backup" on the real engine: [`DeviceCalls`], the part of `EngineBackupsSource` behind `devices`, ` | — |
 | `backups_devices_tests.rs` | Backups' other devices and "Delete this backup" on the real engine (`DeviceCalls`): the list from the engine's answer with its honest rows, | — |
 | `backups_tests.rs` | Backups on the real engine (`EngineBackupsSource`): the root and the folders from the engine's answer, the empty answer, an engine error, si | — |
 | `binding_tests.rs` | The binding of a test build's local data to one server (`engine_host::open::bind_to_server`, the lead's rulings inside decision 2462), from | — |
@@ -16,9 +17,11 @@ Modules 34–66, sorted by path.
 | `drive_settings_limits_tests.rs` | This PC's transfer limits and the Bandwidth read on the engine adapter: a limit goes to the engine under the session of the press and is sho | — |
 | `drive_settings_previews_tests.rs` | Thumbnails and previews (DW-0744) drawn on `EngineDriveSettings` with its preview host on a double of the engine: wired, drawing the engine' | — |
 | `drive_settings_reads.rs` | What Drive's settings read from the engine and the local state: the Bandwidth pane's limits and traffic, the Sync pane's sizes, the folder t | — |
+| `drive_settings_reads_ids_tests.rs` | Insights' largest files carry their file id, so a press can show the file in Files (audit S4). | — |
 | `drive_settings_tests.rs` | Drive's settings panes on the real engine (`EngineDriveSettings`), against the engine's own state database in a folder of each test's own an | — |
 | `drive_settings_tools.rs` | What Drive's settings do besides reading and storing: the speed test's steps, the support bundle's hand-off to the OS (show the file, open a | — |
 | `drive_settings_tools_tests.rs` | Repair and turn off of File Explorer, the speed test, the support bundle, the controls that are not drawn, and the reads that wait for their | — |
+| `drive_settings_walk_tests.rs` | Every Settings sidebar pane on the app's own engine sources (`state::init_on_engine`, a real engine handle on the fake API): none draws the | — |
 | `files.rs` | The Files window's changes of what this PC holds, on the real engine: [`LocalCopies`], the part of `EngineFilesSource` behind `keep_offline` | — |
 | `files_case_twins_tests.rs` | Two server items at one place on disk (`drive_v2::case_place`) on the real engine's Files presses: Open (and Open in another app…), Show in | — |
 | `files_conflicts.rs` | The Files window's Two versions dialog on the real engine: [`ConflictCalls`], the part of `EngineFilesSource` behind `conflicts` and `keep_v | — |
@@ -27,6 +30,8 @@ Modules 34–66, sorted by path.
 | `files_downloads_tests.rs` | The "Downloading" rows' adapter ([`DownloadCalls`]) against a double of the engine that names its own sessions and accounts and counts what | — |
 | `files_facts.rs` | What the Files window says beside its list, on the real engine: [`Facts`], the part of `EngineFilesSource` behind `counts`, `storage_split`, | — |
 | `files_facts_tests.rs` | The sidebar's figures and the folders' sorts on the real engine (`EngineFilesSource::counts`, `storage_split`, `sort_of`, `set_sort`, `chang | — |
+| `files_item_of.rs` | `FilesSource::item_of` on the real engine: the row of one id, as the signed-in account's local state holds it (the way `file_ops::resolve` f | — |
+| `files_item_of_tests.rs` | `FilesSource::item_of` on the real engine: an id of the signed-in account's local state gives its row; the same id under another account giv | — |
 | `files_launch.rs` | Files' starts, each bound to the session of its press (review of #467, P3-1). | — |
 | `files_launch_tests.rs` | Review of #467 on the real engine: a start that waited for the launch lock compares the session of its press inside the lock and starts noth | — |
 | `files_link.rs` | The Files window's Copy link and its Share dialog's link, on the real engine: [`LinkCalls`], the part of `EngineFilesSource` behind `copy_li | — |
@@ -34,8 +39,3 @@ Modules 34–66, sorted by path.
 | `files_open_with_tests.rs` | "Open in another app…" on the real engine (`EngineFilesSource::open_with`): the path is resolved under the account-bound handle before the c | — |
 | `files_places.rs` | What the Files window says of the Backups tree on the real engine: [`Places`], the part of `EngineFilesSource` behind `folder_shown`, `prote | — |
 | `files_places_tests.rs` | Where the rows stand in the Backups tree on the real engine (`EngineFilesSource::folder_shown` / `protection` / `backup_entry`), against the | — |
-| `files_preview.rs` | What the Files window's Preview panel shows of a file on the real engine: [`Previews`], the part of `EngineFilesSource` behind `preview`, `p | — |
-| `files_preview_tests.rs` | The Preview panel's read on the engine seam (`Previews`), against a double of the engine with hooks: what is previewed and what is not, what | — |
-| `files_tests.rs` | `LocalCopies` against an engine of the test's own: what is sent, what is refused, whose answer counts, and what is reported per item. | — |
-| `files_trash.rs` | The Files window's Move to Trash and its Undo, on the real engine: [`TrashCalls`], the part of `EngineFilesSource` behind `trash` and `resto | — |
-| `files_trash_tests.rs` | Move to Trash and its Undo on the real engine (`EngineFilesSource::trash` / `restore` / `changes`), against the engine's fake accounts on lo | — |

@@ -9,6 +9,7 @@ Modules 1–40, sorted by path.
 | `action_scenes.rs` | The board frames of the action dialogs and the preview: what each sets on the board's sample window (`SCENES` in `mod.rs` lists them). | — |
 | `actions_data.rs` | What the action dialogs ask of `FilesSource`, and the board's sample answers. | — |
 | `actions_tests.rs` | Tests of the action dialogs (lane files-actions): Share (DW-0407), Details (DW-0411), Version history (DW-0413), Preview (DW-0408, DW-0408b) | — |
+| `ask_tests.rs` | Files' Share and Version history dialogs for an item that is not Files' selection (what Search, Photos and the viewer ask): the dialog opens | — |
 | `background_menu.rs` | The menu of a right-click on the list's empty space (DW-1103): New folder, Upload files…, the view, Sort by with its choices beside it, Fold | — |
 | `board_drive.rs` | `BoardDrive`: the board's folders as a `crate::source::DriveSource` for the sample window (moved out of `source.rs` whole, as it was; `sourc | — |
 | `browse_states.rs` | Two states of the Files list that the engine reports through `GlobalSource` (DW-1108, DW-1107). | — |
@@ -45,4 +46,3 @@ Modules 1–40, sorted by path.
 | `reread.rs` | The folder the Files window shows, read again after the engine finished a check (`shell::host`, `read_again_after_a_check`), and merged into | — |
 | `reset.rs` | What the Files window forgets, and when. | — |
 | `reset_tests.rs` | What a session end forgets of the Files window's starts (review of #467, P3-1): on a lock, a sign-out and another account (`end_session`), a | — |
-| `rest_tests.rs` | Tests of the dialogs and the name field (lane f-files-rest): New folder (DW-0417), Move to (DW-0409), Rename in the row (DW-0410, DW-0410b), | — |

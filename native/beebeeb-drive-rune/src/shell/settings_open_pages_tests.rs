@@ -1,3 +1,5 @@
+//! Tests that Settings' Privacy and Export my data each ask the shell for their web page, and that no other target is taken.
+
 use std::sync::Arc;
 
 use rune::{Env, Runtime};

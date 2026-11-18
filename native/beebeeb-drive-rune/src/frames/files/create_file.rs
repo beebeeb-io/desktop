@@ -1,7 +1,8 @@
 //! Create file (DW-1522): what the New file dialog asked for ([`viewers::take_asked`]), made by the source in the
 //! folder the dialog was opened on. The dialog checked the name against the rows it showed; the engine checks it
 //! again against the folder itself (a cloud-only name, an 8.3 short name) and refuses rather than overwrite. What
-//! it refuses is said as every other failed action is (DW-0109), with Try again opening the dialog again.
+//! it refuses is said as every other failed action is (DW-0109), with Try again opening the dialog again. New file's
+//! Continue on an office type is not made here: it opens New document (DW-1558) on that app (`edit::new_document`).
 
 use rune::Tx;
 

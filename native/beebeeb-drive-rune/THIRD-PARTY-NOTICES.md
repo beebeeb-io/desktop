@@ -8,6 +8,15 @@ licences. Edit this file, then run that script (its `--check` and `packaging/lic
 Also compiled in, with nothing asked of a binary: two colour profiles in `hayro-interpret`
 (`CGATS001Compat-v2-micro.icc` and `LAB.icc`, both CC0-1.0 by that crate's `assets/README.md`).
 
+## The audio decoders (`symphonia`, MPL-2.0), in the Office editor's helper
+
+`deckcraft-engine` (the slide editor's engine, held in `beebeeb-io/desktop-office`) brings the `symphonia` family
+(`symphonia`, `symphonia-core`, `symphonia-metadata`, `symphonia-utils-xiph`, `symphonia-bundle-flac`, `symphonia-bundle-mp3`,
+`symphonia-codec-alac`, `symphonia-codec-pcm`, `symphonia-codec-vorbis`, `symphonia-format-isomp4`, `symphonia-format-ogg`
+and `symphonia-format-riff`, version 0.5.5): MPL-2.0, used unmodified, accepted for the editor on 2026-11-18. Their
+source links are in section 4 of `THIRD-PARTY-LICENSES.txt`, which `packaging/licences/generate.sh` writes from the lock
+files, and the licence text is in its section 5.
+
 ## Ubuntu Light, in the Office viewer's helper
 
 Ubuntu Light (`Ubuntu-Light.ttf`, Dalton Maag Ltd for Canonical, via `epaint_default_fonts` 0.37), the Office engine's last-resort text face, compiled into `beebeeb-office-render`: Ubuntu Font Licence 1.0 (`Ubuntu-font-1.0`), its notice and licence carried in the font's own metadata. The licence text is `packaging/licences/texts/UFL-1.0.txt` (from `epaint_default_fonts`), and goes into the shipped notice's section 2.

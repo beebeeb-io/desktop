@@ -1,6 +1,7 @@
 //! What the open viewer asked of the shell (`frames::viewers::Intent`), taken by the poll. SaveCopy and DownloadTo go
 //! to `viewer_save`. Every press here acts on the OPEN file only; the Files window's own selection is not read.
-//! Office(..), EditInSheets and NewDocument stay with the router's 0.9.1 toast (`false`).
+//! Office(..) is taken while an editor runs on the open document (a refusal, said as one) and NewDocument opens the
+//! New document dialog in the folder shown; EditInSheets, OpenInAnotherApp and CreateFile are not this file's (`false`).
 
 use rune::Tx;
 

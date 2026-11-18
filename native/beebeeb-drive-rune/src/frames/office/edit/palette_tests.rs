@@ -1,3 +1,6 @@
+//! Tests of the editor's command search (`edit::palette`): each document kind lists its own operations, typing filters
+//! them, and a result resolves to its operation (a mark toggles).
+
 use std::cell::RefCell;
 use std::rc::Rc;
 

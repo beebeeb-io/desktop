@@ -1,10 +1,10 @@
 //! Slice OF4 (plan40 batch 1): the Office viewer's licence notice, DW-1557 (a panel from About in the status bar).
-//! DW-1558 (New document from a template) is a 0.9.1 frame (the editor, decision 2539): its row stays a placeholder.
+//! DW-1558 (New document from a template) is drawn by `edit::new_document` (the editor, release 0.9.0 since the owner's
+//! 2026-11-18 ruling that reversed decision 2539); its row here is that scene.
 //!
 //! The panel is drawn by [`licence_panel`] from the words below. The words sit in ONE text node (`NOTICE`) so that the
-//! naming decision D-OV-4 is one edit. Nothing here claims the panel is wired: until the viewer's status bar hosts it
-//! (see BRANCH-NOTES, "Integration gap"), the DW-1557 row stays on `placeholder::scene`, which the progress counter
-//! reads as "not built".
+//! naming decision D-OV-4 is one edit. The DW-1557 row is `viewers::scene_licence`, the panel as the viewer's status bar
+//! hosts it from About.
 
 use rune::{El, TextStyle, col, el, row};
 
@@ -18,7 +18,7 @@ use crate::ui::settings_dialog::DIALOG_TITLE;
 const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 
 /// The notice, as the board's DW-1557 words it (viewer contract section 6.2). One text node.
-pub const NOTICE: &str = "This viewer is built on WordCraft, GridCraft and DeckCraft, open-source projects \
+pub const NOTICE: &str = "This viewer and editor are built on WordCraft, GridCraft and DeckCraft, open-source projects \
 (MIT OR Apache-2.0), with fonts under the SIL Open Font License 1.1 and the Ubuntu Font Licence 1.0, and PDF data \
 under BSD-3-Clause. Beebeeb is under the AGPL-3.0-or-later, and some media libraries are under MPL-2.0. It runs \
 entirely on this device.";

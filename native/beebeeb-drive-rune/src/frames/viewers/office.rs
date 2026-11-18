@@ -2,11 +2,11 @@
 //! window's own toolbar with the file's path, the ribbon (tabs, command search, Share, Save, the
 //! tab's tools), the outline, the page on its stage, and the status line.
 //!
-//! What is here is the editor's FRAME. No editing engine stands behind it yet: the page is drawn
-//! from what [`super::source::ViewerSource::open`] hands over ([`WordDoc`]: the board's sample in
-//! a development build), and every command a control stands for is asked of the app around it as
-//! [`super::Intent::Office`], which says "Not built yet" until the editor takes it. Nothing is
-//! typed, saved or changed by this file.
+//! What is here is the editor's FRAME. The page is drawn from what [`super::source::ViewerSource::open`]
+//! hands over ([`WordDoc`]: the board's sample in a development build), and every command a control stands for is
+//! asked of the live editor (`frames::office::edit`) when one runs on the document, else of the app around it as
+//! [`super::Intent::Office`], which says "Not built yet" for the board's sample. Nothing is typed, saved or changed by
+//! this file.
 //!
 //! Keys: the window's caption, sidebar and toolbar keep the keys every window has. The editor's
 //! own are `rib*` (the ribbon), `rt-<N>` / `rp-<N>` / `rsep-<N>` (its tools, pop-up buttons and

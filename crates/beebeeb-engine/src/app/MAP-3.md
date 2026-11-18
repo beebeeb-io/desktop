@@ -6,6 +6,13 @@ Modules 70–103, sorted by path.
 
 | Module | Purpose | Public API |
 |---|---|---|
+| `settings_api.rs` | The account's own settings on Beebeeb, for a host without a UI toolkit (the native Settings panes): where new files are stored, the account' | — |
+| `setup_api.rs` | The first run on this computer, for a host without a UI toolkit (the native first-run steps): whether it is still to do, marking it done, th | — |
+| `setup_api_tests.rs` | The first run's settings and the sync-folder check with the engine's own parts: a real settings file in a folder of the test's own (`CONFIG_ | — |
+| `share_invite_api.rs` | "Invite someone" (DW-0514) for a host without a UI toolkit: share one of the account's own items with a person by their email address. | — |
+| `share_invite_api_tests.rs` | `Engine::invite_for` and `Engine::share_target_of` on a real handle, against a fake server on loopback that answers the invite routes in the | — |
+| `share_link_api.rs` | A link to one of the account's files, for a host without a UI toolkit (the native Files window's Copy link and its Share dialog): [`Engine:: | — |
+| `share_link_api_tests.rs` | A link to a file at the engine (`Engine::share_link_for`), against the engine's own doubles: two invented accounts on the fake API on loopba | — |
 | `shares_api.rs` | What the account shares and what is shared with it, for a host without a UI toolkit (the native Shared window): the invitations waiting for | — |
 | `shares_api_more_tests.rs` | `Engine::share_change`'s answer to a 403 (ported from the Tauri shell's `share_v2/reads_tests.rs::a_403_on_set_access_is_not_a_signed_out_se | — |
 | `shares_api_tests.rs` | `Engine::shares_overview` and `Engine::share_change` on a real handle against the engine's fake account on loopback, with the share routes a | — |
@@ -33,10 +40,3 @@ Modules 70–103, sorted by path.
 | `uploads_api_tests.rs` | `Engine::uploads_for`, `retry_upload_for` and `cancel_upload_for` with the engine's own parts: a real handle, a session put in memory, a sta | — |
 | `uploads_recycle_bin.rs` | The move of ONE file to the Recycle Bin for Cancel upload, never a delete for good (review of desktop#423, P1 #1). | — |
 | `versions_api.rs` | A file's versions, for a host without a UI toolkit (the native Files window's Version history): the list the server holds ([`Engine::file_ve | — |
-| `versions_api_tests.rs` | A file's versions at the engine, against the fake account on loopback: what is listed and in which order, what is sent and when, and the ses | — |
-| `viewer_api.rs` | An open file, for a host without a UI toolkit (the native viewer window): what the local state says about the file ([`Engine::open_file_fact | — |
-| `viewer_api_tests.rs` | An open file at the engine (`Engine::open_file_facts`, `Engine::open_file_in_memory`), against the engine's own doubles: two invented accoun | — |
-| `viewer_chain_tests.rs` | The viewer's save and the write queue (review of desktop#432, delta 3): a save never queues behind a write of the file that is not its own o | — |
-| `viewer_copy_tests.rs` | A viewer save refused behind an earlier change to the file on this PC (task 2530, item 1): the refusal says whether that change is held back | — |
-| `viewer_edit_api.rs` | Keep a file on this PC and save a text edit, for the native viewer window: the pieces the viewer's switch and its editor ask of the engine, | — |
-| `viewer_edit_held.rs` | Which refusal a viewer save behind an earlier write of the file is (task 2530, item 1): the earlier change is held back and is not sent unti | — |

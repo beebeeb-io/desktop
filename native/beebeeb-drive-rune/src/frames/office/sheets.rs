@@ -5,7 +5,7 @@
 //!
 //! The grid is OURS: Rune elements drawn from a [`SheetView`] (the engine gives geometry and cells; we draw), never
 //! an image. [`sheets_fixture::board`] is the board's workbook; a live host fills the same shape later.
-//! DW-1559 (the Data tab) is a 0.9.1 frame (the editor): its row stays `placeholder::scene`, nothing of it is drawn.
+//! DW-1559 (the Data tab) is the editor's: its scene is `edit::sheet_ribbon::scene`, the same as DW-1508e's.
 //!
 //! Wiring (the integration lane applies it, see this lane's BRANCH-NOTES): `Body::Sheet(SheetView)` in
 //! `viewers::source`, one arm in `viewers::view` that calls [`window`], one `scene_file` arm for DW-1508.
@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     /// The scene sets what the frame names: the sheet open, its first tab, B2:B9 selected, B10 current, no ribbon;
-    /// and DW-1559 (0.9.1) is still the placeholder.
+    /// and DW-1559 is the editor's `edit::sheet_ribbon` scene.
     #[test]
     fn office_sheets_scenes_set_their_state() {
         let mut state = scene_state();
