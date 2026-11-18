@@ -309,10 +309,23 @@ mod tests {
     #[test]
     fn an_unresolvable_host_is_offline() {
         block(async {
-            // `.invalid` is reserved (RFC 2606): it can never resolve.
-            let err = get(&client(Duration::from_secs(10)), "http://nothing.invalid/")
-                .await
-                .unwrap_err();
+            // A resolver that always fails: no real DNS lookup, so the host's resolver
+            // (some answer even for `.invalid`) cannot change the outcome.
+            struct FailingResolver;
+            impl reqwest::dns::Resolve for FailingResolver {
+                fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                    Box::pin(async {
+                        Err(Box::new(std::io::Error::other("no such host")) as Box<dyn std::error::Error + Send + Sync>)
+                    })
+                }
+            }
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .dns_resolver(std::sync::Arc::new(FailingResolver))
+                .build()
+                .unwrap();
+            let err = get(&client, "http://nothing.invalid/").await.unwrap_err();
             let failure = classify_reqwest(&err).expect("a DNS failure is a link failure");
             assert_eq!(failure.kind, LinkFailureKind::Offline, "{err:?}");
         })
