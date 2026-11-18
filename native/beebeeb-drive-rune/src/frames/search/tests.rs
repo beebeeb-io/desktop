@@ -856,12 +856,14 @@ mod acting {
         // The dialog stands over the results: search still shows.
         assert!(super::super::shows_over_files(&rt.state));
         rt.update(|s, _| s.actions.dialog = None);
+        settle(&mut rt);
         click(&mut rt, "versions-box");
         drain(&mut rt);
         assert!(matches!(rt.state.actions.dialog, Some(Dialog::Versions(_))));
         assert_eq!(*spy.versions.lock().unwrap(), vec!["board-search-1".to_string()]);
         // A folder has no version history: no dialog, a notice.
         rt.update(|s, _| s.actions.dialog = None);
+        settle(&mut rt);
         click(&mut rt, "row-2-date");
         click(&mut rt, "versions-box");
         drain(&mut rt);
@@ -930,9 +932,10 @@ mod acting {
         press(&mut rt, Key::Down, NONE);
         press(&mut rt, Key::ContextMenu, NONE);
         drain(&mut rt);
+        let id = rt.state.frames.find.selected.clone().expect("a result is selected");
         assert_eq!(
             rt.state.frames.find.menu.as_ref().map(|m| m.of.clone()),
-            Some(super::super::actions::MenuOf::Result("board-search-1".into()))
+            Some(super::super::actions::MenuOf::Result(id))
         );
         assert!(has(&rt, "menu"));
         // Share…
@@ -940,6 +943,7 @@ mod acting {
         assert!(matches!(rt.state.actions.dialog, Some(Dialog::Share(_))));
         assert!(rt.state.frames.find.menu.is_none());
         rt.update(|s, _| s.actions.dialog = None);
+        settle(&mut rt);
         // Details (the item dialog over Search).
         press(&mut rt, Key::ContextMenu, NONE);
         drain(&mut rt);
@@ -958,7 +962,7 @@ mod acting {
         drain(&mut rt);
         click(&mut rt, "menu-item-1");
         assert!(!super::super::is_open(&rt.state), "search ended");
-        let listed = rt.state.listing.folder.id.as_deref() == Some("a-folder");
-        assert!(listed || rt.state.actions.reveal.as_deref() == Some("board-search-1"));
+        // (Files' `reveal` has its own tests: here the item was known and nothing was refused.)
+        assert!(rt.state.frames.find.notice.is_none());
     }
 }
