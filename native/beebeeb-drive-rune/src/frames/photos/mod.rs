@@ -579,6 +579,7 @@ impl Ui {
         if let Some((_, handle)) = self.playing.take() {
             handle.stop(crate::media::StopReason::Closed);
         }
+        self.playing_file = None;
         viewer.id = id;
         viewer.original = Original::Preview;
         viewer.playing = true;
@@ -621,8 +622,29 @@ impl Ui {
 
     /// Stops the video this window started, if one is held (Esc, close, another item).
     pub fn stop_playing(&mut self) {
+        self.playing_file = None;
         if let Some((_, handle)) = self.playing.take() {
             handle.stop(crate::media::StopReason::Closed);
+        }
+    }
+
+    /// The window's poll for the video it started: the player names its file when it has opened it, which can be after
+    /// `play_pause` returned. Until then the stage has no file to read the state of and shows its own picture; this
+    /// takes the file the moment the player's state names it. `(changed, waiting)`: `waiting` is true only while the
+    /// player has said nothing yet, so the poll ends on the player's own state and never runs on after it.
+    pub fn settle_playing(&mut self) -> (bool, bool) {
+        let Some((_, handle)) = &self.playing else {
+            return (false, false);
+        };
+        if self.playing_file.is_some() {
+            return (false, false);
+        }
+        match handle.state() {
+            Some(state) => {
+                self.playing_file = Some(state.file_id);
+                (true, false)
+            }
+            None => (false, true),
         }
     }
 

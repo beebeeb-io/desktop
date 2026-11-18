@@ -670,6 +670,12 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
+    // A video this window started: the stage reads the player's state once it names the file, then the poll ends.
+    let (settled, waiting) = ui.settle_playing();
+    changed |= settled;
+    if waiting {
+        tx.wake_after(POLL_EVERY);
+    }
     changed |= pumped.changed || !pumped.answered.is_empty();
     if pumped.changed {
         ui.relayout();
