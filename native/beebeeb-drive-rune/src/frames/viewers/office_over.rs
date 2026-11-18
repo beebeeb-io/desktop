@@ -16,6 +16,7 @@ use beebeeb_office_protocol::office::EditOp;
 
 use rune::{Align, Color, El, Icon, Key, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text_input};
 
+use crate::frames::office::edit::save::{self, Seen, Sent};
 use crate::frames::office::edit::word_insert::{self, Insert, LinkForm, Picking, TableForm};
 
 use super::chrome::{ButtonKind, button};
@@ -100,6 +101,8 @@ pub enum Over {
     Link(LinkForm),
     /// DW-1550: Insert's Image...: the platform's file picker is open, and answers on its own worker.
     Image(Picking),
+    /// DW-1525 for the office editor: Back with changes no version holds.
+    Leave,
 }
 
 impl Ui {
@@ -119,8 +122,12 @@ impl Ui {
     }
 
     /// Save (the ribbon's Save, Ctrl+S): asked of the source, and drawn as what it answers. A
-    /// document with nothing to save asks nothing.
+    /// document with nothing to save, or one whose save is on its way, asks nothing.
     pub fn office_save(&mut self) {
+        if self.office.edit.is_some() {
+            self.office_ask(None);
+            return;
+        }
         if !self.word().is_some_and(|doc| doc.kept == office::Kept::Unsaved) {
             return;
         }
@@ -133,27 +140,119 @@ impl Ui {
         if !matches!(self.office.over, Some(Over::Conflict(_))) {
             return;
         }
+        if self.office.edit.is_some() {
+            self.office_ask(Some(keep));
+            return;
+        }
         let outcome = self.source.resolve_document(&self.file.id, keep);
         self.office_outcome(outcome);
     }
 
+    /// A live editor's save (`keep`: the answer to a conflict, else a plain save): the revision it holds is kept
+    /// until the answer comes, so what is typed meanwhile stays unsaved.
+    fn office_ask(&mut self, keep: Option<Keep>) {
+        let Some(edit) = self.office.edit.as_ref() else { return };
+        // A conflict's answer is asked of an edit that is unsaved by definition; a second save is never asked.
+        if edit.saving || edit.stopped || (keep.is_none() && (!save::can_begin(edit) || self.office.over.is_some())) {
+            return;
+        }
+        let sent = Sent {
+            revision: edit.revision,
+            id: self.file.id.clone(),
+            version: self.file.version,
+        };
+        let version = self.file.version;
+        let (source, id) = self.edit_source();
+        let id = id.to_string();
+        let outcome = match keep {
+            None => source.save_document(&id, version),
+            Some(keep) => source.resolve_document(&id, keep),
+        };
+        self.office.save = Some(sent);
+        self.office_outcome(outcome);
+    }
+
+    /// The save's answer, from the press (`Saved`, `Opened`, `Conflict`, `Failed`) or later ([`Ui::office_settle_save`]).
     fn office_outcome(&mut self, outcome: SaveOutcome) {
+        let sent = self.office.save.take();
         match outcome {
             SaveOutcome::Saved { file, .. } => {
                 self.toast = Some(format!("Saved \u{00B7} encrypted \u{00B7} version {}", file.version));
                 self.office.over = None;
                 self.replace(file);
+                if let (Some(edit), Some(sent)) = (self.office.edit.as_mut(), sent.as_ref()) {
+                    save::landed(edit, sent);
+                }
             }
             SaveOutcome::Opened(file) => {
                 self.office.over = None;
                 self.replace(file);
+                if let Some(edit) = self.office.edit.as_mut() {
+                    save::dropped(edit);
+                }
             }
+            // Nothing was written: the edit stays unsaved, the question opens over it.
             SaveOutcome::Conflict(other) => self.office.over = Some(Over::Conflict(other)),
             // Not saved: the edit and the question stay as they are, and the person is told.
             SaveOutcome::Failed => self.toast = Some(NOT_SAVED.to_string()),
             // On its way to the engine: nothing is drawn as saved before it answers; the question and file stay.
-            SaveOutcome::Working => self.toast = Some("Saving\u{2026}".to_string()),
+            SaveOutcome::Working => {
+                self.toast = Some(save::SAVING.to_string());
+                if let Some(edit) = self.office.edit.as_mut() {
+                    edit.saving = true;
+                    self.office.save = sent;
+                }
+            }
         }
+    }
+
+    /// What a save that left the window's thread became, read from the window's file and toast (`viewers::settle`
+    /// applied it). `true`: something changed, the view must run again.
+    pub fn office_settle_save(&mut self) -> bool {
+        let Some(sent) = self.office.save.clone() else { return false };
+        // A newer version in the way: `settle` asked the text editor's question; the office editor's is this one.
+        if let Some(super::Dialog::Conflict(other)) = &self.dialog {
+            let other = other.clone();
+            self.dialog = None;
+            self.office.save = None;
+            if let Some(edit) = self.office.edit.as_mut() {
+                edit.saving = false;
+            }
+            self.office.over = Some(Over::Conflict(other));
+            return true;
+        }
+        match save::seen(&sent, &self.file.id, self.file.version, self.toast.as_deref()) {
+            Seen::Waiting => false,
+            Seen::Landed => {
+                self.office.save = None;
+                self.office.over = None;
+                if let Some(edit) = self.office.edit.as_mut() {
+                    save::landed(edit, &sent);
+                }
+                true
+            }
+            Seen::Failed => {
+                self.office.save = None;
+                if let Some(edit) = self.office.edit.as_mut() {
+                    edit.saving = false;
+                }
+                self.toast = Some(NOT_SAVED.to_string());
+                true
+            }
+        }
+    }
+
+    /// Leaving the document was asked for (Back, Esc): `true` while changes no version holds are there, so the
+    /// question is up (DW-1525) and the document stays. For `viewers::hold_for_changes`.
+    pub fn office_hold_for_changes(&mut self) -> bool {
+        let Some(edit) = self.office.edit.as_ref() else { return false };
+        if edit.stopped || !edit.unsaved() {
+            return false;
+        }
+        if self.office.over.is_none() {
+            self.office.over = Some(Over::Leave);
+        }
+        true
     }
 
     /// Cancel and Esc: back to the document, still not saved.
@@ -349,7 +448,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     let Some(ui) = super::ui(s) else { return false };
     // Only the editor's frame has these keys.
-    if ui.word().is_none() && ui.office.over.is_none() {
+    if ui.word().is_none() && ui.office.edit.is_none() && ui.office.over.is_none() {
         return false;
     }
     match (&ui.office.over, &ev.key) {
@@ -444,6 +543,59 @@ fn conflict(opened: u32, other: &Conflict, t: &Theme) -> El {
             .child(wide("btn-3", "Cancel".into(), Look::Quiet).on_press(close)),
     );
     dialogs::shell_closing(SAVED_FIRST, "alertdialog", 420.0, head, None, foot, close, t)
+}
+
+/// DW-1525 in the office editor: Back with changes no version holds. Save keeps the document open while it saves.
+fn leave(name: &str, t: &Theme) -> El {
+    let foot = row()
+        .center_y()
+        .justify_end()
+        .gap(8.0)
+        .child(
+            crate::ui::settings_dialog::button(0, "Save", Weight::Primary, t).on_press(|s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.office.over = None;
+                    ui.office_save();
+                }
+            }),
+        )
+        .child(
+            crate::ui::settings_dialog::button_danger(1, "Discard changes", t).on_press(|s: &mut State| {
+                if let Some(ui) = super::ui(s)
+                    && let Some(edit) = ui.office.edit.as_mut()
+                {
+                    save::dropped(edit);
+                    ui.office.over = None;
+                }
+                super::close(s);
+            }),
+        )
+        .child(crate::ui::settings_dialog::button(2, "Keep editing", Weight::Quiet, t).on_press(close));
+    let words = format!("Your edits to {name} aren't saved. Save them as a new, encrypted version, or discard them.");
+    insert_card(
+        dialog::card(
+            "You have unsaved changes",
+            420.0,
+            "You have unsaved changes",
+            Some(Sub::Wrap(&words)),
+            Vec::new(),
+            foot,
+            t,
+        ),
+        t,
+    )
+}
+
+/// The editor's answers that arrive between presses (the shell's poll calls this each frame): the picked picture,
+/// and what a save that left the window's thread became. While one is awaited it wakes the window again soon, so
+/// neither waits for input. `true`: something changed, the view must run again.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let Some(ui) = super::ui(s) else { return false };
+    let changed = ui.office_image_poll() | ui.office_settle_save();
+    if ui.office_image_waiting() || ui.office.save.is_some() {
+        tx.wake_after(std::time::Duration::from_millis(100));
+    }
+    changed
 }
 
 /// A `.kit-kbd` as wide as its letters. Keys: `<key>-box`, `<key>`.
@@ -628,6 +780,7 @@ pub fn over(ui: &Ui, t: &Theme) -> Option<El> {
         Over::Table(form) => table_dialog(form, t),
         Over::Link(form) => link_dialog(form, t),
         Over::Image(_) => image_dialog(t),
+        Over::Leave => leave(ui.file.name.as_str(), t),
     })
 }
 
@@ -1006,5 +1159,148 @@ mod tests {
         assert_eq!(ui.toast.as_deref(), Some("Saving\u{2026}"));
         assert_eq!(ui.file.version, version, "the version did not move");
         assert!(matches!(ui.office.over, Some(Over::Licence)), "the question stayed");
+    }
+
+    use crate::frames::office::edit::EditUi;
+    use crate::frames::viewers::source::{Body, OpenError, OpenFile, Settled, ViewerSource};
+    use beebeeb_office_protocol::office::EditKind;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    /// The fixture whose save is handed to the engine and answers later, as the test queues it.
+    struct Later {
+        inner: FixtureViewerSource,
+        saves: Rc<RefCell<u32>>,
+        settled: Rc<RefCell<VecDeque<Settled>>>,
+    }
+
+    impl ViewerSource for Later {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.open(id)
+        }
+        fn poll(&mut self, id: &str) -> Option<Body> {
+            self.inner.poll(id)
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.retry(id)
+        }
+        fn save_document(&mut self, _: &str, _: u32) -> SaveOutcome {
+            *self.saves.borrow_mut() += 1;
+            SaveOutcome::Working
+        }
+        fn settled(&mut self, _: &str) -> Option<Settled> {
+            self.settled.borrow_mut().pop_front()
+        }
+    }
+
+    type Saves = Rc<RefCell<u32>>;
+    type Answers = Rc<RefCell<VecDeque<Settled>>>;
+
+    /// The agreement live in the editor, one change typed (revision 1, nothing saved).
+    fn live() -> (Ui, Saves, Answers) {
+        let (saves, settled) = (Saves::default(), Answers::default());
+        let source = Later {
+            inner: FixtureViewerSource::new(),
+            saves: saves.clone(),
+            settled: settled.clone(),
+        };
+        let mut ui = Ui::open(Box::new(source), board::DOCX).expect("the fixture opens it");
+        let mut edit = EditUi::new(EditKind::Docx);
+        edit.revision = 1;
+        ui.office.edit = Some(edit);
+        (ui, saves, settled)
+    }
+
+    fn unsaved(ui: &Ui) -> bool {
+        ui.office.edit.as_ref().is_some_and(EditUi::unsaved)
+    }
+
+    fn saved_as(ui: &Ui, version: u32) -> Settled {
+        Settled::Saved {
+            id: ui.file.id.clone(),
+            name: ui.file.name.clone(),
+            body: ui.file.body.clone(),
+            version,
+            at: "09:41".into(),
+        }
+    }
+
+    #[test]
+    fn a_save_in_progress_refuses_a_second_one() {
+        let (mut ui, saves, _) = live();
+        ui.office_save();
+        ui.office_save();
+        assert_eq!(*saves.borrow(), 1);
+        assert!(ui.office.edit.as_ref().is_some_and(|e| e.saving));
+        assert_eq!(ui.toast.as_deref(), Some(save::SAVING));
+        assert!(unsaved(&ui), "nothing is drawn as saved before it lands");
+    }
+
+    #[test]
+    fn an_edit_typed_during_a_save_stays_unsaved_after_it_lands() {
+        let (mut ui, _, settled) = live();
+        ui.office_save();
+        ui.office.edit.as_mut().expect("edit").revision = 2;
+        settled.borrow_mut().push_back(saved_as(&ui, 8));
+        assert!(ui.pump());
+        assert!(ui.office_settle_save());
+        let edit = ui.office.edit.as_ref().expect("edit");
+        assert!(!edit.saving);
+        assert_eq!(edit.saved_revision, 1, "saved up to the revision that was sent");
+        assert!(edit.unsaved());
+        assert_eq!(ui.file.version, 8);
+        assert_eq!(ui.toast.as_deref(), Some("Saved \u{00B7} encrypted \u{00B7} version 8"));
+    }
+
+    #[test]
+    fn a_save_with_nothing_typed_during_it_lands_as_saved() {
+        let (mut ui, _, settled) = live();
+        ui.office_save();
+        settled.borrow_mut().push_back(saved_as(&ui, 8));
+        assert!(ui.pump() && ui.office_settle_save());
+        assert!(!unsaved(&ui));
+        assert!(ui.office.save.is_none());
+    }
+
+    #[test]
+    fn a_failed_save_says_so_and_keeps_the_edit() {
+        let (mut ui, _, settled) = live();
+        ui.office_save();
+        settled.borrow_mut().push_back(Settled::Failed);
+        assert!(ui.pump() && ui.office_settle_save());
+        assert_eq!(ui.toast.as_deref(), Some(NOT_SAVED));
+        assert!(unsaved(&ui) && !ui.office.edit.as_ref().is_some_and(|e| e.saving));
+    }
+
+    #[test]
+    fn a_conflict_opens_the_question_and_cancel_saves_nothing() {
+        let (mut ui, saves, settled) = live();
+        ui.office_save();
+        let other = Conflict {
+            from: "Anna's iPhone".into(),
+            at: "09:14".into(),
+            version: 8,
+        };
+        settled.borrow_mut().push_back(Settled::Conflict(other));
+        assert!(ui.pump() && ui.office_settle_save());
+        assert!(matches!(ui.office.over, Some(Over::Conflict(_))));
+        assert!(ui.dialog.is_none(), "the text editor's question is not asked");
+        ui.office_close_over();
+        assert!(ui.office.over.is_none());
+        assert_eq!(*saves.borrow(), 1, "Cancel asked nothing of the source");
+        assert!(unsaved(&ui));
+    }
+
+    #[test]
+    fn back_with_unsaved_changes_asks_first() {
+        let (mut ui, _, _) = live();
+        assert!(ui.office_hold_for_changes());
+        assert!(matches!(ui.office.over, Some(Over::Leave)));
+        ui.office_close_over();
+        assert!(unsaved(&ui), "Keep editing keeps the edit");
+        ui.office.edit.as_mut().expect("edit").saved_revision = 1;
+        assert!(!ui.office_hold_for_changes(), "nothing unsaved: Back leaves");
     }
 }

@@ -172,6 +172,8 @@ pub struct OfficeUi {
     pub edit: Option<crate::frames::office::edit::EditUi>,
     /// The live word ribbon's open pop-up and link field (`frames/office/edit/word_ribbon.rs`).
     pub ribbon: crate::frames::office::edit::word_ribbon::Pops,
+    /// The save asked and not yet answered (`frames/office/edit/save.rs`).
+    pub save: Option<crate::frames::office::edit::save::Sent>,
 }
 
 impl Default for OfficeUi {
@@ -182,6 +184,7 @@ impl Default for OfficeUi {
             over: None,
             edit: None,
             ribbon: Default::default(),
+            save: None,
         }
     }
 }
@@ -739,6 +742,8 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
 pub(crate) enum Keeping {
     Saved,
     Unsaved,
+    /// A save is on its way: the status stays on the old version until it lands (DW-1553).
+    Saving,
     /// The last save found a newer version; the question is open (DW-1554).
     Conflict,
     /// The editor did not start: the file is shown by nothing here (DW-1556).
@@ -768,7 +773,7 @@ pub(crate) fn status_live(ui: &Ui, keeping: Keeping, t: &Theme) -> El {
 fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at: Option<&str>, t: &Theme) -> El {
     // A live document the editor holds: its numbers, never "Preparing".
     let live = match (&file.body, doc, keeping) {
-        (super::source::Body::Doc(d), None, Keeping::Saved | Keeping::Unsaved | Keeping::Conflict) => Some(d),
+        (super::source::Body::Doc(d), None, Keeping::Saved | Keeping::Unsaved | Keeping::Saving | Keeping::Conflict) => Some(d),
         _ => None,
     };
     let plain = |key: String, words: &str| style::fitted(key, words, type_::STATUS, t.text_tertiary);
@@ -839,6 +844,7 @@ fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at:
         (Keeping::Saved, Some(at)) => format!("saved as version {} \u{00B7} {at}", file.version),
         (Keeping::Saved, None) if live.is_some() => format!("saved as version {}", file.version),
         (Keeping::Unsaved, _) => "unsaved changes".to_string(),
+        (Keeping::Saving, _) => "saving\u{2026}".to_string(),
         (Keeping::Conflict, _) => "not saved \u{00B7} conflict".to_string(),
         (Keeping::NoEditor, _) | (Keeping::Saved, None) => "read-only for now".to_string(),
     };
@@ -1084,10 +1090,13 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: Option<&WordDoc>) -> 
     let keeping = match (doc, &ui.office.over) {
         (None, _) => Keeping::NoEditor,
         (Some(_), Some(super::office_over::Over::Conflict(_))) => Keeping::Conflict,
+        (Some(_), _) if ui.office.edit.as_ref().is_some_and(|edit| edit.saving) => Keeping::Saving,
         (Some(doc), _) if doc.kept == Kept::Unsaved => Keeping::Unsaved,
         (Some(_), _) => Keeping::Saved,
     };
+    // Save is off while it saves; the dot stays (what is typed meanwhile is still unsaved).
     let unsaved = matches!(keeping, Keeping::Unsaved | Keeping::Conflict);
+    let dot = unsaved || keeping == Keeping::Saving;
     let mut body = row().key("viewer-row").grow(1.0).min_h(0.0).w_full();
     body = match doc {
         Some(doc) => {
@@ -1108,7 +1117,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: Option<&WordDoc>) -> 
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar(s, ui, unsaved, &t));
+        .child(toolbar(s, ui, dot, &t));
     if doc.is_some_and(|doc| doc.older) {
         main = main.child(super::text::banner_el(&super::icons::INFO, OLDER_FORMAT, None, &t));
     }
