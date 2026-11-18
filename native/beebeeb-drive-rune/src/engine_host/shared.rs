@@ -53,8 +53,8 @@ use super::stamp::{Stamp, stamp};
 use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
 use crate::frames::shared::source::{
-    Access, Invitation, InviteResult, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped, Request,
-    RequestForm, RequestState, RowTarget, SharedSource,
+    Access, Invitation, InviteResult, LinkEdit, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped,
+    Request, RequestForm, RequestState, RowTarget, SharedSource,
 };
 use crate::frames::files::link::LinkText;
 use crate::ui::file_list::PcState;
@@ -113,6 +113,8 @@ pub struct EngineSharedSource<C: CredentialStores> {
     invite_answers: VecDeque<(String, InviteResult)>,
     /// Slice B4 (`shared_offline.rs`): what it keeps between a press and its answer. Empty until it binds.
     shared_offline: shared_offline::SharedOfflineCalls,
+    /// `shared_links.rs`: the links Copy link made, waiting for the clipboard.
+    shared_links: shared_links::SharedLinkCalls,
     /// `shared_requests.rs`: the links a new request made, until the window takes them.
     shared_requests: shared_requests::RequestCalls,
 }
@@ -168,6 +170,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             inviting: HashSet::new(),
             invite_answers: VecDeque::new(),
             shared_offline: Default::default(),
+            shared_links: Default::default(),
             shared_requests: Default::default(),
         }
     }
@@ -456,6 +459,17 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.change(session, id, ShareChange::Decline { invite_id: id.into() })
     }
 
+    // w17-shared-links (`shared_links.rs`).
+    fn copy_row_link(&mut self, id: &str) -> bool {
+        self.shared_links_copy_row_link(id)
+    }
+    fn change_link(&mut self, share_id: &str, change: LinkEdit) -> bool {
+        self.shared_links_change_link(share_id, change)
+    }
+    fn change_request_expiry(&mut self, id: &str, hours: Option<u32>) -> bool {
+        self.shared_links_change_request_expiry(id, hours)
+    }
+
     // Slice B4 (`shared_offline.rs`): sent once per press for a row of "Shared with me".
     fn keep_offline(&mut self, id: &str) -> bool {
         self.shared_offline_keep_offline(id)
@@ -567,7 +581,7 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
     }
 
     fn take_link(&mut self) -> Option<LinkText> {
-        self.shared_requests_take_link()
+        self.shared_links_take_link().or_else(|| self.shared_requests_take_link())
     }
 
     fn loaded(&self) -> Loaded {

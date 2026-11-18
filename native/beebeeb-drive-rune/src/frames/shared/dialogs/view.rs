@@ -782,7 +782,7 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
             .into_iter()
             .collect(),
         Dialog::LinkExpiry { .. } | Dialog::LinkPassword { .. } => {
-            vec![modal("link-change", super::link_change::card(dialog, t))]
+            vec![modal("link-change", super::link_change::card(s, dialog, t))]
         }
         Dialog::ConfirmLeave { .. } | Dialog::ConfirmStop { .. } | Dialog::ConfirmClose { .. } => {
             vec![super::confirm::alert(dialog, t)]

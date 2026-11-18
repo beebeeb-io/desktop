@@ -839,3 +839,7 @@ fn a_link_row_keeps_the_item_it_is_a_link_to() {
     assert_eq!(held.link_items.get(INV_A).map(String::as_str), Some(THEIRS));
     assert_eq!(held.link_items.len(), held.links.len());
 }
+
+// w17-shared-links: the tests of the link calls.
+#[path = "shared_links_tests.rs"]
+mod shared_links_tests;
