@@ -87,7 +87,8 @@ fn showing_a_largest_file_lands_on_its_folder_with_it_selected() {
     let mut rt = Runtime::new(state, crate::view, (1278.0, 798.0), env);
     rt.frame(0.0);
     rt.update(|s: &mut State, tx| {
-        crate::shell::settings_show_in_files::show(s, tx, "f-big");
+        s.settings.ask(super::Intent::ShowInFiles("f-big".into()));
+        assert!(crate::shell::intents::drain_settings_intents(s, tx));
         assert_eq!(s.listing.folder.id.as_deref(), Some("f-backups"));
         let picked: Vec<&str> = s.actions.selection.iter().map(|&r| s.listing.items[r].id.as_str()).collect();
         assert_eq!(picked, ["f-big"]);
