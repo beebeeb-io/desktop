@@ -22,8 +22,8 @@ pub(crate) type NewOpener = Box<dyn Fn(&Path, EditKind, Template, Wake) -> Offic
 pub(crate) struct EditShips {
     pub(crate) docx: bool,
     pub(crate) xlsx: bool,
-    /// Slides edit only in a helper built with desktop-office's `edit-slides` (until MPL-2.0 is accepted): a helper
-    /// without it answers `Unsupported`, which would show "No preview" for a deck the viewer shows. Off until then.
+    /// Slides edit only in a helper built with desktop-office's `edit-slides` (MPL-2.0, accepted 2026-11-18, and the
+    /// helper's build turns it on): a helper without it answers `Unsupported`, which would show "No preview".
     pub(crate) pptx: bool,
 }
 
@@ -31,7 +31,7 @@ impl EditShips {
     pub(crate) const SHIPPED: EditShips = EditShips {
         docx: true,
         xlsx: true,
-        pptx: false,
+        pptx: true,
     };
 
     pub(super) fn allows(self, kind: EditKind) -> bool {

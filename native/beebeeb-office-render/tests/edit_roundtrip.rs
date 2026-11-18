@@ -1,7 +1,7 @@
 //! The real helper loop with the real Office engines, an edit session end to end: `OpenEdit` a fixture, a few ops,
 //! the save handshake, `OpenEdit` the saved bytes: the edit is there. One process, as `tests/serve.rs`.
 //! A kind whose engine is not built in answers `Unsupported`/`Internal`-style errors: the test says so and stops
-//! there instead of passing silently (slides are behind `edit-slides` until Guus accepts MPL-2.0).
+//! there instead of passing silently (slides need the helper's `edit-slides` feature, on in Cargo.toml).
 
 mod common;
 
@@ -98,11 +98,6 @@ fn edit_roundtrip_pptx_new_slide_survives_save_and_reopen() {
     let (mut helper, opened) = open_real_edit(&memory, EditKind::Pptx, PPTX);
     let before = match opened {
         Message::Opened(o) => o.pages,
-        // Without the `edit-slides` feature the slide editor is not built in: nothing to round-trip.
-        Message::Error(err) if err.code == ErrorCode::Unsupported => {
-            println!("SKIPPED slides round trip: the slide editor is not built in");
-            return;
-        }
         other => panic!("Opened was due: {other:?}"),
     };
     assert_eq!(before, 3);
@@ -110,11 +105,6 @@ fn edit_roundtrip_pptx_new_slide_survives_save_and_reopen() {
     helper.send(2, &Message::Edit(Edit { op: EditOp::NewSlide { layout: None } }));
     let e = match helper.answer() {
         (2, Message::Edited(e)) => e,
-        // Without the `edit-slides` feature the engine answers an error: nothing more to round-trip.
-        (2, Message::Error(err)) => {
-            println!("SKIPPED slides round trip: the slide editor is not built in ({err:?})");
-            return;
-        }
         other => panic!("Edited was due: {other:?}"),
     };
     assert_eq!(e.slides, Some(4), "four slides after NewSlide");

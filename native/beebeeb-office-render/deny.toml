@@ -40,6 +40,25 @@ allow = [
     "Ubuntu-font-1.0",  # Ubuntu Light, the slide renderer's last-resort face (epaint_default_fonts); lead 2026-11-15 R-L1
 ]
 
+exceptions = [  # MPL-2.0 via deckcraft-engine (slides editor, `edit-slides`): accepted by Guus 2026-11-18; notice: desktop-090 w17-licence-notice
+    { allow = ["MPL-2.0"], crate = "symphonia" },
+    { allow = ["MPL-2.0"], crate = "symphonia-bundle-flac" },
+    { allow = ["MPL-2.0"], crate = "symphonia-bundle-mp3" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-aac" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-adpcm" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-alac" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-pcm" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-vorbis" },
+    { allow = ["MPL-2.0"], crate = "symphonia-core" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-caf" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-isomp4" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-mkv" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-ogg" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-riff" },
+    { allow = ["MPL-2.0"], crate = "symphonia-metadata" },
+    { allow = ["MPL-2.0"], crate = "symphonia-utils-xiph" },
+]
+
 [licenses.private]
 # Our own unpublished crates (this helper, the protocol and sandbox crates, the Office engine) are not checked here.
 ignore = true

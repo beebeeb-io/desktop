@@ -767,8 +767,8 @@ fn a_writable_file_opens_in_the_editor_and_the_rest_in_the_viewer() {
     source.open("f1").unwrap();
     first_body(&mut source, "f1");
     assert!(edits.lock().unwrap().is_empty() && opened.lock().unwrap().len() == 1, "pptx off: the viewer");
-    // The shipped switches: the editor on where the sandbox is, slides held back until Guus accepts MPL-2.0.
-    assert!(EditShips::SHIPPED.docx && EditShips::SHIPPED.xlsx && !EditShips::SHIPPED.pptx);
+    // The shipped switches: the editor on where the sandbox is, slides too (MPL-2.0 accepted 2026-11-18).
+    assert!(EditShips::SHIPPED.docx && EditShips::SHIPPED.xlsx && EditShips::SHIPPED.pptx);
 }
 
 #[test]
