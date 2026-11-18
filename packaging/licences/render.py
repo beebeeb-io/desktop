@@ -51,6 +51,8 @@ def git_sources(pkgs):
     return found
 
 
+# Crates that declare no licence anywhere: what the repository they come from says (checked by hand, 2026-11-18).
+SIBLING_LICENCES = {"beebeeb-office": "MIT OR Apache-2.0"}
 LICENCE_FILE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE")
 
 
@@ -59,6 +61,7 @@ def git_crate_licences(root: Path, missing):
     from `cargo metadata` and the licence files in the crate's folder and the folders above it, up to the git checkout's
     top. A crate with neither an expression nor a file is an error: someone has to say what it is."""
     found = {}
+    built = set()
     wanted = set(missing)
     for _label, rel in LOCKS:
         manifest = root / rel.replace("Cargo.lock", "Cargo.toml")
@@ -78,8 +81,19 @@ def git_crate_licences(root: Path, missing):
                 if (d / ".git").exists() or d == d.parent:
                     break
                 d = d.parent
-            found[key] = (p.get("license") or "", files, p.get("repository") or "")
-    return found
+            expr = p.get("license") or ""
+            if not expr and not files and p["name"] in SIBLING_LICENCES:
+                # desktop-office's glue crate has no licence field and no file of its own; the repository's README says
+                # "All projects are MIT OR Apache-2.0" and each project folder (wordcraft, gridcraft, ...) keeps the files.
+                expr = SIBLING_LICENCES[p["name"]]
+                for sub in sorted(d.iterdir()):
+                    for f in sorted(sub.glob("*")) if sub.is_dir() else []:
+                        if f.is_file() and f.name.upper().startswith(LICENCE_FILE_PREFIXES) and f.suffix.lower() in ("", ".txt", ".md", ".MIT"):
+                            files.append((f"{sub.name}/{f.name}", f.read_text(encoding="utf-8", errors="replace").strip("\n")))
+            found[key] = (expr, files, p.get("repository") or "")
+        built |= {(p["name"], p["version"]) for p in json.loads(out)["packages"]
+                  if p["id"] in {n["id"] for n in json.loads(out)["resolve"]["nodes"]}}
+    return found, built
 
 
 def main() -> int:
@@ -106,8 +120,12 @@ def main() -> int:
     for _label, rel in LOCKS:
         all_pkgs += lock_packages(root / rel)
     missing = sorted({(n, v) for n, v, _s in all_pkgs} - listed)
-    skipped = git_crate_licences(root, missing) if missing else {}
-    unknown = [k for k in missing if k not in skipped or not (skipped[k][0] or skipped[k][1])]
+    skipped, built = git_crate_licences(root, missing) if missing else ({}, set())
+    # Optional crates the lock records but no feature pulls in are not in any program: indexed, not licensed.
+    unbuilt = sorted(k for k in missing if k not in built)
+    for k in unbuilt:
+        skipped.pop(k, None)
+    unknown = [k for k in missing if k in built and (k not in skipped or not (skipped[k][0] or skipped[k][1]))]
     if unknown:
         sys.exit(f"render.py: no licence found for {unknown}: add a text under packaging/licences/texts and a rule here")
 
@@ -226,6 +244,12 @@ def main() -> int:
                 w("")
                 w(f"[{fname}]")
                 w(text)
+    if unbuilt:
+        w("")
+        w(SUB)
+        w("Crates named in a Cargo.lock that are NOT compiled into any of the three programs (optional features that are")
+        w("not enabled), listed so the index is complete:")
+        w("  " + ", ".join(f"{n} {v}" for n, v in unbuilt))
     w("")
     w("")
     w("6. INDEX OF EVERY CRATE OF THE THREE PROGRAMS")
