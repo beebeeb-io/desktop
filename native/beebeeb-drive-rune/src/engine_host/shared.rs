@@ -10,11 +10,11 @@
 //!
 //! Bound changes ([`Engine::share_change`], by id, for the session the row was drawn under): `accept`, `set_access`,
 //! `remove_access` (the view confirms it, DW-0512b), `decline` (`/decline`: the sender sees it declined; 409 is "Already
-//! accepted."), `remove_request` ("Remove from my list" is the server's `/hide`, never DELETE, which destroys the key;
+//! accepted."), `stop_sharing` (a people share: `CancelInvites` for every invite; a link row: `RevokeLinks` for every live link
+//! of the item), `close_request` (`CloseRequest`, an open request only), `remove_request` ("Remove from my list" is the server's `/hide`, never DELETE, which destroys the key;
 //! 409 is "Close the request first."). A change is never drawn before Beebeeb confirmed it: the rows
 //! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a
-//! notice the view draws ("Not available yet"): `stop_sharing`, `close_request` (the view asks no confirmation),
-//! and the old synchronous `invite` (it cannot wait for the server). `keep_offline` is bound (`shared_offline.rs`):
+//! notice the view draws ("Not available yet"): the old synchronous `invite` (it cannot wait for the server). `keep_offline` is bound (`shared_offline.rs`):
 //! the engine's pin change for a row of Shared with me, answered like a change.
 //!
 //! Invite someone (DW-0514, [`Engine::invite_for`]): `start_invite` stamps the press's session and account, runs the
@@ -67,6 +67,12 @@ mod tests;
 // plan40 batch 1: Make available offline on someone else's file (slice B4).
 #[path = "shared_offline.rs"]
 mod shared_offline;
+#[path = "shared_links.rs"]
+mod shared_links;
+#[path = "shared_requests.rs"]
+mod shared_requests;
+#[path = "shared_leave.rs"]
+mod shared_leave;
 
 /// Lists this recent are not read again when the Shared section opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -119,6 +125,8 @@ pub(crate) struct Held {
     pub(crate) links: Vec<LinkShare>,
     /// A link row's id to every live link behind it (what Stop sharing revokes).
     pub(crate) link_shares: HashMap<String, Vec<String>>,
+    /// A link row's id to the item it is a link to (OwnedLink.item_id).
+    pub(crate) link_items: HashMap<String, String>,
     pub(crate) requests: Vec<Request>,
 }
 
@@ -685,11 +693,13 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         members.insert(share.item_id, rows);
     }
     let mut link_shares = HashMap::new();
+    let mut link_items = HashMap::new();
     let links = overview
         .links
         .into_iter()
         .map(|link| {
             link_shares.insert(link.share_id.clone(), link.share_ids.clone());
+            link_items.insert(link.share_id.clone(), link.item_id.clone());
             let expiry = link.expires_at.as_deref().and_then(seconds_of);
             let expired = expiry.is_some_and(|at| at <= now.timestamp());
             let mut line = match expiry {
@@ -746,6 +756,7 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         members,
         links,
         link_shares,
+        link_items,
         requests,
     }
 }

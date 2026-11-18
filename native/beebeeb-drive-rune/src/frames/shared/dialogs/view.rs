@@ -749,5 +749,11 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
             .map(|card| kit::layer("preview", card, super::item_view::preview_keys, dismiss, false, t))
             .into_iter()
             .collect(),
+        Dialog::LinkExpiry { .. } | Dialog::LinkPassword { .. } => {
+            vec![modal("link-change", super::link_change::card(dialog, t))]
+        }
+        Dialog::ConfirmLeave { .. } | Dialog::ConfirmStop { .. } | Dialog::ConfirmClose { .. } => {
+            vec![super::confirm::alert(dialog, t)]
+        }
     }
 }

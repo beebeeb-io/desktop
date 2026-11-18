@@ -716,3 +716,25 @@ fn share_invite_for_an_item_shared_with_no_one_yet_is_titled_by_its_name() {
     assert_eq!(rt.state.frames.shared.fields.unlisted, None);
     assert!(any_text(&rt, "Lisbon trip") && !any_text(&rt, "another name"));
 }
+
+#[test]
+fn the_new_dialogs_open_draw_and_close_on_escape() {
+    let new = [
+        (Dialog::LinkExpiry { share_id: "s".into() }, "dialog-link-change"),
+        (Dialog::LinkPassword { share_id: "s".into(), has_password: false }, "dialog-link-change"),
+        (Dialog::ConfirmLeave { id: "i".into() }, "alert-confirm-leave"),
+        (Dialog::ConfirmStop { id: "i".into() }, "alert-confirm-stop"),
+        (Dialog::ConfirmClose { id: "i".into() }, "alert-confirm-close"),
+    ];
+    for (d, key) in new {
+        let mut rt = runtime(scenes::dw_0511);
+        rt.state.frames.shared.open_dialog(d.clone());
+        settle(&mut rt);
+        assert_eq!(d.section(), Section::Shared);
+        assert!(rt.state.frames.shared.fields.link_password.text.is_empty());
+        let _ = info(&rt, key);
+        press(&mut rt, Key::Escape);
+        settle(&mut rt);
+        assert_eq!(dialog(&rt), None, "{d:?}");
+    }
+}
