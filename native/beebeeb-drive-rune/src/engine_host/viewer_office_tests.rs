@@ -80,7 +80,7 @@ struct Log {
     /// Handed at the next `poll_edit`.
     answers: Vec<HostEdit>,
     /// Where the editor said its unsaved work is sealed at a lock (the real host's worker calls it).
-    sink: Option<super::office_host::FlushSink>,
+    sink: Option<crate::engine_host::office_host::FlushSink>,
 }
 
 #[derive(Clone, Default)]
@@ -117,7 +117,7 @@ impl Fake {
     }
 
     /// The door the editor registered for a lock's snapshot.
-    pub(super) fn flush_sink(&self) -> Option<super::office_host::FlushSink> {
+    pub(super) fn flush_sink(&self) -> Option<crate::engine_host::office_host::FlushSink> {
         self.log().sink.clone()
     }
 
@@ -183,7 +183,7 @@ impl Fake {
 }
 
 impl Host for Fake {
-    fn set_flush_sink(&mut self, sink: super::office_host::FlushSink) {
+    fn set_flush_sink(&mut self, sink: crate::engine_host::office_host::FlushSink) {
         self.log().sink = Some(sink);
     }
 

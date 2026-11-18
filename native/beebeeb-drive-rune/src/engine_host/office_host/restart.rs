@@ -64,8 +64,8 @@ pub(super) struct State {
     /// The snapshot the worker asked for a lock, until it lands or fails.
     pub(super) flush_id: Option<RequestId>,
     /// Edits sent so far, and the count when the save that is out was asked.
-    edit_seq: u64,
-    save_started: u64,
+    pub(super) edit_seq: u64,
+    pub(super) save_started: u64,
     last_input: Instant,
     dirty_since: Instant,
     own: u32,
