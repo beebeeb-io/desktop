@@ -434,3 +434,9 @@ fn add_sheet(t: &Theme) -> El {
         .on_press(|s: &mut State| say(s, ADD_WORDS))
         .child(fitted("sh-tab-add-t", "+", TAB, t.text_quaternary))
 }
+
+// The tests of the sheet ribbon (`edit/sheet_ribbon.rs`) and of these tabs: one file, mounted here because this module is
+// private to `sheets`.
+#[cfg(test)]
+#[path = "edit/sheet_ribbon_tests.rs"]
+mod tests;

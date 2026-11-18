@@ -17,7 +17,7 @@ use rune::{El, Key, KeyEvent, Tx, row};
 use super::sheet;
 use crate::State;
 use crate::frames::office::sheets::{self, Cell, SheetView};
-use crate::frames::office::sheets_scroll;
+use crate::frames::office::sheets::sheets_scroll;
 use crate::frames::viewers::office::{self as vo, Face, Tool, ico};
 use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Intent, Ui};
@@ -51,7 +51,7 @@ pub fn open_pop() -> Option<Pop> {
     OPEN.with(Slot::get)
 }
 
-fn set_open(pop: Option<Pop>) {
+pub(crate) fn set_open(pop: Option<Pop>) {
     OPEN.with(|o| o.set(pop));
     HOT.with(|h| h.set(None));
 }
@@ -521,6 +521,4 @@ pub fn scene(s: &mut State) {
     }
 }
 
-#[cfg(test)]
-#[path = "sheet_ribbon_tests.rs"]
-mod tests;
+// The tests of this file and of `sheets_tabs.rs` are one file, mounted there (`sheets_tabs` is private to `sheets`).

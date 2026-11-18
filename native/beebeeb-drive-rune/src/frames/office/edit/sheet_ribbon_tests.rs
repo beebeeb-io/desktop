@@ -10,9 +10,13 @@ use beebeeb_office_protocol::office::{EditKind, EditOp, ListKind, Mark, Marks, N
 use rune::{Env, Key, KeyEvent, Runtime};
 
 use super::*;
+use super as sheets_tabs;
 use crate::frames::office::docs::docs_fixture;
 use crate::frames::office::edit::EditUi;
-use crate::frames::office::sheets_tabs;
+use crate::frames::office::edit::sheet_ribbon::{
+    NOT_VALID, data_tools, go_to, is_auto_sum, parse_reference, ribbon, scene, set_open,
+};
+use crate::frames::office::sheets;
 use crate::frames::viewers::source::{OpenError, OpenFile, ViewerSource};
 use crate::theme::tokens;
 use crate::{init, view};
