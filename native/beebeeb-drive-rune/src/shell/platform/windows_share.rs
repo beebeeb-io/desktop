@@ -22,6 +22,17 @@ use windows::core::{HSTRING, factory};
 
 use super::PlatformError;
 
+/// What the data package hands to the sheet. The handler must be `Send`; the storage items of a folder query are
+/// agile (free-threaded) WinRT objects, so moving them to whichever thread calls the handler is allowed.
+struct Items(windows::Foundation::Collections::IVectorView<windows::Storage::IStorageItem>);
+// SAFETY: see above; `StorageItemQueryResult` results are agile.
+unsafe impl Send for Items {}
+impl Items {
+    fn get(&self) -> &windows::Foundation::Collections::IVectorView<windows::Storage::IStorageItem> {
+        &self.0
+    }
+}
+
 fn os(what: &str, error: &windows::core::Error) -> PlatformError {
     PlatformError::Os(format!("the share sheet: {what} (0x{:08X})", error.code().0 as u32))
 }
@@ -77,6 +88,7 @@ pub fn share_file(window: Option<&rune::WindowHandle>, path: &Path) -> Result<()
         if items.Size().unwrap_or(0) != 1 {
             return Err(PlatformError::Os("the share sheet: the file was not found".into()));
         }
+        let items = Items(items);
         let title = HSTRING::from(name);
         let interop = factory::<DataTransferManager, IDataTransferManagerInterop>()
             .map_err(|e| os("is not available", &e))?;
@@ -92,7 +104,7 @@ pub fn share_file(window: Option<&rune::WindowHandle>, path: &Path) -> Result<()
             if let Some(args) = args {
                 let data = args.Request()?.Data()?;
                 data.Properties()?.SetTitle(&title)?;
-                data.SetStorageItems(&items, true)?;
+                data.SetStorageItems(items.get(), true)?;
             }
             Ok(())
         });
