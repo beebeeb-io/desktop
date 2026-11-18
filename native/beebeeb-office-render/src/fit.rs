@@ -5,14 +5,17 @@
 //! the sheets that do not fit are counted in `more`. Sizes here are counted the way each message encodes; the
 //! encoding itself stays the last word ([`crate::serve`] never writes a message that does not encode).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use beebeeb_office_protocol::check::{
-    Limits, MAX_ANCHORS, MAX_CELL_TEXT_BYTES, MAX_FORMULA_BYTES, MAX_OUTLINE_ENTRIES, MAX_OUTLINE_TEXT_BYTES,
-    MAX_SHEET_NAME_CHARS, MAX_SHEETS, anchor_placeable,
+    Limits, MAX_ANCHORS, MAX_CELL_TEXT_BYTES, MAX_DIRTY_RECTS, MAX_FORMULA_BYTES, MAX_LAYOUT_NAME_BYTES, MAX_LAYOUTS,
+    MAX_OUTLINE_ENTRIES, MAX_OUTLINE_TEXT_BYTES, MAX_SELECTION_RECTS, MAX_SHEET_NAME_CHARS, MAX_SHEETS,
+    anchor_placeable,
 };
 use beebeeb_office_protocol::frame::{MAX_PAYLOAD, fits_one_frame};
-use beebeeb_office_protocol::office::{CellData, CellRange, OpenedSheets, OutlineData, OutlineEntry, SheetInfo};
+use beebeeb_office_protocol::office::{
+    CellData, CellRange, Dirty, Edited, LayoutList, OpenedSheets, OutlineData, OutlineEntry, SheetInfo,
+};
 
 /// Bytes of a `u32` on the wire: a count, a length, a number.
 const U32: usize = 4;
@@ -193,6 +196,63 @@ fn clip(merge: &CellRange, asked: &CellRange) -> Option<CellRange> {
         rows: u32::try_from(bottom - top).ok()?,
         cols: u32::try_from(right - left).ok()?,
     })
+}
+
+/// An `Edited` held to the caps the app's check takes (`check::check_edited`): a selection past the most rectangles is
+/// cut to that many (the caret is separate and stays); more dirty rectangles than the app takes become "redraw all";
+/// changed cell ranges that are empty are dropped, and past the most ranges they become one bounding range per sheet
+/// (a larger area than changed, never a smaller one). At its largest an `Edited` is well under one frame.
+pub(crate) fn edited(mut got: Edited) -> Edited {
+    got.selection.truncate(MAX_SELECTION_RECTS);
+    if matches!(&got.dirty, Dirty::Rects(rects) if rects.len() > MAX_DIRTY_RECTS) {
+        got.dirty = Dirty::All;
+    }
+    got.cells.retain(|(_, r)| r.rows > 0 && r.cols > 0);
+    if got.cells.len() > MAX_DIRTY_RECTS {
+        let mut bounds: BTreeMap<u32, CellRange> = BTreeMap::new();
+        for (sheet, r) in &got.cells {
+            bounds.entry(*sheet).and_modify(|b| *b = union(b, r)).or_insert(*r);
+        }
+        got.cells = bounds.into_iter().collect();
+        // At most the engine's 256 sheets, which is the cap.
+        got.cells.truncate(MAX_DIRTY_RECTS);
+    }
+    got
+}
+
+/// The smallest range holding both.
+fn union(a: &CellRange, b: &CellRange) -> CellRange {
+    let top = a.row.min(b.row);
+    let left = a.col.min(b.col);
+    let bottom = (u64::from(a.row) + u64::from(a.rows)).max(u64::from(b.row) + u64::from(b.rows));
+    let right = (u64::from(a.col) + u64::from(a.cols)).max(u64::from(b.col) + u64::from(b.cols));
+    CellRange {
+        row: top,
+        col: left,
+        rows: u32::try_from(bottom - u64::from(top)).unwrap_or(u32::MAX),
+        cols: u32::try_from(right - u64::from(left)).unwrap_or(u32::MAX),
+    }
+}
+
+/// The slide layouts' names as the app takes them: at most the protocol's count, each cut to its byte cap, and as many
+/// as fit one frame.
+pub(crate) fn layouts(mut names: Vec<String>) -> LayoutList {
+    names.truncate(MAX_LAYOUTS);
+    for name in &mut names {
+        cut_to_bytes(name, MAX_LAYOUT_NAME_BYTES);
+    }
+    // The count, then each name's length and bytes.
+    let mut used = U32;
+    let mut fit = 0usize;
+    for name in &names {
+        used = used.saturating_add(U32 + name.len());
+        if !fits_one_frame(used) {
+            break;
+        }
+        fit += 1;
+    }
+    names.truncate(fit);
+    LayoutList { names }
 }
 
 #[cfg(test)]
