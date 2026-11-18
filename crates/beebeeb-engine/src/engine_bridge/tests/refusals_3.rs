@@ -98,7 +98,8 @@ fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
         (
             "engine_bridge/finder_edit.rs",
             "return self.queue_finder_modify_from(target, contents).map(|outcome| FpWrite {",
-            "pub fn queue_file_provider_modify_from(",
+            // The body moved here when Office saves joined the path (queue_file_provider_modify_from forwards to it).
+            "fn queue_modify_staging(",
             &["let Some(contents_path) = target.contents_path.clone() else {"],
             "no contents: a rename or move op",
         ),
