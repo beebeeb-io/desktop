@@ -68,6 +68,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -81,6 +87,12 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
@@ -88,7 +100,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 [[package]]
 name = "beebeeb-office"
 version = "0.0.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "deckcraft-model",
  "deckcraft-pptx",
@@ -96,6 +108,7 @@ dependencies = [
  "gridcraft-calc",
  "gridcraft-chart",
  "gridcraft-core",
+ "gridcraft-engine",
  "gridcraft-formula",
  "gridcraft-model",
  "gridcraft-numfmt",
@@ -103,6 +116,7 @@ dependencies = [
  "wordcraft-doc",
  "wordcraft-docbin",
  "wordcraft-docx",
+ "wordcraft-engine",
  "wordcraft-fonts",
  "wordcraft-layout",
  "wordcraft-render",
@@ -245,6 +259,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "chardetng"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13de944a44b5064ee5d3a5ceccc49a41bfec50f2580e66f82e87703acdb88b53"
+dependencies = [
+ "cfg-if",
+ "encoding_rs",
+ "memchr",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -299,6 +324,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -311,6 +342,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "craft-pdf"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=6e03f65bf45181db77ba6229716e6624db9eb25b#6e03f65bf45181db77ba6229716e6624db9eb25b"
+dependencies = [
+ "krilla",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -394,7 +434,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-anim"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "deckcraft-geom",
  "deckcraft-model",
@@ -404,7 +444,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-color"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "serde",
 ]
@@ -412,7 +452,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-fonts"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "epaint_default_fonts",
  "harfrust",
@@ -425,7 +465,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-geom"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "kurbo",
  "serde",
@@ -434,7 +474,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-metafile"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "image",
  "kurbo",
@@ -444,7 +484,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-model"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "deckcraft-color",
  "deckcraft-geom",
@@ -457,7 +497,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-pptx"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "deckcraft-color",
  "deckcraft-geom",
@@ -471,7 +511,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-render"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "deckcraft-anim",
  "deckcraft-color",
@@ -491,7 +531,7 @@ dependencies = [
 [[package]]
 name = "deckcraft-text"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "chrono",
  "deckcraft-color",
@@ -533,6 +573,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
+]
+
+[[package]]
 name = "epaint_default_fonts"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -543,6 +597,16 @@ name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
+
+[[package]]
+name = "errno"
+version = "0.3.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
 
 [[package]]
 name = "euclid"
@@ -603,6 +667,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "float-cmp"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -613,6 +686,15 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "font-types"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b38ad915f6dadd993ced50848a8291a543bd41ca62bc10740d5e64e2ab4cfd7"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "font-types"
@@ -691,7 +773,7 @@ dependencies = [
 [[package]]
 name = "gridcraft-calc"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "gridcraft-core",
  "gridcraft-formula",
@@ -704,7 +786,7 @@ dependencies = [
 [[package]]
 name = "gridcraft-chart"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "gridcraft-calc",
  "gridcraft-core",
@@ -716,7 +798,7 @@ dependencies = [
 [[package]]
 name = "gridcraft-core"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "chrono",
  "js-sys",
@@ -725,9 +807,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridcraft-engine"
+version = "0.19.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
+dependencies = [
+ "gridcraft-calc",
+ "gridcraft-chart",
+ "gridcraft-core",
+ "gridcraft-formula",
+ "gridcraft-functions",
+ "gridcraft-math",
+ "gridcraft-model",
+ "gridcraft-numfmt",
+ "gridcraft-pdf",
+ "gridcraft-xlsx",
+ "image",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "web-time",
+]
+
+[[package]]
 name = "gridcraft-formula"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "gridcraft-core",
  "serde",
@@ -737,7 +842,7 @@ dependencies = [
 [[package]]
 name = "gridcraft-functions"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "gridcraft-core",
  "regex",
@@ -746,7 +851,7 @@ dependencies = [
 [[package]]
 name = "gridcraft-math"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "ratex-font",
  "ratex-layout",
@@ -757,7 +862,7 @@ dependencies = [
 [[package]]
 name = "gridcraft-model"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "gridcraft-core",
  "gridcraft-formula",
@@ -771,15 +876,20 @@ dependencies = [
 [[package]]
 name = "gridcraft-numfmt"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "gridcraft-core",
 ]
 
 [[package]]
+name = "gridcraft-pdf"
+version = "0.19.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
+
+[[package]]
 name = "gridcraft-xlsx"
 version = "0.19.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "aes",
  "gridcraft-core",
@@ -907,6 +1017,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "imagesize"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -943,6 +1059,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "krilla"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27da593198b20eeba65caeb73c2bbeec3e53ab08fa549898312ce81c4fce5e33"
+dependencies = [
+ "base64 0.22.1",
+ "bumpalo",
+ "flate2",
+ "float-cmp",
+ "gif",
+ "image-webp",
+ "imagesize",
+ "indexmap",
+ "pdf-writer",
+ "png",
+ "rustc-hash",
+ "siphasher",
+ "skrifa 0.42.1",
+ "smallvec",
+ "subsetter",
+ "tiny-skia-path",
+ "xmp-writer",
+ "yoke",
+ "zune-jpeg",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -966,6 +1109,12 @@ name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "log"
@@ -1010,6 +1159,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1031,6 +1186,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95be4d57809897b5a7539fc15a7dfe0e84141bc3dfaa2e9b1b27caa90acf61ab"
 dependencies = [
  "crossbeam-channel",
+]
+
+[[package]]
+name = "pdf-writer"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753"
+dependencies = [
+ "bitflags",
+ "itoa",
+ "memchr",
+ "ryu",
 ]
 
 [[package]]
@@ -1258,12 +1425,22 @@ dependencies = [
 
 [[package]]
 name = "read-fonts"
+version = "0.39.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4ed38b89c2c77ff968c524145ad65fb010f38af5c7a224b53b81d47ac2daa81"
+dependencies = [
+ "bytemuck",
+ "font-types 0.11.3",
+]
+
+[[package]]
+name = "read-fonts"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
 dependencies = [
  "bytemuck",
- "font-types",
+ "font-types 0.12.7",
  "once_cell",
 ]
 
@@ -1274,7 +1451,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "005c8acf251756c478b0bf402885bfd88a1476020c4c7e6060edc1aa68da38ea"
 dependencies = [
  "bytemuck",
- "font-types",
+ "font-types 0.12.7",
  "once_cell",
 ]
 
@@ -1285,7 +1462,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5a0cf4bb6cbce4c29756270d189a5e400ac05e91192161d83a0bcb6e68492e8"
 dependencies = [
  "bytemuck",
- "font-types",
+ "font-types 0.12.7",
  "once_cell",
 ]
 
@@ -1325,10 +1502,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+
+[[package]]
+name = "rustix"
+version = "1.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
+dependencies = [
+ "bitflags",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "serde"
@@ -1417,10 +1625,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
+
+[[package]]
+name = "skrifa"
+version = "0.42.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c34617370ae968efb7161bb2beb517d9084659aae19e24b89e3db25b46e4564"
+dependencies = [
+ "bytemuck",
+ "read-fonts 0.39.2",
+]
 
 [[package]]
 name = "skrifa"
@@ -1458,6 +1682,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "stable_deref_trait"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "strict-num"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
+
+[[package]]
+name = "subsetter"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38803281d1c23166c5ebcb455439a5d2afe711cc909cf88af72448c297756ad6"
+dependencies = [
+ "kurbo",
+ "rustc-hash",
+ "skrifa 0.42.1",
+ "write-fonts",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1477,6 +1725,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "synstructure"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -1540,6 +1799,17 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg",
+]
+
+[[package]]
+name = "tiny-skia-path"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edca365c3faccca67d06593c5980fa6c57687de727a03131735bb85f01fdeeb9"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "strict-num",
 ]
 
 [[package]]
@@ -1827,9 +2097,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wordcraft-doc"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "log",
  "serde",
  "serde_json",
@@ -1841,7 +2111,7 @@ dependencies = [
 [[package]]
 name = "wordcraft-docbin"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "cfb",
  "chrono",
@@ -1857,10 +2127,10 @@ dependencies = [
 [[package]]
 name = "wordcraft-docx"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "aes",
- "base64",
+ "base64 0.23.1",
  "cfb",
  "chrono",
  "getrandom",
@@ -1878,9 +2148,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-engine"
+version = "0.18.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
+dependencies = [
+ "chrono",
+ "craft-proof",
+ "getrandom",
+ "image",
+ "js-sys",
+ "libc",
+ "log",
+ "regex",
+ "regex-automata",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "wordcraft-doc",
+ "wordcraft-docbin",
+ "wordcraft-docx",
+ "wordcraft-fonts",
+ "wordcraft-formats",
+ "wordcraft-geom",
+ "wordcraft-layout",
+ "wordcraft-pdf",
+ "wordcraft-render",
+ "zeroize",
+]
+
+[[package]]
 name = "wordcraft-fonts"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "brotli-decompressor 5.0.3",
  "harfrust",
@@ -1893,9 +2193,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "wordcraft-formats"
+version = "0.18.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
+dependencies = [
+ "aes",
+ "base64 0.23.1",
+ "cfb",
+ "chardetng",
+ "chrono",
+ "encoding_rs",
+ "getrandom",
+ "hmac",
+ "image",
+ "js-sys",
+ "log",
+ "miniz_oxide 0.9.1",
+ "quick-xml",
+ "sha1",
+ "sha2",
+ "wordcraft-doc",
+ "wordcraft-geom",
+ "wordcraft-metafile",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
 name = "wordcraft-geom"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "image",
  "serde",
@@ -1904,7 +2231,7 @@ dependencies = [
 [[package]]
 name = "wordcraft-layout"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "craft-proof",
  "image",
@@ -1925,16 +2252,35 @@ dependencies = [
 [[package]]
 name = "wordcraft-metafile"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "kurbo",
  "thiserror 2.0.21",
 ]
 
 [[package]]
+name = "wordcraft-pdf"
+version = "0.18.1"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
+dependencies = [
+ "chrono",
+ "craft-pdf",
+ "image",
+ "js-sys",
+ "kurbo",
+ "log",
+ "thiserror 2.0.21",
+ "wordcraft-doc",
+ "wordcraft-fonts",
+ "wordcraft-geom",
+ "wordcraft-layout",
+ "wordcraft-metafile",
+]
+
+[[package]]
 name = "wordcraft-render"
 version = "0.18.1"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a#0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ab1b1760b70584ee6211a24691f250ce4cba0d5f#ab1b1760b70584ee6211a24691f250ce4cba0d5f"
 dependencies = [
  "image",
  "log",
@@ -1947,6 +2293,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "write-fonts"
+version = "0.48.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb731d4c4d93eacc69a1ad2f270f905788a98e4a3438267bcafbe08d3431c8d8"
+dependencies = [
+ "font-types 0.11.3",
+ "indexmap",
+ "kurbo",
+ "log",
+ "read-fonts 0.39.2",
+]
+
+[[package]]
 name = "wuff"
 version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1955,6 +2314,35 @@ dependencies = [
  "brotli-decompressor 6.3.1",
  "bytes",
  "flate2",
+]
+
+[[package]]
+name = "xmp-writer"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
+
+[[package]]
+name = "yoke"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "417ef3fcf6c300b7dbd25c85531a746931c02ad536f3cf4786ed1e88223340b3"
+dependencies = [
+ "stable_deref_trait",
+ "yoke-derive",
+ "zerofrom",
+]
+
+[[package]]
+name = "yoke-derive"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+ "synstructure",
 ]
 
 [[package]]
@@ -1975,6 +2363,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "zerofrom"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272"
+dependencies = [
+ "zerofrom-derive",
+]
+
+[[package]]
+name = "zerofrom-derive"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f75b4683f6c7f45248d4d64056a24298c6281e0993356d7d1b4a1a962ef10d4a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+ "synstructure",
 ]
 
 [[package]]
