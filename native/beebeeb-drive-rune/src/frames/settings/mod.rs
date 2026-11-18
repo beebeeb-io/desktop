@@ -742,106 +742,21 @@ impl Pane {
     }
 }
 
-/// One entry of the settings sidebar: its label, its icon, and the frame it shows.
-struct Section {
-    label: &'static str,
-    icon: &'static rune::Icon,
-    frame: &'static str,
-    pane: Option<Pane>,
+/// The sidebar label of the section a pane belongs to. The board draws no item selected on its Sync
+/// and File Explorer frames (DW-0746 and the nine over it), unlike every other section: followed, and flagged.
+fn section_label(section: Pane) -> Option<&'static str> {
+    match section {
+        Pane::General => Some("General"),
+        Pane::Notifications => Some("Notifications"),
+        Pane::Storage => Some("Storage"),
+        Pane::Previews => Some("Thumbnails and previews"),
+        Pane::Bandwidth => Some("Bandwidth"),
+        _ => None,
+    }
 }
 
-const SETTINGS_SECTIONS: &[Section] = &[
-    Section {
-        label: "General",
-        icon: &ic::GEAR,
-        frame: "DW-0701",
-        pane: Some(Pane::General),
-    },
-    Section {
-        label: "Account",
-        icon: &ic::PEOPLE,
-        frame: "DW-A51",
-        pane: None,
-    },
-    Section {
-        label: "Security",
-        icon: &ic::SHIELD,
-        frame: "DW-A52",
-        pane: None,
-    },
-    Section {
-        label: "Devices and sessions",
-        icon: &ic::LAPTOP,
-        frame: "DW-A55",
-        pane: None,
-    },
-    Section {
-        label: "Notifications",
-        icon: &ic::BELL,
-        frame: "DW-0750",
-        pane: Some(Pane::Notifications),
-    },
-];
-
-// The board draws the Drive group's items with a chevron where the other group has a glyph.
-const DRIVE_SECTIONS: &[Section] = &[
-    Section {
-        label: "Storage",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0712",
-        pane: Some(Pane::Storage),
-    },
-    Section {
-        label: "Backups",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0737",
-        pane: None,
-    },
-    Section {
-        label: "Sync and File Explorer",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0746",
-        // The board draws no sidebar item selected on its Sync and File Explorer frames
-        // (DW-0746 and the nine over it), unlike every other section: followed, and flagged.
-        pane: None,
-    },
-    Section {
-        label: "Thumbnails and previews",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0744",
-        pane: Some(Pane::Previews),
-    },
-    Section {
-        label: "Bandwidth",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0785",
-        pane: Some(Pane::Bandwidth),
-    },
-];
-
 fn sidebar(section: Pane, previews: bool, t: &Theme) -> El {
-    let items = |sections: &'static [Section]| -> Vec<El> {
-        sections
-            .iter()
-            // Thumbnails and previews is not listed where nothing answers for it (the engine makes no preview
-            // setting yet): a pane that only says "not built yet" is a dead door.
-            .filter(|sec| previews || sec.pane != Some(Pane::Previews))
-            .map(|sec| {
-                let frame = sec.frame;
-                shell::nav_item(sec.label, sec.icon, 16.0, sec.pane == Some(section), t)
-                    .on_press(move |s: &mut State| go(s, frame))
-            })
-            .collect()
-    };
-    let back = shell::nav_item("Back to Drive", &ic::BACK, 15.0, false, t)
-        .shortcut_hint("Esc")
-        .on_press(|s: &mut State| go(s, "DW-0401"));
-    shell::sidebar(
-        back,
-        vec![("Settings", items(SETTINGS_SECTIONS)), ("Drive", items(DRIVE_SECTIONS))],
-        "Settings open inside the app. Esc goes back.",
-        t,
-    )
+    shell::app_sidebar(section_label(section), previews, go, t)
 }
 
 /// The window while settings is open.
