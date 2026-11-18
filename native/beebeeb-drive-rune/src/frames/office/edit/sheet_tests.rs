@@ -97,7 +97,6 @@ struct Rig {
 }
 
 fn rig_with(body: SheetView) -> Rig {
-    super::reset();
     let mut file = docs_fixture::file(false);
     file.version = 4;
     file.body = Body::Sheet(body);
@@ -138,6 +137,14 @@ impl Rig {
         for _ in 0..6 {
             self.rt.frame(1.0 / 60.0);
         }
+    }
+
+    fn editing(&mut self) -> Option<Editing> {
+        super::editing(&self.rt.state)
+    }
+
+    fn typed(&mut self) -> String {
+        super::typed(&self.rt.state)
     }
 
     fn sheet(&mut self) -> SheetView {
@@ -474,16 +481,16 @@ fn office_sheets_typing_opens_the_editor_and_enter_keeps_it_with_one_setcell() {
     rig.click(7, 1);
     rig.text("4");
     assert!(rig.find(EDITOR_KEY).is_some(), "the editor is over the cell");
-    assert_eq!(editing().map(|e| e.cell), Some(Cell { row: 7, col: 1 }));
+    assert_eq!(rig.editing().map(|e| e.cell), Some(Cell { row: 7, col: 1 }));
     rig.text("2");
-    assert_eq!(typed(), "42", "the field took the keys");
+    assert_eq!(rig.typed(), "42", "the field took the keys");
     assert!(rig.sets().is_empty(), "nothing is sent while typing");
     assert_eq!(rig.words("sh-formula"), "42", "the formula bar shows what is typed");
     rig.key(Key::Enter);
     assert_eq!(rig.sets(), [(7, 1, "42".to_string())], "exactly one SetCell");
     assert!(rig.find(EDITOR_KEY).is_none(), "the editor is gone");
     assert_eq!(rig.sheet().current, Cell { row: 8, col: 1 }, "Enter moves down");
-    assert_eq!(typed(), "", "the words are dropped");
+    assert_eq!(rig.typed(), "", "the words are dropped");
 }
 
 #[test]
@@ -506,12 +513,12 @@ fn office_sheets_escape_drops_the_words_and_sends_nothing() {
     rig.click(7, 1);
     rig.text("9");
     rig.text("9");
-    assert_eq!(typed(), "99");
+    assert_eq!(rig.typed(), "99");
     rig.key(Key::Escape);
     assert!(rig.find(EDITOR_KEY).is_none());
     assert!(rig.sets().is_empty(), "nothing was changed");
-    assert_eq!(editing(), None);
-    assert_eq!(typed(), "", "the words are gone");
+    assert_eq!(rig.editing(), None);
+    assert_eq!(rig.typed(), "", "the words are gone");
     assert_eq!(
         rig.sheet().current,
         Cell { row: 7, col: 1 },
@@ -524,7 +531,7 @@ fn office_sheets_f2_and_a_double_press_edit_the_cells_own_words() {
     let mut rig = rig();
     rig.click(2, 1);
     rig.key(Key::Function(2));
-    assert_eq!(typed(), "=B1+B2", "F2 opens on the formula");
+    assert_eq!(rig.typed(), "=B1+B2", "F2 opens on the formula");
     rig.key(Key::Escape);
     assert!(rig.sets().is_empty());
     // A double press: on a cell with words only.
@@ -534,8 +541,8 @@ fn office_sheets_f2_and_a_double_press_edit_the_cells_own_words() {
     rig.rt.pointer_down(x, y);
     rig.rt.pointer_up(x, y);
     rig.settle();
-    assert_eq!(editing().map(|e| e.cell), Some(Cell { row: 1, col: 0 }));
-    assert_eq!(typed(), "Item 2");
+    assert_eq!(rig.editing().map(|e| e.cell), Some(Cell { row: 1, col: 0 }));
+    assert_eq!(rig.typed(), "Item 2");
     // Kept as it is, it is still one SetCell (Excel does the same).
     rig.key(Key::Enter);
     assert_eq!(rig.sets(), [(1, 0, "Item 2".to_string())]);
@@ -560,8 +567,8 @@ fn office_sheets_a_change_the_helper_does_not_take_stays_in_the_editor() {
     rig.take.set(false);
     rig.key(Key::Enter);
     assert!(rig.sets().is_empty());
-    assert_eq!(editing().map(|e| e.cell), Some(Cell { row: 7, col: 1 }), "still open");
-    assert_eq!(typed(), "7", "nothing was lost");
+    assert_eq!(rig.editing().map(|e| e.cell), Some(Cell { row: 7, col: 1 }), "still open");
+    assert_eq!(rig.typed(), "7", "nothing was lost");
     let toast = viewers::ui(&mut rig.rt.state).and_then(|ui| ui.toast.clone());
     assert_eq!(toast.as_deref(), Some(NOT_TAKEN));
     rig.take.set(true);
@@ -578,7 +585,7 @@ fn office_sheets_words_over_the_op_limit_are_refused_not_sent() {
     with(|g| g.edit.replace_text(long));
     rig.key(Key::Enter);
     assert!(rig.sets().is_empty());
-    assert!(editing().is_some(), "kept open, nothing lost");
+    assert!(rig.editing().is_some(), "kept open, nothing lost");
     let toast = viewers::ui(&mut rig.rt.state).and_then(|ui| ui.toast.clone());
     assert_eq!(toast.as_deref(), Some(TOO_LONG));
     rig.key(Key::Escape);
@@ -603,7 +610,7 @@ fn office_sheets_a_shortcut_does_not_start_an_edit() {
     rig.click(7, 1);
     rig.key_with(Key::Command('c'), ctrl());
     rig.key_with(Key::Text("a".into()), ctrl());
-    assert_eq!(editing(), None);
+    assert_eq!(rig.editing(), None);
     assert!(rig.find(EDITOR_KEY).is_none());
 }
 
@@ -621,10 +628,10 @@ fn office_sheets_the_formula_bar_shows_and_edits_the_current_cell() {
     rig.rt.pointer_down(open[0] + 6.0, open[1] + open[3] / 2.0);
     rig.rt.pointer_up(open[0] + 6.0, open[1] + open[3] / 2.0);
     rig.settle();
-    assert_eq!(editing().map(|e| e.in_bar), Some(true));
+    assert_eq!(rig.editing().map(|e| e.in_bar), Some(true));
     assert!(rig.find(BAR_KEY).is_some(), "the bar holds the text field");
     assert!(rig.find(EDITOR_KEY).is_none(), "and the cell does not");
-    assert_eq!(typed(), "=B1+B2");
+    assert_eq!(rig.typed(), "=B1+B2");
     rig.text("1");
     rig.key(Key::Enter);
     assert_eq!(rig.sets(), [(2, 1, "=B1+B21".to_string())]);
@@ -642,7 +649,7 @@ fn office_sheets_the_formula_bar_escape_cancels() {
     rig.text("z");
     rig.key(Key::Escape);
     assert!(rig.sets().is_empty());
-    assert_eq!(editing(), None);
+    assert_eq!(rig.editing(), None);
     assert_eq!(rig.words("sh-formula"), "=B1+B2");
 }
 
@@ -655,15 +662,15 @@ fn office_sheets_a_tab_press_drops_words_typed_on_the_other_sheet() {
     let mut rig = rig();
     rig.click(7, 1);
     rig.text("s");
-    assert_eq!(typed(), "s");
+    assert_eq!(rig.typed(), "s");
     rig.rt.update(|s, _| {
         if let Some(Body::Sheet(v)) = viewers::ui(s).map(|ui| &mut ui.file.body) {
             v.sheet = 1;
         }
     });
     rig.settle();
-    assert_eq!(editing(), None);
-    assert_eq!(typed(), "");
+    assert_eq!(rig.editing(), None);
+    assert_eq!(rig.typed(), "");
     assert!(rig.sets().is_empty());
 }
 
@@ -795,7 +802,7 @@ fn office_sheets_alt_equals_in_the_grid_sums_the_selection() {
     };
     rig.key_with(Key::Text("=".into()), alt);
     assert_eq!(rig.ops.borrow().last(), Some(&EditOp::AutoSum));
-    assert!(editing().is_none(), "Alt+= does not open the cell editor");
+    assert!(rig.editing().is_none(), "Alt+= does not open the cell editor");
 }
 
 #[test]

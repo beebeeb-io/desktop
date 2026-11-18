@@ -864,12 +864,12 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
             .layout_size("sh-grid")
             .map_or((800.0, 600.0), |[w, h]| ((w - ROW_HEAD_W).max(0.0), (h - HEADER_H).max(0.0)));
         (
-            Some(edit_sheet::layer(view, geometry, room, &t)),
-            Some(edit_sheet::cell_box(view, &t)),
-            Some(edit_sheet::formula(view, &t)),
+            Some(edit_sheet::layer(&ui.office.grid, view, geometry, room, &t)),
+            Some(edit_sheet::cell_box(&ui.office.grid, view, &t)),
+            Some(edit_sheet::formula(&ui.office.grid, view, &t)),
         )
     } else {
-        edit_sheet::reset();
+        edit_sheet::reset(s);
         (None, None, None)
     };
     let mut cells = grid(view, shown, anchors_of(view, shown, live, &t), layer, &t);

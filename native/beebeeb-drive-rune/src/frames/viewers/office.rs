@@ -196,6 +196,8 @@ pub struct OfficeUi {
     pub save: Option<crate::frames::office::edit::save::Sent>,
     /// An unsaved editing of the open file that this PC kept, read when the editor started (`edit/recovery.rs`).
     pub recovery: Option<super::source::RecoveryOffer>,
+    /// The sheet cell editor's grid state (`frames/office/edit/sheet.rs`).
+    pub grid: crate::frames::office::edit::sheet::SheetGrid,
 }
 
 impl Default for OfficeUi {
@@ -208,6 +210,7 @@ impl Default for OfficeUi {
             ribbon: Default::default(),
             save: None,
             recovery: None,
+            grid: Default::default(),
         }
     }
 }

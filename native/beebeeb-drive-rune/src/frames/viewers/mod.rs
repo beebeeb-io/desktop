@@ -845,7 +845,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         // Not after a key of this group (those take it in `on_key`): no ring is drawn.
         tx.focus(key, false);
     }
-    crate::frames::office::edit::sheet::take_focus(tx);
+    crate::frames::office::edit::sheet::take_focus(s, tx);
     // The office editor between presses: its answers, a save's end, the picked picture (`office_over::poll`).
     new_file |= changed | office_over::poll(s, tx);
     new_file
@@ -1047,7 +1047,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);
         }
-        crate::frames::office::edit::sheet::take_focus(tx);
+        crate::frames::office::edit::sheet::take_focus(s, tx);
         return true;
     }
     let page_before = ui(s).map(|ui| ui.media.page);
@@ -1062,7 +1062,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);
         }
-        crate::frames::office::edit::sheet::take_focus(tx);
+        crate::frames::office::edit::sheet::take_focus(s, tx);
         return true;
     }
     let Some(ui) = ui(s) else { return false };
@@ -1087,7 +1087,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if let Some(key) = ui.focus.take() {
         tx.focus(key, true);
     }
-    crate::frames::office::edit::sheet::take_focus(tx);
+    crate::frames::office::edit::sheet::take_focus(s, tx);
     handled
 }
 

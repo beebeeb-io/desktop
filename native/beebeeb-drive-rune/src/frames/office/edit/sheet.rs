@@ -17,7 +17,7 @@
 // fill, AutoSum and Sort act on it. What a `SetCell` changes comes back as `Edited.cells` and the source re-asks only
 // those blocks; nothing here draws a value that was not asked of the renderer.
 
-use std::cell::UnsafeCell;
+use std::cell::RefCell;
 
 use beebeeb_office_protocol::check::MAX_OP_TEXT_BYTES;
 use beebeeb_office_protocol::office::{CellRange, EditOp};
@@ -88,57 +88,81 @@ impl Grid {
     }
 }
 
-thread_local! {
-    /// The window's one grid. Rune's text field reaches its `TextEdit` through a function of the app state
-    /// ([`cell_edit`]), and the state of a sheet's window has no place for one that this task owns; it stays with the
-    /// window's thread, the only one that builds the view and runs its handlers.
-    static GRID: UnsafeCell<Grid> = UnsafeCell::new(Grid::new());
+/// The window's one grid, held by the office UI state (`OfficeUi::grid`). Rune's text field reaches its `TextEdit`
+/// through a function of the app state ([`cell_edit`]); the views get the grid by reference and the handlers through
+/// the state, so a `RefCell` (never nested, never held across a call back into Rune) is all the sharing it needs.
+#[derive(Default)]
+pub struct SheetGrid(RefCell<Grid>);
+
+impl Default for Grid {
+    fn default() -> Grid {
+        Grid::new()
+    }
 }
 
-/// Run `f` on the grid's state. Never nested, and never held across a call back into Rune.
-fn with<R>(f: impl FnOnce(&mut Grid) -> R) -> R {
-    // SAFETY: the cell is thread-local, so no other thread reaches it; every use is one short call of `f`, which does
-    // not call `with` again (nothing here nests), so there is never a second reference to it alive.
-    GRID.with(|g| f(unsafe { &mut *g.get() }))
+/// Run `f` on the grid's state in a view (`None`-less: the caller holds the grid). Never nested.
+fn on<R>(grid: &SheetGrid, f: impl FnOnce(&mut Grid) -> R) -> R {
+    f(&mut grid.0.borrow_mut())
+}
+
+/// Run `f` on the open window's grid, from a handler; `R::default()` when no file is open. Never nested.
+fn with<R: Default>(s: &State, f: impl FnOnce(&mut Grid) -> R) -> R {
+    match s.viewer.ui.as_ref() {
+        Some(ui) => on(&ui.office.grid, f),
+        None => R::default(),
+    }
 }
 
 /// The text field's `TextEdit`, for `on_edit`. The field and the key handlers never hold it together.
-pub fn cell_edit(_s: &mut State) -> &mut TextEdit {
-    // SAFETY: as `with`: the window's thread only. Rune takes this borrow for one edit and lets it go before it calls
-    // anything of ours, and `with` is never open while Rune runs.
-    GRID.with(|g| unsafe { &mut (*g.get()).edit })
+pub fn cell_edit(s: &mut State) -> &mut TextEdit {
+    &mut grid_mut(s).edit
+}
+
+fn grid_mut(s: &mut State) -> &mut Grid {
+    // The field is only built (and so only edits) in a window that has a file open.
+    s.viewer.ui.as_mut().expect("the sheet's cell editor belongs to an open file").office.grid.0.get_mut()
 }
 
 /// The cell being edited and where, if one is.
-pub fn editing() -> Option<Editing> {
-    with(|g| g.editing)
+pub fn editing(s: &State) -> Option<Editing> {
+    with(s, |g| g.editing)
+}
+
+fn editing_in(grid: &SheetGrid) -> Option<Editing> {
+    on(grid, |g| g.editing)
+}
+
+fn typed_in(grid: &SheetGrid) -> String {
+    on(grid, |g| g.edit.text.clone())
 }
 
 /// The words typed so far (a copy).
-pub fn typed() -> String {
-    with(|g| g.edit.text.clone())
+pub fn typed(s: &State) -> String {
+    with(s, |g| g.edit.text.clone())
 }
 
 /// Drop what was typed, overwriting it first, and the pointer's hold: the file closed, or the editor is not shown.
-pub fn reset() {
-    with(|g| {
-        if g.editing.is_some() || !g.edit.text.is_empty() {
-            g.edit.clear();
-            g.edit.focused = false;
-        }
-        g.editing = None;
-        g.dragging = false;
-        g.name.clear();
-        g.name.focused = false;
-        g.opened = false;
-        g.wants_focus = false;
-    });
+pub fn reset(s: &State) {
+    with(s, reset_grid);
+}
+
+fn reset_grid(g: &mut Grid) {
+    if g.editing.is_some() || !g.edit.text.is_empty() {
+        g.edit.clear();
+        g.edit.focused = false;
+    }
+    g.editing = None;
+    g.dragging = false;
+    g.name.clear();
+    g.name.focused = false;
+    g.opened = false;
+    g.wants_focus = false;
 }
 
 /// The keyboard goes to the grid the first time it is shown for an open file (the shell calls this each turn, next to the
 /// viewer's own one-shot focus). `true`: it moved.
-pub fn take_focus(tx: &mut Tx) -> bool {
-    if !with(|g| std::mem::take(&mut g.wants_focus)) {
+pub fn take_focus(s: &State, tx: &mut Tx) -> bool {
+    if !with(s, |g| std::mem::take(&mut g.wants_focus)) {
         return false;
     }
     tx.focus(GRID_KEY, false);
@@ -146,13 +170,12 @@ pub fn take_focus(tx: &mut Tx) -> bool {
 }
 
 /// The cell box's field, for `on_edit`.
-pub fn namebox_edit(_s: &mut State) -> &mut TextEdit {
-    // SAFETY: as `cell_edit`.
-    GRID.with(|g| unsafe { &mut (*g.get()).name })
+pub fn namebox_edit(s: &mut State) -> &mut TextEdit {
+    &mut grid_mut(s).name
 }
 
-fn leave_namebox(tx: &mut Tx) {
-    with(|g| {
+fn leave_namebox(s: &State, tx: &mut Tx) {
+    with(s, |g| {
         g.name.clear();
         g.name.focused = false;
     });
@@ -164,15 +187,15 @@ fn leave_namebox(tx: &mut Tx) {
 fn namebox_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Enter => {
-            let typed = with(|g| g.name.text.clone());
-            let room = with(|g| g.room);
+            let typed = with(s, |g| g.name.text.clone());
+            let room = with(s, |g| g.room);
             if super::sheet_ribbon::go_to(s, tx, &typed, room) {
-                leave_namebox(tx);
+                leave_namebox(s, tx);
             }
             true
         }
         Key::Escape => {
-            leave_namebox(tx);
+            leave_namebox(s, tx);
             true
         }
         _ => false,
@@ -180,9 +203,9 @@ fn namebox_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 /// The cell box of the open workbook: the current cell's name, which a press turns into a field to type a reference in.
-pub fn cell_box(view: &SheetView, t: &Theme) -> rune::El {
+pub fn cell_box(grid: &SheetGrid, view: &SheetView, t: &Theme) -> rune::El {
     let name = sheets::a1(view.current);
-    with(|g| {
+    on(grid, |g| {
         // Rune keeps `focused` for a field the pointer or Tab put the keyboard in; otherwise it shows the cell's name.
         if !g.name.focused {
             g.name.replace_text(name.clone());
@@ -192,7 +215,7 @@ pub fn cell_box(view: &SheetView, t: &Theme) -> rune::El {
             g.name.set_selection(0, n);
         }
     });
-    with(|g| text_input(&g.name, sheets::MONO))
+    on(grid, |g| text_input(&g.name, sheets::MONO))
         .key(NAME_KEY)
         .label(format!("Cell {name}"))
         .single_line()
@@ -415,7 +438,7 @@ pub enum Begin {
 
 /// Open the editor on the current cell. `false`: no sheet is open.
 pub fn begin(s: &mut State, tx: &mut Tx, how: Begin) -> bool {
-    let room = with(|g| g.room);
+    let room = with(s, |g| g.room);
     let Some((sheet, cell, held_text)) = with_sheet(s, |v| {
         reveal(v, v.current, room);
         sheets_scroll::follow(v, tx);
@@ -427,7 +450,7 @@ pub fn begin(s: &mut State, tx: &mut Tx, how: Begin) -> bool {
         Begin::Typed(text) => (text, false),
         Begin::Existing { in_bar } => (held_text, in_bar),
     };
-    with(|g| {
+    with(s, |g| {
         g.edit.replace_text(text);
         g.edit.focused = true;
         g.editing = Some(Editing { sheet, cell, in_bar });
@@ -436,8 +459,8 @@ pub fn begin(s: &mut State, tx: &mut Tx, how: Begin) -> bool {
 }
 
 /// Close the editor and drop its words.
-fn close(tx: &mut Tx) {
-    with(|g| {
+fn close(s: &State, tx: &mut Tx) {
+    with(s, |g| {
         g.edit.clear();
         g.edit.focused = false;
         g.editing = None;
@@ -446,16 +469,16 @@ fn close(tx: &mut Tx) {
 }
 
 /// Escape: the words go, the cell stays as it was.
-pub fn cancel(tx: &mut Tx) {
-    close(tx);
+pub fn cancel(s: &State, tx: &mut Tx) {
+    close(s, tx);
 }
 
 /// Enter or Tab (or a press on another cell): the words become the cell's, with one `SetCell`, and the current cell
 /// moves by `advance` (rows, columns). Words the helper cannot take stay in the editor with a line saying why. `true`:
 /// the editor was open.
 pub fn commit(s: &mut State, tx: &mut Tx, advance: Option<(i64, i64)>) -> bool {
-    let Some(at) = editing() else { return false };
-    let text = typed();
+    let Some(at) = editing(s) else { return false };
+    let text = typed(s);
     if text.len() > MAX_OP_TEXT_BYTES {
         say(s, TOO_LONG);
         return true;
@@ -470,7 +493,7 @@ pub fn commit(s: &mut State, tx: &mut Tx, advance: Option<(i64, i64)>) -> bool {
         say(s, NOT_TAKEN);
         return true;
     }
-    close(tx);
+    close(s, tx);
     if let Some((dr, dc)) = advance {
         go(s, tx, false, |v, from| shifted(v, from, dr, dc));
     }
@@ -484,8 +507,8 @@ pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Enter => commit(s, tx, Some((if back { -1 } else { 1 }, 0))),
         Key::Tab => commit(s, tx, Some((0, if back { -1 } else { 1 }))),
-        Key::Escape if editing().is_some() => {
-            cancel(tx);
+        Key::Escape if editing(s).is_some() => {
+            cancel(s, tx);
             true
         }
         _ => false,
@@ -499,7 +522,7 @@ pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// Move the current cell (or, extending, the far corner of the selection) to what `target` makes of where it is, show
 /// it, and tell the helper. `true`: taken.
 fn go(s: &mut State, tx: &mut Tx, extend: bool, target: impl FnOnce(&SheetView, Cell) -> Cell) -> bool {
-    let room = with(|g| g.room);
+    let room = with(s, |g| g.room);
     let moved = with_sheet(s, |view| {
         let from = if extend { head(view) } else { view.current };
         let to = clamp(view, target(view, from));
@@ -564,7 +587,7 @@ fn typed_text(ev: &KeyEvent) -> Option<&str> {
 /// A key for the surface. `false`: not taken.
 pub fn on_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
     // While the editor is open the field has the keys (`editor_key` is the field's own).
-    if editing().is_some() {
+    if editing(s).is_some() {
         return false;
     }
     let m = ev.mods;
@@ -580,7 +603,7 @@ pub fn on_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
     }
     let jump_by = m.ctrl || m.cmd;
     let extend = m.shift;
-    let room = with(|g| g.room);
+    let room = with(s, |g| g.room);
     let by = |dr: i64, dc: i64| {
         move |v: &SheetView, from: Cell| {
             if jump_by {
@@ -645,16 +668,16 @@ pub fn on_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
 fn on_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
     match d.phase {
         Phase::Down => {
-            let Some(hit) = with(|g| g.geometry.hit(d.x, d.y, false)) else {
+            let Some(hit) = with(s, |g| g.geometry.hit(d.x, d.y, false)) else {
                 return;
             };
-            with(|g| {
+            with(s, |g| {
                 g.name.focused = false;
             });
             // Pressing another cell ends an edit by keeping it (as Excel does); words the helper refused stay.
-            if editing().is_some() {
+            if editing(s).is_some() {
                 commit(s, tx, None);
-                if editing().is_some() {
+                if editing(s).is_some() {
                     return;
                 }
             }
@@ -667,17 +690,17 @@ fn on_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
                     select(v, cell, cell);
                 }
             });
-            with(|g| g.dragging = true);
+            with(s, |g| g.dragging = true);
             tx.focus(GRID_KEY, false);
             if d.clicks >= 2 {
                 begin(s, tx, Begin::Existing { in_bar: false });
             }
         }
         Phase::Move => {
-            if !with(|g| g.dragging) {
+            if !with(s, |g| g.dragging) {
                 return;
             }
-            let Some(hit) = with(|g| g.geometry.hit(d.x, d.y, true)) else {
+            let Some(hit) = with(s, |g| g.geometry.hit(d.x, d.y, true)) else {
                 return;
             };
             with_sheet(s, |v| {
@@ -686,7 +709,7 @@ fn on_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
             });
         }
         Phase::Up => {
-            if !with(|g| std::mem::replace(&mut g.dragging, false)) {
+            if !with(s, |g| std::mem::replace(&mut g.dragging, false)) {
                 return;
             }
             if !d.cancelled() {
@@ -702,13 +725,13 @@ fn on_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
 
 /// The surface lying over the grid for the frame drawn with `geometry`, in a grid of `room` points of cells: the keys,
 /// the pointer, and the cell editor over the current cell while it is open there.
-pub fn layer(view: &SheetView, geometry: Geometry, room: (f32, f32), t: &Theme) -> rune::El {
+pub fn layer(grid: &SheetGrid, view: &SheetView, geometry: Geometry, room: (f32, f32), t: &Theme) -> rune::El {
     // Words typed on another sheet are not this one's: a tab was pressed, so they go.
-    if editing().is_some_and(|e| e.sheet != view.sheet) {
-        reset();
+    if editing_in(grid).is_some_and(|e| e.sheet != view.sheet) {
+        on(grid, reset_grid);
     }
-    let cell_at = editing().filter(|e| !e.in_bar).and_then(|e| geometry.rect_of(e.cell));
-    with(|g| {
+    let cell_at = editing_in(grid).filter(|e| !e.in_bar).and_then(|e| geometry.rect_of(e.cell));
+    on(grid, |g| {
         g.geometry = geometry;
         g.room = room;
         if !g.opened {
@@ -727,7 +750,7 @@ pub fn layer(view: &SheetView, geometry: Geometry, room: (f32, f32), t: &Theme) 
     if let Some([x, y, w, h]) = cell_at {
         let name = sheets::a1(view.current);
         layer = layer.child(
-            with(|g| text_input(&g.edit, sheets::CELL))
+            on(grid, |g| text_input(&g.edit, sheets::CELL))
                 .key(EDITOR_KEY)
                 .label(format!("Cell {name}"))
                 .single_line()
@@ -749,10 +772,10 @@ pub fn layer(view: &SheetView, geometry: Geometry, room: (f32, f32), t: &Theme) 
 
 /// The formula bar's formula: the words of the current cell, which a press opens for editing; while the editor is open it
 /// is the text field (from the bar) or shows what is typed (from the cell).
-pub fn formula(view: &SheetView, t: &Theme) -> rune::El {
+pub fn formula(grid: &SheetGrid, view: &SheetView, t: &Theme) -> rune::El {
     use crate::ui::kit;
-    match editing() {
-        Some(e) if e.in_bar => with(|g| text_input(&g.edit, sheets::MONO))
+    match editing_in(grid) {
+        Some(e) if e.in_bar => on(grid, |g| text_input(&g.edit, sheets::MONO))
             .key(BAR_KEY)
             .label("Formula bar")
             .single_line()
@@ -762,7 +785,7 @@ pub fn formula(view: &SheetView, t: &Theme) -> rune::El {
             .on_input_key(editor_key)
             .grow(1.0)
             .min_w(0.0),
-        Some(_) => kit::label("sh-formula", typed(), sheets::MONO, t.text)
+        Some(_) => kit::label("sh-formula", typed_in(grid), sheets::MONO, t.text)
             .truncate()
             .min_w(0.0),
         None => rune::row()
