@@ -18,7 +18,7 @@ use rune::{El, Key, KeyEvent, Tx, row};
 use super::slide;
 use crate::State;
 use crate::frames::viewers::office::{self as vo, Face, Tab, Tool, ico};
-use crate::frames::viewers::office_over::Insert;
+use super::word_insert::Insert;
 use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
@@ -106,7 +106,7 @@ fn worded(
     if state == Tool::Off {
         b = b.disabled(true);
     } else {
-        b = b.focusable(true).on_press(move |s: &mut State, tx: &mut Tx| act(s, tx));
+        b = b.focusable(true).preserve_focus_on_press(true).on_press_tx(act);
     }
     b
 }
@@ -298,14 +298,21 @@ fn design_tools(ui: &Ui, t: &Theme) -> Vec<El> {
                 .hover(t.hover)
                 .press(t.press)
                 .focusable(true)
-                .on_press(move |s: &mut State, tx: &mut Tx| act(s, tx))
+                .preserve_focus_on_press(true)
+                .on_press_tx(act)
                 .child(
                     kit::label(format!("{key}-label"), name.clone(), style, ink)
                         .w(rune::text::advance(name, style))
                         .a11y_hidden(),
                 );
             if is_on {
-                b = b.fill(t.press);
+                b = b.fill(t.selection).checked(true).child(
+                    rune::el()
+                        .key(format!("{key}-on"))
+                        .pin(Some(8.0), None, Some(8.0), Some(0.0))
+                        .h(2.0)
+                        .fill(t.text),
+                );
             }
             b
         })

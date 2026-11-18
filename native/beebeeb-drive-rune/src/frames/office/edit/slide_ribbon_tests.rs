@@ -96,6 +96,10 @@ fn press(rt: &mut Runtime<State>, label: &str) {
     rt.frame(0.0);
 }
 
+fn has(rt: &Runtime<State>, key: &str) -> bool {
+    rt.elements().iter().any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+}
+
 fn deck(rt: &mut Runtime<State>) -> (u32, u32) {
     let d = viewers::deck_mut(&mut rt.state).expect("a deck");
     (d.view.current, d.view.count)
@@ -143,11 +147,10 @@ fn office_slides_ribbon_design_lists_layouts_and_applies_one() {
         assert!(by_label(&rt, name).is_some(), "{name} is offered");
     }
     // A new deck's first slide shows Title slide.
-    assert_eq!(by_label(&rt, "Title slide").and_then(|e| e.checked), Some(true));
+    assert!(has(&rt, "rl-0-on"));
     press(&mut rt, "Title only");
     assert_eq!(log.borrow().edits.last(), Some(&EditOp::SetLayout { slide: 0, layout: 3 }));
-    assert_eq!(by_label(&rt, "Title only").and_then(|e| e.checked), Some(true));
-    assert_eq!(by_label(&rt, "Title slide").and_then(|e| e.checked), Some(false));
+    assert!(has(&rt, "rl-3-on") && !has(&rt, "rl-0-on"));
 }
 
 #[test]
