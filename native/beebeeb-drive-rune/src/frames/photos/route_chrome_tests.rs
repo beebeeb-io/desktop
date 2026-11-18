@@ -5,11 +5,12 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use super::{Intent, Ui};
 use crate::shell::app::{Route, Section};
 use crate::shell::registry::view;
-use crate::shell::state::init;
 use crate::State;
 
 fn photos_window() -> Runtime<State> {
-    let mut state = init();
+    let engine = std::sync::Arc::new(crate::shell::actions::FixtureEngine::ready());
+    let platform = std::sync::Arc::new(crate::shell::platform::fake::FakePlatform::default());
+    let mut state = crate::shell::state::init_with(crate::shell::host::Shell::fixture_on(engine, platform));
     crate::shell::host::dispatch(&mut state, crate::shell::app::Event::Navigate(Route::section(Section::Photos)));
     state.photos = Ui::new(Box::new(super::source::FixturePhotos::new()));
     let env = Env {
