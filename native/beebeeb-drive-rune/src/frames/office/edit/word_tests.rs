@@ -428,7 +428,7 @@ fn a_drag_extends_the_selection() {
         })
         .collect();
     assert_eq!(modes, vec![HitMode::Place, HitMode::Extend]);
-    assert_eq!(rt.focused().as_deref(), Some(SURFACE));
+    assert!(find(&rt, SURFACE).is_some_and(|e| e.focused), "the press focused the surface");
 }
 
 /// A press in the gap or past the last page lands on the nearer page, kept on it.
