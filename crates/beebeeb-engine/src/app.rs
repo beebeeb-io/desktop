@@ -107,6 +107,7 @@ pub mod versions_api;
 pub mod viewer_api;
 pub mod office_edit_api;
 pub mod office_recovery;
+pub mod office_scratch;
 pub mod viewer_edit_api;
 
 pub use credential_stores::{CredentialStores, PlatformCredentials};
@@ -1025,6 +1026,7 @@ impl<C: CredentialStores> Engine<C> {
             let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
             // Every Office recovery blob of this account goes with the session (not a waiting save).
             self.wipe_office_recovery_at_session_end();
+            self.end_office_scratch_at_session_end();
             let mut vault = self.vault();
             let token = vault
                 .session_token()

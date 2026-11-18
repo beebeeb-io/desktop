@@ -383,6 +383,7 @@ impl<C: CredentialStores> Engine<C> {
             let signed_in = self.lock_state() != LockState::SignedOut;
             let mut survives_restart = signed_in && vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
             let stopped = self.stop_holding_step().await;
+            self.end_office_scratch_at_session_end();
             self.forget_session(SessionTransition::Lock);
             if signed_in && vault.lock_flag(LockFlag::VaultClosed) != Some(true) {
                 survives_restart = vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
