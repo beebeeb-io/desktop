@@ -194,6 +194,10 @@ pub enum Notice {
     AlreadyAccepted,
     /// "Remove from my list" met a file request that is still open.
     RequestStillOpen,
+    /// Show in File Explorer met an item that is not kept on this PC.
+    NotOnThisPc,
+    /// View files met a request that has no folder of its own.
+    NoFolder,
 }
 
 /// How an invitation sent with [`SharedSource::start_invite`] ended (DW-0514).
