@@ -90,6 +90,8 @@ pub(crate) mod tools;
 // plan40 batch 1: "Show sync status on files" (slice B3).
 #[path = "status_on_files.rs"]
 mod status_on_files;
+#[path = "app_activity.rs"]
+pub(crate) mod app_activity;
 pub(crate) use reads::*;
 use tools::Os;
 pub use tools::SPEED_TEST_ON;
@@ -340,6 +342,8 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     os: Os,
     /// The pane last opened: read again for the new account after a change of gate or account.
     open: Option<Pane>,
+    /// Diagnostics > App activity: sampled only while that pane is shown (`app_activity`).
+    activity: app_activity::AppActivity,
     /// When the local sizes and the folder tree were last answered, and whether that read is out.
     local_at: Option<Instant>,
     local_reading: bool,
@@ -381,6 +385,7 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             bundle: Bundle::None,
             os: Os::real(),
             open: None,
+            activity: app_activity::AppActivity::new(),
             local_at: None,
             local_reading: false,
             previews: super::drive_previews::PreviewsHost::off(),
@@ -823,12 +828,35 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             }
         }
         changed |= self.previews.pump();
-        (changed, !self.idle())
+        // App activity: a sample every 2 seconds while Diagnostics is shown; the rates are the engine's newest
+        // bandwidth sample, read only when a sample is due.
+        let sampling = self.activity.running();
+        if sampling {
+            let engine = &self.engine;
+            let rates = || {
+                engine
+                    .local_state(|db| db.latest_bandwidth_sample())
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                    .map_or((0, 0), |s| {
+                        let secs = u64::from(s.period_secs.max(1));
+                        (s.up_bytes / secs, s.down_bytes / secs)
+                    })
+            };
+            changed |= self.activity.tick(Instant::now(), rates);
+        }
+        (changed, !self.idle() || sampling)
     }
 
     /// A pane of Drive's settings opened: insights reads again when what it holds is old (P2-3).
     fn opened(&mut self, pane: Pane) {
         self.open = Some(pane);
+        if pane == Pane::Diagnostics {
+            self.activity.show();
+        } else {
+            self.activity.hide();
+        }
         if pane == Pane::Previews {
             self.previews.opened();
         } else {
@@ -1040,11 +1068,11 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         }
     }
 
-    /// What the page can say today: where the last export ended. The app's own CPU, memory and transfer rates are
-    /// not sampled in this version: no list is drawn for them, and the page says so.
+    /// What the page can say: the app's own CPU, memory and transfer rates (sampled while the pane is shown; none
+    /// before the first sample) and where the last export ended.
     fn diagnostics(&self) -> Diagnostics {
         Diagnostics {
-            activity: Vec::new(),
+            activity: self.activity.rows(),
             bundle: if self.mine() { self.bundle.clone() } else { Bundle::None },
         }
     }

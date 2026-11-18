@@ -37,6 +37,8 @@ beebeeb-media-protocol = { path = "../../crates/beebeeb-media-protocol" }
 beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
 beebeeb-office-protocol = { path = "../../crates/beebeeb-office-protocol" }
 
+# The App activity sampler (`engine_host/app_activity.rs`): this process only; the engine already links it.
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 serde_json = "1"
 # The local log file's subscriber (`log_file.rs`): the `tracing` the engine already logs through; already in the lock
 # through the engine, so no new crate is built (no `tracing-subscriber`: the subscriber is this crate's own).

@@ -1059,3 +1059,38 @@ fn the_engines_glue_reads_the_signed_in_accounts_state() {
         other => panic!("insights are ready, not {other:?}"),
     }
 }
+
+/// App activity (DW-0790): with Diagnostics open every pump past the interval adds a sample; on any other pane the
+/// sampler is stopped and the page has no rows.
+#[test]
+fn app_activity_samples_only_while_diagnostics_is_open() {
+    struct Steady;
+    impl app_activity::Probe for Steady {
+        fn read(&mut self) -> app_activity::Reading {
+            app_activity::Reading {
+                cpu_percent: 2.0,
+                memory_bytes: 100_000_000,
+                ..Default::default()
+            }
+        }
+    }
+    let fake = account();
+    let mut source = EngineDriveSettings::new(fake, Arc::new(FakePlatform::default()));
+    source.activity = app_activity::AppActivity::with_probe(Box::new(Steady), Duration::ZERO);
+    settle(&mut source);
+    source.opened(Pane::Storage);
+    source.pump(0.0);
+    assert!(source.diagnostics().activity.is_empty(), "closed: no sampling");
+    source.opened(Pane::Diagnostics);
+    let mut last = 0;
+    for _ in 0..3 {
+        let (changed, more) = source.pump(0.0);
+        assert!(changed && more);
+        let now = source.diagnostics().activity[0].samples.len();
+        assert_eq!(now, last + 1);
+        last = now;
+    }
+    source.opened(Pane::Storage);
+    source.pump(0.0);
+    assert!(source.diagnostics().activity.is_empty(), "left: the sampler stopped");
+}
