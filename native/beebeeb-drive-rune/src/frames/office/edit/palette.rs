@@ -156,7 +156,7 @@ pub fn found(kind: Option<EditKind>, typed: &str, from_source: Vec<CommandGroup>
             let listed = groups
                 .iter()
                 .any(|g| g.title == group.title && g.commands.iter().any(|c| c.name == command.name));
-            if !listed && (kind.is_some() || group.title != FILES || matches(&command.name, typed)) {
+            if !listed {
                 push(&mut groups, &group.title, command);
             }
         }

@@ -33,7 +33,7 @@ fn each_kind_lists_its_own_operations_and_typing_filters() {
     assert_eq!(slides, ["New slide"]);
     let bold = found(Some(EditKind::Docx), "bold", Vec::new());
     assert_eq!(bold[0].commands[0].shortcut.as_deref(), Some("Ctrl+B"));
-    // Without an editor only the source's answer, and the source's file names are filtered by the words.
+    // Without an editor only the source's answer,: the source filters its own names.
     assert!(found(None, "bold", Vec::new()).is_empty());
     assert_eq!(names(&found(Some(EditKind::Docx), "plan", files(&["Plan.pdf", "Other.pdf"]))), ["Plan.pdf", "Other.pdf"]);
     // A name the document's styles share with ours is listed once.
