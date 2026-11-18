@@ -28,6 +28,10 @@ mod windows_control;
 mod windows_folder;
 #[cfg(windows)]
 mod windows_photo;
+#[cfg(windows)]
+mod windows_save;
+#[cfg(windows)]
+mod windows_share;
 // The lock screen's prompt (`engine_host::hello`). Compiled on every platform (a stub off Windows).
 #[allow(dead_code)]
 pub mod windows_hello;
@@ -79,6 +83,26 @@ pub enum TrayEvent {
     /// The PC woke from sleep or hibernation: how long it was away, its time without input before it slept and the
     /// sleep itself (the away lock's event; a wake's own key press is input, so the idle count alone would miss it).
     Resumed { away: std::time::Duration },
+}
+
+/// What Windows' save panel answered (`Platform::pick_save_path`). The path is the person's own: never logged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SaveAnswer {
+    /// The person chose where the file goes (the panel already asked about replacing an existing file).
+    Chosen(std::path::PathBuf),
+    /// The panel was closed without a choice.
+    Cancelled,
+    /// The panel could not open (the cause is logged in fixed words by the platform, never with a path).
+    Failed,
+}
+
+impl SaveAnswer {
+    /// The answer for the session of the press: `pressed` is the account that pressed Save, `now` the account the
+    /// window may act on right now (`None`: signed out, locked or switching). An answer that lands under any other
+    /// session is dropped, never handed on: a path chosen for one account must not start a save for another.
+    pub fn for_session(self, pressed: &str, now: Option<&str>) -> Option<SaveAnswer> {
+        (now == Some(pressed)).then_some(self)
+    }
 }
 
 pub type TrayHandler = Arc<dyn Fn(TrayEvent) + Send + Sync>;
@@ -151,6 +175,19 @@ pub trait Platform: Send + Sync {
     fn pick_photo(&self, _title: &str, _start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
         Err(PlatformError::NotBuilt("the photo picker"))
     }
+    /// Opens the OS's own save panel (Windows: `IFileSaveDialog`) with `suggested_name` filled in, in `start` when
+    /// that folder exists. BLOCKS until the person closed it: a worker's call, never the window's thread; asked
+    /// modeless like `pick_folder`, and its answer is handed over only for the session of the press
+    /// ([`SaveAnswer::for_session`]). The path is shown to the person, never logged.
+    fn pick_save_path(&self, _suggested_name: &str, _start: std::path::PathBuf) -> SaveAnswer {
+        SaveAnswer::Failed
+    }
+    /// Opens the OS's Share sheet (Windows: `IDataTransferManagerInterop::ShowShareUIForWindow`) for the file at
+    /// `path`, over `window` (`None`: the window has no handle yet). Returns once the sheet is shown, not when the
+    /// person is done. The file is the person's own: never logged.
+    fn share_file(&self, _window: Option<&rune::WindowHandle>, _path: &std::path::Path) -> Result<(), PlatformError> {
+        Err(PlatformError::NotBuilt("the share sheet"))
+    }
     /// How long this PC has had no input from the person (keys, pointer, touch), in any app: the away lock's
     /// clock. `None`: this platform cannot say; the shell then counts from its own windows' last input.
     fn idle_for(&self) -> Option<Duration> {
@@ -180,6 +217,48 @@ pub fn current() -> Arc<dyn Platform> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         Arc::new(linux::LinuxPlatform)
+    }
+}
+
+#[cfg(test)]
+mod save_share_tests {
+    use super::fake::FakePlatform;
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_save_path_that_lands_after_a_sign_out_is_dropped() {
+        let chosen = SaveAnswer::Chosen(PathBuf::from("C:/Users/x/a.jpg"));
+        assert_eq!(chosen.clone().for_session("acct-1", Some("acct-1")), Some(chosen.clone()));
+        assert_eq!(chosen.clone().for_session("acct-1", None), None);
+        assert_eq!(chosen.for_session("acct-1", Some("acct-2")), None);
+        assert_eq!(SaveAnswer::Cancelled.for_session("acct-1", None), None);
+    }
+
+    #[test]
+    fn a_cancelled_panel_answers_cancelled_and_remembers_the_ask() {
+        let fake = FakePlatform::default();
+        assert_eq!(fake.pick_save_path("a.jpg", PathBuf::from("C:/x")), SaveAnswer::Cancelled);
+        fake.saves.lock().unwrap().push_back(SaveAnswer::Chosen(PathBuf::from("C:/x/b.jpg")));
+        fake.saves.lock().unwrap().push_back(SaveAnswer::Failed);
+        assert_eq!(
+            fake.pick_save_path("b.jpg", PathBuf::from("C:/x")),
+            SaveAnswer::Chosen(PathBuf::from("C:/x/b.jpg"))
+        );
+        assert_eq!(fake.pick_save_path("c.jpg", PathBuf::from("C:/y")), SaveAnswer::Failed);
+        let asks = fake.save_asks.lock().unwrap();
+        assert_eq!(asks.len(), 3);
+        assert_eq!(asks[0], ("a.jpg".to_string(), PathBuf::from("C:/x")));
+    }
+
+    #[test]
+    fn the_fake_shares_a_file_and_the_unbuilt_one_says_so() {
+        let fake = FakePlatform::default();
+        assert_eq!(fake.share_file(None, Path::new("C:/x/a.jpg")), Ok(()));
+        assert_eq!(fake.shared.lock().unwrap().as_slice(), [PathBuf::from("C:/x/a.jpg")]);
+        let unbuilt = FakePlatform::unbuilt();
+        assert!(matches!(unbuilt.share_file(None, Path::new("a")), Err(PlatformError::NotBuilt(_))));
+        assert_eq!(unbuilt.pick_save_path("a", PathBuf::new()), SaveAnswer::Failed);
     }
 }
 
