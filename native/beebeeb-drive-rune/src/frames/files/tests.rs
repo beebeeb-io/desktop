@@ -120,6 +120,7 @@ pub(super) fn click(rt: &mut Runtime<State>, key: &str) {
 pub(super) fn click_with(rt: &mut Runtime<State>, key: &str, mods: Mods) {
     let (x, y) = centre(rt, key);
     rt.physical_input(PhysicalInput::Modifiers(mods));
+    eprintln!("P2 sel={:?} row0w={:?} pane={:?}", rt.state.selected, find(rt, "row-0").map(|e| e.rect), find(rt, "detail-pane-empty").map(|e| e.rect));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     settle(rt);
@@ -796,10 +797,12 @@ fn double_click_with_frame(rt: &mut Runtime<State>, key: &str, x: Option<f32>) {
     let x = x.unwrap_or(cx);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
+    eprintln!("P1 x={x} y={y} sel={:?} pane={} detail={}", rt.state.selected, rt.state.show_detail_pane, find(rt, "row-0").map(|e| e.rect[2]).unwrap_or(0.0));
     // Frames while the hand waits between the clicks, shorter than the double-click interval.
     for _ in 0..4 {
         rt.frame(0.03);
     }
+    eprintln!("P2 sel={:?} row0w={:?} pane={:?}", rt.state.selected, find(rt, "row-0").map(|e| e.rect), find(rt, "detail-pane-empty").map(|e| e.rect));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     settle(rt);
