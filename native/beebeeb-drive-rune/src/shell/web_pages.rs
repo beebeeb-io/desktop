@@ -28,6 +28,11 @@ pub const NAMES: &[(&str, &str)] = &[
     ("plan", "https://app.beebeeb.io/settings/billing"),
     // `repos/web/src/app.tsx`, route `/settings/delete-account`.
     ("delete-account", "https://app.beebeeb.io/settings/delete-account"),
+    // `repos/web/src/app.tsx`, route `/settings/privacy`.
+    ("privacy", "https://app.beebeeb.io/settings/privacy"),
+    // The web has no route of its own for the data export; it runs on the privacy page (`repos/web`,
+    // `pages/settings/privacy`).
+    ("export-my-data", "https://app.beebeeb.io/settings/privacy"),
     // `SUPPORT`; the subject is fixed here (see [`support_mailto`] for one with its own subject).
     ("support", "mailto:support@beebeeb.io?subject=Beebeeb%20support"),
 ];

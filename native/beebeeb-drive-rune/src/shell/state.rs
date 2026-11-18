@@ -211,6 +211,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         crate::engine_host::EngineSignInSource::with_hello(engine.clone(), Box::new(hello)),
     )));
     crate::engine_host::media::install_shell_player(engine.clone());
+    // "Save a copy…" and "Download to…" copy through the engine's one handle (`shell::viewer_save`).
+    crate::shell::viewer_save::install(std::sync::Arc::new(crate::engine_host::save_copy::EngineSaver(engine.clone())));
     // An open file: read from the engine, decrypted in memory (`engine_host::viewer`); one source per opened file.
     let viewer_engine = engine.clone();
     crate::frames::viewers::wire(

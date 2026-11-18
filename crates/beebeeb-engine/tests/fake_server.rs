@@ -91,7 +91,8 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
     assert_eq!(engine.gate(), GateState::Ready);
 
     let written = lines.lock().unwrap().clone();
-    assert_eq!(served.load(Ordering::SeqCst), 6);
+    // Six sign-in requests and the one plan check at the unlock (the No plan gate).
+    assert_eq!(served.load(Ordering::SeqCst), 7);
     assert_eq!(fake.requests().len(), 0, "the server keeps no request");
     // The secrets check runs before the exact-match assertion so it guards against a future change to the access-line
     // format that leaks a secret (P2-4 of the PR #338 review).
@@ -110,6 +111,7 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
             "POST /api/v1/opaque/login-finish -> 200",
             "GET /api/v1/auth/me -> 200",
             "POST /api/v1/auth/verify-recovery-check -> 200",
+            "GET /api/v1/billing/subscription -> 200",
         ]
     );
 }
@@ -240,6 +242,8 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
         r#"File "${MAINBINARYSRCPATH}""#,
         r#"File "${OFFICERENDERSRCPATH}""#,
         r#"File "${MEDIAHELPERSRCPATH}""#,
+        // The third-party licence text (a text file, w17-licence-notice).
+        r#"File "${LICENSESRCPATH}""#,
     ];
     if file_commands.len() != packed_files.len()
         || !file_commands.iter().zip(packed_files).all(|(a, b)| a.eq_ignore_ascii_case(b))
@@ -258,6 +262,7 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
             "Copy-Item -LiteralPath $Exe -Destination $staged",
             "Copy-Item -LiteralPath $OfficeRenderExe -Destination $stagedOffice",
             "Copy-Item -LiteralPath $MediaHelperExe -Destination $stagedMedia",
+            "Copy-Item -LiteralPath $licenceSrc -Destination $stagedLicence",
         ]
     {
         wrong.push(format!("build-installer.ps1 copies {copies:?}"));

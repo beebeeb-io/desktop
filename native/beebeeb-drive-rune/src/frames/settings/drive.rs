@@ -287,6 +287,14 @@ pub trait DriveSettings {
     /// - `Bundle::Failed`'s reason is shown on the page as given: it must be a fixed sentence
     ///   or a redacted one, never an OS error with a path in it.
     fn export_bundle(&mut self) {}
+    /// "Show in File Explorer" on the banner (w17-settings-places): show the file of the last `Bundle::Saved`.
+    /// `false`: there is none, or it could not be shown.
+    fn reveal_bundle(&mut self) -> bool {
+        false
+    }
+    /// "Choose photo" in Thumbnails and previews: the OS's photo picker, then the pick measured on this PC (the
+    /// pane's sample follows). A source with no previews does nothing.
+    fn choose_photo(&mut self) {}
     /// Keep on this PC (DW-0784). Engine: the folder tree with sizes and the kept set
     /// (the same thing as Available offline for folders). Until a source answers: not loaded.
     fn keep(&self) -> super::keep::Keep {

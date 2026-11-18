@@ -10,11 +10,11 @@
 //!
 //! Bound changes ([`Engine::share_change`], by id, for the session the row was drawn under): `accept`, `set_access`,
 //! `remove_access` (the view confirms it, DW-0512b), `decline` (`/decline`: the sender sees it declined; 409 is "Already
-//! accepted."), `remove_request` ("Remove from my list" is the server's `/hide`, never DELETE, which destroys the key;
+//! accepted."), `stop_sharing` (a people share: `CancelInvites` for every invite; a link row: `RevokeLinks` for every live link
+//! of the item), `close_request` (`CloseRequest`, an open request only), `remove_request` ("Remove from my list" is the server's `/hide`, never DELETE, which destroys the key;
 //! 409 is "Close the request first."). A change is never drawn before Beebeeb confirmed it: the rows
 //! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a
-//! notice the view draws ("Not available yet"): `stop_sharing`, `close_request` (the view asks no confirmation),
-//! and the old synchronous `invite` (it cannot wait for the server). `keep_offline` is bound (`shared_offline.rs`):
+//! notice the view draws ("Not available yet"): the old synchronous `invite` (it cannot wait for the server). `keep_offline` is bound (`shared_offline.rs`):
 //! the engine's pin change for a row of Shared with me, answered like a change.
 //!
 //! Invite someone (DW-0514, [`Engine::invite_for`]): `start_invite` stamps the press's session and account, runs the
@@ -53,9 +53,10 @@ use super::stamp::{Stamp, stamp};
 use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
 use crate::frames::shared::source::{
-    Access, Invitation, InviteResult, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped, Request,
-    RequestState, SharedSource,
+    Access, Invitation, InviteResult, LinkEdit, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped,
+    Request, RequestForm, RequestState, RowTarget, SharedSource,
 };
+use crate::frames::files::link::LinkText;
 use crate::ui::file_list::PcState;
 
 #[cfg(test)]
@@ -67,6 +68,12 @@ mod tests;
 // plan40 batch 1: Make available offline on someone else's file (slice B4).
 #[path = "shared_offline.rs"]
 mod shared_offline;
+#[path = "shared_links.rs"]
+mod shared_links;
+#[path = "shared_requests.rs"]
+mod shared_requests;
+#[path = "shared_leave.rs"]
+mod shared_leave;
 
 /// Lists this recent are not read again when the Shared section opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -106,6 +113,10 @@ pub struct EngineSharedSource<C: CredentialStores> {
     invite_answers: VecDeque<(String, InviteResult)>,
     /// Slice B4 (`shared_offline.rs`): what it keeps between a press and its answer. Empty until it binds.
     shared_offline: shared_offline::SharedOfflineCalls,
+    /// `shared_links.rs`: the links Copy link made, waiting for the clipboard.
+    shared_links: shared_links::SharedLinkCalls,
+    /// `shared_requests.rs`: the links a new request made, until the window takes them.
+    shared_requests: shared_requests::RequestCalls,
 }
 
 /// The lists as the view draws them.
@@ -119,7 +130,13 @@ pub(crate) struct Held {
     pub(crate) links: Vec<LinkShare>,
     /// A link row's id to every live link behind it (what Stop sharing revokes).
     pub(crate) link_shares: HashMap<String, Vec<String>>,
+    /// A link row's id to the item it is a link to (OwnedLink.item_id).
+    pub(crate) link_items: HashMap<String, String>,
     pub(crate) requests: Vec<Request>,
+    /// A with-me row's item id to the invite it came with (what Leave sends).
+    pub(crate) invites: HashMap<String, String>,
+    /// A request's id to the folder its uploads land in, when it has one (what View files opens).
+    pub(crate) request_folders: HashMap<String, String>,
 }
 
 enum Answer {
@@ -153,6 +170,8 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             inviting: HashSet::new(),
             invite_answers: VecDeque::new(),
             shared_offline: Default::default(),
+            shared_links: Default::default(),
+            shared_requests: Default::default(),
         }
     }
 
@@ -440,6 +459,17 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.change(session, id, ShareChange::Decline { invite_id: id.into() })
     }
 
+    // w17-shared-links (`shared_links.rs`).
+    fn copy_row_link(&mut self, id: &str) -> bool {
+        self.shared_links_copy_row_link(id)
+    }
+    fn change_link(&mut self, share_id: &str, change: LinkEdit) -> bool {
+        self.shared_links_change_link(share_id, change)
+    }
+    fn change_request_expiry(&mut self, id: &str, hours: Option<u32>) -> bool {
+        self.shared_links_change_request_expiry(id, hours)
+    }
+
     // Slice B4 (`shared_offline.rs`): sent once per press for a row of "Shared with me".
     fn keep_offline(&mut self, id: &str) -> bool {
         self.shared_offline_keep_offline(id)
@@ -473,6 +503,15 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
             return false;
         };
         self.change(session, id, change)
+    }
+
+    // Slice w17 (`shared_leave.rs`): Leave a share someone made with the person; where a row points.
+    fn leave(&mut self, id: &str) -> bool {
+        self.shared_leave(id)
+    }
+
+    fn target_of(&self, id: &str) -> Option<RowTarget> {
+        self.shared_target_of(id)
     }
 
     /// Sent once per press, for an open request of the current session's lists.
@@ -537,6 +576,14 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.invite_answers.pop_front()
     }
 
+    fn create_request(&mut self, form: RequestForm) -> bool {
+        self.shared_requests_create(form)
+    }
+
+    fn take_link(&mut self) -> Option<LinkText> {
+        self.shared_links_take_link().or_else(|| self.shared_requests_take_link())
+    }
+
     fn loaded(&self) -> Loaded {
         if !self.engine.has_session() {
             Loaded::SignedOut
@@ -591,6 +638,7 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
     }
 
     fn forget(&mut self) {
+        self.shared_requests_forget();
         self.held = None;
         self.again = false;
         self.asked = false;
@@ -620,7 +668,11 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
     let kind = |is_folder: bool, name: &str| kind_of(is_folder, mime_for_name(name));
     let date = |stamp: &str| seconds_of(stamp).map(|at| when(at, now)).unwrap_or_default();
     let (mut invitations, mut with_me) = (Vec::new(), Vec::new());
+    let mut invites = HashMap::new();
     for item in overview.incoming {
+        if !item.waiting {
+            invites.insert(item.item_id.clone(), item.invite_id.clone());
+        }
         let row = Row {
             id: item.item_id,
             kind: kind(item.is_folder, &item.name),
@@ -685,11 +737,13 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         members.insert(share.item_id, rows);
     }
     let mut link_shares = HashMap::new();
+    let mut link_items = HashMap::new();
     let links = overview
         .links
         .into_iter()
         .map(|link| {
             link_shares.insert(link.share_id.clone(), link.share_ids.clone());
+            link_items.insert(link.share_id.clone(), link.item_id.clone());
             let expiry = link.expires_at.as_deref().and_then(seconds_of);
             let expired = expiry.is_some_and(|at| at <= now.timestamp());
             let mut line = match expiry {
@@ -709,10 +763,14 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
             }
         })
         .collect();
+    let mut request_folders = HashMap::new();
     let requests = overview
         .requests
         .into_iter()
         .map(|r| {
+            if let Some(folder) = &r.target_folder_id {
+                request_folders.insert(r.id.clone(), folder.clone());
+            }
             let expiry = r.expires_at.as_deref().and_then(seconds_of);
             let state = match expiry {
                 _ if r.closed => RequestState::Closed,
@@ -746,7 +804,10 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         members,
         links,
         link_shares,
+        link_items,
         requests,
+        invites,
+        request_folders,
     }
 }
 

@@ -10,8 +10,18 @@ mod chrome;
 mod grid;
 mod icons;
 mod overlay;
+mod route;
+mod route_chrome;
+#[cfg(test)]
+mod route_chrome_tests;
+mod route_items;
+mod route_original;
+mod route_save_send;
+mod route_share;
 mod session;
 pub mod source;
+#[cfg(test)]
+mod original_tests;
 #[cfg(test)]
 mod tests;
 mod viewer;
@@ -106,6 +116,8 @@ pub enum Dialog {
     Sources(SourcesDraft),
     Share(ShareDraft),
     Details,
+    /// Rename: the name dialog of an open photo's menu (`route_items::rename`).
+    Rename(route_items::rename::Draft),
 }
 
 /// Which rendition of an open photo shows.
@@ -514,7 +526,8 @@ impl Ui {
                     });
                 }
             }
-            Some(Dialog::Details) | None => {}
+            // Its own button and Enter in its field ask for the rename (`route_items::rename::commit`).
+            Some(Dialog::Rename(_)) | Some(Dialog::Details) | None => {}
         }
     }
 
@@ -536,7 +549,7 @@ impl Ui {
     pub fn close_viewer(&mut self) {
         self.stop_playing();
         if let Some(viewer) = self.viewer.take()
-            && matches!(viewer.original, Original::Downloading { .. })
+            && viewer.original != Original::Preview
         {
             self.ask(Intent::StopOriginal(viewer.id));
         }
@@ -574,7 +587,10 @@ impl Ui {
         if viewer.id == id && viewer.gone.is_none() {
             return;
         }
-        // A download carries on in the background (DW-0605b); the next photo shows its preview.
+        // The original is memory only and belongs to the open photo: another photo stops and wipes it.
+        if viewer.original != Original::Preview {
+            self.source.stop_original(viewer.id);
+        }
         // A video this window started stops when another item is shown.
         if let Some((_, handle)) = self.playing.take() {
             handle.stop(crate::media::StopReason::Closed);
@@ -591,6 +607,7 @@ impl Ui {
     pub fn show_preview(&mut self) {
         let Some(viewer) = &mut self.viewer else { return };
         let was = std::mem::replace(&mut viewer.original, Original::Preview);
+        // A whole original already here is wiped when the viewer closes or another photo shows (memory only).
         if matches!(was, Original::Downloading { .. }) {
             let id = viewer.id;
             self.ask(Intent::StopOriginal(id));

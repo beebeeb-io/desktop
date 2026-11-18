@@ -3,6 +3,11 @@
 //! the lane's dialogs (`dialogs`: DW-0504, DW-0511 to DW-0515, Trash's DW-0749). The checklist
 //! is `FRAMES.md`.
 
+pub mod actions;
+mod actions_items;
+mod actions_links;
+mod actions_new;
+mod actions_sort;
 pub mod dialogs;
 pub mod parts;
 pub mod scenes;
@@ -131,6 +136,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         ui.invite_answered(&share, result);
         changed = true;
     }
+    // A link the source made (a new request's): only this `Tx` can put it on the clipboard.
+    let mut copied = false;
+    while let Some(link) = ui.source.take_link() {
+        tx.copy(link.expose());
+        copied = true;
+    }
+    if copied {
+        s.show_toast(crate::frames::files::Toast::LinkCopied, tx);
+        changed = true;
+    }
+    let ui = &mut s.frames.shared;
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
@@ -151,6 +167,8 @@ fn notice_words(notice: Notice) -> &'static str {
         Notice::ChangeRefused => "Couldn\u{2019}t make that change. Nothing was changed.",
         Notice::AlreadyAccepted => "Already accepted.",
         Notice::RequestStillOpen => "Close the request first.",
+        Notice::NotOnThisPc => "This isn\u{2019}t on this PC. Make it available offline to show it in File Explorer.",
+        Notice::NoFolder => "This request has no folder of its own. Its files arrive in your Beebeeb.",
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Shared. What\u{2019}s shown may be out of date.",
     }
 }
@@ -354,8 +372,11 @@ impl SharedUi {
             }
             "Show in File Explorer" => Some(Intent::About("DW-1180", id)),
             "Details" => Some(Intent::About("DW-0411", id)),
-            // The confirmation is the shell's (the board draws none); the engine call follows it.
-            "Leave\u{2026}" => Some(Intent::Do("leave", id)),
+            // Each asks first; the engine call follows the answer (`actions_items`).
+            "Leave\u{2026}" => {
+                self.open_dialog(dialogs::Dialog::ConfirmLeave { id });
+                None
+            }
             "Copy link" => Some(Intent::Do("copy-link", id)),
             "Change expiry" => Some(Intent::Do("change-expiry", id)),
             "Password\u{2026}" => Some(Intent::Do("link-password", id)),
@@ -364,11 +385,11 @@ impl SharedUi {
             "People" if self.show_people(&id) => None,
             "People" => Some(Intent::About("DW-0511", id)),
             "Stop sharing" => {
-                gone = self.source.stop_sharing(&id);
+                self.open_dialog(dialogs::Dialog::ConfirmStop { id });
                 None
             }
             "Close request" => {
-                self.source.close_request(&id);
+                self.open_dialog(dialogs::Dialog::ConfirmClose { id });
                 None
             }
             "Remove" => {

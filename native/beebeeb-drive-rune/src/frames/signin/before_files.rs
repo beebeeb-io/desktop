@@ -32,8 +32,7 @@ use crate::ui::toolbar::{self, Closed};
 use crate::ui::{caption, kit};
 use rune::{Align, Color, Cx, El, Icon, TextStyle, col, el, row};
 
-/// The action each button names, for tests and the log. None of these is wired to an engine
-/// action yet: each button shows [`NOT_AVAILABLE`].
+/// The action each button names, for tests and the log.
 pub const OPEN_PLANS: &str = "open-plans";
 pub const CHECK_PLAN: &str = "check-plan";
 pub const SIGN_OUT: &str = "sign-out";
@@ -64,6 +63,14 @@ pub const NO_PLAN: Frame = Frame {
     feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
 };
 
+/// The credential store did not answer (no board frame): `keystore.rs`.
+pub const KEYSTORE: Frame = Frame {
+    group: FrameGroup::KeyStoreUnavailable,
+    view,
+    on_key: None,
+    feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
+};
+
 /// The board's frames of this file: the id, and what shows it on a fresh `State`.
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0009", |s| {
@@ -74,20 +81,54 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     }),
 ];
 
-/// The message every gate button shows today: none of the four engine actions exists yet.
+/// What a gate button says when the engine cannot be asked (no sign-in source in this window).
 const NOT_AVAILABLE: &str = "Not available yet";
 
-/// Set the gate notice and log the attempt. The engine actions these buttons need (unlock via
-/// Windows Hello, opening the plans page in the browser, re-checking the plan with the server,
-/// and sign-out while the gate is closed) are phase 2: this file does not edit `engine_host.rs`.
-fn not_built(what: &'static str) -> impl Fn(&mut State) + 'static {
-    move |s: &mut State| {
+#[cfg(test)]
+#[path = "gates_tests.rs"]
+mod gates_tests;
+#[path = "keystore.rs"]
+pub mod keystore;
+
+/// Asks the window's sign-in source (the engine's) for one of the gate buttons; says [`NOT_AVAILABLE`] under the
+/// buttons when this window has none. The engine's gate then changes by itself and the window follows it.
+fn ask_source(s: &mut State, what: &'static str, ask: impl FnOnce(&mut dyn super::source::SignInSource)) {
+    match s.signin.as_mut() {
+        Some(ui) => ask(ui.source.as_mut()),
+        None => {
+            let gate = s.shell.app.gate();
+            s.frames.gate_notice = Some(GateNotice {
+                message: NOT_AVAILABLE,
+                gate,
+            });
+            eprintln!("beebeeb gate: NotAvailable({what})");
+        }
+    }
+}
+
+/// "Check again" / "Try again": the engine reads its gate once more.
+fn recheck(s: &mut State) {
+    s.frames.gate_notice = None;
+    ask_source(s, CHECK_PLAN, |source| source.recheck_gate());
+}
+
+/// "Sign out" on the no-plan screen: the existing sign-out of this app.
+fn sign_out(s: &mut State) {
+    s.frames.gate_notice = None;
+    ask_source(s, SIGN_OUT, |source| source.sign_out_from_gate());
+}
+
+/// Opens one of the website's pages by its name in `shell::web_pages`; says so when it did not open.
+fn open_page(s: &mut State, name: &'static str) {
+    s.frames.gate_notice = None;
+    let opened = crate::shell::web_pages::url(name)
+        .is_some_and(|address| crate::engine_host::signin::open_web_page(address).is_ok());
+    if !opened {
         let gate = s.shell.app.gate();
         s.frames.gate_notice = Some(GateNotice {
-            message: NOT_AVAILABLE,
+            message: "Could not open that page",
             gate,
         });
-        eprintln!("beebeeb gate: NotBuilt({what})");
     }
 }
 
@@ -211,7 +252,13 @@ fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
 /// nothing (the engine's lock is open). The press closes the engine's lock; its own password screen takes the window.
 fn cover_sign_in(t: &Theme) -> El {
     let mut block = col().key("gate").items_center().gap(8.0);
-    for child in head(&ic::PADLOCK, "Beebeeb is locked", "Sign in to see your files.", false, t) {
+    for child in head(
+        &ic::PADLOCK,
+        "Beebeeb is locked",
+        "Sign in to see your files.",
+        false,
+        t,
+    ) {
         block = block.child(child);
     }
     block.child(
@@ -262,10 +309,10 @@ fn no_plan(t: &Theme) -> El {
                 .label("Choose a plan on beebeeb.io, opens in your browser")
                 .default_button()
                 .autofocus()
-                .on_press(not_built(OPEN_PLANS)),
+                .on_press(|s: &mut State| open_page(s, "plan")),
             )
-            .child(wide("gate-btn-1", "Check again", None, Look::Plain).on_press(not_built(CHECK_PLAN)))
-            .child(wide("gate-btn-2", "Sign out", None, Look::Quiet).on_press(not_built(SIGN_OUT))),
+            .child(wide("gate-btn-1", "Check again", None, Look::Plain).on_press(recheck))
+            .child(wide("gate-btn-2", "Sign out", None, Look::Quiet).on_press(sign_out)),
     )
 }
 
@@ -332,7 +379,18 @@ fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
         .as_ref()
         .and_then(super::Ui::lock_said)
         .filter(|_| current_gate == GateState::Locked);
-    let (standing, closed, block, words, dot) = if is_locked {
+    let (standing, closed, block, words, dot) = if current_gate == GateState::KeyStoreUnavailable {
+        (
+            Standing::Locked,
+            Closed {
+                title: "Files",
+                sub: Some("Can't read your keys"),
+            },
+            keystore::block(&t),
+            "Not syncing \u{00B7} can't read your keys",
+            t.text_quaternary,
+        )
+    } else if is_locked {
         (
             Standing::Locked,
             Closed {

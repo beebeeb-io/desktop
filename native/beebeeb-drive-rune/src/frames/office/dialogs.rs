@@ -19,7 +19,9 @@ const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 
 /// The notice, as the board's DW-1557 words it (viewer contract section 6.2). One text node.
 pub const NOTICE: &str = "This viewer is built on WordCraft, GridCraft and DeckCraft, open-source projects \
-(MIT OR Apache-2.0), with fonts under the SIL Open Font License 1.1. It runs entirely on this device.";
+(MIT OR Apache-2.0), with fonts under the SIL Open Font License 1.1 and the Ubuntu Font Licence 1.0, and PDF data \
+under BSD-3-Clause. Beebeeb is under the AGPL-3.0-or-later, and some media libraries are under MPL-2.0. It runs \
+entirely on this device.";
 pub const TITLE: &str = "About this viewer";
 /// The two links, opened in the browser. The first is a label and an address (the address is in the machine font).
 pub const LINKS: [&str; 2] = [
@@ -117,8 +119,17 @@ mod tests {
     fn office_licence_names_the_licences() {
         let w = all_words();
         assert!(w.contains("MIT OR Apache-2.0"));
-        assert!(w.contains("SIL Open Font License 1.1"));
-        for banned in ["LibreOffice", "Qt", "MPL"] {
+        for named in [
+            "SIL Open Font License 1.1",
+            "Ubuntu Font Licence 1.0",
+            "BSD-3-Clause",
+            "MPL-2.0",
+            "AGPL-3.0-or-later",
+        ] {
+            assert!(w.contains(named), "{named} must be named (the shipped notice carries all of them)");
+        }
+        // Stale spec text: the Office engine is not LibreOffice, and no Qt or LGPL code ships.
+        for banned in ["LibreOffice", "Qt", "LGPL", "ffmpeg", "GPL-2"] {
             assert!(!w.contains(banned), "{banned} must not appear");
         }
     }

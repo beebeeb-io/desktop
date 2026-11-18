@@ -59,6 +59,7 @@ ${StrLoc}
 !insertmacro RequireDefine MAINBINARYSRCPATH      ; the built native exe, already named ${MAINBINARYNAME}.exe
 !insertmacro RequireDefine OFFICERENDERSRCPATH    ; beebeeb-office-render.exe, the Office viewer's helper (beside the app exe)
 !insertmacro RequireDefine MEDIAHELPERSRCPATH     ; beebeeb-media-helper.exe, the video/audio helper (beside the app exe)
+!insertmacro RequireDefine LICENSESRCPATH         ; THIRD-PARTY-LICENSES.txt (packaging/licences), the notice installed beside the exes
 !insertmacro RequireDefine INSTALLERICON          ; packaging/windows/icon.ico
 !insertmacro RequireDefine OUTFILE
 !insertmacro RequireDefine ADDITIONALPLUGINSPATH  ; the folder that holds nsis_tauri_utils.dll
@@ -609,6 +610,14 @@ Section Install
   File "${OFFICERENDERSRCPATH}"
   File "${MEDIAHELPERSRCPATH}"
 
+  ; Beebeeb: the third-party licence notice, beside the app exe (Settings > About > Open-source licences opens this
+  ; file by this name, frames/settings/about.rs LICENCES_FILE) and a Start Menu entry for it. Written on every install,
+  ; an update too, so the file always matches the exes.
+  File "${LICENSESRCPATH}"
+  ${If} $NoShortcutMode = 0
+    CreateShortcut "$SMPROGRAMS\${PRODUCTNAME} licences.lnk" "$INSTDIR\THIRD-PARTY-LICENSES.txt"
+  ${EndIf}
+
   ; Create file associations
 
   ; Register deep links
@@ -728,6 +737,7 @@ Section Uninstall
   ; Delete external binaries
   Delete "$INSTDIR\beebeeb-office-render.exe"
   Delete "$INSTDIR\beebeeb-media-helper.exe"
+  Delete "$INSTDIR\THIRD-PARTY-LICENSES.txt"
 
   ; Delete app associations
 
@@ -758,6 +768,8 @@ Section Uninstall
       !insertmacro UnpinShortcut "$SMPROGRAMS\${PRODUCTNAME}.lnk"
       Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"
     ${EndIf}
+
+    Delete "$SMPROGRAMS\${PRODUCTNAME} licences.lnk"
 
     ; Remove desktop shortcuts
     !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"

@@ -413,6 +413,8 @@ impl Window {
 
 #[test]
 fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_its_account() {
+    // The shell's poll takes the viewer's intents (the Edit toast below is its router's).
+    crate::shell::intents::poll_drains_for_this_test();
     let mut w = window("opens");
     w.settle();
     w.assert_nothing_of_the_file("signed out");
@@ -472,7 +474,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     );
     assert!(w.rt.state.viewer.ui.as_ref().unwrap().editor.is_none());
     assert!(
-        w.drawn().contains("Not built yet: Edit and save from here"),
+        w.drawn().contains("Not on this PC: keep it available offline to edit it here"),
         "{}",
         w.drawn()
     );

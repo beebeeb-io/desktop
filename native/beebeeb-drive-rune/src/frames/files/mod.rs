@@ -32,6 +32,7 @@ pub mod protected_fixture;
 pub mod rename;
 pub mod reread;
 pub mod reset;
+pub mod reveal;
 pub mod retry;
 mod row_facts;
 pub mod scenes_waveb;
@@ -286,6 +287,8 @@ pub struct Actions {
     pub list_scroll: reread::ListScroll,
     /// Open With (DW-1562): the submenu's keyboard line, and the Office switches a board scene turns on.
     pub open_with: open_with_menu::Ui,
+    /// An item to select as soon as its folder's listing holds it (`reveal.rs`).
+    pub reveal: Option<String>,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -330,6 +333,7 @@ impl Actions {
             board_first_row: 0,
             list_scroll: reread::ListScroll::default(),
             open_with: open_with_menu::Ui::default(),
+            reveal: None,
         }
     }
 }
@@ -608,7 +612,7 @@ impl State {
     }
 
     /// Select the rows with these ids; the keyboard is on the last of them.
-    fn select_ids(&mut self, ids: &[String]) {
+    pub(super) fn select_ids(&mut self, ids: &[String]) {
         let rows: BTreeSet<usize> = self
             .listing
             .items
@@ -627,6 +631,7 @@ impl State {
     fn entered(&mut self) {
         self.actions.selection.clear();
         self.actions.anchor = None;
+        self.actions.reveal = None;
         self.actions.undo.clear();
         // The rows an Undo waits for are another folder's now: its answer puts nothing in this one.
         self.actions.trash.restoring.clear();

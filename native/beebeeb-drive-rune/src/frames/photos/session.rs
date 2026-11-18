@@ -13,7 +13,7 @@
 use rune::{El, Tx, col};
 
 use super::chrome::style;
-use super::source::{Answered, Left, Loaded, PhotoId, Viewing};
+use super::source::{Answered, Left, Loaded, OriginalAnswer, PhotoId, Viewing};
 use super::{Intent, Original, Toast, Ui, Viewer};
 use crate::State;
 use crate::frames::files::dialogs::Purpose;
@@ -281,6 +281,32 @@ impl Ui {
     }
 
     /// A source that answers later said what a change did, per item.
+    /// What the original's download did: the bar, the swap, or the preview kept.
+    pub(super) fn original_answered(&mut self, answer: OriginalAnswer) {
+        match answer {
+            OriginalAnswer::Progress { id, done, total } => {
+                if total == 0 {
+                    return;
+                }
+                // The last byte is not "whole": the picture is swapped in at `Done`, once decoded.
+                self.original_progress(id, done.min(total - 1), total);
+            }
+            OriginalAnswer::Done(id) => {
+                let total = self.source.viewing(id).map_or(0, |viewing| viewing.original_bytes);
+                self.original_progress(id, total, total);
+            }
+            OriginalAnswer::Failed(id) => {
+                if let Some(viewer) = &mut self.viewer
+                    && viewer.id == id
+                {
+                    // The preview stays.
+                    viewer.original = Original::Preview;
+                    self.toast = Some(Toast::Words(WORDS_ORIGINAL));
+                }
+            }
+        }
+    }
+
     pub(super) fn answered(&mut self, answer: Answered) {
         let split = |items: &[(PhotoId, Option<Left>)]| {
             let done: Vec<PhotoId> = items
@@ -401,9 +427,10 @@ impl Ui {
 
     /// What the group asked of the shell, on a source that answers later: what this source can do is done, and a
     /// control whose work is not connected in this build says so instead of doing nothing.
-    fn take_in_intents(&mut self) -> bool {
+    fn take_in_intents(&mut self) -> (bool, Vec<Intent>) {
         let intents = self.take_intents();
         let any = !intents.is_empty();
+        let mut left_over = Vec::new();
         for intent in intents {
             match intent {
                 // "On this PC", pressed again: it stops being kept (asked; said once this PC answered).
@@ -427,7 +454,7 @@ impl Ui {
                     self.say_left(What::Keep(true), &left);
                 }
                 // Kept in this window for as long as it is open.
-                Intent::RememberAcross(_) | Intent::StopOriginal(_) => {}
+                Intent::RememberAcross(_) => {}
                 // The folder dialog of Files opens over the window at the next poll; its answer comes back as
                 // `folder_chosen` / `moved`. What is not there to ask (no session, a photo that left) is said.
                 Intent::AddFolder if self.later.closed => self.toast = Some(Toast::Words(WORDS_FOLDER)),
@@ -440,17 +467,11 @@ impl Ui {
                     Some(items) if !items.is_empty() && !self.later.closed => self.later.pick = Some(Pick::Move(items)),
                     _ => self.toast = Some(Toast::Words(WORDS_MOVE)),
                 },
-                Intent::DownloadOriginal(_) => {
-                    // No download was started: the tab does not say one is running.
-                    if let Some(viewer) = &mut self.viewer {
-                        viewer.original = Original::Preview;
-                    }
-                    self.toast = Some(Toast::NotYet);
-                }
-                _ => self.toast = Some(Toast::NotYet),
+                // Everything else goes to the route of its feature (`route.rs`), which has the State and Tx.
+                other => left_over.push(other),
             }
         }
-        any
+        (any, left_over)
     }
 
     /// The folder of Files that the dialog chose goes to Photo sources. What the Sources dialog's switches say now is
@@ -512,6 +533,7 @@ impl Ui {
 
 /// What is said when a folder could not be added, and when photos could not be moved.
 const WORDS_FOLDER: &str = "Couldn\u{2019}t add that folder \u{00B7} not available right now";
+const WORDS_ORIGINAL: &str = "Couldn\u{2019}t download the original";
 const WORDS_CHANGE: &str = "Couldn\u{2019}t change that folder";
 /// Move… while a move to Trash of the photo is on its way: what did not happen, then Files' own sentence.
 const WORDS_MOVE_IN_FLIGHT: &str = "Couldn\u{2019}t move. The last change is still on its way.";
@@ -653,9 +675,16 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     ui.later.was_open = open;
     let later = ui.source.answers_later();
+    let mut left_over = Vec::new();
     if later {
-        changed |= ui.take_in_intents();
+        let (any, rest) = ui.take_in_intents();
+        changed |= any;
+        left_over = rest;
     }
+    for intent in left_over {
+        changed |= super::route::route(s, tx, intent);
+    }
+    let ui = &mut s.photos;
     // The tile the arrow keys are on, by its photo: a read that lands puts photos before it.
     let cursor_on = ui
         .cursor
@@ -676,7 +705,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if waiting {
         tx.wake_after(POLL_EVERY);
     }
-    changed |= pumped.changed || !pumped.answered.is_empty();
+    let originals = ui.source.take_original_answers();
+    changed |= pumped.changed || !pumped.answered.is_empty() || !originals.is_empty();
+    for answer in originals {
+        ui.original_answered(answer);
+    }
     if pumped.changed {
         ui.relayout();
         if later {

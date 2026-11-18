@@ -98,7 +98,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
             view: View::NotHere,
             on_view: None,
             sort: Sort::Idle,
-            on_sort: press(|s, _| s.frames.intents.push(crate::frames::Intent::Frame("DW-0406"))),
+            on_sort: press(|s, _| s.frames.intents.push(crate::frames::Intent::Frame("DW-0404"))),
             details: Details::NotHere,
             on_details: None,
             inert: false,
@@ -106,7 +106,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
             on_explorer: Box::new(tb::open_beebeeb_location),
             // New is unavailable in Trash: drawn at 40 %, not focusable.
             new: if bar.new_off { New::Off } else { New::Idle },
-            on_new: press(|s, _| s.frames.intents.push(crate::frames::Intent::Frame("DW-0415"))),
+            on_new: press(|s, _| s.frames.intents.push(crate::frames::Intent::Frame("DW-0414"))),
             search: search_field(s, t),
             trailing_inset: 0.0,
         },

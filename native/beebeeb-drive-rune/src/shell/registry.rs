@@ -67,7 +67,7 @@ impl FrameGroup {
             FrameGroup::Locked => "Before Files: locked (DW-0009)",
             FrameGroup::RecoveryPhrase => "Email and password: the recovery phrase (DW-A23)",
             FrameGroup::NoPlan => "Before Files: no plan yet (DW-0014)",
-            FrameGroup::KeyStoreUnavailable => "no board frame yet (the auth gate's KeyStoreUnavailable)",
+            FrameGroup::KeyStoreUnavailable => "no board frame (the auth gate's KeyStoreUnavailable)",
             FrameGroup::FirstRun => "First run on Windows: a window of its own, 960 x 640 (DW-0201 to DW-0208)",
             FrameGroup::Section(Section::Files) => "Files: the full Drive in the window (DW-0401)",
             FrameGroup::Section(Section::Shared) => "Shared (DW-0501)",
@@ -187,6 +187,7 @@ pub const FRAMES: &[Frame] = &[
     crate::frames::shared::dialogs::TRASH,
     crate::frames::signin::before_files::LOCKED,
     crate::frames::signin::before_files::NO_PLAN,
+    crate::frames::signin::before_files::KEYSTORE,
     Frame {
         group: FrameGroup::Settings(SettingsPane::General),
         view: crate::frames::settings::view,
@@ -513,7 +514,7 @@ mod tests {
     fn the_frame_count_is_pinned() {
         assert_eq!(
             FRAMES.len(),
-            23,
+            24,
             "a frame was added to FRAMES without updating this test"
         );
         assert_eq!(

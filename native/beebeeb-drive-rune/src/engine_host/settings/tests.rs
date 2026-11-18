@@ -312,8 +312,8 @@ fn general_and_storage_location_draw_what_beebeeb_says_by_country() {
     assert!(source.wired(Pane::About), "About answers from the build itself");
     assert!(source.wired(Pane::Notifications) && source.wired(Pane::Recent));
     assert!(
-        !source.opens("DW-0782"),
-        "no support bundle behind Report a problem yet"
+        source.opens("DW-0782"),
+        "Report a problem opens: the support bundle is behind it"
     );
     assert!(!source.choose_location(3), "a place that is not live is never chosen");
     assert!(account.writes.lock().unwrap().is_empty());

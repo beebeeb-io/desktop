@@ -90,7 +90,7 @@ pub struct GateNotice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Intent {
     /// Open a board frame that is about no single item (`DW-0749` Empty Trash, `DW-0504` New
-    /// request, `DW-0415` New, `DW-0406` Sort).
+    /// request, `DW-0414` New, `DW-0404` Sort).
     Frame(&'static str),
     /// Open a board frame about the item with this id (`DW-0411` Details, `DW-0511` People
     /// with access, `DW-1180` Show in File Explorer).

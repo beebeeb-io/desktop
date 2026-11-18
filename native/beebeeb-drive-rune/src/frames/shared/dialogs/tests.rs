@@ -81,11 +81,11 @@ fn each_dialog_and_its_controls_are_named_as_the_board_names_them() {
     assert_eq!(info(&rt, super::NOTE_INPUT).label.as_deref(), Some("Note (optional)"));
     assert_eq!(
         role_and_name(&rt, "item-1-0"),
-        named("listitem", "Files go to, Documents")
+        named("combobox", "Files go to, All files")
     );
     assert_eq!(
         role_and_name(&rt, "item-1-3"),
-        named("listitem", "Total size, No limit")
+        named("combobox", "Total size, No limit")
     );
     assert_eq!(role_and_name(&rt, "btn-create-link"), named("button", "Create link"));
     assert_eq!(focused(&rt).as_deref(), Some(super::TITLE_INPUT));
@@ -715,4 +715,133 @@ fn share_invite_for_an_item_shared_with_no_one_yet_is_titled_by_its_name() {
     settle(&mut rt);
     assert_eq!(rt.state.frames.shared.fields.unlisted, None);
     assert!(any_text(&rt, "Lisbon trip") && !any_text(&rt, "another name"));
+}
+
+#[test]
+fn the_new_dialogs_open_draw_and_close_on_escape() {
+    let new = [
+        (Dialog::LinkExpiry { share_id: "s".into() }, "dialog-link-change"),
+        (Dialog::LinkPassword { share_id: "s".into(), has_password: false }, "dialog-link-change"),
+        (Dialog::ConfirmLeave { id: "i".into() }, "alert-confirm-leave"),
+        (Dialog::ConfirmStop { id: "i".into() }, "alert-confirm-stop"),
+        (Dialog::ConfirmClose { id: "i".into() }, "alert-confirm-close"),
+    ];
+    for (d, key) in new {
+        let mut rt = runtime(scenes::dw_0511);
+        rt.state.frames.shared.open_dialog(d.clone());
+        settle(&mut rt);
+        assert_eq!(d.section(), Section::Shared);
+        assert!(rt.state.frames.shared.fields.link_password.text.is_empty());
+        let _ = info(&rt, key);
+        press(&mut rt, Key::Escape);
+        settle(&mut rt);
+        assert_eq!(dialog(&rt), None, "{d:?}");
+    }
+}
+
+// ---- New request: the four menus and Create link (DW-0504) ----
+
+mod new_request {
+    use super::*;
+    use crate::frames::shared::source::{
+        BoardShared, Invitation, LinkShare, PeopleShare, Request, RequestForm, SharedSource,
+    };
+    use crate::frames::shared::parts::table::Row;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The board's source, recording every create it is asked for.
+    struct Recording(BoardShared, Rc<RefCell<Vec<RequestForm>>>);
+
+    impl SharedSource for Recording {
+        fn invitations(&self) -> Vec<Invitation> {
+            self.0.invitations()
+        }
+        fn with_me(&self) -> Vec<Row> {
+            self.0.with_me()
+        }
+        fn people_shares(&self) -> Vec<PeopleShare> {
+            self.0.people_shares()
+        }
+        fn links(&self) -> Vec<LinkShare> {
+            self.0.links()
+        }
+        fn requests(&self) -> Vec<Request> {
+            self.0.requests()
+        }
+        fn accept(&mut self, id: &str) -> bool {
+            self.0.accept(id)
+        }
+        fn decline(&mut self, id: &str) -> bool {
+            self.0.decline(id)
+        }
+        fn keep_offline(&mut self, id: &str) -> bool {
+            self.0.keep_offline(id)
+        }
+        fn stop_sharing(&mut self, id: &str) -> bool {
+            self.0.stop_sharing(id)
+        }
+        fn close_request(&mut self, id: &str) -> bool {
+            self.0.close_request(id)
+        }
+        fn remove_request(&mut self, id: &str) -> bool {
+            self.0.remove_request(id)
+        }
+        fn members(&self, share: &str) -> Vec<crate::frames::shared::source::Member> {
+            self.0.members(share)
+        }
+        fn set_access(&mut self, share: &str, person: &str, access: Access) -> bool {
+            self.0.set_access(share, person, access)
+        }
+        fn remove_access(&mut self, share: &str, person: &str) -> bool {
+            self.0.remove_access(share, person)
+        }
+        fn create_request(&mut self, form: RequestForm) -> bool {
+            self.1.borrow_mut().push(form);
+            true
+        }
+    }
+
+    #[test]
+    fn create_link_sends_one_create_with_the_chosen_options() {
+        let mut rt = runtime(scenes::dw_0504);
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        rt.state.frames.shared.source = Box::new(Recording(BoardShared::new(), sent.clone()));
+        let n = rt.state.frames.shared.lists_behind();
+        // The Expires menu opens under its row and its choice is taken; Most files too.
+        click(&mut rt, &format!("item-{n}-1"));
+        assert!(rt.find("menu-0").is_some());
+        click(&mut rt, "menu-0-item-1");
+        assert!(rt.find("menu-0").is_none());
+        click(&mut rt, &format!("item-{n}-2"));
+        click(&mut rt, "menu-0-item-3");
+        click(&mut rt, &format!("item-{n}-3"));
+        click(&mut rt, "menu-0-item-2");
+        rt.state.frames.shared.fields.title.text = "Tax forms".into();
+        click(&mut rt, "btn-create-link");
+        assert_eq!(
+            rt.state.frames.intents,
+            vec![Intent::Do("create-request", "Tax forms".into())]
+        );
+        let mut tx = rune::Tx::default();
+        let intents = std::mem::take(&mut rt.state.frames.intents);
+        for intent in &intents {
+            assert!(crate::frames::shared::actions_new::take(&mut rt.state, &mut tx, intent));
+        }
+        let sent = sent.borrow();
+        assert_eq!(sent.len(), 1, "one create per press");
+        assert_eq!(sent[0].title, "Tax forms");
+        assert_eq!(sent[0].expires_in_hours, Some(24 * 7));
+        assert_eq!(sent[0].max_files, Some(10));
+        assert_eq!(sent[0].max_total_bytes, Some(1 << 30));
+        assert_eq!(dialog(&rt), None, "the dialog closes once the source took it");
+    }
+
+    #[test]
+    fn a_new_request_starts_at_thirty_days_with_no_limits() {
+        let form = super::super::request_menus::Pick::default().form(" A title ", "");
+        assert_eq!(form.title, "A title");
+        assert_eq!(form.expires_in_hours, Some(720));
+        assert_eq!((form.max_files, form.max_total_bytes), (None, None));
+    }
 }

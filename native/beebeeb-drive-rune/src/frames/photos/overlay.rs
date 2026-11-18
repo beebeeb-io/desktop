@@ -2,15 +2,16 @@
 //! dialogs on their scrim (`.wn-dlg`: DW-0604, DW-0607, DW-0609) and the message (`.kit-toast`:
 //! DW-0608, DW-0610).
 
-use rune::{Color, El, Icon, col, el, row};
+use rune::{Color, El, Icon, Tx, col, el, row, text_input};
 
+use super::route_items::rename::Draft;
 use super::chrome::{self, Tone, style};
 use super::grid::megabytes;
 use super::source::{DeviceKind, Shape, SourceRef};
 use super::{ACROSS, Dialog, Intent, Menu, OpenMenu, ShareDraft, SourcesDraft, Toast, Ui, icons};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
-use crate::ui::kit;
+use crate::ui::{field, kit};
 
 /// The caption bar's height: menus and dialogs sit in the window under it.
 const CAPTION: f32 = 32.0;
@@ -645,6 +646,67 @@ fn details(ui: &Ui, t: &Theme) -> (f32, Vec<El>, Foot) {
     (420.0, vec![list(0, None, items, t)], foot)
 }
 
+/// The name dialog of Rename: Files' field, its words under it when the name cannot be given.
+fn rename(draft: &Draft, t: &Theme) -> (f32, Vec<El>, Foot) {
+    let edit = &draft.edit.0;
+    let error = draft.error_now();
+    let mut input = text_input(edit, field::VALUE)
+        .key("ph-rename-input")
+        .label("Name")
+        .single_line()
+        .color(t.text)
+        .caret(t.accent_deep, field::selection(t))
+        .selection_style(rune::SelectionStyle::new(field::selection(t)))
+        .invalid(error.is_some())
+        .on_edit(rename_edit)
+        .on_submit(|s: &mut State, tx: &mut Tx| rename_commit(s, tx))
+        .grow(1.0)
+        .min_w(0.0);
+    if let Some(why) = error {
+        input = input.description(why.message());
+    }
+    let ring = if error.is_some() {
+        kit::ring(2.0, t.red)
+    } else {
+        kit::ring(1.0, t.separator_strong)
+    };
+    let well = row()
+        .key("ph-rename-field")
+        .w_full()
+        .h(30.0)
+        .px(8.0)
+        .center_y()
+        .radius(6.0)
+        .fill(t.card)
+        .box_shadow(ring)
+        .child(input);
+    let mut body = vec![well];
+    if let Some(why) = error {
+        body.push(kit::label("ph-rename-error", why.message(), style::CAP, t.red).w_full().wrap());
+    }
+    let foot = vec![
+        foot_button("ph-dlg-btn-0", "Rename", None, Tone::Primary, t, |b| {
+            b.default_button()
+                .on_press_tx(|s: &mut State, tx: &mut Tx| rename_commit(s, tx))
+        }),
+        foot_button("ph-dlg-btn-1", "Cancel", None, Tone::Quiet, t, |b| {
+            b.on_press(|s: &mut State| s.photos.close_dialog())
+        }),
+    ];
+    (400.0, body, foot)
+}
+
+fn rename_edit(s: &mut State) -> &mut rune::TextEdit {
+    match &mut s.photos.dialog {
+        Some(Dialog::Rename(draft)) => &mut draft.edit.0,
+        _ => &mut s.actions.name_edit,
+    }
+}
+
+fn rename_commit(s: &mut State, tx: &mut Tx) {
+    super::route_items::rename::commit(s, tx);
+}
+
 /// A dialog (`.wn-dlg`), centred in the window under the caption.
 /// How far a dialog's foot ends above the card's edge (see `dialog`).
 const FOOT_INSET: f32 = 0.125;
@@ -703,6 +765,7 @@ pub fn dialog(ui: &Ui, dialog: &Dialog, scale: f32, t: &Theme) -> El {
         Dialog::Sources(draft) => ("Photo sources", sources(ui, draft, t)),
         Dialog::Share(draft) => ("Share", share(ui, draft, t)),
         Dialog::Details => ("Details", details(ui, t)),
+        Dialog::Rename(draft) => ("Rename", rename(draft, t)),
     };
     let card = col()
         .key("ph-dlg")

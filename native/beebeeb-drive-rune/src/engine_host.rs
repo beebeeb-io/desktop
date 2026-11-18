@@ -63,6 +63,10 @@ mod files_case_twins_tests;
 mod files_conflicts;
 mod files_downloads;
 mod files_facts;
+mod files_item_of;
+#[cfg(test)]
+#[path = "engine_host/files_item_of_tests.rs"]
+mod files_item_of_tests;
 mod files_launch;
 mod files_link;
 #[cfg(test)]
@@ -117,8 +121,10 @@ pub mod setup;
 pub mod tray;
 // An open file: its facts from the local state, its content decrypted in memory (`viewer`).
 pub mod viewer;
+// "Save a copy…" and "Download to…": a copy of one file at a place the person chose (`shell::viewer_save`; Photos reuses it).
+pub mod save_copy;
 
-pub use signin::EngineSignInSource;
+pub use signin::{EngineSignInSource, open_installed_file};
 pub use sync::EngineGlobalSource;
 pub use tray::EngineTraySource;
 
@@ -1014,6 +1020,12 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     /// the account-bound local state only: nothing is asked of the server on the press).
     fn share_of(&self, item: &DriveItem) -> Option<String> {
         self.engine.share_target_of(self.engine.session_turn(), &item.id)
+    }
+
+    fn item_of(&self, id: &str) -> Option<DriveItem> {
+        // Not `local`: no sync root is needed to read one row, and a listing reads without one too.
+        let state = self.engine.local_state_for_changes().ok()?;
+        state.with(|db| files_item_of::item_of(db, id)).ok().flatten()
     }
 
     fn versions(&self, item: &DriveItem) -> Vec<crate::frames::files::actions_data::Version> {

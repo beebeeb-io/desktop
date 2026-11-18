@@ -796,12 +796,10 @@ fn a_source_that_cannot_save_or_keep_offline_says_so_on_the_press() {
     let mut cannot = crate::frames::viewers::Ui::open(Box::new(CannotSave(inner)), "f-state").expect("it opened");
     cannot.edit();
     assert!(cannot.editor.is_none());
-    assert_eq!(cannot.toast.as_deref(), Some("Not built yet: Edit and save from here"));
+    // The press queues its intent for the shell's router, which says "Not built yet" where nothing takes it.
+    assert_eq!(cannot.take_intents(), [crate::frames::viewers::Intent::Edit]);
     cannot.toggle_offline();
     assert!(!cannot.file.details.offline, "nothing was switched");
-    assert_eq!(
-        cannot.toast.as_deref(),
-        Some("Not built yet: Available offline from here")
-    );
+    assert_eq!(cannot.take_intents(), [crate::frames::viewers::Intent::KeepOffline]);
     assert!(!cannot.knows_offline());
 }

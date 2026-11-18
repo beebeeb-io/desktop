@@ -20,8 +20,11 @@
 //! every close and when it is sent; it is drawn as dots and is in no label, intent or `Debug`.
 //! A safety number is never computed here: only a scene gives one ([`SafetyNumber`]).
 
+mod confirm;
 mod item_view;
 mod kit;
+mod link_change;
+pub mod request_menus;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -88,6 +91,16 @@ pub enum Dialog {
     Details { origin: Origin, id: String },
     /// The read-only Preview (DW-0408's panel) of the item with this id in `origin`'s list (`frames::item`).
     Preview { origin: Origin, id: String },
+    /// Change a live link's expiry (stub: w17-shared-links).
+    LinkExpiry { share_id: String },
+    /// Set or remove a link's password; its secure field is `Fields::link_password` (stub: w17-shared-links).
+    LinkPassword { share_id: String, has_password: bool },
+    /// Leave a share someone made with the person (stub: w17-shared-items).
+    ConfirmLeave { id: String },
+    /// Stop sharing the row with this id (stub: w17-shared-items).
+    ConfirmStop { id: String },
+    /// Close the request with this id (stub: w17-shared-items).
+    ConfirmClose { id: String },
 }
 
 impl Dialog {
@@ -173,11 +186,15 @@ pub struct Fields {
     /// New request's Title and Note.
     pub title: TextEdit,
     pub note: TextEdit,
+    /// New request's four menus.
+    pub request: request_menus::Pick,
     /// Invite someone's Email.
     pub email: TextEdit,
     /// The account password Empty Trash and Delete permanently ask: secure, wiped whenever a dialog opens or closes
     /// and when it is sent.
     pub password: TextEdit,
+    /// A link's new password (LinkPassword): secure, wiped on every close.
+    pub link_password: TextEdit,
     /// What the last try said (the password was not right; an invitation was not sent), shown under the field.
     pub problem: Option<&'static str>,
     /// Invite someone: an invitation is on its way, and Send invite takes no second press.
@@ -195,8 +212,10 @@ impl Default for Fields {
         Fields {
             title: TextEdit::new(""),
             note: TextEdit::new(""),
+            request: Default::default(),
             email: TextEdit::new(""),
             password: TextEdit::new("").secure(),
+            link_password: TextEdit::new("").secure(),
             problem: None,
             sending: false,
             unlisted: None,
@@ -209,10 +228,17 @@ impl Default for Fields {
 impl Fields {
     /// Empty every field; the password's characters are overwritten, not left behind.
     fn clear(&mut self) {
-        for edit in [&mut self.title, &mut self.note, &mut self.email, &mut self.password] {
+        for edit in [
+            &mut self.title,
+            &mut self.note,
+            &mut self.email,
+            &mut self.password,
+            &mut self.link_password,
+        ] {
             edit.clear();
             edit.focused = false;
         }
+        self.request = Default::default();
         self.problem = None;
         self.sending = false;
         self.unlisted = None;
@@ -269,6 +295,14 @@ impl super::SharedUi {
             // Its row is in another section's list: `frames::item::poll` closes it when the row goes, and
             // `section_keys` when it is not drawn.
             Some(Dialog::Details { .. } | Dialog::Preview { .. }) => true,
+            // Stubs: the row they name may be a link, a request or an incoming share; the later tasks check it.
+            Some(
+                Dialog::LinkExpiry { .. }
+                | Dialog::LinkPassword { .. }
+                | Dialog::ConfirmLeave { .. }
+                | Dialog::ConfirmStop { .. }
+                | Dialog::ConfirmClose { .. },
+            ) => true,
             Some(Dialog::People { share, .. }) => self.share(share).is_some(),
             // An item not shared with anyone yet has no row: its name is kept with the dialog.
             Some(Dialog::Invite { share, .. }) => self.share(share).is_some() || self.fields.unlisted.is_some(),

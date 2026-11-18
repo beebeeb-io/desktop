@@ -12,6 +12,7 @@
 
 use rune::{Align, Color, Cx, El, Shadow, Span, Tx, col, el, row, text_input};
 
+use super::actions;
 use super::source::{Hit, Loading, Narrow, matched};
 use super::{Shows, close, open_result, run};
 use crate::State;
@@ -74,7 +75,7 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
     let ui = &s.frames.find;
     // Rune reports the caret of the field that has the keyboard.
     let focused = cx.caret(SEARCH_KEY).is_some();
-    let shows = ui.shows(&s.search.text);
+    let shows = actions::shows(s);
     let content = match &shows {
         Shows::Unavailable => unavailable(ui.unavailable_reason(&s.search.text), &t),
         Shows::Searching => searching(&t),
@@ -104,6 +105,7 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
         .role("window")
         .label(s.identity.main_window_title())
         .on_key(super::on_key)
+        .on_layout(|s: &mut State, [_, _, w, h]| s.actions.window = (w, h))
         .w_full()
         .h_full()
         .fill(t.bg)
@@ -114,7 +116,22 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
 
 /// An item's Details over the results (`frames::item`), drawn by the one dialog layer of Shared and Trash.
 fn dialogs(s: &State, t: &Theme, cx: &mut Cx<State>) -> Vec<El> {
-    let dialogs = crate::frames::shared::dialogs::layers(s, t);
+    let mut dialogs = crate::frames::shared::dialogs::layers(s, t);
+    // The menu of Sort or of a result, Files' Share and Version history dialogs standing over the results, and the
+    // line for what could not be done.
+    dialogs.extend(actions::menu_layer(s, t));
+    if s.frames.find.dialog_over {
+        dialogs.extend(crate::frames::files::dialogs::layer(s, t));
+    }
+    dialogs.extend(actions::notice(s).map(|words| {
+        crate::ui::toast::layer(crate::ui::toast::toast(
+            &crate::theme::icons_files::ALERT,
+            crate::ui::toast::Tone::Failed,
+            words,
+            None,
+            t,
+        ))
+    }));
     if !dialogs.is_empty() {
         // Keyboard as Windows has it in a dialog (`shared::parts::chrome`): Tab visits every control, Space and
         // Enter press the focused one.
@@ -182,14 +199,24 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
         "view-toggle",
         "View",
         vec![
-            segment("view-list", "as List", &icons::VIEW_LIST, true, t),
-            segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t).on_press(push(Intent::Frame("DW-1102"))),
+            segment("view-list", "as List", &icons::VIEW_LIST, !s.frames.find.grid, t)
+                .on_press(|s: &mut State| s.frames.find.grid = false),
+            segment("view-grid", "as Grid", &icons::VIEW_GRID, s.frames.find.grid, t)
+                .on_press(push(Intent::Frame("DW-1102"))),
         ],
         t,
     );
-    let sort = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, ToolState::Idle, t)
+    let sorting = matches!(&s.frames.find.menu, Some(actions::Menu { of: actions::MenuOf::Sort, .. }));
+    let sort = tool_button(
+        "sort-btn",
+        "Sort",
+        &icons::SORT,
+        15.0,
+        if sorting { ToolState::On } else { ToolState::Idle },
+        t,
+    )
         .child(kit::glyph("sort-caret", &icons::CHEVRON_DOWN, 11.0, t.text_secondary))
-        .on_press(push(Intent::Frame("DW-0406")));
+        .on_press(push(Intent::Frame("DW-0404")));
     let panel = tool_button(
         "panel-toggle-btn",
         "Details panel",
@@ -233,7 +260,7 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
         .hover(t.press)
         .press(t.press)
         .focusable(true)
-        .on_press(push(Intent::Frame("DW-0415")))
+        .on_press(push(Intent::Frame("DW-0414")))
         .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
         .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
         .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
@@ -635,6 +662,64 @@ fn header(t: &Theme) -> El {
         )
 }
 
+/// How many tiles stand in a row of the grid.
+const TILES_PER_ROW: usize = 5;
+
+/// The tiles in rows of [`TILES_PER_ROW`].
+fn grid_rows(tiles: Vec<El>) -> Vec<El> {
+    let mut rows = Vec::new();
+    let mut tiles = tiles.into_iter().peekable();
+    while tiles.peek().is_some() {
+        let n = rows.len();
+        rows.push(
+            row()
+                .key(format!("grid-row-{n}"))
+                .w_full()
+                .gap(8.0)
+                .py(4.0)
+                .children(tiles.by_ref().take(TILES_PER_ROW)),
+        );
+    }
+    rows
+}
+
+/// One result as a tile of the grid: its icon, its name with the match in bold, and where it is. Keys `row-<i>`,
+/// `-icon`, `-name`, `-dash`, as the list's row has them, so the keyboard and the pointer treat both alike.
+fn result_tile(i: usize, hit: &Hit, query: &str, selected: bool, t: &Theme) -> El {
+    let k = format!("row-{i}");
+    let mut name = kit::label(format!("{k}-name"), hit.name.clone(), type_::LIST_ITEM, t.text)
+        .truncate()
+        .min_w(0.0)
+        .w_full();
+    if let Some((from, to)) = matched(&hit.name, query) {
+        name = name.spans(vec![Span::new(from, to).weight(700.0)]);
+    }
+    col()
+        .key(k.clone())
+        .role("listitem")
+        .label(&hit.name)
+        .description(format!("In {}", hit.place))
+        .w(132.0)
+        .padding(8.0)
+        .gap(4.0)
+        .items_center()
+        .radius(radius::CONTROL)
+        .fill(if selected { t.selection_row } else { Color::TRANSPARENT })
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .focus_selected(selected)
+        .tab_index(if selected { 0 } else { -1 })
+        .child(tile(&k, format!("{k}-icon"), hit.kind, 48.0, 10.0, 26.0, t))
+        .child(name)
+        .child(
+            kit::label(format!("{k}-dash"), hit.place.clone(), style::CELL, t.text_tertiary)
+                .truncate()
+                .min_w(0.0)
+                .w_full(),
+        )
+}
+
 /// One result (`.mk-row`): the name with the match in bold, when it changed, its size, where it
 /// is, and the PC column. Keys: `row-<i>` and `-tile`, `-icon`, `-name`, `-date`, `-size`,
 /// `-dash` (Where), `-pc`.
@@ -710,7 +795,7 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
         .enumerate()
         .map(|(i, hit)| {
             let (pressed, opened, menu) = (hit.id.clone(), hit.id.clone(), hit.id.clone());
-            result_row(i, hit, query, at == Some(i), t)
+            (if ui.grid { result_tile(i, hit, query, at == Some(i), t) } else { result_row(i, hit, query, at == Some(i), t) })
                 .on_press_tx(move |s: &mut State, tx: &mut Tx| {
                     s.frames.find.selected = Some(pressed.clone());
                     tx.focus(format!("row-{i}"), false);
@@ -722,8 +807,9 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
                     }
                 })
                 // The usual file menu, plus Show in enclosing folder (DW-0402).
-                .on_secondary_press(move |s: &mut State, _, _| {
+                .on_secondary_press(move |s: &mut State, at: rune::PointerPress, _: &mut Tx| {
                     s.frames.find.selected = Some(menu.clone());
+                    s.frames.find.menu_at = Some((at.x, at.y));
                     s.frames.intents.push(Intent::About("DW-0402", menu.clone()));
                 })
         })
@@ -735,7 +821,7 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
         .h_full()
         .child(narrow_row(ui.narrow, true, t))
         .children(loading.map(|l| loading_note(l, t)))
-        .child(header(t))
+        .children((!ui.grid).then(|| header(t)))
         .child(
             col()
                 .key("rows")
@@ -747,7 +833,7 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
                 .py(4.0)
                 .px(6.0)
                 .scroll(rune::ScrollSpec { stick_bottom: false })
-                .children(rows),
+                .children(if ui.grid { grid_rows(rows) } else { rows }),
         );
     let mut body = row().key("search-body").w_full().child(list);
     if s.show_detail_pane
@@ -756,6 +842,10 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
         && let Some(hit) = at.and_then(|i| hits.get(i))
         && let Some(facts) = ui.source.details(&hit.id)
     {
+        let mut facts = facts;
+        if let Some(kept) = ui.kept.get(&hit.id) {
+            facts.kept_offline = *kept;
+        }
         body = body.child(details_pane(hit, &facts, t));
     }
     body

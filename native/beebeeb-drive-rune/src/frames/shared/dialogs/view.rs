@@ -2,6 +2,7 @@
 //! Mac sheet (`WinDialog`, the main action first) and of each Mac alert (`WinAlert`).
 
 use super::kit::{self, Field, Foot};
+use super::request_menus::{Pick, Setting};
 use super::{Dialog, EMAIL_INPUT, NOTE_INPUT, PASSWORD_INPUT, SafetyNumber, TITLE_INPUT, ask, close, dismiss};
 use crate::State;
 use crate::frames::Intent;
@@ -80,8 +81,7 @@ fn share_line(share: &PeopleShare) -> String {
 }
 
 /// New request (DW-0504): its title and note, where the files go, when it expires and how much
-/// it takes. The four settings show what a request starts with; their menus are not built
-/// (the board names no choices).
+/// it takes. The four settings are pop-up menus (`request_menus`); [`new_request_menu`] draws the open one.
 fn new_request(s: &State, t: &Theme) -> El {
     let ui = &s.frames.shared;
     let n = ui.lists_behind();
@@ -111,27 +111,29 @@ fn new_request(s: &State, t: &Theme) -> El {
         |input| input.on_submit(|s: &mut State, tx: &mut Tx| create_link(s, tx)),
         t,
     );
-    let setting = |m: usize, icon: &'static Icon, words: &str, choice: &str| {
+    let pick = &ui.fields.request;
+    let setting = |m: usize, icon: &'static Icon, words: &str, which: Setting| {
         let mut item = Item::new(Some(icon), words)
             .trailing(Trailing::Pop {
-                choice: choice.to_string(),
-                open: false,
-                menu_at: (0.0, 0.0),
+                choice: Pick::words(which)[pick.chosen(which)].to_string(),
+                open: pick.open == Some(which),
+                menu_at: (252.0, 28.0),
             })
-            .role(Role::Plain);
+            .role(Role::PopUp);
         if m > 0 {
             item = item.ruled();
         }
         settings_list::item(n, m, &item, t)
+            .on_press(move |s: &mut State| s.frames.shared.fields.request.toggle(which))
     };
     let settings = kit::rows(
         n,
         "Request settings",
         vec![
-            setting(0, &ic::FOLDER, "Files go to", "Documents"),
-            setting(1, &ic::CLOCK, "Expires", "In 30 days"),
-            setting(2, &crate::frames::shared::parts::icons::FILE, "Most files", "No limit"),
-            setting(3, &ic::DATABASE, "Total size", "No limit"),
+            setting(0, &ic::FOLDER, "Files go to", Setting::Folder),
+            setting(1, &ic::CLOCK, "Expires", Setting::Expires),
+            setting(2, &crate::frames::shared::parts::icons::FILE, "Most files", Setting::Files),
+            setting(3, &ic::DATABASE, "Total size", Setting::Size),
         ],
     );
     let body = vec![
@@ -152,7 +154,7 @@ fn new_request(s: &State, t: &Theme) -> El {
 }
 
 /// Create link: a request needs a title (the field takes the keyboard while it has none).
-/// Making it is the engine's (frames-open §5, create-file-request): recorded, the dialog stays.
+/// Making it is the engine's (`actions_new`): recorded with the dialog still open, which it closes.
 fn create_link(s: &mut State, tx: &mut Tx) {
     let title = s.frames.shared.fields.title.text.trim().to_string();
     if title.is_empty() {
@@ -160,6 +162,32 @@ fn create_link(s: &mut State, tx: &mut Tx) {
         return;
     }
     ask(s, Intent::Do("create-request", title));
+}
+
+/// The open menu of New request (DW-0504), under its setting's row.
+fn new_request_menu(s: &State, t: &Theme) -> Option<El> {
+    let ui = &s.frames.shared;
+    let which = ui.fields.request.open?;
+    let (name, m) = match which {
+        Setting::Folder => ("Files go to", 0),
+        Setting::Expires => ("Expires", 1),
+        Setting::Files => ("Most files", 2),
+        Setting::Size => ("Total size", 3),
+    };
+    let chosen = ui.fields.request.chosen(which);
+    let items = Pick::words(which)
+        .into_iter()
+        .enumerate()
+        .map(|(i, words)| {
+            crate::ui::settings_controls::menu_item(0, i, words, i == chosen, false, t)
+                .on_press(move |s: &mut State| s.frames.shared.fields.request.choose(which, i))
+        })
+        .collect();
+    Some(
+        crate::ui::settings_controls::menu(0, name, 150.0, items, t)
+            .anchored(format!("item-{}-{m}-menu-at", ui.lists_behind()), rune::Side::Bottom, rune::Align::Start, 0.0)
+            .modal(true, |s: &mut State| s.frames.shared.fields.request.open = None),
+    )
 }
 
 /// People with access (DW-0511): everyone who can open what is shared here, the owner first.
@@ -694,7 +722,11 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
     let modal = |name: &str, card: El| kit::layer(name, card, super::on_key, dismiss, false, t);
     let share_and = |share: &str, person: &str| Some((ui.share(share)?, ui.member(share, person)?));
     match dialog {
-        Dialog::NewRequest => vec![modal("new-request", new_request(s, t))],
+        Dialog::NewRequest => {
+            let mut out = vec![modal("new-request", new_request(s, t))];
+            out.extend(new_request_menu(s, t));
+            out
+        }
         Dialog::EmptyTrash => purge(s, None, t)
             .map(|card| modal("empty-trash", card))
             .into_iter()
@@ -749,5 +781,11 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
             .map(|card| kit::layer("preview", card, super::item_view::preview_keys, dismiss, false, t))
             .into_iter()
             .collect(),
+        Dialog::LinkExpiry { .. } | Dialog::LinkPassword { .. } => {
+            vec![modal("link-change", super::link_change::card(s, dialog, t))]
+        }
+        Dialog::ConfirmLeave { .. } | Dialog::ConfirmStop { .. } | Dialog::ConfirmClose { .. } => {
+            vec![super::confirm::alert(dialog, t)]
+        }
     }
 }
