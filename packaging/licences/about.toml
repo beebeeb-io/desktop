@@ -21,7 +21,7 @@ accepted = [
     "Zlib",
     "AGPL-3.0",
     "AGPL-3.0-or-later",
-    "LicenseRef-UFL-1.0",
+    "Ubuntu-font-1.0",
 ]
 ignore-dev-dependencies = false
 ignore-build-dependencies = false
