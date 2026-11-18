@@ -110,8 +110,8 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
             "POST /api/v1/opaque/login-start -> 200",
             "POST /api/v1/opaque/login-finish -> 200",
             "GET /api/v1/auth/me -> 200",
-            "GET /api/v1/billing/subscription -> 200",
             "POST /api/v1/auth/verify-recovery-check -> 200",
+            "GET /api/v1/billing/subscription -> 200",
         ]
     );
 }
