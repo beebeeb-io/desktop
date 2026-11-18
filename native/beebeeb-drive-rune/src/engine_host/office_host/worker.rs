@@ -47,12 +47,13 @@ pub(super) fn spawn<S: Starter>(
     timeouts: Timeouts,
     cadence: Cadence,
     bytes: Option<Zeroizing<Vec<u8>>>,
+    scratch: Option<beebeeb_engine::app::office_scratch::ScratchStore>,
 ) -> bool {
-    // An editing session keeps what it was opened with, for a restart.
+    // An editing session keeps what it was opened with, for a restart; large copies spill sealed to scratch.
     let held = match mode {
         Mode::View => None,
-        Mode::Edit(_) => Some(Held::new(bytes.clone())),
-        Mode::New(..) => Some(Held::new(None)),
+        Mode::Edit(_) => Some(Held::with_scratch(bytes.clone(), scratch)),
+        Mode::New(..) => Some(Held::with_scratch(None, scratch)),
     };
     let worker = Worker {
         held,

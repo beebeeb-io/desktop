@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
 use beebeeb_engine::account::SessionGeneration;
+use beebeeb_engine::app::office_scratch::ScratchStore;
 use beebeeb_engine::app::viewer_api::{OpenFileError, OpenFileFacts};
 use beebeeb_office_protocol::check;
 use beebeeb_office_protocol::office::{Align, Dirty};
@@ -601,6 +602,8 @@ pub(crate) struct OfficeView {
     saved: Vec<SavedBytes>,
     /// Requests the helper refused, not taken yet.
     failed: Vec<u64>,
+    /// Where the snapshots the helper hands over are kept (an editing session of a file; not a new document).
+    tap: Option<recovery::Tap>,
 }
 
 /// The document as the helper serialised it, for request `id`.
@@ -639,14 +642,27 @@ impl OfficeView {
     }
 
     /// Start an editing session on `bytes` (moved in, never copied elsewhere). Returns at once.
-    pub(crate) fn open_edit(helper: &Path, kind: EditKind, bytes: Zeroizing<Vec<u8>>, wake: Wake) -> OfficeView {
-        let host = Box::new(Live::new(OfficeHost::open_edit(helper, kind, bytes, wake))) as Box<dyn Host>;
+    /// `scratch`: the session's sealed scratch, where the host keeps large working copies.
+    pub(crate) fn open_edit(
+        helper: &Path,
+        kind: EditKind,
+        bytes: Zeroizing<Vec<u8>>,
+        wake: Wake,
+        scratch: Option<ScratchStore>,
+    ) -> OfficeView {
+        let host = Box::new(Live::new(OfficeHost::open_edit_scratch(helper, kind, bytes, wake, scratch))) as Box<dyn Host>;
         OfficeView::editing_on(host, kind)
     }
 
     /// Start a new document of `kind` from `template`. Returns at once.
-    pub(crate) fn new_doc(helper: &Path, kind: EditKind, template: Template, wake: Wake) -> OfficeView {
-        let host = Box::new(Live::new(OfficeHost::new_doc(helper, kind, template, wake))) as Box<dyn Host>;
+    pub(crate) fn new_doc(
+        helper: &Path,
+        kind: EditKind,
+        template: Template,
+        wake: Wake,
+        scratch: Option<ScratchStore>,
+    ) -> OfficeView {
+        let host = Box::new(Live::new(OfficeHost::new_doc_scratch(helper, kind, template, wake, scratch))) as Box<dyn Host>;
         OfficeView::editing_on(host, kind)
     }
 
@@ -683,6 +699,7 @@ impl OfficeView {
             edit_out: VecDeque::new(),
             saved: Vec::new(),
             failed: Vec::new(),
+            tap: None,
         };
         let state = match view.host.get_mut() {
             Some(host) => host.state(),
@@ -690,6 +707,16 @@ impl OfficeView {
         };
         view.take_state(state);
         view
+    }
+
+    /// Keep the snapshots this editing session hands over as `file_id`'s recovery blob (edited from version `base`).
+    pub(crate) fn set_recovery(&mut self, recovery: recovery::Recovery, file_id: &str, base: i64) {
+        self.tap = Some(recovery::Tap::new(recovery, file_id, base));
+    }
+
+    /// Queue an answer for the editor (the source's restore).
+    pub(crate) fn push_answer(&mut self, answer: EditAnswer) {
+        self.edit_out.push_back(answer);
     }
 
     /// The file is kept on this PC: the states offer "Open in another app…" (decision 2482 Q8).
@@ -993,10 +1020,17 @@ impl OfficeView {
                 }
                 HostEdit::Clip { text, html } => self.edit_out.push_back(EditAnswer::Clip { text, html }),
                 HostEdit::Layouts(names) => self.edit_out.push_back(EditAnswer::Layouts(names)),
-                // Only `Purpose::Save` is ever asked here; a snapshot is the recovery task's.
+                // A snapshot (the host's own timer) is kept as the file's recovery blob and never reaches a save.
                 HostEdit::Saved {
-                    id, revision, bytes, ..
-                } => self.saved.push(SavedBytes { id, revision, bytes }),
+                    purpose: Purpose::Snapshot,
+                    bytes,
+                    ..
+                } => {
+                    if let Some(tap) = &self.tap {
+                        tap.keep(&bytes);
+                    }
+                }
+                HostEdit::Saved { id, revision, bytes, .. } => self.saved.push(SavedBytes { id, revision, bytes }),
                 HostEdit::Failed { id } => self.failed.push(id),
                 HostEdit::Restored { at } => self.edit_out.push_back(EditAnswer::Restored { at }),
                 HostEdit::ReadOnly => self.edit_out.push_back(EditAnswer::Stopped),

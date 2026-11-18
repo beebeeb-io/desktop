@@ -46,6 +46,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
+use beebeeb_engine::app::office_scratch::ScratchStore;
 use beebeeb_office_protocol::check;
 use beebeeb_office_protocol::frame::FrameError;
 use beebeeb_office_protocol::office::{self, Message};
@@ -1052,6 +1053,23 @@ pub(crate) fn open_mode_cadence<S: Starter>(
     bytes: Option<Zeroizing<Vec<u8>>>,
     wake: Wake,
 ) -> OfficeHost {
+    open_mode_held(starter, registry, timeouts, cadence, mode, kind, bytes, wake, None)
+}
+
+/// [`open_mode_cadence`] with the session's scratch store: what the host keeps for a restart goes sealed to scratch
+/// above `SPILL_ABOVE_BYTES` (`None`: always in memory).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_mode_held<S: Starter>(
+    starter: S,
+    registry: &Registry,
+    timeouts: Timeouts,
+    cadence: Cadence,
+    mode: Mode,
+    kind: DocKind,
+    bytes: Option<Zeroizing<Vec<u8>>>,
+    wake: Wake,
+    scratch: Option<ScratchStore>,
+) -> OfficeHost {
     let (commands, inputs) = mpsc::channel();
     // Refused before anything starts: `bytes` is wiped when this returns.
     let refused = match &bytes {
@@ -1087,7 +1105,7 @@ pub(crate) fn open_mode_cadence<S: Starter>(
         return host;
     }
     registry.add(&shared);
-    if !worker::spawn(starter, mode, kind, shared.clone(), inputs, timeouts, cadence, bytes) {
+    if !worker::spawn(starter, mode, kind, shared.clone(), inputs, timeouts, cadence, bytes, scratch) {
         // The worker (and the bytes in it) was dropped: wiped.
         lock(&shared.inner).state = OfficeState::Stopped {
             why: Stop::Failed,

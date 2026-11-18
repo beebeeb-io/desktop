@@ -23,9 +23,11 @@ use std::path::Path;
 
 use super::super::{
     Confined, DocKind, EditKind, EditOp, Edited, HitMode, OfficeHost, OfficeState, Purpose, Registry, RequestId,
-    Template, Timeouts, Wake, lock, open_mode,
+    Template, Timeouts, Wake, lock, open_mode, open_mode_held,
 };
+use super::restart::Cadence;
 use super::{Asked, Command, Doc, Out, Phase, Starter, Stop, Worker};
+use beebeeb_engine::app::office_scratch::ScratchStore;
 
 /// How a document starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,23 +239,59 @@ impl OfficeHost {
         bytes: Zeroizing<Vec<u8>>,
         wake: Wake,
     ) -> OfficeHost {
+        Self::open_edit_with(registry, helper, kind, bytes, wake, None)
+    }
+
+    pub(crate) fn open_edit_with(
+        registry: &Registry,
+        helper: &Path,
+        kind: EditKind,
+        bytes: Zeroizing<Vec<u8>>,
+        wake: Wake,
+        scratch: Option<ScratchStore>,
+    ) -> OfficeHost {
         let starter = Confined {
             helper: helper.to_path_buf(),
         };
-        open_mode(
+        open_mode_held(
             starter,
             registry,
             Timeouts::PRODUCTION,
+            Cadence::PRODUCTION,
             Mode::Edit(kind),
             doc_kind(kind),
             Some(bytes),
             wake,
+            scratch,
         )
     }
 
     /// A new document of `kind` from `template`, edited with the helper at `helper`. Never blocks.
     pub fn new_doc(helper: &Path, kind: EditKind, template: Template, wake: Wake) -> OfficeHost {
         Self::new_doc_in(&super::super::PROCESS, helper, kind, template, wake)
+    }
+
+    /// [`OfficeHost::open_edit`] with the session's scratch store (the app's: `ViewerEngine::scratch`): the opened
+    /// bytes and the snapshots above `SPILL_ABOVE_BYTES` are kept sealed on disk, not in memory.
+    pub fn open_edit_scratch(
+        helper: &Path,
+        kind: EditKind,
+        bytes: Zeroizing<Vec<u8>>,
+        wake: Wake,
+        scratch: Option<ScratchStore>,
+    ) -> OfficeHost {
+        Self::open_edit_with(&super::super::PROCESS, helper, kind, bytes, wake, scratch)
+    }
+
+    /// [`OfficeHost::new_doc`] with the session's scratch store.
+    pub fn new_doc_scratch(
+        helper: &Path,
+        kind: EditKind,
+        template: Template,
+        wake: Wake,
+        scratch: Option<ScratchStore>,
+    ) -> OfficeHost {
+        Self::new_doc_with(&super::super::PROCESS, helper, kind, template, wake, scratch)
     }
 
     /// [`OfficeHost::new_doc`] joining `registry`.
@@ -264,17 +302,30 @@ impl OfficeHost {
         template: Template,
         wake: Wake,
     ) -> OfficeHost {
+        Self::new_doc_with(registry, helper, kind, template, wake, None)
+    }
+
+    pub(crate) fn new_doc_with(
+        registry: &Registry,
+        helper: &Path,
+        kind: EditKind,
+        template: Template,
+        wake: Wake,
+        scratch: Option<ScratchStore>,
+    ) -> OfficeHost {
         let starter = Confined {
             helper: helper.to_path_buf(),
         };
-        open_mode(
+        open_mode_held(
             starter,
             registry,
             Timeouts::PRODUCTION,
+            Cadence::PRODUCTION,
             Mode::New(kind, template),
             doc_kind(kind),
             None,
             wake,
+            scratch,
         )
     }
 
