@@ -79,6 +79,8 @@ struct Log {
     asked: Vec<(&'static str, u64)>,
     /// Handed at the next `poll_edit`.
     answers: Vec<HostEdit>,
+    /// Where the editor said its unsaved work is sealed at a lock (the real host's worker calls it).
+    sink: Option<super::office_host::FlushSink>,
 }
 
 #[derive(Clone, Default)]
@@ -112,6 +114,11 @@ impl Fake {
 
     pub(super) fn asked_count(&self, what: &str) -> usize {
         self.log().asked.iter().filter(|(asked, _)| *asked == what).count()
+    }
+
+    /// The door the editor registered for a lock's snapshot.
+    pub(super) fn flush_sink(&self) -> Option<super::office_host::FlushSink> {
+        self.log().sink.clone()
     }
 
     pub(super) fn answer(&self, answer: HostEdit) {
@@ -176,6 +183,10 @@ impl Fake {
 }
 
 impl Host for Fake {
+    fn set_flush_sink(&mut self, sink: super::office_host::FlushSink) {
+        self.log().sink = Some(sink);
+    }
+
     fn state(&self) -> HostState {
         self.log().state.clone().unwrap_or(HostState::Opening)
     }
