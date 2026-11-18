@@ -317,7 +317,7 @@ impl EngineBridge {
                     kind: office.kind,
                 };
                 let blob = beebeeb_core::local_seal::seal_recovery_snapshot(
-                    self.api.master_key(),
+                    &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()),
                     file_id,
                     &meta,
                     office.bytes,

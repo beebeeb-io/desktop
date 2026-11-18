@@ -733,10 +733,9 @@ impl EngineBridge {
             // A sealed Office save is opened here, as it is read: the plaintext lives in memory only, never on disk.
             let source: Box<dyn std::io::Read + Send> = if super::finder_edit::is_sealed_office(metadata) {
                 let plain = self.open_sealed_office(op, payload_path)?;
-                anyhow::ensure!(
-                    plain.len() as u64 == session.payload_size as u64,
-                    "staged upload payload could not be read"
-                );
+                if plain.len() as u64 != session.payload_size as u64 {
+                    return Err(anyhow::anyhow!("staged upload payload could not be read").into());
+                }
                 Box::new(std::io::Cursor::new(plain))
             } else {
                 Box::new(std::fs::File::open(payload_path)?)
@@ -1105,7 +1104,11 @@ impl EngineBridge {
         let unreadable = || anyhow::anyhow!("staged upload payload could not be read");
         let file_id = op.file_id.as_deref().ok_or_else(unreadable)?;
         let sealed = std::fs::read(payload_path).map_err(|_| unreadable())?;
-        let (_, plain) = beebeeb_core::local_seal::open_recovery_snapshot(self.api.master_key(), file_id, &sealed)
+        let (_, plain) = beebeeb_core::local_seal::open_recovery_snapshot(
+            &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()),
+            file_id,
+            &sealed,
+        )
             .map_err(|_| unreadable())?;
         Ok(plain)
     }
