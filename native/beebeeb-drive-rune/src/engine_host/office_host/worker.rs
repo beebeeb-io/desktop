@@ -34,7 +34,7 @@ pub(crate) mod restart;
 
 use edit::Mode;
 use held::Held;
-use restart::{Cadence, Due};
+use restart::Cadence;
 
 /// Starts the worker of one document on a thread of its own. `false` when no thread could be made: the worker, and
 /// the bytes in it, are dropped (wiped).

@@ -60,6 +60,7 @@ pub use worker::edit::EditEvent;
 // Re-exported for the window; the window proof (`beebeeb-office-page`) compiles this file alone and names neither.
 #[allow(unused_imports)]
 pub use worker::edit::{EditFailure, EditRefused};
+#[allow(unused_imports)]
 pub use worker::restart::{READ_ONLY_WORDS, RESTORED_WORDS};
 pub(crate) use worker::edit::Mode;
 pub(crate) use worker::restart::Cadence;
