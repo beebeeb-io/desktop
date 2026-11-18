@@ -259,7 +259,8 @@ fn host(account: Option<&str>) -> Arc<Host> {
 /// Pump until no build and no query is on its way (at most 30 s).
 fn settle(source: &mut EngineSearchSource<Host>) {
     let began = Instant::now();
-    while source.pump().busy {
+    // A refusal that waits to be built again is not an answer on its way.
+    while source.pump().busy && (source.building.is_some() || source.asked.is_some() || source.recent_out.is_some()) {
         assert!(began.elapsed() < HOLD_FOR, "an answer did not come back");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -1151,16 +1152,11 @@ fn a_refusal_during_the_first_sync_is_built_again_when_sync_is_done() {
     let host = host(Some(ME));
     host.nothing_synced.store(true, Ordering::SeqCst);
     let mut source = EngineSearchSource::new(host.clone());
-    source.retry_after = Duration::ZERO;
     source.opened();
     source.ask("contract", Narrow::All);
-    let began = Instant::now();
-    while host.builds.load(Ordering::SeqCst) < 1 || source.building.is_some() {
-        source.pump();
-        assert!(began.elapsed() < HOLD_FOR, "the first build did not answer");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    source.pump();
+    settle(&mut source);
+    assert_eq!(host.builds.load(Ordering::SeqCst), 1);
+    source.retry_after = Duration::ZERO;
     assert!(source.held.is_none());
     assert!(source.wired(), "getting ready is not \"not available\"");
     assert_eq!(source.search("contract", Narrow::All), Answer::Searching);
