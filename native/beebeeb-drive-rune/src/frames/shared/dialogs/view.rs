@@ -7,7 +7,7 @@ use super::{Dialog, EMAIL_INPUT, NOTE_INPUT, PASSWORD_INPUT, SafetyNumber, TITLE
 use crate::State;
 use crate::frames::Intent;
 use crate::frames::shared::parts::controls::{ButtonKind, ButtonSize, button_keyed, button_md};
-use crate::frames::shared::source::{Access, Member, PeopleShare};
+use crate::frames::shared::source::{Access, Member, PeopleShare, SafetyAsk, SafetyState};
 use crate::theme::icons;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, type_};
@@ -277,8 +277,11 @@ fn person(s: &State, share: &PeopleShare, member: &Member, t: &Theme) -> El {
                 .opens(),
             t,
         )
-        // Comparing shows crypto material the engine gives: the security-reviewed wiring opens it.
-        .on_press(move |s: &mut State| ask(s, Intent::About("DW-0513", person.clone())))
+        // Comparing shows crypto material the engine gives: with no engine behind it, only the press is recorded.
+        .on_press({
+            let share = share_id.clone();
+            move |s: &mut State| compare(s, &share, &person)
+        })
     };
     let body = vec![
         kit::list(n, "Email", None, kit::rows(n, "Email", vec![email]), None, t),
@@ -369,32 +372,108 @@ fn remove_access(share: &PeopleShare, member: &Member, t: &Theme) -> El {
     )
 }
 
-/// The safety number (DW-0513): compared in person or on a call. What they match or not means
-/// is the engine's to act on: recorded, the dialog stays.
-fn safety_number(member: &Member, number: &SafetyNumber, t: &Theme) -> El {
-    let body = vec![
-        sub(
-            "dlg-text-0",
-            &format!(
-                "Compare this with {}, in person or on a call. It should be exactly the same on both devices.",
-                member.first_name()
-            ),
-            t,
+/// Compare safety numbers with `person` (DW-0513). With an engine behind the source, the number is worked out there
+/// and the dialog shows it when it is in; with none, the press is only recorded.
+pub(super) fn compare(s: &mut State, share: &str, person: &str) {
+    if !s.frames.shared.source.safety_wired() {
+        ask(s, Intent::About("DW-0513", person.to_string()));
+        return;
+    }
+    let ui = &mut s.frames.shared;
+    ui.source.safety_clear(share, person);
+    ui.source.safety_start(share, person, SafetyAsk::Number);
+    ui.open_dialog(Dialog::SafetyNumber {
+        share: share.to_string(),
+        person: person.to_string(),
+        number: SafetyNumber(Vec::new()),
+    });
+}
+
+/// Back to the person's access, after the comparison is over.
+fn back_to_person(s: &mut State, share: &str, person: &str) {
+    s.frames.shared.source.safety_clear(share, person);
+    s.frames.shared.open_dialog(Dialog::Person {
+        share: share.to_string(),
+        person: person.to_string(),
+    });
+}
+
+/// The words of a refused or unfinished safety call.
+fn safety_trouble(state: &SafetyState) -> Option<&'static str> {
+    match state {
+        SafetyState::Refused(words) => Some(words),
+        _ => None,
+    }
+}
+
+/// The safety number (DW-0513): compared in person or on a call. With an engine behind the source, the digits are its
+/// own and both answers are written there (a local mark, nothing sent); without one, the dialog shows what it was
+/// given and records the press.
+fn safety_number(s: &State, share: &str, member: &Member, number: &SafetyNumber, t: &Theme) -> El {
+    let wired = s.frames.shared.source.safety_wired();
+    let state = if wired {
+        s.frames.shared.source.safety_state(share, &member.id)
+    } else {
+        SafetyState::Idle
+    };
+    let shown: Vec<String> = match &state {
+        SafetyState::Number(groups) | SafetyState::Marked { number: groups, .. } => groups.clone(),
+        _ => number.0.clone(),
+    };
+    let mut body = vec![sub(
+        "dlg-text-0",
+        &format!(
+            "Compare this with {}, in person or on a call. It should be exactly the same on both devices.",
+            member.first_name()
         ),
-        kit::groups(&kit::GROUPS_LARGE, &number.0, t),
-    ];
-    let (differ, matched) = (member.id.clone(), member.id.clone());
-    let foot = row()
-        .center_y()
-        .child(
-            button_md("They don't match", ButtonKind::Outline, None, t)
-                .on_press(move |s: &mut State| ask(s, Intent::Do("safety-number-differs", differ.clone()))),
-        )
-        .child(spacer())
-        .child(
-            button_md("They match", ButtonKind::Amber, None, t)
-                .on_press(move |s: &mut State| ask(s, Intent::Do("safety-number-matches", matched.clone()))),
-        );
+        t,
+    )];
+    if wired && shown.is_empty() {
+        let words = match &state {
+            SafetyState::Refused(words) => *words,
+            _ => "Working out the safety number\u{2026}",
+        };
+        body.push(sub("dlg-text-1", words, t));
+    } else {
+        body.push(kit::groups(&kit::GROUPS_LARGE, &shown, t));
+    }
+    if let Some(words) = safety_trouble(&state).filter(|_| !shown.is_empty()) {
+        body.push(sub("dlg-text-1", words, t));
+    }
+    if matches!(state, SafetyState::Marked { matched: true, .. }) {
+        body.push(sub("dlg-text-1", "Compared: the numbers matched.", t));
+    }
+    let (share, person) = (share.to_string(), member.id.clone());
+    let foot = if wired && !matches!(state, SafetyState::Number(_)) {
+        // Not ready, or already answered: the only way on is back.
+        let (share, person) = (share.clone(), person.clone());
+        trailing(vec![
+            button_md("Done", ButtonKind::Amber, None, t).on_press(move |s: &mut State| back_to_person(s, &share, &person)),
+        ])
+    } else {
+        let (differ, matched) = ((share.clone(), person.clone()), (share, person));
+        row()
+            .center_y()
+            .child(
+                button_md("They don't match", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
+                    if wired {
+                        s.frames.shared.source.safety_start(&differ.0, &differ.1, SafetyAsk::Differs);
+                    } else {
+                        ask(s, Intent::Do("safety-number-differs", differ.1.clone()));
+                    }
+                }),
+            )
+            .child(spacer())
+            .child(
+                button_md("They match", ButtonKind::Amber, None, t).on_press(move |s: &mut State| {
+                    if wired {
+                        s.frames.shared.source.safety_start(&matched.0, &matched.1, SafetyAsk::Matches);
+                    } else {
+                        ask(s, Intent::Do("safety-number-matches", matched.1.clone()));
+                    }
+                }),
+            )
+    };
     standard("Safety number", 440.0, "Safety number", None, body, foot, t)
 }
 
@@ -458,9 +537,13 @@ fn stopped(s: &State, share: &PeopleShare, member: &Member, number: &SafetyNumbe
             .default_button()
             .on_press(move |s: &mut State| {
                 let (share, person, number) = again.clone();
-                s.frames
-                    .shared
-                    .open_dialog(Dialog::SafetyNumber { share, person, number });
+                if s.frames.shared.source.safety_wired() {
+                    compare(s, &share, &person);
+                } else {
+                    s.frames
+                        .shared
+                        .open_dialog(Dialog::SafetyNumber { share, person, number });
+                }
             }),
         button_md(&format!("Remove {first}'s access"), ButtonKind::GhostDanger, None, t).on_press(
             move |s: &mut State| {
@@ -571,19 +654,41 @@ pub(super) fn step_access(s: &mut State, right: bool, tx: &mut Tx) {
 
 /// A changed key (DW-0515), over People: nothing new goes to them until the person chooses.
 /// Both choices are the engine's (it holds the keys): recorded, the alert stays.
-fn key_changed(member: &Member, t: &Theme) -> El {
+fn key_changed(s: &State, share: &str, member: &Member, t: &Theme) -> El {
     let first = member.first_name();
     let title = format!("{first}'s key has changed");
-    let words = format!(
+    let mut words = format!(
         "{first} may have set up a new account, or someone may be trying to read what you share. Nothing new goes to {first} until you choose."
     );
-    let (compare, anyway) = (member.id.clone(), member.id.clone());
+    let wired = s.frames.shared.source.safety_wired();
+    let state = if wired {
+        s.frames.shared.source.safety_state(share, &member.id)
+    } else {
+        SafetyState::Idle
+    };
+    match &state {
+        SafetyState::Asking(SafetyAsk::Anyway) => words.push_str(" Sharing\u{2026}"),
+        SafetyState::Refused(why) => {
+            words.push(' ');
+            words.push_str(why);
+        }
+        _ => {}
+    }
+    let (compare_share, compare_id) = (share.to_string(), member.id.clone());
+    let (anyway_share, anyway) = (share.to_string(), member.id.clone());
     let buttons = vec![
         button_md("Compare safety numbers", ButtonKind::Amber, None, t)
             .default_button()
-            .on_press(move |s: &mut State| ask(s, Intent::About("DW-0513", compare.clone()))),
-        button_md("Share anyway", ButtonKind::Outline, None, t)
-            .on_press(move |s: &mut State| ask(s, Intent::Do("share-anyway", anyway.clone()))),
+            .on_press(move |s: &mut State| compare(s, &compare_share, &compare_id)),
+        // Only this press shares: nothing else sends the approval for a changed key.
+        button_md("Share anyway", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
+            if s.frames.shared.source.safety_wired() {
+                s.frames.shared.source.safety_clear(&anyway_share, &anyway);
+                s.frames.shared.source.safety_start(&anyway_share, &anyway, SafetyAsk::Anyway);
+            } else {
+                ask(s, Intent::Do("share-anyway", anyway.clone()));
+            }
+        }),
         button_md("Cancel", ButtonKind::Ghost, None, t).on_press_tx(dismiss),
     ];
     kit::alert(
@@ -739,7 +844,13 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
             let Some(share) = ui.share(share) else {
                 return Vec::new();
             };
-            let changed = key_changed.as_deref().and_then(|p| ui.member(&share.id, p));
+            // A share that went through "Share anyway" has nothing left to warn about.
+            let changed = key_changed.as_deref().and_then(|p| ui.member(&share.id, p)).filter(|m| {
+                !matches!(
+                    ui.source.safety_state(&share.id, &m.id),
+                    SafetyState::Shared | SafetyState::Withdrawn
+                )
+            });
             let people = kit::layer(
                 "people",
                 people(s, &share, t),
@@ -750,7 +861,7 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
             );
             let mut out = vec![people];
             if let Some(member) = changed {
-                out.push(self::key_changed(&member, t));
+                out.push(self::key_changed(s, &share.id, &member, t));
             }
             out
         }
@@ -761,7 +872,13 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
             .map(|(share, member)| vec![remove_access(&share, &member, t)])
             .unwrap_or_default(),
         Dialog::SafetyNumber { share, person, number } => share_and(share, person)
-            .map(|(_, member)| vec![modal("safety-number", safety_number(&member, number, t))])
+            .map(|(listed, member)| {
+                // "They don't match" was written: sharing with them is stopped, as DW-0513b draws it.
+                if let SafetyState::Marked { matched: false, number } = ui.source.safety_state(&listed.id, &member.id) {
+                    return vec![modal("stopped", stopped(s, &listed, &member, &SafetyNumber(number), t))];
+                }
+                vec![modal("safety-number", safety_number(s, &listed.id, &member, number, t))]
+            })
             .unwrap_or_default(),
         Dialog::Stopped { share, person, number } => share_and(share, person)
             .map(|(share, member)| vec![modal("stopped", stopped(s, &share, &member, number, t))])

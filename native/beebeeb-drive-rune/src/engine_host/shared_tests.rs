@@ -725,8 +725,8 @@ fn share_invite_goes_once_per_share_answers_from_the_engine_and_a_late_answer_is
     assert_eq!(source.invite_answer(), None, "each answer once");
     assert_eq!(invites(&fake.fake), 1);
     // The person is never inserted here: the lists were read again (the invite's own read of the sent list, then
-    // the lists after the answer).
-    assert_eq!(sent_reads(&fake.fake), before + 2);
+    // the lists after the answer, and the trust read that follows them: People's "compared" marks).
+    assert_eq!(sent_reads(&fake.fake), before + 3);
 
     // Refused, in words: not one of the account's own items on this computer. Nothing was sent.
     assert!(source.start_invite(THEIRS, "new@example.eu"));
@@ -843,3 +843,7 @@ fn a_link_row_keeps_the_item_it_is_a_link_to() {
 // w17-shared-links: the tests of the link calls.
 #[path = "shared_links_tests.rs"]
 mod shared_links_tests;
+
+// w18-people-safety-number: the tests of People's safety calls.
+#[path = "shared_safety_tests.rs"]
+mod shared_safety_tests;
