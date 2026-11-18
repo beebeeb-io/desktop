@@ -5,7 +5,7 @@
 //! * Invites: `GET /api/v1/shares/invites/incoming` and `/sent` (`{"invites": [...]}`); `POST .../{id}/decline` and
 //!   `.../{id}/claim` (an incoming invite: gone / `claimed`, which the listing hides until the sender approves),
 //!   `DELETE .../{id}` (the sender cancels) and `PATCH .../{id}` `{permission}` (read or write).
-//! * Share links: `DELETE /api/v1/shares/{id}` marks the link revoked, as `GET /api/v1/shares/mine` then lists it.
+//! * Share links: `PATCH /api/v1/shares/{id}` sets expiry/password, `DELETE /api/v1/shares/{id}` marks the link revoked, as `GET /api/v1/shares/mine` then lists it.
 //! * File requests: `GET /api/v1/file-requests` (`{"file_requests": [...]}`), `POST .../{id}/close` and `.../{id}/hide`.
 //! * Shared folders (the owner's custody record): `PUT /api/v1/shared-folders/{id}/key` stores it, `GET
 //!   /api/v1/shared-folders/{id}` reads it (404 until stored), `GET .../{id}/keys` is the member key inventory (empty).
@@ -79,6 +79,14 @@ impl FakeAccount {
         requests.iter().find(|r| id_of(r) == id)?[field].as_bool()
     }
 
+    /// An incoming invite the sender approved (the recipient may open it, and leave it).
+    pub fn approve_incoming_invite(&self, id: &str) {
+        let mut incoming = self.sharing.incoming.lock().expect("invites");
+        if let Some(row) = incoming.iter_mut().find(|r| id_of(r) == id) {
+            row["status"] = json!("approved");
+        }
+    }
+
     /// The `status` and `permission` of the invite the account sent, `None` when it is gone.
     pub fn sent_invite_state(&self, id: &str) -> Option<(String, String)> {
         let sent = self.sharing.sent.lock().expect("invites");
@@ -106,7 +114,7 @@ impl FakeAccount {
         let ours = path.starts_with("/api/v1/shares/invites/")
             || path.starts_with("/api/v1/file-requests")
             || path.starts_with("/api/v1/shared-folders/")
-            || (method == "DELETE" && path.starts_with("/api/v1/shares/"));
+            || (matches!(method, "DELETE" | "PATCH") && path.starts_with("/api/v1/shares/"));
         if !ours {
             return None;
         }
@@ -175,6 +183,42 @@ impl FakeAccount {
                 }
             }
             ("DELETE", ["shares", id]) => self.revoke_link(id),
+            ("PATCH", ["shares", id]) => self.patch_link(id, &request.json()),
+            ("POST", ["shares", "invites", id, "leave"]) => {
+                let mut incoming = state.incoming.lock().expect("invites");
+                match incoming
+                    .iter()
+                    .position(|r| id_of(r) == *id && r["status"] == "approved")
+                {
+                    Some(at) => {
+                        incoming.remove(at);
+                        Reply::ok(json!({ "status": "left" }))
+                    }
+                    None => Reply::error(404, "not_found"),
+                }
+            }
+            ("PATCH", ["file-requests", id]) => {
+                let body = request.json();
+                let mut requests = state.requests.lock().expect("requests");
+                match requests.iter_mut().find(|r| id_of(r) == *id) {
+                    Some(row) if row["closed"] == true => Reply::error(409, "closed"),
+                    Some(row) => match &body["expires_in_secs"] {
+                        Value::Null => {
+                            row["expires_at"] = Value::Null;
+                            Reply::ok(json!({ "id": id, "expires_at": null }))
+                        }
+                        secs => match secs.as_i64().filter(|s| *s > 0) {
+                            Some(secs) => {
+                                let at = (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339();
+                                row["expires_at"] = json!(at);
+                                Reply::ok(json!({ "id": id, "expires_at": at }))
+                            }
+                            None => Reply::error(400, "bad_expiry"),
+                        },
+                    },
+                    None => Reply::error(404, "not_found"),
+                }
+            }
             ("GET", ["file-requests"]) => {
                 Reply::ok(json!({ "file_requests": *state.requests.lock().expect("requests") }))
             }

@@ -108,6 +108,8 @@ pub struct FileRequestRow {
     pub max_files: Option<u64>,
     pub expires_at: Option<String>,
     pub closed: bool,
+    /// The folder the request's uploads land in, when it has one.
+    pub target_folder_id: Option<String>,
 }
 
 /// A change to a share, on the server, for the session's account.
@@ -130,6 +132,11 @@ pub enum ShareChange {
     /// Take a CLOSED file request off the account's list (`POST /file-requests/{id}/hide`): the row stays on the
     /// server with its key, so what arrived can still be opened. Never the DELETE route, which destroys the key.
     HideRequest { request_id: String },
+    /// Change when an OPEN file request of the account's stops taking uploads (`PATCH /file-requests/{id}`);
+    /// `None` is never. A closed request is `Refused` (409).
+    RequestExpiry { request_id: String, expires_in_secs: Option<u64> },
+    /// Leave a share that was approved for the account (`POST /shares/invites/{id}/leave`); already left is done.
+    Leave { invite_id: String },
 }
 
 /// Why a change was not made. Fixed words only.
@@ -280,6 +287,19 @@ fn change_requests(change: &ShareChange) -> Result<(Vec<HttpRequest>, bool), Sha
         ShareChange::HideRequest { request_id } => {
             let path = format!("/api/v1/file-requests/{}/hide", canonical(request_id)?);
             Ok((vec![request(Method::Post, path)], false))
+        }
+        ShareChange::RequestExpiry {
+            request_id,
+            expires_in_secs,
+        } => {
+            let path = format!("/api/v1/file-requests/{}", canonical(request_id)?);
+            let mut req = HttpRequest::session_post(path, json!({ "expires_in_secs": expires_in_secs }));
+            req.method = Method::Patch;
+            Ok((vec![req], false))
+        }
+        ShareChange::Leave { invite_id } => {
+            let path = format!("/api/v1/shares/invites/{}/leave", canonical(invite_id)?);
+            Ok((vec![request(Method::Post, path)], true))
         }
         ShareChange::CancelInvites { invite_ids } => {
             let reqs = invite_ids
@@ -487,6 +507,7 @@ fn request_row(r: &Value) -> Option<FileRequestRow> {
         max_files: r.get("max_files").and_then(Value::as_u64).filter(|max| *max > 0),
         expires_at: text(r, "expires_at").map(str::to_string),
         closed: flag(r, "closed"),
+        target_folder_id: text(r, "target_folder_id").map(str::to_string),
     })
 }
 

@@ -443,3 +443,56 @@ fn declining_uses_the_decline_route_and_hiding_a_request_never_deletes_it() {
     assert_eq!(engine.share_change(session, &bad), Err(ShareChangeError::NotFound));
     assert_eq!(share_routes(&fake).len(), count);
 }
+
+#[test]
+fn a_request_expiry_and_leaving_are_sent_as_the_server_takes_them() {
+    let fake = fake("expiry-leave", false);
+    let engine = engine(&fake, true);
+    let session = engine.session_turn();
+    let change = |c: ShareChange| engine.share_change(session, &c);
+    change(ShareChange::RequestExpiry { request_id: INV_A.into(), expires_in_secs: Some(3600) }).expect("expiry");
+    change(ShareChange::RequestExpiry { request_id: INV_A.into(), expires_in_secs: None }).expect("never");
+    change(ShareChange::Leave { invite_id: INV_MINE.into() }).expect("left");
+    assert_eq!(
+        share_routes(&fake),
+        [
+            format!("PATCH /api/v1/file-requests/{INV_A}"),
+            format!("PATCH /api/v1/file-requests/{INV_A}"),
+            format!("POST /api/v1/shares/invites/{INV_MINE}/leave"),
+        ]
+    );
+    let bodies: Vec<Value> = fake.api.requests().iter().filter(|r| r.method == "PATCH").map(|r| r.json()).collect();
+    assert_eq!(bodies, [json!({ "expires_in_secs": 3600 }), json!({ "expires_in_secs": null })]);
+    // Not an id: nothing more is sent.
+    assert_eq!(
+        change(ShareChange::Leave { invite_id: "x".into() }),
+        Err(ShareChangeError::NotFound)
+    );
+    assert_eq!(share_routes(&fake).len(), 3);
+}
+
+#[test]
+fn leaving_an_invite_that_is_already_gone_is_done_and_a_closed_request_keeps_its_expiry() {
+    let fake = fake("leave-gone", false);
+    let engine = engine(&fake, true);
+    let session = engine.session_turn();
+    fake.status.store(404, Ordering::SeqCst);
+    assert_eq!(engine.share_change(session, &ShareChange::Leave { invite_id: INV_MINE.into() }), Ok(()));
+    assert_eq!(
+        engine.share_change(session, &ShareChange::RequestExpiry { request_id: INV_A.into(), expires_in_secs: Some(5) }),
+        Err(ShareChangeError::NotFound)
+    );
+    fake.status.store(409, Ordering::SeqCst);
+    assert_eq!(
+        engine.share_change(session, &ShareChange::RequestExpiry { request_id: INV_B.into(), expires_in_secs: Some(5) }),
+        Err(ShareChangeError::Refused)
+    );
+}
+
+#[test]
+fn a_request_row_carries_its_target_folder() {
+    let with = request_row(&json!({ "id": INV_A, "title": "t", "target_folder_id": TRIP })).unwrap();
+    assert_eq!(with.target_folder_id.as_deref(), Some(TRIP));
+    let without = request_row(&json!({ "id": INV_A, "title": "t", "target_folder_id": null })).unwrap();
+    assert_eq!(without.target_folder_id, None);
+}
