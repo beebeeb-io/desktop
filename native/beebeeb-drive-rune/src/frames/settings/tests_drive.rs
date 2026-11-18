@@ -3,7 +3,7 @@
 //!
 //! Input is scripted: keys and presses go through Rune's `Runtime`, as a person's would.
 
-use super::drive::{BoardDrive, DriveSettings, Insights, Kept, Repair, SyncStatus};
+use super::drive::{BoardDrive, DriveSettings, Insights, Kept, Repair, Storage, SyncPane, SyncStatus};
 use super::{Dialog, Intent, Pane};
 use crate::shell::app::{Screen, SettingsPane};
 use crate::shell::host;
