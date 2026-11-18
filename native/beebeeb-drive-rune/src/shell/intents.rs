@@ -47,6 +47,8 @@ thread_local! {
 #[cfg(test)]
 pub fn poll_drains_for_this_test() {
     POLL_DRAINS.set(true);
+    // A test's window is a new window: its first poll with the gate open is an opening of the gate.
+    GATE_WAS_OPEN.set(false);
 }
 
 /// The shell's poll: acts on the queues (in a test, only where the test asked for it).

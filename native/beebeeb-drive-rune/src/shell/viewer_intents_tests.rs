@@ -138,3 +138,65 @@ fn office_commands_keep_the_routers_toast() {
     press(&mut rt, Intent::EditInSheets);
     assert_eq!(toast(&mut rt).as_deref(), Some("Not built yet: Edit in Sheets"));
 }
+
+/// A command of the office editor that its source did not take: with an editor running on the open document it is a
+/// refusal, said as one; with none (the board's sample document) the router's toast stays.
+#[test]
+fn a_command_the_running_editor_did_not_take_says_so() {
+    use crate::frames::office::edit::EditUi;
+    use beebeeb_office_protocol::office::EditKind;
+    let mut rt = runtime();
+    press(&mut rt, Intent::Office("Bold"));
+    assert_eq!(toast(&mut rt).as_deref(), Some("Not built yet: Bold"));
+    rt.update(|s, _| viewers::ui(s).expect("open").office.edit = Some(EditUi::new(EditKind::Docx)));
+    press(&mut rt, Intent::Office("Bold"));
+    assert_eq!(toast(&mut rt).as_deref(), Some(NOT_TAKEN));
+    rt.update(|s, _| viewers::ui(s).expect("open").office.edit.as_mut().expect("edit").stopped = true);
+    press(&mut rt, Intent::Office("Bold"));
+    assert_eq!(
+        toast(&mut rt).as_deref(),
+        Some(crate::frames::office::edit::recovery::read_only_words())
+    );
+}
+
+/// A file picked in the editor's command search comes as its name from "Files": changes no version holds are asked
+/// about first, as Back asks, and the document stays; a name is taken as it is, whatever characters it has.
+#[test]
+fn a_file_named_by_the_command_search_asks_about_unsaved_changes_first_and_opens_by_its_name() {
+    use crate::frames::office::edit::EditUi;
+    use crate::frames::viewers::office_over::Over;
+    use beebeeb_office_protocol::office::EditKind;
+    let mut rt = runtime();
+    let name = "Invented: notes of 14.md";
+    rt.update(|s, _| {
+        let row = s.listing.items.iter_mut().find(|row| !row.is_folder).expect("a file in the folder shown");
+        row.name = name.to_string();
+    });
+    // Unsaved changes: the question, and the document stays.
+    rt.update(|s, _| {
+        if viewers::ui(s).is_none() {
+            assert!(viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::AUDIO));
+        }
+        let mut edit = EditUi::new(EditKind::Docx);
+        edit.revision = 2;
+        viewers::ui(s).expect("open").office.edit = Some(edit);
+        viewers::ui(s).expect("open").intent(Intent::OpenInDrive(name.to_string()));
+    });
+    rt.frame(1.0);
+    rt.update(|s, _| {
+        let ui = viewers::ui(s).expect("the document stays open");
+        assert_eq!(ui.file.id, board::AUDIO);
+        assert!(matches!(ui.office.over, Some(Over::Leave)), "the question about unsaved changes is up");
+        // Answered (nothing unsaved any more): the same press goes on.
+        ui.office.over = None;
+        ui.office.edit = None;
+        ui.toast = None;
+        ui.intent(Intent::OpenInDrive(name.to_string()));
+    });
+    rt.frame(1.0);
+    rt.update(|s, _| {
+        let said = viewers::ui(s).and_then(|ui| ui.toast.clone());
+        assert_ne!(said.as_deref(), Some("That link isn't in your Beebeeb Drive"), "a name is not a path");
+        assert_ne!(said.as_deref(), Some("Couldn't find that in this folder"));
+    });
+}

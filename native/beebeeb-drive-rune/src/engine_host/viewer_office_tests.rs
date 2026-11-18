@@ -82,19 +82,19 @@ struct Log {
 }
 
 #[derive(Clone, Default)]
-struct Fake(Arc<Mutex<Log>>);
+pub(super) struct Fake(Arc<Mutex<Log>>);
 
 impl Fake {
     fn log(&self) -> MutexGuard<'_, Log> {
         self.0.lock().unwrap()
     }
 
-    fn view(&self, kind: OfficeKind) -> OfficeView {
+    pub(super) fn view(&self, kind: OfficeKind) -> OfficeView {
         OfficeView::on(Some(Box::new(self.clone())), kind)
     }
 
     /// An editing session of `kind`: the host is open for editing once its state says so.
-    fn editor(&self, kind: EditKind) -> OfficeView {
+    pub(super) fn editor(&self, kind: EditKind) -> OfficeView {
         self.log().editing = true;
         OfficeView::editing_on(Box::new(self.clone()), kind)
     }
@@ -110,16 +110,16 @@ impl Fake {
             .1
     }
 
-    fn asked_count(&self, what: &str) -> usize {
+    pub(super) fn asked_count(&self, what: &str) -> usize {
         self.log().asked.iter().filter(|(asked, _)| *asked == what).count()
     }
 
-    fn answer(&self, answer: HostEdit) {
+    pub(super) fn answer(&self, answer: HostEdit) {
         self.log().answers.push(answer);
     }
 
     /// The editor answers a save with `bytes` at `revision`.
-    fn saved(&self, bytes: &[u8], revision: u64) {
+    pub(super) fn saved(&self, bytes: &[u8], revision: u64) {
         let id = self.id_of("save");
         self.answer(HostEdit::Saved {
             id,
@@ -141,7 +141,7 @@ impl Fake {
     }
 
     /// The host moves to `state` and says so at the next poll.
-    fn set(&self, state: HostState) {
+    pub(super) fn set(&self, state: HostState) {
         let mut log = self.log();
         log.state = Some(state);
         log.events.push(HostEvent::State);
@@ -266,7 +266,7 @@ impl Host for Fake {
     }
 }
 
-fn pages(n: u32) -> HostState {
+pub(super) fn pages(n: u32) -> HostState {
     HostState::Pages {
         pages: n,
         sizes: vec![A4; n as usize],
@@ -649,7 +649,7 @@ fn first_body(source: &mut EngineViewerSource<TestEngine>, id: &str) -> Body {
 // ---------------------------------------------------------------------------------------------------------------
 
 /// An `Edited` at `revision` (a caret on page one, nothing selected).
-fn edited(revision: u64, dirty: Dirty) -> Edited {
+pub(super) fn edited(revision: u64, dirty: Dirty) -> Edited {
     Edited {
         revision,
         caret: Some(PageRect {

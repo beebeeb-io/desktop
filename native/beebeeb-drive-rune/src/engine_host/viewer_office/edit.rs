@@ -525,3 +525,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "edit_window_tests.rs"]
+mod window_tests;

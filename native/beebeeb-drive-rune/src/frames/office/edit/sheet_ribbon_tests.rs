@@ -484,3 +484,45 @@ fn office_sheets_ribbon_scene_is_the_workbook_with_its_ribbon() {
     assert!(find(&rt, "rib").is_some(), "the ribbon");
     assert!(find(&rt, "sh-cellbox").is_some(), "over the workbook");
 }
+
+/// The tab row's words, in order.
+fn tab_words(rt: &Runtime<State>) -> Vec<String> {
+    (0..6)
+        .filter_map(|i| find(rt, &format!("rib-tab-{i}-cell")).and_then(|tab| tab.label))
+        .collect()
+}
+
+/// A live workbook's row is Home, Insert, Data, Formulas: Data and Formulas draw their tools, and a press on one is
+/// one edit. A text document's row is as it was.
+#[test]
+fn office_sheets_data_and_formulas_tabs_draw_and_press() {
+    use crate::frames::viewers::office::Tab;
+    let (mut rt, ops) = ribbon_rt(None);
+    assert_eq!(tab_words(&rt), ["Home", "Insert", "Data", "Formulas"]);
+
+    press(&mut rt, "rib-tab-2-cell");
+    assert_eq!(viewers::ui(&mut rt.state).expect("a file").office.tab, Tab::Data);
+    for name in ["Sort A to Z", "Filter", "Table"] {
+        assert!(rt.elements().iter().any(|e| !e.exiting && e.label.as_deref() == Some(name)), "Data draws {name}");
+    }
+    let sort = tool_key(&rt, "Sort A to Z");
+    press(&mut rt, &sort);
+    assert_eq!(ops.borrow().last(), Some(&EditOp::Sort { ascending: true }));
+
+    press(&mut rt, "rib-tab-3-cell");
+    assert_eq!(viewers::ui(&mut rt.state).expect("a file").office.tab, Tab::Formulas);
+    let sum = tool_key(&rt, "Sum");
+    press(&mut rt, &sum);
+    assert_eq!(ops.borrow().last(), Some(&EditOp::AutoSum));
+    assert_eq!(ops.borrow().len(), 2, "one edit a press");
+
+    // The same window on a text document: the four tabs it always had.
+    viewers::ui(&mut rt.state).expect("a file").office.edit = Some(EditUi::new(EditKind::Docx));
+    viewers::ui(&mut rt.state).expect("a file").office.tab = Tab::Home;
+    settle(&mut rt);
+    assert_eq!(tab_words(&rt), ["Home", "Insert", "Layout", "Review"]);
+    // And on a deck: its own words for the third and the fourth.
+    viewers::ui(&mut rt.state).expect("a file").office.edit = Some(EditUi::new(EditKind::Pptx));
+    settle(&mut rt);
+    assert_eq!(tab_words(&rt), ["Home", "Insert", "Design", "Transitions"]);
+}
