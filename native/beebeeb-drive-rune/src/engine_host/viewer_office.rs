@@ -137,6 +137,10 @@ pub(crate) enum HostEdit {
     Failed {
         id: u64,
     },
+    /// The helper restarted from a snapshot; `at` is its time of day (UTC, "09:41").
+    Restored { at: String },
+    /// A second crash within a minute: the document is read-only now (the editor is no longer live).
+    ReadOnly,
 }
 
 /// What the host handed over since the last poll. Every payload passed the protocol's check in the host.
@@ -363,10 +367,18 @@ impl Host for Live {
                     bytes,
                 },
                 EditEvent::Failed { id, .. } => HostEdit::Failed { id: self.answered(id) },
+                EditEvent::Restored { at, .. } => HostEdit::Restored { at: clock_words(at) },
+                EditEvent::ReadOnly { .. } => HostEdit::ReadOnly,
             });
         }
         out
     }
+}
+
+/// A time of day as "09:41" (UTC; the words only say roughly when).
+fn clock_words(at: std::time::SystemTime) -> String {
+    let secs = at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) % 86_400;
+    format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60)
 }
 
 fn wipe_rgba(mut rgba: Vec<u8>) {
@@ -984,6 +996,8 @@ impl OfficeView {
                     id, revision, bytes, ..
                 } => self.saved.push(SavedBytes { id, revision, bytes }),
                 HostEdit::Failed { id } => self.failed.push(id),
+                HostEdit::Restored { at } => self.edit_out.push_back(EditAnswer::Restored { at }),
+                HostEdit::ReadOnly => self.edit_out.push_back(EditAnswer::Stopped),
             }
         }
     }
