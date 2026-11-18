@@ -791,8 +791,9 @@ fn menus_toasts_and_the_path_have_their_roles_and_names() {
 
 /// A double-click as in a window: the pointer stays where it is, and a frame is drawn between the two
 /// presses (the first one's selection is on screen, and moving, when the second goes down).
-fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
-    let (x, y) = centre(rt, key);
+fn double_click_with_frame(rt: &mut Runtime<State>, key: &str, x: Option<f32>) {
+    let (cx, y) = centre(rt, key);
+    let x = x.unwrap_or(cx);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(0.016);
@@ -805,10 +806,10 @@ fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
 #[test]
 fn a_double_click_on_a_folder_opens_it_when_the_first_click_makes_the_details_pane_appear() {
     let mut rt = runtime_of(init());
-    double_click_with_frame(&mut rt, "row-3-date");
+    double_click_with_frame(&mut rt, "row-3-date", None);
     assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Lisbon trip"));
     assert!(rt.state.selected.is_none(), "a folder just opened has nothing selected");
-    // The pointer is on the far column; the pane the first click opens must not take that place.
-    double_click_with_frame(&mut rt, "row-0-pc");
+    // The pointer is right of where the pane will stand; the pane the first click opens must not take that place.
+    double_click_with_frame(&mut rt, "row-0", Some(1100.0));
     assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Day 1"), "the second double-click opens Day 1");
 }
