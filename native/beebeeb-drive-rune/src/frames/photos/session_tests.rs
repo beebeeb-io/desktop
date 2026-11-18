@@ -1006,7 +1006,7 @@ fn what_session_does_not_handle_goes_to_one_route_per_feature() {
     rt.frame(0.0);
     rt.frame(0.0);
     assert_eq!(super::super::route::reached(), ["route_items"]);
-    assert_eq!(rt.state.photos.toast, Some(Toast::NotYet), "a stub's Err says so as before");
+    assert_ne!(rt.state.photos.toast, Some(Toast::NotYet), "Duplicate is built: no \"not yet\"");
 
     // The tab is no longer reset inside session.rs: the route for the original owns it.
     super::super::route::reached_clear();

@@ -62,6 +62,9 @@ mod tests_accounts;
 /// An index this recent is not built again when Search opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
 
+/// A refused build (nothing synced yet, an unreadable list) is built again once it is this old, while Search is open.
+pub const RETRY_AFTER: Duration = Duration::from_secs(3);
+
 /// At most this many results are shown.
 pub const SHOWN: usize = 100;
 
@@ -197,6 +200,10 @@ pub struct EngineSearchSource<H: SearchHost> {
     jobs: u64,
     /// When the last build was answered (a failure too).
     built_at: Option<Instant>,
+    /// How old a refusal is before it is built again.
+    retry_after: Duration,
+    /// Search was opened in this session: only then does a refusal come back for another build.
+    watching: bool,
     /// The build on its way.
     building: Option<u64>,
     /// Why the last build of a session built nothing, and that session (`None`: it built, or none was refused). Said
@@ -243,6 +250,8 @@ impl<H: SearchHost> EngineSearchSource<H> {
             installed: 0,
             jobs: 0,
             built_at: None,
+            retry_after: RETRY_AFTER,
+            watching: false,
             building: None,
             refused: None,
             wanted: None,
@@ -271,6 +280,30 @@ impl<H: SearchHost> EngineSearchSource<H> {
         self.refused
             .as_ref()
             .is_some_and(|(of, refused)| *of == now && refused.not_this_accounts())
+    }
+
+    /// The current session's last build was refused for a reason that passes (not this account's state: that stays
+    /// said, and is never built again by itself).
+    fn refused_for_now(&self) -> bool {
+        let Some(now) = session_of(&*self.host) else {
+            return false;
+        };
+        self.refused
+            .as_ref()
+            .is_some_and(|(of, refused)| *of == now && !refused.not_this_accounts())
+    }
+
+    /// Nothing is held and the first sync has not given this PC a list yet (`NothingSynced`): the files are being got
+    /// ready, which is not "not available".
+    fn getting_ready(&self) -> bool {
+        let Some(now) = session_of(&*self.host) else {
+            return false;
+        };
+        self.current().is_none()
+            && self
+                .refused
+                .as_ref()
+                .is_some_and(|(of, refused)| *of == now && matches!(refused, LocalStateRefused::NothingSynced))
     }
 
     /// Follow the session of the moment: when it is not the one this source's state belongs to, all of that state
@@ -501,7 +534,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
 impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     /// An index of the current session is held, or is being built (a query then reads `Searching`). Reads only.
     fn wired(&self) -> bool {
-        self.current().is_some() || self.building_now()
+        self.current().is_some() || self.building_now() || self.getting_ready()
     }
 
     /// The recent searches the engine answered for the session of the moment, newest first; none while it has not
@@ -538,7 +571,9 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         if !recent_held && self.recent_out.is_none() && self.recent_next.is_empty() {
             self.ask_recent(RecentWork::Read);
         }
-        let fresh = self.built_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
+        self.watching = self.of.is_some();
+        // A refusal is never "fresh": opening Search builds again.
+        let fresh = self.built_at.is_some_and(|at| at.elapsed() < FRESH_FOR) && !self.refused_for_now();
         if !fresh {
             self.build();
         }
@@ -564,9 +599,14 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
             self.take_in(landed);
             changed = true;
         }
+        // A refusal that passes (the first sync, a list that could not be read) is built again after a short wait.
+        let waiting = self.watching && self.building.is_none() && self.current().is_none() && self.refused_for_now();
+        if waiting && self.built_at.is_none_or(|at| at.elapsed() >= self.retry_after) {
+            self.build();
+        }
         Pumped {
             changed,
-            busy: self.building.is_some() || self.asked.is_some() || self.recent_out.is_some(),
+            busy: self.building.is_some() || self.asked.is_some() || self.recent_out.is_some() || waiting,
         }
     }
 
@@ -579,6 +619,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         self.wanted = None;
         self.building = None;
         self.built_at = None;
+        self.watching = false;
         self.refused = None;
         self.recent = None;
         self.recent_out = None;
@@ -591,7 +632,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     fn search(&self, query: &str, narrow: Narrow) -> Answer {
         let Some(held) = self.current() else {
             // The first index of this session is being built: the query is answered when it lands.
-            return if self.building_now() {
+            return if self.building_now() || self.getting_ready() {
                 Answer::Searching
             } else if self.not_this_accounts() {
                 // This PC's local state is another account's: Search says why; nothing of it was read.

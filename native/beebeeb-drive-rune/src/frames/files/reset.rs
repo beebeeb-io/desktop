@@ -110,6 +110,7 @@ pub fn end_session(s: &mut State, account_left: bool) {
         session: _,
         local,
         first_load_strip,
+        reveal,
     } = &mut s.actions;
     // Another session of this window: an answer asked for under the one that ended is dropped.
     *session_no += 1;
@@ -117,6 +118,7 @@ pub fn end_session(s: &mut State, account_left: bool) {
     source.forget_starts();
     // The folder has not loaded under the next session yet.
     *first_load_strip = false;
+    *reveal = None;
     // The account left (a sign-out, another account): what it was uploading is cancelled and
     // forgotten by the source, so the next account sees no status line, panel or row of it. A
     // LOCK is the same account coming back: its uploads go on (the panel says "Continues in the

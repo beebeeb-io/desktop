@@ -194,6 +194,10 @@ pub enum Notice {
     AlreadyAccepted,
     /// "Remove from my list" met a file request that is still open.
     RequestStillOpen,
+    /// Show in File Explorer met an item that is not kept on this PC.
+    NotOnThisPc,
+    /// View files met a request that has no folder of its own.
+    NoFolder,
 }
 
 /// How an invitation sent with [`SharedSource::start_invite`] ended (DW-0514).
@@ -309,6 +313,10 @@ pub trait SharedSource {
     /// Make a file request. Default: not available.
     fn create_request(&mut self, _form: RequestForm) -> bool {
         false
+    }
+    /// A link a source made (a new request's) for the clipboard: only the window's `Tx` can put it there. Taken once.
+    fn take_link(&mut self) -> Option<crate::frames::files::link::LinkText> {
+        None
     }
     /// The item behind a row, when the source knows.
     fn target_of(&self, _id: &str) -> Option<RowTarget> {

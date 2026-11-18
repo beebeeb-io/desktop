@@ -170,6 +170,17 @@ pub enum Answered {
     },
 }
 
+/// What the download of the open photo's original did ([`PhotosSource::take_original_answers`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OriginalAnswer {
+    /// This much of this many bytes has arrived.
+    Progress { id: PhotoId, done: u64, total: u64 },
+    /// The original is here, decoded ([`PhotosSource::original`] has it).
+    Done(PhotoId),
+    /// The original could not be had; the preview stays.
+    Failed(PhotoId),
+}
+
 /// What the window draws in the library's place while there is none.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Loaded {
@@ -263,6 +274,21 @@ pub trait PhotosSource {
     /// Moves items to Beebeeb's Trash; `restore` brings them back (Undo). `Ok` and `Err` as [`Self::keep_offline`].
     fn trash(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
     fn restore(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
+    /// Starts downloading the original of `id` into memory (one at a time; the earlier one stops). Progress and the
+    /// end arrive through [`Self::pump`]. `false`: nothing is started (a fixture, a video, too large, locked).
+    fn download_original(&mut self, _id: PhotoId) -> bool {
+        false
+    }
+    /// Stops the original's download and wipes what is held of it. The preview is untouched.
+    fn stop_original(&mut self, _id: PhotoId) {}
+    /// What the original's download did since the last call (read right after [`Self::pump`]).
+    fn take_original_answers(&mut self) -> Vec<OriginalAnswer> {
+        Vec::new()
+    }
+    /// The decoded original of `id`, once it is here.
+    fn original(&self, _id: PhotoId) -> Option<Pixels> {
+        None
+    }
     /// Plays the video `id` in the shell's player and hands the player to the stage (DW-0611). `None` (the
     /// default): a photo, no player, or no playback on this PC; the stage keeps its poster and "Open in another
     /// app".

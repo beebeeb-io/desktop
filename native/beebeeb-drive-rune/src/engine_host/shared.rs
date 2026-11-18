@@ -53,9 +53,10 @@ use super::stamp::{Stamp, stamp};
 use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
 use crate::frames::shared::source::{
-    Access, Invitation, InviteResult, LinkEdit, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped, Request,
-    RequestState, SharedSource,
+    Access, Invitation, InviteResult, LinkEdit, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped,
+    Request, RequestForm, RequestState, RowTarget, SharedSource,
 };
+use crate::frames::files::link::LinkText;
 use crate::ui::file_list::PcState;
 
 #[cfg(test)]
@@ -114,6 +115,8 @@ pub struct EngineSharedSource<C: CredentialStores> {
     shared_offline: shared_offline::SharedOfflineCalls,
     /// `shared_links.rs`: the links Copy link made, waiting for the clipboard.
     shared_links: shared_links::SharedLinkCalls,
+    /// `shared_requests.rs`: the links a new request made, until the window takes them.
+    shared_requests: shared_requests::RequestCalls,
 }
 
 /// The lists as the view draws them.
@@ -130,6 +133,10 @@ pub(crate) struct Held {
     /// A link row's id to the item it is a link to (OwnedLink.item_id).
     pub(crate) link_items: HashMap<String, String>,
     pub(crate) requests: Vec<Request>,
+    /// A with-me row's item id to the invite it came with (what Leave sends).
+    pub(crate) invites: HashMap<String, String>,
+    /// A request's id to the folder its uploads land in, when it has one (what View files opens).
+    pub(crate) request_folders: HashMap<String, String>,
 }
 
 enum Answer {
@@ -164,6 +171,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             invite_answers: VecDeque::new(),
             shared_offline: Default::default(),
             shared_links: Default::default(),
+            shared_requests: Default::default(),
         }
     }
 
@@ -497,6 +505,15 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.change(session, id, change)
     }
 
+    // Slice w17 (`shared_leave.rs`): Leave a share someone made with the person; where a row points.
+    fn leave(&mut self, id: &str) -> bool {
+        self.shared_leave(id)
+    }
+
+    fn target_of(&self, id: &str) -> Option<RowTarget> {
+        self.shared_target_of(id)
+    }
+
     /// Sent once per press, for an open request of the current session's lists.
     fn close_request(&mut self, id: &str) -> bool {
         let Some(session) = self
@@ -559,6 +576,14 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.invite_answers.pop_front()
     }
 
+    fn create_request(&mut self, form: RequestForm) -> bool {
+        self.shared_requests_create(form)
+    }
+
+    fn take_link(&mut self) -> Option<LinkText> {
+        self.shared_links_take_link().or_else(|| self.shared_requests_take_link())
+    }
+
     fn loaded(&self) -> Loaded {
         if !self.engine.has_session() {
             Loaded::SignedOut
@@ -613,6 +638,7 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
     }
 
     fn forget(&mut self) {
+        self.shared_requests_forget();
         self.held = None;
         self.again = false;
         self.asked = false;
@@ -642,7 +668,11 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
     let kind = |is_folder: bool, name: &str| kind_of(is_folder, mime_for_name(name));
     let date = |stamp: &str| seconds_of(stamp).map(|at| when(at, now)).unwrap_or_default();
     let (mut invitations, mut with_me) = (Vec::new(), Vec::new());
+    let mut invites = HashMap::new();
     for item in overview.incoming {
+        if !item.waiting {
+            invites.insert(item.item_id.clone(), item.invite_id.clone());
+        }
         let row = Row {
             id: item.item_id,
             kind: kind(item.is_folder, &item.name),
@@ -733,10 +763,14 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
             }
         })
         .collect();
+    let mut request_folders = HashMap::new();
     let requests = overview
         .requests
         .into_iter()
         .map(|r| {
+            if let Some(folder) = &r.target_folder_id {
+                request_folders.insert(r.id.clone(), folder.clone());
+            }
             let expiry = r.expires_at.as_deref().and_then(seconds_of);
             let state = match expiry {
                 _ if r.closed => RequestState::Closed,
@@ -772,6 +806,8 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         link_shares,
         link_items,
         requests,
+        invites,
+        request_folders,
     }
 }
 

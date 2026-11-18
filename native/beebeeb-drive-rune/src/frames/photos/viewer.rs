@@ -283,7 +283,12 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         })
         .size(600.0, 400.0)
         .radius(4.0);
-    photo = match ui.source.thumbnail(viewer.id, Shape::Preview) {
+    let whole = if viewer.original == Original::Whole {
+        ui.source.original(viewer.id)
+    } else {
+        None
+    };
+    photo = match whole.or_else(|| ui.source.thumbnail(viewer.id, Shape::Preview)) {
         Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fit),
         None => photo.fill(white.alpha(0.07)),
     };

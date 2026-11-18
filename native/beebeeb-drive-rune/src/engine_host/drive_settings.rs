@@ -679,6 +679,7 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
                     folder: saved.folder.to_string(),
                     file: saved.file_name,
                     draft_opened: draft,
+                    path: saved.path,
                 }));
             }
             Err(why) => {
@@ -1052,6 +1053,21 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// in File Explorer and open a draft to support. Called once per press, never by showing a page.
     fn export_bundle(&mut self) {
         self.change(Ask::Export);
+    }
+
+    /// The banner's "Show in File Explorer": the saved file of this account's last export, shown by the OS.
+    fn reveal_bundle(&mut self) -> bool {
+        match self.diagnostics().bundle {
+            Bundle::Saved { path, .. } => (self.os.reveal)(&path),
+            _ => false,
+        }
+    }
+
+    /// "Choose photo": the OS's photo picker (a worker's call: it blocks), then the pick measured here.
+    fn choose_photo(&mut self) {
+        let platform = self.platform.clone();
+        self.previews
+            .choose_photo(std::sync::Arc::new(move |title, start| platform.pick_photo(title, start)));
     }
 
     /// Stored in this PC's settings file through the engine, under the session of the press; the engine's upload

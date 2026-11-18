@@ -628,25 +628,28 @@ fn an_archive_lists_steps_into_a_folder_and_out_again() {
 }
 
 #[test]
-fn share_says_not_built_yet_until_something_takes_it() {
+fn share_opens_files_dialog_over_the_viewer() {
     crate::shell::intents::poll_drains_for_this_test();
     let (mut rt, _) = recording(board::AUDIO);
-    assert!(!has(&rt, "toast-text"));
     click(&mut rt, "tool-0");
-    assert_eq!(words(&rt, "toast-text"), "Not built yet: Share");
     assert!(intents(&mut rt).is_empty(), "the shell's router took the intent");
-    // The notice goes with the next key the window gets.
-    press(&mut rt, Key::Down);
-    assert_eq!(viewer(&rt).toast, None);
+    let mut shared = false;
+    rt.update(|s, _| shared = matches!(s.actions.dialog, Some(crate::frames::files::dialogs::Dialog::Share(_))));
+    assert!(shared, "Files holds the share of the open file");
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(has(&rt, "viewer-root"), "the dialog layer is drawn over the viewer");
+    assert!(viewer(&rt).toast.is_none());
 }
 
 #[test]
-fn trash_says_not_built_yet_until_something_takes_it() {
+fn trash_moves_the_file_and_leaves_the_viewer() {
     crate::shell::intents::poll_drains_for_this_test();
     let (mut rt, _) = recording(board::RAW);
     click(&mut rt, "action-3");
-    assert_eq!(words(&rt, "toast-text"), "Not built yet: Move to Trash");
-    assert_eq!(viewer(&rt).file.name, "DSC04182.ARW", "nothing was trashed");
+    let mut open = true;
+    rt.update(|s, _| open = super::ui(s).is_some());
+    assert!(!open, "the viewer closed back to Files");
 }
 
 #[test]

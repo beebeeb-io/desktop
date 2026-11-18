@@ -69,3 +69,18 @@ fn change_expiry_on_a_request_goes_out_once_by_id() {
     assert!(settle(&mut source).is_empty());
     assert_eq!(changes(&fake.fake), vec![format!("PATCH /api/v1/file-requests/{REQ}")]);
 }
+
+#[test]
+fn copy_link_asks_only_for_listed_rows_and_a_refusal_hands_no_link_to_take_link() {
+    let fake = fake("copy-link");
+    let mut source = EngineSharedSource::new(signed_in(&fake));
+    assert!(!source.copy_row_link(REQ), "before the lists are here");
+    opened(&mut source);
+    assert!(!source.copy_row_link(OTHERS), "not a link or request row");
+    assert!(source.take_link().is_none());
+    // The fake holds no key for this file: the engine refuses, the view says so, and nothing reaches the clipboard.
+    assert!(source.copy_row_link(REQ));
+    assert!(!source.copy_row_link(REQ), "an answer is on its way");
+    assert_eq!(settle(&mut source), vec![Notice::ChangeRefused]);
+    assert!(source.take_link().is_none());
+}
