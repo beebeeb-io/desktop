@@ -23,6 +23,7 @@ use super::office_icons as oi;
 use super::source::OpenFile;
 use super::{Intent, Ui, style};
 use crate::State;
+use crate::frames::office::docs::DocBody;
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::toolbar::{self as tb, Bar, Details, New, Sort, View, press};
@@ -55,8 +56,8 @@ const DOC_BODY: TextStyle = TextStyle::new(12.5, 400.0).lh(20.0);
 const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
 const STATUS_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
 /// The letters of Bold, Italic, Underline and Strikethrough.
-const LETTER_HEAVY: TextStyle = TextStyle::new(13.5, 800.0).lh(17.0);
-const LETTER: TextStyle = TextStyle::new(13.5, 700.0).lh(17.0);
+pub(crate) const LETTER_HEAVY: TextStyle = TextStyle::new(13.5, 800.0).lh(17.0);
+pub(crate) const LETTER: TextStyle = TextStyle::new(13.5, 700.0).lh(17.0);
 
 /// The page's ink: a document is near-black on white in both themes.
 fn ink() -> Color {
@@ -169,6 +170,8 @@ pub struct OfficeUi {
     pub over: Option<super::office_over::Over>,
     /// The live editor's state (`frames/office/edit`); `None` while the file is only viewed.
     pub edit: Option<crate::frames::office::edit::EditUi>,
+    /// The live word ribbon's open pop-up and link field (`frames/office/edit/word_ribbon.rs`).
+    pub ribbon: crate::frames::office::edit::word_ribbon::Pops,
 }
 
 impl Default for OfficeUi {
@@ -178,13 +181,19 @@ impl Default for OfficeUi {
             outline: true,
             over: None,
             edit: None,
+            ribbon: Default::default(),
         }
     }
 }
 
+/// The editor's icons, for the live ribbon (`frames/office/edit`), which is outside `viewers`.
+pub(crate) mod ico {
+    pub use super::super::office_icons::*;
+}
+
 /// A command a control of the editor stands for. The editor takes it; until it does the press says
 /// "Not built yet" ([`Ui::intent`]).
-pub(super) fn ask(command: &'static str) -> impl Fn(&mut State) + 'static {
+pub(crate) fn ask(command: &'static str) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
         if let Some(ui) = super::ui(s) {
             ui.intent(Intent::Office(command));
@@ -209,6 +218,19 @@ pub(crate) enum Face {
 
 /// A tool button (`.mk-tbtn`): 28 square, its glyph or its letter. Keys: `<key>`, `-icon` or `-letter`.
 pub(crate) fn tool(key: &str, name: &'static str, face: Face, state: Tool, command: &'static str, t: &Theme) -> El {
+    let ask = ask(command);
+    tool_with(key, name, face, state, move |s: &mut State, _: &mut rune::Tx| ask(s), t)
+}
+
+/// [`tool`] whose press is `act`. A press leaves the keyboard where it was (the page keeps typing).
+pub(crate) fn tool_with(
+    key: &str,
+    name: &'static str,
+    face: Face,
+    state: Tool,
+    act: impl Fn(&mut State, &mut rune::Tx) + 'static,
+    t: &Theme,
+) -> El {
     let ink = match state {
         Tool::Idle => t.text_secondary,
         Tool::On => t.text,
@@ -229,7 +251,11 @@ pub(crate) fn tool(key: &str, name: &'static str, face: Face, state: Tool, comma
     b = if state == Tool::Off {
         b.disabled(true)
     } else {
-        b.hover(t.hover).press(t.press).focusable(true).on_press(ask(command))
+        b.hover(t.hover)
+            .press(t.press)
+            .focusable(true)
+            .preserve_focus_on_press(true)
+            .on_press_tx(act)
     };
     if state == Tool::On {
         b = b.checked(true);
@@ -256,7 +282,7 @@ pub(crate) fn tool(key: &str, name: &'static str, face: Face, state: Tool, comma
 }
 
 /// A hairline between groups of tools (`.mk-sep`). Key: `<key>`.
-pub(super) fn hairline(key: String, t: &Theme) -> El {
+pub(crate) fn hairline(key: String, t: &Theme) -> El {
     el().key(key).w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator)
 }
 
@@ -269,6 +295,19 @@ pub(crate) fn raised(e: El, t: &Theme) -> El {
 
 /// A pop-up button of the ribbon (`.mk-pop2`): the choice, a caret. Keys: `<key>`, `-label`, `-caret`.
 pub(crate) fn pop(key: &str, name: &'static str, choice: &str, w: f32, command: &'static str, t: &Theme) -> El {
+    let ask = ask(command);
+    pop_with(key, name, choice, w, move |s: &mut State, _: &mut rune::Tx| ask(s), t)
+}
+
+/// [`pop`] whose press is `act`.
+pub(crate) fn pop_with(
+    key: &str,
+    name: &'static str,
+    choice: &str,
+    w: f32,
+    act: impl Fn(&mut State, &mut rune::Tx) + 'static,
+    t: &Theme,
+) -> El {
     raised(
         row()
             .key(key.to_string())
@@ -284,7 +323,7 @@ pub(crate) fn pop(key: &str, name: &'static str, choice: &str, w: f32, command: 
         t,
     )
     .focusable(true)
-    .on_press(ask(command))
+    .on_press_tx(act)
     .child(style::fitted(format!("{key}-label"), choice, POP, t.text).a11y_hidden())
     .child(el().key(format!("{key}-gap")).grow(1.0))
     .child(kit::glyph(format!("{key}-caret"), &oi::CARET, 11.0, t.text_tertiary))
@@ -481,6 +520,11 @@ pub(crate) fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
         // Layout's and Review's tools are on no board frame: not drawn.
         Tab::Layout | Tab::Review => Vec::new(),
     };
+    ribbon_of(ui, unsaved, tools, t)
+}
+
+/// The ribbon's frame around `tools` (the live word ribbon brings its own).
+pub(crate) fn ribbon_of(ui: &Ui, unsaved: bool, tools: Vec<El>, t: &Theme) -> El {
     col()
         .key("rib")
         .role("toolbar")
@@ -708,8 +752,25 @@ pub const PREPARING: &str = "Preparing the editor on this PC\u{2026}";
 pub const OLDER_FORMAT: &str = "An older Word file (.doc). It opens and saves in the same format.";
 
 /// The status line: what the document is, how it is kept, the zoom, About. Its parts are keyed
-/// `st-<N>` in order.
+/// `st-<N>` in order. With no `doc` and a live Word document as the file's body, it says that document's
+/// page, words and language and its version (the editor's `chrome` calls it so); the saved time comes with
+/// [`status_live`], which has the window's [`Ui`].
 pub(crate) fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t: &Theme) -> El {
+    status_at(file, doc, keeping, None, t)
+}
+
+/// [`status`] of a live document, with the time of the last save this session made.
+#[allow(dead_code)]
+pub(crate) fn status_live(ui: &Ui, keeping: Keeping, t: &Theme) -> El {
+    status_at(&ui.file, None, keeping, ui.saved_at.as_deref(), t)
+}
+
+fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at: Option<&str>, t: &Theme) -> El {
+    // A live document the editor holds: its numbers, never "Preparing".
+    let live = match (&file.body, doc, keeping) {
+        (super::source::Body::Doc(d), None, Keeping::Saved | Keeping::Unsaved | Keeping::Conflict) => Some(d),
+        _ => None,
+    };
     let plain = |key: String, words: &str| style::fitted(key, words, type_::STATUS, t.text_tertiary);
     let sep = |key: &str| el().key(key.to_string()).w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
     let mut n = 0;
@@ -728,27 +789,55 @@ pub(crate) fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t
         .fill(t.status_bar_bg)
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
         .border_layout();
-    let what = match doc {
-        Some(doc) => {
-            let pages = format!("Page 1 of {}", doc.pages.max(1));
-            let words = format!("{} words", thousands(doc.words));
-            bar = bar
-                .child(plain(next(), &pages))
-                .child(plain(next(), "\u{00B7}"))
-                .child(plain(next(), &words))
-                .child(plain(next(), "\u{00B7}"))
-                .child(plain(next(), &doc.language));
-            format!("{pages}, {words}, {}", doc.language)
+    let counts = |bar: El, next: &mut dyn FnMut() -> String, pages: String, words: String, language: &str| {
+        let what = format!("{pages}, {words}, {language}");
+        let bar = bar
+            .child(plain(next(), &pages))
+            .child(plain(next(), "\u{00B7}"))
+            .child(plain(next(), &words))
+            .child(plain(next(), "\u{00B7}"))
+            .child(plain(next(), language));
+        (bar, what)
+    };
+    let what = match (doc, live) {
+        (Some(doc), _) => {
+            let (b, what) = counts(
+                bar,
+                &mut next,
+                format!("Page 1 of {}", doc.pages.max(1)),
+                format!("{} words", thousands(doc.words)),
+                &doc.language,
+            );
+            bar = b;
+            what
         }
-        None => {
+        (None, Some(d)) => {
+            let (b, what) = counts(
+                bar,
+                &mut next,
+                format!("Page {} of {}", d.page, d.view.pages.max(1)),
+                format!("{} words", thousands(d.view.words)),
+                &d.language,
+            );
+            bar = b;
+            what
+        }
+        (None, None) => {
             bar = bar
                 .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(style::warn(t)))
                 .child(kit::label("status-text", PREPARING, STATUS_STATE, t.text_secondary));
             PREPARING.to_string()
         }
     };
-    let kept = match (keeping, doc) {
-        (Keeping::Saved, Some(doc)) => format!("saved as version {} \u{00B7} {}", file.version, doc.saved_at),
+    // The time of the save, when it is known: a figure, so mono.
+    let stamp = match (doc, live) {
+        (Some(doc), _) => Some(doc.saved_at.as_str()),
+        (None, Some(_)) => saved_at,
+        (None, None) => None,
+    };
+    let kept = match (keeping, stamp) {
+        (Keeping::Saved, Some(at)) => format!("saved as version {} \u{00B7} {at}", file.version),
+        (Keeping::Saved, None) if live.is_some() => format!("saved as version {}", file.version),
         (Keeping::Unsaved, _) => "unsaved changes".to_string(),
         (Keeping::Conflict, _) => "not saved \u{00B7} conflict".to_string(),
         (Keeping::NoEditor, _) | (Keeping::Saved, None) => "read-only for now".to_string(),
@@ -756,21 +845,49 @@ pub(crate) fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t
     let enc = next();
     let dot = next();
     let kept_key = next();
-    let kept_el = match (keeping, doc) {
-        // The time is a figure: mono.
-        (Keeping::Saved, Some(doc)) => {
-            let at = kept.len() - doc.saved_at.len();
+    let kept_el = match (keeping, stamp) {
+        (Keeping::Saved, Some(at)) => {
+            let from = kept.len() - at.len();
             kit::note_text(&kept_key, &kept_key, &kept, type_::STATUS, t.text_tertiary);
-            rich(&kept, vec![Span::new(at, kept.len()).mono()])
+            rich(&kept, vec![Span::new(from, kept.len()).mono()])
                 .key(kept_key)
                 .font(type_::STATUS)
                 .color(t.text_tertiary)
-                .w(rune::text::advance(&kept[..at], type_::STATUS) + rune::text::advance(&doc.saved_at, STATUS_MONO))
+                .w(rune::text::advance(&kept[..from], type_::STATUS) + rune::text::advance(at, STATUS_MONO))
         }
         _ => plain(kept_key, &kept),
     };
     let zoom = next();
     let about = next();
+    let per_cent = live.map_or(100, |d| d.view.zoom);
+    // The zoom's two steps move the live document's stage; the board's own (no engine) have no press.
+    let step = |key: String, icon: &'static Icon, name: &'static str, act: Option<fn(&mut DocBody)>| {
+        let g = kit::glyph(key.clone(), icon, 12.0, t.text_tertiary);
+        match act {
+            Some(act) => row()
+                .key(format!("{key}-btn"))
+                .role("button")
+                .label(name)
+                .size(18.0, 18.0)
+                .center()
+                .radius(5.0)
+                .hover(t.hover)
+                .press(t.press)
+                .focusable(true)
+                .preserve_focus_on_press(true)
+                .on_press_tx(crate::frames::office::docs::scroll::with_doc_tx(act))
+                .child(g),
+            None => g,
+        }
+    };
+    let (less, more) = if live.is_some() {
+        (
+            Some(DocBody::zoom_out as fn(&mut DocBody)),
+            Some(DocBody::zoom_in as fn(&mut DocBody)),
+        )
+    } else {
+        (None, None)
+    };
     bar.label(format!("{what}. Encrypted, {kept}"))
         .child(el().key("st-gap").grow(1.0))
         .child(
@@ -788,17 +905,17 @@ pub(crate) fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t
             row()
                 .key(zoom.clone())
                 .role("group")
-                .label("Zoom, 100 per cent")
+                .label(format!("Zoom, {per_cent} per cent"))
                 .gap(4.0)
                 .center_y()
-                .child(kit::glyph(format!("{zoom}-less"), &oi::LESS, 12.0, t.text_tertiary))
+                .child(step(format!("{zoom}-less"), &oi::LESS, "Zoom out", less))
                 .child(style::fitted(
                     format!("{zoom}-zoom"),
-                    "100%",
+                    &format!("{per_cent}%"),
                     STATUS_MONO,
                     t.text_tertiary,
                 ))
-                .child(kit::glyph(format!("{zoom}-more"), &oi::MORE, 12.0, t.text_tertiary)),
+                .child(step(format!("{zoom}-more"), &oi::MORE, "Zoom in", more)),
         )
         .child(sep("st-sep-1"))
         .child(
