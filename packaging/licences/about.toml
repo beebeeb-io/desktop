@@ -20,8 +20,11 @@ accepted = [
     "Unicode-DFS-2016",
     "Zlib",
     "AGPL-3.0",
+    "AGPL-3.0-or-later",
     "LicenseRef-UFL-1.0",
 ]
 ignore-dev-dependencies = false
 ignore-build-dependencies = false
 workarounds = ["ring"]
+# Our own unpublished crates (publish = false) are not "third party": section 1 of the notice covers them (AGPL-3.0-or-later).
+private = { ignore = true }
