@@ -45,7 +45,7 @@ pub use strip::{StripMenu, entries as menu_entries};
 /// The group's board frames and the scene that shows each (`frames::scenes`). DW-1560 stays a placeholder (0.9.1).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1509", scene_deck),
-    ("DW-1560", placeholder::scene),
+    ("DW-1560", slide_ribbon::scene_design),
     ("DW-1561", scene_present),
 ];
 
@@ -1053,11 +1053,11 @@ mod tests {
         let mut rt = scene(scene_present, false);
         assert_eq!(deck_state(&mut rt), (slides_fixture::BOARD_SLIDE, true));
         assert!(find(&rt, "pres-stage").is_some() && find(&rt, "filmstrip").is_none());
-        // DW-1560 is a 0.9.1 frame: still the placeholder.
+        // DW-1560 is the editor's Design tab: no longer the placeholder.
         assert!(
             FRAMES
                 .iter()
-                .any(|(id, f)| *id == "DW-1560" && *f as usize == placeholder::scene as usize)
+                .any(|(id, f)| *id == "DW-1560" && *f as usize != placeholder::scene as usize)
         );
     }
 
