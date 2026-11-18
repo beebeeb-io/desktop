@@ -499,6 +499,49 @@ impl FakeAccount {
         }
     }
 
+    /// `PATCH /api/v1/shares/{id}`: an owner's live link's expiry and password. A field that is absent is
+    /// unchanged, `null` clears; limits as create (1..=87600 hours, a password of at least 4 after trim).
+    pub(super) fn patch_link(&self, id: &str, body: &Value) -> Reply {
+        let mut links = self.links.lock().expect("links");
+        let Some(link) = links
+            .iter_mut()
+            .find(|link| link["id"].as_str() == Some(id) && link["revoked"] != true)
+        else {
+            return Reply::json(404, json!({ "error": "not_found" }));
+        };
+        let hours = match body.get("expires_in_hours") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(h) => match h.as_i64().filter(|h| (1..=87_600).contains(h)) {
+                Some(h) => Some(Some(h)),
+                None => return Reply::json(400, json!({ "error": "bad_expiry" })),
+            },
+        };
+        let passphrase = match body.get("passphrase") {
+            None => None,
+            Some(Value::Null) => Some(false),
+            Some(p) => match p.as_str().filter(|p| p.trim().chars().count() >= 4) {
+                Some(_) => Some(true),
+                None => return Reply::json(400, json!({ "error": "bad_passphrase" })),
+            },
+        };
+        match hours {
+            Some(Some(h)) => {
+                link["expires_at"] = json!((chrono::Utc::now() + chrono::Duration::hours(h)).to_rfc3339())
+            }
+            Some(None) => link["expires_at"] = Value::Null,
+            None => {}
+        }
+        if let Some(set) = passphrase {
+            link["has_passphrase"] = json!(set);
+        }
+        Reply::ok(json!({
+            "id": id,
+            "expires_at": link.get("expires_at").cloned().unwrap_or(Value::Null),
+            "has_passphrase": link.get("has_passphrase").and_then(Value::as_bool).unwrap_or(false),
+        }))
+    }
+
     /// `POST /api/v1/shares`: a link to a live item of this account; another id is not found.
     fn post_link(&self, body: &Value) -> Reply {
         let file_id = body.get("file_id").and_then(Value::as_str).unwrap_or_default();

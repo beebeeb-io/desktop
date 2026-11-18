@@ -546,3 +546,66 @@ fn health_and_the_speedtest_answer_for_the_clients_latency_and_speed_checks() {
     assert_eq!(rt.block_on(client.speedtest_download(100_000)).unwrap().len(), 100_000);
     rt.block_on(client.speedtest_upload(&[0u8; 5_000])).unwrap();
 }
+
+#[test]
+fn a_links_expiry_and_password_change_in_place_and_a_revoked_or_unknown_link_is_not_found() {
+    let (account, fake) = start();
+    let file = id(1);
+    account.add_file_with_content(&file, None, "f.txt", b"f");
+    let made = send(
+        &fake,
+        &account.session_token,
+        call(Method::Post, "/api/v1/shares".into(), Some(json!({ "file_id": file, "token": "t" }))),
+    );
+    let link = made.1["id"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/shares/{link}");
+    let patch = |body: Value| send(&fake, &account.session_token, call(Method::Patch, path.clone(), Some(body)));
+
+    let (status, body) = patch(json!({ "expires_in_hours": 24, "passphrase": "four" }));
+    assert_eq!(status, 200);
+    assert_eq!(body["has_passphrase"], true);
+    assert!(body["expires_at"].is_string());
+    // Absent is unchanged; null clears.
+    let (_, body) = patch(json!({ "expires_in_hours": null }));
+    assert_eq!((body["expires_at"].is_null(), body["has_passphrase"].clone()), (true, json!(true)));
+    let (_, body) = patch(json!({ "passphrase": null }));
+    assert_eq!(body["has_passphrase"], false);
+    // Limits as create.
+    assert_eq!(patch(json!({ "passphrase": "  a " })).0, 400);
+    assert_eq!(patch(json!({ "expires_in_hours": 0 })).0, 400);
+    assert_eq!(patch(json!({ "expires_in_hours": 87601 })).0, 400);
+
+    assert_eq!(send(&fake, &account.session_token, share_flow::revoke_link_request(&link).unwrap()).0, 200);
+    assert_eq!(patch(json!({ "expires_in_hours": 5 })).0, 404);
+    let unknown = call(Method::Patch, format!("/api/v1/shares/{}", id(99)), Some(json!({})));
+    assert_eq!(send(&fake, &account.session_token, unknown).0, 404);
+}
+
+#[test]
+fn a_file_requests_expiry_changes_while_open_and_an_invite_is_left_once() {
+    let (account, fake) = start();
+    account.add_file_request(&id(5), "Invented request", 10);
+    let path = format!("/api/v1/file-requests/{}", id(5));
+    let patch = |body: Value| send(&fake, &account.session_token, call(Method::Patch, path.clone(), Some(body)));
+    assert_eq!(patch(json!({ "expires_in_secs": 3600 })).0, 200);
+    let listed = send(&fake, &account.session_token, call(Method::Get, "/api/v1/file-requests".into(), None)).1;
+    assert!(listed["file_requests"][0]["expires_at"].is_string());
+    assert_eq!(patch(json!({ "expires_in_secs": null })).0, 200);
+    let listed = send(&fake, &account.session_token, call(Method::Get, "/api/v1/file-requests".into(), None)).1;
+    assert!(listed["file_requests"][0]["expires_at"].is_null());
+    let close = beebeeb_core::share_flow::request::close_request(&id(5)).unwrap();
+    assert_eq!(send(&fake, &account.session_token, close).0, 200);
+    assert_eq!(patch(json!({ "expires_in_secs": 60 })).0, 409);
+    let missing = call(Method::Patch, format!("/api/v1/file-requests/{}", id(9)), Some(json!({ "expires_in_secs": 1 })));
+    assert_eq!(send(&fake, &account.session_token, missing).0, 404);
+
+    account.add_incoming_invite(&id(7), &id(8), "sender@example.eu");
+    let leave = |n: u8| call(Method::Post, format!("/api/v1/shares/invites/{}/leave", id(n)), None);
+    // Only an approved invite can be left.
+    assert_eq!(send(&fake, &account.session_token, leave(7)).0, 404);
+    account.approve_incoming_invite(&id(7));
+    let (status, body) = send(&fake, &account.session_token, leave(7));
+    assert_eq!((status, body["status"].clone()), (200, json!("left")));
+    assert_eq!(account.incoming_invite_status(&id(7)), None);
+    assert_eq!(send(&fake, &account.session_token, leave(7)).0, 404);
+}
