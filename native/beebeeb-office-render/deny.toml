@@ -20,6 +20,14 @@ ignore = [
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
     "RUSTSEC-2026-0429",
+    # zip 3.0.0, two more advisories published after the four above; also not reachable: 0545 is AES-encrypted
+    # entries read with a password (`aes-crypto` is off: our zip has `deflate` only, and nothing calls
+    # `by_name_decrypt`); 0548 is `ZipStreamReader` (nothing here streams a zip; archives are read through `ZipArchive`).
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0548",
+    # chrono 0.4.45: "unmaintained", no vulnerability. Comes with wordcraft-engine (the local clock's offset for
+    # Insert > Date & Time); it opens no connection. Revisit at a WordCraft bump.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
