@@ -12,7 +12,7 @@ pub fn take(s: &mut State, tx: &mut Tx, intent: &Intent) -> bool {
         Intent::Do("copy-link" | "change-expiry" | "link-password", _) => super::actions_links::take(s, tx, intent),
         Intent::OpenItem(_)
         | Intent::About("DW-1180" | "DW-0511", _)
-        | Intent::Do("leave" | "stop" | "close", _) => super::actions_items::take(s, tx, intent),
+        | Intent::Do("confirm-leave" | "confirm-stop" | "confirm-close", _) => super::actions_items::take(s, tx, intent),
         Intent::Frame("DW-0504" | "DW-0414") | Intent::Do("create-request", _) => {
             super::actions_new::take(s, tx, intent)
         }

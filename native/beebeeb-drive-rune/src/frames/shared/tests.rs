@@ -244,6 +244,8 @@ fn the_menu_is_the_boards_takes_the_keyboard_and_does_what_it_says() {
     // DW-0506: Stop sharing ends the link straight away; the selection stays in the list.
     let mut rt = runtime(super::scenes::dw_0506);
     click(&mut rt, "mi-stop-sharing");
+    assert_eq!(rt.state.frames.shared.source.links().len(), 3, "it asks first");
+    confirm(&mut rt);
     assert_eq!(rt.state.frames.shared.source.links().len(), 2);
     assert!(rt.find("menu").is_none() && rt.find("item-1-2").is_none());
     // A share with people offers People and Stop sharing only.
@@ -271,12 +273,27 @@ fn the_menu_is_the_boards_takes_the_keyboard_and_does_what_it_says() {
     let mut rt = runtime(super::scenes::dw_0507);
     press(&mut rt, Key::End);
     press(&mut rt, Key::Enter);
+    confirm(&mut rt);
     assert_eq!(rt.state.frames.shared.source.requests()[1].state, RequestState::Closed);
     rt.state.frames.shared.menu = Some(super::parts::menu::Open::at(520.0, 222.0));
     settle(&mut rt);
     assert!(rt.find("mi-view-files").is_some() && rt.find("mi-remove").is_some() && rt.find("mi-copy-link").is_none());
     click(&mut rt, "mi-remove");
     assert_eq!(rt.state.frames.shared.source.requests().len(), 3);
+}
+
+/// Answers the confirmation that is open (Stop sharing, Close request, Leave): what its button asks, taken as the
+/// shell's drain takes it.
+fn confirm(rt: &mut Runtime<State>) {
+    use super::dialogs::Dialog;
+    let (tag, id) = match rt.state.frames.shared.dialog.clone() {
+        Some(Dialog::ConfirmStop { id }) => ("confirm-stop", id),
+        Some(Dialog::ConfirmClose { id }) => ("confirm-close", id),
+        Some(Dialog::ConfirmLeave { id }) => ("confirm-leave", id),
+        other => panic!("no confirmation is open: {other:?}"),
+    };
+    rt.update(|s, tx| assert!(super::actions_items::take(s, tx, &Intent::Do(tag, id))));
+    settle(rt);
 }
 
 // ---- The review of PR 293 ----
@@ -299,6 +316,7 @@ fn the_menu_key_opens_the_menu_of_the_highlighted_item() {
     assert_eq!(rt.state.frames.shared.selected, Some(4), "still Harbour.heic");
     press(&mut rt, Key::End);
     press(&mut rt, Key::Enter);
+    confirm(&mut rt);
     let left: Vec<String> = rt
         .state
         .frames
