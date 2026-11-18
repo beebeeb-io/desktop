@@ -51,7 +51,7 @@ use chrono::Local;
 use super::log;
 use super::trash::{kind_of, when};
 use crate::frames::files::source::Details;
-use crate::frames::search::source::{Answer, Hit, Narrow, Pumped, SearchSource};
+use crate::frames::search::source::{Answer, Hit, Loading, Narrow, Pumped, SearchSource};
 use crate::ui::file_list::PcState;
 
 #[cfg(test)]
@@ -82,6 +82,11 @@ pub trait SearchHost: Send + Sync + 'static {
     /// The index of this computer's local state. `Err`: why there is none, as the engine's account-bound handle says
     /// it (another account's local state, nothing synced yet, …); a list that cannot be read is `Unreadable`.
     fn index(&self) -> Result<LocalSearchIndex, LocalStateRefused>;
+    /// How far the first listing of the files has come while a first sign-in still gets them (DW-0802b): `None`
+    /// when it is not known or the list is whole. In memory, never waits.
+    fn listing(&self) -> Option<Loading> {
+        None
+    }
     /// The recent searches of the account of the session `turn`, newest first (disk work: a worker calls it). `Err`:
     /// none can be read (another account's local state, nothing synced yet, the session moved on).
     fn recent_searches(&self, turn: Self::Turn) -> Result<Vec<String>, ()>;
@@ -304,6 +309,11 @@ impl<H: SearchHost> EngineSearchSource<H> {
                 .refused
                 .as_ref()
                 .is_some_and(|(of, refused)| *of == now && matches!(refused, LocalStateRefused::NothingSynced))
+    }
+
+    /// How far the first listing is, only while it is not whole.
+    fn listing_now(&self) -> Option<Loading> {
+        self.host.listing().filter(|l| l.listed < l.total)
     }
 
     /// Follow the session of the moment: when it is not the one this source's state belongs to, all of that state
@@ -632,7 +642,13 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     fn search(&self, query: &str, narrow: Narrow) -> Answer {
         let Some(held) = self.current() else {
             // The first index of this session is being built: the query is answered when it lands.
-            return if self.building_now() || self.getting_ready() {
+            return if self.getting_ready() && self.listing_now().is_some() {
+                // The first sign-in still lists the files: no match yet, and the note says how far it is.
+                Answer::Found {
+                    hits: Vec::new(),
+                    loading: self.listing_now(),
+                }
+            } else if self.building_now() || self.getting_ready() {
                 Answer::Searching
             } else if self.not_this_accounts() {
                 // This PC's local state is another account's: Search says why; nothing of it was read.
@@ -652,7 +668,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
             Some(((words, pill, number), hits)) if words == query && *pill == narrow && *number == held.number => {
                 Answer::Found {
                     hits: hits.clone(),
-                    loading: None,
+                    loading: self.listing_now(),
                 }
             }
             _ => Answer::Searching,

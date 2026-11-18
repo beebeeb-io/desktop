@@ -118,6 +118,7 @@ impl PhotosSource for Later {
             changed: dirty || !answered.is_empty(),
             busy: false,
             answered,
+            ..Pumped::default()
         }
     }
     fn devices(&self) -> Vec<Device> {

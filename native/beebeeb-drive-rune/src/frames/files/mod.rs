@@ -188,6 +188,7 @@ impl Toast {
             ActionError::NotAll => " Some items were left as they were.",
             ActionError::NotOnThisSystem => " It is not available on this computer yet.",
             ActionError::NotYet => " It is not available yet.",
+            ActionError::NotAFile => " Only a file can have a link here, not a folder.",
             ActionError::HasLink => {
                 " This file already has a link that can't be copied here yet. To get a new link, stop sharing the \
                  file in the web app first."

@@ -42,11 +42,10 @@ fn the_support_draft_percent_encodes_its_subject() {
 }
 
 #[test]
-fn the_opener_refuses_http_file_javascript_and_a_bare_path() {
+fn the_opener_refuses_file_javascript_and_a_bare_path() {
     use crate::engine_host::signin::{OPENED, open_web_page};
     OPENED.with(|o| o.borrow_mut().clear());
     for bad in [
-        "http://beebeeb.io",
         "file:///etc/passwd",
         "javascript:alert(1)",
         "/etc/passwd",
@@ -58,10 +57,11 @@ fn the_opener_refuses_http_file_javascript_and_a_bare_path() {
     assert!(OPENED.with(|o| o.borrow().is_empty()), "nothing was opened");
     for good in [
         "https://beebeeb.io",
+        "http://beebeeb.io",
         "mailto:support@beebeeb.io",
         "ms-settings:notifications",
     ] {
         assert!(open_web_page(good).is_ok(), "{good}");
     }
-    assert_eq!(OPENED.with(|o| o.borrow().len()), 3);
+    assert_eq!(OPENED.with(|o| o.borrow().len()), 4);
 }

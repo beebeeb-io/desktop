@@ -23,7 +23,7 @@ use rune::{Env, Runtime, TextEdit};
 
 use super::*;
 use crate::State;
-use crate::frames::search::source::RECENT_KEPT;
+use crate::frames::search::source::{Loading, RECENT_KEPT};
 use crate::frames::shared::parts::table::Kind;
 
 const ME: &str = "search-me@example.eu";
@@ -47,6 +47,8 @@ struct Host {
     broken: AtomicBool,
     /// Nothing has synced on this computer yet.
     nothing_synced: AtomicBool,
+    /// How far the first listing has come, as the engine says it: (listed, total); `None`: not known.
+    listing: Mutex<Option<(u64, u64)>>,
     builds: AtomicUsize,
     woken: AtomicUsize,
     /// The recent searches each account keeps on this computer (the engine's row per account).
@@ -155,6 +157,10 @@ impl SearchHost for Host {
         index
     }
 
+    fn listing(&self) -> Option<Loading> {
+        (*self.listing.lock().unwrap()).map(|(listed, total)| Loading { listed, total })
+    }
+
     fn recent_searches(&self, turn: u64) -> Result<Vec<String>, ()> {
         let account = self.recents_of(turn)?;
         Ok(self.recents.lock().unwrap().get(&account).cloned().unwrap_or_default())
@@ -253,6 +259,7 @@ fn host(account: Option<&str>) -> Arc<Host> {
         woken: AtomicUsize::new(0),
         recents: Mutex::new(HashMap::new()),
         recent_calls: AtomicUsize::new(0),
+        listing: Mutex::new(None),
     })
 }
 
@@ -1183,4 +1190,46 @@ fn reopening_search_after_a_refusal_builds_again() {
     source.opened();
     settle(&mut source);
     assert_eq!(found(&mut source, "draft", Narrow::All).len(), 1);
+}
+
+/// While the first sign-in still lists the files, the answer says how far it is (DW-0802b): the note shows with the
+/// live count, never "Searching" forever and never "No results" without the note.
+#[test]
+fn while_the_first_listing_runs_the_answer_carries_how_far_it_is() {
+    let host = host(Some(ME));
+    host.nothing_synced.store(true, Ordering::SeqCst);
+    *host.listing.lock().unwrap() = Some((0, 40_112));
+    let mut source = EngineSearchSource::new(host.clone());
+    source.opened();
+    source.ask("contract", Narrow::All);
+    settle(&mut source);
+    assert_eq!(
+        source.search("contract", Narrow::All),
+        Answer::Found {
+            hits: Vec::new(),
+            loading: Some(Loading { listed: 0, total: 40_112 })
+        }
+    );
+    // Part of the list is in: the matches so far come with the count; a complete list carries none.
+    host.nothing_synced.store(false, Ordering::SeqCst);
+    *host.listing.lock().unwrap() = Some((10, 40_112));
+    source.retry_after = Duration::ZERO;
+    let began = Instant::now();
+    while source.held.is_none() {
+        source.pump();
+        assert!(began.elapsed() < HOLD_FOR, "no build after the list came");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    settle(&mut source);
+    source.ask("contract", Narrow::All);
+    settle(&mut source);
+    match source.search("contract", Narrow::All) {
+        Answer::Found { hits, loading } => {
+            assert!(!hits.is_empty());
+            assert_eq!(loading, Some(Loading { listed: 10, total: 40_112 }));
+        }
+        other => panic!("{other:?}"),
+    }
+    *host.listing.lock().unwrap() = Some((40_112, 40_112));
+    assert!(matches!(source.search("contract", Narrow::All), Answer::Found { loading: None, .. }));
 }

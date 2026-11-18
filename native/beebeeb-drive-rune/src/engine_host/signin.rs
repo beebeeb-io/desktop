@@ -813,7 +813,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
 }
 
 /// Opens one of our own addresses by the same OS call a file opens with: the address is one argument, never a
-/// command line. Only three schemes open (`https://`, `mailto:`, `ms-settings:`); anything else is refused in
+/// command line. Only four schemes open (`https://`, `http://`, `mailto:`, `ms-settings:`); anything else is refused in
 /// every build. The addresses come from `shell::web_pages` only, never from the server, a file or a typed string.
 pub fn open_web_page(url: &str) -> Result<(), ()> {
     if !is_allowed_address(url) {
@@ -864,9 +864,9 @@ thread_local! {
     pub(crate) static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Whether `url` starts with one of the three schemes the opener allows.
+/// Whether `url` starts with one of the four schemes the opener allows (https and http, mail, Windows Settings).
 pub fn is_allowed_address(url: &str) -> bool {
-    ["https://", "mailto:", "ms-settings:"]
+    ["https://", "http://", "mailto:", "ms-settings:"]
         .iter()
         .any(|scheme| url.starts_with(scheme))
 }

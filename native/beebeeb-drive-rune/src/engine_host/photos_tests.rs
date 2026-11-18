@@ -958,8 +958,7 @@ fn originals_until(source: &mut Source, mut done: impl FnMut(&[OriginalAnswer]) 
     let deadline = Instant::now() + WAIT;
     let mut got = Vec::new();
     loop {
-        source.pump();
-        got.extend(source.take_original_answers());
+        got.extend(source.pump().originals);
         if done(&got) {
             return got;
         }
@@ -1017,9 +1016,9 @@ fn the_original_reports_its_progress_then_swaps_the_picture_in_and_stop_keeps_no
     source.stop_original(harbour);
     go_on_tx.send(()).unwrap();
     std::thread::sleep(Duration::from_millis(100));
-    let late = settle(&mut source);
-    assert!(late.is_empty(), "{late:?}");
-    assert_eq!(source.take_original_answers(), []);
+    let late = source.pump();
+    assert!(late.answered.is_empty(), "{:?}", late.answered);
+    assert_eq!(late.originals, [], "nothing of a stopped download arrives");
     assert!(source.original(harbour).is_none());
 
     // Bytes that are not a picture: said as failed, nothing held.

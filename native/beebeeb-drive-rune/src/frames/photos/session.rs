@@ -705,9 +705,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if waiting {
         tx.wake_after(POLL_EVERY);
     }
-    let originals = ui.source.take_original_answers();
-    changed |= pumped.changed || !pumped.answered.is_empty() || !originals.is_empty();
-    for answer in originals {
+    changed |= pumped.changed || !pumped.answered.is_empty() || !pumped.originals.is_empty();
+    for answer in pumped.originals {
         ui.original_answered(answer);
     }
     if pumped.changed {

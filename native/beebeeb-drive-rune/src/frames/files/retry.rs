@@ -88,6 +88,7 @@ impl State {
                 ActionError::NotOnThisSystem
                     | ActionError::HoldsKept
                     | ActionError::NotYet
+                    | ActionError::NotAFile
                     | ActionError::HasLink
                     | ActionError::TooLarge
                     | ActionError::NameShared

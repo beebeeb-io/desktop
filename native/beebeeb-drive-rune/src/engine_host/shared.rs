@@ -576,6 +576,26 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.invite_answers.pop_front()
     }
 
+    /// The account's top-level folders from this PC's copy of the list, by name (a read on the window's thread, as
+    /// Files' own listing is); none when the list cannot be read yet.
+    fn folders(&self) -> Vec<(String, String)> {
+        use beebeeb_engine::drive_v2::model::{self, Sort};
+        let read = |db: &beebeeb_engine::state_db::StateDb| {
+            model::children_of(db, None, Sort::default(), 0, usize::MAX)
+                .map(|(rows, _)| rows)
+                .unwrap_or_default()
+        };
+        let rows = self
+            .engine
+            .local_state()
+            .and_then(|state| state.with(read))
+            .unwrap_or_default();
+        rows.into_iter()
+            .filter(|row| row.is_folder)
+            .map(|row| (row.id, row.name))
+            .collect()
+    }
+
     fn create_request(&mut self, form: RequestForm) -> bool {
         self.shared_requests_create(form)
     }

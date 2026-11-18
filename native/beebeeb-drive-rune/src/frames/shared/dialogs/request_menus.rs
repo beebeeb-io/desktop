@@ -15,8 +15,8 @@ pub enum Setting {
 
 const GB: u64 = 1 << 30;
 
-/// Where the files go: the account's top level (the one place a request can name without the folder tree).
-pub const FOLDERS: [&str; 1] = ["All files"];
+/// Where the files go when no folder is chosen: the account's top level. The menu's first choice, always.
+pub const ALL_FILES: &str = "All files";
 /// Expiry: its words, and hours (`None`: never). A new request starts at 30 days.
 pub const EXPIRES: [(&str, Option<u32>); 4] = [
     ("In 1 day", Some(24)),
@@ -41,8 +41,12 @@ pub const SIZES: [(&str, Option<u64>); 5] = [
 ];
 
 /// What the four menus hold: the index chosen in each, and the menu that is open.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Pick {
+    /// The account's folders the source offered when the dialog opened: (id, name). Names are file names.
+    pub folders: Vec<(String, String)>,
+    /// The choice in the folder menu: 0 is All files, `n` is `folders[n - 1]`.
+    pub folder: usize,
     pub expires: usize,
     pub files: usize,
     pub size: usize,
@@ -52,6 +56,8 @@ pub struct Pick {
 impl Default for Pick {
     fn default() -> Self {
         Pick {
+            folders: Vec::new(),
+            folder: 0,
             expires: 2,
             files: 0,
             size: 0,
@@ -60,21 +66,43 @@ impl Default for Pick {
     }
 }
 
+/// Never a folder's name: a debug print holds only the numbers.
+impl std::fmt::Debug for Pick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pick")
+            .field("folders", &self.folders.len())
+            .field("folder", &self.folder)
+            .field("expires", &self.expires)
+            .field("files", &self.files)
+            .field("size", &self.size)
+            .field("open", &self.open)
+            .finish()
+    }
+}
+
 impl Pick {
+    /// The folders the menu offers after All files. The choice goes back to All files.
+    pub fn set_folders(&mut self, folders: Vec<(String, String)>) {
+        self.folders = folders;
+        self.folder = 0;
+    }
+
     /// The words of each choice of `setting`, in order.
-    pub fn words(setting: Setting) -> Vec<&'static str> {
+    pub fn words(&self, setting: Setting) -> Vec<String> {
         match setting {
-            Setting::Folder => FOLDERS.to_vec(),
-            Setting::Expires => EXPIRES.iter().map(|c| c.0).collect(),
-            Setting::Files => FILES.iter().map(|c| c.0).collect(),
-            Setting::Size => SIZES.iter().map(|c| c.0).collect(),
+            Setting::Folder => std::iter::once(ALL_FILES.to_string())
+                .chain(self.folders.iter().map(|(_, name)| name.clone()))
+                .collect(),
+            Setting::Expires => EXPIRES.iter().map(|c| c.0.to_string()).collect(),
+            Setting::Files => FILES.iter().map(|c| c.0.to_string()).collect(),
+            Setting::Size => SIZES.iter().map(|c| c.0.to_string()).collect(),
         }
     }
 
     /// The index chosen in `setting`.
     pub fn chosen(&self, setting: Setting) -> usize {
         match setting {
-            Setting::Folder => 0,
+            Setting::Folder => self.folder,
             Setting::Expires => self.expires,
             Setting::Files => self.files,
             Setting::Size => self.size,
@@ -87,9 +115,9 @@ impl Pick {
 
     /// Choose `index` in `setting` (one that is not a choice changes nothing); the menu closes.
     pub fn choose(&mut self, setting: Setting, index: usize) {
-        if index < Self::words(setting).len() {
+        if index < self.words(setting).len() {
             match setting {
-                Setting::Folder => {}
+                Setting::Folder => self.folder = index,
                 Setting::Expires => self.expires = index,
                 Setting::Files => self.files = index,
                 Setting::Size => self.size = index,
@@ -103,7 +131,7 @@ impl Pick {
         RequestForm {
             title: title.trim().to_string(),
             note: note.trim().to_string(),
-            target_folder: None,
+            target_folder: self.folder.checked_sub(1).and_then(|i| self.folders.get(i)).map(|(id, _)| id.clone()),
             max_files: FILES[self.files].1,
             max_total_bytes: SIZES[self.size].1,
             expires_in_hours: EXPIRES[self.expires].1,

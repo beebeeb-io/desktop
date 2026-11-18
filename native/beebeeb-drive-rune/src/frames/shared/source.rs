@@ -310,6 +310,11 @@ pub trait SharedSource {
     fn leave(&mut self, _id: &str) -> bool {
         false
     }
+    /// The account's top-level folders a new request can send its files to: (id, name). Default: none, so the
+    /// menu offers All files only.
+    fn folders(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// Make a file request. Default: not available.
     fn create_request(&mut self, _form: RequestForm) -> bool {
         false

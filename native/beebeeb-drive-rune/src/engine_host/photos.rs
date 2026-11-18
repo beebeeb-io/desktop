@@ -930,6 +930,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
                 || self.thumbs.busy()
                 || self.original.as_ref().is_some_and(|job| job.pixels.is_none()),
             answered: std::mem::take(&mut self.answered),
+            originals: std::mem::take(&mut self.original_answers),
         }
     }
 
@@ -1288,10 +1289,6 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
 
     fn stop_original(&mut self, _id: PhotoId) {
         self.end_original();
-    }
-
-    fn take_original_answers(&mut self) -> Vec<OriginalAnswer> {
-        std::mem::take(&mut self.original_answers)
     }
 
     fn original(&self, id: PhotoId) -> Option<Pixels> {

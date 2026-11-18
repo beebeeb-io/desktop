@@ -14,7 +14,7 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ const POLL: Duration = Duration::from_millis(250);
 
 const SAVED: &str = "Saved a copy";
 const NOT_AVAILABLE: &str = "Not saved: saving a copy is not available here";
+const PROGRESS: &str = "Saving a copy\u{2026}";
 const BUSY: &str = "A copy is being saved already";
 const NO_PANEL: &str = "Not saved: the save window could not open";
 
@@ -44,6 +45,8 @@ struct Running {
     session: SessionGeneration,
     saver: Arc<dyn CopySaver>,
     cancel: Arc<AtomicBool>,
+    /// How far the copy is: (bytes written, bytes in all), as the engine last said.
+    progress: Arc<(AtomicU64, AtomicU64)>,
     done: mpsc::Receiver<Option<Done>>,
 }
 
@@ -111,11 +114,16 @@ pub fn save_with(
     }
     let session = saver.turn();
     let cancel = Arc::new(AtomicBool::new(false));
+    let progress: Arc<(AtomicU64, AtomicU64)> = Arc::default();
     let (send, done) = mpsc::channel();
     let worker = {
-        let (saver, cancel) = (saver.clone(), cancel.clone());
+        let (saver, cancel, seen) = (saver.clone(), cancel.clone(), progress.clone());
         std::thread::Builder::new().name("save-copy".into()).spawn(move || {
-            let _ = send.send(ask_and_save(&*platform, &*saver, session, &cancel, &id, &name, start));
+            let report = move |written: u64, total: u64| {
+                seen.1.store(total, Ordering::Relaxed);
+                seen.0.store(written, Ordering::Relaxed);
+            };
+            let _ = send.send(ask_and_save(&*platform, &*saver, session, &cancel, &report, &id, &name, start));
         })
     };
     if worker.is_err() {
@@ -123,18 +131,20 @@ pub fn save_with(
         say(s, NO_PANEL);
         return false;
     }
-    RUNNING.set(Some(Running { session, saver, cancel, done }));
+    RUNNING.set(Some(Running { session, saver, cancel, progress, done }));
     tx.wake_after(POLL);
     true
 }
 
 /// The worker: the panel, then the copy, only while the session of the press stands. `None`: nothing to say (the
 /// panel was closed without a place).
+#[allow(clippy::too_many_arguments)]
 fn ask_and_save(
     platform: &dyn Platform,
     saver: &dyn CopySaver,
     session: SessionGeneration,
     cancel: &AtomicBool,
+    progress: &crate::engine_host::save_copy::Progress,
     id: &str,
     name: &str,
     start: PathBuf,
@@ -152,7 +162,7 @@ fn ask_and_save(
         log("a chosen place was dropped: the session changed while the save window was open");
         return Some(Err(SaveRefused::NotSignedIn.words()));
     }
-    match saver.save(session, id, &dest, &|_, _| {}, cancel) {
+    match saver.save(session, id, &dest, progress, cancel) {
         Err(SaveRefused::Cancelled) => None,
         other => Some(other.map_err(SaveRefused::words)),
     }
@@ -161,6 +171,12 @@ fn ask_and_save(
 /// The shell's poll: the result of the save that ran goes to the viewer's toast; a save whose session moved on is
 /// stopped. `true`: something was taken.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    // Still running: the words of how far it is; ended: the result; nothing running: nothing.
+    enum Step {
+        Waiting,
+        Going(String),
+        Ended(Option<Done>),
+    }
     let step = RUNNING.with(|running| {
         let mut running = running.borrow_mut();
         let run = running.as_mut()?;
@@ -170,23 +186,43 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         match run.done.try_recv() {
             Err(mpsc::TryRecvError::Empty) => {
                 tx.wake_after(POLL);
-                None
+                let (written, total) = (run.progress.0.load(Ordering::Relaxed), run.progress.1.load(Ordering::Relaxed));
+                // Nothing is said while the panel is open or before the copy knows its size.
+                Some(if total == 0 { Step::Waiting } else { Step::Going(progress_words(written, total)) })
             }
             got => {
                 running.take();
-                Some(got.ok().flatten())
+                Some(Step::Ended(got.ok().flatten()))
             }
         }
     });
-    let Some(done) = step else {
+    let Some(step) = step else {
         return false;
     };
-    match done {
-        Some(Ok(())) => say(s, SAVED),
-        Some(Err(words)) => say(s, &words),
-        None => {}
+    match step {
+        Step::Waiting => {}
+        Step::Going(words) => say(s, &words),
+        Step::Ended(Some(Ok(()))) => say(s, SAVED),
+        Step::Ended(Some(Err(words))) => say(s, &words),
+        // Stopped or closed: the words of how far it was go.
+        Step::Ended(None) => {
+            if let Some(ui) = viewers::ui(s)
+                && ui.toast.as_deref().is_some_and(|t| t.starts_with(PROGRESS))
+            {
+                ui.toast = None;
+            }
+        }
     }
     true
+}
+
+/// What the viewer says while the copy is written: the share written in whole percent, never whole before the end.
+fn progress_words(written: u64, total: u64) -> String {
+    if total == 0 {
+        return PROGRESS.into();
+    }
+    let percent = (u128::from(written.min(total)) * 100 / u128::from(total)).min(99);
+    format!("{PROGRESS} {percent}%")
 }
 
 fn say(s: &mut State, words: &str) {
