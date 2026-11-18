@@ -265,6 +265,17 @@ pub fn tag(intent: &Intent) -> String {
     }
 }
 
+/// Takes the intents that open over the section shown: Details (`About("DW-0411", id)`) and Preview
+/// (`Do("preview", id)`). `false`: not this module's, or the id has no row in the section shown (the router logs
+/// it as `NotWired`).
+pub fn take(s: &mut State, tx: &mut Tx, intent: &Intent) -> bool {
+    match intent {
+        Intent::About("DW-0411", id) => open_details(s, id, tx),
+        Intent::Do("preview", id) => open_preview(s, id, tx),
+        _ => false,
+    }
+}
+
 /// Details of the item `id` over the section shown (`About("DW-0411", id)`). `false`: its row is not in the
 /// section's current list, and nothing opened.
 pub fn open_details(s: &mut State, id: &str, tx: &mut Tx) -> bool {

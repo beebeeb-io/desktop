@@ -14,6 +14,7 @@
 //!   (`OpenItem`), its file menu (`About("DW-0402")`), Details, Share…, Version history, Available
 //!   offline, and the toolbar's Sort, New and grid view.
 
+pub mod actions;
 pub mod source;
 #[cfg(test)]
 mod tests;
