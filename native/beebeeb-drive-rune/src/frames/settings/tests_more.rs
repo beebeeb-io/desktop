@@ -219,6 +219,7 @@ fn the_banner_says_so_when_no_email_app_opened_and_when_nothing_was_saved() {
         folder: "%LOCALAPPDATA%\\io.beebeeb.app\\diagnostics\\".into(),
         file: "beebeeb-diagnostics-1.json".into(),
         draft_opened: false,
+        path: std::path::PathBuf::new(),
     });
     assert!(
         named(&rt, "note-0").ends_with("Your email app didn't open; send the file to support@beebeeb.io yourself."),
