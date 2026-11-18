@@ -242,6 +242,8 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
         r#"File "${MAINBINARYSRCPATH}""#,
         r#"File "${OFFICERENDERSRCPATH}""#,
         r#"File "${MEDIAHELPERSRCPATH}""#,
+        // The third-party licence text (a text file, w17-licence-notice).
+        r#"File "${LICENSESRCPATH}""#,
     ];
     if file_commands.len() != packed_files.len()
         || !file_commands.iter().zip(packed_files).all(|(a, b)| a.eq_ignore_ascii_case(b))
@@ -260,6 +262,7 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
             "Copy-Item -LiteralPath $Exe -Destination $staged",
             "Copy-Item -LiteralPath $OfficeRenderExe -Destination $stagedOffice",
             "Copy-Item -LiteralPath $MediaHelperExe -Destination $stagedMedia",
+            "Copy-Item -LiteralPath $licenceSrc -Destination $stagedLicence",
         ]
     {
         wrong.push(format!("build-installer.ps1 copies {copies:?}"));
