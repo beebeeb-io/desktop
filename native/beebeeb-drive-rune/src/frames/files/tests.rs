@@ -829,6 +829,7 @@ fn dbg_variants() {
         let b = rt.state.listing.folder.name.clone();
         press(&mut rt, Key::Left, ALT);
         press(&mut rt, Key::Left, ALT);
+        eprintln!("W {key} {a} {b} names={:?}", names(&rt));
         double_click_with_frame(&mut rt, "row-3-date", None);
         let c = rt.state.listing.folder.name.clone();
         eprintln!("V {key} {a} {b} {c}");
