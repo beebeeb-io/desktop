@@ -17,7 +17,7 @@ OUT="$HERE/THIRD-PARTY-LICENSES.txt"
 
 if ! cargo about --version >/dev/null 2>&1; then
   echo "[licences] installing cargo-about"
-  cargo install --locked cargo-about
+  cargo install --locked cargo-about --features cli
 fi
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 n=0
