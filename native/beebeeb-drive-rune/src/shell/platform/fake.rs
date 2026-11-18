@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::{ControlHandler, ControlServer, Platform, PlatformError, ServeError, TrayHandler, TrayIcon};
+use super::{SaveAnswer, ControlHandler, ControlServer, Platform, PlatformError, ServeError, TrayHandler, TrayIcon};
 use crate::shell::control::Request;
 use crate::shell::identity::AppIdentity;
 use crate::shell::instance::Delivery;
@@ -30,6 +30,12 @@ pub struct FakePlatform {
     pub picks: Mutex<std::collections::VecDeque<Result<Option<std::path::PathBuf>, PlatformError>>>,
     /// The title and the start folder of every `pick_folder` call, in order.
     pub pick_asks: Mutex<Vec<(String, std::path::PathBuf)>>,
+    /// What the save panel answers, one per call, oldest first; with none left it was cancelled.
+    pub saves: Mutex<std::collections::VecDeque<SaveAnswer>>,
+    /// The suggested name and the start folder of every `pick_save_path` call, in order.
+    pub save_asks: Mutex<Vec<(String, std::path::PathBuf)>>,
+    /// Every file `share_file` was asked to share, in order.
+    pub shared: Mutex<Vec<std::path::PathBuf>>,
     /// What `idle_for` answers: how long the PC has had no input. Tests set it.
     pub idle: Mutex<Option<Duration>>,
 }
@@ -49,6 +55,9 @@ impl Default for FakePlatform {
             capture_exclusion_fails: AtomicBool::new(false),
             picks: Mutex::default(),
             pick_asks: Mutex::default(),
+            saves: Mutex::default(),
+            save_asks: Mutex::default(),
+            shared: Mutex::default(),
             idle: Mutex::new(Some(Duration::ZERO)),
         }
     }
@@ -145,6 +154,22 @@ impl Platform for FakePlatform {
             .unwrap()
             .push((title.to_string(), start.to_path_buf()));
         self.picks.lock().unwrap().pop_front().unwrap_or(Ok(None))
+    }
+
+    fn pick_save_path(&self, suggested_name: &str, start: std::path::PathBuf) -> SaveAnswer {
+        if self.unbuilt {
+            return SaveAnswer::Failed;
+        }
+        self.save_asks.lock().unwrap().push((suggested_name.to_string(), start));
+        self.saves.lock().unwrap().pop_front().unwrap_or(SaveAnswer::Cancelled)
+    }
+
+    fn share_file(&self, _window: Option<&rune::WindowHandle>, path: &std::path::Path) -> Result<(), PlatformError> {
+        if self.unbuilt {
+            return Err(PlatformError::NotBuilt("the share sheet"));
+        }
+        self.shared.lock().unwrap().push(path.to_path_buf());
+        Ok(())
     }
 
     fn show_start_refusal(&self, title: &str, message: &str) {

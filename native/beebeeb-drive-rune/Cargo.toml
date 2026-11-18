@@ -82,7 +82,7 @@ raw-window-handle = "0.6"
 # Win32_UI_Shell_PropertiesSystem); File Explorer's menu items are registry keys (`shell/platform/windows_verbs.rs`).
 # The media controls of Windows (`media/os_controls.rs`: System Media Transport Controls, the picture from memory
 # through an in-memory stream): `Media`, `Storage_Streams`.
-windows = { version = "0.58", features = ["Data_Xml_Dom", "Foundation", "Media", "Security_Credentials_UI", "Storage_Streams", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem"] }
+windows = { version = "0.58", features = ["ApplicationModel_DataTransfer", "Data_Xml_Dom", "Foundation", "Foundation_Collections", "Storage", "Storage_Search", "Media", "Security_Credentials_UI", "Storage_Streams", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem"] }
 # The updater's https client (`net`): Windows only (see `beebeeb-updater` above).
 beebeeb-updater = { path = "../../crates/beebeeb-updater", features = ["net"] }
 

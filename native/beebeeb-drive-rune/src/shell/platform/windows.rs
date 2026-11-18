@@ -209,6 +209,14 @@ impl Platform for WindowsPlatform {
         super::windows_photo::pick_photo(title, start)
     }
 
+    fn pick_save_path(&self, suggested_name: &str, start: std::path::PathBuf) -> super::SaveAnswer {
+        super::windows_save::pick_save_path(suggested_name, &start)
+    }
+
+    fn share_file(&self, window: Option<&rune::WindowHandle>, path: &std::path::Path) -> Result<(), PlatformError> {
+        super::windows_share::share_file(window, path)
+    }
+
     fn autostart_enabled(&self) -> Result<bool, PlatformError> {
         let run = reg_read_string(autostart::RUN_KEY, run_value_name())?;
         let approved = reg_read(autostart::STARTUP_APPROVED_KEY, run_value_name(), RRF_RT_REG_BINARY).unwrap_or(None);
