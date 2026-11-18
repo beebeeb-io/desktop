@@ -410,3 +410,54 @@ fn helper_sends_an_audio_files_title_and_artist_after_opened() {
     assert!(matches!(app.next(), FromHelper::Frame { .. }), "a video sends no tags");
     app.send(&ToHelper::Close);
 }
+
+/// w12-video-start: the sound of an H.264 + MP3 file is proven by its decode and its clock, not by ear (VM 401 has no
+/// sound device). The picture and the PCM are asked for in turn, as the player does: each PCM answer starts where the
+/// one before ended, the tone is there (not silence), and after a second of sound the picture is a second on too.
+#[test]
+fn helper_decodes_an_mp3_track_beside_the_h264_picture() {
+    let mut app = App::start(fixture("h264-mp3.avi"), ROUTES);
+    let FromHelper::Opened(opened) = app.open(KindHint::Video) else {
+        panic!("the file opens");
+    };
+    assert_eq!(opened.video.map(|video| video.codec), Some(Codec::H264));
+    assert_eq!(opened.audio.map(|audio| audio.codec), Some(Codec::Mp3));
+    assert_eq!(opened.no_sound, None, "its sound plays");
+    let (rate, channels, part) = (48_000u32, 2u16, 4_800u32);
+    let (mut next_pts, mut frames, mut sum_sq, mut count) = (0u64, 0u64, 0f64, 0u64);
+    let mut last_picture = None;
+    for _ in 0..10 {
+        app.send(&ToHelper::WantAudio {
+            rate,
+            channels,
+            frames: part,
+        });
+        let FromHelper::Audio {
+            pts_ms,
+            channels: got,
+            samples,
+        } = app.next()
+        else {
+            panic!("PCM for every ask in the first second");
+        };
+        assert_eq!(got, channels);
+        assert_eq!(pts_ms, next_pts, "each answer starts where the one before ended");
+        frames += (samples.len() / usize::from(channels)) as u64;
+        next_pts = frames * 1000 / u64::from(rate);
+        sum_sq += samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>();
+        count += samples.len() as u64;
+        for _ in 0..3 {
+            app.send(&ToHelper::WantVideo { w: 64, h: 36 });
+            let FromHelper::Frame { pts_ms, .. } = app.next() else {
+                panic!("a frame for every ask in the first second");
+            };
+            assert!(last_picture.is_none_or(|last| pts_ms > last), "the picture moves on");
+            last_picture = Some(pts_ms);
+        }
+    }
+    assert_eq!(next_pts, 1_000, "a second of sound was decoded");
+    let rms = (sum_sq / count as f64).sqrt();
+    assert!(rms > 0.01, "the track's tone, not silence: rms {rms}");
+    assert!(last_picture.is_some_and(|pts| pts >= 900), "the picture is a second on too");
+    app.send(&ToHelper::Close);
+}

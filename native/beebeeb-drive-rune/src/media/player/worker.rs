@@ -18,7 +18,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::{
     ANSWER_WAIT_MS, AUDIO_PARTS_PER_SECOND, AudioFactory, BATCH_MAX, Clock, Cmd, DEFAULT_FRAME_MS, HELD_FRAMES,
     LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener, NOW_PLAYING_EVERY_MS, NoSound, OPEN_WAIT_MS,
-    PLAYED_AFTER_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, lock,
+    PLAYED_AFTER_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, Waker, lock,
 };
 use crate::media::os_controls::{NowPlaying, OsButton};
 use crate::media::transport::{LinkError, profile_for_file_with, wipe, wipe_answer};
@@ -179,6 +179,20 @@ impl Trace {
     }
 }
 
+/// What a view draws of a run: when it changes, the window is woken. The place counts in quarter seconds (the
+/// scrubber moves; the text says seconds).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Drawn {
+    phase: Phase,
+    playing: bool,
+    buffering: bool,
+    quarter: u64,
+    length_ms: u64,
+    no_sound: Option<NoSound>,
+    framed: bool,
+    tagged: bool,
+}
+
 /// What a worker is started with.
 pub(super) struct Start {
     pub(super) generation: u64,
@@ -188,6 +202,7 @@ pub(super) struct Start {
     pub(super) links: Arc<dyn LinkFactory>,
     pub(super) audio: Arc<dyn AudioFactory>,
     pub(super) clock: Arc<dyn Clock>,
+    pub(super) waker: Option<Waker>,
     /// Decision 2541's switch, as the player holds it.
     pub(super) system_on: bool,
     pub(super) slots: Arc<Slots>,
@@ -204,6 +219,11 @@ pub(super) struct Worker {
     links: Arc<dyn LinkFactory>,
     audio: Arc<dyn AudioFactory>,
     clock: Arc<dyn Clock>,
+    waker: Option<Waker>,
+    /// What the window was last woken for.
+    drawn: Option<Drawn>,
+    /// A frame was shown since the open.
+    framed: bool,
     system_on: bool,
     /// The profile the current helper was started in: the default one, or (after a restart) the system decoder's.
     profile: Profile,
@@ -267,6 +287,9 @@ impl Worker {
             links: start.links,
             audio: start.audio,
             clock: start.clock,
+            waker: start.waker,
+            drawn: None,
+            framed: false,
             system_on: start.system_on,
             profile: Profile::default(),
             starts: 0,
@@ -326,8 +349,17 @@ impl Worker {
         self.slots.end();
         self.bytes = None;
         self.release();
-        if let Exit::Refused(refusal) = exit {
-            self.publish(|player| player.failed(refusal));
+        if let Exit::Refused(refusal) = exit
+            && self.publish(|player| player.failed(refusal)).is_some()
+        {
+            self.wake();
+        }
+    }
+
+    /// Wakes the window's loop. Never called with the player held.
+    fn wake(&self) {
+        if let Some(waker) = self.waker.as_ref() {
+            waker();
         }
     }
 
@@ -854,7 +886,7 @@ impl Worker {
     /// Hands PCM to the device and shows the frames whose time came.
     fn present(&mut self) -> Result<(), Exit> {
         self.push_sound()?;
-        let clock = self.clock_ms();
+        let mut clock = self.clock_ms();
         let now = self.clock.now_ms();
         while self.held.front().is_some_and(|frame| frame.pts <= clock) {
             let Some(frame) = self.held.pop_front() else {
@@ -865,9 +897,17 @@ impl Worker {
             let starving = self
                 .last_shown_at
                 .is_none_or(|at| now.saturating_sub(at) >= SHOW_LATE_AFTER_MS);
-            if superseded || (late && !starving) {
+            // Sound keeps its own time, so a late frame is dropped to stay in step with it. Without sound the
+            // picture is all there is: a late frame is shown, and the wall clock goes on from its time.
+            let follows_sound = self.out.is_some();
+            if superseded || (late && follows_sound && !starving) {
                 self.trace.dropped += 1;
                 continue;
+            }
+            if late && !follows_sound {
+                self.base_ms = frame.pts;
+                self.mono_from = self.playing.then_some(now);
+                clock = frame.pts;
             }
             self.show(frame, now)?;
         }
@@ -887,6 +927,7 @@ impl Worker {
         .ok_or(Exit::Done)?;
         self.last_shown_at = Some(now);
         self.presented = true;
+        self.framed = true;
         self.trace.mark("shown");
         self.trace.shown += 1;
         self.trace.shown_pts = pts;
@@ -1097,6 +1138,20 @@ impl Worker {
         if feed {
             self.now_dirty = false;
             self.now_shown_at = Some(now);
+        }
+        let drawn = Drawn {
+            phase,
+            playing,
+            buffering,
+            quarter: at_ms / 250,
+            length_ms: length.unwrap_or(0),
+            no_sound: self.publish(|player| player.shown.as_ref().and_then(|state| state.no_sound)).flatten(),
+            framed: self.framed,
+            tagged: self.tags_taken,
+        };
+        if self.drawn != Some(drawn) {
+            self.drawn = Some(drawn);
+            self.wake();
         }
         for button in buttons.unwrap_or_default() {
             self.press(button)?;
