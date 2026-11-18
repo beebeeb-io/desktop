@@ -1,10 +1,15 @@
 //! Drive's own settings panes on the real engine: [`EngineDriveSettings`], the `DriveSettings` of the running app.
 //!
-//! Wired (draws what it read): Storage insights (DW-0783, b, c, d): the account's use from Beebeeb
-//! ([`Engine::storage_info`]), the breakdown by type and the largest files worked out on this PC from the file list
-//! in the local state database (decrypted names, in memory only).
+//! Wired (draws what it read): Storage (use from Beebeeb, the rows by type from the insights' read, the Trash's item
+//! count from Beebeeb, the downloaded and kept sizes and the downloaded limit from this PC), Storage insights
+//! (DW-0783, b, c, d: the breakdown by type and the largest files worked out on this PC from the file list in the
+//! local state database, decrypted names, in memory only), Sync and File Explorer, Bandwidth and Diagnostics;
+//! Thumbnails and previews once its host is bound.
 //!
-//! Bound but NOT wired (each pane keeps the shell's "not built yet" frame; the PR body names what each one lacks):
+//! Storage's "Thumbnails and previews" row has no honest source: the engine keeps no previews cache on this PC and no
+//! limit for it, so its size and limit stay empty (the frame is not this module's to hide the row).
+//!
+//! What each pane still lacks (every one is wired and draws what it has):
 //! - Sync and File Explorer: the sync state from the handle's view, Pause and Resume ([`Engine::pause`] /
 //!   [`Engine::resume`]), Open at login through the shell's own autostart call (`Platform::set_autostart`, no
 //!   registry write of its own), the downloaded and kept sizes, Free up space
@@ -12,8 +17,6 @@
 //!   The limit on downloaded copies is stored through the engine ([`Engine::set_transfer_limits_for`]; eviction
 //!   works to it). Missing: a repair and a turn-off of File Explorer in the engine crate, a pane that can say "no
 //!   limit" (the engine's default), an engine that honours "Show sync status".
-//! - Storage: `storage()` holds only what the engine has (use, downloaded, kept); the per-kind use, the Trash size,
-//!   the previews' size and limit have no engine call.
 //! - Keep on this PC (a dialog of Sync and Storage): the folder tree with sizes and the kept set from the local
 //!   state, and Apply through the pin change ([`Engine::set_kept`]), refused while sync does not run.
 //! - Bandwidth: the two speed limits, read from and stored in this PC's settings file through the engine (its
@@ -75,7 +78,7 @@ use crate::frames::settings::bandwidth_data::{Bandwidth, Direction, History, Spe
 use crate::frames::settings::diagnostics::{Bundle, Diagnostics};
 use crate::frames::settings::drive::{
     Control, DriveSettings, Insights, InsightsData, Kept, KeptOnPc, KindShare, LargeFile, Limit, Repair, Storage,
-    SyncPane, SyncStatus,
+    SyncPane, SyncStatus, UseKind,
 };
 use crate::frames::settings::keep::{Folder, Keep};
 use crate::shell::platform::Platform;
@@ -135,6 +138,8 @@ pub trait DriveEngine: Send + Sync + 'static {
     fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused>;
     /// Used and quota bytes from Beebeeb. A network call: a worker's.
     fn storage_info(&self) -> Result<(i64, i64), String>;
+    /// How many items the account's Trash holds, as Beebeeb counts them (`Engine::trash_count_for`). BLOCKS.
+    fn trash_count(&self, session: SessionGeneration) -> Result<u64, String>;
     fn set_paused(&self, paused: bool) -> Result<(), String>;
     /// Sync runs for this handle. May wait: a worker's.
     fn syncing(&self) -> bool;
@@ -175,6 +180,9 @@ impl<C: CredentialStores> DriveEngine for Engine<C> {
     }
     fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
         Engine::local_state(self).and_then(|state| state.with(read))
+    }
+    fn trash_count(&self, session: SessionGeneration) -> Result<u64, String> {
+        self.trash_count_for(session).map_err(|e| format!("{e:?}"))
     }
     fn storage_info(&self) -> Result<(i64, i64), String> {
         Engine::storage_info(self)
@@ -239,6 +247,8 @@ enum Ask {
     /// The local sizes, the settings, Open at login and the folder tree.
     Read,
     Insights,
+    /// The Trash's item count, for Storage.
+    Trash,
     Pause(bool),
     OpenAtLogin(bool),
     FreeUp,
@@ -271,6 +281,8 @@ enum Answer {
     OpenAtLogin(Option<bool>),
     Keep(Keep),
     Insights(Insights, Option<(i64, i64)>),
+    /// The Trash's item count (`None`: Beebeeb did not say).
+    Trash(Option<u64>),
     /// A change that did not happen, in words the window says (P2-6).
     Refused(&'static str),
     /// Where a repair ended.
@@ -300,6 +312,8 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     on_pc: Option<OnThisPc>,
     open_at_login: Option<bool>,
     usage: Option<(i64, i64)>,
+    /// The Trash's item count as Beebeeb last said it (`None`: not read, or not said).
+    trash: Option<u64>,
     /// The Bandwidth pane's limits and traffic, as last read (`None`: not read yet, or not readable).
     bandwidth: Option<(TransferLimits, Option<History>)>,
     insights: Insights,
@@ -351,6 +365,7 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             on_pc: None,
             open_at_login: None,
             usage: None,
+            trash: None,
             bandwidth: None,
             insights: Insights::Loading,
             keep: Keep::Failed,
@@ -469,6 +484,29 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
         account.is_some() && account == self.seen.1
     }
 
+    /// Storage's rows by type: the insights' kinds as the account's use, largest first, only once they were read
+    /// for this account. Nothing is invented: no insights, no rows.
+    fn use_kinds(&self, mine: bool) -> Vec<(UseKind, &'static str, String)> {
+        let Insights::Ready(data) = &self.insights else {
+            return Vec::new();
+        };
+        if !mine || self.insights_at.is_none() {
+            return Vec::new();
+        }
+        data.kinds
+            .iter()
+            .map(|k| {
+                let (kind, title) = match k.name.as_str() {
+                    "Media" => (UseKind::Photos, "Photos and media"),
+                    "Documents" => (UseKind::Files, "Documents"),
+                    _ => (UseKind::Files, "Other files"),
+                };
+                let size = k.says.split(" \u{b7} ").next().unwrap_or_default().to_string();
+                (kind, title, size)
+            })
+            .collect()
+    }
+
     fn ask_insights(&mut self) {
         if !self.insights_reading {
             self.insights_reading = self.send(Ask::Insights);
@@ -574,7 +612,7 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
         });
     };
     let refuse = |words| send(Answer::Refused(words));
-    if !matches!(ask, Ask::Read | Ask::Insights | Ask::Bandwidth) && !still_for(engine, &account) {
+    if !matches!(ask, Ask::Read | Ask::Insights | Ask::Trash | Ask::Bandwidth) && !still_for(engine, &account) {
         // The account that asked has left, or the vault is locked: nothing is changed for whoever is here now.
         log("drive settings: a change was not made (the account that asked is not signed in)");
         return refuse(CHANGE_LOCKED);
@@ -585,6 +623,7 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
             let (insights, usage) = insights(engine, &account);
             send(Answer::Insights(insights, usage));
         }
+        Ask::Trash => send(Answer::Trash(engine.trash_count(session).ok())),
         Ask::Pause(paused) => {
             if engine.set_paused(paused).is_err() {
                 log("drive settings: sync was not paused or resumed (the settings file)");
@@ -678,9 +717,10 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
 }
 
 impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
-    /// Storage insights only: every other pane keeps the shell's frame (the module's doc says why).
+    /// Every pane but Thumbnails and previews while its host is unbound answers (the module's doc says which rows
+    /// of Storage stay empty).
     fn wired(&self, pane: Pane) -> bool {
-        matches!(pane, Pane::Insights | Pane::Sync | Pane::Bandwidth | Pane::Diagnostics)
+        matches!(pane, Pane::Storage | Pane::Insights | Pane::Sync | Pane::Bandwidth | Pane::Diagnostics)
             || (pane == Pane::Previews && self.previews.bound())
     }
 
@@ -707,6 +747,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             self.on_pc = None;
             self.open_at_login = None;
             self.usage = None;
+            self.trash = None;
             self.bandwidth = None;
             self.keep = Keep::Failed;
             self.insights_at = None;
@@ -724,7 +765,12 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             // Only what the open pane shows is read again for the new account.
             match self.open {
                 Some(Pane::Insights) => self.ask_insights(),
-                Some(Pane::Sync | Pane::Storage) => self.ask_local(),
+                Some(Pane::Storage) => {
+                    self.ask_local();
+                    self.ask_insights();
+                    self.send(Ask::Trash);
+                }
+                Some(Pane::Sync) => self.ask_local(),
                 Some(Pane::Bandwidth) => {
                     self.send(Ask::Bandwidth);
                 }
@@ -766,6 +812,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
                     }
                 }
                 _ if !mine => {}
+                Answer::Trash(count) => self.trash = count,
                 Answer::Bandwidth(read) => self.bandwidth = read,
                 Answer::OnThisPc(on_pc) => self.on_pc = on_pc,
                 Answer::OpenAtLogin(on) => self.open_at_login = on,
@@ -790,7 +837,11 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         if matches!(pane, Pane::Sync | Pane::Storage) {
             self.ask_local();
         }
-        if pane == Pane::Insights {
+        // Storage also shows the account's use and its kinds (the insights' read) and the Trash's count.
+        if pane == Pane::Storage {
+            self.send(Ask::Trash);
+        }
+        if matches!(pane, Pane::Insights | Pane::Storage) {
             let fresh = self.insights_at.is_some_and(|at| at.elapsed() < INSIGHTS_FRESH_FOR) && self.mine();
             if !fresh {
                 self.ask_insights();
@@ -823,8 +874,11 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
                     .map_or(0.0, |(used, quota)| (used as f64 / quota as f64).clamp(0.0, 1.0) as f32),
                 0.0,
             ],
-            kinds: Vec::new(),
-            trash: String::new(),
+            kinds: self.use_kinds(mine),
+            trash: self
+                .trash
+                .filter(|_| mine)
+                .map_or_else(String::new, |n| count_words(n as usize, "item", "items")),
             downloaded: KeptOnPc {
                 used: on_pc.map(|p| size_words(p.downloaded)).unwrap_or_default(),
                 limit: Limit {
