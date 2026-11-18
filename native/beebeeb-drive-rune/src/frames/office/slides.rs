@@ -689,18 +689,18 @@ fn window_with(
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(viewers::office::toolbar(s, ui, false, &t))
-        .child(bar(deck, &t))
-        .child(
-            row()
-                .key("viewer-row")
-                .grow(1.0)
-                .min_h(0.0)
-                .w_full()
-                .child(filmstrip(deck, thumb, &t))
-                .child(stage(deck, stage_page, &t)),
-        )
-        .child(status(deck, &t));
+        .child(viewers::office::toolbar(s, ui, false, &t));
+    let body = row()
+        .key("viewer-row")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .child(filmstrip(deck, thumb, &t))
+        .child(stage(deck, stage_page, &t));
+    let main = match ui.office.edit.as_ref().map(|e| e.kind) {
+        Some(kind) => main.child(super::edit::chrome(s, cx, ui, kind, body)),
+        None => main.child(bar(deck, &t)).child(body).child(status(deck, &t)),
+    };
     col()
         .key("window")
         .role("window")

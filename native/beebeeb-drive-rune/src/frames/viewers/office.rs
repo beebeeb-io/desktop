@@ -167,6 +167,8 @@ pub struct OfficeUi {
     pub outline: bool,
     /// The question after a save, or the command search (`office_over.rs`).
     pub over: Option<super::office_over::Over>,
+    /// The live editor's state (`frames/office/edit`); `None` while the file is only viewed.
+    pub edit: Option<crate::frames::office::edit::EditUi>,
 }
 
 impl Default for OfficeUi {
@@ -175,6 +177,7 @@ impl Default for OfficeUi {
             tab: Tab::Home,
             outline: true,
             over: None,
+            edit: None,
         }
     }
 }

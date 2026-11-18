@@ -745,7 +745,10 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pic
     if doc.view.older_format {
         main = main.child(note(&t));
     }
-    main = main.child(bar(doc, &t)).child(body).child(status(doc, &t));
+    main = match ui.office.edit.as_ref().map(|e| e.kind) {
+        Some(kind) => main.child(super::edit::chrome(s, cx, ui, kind, body)),
+        None => main.child(bar(doc, &t)).child(body).child(status(doc, &t)),
+    };
     let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
         row()
             .key("body")
