@@ -789,16 +789,13 @@ fn menus_toasts_and_the_path_have_their_roles_and_names() {
     assert_eq!(info(&rt, "rows").label.as_deref(), Some("Lisbon trip"));
 }
 
-/// Two presses of a double-click with a frame drawn between them, as in a window (the selection the
-/// first press made is already on screen when the second goes down).
+/// A double-click as in a window: the pointer stays where it is, and a frame is drawn between the two
+/// presses (the first one's selection is on screen, and moving, when the second goes down).
 fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
     let (x, y) = centre(rt, key);
-    eprintln!("DC {key} {:?} {:?}", info(rt, key).path, info(rt, key).rect);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(0.016);
-    for e in rt.elements() { if e.key.as_deref().is_some_and(|k| k.starts_with("row-0")) { eprintln!("E {:?} exiting={} rect={:?} path={}", e.key, e.exiting, e.rect, e.path); } }
-    let (x, y) = centre(rt, key);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(0.016);
@@ -806,11 +803,12 @@ fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
 }
 
 #[test]
-fn a_double_click_on_a_folder_opens_it_again_after_going_into_another() {
+fn a_double_click_on_a_folder_opens_it_when_the_first_click_makes_the_details_pane_appear() {
     let mut rt = runtime_of(init());
     double_click_with_frame(&mut rt, "row-3-date");
     assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Lisbon trip"));
-    assert_eq!(names(&rt)[0], "Day 1");
-    double_click_with_frame(&mut rt, "row-0-date");
+    assert!(rt.state.selected.is_none(), "a folder just opened has nothing selected");
+    // The pointer is on the far column; the pane the first click opens must not take that place.
+    double_click_with_frame(&mut rt, "row-0-pc");
     assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Day 1"), "the second double-click opens Day 1");
 }
