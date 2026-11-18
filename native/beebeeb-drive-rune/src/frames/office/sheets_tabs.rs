@@ -3,8 +3,14 @@
 //! tabs (a press opens that sheet) and says how many sheets are not listed. The open sheet always has its tab in the bar.
 //! The board draws three tabs that fit, so it draws no "more" control: its look here (a plain tab's words, "N more") is
 //! this file's, named in the branch notes.
+//!
+//! An open workbook (`sheet_tabs_edit`): a double press on a tab renames the sheet (a text field in its place; Enter
+//! sends one `RenameSheet`, Escape keeps the name), and a dimmed "+" says adding sheets is not there yet.
 
-use rune::{Color, El, Tx, col, el, row};
+use std::cell::UnsafeCell;
+
+use beebeeb_office_protocol::office::EditOp;
+use rune::{Color, El, Key, KeyEvent, TextEdit, Tx, col, el, row, text_input};
 
 use super::sheets_scroll::follow;
 use super::{Cell, SheetView, TAB, TAB_ON, TABS_H, fitted};
@@ -69,6 +75,159 @@ pub fn shown_tabs(view: &SheetView, room: f32) -> (Vec<usize>, Vec<usize>) {
     (shown, hidden)
 }
 
+/// What the "+" says.
+pub const ADD_WORDS: &str = "Adding sheets isn't available in this editor yet";
+/// The longest name a sheet has, and the characters it cannot have.
+const NAME_MAX: usize = 31;
+const NAME_BAD: [char; 7] = [':', '\\', '/', '?', '*', '[', ']'];
+
+struct Renaming {
+    /// The tab being renamed.
+    tab: Option<usize>,
+    edit: TextEdit,
+}
+
+thread_local! {
+    /// The tab being renamed and its text. Rune's text field reaches its `TextEdit` through a function of the app
+    /// state, which has no place for one of this file's; it stays with the window's thread (as `edit/sheet.rs`'s grid).
+    static RENAME: UnsafeCell<Renaming> = UnsafeCell::new(Renaming { tab: None, edit: TextEdit::new("") });
+}
+
+fn with_rename<R>(f: impl FnOnce(&mut Renaming) -> R) -> R {
+    // SAFETY: thread-local, and every use is one short call of `f`, which never calls `with_rename` again.
+    RENAME.with(|r| f(unsafe { &mut *r.get() }))
+}
+
+/// The tab being renamed, if one is.
+pub fn renaming() -> Option<usize> {
+    with_rename(|r| r.tab)
+}
+
+/// The words typed so far (a copy).
+pub fn typed() -> String {
+    with_rename(|r| r.edit.text.clone())
+}
+
+/// Drop a rename in progress (the file closed, or the bar is not editable).
+pub fn reset() {
+    with_rename(|r| {
+        if r.tab.is_some() || !r.edit.text.is_empty() {
+            r.edit.clear();
+            r.edit.focused = false;
+        }
+        r.tab = None;
+    });
+}
+
+fn rename_edit(_: &mut State) -> &mut TextEdit {
+    // SAFETY: as `with_rename`: Rune takes this borrow for one edit and lets it go before it calls anything of ours.
+    RENAME.with(|r| unsafe { &mut (*r.get()).edit })
+}
+
+fn say(s: &mut State, words: &str) {
+    if let Some(ui) = viewers::ui(s) {
+        ui.toast = Some(words.to_string());
+    }
+}
+
+/// Why `name` cannot be a sheet's name, in words; `None`: it can. `others`: the other sheets' names.
+pub fn name_problem(name: &str, others: &[&str]) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("A sheet needs a name");
+    }
+    if name.chars().count() > NAME_MAX {
+        return Some("A sheet name has at most 31 characters");
+    }
+    if name.contains(NAME_BAD) {
+        return Some("A sheet name can't have : \\ / ? * [ ]");
+    }
+    if others.iter().any(|o| o.eq_ignore_ascii_case(name) || o.to_lowercase() == name.to_lowercase()) {
+        return Some("Another sheet has that name");
+    }
+    None
+}
+
+/// Start renaming tab `i`: its field holds the name.
+fn begin_rename(s: &mut State, tx: &mut Tx, i: usize) {
+    let Some(Body::Sheet(view)) = viewers::ui(s).map(|ui| &mut ui.file.body) else {
+        return;
+    };
+    let Some(name) = view.tabs.get(i).cloned() else { return };
+    view.more.open = false;
+    with_rename(|r| {
+        r.edit = TextEdit::new(name);
+        r.edit.focused = true;
+        r.tab = Some(i);
+    });
+    tx.instant();
+    tx.focus(RENAME_KEY, false);
+}
+
+/// Keep the typed name: one `RenameSheet`. A name that is not one stays in the field, with words.
+fn commit_rename(s: &mut State, tx: &mut Tx) {
+    let Some(i) = renaming() else { return };
+    let typed = typed();
+    let name = typed.trim().to_string();
+    let Some(Body::Sheet(view)) = viewers::ui(s).map(|ui| &mut ui.file.body) else {
+        reset();
+        return;
+    };
+    let was = view.tabs.get(i).cloned().unwrap_or_default();
+    if name == was {
+        reset();
+        return;
+    }
+    let others: Vec<&str> = view
+        .tabs
+        .iter()
+        .enumerate()
+        .filter(|(n, _)| *n != i)
+        .map(|(_, t)| t.as_str())
+        .collect();
+    if let Some(words) = name_problem(&name, &others) {
+        say(s, words);
+        return;
+    }
+    let sheet = u32::try_from(i).unwrap_or(u32::MAX);
+    tx.instant();
+    let taken = match viewers::ui(s) {
+        Some(ui) => {
+            let (source, id) = ui.edit_source();
+            let id = id.to_string();
+            source.edit(&id, EditOp::RenameSheet { sheet, name: name.clone() })
+        }
+        None => false,
+    };
+    if !taken {
+        say(s, "Renaming a sheet isn't available in this editor yet");
+        reset();
+        return;
+    }
+    if let Some(Body::Sheet(view)) = viewers::ui(s).map(|ui| &mut ui.file.body)
+        && let Some(tab) = view.tabs.get_mut(i)
+    {
+        *tab = name;
+    }
+    reset();
+}
+
+fn rename_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    match ev.key {
+        Key::Escape => {
+            reset();
+            true
+        }
+        Key::Enter => {
+            commit_rename(s, tx);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The text field a tab becomes while it is renamed.
+const RENAME_KEY: &str = "edit-sheet-tab-name";
+
 /// A press that opens sheet `i`: its tab, its first row and column in view, the menu closed, the viewports at the top.
 fn open_sheet(i: usize) -> impl Fn(&mut State, &mut Tx) + 'static {
     move |s: &mut State, tx: &mut Tx| {
@@ -88,9 +247,26 @@ fn set_more_open(s: &mut State, open: bool) {
     }
 }
 
-fn tab(view: &SheetView, i: usize, live: bool, t: &Theme) -> El {
+fn tab(view: &SheetView, i: usize, live: bool, editing: bool, t: &Theme) -> El {
     let name = &view.tabs[i];
     let on = i == view.active;
+    if editing && renaming() == Some(i) {
+        return text_input(&with_rename(|r| r.edit.clone()), TAB_ON)
+            .key(RENAME_KEY)
+            .label("Sheet name")
+            .single_line()
+            .color(t.text)
+            .caret(t.accent_deep, t.selection)
+            .on_edit(rename_edit)
+            .on_input_key(rename_key)
+            .h(22.0)
+            .px(TAB_PAD)
+            .w(tab_w(&typed(), true).max(80.0))
+            .radius(5.0)
+            .fill(t.paper)
+            .border(2.0, t.text)
+            .border_layout();
+    }
     // The open sheet is a pill: the content fill, a hairline ring, 22 high, 5 round. The others are plain words.
     let mut tab = el()
         .key(format!("sh-tab-{i}"))
@@ -115,6 +291,11 @@ fn tab(view: &SheetView, i: usize, live: bool, t: &Theme) -> El {
             .focusable(true)
             .cursor(rune::Cursor::Pointer)
             .on_press_tx(open_sheet(i));
+    }
+    if editing {
+        tab = tab
+            .focusable(true)
+            .on_double_press_tx(move |s: &mut State, tx: &mut Tx| begin_rename(s, tx, i));
     }
     tab
 }
@@ -173,6 +354,16 @@ fn menu(view: &SheetView, hidden: &[usize], t: &Theme) -> El {
 
 /// The tabs' bar. `room`: the bar's width as the last frame laid it out (`None` on a first build: every tab is drawn).
 pub(super) fn sheet_tabs(view: &SheetView, live: bool, room: Option<f32>, t: &Theme) -> El {
+    sheet_tabs_edit(view, live, room, false, t)
+}
+
+/// [`sheet_tabs`] for a workbook that may be open for editing (`editing`): a double press renames a tab, and a dimmed "+"
+/// ends the bar.
+pub fn sheet_tabs_edit(view: &SheetView, live: bool, room: Option<f32>, editing: bool, t: &Theme) -> El {
+    let editing = editing && live;
+    if !editing {
+        reset();
+    }
     let mut tabs = row()
         .key("sh-tabs")
         .role("tablist")
@@ -190,13 +381,13 @@ pub(super) fn sheet_tabs(view: &SheetView, live: bool, room: Option<f32>, t: &Th
         _ => ((0..view.tabs.len()).collect(), Vec::new()),
     };
     for &i in &shown {
-        tabs = tabs.child(tab(view, i, live, t));
+        tabs = tabs.child(tab(view, i, live, editing, t));
     }
     let behind = u32::try_from(hidden.len())
         .unwrap_or(u32::MAX)
         .saturating_add(view.more.unnamed);
     if !live || behind == 0 {
-        return tabs;
+        return if editing { tabs.child(add_sheet(t)) } else { tabs };
     }
     let words = more_words(behind);
     let open = view.more.open;
@@ -219,8 +410,27 @@ pub(super) fn sheet_tabs(view: &SheetView, live: bool, room: Option<f32>, t: &Th
             .on_press(move |s: &mut State| set_more_open(s, !open))
             .child(fitted("sh-tab-more-t", &words, TAB, t.text_tertiary)),
     );
+    if editing {
+        tabs = tabs.child(add_sheet(t));
+    }
     if open {
         tabs = tabs.child(menu(view, &hidden, t));
     }
     tabs
+}
+
+/// The "+": there to be seen, dimmed; a press says why nothing happens.
+fn add_sheet(t: &Theme) -> El {
+    el().key("sh-tab-add")
+        .role("button")
+        .label("Add sheet")
+        .description(ADD_WORDS)
+        .help(ADD_WORDS)
+        .h(22.0)
+        .px(TAB_PAD)
+        .center()
+        .radius(5.0)
+        .focusable(true)
+        .on_press(|s: &mut State| say(s, ADD_WORDS))
+        .child(fitted("sh-tab-add-t", "+", TAB, t.text_quaternary))
 }

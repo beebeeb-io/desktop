@@ -41,7 +41,8 @@ pub mod sheets_fixture;
 /// The group's board frames and the scene that shows each (`frames::scenes`).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1508", |s| viewers::set_scene(s, "DW-1508")),
-    ("DW-1559", placeholder::scene),
+    ("DW-1508e", super::edit::sheet_ribbon::scene),
+    ("DW-1559", super::edit::sheet_ribbon::scene),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1022,10 +1023,10 @@ mod tests {
         let rt = runtime_of(state, false);
         assert!(find(&rt, "rib").is_none(), "a viewer has no ribbon");
         let row_1559 = FRAMES.iter().find(|(id, _)| *id == "DW-1559").expect("the DW-1559 row");
-        assert_eq!(
+        assert_ne!(
             row_1559.1 as usize,
             placeholder::scene as usize,
-            "DW-1559 is a 0.9.1 frame"
+            "DW-1559 is the sheet ribbon's scene (w04-ui-sheet-ribbon)"
         );
     }
 
