@@ -451,6 +451,14 @@ impl<C: CredentialStores> Engine<C> {
         gate::decide_gate(present || unlocked, unlocked, stored, false)
     }
 
+    /// The window's gate buttons (Try again on the credential-store screen, Check again on the no-plan screen):
+    /// read the gate once more and publish it, so `view().gate` changes when the store answers or the plan arrived.
+    /// Never the start path: [`Engine::restore`] is not run again.
+    pub fn recheck_gate(&self) -> GateState {
+        self.publish();
+        self.view.read().gate
+    }
+
     /// The signed-in account's email, as the server spelled it.
     pub fn account_email(&self) -> Option<String> {
         self.acct.auth_email.lock().ok().and_then(|email| email.clone())
