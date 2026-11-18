@@ -811,5 +811,5 @@ fn a_double_click_on_a_folder_opens_it_when_the_first_click_makes_the_details_pa
     assert!(rt.state.selected.is_none(), "a folder just opened has nothing selected");
     // The pointer is right of where the pane will stand; the pane the first click opens must not take that place.
     double_click_with_frame(&mut rt, "row-0", Some(1100.0));
-    assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Day 1"), "the second double-click opens Day 1");
+    assert_eq!(rt.state.listing.folder.name, "Day 1", "the second double-click opens Day 1");
 }
