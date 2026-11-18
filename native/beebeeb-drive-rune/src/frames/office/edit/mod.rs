@@ -136,5 +136,5 @@ pub fn chrome(_s: &State, cx: &mut Cx<State>, ui: &Ui, kind: EditKind, body: El)
         .w_full()
         .child(ribbon)
         .child(body)
-        .child(viewers::office::status(&ui.file, None, keeping, &t))
+        .child(viewers::office::status_live(ui, keeping, &t))
 }
