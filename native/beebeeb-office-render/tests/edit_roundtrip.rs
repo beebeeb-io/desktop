@@ -6,7 +6,7 @@
 mod common;
 
 use beebeeb_office_protocol::office::{
-    CellRange, Cells, Copy as CopyAsk, Edit, EditKind, EditOp, ErrorCode, Message,
+    CellRange, Cells, Copy as CopyAsk, Edit, EditKind, EditOp, Message,
 };
 use common::{FakeMemory, open_real_edit, save_real};
 
