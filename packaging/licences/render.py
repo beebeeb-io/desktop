@@ -8,6 +8,7 @@ Deterministic: the same inputs give the same bytes (sorted; no dates), so `gener
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -50,6 +51,37 @@ def git_sources(pkgs):
     return found
 
 
+LICENCE_FILE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE")
+
+
+def git_crate_licences(root: Path, missing):
+    """For crates cargo-about skipped (publish = false git dependencies): (licence expression, [(file name, text)])
+    from `cargo metadata` and the licence files in the crate's folder and the folders above it, up to the git checkout's
+    top. A crate with neither an expression nor a file is an error: someone has to say what it is."""
+    found = {}
+    wanted = set(missing)
+    for _label, rel in LOCKS:
+        manifest = root / rel.replace("Cargo.lock", "Cargo.toml")
+        out = subprocess.run(["cargo", "metadata", "--locked", "--format-version", "1", "--manifest-path", str(manifest)],
+                             check=True, capture_output=True, text=True).stdout
+        for p in json.loads(out)["packages"]:
+            key = (p["name"], p["version"])
+            if key not in wanted or key in found:
+                continue
+            here = Path(p["manifest_path"]).parent
+            files = []
+            d = here
+            for _ in range(6):
+                for f in sorted(d.iterdir()):
+                    if f.is_file() and f.name.upper().startswith(LICENCE_FILE_PREFIXES) and f.suffix.lower() in ("", ".txt", ".md"):
+                        files.append((f.name, f.read_text(encoding="utf-8", errors="replace").strip("\n")))
+                if (d / ".git").exists() or d == d.parent:
+                    break
+                d = d.parent
+            found[key] = (p.get("license") or "", files, p.get("repository") or "")
+    return found
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
@@ -74,8 +106,10 @@ def main() -> int:
     for _label, rel in LOCKS:
         all_pkgs += lock_packages(root / rel)
     missing = sorted({(n, v) for n, v, _s in all_pkgs} - listed)
-    if missing:
-        sys.exit(f"render.py: {len(missing)} crate(s) of the Cargo.lock graphs are not in the cargo-about output: {missing}")
+    skipped = git_crate_licences(root, missing) if missing else {}
+    unknown = [k for k in missing if k not in skipped or not (skipped[k][0] or skipped[k][1])]
+    if unknown:
+        sys.exit(f"render.py: no licence found for {unknown}: add a text under packaging/licences/texts and a rule here")
 
     o = []
     w = o.append
@@ -174,6 +208,24 @@ def main() -> int:
             w(f"  {name} {version}" + (f"  <{repo}>" if repo else ""))
         w("")
         w(text)
+    if skipped:
+        w("")
+        w(SUB)
+        w(f"5.{len(order) + 1}  Crates fetched from git repositories (not on crates.io): {len(skipped)} crate(s)")
+        w(SUB)
+        w("The licence each declares, and the licence files found with it in its repository, exactly as shipped there.")
+        by_files = {}
+        for (name, version), (expr, files, repo) in sorted(skipped.items()):
+            by_files.setdefault((expr, tuple(files)), []).append((name, version))
+        for (expr, files), crates in sorted(by_files.items(), key=lambda kv: kv[1][0]):
+            w("")
+            w(f"Licence: {expr or 'not declared in Cargo.toml; the files below are the repository\'s'}")
+            for name, version in crates:
+                w(f"  {name} {version}")
+            for fname, text in files:
+                w("")
+                w(f"[{fname}]")
+                w(text)
     w("")
     w("")
     w("6. INDEX OF EVERY CRATE OF THE THREE PROGRAMS")

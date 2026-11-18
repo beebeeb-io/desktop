@@ -26,11 +26,7 @@ accepted = [
 ignore-dev-dependencies = false
 ignore-build-dependencies = false
 workarounds = ["ring"]
-# Our own two crates have no `license` field (Cargo.toml is not ours to change here): say what they are, with the repo's text.
-[beebeeb-engine.clarify]
-license = "AGPL-3.0-or-later"
-files = [{ path = "../../LICENSE", checksum = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0" }]
-
-[beebeeb-drive-rune.clarify]
-license = "AGPL-3.0-or-later"
-files = [{ path = "../../LICENSE", checksum = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0" }]
+# Crates marked publish = false are not listed by cargo-about: ours (section 1 of the notice covers them, AGPL-3.0-or-later)
+# and the git dependencies that do the same (desktop-office, FilmCraft, ...). render.py reads the git ones' licence from
+# `cargo metadata` and the files beside them, so none goes unlisted, and fails when it finds none.
+private = { ignore = true }
