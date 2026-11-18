@@ -30,7 +30,7 @@ use super::super::{EditShips, HostEdit};
 use crate::State;
 use crate::engine_host::LiveEngine;
 use crate::engine_host::open::Opened;
-use crate::frames::files::{MenuKind, Toast};
+use crate::frames::files::Toast;
 use crate::frames::office::edit::{new_document, recovery};
 use crate::frames::viewers;
 use crate::frames::viewers::kinds::OfficeShips;
@@ -148,6 +148,8 @@ struct Window {
     edits: Edits,
     /// How many of `edits` an [`Window::open_in_the_editor`] already waited for.
     sessions: usize,
+    /// Makes a source as the window's route does.
+    make: Box<dyn Fn() -> Box<dyn viewers::source::ViewerSource>>,
     /// How often a file was opened in the viewer (no editing session).
     viewed: Arc<AtomicUsize>,
     state_path: PathBuf,
@@ -167,6 +169,39 @@ const ALL: OfficeShips = OfficeShips {
     xls: true,
     pptx: true,
 };
+
+/// The engine's own source with the editor on for this source and the helper a fake.
+fn source_of(
+    engine: &Arc<Engine<MemoryCredentials>>,
+    helper: &Fake,
+    template: &Fake,
+    edits: &Edits,
+    viewed: &Arc<AtomicUsize>,
+) -> Box<dyn viewers::source::ViewerSource> {
+    let mut source = EngineViewerSource::new(engine.clone());
+    source.office.on = true;
+    source.office.ships = ALL;
+    source.office.edit_on = true;
+    source.office.edits = EditShips {
+        docx: true,
+        xlsx: true,
+        pptx: true,
+    };
+    source.office.helper = || Some(PathBuf::from("beebeeb-office-render"));
+    let (fake, seen) = (helper.clone(), viewed.clone());
+    source.office.opener = Box::new(move |_, kind, _, _| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        fake.view(kind)
+    });
+    let (fake, log) = (helper.clone(), edits.clone());
+    source.office.edit_opener = Box::new(move |_, kind, bytes, _, _| {
+        log.lock().unwrap().push((kind, bytes.len()));
+        fake.editor(kind)
+    });
+    let fake = template.clone();
+    source.office.new_opener = Box::new(move |_, kind, _, _, _| fake.editor(kind));
+    Box::new(source)
+}
 
 fn window(tag: &str) -> Window {
     let (account, _) = FakeAccount::register(&format!("office-window-{tag}@example.eu"), PASSWORD, TEST_PHRASE);
@@ -232,37 +267,13 @@ fn window(tag: &str) -> Window {
     // The window's source is the engine's own, with the editor on for this source and the helper a fake.
     let (helper, template, edits) = (Fake::default(), Fake::default(), Edits::default());
     let viewed = Arc::new(AtomicUsize::new(0));
+    let makers;
     {
         let (engine, helper, template, edits, viewed) =
             (engine.clone(), helper.clone(), template.clone(), edits.clone(), viewed.clone());
-        viewers::wire(
-            &mut s,
-            Box::new(move || {
-                let mut source = EngineViewerSource::new(engine.clone());
-                source.office.on = true;
-                source.office.ships = ALL;
-                source.office.edit_on = true;
-                source.office.edits = EditShips {
-                    docx: true,
-                    xlsx: true,
-                    pptx: true,
-                };
-                source.office.helper = || Some(PathBuf::from("beebeeb-office-render"));
-                let (fake, seen) = (helper.clone(), viewed.clone());
-                source.office.opener = Box::new(move |_, kind, _, _| {
-                    seen.fetch_add(1, Ordering::SeqCst);
-                    fake.view(kind)
-                });
-                let (fake, log) = (helper.clone(), edits.clone());
-                source.office.edit_opener = Box::new(move |_, kind, bytes, _, _| {
-                    log.lock().unwrap().push((kind, bytes.len()));
-                    fake.editor(kind)
-                });
-                let fake = template.clone();
-                source.office.new_opener = Box::new(move |_, kind, _, _, _| fake.editor(kind));
-                Box::new(source)
-            }),
-        );
+        let make = move || source_of(&engine, &helper, &template, &edits, &viewed);
+        makers = Some(Box::new(make.clone()) as Box<dyn Fn() -> Box<dyn viewers::source::ViewerSource>>);
+        viewers::wire(&mut s, Box::new(make));
     }
 
     // The main window's app as `shell::run` builds it (its poll, its keys, its input method hook), headless.
@@ -285,6 +296,7 @@ fn window(tag: &str) -> Window {
         template,
         edits,
         sessions: 0,
+        make: makers.expect("the source's maker"),
         viewed,
         state_path,
         root,
@@ -518,14 +530,13 @@ fn new_document_from_the_files_menu_makes_a_new_file_on_the_server() {
     w.sign_in();
     assert_eq!(w.account.live_file_ids(), [DOC.to_string()]);
 
-    w.rt.update(|s, tx| {
-        s.toggle_menu(MenuKind::New);
-        let at = s
-            .menu_entries(MenuKind::New)
-            .iter()
-            .position(|entry| entry.id() == Some("new-document"))
-            .expect("New document is in the New menu");
-        s.pick_menu(at, tx);
+    // Sync is off in this harness, so Files' New takes nothing here (the menu's press and the poll that opens DW-1558
+    // are held by `shell::intents_tests`). The dialog is put up as `new_file::begin_document` puts it up, on the
+    // window's own source.
+    let source = (w.make)();
+    w.rt.update(|s, _| {
+        let doc = new_document::Doc::new(Some(source));
+        s.viewer.new_file = Some(viewers::new_file::NewFile::document(None, viewers::new_file::Kind::Word, doc));
     });
     w.settle();
     let step = w.rt.state.viewer.new_file.as_ref().map(|dialog| dialog.step);
@@ -567,8 +578,8 @@ fn an_editing_this_pc_kept_is_said_after_unlock_and_restored_from_the_offer() {
     assert_eq!(w.rt.state.actions.toast, None, "nothing kept: nothing said at sign-in");
     w.open_in_the_editor();
 
-    // The helper's snapshot of an edited document (the host asks for one by itself while there are edits).
-    w.helper.answer(HostEdit::Edited(Box::new(edited(1, Dirty::All))));
+    // The helper's snapshot of the document (the host asks for one by itself while there are edits). The window's
+    // editor holds nothing unsaved, so a lock closes the document (an unsaved one stays open across it, as a text's).
     w.helper.answer(HostEdit::Saved {
         id: 9_999,
         purpose: Purpose::Snapshot,
