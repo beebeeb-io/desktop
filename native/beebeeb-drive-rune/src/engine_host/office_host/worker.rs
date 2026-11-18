@@ -259,6 +259,7 @@ impl<S: Starter> Worker<S> {
                 Input::Close => break,
                 Input::Frame { link, frame } => self.on_frame(link, frame),
                 Input::Command(command) => self.on_command(command),
+                Input::Flush => self.on_flush(),
             }
         }
         self.finish();
@@ -426,6 +427,8 @@ impl<S: Starter> Worker<S> {
 
     /// "Renderer stopped". The document's section stays for Try again; without one it goes now.
     fn stopped(&mut self, why: Stop) {
+        // A snapshot a lock waits for can no longer come from this helper.
+        self.flush_complete();
         // An editing session whose helper exited goes on with a new one (or read-only).
         if why == Stop::Exited && self.try_restart() {
             return;

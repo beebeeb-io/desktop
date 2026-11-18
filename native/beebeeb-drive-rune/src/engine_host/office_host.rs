@@ -43,8 +43,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::office_scratch::ScratchStore;
 use beebeeb_office_protocol::check;
@@ -133,6 +133,30 @@ static PROCESS: Registry = Registry::new();
 /// Ends every live helper of the process: the hook for a lock and a sign-out.
 pub fn kill_all(why: CloseWhy) {
     kill_all_in(&PROCESS, why);
+}
+
+/// How long a lock waits, in all, for the open editors' unsaved work to be sealed. One bound for every document: the
+/// lock itself is never held longer, and what is not sealed by then is not kept.
+pub const LOCK_FLUSH_BUDGET: Duration = Duration::from_millis(1_500);
+
+/// What the engine's session end calls (`office_session_end`): a lock seals every open editor's unsaved work within
+/// [`LOCK_FLUSH_BUDGET`]; a sign-out ends every helper first (no snapshot lands after the wipe that follows).
+pub fn on_session_end(ending: beebeeb_engine::app::office_session_end::SessionEnding) {
+    use beebeeb_engine::app::office_session_end::SessionEnding;
+    match ending {
+        SessionEnding::Lock => flush_all_in(&PROCESS, LOCK_FLUSH_BUDGET),
+        SessionEnding::SignOut => kill_all(CloseWhy::SignedOut),
+    }
+}
+
+/// Every live editing host of `registry` seals its unsaved work (all asked at once, one deadline for all).
+pub(crate) fn flush_all_in(registry: &Registry, budget: Duration) {
+    let deadline = Instant::now() + budget;
+    let live: Vec<Arc<Shared>> = lock(&registry.hosts).iter().filter_map(Weak::upgrade).collect();
+    let asked: Vec<&Arc<Shared>> = live.iter().filter(|shared| shared.flush_begin()).collect();
+    for shared in asked {
+        shared.flush_wait(deadline);
+    }
 }
 
 /// The shell's session end (a lock, a sign-out, another account): every helper of the process is killed and what
@@ -538,6 +562,19 @@ struct Shared {
     wiped: AtomicUsize,
     /// Payload bytes of helper frames wiped because nobody handled them (a test hook).
     frames_wiped: AtomicUsize,
+    /// The snapshot flush a lock asks for ([`flush_all_in`]): where the worker seals, and when it is done.
+    flush: (Mutex<Flush>, Condvar),
+}
+
+/// Where a snapshot the worker takes for a lock is sealed: the file's recovery blob (called on the worker's thread).
+pub type FlushSink = Arc<dyn Fn(&Zeroizing<Vec<u8>>) + Send + Sync>;
+
+#[derive(Default)]
+struct Flush {
+    sink: Option<FlushSink>,
+    /// A waiter is waiting: the worker may seal. Cleared when the waiter leaves, so a late answer seals nothing.
+    armed: bool,
+    done: bool,
 }
 
 struct Inner {
@@ -569,6 +606,56 @@ enum Out {
 }
 
 impl Shared {
+    /// The worker is done with the flush that was asked (sealed, nothing to seal, or it cannot): wakes the waiter.
+    fn flush_complete(&self) {
+        let (state, wake) = &self.flush;
+        lock(state).done = true;
+        wake.notify_all();
+    }
+
+    /// The sink, while a waiter waits.
+    fn flush_sink(&self) -> Option<FlushSink> {
+        let state = lock(&self.flush.0);
+        state.armed.then(|| state.sink.clone()).flatten()
+    }
+
+    /// Ask the worker to seal this document's unsaved work. `false`: nothing to wait for (no sink, closed, no worker).
+    fn flush_begin(&self) -> bool {
+        if lock(&self.inner).closed.is_some() {
+            return false;
+        }
+        {
+            let mut state = lock(&self.flush.0);
+            if state.sink.is_none() {
+                return false;
+            }
+            state.armed = true;
+            state.done = false;
+        }
+        if self.commands.send(Input::Flush).is_err() {
+            self.flush_end();
+            return false;
+        }
+        true
+    }
+
+    /// Wait for the worker's answer until `deadline`; whatever it did not do by then is left undone for good.
+    fn flush_wait(&self, deadline: Instant) {
+        let (state, wake) = &self.flush;
+        let mut guard = lock(state);
+        while !guard.done {
+            let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else {
+                break;
+            };
+            guard = wake.wait_timeout(guard, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+        guard.armed = false;
+    }
+
+    fn flush_end(&self) {
+        lock(&self.flush.0).armed = false;
+    }
+
     /// Kills the helper through the shared handle, wipes the state and every answer not taken, tells the worker,
     /// wakes the window. Never waits for the worker. The first close's reason stays.
     fn close(&self, why: CloseWhy) {
@@ -591,6 +678,7 @@ impl Shared {
         if let Some(helper) = helper {
             helper.end();
         }
+        self.flush_complete();
         // The document's section, while its worker waits for a start: dropped (and wiped) now.
         drop(parked);
         let mut wiped = wipe_state(&mut state);
@@ -662,6 +750,8 @@ impl Shared {
         let mut inner = lock(&self.inner);
         inner.helper = None;
         inner.worker_ended = true;
+        drop(inner);
+        self.flush_complete();
     }
 
     /// Wipes a helper frame nobody handles, and counts its payload.
@@ -689,6 +779,8 @@ enum Input {
         frame: Result<Received, FrameError>,
     },
     Command(Command),
+    /// A lock is coming: seal the unsaved work now ([`Shared::flush_begin`]).
+    Flush,
     Close,
 }
 
@@ -768,6 +860,11 @@ impl OfficeHost {
             helper: helper.to_path_buf(),
         };
         open_with(starter, registry, Timeouts::PRODUCTION, kind, bytes, wake)
+    }
+
+    /// Where this editing session's unsaved work is sealed when a lock comes ([`on_session_end`]).
+    pub fn set_flush_sink(&mut self, sink: FlushSink) {
+        lock(&self.shared.flush.0).sink = Some(sink);
     }
 
     /// What the window shows, as a copy. A close from another thread (a lock, a sign-out) makes it `Closed` at once;
@@ -1093,6 +1190,7 @@ pub(crate) fn open_mode_held<S: Starter>(
         wake,
         wiped: AtomicUsize::new(0),
         frames_wiped: AtomicUsize::new(0),
+        flush: (Mutex::new(Flush::default()), Condvar::new()),
     });
     let host = OfficeHost {
         shared: shared.clone(),

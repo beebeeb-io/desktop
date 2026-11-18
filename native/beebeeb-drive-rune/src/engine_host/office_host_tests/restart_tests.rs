@@ -285,3 +285,75 @@ fn steady_typing_still_snapshots_every_so_often() {
     }
     assert!(snapshots(&got) >= 2, "{} edits, snapshots: {}", typing.load(SeqCst), snapshots(&got));
 }
+
+// ---- the lock's flush (`flush_all_in`): unsaved work is sealed on the worker's thread before the session ends ----
+
+fn collecting(host: &mut OfficeHost) -> Arc<std::sync::Mutex<Vec<Vec<u8>>>> {
+    let kept: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::default();
+    let sink = kept.clone();
+    host.set_flush_sink(Arc::new(move |bytes| sink.lock().unwrap().push(bytes.to_vec())));
+    kept
+}
+
+#[test]
+fn a_lock_seals_what_was_typed_before_any_timer_fired() {
+    let registry = Registry::new();
+    // No timer for 30 s: only the flush can have taken a snapshot.
+    let mut host = start(mortal(), cadence(30_000, 30_000, 60_000), &registry);
+    let kept = collecting(&mut host);
+    host.edit(EditOp::InsertText("last words".to_owned())).expect("sent");
+
+    let began = std::time::Instant::now();
+    flush_all_in(&registry, Duration::from_secs(2));
+    assert!(began.elapsed() < Duration::from_secs(2), "the flush answered, it did not run to its bound");
+    assert_eq!(&*kept.lock().unwrap(), &vec![vec![0x5a; SNAPSHOT_LEN as usize]], "one sealed snapshot of the latest text");
+}
+
+#[test]
+fn a_lock_seals_nothing_when_nothing_is_unsaved() {
+    let registry = Registry::new();
+    let mut host = start(mortal(), cadence(30_000, 30_000, 60_000), &registry);
+    let kept = collecting(&mut host);
+    flush_all_in(&registry, Duration::from_secs(1));
+    assert!(kept.lock().unwrap().is_empty(), "no edits: no blob");
+
+    // Typed, then saved: the save holds it all, so the lock has nothing of it to keep.
+    host.edit(EditOp::InsertText("a".to_owned())).expect("sent");
+    let id = host.save_bytes(Purpose::Save).expect("sent");
+    let mut got = Vec::new();
+    assert!(
+        wait_events(&mut host, &mut got, |got| got
+            .iter()
+            .any(|e| matches!(e, EditEvent::Saved { id: got_id, purpose: Purpose::Save, .. } if *got_id == id))),
+        "{got:?}"
+    );
+    flush_all_in(&registry, Duration::from_secs(1));
+    assert!(kept.lock().unwrap().is_empty(), "saved: no blob");
+}
+
+#[test]
+fn a_helper_that_does_not_answer_never_holds_the_lock_past_its_bound() {
+    let registry = Registry::new();
+    let fake = Fake::new(move |link| {
+        while let Some((id, message)) = link.next() {
+            let reply = match message {
+                Message::Open(_) | Message::OpenEdit(_) | Message::NewDoc(_) => opened(&[LETTER]),
+                Message::Edit(_) => edited(1),
+                Message::SaveSize(_) => {
+                    std::thread::sleep(Duration::from_secs(5));
+                    return;
+                }
+                _ => return,
+            };
+            link.answer(id, reply);
+        }
+    });
+    let mut host = start(fake, cadence(30_000, 30_000, 60_000), &registry);
+    let kept = collecting(&mut host);
+    host.edit(EditOp::InsertText("a".to_owned())).expect("sent");
+    let began = std::time::Instant::now();
+    flush_all_in(&registry, Duration::from_millis(300));
+    let took = began.elapsed();
+    assert!(took >= Duration::from_millis(300) && took < Duration::from_millis(1_500), "bounded: {took:?}");
+    assert!(kept.lock().unwrap().is_empty());
+}

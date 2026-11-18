@@ -601,6 +601,9 @@ impl<S: Starter> Worker<S> {
         // A snapshot the worker asked itself: nobody is waiting for it; not again at once.
         if self.is_own_id(id) {
             self.snapshot_backoff();
+            if self.rs.flush_id == Some(id) {
+                self.flush_complete();
+            }
             return;
         }
         if was_save {
@@ -713,6 +716,16 @@ impl<S: Starter> Worker<S> {
         }
         drop(section);
         self.keep(&bytes, revision);
+        if purpose == Purpose::Save && self.rs.save_started == self.rs.edit_seq {
+            self.rs.unsaved = false;
+        }
+        if self.rs.flush_id == Some(id) {
+            // The snapshot a lock asked for: sealed here, on this thread, before the window could poll it.
+            if let Some(sink) = self.shared.flush_sink() {
+                sink(&bytes);
+            }
+            self.flush_complete();
+        }
         self.push_edit(EditEvent::Saved {
             id,
             purpose,
