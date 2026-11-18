@@ -135,6 +135,9 @@ impl State {
         self.selected = focus.and_then(|id| row_of(self, id.as_str()));
         self.actions.anchor = anchor.and_then(|id| row_of(self, id.as_str()));
         self.actions.selection = chosen.iter().filter_map(|id| row_of(self, id.as_str())).collect();
+        if let Some(y) = self.apply_reveal() {
+            return Some(y);
+        }
         let (before, id) = held?;
         let now = row_of(self, id.as_str())?;
         (now != before).then(|| (scrolled + (now as f32 - before as f32) * ROW_H).max(0.0))
