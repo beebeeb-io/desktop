@@ -815,3 +815,12 @@ fn a_double_click_on_a_folder_opens_it_again_after_going_into_another() {
     double_click_with_frame(&mut rt, "row-0-date");
     assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Day 1"), "the second double-click opens Day 1");
 }
+
+#[test]
+fn dbg_plain() {
+    let mut rt = runtime_of(init());
+    let (x, y) = centre(&rt, "row-3-date");
+    for _ in 0..2 { rt.pointer_down(x, y); rt.pointer_up(x, y); }
+    settle(&mut rt);
+    eprintln!("D folder={:?}", rt.state.listing.folder.name);
+}
