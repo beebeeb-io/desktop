@@ -818,3 +818,19 @@ fn a_double_click_on_a_folder_opens_it_when_the_first_click_makes_the_details_pa
     double_click_with_frame(&mut rt, "row-0", Some(1100.0));
     assert_eq!(rt.state.listing.folder.name, "Day 1", "the second double-click opens Day 1");
 }
+
+#[test]
+fn dbg_variants() {
+    for key in ["row-0-name", "row-0-date", "row-0-size", "row-0-pc"] {
+        let mut rt = runtime_of(init());
+        double_click_with_frame(&mut rt, "row-3-name", None);
+        let a = rt.state.listing.folder.name.clone();
+        double_click_with_frame(&mut rt, key, None);
+        let b = rt.state.listing.folder.name.clone();
+        press(&mut rt, Key::Left, ALT);
+        press(&mut rt, Key::Left, ALT);
+        double_click_with_frame(&mut rt, "row-3-name", None);
+        let c = rt.state.listing.folder.name.clone();
+        eprintln!("V {key} {a} {b} {c}");
+    }
+}
