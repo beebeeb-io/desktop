@@ -388,7 +388,7 @@ fn a_list_that_cannot_be_read_is_unavailable_never_no_results() {
     assert_eq!(
         host.builds.load(Ordering::SeqCst),
         1,
-        "no retry loop: not built again before RETRY_AFTER
+        "no retry loop: not built again before RETRY_AFTER"
     );
 }
 
