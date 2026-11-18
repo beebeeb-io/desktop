@@ -1133,6 +1133,8 @@ fn every_poll_pumps_the_media_controls_with_no_window_shown_and_when_a_lock_stop
     );
 }
 
+#[path = "host_capture_build_tests.rs"]
+mod capture_build;
 #[path = "host_tests_files.rs"]
 mod files;
 #[path = "host_tests_flows.rs"]

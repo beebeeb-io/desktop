@@ -754,8 +754,12 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
 /// painting it for the length of their animation. So that poll keeps the window excluded and
 /// lands every running animation (the leaving elements are gone from the frame it builds); the
 /// next poll, which it asks for, tells the platform.
+///
+/// The test build is the exception (Guus, 2026-11-17): it holds no real account and is what a release is
+/// recorded from, so it never asks for exclusion, on any screen ([`hides_secrets_from_capture`]).
 fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
-    let secret = registry::route_shows_secret(&s.shell.app) || {
+    let secret = hides_secrets_from_capture(s.identity)
+        && (registry::route_shows_secret(&s.shell.app) || {
         let group = registry::group_for(&s.shell.app);
         matches!(
             group,
@@ -766,7 +770,7 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
     || (matches!(registry::group_for(&s.shell.app), registry::FrameGroup::Section(_))
         && crate::frames::files::share::shows_secret(s))
     // A deck in Present (the viewer contract §5.4): its slides stay out of captures and screen shares.
-    || crate::frames::office::slides::presenting(s);
+    || crate::frames::office::slides::presenting(s));
     let leaving = std::mem::replace(&mut s.shell.secret_seen, secret) && !secret;
     if leaving {
         tx.settle();
@@ -774,6 +778,14 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
     }
     s.shell.apply_capture_exclusion(secret || leaving);
     leaving
+}
+
+/// Whether this build keeps its secret screens out of screenshots, recordings and screen shares: every build
+/// but the test build. The answer comes from the identity the window was started with (`State::identity`,
+/// fixed when the binary was built), never from a flag, a file, a setting or the environment: nothing a person
+/// can change turns the released app's exclusion off. Anything that is not exactly the test build excludes.
+fn hides_secrets_from_capture(identity: super::identity::AppIdentity) -> bool {
+    identity.bundle_identifier() != super::identity::TEST_BUNDLE_IDENTIFIER
 }
 
 fn open_web_page(url: &str) {
