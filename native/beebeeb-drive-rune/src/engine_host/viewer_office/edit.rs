@@ -79,6 +79,13 @@ pub(super) struct Work {
     made_rx: mpsc::Receiver<Made>,
 }
 
+impl Work {
+    /// A save waits for its bytes or its answer.
+    pub(super) fn is_saving(&self) -> bool {
+        self.saving.is_some()
+    }
+}
+
 impl Default for Work {
     fn default() -> Self {
         let (made_tx, made_rx) = mpsc::channel();

@@ -141,7 +141,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         };
         let session = self.engine.session_turn();
         let account = self.engine.account();
-        let busy = self.changes.busy || self.office.work.saving.is_some();
+        let busy = self.changes.busy || self.office.work.is_saving();
         let Some(shown) = self
             .office
             .shown

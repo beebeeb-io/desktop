@@ -594,7 +594,7 @@ fn source_with(engine: Arc<TestEngine>, fake: &Fake, opened: Opened) -> EngineVi
     source.office.ships = ALL;
     source.office.helper = || Some(PathBuf::from("beebeeb-office-render"));
     let fake = fake.clone();
-    source.office.opener = Box::new(move |_, kind, bytes, _, _| {
+    source.office.opener = Box::new(move |_, kind, bytes, _| {
         opened.lock().unwrap().push((kind, bytes.len()));
         fake.view(kind)
     });
@@ -1962,8 +1962,9 @@ fn a_snapshot_is_kept_survives_a_restart_and_restores() {
     drop(e);
     let mut again = editor_over(engine, "Invented.docx");
     let offer = again.source.office_recovery("f1").expect("offered after the restart");
-    assert_eq!(offer.at, clock_words(std::time::UNIX_EPOCH + Duration::from_secs(86_400 * 100 + 14 * 3600 + 32 * 60)));
-    assert_eq!(again.source.office_recovery_pending().len(), 1);
+    let pending = again.source.office_recovery_pending();
+    assert_eq!(pending.len(), 1);
+    assert_eq!((pending[0].file_id.as_str(), pending[0].at.as_str()), ("f1", offer.at.as_str()));
     assert!(again.source.office_restore("f1"));
     // A new editing session opened on the blob's bytes, and the editor was told.
     assert_eq!(again.edits.lock().unwrap().last().map(|(_, len)| *len), Some(8));
