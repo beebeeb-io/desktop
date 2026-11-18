@@ -42,7 +42,10 @@ impl MediaBytes for FileBytes {
     fn read_at(&mut self, offset: u64, len: u32, _cancel: &AtomicBool) -> Result<Zeroizing<Vec<u8>>, ()> {
         let start = usize::try_from(offset).map_err(|_| ())?;
         let end = start.checked_add(len as usize).ok_or(())?;
-        self.0.get(start..end).map(|bytes| Zeroizing::new(bytes.to_vec())).ok_or(())
+        self.0
+            .get(start..end)
+            .map(|bytes| Zeroizing::new(bytes.to_vec()))
+            .ok_or(())
     }
 }
 
@@ -100,7 +103,10 @@ impl AudioSink for Timed {
         self.pushed_frames += frames as u64;
         let mut taken = self.taken.lock().unwrap();
         taken.samples += take as u64;
-        taken.sum_sq += samples[..take].iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>();
+        taken.sum_sq += samples[..take]
+            .iter()
+            .map(|s| f64::from(*s) * f64::from(*s))
+            .sum::<f64>();
         take
     }
 
@@ -143,7 +149,10 @@ fn where_the_time_to_the_first_frame_goes() {
         .split('x')
         .map(|n| n.parse().expect("a size like 1036x582"))
         .collect();
-    let seconds: u64 = std::env::var("BB_PROBE_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(12);
+    let seconds: u64 = std::env::var("BB_PROBE_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
     for round in 0..3 {
         let started = Instant::now();
         let sound = DefaultAudio.start(48_000);
@@ -158,7 +167,11 @@ fn where_the_time_to_the_first_frame_goes() {
     }
     for clip in clips.split(';').filter(|c| !c.is_empty()) {
         let bytes = Arc::new(std::fs::read(clip).expect("the clip reads"));
-        let name = std::path::Path::new(clip).file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+        let name = std::path::Path::new(clip)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
         let taken = Arc::new(Mutex::new(Taken::default()));
         let timed = std::env::var("BB_PROBE_SOUND").is_ok_and(|sound| sound == "timed");
         let audio: Arc<dyn AudioFactory> = if timed {

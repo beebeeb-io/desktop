@@ -1145,7 +1145,9 @@ impl Worker {
             buffering,
             quarter: at_ms / 250,
             length_ms: length.unwrap_or(0),
-            no_sound: self.publish(|player| player.shown.as_ref().and_then(|state| state.no_sound)).flatten(),
+            no_sound: self
+                .publish(|player| player.shown.as_ref().and_then(|state| state.no_sound))
+                .flatten(),
             framed: self.framed,
             tagged: self.tags_taken,
         };
@@ -1204,15 +1206,29 @@ impl Worker {
         let shown_pts = self.trace.shown_pts;
         #[cfg(test)]
         let _ = self.publish(|player| {
-            player
-                .record
-                .pace
-                .push([now, u64::from(received), u64::from(shown), u64::from(dropped), clock, shown_pts, at_ms]);
+            player.record.pace.push([
+                now,
+                u64::from(received),
+                u64::from(shown),
+                u64::from(dropped),
+                clock,
+                shown_pts,
+                at_ms,
+            ]);
         });
         if !writes_played_line(crate::shell::identity::engine_identity()) {
             return;
         }
-        tracing::info!(t_ms = now, received, shown, dropped, clock_ms = clock, shown_pts, at_ms, "media.pace");
+        tracing::info!(
+            t_ms = now,
+            received,
+            shown,
+            dropped,
+            clock_ms = clock,
+            shown_pts,
+            at_ms,
+            "media.pace"
+        );
     }
 
     /// The test build's one line per item, after the first second of playback.
@@ -1252,6 +1268,14 @@ fn log_played(codec: Codec, frames_1s: u32, rms_1s: f64, confined: bool) {
         return;
     }
     tracing::info!(codec = codec as u8, frames_1s, rms_1s, confined, "media.played");
+}
+
+/// The test build's `media.seen` line: how long after the press a view first took the run's frame to draw it.
+pub(super) fn log_seen(seen_ms: u64) {
+    if !writes_played_line(crate::shell::identity::engine_identity()) {
+        return;
+    }
+    tracing::info!(seen_ms, "media.seen");
 }
 
 /// The words the view shows for a helper's error code.

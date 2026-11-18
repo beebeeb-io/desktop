@@ -458,6 +458,9 @@ fn helper_decodes_an_mp3_track_beside_the_h264_picture() {
     assert_eq!(next_pts, 1_000, "a second of sound was decoded");
     let rms = (sum_sq / count as f64).sqrt();
     assert!(rms > 0.01, "the track's tone, not silence: rms {rms}");
-    assert!(last_picture.is_some_and(|pts| pts >= 900), "the picture is a second on too");
+    assert!(
+        last_picture.is_some_and(|pts| pts >= 900),
+        "the picture is a second on too"
+    );
     app.send(&ToHelper::Close);
 }

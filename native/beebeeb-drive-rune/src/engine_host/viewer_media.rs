@@ -274,7 +274,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             // the file opened, its first frame came (the stage has no picture before it), the place moved, it
             // paused, ended or was refused. Without this the view is run only by a press.
             let player = self.engine.media_player()?;
-            let drawn = video_drawn(player.state_of(&shown.file_id).as_ref(), player.frame().is_some());
+            let drawn = video_drawn(player.state_of(&shown.file_id).as_ref(), player.has_frame());
             let shown = self.media.on.as_mut()?;
             if shown.drawn_video == drawn {
                 return None;

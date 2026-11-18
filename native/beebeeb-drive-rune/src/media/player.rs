@@ -49,9 +49,13 @@
 //! **The window is woken** ([`PlayerHandle::set_waker`]) whenever what a view draws of the player changed, so a
 //! frame, a place or a refusal reaches the screen without waiting for a press.
 //!
-//! **TEST builds only** (the build's identity, never the real app): after 1 s of playback, one `media.played` line
-//! (the codec's protocol number, the frames shown and the RMS of the sound in that second, whether the helper was
-//! confined), read by the VM 401 rung. No name, id, tag or byte is logged, here or anywhere in the player.
+//! **TEST builds only** (the build's identity, never the real app), read by the VM 401 rungs: after 1 s of playback,
+//! one `media.played` line (the codec's protocol number, the frames shown and the RMS of the sound in that second,
+//! whether the helper was confined); at the first frame, one `media.start` line (each step's time since the press:
+//! the bytes, the helper, `Opened`, the sound device, the first want, frame and show) and, when a view first takes
+//! that frame, one `media.seen` line; once a second, a `media.pace` line (frames received, shown and dropped, the
+//! clock, the time of the frame on screen, the place said). Milliseconds and counts only: no name, id, tag or byte
+//! is logged, here or anywhere in the player.
 
 use std::fmt;
 use std::io;
@@ -369,6 +373,10 @@ struct Player {
     art: Option<rune::Pixels>,
     /// A frame was shown since the last blank.
     has_frame: bool,
+    /// When the current item was opened (the press), and whether a view took a frame of it since
+    /// ([`PlayerHandle::frame`]): the TEST build's `media.seen` line.
+    pressed: Option<Instant>,
+    seen: bool,
     /// The items Next and Previous move through, and where the player is in it.
     queue: Vec<MediaItem>,
     at: usize,
@@ -499,6 +507,8 @@ impl Player {
         self.end_run();
         self.generation += 1;
         self.blank();
+        self.pressed = Some(Instant::now());
+        self.seen = false;
         self.phase = Phase::Opening;
         self.shown = Some(PlayState {
             file_id: item.file_id.clone(),
@@ -637,6 +647,8 @@ impl PlayerHandle {
                     shown: None,
                     art: None,
                     has_frame: false,
+                    pressed: None,
+                    seen: false,
                     queue: Vec::new(),
                     at: 0,
                     run: None,
@@ -767,9 +779,25 @@ impl PlayerHandle {
         self.with(|player| player.phase)
     }
 
-    /// The video's current frame.
+    /// The video's current frame, for the view that draws it. The first take of a run is the moment the picture
+    /// reaches the window (the TEST build's `media.seen` line says how long after the press).
     pub fn frame(&self) -> Option<rune::Pixels> {
-        self.with(|player| player.has_frame.then(|| player.surface.pixels()))
+        self.with(|player| {
+            if !player.has_frame {
+                return None;
+            }
+            if !std::mem::replace(&mut player.seen, true)
+                && let Some(pressed) = player.pressed
+            {
+                worker::log_seen(u64::try_from(pressed.elapsed().as_millis()).unwrap_or(u64::MAX));
+            }
+            Some(player.surface.pixels())
+        })
+    }
+
+    /// Whether there is a frame to draw (asked by the poll; the view's own take is [`PlayerHandle::frame`]).
+    pub fn has_frame(&self) -> bool {
+        self.with(|player| player.has_frame)
     }
 
     /// The recording's picture from its tags.
