@@ -1,3 +1,5 @@
+//! Tests of the app machine (`shell::app`): the route it starts on, its history, and what each route asks of the shell.
+
 use super::*;
 
 fn files() -> Route {

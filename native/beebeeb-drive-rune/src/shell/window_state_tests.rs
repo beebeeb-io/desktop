@@ -1,3 +1,6 @@
+//! Tests of the saved window state (`shell::window_state`): what a saved size and place give back on each monitor, and
+//! what nothing saved leaves as the defaults.
+
 use super::*;
 
 const MIN: (f32, f32) = (960.0, 640.0);

@@ -1,3 +1,6 @@
+//! Tests of the first window's size and place from the screen's work area (`shell::work_area`): a small screen gets a
+//! window that fits with its frame, and a roomy one keeps the size.
+
 use super::*;
 use crate::shell::window_state::{self, SavedWindow};
 

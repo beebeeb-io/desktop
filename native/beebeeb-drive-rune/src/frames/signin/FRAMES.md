@@ -262,3 +262,10 @@ Windows' own "Windows Security / Making sure it's you" prompt over the locked wi
 an account row. Windows draws that prompt, not the app, and the app's locked window shows no sample data: a fixture
 that faked either would be a lie. The frame stays red in `compare.sh` (geometry 19 failing, measured 2026-11-15). It is
 verified on the native rung: a person looking at the real Hello prompt at the first open of the app lock.
+
+## Since 2026-11-16 (waves 15 and 16)
+
+Back from Create account to Welcome clears what was typed (w15-create-account-back). The Lock step stays until Windows
+Hello answers: Not now does not skip it (w15-hello-over-lock-step). The "No plan" gate asks the server for the plan
+and the access lines name the plan check, in order (w16-gates). The credential-store card also stands in the
+closed-sidebar window (w16 fix). The counts above were not re-measured.

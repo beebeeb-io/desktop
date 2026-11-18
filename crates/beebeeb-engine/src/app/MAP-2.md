@@ -12,6 +12,12 @@ Modules 35–69, sorted by path.
 | `lock_api_tests.rs` | The choke point of a person's call (`Engine::person_session`) and the census that keeps it the only one. | — |
 | `lock_password_api.rs` | The screen lock's password path: the wrong-try accounting, the server's grant-nothing password proof for the current session, and the local | AppLockProof (2), AppLockRefused (8), Away (3), AwayAnswer (2), LockAfter (4) |
 | `lock_password_api_tests.rs` | The screen lock's password path at the engine, against the local fake API: core's counted tries, the server's grant-nothing password proof ( | — |
+| `office_edit_api.rs` | Save an Office document the editor made, for the native Office window: the helper's bytes become the file's next version, a copy next to it | — |
+| `office_edit_api_tests.rs` | An Office save at the engine (`office_edit_api.rs`), against the local state alone: the closed loopback port means sync does not run, so eve | — |
+| `office_recovery.rs` | Encrypted recovery blobs for open Office documents, on this PC: one blob per open document under the account's own folder in the app-data di | — |
+| `office_scratch.rs` | Scratch for large Office working copies: a document above the host's spill threshold is kept on disk only as a sealed file under the session | — |
+| `office_session_end.rs` | The one seam between the engine's session end and the Office host (which the engine cannot name): the host registers ONE hook per state dir, | — |
+| `office_session_end_tests.rs` | Tests of the session-end hook (a file of their own: the lock census does not read `_tests.rs`). | — |
 | `own_data_start.rs` | Task 2267 in the engine (plan wave 3, slice S2a; census S2: "Unowned local data on a Windows PC" and "Found while paused"). | — |
 | `own_data_start_race_tests.rs` | Row S4 race (plan40, after CP3), at the engine: a stop (a Lock, a sign-out, the close of a session the server ended, the strong unlock's rep | — |
 | `own_data_start_stop_tests.rs` | Row fx-stop-timeout (plan40, after CP3), at the engine: a stop (a Lock, a sign-out) whose ownership proof is held in a write that does not y | — |
@@ -26,6 +32,7 @@ Modules 35–69, sorted by path.
 | `photo_previews_api_tests.rs` | The preview run and the setting at the engine (`Engine::make_previews_for`, `Engine::photo_previews_for`, `Engine::set_photo_previews_for`, | — |
 | `photos_api.rs` | Photos and thumbnails, for a host without a UI toolkit (the native Photos window and every grid of thumbnails): the photos and videos of the | — |
 | `photos_api_tests.rs` | The photo library and thumbnails at the engine (`Engine::photos_library`, `Engine::thumbnail_pixels_for`, `Engine::media_facts_for`, `Engine | — |
+| `plan_gate.rs` | The No plan gate's memory: what the server last said about the plan, for the session in memory. | — |
 | `screen_unlock_ask_tests.rs` | A Windows Hello prompt's claim on the screen lock (`Engine::ask_screen_unlock`): it holds only while the lock it was asked for holds, and a | — |
 | `session_owner_api.rs` | Whose session is this? | — |
 | `session_owner_api_tests.rs` | The owner backfill on a real handle against the engine's fake account on loopback: a session stored before the owner tag gets its owner from | — |
@@ -34,10 +41,3 @@ Modules 35–69, sorted by path.
 | `session_steps_tests.rs` | A session-ending step counts BEFORE it waits for the engine's step lock: a host that took a decision in the turn of now (About's "Restart to | — |
 | `session_watch.rs` | Task 2535: the account's session watch. | — |
 | `session_watch_tests.rs` | Task 2535: the account's session watch (`session_watch.rs`). | — |
-| `settings_api.rs` | The account's own settings on Beebeeb, for a host without a UI toolkit (the native Settings panes): where new files are stored, the account' | — |
-| `setup_api.rs` | The first run on this computer, for a host without a UI toolkit (the native first-run steps): whether it is still to do, marking it done, th | — |
-| `setup_api_tests.rs` | The first run's settings and the sync-folder check with the engine's own parts: a real settings file in a folder of the test's own (`CONFIG_ | — |
-| `share_invite_api.rs` | "Invite someone" (DW-0514) for a host without a UI toolkit: share one of the account's own items with a person by their email address. | — |
-| `share_invite_api_tests.rs` | `Engine::invite_for` and `Engine::share_target_of` on a real handle, against a fake server on loopback that answers the invite routes in the | — |
-| `share_link_api.rs` | A link to one of the account's files, for a host without a UI toolkit (the native Files window's Copy link and its Share dialog): [`Engine:: | — |
-| `share_link_api_tests.rs` | A link to a file at the engine (`Engine::share_link_for`), against the engine's own doubles: two invented accounts on the fake API on loopba | — |

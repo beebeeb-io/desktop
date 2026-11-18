@@ -1,6 +1,6 @@
 //! Slice OF3 (plan40 batch 1): the presentation VIEWER of the Office engine, DW-1509 (the deck, read-only) and
-//! DW-1561 (Present, full screen). DW-1560 (slide layouts) is a 0.9.1 frame, the editor's: its row stays
-//! `placeholder::scene` (owner 2026-11-15 16:29, decision 2539: the Office viewer is in 0.9.0, the editor in 0.9.1).
+//! DW-1561 (Present, full screen). DW-1560 (slide layouts) is the editor's: its scene is
+//! `edit::slide_ribbon::scene_design` (the owner's 2026-11-18 ruling put the editor in 0.9.0, reversing decision 2539).
 //!
 //! What is drawn: the window's own toolbar (the viewer's, reused from `viewers::office`), a bar with Present, the
 //! filmstrip, the current slide on grey, and the status line. Nothing here edits: no ribbon, no New, Duplicate,
@@ -42,7 +42,7 @@ mod strip;
 
 pub use strip::{StripMenu, entries as menu_entries};
 
-/// The group's board frames and the scene that shows each (`frames::scenes`). DW-1560 stays a placeholder (0.9.1).
+/// The group's board frames and the scene that shows each (`frames::scenes`). DW-1560 is the editor's `slide_ribbon` scene.
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1509", scene_deck),
     ("DW-1560", slide_ribbon::scene_design),

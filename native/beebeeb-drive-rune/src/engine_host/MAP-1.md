@@ -31,6 +31,7 @@ Modules 1–33, sorted by path.
 | `account_twofactor_tests.rs` | Two-factor and change email on the real engine: the answer shown from Beebeeb, a refusal said honestly, an answer that lands after the sessi | — |
 | `account_twofactor_tests_window.rs` | Two-factor in the running app's window, through the window's own poll (`shell::host::poll`, which runs `frames::account::poll` and the shell | — |
 | `account_values.rs` | What the account panes draw, made from what Beebeeb answered: a session's row, the name and the plan of Account, and the words for a plan's | — |
+| `app_activity.rs` | Diagnostics > App activity (DW-0790): this process's CPU and memory and the upload and download rates, sampled every 2 seconds while the pan | — |
 | `app_lock.rs` | App lock on the real engine: the "Lock Beebeeb" switch of Sign-in and security (DW-S03, DW-S03b), bound to core's rule through the engine ([ | — |
 | `app_lock_password_tests.rs` | "Use your password" for app lock (no board frame: D-2) on the real engine and the parent modules' fake: Windows Hello did not confirm turnin | — |
 | `app_lock_tests.rs` | App lock's switch on Sign-in and security, on the real engine and the parent module's fake: what the page is told (`security_facts().app_loc | — |
@@ -38,4 +39,3 @@ Modules 1–33, sorted by path.
 | `backup_folders.rs` | Slice A7 (plan40 batch 1): Add a folder and Stop backing up (DW-0737, DW-0738, DW-1410). | — |
 | `backup_folders_tests.rs` | Slice A7 on the adapter (`EngineBackupsSource`): an add asked of the engine for the session of its press and its answer dropped when it land | — |
 | `backups.rs` | Backups on the real engine: [`EngineBackupsSource`], the `BackupsSource` of the running app (DW-0737), and [`may_back_up`], the one rule tha | — |
-| `backups_devices.rs` | Backups' "Other devices" and "Delete this backup" on the real engine: [`DeviceCalls`], the part of `EngineBackupsSource` behind `devices`, ` | — |

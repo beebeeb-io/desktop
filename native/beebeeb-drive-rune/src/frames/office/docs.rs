@@ -151,7 +151,7 @@ impl DocBody {
     }
 
     /// The viewer's keys: Ctrl+Plus and Ctrl+Minus zoom, Ctrl+0 is the actual size, Page Down and Page Up move the stage by a page. Every other
-    /// key is not taken here: there is no editor behind a key (Ctrl+S, Ctrl+K and the rest reach nothing).
+    /// key is not taken here: the editor's keys (Ctrl+S, Ctrl+K and the rest) are `edit`'s, taken while an editor is live on the document.
     /// `true`: taken.
     pub fn on_key(&mut self, key: &Key, m: &Mods) -> bool {
         let command = (m.ctrl || m.cmd) && !m.alt;

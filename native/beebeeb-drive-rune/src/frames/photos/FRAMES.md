@@ -28,3 +28,11 @@ no golden to gate against:
 
 - a thumbnail that is not there yet: built (the neutral tile; `PhotosSource::thumbnail` returns `None`), tested, not gated;
 - albums, loading placeholders, the offline state, the error state, a comparison tool: not built, the board draws none.
+
+## Wired since (waves 17 and 18, 2026-11)
+
+The table above says which frames are drawn; the controls on them now act: Search and New reach Files (w17-photos-chrome);
+the original downloads on the engine (DW-0605b: w17-photos-original); Rename and Duplicate in the ⋯ menu
+(w17-photos-rename-duplicate); Save to PC and Send a copy (w18-photos-save-send); Share selection, Copy link with expiry
+and password, and Version history (w18-photos-share-versions); a link's copy says so in a toast. The Photos row of
+Settings > Previews no longer says "not built".

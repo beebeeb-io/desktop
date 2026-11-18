@@ -106,3 +106,12 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
   channel." without "Read the release notes before you go back to an older version." and opens nothing: an older
   version's notes are never shown (DW-0789b's button would offer it), and a link that opens nothing is a dead
   control. The board sample opens the notes, so the frames as compared draw both rows as the board does.
+
+## Wired since (waves 15 to 17, 2026-11)
+
+Storage reads the real engine (rows by type, the Trash count: w15-storage-wired); the panes' placeholder chrome is
+drawn (w15-settings-placeholder-chrome); Report a problem (`DW-0782`) opens from General and Diagnostics with a support
+bundle the person reads first (w16-report-problem); Privacy and Export my data open their web pages, the file explorer,
+the support-bundle reveal and the photo chooser reach the shell, and the Previews pane loads instead of saying "not
+built" (w17-settings-pages, w17-settings-places); Diagnostics' App activity samples CPU, memory and transfer rates
+(w18). The counts in the status lines at the top are of 2026-11-12 and were not re-measured.

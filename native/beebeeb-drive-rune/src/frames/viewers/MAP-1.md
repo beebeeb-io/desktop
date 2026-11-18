@@ -24,7 +24,7 @@ Modules 1–34, sorted by path.
 | `new_file.rs` | New file (DW-1520 to DW-1522): New's menu in the Files window offers "New file…" (Ctrl+N), and this dialog, over the Files window, picks the | — |
 | `new_file_scene.rs` | The board scenes of the New file dialog (DW-1520 to DW-1522), moved out of `mod.rs` to keep it under the size limit. | — |
 | `new_file_tests.rs` | Tests of the New file dialog (DW-1520 to DW-1522): it opens from the Files window, picks a type, names the file, and asks the shell for what | — |
-| `office.rs` | The office editor in the window (the board's "Office on Windows": DW-1507 and its states): the window's own toolbar with the file's path, th | office_board |
+| `office.rs` | The office editor in the window (the board's "Office on Windows": DW-1507 and its states): the window's own toolbar with the file's path, th | (glob: pub use super::super::office_icons::*) |
 | `office_board.rs` | The board's sample documents of the office editor's frame, for the fixture source and the tests. | — |
 | `office_glue.rs` | The hooks that let the Office viewer's scenes (`frames::office`) draw in the viewer: the spreadsheet (DW-1508), the presentation (DW-1509, D | — |
 | `office_icons.rs` | The office editor's icons: each body is the board's inline `<svg>`, copied by script from the golden (the gate compares the path data). | — |

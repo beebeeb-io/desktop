@@ -1,3 +1,6 @@
+//! Tests of the web pages the frames open (`shell::web_pages`): every name resolves or its control is not drawn, every
+//! address is allowed, and the support draft is percent-encoded.
+
 use super::*;
 
 #[test]
