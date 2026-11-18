@@ -12,6 +12,8 @@ mod icons;
 mod overlay;
 mod route;
 mod route_chrome;
+#[cfg(test)]
+mod route_chrome_tests;
 mod route_items;
 mod route_original;
 mod route_save_send;
