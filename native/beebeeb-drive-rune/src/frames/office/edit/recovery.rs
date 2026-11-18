@@ -114,7 +114,7 @@ pub fn view(banner: &Banner, name: &str, t: &Theme) -> El {
         .gap(10.0)
         .center_y()
         .radius(10.0)
-        .fill(t.ground)
+        .fill(t.surface)
         .child(
             kit::label("recovery-text", words(banner, name), tokens::type_::CAPTION, t.text_secondary)
                 .wrap()
