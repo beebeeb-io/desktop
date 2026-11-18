@@ -12,7 +12,11 @@
 
 use std::fmt;
 
+use beebeeb_office_protocol::office::EditOp;
+
 use rune::{Align, Color, El, Icon, Key, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text_input};
+
+use crate::frames::office::edit::word_insert::{self, Insert, LinkForm, Picking, TableForm};
 
 use super::chrome::{ButtonKind, button};
 use super::dialogs::{self, Look};
@@ -22,9 +26,10 @@ use super::source::{Conflict, Keep, SaveOutcome};
 use super::{Intent, Ui, icons, style};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
-use crate::ui::field::caret_mark;
+use crate::ui::field::{self, Bare, caret_mark};
 use crate::ui::kit;
-use crate::ui::settings_dialog::DIALOG_TITLE;
+use crate::ui::dialog::{self, Sub};
+use crate::ui::settings_dialog::{DIALOG_TITLE, Weight};
 
 /// 13px on 17px (`.t-body`): a command's name, and what is typed.
 const BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
@@ -89,6 +94,12 @@ pub enum Over {
     Palette(Palette),
     /// DW-1557: the licences of the Office engine, from the status line's About.
     Licence,
+    /// DW-1550: Insert's Table...
+    Table(TableForm),
+    /// DW-1550: Insert's Link...
+    Link(LinkForm),
+    /// DW-1550: Insert's Image...: the platform's file picker is open, and answers on its own worker.
+    Image(Picking),
 }
 
 impl Ui {
@@ -188,6 +199,127 @@ impl Ui {
         }
         self.office.over = None;
         self.intent(Intent::Office("this command"));
+    }
+}
+
+/// Insert's tools (DW-1550): live only while the editor is (`office.edit`), else the press says "Not built yet".
+impl Ui {
+    /// The editor is live on this document (its helper has not stopped).
+    fn insert_live(&self) -> bool {
+        self.office.edit.as_ref().is_some_and(|edit| !edit.stopped)
+    }
+
+    /// A press on one of Insert's tools.
+    pub fn office_insert(&mut self, tool: Insert) {
+        if self.office.over.is_some() {
+            return;
+        }
+        match tool {
+            Insert::Table => {
+                self.office.over = Some(Over::Table(TableForm::new()));
+                self.focus = Some(ROWS);
+            }
+            Insert::Link => {
+                self.office.over = Some(Over::Link(LinkForm::new()));
+                self.focus = Some(LINK_TEXT);
+            }
+            Insert::PageBreak => self.office_edit(EditOp::PageBreak),
+            Insert::Image => {
+                // The platform's own file picker, on a worker of its own: it blocks until it is closed.
+                let platform = crate::shell::platform::current();
+                self.office_pick_image(move || platform.pick_photo("Insert a picture", std::path::Path::new("")));
+            }
+        }
+    }
+
+    /// Open the picker `pick` stands for. `false`: it did not open (said in a toast).
+    pub fn office_pick_image(
+        &mut self,
+        pick: impl FnOnce() -> Result<Option<std::path::PathBuf>, crate::shell::platform::PlatformError> + Send + 'static,
+    ) -> bool {
+        match Picking::start(pick) {
+            Some(picking) => {
+                self.office.over = Some(Over::Image(picking));
+                true
+            }
+            None => {
+                self.toast = Some(word_insert::NO_PICKER.to_string());
+                false
+            }
+        }
+    }
+
+    /// Whether a picker is open and its answer is awaited: the shell's poll looks again soon.
+    pub fn office_image_waiting(&self) -> bool {
+        matches!(self.office.over, Some(Over::Image(_)))
+    }
+
+    /// The picker's answer, if it came (the shell's poll calls this while [`Ui::office_image_waiting`]). The picture
+    /// goes to the source; a refusal is said in words. `true`: something changed, the view must run again.
+    pub fn office_image_poll(&mut self) -> bool {
+        let Some(Over::Image(picking)) = &self.office.over else {
+            return false;
+        };
+        let word_insert::Looked::Got(answer) = picking.look() else {
+            return false;
+        };
+        self.office.over = None;
+        self.office_image_answer(answer);
+        true
+    }
+
+    /// The one place a picked picture comes in.
+    pub(crate) fn office_image_answer(&mut self, answer: word_insert::Answer) {
+        match answer {
+            word_insert::Answer::Closed => {}
+            word_insert::Answer::Refused(words) => self.toast = Some(words),
+            word_insert::Answer::Image(image) => {
+                let (source, id) = self.edit_source();
+                let id = id.to_string();
+                if !source.insert_image(&id, image.bytes, image.png) {
+                    self.toast = Some(word_insert::NOT_ADDED.to_string());
+                }
+            }
+        }
+    }
+
+    /// One edit to the editor. A source that does not take it says so.
+    fn office_edit(&mut self, op: EditOp) {
+        let (source, id) = self.edit_source();
+        let id = id.to_string();
+        if !source.edit(&id, op) {
+            self.toast = Some(word_insert::NOT_DONE.to_string());
+        }
+    }
+
+    /// The table dialog's Insert (Enter): what is typed is checked first, in words.
+    pub fn office_table_ok(&mut self) {
+        let Some(Over::Table(form)) = &mut self.office.over else { return };
+        match word_insert::table_op(&form.rows.text, &form.cols.text) {
+            Ok(op) => {
+                self.office.over = None;
+                self.office_edit(op);
+            }
+            Err((which, words)) => {
+                form.error = Some((which, words));
+                self.focus = Some(if which == 0 { ROWS } else { COLS });
+            }
+        }
+    }
+
+    /// The link dialog's Insert (Enter).
+    pub fn office_link_ok(&mut self) {
+        let Some(Over::Link(form)) = &mut self.office.over else { return };
+        match word_insert::link_op(&form.text.text, &form.url.text) {
+            Ok(op) => {
+                self.office.over = None;
+                self.office_edit(op);
+            }
+            Err((which, words)) => {
+                form.error = Some((which, words));
+                self.focus = Some(if which == 0 { LINK_TEXT } else { LINK_URL });
+            }
+        }
     }
 }
 
@@ -493,6 +625,9 @@ pub fn over(ui: &Ui, t: &Theme) -> Option<El> {
         Over::Conflict(other) => conflict(ui.file.version, other, t),
         Over::Palette(p) => palette(ui, p, t),
         Over::Licence => licence(t),
+        Over::Table(form) => table_dialog(form, t),
+        Over::Link(form) => link_dialog(form, t),
+        Over::Image(_) => image_dialog(t),
     })
 }
 
@@ -563,7 +698,8 @@ pub fn no_editor(t: &Theme) -> El {
 }
 
 /// A tool with its word (Insert's): 28 high, the glyph, the word. Keys: `<key>`, `-icon`, `-label`.
-fn worded(key: &str, word: &'static str, icon: &'static Icon, t: &Theme) -> El {
+/// A press does `tool` while the editor is live, else asks the shell's "Not built yet".
+fn worded(key: &str, word: &'static str, icon: &'static Icon, tool: Insert, t: &Theme) -> El {
     row()
         .key(key.to_string())
         .role("button")
@@ -576,7 +712,15 @@ fn worded(key: &str, word: &'static str, icon: &'static Icon, t: &Theme) -> El {
         .hover(t.hover)
         .press(t.press)
         .focusable(true)
-        .on_press(office::ask(word))
+        .on_press(move |s: &mut State| {
+            if let Some(ui) = super::ui(s) {
+                if ui.insert_live() {
+                    ui.office_insert(tool);
+                } else {
+                    ui.intent(Intent::Office(word));
+                }
+            }
+        })
         .child(kit::glyph(format!("{key}-icon"), icon, 15.0, t.text_secondary))
         .child(style::fitted(format!("{key}-label"), word, TOOL_WORD, t.text).a11y_hidden())
 }
@@ -584,12 +728,232 @@ fn worded(key: &str, word: &'static str, icon: &'static Icon, t: &Theme) -> El {
 /// Insert's tools, in the board's order (DW-1550).
 pub fn insert_tools(t: &Theme) -> Vec<El> {
     vec![
-        worded("rt-0", "Table\u{2026}", &oi::TABLE, t),
-        worded("rt-1", "Image\u{2026}", &oi::IMAGE, t),
-        worded("rt-2", "Link\u{2026}", &oi::LINK, t),
+        worded("rt-0", "Table\u{2026}", &oi::TABLE, Insert::Table, t),
+        worded("rt-1", "Image\u{2026}", &oi::IMAGE, Insert::Image, t),
+        worded("rt-2", "Link\u{2026}", &oi::LINK, Insert::Link, t),
         office::hairline("rsep-0".into(), t),
-        worded("rt-3", "Page break", &super::media_icons::FILE_TEXT, t),
+        worded("rt-3", "Page break", &super::media_icons::FILE_TEXT, Insert::PageBreak, t),
     ]
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The dialogs of Insert's tools. Their fields' keys do not start with `edit-` (that is the editing surface's).
+
+pub const ROWS: &str = "ins-rows";
+pub const COLS: &str = "ins-cols";
+pub const LINK_TEXT: &str = "ins-text";
+pub const LINK_URL: &str = "ins-url";
+
+/// A field's keys before the field edits: Esc closes; what a one-line field edits, Tab and Enter (the dialog's
+/// default button) go on; anything else stops here, so it never reaches the document behind.
+fn field_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    match &ev.key {
+        Key::Escape => {
+            close(s);
+            true
+        }
+        Key::Text(_)
+        | Key::Left
+        | Key::Right
+        | Key::Home
+        | Key::End
+        | Key::Backspace
+        | Key::Delete
+        | Key::Tab
+        | Key::Enter => false,
+        Key::Command(c) => !matches!(c, 'a' | 'c' | 'x' | 'v' | 'z' | 'y'),
+        _ => true,
+    }
+}
+
+/// A field's text for an edit that arrives while its dialog is gone (two keys in one frame): a field nobody
+/// shows. Typing takes the dialog's error away.
+fn rows_edit(s: &mut State) -> &mut TextEdit {
+    match s.viewer.ui.as_mut().and_then(|ui| ui.office.over.as_mut()) {
+        Some(Over::Table(form)) => {
+            form.error = None;
+            &mut form.rows
+        }
+        _ => &mut s.viewer.stray,
+    }
+}
+
+fn cols_edit(s: &mut State) -> &mut TextEdit {
+    match s.viewer.ui.as_mut().and_then(|ui| ui.office.over.as_mut()) {
+        Some(Over::Table(form)) => {
+            form.error = None;
+            &mut form.cols
+        }
+        _ => &mut s.viewer.stray,
+    }
+}
+
+fn link_text_edit(s: &mut State) -> &mut TextEdit {
+    match s.viewer.ui.as_mut().and_then(|ui| ui.office.over.as_mut()) {
+        Some(Over::Link(form)) => {
+            form.error = None;
+            &mut form.text
+        }
+        _ => &mut s.viewer.stray,
+    }
+}
+
+fn link_url_edit(s: &mut State) -> &mut TextEdit {
+    match s.viewer.ui.as_mut().and_then(|ui| ui.office.over.as_mut()) {
+        Some(Over::Link(form)) => {
+            form.error = None;
+            &mut form.url
+        }
+        _ => &mut s.viewer.stray,
+    }
+}
+
+/// A labelled field of a dialog. `error`: the words, when this field is the one at fault.
+fn labelled(
+    key: &'static str,
+    label: &str,
+    edit: &TextEdit,
+    on_edit: impl for<'a> Fn(&'a mut State) -> &'a mut TextEdit + 'static,
+    error: Option<&str>,
+    t: &Theme,
+) -> El {
+    let field = field::bare_field(
+        Bare {
+            key: &format!("{key}-f"),
+            name: label,
+            message: error,
+            error: error.is_some(),
+        },
+        edit,
+        key,
+        on_edit,
+        |input| input.on_input_key(field_key),
+        t,
+    );
+    col()
+        .key(format!("{key}-col"))
+        .w_full()
+        .gap(6.0)
+        .child(kit::label(format!("{key}-label"), label, CAP, t.text_tertiary))
+        .child(field)
+}
+
+fn error_of(error: &Option<word_insert::Why>, field: usize) -> Option<&str> {
+    error.as_ref().filter(|(at, _)| *at == field).map(|(_, words)| words.as_str())
+}
+
+/// The scrim and the card of one of Insert's dialogs: Esc and a press outside close it.
+fn insert_card(card: El, t: &Theme) -> El {
+    dialog::scrim(0.0, card, t).modal(false, close)
+}
+
+fn insert_foot(ok: &'static str, on_ok: fn(&mut State), t: &Theme) -> El {
+    row()
+        .center_y()
+        .justify_end()
+        .child(
+            crate::ui::settings_dialog::button(0, ok, Weight::Primary, t)
+                .default_button()
+                .on_press(on_ok),
+        )
+        .child(crate::ui::settings_dialog::button(1, "Cancel", Weight::Quiet, t).on_press(close))
+}
+
+/// DW-1550: Table... asks for its rows and columns.
+fn table_dialog(form: &TableForm, t: &Theme) -> El {
+    let fields = row()
+        .key("ins-fields")
+        .w_full()
+        .gap(12.0)
+        .child(labelled(ROWS, "Rows", &form.rows, rows_edit, error_of(&form.error, 0), t))
+        .child(labelled(
+            COLS,
+            "Columns",
+            &form.cols,
+            cols_edit,
+            error_of(&form.error, 1),
+            t,
+        ));
+    let foot = insert_foot("Insert", |s| {
+        if let Some(ui) = super::ui(s) {
+            ui.office_table_ok();
+        }
+    }, t);
+    insert_card(
+        dialog::card(
+            "Insert table",
+            420.0,
+            "Insert table",
+            Some(Sub::Wrap("At the cursor. Fill in the cells after.")),
+            vec![fields],
+            foot,
+            t,
+        ),
+        t,
+    )
+}
+
+/// DW-1550: Link... asks for the words and the address. The address is only text in the document.
+fn link_dialog(form: &LinkForm, t: &Theme) -> El {
+    let fields = col()
+        .key("ins-fields")
+        .w_full()
+        .gap(12.0)
+        .child(labelled(
+            LINK_TEXT,
+            "Text to show",
+            &form.text,
+            link_text_edit,
+            error_of(&form.error, 0),
+            t,
+        ))
+        .child(labelled(
+            LINK_URL,
+            "Address",
+            &form.url,
+            link_url_edit,
+            error_of(&form.error, 1),
+            t,
+        ));
+    let foot = insert_foot("Insert", |s| {
+        if let Some(ui) = super::ui(s) {
+            ui.office_link_ok();
+        }
+    }, t);
+    insert_card(
+        dialog::card(
+            "Insert link",
+            460.0,
+            "Insert link",
+            Some(Sub::Wrap("The address is kept as text in the document. It is never opened from here.")),
+            vec![fields],
+            foot,
+            t,
+        ),
+        t,
+    )
+}
+
+/// DW-1550: Image... while the platform's file picker is open.
+fn image_dialog(t: &Theme) -> El {
+    let foot = row()
+        .center_y()
+        .justify_end()
+        .child(crate::ui::settings_dialog::button(0, "Cancel", Weight::Quiet, t).on_press(close));
+    insert_card(
+        dialog::card(
+            "Insert picture",
+            420.0,
+            "Insert picture",
+            Some(Sub::Wrap(
+                "Choose a PNG or JPEG file in the window that opened. It is encrypted together with the document.",
+            )),
+            Vec::new(),
+            foot,
+            t,
+        ),
+        t,
+    )
 }
 
 /// A table on the page: the first row is its headings. Keys: `tbl`, `tbl-<row>-<column>`.
