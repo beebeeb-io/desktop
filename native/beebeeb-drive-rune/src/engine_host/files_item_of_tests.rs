@@ -81,6 +81,7 @@ fn an_id_of_this_accounts_state_is_found_and_another_accounts_is_not() {
     assert_eq!((found.id.as_str(), found.name.as_str(), found.is_folder), ("f-invented", "Invented note.txt", false));
     assert!(source.item_of("f-not-there").is_none());
 
+    engine.sign_out_keeping_local_data().expect("signs out");
     sign_in(&engine, &second, &second_phrase);
     assert!(source.item_of("f-invented").is_none(), "another account's id is not answered");
 }
