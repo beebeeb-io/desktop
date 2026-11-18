@@ -953,3 +953,7 @@ mod queued_save_tests {
         assert_eq!(landed_version(&db, "f", &other), None);
     }
 }
+
+#[cfg(test)]
+#[path = "viewer_edit_staging_tests.rs"]
+mod staging_tests;
