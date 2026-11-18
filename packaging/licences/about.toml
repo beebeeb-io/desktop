@@ -28,9 +28,9 @@ ignore-build-dependencies = false
 workarounds = ["ring"]
 # Our own two crates have no `license` field (Cargo.toml is not ours to change here): say what they are, with the repo's text.
 [beebeeb-engine.clarify]
-expression = "AGPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 license-files = [{ path = "../../LICENSE", hash = 0x00000000 }]
 
 [beebeeb-drive-rune.clarify]
-expression = "AGPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 license-files = [{ path = "../../LICENSE", hash = 0x00000000 }]
