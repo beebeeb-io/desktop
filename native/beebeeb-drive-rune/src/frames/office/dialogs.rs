@@ -31,6 +31,8 @@ pub const LINKS: [&str; 2] = [
 /// The first link's label, and the address after it.
 const SOURCE_LABEL: &str = "Source code ";
 const SOURCE_ADDRESS: &str = "github.com/beebeeb-io/desktop-office";
+/// What the source link opens: the repository at this build's version tag (AGPL-3.0 section 13).
+pub const SOURCE_URL: &str = concat!("https://github.com/beebeeb-io/desktop-office/tree/v", env!("CARGO_PKG_VERSION"));
 /// 11px mono: the address (`.t-cap` in the machine font).
 const ADDRESS: TextStyle = TextStyle::new(11.0, 400.0).family(rune::tok::Family::Mono).lh(14.0);
 
@@ -54,8 +56,8 @@ fn link(index: usize, words: &str, t: &Theme) -> El {
         .label(words)
         .focusable(true)
         .cursor(rune::Cursor::Pointer);
-    // "Third-party licences" opens the installed licence lines (Settings' open-source-licences target). The source
-    // link has no address this build may open yet, so it stays as it is.
+    // "Third-party licences" opens the installed licence lines (Settings' open-source-licences target); "Source code"
+    // opens the tagged source address in the browser. A failure to open says so in the toast, as About does.
     let link = if index == 1 {
         link.on_press(|s: &mut State| {
             if let Err(why) = crate::frames::settings::about::open_licences() {
@@ -63,7 +65,11 @@ fn link(index: usize, words: &str, t: &Theme) -> El {
             }
         })
     } else {
-        link
+        link.on_press(|s: &mut State| {
+            if crate::engine_host::signin::open_web_page(SOURCE_URL).is_err() {
+                s.settings.toast = Some("Could not open that page");
+            }
+        })
     };
     link
         .child(
@@ -182,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn third_party_licences_opens_the_licence_lines_and_the_source_link_opens_nothing() {
+    fn third_party_licences_opens_the_licence_lines_and_the_source_link_opens_the_tagged_source() {
         use rune::{Env, Runtime};
         let mut state = crate::init();
         (FRAMES[0].1)(&mut state);
@@ -209,8 +215,11 @@ mod tests {
             rt.frame(0.0);
         };
         rt.state.settings.toast = None;
+        crate::engine_host::signin::OPENED.with(|o| o.borrow_mut().clear());
         click(&mut rt, "lic-link-0");
-        assert_eq!(rt.state.settings.toast, None, "the source link opens nothing here");
+        assert_eq!(rt.state.settings.toast, None);
+        let opened = crate::engine_host::signin::OPENED.with(|o| o.borrow().clone());
+        assert_eq!(opened, vec![SOURCE_URL.to_string()], "the source link opened the tagged source");
         // No licence file sits beside a test build, so the press reaching the licence target says so.
         click(&mut rt, "lic-link-1");
         assert_eq!(
