@@ -15,7 +15,7 @@ use crate::ui::settings_shell::{self as shell, PANE_TITLE, SUB};
 use rune::tok::Family;
 use rune::{El, col, el, row};
 
-use super::drive::{Kept, UseKind};
+use super::drive::{Control, Kept, UseKind};
 use super::{Dialog, SettingsUi};
 
 fn icon_of(kind: UseKind) -> &'static rune::Icon {
@@ -133,9 +133,11 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         )
     };
-    let pc = vec![
-        kept(0, 0, Kept::Downloaded, &ic::DOWNLOAD_TRAY, "Clear…"),
-        kept(1, 2, Kept::Previews, &ic::GRID, "Clear"),
+    let mut pc = vec![kept(0, 0, Kept::Downloaded, &ic::DOWNLOAD_TRAY, "Clear…")];
+    if ui.drive.shows(Control::PreviewsRow) {
+        pc.push(kept(1, 2, Kept::Previews, &ic::GRID, "Clear"));
+    }
+    pc.push(
         lists::item(
             1,
             2,
@@ -145,7 +147,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         )
         .on_press(|s: &mut State| super::go(s, "DW-0715")),
-    ];
+    );
 
     let children = vec![
         shell::heading("Storage", None, t),

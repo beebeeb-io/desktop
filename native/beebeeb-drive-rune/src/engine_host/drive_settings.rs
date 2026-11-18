@@ -733,6 +733,8 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             // No metered-network detection: a switch would do nothing.
             Control::SyncOnMetered => false,
             Control::SpeedTest => SPEED_TEST_ON,
+            // No honest source for what previews hold or their limit: the row would read " of 0 GB".
+            Control::PreviewsRow => false,
         }
     }
 
