@@ -189,9 +189,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     true
 }
 
+/// The engine's saver, when the app gave the shell one (Photos' Save to PC).
+pub(crate) fn saver() -> Option<Arc<dyn CopySaver>> {
+    SAVER.with(|saver| saver.borrow().clone())
+}
+
 fn say(s: &mut State, words: &str) {
     if let Some(ui) = viewers::ui(s) {
         ui.toast = Some(words.to_string());
+    } else if matches!(s.shell.app.screen(), crate::shell::app::Screen::Drive(r) if r.section == crate::shell::app::Section::Photos) {
+        // Photos' own save: its toast says how it ended.
+        s.photos.toast = Some(crate::frames::photos::Toast::Said(words.to_string()));
     }
 }
 

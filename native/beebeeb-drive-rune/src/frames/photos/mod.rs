@@ -159,6 +159,8 @@ pub enum Toast {
     NotYet,
     /// Something asked for could not be done, in these words (Add a folder…, Move…).
     Words(&'static str),
+    /// The end of a copy saved from Photos, in the words the save gave (they name no file).
+    Said(String),
 }
 
 /// One row of the grid: a day's heading, if this is its first row, and up to `across` tiles.

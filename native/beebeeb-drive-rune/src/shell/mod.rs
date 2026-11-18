@@ -38,7 +38,7 @@ mod settings_open_pages;
 mod settings_open_places;
 mod settings_show_in_files;
 mod viewer_intents;
-mod viewer_save;
+pub(crate) mod viewer_save;
 pub mod placeholder;
 pub mod platform;
 pub mod registry;

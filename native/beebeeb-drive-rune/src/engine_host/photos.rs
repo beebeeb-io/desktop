@@ -981,6 +981,22 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             .collect()
     }
 
+    /// The photo's file in the Beebeeb folder, while sync is on and the engine has a path for it (a device backup
+    /// has none). The same check as every hand-over of a file to another app.
+    fn kept_path(&self, id: PhotoId) -> Option<std::path::PathBuf> {
+        let file_id = self.file_of(id)?.id.clone();
+        if !self.engine.is_syncing() {
+            return None;
+        }
+        let root = self.engine.sync_root().ok()?;
+        self.engine
+            .local_state_for_changes()
+            .ok()?
+            .with(|db| super::path_the_system_opens(db, &root, &file_id).ok())
+            .ok()
+            .flatten()
+    }
+
     fn add_folder(&mut self, folder_id: &str) -> bool {
         self.photos_folders_add(folder_id)
     }
