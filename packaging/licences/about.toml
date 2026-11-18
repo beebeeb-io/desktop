@@ -26,5 +26,13 @@ accepted = [
 ignore-dev-dependencies = false
 ignore-build-dependencies = false
 workarounds = ["ring"]
-# Our own unpublished crates (publish = false) are not "third party": section 1 of the notice covers them (AGPL-3.0-or-later).
-private = { ignore = true }
+# Our own two crates have no `license` field (Cargo.toml is not ours to change here): say what they are, with the repo's text.
+[beebeeb-engine]
+accepted = ["AGPL-3.0-or-later"]
+expression = "AGPL-3.0-or-later"
+license-files = [{ path = "../../LICENSE", hash = 0x00000000 }]
+
+[beebeeb-drive-rune]
+accepted = ["AGPL-3.0-or-later"]
+expression = "AGPL-3.0-or-later"
+license-files = [{ path = "../../LICENSE", hash = 0x00000000 }]

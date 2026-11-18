@@ -75,7 +75,7 @@ def main() -> int:
         all_pkgs += lock_packages(root / rel)
     missing = sorted({(n, v) for n, v, _s in all_pkgs} - listed)
     if missing:
-        sys.exit(f"render.py: {len(missing)} crate(s) of the Cargo.lock graphs are not in the cargo-about output: {missing[:10]}")
+        sys.exit(f"render.py: {len(missing)} crate(s) of the Cargo.lock graphs are not in the cargo-about output: {missing}")
 
     o = []
     w = o.append
