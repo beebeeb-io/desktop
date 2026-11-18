@@ -788,3 +788,29 @@ fn menus_toasts_and_the_path_have_their_roles_and_names() {
     assert_eq!((up.role, up.focusable), ("link", true));
     assert_eq!(info(&rt, "rows").label.as_deref(), Some("Lisbon trip"));
 }
+
+/// A double-click as in a window: the pointer stays where it is, and frames are drawn between the two
+/// presses (what the first one selected is on screen, and moving, when the second goes down).
+fn double_click_with_frames(rt: &mut Runtime<State>, key: &str) {
+    let (x, y) = centre(rt, key);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    for _ in 0..4 {
+        rt.frame(0.03);
+    }
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt);
+}
+
+#[test]
+fn a_double_click_on_a_far_column_opens_the_folder_though_the_first_click_opens_the_details_pane() {
+    let mut rt = runtime_of(init());
+    double_click_with_frames(&mut rt, "row-3-date");
+    assert_eq!(names(&rt).len(), 7, "Lisbon trip is open");
+    assert!(rt.state.selected.is_none(), "a folder just opened has nothing selected");
+    // The first click selects Day 1 and the pane opens; the list must not move out from under the pointer,
+    // or the second click lands on the pane (it did, on the PC column) and the row never opens.
+    double_click_with_frames(&mut rt, "row-0-pc");
+    assert_eq!(names(&rt).len(), 0, "Day 1 is open (it is empty)");
+}
