@@ -57,8 +57,14 @@ impl State {
     /// selection, on the board's defaults (Can download, 30 days, no password).
     pub fn begin_share(&mut self) -> bool {
         let items = self.selected_items();
+        self.begin_share_for(items)
+    }
+
+    /// Share… for these items, whatever Files' list has selected (Search, Photos and the viewer ask it): the same
+    /// dialog, defaults, source call and password field as [`State::begin_share`].
+    pub fn begin_share_for(&mut self, items: Vec<DriveItem>) -> bool {
         // No dialog for nothing, and none for a protected item, whoever asks.
-        if items.is_empty() || self.protects_selection() {
+        if items.is_empty() || self.protects(&items) {
             return false;
         }
         self.close_menu();
@@ -469,3 +475,7 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
         None => dialog,
     }
 }
+
+#[cfg(test)]
+#[path = "ask_tests.rs"]
+mod ask_tests;

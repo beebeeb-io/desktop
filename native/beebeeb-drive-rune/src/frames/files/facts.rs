@@ -49,9 +49,18 @@ impl State {
             Some(Dialog::Details(item)) => Some((**item).clone()),
             _ => self.one_selected(),
         };
-        let Some(item) = item.filter(|item| !item.is_folder) else {
+        match item {
+            Some(item) => self.begin_versions_for(item),
+            None => false,
+        }
+    }
+
+    /// Version history… of this file, whatever Files' list has selected (Search, Photos and the viewer ask it): the
+    /// same dialog and source call as [`State::begin_versions`]. A folder has none.
+    pub fn begin_versions_for(&mut self, item: DriveItem) -> bool {
+        if item.is_folder {
             return false;
-        };
+        }
         self.close_menu();
         self.actions.dialog = Some(Dialog::Versions(Box::new(item.clone())));
         self.actions.source.ask_versions(&item);

@@ -63,6 +63,10 @@ mod files_case_twins_tests;
 mod files_conflicts;
 mod files_downloads;
 mod files_facts;
+mod files_item_of;
+#[cfg(test)]
+#[path = "engine_host/files_item_of_tests.rs"]
+mod files_item_of_tests;
 mod files_launch;
 mod files_link;
 #[cfg(test)]
@@ -1014,6 +1018,10 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     /// the account-bound local state only: nothing is asked of the server on the press).
     fn share_of(&self, item: &DriveItem) -> Option<String> {
         self.engine.share_target_of(self.engine.session_turn(), &item.id)
+    }
+
+    fn item_of(&self, id: &str) -> Option<DriveItem> {
+        self.local(|db, _| Ok(files_item_of::item_of(db, id))).ok().flatten()
     }
 
     fn versions(&self, item: &DriveItem) -> Vec<crate::frames::files::actions_data::Version> {

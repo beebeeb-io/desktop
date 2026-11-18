@@ -350,6 +350,10 @@ pub trait FilesSource: Send + 'static {
     fn share_of(&self, _item: &DriveItem) -> Option<String> {
         None
     }
+    /// The item with this id, as this account's local state holds it. `None`: not known, or not this account's.
+    fn item_of(&self, _id: &str) -> Option<DriveItem> {
+        None
+    }
     /// The versions of a file, the current one first (DW-0413). Empty: not known.
     fn versions(&self, _item: &DriveItem) -> Vec<super::actions_data::Version> {
         Vec::new()
