@@ -395,3 +395,35 @@ fn skip_setup_on_the_lock_step_with_hello_verified_turns_app_lock_off_with_the_p
     wait_for(&mut rt, "off", |rt| says(rt, "App lock, Off"));
     assert_eq!(engine.app_lock.lock().unwrap().clone(), [(session(1), false, true)]);
 }
+
+fn step_of(rt: &mut Runtime<State>) -> crate::frames::signin::setup::Step {
+    rt.state.setup.as_ref().expect("the first run").step
+}
+
+/// "Not now" stays on the Lock step while Windows Hello is up (its prompt must not show over the next step), and
+/// moves on once it answered, whatever the answer.
+#[test]
+fn not_now_stays_on_the_lock_step_until_windows_hello_answers() {
+    use crate::frames::signin::setup::Step;
+    for result in [
+        HelloResult::Verified,
+        HelloResult::Cancelled,
+        HelloResult::Failed,
+        HelloResult::Unavailable,
+    ] {
+        let prompts = Prompts::default();
+        let (mut rt, _engine) = lock_window(&prompts);
+        press(&mut rt, "Continue");
+        assert_eq!(step_of(&mut rt), Step::Lock);
+        rt.update(|s, _| s.setup.as_mut().expect("the first run").not_now());
+        assert_eq!(prompts.asked.load(Ordering::SeqCst), 1);
+        for _ in 0..5 {
+            rt.frame(0.1);
+        }
+        assert_eq!(step_of(&mut rt), Step::Lock, "still on Lock while Hello is up ({result:?})");
+        prompts.answer(result);
+        wait_for(&mut rt, "the next step", |rt| {
+            rt.state.setup.as_ref().is_some_and(|ui| ui.step == Step::Backup)
+        });
+    }
+}

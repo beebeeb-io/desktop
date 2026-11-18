@@ -212,6 +212,9 @@ pub struct Results {
 }
 
 pub struct Ui {
+    /// "Not now" or "Continue" on the Lock step was pressed and its prompt (Windows Hello) has not answered: the
+    /// flow stays on the step until it does, so the prompt is never up over the next step.
+    lock_holds: bool,
     source: Box<dyn SetupSource>,
     pub step: Step,
     pub compare: Option<Compare>,
@@ -278,6 +281,7 @@ impl Ui {
     pub fn new(source: Box<dyn SetupSource>) -> Self {
         let sample = source.sample();
         let mut ui = Ui {
+            lock_holds: false,
             step: Step::Passkey,
             folder: source.folder_ask(),
             unsaved: source.folder_unsaved(),
@@ -531,6 +535,9 @@ impl Ui {
             // "Continue" on a step nothing answers for: the next step, nothing asked, nothing claimed.
             return self.advance();
         }
+        if self.lock_holds {
+            return;
+        }
         match self.step {
             Step::Passkey | Step::Done => return,
             Step::Lock => {
@@ -540,6 +547,9 @@ impl Ui {
                 // The delay goes with the switch on only (off never locks).
                 if self.lock_on && self.sets_lock_after() {
                     self.asked(Switch::LockAfter);
+                }
+                if self.hold_for_lock_answer() {
+                    return;
                 }
             }
             Step::Backup => {
@@ -604,13 +614,21 @@ impl Ui {
         if self.compare.is_some() {
             return;
         }
+        if self.lock_holds {
+            return;
+        }
         match self.step {
             Step::Done => return,
             // The sync folder is not skipped from its own question ("Skip setup" leaves the first run).
             Step::Explorer if self.asks_folder() => return,
             // Works like "Continue" with the switch off: Windows Hello is asked first, and a prompt that did not
             // confirm leaves app lock as it was ("Not changed", never "Off").
-            Step::Lock if self.available(Step::Lock) => self.ask_lock_off(),
+            Step::Lock if self.available(Step::Lock) => {
+                self.ask_lock_off();
+                if self.hold_for_lock_answer() {
+                    return;
+                }
+            }
             Step::Notifications if self.available(Step::Notifications) => {
                 self.source.set_notifications(false);
                 self.results.notifications = false;
@@ -631,8 +649,22 @@ impl Ui {
             self.ask_lock_off();
         }
         self.leave_passkey_step();
+        self.lock_holds = false;
         self.step = Step::Done;
         self.focus = Some(TITLE_KEY);
+    }
+
+    /// Whether the Lock step must wait for what it asked: a source that answers later may have Windows Hello up
+    /// for it, and the next step must not be shown under that prompt.
+    fn hold_for_lock_answer(&mut self) -> bool {
+        self.lock_holds = self.lock_pending();
+        self.lock_holds
+    }
+
+    fn lock_pending(&self) -> bool {
+        self.answered
+            .iter()
+            .any(|(s, a)| matches!(s, Switch::AppLock | Switch::LockAfter) && *a == Answered::Waiting)
     }
 
     /// Step 2 with the switch off, whatever the switch shows: the source asks Windows Hello first.
@@ -776,6 +808,12 @@ impl Ui {
             self.take_in(outcome);
         }
         self.take_in_passkey();
+        if self.lock_holds && !self.lock_pending() {
+            self.lock_holds = false;
+            if self.step == Step::Lock {
+                self.advance();
+            }
+        }
         if let Some(folders) = self.source.fresh_folders() {
             self.folders = folders;
         }
