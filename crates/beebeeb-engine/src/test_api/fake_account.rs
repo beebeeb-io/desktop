@@ -138,6 +138,10 @@ pub struct FakeAccount {
     security_routes: AtomicBool,
     /// What `me/two-factor` says ([`Self::set_two_factor`]); off at the start.
     pub(super) two_factor_on: AtomicBool,
+    /// The `plan_state` the subscription says ([`Self::set_plan_state`]); `active` at the start.
+    plan_state: Mutex<String>,
+    /// The subscription route hangs up ([`Self::set_plan_unreachable`]).
+    plan_unreachable: AtomicBool,
     /// Two-factor, region, deletion, email resend, health and speedtest ([`super::fake_rest`]).
     pub(super) rest: super::fake_rest::RestState,
 }
@@ -150,6 +154,16 @@ impl FakeAccount {
     /// Answer the Security page's four routes (see the field); the fixture of `bb-fake-server` does.
     pub fn serve_security_routes(&self, on: bool) {
         self.security_routes.store(on, Ordering::SeqCst);
+    }
+
+    /// What `billing/subscription` says as `plan_state`: `none`, `trial`, `free`, `active` or `lapsed`.
+    pub fn set_plan_state(&self, state: &str) {
+        *self.plan_state.lock().unwrap() = state.to_string();
+    }
+
+    /// `billing/subscription` hangs up without an answer (the server cannot be reached for the plan).
+    pub fn set_plan_unreachable(&self, unreachable: bool) {
+        self.plan_unreachable.store(unreachable, Ordering::SeqCst);
     }
 
     /// Whether `me/two-factor` says two-factor is on.
@@ -198,6 +212,8 @@ impl FakeAccount {
             restore_hangs_up: AtomicBool::new(false),
             security_routes: AtomicBool::new(false),
             two_factor_on: AtomicBool::new(false),
+            plan_state: Mutex::new("active".to_string()),
+            plan_unreachable: AtomicBool::new(false),
             rest: Default::default(),
         };
         (account, recovery_phrase.to_string())
@@ -700,12 +716,28 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
+                if account.plan_unreachable.load(Ordering::SeqCst) {
+                    return Reply::hang_up();
+                }
+                let state = account.plan_state.lock().unwrap().clone();
+                let (plan, status) = match state.as_str() {
+                    "none" => ("none", "none"),
+                    "lapsed" => ("personal", "canceled"),
+                    "trial" => ("personal", "trialing"),
+                    "free" => ("free", "active"),
+                    _ => ("personal", "active"),
+                };
                 Reply::ok(json!({
-                    "plan_name": "Pro",
-                    "status": "active",
-                    "storage_limit_bytes": account.quota_bytes,
+                    "plan": plan,
+                    "billing_cycle": "monthly",
+                    "status": status,
+                    "seats": 1,
+                    "region": "eu",
                     "created_at": "2025-01-01T00:00:00Z",
                     "current_period_end": "2026-01-01T00:00:00Z",
+                    "quota_bytes": account.quota_bytes,
+                    "used_bytes": account.used_bytes,
+                    "plan_state": state,
                 }))
             }
 
