@@ -272,8 +272,6 @@ pub fn surface(pages: El, doc: &DocBody, edit: &EditUi, stage: Option<[f32; 4]>,
         .role("textbox")
         .label("Document text")
         .focusable(true)
-        // The keyboard is on the page as the document opens: typing starts at once.
-        .autofocus()
         .no_focus_ring()
         .cursor(Cursor::Text)
         // Typing and moving are direct manipulation: the caret and the pictures land at once, never glide.
@@ -282,6 +280,11 @@ pub fn surface(pages: El, doc: &DocBody, edit: &EditUi, stage: Option<[f32; 4]>,
         .on_drag(on_drag)
         .on_wheel(on_wheel)
         .child(pages);
+    // The keyboard is on the page as the document opens: typing starts at once. Only until the editor's first
+    // answer, so a pop-up or a ribbon tool that took the keyboard later keeps it.
+    if edit.revision == 0 && edit.caret.is_none() && !edit.has_keyboard {
+        surface = surface.autofocus();
+    }
     for (i, rect) in edit.selection.iter().take(MAX_SELECTION_RECTS).enumerate() {
         let [x, y, w, h] = doc.page_rect(rect);
         surface = surface.child(
