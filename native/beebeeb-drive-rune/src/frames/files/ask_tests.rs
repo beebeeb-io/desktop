@@ -1,9 +1,9 @@
 //! Files' Share and Version history dialogs for an item that is not Files' selection (what Search, Photos and the
 //! viewer ask): the dialog opens, Copy link asks `share_link` for that item only, and versions are asked for it.
 
-use super::dialogs::Dialog;
-use super::source::{Account, Action, ActionError, Change, Counts, Details, FilesSource, NoEngine, StorageSplit};
-use super::tests::runtime_of;
+use super::super::dialogs::Dialog;
+use super::super::source::{Account, Action, ActionError, Change, Counts, Details, FilesSource, NoEngine, StorageSplit};
+use super::super::tests::runtime_of;
 use crate::State;
 use crate::frames::files::actions_data::ShareOptions;
 use crate::source::DriveItem;
@@ -55,9 +55,21 @@ impl FilesSource for Source {
 }
 
 fn outside(id: &str, is_folder: bool) -> DriveItem {
-    let mut item = crate::frames::this_pc::offline::drive_item(id, "Invented elsewhere.txt", is_folder);
-    item.parent_id = Some("a-folder-not-listed".into());
-    item
+    DriveItem {
+        id: id.to_string(),
+        parent_id: Some("a-folder-not-listed".into()),
+        name: "Invented elsewhere.txt".into(),
+        is_folder,
+        size: None,
+        child_count: None,
+        modified_at: String::new(),
+        mime: None,
+        has_thumbnail: false,
+        shared_type: None,
+        shared_badges: Vec::new(),
+        pc_status: None,
+        is_protected: false,
+    }
 }
 
 fn window() -> (Runtime<State>, Spy) {
@@ -99,7 +111,7 @@ fn share_for_starts_with_no_password_and_an_empty_field() {
         s.actions.share_password = rune::TextEdit::new("left over").secure();
         assert!(s.begin_share_for(vec![outside("elsewhere", false)]));
         assert!(s.actions.share_password.text.is_empty());
-        assert!(!super::share::shows_secret(s));
+        assert!(!super::shows_secret(s));
     });
 }
 
