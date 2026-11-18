@@ -171,7 +171,16 @@ impl EngineBridge {
         // `chunk_count == 1`), which the chunk loop below sends as a 28-byte
         // nonce + tag. Requires a server whose `/uploads/init` accepts
         // `file_size_bytes: 0`.
-        let plaintext_size = std::fs::metadata(payload_path)?.len();
+        let sealed_office = super::finder_edit::is_sealed_office(&metadata);
+        // A sealed Office save: the staged file is core's snapshot blob, `plaintext + SEAL_OVERHEAD` bytes.
+        let plaintext_size = if sealed_office {
+            std::fs::metadata(payload_path)?
+                .len()
+                .checked_sub(super::finder_edit::SEAL_OVERHEAD)
+                .ok_or_else(|| anyhow::anyhow!("staged upload payload could not be read"))?
+        } else {
+            std::fs::metadata(payload_path)?.len()
+        };
 
         let is_create = is_create_file_operation(&metadata);
         let payload_path_str = payload_path.to_string_lossy().into_owned();
@@ -507,7 +516,14 @@ impl EngineBridge {
         }
         // Task 1640: a sync-folder upload (no write id) records what it sent as the content this
         // device now agrees with the server on. A Finder write's copy is not read again.
+        // A sealed Office save is not hashed from its staged blob (that is not the content that was sent).
+        let sealed_office = op
+            .metadata_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .is_some_and(|metadata| super::finder_edit::is_sealed_office(&metadata));
         let completed_payload_hash = match (claim.and_then(|c| c.write.as_ref()), payload_path.as_deref()) {
+            (None, Some(_)) if sealed_office => None,
             (None, Some(path)) => match sha256_file_hex(Path::new(path)) {
                 Ok(hash) => Some(hash),
                 Err(e) => {
@@ -590,7 +606,15 @@ impl EngineBridge {
                 .map_err(EngineError::from)?
                 .0;
             match self
-                .finish_completed_upload(op, server_file_id, Path::new(path), content_type, &file_key, sync_root)
+                .finish_completed_upload(
+                    op,
+                    server_file_id,
+                    Path::new(path),
+                    // No thumbnail is cut from a sealed blob.
+                    if sealed_office { None } else { content_type },
+                    &file_key,
+                    sync_root,
+                )
                 .await
             {
                 Ok(()) => {
@@ -706,13 +730,22 @@ impl EngineBridge {
             if acked != 0 {
                 return Err(anyhow::anyhow!("an upload never continues a persisted session").into());
             }
-            let file = std::fs::File::open(payload_path)?;
+            // A sealed Office save is opened here, as it is read: the plaintext lives in memory only, never on disk.
+            let source: Box<dyn std::io::Read + Send> = if super::finder_edit::is_sealed_office(metadata) {
+                let plain = self.open_sealed_office(op, payload_path)?;
+                if plain.len() as u64 != session.payload_size as u64 {
+                    return Err(anyhow::anyhow!("staged upload payload could not be read").into());
+                }
+                Box::new(std::io::Cursor::new(plain))
+            } else {
+                Box::new(std::fs::File::open(payload_path)?)
+            };
             let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
                 file_key,
                 &server_file_id,
                 session.payload_size as u64,
                 chunk_size as u64,
-                file,
+                source,
             )?
             .with_recorded_pin(record.format)?;
             progress.update(0);
@@ -1059,6 +1092,25 @@ impl EngineBridge {
             Ok(None) => {}
             Err(e) => tracing::warn!(op_id = %op.op_id, error = %e, "upload: failed to read resume state"),
         }
+    }
+
+    /// A sealed Office save's staged blob, opened under the account key and bound to the op's file id. A blob that
+    /// does not open (damaged, another account's) is a retry with a fixed text: nothing is dropped from the queue.
+    fn open_sealed_office(
+        &self,
+        op: &PendingOperation,
+        payload_path: &Path,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, EngineError> {
+        let unreadable = || anyhow::anyhow!("staged upload payload could not be read");
+        let file_id = op.file_id.as_deref().ok_or_else(unreadable)?;
+        let sealed = std::fs::read(payload_path).map_err(|_| unreadable())?;
+        let (_, plain) = beebeeb_core::local_seal::open_recovery_snapshot(
+            &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()),
+            file_id,
+            &sealed,
+        )
+            .map_err(|_| unreadable())?;
+        Ok(plain)
     }
 
     pub(super) async fn upload_thumbnails_for_plaintext_media(

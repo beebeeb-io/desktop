@@ -346,6 +346,19 @@ impl<C: CredentialStores> Engine<C> {
         base: i64,
         opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
+        self.save_bytes_sealed_for(session, file_id, bytes, base, opening, None)
+    }
+
+    /// [`Self::save_bytes_for`]; `seal_kind` `Some(kind)` stages the bytes sealed (an Office save: `office_edit_api`).
+    pub(in crate::app) fn save_bytes_sealed_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &[u8],
+        base: i64,
+        opening: u64,
+        seal_kind: Option<u8>,
+    ) -> Result<SaveEnd, EditRefused> {
         let (token, key) = self.edit_credentials(session)?;
         let state = self.local_state_for_changes().map_err(|_| EditRefused::Unavailable)?;
         if state.session() != session {
@@ -399,7 +412,11 @@ impl<C: CredentialStores> Engine<C> {
             content_type: contract.content_type.clone(),
             base_version_identifier: Some(base.to_string()),
         };
-        let held = anonymous_file(bytes).ok_or(EditRefused::Failed)?;
+        // A sealed save never puts the plaintext in a file of its own: the one staged copy is the sealed blob.
+        let held = match seal_kind {
+            Some(_) => None,
+            None => Some(anonymous_file(bytes).ok_or(EditRefused::Failed)?),
+        };
         // Delta 3 of desktop#432: queued after this opening's own latest unsent save alone. Another unsent write of
         // the file (an earlier opening's save, a File Provider save) is not what the text on screen is based on:
         // after it, both would land one after the other and nobody would be asked. The accept checks it inside its
@@ -419,7 +436,7 @@ impl<C: CredentialStores> Engine<C> {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
                 let queued = EngineBridge::new(self.identity, db.clone(), api)
                     .with_chain_after(chain)
-                    .queue_file_provider_modify_from(target, Some(&held))
+                    .queue_modify_for_save(target, held.as_ref(), bytes, seal_kind)
                     .map(|write| (write.outcome, write.token));
                 // Refused behind an earlier write: ONE read, after the refused accept, picks which refusal it is (held
                 // back, or not sent yet). For the words alone: nothing was stored either way, so a change between the
