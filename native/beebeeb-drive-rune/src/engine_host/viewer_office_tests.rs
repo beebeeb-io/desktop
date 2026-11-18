@@ -950,7 +950,7 @@ fn a_save_that_cannot_get_its_bytes_settles_failed_and_ends_the_busy_state() {
     let mut e = editor("Invented.docx", false);
     assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
     let id = e.fake.id_of("save");
-    e.fake.answer(HostEdit::Failed { id });
+    e.fake.answer(HostEdit::Failed { id, too_large: false });
     let settled = until_settled(&mut e.source, "f1", || {});
     assert!(matches!(settled, crate::frames::viewers::source::Settled::Failed));
     assert!(!e.source.saving());

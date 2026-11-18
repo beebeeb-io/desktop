@@ -7,7 +7,7 @@ use beebeeb_office_protocol::office::{EditKind, Edited, Marks, PageRect};
 use rune::{Cx, El, Tx, col};
 
 use crate::State;
-use crate::frames::viewers::{self, Ui, office::Keeping, source::EditAnswer};
+use crate::frames::viewers::{self, Ui, source::EditAnswer};
 use crate::theme::tokens;
 
 pub mod clipboard;
@@ -110,7 +110,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             EditAnswer::Clip { text, html } => edit.clip = Some((text, html)),
             EditAnswer::Layouts(names) => edit.layouts = names,
             EditAnswer::Stopped => edit.stopped = true,
-            EditAnswer::Restored { at } => edit.restored = Some(at),
+            // The document is another one now (a snapshot, or the kept editing): its revisions start again, nothing
+            // of the old one's caret or undo holds, and no version holds it until it is saved.
+            EditAnswer::Restored { at } => {
+                edit.restored = Some(at);
+                edit.revision = 0;
+                edit.saved_revision = u64::MAX;
+                edit.caret = None;
+                edit.selection.clear();
+                edit.can_undo = false;
+                edit.can_redo = false;
+            }
             EditAnswer::CopyTooLarge => ui.toast = Some(crate::frames::viewers::source::COPY_TOO_LARGE.to_string()),
         }
     }
@@ -123,7 +133,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
 pub fn chrome(_s: &State, cx: &mut Cx<State>, ui: &Ui, kind: EditKind, body: El) -> El {
     let t = tokens::theme(cx.system_dark());
     let unsaved = ui.office.edit.as_ref().is_some_and(EditUi::unsaved);
-    let keeping = if unsaved { Keeping::Unsaved } else { Keeping::Saved };
+    let keeping = save::keeping(ui);
     // The tools of the kind's ribbon come from its own file once that task lands; until then the shared ribbon.
     let ribbon = match kind {
         EditKind::Docx => word_ribbon::ribbon(ui, unsaved, &t),

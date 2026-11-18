@@ -17,8 +17,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     for intent in asked {
         match intent {
             ViewerIntent::CreateFile { folder, name } => s.create_file(folder.as_deref(), &name, tx),
-            // New document is the Office editor's (0.9.1, decision D-OV-3): this build never asks for it.
-            ViewerIntent::NewDocument(_) => {}
+            // New file's Continue on an office type: New document (DW-1558) on that app, for the folder shown.
+            ViewerIntent::NewDocument(kind) => {
+                let folder = s.listing.folder.id.clone();
+                crate::frames::office::edit::new_document::open(s, tx, Some(kind), folder);
+            }
             // The dialog asks for nothing else.
             _ => {}
         }

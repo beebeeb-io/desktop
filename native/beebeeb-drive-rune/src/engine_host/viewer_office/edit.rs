@@ -75,6 +75,11 @@ struct Made {
 pub(super) struct Work {
     saving: Option<Pending>,
     creating: Option<Creating>,
+    /// The revision of the document the save on its way was made from (the helper's, with its bytes): said to the
+    /// window as `Settled::SavedRevision` just before the save's own answer.
+    revision: Option<u64>,
+    /// The save's own answer, held back for one `settled` while its revision is said first.
+    after_revision: Option<Settled>,
     made_tx: mpsc::Sender<Made>,
     made_rx: mpsc::Receiver<Made>,
 }
@@ -92,6 +97,8 @@ impl Default for Work {
         Work {
             saving: None,
             creating: None,
+            revision: None,
+            after_revision: None,
             made_tx,
             made_rx,
         }
@@ -257,7 +264,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         match wait {
             SaveWait::Waiting => {}
             SaveWait::Failed => self.office_fail_save(),
-            SaveWait::Done(bytes, _revision) => self.office_start_save(bytes),
+            SaveWait::Done(bytes, revision) => {
+                self.office.work.revision = Some(revision);
+                self.office_start_save(bytes);
+            }
         }
     }
 
@@ -463,8 +473,20 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         if let Some(settled) = self.office_pump_create() {
             return Some(settled);
         }
+        if let Some(settled) = self.office.work.after_revision.take() {
+            return Some(self.office_fill(file_id, settled));
+        }
         let settled = self.take_settled(file_id)?;
-        Some(self.office_fill(file_id, settled))
+        // A save that landed (or is stored here to be sent) says first which revision it holds: what was typed after
+        // the bytes were taken stays unsaved in the window.
+        let landed = matches!(settled, Settled::Saved { .. } | Settled::Queued { .. });
+        match self.office.work.revision.take() {
+            Some(revision) if landed => {
+                self.office.work.after_revision = Some(settled);
+                Some(Settled::SavedRevision(revision))
+            }
+            _ => Some(self.office_fill(file_id, settled)),
+        }
     }
 
     /// A save of the open Office file answers with the body it holds: the placeholder of the worker is replaced.

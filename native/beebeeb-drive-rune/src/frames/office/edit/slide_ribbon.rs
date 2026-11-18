@@ -360,6 +360,8 @@ pub fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
         )],
         Tab::Layout => design_tools(ui, t),
         Tab::Review => transitions_tools(t),
+        // A workbook's tabs: never on a deck's row.
+        Tab::Data | Tab::Formulas => Vec::new(),
     };
     let mut rib = vo::ribbon_of(ui, unsaved, tools, t);
     if ui.office.ribbon.open == Some(Pop::Font) && ui.office.tab == Tab::Home {

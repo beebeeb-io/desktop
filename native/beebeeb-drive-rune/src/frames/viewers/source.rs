@@ -751,6 +751,11 @@ pub trait ViewerSource {
     }
     /// Drop the kept editing.
     fn discard_recovery(&mut self, _file_id: &str) {}
+    /// The account's files with a kept editing, newest first: the file's id and the editing's time ("14:32"). For the
+    /// notice after unlock.
+    fn recovery_pending(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// How long until this source next reads whether a newer version arrived (DW-1519), while it reads one: the
     /// window asks to be woken then, so the banner comes without a press. `None`: it does not read.
     fn next_check(&self) -> Option<std::time::Duration> {

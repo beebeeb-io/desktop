@@ -1346,6 +1346,23 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
         self.office_create(folder, name, kind, template)
     }
 
+    fn recovery(&self, file_id: &str) -> Option<crate::frames::viewers::source::RecoveryOffer> {
+        self.office_recovery(file_id)
+    }
+
+    fn restore(&mut self, file_id: &str) -> bool {
+        self.office_restore(file_id)
+    }
+
+    fn discard_recovery(&mut self, file_id: &str) {
+        self.office_discard_recovery(file_id)
+    }
+
+    fn recovery_pending(&self) -> Vec<(String, String)> {
+        let pending = self.office_recovery_pending();
+        pending.into_iter().map(|kept| (kept.file_id, kept.at)).collect()
+    }
+
     fn save_document(&mut self, file_id: &str, base: u32) -> SaveOutcome {
         self.office_save_document(file_id, base)
     }

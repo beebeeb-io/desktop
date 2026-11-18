@@ -389,6 +389,8 @@ pub fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
         }
         Tab::Layout => layout_tools(t),
         Tab::Review => review_tools(t),
+        // A workbook's tabs: never on a text document's row.
+        Tab::Data | Tab::Formulas => Vec::new(),
     };
     let mut rib = vo::ribbon_of(ui, unsaved, tools, t);
     let pops = &ui.office.ribbon;

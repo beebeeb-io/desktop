@@ -317,7 +317,9 @@ pub fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
             tools
         }
         Tab::Insert => insert_tools(t),
-        // Layout and Review are on no board frame of the sheet: not drawn.
+        Tab::Data => data_tools(t),
+        Tab::Formulas => formulas_tools(t),
+        // Layout and Review are a text document's: never on a workbook's row.
         Tab::Layout | Tab::Review => Vec::new(),
     };
     let mut rib = vo::ribbon_of(ui, unsaved, tools, t);

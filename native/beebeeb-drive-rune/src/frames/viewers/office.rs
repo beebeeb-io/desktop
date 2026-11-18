@@ -147,16 +147,36 @@ pub enum Tab {
     Insert,
     Layout,
     Review,
+    /// A live workbook's third tab (DW-1559).
+    Data,
+    /// A live workbook's fourth tab (DW-1559).
+    Formulas,
 }
 
 impl Tab {
+    /// A text document's row (and a deck's, under its own words: `edit::slide::tab_label`).
     pub const ALL: [Tab; 4] = [Tab::Home, Tab::Insert, Tab::Layout, Tab::Review];
+    /// A live workbook's row.
+    pub const SHEET: [Tab; 4] = [Tab::Home, Tab::Insert, Tab::Data, Tab::Formulas];
     pub fn label(self) -> &'static str {
         match self {
             Tab::Home => "Home",
             Tab::Insert => "Insert",
             Tab::Layout => "Layout",
             Tab::Review => "Review",
+            Tab::Data => "Data",
+            Tab::Formulas => "Formulas",
+        }
+    }
+
+    /// The row and its words for what is open: a live workbook has Data and Formulas, a live deck Design and
+    /// Transitions.
+    pub fn row_of(kind: Option<beebeeb_office_protocol::office::EditKind>) -> [(Tab, &'static str); 4] {
+        use beebeeb_office_protocol::office::EditKind;
+        match kind {
+            Some(EditKind::Xlsx) => Tab::SHEET.map(|tab| (tab, tab.label())),
+            Some(EditKind::Pptx) => Tab::ALL.map(|tab| (tab, crate::frames::office::edit::slide::tab_label(tab))),
+            _ => Tab::ALL.map(|tab| (tab, tab.label())),
         }
     }
 }
@@ -174,6 +194,8 @@ pub struct OfficeUi {
     pub ribbon: crate::frames::office::edit::word_ribbon::Pops,
     /// The save asked and not yet answered (`frames/office/edit/save.rs`).
     pub save: Option<crate::frames::office::edit::save::Sent>,
+    /// An unsaved editing of the open file that this PC kept, read when the editor started (`edit/recovery.rs`).
+    pub recovery: Option<super::source::RecoveryOffer>,
 }
 
 impl Default for OfficeUi {
@@ -185,6 +207,7 @@ impl Default for OfficeUi {
             edit: None,
             ribbon: Default::default(),
             save: None,
+            recovery: None,
         }
     }
 }
@@ -368,12 +391,12 @@ pub(crate) fn small_button(
 /// The ribbon's first row: the tabs, the command search, Share, Save.
 pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let mut r = row().key("rib-tabs").w_full().h(32.0).px(12.0).gap(4.0).center_y();
-    for (i, tab) in Tab::ALL.into_iter().enumerate() {
+    for (i, (tab, word)) in Tab::row_of(ui.office.edit.as_ref().map(|e| e.kind)).into_iter().enumerate() {
         let on = ui.office.tab == tab;
         let mut cell = el()
             .key(format!("rib-tab-{i}-cell"))
             .role("tab")
-            .label(tab.label())
+            .label(word)
             .checked(on)
             .h_full()
             .px(10.0)
@@ -387,7 +410,7 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .child(
                 style::fitted(
                     format!("rib-tab-{i}"),
-                    tab.label(),
+                    word,
                     if on { TAB_ON } else { TAB },
                     if on { t.text } else { t.text_tertiary },
                 )
@@ -520,8 +543,8 @@ pub(crate) fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let tools = match ui.office.tab {
         Tab::Home => home_tools(t),
         Tab::Insert => super::office_over::insert_tools(t),
-        // Layout's and Review's tools are on no board frame: not drawn.
-        Tab::Layout | Tab::Review => Vec::new(),
+        // Layout's and Review's tools are on no board frame: not drawn. Data and Formulas are a live workbook's.
+        Tab::Layout | Tab::Review | Tab::Data | Tab::Formulas => Vec::new(),
     };
     ribbon_of(ui, unsaved, tools, t)
 }
@@ -551,6 +574,8 @@ pub(crate) fn ribbon_of(ui: &Ui, unsaved: bool, tools: Vec<El>, t: &Theme) -> El
                 .clip_rounded(0.0)
                 .children(tools),
         )
+        // A kept editing, or what a stopped editor says (`edit/recovery.rs`): under the tools of every live ribbon.
+        .children(crate::frames::office::edit::recovery::row_of(ui, t))
 }
 
 /// The outline pane: the document's headings, the one the caret is in marked.

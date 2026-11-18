@@ -19,7 +19,13 @@ mod tests;
 pub fn take(s: &mut State, tx: &mut Tx, intent: Intent) -> bool {
     match intent {
         Intent::SaveCopy | Intent::DownloadTo => return super::viewer_save::take(s, tx, intent),
-        Intent::Office(_) | Intent::EditInSheets | Intent::NewDocument(_) => return false,
+        Intent::Office(_) => return office_command(s),
+        Intent::NewDocument(kind) => {
+            let folder = s.listing.folder.id.clone();
+            crate::frames::office::edit::new_document::open(s, tx, Some(kind), folder);
+            return true;
+        }
+        Intent::EditInSheets => return false,
         // Not this file's: a dialog of the viewer's own, or a thing the viewer's source already did.
         Intent::OpenInAnotherApp | Intent::CreateFile { .. } => return false,
         _ => {}
@@ -47,6 +53,24 @@ pub fn take(s: &mut State, tx: &mut Tx, intent: Intent) -> bool {
         Intent::NewMenu => new_menu(s),
         _ => return false,
     }
+    true
+}
+
+/// What a command says when the running editor did not take it.
+pub const NOT_TAKEN: &str = "That change was not taken. Try again.";
+
+/// A command the office editor's controls sent here because its source did not take it. With an editor running on
+/// the open document that is a refusal, said as one; a stopped editor says that it stopped. `false`: no editor runs
+/// (the board's sample document): the router's "Not built yet".
+fn office_command(s: &mut State) -> bool {
+    let Some(ui) = viewers::ui(s) else { return false };
+    let Some(edit) = ui.office.edit.as_ref() else { return false };
+    let words = if edit.stopped {
+        crate::frames::office::edit::recovery::read_only_words()
+    } else {
+        NOT_TAKEN
+    };
+    ui.toast = Some(words.to_string());
     true
 }
 
@@ -152,17 +176,29 @@ fn keep_offline(s: &mut State, item: DriveItem) {
     say(s, words);
 }
 
-/// A link to a file in Drive, as the note wrote it. It resolves in the folder the open file is in (a name, `./name`,
-/// or the full path from Files); anything that is not in Drive (a drive letter, `..`, a scheme, backslashes) is
-/// refused.
+/// A file in Drive to open: a name from "Files" (the office editor's command search), or a link as a note wrote it.
+/// A name is one of the folder shown, taken as it is (whatever characters it has); a link resolves in the folder the
+/// open file is in (a name, `./name`, or the full path from Files), and anything that is not in Drive (a drive
+/// letter, `..`, a scheme, backslashes) is refused. Changes no version holds are asked about first, as Back asks:
+/// the open file stays until that is answered.
 fn open_in_drive(s: &mut State, tx: &mut Tx, path: &str) {
     let Some(ui) = viewers::ui(s) else { return };
+    if ui.hold_for_changes() {
+        return;
+    }
     let here: Vec<String> = ui.file.path.clone();
-    let Some(name) = resolve_in_folder(path, &here) else {
-        return say(s, "That link isn't in your Beebeeb Drive".into());
-    };
-    let Some(row) = s.listing.items.iter().find(|row| row.name == name).cloned() else {
-        return say(s, "Couldn't find that in this folder".into());
+    let named = s.listing.items.iter().find(|row| row.name == path).cloned();
+    let row = match named {
+        Some(row) => row,
+        None => {
+            let Some(name) = resolve_in_folder(path, &here) else {
+                return say(s, "That link isn't in your Beebeeb Drive".into());
+            };
+            let Some(row) = s.listing.items.iter().find(|row| row.name == name).cloned() else {
+                return say(s, "Couldn't find that in this folder".into());
+            };
+            row
+        }
     };
     if row.is_folder {
         viewers::close(s);

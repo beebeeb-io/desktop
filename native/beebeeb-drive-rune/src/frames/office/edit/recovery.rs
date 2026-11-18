@@ -14,6 +14,7 @@
 use rune::{El, Tx, row};
 
 use crate::State;
+use crate::frames::files::Toast;
 use crate::frames::office::edit::EditUi;
 use crate::frames::viewers::source::{Keep, RecoveryOffer};
 use crate::frames::viewers::{self};
@@ -134,6 +135,16 @@ pub fn view(banner: &Banner, name: &str, t: &Theme) -> El {
     b
 }
 
+/// The banner of the open live document, for its ribbon (`viewers::office::ribbon_of`). `None`: nothing to say.
+pub fn row_of(ui: &viewers::Ui, t: &Theme) -> Option<El> {
+    let edit = ui.office.edit.as_ref()?;
+    let banner = banner(Some(edit), ui.office.recovery.as_ref())?;
+    Some(view(&banner, &ui.file.name, t))
+}
+
+/// What the Restore button says when the kept editing could not be opened.
+pub const NOT_RESTORED: &str = "Couldn't restore those changes. They are still kept on this PC.";
+
 /// What the source kept for the open file.
 pub fn offer(s: &mut State) -> Option<RecoveryOffer> {
     let ui = viewers::ui(s)?;
@@ -155,7 +166,14 @@ fn restore_now(s: &mut State) -> bool {
     let Some(ui) = viewers::ui(s) else { return false };
     let (source, id) = ui.edit_source();
     let id = id.to_string();
-    source.restore(&id)
+    let restored = source.restore(&id);
+    if restored {
+        // The offer is answered: what shows next is what the editor says of the restored document.
+        ui.office.recovery = None;
+    } else {
+        ui.toast = Some(NOT_RESTORED.to_string());
+    }
+    restored
 }
 
 /// Discard: the kept editing is deleted.
@@ -168,6 +186,7 @@ fn discard_press(s: &mut State) {
         let (source, id) = ui.edit_source();
         let id = id.to_string();
         source.discard_recovery(&id);
+        ui.office.recovery = None;
     }
 }
 
@@ -178,7 +197,19 @@ fn keep_both(s: &mut State) {
     }
 }
 
-/// The session unlocked: offer what this PC kept. The list of the account's blobs is the source's
-/// (`engine_host::viewer_office::recovery::Recovery::pending`) and the shell hands it over (w05-wire-shell): until then
-/// there is nothing to list here, so nothing shows.
-pub fn on_unlocked(_s: &mut State, _tx: &mut Tx) {}
+/// The session gate opened (an unlock, a sign-in, a start with a session open): say what this PC kept, once. The
+/// list is the window's source's (`ViewerSource::recovery_pending`); nothing is kept: no notice. Files says how
+/// many files (its toast); an open file says it too, with its name when it is the one. Opening such a file offers
+/// Restore and Discard ([`Banner::Offer`]).
+pub fn on_unlocked(s: &mut State, tx: &mut Tx) {
+    let pending = viewers::office_over::recovery_pending(s);
+    if pending.is_empty() {
+        return;
+    }
+    let count = pending.len();
+    if let Some(ui) = viewers::ui(s) {
+        let open = (count == 1 && pending[0].0 == ui.file.id).then(|| ui.file.name.clone());
+        ui.toast = unlocked_words(count, open.as_deref().filter(|name| !name.is_empty()));
+    }
+    s.show_toast(Toast::KeptEdits(u16::try_from(count).unwrap_or(u16::MAX)), tx);
+}

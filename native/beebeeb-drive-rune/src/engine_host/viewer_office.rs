@@ -136,9 +136,11 @@ pub(crate) enum HostEdit {
         revision: u64,
         bytes: Zeroizing<Vec<u8>>,
     },
-    /// The helper refused request `id` and the session goes on.
+    /// The helper refused request `id` and the session goes on. `too_large`: it said the answer is too large (a copy
+    /// of that much: "Too much to copy at once").
     Failed {
         id: u64,
+        too_large: bool,
     },
     /// The helper restarted from a snapshot; `at` is its time of day (UTC, "09:41").
     Restored { at: String },
@@ -369,7 +371,10 @@ impl Host for Live {
                     revision,
                     bytes,
                 },
-                EditEvent::Failed { id, .. } => HostEdit::Failed { id: self.answered(id) },
+                EditEvent::Failed { id, why } => HostEdit::Failed {
+                    id: self.answered(id),
+                    too_large: why == crate::engine_host::office_host::EditFailure::TooLarge,
+                },
                 EditEvent::Restored { at, .. } => HostEdit::Restored { at: clock_words(at) },
                 EditEvent::ReadOnly { .. } => HostEdit::ReadOnly,
             });
@@ -602,6 +607,8 @@ pub(crate) struct OfficeView {
     saved: Vec<SavedBytes>,
     /// Requests the helper refused, not taken yet.
     failed: Vec<u64>,
+    /// The copies asked and not answered yet, oldest first: a refusal of one is said ("Too much to copy at once").
+    copies: Vec<u64>,
     /// Where the snapshots the helper hands over are kept (an editing session of a file; not a new document).
     tap: Option<recovery::Tap>,
 }
@@ -699,6 +706,7 @@ impl OfficeView {
             edit_out: VecDeque::new(),
             saved: Vec::new(),
             failed: Vec::new(),
+            copies: Vec::new(),
             tap: None,
         };
         let state = match view.host.get_mut() {
@@ -967,7 +975,14 @@ impl OfficeView {
     }
 
     pub(crate) fn copy(&mut self) -> bool {
-        self.can_edit() && self.host.get_mut().as_mut().and_then(|host| host.copy()).is_some()
+        if !self.can_edit() {
+            return false;
+        }
+        let Some(id) = self.host.get_mut().as_mut().and_then(|host| host.copy()) else {
+            return false;
+        };
+        self.copies.push(id);
+        true
     }
 
     pub(crate) fn layouts(&mut self) -> bool {
@@ -1018,7 +1033,13 @@ impl OfficeView {
                     self.apply_edited(&edited);
                     self.edit_out.push_back(EditAnswer::Edited(*edited));
                 }
-                HostEdit::Clip { text, html } => self.edit_out.push_back(EditAnswer::Clip { text, html }),
+                HostEdit::Clip { text, html } => {
+                    // Answers come in the order asked: this one is the oldest copy's.
+                    if !self.copies.is_empty() {
+                        self.copies.remove(0);
+                    }
+                    self.edit_out.push_back(EditAnswer::Clip { text, html });
+                }
                 HostEdit::Layouts(names) => self.edit_out.push_back(EditAnswer::Layouts(names)),
                 // A snapshot (the host's own timer) is kept as the file's recovery blob and never reaches a save.
                 HostEdit::Saved {
@@ -1031,7 +1052,16 @@ impl OfficeView {
                     }
                 }
                 HostEdit::Saved { id, revision, bytes, .. } => self.saved.push(SavedBytes { id, revision, bytes }),
-                HostEdit::Failed { id } => self.failed.push(id),
+                // A copy the helper could not answer at all is said; any other refusal waits for who asked it.
+                HostEdit::Failed { id, too_large } => match self.copies.iter().position(|copy| *copy == id) {
+                    Some(at) => {
+                        self.copies.remove(at);
+                        if too_large {
+                            self.edit_out.push_back(EditAnswer::CopyTooLarge);
+                        }
+                    }
+                    None => self.failed.push(id),
+                },
                 HostEdit::Restored { at } => self.edit_out.push_back(EditAnswer::Restored { at }),
                 HostEdit::ReadOnly => self.edit_out.push_back(EditAnswer::Stopped),
             }

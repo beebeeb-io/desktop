@@ -94,7 +94,7 @@ pub fn new_menu() -> Vec<Entry> {
         Entry::keyed("new-folder", "New folder", "Ctrl+Shift+N"),
         Entry::keyed("new-file", "New file\u{2026}", "Ctrl+N"),
     ];
-    // New document (DW-1558) is the Office editor's: not offered in 0.9.0 (decision D-OV-3).
+    // New document (DW-1558): a Word, Excel or PowerPoint file from the office editor.
     if crate::frames::viewers::new_file::OFFICE_EDITOR {
         menu.push(Entry::item("new-document", "New document\u{2026}"));
     }

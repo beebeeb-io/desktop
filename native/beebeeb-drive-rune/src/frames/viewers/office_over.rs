@@ -231,6 +231,11 @@ impl Ui {
                 if let Some(edit) = self.office.edit.as_mut() {
                     save::landed(edit, &sent);
                 }
+                // Keep both: the window is on the copy now, another file. The editor was the first file's.
+                if sent.id != self.file.id {
+                    self.office.edit = None;
+                    self.office.recovery = None;
+                }
                 true
             }
             Seen::Failed => {
@@ -242,6 +247,33 @@ impl Ui {
                 true
             }
         }
+    }
+
+    /// The open document's editing session is up (the source takes edits): the editor starts on it, once. A Word
+    /// document's page takes the keyboard when it is first drawn, and a kept editing of the file is read now, before
+    /// this session's own snapshots replace it, to be offered. `true`: the editor started.
+    pub fn office_begin_edit(&mut self) -> bool {
+        use super::kinds::{OfficeKind, office_of};
+        use super::source::Body;
+        use beebeeb_office_protocol::office::EditKind;
+        if self.office.edit.is_some() || !matches!(self.file.body, Body::Doc(_) | Body::Sheet(_) | Body::Deck(_)) {
+            return false;
+        }
+        let kind = match office_of(&self.file.name) {
+            Some(OfficeKind::Docx) => EditKind::Docx,
+            Some(OfficeKind::Xlsx) => EditKind::Xlsx,
+            Some(OfficeKind::Pptx) => EditKind::Pptx,
+            _ => return false,
+        };
+        if !self.source.can_edit(&self.file.id) {
+            return false;
+        }
+        self.office.edit = Some(crate::frames::office::edit::EditUi::new(kind));
+        self.office.recovery = self.source.recovery(&self.file.id);
+        if kind == EditKind::Docx {
+            crate::frames::office::edit::word::arm_open_focus();
+        }
+        true
     }
 
     /// Leaving the document was asked for (Back, Esc): `true` while changes no version holds are there, so the
@@ -619,11 +651,20 @@ fn leave(name: &str, t: &Theme) -> El {
 /// neither waits for input. `true`: something changed, the view must run again.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let Some(ui) = super::ui(s) else { return false };
-    let changed = ui.office_image_poll() | ui.office_settle_save();
+    let changed = ui.office_begin_edit() | ui.office_image_poll() | ui.office_settle_save();
     if ui.office_image_waiting() || ui.office.save.is_some() {
         tx.wake_after(std::time::Duration::from_millis(100));
     }
-    changed
+    // The editor's own answers (an edit's, a copy's, a restart's), and whether it has the keyboard.
+    changed | crate::frames::office::edit::poll(s, tx)
+}
+
+/// The account's files with a kept editing (id, time), asked of the window's source: for the notice after unlock
+/// (`office::edit::recovery::on_unlocked`). Empty: none, or the window has no source.
+pub(crate) fn recovery_pending(s: &State) -> Vec<(String, String)> {
+    super::route_source(s)
+        .map(|source| source.recovery_pending())
+        .unwrap_or_default()
 }
 
 /// A `.kit-kbd` as wide as its letters. Keys: `<key>-box`, `<key>`.
