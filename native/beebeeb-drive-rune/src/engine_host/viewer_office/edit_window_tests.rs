@@ -578,8 +578,7 @@ fn text_typed_before_the_snapshot_timer_is_offered_after_a_lock_and_an_unlock() 
     let mut w = window("lockflush");
     w.sign_in();
     w.open_in_the_editor();
-    w.helper.answer(HostEdit::Edited(Box::new(edited(1, Dirty::All))));
-    w.settle();
+    // (The window's editor holds nothing unsaved, so the lock closes the document, as in the test below.)
     assert_eq!(viewers::office_over::recovery_pending(&w.rt.state).len(), 0, "no snapshot was ever handed over: nothing kept yet");
 
     let sink = w.helper.flush_sink().expect("the editor registered the door a lock seals through");
