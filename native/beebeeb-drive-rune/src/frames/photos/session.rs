@@ -401,9 +401,10 @@ impl Ui {
 
     /// What the group asked of the shell, on a source that answers later: what this source can do is done, and a
     /// control whose work is not connected in this build says so instead of doing nothing.
-    fn take_in_intents(&mut self) -> bool {
+    fn take_in_intents(&mut self) -> (bool, Vec<Intent>) {
         let intents = self.take_intents();
         let any = !intents.is_empty();
+        let mut left_over = Vec::new();
         for intent in intents {
             match intent {
                 // "On this PC", pressed again: it stops being kept (asked; said once this PC answered).
@@ -427,7 +428,7 @@ impl Ui {
                     self.say_left(What::Keep(true), &left);
                 }
                 // Kept in this window for as long as it is open.
-                Intent::RememberAcross(_) | Intent::StopOriginal(_) => {}
+                Intent::RememberAcross(_) => {}
                 // The folder dialog of Files opens over the window at the next poll; its answer comes back as
                 // `folder_chosen` / `moved`. What is not there to ask (no session, a photo that left) is said.
                 Intent::AddFolder if self.later.closed => self.toast = Some(Toast::Words(WORDS_FOLDER)),
@@ -440,17 +441,11 @@ impl Ui {
                     Some(items) if !items.is_empty() && !self.later.closed => self.later.pick = Some(Pick::Move(items)),
                     _ => self.toast = Some(Toast::Words(WORDS_MOVE)),
                 },
-                Intent::DownloadOriginal(_) => {
-                    // No download was started: the tab does not say one is running.
-                    if let Some(viewer) = &mut self.viewer {
-                        viewer.original = Original::Preview;
-                    }
-                    self.toast = Some(Toast::NotYet);
-                }
-                _ => self.toast = Some(Toast::NotYet),
+                // Everything else goes to the route of its feature (`route.rs`), which has the State and Tx.
+                other => left_over.push(other),
             }
         }
-        any
+        (any, left_over)
     }
 
     /// The folder of Files that the dialog chose goes to Photo sources. What the Sources dialog's switches say now is
@@ -653,9 +648,16 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     ui.later.was_open = open;
     let later = ui.source.answers_later();
+    let mut left_over = Vec::new();
     if later {
-        changed |= ui.take_in_intents();
+        let (any, rest) = ui.take_in_intents();
+        changed |= any;
+        left_over = rest;
     }
+    for intent in left_over {
+        changed |= super::route::route(s, tx, intent);
+    }
+    let ui = &mut s.photos;
     // The tile the arrow keys are on, by its photo: a read that lands puts photos before it.
     let cursor_on = ui
         .cursor
