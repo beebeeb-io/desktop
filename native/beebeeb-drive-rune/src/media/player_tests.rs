@@ -874,18 +874,26 @@ fn played_line_only_in_test_builds() {
         "the released app never writes it"
     );
     assert!(writes_played_line(AppIdentity::Test.engine()), "a test build writes it");
-    // The one call that writes it asks that first, of this binary's identity, and of nothing else.
-    let source = include_str!("player/worker.rs");
-    let line = ["\"media", ".played\""].concat();
-    assert_eq!(source.matches(line.as_str()).count(), 1, "one call writes the line");
-    let call = source.find(line.as_str()).expect("the call");
-    let guard = "if !writes_played_line(crate::shell::identity::engine_identity()) {";
-    let asked = source[..call].rfind(guard).expect("the call is behind the question");
-    let between: String = source[asked + guard.len()..call].split_whitespace().collect();
+    // Each of the TEST build's lines has one call, and that call asks first, of this binary's identity and of nothing
+    // else.
+    let source = include_str!("player/worker/lines.rs");
     assert!(
-        between.starts_with("return;}tracing::info!("),
-        "nothing stands between the question and the call: {between}"
+        !include_str!("player/worker.rs").contains("tracing::"),
+        "the worker's lines are written in worker/lines.rs only"
     );
+    for name in ["played", "start", "seen", "pace"] {
+        let line = ["\"media", ".", name, "\""].concat();
+        assert_eq!(source.matches(line.as_str()).count(), 1, "one call writes {line}");
+        let call = source.find(line.as_str()).expect("the call");
+        let guard = "if !writes_played_line(crate::shell::identity::engine_identity()) {";
+        let asked = source[..call].rfind(guard).expect("the call is behind the question");
+        let between: String = source[asked + guard.len()..call].split_whitespace().collect();
+        assert!(
+            between.starts_with("return;}tracing::info!(") && between.matches("tracing::").count() == 1,
+            "nothing stands between the question and the call of {line}: {between}"
+        );
+    }
+    assert_eq!(source.matches("tracing::").count(), 4, "no other line is written there");
 }
 
 #[test]
@@ -1175,3 +1183,7 @@ fn a_too_old_windows_is_its_own_refusal() {
     );
     assert_eq!(sandbox_refusal(SandboxError::Unsupported), Refusal::NoSandbox);
 }
+
+/// The window is woken, and without sound the clock follows the picture (w12-video-start).
+#[path = "player/start_tests.rs"]
+mod start;

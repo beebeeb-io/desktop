@@ -23,8 +23,10 @@
 //! 4. asks for the next frame (`WantVideo` at the drawn size in device pixels, capped at 1920 x 1080; asked only once
 //!    the view said its size) and the next PCM (`WantAudio` at the device's format), one of each at a time;
 //! 5. shows a frame when its time is at or before the clock (the sound device's clock; without sound, a wall clock
-//!    started at Play), and drops a frame more than one frame-time late (unless nothing was shown for 250 ms: a slow
-//!    PC shows a halting picture, not a black one).
+//!    started at Play). With sound, a frame more than one frame-time late is dropped (unless nothing was shown for
+//!    250 ms: a slow PC shows a halting picture, not a black one). Without sound nothing has to stay in step with
+//!    the picture, so a late frame is shown and the wall clock goes on from that frame's time: a PC that decodes
+//!    slower than the file plays shows every frame, slower, and the place said is the place of the picture.
 //!
 //! **Stopping is never a request to the worker.** What a run holds that must end at once (the helper's link, the
 //! sound) sits in its `Slots`; `stop` (a lock, a sign-out, an account change, a close), `next`, `previous` and `open`
@@ -44,9 +46,16 @@
 //! before `Opened` is killed and ONE new helper is started in the profile `transport::profile_for_file` names (only
 //! while the switch is on); the same answer from that one is the PC's answer. Never a third helper for one item.
 //!
-//! **TEST builds only** (the build's identity, never the real app): after 1 s of playback, one `media.played` line
-//! (the codec's protocol number, the frames shown and the RMS of the sound in that second, whether the helper was
-//! confined), read by the VM 401 rung. No name, id, tag or byte is logged, here or anywhere in the player.
+//! **The window is woken** ([`PlayerHandle::set_waker`]) whenever what a view draws of the player changed, so a
+//! frame, a place or a refusal reaches the screen without waiting for a press.
+//!
+//! **TEST builds only** (the build's identity, never the real app), read by the VM 401 rungs: after 1 s of playback,
+//! one `media.played` line (the codec's protocol number, the frames shown and the RMS of the sound in that second,
+//! whether the helper was confined); at the first frame, one `media.start` line (each step's time since the press:
+//! the bytes, the helper, `Opened`, the sound device, the first want, frame and show) and, when a view first takes
+//! that frame, one `media.seen` line; once a second, a `media.pace` line (frames received, shown and dropped, the
+//! clock, the time of the frame on screen, the place said). Milliseconds and counts only: no name, id, tag or byte
+//! is logged, here or anywhere in the player.
 
 use std::fmt;
 use std::io;
@@ -67,6 +76,9 @@ use super::transport::LinkError;
 use super::video::VideoSurface;
 
 mod worker;
+
+#[cfg(test)]
+mod vm_probe;
 
 use worker::{Start, Worker};
 
@@ -343,6 +355,8 @@ struct Player {
     links: Arc<dyn LinkFactory>,
     audio: Arc<dyn AudioFactory>,
     now_playing: Option<Box<dyn NowPlayingSink>>,
+    /// Wakes the window's loop ([`PlayerHandle::set_waker`]); `None`: nobody draws this player (its tests).
+    waker: Option<Waker>,
     surface: VideoSurface,
     /// The drawn stage in device pixels (`set_view_size`); frames are asked at this size, capped at 1920 x 1080.
     view: (u32, u32),
@@ -359,6 +373,10 @@ struct Player {
     art: Option<rune::Pixels>,
     /// A frame was shown since the last blank.
     has_frame: bool,
+    /// When the current item was opened (the press), and whether a view took a frame of it since
+    /// ([`PlayerHandle::frame`]): the TEST build's `media.seen` line.
+    pressed: Option<Instant>,
+    seen: bool,
     /// The items Next and Previous move through, and where the player is in it.
     queue: Vec<MediaItem>,
     at: usize,
@@ -368,6 +386,9 @@ struct Player {
     /// What the tests read. Filled in test builds only.
     record: Record,
 }
+
+/// Wakes the window's loop, from a worker's thread: what a view draws of the player changed.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
 /// What the tests read of the player (`player_tests.rs`). Nothing is put in it outside the tests.
 #[derive(Default)]
@@ -379,6 +400,11 @@ struct Record {
     received: Vec<u64>,
     /// How often the frame was blanked.
     blanked: usize,
+    /// The worker's steps from the press to the first frame shown: the step and its time in ms.
+    steps: Vec<(&'static str, u64)>,
+    /// One row a second: ms since the press, frames received, shown, dropped, the clock, the time of the frame on
+    /// screen, the position told.
+    pace: Vec<[u64; 7]>,
 }
 
 /// One opened item's worker, as the player holds it.
@@ -481,6 +507,8 @@ impl Player {
         self.end_run();
         self.generation += 1;
         self.blank();
+        self.pressed = Some(Instant::now());
+        self.seen = false;
         self.phase = Phase::Opening;
         self.shown = Some(PlayState {
             file_id: item.file_id.clone(),
@@ -509,6 +537,7 @@ impl Player {
             links: Arc::clone(&self.links),
             audio: Arc::clone(&self.audio),
             clock: Arc::clone(&self.clock),
+            waker: self.waker.clone(),
             system_on: self.system_on,
             slots: Arc::clone(&slots),
             commands: taken,
@@ -608,6 +637,7 @@ impl PlayerHandle {
                     links,
                     audio,
                     now_playing,
+                    waker: None,
                     surface,
                     view: (0, 0),
                     clock: Arc::new(Monotonic(Instant::now())),
@@ -617,6 +647,8 @@ impl PlayerHandle {
                     shown: None,
                     art: None,
                     has_frame: false,
+                    pressed: None,
+                    seen: false,
                     queue: Vec::new(),
                     at: 0,
                     run: None,
@@ -641,6 +673,14 @@ impl PlayerHandle {
     #[cfg(test)]
     fn set_system_decoder(&self, on: bool) {
         self.with(|player| player.system_on = on);
+    }
+
+    /// The window's waker. A worker calls it (never holding the player) whenever what a view draws of the player
+    /// changed: the file opened, its first frame, the place (four times a second), play and pause, the end, no
+    /// sound, a refusal. The view is not run by a frame alone: the toolkit redraws a picture only where a scene
+    /// already shows it, and the first frame of a run is in no scene yet.
+    pub fn set_waker(&self, waker: Waker) {
+        self.with(|player| player.waker = Some(waker));
     }
 
     /// The same player (not a copy of its state).
@@ -739,9 +779,25 @@ impl PlayerHandle {
         self.with(|player| player.phase)
     }
 
-    /// The video's current frame.
+    /// The video's current frame, for the view that draws it. The first take of a run is the moment the picture
+    /// reaches the window (the TEST build's `media.seen` line says how long after the press).
     pub fn frame(&self) -> Option<rune::Pixels> {
-        self.with(|player| player.has_frame.then(|| player.surface.pixels()))
+        self.with(|player| {
+            if !player.has_frame {
+                return None;
+            }
+            if !std::mem::replace(&mut player.seen, true)
+                && let Some(pressed) = player.pressed
+            {
+                worker::log_seen(u64::try_from(pressed.elapsed().as_millis()).unwrap_or(u64::MAX));
+            }
+            Some(player.surface.pixels())
+        })
+    }
+
+    /// Whether there is a frame to draw (asked by the poll; the view's own take is [`PlayerHandle::frame`]).
+    pub fn has_frame(&self) -> bool {
+        self.with(|player| player.has_frame)
     }
 
     /// The recording's picture from its tags.

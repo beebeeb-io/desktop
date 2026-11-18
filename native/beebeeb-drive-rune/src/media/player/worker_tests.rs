@@ -96,6 +96,7 @@ fn worker(kind: KindHint) -> (Worker, PlayerHandle, mpsc::Sender<Cmd>) {
         links: Arc::new(NoHelper),
         audio: Arc::new(NoDevice),
         clock: Arc::new(Still),
+        waker: None,
         system_on: false,
         slots: Arc::new(Slots::default()),
         commands: taken,

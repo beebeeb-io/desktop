@@ -81,6 +81,7 @@ impl<C: CredentialStores + 'static> MediaOpener for EngineMediaOpener<C> {
 /// Makes the shell's one player with the real helper, sound device and media controls, and registers it
 /// (`media::set_shell_player`). Called once when the window is built on the engine (`shell::state::init_on_engine`).
 pub fn install_shell_player<C: CredentialStores + 'static>(engine: Arc<Engine<C>>) {
+    let host = Arc::clone(&engine);
     let player = PlayerHandle::new(
         Arc::new(EngineMediaOpener::new(engine)),
         Arc::new(SandboxedHelpers),
@@ -88,6 +89,9 @@ pub fn install_shell_player<C: CredentialStores + 'static>(engine: Arc<Engine<C>
         Some(Box::new(crate::media::os_controls::shell_controls())),
         VideoSurface::new(),
     );
+    // What the player's worker changes reaches the screen: the window's loop is woken for it (the first frame of a
+    // video is in no scene yet, so no frame alone would).
+    player.set_waker(Arc::new(move || host.wake_host()));
     crate::media::set_shell_player(player);
     // The engine's video thumbnails come from the same confined helper, never from a program found by name.
     crate::media::thumb_frame::install();

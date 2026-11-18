@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use beebeeb_engine::app::viewer_api::{LocalCopy, OpenedFile};
-use beebeeb_media_protocol::{AudioInfo, Codec, FromHelper, Opened, ToHelper};
+use beebeeb_media_protocol::{AudioInfo, Codec, FromHelper, KindHint, Opened, ToHelper, VideoInfo};
 use zeroize::Zeroizing;
 
 use super::*;
@@ -204,6 +204,8 @@ struct FakeLink {
     inbox: Vec<FromHelper>,
     /// Where the next answered PCM starts.
     pts_ms: u64,
+    /// Video frames answered.
+    frames: u64,
 }
 
 impl LinkFactory for FakeLinks {
@@ -211,6 +213,7 @@ impl LinkFactory for FakeLinks {
         Ok(Box::new(FakeLink {
             inbox: Vec::new(),
             pts_ms: 0,
+            frames: 0,
         }))
     }
 }
@@ -218,6 +221,30 @@ impl LinkFactory for FakeLinks {
 impl Link for FakeLink {
     fn send(&mut self, msg: &ToHelper) -> io::Result<()> {
         match msg {
+            // A video: 2 x 2 at 30 frames a second, no audio track.
+            ToHelper::Open {
+                hint: KindHint::Video, ..
+            } => self.inbox.push(FromHelper::Opened(Opened {
+                duration_ms: 90_000,
+                video: Some(VideoInfo {
+                    w: 2,
+                    h: 2,
+                    fps_milli: 30_000,
+                    codec: Codec::Vp9,
+                }),
+                audio: None,
+                reduced_quality: false,
+                no_sound: None,
+            })),
+            ToHelper::WantVideo { w, h } => {
+                self.inbox.push(FromHelper::Frame {
+                    pts_ms: self.frames * 1000 / 30,
+                    w: *w,
+                    h: *h,
+                    rgba: vec![0x40; *w as usize * *h as usize * 4],
+                });
+                self.frames += 1;
+            }
             ToHelper::Open { .. } => self.inbox.push(FromHelper::Opened(Opened {
                 duration_ms: 90_000,
                 video: None,
@@ -486,6 +513,45 @@ fn closing_a_video_stops_it() {
     assert!(world.handle().state().is_some(), "it plays");
     drop(source);
     assert!(world.handle().state().is_none(), "closing the video stops it");
+}
+
+/// w12-video-start: a video's view draws the player's frame and place only when it is run, and before this the poll
+/// never asked for a run (it answered "nothing new" for every video): the stage stayed black and the times stood at
+/// 0:00 until a press ran the view. The poll now answers every change the view draws, and only a change.
+#[test]
+fn a_videos_poll_runs_the_view_for_its_first_frame_and_its_place() {
+    let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
+    let mut source = source(&world);
+    let file = source.open("v1").expect("opens");
+    assert!(matches!(file.body, Body::Video(_)));
+    assert!(source.poll("v1").is_none(), "nothing plays yet: nothing new");
+    world.handle().set_view_size(2, 2);
+    assert!(source.play("v1", true));
+    assert!(
+        matches!(source.poll("v1"), Some(Body::Video(_))),
+        "the player holds the file now: the view runs (Pause, not Play)"
+    );
+    wait_until("the first frame", || world.handle().frame().is_some());
+    assert!(
+        matches!(source.poll("v1"), Some(Body::Video(_))),
+        "the first frame came: the view runs and puts it on the stage"
+    );
+    wait_until("the place moved a second", || {
+        world.handle().state().is_some_and(|state| state.at_ms >= 1_000)
+    });
+    assert!(
+        matches!(source.poll("v1"), Some(Body::Video(doc)) if doc.length == 90),
+        "the place moved: the view runs and says it, with the file's length"
+    );
+    // Paused, nothing moves: after the pause itself is drawn the poll has nothing new.
+    assert!(source.play("v1", false));
+    wait_until("the pause lands in the player", || {
+        world.handle().phase() == Phase::Paused
+    });
+    while source.poll("v1").is_some() {}
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(source.poll("v1").is_none(), "paused: nothing new, the view is not run");
 }
 
 #[test]
