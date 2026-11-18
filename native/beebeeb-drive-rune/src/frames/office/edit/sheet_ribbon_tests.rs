@@ -517,12 +517,15 @@ fn office_sheets_data_and_formulas_tabs_draw_and_press() {
     assert_eq!(ops.borrow().len(), 2, "one edit a press");
 
     // The same window on a text document: the four tabs it always had.
-    viewers::ui(&mut rt.state).expect("a file").office.edit = Some(EditUi::new(EditKind::Docx));
-    viewers::ui(&mut rt.state).expect("a file").office.tab = Tab::Home;
+    rt.update(|s, _| {
+        let ui = viewers::ui(s).expect("a file");
+        ui.office.edit = Some(EditUi::new(EditKind::Docx));
+        ui.office.tab = Tab::Home;
+    });
     settle(&mut rt);
     assert_eq!(tab_words(&rt), ["Home", "Insert", "Layout", "Review"]);
     // And on a deck: its own words for the third and the fourth.
-    viewers::ui(&mut rt.state).expect("a file").office.edit = Some(EditUi::new(EditKind::Pptx));
+    rt.update(|s, _| viewers::ui(s).expect("a file").office.edit = Some(EditUi::new(EditKind::Pptx)));
     settle(&mut rt);
     assert_eq!(tab_words(&rt), ["Home", "Insert", "Design", "Transitions"]);
 }

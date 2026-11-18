@@ -705,8 +705,11 @@ fn until_settled(
     let end = Instant::now() + Duration::from_secs(20);
     loop {
         source.poll(id);
-        if let Some(settled) = source.settled(id) {
-            return settled;
+        match source.settled(id) {
+            // The revision a landed save holds comes first (its own test); the save's answer is the next one.
+            Some(crate::frames::viewers::source::Settled::SavedRevision(_)) => continue,
+            Some(settled) => return settled,
+            None => {}
         }
         each();
         assert!(Instant::now() < end, "nothing settled");
@@ -752,6 +755,44 @@ fn editor_over(engine: Arc<TestEngine>, name: &str) -> Editor {
         viewer_opened,
         edits,
     }
+}
+
+/// A save that landed says first which revision its bytes are (what is typed after them stays unsaved in the window),
+/// then answers as saved. A copy the helper cannot answer at all is said, once, and another refusal is not.
+#[test]
+fn a_landed_save_says_its_revision_first_and_a_copy_too_large_is_said() {
+    use crate::frames::viewers::source::{EditAnswer, Settled};
+    let mut e = editor("Invented.docx", false);
+    assert!(e.source.edit("f1", typed()));
+    e.fake.answer(HostEdit::Edited(Box::new(edited(4, Dirty::All))));
+    assert!(e.source.poll_edit("f1").is_some());
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK invented package", 4);
+    let end = Instant::now() + Duration::from_secs(20);
+    let first = loop {
+        e.source.poll("f1");
+        if let Some(settled) = e.source.settled("f1") {
+            break settled;
+        }
+        assert!(Instant::now() < end, "nothing settled");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(matches!(first, Settled::SavedRevision(4)), "the revision comes first");
+    assert!(matches!(e.source.settled("f1"), Some(Settled::Saved { version: 4, .. })), "then the save");
+    assert!(e.source.settled("f1").is_none());
+
+    // Copy: the helper says the selection is too large.
+    assert!(e.source.copy_selection("f1"));
+    let id = e.fake.id_of("copy");
+    e.fake.answer(HostEdit::Failed { id, too_large: true });
+    assert!(matches!(e.source.poll_edit("f1"), Some(EditAnswer::CopyTooLarge)));
+    assert!(e.source.poll_edit("f1").is_none());
+    // A copy refused for another reason says nothing.
+    assert!(e.source.copy_selection("f1"));
+    let id = e.fake.id_of("copy");
+    e.fake.answer(HostEdit::Failed { id, too_large: false });
+    assert!(e.source.poll_edit("f1").is_none());
 }
 
 /// A writable .docx, .xlsx or .pptx opens in an editing session and everything else opens in the viewer, as before:

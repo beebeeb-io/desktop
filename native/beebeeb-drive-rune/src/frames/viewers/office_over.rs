@@ -253,16 +253,16 @@ impl Ui {
     /// document's page takes the keyboard when it is first drawn, and a kept editing of the file is read now, before
     /// this session's own snapshots replace it, to be offered. `true`: the editor started.
     pub fn office_begin_edit(&mut self) -> bool {
-        use super::kinds::{OfficeKind, office_of};
         use super::source::Body;
         use beebeeb_office_protocol::office::EditKind;
-        if self.office.edit.is_some() || !matches!(self.file.body, Body::Doc(_) | Body::Sheet(_) | Body::Deck(_)) {
+        if self.office.edit.is_some() {
             return false;
         }
-        let kind = match office_of(&self.file.name) {
-            Some(OfficeKind::Docx) => EditKind::Docx,
-            Some(OfficeKind::Xlsx) => EditKind::Xlsx,
-            Some(OfficeKind::Pptx) => EditKind::Pptx,
+        // What the session edits is what it shows (an older format has no editing session: its source says no).
+        let kind = match self.file.body {
+            Body::Doc(_) => EditKind::Docx,
+            Body::Sheet(_) => EditKind::Xlsx,
+            Body::Deck(_) => EditKind::Pptx,
             _ => return false,
         };
         if !self.source.can_edit(&self.file.id) {

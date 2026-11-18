@@ -22,6 +22,8 @@ struct Source {
     file: OpenFile,
     ops: Ops,
     take: Rc<std::cell::Cell<bool>>,
+    /// The file has an editing session (the window's poll starts the editor on one).
+    can: Rc<std::cell::Cell<bool>>,
 }
 
 impl ViewerSource for Source {
@@ -39,7 +41,7 @@ impl ViewerSource for Source {
         true
     }
     fn can_edit(&self, _file_id: &str) -> bool {
-        true
+        self.can.get()
     }
     fn edit(&mut self, _file_id: &str, op: EditOp) -> bool {
         if !self.take.get() {
@@ -91,6 +93,7 @@ struct Rig {
     rt: Runtime<State>,
     ops: Ops,
     take: Rc<std::cell::Cell<bool>>,
+    can: Rc<std::cell::Cell<bool>>,
 }
 
 fn rig_with(body: SheetView) -> Rig {
@@ -100,12 +103,14 @@ fn rig_with(body: SheetView) -> Rig {
     file.body = Body::Sheet(body);
     let ops: Ops = Rc::default();
     let take = Rc::new(std::cell::Cell::new(true));
+    let can = Rc::new(std::cell::Cell::new(true));
     let mut state = init();
     let id = file.id.clone();
     let source = Source {
         file,
         ops: ops.clone(),
         take: take.clone(),
+        can: can.clone(),
     };
     assert!(
         viewers::open_from(&mut state, Box::new(source), &id),
@@ -119,7 +124,7 @@ fn rig_with(body: SheetView) -> Rig {
     let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
     rt.on_key = Some(crate::shell::host::on_key);
     rt.poll = Some(crate::shell::host::poll);
-    let mut rig = Rig { rt, ops, take };
+    let mut rig = Rig { rt, ops, take, can };
     rig.settle();
     rig
 }
@@ -678,6 +683,8 @@ fn office_sheets_unsaved_changes_are_said_in_the_status_line() {
 #[test]
 fn office_sheets_the_viewer_without_the_editor_has_no_surface() {
     let mut rig = rig();
+    // No editing session (a file the account may not change): the window's poll starts no editor.
+    rig.can.set(false);
     rig.rt.update(|s, _| {
         if let Some(ui) = viewers::ui(s) {
             ui.office.edit = None;
@@ -793,9 +800,13 @@ fn office_sheets_alt_equals_in_the_grid_sums_the_selection() {
 
 #[test]
 fn office_sheets_the_grid_asks_for_the_keyboard_once_when_opened() {
-    let rig = rig();
-    assert!(with(|g| g.wants_focus), "the first frame of the open file asks for focus");
-    drop(rig);
+    let mut rig = rig();
+    // The window's poll hands the ask to Rune (`take_focus`, next to the viewer's own one-shot focus): the grid has
+    // the keyboard, and nothing asks again.
+    assert!(!with(|g| g.wants_focus), "the ask was taken by the window's poll");
+    let mut focused = None;
+    rig.rt.update(|_, tx| focused = tx.focused().map(str::to_string));
+    assert_eq!(focused.as_deref(), Some(GRID_KEY), "the grid has the keyboard when the file opens");
 }
 
 #[test]
