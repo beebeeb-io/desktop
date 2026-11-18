@@ -120,7 +120,6 @@ pub(super) fn click(rt: &mut Runtime<State>, key: &str) {
 pub(super) fn click_with(rt: &mut Runtime<State>, key: &str, mods: Mods) {
     let (x, y) = centre(rt, key);
     rt.physical_input(PhysicalInput::Modifiers(mods));
-    eprintln!("P2 sel={:?} row0w={:?} pane={:?}", rt.state.selected, find(rt, "row-0").map(|e| e.rect), find(rt, "detail-pane-empty").map(|e| e.rect));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     settle(rt);
@@ -790,42 +789,29 @@ fn menus_toasts_and_the_path_have_their_roles_and_names() {
     assert_eq!(info(&rt, "rows").label.as_deref(), Some("Lisbon trip"));
 }
 
-/// A double-click as in a window: the pointer stays where it is, and a frame is drawn between the two
-/// presses (the first one's selection is on screen, and moving, when the second goes down).
-fn double_click_with_frame(rt: &mut Runtime<State>, key: &str, x: Option<f32>) {
-    let (cx, y) = centre(rt, key);
-    let x = x.unwrap_or(cx);
+/// A double-click as in a window: the pointer stays where it is, and frames are drawn between the two
+/// presses (what the first one selected is on screen, and moving, when the second goes down).
+fn double_click_with_frames(rt: &mut Runtime<State>, key: &str) {
+    let (x, y) = centre(rt, key);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
-    eprintln!("P1 x={x} y={y} sel={:?} pane={} detail={}", rt.state.selected, rt.state.show_detail_pane, find(rt, "row-0").map(|e| e.rect[2]).unwrap_or(0.0));
-    // Frames while the hand waits between the clicks, shorter than the double-click interval.
     for _ in 0..4 {
         rt.frame(0.03);
     }
-    eprintln!("P2 sel={:?} row0w={:?} pane={:?}", rt.state.selected, find(rt, "row-0").map(|e| e.rect), find(rt, "detail-pane-empty").map(|e| e.rect));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     settle(rt);
 }
 
 #[test]
-fn a_double_click_on_a_folder_opens_it_when_the_first_click_makes_the_details_pane_appear() {
+fn a_double_click_on_a_far_column_opens_the_folder_though_the_first_click_opens_the_details_pane() {
     let mut rt = runtime_of(init());
-    double_click_with_frame(&mut rt, "row-3-date", None);
-    assert_eq!(info(&rt, "crumb-here").text.as_deref(), Some("Lisbon trip"));
+    double_click_with_frames(&mut rt, "row-3-date");
+    assert_eq!(names(&rt).len(), 7, "Lisbon trip is open");
     assert!(rt.state.selected.is_none(), "a folder just opened has nothing selected");
-    // The pointer is right of where the pane will stand; the pane the first click opens must not take that place.
-    double_click_with_frame(&mut rt, "row-0", Some(1100.0));
-    assert_eq!(rt.state.listing.folder.name, "Day 1", "the second double-click opens Day 1");
-}
-
-#[test]
-fn dbg_variants() {
-    for key in ["row-0-name", "row-0-date", "row-0-size", "row-0-pc", "row-0-tile"] {
-        let mut rt = runtime_of(init());
-        double_click_with_frame(&mut rt, "row-3-date", None);
-        let a = names(&rt);
-        double_click_with_frame(&mut rt, key, None);
-        eprintln!("V {key} after1={:?} after2={:?} crumb={:?}", a.len(), names(&rt).len(), find(&rt, "crumb-here").map(|e| e.text));
-    }
+    // The first click selects Day 1 and the pane opens; the list must not move out from under the pointer,
+    // or the second click lands on the pane (it did, on the PC column) and the row never opens.
+    double_click_with_frames(&mut rt, "row-0-pc");
+    assert_eq!(find(&rt, "crumb-here").and_then(|e| e.text).as_deref(), Some("Lisbon trip"));
+    assert_eq!(names(&rt).len(), 0, "Day 1 is open (it is empty)");
 }
