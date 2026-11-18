@@ -22,23 +22,31 @@ use super::{
     wipe_entries, wipe_message,
 };
 
+// The editing session's side of the worker: its requests, the checks of its answers, the save handshake.
+#[path = "edit.rs"]
+pub(crate) mod edit;
+
+use edit::{EditCommand, Mode};
+
 /// Starts the worker of one document on a thread of its own. `false` when no thread could be made: the worker, and
 /// the bytes in it, are dropped (wiped).
 pub(super) fn spawn<S: Starter>(
     starter: S,
+    mode: Mode,
     kind: DocKind,
     shared: Arc<Shared>,
     inputs: Receiver<Input>,
     timeouts: Timeouts,
-    bytes: Zeroizing<Vec<u8>>,
+    bytes: Option<Zeroizing<Vec<u8>>>,
 ) -> bool {
     let worker = Worker {
         starter,
+        mode,
         kind,
         shared,
         inputs,
         timeouts,
-        doc: Doc::Bytes(bytes),
+        doc: bytes.map_or(Doc::Blank, Doc::Bytes),
         run: None,
         links: 0,
         retried: false,
@@ -52,6 +60,8 @@ pub(super) fn spawn<S: Starter>(
 
 /// The document: its bytes until they are in a section, then the section (kept for Try again), then gone.
 enum Doc<T> {
+    /// A new document: there are no bytes.
+    Blank,
     Bytes(Zeroizing<Vec<u8>>),
     Section(T),
     Gone,
@@ -82,6 +92,10 @@ struct Run<S: Starter> {
     sent: VecDeque<Sent<S::Section>>,
     /// Pages and anchors not sent yet (more than [`MAX_IN_FLIGHT`] asked).
     waiting: VecDeque<Ask>,
+    /// A save is out (`SaveSize` to `SavedInto`): edits wait in `deferred`, so that the token stays current.
+    save_busy: bool,
+    /// Edit requests that came during a save, in order.
+    deferred: VecDeque<Command>,
     /// The outline's entries so far, while it is being asked.
     outline: Option<Vec<OutlineEntry>>,
     /// When the outline's first page was asked: its budget counts from here.
@@ -143,6 +157,8 @@ enum Asked<T> {
     },
     Outline(office::Outline),
     Stats,
+    /// A request of an editing session.
+    Edit(edit::EditAsked<T>),
     /// A range, or a half of one, and the window's ask it belongs to.
     Cells {
         asked: office::Cells,
@@ -152,6 +168,7 @@ enum Asked<T> {
 
 struct Worker<S: Starter> {
     starter: S,
+    mode: Mode,
     kind: DocKind,
     shared: Arc<Shared>,
     inputs: Receiver<Input>,
@@ -348,6 +365,8 @@ impl<S: Starter> Worker<S> {
             oldest_since: started_at,
             sent: VecDeque::new(),
             waiting: VecDeque::new(),
+            save_busy: false,
+            deferred: VecDeque::new(),
             outline: None,
             outline_since: None,
             splits: Vec::new(),
@@ -356,21 +375,10 @@ impl<S: Starter> Worker<S> {
             handle_baseline: None,
             baselined: false,
         });
-        let granted = match (self.run.as_ref(), &self.doc) {
-            (Some(run), Doc::Section(section)) => Some(self.starter.grant(&run.helper, section, sandbox::Access::Read)),
-            _ => None,
-        };
-        let Some(Ok(granted)) = granted else {
+        let Some(first) = self.first_message() else {
             return self.stopped(Stop::Failed);
         };
-        let open = office::Open {
-            kind: self.kind,
-            doc: office::GrantRef {
-                wire: granted.wire,
-                len: granted.len,
-            },
-        };
-        self.ask(Message::Open(open), Asked::Open);
+        self.ask(first, Asked::Open);
     }
 
     fn start_failed(&mut self, error: sandbox::SandboxError) {
@@ -397,7 +405,8 @@ impl<S: Starter> Worker<S> {
     /// "Renderer stopped". The document's section stays for Try again; without one it goes now.
     fn stopped(&mut self, why: Stop) {
         self.kill_run();
-        let can_retry = !self.retried && !matches!(self.doc, Doc::Gone);
+        // An editing session has no Try again: a new helper would not hold the edits.
+        let can_retry = !self.retried && !matches!(self.doc, Doc::Gone) && matches!(self.mode, Mode::View);
         if can_retry {
             self.phase = Phase::Stopped { can_retry: true };
         } else {
@@ -447,6 +456,7 @@ impl<S: Starter> Worker<S> {
                 run.waiting.push_back(Ask::Anchor(ask));
                 self.pump_renders();
             }
+            Command::Edit(command) => self.edit_command(command),
             Command::Cancel(id) => self.cancel(id),
             Command::Outline => self.start_outline(),
             Command::Stats => {
@@ -714,6 +724,7 @@ impl<S: Starter> Worker<S> {
             (Asked::Open, Message::Opened(opened)) if pages => self.opened(opened),
             (Asked::Open, Message::OpenedSheets(opened)) if !pages => self.opened_sheets(opened),
             (Asked::Open, Message::Error(error)) => self.open_refused(error.code),
+            (Asked::Edit(asked), message) => self.edit_answer(asked, message),
             // Cancelled: its answer is checked for id, order and kind (above), then discarded with its section.
             (Asked::Render { .. } | Asked::Anchor { .. }, Message::Rendered(_) | Message::Error(_)) if cancelled => {
                 let _ = self.handles_ok();

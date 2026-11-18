@@ -53,8 +53,11 @@ use beebeeb_office_sandbox as sandbox;
 use zeroize::{Zeroize, Zeroizing};
 
 pub use beebeeb_office_protocol::office::{
-    Anchor, CellData, CellRange, DocKind, OutlineEntry, PageSize, Rect, SheetInfo,
+    Anchor, CellData, CellRange, DocKind, EditKind, EditOp, Edited, HitMode, OutlineEntry, PageSize, Purpose, Rect,
+    SheetInfo, Template,
 };
+pub use worker::edit::{EditEvent, EditFailure, EditRefused};
+pub(crate) use worker::edit::Mode;
 
 // Windows Error Reporting keeps no copy of the helper's memory (the lead's answer 4, 2026-11-15 19:03).
 #[path = "office_host/crash_reports.rs"]
@@ -537,6 +540,8 @@ struct Inner {
     /// wipes it at once instead of at the window's next poll.
     state: OfficeState,
     outs: VecDeque<Out>,
+    /// The editor's answers, moved here by [`OfficeHost::poll`] and taken by [`OfficeHost::poll_edit`].
+    edit_events: VecDeque<EditEvent>,
     worker_ended: bool,
     /// The charts and pictures of checked cells from the running helper, by (sheet, id): what
     /// [`OfficeHost::request_anchor`] may ask. Emptied when that helper goes, and at a close.
@@ -550,13 +555,15 @@ struct Inner {
 enum Out {
     State(OfficeState),
     Event(Event),
+    /// An answer of an editing session (see [`EditEvent`]).
+    Edit(EditEvent),
 }
 
 impl Shared {
     /// Kills the helper through the shared handle, wipes the state and every answer not taken, tells the worker,
     /// wakes the window. Never waits for the worker. The first close's reason stays.
     fn close(&self, why: CloseWhy) {
-        let (helper, outs, mut state, parked) = {
+        let (helper, outs, mut state, parked, edits) = {
             let mut inner = lock(&self.inner);
             if inner.closed.is_some() {
                 return;
@@ -569,6 +576,7 @@ impl Shared {
                 std::mem::take(&mut inner.outs),
                 state,
                 inner.parked.take(),
+                std::mem::take(&mut inner.edit_events),
             )
         };
         if let Some(helper) = helper {
@@ -579,6 +587,9 @@ impl Shared {
         let mut wiped = wipe_state(&mut state);
         for mut out in outs {
             wiped += wipe_out(&mut out);
+        }
+        for mut event in edits {
+            wiped += worker::edit::wipe_edit_event(&mut event);
         }
         self.wiped.fetch_add(wiped, Ordering::SeqCst);
         // The worker may be waiting with no deadline: this wakes it so that it drops every section and ends.
@@ -689,6 +700,8 @@ enum Command {
     Stats,
     Cells { sheet: u32, range: CellRange },
     Retry,
+    /// A request of an editing session.
+    Edit(worker::edit::EditCommand),
 }
 
 /// A page asked by the window; `w` x `h` from `check::asked_size`.
@@ -723,6 +736,8 @@ pub struct OfficeHost {
     next_request: u32,
     /// The window knows the host is closed: it closed it itself, or a poll told it with an `Event::State`.
     told_closed: bool,
+    /// An editing session (`open_edit`, `new_doc`): the `edit` calls are for it only.
+    editing: bool,
 }
 
 impl OfficeHost {
@@ -767,6 +782,7 @@ impl OfficeHost {
                         events.push(Event::State);
                     }
                     Out::Event(event) => events.push(event),
+                    Out::Edit(event) => inner.edit_events.push_back(event),
                 }
             }
             (events, inner.closed.is_some())
@@ -999,14 +1015,26 @@ pub(crate) fn open_with<S: Starter>(
     bytes: Zeroizing<Vec<u8>>,
     wake: Wake,
 ) -> OfficeHost {
+    open_mode(starter, registry, timeouts, Mode::View, kind, Some(bytes), wake)
+}
+
+/// The one way a host starts: a viewer (`Mode::View`), an editor of `bytes` (`Mode::Edit`) or a new document
+/// (`Mode::New`, no bytes). Never blocks.
+pub(crate) fn open_mode<S: Starter>(
+    starter: S,
+    registry: &Registry,
+    timeouts: Timeouts,
+    mode: Mode,
+    kind: DocKind,
+    bytes: Option<Zeroizing<Vec<u8>>>,
+    wake: Wake,
+) -> OfficeHost {
     let (commands, inputs) = mpsc::channel();
     // Refused before anything starts: `bytes` is wiped when this returns.
-    let refused = if bytes.len() as u64 > check::MAX_INPUT_BYTES {
-        Some(CannotOpen::TooLarge)
-    } else if bytes.is_empty() {
-        Some(CannotOpen::Damaged)
-    } else {
-        None
+    let refused = match &bytes {
+        Some(bytes) if bytes.len() as u64 > check::MAX_INPUT_BYTES => Some(CannotOpen::TooLarge),
+        Some(bytes) if bytes.is_empty() => Some(CannotOpen::Damaged),
+        _ => None,
     };
     let shared = Arc::new(Shared {
         inner: Mutex::new(Inner {
@@ -1014,6 +1042,7 @@ pub(crate) fn open_with<S: Starter>(
             helper: None,
             state: refused.map_or(OfficeState::Opening, OfficeState::CannotOpen),
             outs: VecDeque::new(),
+            edit_events: VecDeque::new(),
             worker_ended: false,
             anchors: HashMap::new(),
             parked: None,
@@ -1027,13 +1056,14 @@ pub(crate) fn open_with<S: Starter>(
         shared: shared.clone(),
         next_request: 0,
         told_closed: false,
+        editing: !matches!(mode, Mode::View),
     };
     if refused.is_some() {
         shared.mark_worker_ended();
         return host;
     }
     registry.add(&shared);
-    if !worker::spawn(starter, kind, shared.clone(), inputs, timeouts, bytes) {
+    if !worker::spawn(starter, mode, kind, shared.clone(), inputs, timeouts, bytes) {
         // The worker (and the bytes in it) was dropped: wiped.
         lock(&shared.inner).state = OfficeState::Stopped {
             why: Stop::Failed,
@@ -1050,6 +1080,7 @@ fn wipe_out(out: &mut Out) -> usize {
     match out {
         Out::State(state) => wipe_state(state),
         Out::Event(event) => wipe_event(event),
+        Out::Edit(event) => worker::edit::wipe_edit_event(event),
     }
 }
 
@@ -1122,6 +1153,17 @@ fn wipe_message(message: &mut Message) {
         Message::OpenedSheets(opened) => {
             for sheet in &mut opened.sheets {
                 sheet.name.zeroize();
+            }
+        }
+        Message::Clip(clip) => {
+            clip.text.zeroize();
+            if let Some(html) = clip.html.as_mut() {
+                html.zeroize();
+            }
+        }
+        Message::LayoutList(list) => {
+            for name in &mut list.names {
+                name.zeroize();
             }
         }
         _ => {}
