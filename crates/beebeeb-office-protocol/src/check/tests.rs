@@ -1013,3 +1013,220 @@ fn refused_reasons_are_fixed_and_distinct() {
         assert_eq!(r.to_string(), r.reason());
     }
 }
+
+// ---- The editor's checks ---------------------------------------------------------------------------------------
+
+mod edit_checks {
+    use super::*;
+    use crate::office::{
+        Clip, Dirty, EditKind, Edited, LayoutList, ListKind, Marks, ParaStyle, PageRect, RectPt, SaveReady, SavedInto,
+        TextAlign,
+    };
+
+    const PAGES: [PageSize; 2] = [A4, WIDE];
+
+    fn rect(page: u32, x: f32, y: f32, w: f32, h: f32) -> PageRect {
+        PageRect {
+            page,
+            rect: RectPt { x, y, w, h },
+        }
+    }
+
+    fn inside() -> PageRect {
+        rect(0, 72.0, 100.0, 10.0, 14.0)
+    }
+
+    fn edited() -> Edited {
+        Edited {
+            revision: 3,
+            caret: Some(inside()),
+            selection: vec![inside(), rect(1, 0.0, 0.0, 3200.0, 100.0)],
+            can_undo: true,
+            can_redo: false,
+            dirty: Dirty::Rects(vec![inside()]),
+            pages: None,
+            cells: vec![(
+                0,
+                CellRange {
+                    row: 0,
+                    col: 0,
+                    rows: 2,
+                    cols: 2,
+                },
+            )],
+            slides: Some(3),
+            marks: Marks {
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                style: ParaStyle::Normal,
+                align: TextAlign::Left,
+                list: ListKind::None,
+            },
+        }
+    }
+
+    #[test]
+    fn the_editor_numbers_are_fixed() {
+        assert_eq!(MAX_SELECTION_RECTS, 1_024);
+        assert_eq!(MAX_DIRTY_RECTS, 256);
+        assert_eq!(MAX_OP_TEXT_BYTES, 32 * 1024);
+        assert_eq!(MAX_SAVE_BYTES, 2 * MAX_INPUT_BYTES);
+        // The widest legal Edited rects stay in one frame.
+        assert!((MAX_SELECTION_RECTS + MAX_DIRTY_RECTS) * PageRect::BYTES < crate::frame::MAX_PAYLOAD / 2);
+        let _ = EditKind::Docx;
+    }
+
+    #[test]
+    fn edited_accepts_a_good_answer() {
+        assert_eq!(check_edited(&edited(), &PAGES, &L), Ok(()));
+        // A caret on the page's edge.
+        let mut e = edited();
+        e.caret = Some(rect(0, 595.3 - 1.0, 841.9 - 14.0, 1.0, 14.0));
+        assert_eq!(check_edited(&e, &PAGES, &L), Ok(()));
+    }
+
+    #[test]
+    fn edited_refuses_a_rect_outside_its_page() {
+        type Make = fn(PageRect) -> Edited;
+        let makers: [Make; 3] = [
+            |r| Edited {
+                caret: Some(r),
+                ..edited()
+            },
+            |r| Edited {
+                selection: vec![inside(), r],
+                ..edited()
+            },
+            |r| Edited {
+                dirty: Dirty::Rects(vec![inside(), r]),
+                ..edited()
+            },
+        ];
+        let bad = [
+            rect(2, 0.0, 0.0, 1.0, 1.0),                   // a page the document does not have
+            rect(0, 595.0, 0.0, 10.0, 1.0),                // past the right edge
+            rect(0, 0.0, 841.0, 1.0, 10.0),                // past the bottom
+            rect(0, -1.0, 0.0, 1.0, 1.0),                  // negative x
+            rect(0, 0.0, -1.0, 1.0, 1.0),                  // negative y
+            rect(0, 0.0, 0.0, -1.0, 1.0),                  // negative width
+            rect(0, 0.0, 0.0, 1.0, -1.0),                  // negative height
+            rect(0, f32::MAX, 0.0, f32::MAX, 1.0),         // overflowing sum
+        ];
+        for make in makers {
+            for r in bad {
+                assert_eq!(check_edited(&make(r), &PAGES, &L), Err(Refused::BadRect), "{r:?}");
+            }
+        }
+        // Non-finite values cannot come off the wire, but the check refuses them too.
+        let mut e = edited();
+        e.caret = Some(rect(0, f32::NAN, 0.0, 1.0, 1.0));
+        assert_eq!(check_edited(&e, &PAGES, &L), Err(Refused::BadRect));
+    }
+
+    #[test]
+    fn edited_rects_are_held_to_the_new_page_sizes_when_it_brings_them() {
+        let mut e = edited();
+        e.pages = Some(Opened {
+            pages: 1,
+            sizes: vec![PageSize { w_pt: 50.0, h_pt: 50.0 }],
+        });
+        // The old rects (page 1, x 72) no longer fit.
+        assert_eq!(check_edited(&e, &PAGES, &L), Err(Refused::BadRect));
+        e.caret = Some(rect(0, 1.0, 1.0, 1.0, 1.0));
+        e.selection = vec![rect(0, 0.0, 0.0, 50.0, 50.0)];
+        e.dirty = Dirty::All;
+        assert_eq!(check_edited(&e, &[], &L), Ok(()));
+        // The new sizes are checked as an `Opened`.
+        e.pages = Some(Opened {
+            pages: 2,
+            sizes: vec![PageSize { w_pt: 50.0, h_pt: 50.0 }],
+        });
+        assert_eq!(check_edited(&e, &PAGES, &L), Err(Refused::PageCountMismatch));
+    }
+
+    #[test]
+    fn edited_refuses_too_many_rects() {
+        let many = |n: usize| vec![inside(); n];
+        let mut e = edited();
+        e.selection = many(MAX_SELECTION_RECTS);
+        assert_eq!(check_edited(&e, &PAGES, &L), Ok(()));
+        e.selection = many(MAX_SELECTION_RECTS + 1);
+        assert_eq!(check_edited(&e, &PAGES, &L), Err(Refused::TooManyRects));
+        let mut e = edited();
+        e.dirty = Dirty::Rects(many(MAX_DIRTY_RECTS));
+        assert_eq!(check_edited(&e, &PAGES, &L), Ok(()));
+        e.dirty = Dirty::Rects(many(MAX_DIRTY_RECTS + 1));
+        assert_eq!(check_edited(&e, &PAGES, &L), Err(Refused::TooManyRects));
+    }
+
+    #[test]
+    fn edited_refuses_bad_cells_and_slides() {
+        let cell = |row, col, rows, cols| {
+            vec![(
+                0,
+                CellRange { row, col, rows, cols },
+            )]
+        };
+        let mut e = edited();
+        for bad in [
+            cell(0, 0, 0, 1),
+            cell(0, 0, 1, 0),
+            cell(MAX_SHEET_ROWS, 0, 1, 1),
+            cell(0, MAX_SHEET_COLS, 1, 1),
+            cell(u32::MAX, 0, 2, 1),
+            cell(0, u32::MAX, 1, 2),
+            vec![cell(0, 0, 1, 1)[0]; MAX_DIRTY_RECTS + 1],
+        ] {
+            e.cells = bad;
+            assert_eq!(check_edited(&e, &PAGES, &L), Err(Refused::BadCells));
+        }
+        e.cells = cell(MAX_SHEET_ROWS - 1, MAX_SHEET_COLS - 1, 1, 1);
+        assert_eq!(check_edited(&e, &PAGES, &L), Ok(()));
+        e.slides = Some(MAX_PAGES);
+        assert_eq!(check_edited(&e, &PAGES, &L), Ok(()));
+        e.slides = Some(MAX_PAGES + 1);
+        assert_eq!(check_edited(&e, &PAGES, &L), Err(Refused::TooManyPages));
+    }
+
+    #[test]
+    fn save_ready_is_held_to_the_save_cap() {
+        let ready = |len| SaveReady {
+            token: 1,
+            len,
+            revision: 5,
+        };
+        assert_eq!(check_save_ready(&ready(0)), Ok(()));
+        assert_eq!(check_save_ready(&ready(MAX_SAVE_BYTES)), Ok(()));
+        assert_eq!(check_save_ready(&ready(MAX_SAVE_BYTES + 1)), Err(Refused::SaveTooLarge));
+        assert_eq!(check_save_ready(&ready(u64::MAX)), Err(Refused::SaveTooLarge));
+    }
+
+    #[test]
+    fn saved_into_must_equal_the_granted_length() {
+        let got = |len| SavedInto { len };
+        assert_eq!(check_saved_into(&got(4096), 4096), Ok(()));
+        assert_eq!(check_saved_into(&got(0), 0), Ok(()));
+        for wrong in [4095, 4097, 0, u64::MAX] {
+            assert_eq!(check_saved_into(&got(wrong), 4096), Err(Refused::SavedLengthMismatch));
+        }
+    }
+
+    #[test]
+    fn layout_lists_are_capped() {
+        let list = |n: usize, len: usize| LayoutList {
+            names: vec!["n".repeat(len); n],
+        };
+        assert_eq!(check_layouts(&list(MAX_LAYOUTS, MAX_LAYOUT_NAME_BYTES)), Ok(()));
+        assert_eq!(check_layouts(&list(MAX_LAYOUTS + 1, 1)), Err(Refused::TooManyLayouts));
+        assert_eq!(
+            check_layouts(&list(1, MAX_LAYOUT_NAME_BYTES + 1)),
+            Err(Refused::TooManyLayouts)
+        );
+        let _ = Clip {
+            text: String::new(),
+            html: None,
+        };
+    }
+}

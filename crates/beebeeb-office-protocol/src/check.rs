@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use crate::frame::Side;
 use crate::office::{
-    Anchor, CellData, CellRange, Cells, Opened, OpenedSheets, Outline, OutlineData, PageSize, Render, RenderAnchor,
-    Rendered,
+    Anchor, CellData, CellRange, Cells, Dirty, Edited, LayoutList, Opened, OpenedSheets, Outline, OutlineData, PageRect,
+    PageSize, Render, RenderAnchor, Rendered, SaveReady, SavedInto,
 };
 
 // The viewer contract §5.2, one constant per number. MB and GB are binary here, as in the sandbox crate's 1 GiB.
@@ -73,6 +73,21 @@ pub const POINTS_PER_INCH: f32 = 72.0;
 /// The tallest page height the Office engine sizes: it clamps a page's height to this before it multiplies by the
 /// scale, and so does [`page_pixels`].
 pub const MAX_PAGE_HEIGHT_PT: f32 = 1e6;
+
+// The editor's numbers (W1). Every one keeps its message inside one frame ([`crate::frame::MAX_PAYLOAD`]).
+
+/// The most rectangles one `Edited` selection may hold (20 bytes each on the wire).
+pub const MAX_SELECTION_RECTS: usize = 1_024;
+/// The most rectangles one `Edited` dirty list may hold; more than this the helper says `Dirty::All`.
+pub const MAX_DIRTY_RECTS: usize = 256;
+/// The most bytes of text in one edit op (a paste, typed text, a cell, a link part, a name).
+pub const MAX_OP_TEXT_BYTES: usize = 32 * 1024;
+/// The most bytes of a serialised document the app takes from the helper: twice the largest input.
+pub const MAX_SAVE_BYTES: u64 = 2 * MAX_INPUT_BYTES;
+/// The most slide layouts a `LayoutList` may name.
+pub const MAX_LAYOUTS: usize = 256;
+/// The most bytes of one layout name.
+pub const MAX_LAYOUT_NAME_BYTES: usize = 1024;
 
 /// The limits the checks hold. [`Limits::CONTRACT`] is the only value the app uses; tests may tighten it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +191,18 @@ pub enum Refused {
     NotAnAnswer,
     /// An answer to an id the app has no request out for.
     UnsentId,
+    /// A caret, selection or dirty rectangle that is not finite, has a negative size, or is not inside its page.
+    BadRect,
+    /// More selection or dirty rectangles than the limit.
+    TooManyRects,
+    /// A serialised document over [`MAX_SAVE_BYTES`].
+    SaveTooLarge,
+    /// `SavedInto.len` is not the length of the section the app granted.
+    SavedLengthMismatch,
+    /// Changed cell ranges that are empty or past a sheet, or more of them than the limit.
+    BadCells,
+    /// More layouts or a layout name longer than the limit.
+    TooManyLayouts,
 }
 
 impl Refused {
@@ -210,6 +237,12 @@ impl Refused {
             Refused::CannotHalve => "a range too large to send that cannot be halved",
             Refused::NotAnAnswer => "a helper request where an answer was due",
             Refused::UnsentId => "an answer to a request never sent",
+            Refused::BadRect => "a rectangle that is not inside its page",
+            Refused::TooManyRects => "too many rectangles",
+            Refused::SaveTooLarge => "a saved document over the limit",
+            Refused::SavedLengthMismatch => "a saved length that is not the section's",
+            Refused::BadCells => "changed cells that are empty or past the sheet",
+            Refused::TooManyLayouts => "too many layouts or a layout name over the limit",
         }
     }
 }
@@ -568,6 +601,94 @@ pub fn check_answer_id(id: u32, was_sent: impl FnOnce(u32) -> bool) -> Result<()
     }
     if !was_sent(id) {
         return Err(Refused::UnsentId);
+    }
+    Ok(())
+}
+
+/// A rectangle (points) on a page of `pages`: finite, not negative in size, inside the page.
+fn rect_inside(r: &PageRect, pages: &[PageSize]) -> bool {
+    let Some(page) = pages.get(r.page as usize) else {
+        return false;
+    };
+    let q = &r.rect;
+    let all = [q.x, q.y, q.w, q.h];
+    // Compared with a small tolerance: the helper lays out in f32 and a caret may touch the page's edge.
+    all.iter().all(|v| v.is_finite())
+        && q.x >= 0.0
+        && q.y >= 0.0
+        && q.w >= 0.0
+        && q.h >= 0.0
+        && q.x + q.w <= page.w_pt + 0.01
+        && q.y + q.h <= page.h_pt.min(MAX_PAGE_HEIGHT_PT) + 0.01
+}
+
+/// An `Edited` answer. `pages` are the page sizes the app holds from its last `Opened` (or the last `Edited` that
+/// brought new ones); when this answer brings its own, those are checked ([`check_opened`]) and used for the rects.
+/// The caret, every selection rectangle and every dirty rectangle lies inside its page; at most
+/// [`MAX_SELECTION_RECTS`] and [`MAX_DIRTY_RECTS`]; changed cell ranges are non-empty and inside a sheet (at most
+/// [`MAX_DIRTY_RECTS`] of them); a slide count under the page limit.
+pub fn check_edited(got: &Edited, pages: &[PageSize], limits: &Limits) -> Result<(), Refused> {
+    let pages = match &got.pages {
+        Some(new) => {
+            check_opened(new, limits)?;
+            new.sizes.as_slice()
+        }
+        None => pages,
+    };
+    if got.selection.len() > MAX_SELECTION_RECTS {
+        return Err(Refused::TooManyRects);
+    }
+    if let Dirty::Rects(rects) = &got.dirty {
+        if rects.len() > MAX_DIRTY_RECTS {
+            return Err(Refused::TooManyRects);
+        }
+        if !rects.iter().all(|r| rect_inside(r, pages)) {
+            return Err(Refused::BadRect);
+        }
+    }
+    if !got.caret.iter().chain(got.selection.iter()).all(|r| rect_inside(r, pages)) {
+        return Err(Refused::BadRect);
+    }
+    if got.cells.len() > MAX_DIRTY_RECTS {
+        return Err(Refused::BadCells);
+    }
+    for (_, range) in &got.cells {
+        let end_row = u64::from(range.row) + u64::from(range.rows);
+        let end_col = u64::from(range.col) + u64::from(range.cols);
+        if range.rows == 0
+            || range.cols == 0
+            || end_row > u64::from(limits.max_sheet_rows)
+            || end_col > u64::from(limits.max_sheet_cols)
+        {
+            return Err(Refused::BadCells);
+        }
+    }
+    if got.slides.is_some_and(|n| n > limits.max_pages) {
+        return Err(Refused::TooManyPages);
+    }
+    Ok(())
+}
+
+/// A `SaveReady` answer: `len` at most [`MAX_SAVE_BYTES`] (the app makes a section of exactly `len` only after this).
+pub fn check_save_ready(got: &SaveReady) -> Result<(), Refused> {
+    if got.len > MAX_SAVE_BYTES {
+        return Err(Refused::SaveTooLarge);
+    }
+    Ok(())
+}
+
+/// A `SavedInto` answer: `len` is the length of the section the app granted (`granted_len`, the `SaveReady.len`).
+pub fn check_saved_into(got: &SavedInto, granted_len: u64) -> Result<(), Refused> {
+    if got.len != granted_len {
+        return Err(Refused::SavedLengthMismatch);
+    }
+    Ok(())
+}
+
+/// A `LayoutList` answer: at most [`MAX_LAYOUTS`] names of at most [`MAX_LAYOUT_NAME_BYTES`] bytes.
+pub fn check_layouts(got: &LayoutList) -> Result<(), Refused> {
+    if got.names.len() > MAX_LAYOUTS || got.names.iter().any(|n| n.len() > MAX_LAYOUT_NAME_BYTES) {
+        return Err(Refused::TooManyLayouts);
     }
     Ok(())
 }
