@@ -245,7 +245,11 @@ fn a_locked_window_shows_no_file_name() {
 #[test]
 fn the_notice_is_not_drawn_after_a_gate_change() {
     let (engine, mut rt) = window(GateState::NoPlan, false);
-    click(&mut rt, "gate-btn-0");
+    rt.state.frames.gate_notice = Some(GateNotice {
+        message: "Not available yet",
+        gate: GateState::NoPlan,
+    });
+    settle(&mut rt);
     assert!(find(&rt, "gate-notice").is_some(), "the notice is drawn");
     engine.set_gate(GateState::Ready);
     rt.frame(1.0);

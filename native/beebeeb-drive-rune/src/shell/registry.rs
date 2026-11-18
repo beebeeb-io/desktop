@@ -514,7 +514,7 @@ mod tests {
     fn the_frame_count_is_pinned() {
         assert_eq!(
             FRAMES.len(),
-            23,
+            24,
             "a frame was added to FRAMES without updating this test"
         );
         assert_eq!(
