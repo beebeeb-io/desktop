@@ -150,3 +150,29 @@ fn viewer_save_takes_only_its_two_intents_and_without_an_engine_says_not_availab
         assert_eq!(viewers::ui(s).unwrap().toast.as_deref(), Some(NOT_AVAILABLE));
     });
 }
+
+#[test]
+fn viewer_save_the_shells_poll_hands_the_result_to_the_toast() {
+    let dir = tempfile::tempdir().unwrap();
+    let platform = Arc::new(FakePlatform::default());
+    platform.saves.lock().unwrap().push_back(SaveAnswer::Chosen(dir.path().join("p.m4a")));
+    let saver = FakeSaver::new();
+    let mut rt = runtime();
+    super::super::intents::poll_drains_for_this_test();
+    rt.update(|s, tx| {
+        assert!(viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::AUDIO));
+        assert!(save_with(s, tx, platform, saver, "id".into(), "p.m4a".into(), PathBuf::new()));
+    });
+    let mut toast = None;
+    for _ in 0..400 {
+        rt.update(|s, tx| {
+            super::super::intents::drain_in_poll(s, tx);
+            toast = viewers::ui(s).and_then(|ui| ui.toast.clone());
+        });
+        if toast.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(toast.as_deref(), Some(SAVED));
+}

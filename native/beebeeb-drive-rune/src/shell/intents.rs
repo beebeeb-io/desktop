@@ -60,7 +60,8 @@ pub fn drain_in_poll(s: &mut State, tx: &mut Tx) -> bool {
     let viewer = drain_viewer_intents(s, tx);
     let backups = drain_backups_intents(s);
     let picked = take_picked_folder(s, tx);
-    settings | frames | viewer | backups | picked
+    let saved = super::viewer_save::poll(s, tx);
+    settings | frames | viewer | backups | picked | saved
 }
 
 /// Which section asked for Windows' folder picker, and gets the folder: one variant per section. A later section
