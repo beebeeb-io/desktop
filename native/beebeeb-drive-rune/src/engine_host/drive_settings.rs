@@ -851,6 +851,13 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         (changed, !self.idle() || sampling)
     }
 
+    /// The window left Settings: the App activity sampler stops and its samples go, whatever pane was open.
+    fn closed(&mut self) {
+        self.open = None;
+        self.activity.hide();
+        self.previews.closed();
+    }
+
     /// A pane of Drive's settings opened: insights reads again when what it holds is old (P2-3).
     fn opened(&mut self, pane: Pane) {
         self.open = Some(pane);

@@ -122,6 +122,11 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
             .map_err(|_| LocalStateRefused::Unreadable)
     }
 
+    fn listing(&self) -> Option<Loading> {
+        let (listed, total) = self.first_listing()?;
+        Some(Loading { listed, total })
+    }
+
     fn recent_searches(&self, turn: SessionGeneration) -> Result<Vec<String>, ()> {
         self.recent_searches_for(turn).map_err(|_| ())
     }

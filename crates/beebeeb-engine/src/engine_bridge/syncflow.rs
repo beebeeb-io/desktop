@@ -559,7 +559,14 @@ pub fn apply_snapshot(
     // Their children are skipped instead of being placed at the root.
     let mut unplaced: HashSet<String> = HashSet::new();
 
-    for f in order {
+    // DW-0802b: Search says how far the first listing is while this runs.
+    let total = order.len() as u64;
+    let board = bridge.transfers().clone();
+    board.set_first_listing(0, total);
+    let ended = ListingEnd(board.clone());
+
+    for (listed, f) in order.into_iter().enumerate() {
+        board.set_first_listing(listed as u64, total);
         let file_id = f["id"].as_str().unwrap_or_default();
         if file_id.is_empty() {
             continue;
@@ -660,7 +667,17 @@ pub fn apply_snapshot(
     }
 
     bridge.db().set_sync_cursor(snapshot.seq_id)?;
+    drop(ended);
     Ok(applied)
+}
+
+/// Ends the board's first-listing report when the ingest ends, by return or by an error.
+struct ListingEnd(Arc<crate::transfer_progress::TransferBoard>);
+
+impl Drop for ListingEnd {
+    fn drop(&mut self) {
+        self.0.end_first_listing();
+    }
 }
 
 /// Order snapshot nodes so every node appears AFTER its parent (parents-first),

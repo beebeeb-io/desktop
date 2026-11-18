@@ -480,10 +480,15 @@ impl std::fmt::Debug for Wake {
     }
 }
 
+/// How many ingested rows pass between two redraws of the first-listing count.
+const LISTING_RING_EVERY: u64 = 256;
+
 #[derive(Debug, Default)]
 pub struct TransferBoard {
     inner: Mutex<Inner>,
     wake: Wake,
+    /// (rows ingested, rows in the snapshot) while a snapshot is being applied; `None` otherwise.
+    first_listing: Mutex<Option<(u64, u64)>>,
 }
 
 impl TransferBoard {
@@ -497,6 +502,36 @@ impl TransferBoard {
     pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
         if let Ok(mut slot) = self.wake.0.lock() {
             *slot = Some(Arc::new(wake));
+        }
+    }
+
+    /// How far the listing of the account's files has come while a snapshot is ingested (DW-0802b): `(listed, total)`.
+    /// `None` when no snapshot is being applied. In memory, never waits on anything but a short lock.
+    pub fn first_listing(&self) -> Option<(u64, u64)> {
+        self.first_listing.lock().ok().and_then(|slot| *slot)
+    }
+
+    /// A snapshot of `total` rows is being ingested and `listed` are in. Rings the wake hook when this is the first
+    /// report, and then every [`LISTING_RING_EVERY`] rows, so a window can redraw the count without a call per row.
+    pub fn set_first_listing(&self, listed: u64, total: u64) {
+        let first = match self.first_listing.lock() {
+            Ok(mut slot) => {
+                let first = slot.is_none();
+                *slot = Some((listed, total));
+                first
+            }
+            Err(_) => return,
+        };
+        if first || listed % LISTING_RING_EVERY == 0 {
+            self.ring();
+        }
+    }
+
+    /// The snapshot is whole (or its ingest failed): no listing is in progress. Rings the wake hook.
+    pub fn end_first_listing(&self) {
+        let had = self.first_listing.lock().ok().is_some_and(|mut slot| slot.take().is_some());
+        if had {
+            self.ring();
         }
     }
 

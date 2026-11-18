@@ -1112,7 +1112,8 @@ fn closing_settings_on_diagnostics_stops_the_sampler() {
     source.opened(Pane::Diagnostics);
     source.pump(0.0);
     assert!(source.activity.running());
-    <EngineDriveSettings as DriveSettings>::closed(&mut source);
+    let drive: &mut dyn DriveSettings = &mut source;
+    drive.closed();
     assert!(!source.activity.running(), "the window closed: nothing samples");
     let (_, more) = source.pump(0.0);
     assert!(!more, "and nothing asks for a frame");
