@@ -198,7 +198,7 @@ pub fn create(s: &mut State) {
 /// The engine's answer, read on the window's poll (`new_file::sync`): the new file opens in the editor, a failure
 /// is said in the dialog. Nothing while no creation waits.
 pub fn poll(s: &mut State) {
-    let made = with(s, |_, d| {
+    let made = with(s, |nf, d| {
         if !d.creating {
             return None;
         }
