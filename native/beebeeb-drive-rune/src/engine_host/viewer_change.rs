@@ -679,7 +679,7 @@ fn earlier(settled: Settled, file_id: &str) -> Option<Settled> {
         }
         Settled::Conflict(_) => "Your earlier edit was not saved: the file changed since you opened it".to_string(),
         Settled::Failed | Settled::Refused(_) => "Your earlier edit was not saved".to_string(),
-        Settled::Opened { .. } | Settled::Newer(_) | Settled::Said(_) => String::new(),
+        Settled::Opened { .. } | Settled::SavedRevision(_) | Settled::Newer(_) | Settled::Said(_) => String::new(),
     };
     wipe(settled);
     (!said.is_empty()).then_some(Settled::Said(said))

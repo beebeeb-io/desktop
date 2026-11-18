@@ -111,6 +111,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             EditAnswer::Layouts(names) => edit.layouts = names,
             EditAnswer::Stopped => edit.stopped = true,
             EditAnswer::Restored { at } => edit.restored = Some(at),
+            EditAnswer::CopyTooLarge => ui.toast = Some(crate::frames::viewers::source::COPY_TOO_LARGE.to_string()),
         }
     }
     ui.office.edit = Some(edit);
