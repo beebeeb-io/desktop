@@ -68,6 +68,8 @@ pub enum Bundle {
         folder: String,
         file: String,
         draft_opened: bool,
+        /// The saved file in full, for "Show in File Explorer" (never drawn: a person's own path).
+        path: std::path::PathBuf,
     },
     /// Not saved: the reason, in the engine's words.
     Failed(String),
@@ -121,6 +123,7 @@ fn banner(bundle: &Bundle, t: &Theme) -> Option<El> {
             folder,
             file,
             draft_opened,
+            ..
         } => (
             &ic::CHECK,
             "Support bundle saved.",
@@ -290,7 +293,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             2,
             1,
             &Item::new(Some(&ic::CHAT), "Get help")
-                .sub("Opens our support page in your browser.")
+                .sub("Opens a draft to support in your email app.")
                 .trailing(lists::Trailing::External)
                 .role(lists::Role::Link),
             t,
