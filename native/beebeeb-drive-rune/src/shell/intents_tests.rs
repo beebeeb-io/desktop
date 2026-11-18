@@ -150,9 +150,9 @@ fn the_poll_line_drains_frame_intents() {
     });
 }
 
-/// A press in the viewer reaches the shell's viewer route: with no handler yet the router's fallback says so.
+/// A press in the viewer reaches the shell's viewer route: Share opens Files' dialog for the open file.
 #[test]
-fn a_viewer_share_press_reaches_the_viewer_route_and_says_not_built_while_nothing_takes_it() {
+fn a_viewer_share_press_reaches_the_viewer_route_and_opens_files_share_dialog() {
     use crate::frames::viewers;
     let mut rt = runtime(FixtureEngine::ready());
     rt.update(|s, tx| {
@@ -161,6 +161,7 @@ fn a_viewer_share_press_reaches_the_viewer_route_and_says_not_built_while_nothin
         assert!(drain_in_poll(s, tx), "the viewer's queue was taken");
         let ui = viewers::ui(s).expect("open");
         assert!(ui.take_intents().is_empty());
-        assert_eq!(ui.toast.as_deref(), Some("Not built yet: Share"));
+        assert_eq!(ui.toast, None);
+        assert!(matches!(&s.actions.dialog, Some(crate::frames::files::dialogs::Dialog::Share(sh)) if sh.items[0].id == crate::frames::viewers::source::board::AUDIO));
     });
 }
