@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use beebeeb_office_protocol::office::{EditKind, EditOp, Mark};
+use beebeeb_office_protocol::office::{EditKind, EditOp, ListKind, Mark, Marks, ParaStyle, TextAlign};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::*;
@@ -48,9 +48,17 @@ fn each_kind_lists_its_own_operations_and_typing_filters() {
 fn a_result_resolves_to_its_operation_and_a_mark_toggles() {
     let k = Some(EditKind::Docx);
     assert_eq!(resolve(k, "Data", "Sort A to Z", None), Run::Unknown);
-    assert_eq!(resolve(k, STYLES, "Heading 2", None), Run::Op(EditOp::ParaStyle(beebeeb_office_protocol::office::ParaStyle::Heading2)));
+    assert_eq!(resolve(k, STYLES, "Heading 2", None), Run::Op(EditOp::ParaStyle(ParaStyle::Heading2)));
     assert_eq!(resolve(k, "Format", "Bold", None), Run::Op(EditOp::Mark { mark: Mark::Bold, on: true }));
-    let bold = Marks { bold: true, ..EditUi::new(EditKind::Docx).marks.unwrap_or_default() };
+    let bold = Marks {
+        bold: true,
+        italic: false,
+        underline: false,
+        strike: false,
+        style: ParaStyle::Normal,
+        align: TextAlign::Left,
+        list: ListKind::None,
+    };
     assert_eq!(resolve(k, "Format", "Bold", Some(&bold)), Run::Op(EditOp::Mark { mark: Mark::Bold, on: false }));
     assert_eq!(resolve(k, FILES, "A.pdf", None), Run::File("A.pdf".into()));
     assert_eq!(resolve(Some(EditKind::Pptx), "Slides", "New slide", None), Run::Op(EditOp::NewSlide { layout: None }));
@@ -100,8 +108,8 @@ fn open(live: bool) -> (Runtime<State>, Rc<RefCell<Vec<EditOp>>>) {
 }
 
 fn key(rt: &mut Runtime<State>, key: Key, ctrl: bool) {
-    let mods = Mods { ctrl, ..Mods::default() };
-    rt.key(KeyEvent { key, mods, ..KeyEvent::default() });
+    let mods = Mods { cmd: ctrl, ..Mods::default() };
+    rt.key(KeyEvent { key, mods });
     rt.frame(0.0);
 }
 
