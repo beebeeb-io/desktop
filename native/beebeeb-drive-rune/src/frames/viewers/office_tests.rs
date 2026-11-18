@@ -488,3 +488,364 @@ fn nothing_of_a_document_reaches_a_debug_and_wipe_clears_its_cells() {
             .all(|s| s.text.is_empty() && s.table.iter().flatten().flatten().all(String::is_empty))
     );
 }
+
+// ---------------------------------------------------------------------------
+// The live word ribbon (`frames/office/edit/word_ribbon.rs`)
+// ---------------------------------------------------------------------------
+
+mod live_ribbon {
+    use beebeeb_office_protocol::office::{
+        Dirty, EditKind, EditOp, Edited, ListKind, Mark, Marks, PageRect, ParaStyle, RectPt, TextAlign,
+    };
+
+    use super::*;
+    use crate::frames::office::docs::docs_fixture::DOCX_ID;
+    use crate::frames::office::edit::{self, EditUi, word_ribbon};
+    use crate::frames::viewers;
+    use crate::frames::viewers::source::EditAnswer;
+
+    type Ops = Rc<RefCell<Vec<EditOp>>>;
+    type Answers = Rc<RefCell<Vec<EditAnswer>>>;
+
+    /// A live-looking document whose editor records every op it is given and answers what the test queued.
+    struct Editing {
+        inner: FixtureViewerSource,
+        ops: Ops,
+        answers: Answers,
+        takes: bool,
+    }
+
+    impl ViewerSource for Editing {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.open(id)
+        }
+        fn poll(&mut self, id: &str) -> Option<Body> {
+            self.inner.poll(id)
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.retry(id)
+        }
+        fn can_edit(&self, _: &str) -> bool {
+            true
+        }
+        fn edit(&mut self, _: &str, op: EditOp) -> bool {
+            self.ops.borrow_mut().push(op);
+            self.takes
+        }
+        fn poll_edit(&mut self, _: &str) -> Option<EditAnswer> {
+            let mut answers = self.answers.borrow_mut();
+            (!answers.is_empty()).then(|| answers.remove(0))
+        }
+    }
+
+    pub fn marks() -> Marks {
+        Marks {
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            style: ParaStyle::Normal,
+            align: TextAlign::Left,
+            list: ListKind::None,
+        }
+    }
+
+    pub fn edited(revision: u64, marks: Marks, selection: Vec<PageRect>) -> Edited {
+        Edited {
+            revision,
+            caret: None,
+            selection,
+            can_undo: true,
+            can_redo: false,
+            dirty: Dirty::All,
+            pages: None,
+            cells: Vec::new(),
+            slides: None,
+            marks,
+        }
+    }
+
+    pub fn selection() -> Vec<PageRect> {
+        vec![PageRect {
+            page: 0,
+            rect: RectPt {
+                x: 72.0,
+                y: 300.0,
+                w: 120.0,
+                h: 14.0,
+            },
+        }]
+    }
+
+    /// The agreement open for editing: the editor's state is on, the source records.
+    fn editing(takes: bool) -> (Runtime<State>, Ops, Answers) {
+        let (ops, answers) = (Ops::default(), Answers::default());
+        let mut state = init();
+        let source = Editing {
+            inner: FixtureViewerSource::new(),
+            ops: ops.clone(),
+            answers: answers.clone(),
+            takes,
+        };
+        assert!(open_from(&mut state, Box::new(source), DOCX_ID));
+        state.viewer.ui.as_mut().expect("open").office.edit = Some(EditUi::new(EditKind::Docx));
+        (runtime_of(state, false), ops, answers)
+    }
+
+    /// The helper answered `e`: the editor's poll takes it, the frame is drawn again.
+    pub fn answer(rt: &mut Runtime<State>, answers: &Answers, e: Edited) {
+        answers.borrow_mut().push(EditAnswer::Edited(e));
+        rt.update(|s, tx| {
+            edit::poll(s, tx);
+        });
+        // The lit fill is a short transition: let it land.
+        for _ in 0..4 {
+            rt.frame(1.0);
+        }
+    }
+
+    fn checked(rt: &Runtime<State>, key: &str) -> bool {
+        find(rt, key).unwrap_or_else(|| panic!("no element keyed {key}")).fill != rune::Color::TRANSPARENT
+    }
+
+    #[test]
+    fn the_tools_are_lit_from_what_the_helper_said_and_send_the_opposite() {
+        let (mut rt, ops, answers) = editing(true);
+        // Nothing was said yet: nothing is lit, and Undo and Redo have nothing to do.
+        assert!(!checked(&rt, "rt-2"));
+        let undo = find(&rt, "rt-0").expect("Undo");
+        assert!(!undo.focusable, "no revision to go back to yet");
+        let mut m = marks();
+        m.bold = true;
+        m.align = TextAlign::Center;
+        m.list = ListKind::Bullet;
+        m.style = ParaStyle::Heading2;
+        answer(&mut rt, &answers, edited(1, m, Vec::new()));
+        assert!(checked(&rt, "rt-2"), "Bold is lit");
+        assert!(!checked(&rt, "rt-3"), "Italic is not");
+        assert!(checked(&rt, "rt-11"), "Align centre is lit");
+        assert!(!checked(&rt, "rt-10"));
+        assert!(checked(&rt, "rt-8"), "Bulleted list is lit");
+        assert_eq!(words(&rt, "rp-0-label"), "Heading 2");
+        assert!(find(&rt, "rt-0").expect("Undo").focusable);
+        assert!(!find(&rt, "rt-1").expect("Redo").focusable);
+        // A lit Bold turns Bold off; an unlit Italic turns it on.
+        operate(&mut rt, "rt-2");
+        operate(&mut rt, "rt-3");
+        operate(&mut rt, "rt-0");
+        // A lit list tool turns the list off; Numbered turns it on.
+        operate(&mut rt, "rt-8");
+        operate(&mut rt, "rt-9");
+        operate(&mut rt, "rt-12");
+        operate(&mut rt, "rt-15");
+        assert_eq!(
+            *ops.borrow(),
+            [
+                EditOp::Mark {
+                    mark: Mark::Bold,
+                    on: false
+                },
+                EditOp::Mark {
+                    mark: Mark::Italic,
+                    on: true
+                },
+                EditOp::Undo,
+                EditOp::List(ListKind::None),
+                EditOp::List(ListKind::Number),
+                EditOp::Align(TextAlign::Right),
+                EditOp::Indent(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_source_that_does_not_take_the_edit_says_so_and_never_nothing() {
+        let (mut rt, ops, _) = editing(false);
+        operate(&mut rt, "rt-2");
+        assert_eq!(ops.borrow().len(), 1);
+        assert!(ui(&rt).toast.is_some(), "the press said it did nothing");
+    }
+
+    #[test]
+    fn the_style_pop_up_picks_with_the_arrows_and_closes() {
+        let (mut rt, ops, _) = editing(true);
+        operate(&mut rt, "rp-0");
+        assert!(has(&rt, "rib-menu"), "the menu hangs under the Style button");
+        assert_eq!(ui(&rt).office.ribbon.open, Some(word_ribbon::Pop::Style));
+        for _ in 0..3 {
+            press(&mut rt, Key::Down);
+        }
+        press(&mut rt, Key::Enter);
+        assert_eq!(*ops.borrow(), [EditOp::ParaStyle(ParaStyle::Heading1)]);
+        assert!(!has(&rt, "rib-menu"));
+        assert!(ui(&rt).office.ribbon.open.is_none());
+    }
+
+    #[test]
+    fn colour_font_size_and_table_pop_ups_send_their_edits() {
+        let (mut rt, ops, _) = editing(true);
+        for (button, downs) in [("rp-1", 2), ("rp-2", 5), ("rt-6", 3), ("rt-18", 2)] {
+            operate(&mut rt, button);
+            assert!(has(&rt, "rib-menu"), "{button} opens a menu");
+            for _ in 0..downs {
+                press(&mut rt, Key::Down);
+            }
+            press(&mut rt, Key::Enter);
+        }
+        let ops = ops.borrow();
+        assert_eq!(ops[0], EditOp::FontFamily("Arial".into()));
+        assert_eq!(ops[1], EditOp::FontSize(12.0));
+        assert!(matches!(ops[2], EditOp::TextColour(c) if (c.r, c.g, c.b) == (0xC0, 0x39, 0x2B)));
+        assert_eq!(ops[3], EditOp::Table { rows: 3, cols: 3 });
+    }
+
+    #[test]
+    fn the_link_pop_up_takes_a_web_or_mail_address_only() {
+        assert_eq!(
+            word_ribbon::link_address("https://beebeeb.io/x"),
+            Some("https://beebeeb.io/x".into())
+        );
+        assert_eq!(
+            word_ribbon::link_address("beebeeb.io"),
+            Some("https://beebeeb.io".into())
+        );
+        assert_eq!(word_ribbon::link_address("a@b.nl"), Some("mailto:a@b.nl".into()));
+        assert_eq!(word_ribbon::link_address("MAILTO:a@b.nl"), Some("MAILTO:a@b.nl".into()));
+        for wrong in [
+            "",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "ftp://x.y",
+            "two words.nl",
+            "plain",
+        ] {
+            assert_eq!(word_ribbon::link_address(wrong), None, "{wrong}");
+        }
+        let (mut rt, ops, _) = editing(true);
+        operate(&mut rt, "rt-16");
+        assert!(has(&rt, "rib-link-input"));
+        press(&mut rt, Key::Text("javascript:x".into()));
+        press(&mut rt, Key::Enter);
+        assert!(
+            ops.borrow().is_empty(),
+            "an address the engine would refuse is not sent"
+        );
+        assert!(has(&rt, "rib-link-wrong"));
+        rt.update(|s, _| {
+            if let Some(link) = s.viewer.ui.as_mut().and_then(|u| u.office.ribbon.link.as_mut()) {
+                link.replace_text("beebeeb.io");
+            }
+        });
+        rt.frame(0.0);
+        press(&mut rt, Key::Enter);
+        assert_eq!(
+            *ops.borrow(),
+            [EditOp::Link {
+                text: String::new(),
+                url: "https://beebeeb.io".into()
+            }]
+        );
+        assert!(ui(&rt).office.ribbon.link.is_none(), "the typed address is not kept");
+    }
+
+    #[test]
+    fn the_selection_tools_show_over_a_selection_only() {
+        let (mut rt, ops, answers) = editing(true);
+        assert!(!has(&rt, "float"));
+        answer(&mut rt, &answers, edited(1, marks(), Vec::new()));
+        assert!(!has(&rt, "float"), "a caret is not a selection");
+        let mut m = marks();
+        m.underline = true;
+        answer(&mut rt, &answers, edited(2, m, selection()));
+        assert!(has(&rt, "float"));
+        for (i, name) in ["Bold", "Italic", "Underline", "Text colour", "Insert link"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                find(&rt, &format!("ft-{i}")).expect("a tool").label.as_deref(),
+                Some(*name)
+            );
+        }
+        assert!(checked(&rt, "ft-2"), "Underline is lit");
+        operate(&mut rt, "ft-0");
+        operate(&mut rt, "ft-2");
+        assert_eq!(
+            *ops.borrow(),
+            [
+                EditOp::Mark {
+                    mark: Mark::Bold,
+                    on: true
+                },
+                EditOp::Mark {
+                    mark: Mark::Underline,
+                    on: false
+                },
+            ]
+        );
+        // Over the first selected line, scaled to the page at this zoom, inside the page.
+        let (x, y, page_w) = word_ribbon::float_at(ui(&rt)).expect("on screen");
+        assert!(x >= 0.0 && x + 160.0 <= page_w + 1.0 && y >= 0.0);
+    }
+
+    #[test]
+    fn a_selection_scrolled_out_of_view_has_no_tools() {
+        let (mut rt, _, answers) = editing(true);
+        answer(&mut rt, &answers, edited(1, marks(), selection()));
+        assert!(word_ribbon::float_at(ui(&rt)).is_some());
+        rt.update(|s, _| {
+            if let Some(d) = viewers::doc_mut(s) {
+                d.go_to_page(3);
+            }
+        });
+        assert!(word_ribbon::float_at(ui(&rt)).is_none());
+    }
+
+    #[test]
+    fn the_status_line_is_the_live_documents() {
+        let (mut rt, _, answers) = editing(true);
+        assert_eq!(words(&rt, "st-0"), "Page 1 of 4");
+        assert!(words(&rt, "st-2").ends_with(" words"));
+        assert_eq!(words(&rt, "st-4"), "English (UK)");
+        assert_eq!(words(&rt, "st-7"), "saved as version 7");
+        assert!(!has(&rt, "status-text"), "never Preparing");
+        assert_eq!(words(&rt, "st-8-zoom"), "100%");
+        answer(&mut rt, &answers, edited(1, marks(), Vec::new()));
+        assert_eq!(words(&rt, "st-7"), "unsaved changes");
+        // The zoom's steps move the document's stage.
+        operate(&mut rt, "st-8-more-btn");
+        assert_eq!(words(&rt, "st-8-zoom"), "110%");
+        operate(&mut rt, "st-8-less-btn");
+        operate(&mut rt, "st-8-less-btn");
+        assert_eq!(words(&rt, "st-8-zoom"), "90%");
+    }
+
+    #[test]
+    fn layout_and_review_keep_only_what_the_web_editor_has() {
+        let (mut rt, _, _) = editing(true);
+        operate(&mut rt, "rib-tab-2-cell");
+        assert_eq!(words(&rt, "rt-0-label"), "Page layout\u{2026}");
+        assert!(!has(&rt, "rt-1"));
+        operate(&mut rt, "rib-tab-3-cell");
+        assert_eq!(words(&rt, "rt-0-label"), "Word count\u{2026}");
+        operate(&mut rt, "rt-0");
+        let said = ui(&rt).toast.clone().expect("it says the count");
+        assert!(said.contains("words") && said.contains("4 pages"), "{said}");
+    }
+
+    #[test]
+    fn the_image_tool_goes_to_inserts_picker_and_the_fixture_ribbon_is_unchanged() {
+        let (mut rt, ops, _) = editing(true);
+        operate(&mut rt, "rt-17");
+        assert_eq!(ui(&rt).office.tab, Tab::Insert);
+        assert!(ops.borrow().is_empty());
+        // The board's own scene keeps its fixture tools and words.
+        let (rt, _) = agreement(Case::Selected, false, true);
+        assert_eq!(words(&rt, "rp-0-label"), "Normal text");
+        assert_eq!(words(&rt, "rp-1-label"), "Inter");
+        assert_eq!(words(&rt, "rp-2-label"), "11");
+        assert!(!find(&rt, "rt-1").expect("Redo").focusable, "the board's Redo is off");
+        assert_eq!(words(&rt, "st-0"), "Page 1 of 4");
+    }
+}
