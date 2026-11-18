@@ -1160,4 +1160,144 @@ mod tests {
         assert_eq!(ui.file.version, version, "the version did not move");
         assert!(matches!(ui.office.over, Some(Over::Licence)), "the question stayed");
     }
+
+    use crate::frames::office::edit::EditUi;
+    use crate::frames::viewers::source::{Body, OpenError, OpenFile, Settled, ViewerSource};
+    use beebeeb_office_protocol::office::EditKind;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    /// The fixture whose save is handed to the engine and answers later, as the test queues it.
+    struct Later {
+        inner: FixtureViewerSource,
+        saves: Rc<RefCell<u32>>,
+        settled: Rc<RefCell<VecDeque<Settled>>>,
+    }
+
+    impl ViewerSource for Later {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.open(id)
+        }
+        fn poll(&mut self, id: &str) -> Option<Body> {
+            self.inner.poll(id)
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn save_document(&mut self, _: &str, _: u32) -> SaveOutcome {
+            *self.saves.borrow_mut() += 1;
+            SaveOutcome::Working
+        }
+        fn settled(&mut self, _: &str) -> Option<Settled> {
+            self.settled.borrow_mut().pop_front()
+        }
+    }
+
+    type Saves = Rc<RefCell<u32>>;
+    type Answers = Rc<RefCell<VecDeque<Settled>>>;
+
+    /// The agreement live in the editor, one change typed (revision 1, nothing saved).
+    fn live() -> (Ui, Saves, Answers) {
+        let (saves, settled) = (Saves::default(), Answers::default());
+        let source = Later {
+            inner: FixtureViewerSource::new(),
+            saves: saves.clone(),
+            settled: settled.clone(),
+        };
+        let mut ui = Ui::open(Box::new(source), board::DOCX).expect("the fixture opens it");
+        let mut edit = EditUi::new(EditKind::Docx);
+        edit.revision = 1;
+        ui.office.edit = Some(edit);
+        (ui, saves, settled)
+    }
+
+    fn unsaved(ui: &Ui) -> bool {
+        ui.office.edit.as_ref().is_some_and(EditUi::unsaved)
+    }
+
+    fn saved_as(ui: &Ui, version: u32) -> Settled {
+        Settled::Saved {
+            id: ui.file.id.clone(),
+            name: ui.file.name.clone(),
+            body: ui.file.body.clone(),
+            version,
+            at: "09:41".into(),
+        }
+    }
+
+    #[test]
+    fn a_save_in_progress_refuses_a_second_one() {
+        let (mut ui, saves, _) = live();
+        ui.office_save();
+        ui.office_save();
+        assert_eq!(*saves.borrow(), 1);
+        assert!(ui.office.edit.as_ref().is_some_and(|e| e.saving));
+        assert_eq!(ui.toast.as_deref(), Some(save::SAVING));
+        assert!(unsaved(&ui), "nothing is drawn as saved before it lands");
+    }
+
+    #[test]
+    fn an_edit_typed_during_a_save_stays_unsaved_after_it_lands() {
+        let (mut ui, _, settled) = live();
+        ui.office_save();
+        ui.office.edit.as_mut().expect("edit").revision = 2;
+        settled.borrow_mut().push_back(saved_as(&ui, 8));
+        assert!(ui.pump());
+        assert!(ui.office_settle_save());
+        let edit = ui.office.edit.as_ref().expect("edit");
+        assert!(!edit.saving);
+        assert_eq!(edit.saved_revision, 1, "saved up to the revision that was sent");
+        assert!(edit.unsaved());
+        assert_eq!(ui.file.version, 8);
+        assert_eq!(ui.toast.as_deref(), Some("Saved \u{00B7} encrypted \u{00B7} version 8"));
+    }
+
+    #[test]
+    fn a_save_with_nothing_typed_during_it_lands_as_saved() {
+        let (mut ui, _, settled) = live();
+        ui.office_save();
+        settled.borrow_mut().push_back(saved_as(&ui, 8));
+        assert!(ui.pump() && ui.office_settle_save());
+        assert!(!unsaved(&ui));
+        assert!(ui.office.save.is_none());
+    }
+
+    #[test]
+    fn a_failed_save_says_so_and_keeps_the_edit() {
+        let (mut ui, _, settled) = live();
+        ui.office_save();
+        settled.borrow_mut().push_back(Settled::Failed);
+        assert!(ui.pump() && ui.office_settle_save());
+        assert_eq!(ui.toast.as_deref(), Some(NOT_SAVED));
+        assert!(unsaved(&ui) && !ui.office.edit.as_ref().is_some_and(|e| e.saving));
+    }
+
+    #[test]
+    fn a_conflict_opens_the_question_and_cancel_saves_nothing() {
+        let (mut ui, saves, settled) = live();
+        ui.office_save();
+        let other = Conflict {
+            from: "Anna's iPhone".into(),
+            at: "09:14".into(),
+            version: 8,
+        };
+        settled.borrow_mut().push_back(Settled::Conflict(other));
+        assert!(ui.pump() && ui.office_settle_save());
+        assert!(matches!(ui.office.over, Some(Over::Conflict(_))));
+        assert!(ui.dialog.is_none(), "the text editor's question is not asked");
+        ui.office_close_over();
+        assert!(ui.office.over.is_none());
+        assert_eq!(*saves.borrow(), 1, "Cancel asked nothing of the source");
+        assert!(unsaved(&ui));
+    }
+
+    #[test]
+    fn back_with_unsaved_changes_asks_first() {
+        let (mut ui, _, _) = live();
+        assert!(ui.office_hold_for_changes());
+        assert!(matches!(ui.office.over, Some(Over::Leave)));
+        ui.office_close_over();
+        assert!(unsaved(&ui), "Keep editing keeps the edit");
+        ui.office.edit.as_mut().expect("edit").saved_revision = 1;
+        assert!(!ui.office_hold_for_changes(), "nothing unsaved: Back leaves");
+    }
 }
