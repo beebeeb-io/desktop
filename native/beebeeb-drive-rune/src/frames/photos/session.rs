@@ -13,7 +13,7 @@
 use rune::{El, Tx, col};
 
 use super::chrome::style;
-use super::source::{Answered, Left, Loaded, PhotoId, Viewing};
+use super::source::{Answered, Left, Loaded, OriginalAnswer, PhotoId, Viewing};
 use super::{Intent, Original, Toast, Ui, Viewer};
 use crate::State;
 use crate::frames::files::dialogs::Purpose;
@@ -281,6 +281,32 @@ impl Ui {
     }
 
     /// A source that answers later said what a change did, per item.
+    /// What the original's download did: the bar, the swap, or the preview kept.
+    pub(super) fn original_answered(&mut self, answer: OriginalAnswer) {
+        match answer {
+            OriginalAnswer::Progress { id, done, total } => {
+                if total == 0 {
+                    return;
+                }
+                // The last byte is not "whole": the picture is swapped in at `Done`, once decoded.
+                self.original_progress(id, done.min(total - 1), total);
+            }
+            OriginalAnswer::Done(id) => {
+                let total = self.source.viewing(id).map_or(0, |viewing| viewing.original_bytes);
+                self.original_progress(id, total, total);
+            }
+            OriginalAnswer::Failed(id) => {
+                if let Some(viewer) = &mut self.viewer
+                    && viewer.id == id
+                {
+                    // The preview stays.
+                    viewer.original = Original::Preview;
+                    self.toast = Some(Toast::Words(WORDS_ORIGINAL));
+                }
+            }
+        }
+    }
+
     pub(super) fn answered(&mut self, answer: Answered) {
         let split = |items: &[(PhotoId, Option<Left>)]| {
             let done: Vec<PhotoId> = items
@@ -507,6 +533,7 @@ impl Ui {
 
 /// What is said when a folder could not be added, and when photos could not be moved.
 const WORDS_FOLDER: &str = "Couldn\u{2019}t add that folder \u{00B7} not available right now";
+const WORDS_ORIGINAL: &str = "Couldn\u{2019}t download the original";
 const WORDS_CHANGE: &str = "Couldn\u{2019}t change that folder";
 /// Move… while a move to Trash of the photo is on its way: what did not happen, then Files' own sentence.
 const WORDS_MOVE_IN_FLIGHT: &str = "Couldn\u{2019}t move. The last change is still on its way.";
@@ -678,7 +705,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if waiting {
         tx.wake_after(POLL_EVERY);
     }
-    changed |= pumped.changed || !pumped.answered.is_empty();
+    let originals = ui.source.take_original_answers();
+    changed |= pumped.changed || !pumped.answered.is_empty() || !originals.is_empty();
+    for answer in originals {
+        ui.original_answered(answer);
+    }
     if pumped.changed {
         ui.relayout();
         if later {
