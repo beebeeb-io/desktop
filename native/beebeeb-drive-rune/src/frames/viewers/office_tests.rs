@@ -664,7 +664,9 @@ mod live_ribbon {
         let (mut rt, ops, _) = editing(false);
         operate(&mut rt, "rt-2");
         assert_eq!(ops.borrow().len(), 1);
-        assert!(ui(&rt).toast.is_some(), "the press said it did nothing");
+        // The shell's router answers the intent ("Not built yet: ..."): the press is never nothing.
+        let pushed = rt.state.viewer.ui.as_mut().expect("open").take_intents();
+        assert!(!pushed.is_empty(), "the press said it did nothing");
     }
 
     #[test]

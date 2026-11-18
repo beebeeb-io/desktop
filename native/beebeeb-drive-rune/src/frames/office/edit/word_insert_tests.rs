@@ -403,7 +403,9 @@ fn without_a_live_editor_the_tools_say_not_built_yet_and_change_nothing() {
     let mut rt = runtime(source, false);
     operate(&mut rt, "rt-0");
     assert!(!has(&rt, "dlg"));
-    assert!(ui_of(&rt).toast.as_deref().is_some_and(|t| t.contains("Table")));
+    // The shell's router says "Not built yet: <what>" for what the Ui hands it; the press is never nothing.
+    let pushed = rt.state.viewer.ui.as_mut().expect("a file is open").take_intents();
+    assert_eq!(pushed.len(), 1, "the press handed the shell an intent: {pushed:?}");
     operate(&mut rt, "rt-3");
     assert!(asked.borrow().edits.is_empty() && asked.borrow().images.is_empty());
 }
