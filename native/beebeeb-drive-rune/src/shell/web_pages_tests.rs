@@ -9,6 +9,8 @@ fn every_name_the_frames_ask_for_resolves_or_its_control_is_not_drawn() {
         "beebeeb.io",
         "plan",
         "delete-account",
+        "privacy",
+        "export-my-data",
         "support",
     ] {
         let address = url(name).unwrap_or_else(|| panic!("no address for {name}"));
