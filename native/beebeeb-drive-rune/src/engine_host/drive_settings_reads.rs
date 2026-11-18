@@ -258,6 +258,7 @@ pub(crate) fn insights_of(files: &[&FileEntry], (used, quota): (i64, i64)) -> In
             .map(|f| {
                 let path = f.path.trim_matches('/').to_string();
                 LargeFile {
+                    id: f.file_id.clone(),
                     shown: cut_middle(&path),
                     kind: kind_name(&path).to_string(),
                     size: size_words(f.size_bytes),
@@ -373,3 +374,7 @@ pub(crate) fn keep_of(rows: &[(FileEntry, bool, DriveItem)]) -> Keep {
         total_mb: total as f32 / 1e6,
     }
 }
+
+#[cfg(test)]
+#[path = "drive_settings_reads_ids_tests.rs"]
+mod ids_tests;

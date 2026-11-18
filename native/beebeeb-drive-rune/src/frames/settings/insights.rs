@@ -174,7 +174,7 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
             ),
     );
     for (i, file) in d.largest.iter().enumerate() {
-        let path = file.path.clone();
+        let id = file.id.clone();
         rows = rows.child(
             row()
                 .key(format!("lrow-{i}"))
@@ -190,7 +190,7 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
                 .press(t.press)
                 .focusable(true)
                 .on_press(move |s: &mut State| {
-                    s.settings.ask(Intent::ShowInFiles(path.clone()));
+                    s.settings.ask(Intent::ShowInFiles(id.clone()));
                     super::go(s, "DW-0401");
                 })
                 .child(
@@ -263,3 +263,7 @@ fn failed(why: &str, t: &Theme) -> El {
                 .child(row().key("card-0-actions").pt(8.0).child(again)),
         )
 }
+
+#[cfg(test)]
+#[path = "tests_insights_reveal.rs"]
+mod reveal_tests;

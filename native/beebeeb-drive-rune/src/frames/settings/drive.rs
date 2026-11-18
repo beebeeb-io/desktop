@@ -99,6 +99,8 @@ pub struct KindShare {
 /// One of the largest files (DW-0783).
 #[derive(Clone, PartialEq, Debug)]
 pub struct LargeFile {
+    /// The file's id in the account: what Files selects when the row is pressed.
+    pub id: String,
     /// The whole path (the row's name for assistive technology and its tooltip).
     pub path: String,
     /// The path as the row shows it, cut in the middle so the file name stays readable.
@@ -185,6 +187,9 @@ pub enum Control {
     SyncOnMetered,
     /// Bandwidth: the speed test, and the link to it in Diagnostics.
     SpeedTest,
+    /// Storage: the "Thumbnails and previews" row of "On this PC". Hidden until a source can say what previews hold
+    /// and what limit they have.
+    PreviewsRow,
 }
 
 /// What Drive's settings panes read and change.
@@ -361,6 +366,7 @@ impl Default for BoardDrive {
 impl BoardDrive {
     pub fn new() -> Self {
         let large = |path: &str, shown: &str, kind: &str, size: &str| LargeFile {
+            id: path.into(),
             path: path.into(),
             shown: shown.into(),
             kind: kind.into(),
