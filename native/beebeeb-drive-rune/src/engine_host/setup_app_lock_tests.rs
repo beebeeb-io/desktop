@@ -235,3 +235,162 @@ fn leaving_the_first_run_takes_its_prompt_away() {
     drop(set);
     assert_eq!(taken_away(), 2, "leaving the first run takes its prompt away");
 }
+
+// ---------------------------------------------------------------------------
+// "Not now" and "Skip setup" on the Lock step, in the first run's window on the real source: a Windows Hello that
+// does not confirm leaves app lock as it was, and "You're set up" says "Not changed", never "Off".
+// ---------------------------------------------------------------------------
+
+/// The double of `setup_tests.rs`, but one that binds app lock (the double alone leaves step 2 "not available").
+struct Binds(Arc<Fake>);
+
+impl SetupPasskeyEngine for Binds {}
+
+impl SetupEngine for Binds {
+    fn view(&self) -> SyncView {
+        self.0.view()
+    }
+    fn stamp(&self) -> Stamp {
+        self.0.stamp()
+    }
+    fn wake(&self) {
+        self.0.wake()
+    }
+    fn first_run_due(&self) -> Result<bool, SetupRefused> {
+        self.0.first_run_due()
+    }
+    fn mark_done_for(&self, session: SessionGeneration) -> Result<(), SetupRefused> {
+        self.0.mark_done_for(session)
+    }
+    fn set_notifications_for(&self, session: SessionGeneration, on: bool) -> Result<(), SetupRefused> {
+        self.0.set_notifications_for(session, on)
+    }
+    fn sync_folder(&self) -> Option<PathBuf> {
+        self.0.sync_folder()
+    }
+    fn settings_folder(&self) -> Result<Option<PathBuf>, SetupRefused> {
+        self.0.settings_folder()
+    }
+    fn suggested_folder(&self) -> PathBuf {
+        self.0.suggested_folder()
+    }
+    fn check_folder(&self, folder: &Path) -> Result<(), SyncFolderRefused> {
+        self.0.check_folder(folder)
+    }
+    fn start(&self, folder: PathBuf) -> Result<SyncStart, SyncStartRefused> {
+        self.0.start(folder)
+    }
+    fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused> {
+        self.0.keep_folder(folder)
+    }
+    fn ask_explorer_again(&self) {
+        self.0.ask_explorer_again()
+    }
+    fn set_app_lock_for(
+        &self,
+        session: SessionGeneration,
+        on: bool,
+        proof: Option<AppLockProof>,
+    ) -> Result<(), AppLockRefused> {
+        self.0.set_app_lock_for(session, on, proof)
+    }
+    fn binds_app_lock(&self) -> bool {
+        true
+    }
+}
+
+/// The first run's window on `Binds`, with `prompts` as its Windows Hello.
+fn lock_window(prompts: &Prompts) -> (Runtime<State>, Arc<Fake>) {
+    let set = set();
+    set.engine.set(Start::Running, EngineExplorer::Added);
+    let Set {
+        engine,
+        asked,
+        platform,
+        first_run,
+        ..
+    } = set;
+    let fixture = Arc::new(FixtureEngine::ready());
+    fixture.set_account(FIRST);
+    let mut state = crate::shell::state::init_with(Shell::fixture_on(fixture.clone(), platform.clone()));
+    let (binds, source_hooks, hello) = (Arc::new(Binds(engine.clone())), hooks(&asked, platform, first_run), prompts.clone());
+    state.setup_source = Some(Box::new(move || {
+        Box::new(EngineSetupSource::new(binds.clone(), source_hooks.clone()).with_hello(Box::new(hello.clone())))
+    }));
+    let mut rt = Runtime::new(
+        state,
+        crate::view,
+        (960.0, 640.0),
+        Env {
+            system_dark: false,
+            scale: 2.0,
+        },
+    );
+    rt.on_key = Some(host::on_key);
+    rt.poll = Some(|s: &mut State, seconds: f64, tx: &mut Tx| host::poll(s, seconds, tx));
+    rt.frame(0.0);
+    fixture.set_gate_for_scene(ShellGate::FirstRun);
+    wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
+    (rt, engine)
+}
+
+/// "Not now" or "Skip setup" on the Lock step, then Windows Hello answers `result`: app lock was asked nothing of
+/// the engine, and the last page says "Not changed" for it.
+fn leave_the_lock_step_with(skip: bool, result: HelloResult) {
+    let prompts = Prompts::default();
+    let (mut rt, engine) = lock_window(&prompts);
+    // Step 1 has nothing here: on to step 2.
+    press(&mut rt, "Continue");
+    assert!(says(&rt, "Lock Beebeeb"), "the Lock step is offered");
+    rt.update(|s, _| {
+        let ui = s.setup.as_mut().expect("the first run");
+        if skip { ui.skip() } else { ui.not_now() }
+    });
+    assert_eq!(prompts.asked.load(Ordering::SeqCst), 1, "Windows Hello is asked first");
+    rt.update(|s, _| {
+        if let Some(ui) = s.setup.as_mut() {
+            ui.skip();
+        }
+    });
+    wait_for(&mut rt, "the last page", |rt| says(rt, "You're set up"));
+    assert!(says(&rt, "App lock, Saving"), "no value before Windows Hello answered");
+    assert!(engine.app_lock.lock().unwrap().is_empty());
+    prompts.answer(result);
+    wait_for(&mut rt, "not changed", |rt| says(rt, "App lock, Not changed"));
+    assert!(!says(&rt, "App lock, Off") && !says(&rt, "App lock, On"));
+    assert!(
+        engine.app_lock.lock().unwrap().is_empty(),
+        "nothing was written for a prompt that did not confirm ({result:?})"
+    );
+}
+
+#[test]
+fn not_now_on_the_lock_step_with_a_hello_that_does_not_confirm_says_not_changed() {
+    for result in [HelloResult::Cancelled, HelloResult::Failed, HelloResult::Unavailable] {
+        leave_the_lock_step_with(false, result);
+    }
+}
+
+#[test]
+fn skip_setup_on_the_lock_step_with_a_hello_that_does_not_confirm_says_not_changed() {
+    for result in [HelloResult::Cancelled, HelloResult::Failed, HelloResult::Unavailable] {
+        leave_the_lock_step_with(true, result);
+    }
+}
+
+/// The yes of the same prompt still turns it off, and says "Off" (the other half of the rule).
+#[test]
+fn skip_setup_on_the_lock_step_with_hello_verified_turns_app_lock_off_with_the_proof() {
+    let prompts = Prompts::default();
+    let (mut rt, engine) = lock_window(&prompts);
+    press(&mut rt, "Continue");
+    rt.update(|s, _| {
+        if let Some(ui) = s.setup.as_mut() {
+            ui.skip();
+        }
+    });
+    wait_for(&mut rt, "the last page", |rt| says(rt, "You're set up"));
+    prompts.answer(HelloResult::Verified);
+    wait_for(&mut rt, "off", |rt| says(rt, "App lock, Off"));
+    assert_eq!(engine.app_lock.lock().unwrap().clone(), [(session(1), false, true)]);
+}
