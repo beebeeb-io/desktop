@@ -167,7 +167,7 @@ fn drive(bridge: &EngineBridge, root: &Path) -> crate::engine_bridge::TransferLo
         .enable_all()
         .build()
         .unwrap()
-        .block_on(bridge.process_due_operations(root, crate::state_db::now_secs()))
+        .block_on(bridge.process_due_operations(root, chrono::Utc::now().timestamp()))
         .expect("the pass runs")
 }
 
@@ -185,7 +185,7 @@ fn stored_plain(account: &FakeAccount, id: &str) -> Vec<u8> {
     out
 }
 
-fn save(rig: &Rig, id: &str, bytes: &[u8]) -> Result<SaveEnd, EditRefused> {
+fn save(rig: &Rig, id: &str, bytes: &Zeroizing<Vec<u8>>) -> Result<SaveEnd, EditRefused> {
     let session = rig.engine.acct.session_generation();
     let opening = rig.engine.viewer_opening(session, id);
     rig.engine.save_office_for(session, id, bytes, 1, opening)
@@ -289,7 +289,7 @@ fn a_blob_staged_for_one_document_is_never_uploaded_as_another() {
     let rig = rig();
     let bytes = package();
     assert_eq!(save(&rig, DOC, &bytes), Ok(SaveEnd::Queued { base: 1 }));
-    assert_eq!(save(&rig, OTHER_DOC, &zip_of(&["[Content_Types].xml", "word/document.xml"])), Ok(SaveEnd::Queued { base: 1 }));
+    assert_eq!(save(&rig, OTHER_DOC, &Zeroizing::new(zip_of(&["[Content_Types].xml", "word/document.xml"]))), Ok(SaveEnd::Queued { base: 1 }));
     // Swap the two staged blobs on disk: each op now points at the other document's sealed copy.
     let (a, b) = (staged_path_of_one(&rig, DOC), staged_path_of_one(&rig, OTHER_DOC));
     let (blob_a, blob_b) = (std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
