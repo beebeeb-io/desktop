@@ -742,3 +742,223 @@ fn an_undrawn_details_over_search_is_closed_by_the_next_key() {
     assert_eq!(rt.state.frames.shared.dialog, None, "the key closed it");
     assert_ne!(rt.state.frames.find.selected, before, "and reached the results");
 }
+
+// ---- w17-search-actions: Sort, grid, New, Share, Version history, Available offline, the result's menu ----
+
+mod acting {
+    use super::*;
+    use crate::frames::files::actions_data::ShareOptions;
+    use crate::frames::files::dialogs::Dialog;
+    use crate::frames::files::source::{
+        Account, ActionError, Change, Counts, Details, FilesSource, NoEngine, StorageSplit,
+    };
+    use crate::source::DriveItem;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    type R = Result<(), ActionError>;
+
+    #[derive(Default, Clone)]
+    struct Spy {
+        versions: Arc<Mutex<Vec<String>>>,
+        kept: Arc<Mutex<Vec<(String, bool)>>>,
+    }
+
+    struct Source(Spy);
+
+    fn known(id: &str) -> DriveItem {
+        DriveItem {
+            id: id.to_string(),
+            parent_id: Some("a-folder".into()),
+            name: format!("{id}.txt"),
+            is_folder: id == "board-search-3",
+            size: None,
+            child_count: None,
+            modified_at: String::new(),
+            mime: None,
+            has_thumbnail: false,
+            shared_type: None,
+            shared_badges: Vec::new(),
+            pc_status: None,
+            is_protected: false,
+        }
+    }
+
+    #[rustfmt::skip]
+    impl FilesSource for Source {
+        fn counts(&self) -> Option<Counts> { None }
+        fn account(&self) -> Option<Account> { None }
+        fn storage_split(&self) -> Option<StorageSplit> { None }
+        fn sync_state(&self) -> Option<String> { None }
+        fn details(&self, item: &DriveItem, folder: &str) -> Details { NoEngine.details(item, folder) }
+        fn changed_label(&self, _: &DriveItem) -> Option<String> { None }
+        fn can_add(&self, _: Option<&str>) -> bool { true }
+        fn sort_of(&self, _: Option<&str>) -> Option<crate::frames::files::Sort> { None }
+        fn set_sort(&mut self, _: Option<&str>, _: crate::frames::files::Sort) {}
+        fn trash(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn restore(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn duplicate(&mut self, _: &[DriveItem], _: &[&str]) -> R { Ok(()) }
+        fn keep_offline(&mut self, items: &[DriveItem], keep: bool) -> R {
+            self.0.kept.lock().unwrap().push((items[0].id.clone(), keep));
+            Ok(())
+        }
+        fn copy_link(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn share_link(&mut self, _: &[DriveItem], _: &ShareOptions) -> R { Ok(()) }
+        fn open(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn show_in_file_explorer(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn upload(&mut self, _: Option<&str>, _: &[PathBuf]) -> R { Ok(()) }
+        fn new_folder(&mut self, _: Option<&str>, _: &str) -> R { Ok(()) }
+        fn rename(&mut self, _: &DriveItem, _: &str) -> R { Ok(()) }
+        fn move_to(&mut self, _: &[DriveItem], _: Option<&str>) -> R { Ok(()) }
+        fn free_up_space(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn open_in_file_explorer(&mut self, _: Option<&str>) -> R { Ok(()) }
+        fn changes(&mut self) -> Vec<Change> { Vec::new() }
+        fn ask_versions(&mut self, item: &DriveItem) { self.0.versions.lock().unwrap().push(item.id.clone()); }
+        fn item_of(&self, id: &str) -> Option<DriveItem> { id.starts_with("board-search-").then(|| known(id)) }
+    }
+
+    fn open() -> (Runtime<State>, Spy) {
+        let spy = Spy::default();
+        let mut state = init();
+        dw_0802(&mut state);
+        state.actions.source = Box::new(Source(spy.clone()));
+        (window(state), spy)
+    }
+
+    /// What the shell's poll does with the queue; the intents are the real ones, from real clicks and keys.
+    fn drain(rt: &mut Runtime<State>) {
+        rt.update(|s, tx| {
+            let queued = s.frames.intents.clone();
+            assert!(!queued.is_empty(), "the control queued nothing");
+            // Search's own router takes every one of them: nothing is left for the NotWired line.
+            for intent in &queued {
+                assert!(super::super::actions::take(s, tx, intent), "{intent:?} was not taken");
+            }
+            s.frames.intents.clear();
+        });
+        settle(rt);
+    }
+
+    fn names(s: &State) -> Vec<String> {
+        super::super::hits(s).into_iter().map(|h| h.name).collect()
+    }
+
+    #[test]
+    fn share_and_version_history_open_files_dialogs_for_the_selected_hit() {
+        let (mut rt, spy) = open();
+        click(&mut rt, "share-box");
+        drain(&mut rt);
+        let Some(Dialog::Share(share)) = rt.state.actions.dialog.clone() else {
+            panic!("no Share dialog")
+        };
+        assert_eq!(share.items.len(), 1);
+        assert_eq!(share.items[0].id, "board-search-1");
+        // The dialog stands over the results: search still shows.
+        assert!(super::super::shows_over_files(&rt.state));
+        rt.update(|s, _| s.actions.dialog = None);
+        click(&mut rt, "versions-box");
+        drain(&mut rt);
+        assert!(matches!(rt.state.actions.dialog, Some(Dialog::Versions(_))));
+        assert_eq!(*spy.versions.lock().unwrap(), vec!["board-search-1".to_string()]);
+        // A folder has no version history: no dialog, a notice.
+        rt.update(|s, _| s.actions.dialog = None);
+        click(&mut rt, "row-2-date");
+        click(&mut rt, "versions-box");
+        drain(&mut rt);
+        assert!(rt.state.actions.dialog.is_none());
+        assert!(rt.state.frames.find.notice.is_some());
+    }
+
+    #[test]
+    fn available_offline_asks_the_files_source_and_flips() {
+        let (mut rt, spy) = open();
+        click(&mut rt, "offline-switch");
+        drain(&mut rt);
+        click(&mut rt, "offline-switch");
+        drain(&mut rt);
+        assert_eq!(
+            *spy.kept.lock().unwrap(),
+            vec![("board-search-1".to_string(), true), ("board-search-1".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn sort_orders_the_results_in_searchs_own_state_and_leaves_files_alone() {
+        let (mut rt, _) = open();
+        let files_sort = rt.state.actions.sort;
+        let source_order = names(&rt.state);
+        click(&mut rt, "sort-btn");
+        drain(&mut rt);
+        assert!(has(&rt, "menu"), "Files' Sort entries are drawn");
+        // Name, folders first: Sort by (1 name), Order (7 reversed).
+        click(&mut rt, "menu-item-1");
+        assert_eq!(names(&rt.state), ["Contractors", "Contract draft.pdf", "Contract signed 2025.pdf"]);
+        click(&mut rt, "menu-item-7");
+        assert_eq!(names(&rt.state), ["Contractors", "Contract signed 2025.pdf", "Contract draft.pdf"]);
+        assert_eq!(rt.state.actions.sort, files_sort, "Files' own sort is not touched");
+        assert_ne!(source_order, names(&rt.state));
+        // The drawn rows follow: the first row is the folder.
+        assert_eq!(text(&rt, "row-0-name"), "Contractors");
+        press(&mut rt, Key::Escape, NONE);
+        assert!(rt.state.frames.find.menu.is_none());
+    }
+
+    #[test]
+    fn the_view_switch_shows_a_grid_and_back() {
+        let (mut rt, _) = open();
+        click(&mut rt, "view-grid");
+        drain(&mut rt);
+        assert!(rt.state.frames.find.grid);
+        assert!(has(&rt, "row-0-icon") && !has(&rt, "column-headers"));
+        click(&mut rt, "view-list");
+        assert!(!rt.state.frames.find.grid && has(&rt, "column-headers"));
+    }
+
+    #[test]
+    fn new_opens_files_new_menu_as_this_pc_does() {
+        use crate::frames::files::MenuKind;
+        let (mut rt, _) = open();
+        click(&mut rt, "new-btn");
+        drain(&mut rt);
+        assert_eq!(rt.state.actions.menu.map(|m| m.kind), Some(MenuKind::New));
+        assert!(!super::super::shows_over_files(&rt.state), "Files shows while its menu is open");
+    }
+
+    #[test]
+    fn the_menu_key_opens_the_results_menu_and_its_entries_act() {
+        let (mut rt, _) = open();
+        press(&mut rt, Key::Down, NONE);
+        press(&mut rt, Key::ContextMenu, NONE);
+        drain(&mut rt);
+        assert_eq!(
+            rt.state.frames.find.menu.as_ref().map(|m| m.of.clone()),
+            Some(super::super::actions::MenuOf::Result("board-search-1".into()))
+        );
+        assert!(has(&rt, "menu"));
+        // Share…
+        click(&mut rt, "menu-item-2");
+        assert!(matches!(rt.state.actions.dialog, Some(Dialog::Share(_))));
+        assert!(rt.state.frames.find.menu.is_none());
+        rt.update(|s, _| s.actions.dialog = None);
+        // Details (the item dialog over Search).
+        press(&mut rt, Key::ContextMenu, NONE);
+        drain(&mut rt);
+        click(&mut rt, "menu-item-4");
+        assert!(matches!(
+            rt.state.frames.shared.dialog,
+            Some(crate::frames::shared::dialogs::Dialog::Details { .. })
+        ));
+    }
+
+    #[test]
+    fn show_in_files_ends_search_and_reveals_the_hit() {
+        let (mut rt, _) = open();
+        press(&mut rt, Key::Down, NONE);
+        press(&mut rt, Key::ContextMenu, NONE);
+        drain(&mut rt);
+        click(&mut rt, "menu-item-1");
+        assert!(!super::super::is_open(&rt.state), "search ended");
+        let listed = rt.state.listing.folder.id.as_deref() == Some("a-folder");
+        assert!(listed || rt.state.actions.reveal.as_deref() == Some("board-search-1"));
+    }
+}

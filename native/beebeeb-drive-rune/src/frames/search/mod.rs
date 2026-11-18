@@ -53,6 +53,20 @@ pub struct SearchUi {
     asked: Option<(String, Narrow)>,
     /// The shell's session gate was open at the last poll (`shell::session_gate`).
     gate_open: bool,
+    /// The results' order (the toolbar's Sort); `None`: the source's own order.
+    pub sort: Option<crate::frames::files::Sort>,
+    /// The results as a grid of tiles (the toolbar's view switch) instead of the list.
+    pub grid: bool,
+    /// The open menu of this window (Sort, or a result's menu).
+    pub menu: Option<actions::Menu>,
+    /// Where the pointer asked for the result's menu (a right-click); none for the Menu key.
+    pub menu_at: Option<(f32, f32)>,
+    /// What Available offline was last set to, by result id, until the source says so itself.
+    pub kept: std::collections::HashMap<String, bool>,
+    /// A line for what could not be done, with the time it was said.
+    pub notice: Option<(String, std::time::Instant)>,
+    /// Files' dialog (Share, Version history) was opened from here: it stands over the results.
+    pub dialog_over: bool,
 }
 
 impl Default for SearchUi {
@@ -70,6 +84,13 @@ impl Default for SearchUi {
             was_open: false,
             asked: None,
             gate_open: false,
+            sort: None,
+            grid: false,
+            menu: None,
+            menu_at: None,
+            kept: Default::default(),
+            notice: None,
+            dialog_over: false,
         }
     }
 }
@@ -86,6 +107,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     // The shell's session gate, read from the engine as it is now: it is also closed for a session
     // that ended under a Ready gate and for a change this poll's refresh has not applied yet.
     let gate_open = crate::shell::session_gate::open(s);
+    if s.actions.dialog.is_none() {
+        s.frames.find.dialog_over = false;
+    }
     let open = is_open(s) && !files_busy(s) && gate_open;
     let typed = s.search.text.trim().to_string();
     let ui = &mut s.frames.find;
@@ -240,7 +264,9 @@ pub fn is_open(s: &State) -> bool {
 /// Something of the Files window that takes the keyboard on its own (a menu, a dialog, a name
 /// being typed in a row) keeps it: search does not open over it.
 fn files_busy(s: &State) -> bool {
-    s.actions.menu.is_some() || s.actions.dialog.is_some() || s.actions.rename.is_some()
+    s.actions.menu.is_some()
+        || (s.actions.dialog.is_some() && !s.frames.find.dialog_over)
+        || s.actions.rename.is_some()
 }
 
 /// While search shows, Alt+Left and Alt+Right are not the window's Back and Forward: the board
@@ -309,6 +335,7 @@ pub fn close(s: &mut State, tx: &mut Tx) {
     ui.selected = None;
     ui.narrow = Narrow::All;
     ui.pictured = false;
+    ui.menu = None;
     s.search.clear();
     tx.focus(SEARCH_KEY, false);
 }
@@ -326,7 +353,7 @@ pub fn run(s: &mut State, query: &str, tx: &mut Tx) {
 
 /// The results for the field as it is now (empty while there is none).
 fn hits(s: &State) -> Vec<Hit> {
-    match s.frames.find.shows(&s.search.text) {
+    match actions::shows(s) {
         Shows::Results { hits, .. } => hits,
         _ => Vec::new(),
     }
@@ -395,6 +422,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // `files_key` hands its keys here once search is open, so a Files key with search closed never touches it.)
     if let Some(took) = crate::frames::shared::dialogs::section_keys(s, ev, tx, Section::Files) {
         return took;
+    }
+    // Files' own dialog over the results (Share, Version history) takes every key.
+    if s.actions.dialog.is_some() && s.frames.find.dialog_over {
+        return crate::frames::files::keys::on_key(s, ev, tx);
     }
     s.frames.find.pictured = false;
     if ev.key == Key::Escape && frames::plain(ev) {
