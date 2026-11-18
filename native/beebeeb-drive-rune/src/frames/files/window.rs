@@ -438,3 +438,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     root
 }
+
+/// The dialog Files holds (Share, Version history, Details…) as a layer, for a window that is not Files' own: the
+/// viewer asks for the share and the versions of the open file, and the dialog stands over it. The caller puts this
+/// over what it draws (`frames::viewers::frame`).
+pub fn dialog_over_viewer(s: &State, t: &Theme) -> Option<El> {
+    dialogs::layer(s, t)
+}
