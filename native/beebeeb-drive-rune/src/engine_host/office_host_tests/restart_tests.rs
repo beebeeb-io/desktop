@@ -208,11 +208,8 @@ fn two_kills_within_the_window_open_it_read_only_and_offer_the_snapshot() {
     assert!(wait_events(&mut host, &mut got, |got| snapshots(got) == 1));
     host.edit(die()).expect("sent");
     assert!(wait_events(&mut host, &mut got, |got| restored(got) == 1), "{got:?}");
-    // Wait until the restarted helper is open for editing again.
-    assert!(wait_for(|| {
-        let _ = host.poll();
-        host.edit(die()).is_ok()
-    }));
+    // `Restored` comes after the new helper opened: editing works again.
+    host.edit(die()).expect("sent");
     assert!(wait_events(&mut host, &mut got, |got| {
         got.iter().any(|event| matches!(event, EditEvent::ReadOnly { .. }))
     }), "{got:?}");
@@ -240,10 +237,7 @@ fn a_second_kill_after_the_window_restarts_again() {
     host.edit(die()).expect("sent");
     assert!(wait_events(&mut host, &mut got, |got| restored(got) == 1));
     std::thread::sleep(Duration::from_millis(300));
-    assert!(wait_for(|| {
-        let _ = host.poll();
-        host.edit(die()).is_ok()
-    }));
+    host.edit(die()).expect("sent");
     assert!(wait_events(&mut host, &mut got, |got| restored(got) == 2), "{got:?}");
     assert!(!host.read_only());
     assert_eq!(log.starts(), 3);
