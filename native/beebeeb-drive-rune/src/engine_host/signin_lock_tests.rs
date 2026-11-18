@@ -288,11 +288,19 @@ fn an_unlock_that_was_left_and_finished_anyway_is_locked_again_at_its_level_neve
         source.begin_two_factor(TOTP, CodeKind::Authenticator);
         wait_until("the code to be sent", || requests(&fake, "/auth/2fa/verify") == 1);
         source.discard_partial_sign_in();
+        let plan_asked = requests(&fake, "/billing/subscription");
         fake.code_door.open();
 
         wait_until("the lock to be put back", || engine.lock_state() == level);
+        // The lock never left `level` before the late code was answered, so the wait above can return at once. The
+        // finished unlock ends with the engine's plan check (a request), and the lock is put back after it: wait
+        // for that request (it is asked once per session, so give up after a while), then for the worker's wake.
+        let began = std::time::Instant::now();
+        while requests(&fake, "/billing/subscription") == plan_asked && began.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(5));
+        }
         // The worker is done with the step once its wake arrived; the state holds.
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(300));
         assert_eq!(engine.lock_state(), level, "{level:?}");
         assert_eq!(
             engine.user_id().as_deref(),
