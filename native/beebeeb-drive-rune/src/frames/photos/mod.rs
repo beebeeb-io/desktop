@@ -10,6 +10,12 @@ mod chrome;
 mod grid;
 mod icons;
 mod overlay;
+mod route;
+mod route_chrome;
+mod route_items;
+mod route_original;
+mod route_save_send;
+mod route_share;
 mod session;
 pub mod source;
 #[cfg(test)]

@@ -996,3 +996,24 @@ fn a_finished_check_waits_while_a_menu_is_open_and_reads_once_it_closed() {
     rt.frame(0.0);
     assert_eq!(script.lock().unwrap().refreshed, before + 1, "and only once");
 }
+
+#[test]
+fn what_session_does_not_handle_goes_to_one_route_per_feature() {
+    let (mut rt, _script) = window();
+    let harbour = id(board::HARBOUR);
+    super::super::route::reached_clear();
+    rt.state.photos.ask(super::super::Intent::Duplicate(harbour));
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(super::super::route::reached(), ["route_items"]);
+    assert_eq!(rt.state.photos.toast, Some(Toast::NotYet), "a stub's Err says so as before");
+
+    // The tab is no longer reset inside session.rs: the route for the original owns it.
+    super::super::route::reached_clear();
+    rt.state.photos.open(harbour);
+    rt.frame(0.0);
+    rt.state.photos.show_original();
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(super::super::route::reached(), ["route_original"]);
+}
