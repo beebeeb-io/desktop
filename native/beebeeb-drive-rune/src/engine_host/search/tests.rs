@@ -382,14 +382,13 @@ fn a_list_that_cannot_be_read_is_unavailable_never_no_results() {
     assert_eq!(source.details("f-draft"), None);
     for _ in 0..20 {
         source.search("contract", Narrow::All);
-        source.opened();
         source.ask("contract", Narrow::All);
+        source.pump();
     }
-    settle(&mut source);
     assert_eq!(
         host.builds.load(Ordering::SeqCst),
         1,
-        "no retry loop: not built again within FRESH_FOR"
+        "no retry loop: not built again before RETRY_AFTER
     );
 }
 
