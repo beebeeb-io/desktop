@@ -26,6 +26,8 @@ mod kit;
 mod link_change;
 pub mod request_menus;
 #[cfg(test)]
+mod safety_tests;
+#[cfg(test)]
 mod tests;
 mod view;
 
@@ -441,7 +443,17 @@ impl super::SharedUi {
         }
         self.fields.sending = false;
         match result {
-            InviteResult::KeyChanged => self.fields.problem = Some(KEY_CHANGED),
+            InviteResult::KeyChanged => {
+                self.fields.problem = Some(KEY_CHANGED);
+                // The source names the person whose key stopped it: People warns over them (DW-0515).
+                // Its row may not be listed yet: the warning draws once the lists are read again.
+                if let Some(person) = self.source.key_changed_person(share) {
+                    self.open_dialog(Dialog::People {
+                        share: share.to_string(),
+                        key_changed: Some(person),
+                    });
+                }
+            }
             InviteResult::Refused(words) => self.fields.problem = Some(words),
             _ => {
                 if !self.show_people(share) {

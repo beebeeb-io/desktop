@@ -6,7 +6,8 @@
 //! - `people_shares` / `members`: the invites the account sent, by item; a person's id is the invite's id, the
 //!   owner's row is the session's own email. A person is named by their email address (Beebeeb has no other name).
 //! - `links`: the account's live links, one per item. `requests`: its file requests.
-//! - `Member::compared` is always `false`: the safety-number marks are not in the engine crate yet (see the PR).
+//! - `Member::compared` is the engine's trust read after each read of the lists (`shared_safety.rs`, which also holds
+//!   People's safety number, the two marks and "Share anyway").
 //!
 //! Bound changes ([`Engine::share_change`], by id, for the session the row was drawn under): `accept`, `set_access`,
 //! `remove_access` (the view confirms it, DW-0512b), `decline` (`/decline`: the sender sees it declined; 409 is "Already
@@ -54,7 +55,7 @@ use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
 use crate::frames::shared::source::{
     Access, Invitation, InviteResult, LinkEdit, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped,
-    Request, RequestForm, RequestState, RowTarget, SharedSource,
+    Request, RequestForm, RequestState, RowTarget, SafetyAsk, SafetyState, SharedSource,
 };
 use crate::frames::files::link::LinkText;
 use crate::ui::file_list::PcState;
@@ -74,6 +75,8 @@ mod shared_links;
 mod shared_requests;
 #[path = "shared_leave.rs"]
 mod shared_leave;
+#[path = "shared_safety.rs"]
+mod shared_safety;
 
 /// Lists this recent are not read again when the Shared section opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -117,6 +120,8 @@ pub struct EngineSharedSource<C: CredentialStores> {
     shared_links: shared_links::SharedLinkCalls,
     /// `shared_requests.rs`: the links a new request made, until the window takes them.
     shared_requests: shared_requests::RequestCalls,
+    /// `shared_safety.rs`: the safety numbers, marks and "Share anyway" of People.
+    safety: shared_safety::SafetyCalls,
 }
 
 /// The lists as the view draws them.
@@ -172,6 +177,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             shared_offline: Default::default(),
             shared_links: Default::default(),
             shared_requests: Default::default(),
+            safety: Default::default(),
         }
     }
 
@@ -282,6 +288,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                         self.held = Some(held);
                         self.unmade = false;
                         self.loaded = Loaded::Ready;
+                        self.shared_safety_after_read();
                     }
                     Err(kind) => {
                         if kind != AccountCallError::NotSignedIn {
@@ -344,6 +351,9 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                     return;
                 }
                 let result = invite_result(&answer);
+                if let InviteAnswer::PeerKeyChanged { invite_id } = &answer {
+                    self.shared_safety_key_changed(&share, invite_id);
+                }
                 if let InviteAnswer::Refused(kind) = answer {
                     log(format!("shared: an invitation was not sent ({kind})"));
                 }
@@ -374,7 +384,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
 #[cfg(test)]
 impl<C: CredentialStores> EngineSharedSource<C> {
     fn busy(&self) -> bool {
-        self.reading.is_some() || !self.changing.is_empty() || !self.inviting.is_empty()
+        self.reading.is_some() || !self.changing.is_empty() || !self.inviting.is_empty() || self.shared_safety_busy()
     }
 }
 
@@ -395,9 +405,28 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.current().map(|h| h.requests.clone()).unwrap_or_default()
     }
     fn members(&self, share: &str) -> Vec<Member> {
-        self.current()
+        let mut members = self
+            .current()
             .and_then(|h| h.members.get(share).cloned())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.shared_safety_overlay(&mut members);
+        members
+    }
+
+    fn safety_wired(&self) -> bool {
+        true
+    }
+    fn safety_start(&mut self, share: &str, person: &str, ask: SafetyAsk) -> bool {
+        self.shared_safety_start(share, person, ask)
+    }
+    fn safety_state(&self, share: &str, person: &str) -> SafetyState {
+        self.shared_safety_state(share, person)
+    }
+    fn safety_clear(&mut self, share: &str, person: &str) {
+        self.shared_safety_clear(share, person)
+    }
+    fn key_changed_person(&self, share: &str) -> Option<String> {
+        self.shared_safety_key_changed_person(share)
     }
 
     /// Sent once per press, for an invitation of the current session's lists. Nothing is drawn as accepted before
@@ -649,16 +678,21 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
             self.take_in(answer);
             changed = true;
         }
+        changed |= self.shared_safety_pump();
         let notice = self.notice.take();
         Pumped {
             changed: changed || notice.is_some() || !self.invite_answers.is_empty(),
-            busy: self.reading.is_some() || !self.changing.is_empty() || !self.inviting.is_empty(),
+            busy: self.reading.is_some()
+                || !self.changing.is_empty()
+                || !self.inviting.is_empty()
+                || self.shared_safety_busy(),
             notice,
         }
     }
 
     fn forget(&mut self) {
         self.shared_requests_forget();
+        self.shared_safety_forget();
         self.held = None;
         self.again = false;
         self.asked = false;
@@ -887,7 +921,7 @@ fn member_of(member: ShareMember) -> Member {
         access: Some(if member.can_edit { Access::Edit } else { Access::View }),
         you: false,
         invited: !member.accepted,
-        // Not read here: the safety-number marks are not in the engine crate (the module's doc).
+        // The engine's trust read is laid over it when the lists are handed out (`shared_safety.rs`).
         compared: false,
         pronoun: Pronoun::They,
         email: member.email,

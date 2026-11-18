@@ -222,6 +222,36 @@ impl InviteResult {
     }
 }
 
+/// What a person pressed in the safety-number dialogs (DW-0513, DW-0515), for the source to run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SafetyAsk {
+    /// Work the number out.
+    Number,
+    /// "They match": the local mark.
+    Matches,
+    /// "They don't match": the local mark.
+    Differs,
+    /// "Share anyway" on a changed key: only ever started by that button.
+    Anyway,
+}
+
+/// Where one person's safety call stands. The number is twelve groups of five digits: nothing else of a key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SafetyState {
+    Idle,
+    /// Asked, not answered.
+    Asking(SafetyAsk),
+    Number(Vec<String>),
+    /// The mark was written; `number` is the one compared.
+    Marked { matched: bool, number: Vec<String> },
+    /// "Share anyway" shared with them.
+    Shared,
+    /// "Share anyway" on a folder: the refused invite was withdrawn, nothing is shared.
+    Withdrawn,
+    /// Nothing was done, in the words to show.
+    Refused(&'static str),
+}
+
 /// One change to a live link (DW-0511's Change expiry, Password).
 #[derive(Clone, PartialEq)]
 pub enum LinkEdit {
@@ -361,6 +391,25 @@ pub trait SharedSource {
     }
     /// The session or the account changed: drop every name, address and count at once.
     fn forget(&mut self) {}
+
+    /// Whether this source works out safety numbers: `false`, the dialogs only record what was pressed.
+    fn safety_wired(&self) -> bool {
+        false
+    }
+    /// Run `ask` for the person `person` of `share`, once at a time per person; answered through
+    /// [`Self::safety_state`] after a pump. `false`: nothing was started.
+    fn safety_start(&mut self, _share: &str, _person: &str, _ask: SafetyAsk) -> bool {
+        false
+    }
+    fn safety_state(&self, _share: &str, _person: &str) -> SafetyState {
+        SafetyState::Idle
+    }
+    /// Forget what a person's last call ended in (a new comparison starts clean).
+    fn safety_clear(&mut self, _share: &str, _person: &str) {}
+    /// The person whose key stopped the last invitation to `share`: People warns over them.
+    fn key_changed_person(&self, _share: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The board's sample (DW-0501, DW-0502, DW-0503), or nothing at all (DW-0508, DW-0509, DW-0510).
@@ -375,6 +424,9 @@ pub struct BoardShared {
     requests: Vec<Request>,
     /// The answers to invitations sent, in order (the board answers at once).
     invite_answers: std::collections::VecDeque<(String, InviteResult)>,
+    /// A test's stand-in for an engine that works safety numbers out (never made by a build).
+    #[cfg(test)]
+    pub(crate) safety: Option<std::collections::HashMap<(String, String), SafetyState>>,
 }
 
 fn from(id: &str, name: &str, kind: Kind, date: &str, size: &str, who: (&str, &str, char), pc: PcState) -> Row {
@@ -656,6 +708,8 @@ impl BoardShared {
                 ),
             ],
             invite_answers: Default::default(),
+            #[cfg(test)]
+            safety: None,
         }
     }
 
@@ -801,6 +855,48 @@ impl SharedSource for BoardShared {
     }
     fn invite_answer(&mut self) -> Option<(String, InviteResult)> {
         self.invite_answers.pop_front()
+    }
+    #[cfg(test)]
+    fn safety_wired(&self) -> bool {
+        self.safety.is_some()
+    }
+    /// Test double: answers at once with invented digits.
+    #[cfg(test)]
+    fn safety_start(&mut self, share: &str, person: &str, ask: SafetyAsk) -> bool {
+        let key = (share.to_string(), person.to_string());
+        let Some(map) = self.safety.as_mut() else {
+            return false;
+        };
+        let held = match map.get(&key) {
+            Some(SafetyState::Number(n)) => n.clone(),
+            _ => Vec::new(),
+        };
+        let next = match ask {
+            SafetyAsk::Number => SafetyState::Number((1..=12).map(|i| format!("{:05}", i * 111)).collect()),
+            SafetyAsk::Matches => SafetyState::Marked { matched: true, number: held },
+            SafetyAsk::Differs => SafetyState::Marked { matched: false, number: held },
+            SafetyAsk::Anyway => SafetyState::Shared,
+        };
+        map.insert(key, next);
+        if ask == SafetyAsk::Matches
+            && let Some(m) = self.people_of(share).and_then(|p| p.iter_mut().find(|m| m.id == person))
+        {
+            m.compared = true;
+        }
+        true
+    }
+    #[cfg(test)]
+    fn safety_state(&self, share: &str, person: &str) -> SafetyState {
+        self.safety
+            .as_ref()
+            .and_then(|m| m.get(&(share.to_string(), person.to_string())).cloned())
+            .unwrap_or(SafetyState::Idle)
+    }
+    #[cfg(test)]
+    fn safety_clear(&mut self, share: &str, person: &str) {
+        if let Some(m) = self.safety.as_mut() {
+            m.remove(&(share.to_string(), person.to_string()));
+        }
     }
 }
 
