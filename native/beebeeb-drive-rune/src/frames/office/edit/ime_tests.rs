@@ -10,7 +10,7 @@ use beebeeb_office_protocol::office::{EditKind, EditOp, PageRect, RectPt};
 use rune::clipboard::{MemoryClipboard, memory};
 use rune::{App, AppSpec, ClipboardContent, Color, Cx, El, Env, Ime, Key, KeyEvent, Mods, Runtime, Tx, el};
 
-use super::{EditUi, clipboard, ime};
+use crate::frames::office::edit::{self, EditUi, clipboard, ime};
 use crate::frames::viewers::source::{Body, EditAnswer, FixtureViewerSource, OpenError, OpenFile, ViewerSource, board};
 use crate::frames::viewers::{self, open_from};
 use crate::{State, init};
@@ -69,14 +69,14 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
     if let Some(caret) = ime::caret_el(s) {
         page = page.child(caret.absolute(40.0, 50.0));
     }
-    if let Some(pre) = ime::preedit_el(s, 14.0, Color::new(0.1, 0.1, 0.12, 1.0)) {
+    if let Some(pre) = ime::preedit_el(s, 14.0, Color { r: 0.1, g: 0.1, b: 0.12, a: 1.0 }) {
         page = page.child(pre.absolute(40.0, 70.0));
     }
     page
 }
 
 fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
-    let edits = super::poll(s, tx);
+    let edits = edit::poll(s, tx);
     clipboard::flush_clip(s, tx) | edits
 }
 
