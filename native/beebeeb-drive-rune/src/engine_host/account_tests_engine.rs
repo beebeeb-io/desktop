@@ -223,9 +223,13 @@ fn the_accounts_calls_count_in_the_engines_run_of_401s() {
         locks.lock();
     }) as Box<dyn FnOnce() + Send>);
     assert_eq!(engine.account_sessions().err(), Some(AccountCallError::NotSignedIn));
+    // The unlock's own plan check (`GET /billing/subscription`) is an account call that would answer and clear the
+    // run; a 500 neither counts nor clears, so only the late answer is under test.
+    server.plan_mode.store(SERVER_ERROR, Ordering::SeqCst);
     engine
         .unlock_with_phrase(Zeroizing::new(server.people[0].phrase.clone()))
         .expect("the phrase unlocks");
+    server.plan_mode.store(ANSWER, Ordering::SeqCst);
     assert!(!engine.account_session_refused());
     refuse(1);
     assert!(
