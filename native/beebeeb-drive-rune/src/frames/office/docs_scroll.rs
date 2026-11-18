@@ -13,7 +13,9 @@ use std::rc::Rc;
 use rune::{El, KeyEvent, ScrollSpec, Tx, col, row};
 use rune_kit::{ScrollBar, ScrollBarStyle};
 
-use super::{DocBody, PAGE_GAP, box_pt};
+use beebeeb_office_protocol::office::PageRect;
+
+use super::{DocBody, PAGE_GAP, box_pt, size_pt};
 use crate::State;
 use crate::frames::viewers;
 use crate::theme::tokens::Theme;
@@ -60,6 +62,40 @@ impl DocBody {
                 .sum::<f32>()
     }
 
+    /// Layout points per point of page `n` (the page's box over the file's size).
+    pub fn page_scale(&self, n: u32) -> f32 {
+        let n = n.clamp(1, self.view.pages.max(1));
+        box_pt(self, n).0 / size_pt(self, n).0
+    }
+
+    /// A point of the pages' column (layout points from its top-left, the top padding included) as a point of a page:
+    /// the page (0-based; the gap between two pages goes to the nearer one, above the first and below the last to
+    /// those), then x and y in the page's points, kept on the page.
+    pub fn page_point(&self, x: f32, y: f32) -> (u32, f32, f32) {
+        let count = self.view.pages.max(1);
+        let (x, y) = (if x.is_finite() { x } else { 0.0 }, if y.is_finite() { y } else { 0.0 });
+        let (mut n, mut top) = (1, PAD_TOP);
+        while n < count {
+            let foot = top + box_pt(self, n).1;
+            if y < foot + PAGE_GAP / 2.0 {
+                break;
+            }
+            top = foot + PAGE_GAP;
+            n += 1;
+        }
+        let (w_pt, h_pt) = size_pt(self, n);
+        let k = self.page_scale(n);
+        (n - 1, (x / k).clamp(0.0, w_pt), ((y - top) / k).clamp(0.0, h_pt))
+    }
+
+    /// A rectangle of a page, as `[x, y, w, h]` in layout points of the pages' column (the inverse of
+    /// [`Self::page_point`]). A page the document does not have is its last.
+    pub fn page_rect(&self, r: &PageRect) -> [f32; 4] {
+        let n = r.page.saturating_add(1).clamp(1, self.view.pages.max(1));
+        let k = self.page_scale(n);
+        [r.rect.x * k, self.page_top(n) + r.rect.y * k, r.rect.w * k, r.rect.h * k]
+    }
+
     /// The offset the asks band reads: where the stage was last seen scrolled to, or, when that is not where the page in
     /// view stands (a body that came in with the page carried over), that page's top.
     pub fn view_y(&self) -> f32 {
@@ -103,6 +139,10 @@ pub fn with_doc_tx(act: impl Fn(&mut DocBody) + 'static) -> impl Fn(&mut State, 
 
 /// The document's keys ([`DocBody::on_key`]), then the stage follows the page they went to. `true`: taken.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // An editor with nothing else focused takes its keys at the window too (the surface takes them when it is focused).
+    if tx.focused().is_none() && super::super::edit::word::on_key(s, tx, ev) {
+        return true;
+    }
     let Some(doc) = viewers::doc_mut(s) else {
         return false;
     };
