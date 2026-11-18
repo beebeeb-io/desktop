@@ -2,6 +2,7 @@
 //! where it came from. Nothing here opens (an item can be restored); Details and a read-only Preview show over the list
 //! (`frames::item`).
 
+pub mod actions;
 pub mod scenes;
 pub mod source;
 #[cfg(test)]

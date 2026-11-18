@@ -161,13 +161,13 @@ fn sort_opens_the_sort_frame_in_shared_and_trash_and_is_out_of_reach_in_photos_a
         if live {
             assert_eq!(
                 rt.state.frames.intents,
-                [Intent::Frame("DW-0406")],
+                [Intent::Frame("DW-0404")],
                 "{name}: the pointer"
             );
             press_focused(&mut rt, "sort-btn");
             assert_eq!(
                 rt.state.frames.intents,
-                [Intent::Frame("DW-0406"), Intent::Frame("DW-0406")],
+                [Intent::Frame("DW-0404"), Intent::Frame("DW-0404")],
                 "{name}: the keyboard"
             );
         } else {

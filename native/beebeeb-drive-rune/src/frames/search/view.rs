@@ -189,7 +189,7 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
     );
     let sort = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, ToolState::Idle, t)
         .child(kit::glyph("sort-caret", &icons::CHEVRON_DOWN, 11.0, t.text_secondary))
-        .on_press(push(Intent::Frame("DW-0406")));
+        .on_press(push(Intent::Frame("DW-0404")));
     let panel = tool_button(
         "panel-toggle-btn",
         "Details panel",
@@ -233,7 +233,7 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
         .hover(t.press)
         .press(t.press)
         .focusable(true)
-        .on_press(push(Intent::Frame("DW-0415")))
+        .on_press(push(Intent::Frame("DW-0414")))
         .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
         .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
         .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));

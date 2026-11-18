@@ -139,7 +139,7 @@ fn the_poll_line_drains_frame_intents() {
     use crate::frames::Intent as Frame;
     let mut rt = runtime(FixtureEngine::ready());
     rt.update(|s, tx| {
-        s.frames.intents.push(Frame::Frame("DW-0406"));
+        s.frames.intents.push(Frame::Frame("DW-0404"));
         s.frames.intents.push(Frame::OpenItem("an-invented-id".into()));
         poll(s, 0.0, tx);
         assert!(
@@ -147,5 +147,20 @@ fn the_poll_line_drains_frame_intents() {
             "the poll took them: {:?}",
             s.frames.intents
         );
+    });
+}
+
+/// A press in the viewer reaches the shell's viewer route: with no handler yet the router's fallback says so.
+#[test]
+fn a_viewer_share_press_reaches_the_viewer_route_and_says_not_built_while_nothing_takes_it() {
+    use crate::frames::viewers;
+    let mut rt = runtime(FixtureEngine::ready());
+    rt.update(|s, tx| {
+        assert!(viewers::open_from(s, Box::new(viewers::source::FixtureViewerSource::new()), crate::frames::viewers::source::board::AUDIO));
+        viewers::ui(s).expect("open").intent(viewers::Intent::Share);
+        assert!(drain_in_poll(s, tx), "the viewer's queue was taken");
+        let ui = viewers::ui(s).expect("open");
+        assert!(ui.take_intents().is_empty());
+        assert_eq!(ui.toast.as_deref(), Some("Not built yet: Share"));
     });
 }

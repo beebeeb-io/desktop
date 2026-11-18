@@ -3,6 +3,11 @@
 //! the lane's dialogs (`dialogs`: DW-0504, DW-0511 to DW-0515, Trash's DW-0749). The checklist
 //! is `FRAMES.md`.
 
+pub mod actions;
+mod actions_items;
+mod actions_links;
+mod actions_new;
+mod actions_sort;
 pub mod dialogs;
 pub mod parts;
 pub mod scenes;

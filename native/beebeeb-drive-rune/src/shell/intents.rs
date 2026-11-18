@@ -57,9 +57,10 @@ pub fn drain_in_poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     let settings = drain_settings_intents(s, tx);
     let frames = drain_frame_intents(s, tx);
+    let viewer = drain_viewer_intents(s, tx);
     let backups = drain_backups_intents(s);
     let picked = take_picked_folder(s, tx);
-    settings | frames | backups | picked
+    settings | frames | viewer | backups | picked
 }
 
 /// Which section asked for Windows' folder picker, and gets the folder: one variant per section. A later section
@@ -361,21 +362,37 @@ pub fn drain_backups_intents(s: &mut State) -> bool {
 /// logged as `NotWired(<its fixed words>)`. No line carries an id, a name or typed words. `true`: something was
 /// taken.
 pub fn drain_frame_intents(s: &mut State, tx: &mut Tx) -> bool {
-    use crate::frames::Intent as Frame;
     let intents = std::mem::take(&mut s.frames.intents);
     for intent in &intents {
-        match intent {
-            Frame::About("DW-0411", id) => {
-                if !crate::frames::item::open_details(s, id, tx) {
-                    log("an item's Details found no row");
-                }
-            }
-            Frame::Do("preview", id) => {
-                if !crate::frames::item::open_preview(s, id, tx) {
-                    log("an item's Preview found no row");
-                }
-            }
-            other => log(format!("NotWired({})", crate::frames::item::tag(other))),
+        use crate::frames::item::Origin;
+        let taken = match crate::frames::item::origin_shown(s) {
+            Some(Origin::Shared) => crate::frames::shared::actions::take(s, tx, intent),
+            Some(Origin::Trash) => crate::frames::trash::actions::take(s, tx, intent),
+            Some(Origin::Search) => crate::frames::search::actions::take(s, tx, intent),
+            None => false,
+        } || crate::frames::item::take(s, tx, intent);
+        if !taken {
+            log(format!("NotWired({})", crate::frames::item::tag(intent)));
+        }
+    }
+    !intents.is_empty()
+}
+
+/// Takes every intent the open viewer queued: `viewer_intents::take` acts on it; one nothing takes yet shows
+/// "Not built yet: <what>" in the viewer's toast (where it has a name) and is logged by its fixed words. `true`:
+/// something was taken.
+pub fn drain_viewer_intents(s: &mut State, tx: &mut Tx) -> bool {
+    let Some(ui) = crate::frames::viewers::ui(s) else {
+        return false;
+    };
+    let intents = ui.take_intents();
+    for intent in &intents {
+        if super::viewer_intents::take(s, tx, intent.clone()) {
+            continue;
+        }
+        log("NotWired(viewer intent)");
+        if let (Some(what), Some(ui)) = (intent.not_built(), crate::frames::viewers::ui(s)) {
+            ui.toast = Some(format!("{}: {what}", crate::frames::viewers::NOT_BUILT));
         }
     }
     !intents.is_empty()
@@ -396,13 +413,14 @@ pub fn drain_settings_intents(s: &mut State, tx: &mut Tx) -> bool {
             }
             Intent::OpenWindowsNotificationSettings => open(s, web_pages::WINDOWS_NOTIFICATIONS),
             Intent::Show(_) => log("NotWired(Show)"),
-            Intent::Open(_) => log("NotWired(Open)"),
+            Intent::Open(target) => super::settings_open::open(s, tx, target),
             // Taken by the settings source's updater (`SettingsSource::check_for_updates`, `restart_to_update`): the
             // shell's part of the hand-off (quit once the installer started, start sync again after a failed start)
             // comes through `frames::settings::poll`.
             Intent::CheckForUpdates | Intent::RestartToUpdate => {}
-            Intent::SaveBundleAndWriteEmail => log("NotWired(SaveBundleAndWriteEmail)"),
-            Intent::ShowInFiles(_) => log("NotWired(ShowInFiles)"),
+            // The export already saved the bundle and opened the mail draft (`drive_settings_tools.rs`).
+            Intent::SaveBundleAndWriteEmail => {}
+            Intent::ShowInFiles(id) => super::settings_show_in_files::show(s, tx, id),
         }
     }
     !intents.is_empty()

@@ -143,7 +143,7 @@ pub const NOT_OPENED_ELSEWHERE: &str = "Couldn't open this file in another app."
 
 impl Intent {
     /// The name of where this intent goes, while nothing there answers it yet.
-    fn not_built(&self) -> Option<&'static str> {
+    pub(crate) fn not_built(&self) -> Option<&'static str> {
         Some(match self {
             Intent::Share => "Share",
             Intent::Trash => "Move to Trash",
@@ -341,16 +341,12 @@ impl Ui {
                 Elsewhere::NotBound => {}
             }
         }
-        // Nothing takes these yet (the shell's drain of this group's intents comes with the
-        // engine's wiring): the press says so, in the shell's own words, never nothing.
-        if let Some(what) = intent.not_built() {
-            self.toast = Some(format!("{NOT_BUILT}: {what}"));
-        }
+        // The shell's router takes it (`shell::intents::drain_viewer_intents`); while nothing there answers it,
+        // the router's fallback says "Not built yet: <what>".
         self.intents.push(intent);
     }
 
     /// What the person asked for that is outside this group, oldest first.
-    #[cfg_attr(not(test), allow(dead_code))] // waits for its caller in `shell/host.rs` (PR body)
     pub fn take_intents(&mut self) -> Vec<Intent> {
         std::mem::take(&mut self.intents)
     }
