@@ -28,6 +28,7 @@ import {
 } from '../../desktopApi'
 import { ageOf } from '../../relativeTime'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import ApproveSignInView from './ApproveSignInView'
 
 // ── Date formatting (RFC3339 → human, shown in mono) ─────────────────────────
 
@@ -381,6 +382,7 @@ type LoadState =
 
 export default function DevicesView() {
   const [state, setState] = useState<LoadState>({ phase: 'loading' })
+  const [approving, setApproving] = useState(false)
 
   const load = () => {
     let cancelled = false
@@ -418,8 +420,11 @@ export default function DevicesView() {
 
   const activeDeviceCount = state.phase === 'ready' ? state.devices.length : null
 
+  if (approving) return <ApproveSignInView onClose={() => { setApproving(false); load() }} />
+
   return (
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
+      <div style={{ marginBottom: 14 }}><PrimaryBtn onClick={() => setApproving(true)}>Approve a sign-in</PrimaryBtn></div>
       <PageHeader
         title="Devices"
         subtitle="Every device holding a copy of your vault key, and the sync sessions running on each. Revoke a device to re-encrypt your data against a new key."

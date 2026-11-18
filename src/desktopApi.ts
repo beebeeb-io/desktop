@@ -1644,3 +1644,28 @@ export interface UnknownFilesAtSignOut {
 export function signOutUnknownFiles(): Promise<CommandResult<UnknownFilesAtSignOut>> {
   return command<UnknownFilesAtSignOut>('sign_out_unknown_files')
 }
+
+// ── Approve a sign-in on a new device with its typed code (no camera) ─────────
+
+export interface PendingDeviceLink {
+  id: string
+  device_name: string
+  expires_at: unknown
+}
+
+export function deviceApprovalPending(): Promise<CommandResult<PendingDeviceLink[]>> {
+  return command<PendingDeviceLink[]>('device_approval_pending')
+}
+
+/** Starts with the code the new device shows; resolves with the device name it proved it reported. */
+export function deviceApprovalBegin(id: string, code: string): Promise<CommandResult<string>> {
+  return command<string>('device_approval_begin', { id, code })
+}
+
+export function deviceApprovalApprove(id: string): Promise<CommandResult<void>> {
+  return command<void>('device_approval_approve', { id })
+}
+
+export function deviceApprovalDeny(id: string): Promise<CommandResult<void>> {
+  return command<void>('device_approval_deny', { id })
+}

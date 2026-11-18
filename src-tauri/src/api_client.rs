@@ -64,6 +64,8 @@ pub use client::{ApiClient};
 mod auth;
 // LD-0113: the Backups root endpoints.
 mod backups;
+mod device_approval;
+pub use device_approval::PendingLink;
 mod files;
 mod search;
 mod shares;
