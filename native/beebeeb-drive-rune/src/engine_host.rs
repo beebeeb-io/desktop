@@ -1021,7 +1021,9 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn item_of(&self, id: &str) -> Option<DriveItem> {
-        self.local(|db, _| Ok(files_item_of::item_of(db, id))).ok().flatten()
+        // Not `local`: no sync root is needed to read one row, and a listing reads without one too.
+        let state = self.engine.local_state_for_changes().ok()?;
+        state.with(|db| files_item_of::item_of(db, id)).ok().flatten()
     }
 
     fn versions(&self, item: &DriveItem) -> Vec<crate::frames::files::actions_data::Version> {
