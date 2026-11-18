@@ -769,6 +769,8 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
     // A link's password being typed in the Files window's Share dialog (DW-0407).
     || (matches!(registry::group_for(&s.shell.app), registry::FrameGroup::Section(_))
         && crate::frames::files::share::shows_secret(s))
+    // A link's password being typed in Photos' own Share dialog.
+    || matches!(&s.photos.dialog, Some(crate::frames::photos::Dialog::Share(d)) if d.password)
     // A link's password being typed in Shared's Password… dialog.
     || matches!(s.frames.shared.dialog, Some(crate::frames::shared::dialogs::Dialog::LinkPassword { .. }))
     // A deck in Present (the viewer contract §5.4): its slides stay out of captures and screen shares.

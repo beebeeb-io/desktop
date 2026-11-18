@@ -476,16 +476,19 @@ fn share_says_which_way_keeps_the_encryption_and_asks_for_it() {
     let mut rt = runtime("DW-0607");
     let harbour = id(board::HARBOUR);
     assert!(text(&rt, "ph-dlg-note").starts_with("Copy link keeps it encrypted. Send a copy decrypts it"));
-    click(&mut rt, "ph-item-0-0-pop");
     click(&mut rt, "ph-item-0-2-switch");
-    assert_eq!(text(&rt, "ph-item-0-0-pop-label"), "Can edit");
+    assert_eq!(text(&rt, "ph-item-0-0-pop-label"), "Can download", "a link has no Can edit");
+    // Password on and none typed: no link, the dialog stays and says so.
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.photos.take_intents().is_empty());
+    assert!(matches!(&rt.state.photos.dialog, Some(Dialog::Share(d)) if d.password_missing));
+    rt.state.photos.share_password = rune::TextEdit::new("hunter2").secure();
     press(&mut rt, Key::Enter);
     assert_eq!(
         rt.state.photos.take_intents(),
         vec![Intent::CopyLink {
             id: harbour,
-            can_edit: true,
-            days: Some(30),
+            expires: crate::frames::files::actions_data::LinkExpiry::Month,
             password: true
         }]
     );
