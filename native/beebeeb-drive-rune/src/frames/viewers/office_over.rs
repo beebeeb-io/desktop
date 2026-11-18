@@ -2,9 +2,10 @@
 //! save that found a newer version (DW-1554), the command search (DW-1551), the body when the
 //! editor did not start (DW-1556), Insert's tools and a table on the page (DW-1550).
 //!
-//! As in `office.rs`, no editing engine stands behind these: a save is asked of
-//! [`ViewerSource::save_document`], the search of [`ViewerSource::commands`], and both answer
-//! "nothing" until an editor takes them. Nothing is drawn as saved, kept or found before the
+//! The command search lists our operations for the editor's kind (`office::edit::palette`) with the styles and
+//! file names [`ViewerSource::commands`] finds; Enter runs the highlighted one through the source (`edit`), a
+//! file name opens that file (`Intent::OpenInDrive`). A save is asked of [`ViewerSource::save_document`].
+//! Without a live editor the source's answer alone is shown, and a press on it says "Not built yet". Nothing is drawn as saved, kept or found before the
 //! source says so.
 //!
 //! [`ViewerSource::save_document`]: super::source::ViewerSource::save_document
@@ -16,6 +17,7 @@ use beebeeb_office_protocol::office::EditOp;
 
 use rune::{Align, Color, El, Icon, Key, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text_input};
 
+use crate::frames::office::edit::palette::{self, Run};
 use crate::frames::office::edit::save::{self, Seen, Sent};
 use crate::frames::office::edit::word_insert::{self, Insert, LinkForm, Picking, TableForm};
 
@@ -274,7 +276,11 @@ impl Ui {
     /// what it holds in memory.
     fn office_found(&self) -> Vec<CommandGroup> {
         match &self.office.over {
-            Some(Over::Palette(palette)) => self.source.commands(&self.file.id, &palette.query.text),
+            Some(Over::Palette(palette)) => {
+                let kind = self.office.edit.as_ref().filter(|e| !e.stopped).map(|e| e.kind);
+                let typed = palette.query.text.as_str();
+                palette::found(kind, typed, self.source.commands(&self.file.id, typed))
+            }
             _ => Vec::new(),
         }
     }
@@ -290,14 +296,36 @@ impl Ui {
         }
     }
 
-    /// Enter or a press on a result: the editor takes the command; until it does the press says so.
+    /// Enter or a press on a result: a file name opens that file, an operation goes to the editor through the
+    /// source; what nothing answers to says so.
     fn office_run(&mut self) {
+        let found = self.office_found();
+        let count: usize = found.iter().map(|group| group.commands.len()).sum();
         // Nothing found: nothing to run.
-        if self.office_found().iter().all(|group| group.commands.is_empty()) {
+        if count == 0 {
             return;
         }
+        let hot = match &self.office.over {
+            Some(Over::Palette(palette)) => palette.hot.min(count - 1),
+            _ => return,
+        };
+        let Some((group, command)) = found
+            .iter()
+            .flat_map(|group| group.commands.iter().map(move |command| (group, command)))
+            .nth(hot)
+        else {
+            return;
+        };
+        let edit = self.office.edit.as_ref().filter(|e| !e.stopped);
+        let live = edit.is_some();
+        let run = palette::resolve(edit.map(|e| e.kind), &group.title, &command.name, edit.and_then(|e| e.marks.as_ref()));
         self.office.over = None;
-        self.intent(Intent::Office("this command"));
+        match run {
+            Run::File(name) => self.intent(Intent::OpenInDrive(name)),
+            Run::Op(op) if live => self.office_edit(op),
+            Run::Insert(tool) if live => self.office_insert(tool),
+            _ => self.intent(Intent::Office("this command")),
+        }
     }
 }
 
