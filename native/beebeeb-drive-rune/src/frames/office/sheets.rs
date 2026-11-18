@@ -282,7 +282,7 @@ pub(crate) const ROW_HEAD_W: f32 = 40.0;
 pub(crate) const HEADER_H: f32 = 24.0;
 const FORMULA_BAR_H: f32 = 34.0;
 /// The cell's name is plain text 92 wide on the board (no box).
-const CELLBOX_W: f32 = 92.0;
+pub(crate) const CELLBOX_W: f32 = 92.0;
 const TABS_H: f32 = 30.0;
 /// The viewer bar's height (`OvBar`).
 const VBAR_H: f32 = 38.0;
@@ -309,15 +309,19 @@ pub fn formula_text(view: &SheetView) -> String {
 
 /// The formula bar: the cell's name as text, then the formula as text (no "fx" mark: the board draws none). No box around
 /// either. In the editor `formula` is the element that shows and edits it (`edit::sheet::formula`); the viewer's is read-only.
-fn formula_bar(view: &SheetView, formula: Option<El>, t: &Theme) -> El {
+fn formula_bar(view: &SheetView, cellbox: Option<El>, formula: Option<El>, t: &Theme) -> El {
     let name = a1(view.current);
-    let cellbox = row()
+    let shown = row()
         .key("sh-cellbox")
         .role("group")
         .label(format!("Cell {name}"))
         .w(CELLBOX_W)
-        .center_y()
-        .child(kit::label("sh-cellbox-text", name.clone(), MONO, t.text));
+        .center_y();
+    // The editor's cell box is a field (`edit::sheet::cell_box`); the viewer's is the name as text.
+    let cellbox = match cellbox {
+        Some(field) => shown.child(field),
+        None => shown.child(kit::label("sh-cellbox-text", name.clone(), MONO, t.text)),
+    };
     row()
         .key("sh-formula-bar")
         .role("group")
@@ -693,7 +697,7 @@ mod sheets_tabs;
 mod sheets_bounds;
 pub use sheets_bounds::Geometry;
 use sheets_bounds::{AtCell, MAX_DRAWN_CELLS, MAX_LINES, MergesShown, Side};
-use sheets_tabs::sheet_tabs;
+use sheets_tabs::sheet_tabs_edit;
 
 /// A status word with its figure in mono, as the board sets it ("Sum " sans, "13,220" mono; "Count 8" is all sans).
 fn status_word(key: String, word: &str, t: &Theme) -> El {
@@ -854,18 +858,19 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
             .edit
             .as_ref()
             .is_some_and(|e| e.kind == beebeeb_office_protocol::office::EditKind::Xlsx);
-    let (layer, formula) = if editing {
+    let (layer, cellbox, formula) = if editing {
         let geometry = Geometry::of(view, &shown.rows, &shown.cols);
         let room = cx
             .layout_size("sh-grid")
             .map_or((800.0, 600.0), |[w, h]| ((w - ROW_HEAD_W).max(0.0), (h - HEADER_H).max(0.0)));
         (
             Some(edit_sheet::layer(view, geometry, room, &t)),
+            Some(edit_sheet::cell_box(view, &t)),
             Some(edit_sheet::formula(view, &t)),
         )
     } else {
         edit_sheet::reset();
-        (None, None)
+        (None, None, None)
     };
     let mut cells = grid(view, shown, anchors_of(view, shown, live, &t), layer, &t);
     // A workbook in a renderer scrolls (`sheets_scroll`); the fixture's is the board's still sheet.
@@ -881,9 +886,9 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
             .min_w(0.0)
             .h_full()
             .child(viewer_bar(&t))
-            .child(formula_bar(view, formula, &t))
+            .child(formula_bar(view, cellbox, formula, &t))
             .child(cells)
-            .child(sheet_tabs(view, live.is_some(), room, &t)),
+            .child(sheet_tabs_edit(view, live.is_some(), room, editing, &t)),
     );
     if ui.show_details {
         body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
