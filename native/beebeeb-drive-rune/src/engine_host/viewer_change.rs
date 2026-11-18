@@ -154,7 +154,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// The press's stamp for `file_id`: the session, the account, the opening, what the file is shown as and its
     /// name.
-    fn stamp_of(&self, file_id: &str) -> Option<Stamp> {
+    pub(super) fn stamp_of(&self, file_id: &str) -> Option<Stamp> {
         let (opening, _) = self.change_facts().filter(|(opening, _)| opening.file_id == file_id)?;
         Some(Stamp {
             session: opening.session,
@@ -168,7 +168,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// Run `work` on a worker; what it settles, and the version the view then holds, is sent back for the stamp's
     /// session, account and opening.
-    fn spawn(
+    pub(super) fn spawn(
         &mut self,
         file_id: &str,
         stamp: Stamp,
@@ -577,14 +577,14 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
 /// The press's stamp: the session, the account and the opening the change is for; what the file is shown as and
 /// its name (a Keep both names the copy after it).
-struct Stamp {
-    session: SessionGeneration,
-    account: Option<String>,
-    opening: u64,
+pub(super) struct Stamp {
+    pub(super) session: SessionGeneration,
+    pub(super) account: Option<String>,
+    pub(super) opening: u64,
     /// The engine's opening of the file the change is for (`Opening::epoch`): only its saves are its own.
-    epoch: u64,
-    shows: Shows,
-    name: String,
+    pub(super) epoch: u64,
+    pub(super) shows: Shows,
+    pub(super) name: String,
 }
 
 /// The body of `text` as the file is shown.

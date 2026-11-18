@@ -3,6 +3,28 @@
 
 use super::*;
 
+/// A block the host took and has not answered yet. A range too large for one frame is answered in parts, so `left`
+/// counts the cells still to come; `stale`: an edit was sent after it was asked, so its answer is older than the edit.
+pub(super) struct Inflight {
+    sheet: u32,
+    range: CellRange,
+    left: u64,
+    stale: bool,
+}
+
+/// The two blocks share a cell.
+fn touches(a: &CellRange, b: &CellRange) -> bool {
+    let end = |start: u32, len: u32| u64::from(start) + u64::from(len);
+    a.rows > 0
+        && a.cols > 0
+        && b.rows > 0
+        && b.cols > 0
+        && u64::from(a.row) < end(b.row, b.rows)
+        && u64::from(b.row) < end(a.row, a.rows)
+        && u64::from(a.col) < end(b.col, b.cols)
+        && u64::from(b.col) < end(a.col, a.cols)
+}
+
 /// `outer` holds every cell of `inner`.
 pub(super) fn covers(outer: &CellRange, inner: &CellRange) -> bool {
     let end = |start: u32, len: u32| u64::from(start) + u64::from(len);
@@ -39,6 +61,98 @@ impl Model {
             rows,
             cols,
         })
+    }
+
+    /// The host took the ask for `range` of `sheet`.
+    pub(super) fn expect(&mut self, sheet: u32, range: CellRange) {
+        self.inflight.push(Inflight {
+            sheet,
+            range,
+            left: range.area(),
+            stale: false,
+        });
+    }
+
+    /// An edit was sent: every block on its way is older than it. (The helper answers in order, so a block asked
+    /// after the edit comes after the stale ones.)
+    pub(super) fn stale_inflight(&mut self) {
+        for ask in &mut self.inflight {
+            ask.stale = true;
+        }
+    }
+
+    /// An answer for `range` of `sheet` came: `false` when it answers a block asked before an edit was sent.
+    pub(super) fn answered(&mut self, sheet: u32, range: &CellRange) -> bool {
+        let Some(at) = self
+            .inflight
+            .iter()
+            .position(|ask| ask.sheet == sheet && covers(&ask.range, range))
+        else {
+            return true;
+        };
+        let ask = &mut self.inflight[at];
+        let fresh = !ask.stale;
+        ask.left = ask.left.saturating_sub(range.area());
+        if ask.left == 0 {
+            self.inflight.remove(at);
+        }
+        fresh
+    }
+
+    /// Forget that the blocks touching `range` were asked: the next draw asks for them again.
+    pub(super) fn forget_asked(&mut self, range: &CellRange) {
+        self.asked.retain(|asked| !touches(asked, range));
+    }
+
+    /// The editor changed these ranges: their blocks are no longer asked, the cells held in them are overwritten and
+    /// dropped (the next draw asks again, and the answer replaces the block whole), and the sheet grows to hold
+    /// them.
+    pub(super) fn edited_cells(&mut self, changed: &[(u32, CellRange)]) {
+        for (sheet, range) in changed {
+            let (rows, cols) = (range.row.saturating_add(range.rows), range.col.saturating_add(range.cols));
+            if let Some(size) = self.sheets.get_mut(*sheet as usize) {
+                size.0 = size.0.max(rows);
+                size.1 = size.1.max(cols);
+            }
+            let Body::Sheet(view) = &mut self.body else {
+                continue;
+            };
+            if view.sheet != *sheet {
+                continue;
+            }
+            view.extent = (view.extent.0.max(rows), view.extent.1.max(cols));
+            let dropped: Vec<CellRange> = self.asked.iter().filter(|asked| touches(asked, range)).copied().collect();
+            self.asked.retain(|asked| !touches(asked, range));
+            self.remove_cells(|row, col| range.contains(row, col) || dropped.iter().any(|block| block.contains(row, col)));
+        }
+    }
+
+    /// The held cells for which `gone` holds are overwritten and dropped.
+    pub(super) fn remove_cells(&mut self, gone: impl Fn(u32, u32) -> bool) {
+        let Body::Sheet(view) = &mut self.body else {
+            return;
+        };
+        if !view.cells.iter().any(|cell| gone(cell.row, cell.col)) {
+            return;
+        }
+        let mut kept = Vec::with_capacity(view.cells.len());
+        for mut cell in view.cells.drain(..) {
+            if gone(cell.row, cell.col) {
+                cell.text.zeroize();
+                if let Some(formula) = cell.formula.as_mut() {
+                    formula.zeroize();
+                }
+            } else {
+                kept.push(cell);
+            }
+        }
+        view.cells = kept;
+        self.index = view
+            .cells
+            .iter()
+            .enumerate()
+            .map(|(at, cell)| ((cell.row, cell.col), at))
+            .collect();
     }
 
     pub(super) fn remember(&mut self, range: CellRange) {
@@ -95,6 +209,8 @@ impl Model {
     /// `data` (the cells of `range`) into the sheet, by place: a cell held at the same place is replaced (its text
     /// overwritten first), sizes per column and row, merges, the frozen panes and the anchors once each.
     pub(super) fn merge(&mut self, range: CellRange, data: CellData) {
+        // A re-asked block replaces the old one whole: a cell the answer does not have is empty now.
+        self.remove_cells(|row, col| range.contains(row, col));
         let Body::Sheet(view) = &mut self.body else {
             return;
         };
