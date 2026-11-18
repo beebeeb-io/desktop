@@ -47,6 +47,11 @@ fn die() -> EditOp {
 
 /// A helper that serves an editing session (and the viewer's `Open`); an `InsertText("die")` makes it exit.
 fn mortal() -> Fake {
+    mortal_slow(0)
+}
+
+/// [`mortal`] whose answer to the size of a save takes `delay_ms`.
+fn mortal_slow(delay_ms: u64) -> Fake {
     Fake::new(move |link| {
         let mut revision = 0;
         while let Some((id, message)) = link.next() {
@@ -59,11 +64,14 @@ fn mortal() -> Fake {
                     revision += 1;
                     edited(revision)
                 }
-                Message::SaveSize(_) => Message::SaveReady(office::SaveReady {
+                Message::SaveSize(_) => {
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                    Message::SaveReady(office::SaveReady {
                     token: 7,
                     len: SNAPSHOT_LEN,
                     revision,
-                }),
+                    })
+                }
                 Message::SaveInto(into) => {
                     link.paint(into.out, 0x5a);
                     Message::SavedInto(office::SavedInto { len: into.out.len })
@@ -356,4 +364,51 @@ fn a_helper_that_does_not_answer_never_holds_the_lock_past_its_bound() {
     let took = began.elapsed();
     assert!(took >= Duration::from_millis(300) && took < Duration::from_millis(1_500), "bounded: {took:?}");
     assert!(kept.lock().unwrap().is_empty());
+}
+
+// ---- a screen lock's flush (`screen_lock_begin_in`): the lock is immediate, the seal and the close come after ----
+
+fn leaked_registry() -> &'static Registry {
+    Box::leak(Box::new(Registry::new()))
+}
+
+#[test]
+fn a_screen_lock_returns_at_once_then_seals_the_last_text_and_closes_the_helper() {
+    let registry = leaked_registry();
+    // The helper takes 150 ms to answer the snapshot: the call that follows the lock frame must not wait for it.
+    let fake = mortal_slow(150);
+    let mut host = start(fake, cadence(30_000, 30_000, 60_000), registry);
+    let kept = collecting(&mut host);
+    host.edit(EditOp::InsertText("last words".to_owned())).expect("sent");
+
+    let began = std::time::Instant::now();
+    let run = screen_lock_begin_in(registry, Duration::from_secs(3));
+    assert!(began.elapsed() < Duration::from_millis(100), "the lock does not wait for the seal: {:?}", began.elapsed());
+    assert!(kept.lock().unwrap().is_empty(), "not sealed yet when the lock call returned");
+    assert_ne!(host.state(), OfficeState::Closed(CloseWhy::Locked), "the helper is still there for the seal");
+
+    run.finish();
+    assert_eq!(kept.lock().unwrap().len(), 1, "one sealed snapshot of the latest text");
+    assert_eq!(host.state(), OfficeState::Closed(CloseWhy::Locked), "then the helper is closed");
+}
+
+#[test]
+fn the_shells_close_during_a_screen_lock_flush_waits_for_the_seal() {
+    let registry = leaked_registry();
+    let mut host = start(mortal(), cadence(30_000, 30_000, 60_000), registry);
+    let kept = collecting(&mut host);
+    host.edit(EditOp::InsertText("last words".to_owned())).expect("sent");
+
+    let run = screen_lock_begin_in(registry, Duration::from_secs(2));
+    // The shell's poll sees the gate leave Ready and ends the session: it must not kill the helper mid-seal.
+    end_session_in(registry, CloseWhy::SignedOut);
+    assert_ne!(host.state(), OfficeState::Closed(CloseWhy::SignedOut), "deferred, not killed");
+    run.finish();
+    assert_eq!(kept.lock().unwrap().len(), 1, "the seal landed first");
+    assert_eq!(host.state(), OfficeState::Closed(CloseWhy::SignedOut), "the shell's reason stands");
+    // With no flush running, the shell's close is immediate again.
+    let mut again = start(mortal(), cadence(30_000, 30_000, 60_000), registry);
+    end_session_in(registry, CloseWhy::Locked);
+    assert_eq!(again.state(), OfficeState::Closed(CloseWhy::Locked));
+    let _ = again.poll();
 }

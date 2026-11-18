@@ -145,6 +145,14 @@ pub fn on_session_end(ending: beebeeb_engine::app::office_session_end::SessionEn
     use beebeeb_engine::app::office_session_end::SessionEnding;
     match ending {
         SessionEnding::Lock => flush_all_in(&PROCESS, LOCK_FLUSH_BUDGET),
+        // The lock already shows: ask now (never waits), wait and close in the background.
+        SessionEnding::ScreenLock => {
+            let run = screen_lock_begin_in(&PROCESS, LOCK_FLUSH_BUDGET);
+            // A thread that cannot start drops `run`: the helpers close at once, nothing is waited for.
+            let _ = std::thread::Builder::new()
+                .name("office-screen-lock-flush".into())
+                .spawn(move || run.finish());
+        }
         SessionEnding::SignOut => kill_all(CloseWhy::SignedOut),
     }
 }
@@ -159,10 +167,77 @@ pub(crate) fn flush_all_in(registry: &Registry, budget: Duration) {
     }
 }
 
+/// A screen lock's flush: every live editing host was asked to seal its unsaved work ([`screen_lock_begin_in`]); the
+/// wait, and then the close of every helper that was open at the lock, is [`ScreenLockFlush::finish`] (or its drop).
+pub(crate) struct ScreenLockFlush {
+    registry: &'static Registry,
+    open_at_lock: Vec<Arc<Shared>>,
+    asked: Vec<Arc<Shared>>,
+    deadline: Instant,
+}
+
+/// Ask every live editing host of `registry` to seal now, and return at once. Hosts opened after this call are not
+/// this lock's: they are neither waited for nor closed by it.
+pub(crate) fn screen_lock_begin_in(registry: &'static Registry, budget: Duration) -> ScreenLockFlush {
+    let deadline = Instant::now() + budget;
+    // Counted before the first ask, so a close the shell asks for from now on waits.
+    lock(&registry.screen).running += 1;
+    let open_at_lock: Vec<Arc<Shared>> = lock(&registry.hosts).iter().filter_map(Weak::upgrade).collect();
+    let asked = open_at_lock.iter().filter(|shared| shared.flush_begin()).cloned().collect();
+    ScreenLockFlush {
+        registry,
+        open_at_lock,
+        asked,
+        deadline,
+    }
+}
+
+impl ScreenLockFlush {
+    /// Wait (one deadline for all) for the answers, then close the helpers.
+    pub(crate) fn finish(self) {
+        for shared in &self.asked {
+            shared.flush_wait(self.deadline);
+        }
+    }
+}
+
+impl Drop for ScreenLockFlush {
+    /// Whatever the way out: the helpers that were open at the lock close, with the shell's reason when it asked.
+    fn drop(&mut self) {
+        let why = {
+            let mut state = lock(&self.registry.screen);
+            state.running = state.running.saturating_sub(1);
+            if state.running > 0 {
+                None
+            } else {
+                Some(state.deferred.take().unwrap_or(CloseWhy::Locked))
+            }
+        };
+        for shared in &self.asked {
+            shared.flush_end();
+        }
+        // While another flush is still running it closes its own (a later lock's) hosts; these close now.
+        for shared in &self.open_at_lock {
+            shared.close(why.unwrap_or(CloseWhy::Locked));
+        }
+    }
+}
+
 /// The shell's session end (a lock, a sign-out, another account): every helper of the process is killed and what
-/// it rendered is wiped.
+/// it rendered is wiped. While a screen lock's flush is under way the close waits for it (it is the flush's last step).
 pub fn end_session(locked: bool) {
-    kill_all(if locked { CloseWhy::Locked } else { CloseWhy::SignedOut });
+    end_session_in(&PROCESS, if locked { CloseWhy::Locked } else { CloseWhy::SignedOut });
+}
+
+pub(crate) fn end_session_in(registry: &Registry, why: CloseWhy) {
+    {
+        let mut state = lock(&registry.screen);
+        if state.running > 0 {
+            state.deferred.get_or_insert(why);
+            return;
+        }
+    }
+    kill_all_in(registry, why);
 }
 
 /// A render request, as [`OfficeHost::request_page`] handed it out.
@@ -522,12 +597,23 @@ impl Timeouts {
 /// `kill_all_in` never reaches another test's hosts.
 pub(crate) struct Registry {
     hosts: Mutex<Vec<Weak<Shared>>>,
+    /// The screen-lock flushes under way, and the close the shell asked for meanwhile.
+    screen: Mutex<ScreenFlushState>,
+}
+
+/// What a screen lock's background flush and the shell's close of the helpers agree on: the shell's `end_session`
+/// (the gate left Ready) must not kill a helper whose snapshot is still being asked for.
+#[derive(Default)]
+struct ScreenFlushState {
+    running: usize,
+    deferred: Option<CloseWhy>,
 }
 
 impl Registry {
     pub(crate) const fn new() -> Registry {
         Registry {
             hosts: Mutex::new(Vec::new()),
+            screen: Mutex::new(ScreenFlushState { running: 0, deferred: None }),
         }
     }
 
