@@ -29,7 +29,7 @@ pub(super) fn alert(dialog: &Dialog, t: &Theme) -> El {
             .on_press_tx(dismiss),
     ];
     kit::alert(
-        title,
+        tag,
         380.0,
         tile_sized(0, Tone::Red, &ic::SHIELD, 36.0, t),
         title,
