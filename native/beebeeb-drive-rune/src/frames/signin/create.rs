@@ -261,6 +261,8 @@ impl Ui {
                 (self.screen, self.focus) = if from_sign_in {
                     (Screen::SignIn, Some(EMAIL_KEY))
                 } else {
+                    // Back to Welcome: the address typed for sign-up is not kept.
+                    self.email.clear();
                     (Screen::Welcome, Some(FIRST_BUTTON_KEY))
                 };
             }
