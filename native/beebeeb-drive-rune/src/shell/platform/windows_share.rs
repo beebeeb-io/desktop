@@ -29,7 +29,7 @@ fn os(what: &str, error: &windows::core::Error) -> PlatformError {
 thread_local! {
     /// The `DataRequested` registration of the last sheet, taken off before the next one is added: the manager is
     /// one per window, so handlers would pile up.
-    static LAST: RefCell<Option<(DataTransferManager, i64)>> = const { RefCell::new(None) };
+    static LAST: RefCell<Option<(DataTransferManager, windows::Foundation::EventRegistrationToken)>> = const { RefCell::new(None) };
 }
 
 /// Show the Share sheet over `window` for the file at `path`. Call on the window's thread.
@@ -71,7 +71,7 @@ pub fn share_file(window: Option<&rune::WindowHandle>, path: &Path) -> Result<()
             .CreateItemQueryWithOptions(&options)
             .map_err(|e| os("the query could not start", &e))?;
         let items = query
-            .GetItemsAsync()
+            .GetItemsAsync(0, 2)
             .and_then(|op| op.get())
             .map_err(|e| os("the file could not be read", &e))?;
         if items.Size().unwrap_or(0) != 1 {
