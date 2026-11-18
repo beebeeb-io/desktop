@@ -399,6 +399,9 @@ pub enum Settled {
     /// Not saved, and why (the words): nothing changed, the edit stays as it is (delta 3 of desktop#432: an earlier
     /// change to the file on this PC has not been sent yet).
     Refused(String),
+    /// The revision of the editor's document that the save just reported (`Saved`, `Queued`) was made from: the
+    /// editor is saved up to it, no further (typing during the upload stays unsaved). Comes just before its `Saved`/`Queued`.
+    SavedRevision(u64),
     /// A change begun before the file was opened again (Show it, Try again): what it came to, said. Nothing on
     /// screen changes.
     Said(String),
@@ -570,7 +573,12 @@ pub enum EditAnswer {
     Stopped,
     /// A recovery snapshot was restored: the document is the one saved at `at`.
     Restored { at: String },
+    /// The selection is too big to copy at all (not even as text): said as [`COPY_TOO_LARGE`].
+    CopyTooLarge,
 }
+
+/// What is said when the helper cannot copy the selection (`Error{TooLarge}` to a `Copy`).
+pub const COPY_TOO_LARGE: &str = "Too much to copy at once";
 
 /// A snapshot of an earlier, unsaved editing of the file that this PC kept (the words say when: "09:41").
 #[derive(Debug, Clone, PartialEq, Eq)]

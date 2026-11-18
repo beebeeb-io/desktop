@@ -272,6 +272,8 @@ pub fn surface(pages: El, doc: &DocBody, edit: &EditUi, stage: Option<[f32; 4]>,
         .role("textbox")
         .label("Document text")
         .focusable(true)
+        // The keyboard is on the page as the document opens: typing starts at once.
+        .autofocus()
         .no_focus_ring()
         .cursor(Cursor::Text)
         // Typing and moving are direct manipulation: the caret and the pictures land at once, never glide.
