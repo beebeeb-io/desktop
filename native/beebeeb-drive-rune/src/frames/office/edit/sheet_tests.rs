@@ -247,7 +247,7 @@ fn office_sheets_a_press_selects_the_cell_under_it() {
         view.selection, None,
         "one cell is no selection: the status shows no figures"
     );
-    assert_eq!(rig.words("sh-cellbox-text"), "B3");
+    assert_eq!(rig.words(NAME_KEY), "B3");
     // The helper is told once the selection settled.
     assert_eq!(
         rig.selections(),
@@ -611,7 +611,7 @@ fn office_sheets_the_formula_bar_shows_and_edits_the_current_cell() {
     let mut rig = rig();
     rig.click(2, 1);
     assert_eq!(rig.words("sh-formula"), "=B1+B2", "the formula, not the value");
-    assert_eq!(rig.words("sh-cellbox-text"), "B3");
+    assert_eq!(rig.words(NAME_KEY), "B3");
     let open = rig.find(BAR_OPEN_KEY).expect("the formula is pressable").rect;
     rig.rt.pointer_down(open[0] + 6.0, open[1] + open[3] / 2.0);
     rig.rt.pointer_up(open[0] + 6.0, open[1] + open[3] / 2.0);
@@ -761,7 +761,9 @@ fn press_key(rig: &mut Rig, key: &str) {
 fn office_sheets_the_cell_box_in_the_window_goes_to_what_is_typed() {
     let mut rig = rig();
     press_key(&mut rig, NAME_KEY);
+    eprintln!("DBG focused={:?} naming={} typed={:?}", rig.rt.focused(), with(|g| g.naming), with(|g| g.name.text.clone()));
     rig.text("B5");
+    eprintln!("DBG after text {:?} {:?}", rig.rt.focused(), with(|g| g.name.text.clone()));
     rig.key(Key::Enter);
     let v = rig.sheet();
     assert_eq!(v.current, Cell { row: 4, col: 1 });
