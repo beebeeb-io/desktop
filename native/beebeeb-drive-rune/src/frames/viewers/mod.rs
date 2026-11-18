@@ -877,7 +877,15 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
     let here = route_item(s);
     match &s.viewer.ui {
         // Only the file the route names is drawn: a stale one never shows under another's path.
-        Some(ui) if here.as_deref() == Some(ui.file.id.as_str()) => view(s, ui, cx),
+        Some(ui) if here.as_deref() == Some(ui.file.id.as_str()) => {
+            let page = view(s, ui, cx);
+            // Share and Version history of the open file are Files' dialogs: they stand over the viewer.
+            let theme = tokens::theme(cx.system_dark());
+            match crate::frames::files::window::dialog_over_viewer(s, &theme) {
+                Some(dialog) => rune::el().key("viewer-root").w_full().h_full().child(page).child(dialog),
+                None => page,
+            }
+        }
         _ => crate::shell::placeholder::window(s, cx, FrameGroup::Viewer),
     }
 }
