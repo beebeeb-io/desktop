@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroizing;
 
+use plan_gate::PlanKnown;
 use crate::account::{AccountId, AccountRuntime, Accounts, SessionGeneration, SessionTransition};
 use crate::account_binding::{self, Identity};
 use crate::account_dto::AccountProfile;
@@ -46,6 +47,7 @@ use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 use lock_api::SessionMoved;
 
+mod plan_gate;
 pub mod account_actions_api;
 pub mod account_api;
 pub mod account_email_api;
@@ -255,6 +257,8 @@ pub struct Engine<C: CredentialStores> {
     failures: AtomicU32,
     /// [`Engine::watch_session`] ran on this handle.
     session_watch_started: AtomicBool,
+    /// What the server last said about the plan, for the No plan gate ([`Engine::gate`]).
+    plan: Mutex<PlanKnown>,
     /// Items moved to or from Trash through this handle (`trash_api`), for a window that keeps a Trash count.
     trash_moves: AtomicU64,
     /// The two-level lock: core's state machine, moved only by `lock_api`.
@@ -325,6 +329,7 @@ impl<C: CredentialStores> Engine<C> {
             lock_password: lock_password_api::LockPassword::default(),
             failures: AtomicU32::new(0),
             session_watch_started: AtomicBool::new(false),
+            plan: Mutex::new(PlanKnown::default()),
             trash_moves: AtomicU64::new(0),
             lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
             view,
@@ -356,6 +361,7 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The end of a transition: the view's gate is the gate now, and the window is woken to read it.
     fn publish(&self) {
+        self.ask_plan(false);
         let gate = self.gate();
         self.view.write(|view| view.gate = gate);
         self.host.wake();
@@ -429,8 +435,9 @@ impl<C: CredentialStores> Engine<C> {
         self.view.read().gate
     }
 
-    /// Which screen the window shows (`gate::decide_gate`). The plan check is not made here: a signed-in, unlocked
-    /// account answers `Ready`.
+    /// Which screen the window shows (`gate::decide_gate`). `NoPlan` only when the server last said the account has
+    /// no active plan (none, or lapsed: trial or subscription ended, payment failed past grace). No network here: a
+    /// server that could not be reached leaves the last known answer, and no answer at all never blocks.
     pub fn gate(&self) -> GateState {
         let unlocked = self.unlocked();
         if unlocked && self.lock_state() == beebeeb_api::flows::LockState::ScreenLocked {
@@ -448,13 +455,15 @@ impl<C: CredentialStores> Engine<C> {
         } else {
             StoredKey::Absent
         };
-        gate::decide_gate(present || unlocked, unlocked, stored, false)
+        let no_plan = unlocked && self.plan_known_none();
+        gate::decide_gate(present || unlocked, unlocked, stored, no_plan)
     }
 
     /// The window's gate buttons (Try again on the credential-store screen, Check again on the no-plan screen):
     /// read the gate once more and publish it, so `view().gate` changes when the store answers or the plan arrived.
     /// Never the start path: [`Engine::restore`] is not run again.
     pub fn recheck_gate(&self) -> GateState {
+        self.ask_plan(true);
         self.publish();
         self.view.read().gate
     }
