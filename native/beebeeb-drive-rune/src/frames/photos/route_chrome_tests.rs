@@ -49,8 +49,12 @@ fn enter_in_photos_search_box_shows_searchs_results_for_that_text() {
             key: Key::Text(c.to_string().into()),
             mods: Mods::default(),
         });
+        rt.frame(0.0);
+        rt.settle_all();
+        rt.frame(0.0);
     }
-    assert_eq!(rt.state.search.text.to_string(), "harbour", "typed");
+    let focus = rt.elements().into_iter().find(|e| e.focused && !e.exiting).and_then(|e| e.key);
+    assert_eq!(rt.state.search.text.to_string(), "harbour", "typed; focus={focus:?}");
     rt.key(KeyEvent {
         key: Key::Enter,
         mods: Mods::default(),
