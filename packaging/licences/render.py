@@ -155,6 +155,9 @@ def main() -> int:
         if "beebeeb-io" in url:
             w(f"  Part of the build, pinned: {url} at commit {rev}")
             w(f"                           ({url}/tree/{rev}; crates: {', '.join(sorted(names))})")
+    for (url, rev), names in sorted(git_sources(all_pkgs).items()):
+        if "beebeeb-io" not in url:
+            w(f"  Other git dependency (its own licence is in section 5): {url} at commit {rev} ({', '.join(sorted(names))})")
     w("")
     w("The Office viewer's engine (WordCraft, GridCraft, DeckCraft, in the repository beebeeb-io/desktop-office) is under")
     w("MIT OR Apache-2.0, at your option; its ArtCraft name and logos are trademarks and are not covered by that licence.")
@@ -260,7 +263,7 @@ def main() -> int:
         w(f"{name} {version}")
     w(INDEX_END)
     w("")
-    Path(a.out).write_text("\n".join(o) + "\n", encoding="utf-8", newline="\n")
+    Path(a.out).write_text(("\n".join(o) + "\n").replace("\r", ""), encoding="utf-8", newline="\n")
     return 0
 
 

@@ -122,7 +122,7 @@ pub mod tray;
 // An open file: its facts from the local state, its content decrypted in memory (`viewer`).
 pub mod viewer;
 
-pub use signin::EngineSignInSource;
+pub use signin::{EngineSignInSource, open_installed_file};
 pub use sync::EngineGlobalSource;
 pub use tray::EngineTraySource;
 

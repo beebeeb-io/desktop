@@ -829,6 +829,18 @@ pub fn open_web_page(url: &str) -> Result<(), ()> {
     open_on_the_launch_worker(url, super::open_path)
 }
 
+/// Opens a file that ships with the app (the licence notice, beside the exe) with the system's handler, on the same
+/// launch worker as the pages. The path comes from this program's own location, never from the server or a file.
+pub fn open_installed_file(path: &std::path::Path) -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        OPENED.with(|o| o.borrow_mut().push(path.display().to_string()));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    open_on_the_launch_worker(&path.to_string_lossy(), super::open_path)
+}
+
 /// The one launch worker the pages open on: the window's thread never waits for the launch lock (ruling R-OW1). A
 /// page has no session (the sign-in page opens signed out), so its start compares none.
 #[cfg_attr(test, allow(dead_code))]
