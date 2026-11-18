@@ -761,9 +761,9 @@ fn press_key(rig: &mut Rig, key: &str) {
 fn office_sheets_the_cell_box_in_the_window_goes_to_what_is_typed() {
     let mut rig = rig();
     press_key(&mut rig, NAME_KEY);
-    eprintln!("DBG focused={:?} naming={} typed={:?}", rig.rt.focused(), with(|g| g.naming), with(|g| g.name.text.clone()));
+    eprintln!("DBG naming={} typed={:?}", with(|g| g.naming), with(|g| g.name.text.clone()));
     rig.text("B5");
-    eprintln!("DBG after text {:?} {:?}", rig.rt.focused(), with(|g| g.name.text.clone()));
+    eprintln!("DBG after text {:?}", with(|g| g.name.text.clone()));
     rig.key(Key::Enter);
     let v = rig.sheet();
     assert_eq!(v.current, Cell { row: 4, col: 1 });
