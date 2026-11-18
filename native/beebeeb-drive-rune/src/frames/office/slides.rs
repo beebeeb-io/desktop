@@ -613,6 +613,10 @@ fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, edit: Option<
             .focusable(true)
             .on_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| edit_slide::on_key(s, tx, ev))
             .on_drag(edit_slide::on_drag)
+            .on_layout_tx(|s: &mut State, _: [f32; 4], tx: &mut rune::Tx| {
+                edit_slide::ask_layouts_once(s);
+                tx.live_only();
+            })
             .child(slide)
             .children(edit_slide::overlay(deck, edit, (w, h))),
     };

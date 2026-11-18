@@ -86,6 +86,41 @@ fn send_hit(s: &mut State, page: u32, x_pt: f32, y_pt: f32, mode: HitMode) -> bo
     source.hit(&id, page, x_pt, y_pt, mode)
 }
 
+thread_local! {
+    /// The file whose layouts were last asked for, so an open deck asks once.
+    static ASKED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A deck opened in the live editor asks the helper for its layouts once (the stage calls this when it is laid out),
+/// so Design lists them without being asked. A source that does not take the ask is asked again later.
+pub fn ask_layouts_once(s: &mut State) {
+    if live(s).is_none() {
+        return;
+    }
+    let Some(ui) = viewers::ui(s) else { return };
+    if ui.office.edit.as_ref().is_none_or(|e| !e.layouts.is_empty()) {
+        return;
+    }
+    let (source, id) = ui.edit_source();
+    let id = id.to_string();
+    if ASKED.with(|a| a.borrow().as_deref() == Some(id.as_str())) {
+        return;
+    }
+    if source.layouts(&id) {
+        ASKED.with(|a| *a.borrow_mut() = Some(id));
+    }
+}
+
+/// The deck ribbon's tab words: the third tab is Design and the fourth Transitions (DW-1509e, DW-1560).
+pub fn tab_label(tab: crate::frames::viewers::office::Tab) -> &'static str {
+    use crate::frames::viewers::office::Tab;
+    match tab {
+        Tab::Layout => "Design",
+        Tab::Review => "Transitions",
+        other => other.label(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Slide operations (keys, menu and strip share them)
 // ---------------------------------------------------------------------------
