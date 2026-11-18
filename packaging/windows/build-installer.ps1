@@ -153,6 +153,23 @@ $stagedOffice = Join-Path $stage 'beebeeb-office-render.exe'
 $stagedMedia = Join-Path $stage 'beebeeb-media-helper.exe'
 Copy-Item -LiteralPath $OfficeRenderExe -Destination $stagedOffice
 Copy-Item -LiteralPath $MediaHelperExe -Destination $stagedMedia
+# The third-party licence notice goes in every installer (legal review 2026-11-18). It is generated and committed
+# (packaging\licences\generate.sh); refuse a missing, stale or other-release one rather than ship an installer without.
+$licenceSrc = Join-Path $repo 'packaging\licences\THIRD-PARTY-LICENSES.txt'
+if (!(Test-Path -LiteralPath $licenceSrc) -or (Get-Item -LiteralPath $licenceSrc).Length -lt 10000) {
+  Fail "the licence notice is missing or empty: $licenceSrc (run packaging/licences/generate.sh)"
+}
+$noticeText = [IO.File]::ReadAllText($licenceSrc)
+if ($noticeText -notmatch "(?m)^release-version: $([regex]::Escape($Version))\r?$") { Fail "the licence notice is for another release than $Version (run: VERSION=$Version packaging/licences/generate.sh)" }
+# Stale vs Cargo.lock: the notice records the hash of each lock (CR bytes removed, so a CRLF checkout agrees).
+foreach ($lk in @(@('app', 'native\beebeeb-drive-rune'), @('office-render', 'native\beebeeb-office-render'), @('media-helper', 'native\beebeeb-media-helper'))) {
+  $bytes = [IO.File]::ReadAllBytes((Join-Path $repo "$($lk[1])\Cargo.lock")) | Where-Object { $_ -ne 13 }
+  $sha = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([byte[]]$bytes)).Replace('-', '').ToLowerInvariant()
+  if ($noticeText -notmatch "(?m)^cargo-lock-sha256 $($lk[0]): $sha\r?$") { Fail "the licence notice is stale: $($lk[1])\Cargo.lock changed since it was generated (run packaging/licences/generate.sh)" }
+}
+$stagedLicence = Join-Path $stage 'THIRD-PARTY-LICENSES.txt'
+Copy-Item -LiteralPath $licenceSrc -Destination $stagedLicence
+if (!(Test-Path -LiteralPath $stagedLicence)) { Fail 'the licence notice did not reach the staged files' }
 $outFile = Join-Path $OutDir ("{0}_{1}_x64-setup.exe" -f $product, $Version)
 if (Test-Path -LiteralPath $outFile) { Remove-Item -LiteralPath $outFile -Force }
 
@@ -181,6 +198,7 @@ $defines = @(
   "/DMAINBINARYSRCPATH=$staged",
   "/DOFFICERENDERSRCPATH=$stagedOffice",
   "/DMEDIAHELPERSRCPATH=$stagedMedia",
+  "/DLICENSESRCPATH=$stagedLicence",
   "/DINSTALLERICON=$icon",
   "/DOUTFILE=$outFile",
   "/DADDITIONALPLUGINSPATH=$PluginDir",
