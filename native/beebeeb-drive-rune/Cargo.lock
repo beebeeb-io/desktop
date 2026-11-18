@@ -621,6 +621,7 @@ dependencies = [
  "rune-notify",
  "rusqlite",
  "serde_json",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tracing",
