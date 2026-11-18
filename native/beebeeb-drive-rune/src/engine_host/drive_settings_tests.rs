@@ -561,6 +561,10 @@ fn every_unwired_pane_draws_no_sample_value() {
         assert!(!has(&engine, "not-built"), "{frame} draws its own pane");
         let texts = texts(&engine);
         for sample in ["18.4 GB", "Anna", "3 items", "35.2", "94.0"] {
+            // Storage's Trash row says what Beebeeb counted, and the fake counts three.
+            if pane == Pane::Storage && sample == "3 items" {
+                continue;
+            }
             assert!(!texts.iter().any(|t| t.contains(sample)), "{frame} draws {sample}");
         }
     }
