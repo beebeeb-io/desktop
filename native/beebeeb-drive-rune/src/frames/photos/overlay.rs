@@ -10,6 +10,8 @@ use super::grid::megabytes;
 use super::source::{DeviceKind, Shape, SourceRef};
 use super::{ACROSS, Dialog, Intent, Menu, OpenMenu, ShareDraft, SourcesDraft, Toast, Ui, icons};
 use crate::State;
+use crate::frames::files::actions_data::{LinkAccess, LinkExpiry};
+use crate::ui::settings_controls as controls;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::{field, kit};
 
@@ -492,6 +494,40 @@ fn sources(ui: &Ui, draft: &SourcesDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
     (460.0, body, foot)
 }
 
+/// The key of the link password's text input.
+pub const SHARE_PASSWORD: &str = "ph-share-password";
+
+/// The expiry choices of the Share dialog (Files' four), under the Link expires button.
+pub fn expiry_menu(ui: &Ui, t: &Theme) -> Option<El> {
+    let Some(Dialog::Share(draft)) = &ui.dialog else { return None };
+    if !draft.menu {
+        return None;
+    }
+    let items = LinkExpiry::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, choice)| {
+            controls::menu_item(0, i, choice.choice(), *choice == draft.expires, false, t).on_press(
+                move |s: &mut State| {
+                    if let Some(Dialog::Share(draft)) = &mut s.photos.dialog {
+                        draft.expires = LinkExpiry::ALL[i];
+                        draft.menu = false;
+                    }
+                },
+            )
+        })
+        .collect();
+    Some(
+        controls::menu(0, "Link expires", 130.0, items, t)
+            .anchored("ph-item-0-1-pop", rune::Side::Bottom, rune::Align::End, 4.0)
+            .modal(true, |s: &mut State| {
+                if let Some(Dialog::Share(draft)) = &mut s.photos.dialog {
+                    draft.menu = false;
+                }
+            }),
+    )
+}
+
 fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
     let viewing = ui.viewing();
     let (name, bytes, id) = viewing.as_ref().map_or((String::new(), 0, None), |v| {
@@ -514,10 +550,7 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
                 t.text_tertiary,
             )),
     );
-    let expiry = match draft.days {
-        Some(days) => format!("In {days} days"),
-        None => "Never".into(),
-    };
+    let expiry = draft.expires.words();
     let items = vec![
         item(
             0,
@@ -526,17 +559,8 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
             "Anyone with the link",
             None,
             vec![
-                pop(
-                    "ph-item-0-0",
-                    "Anyone with the link",
-                    if draft.can_edit { "Can edit" } else { "Can view" },
-                    t,
-                )
-                .on_press(|s: &mut State| {
-                    if let Some(Dialog::Share(draft)) = &mut s.photos.dialog {
-                        draft.can_edit = !draft.can_edit;
-                    }
-                }),
+                // A link is a download link (decision 11-17): no "Can edit", and nothing to choose here.
+                pop("ph-item-0-0", "Anyone with the link", LinkAccess::Download.words(), t),
             ],
             t,
         ),
@@ -547,7 +571,7 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
             "Link expires",
             None,
             vec![
-                pop("ph-item-0-1", "Link expires", &expiry, t).on_press(|s: &mut State| {
+                pop("ph-item-0-1", "Link expires", expiry, t).on_press(|s: &mut State| {
                     if let Some(id) = s.photos.viewer.as_ref().map(|v| v.id) {
                         s.photos.ask(Intent::ChooseExpiry(id));
                     }
@@ -562,23 +586,43 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
             "Password",
             None,
             vec![
-                switch("ph-item-0-2", "Password", draft.password, t).on_press(|s: &mut State| {
-                    if let Some(Dialog::Share(draft)) = &mut s.photos.dialog {
-                        draft.password = !draft.password;
+                switch("ph-item-0-2", "Password", draft.password, t).on_press_tx(|s: &mut State, tx: &mut Tx| {
+                    s.photos.toggle_share_password();
+                    if matches!(&s.photos.dialog, Some(Dialog::Share(d)) if d.password) {
+                        tx.focus(SHARE_PASSWORD, false);
                     }
                 }),
             ],
             t,
         ),
     ];
-    let body = vec![
-        what,
-        list(0, None, items, t),
+    let mut body = vec![what, list(0, None, items, t)];
+    if draft.password {
+        let message = if draft.password_missing {
+            "Type a password, or turn Password off."
+        } else {
+            "Whoever opens the link needs this password. Send it another way than the link."
+        };
+        body.push(field::bare_field(
+            field::Bare {
+                key: "ph-share-field",
+                name: "Password for the link",
+                message: Some(message),
+                error: draft.password_missing,
+            },
+            &ui.share_password,
+            SHARE_PASSWORD,
+            |s: &mut State| &mut s.photos.share_password,
+            |input| input.autofocus().on_submit(|s: &mut State, _: &mut Tx| s.photos.confirm_dialog()),
+            t,
+        ));
+    }
+    body.push(
         note(
             "Copy link keeps it encrypted. Send a copy decrypts it, so it leaves Beebeeb's protection.",
             t,
         ),
-    ];
+    );
     let foot = vec![
         foot_button("ph-dlg-btn-0", "Send a copy\u{2026}", None, Tone::Plain, t, |b| {
             b.on_press(|s: &mut State| {

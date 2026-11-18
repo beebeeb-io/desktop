@@ -18,6 +18,9 @@ mod route_items;
 mod route_original;
 mod route_save_send;
 mod route_share;
+#[cfg(test)]
+#[path = "route_share_tests.rs"]
+mod route_share_tests;
 mod session;
 pub mod source;
 #[cfg(test)]
@@ -31,6 +34,7 @@ use std::collections::BTreeMap;
 use rune::{Cx, El, Key, KeyEvent, Tx};
 
 use crate::State;
+use crate::frames::files::actions_data::LinkExpiry;
 use crate::shell::app::{Event, Route, Section};
 use crate::theme::tokens;
 use source::{FixturePhotos, Kind, Photo, PhotoId, PhotosSource, SourceRef, Viewing};
@@ -58,10 +62,10 @@ pub enum Intent {
     Rename(PhotoId),
     Duplicate(PhotoId),
     /// Copy link in Share (DW-0107 says so afterwards).
+    /// The password, when `password`, is in `Ui::share_password`: an intent never carries a secret.
     CopyLink {
         id: PhotoId,
-        can_edit: bool,
-        days: Option<u32>,
+        expires: LinkExpiry,
         password: bool,
     },
     /// Link expires, pressed: the choices are the Files share dialog's.
@@ -105,10 +109,12 @@ pub struct SourcesDraft {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShareDraft {
-    pub can_edit: bool,
-    /// Days until the link expires; `None`: never.
-    pub days: Option<u32>,
+    pub expires: LinkExpiry,
+    /// The expiry choices are open.
+    pub menu: bool,
     pub password: bool,
+    /// Copy link was pressed with Password on and nothing typed.
+    pub password_missing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +190,8 @@ pub struct Ui {
     pub cursor: Option<(usize, usize)>,
     pub menu: Option<OpenMenu>,
     pub dialog: Option<Dialog>,
+    /// The password of the Share dialog's link: a secure field, wiped when the dialog closes and once Copy link used it.
+    pub share_password: rune::TextEdit,
     pub viewer: Option<Viewer>,
     /// The video this window started in the shell's player, and its handle (`PhotosSource::play_video`). The stage
     /// is live only for this item (`viewer::live_for`); it is stopped when the item is left.
@@ -212,6 +220,7 @@ impl Ui {
             cursor: None,
             menu: None,
             dialog: None,
+            share_password: rune::TextEdit::new("").secure(),
             viewer: None,
             playing: None,
             playing_file: None,
@@ -479,10 +488,12 @@ impl Ui {
     pub fn open_share(&mut self) {
         if self.viewer.is_some() {
             self.menu = None;
+            self.wipe_share_password();
             self.dialog = Some(Dialog::Share(ShareDraft {
-                can_edit: false,
-                days: Some(30),
+                expires: LinkExpiry::default(),
+                menu: false,
                 password: false,
+                password_missing: false,
             }));
         }
     }
@@ -497,6 +508,21 @@ impl Ui {
     /// Cancel, Esc, or Done where Done changes nothing (Details).
     pub fn close_dialog(&mut self) {
         self.dialog = None;
+        self.wipe_share_password();
+    }
+
+    /// Forget what was typed as a link's password.
+    pub fn wipe_share_password(&mut self) {
+        self.share_password = rune::TextEdit::new("").secure();
+    }
+
+    /// The Password switch: on shows the field; off wipes what was typed.
+    pub fn toggle_share_password(&mut self) {
+        if let Some(Dialog::Share(draft)) = &mut self.dialog {
+            draft.password = !draft.password;
+            draft.password_missing = false;
+        }
+        self.wipe_share_password();
     }
 
     /// The dialog's first button: Done in Photo sources and Details, Copy link in Share.
@@ -517,13 +543,18 @@ impl Ui {
                 }
                 self.relayout();
             }
-            Some(Dialog::Share(draft)) => {
+            Some(Dialog::Share(mut draft)) => {
+                // A link that should ask for a password never goes out without one (as in Files).
+                if draft.password && self.share_password.text.trim().is_empty() {
+                    draft.password_missing = true;
+                    self.dialog = Some(Dialog::Share(draft));
+                    return;
+                }
                 if let Some(viewer) = &self.viewer {
                     let id = viewer.id;
                     self.ask(Intent::CopyLink {
                         id,
-                        can_edit: draft.can_edit,
-                        days: draft.days,
+                        expires: draft.expires,
                         password: draft.password,
                     });
                 }
@@ -720,6 +751,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     if let Some(dialog) = &ui.dialog {
         front.push(overlay::scrim(&t));
         front.push(overlay::dialog(ui, dialog, cx.env().scale, &t));
+    }
+    if let Some(menu) = overlay::expiry_menu(ui, &t) {
+        front.push(menu);
     }
     // The folder dialog of Files, opened by Add a folder… / Move…: its own layer, in front of all of it.
     front.extend(crate::frames::files::dialogs::layer(s, &t));
