@@ -64,10 +64,11 @@ use beebeeb_engine::file_ops;
 use zeroize::Zeroize;
 
 use super::log;
+use beebeeb_office_protocol::office::{EditKind, EditOp, HitMode, Template};
 use crate::frames::viewers::kinds::{self, PdfDoc, PhotoDoc, Picture, Viewer};
 #[allow(unused_imports)] // the text readers moved to `viewer_text.rs`; tests reach them through `super::*`.
 use crate::frames::viewers::source::{
-    Body, Cut, Details, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
+    Body, Cut, Details, EditAnswer, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
     Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
 };
 
@@ -195,6 +196,38 @@ pub trait ViewerEngine: Send + Sync + 'static {
     /// Its number is handed to every read and save of this opening; a save of an earlier one is never its own.
     fn begin_opening(&self, _session: SessionGeneration, _file_id: &str) -> u64 {
         0
+    }
+    /// [`Engine::save_office_for`], under the engine's opening `opening`. A worker's.
+    fn save_office(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+        _base: i64,
+        _opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
+        Err(EditRefused::Failed)
+    }
+    /// [`Engine::save_office_copy_for`]. A worker's.
+    fn save_office_copy(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+        _device: &str,
+        _hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        Err(EditRefused::Failed)
+    }
+    /// [`Engine::create_office_for`]: the new file's id. A worker's.
+    fn create_office(
+        &self,
+        _session: SessionGeneration,
+        _folder: Option<&str>,
+        _name: &str,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<String, EditRefused> {
+        Err(EditRefused::Failed)
     }
     /// [`Engine::save_text_copy_for`]. A worker's.
     fn save_copy(
@@ -350,6 +383,38 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 
     fn begin_opening(&self, session: SessionGeneration, file_id: &str) -> u64 {
         self.engine.viewer_opening(session, file_id)
+    }
+
+    fn save_office(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+        base: i64,
+        opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
+        self.engine.save_office_for(session, file_id, bytes, base, opening)
+    }
+
+    fn save_office_copy(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+        device: &str,
+        hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        self.engine.save_office_copy_for(session, file_id, bytes, device, hhmm)
+    }
+
+    fn create_office(
+        &self,
+        session: SessionGeneration,
+        folder: Option<&str>,
+        name: &str,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<String, EditRefused> {
+        self.engine.create_office_for(session, folder, name, bytes)
     }
 }
 
@@ -1159,7 +1224,47 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn settled(&mut self, file_id: &str) -> Option<Settled> {
-        self.take_settled(file_id)
+        self.office_settled(file_id)
+    }
+
+    fn can_edit(&self, file_id: &str) -> bool {
+        self.office_can_edit(file_id)
+    }
+
+    fn edit(&mut self, file_id: &str, op: EditOp) -> bool {
+        self.office_edit(file_id, op)
+    }
+
+    fn hit(&mut self, file_id: &str, page: u32, x_pt: f32, y_pt: f32, mode: HitMode) -> bool {
+        self.office_hit(file_id, page, x_pt, y_pt, mode)
+    }
+
+    fn copy_selection(&mut self, file_id: &str) -> bool {
+        self.office_copy(file_id)
+    }
+
+    fn layouts(&mut self, file_id: &str) -> bool {
+        self.office_layouts(file_id)
+    }
+
+    fn insert_image(&mut self, file_id: &str, bytes: zeroize::Zeroizing<Vec<u8>>, png: bool) -> bool {
+        self.office_insert_image(file_id, bytes, png)
+    }
+
+    fn poll_edit(&mut self, file_id: &str) -> Option<EditAnswer> {
+        self.office_poll_edit(file_id)
+    }
+
+    fn create_document(&mut self, folder: Option<&str>, name: &str, kind: EditKind, template: Template) -> bool {
+        self.office_create(folder, name, kind, template)
+    }
+
+    fn save_document(&mut self, file_id: &str, base: u32) -> SaveOutcome {
+        self.office_save_document(file_id, base)
+    }
+
+    fn resolve_document(&mut self, file_id: &str, keep: Keep) -> SaveOutcome {
+        self.office_resolve_document(file_id, keep)
     }
 
     fn answers_later(&self) -> bool {
