@@ -112,6 +112,8 @@ pub enum Dialog {
     Sources(SourcesDraft),
     Share(ShareDraft),
     Details,
+    /// Rename: the name dialog of an open photo's menu (`route_items::rename`).
+    Rename(route_items::rename::Draft),
 }
 
 /// Which rendition of an open photo shows.
@@ -520,7 +522,8 @@ impl Ui {
                     });
                 }
             }
-            Some(Dialog::Details) | None => {}
+            // Its own button and Enter in its field ask for the rename (`route_items::rename::commit`).
+            Some(Dialog::Rename(_)) | Some(Dialog::Details) | None => {}
         }
     }
 
