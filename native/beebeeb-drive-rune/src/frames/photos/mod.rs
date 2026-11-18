@@ -602,7 +602,8 @@ impl Ui {
     pub fn show_preview(&mut self) {
         let Some(viewer) = &mut self.viewer else { return };
         let was = std::mem::replace(&mut viewer.original, Original::Preview);
-        if was != Original::Preview {
+        // A whole original already here is wiped when the viewer closes or another photo shows (memory only).
+        if matches!(was, Original::Downloading { .. }) {
             let id = viewer.id;
             self.ask(Intent::StopOriginal(id));
         }
