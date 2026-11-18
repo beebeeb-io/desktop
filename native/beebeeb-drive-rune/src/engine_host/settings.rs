@@ -469,12 +469,11 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
         Self::answers_for(pane)
     }
 
-    /// Report a problem (DW-0782) is a dialog over General with no support bundle behind it yet. The channel menu
-    /// (DW-0789) needs an updater; the release notes (DW-0789b) need a newer version on offer (an older one is never
+    /// Report a problem (DW-0782) opens: the engine writes the support bundle (`export_bundle`) and the person sends
+    /// the email themselves. The channel menu (DW-0789) needs an updater; the release notes (DW-0789b) need a newer version on offer (an older one is never
     /// offered, and the updater has no other notes).
     fn opens(&self, frame: &str) -> bool {
         match frame {
-            "DW-0782" => false,
             "DW-0789" => self.updates.is_some(),
             "DW-0789b" => self.updates.as_ref().is_some_and(updates::UpdatesPart::has_notes),
             _ => true,
