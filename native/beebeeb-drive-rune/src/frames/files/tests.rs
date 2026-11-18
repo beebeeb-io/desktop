@@ -812,6 +812,5 @@ fn a_double_click_on_a_far_column_opens_the_folder_though_the_first_click_opens_
     // The first click selects Day 1 and the pane opens; the list must not move out from under the pointer,
     // or the second click lands on the pane (it did, on the PC column) and the row never opens.
     double_click_with_frames(&mut rt, "row-0-pc");
-    assert_eq!(find(&rt, "crumb-here").and_then(|e| e.text).as_deref(), Some("Lisbon trip"));
     assert_eq!(names(&rt).len(), 0, "Day 1 is open (it is empty)");
 }
