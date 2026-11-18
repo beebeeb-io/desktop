@@ -238,6 +238,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                         None => (self.office.opener)(&shown.helper, shown.kind, bytes, wake),
                     };
                     if shown.edit.is_some() {
+                        self.engine.office_install_session_end_hook();
                         let recovery = recovery::Recovery::new(
                             Arc::new(recovery::EngineBlobs(self.engine.clone())),
                             shown.session,

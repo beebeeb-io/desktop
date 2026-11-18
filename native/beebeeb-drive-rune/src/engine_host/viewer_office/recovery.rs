@@ -196,6 +196,14 @@ impl Recovery {
         self.blobs.put(self.session, file_id, base, bytes).is_ok()
     }
 
+    /// The door a lock seals through: `file_id`'s blob, for this session (a refusal only means no safety net).
+    pub(crate) fn sink(&self, file_id: &str, base: i64) -> crate::engine_host::office_host::FlushSink {
+        let (blobs, session, file_id) = (self.blobs.clone(), self.session, file_id.to_string());
+        Arc::new(move |bytes| {
+            let _ = blobs.put(session, &file_id, base, bytes);
+        })
+    }
+
     /// When the file's blob is from, if there is one.
     pub(crate) fn offer(&self, file_id: &str) -> Option<RecoveryOffer> {
         let entries = self.blobs.list(self.session).ok()?;

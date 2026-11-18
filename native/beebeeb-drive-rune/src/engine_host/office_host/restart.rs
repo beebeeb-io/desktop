@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::edit::{EditAsked, EditCommand, EditEvent, EditFailure, Mode};
 use super::super::{OfficeState, Out, Purpose, RequestId, Starter, lock};
+use super::held::Held;
 use super::{Asked, Command, Doc, Phase, Worker};
 
 /// What the window says after a restart.
@@ -58,9 +59,13 @@ pub(super) struct State {
     restored: Option<(SystemTime, bool)>,
     /// Edits since the last snapshot or save.
     dirty: bool,
+    /// Edits since the last save landed (a snapshot does not clear it): what a lock must not lose.
+    pub(super) unsaved: bool,
+    /// The snapshot the worker asked for a lock, until it lands or fails.
+    pub(super) flush_id: Option<RequestId>,
     /// Edits sent so far, and the count when the save that is out was asked.
-    edit_seq: u64,
-    save_started: u64,
+    pub(super) edit_seq: u64,
+    pub(super) save_started: u64,
     last_input: Instant,
     dirty_since: Instant,
     own: u32,
@@ -75,6 +80,8 @@ impl State {
             restarting: false,
             restored: None,
             dirty: false,
+            unsaved: false,
+            flush_id: None,
             edit_seq: 0,
             save_started: 0,
             last_input: now,
@@ -100,6 +107,7 @@ impl<S: Starter> Worker<S> {
     pub(super) fn note_edit(&mut self) {
         let now = Instant::now();
         self.rs.edit_seq += 1;
+        self.rs.unsaved = true;
         if !self.rs.dirty {
             self.rs.dirty = true;
             self.rs.dirty_since = now;
@@ -122,6 +130,34 @@ impl<S: Starter> Worker<S> {
         } else {
             self.rs.dirty_since = Instant::now();
         }
+    }
+
+    /// A lock is coming ([`super::super::Shared::flush_begin`]): seal the work typed since the last save, now. The
+    /// helper is asked for a fresh snapshot; when none can be asked (it is restarting, or gone) the last one held is
+    /// sealed. Every way out says done, so the lock never waits for more than its bound.
+    pub(super) fn on_flush(&mut self) {
+        if !self.rs.unsaved {
+            return self.flush_complete();
+        }
+        if self.editable() {
+            self.rs.own = (self.rs.own + 1) % (u32::MAX - OWN_BASE);
+            let id = RequestId(OWN_BASE + self.rs.own);
+            self.rs.flush_id = Some(id);
+            self.edit_command(EditCommand::Save {
+                id,
+                purpose: Purpose::Snapshot,
+            });
+            return;
+        }
+        if let (Some(sink), Some(copy)) = (self.shared.flush_sink(), self.held.as_ref().and_then(Held::snapshot_copy)) {
+            sink(&copy);
+        }
+        self.flush_complete();
+    }
+
+    pub(super) fn flush_complete(&mut self) {
+        self.rs.flush_id = None;
+        self.shared.flush_complete();
     }
 
     /// A snapshot the helper refused: not again at once.

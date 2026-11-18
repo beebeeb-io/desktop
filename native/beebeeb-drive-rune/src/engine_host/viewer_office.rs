@@ -118,6 +118,8 @@ pub(crate) trait Host: Send {
     fn poll_edit(&mut self) -> Vec<HostEdit> {
         Vec::new()
     }
+    /// Where this editing session's unsaved work is sealed when a lock comes (the host's worker calls it).
+    fn set_flush_sink(&mut self, _sink: crate::engine_host::office_host::FlushSink) {}
 }
 
 /// What an editing session answered. Every payload passed the protocol's check in the host.
@@ -337,6 +339,10 @@ impl Host for Live {
     fn save_bytes(&mut self, purpose: Purpose) -> Option<u64> {
         let id = self.host.save_bytes(purpose).ok();
         self.number(id)
+    }
+
+    fn set_flush_sink(&mut self, sink: crate::engine_host::office_host::FlushSink) {
+        self.host.set_flush_sink(sink);
     }
 
     fn poll_edit(&mut self) -> Vec<HostEdit> {
@@ -719,6 +725,10 @@ impl OfficeView {
 
     /// Keep the snapshots this editing session hands over as `file_id`'s recovery blob (edited from version `base`).
     pub(crate) fn set_recovery(&mut self, recovery: recovery::Recovery, file_id: &str, base: i64) {
+        // A lock seals the unsaved work through the same door, on the host's thread, before the session ends.
+        if let Some(host) = self.host.get_mut() {
+            host.set_flush_sink(recovery.sink(file_id, base));
+        }
         self.tap = Some(recovery::Tap::new(recovery, file_id, base));
     }
 

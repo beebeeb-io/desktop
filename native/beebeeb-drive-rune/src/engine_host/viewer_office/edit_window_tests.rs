@@ -569,6 +569,39 @@ fn new_document_from_the_files_menu_makes_a_new_file_on_the_server() {
     assert_eq!(files.len(), 2, "the fake server holds the new document beside the first: {files:?}");
 }
 
+/// A lock before any snapshot timer fired: the host's flush seals the typed text through the door the editor registered
+/// (here the fake host's hook calls that door, as the real host's worker does), while the session is still in memory;
+/// after the unlock the reopened document offers it.
+#[test]
+fn text_typed_before_the_snapshot_timer_is_offered_after_a_lock_and_an_unlock() {
+    use beebeeb_engine::app::office_session_end::SessionEnding;
+    let mut w = window("lockflush");
+    w.sign_in();
+    w.open_in_the_editor();
+    // (The window's editor holds nothing unsaved, so the lock closes the document, as in the test below.)
+    assert_eq!(viewers::office_over::recovery_pending(&w.rt.state).len(), 0, "no snapshot was ever handed over: nothing kept yet");
+
+    let sink = w.helper.flush_sink().expect("the editor registered the door a lock seals through");
+    let last_text = Zeroizing::new(edited_version());
+    w.engine.set_office_session_end_hook(Arc::new(move |ending| {
+        if ending == SessionEnding::Lock {
+            sink(&last_text);
+        }
+    }));
+    w.engine.lock();
+    w.settle();
+    assert!(w.rt.state.viewer.ui.is_none(), "locked: no open file");
+    w.engine
+        .unlock_with_phrase(Zeroizing::new(TEST_PHRASE.to_string()))
+        .expect("the phrase unlocks");
+    w.until("the notice after unlock", |w| w.rt.state.actions.toast == Some(Toast::KeptEdits(1)));
+    w.open_in_the_editor();
+    assert!(
+        w.rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.office.recovery.is_some()),
+        "the reopened document offers the text typed before the lock"
+    );
+}
+
 /// Recovery: a snapshot the helper handed over is kept (sealed by the engine); after a lock and an unlock the
 /// window says so, the reopened document offers it, and Restore opens the editor on the kept bytes, unsaved.
 #[test]

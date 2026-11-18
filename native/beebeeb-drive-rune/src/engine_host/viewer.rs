@@ -237,6 +237,9 @@ pub trait ViewerEngine: Send + Sync + 'static {
     ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
         None
     }
+    /// [`Engine::set_office_session_end_hook`]: a lock seals the open editors' unsaved work, a sign-out ends them,
+    /// before the session does. Asked again for every editor; the same hook each time.
+    fn office_install_session_end_hook(&self) {}
     /// [`Engine::put_office_snapshot_for`]: keep an editing session's snapshot of `file_id` as its one recovery blob.
     fn recovery_put(
         &self,
@@ -466,6 +469,11 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         session: SessionGeneration,
     ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
         self.engine.scratch_for(session)
+    }
+
+    fn office_install_session_end_hook(&self) {
+        self.engine
+            .set_office_session_end_hook(std::sync::Arc::new(crate::engine_host::office_host::on_session_end));
     }
 
     fn recovery_put(
