@@ -1183,6 +1183,9 @@ mod tests {
             self.inner.poll(id)
         }
         fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.retry(id)
+        }
         fn save_document(&mut self, _: &str, _: u32) -> SaveOutcome {
             *self.saves.borrow_mut() += 1;
             SaveOutcome::Working
