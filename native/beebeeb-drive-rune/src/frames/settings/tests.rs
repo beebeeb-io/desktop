@@ -1033,6 +1033,20 @@ fn a_build_that_ships_never_shows_the_sample_content() {
     assert_eq!(on_settings(&rt), None, "Esc still leaves");
 }
 
+/// w14 bug 2: a not-wired pane keeps the settings sidebar and its Back to Drive, so only Esc is not the way out.
+#[test]
+fn a_not_built_pane_keeps_the_settings_sidebar_and_back() {
+    let mut state = init();
+    state.settings.source = Box::new(Unwired);
+    let mut rt = window(state, (958.0, 638.0));
+    ctrl_comma(&mut rt);
+    assert!(find(&rt, "not-built").is_some(), "the not-built frame");
+    assert_eq!(info(&rt, "settings-nav").role, "navigation");
+    assert!(info(&rt, "General-row").fill.a > 0.0, "General is selected");
+    click(&mut rt, "Back to Drive-row");
+    assert_eq!(on_settings(&rt), None, "Back leaves");
+}
+
 /// P2.8: what was open when the window left settings is not there on the next visit,
 /// whoever closed settings.
 #[test]

@@ -20,6 +20,8 @@ use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Icon, TextStyle, col, el, row};
 
 use super::kit;
+use crate::State;
+use crate::theme::icons_settings as ic;
 
 /// The settings sidebar is 224 pt wide on the board (the Drive sidebar is 220).
 pub const SIDEBAR_W: f32 = 224.0;
@@ -201,4 +203,47 @@ pub fn heading(title: &str, sub: Option<&str>, t: &Theme) -> El {
         h = h.child(kit::label("set-sub", sub, SUB, t.text_tertiary).wrap().w(454.22));
     }
     h
+}
+
+/// Where a sidebar item leads: the frame it shows. The frame lane owns what a press does.
+pub type Go = fn(&mut State, &'static str);
+
+/// The whole settings sidebar as the board draws it (Back to Drive, Settings, Drive): the one list
+/// every settings frame and the not-built placeholder share. `selected` is an item's label (none:
+/// no item selected); `previews`: list Thumbnails and previews; `go` is called with the board frame
+/// an item shows (`DW-0401`: Back to Drive).
+pub fn app_sidebar(selected: Option<&str>, previews: bool, go: Go, t: &Theme) -> El {
+    const SETTINGS: &[(&str, &Icon, &str)] = &[
+        ("General", &ic::GEAR, "DW-0701"),
+        ("Account", &ic::PEOPLE, "DW-A51"),
+        ("Security", &ic::SHIELD, "DW-A52"),
+        ("Devices and sessions", &ic::LAPTOP, "DW-A55"),
+        ("Notifications", &ic::BELL, "DW-0750"),
+    ];
+    // The board draws the Drive group's items with a chevron where the other group has a glyph.
+    const DRIVE: &[(&str, &Icon, &str)] = &[
+        ("Storage", &ic::CHEV_RIGHT, "DW-0712"),
+        ("Backups", &ic::CHEV_RIGHT, "DW-0737"),
+        ("Sync and File Explorer", &ic::CHEV_RIGHT, "DW-0746"),
+        ("Thumbnails and previews", &ic::CHEV_RIGHT, "DW-0744"),
+        ("Bandwidth", &ic::CHEV_RIGHT, "DW-0785"),
+    ];
+    let items = |list: &'static [(&'static str, &'static Icon, &'static str)]| -> Vec<El> {
+        list.iter()
+            // Not listed where nothing answers for it: a pane that only says "not built yet" is a dead door.
+            .filter(|(label, _, _)| previews || *label != "Thumbnails and previews")
+            .map(|&(label, icon, frame)| {
+                nav_item(label, icon, 16.0, selected == Some(label), t).on_press(move |s: &mut State| go(s, frame))
+            })
+            .collect()
+    };
+    let back = nav_item("Back to Drive", &ic::BACK, 15.0, false, t)
+        .shortcut_hint("Esc")
+        .on_press(move |s: &mut State| go(s, "DW-0401"));
+    sidebar(
+        back,
+        vec![("Settings", items(SETTINGS)), ("Drive", items(DRIVE))],
+        "Settings open inside the app. Esc goes back.",
+        t,
+    )
 }

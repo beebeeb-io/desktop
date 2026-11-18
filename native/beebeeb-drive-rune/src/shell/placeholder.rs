@@ -67,6 +67,10 @@ pub fn around(s: &State, cx: &mut Cx<State>, content: El) -> El {
     let t = tokens::theme(cx.system_dark());
     let hairline = 1.0 / cx.env().scale;
     let in_drive = matches!(s.shell.app.screen(), Screen::Drive(_));
+    let in_settings = match s.shell.app.screen() {
+        Screen::Settings(pane) => Some(pane),
+        _ => None,
+    };
     let content = col()
         .key("content-area")
         .grow(1.0)
@@ -75,6 +79,15 @@ pub fn around(s: &State, cx: &mut Cx<State>, content: El) -> El {
         .center()
         .child(content);
     let mut body = row().key("body").grow(1.0).w_full();
+    // Inside settings the sidebar is the settings one, so a pane that is not built still has a way back.
+    if let Some(pane) = in_settings {
+        body = body.child(ui::settings_shell::app_sidebar(
+            Some(pane.label()),
+            true,
+            crate::frames::settings::go,
+            &t,
+        ));
+    }
     // Inside Drive the caption and the sidebar are the real ones and stay. The gate and
     // settings have their own left side (the brand panel, the settings sidebar), so there the
     // caption is only the strip that moves the window and holds Windows' buttons.

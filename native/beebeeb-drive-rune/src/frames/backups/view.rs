@@ -32,47 +32,17 @@ pub(super) fn thousands(n: u32) -> String {
     out
 }
 
-/// The settings sidebar with Backups selected. The same items, in the same order, as
-/// `frames::settings` draws them; a press goes through `settings::go`, which keeps the
-/// shell's route in step.
+/// The settings sidebar with Backups selected: the shared list; Backups itself goes back to the
+/// section's own page, the rest through `settings::go`, which keeps the shell's route in step.
 fn sidebar(t: &Theme) -> El {
-    const SETTINGS: &[(&str, &rune::Icon, &str)] = &[
-        ("General", &ic::GEAR, "DW-0701"),
-        ("Account", &ic::PEOPLE, "DW-A51"),
-        ("Security", &ic::SHIELD, "DW-A52"),
-        ("Devices and sessions", &ic::LAPTOP, "DW-A55"),
-        ("Notifications", &ic::BELL, "DW-0750"),
-    ];
-    const DRIVE: &[(&str, &rune::Icon, &str)] = &[
-        ("Storage", &ic::CHEV_RIGHT, "DW-0712"),
-        ("Backups", &ic::CHEV_RIGHT, "DW-0737"),
-        ("Sync and File Explorer", &ic::CHEV_RIGHT, "DW-0746"),
-        ("Thumbnails and previews", &ic::CHEV_RIGHT, "DW-0744"),
-        ("Bandwidth", &ic::CHEV_RIGHT, "DW-0785"),
-    ];
-    let items = |sections: &'static [(&'static str, &'static rune::Icon, &'static str)]| -> Vec<El> {
-        sections
-            .iter()
-            .map(|&(label, icon, frame)| {
-                let item = shell::nav_item(label, icon, 16.0, label == "Backups", t);
-                if label == "Backups" {
-                    // Already here: back to the section's own page.
-                    item.on_press(|s: &mut State| s.backups.show(Page::Section))
-                } else {
-                    item.on_press(move |s: &mut State| settings::go(s, frame))
-                }
-            })
-            .collect()
-    };
-    let back = shell::nav_item("Back to Drive", &ic::BACK, 15.0, false, t)
-        .shortcut_hint("Esc")
-        .on_press(|s: &mut State| settings::go(s, "DW-0401"));
-    shell::sidebar(
-        back,
-        vec![("Settings", items(SETTINGS)), ("Drive", items(DRIVE))],
-        "Settings open inside the app. Esc goes back.",
-        t,
-    )
+    fn go(s: &mut State, frame: &'static str) {
+        if frame == "DW-0737" {
+            s.backups.show(Page::Section);
+        } else {
+            settings::go(s, frame);
+        }
+    }
+    shell::app_sidebar(Some("Backups"), true, go, t)
 }
 
 /// The status card: all backed up with Back up now, or a backup running with its bar.
