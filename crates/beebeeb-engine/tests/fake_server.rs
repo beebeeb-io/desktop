@@ -91,7 +91,8 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
     assert_eq!(engine.gate(), GateState::Ready);
 
     let written = lines.lock().unwrap().clone();
-    assert_eq!(served.load(Ordering::SeqCst), 6);
+    // Six sign-in requests and the one plan check at the unlock (the No plan gate).
+    assert_eq!(served.load(Ordering::SeqCst), 7);
     assert_eq!(fake.requests().len(), 0, "the server keeps no request");
     // The secrets check runs before the exact-match assertion so it guards against a future change to the access-line
     // format that leaks a secret (P2-4 of the PR #338 review).
