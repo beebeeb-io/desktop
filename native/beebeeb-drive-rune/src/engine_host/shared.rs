@@ -54,8 +54,9 @@ use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
 use crate::frames::shared::source::{
     Access, Invitation, InviteResult, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped, Request,
-    RequestState, RowTarget, SharedSource,
+    RequestForm, RequestState, RowTarget, SharedSource,
 };
+use crate::frames::files::link::LinkText;
 use crate::ui::file_list::PcState;
 
 #[cfg(test)]
@@ -112,6 +113,8 @@ pub struct EngineSharedSource<C: CredentialStores> {
     invite_answers: VecDeque<(String, InviteResult)>,
     /// Slice B4 (`shared_offline.rs`): what it keeps between a press and its answer. Empty until it binds.
     shared_offline: shared_offline::SharedOfflineCalls,
+    /// `shared_requests.rs`: the links a new request made, until the window takes them.
+    shared_requests: shared_requests::RequestCalls,
 }
 
 /// The lists as the view draws them.
@@ -165,6 +168,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             inviting: HashSet::new(),
             invite_answers: VecDeque::new(),
             shared_offline: Default::default(),
+            shared_requests: Default::default(),
         }
     }
 
@@ -558,6 +562,14 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.invite_answers.pop_front()
     }
 
+    fn create_request(&mut self, form: RequestForm) -> bool {
+        self.shared_requests_create(form)
+    }
+
+    fn take_link(&mut self) -> Option<LinkText> {
+        self.shared_requests_take_link()
+    }
+
     fn loaded(&self) -> Loaded {
         if !self.engine.has_session() {
             Loaded::SignedOut
@@ -612,6 +624,7 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
     }
 
     fn forget(&mut self) {
+        self.shared_requests_forget();
         self.held = None;
         self.again = false;
         self.asked = false;

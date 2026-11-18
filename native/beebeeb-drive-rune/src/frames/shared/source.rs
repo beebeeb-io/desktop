@@ -314,6 +314,10 @@ pub trait SharedSource {
     fn create_request(&mut self, _form: RequestForm) -> bool {
         false
     }
+    /// A link a source made (a new request's) for the clipboard: only the window's `Tx` can put it there. Taken once.
+    fn take_link(&mut self) -> Option<crate::frames::files::link::LinkText> {
+        None
+    }
     /// The item behind a row, when the source knows.
     fn target_of(&self, _id: &str) -> Option<RowTarget> {
         None

@@ -136,6 +136,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         ui.invite_answered(&share, result);
         changed = true;
     }
+    // A link the source made (a new request's): only this `Tx` can put it on the clipboard.
+    let mut copied = false;
+    while let Some(link) = ui.source.take_link() {
+        tx.copy(link.expose());
+        copied = true;
+    }
+    if copied {
+        s.show_toast(crate::frames::files::Toast::LinkCopied, tx);
+        changed = true;
+    }
+    let ui = &mut s.frames.shared;
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }

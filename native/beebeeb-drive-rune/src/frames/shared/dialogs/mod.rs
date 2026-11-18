@@ -24,6 +24,7 @@ mod confirm;
 mod item_view;
 mod kit;
 mod link_change;
+pub mod request_menus;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -185,6 +186,8 @@ pub struct Fields {
     /// New request's Title and Note.
     pub title: TextEdit,
     pub note: TextEdit,
+    /// New request's four menus.
+    pub request: request_menus::Pick,
     /// Invite someone's Email.
     pub email: TextEdit,
     /// The account password Empty Trash and Delete permanently ask: secure, wiped whenever a dialog opens or closes
@@ -209,6 +212,7 @@ impl Default for Fields {
         Fields {
             title: TextEdit::new(""),
             note: TextEdit::new(""),
+            request: Default::default(),
             email: TextEdit::new(""),
             password: TextEdit::new("").secure(),
             link_password: TextEdit::new("").secure(),
@@ -234,6 +238,7 @@ impl Fields {
             edit.clear();
             edit.focused = false;
         }
+        self.request = Default::default();
         self.problem = None;
         self.sending = false;
         self.unlisted = None;
