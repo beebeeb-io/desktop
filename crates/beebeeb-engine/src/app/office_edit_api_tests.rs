@@ -277,3 +277,44 @@ fn office_edit_create_refuses_a_name_that_exists_and_queues_a_new_one() {
         Some(EditRefused::Unavailable)
     );
 }
+
+const MARKER: &str = "word/INVENTED-MARKER-7731.xml";
+
+fn marked_package() -> Zeroizing<Vec<u8>> {
+    Zeroizing::new(zip_of(&["[Content_Types].xml", "word/document.xml", MARKER]))
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn office_edit_the_staged_copy_is_sealed_under_the_account_key_and_opens_to_exactly_the_bytes() {
+    use beebeeb_core::kdf::MasterKey;
+    use beebeeb_core::local_seal::open_recovery_snapshot;
+    let (engine, _d, _r, db) = setup();
+    let session = engine.acct.session_generation();
+    let opening = engine.viewer_opening(session, DOC);
+    let bytes = marked_package();
+    assert_eq!(
+        engine.save_office_for(session, DOC, &bytes, 4, opening),
+        Ok(SaveEnd::Queued { base: 4 })
+    );
+    let ops = db.list_operations_for_file(DOC).unwrap();
+    assert_eq!(ops.len(), 1);
+    let op = &ops[0];
+    // The op says so, so the upload opens it.
+    let metadata: serde_json::Value = serde_json::from_str(op.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["staged_seal"], "office-v1");
+    // The staged file holds no byte of the document.
+    let staged = std::fs::read(op.payload_path.as_deref().unwrap()).unwrap();
+    assert!(!contains(&staged, MARKER.as_bytes()), "a marker of the document is in the staged copy");
+    assert!(!contains(&staged, b"[Content_Types].xml"));
+    assert_eq!(staged.len(), bytes.len() + 50);
+    // A restart keeps only the account key: that opens it to exactly the bytes; another key or another file does not.
+    let (meta, plain) = open_recovery_snapshot(&MasterKey::from_bytes([7; 32]), DOC, &staged).unwrap();
+    assert_eq!(&plain[..], &bytes[..]);
+    assert_eq!((meta.base_version, meta.kind), (4, 1));
+    assert!(open_recovery_snapshot(&MasterKey::from_bytes([8; 32]), DOC, &staged).is_err());
+    assert!(open_recovery_snapshot(&MasterKey::from_bytes([7; 32]), FOLDER, &staged).is_err());
+}

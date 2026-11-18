@@ -241,8 +241,10 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// The one place the saved bytes are staged for the upload: what every local edit does today (a staged copy of the
-    /// bytes, held until the upload lands, then the queued write). Sealed staging would change this function only.
+    /// The one place the saved bytes are staged for the upload: sealed with core's account-bound recovery-snapshot
+    /// seal (never the session scratch key: a staged save must survive a restart), so the staging folder holds no byte
+    /// of the document. The upload of the op opens it as it reads. Same checks and the same one write path as
+    /// [`Self::save_bytes_for`].
     fn stage_office_bytes(
         &self,
         session: SessionGeneration,
@@ -251,7 +253,23 @@ impl<C: CredentialStores> Engine<C> {
         base: i64,
         opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
-        self.save_bytes_for(session, file_id, bytes, base, opening)
+        let kind = package_kind(bytes).ok_or(EditRefused::Failed)?;
+        self.save_bytes_sealed_for(session, file_id, bytes, base, opening, Some(kind))
+    }
+}
+
+/// The kind core records for a package (1 docx, 2 xlsx, 3 pptx), by the part names in its directory (the end).
+pub(crate) fn package_kind(package: &[u8]) -> Option<u8> {
+    let tail = &package[package.len().saturating_sub(8 * 1024 * 1024)..];
+    let has = |needle: &[u8]| tail.windows(needle.len()).any(|w| w == needle);
+    if has(b"word/document.xml") {
+        Some(1)
+    } else if has(b"xl/workbook.xml") {
+        Some(2)
+    } else if has(b"ppt/presentation.xml") {
+        Some(3)
+    } else {
+        None
     }
 }
 
