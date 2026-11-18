@@ -2,6 +2,7 @@
 
 use super::parts::table::{Extra, Kind, Row, Thumb};
 use crate::ui::file_list::PcState;
+use zeroize::Zeroizing;
 
 /// Someone wants to share something with the person (DW-0501's card).
 #[derive(Clone, Debug, PartialEq)]
@@ -217,6 +218,44 @@ impl InviteResult {
     }
 }
 
+/// One change to a live link (DW-0511's Change expiry, Password).
+#[derive(Clone, PartialEq)]
+pub enum LinkEdit {
+    /// Hours from now; `None` = never.
+    Expiry(Option<u32>),
+    /// `None` = remove the password.
+    Password(Option<Zeroizing<String>>),
+}
+
+impl std::fmt::Debug for LinkEdit {
+    /// Never names a password.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkEdit::Expiry(hours) => f.debug_tuple("Expiry").field(hours).finish(),
+            LinkEdit::Password(Some(_)) => f.write_str("Password(set)"),
+            LinkEdit::Password(None) => f.write_str("Password(remove)"),
+        }
+    }
+}
+
+/// What a new file request asks for (DW-0504).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RequestForm {
+    pub title: String,
+    pub note: String,
+    pub target_folder: Option<String>,
+    pub max_files: Option<u32>,
+    pub max_total_bytes: Option<u64>,
+    pub expires_in_hours: Option<u32>,
+}
+
+/// What a row of Shared is, for the item behind it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowTarget {
+    Item { id: String, is_folder: bool },
+    Folder(String),
+}
+
 /// What [`SharedSource::pump`] took in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pumped {
@@ -251,6 +290,30 @@ pub trait SharedSource {
     fn close_request(&mut self, id: &str) -> bool;
     /// Take a closed or expired request out of the list.
     fn remove_request(&mut self, id: &str) -> bool;
+    /// The link row's link to the clipboard. The default answers "Not available yet" (`false`).
+    fn copy_row_link(&mut self, _id: &str) -> bool {
+        false
+    }
+    /// Change a live link's expiry or password. Default: not available.
+    fn change_link(&mut self, _share_id: &str, _change: LinkEdit) -> bool {
+        false
+    }
+    /// Change an open request's expiry (`None` = never). Default: not available.
+    fn change_request_expiry(&mut self, _id: &str, _hours: Option<u32>) -> bool {
+        false
+    }
+    /// Leave a share someone made with the person. Default: not available.
+    fn leave(&mut self, _id: &str) -> bool {
+        false
+    }
+    /// Make a file request. Default: not available.
+    fn create_request(&mut self, _form: RequestForm) -> bool {
+        false
+    }
+    /// The item behind a row, when the source knows.
+    fn target_of(&self, _id: &str) -> Option<RowTarget> {
+        None
+    }
     /// The people of a share with people, the owner first (DW-0511). Empty: no such share.
     fn members(&self, share: &str) -> Vec<Member>;
     /// What one person may do with a share, changed at once (DW-0512). `false`: no such
