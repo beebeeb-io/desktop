@@ -45,7 +45,9 @@ fn offline_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
 
 pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
     let Some((item, d)) = item else {
-        return el().key("detail-pane-empty");
+        // Its place stays, bare: the list must not shrink under the pointer when a click selects a row, or
+        // the second click of a double-click lands on the pane that just opened and the row never opens.
+        return el().key("detail-pane-empty").w(PANE_W).h_full();
     };
     // Free up space, under the Available offline card: where the item has a copy on this PC.
     let on_this_pc = matches!(item.pc_status.as_deref(), Some("on_this_pc" | "available_offline"));
