@@ -334,8 +334,9 @@ fn source(fake: &Arc<Fake>, platform: Arc<FakePlatform>) -> EngineDriveSettings<
 fn settle(source: &mut EngineDriveSettings<Fake>) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let (_, more) = source.pump(0.0);
-        if !more && source.idle() {
+        // `more` stays true while App activity samples, so only the workers' idleness ends the wait.
+        source.pump(0.0);
+        if source.idle() {
             source.pump(0.0);
             return;
         }
