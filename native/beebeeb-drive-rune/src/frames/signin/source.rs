@@ -273,6 +273,12 @@ pub enum ScreenPasswordOutcome {
 
 pub trait SignInSource {
     fn gate(&self) -> GateState;
+    /// The gate screens' "Try again" and "Check again" (w16-gates): read the gate once more and publish it, so
+    /// `gate()` follows the credential store and the plan check. Never the start path. The default asks nothing.
+    fn recheck_gate(&mut self) {}
+    /// The no-plan screen's "Sign out": the existing sign-out of this app (the engine's `sign_out_for`), with the
+    /// gate closed. The window follows the engine's gate when it ends. The default does nothing.
+    fn sign_out_from_gate(&mut self) {}
     /// `None`: no other Beebeeb app is signed in here, or Windows Hello is not set up (DW-A03).
     fn shared_session(&self) -> Option<SharedSession>;
     /// Engine: `auth_v2::sign_in` (OPAQUE login + vault unlock).

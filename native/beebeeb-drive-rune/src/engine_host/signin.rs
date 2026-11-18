@@ -465,6 +465,33 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         map_gate_signin(self.engine.view().gate)
     }
 
+    /// w16-gates: the gate read once more and published, on the worker (the credential store may be slow to answer).
+    fn recheck_gate(&mut self) {
+        let job: Job<C> = Box::new(|engine| {
+            engine.recheck_gate();
+            engine.wake_host();
+        });
+        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
+            log("sign-in: the gate re-check could not be passed to the engine");
+        }
+    }
+
+    /// w16-gates: the no-plan screen's sign-out: the session as it is now, signed out by the engine's own call.
+    fn sign_out_from_gate(&mut self) {
+        let job: Job<C> = Box::new(|engine| {
+            if engine.has_session() {
+                let session = engine.session_turn();
+                if engine.sign_out_for(session).is_err() {
+                    log("sign-in: the sign-out from the gate was not done");
+                }
+            }
+            engine.wake_host();
+        });
+        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
+            log("sign-in: the sign-out could not be passed to the engine");
+        }
+    }
+
     /// No other Beebeeb app's session is read on this computer, and no Windows Hello prompt exists for this app
     /// yet: the Continue-as card is never offered, so `begin_hello` is never reached from a screen.
     fn shared_session(&self) -> Option<SharedSession> {

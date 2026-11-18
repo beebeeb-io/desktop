@@ -57,6 +57,7 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A50 | Password updated | built, 0 |
 | DW-0009 | Beebeeb is locked (the main window, gate `Locked`) | built (`before_files.rs`); geometry, text, icons and fills 0 failing in both themes; pixels NOT measured (measured 2026-11-13 in the integration loop: not at 0): `--snap` of a gate scene draws the Files window (the regression on `v2-native`), and the board draws Windows Hello's prompt over the frame |
 | DW-0014 | No plan yet (the main window, gate `NoPlan`) | built (`before_files.rs`); geometry, text, icons and fills 0 failing in both themes; pixels NOT measured (measured 2026-11-13 in the integration loop: not at 0): the same `--snap` regression |
+| (no board id) | The credential store did not answer (the main window, gate `KeyStoreUnavailable`): Try again, Get help, Quit | built (`keystore.rs`, w16-gates), no board frame to measure against; words from the engine gate and the tray |
 | DW-0380, DW-0301 to DW-0305 | The first-time guide | see "The first-time guide" below |
 
 Built: 52 of 59 here (DW-0009 and DW-0014 in `before_files.rs`, DW-A31 to A44 in `create.rs` and its files, the 6 of
