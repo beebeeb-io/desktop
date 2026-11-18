@@ -264,6 +264,7 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     if SEARCH_ON_ENGINE {
         s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine.clone()));
     }
+    // No words of its own: Shared and Trash say what Files says (`frames::sync_words`, `frames::pc_summary`).
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
     // Photos and every grid of thumbnails read the engine (`engine_host::photos`, `engine_host::thumbs`): one store
     // of thumbnails for both, in memory only, the session's alone.

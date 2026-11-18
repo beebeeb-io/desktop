@@ -136,6 +136,24 @@ impl PcStatus for UnwiredPc {
     }
 }
 
+/// The sync state in words for the status line of Shared and Trash: the PC's words where it has some (the board's
+/// sample, a test's), else what Files' own status line says (`FilesSource::sync_state`), so the three agree.
+/// Empty: nothing syncs here (no dot, no word).
+pub fn sync_words(s: &State) -> String {
+    let own = s.frames.pc.sync_words();
+    if own.is_empty() {
+        s.actions.source.sync_state().unwrap_or_default()
+    } else {
+        own
+    }
+}
+
+/// How much is on this PC, for a section with nothing of its own to count: the PC's summary, else Files' own words.
+pub fn pc_summary(s: &State) -> String {
+    let own = s.frames.pc.summary();
+    if own.is_empty() { files::window::pc_summary(s) } else { own }
+}
+
 /// What the lane's groups keep on `State` (ONE field: `State::frames`).
 pub struct Ui {
     pub shared: shared::SharedUi,

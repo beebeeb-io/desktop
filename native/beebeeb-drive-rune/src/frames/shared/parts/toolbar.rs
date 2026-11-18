@@ -45,16 +45,13 @@ fn search_field(s: &State, t: &Theme) -> El {
     )
 }
 
-/// The search field's keys while it has focus: Enter asks for what is typed (the Search
-/// group shows the results, DW-0802). Every other key is the field's.
+/// The search field's keys while it has focus: Enter asks for what is typed; the section lists only the rows whose
+/// name holds it, and Enter on an empty field lists them all again (`actions_sort`). Every other key is the field's.
 pub fn search_key(s: &mut State, ev: &rune::KeyEvent) -> bool {
     if ev.key != rune::Key::Enter || !crate::frames::plain(ev) {
         return false;
     }
     let typed = s.frames.search.text.trim().to_string();
-    if typed.is_empty() {
-        return false;
-    }
     s.frames.intents.push(crate::frames::Intent::Do("search", typed));
     true
 }

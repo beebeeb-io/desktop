@@ -166,6 +166,8 @@ fn row(id: &str, name: &str, kind: Kind, date: &str, size: &str, from: &str) -> 
         size: size.into(),
         extra: Extra::Words(format!("From {from}")),
         pc: None,
+        bytes: None,
+        at: None,
     }
 }
 

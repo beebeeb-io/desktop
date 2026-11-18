@@ -713,6 +713,8 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
             },
             // Whether it is on this PC is not known here: no claim.
             pc: None,
+            bytes: (!item.is_folder).then(|| item.size_bytes.max(0) as u64),
+            at: seconds_of(&item.shared_at),
             name: item.name,
         };
         if item.waiting {

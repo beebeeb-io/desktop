@@ -14,7 +14,7 @@ use crate::State;
 use crate::frames::shared::dialogs::{Dialog, PASSWORD_INPUT};
 use crate::frames::shared::parts::controls::{ButtonKind, button};
 use crate::frames::shared::parts::menu::{Entry, Open, Took, menu};
-use crate::frames::shared::parts::table::{Columns, header, rows, table_row};
+use crate::frames::shared::parts::table::{Columns, Row, header, rows, table_row};
 use crate::frames::shared::parts::toolbar::{Bar, toolbar};
 use crate::frames::shared::parts::{chrome, empty};
 use crate::frames::{self, Intent};
@@ -46,6 +46,8 @@ pub struct TrashUi {
     was_open: bool,
     /// A sync check finished and the list is to be read again: waits while a menu or a dialog is open.
     pub(crate) reread_due: bool,
+    /// The list's order and what the toolbar's search filters it by (`shared::actions_sort`).
+    pub sort: crate::frames::shared::actions_sort::SectionSort,
 }
 
 /// How often the poll runs again while a read or a restore is on its way.
@@ -143,6 +145,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     changed
 }
 
+use crate::frames::shared::actions_sort as sort;
+
+/// The open menu's name, entries and width: Sort's under the toolbar, else the selected item's.
+fn menu_of(open: &Open) -> (&'static str, &'static [Entry], f32) {
+    if sort::is_sort_menu(open) {
+        ("Sort by", sort::SORT_MENU, 180.0)
+    } else {
+        ("Trash item", MENU, 220.0)
+    }
+}
+
 const MENU: &[Entry] = &[
     Entry::new("Restore"),
     Entry::new("Details").keys("Alt+Enter"),
@@ -152,6 +165,13 @@ const MENU: &[Entry] = &[
 /// Do what the menu's item `n` says, for the selected item; focus goes back to it (or to the
 /// row that took its place).
 fn pick(s: &mut State, n: usize, tx: &mut Tx) {
+    if s.frames.trash.menu.as_ref().is_some_and(sort::is_sort_menu) {
+        s.frames.trash.menu = None;
+        s.frames.trash.sort.pick(n);
+        s.frames.trash.selected = None;
+        s.frames.trash.selected_item = None;
+        return;
+    }
     s.frames.trash.menu = None;
     let id = s.frames.trash.selected_id();
     match (n, id) {
@@ -211,11 +231,17 @@ impl Default for TrashUi {
             seen: None,
             was_open: false,
             reread_due: false,
+            sort: Default::default(),
         }
     }
 }
 
 impl TrashUi {
+    /// The rows as drawn: the source's, in the Sort and the filter of the toolbar's search.
+    pub fn rows(&self) -> Vec<Row> {
+        self.sort.arrange(self.source.items())
+    }
+
     /// A Trash on `source`, nothing selected.
     pub fn on(source: Box<dyn TrashSource>) -> Self {
         TrashUi {
@@ -228,7 +254,7 @@ impl TrashUi {
     pub fn selected_id(&self) -> Option<String> {
         self.selected_item
             .clone()
-            .or_else(|| self.source.items().get(self.selected?).map(|item| item.id.clone()))
+            .or_else(|| self.rows().get(self.selected?).map(|item| item.id.clone()))
     }
 
     /// Move the selection to row `i` and its item; focus goes with it.
@@ -240,7 +266,7 @@ impl TrashUi {
     /// Select row `i` and the item on it.
     pub fn pick_row(&mut self, i: usize) {
         self.selected = Some(i);
-        self.selected_item = self.source.items().get(i).map(|item| item.id.clone());
+        self.selected_item = self.rows().get(i).map(|item| item.id.clone());
     }
 
     /// The list changed: the selection stays on its ITEM (its row may have moved), or ends when the item is gone.
@@ -248,7 +274,7 @@ impl TrashUi {
         let Some(id) = self.selected_item.as_deref() else {
             return;
         };
-        match self.source.items().iter().position(|item| item.id == id) {
+        match self.rows().iter().position(|item| item.id == id) {
             Some(i) => self.selected = Some(i),
             None => {
                 self.selected = None;
@@ -263,9 +289,9 @@ impl TrashUi {
         let Some(id) = self.selected_id() else {
             return false;
         };
-        let at = self.source.items().iter().position(|item| item.id == id);
+        let at = self.rows().iter().position(|item| item.id == id);
         let done = self.source.restore(&id);
-        let items = self.source.items();
+        let items = self.rows();
         let left = items.len();
         self.selected = at.or(self.selected).filter(|_| left > 0).map(|i| i.min(left - 1));
         self.selected_item = self.selected.and_then(|i| items.get(i)).map(|item| item.id.clone());
@@ -444,7 +470,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     let t = tokens::theme(cx.system_dark());
     let ui = &s.frames.trash;
-    let items = ui.source.items();
+    let items = ui.rows();
     let totals = ui.source.totals();
     let is_empty = totals.items == 0;
     // A list that is not here yet (loading, offline, signed out…) says so; never "Trash is empty" for it.
@@ -548,11 +574,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         body,
         "Items in Trash are deleted for good after 30 days",
         ui.menu.as_ref().map(|open| {
+            let (name, entries, w) = menu_of(open);
             menu(
-                "Trash item",
-                MENU,
+                name,
+                entries,
                 open,
-                220.0,
+                w,
                 window,
                 &t,
                 pick,
@@ -572,7 +599,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 /// for the search.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if let Some(open) = s.frames.trash.menu.as_mut() {
-        match open.on_key(ev, MENU, tx) {
+        match open.on_key(ev, menu_of(open).1, tx) {
             Took::Pick(n) => pick(s, n, tx),
             Took::Close => close_menu(s, tx),
             Took::Key => {}
@@ -590,7 +617,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Some(key) if !key.starts_with("row-") => return false,
         _ => {}
     }
-    let count = s.frames.trash.source.items().len();
+    let count = s.frames.trash.rows().len();
     if count == 0 {
         return false;
     }

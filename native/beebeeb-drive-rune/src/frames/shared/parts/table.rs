@@ -59,6 +59,10 @@ pub struct Row {
     pub size: String,
     pub extra: Extra,
     pub pc: Option<PcState>,
+    /// The size in bytes, as the source knows it (a folder: `None`): what Sort by size orders by, never the drawn words.
+    pub bytes: Option<u64>,
+    /// The time the date column shows, Unix seconds, as the source knows it: what Sort by date orders by.
+    pub at: Option<i64>,
 }
 
 /// The column set of one section.
