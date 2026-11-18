@@ -66,9 +66,8 @@ struct Grid {
     /// What the last frame drew, for the handlers that run between frames.
     geometry: Geometry,
     room: (f32, f32),
-    /// The cell box's field, and whether it is being typed in (else it shows the current cell's name).
+    /// The cell box's field.
     name: TextEdit,
-    naming: bool,
     /// The grid has been drawn since the file was opened, and still owes the keyboard its first focus.
     opened: bool,
     wants_focus: bool,
@@ -83,7 +82,6 @@ impl Grid {
             geometry: Geometry::default(),
             room: (800.0, 600.0),
             name: TextEdit::new(String::new()),
-            naming: false,
             opened: false,
             wants_focus: false,
         }
@@ -132,7 +130,6 @@ pub fn reset() {
         g.dragging = false;
         g.name.clear();
         g.name.focused = false;
-        g.naming = false;
         g.opened = false;
         g.wants_focus = false;
     });
@@ -158,7 +155,6 @@ fn leave_namebox(tx: &mut Tx) {
     with(|g| {
         g.name.clear();
         g.name.focused = false;
-        g.naming = false;
     });
     tx.focus(GRID_KEY, false);
 }
@@ -187,7 +183,8 @@ fn namebox_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 pub fn cell_box(view: &SheetView, t: &Theme) -> rune::El {
     let name = sheets::a1(view.current);
     with(|g| {
-        if !g.naming {
+        // Rune keeps `focused` for a field the pointer or Tab put the keyboard in; otherwise it shows the cell's name.
+        if !g.name.focused {
             g.name.replace_text(name.clone());
         }
     });
@@ -199,15 +196,6 @@ pub fn cell_box(view: &SheetView, t: &Theme) -> rune::El {
         .caret(t.accent_deep, t.selection)
         .on_edit(namebox_edit)
         .on_input_key(namebox_key)
-        .on_press_tx(|_: &mut State, _: &mut Tx| {
-            with(|g| {
-                if !g.naming {
-                    g.naming = true;
-                    g.name.clear();
-                }
-                g.name.focused = true;
-            });
-        })
         .w(sheets::CELLBOX_W)
 }
 
@@ -657,7 +645,6 @@ fn on_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
                 return;
             };
             with(|g| {
-                g.naming = false;
                 g.name.focused = false;
             });
             // Pressing another cell ends an edit by keeping it (as Excel does); words the helper refused stay.
