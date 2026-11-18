@@ -47,6 +47,8 @@ fn trash_with_text(s: &mut State) {
             size: "4 KB".into(),
             extra: Extra::Words("From Documents".into()),
             pc: None,
+            bytes: None,
+            at: None,
         },
     );
     s.frames.trash = TrashUi::on(Box::new(WithText(rows)));

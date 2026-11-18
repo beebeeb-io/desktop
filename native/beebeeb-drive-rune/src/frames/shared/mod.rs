@@ -7,13 +7,15 @@ pub mod actions;
 mod actions_items;
 mod actions_links;
 mod actions_new;
-mod actions_sort;
+pub mod actions_sort;
 pub mod dialogs;
 pub mod parts;
 pub mod scenes;
 pub mod source;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod tests_chrome;
 
 use crate::State;
 use crate::frames::{self, Intent};
@@ -23,7 +25,7 @@ use crate::theme::{icons, tokens};
 use crate::ui::kit;
 use parts::controls::{ButtonKind, ButtonSize, Tone, button, button_keyed, pill, segments};
 use parts::menu::{Entry, Open, Took, Trail};
-use parts::table::{Columns, header, rows, table_row, tile};
+use parts::table::{Columns, Row, header, rows, table_row, tile};
 use parts::toolbar::{Bar, slot_sep, toolbar};
 use parts::{chrome, empty, list, style};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el, row};
@@ -69,6 +71,8 @@ pub struct SharedUi {
     was_open: bool,
     /// A sync check finished and the lists are to be read again: waits while a menu or a dialog is open.
     pub(crate) reread_due: bool,
+    /// The With me list's order and what the toolbar's search filters it by (`actions_sort`).
+    pub sort: actions_sort::SectionSort,
 }
 
 /// A sync check finished (`shell::host::poll`): the lists are read again, on the first poll with nothing open over
@@ -229,11 +233,17 @@ impl Default for SharedUi {
             seen: None,
             was_open: false,
             reread_due: false,
+            sort: actions_sort::SectionSort::default(),
         }
     }
 }
 
 impl SharedUi {
+    /// What Shared with the person lists, in the Sort and the filter of the toolbar's search.
+    pub fn with_me_rows(&self) -> Vec<Row> {
+        self.sort.arrange(self.source.with_me())
+    }
+
     pub fn show(&mut self, tab: Tab) {
         if self.tab != tab {
             self.tab = tab;
@@ -257,7 +267,7 @@ impl SharedUi {
     /// How many items the tab that shows lists.
     pub fn count(&self) -> usize {
         match self.tab {
-            Tab::WithMe => self.source.with_me().len(),
+            Tab::WithMe => self.with_me_rows().len(),
             Tab::ByMe => self.source.people_shares().len() + self.source.links().len(),
             Tab::Requests => self.source.requests().len(),
         }
@@ -268,7 +278,7 @@ impl SharedUi {
     pub fn open_intent(&self) -> Option<Intent> {
         let i = self.selected?;
         match self.tab {
-            Tab::WithMe => self.source.with_me().get(i).map(|r| Intent::OpenItem(r.id.clone())),
+            Tab::WithMe => self.with_me_rows().get(i).map(|r| Intent::OpenItem(r.id.clone())),
             // A link or a request opens what it points at.
             Tab::ByMe if i < self.source.people_shares().len() => None,
             Tab::ByMe => self
@@ -289,7 +299,7 @@ impl SharedUi {
     /// The ids of the items of the tab that shows, in the order they are drawn.
     fn item_ids(&self) -> Vec<String> {
         match self.tab {
-            Tab::WithMe => self.source.with_me().into_iter().map(|r| r.id).collect(),
+            Tab::WithMe => self.with_me_rows().into_iter().map(|r| r.id).collect(),
             Tab::ByMe => self
                 .source
                 .people_shares()
@@ -340,6 +350,9 @@ impl SharedUi {
 
     /// The selected item's menu (DW-0505, DW-0506, DW-0507) and its name.
     pub fn menu_entries(&self) -> (&'static str, &'static [Entry], f32) {
+        if self.menu.as_ref().is_some_and(actions_sort::is_sort_menu) {
+            return ("Sort by", actions_sort::SORT_MENU, 180.0);
+        }
         let Some(i) = self.selected else {
             return ("", &[], 0.0);
         };
@@ -358,6 +371,12 @@ impl SharedUi {
 
     /// Do what the menu's item `n` says, and close the menu.
     pub fn pick(&mut self, n: usize) -> Option<Intent> {
+        if self.menu.as_ref().is_some_and(actions_sort::is_sort_menu) {
+            self.menu = None;
+            self.sort.pick(n);
+            self.selected = None;
+            return None;
+        }
         let (_, entries, _) = self.menu_entries();
         self.menu = None;
         let words = entries.get(n)?.words;
@@ -561,7 +580,7 @@ fn invitation_card(n: usize, inv: &source::Invitation, t: &Theme) -> El {
 
 fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
     let invitations = ui.source.invitations();
-    let items = ui.source.with_me();
+    let items = ui.with_me_rows();
     let count = items.len() + invitations.len();
     let status = format!(
         "Shared with you: {} \u{00B7} waiting: {}",
@@ -853,7 +872,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         &t,
     );
     // With nothing to count, the status line is the PC's summary, as in Files (DW-0508, DW-0509, DW-0510).
-    let status = if count == 0 { s.frames.pc.summary() } else { status };
+    let status = if count == 0 { frames::pc_summary(s) } else { status };
     let window = cx.layout_size("window");
     let layer = ui.menu.as_ref().map(|open| {
         let (name, entries, min_w) = ui.menu_entries();

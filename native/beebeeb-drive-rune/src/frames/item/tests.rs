@@ -331,6 +331,8 @@ fn trash_row(id: &str, name: &str) -> crate::frames::shared::parts::table::Row {
         size: "1 KB".into(),
         extra: crate::frames::shared::parts::table::Extra::Words(String::new()),
         pc: None,
+        bytes: None,
+        at: None,
     }
 }
 

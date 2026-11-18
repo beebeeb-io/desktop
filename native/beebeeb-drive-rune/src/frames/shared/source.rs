@@ -385,6 +385,8 @@ fn from(id: &str, name: &str, kind: Kind, date: &str, size: &str, who: (&str, &s
             hue: who.2,
         },
         pc: Some(pc),
+        bytes: None,
+        at: None,
     }
 }
 
@@ -478,6 +480,8 @@ impl BoardShared {
                         hue: 'd',
                     },
                     pc: Some(PcState::OnlineOnly),
+                    bytes: None,
+                    at: None,
                 },
             }],
             with_me: vec![

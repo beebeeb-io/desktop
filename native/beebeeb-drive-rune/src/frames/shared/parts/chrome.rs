@@ -3,28 +3,14 @@
 
 use super::sidebar;
 use crate::State;
-use crate::theme::tokens::{Theme, type_};
-use crate::ui::{caption, kit};
-use rune::{Cx, El, col, el, row};
+use crate::theme::tokens::Theme;
+use crate::ui::caption;
+use rune::{Cx, El, col, row};
 
-/// The status line (`.mk-foot`): the PC's sync state in words at the left (`sync`, from
-/// `frames::PcStatus`), this section's words at the right.
+/// The status line (`.mk-foot`): the PC's sync state in words at the left (`frames::sync_words`, with the dot
+/// coloured as Files' line has it: `ui::status_line`), this section's words at the right. No words, no dot.
 pub fn status_line(sync: &str, details: &str, t: &Theme) -> El {
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(t.green))
-        .child(kit::label("status-text", sync, type_::STATUS_STRONG, t.text_secondary))
-        .child(el().key("status-spacer").grow(1.0))
-        .child(kit::label("status-details", details, type_::STATUS, t.text_tertiary))
+    crate::ui::status_line::status_line((!sync.is_empty()).then_some(sync), details, t)
 }
 
 /// The section window. `layer` is drawn over the whole client area (a menu, a dialog).
@@ -40,7 +26,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
         // The one banner of the whole window (`frames::global`: "on every view of the window").
         .children(crate::frames::global::banner_under_toolbar(s, t))
         .child(body.grow(1.0).min_h(0.0).w_full())
-        .child(status_line(&s.frames.pc.sync_words(), status, t));
+        .child(status_line(&crate::frames::sync_words(s), status, t));
     let mut window = col()
         .key("window")
         .role("window")

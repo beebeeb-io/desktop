@@ -768,6 +768,8 @@ mod reread {
             size: "1 KB".into(),
             extra: Extra::Words(String::new()),
             pc: None,
+            bytes: None,
+            at: None,
         }
     }
 
