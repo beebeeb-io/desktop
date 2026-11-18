@@ -208,6 +208,8 @@ pub trait DriveSettings {
     /// A pane of these was opened (the route moved to it): a source that reads late reads again when what it holds
     /// is old.
     fn opened(&mut self, _pane: super::Pane) {}
+    /// The window left Settings (the route is elsewhere): whatever a pane started on its own (a sampler) stops.
+    fn closed(&mut self) {}
     /// A change the person asked for was refused since the last frame: the settings window's toast says it (a fixed
     /// sentence). Taken once.
     fn take_toast(&mut self) -> Option<&'static str> {

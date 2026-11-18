@@ -1095,3 +1095,27 @@ fn app_activity_samples_only_while_diagnostics_is_open() {
     source.pump(0.0);
     assert!(source.diagnostics().activity.is_empty(), "left: the sampler stopped");
 }
+
+/// The window leaving Settings while Diagnostics is open stops the sampler, as leaving the pane does.
+#[test]
+fn closing_settings_on_diagnostics_stops_the_sampler() {
+    struct Idle;
+    impl app_activity::Probe for Idle {
+        fn read(&mut self) -> app_activity::Reading {
+            app_activity::Reading::default()
+        }
+    }
+    let fake = account();
+    let mut source = EngineDriveSettings::new(fake, Arc::new(FakePlatform::default()));
+    source.activity = app_activity::AppActivity::with_probe(Box::new(Idle), Duration::ZERO);
+    settle(&mut source);
+    source.opened(Pane::Diagnostics);
+    source.pump(0.0);
+    assert!(source.activity.running());
+    let drive: &mut dyn DriveSettings = &mut source;
+    drive.closed();
+    assert!(!source.activity.running(), "the window closed: nothing samples");
+    let (_, more) = source.pump(0.0);
+    assert!(!more, "and nothing asks for a frame");
+    assert!(source.diagnostics().activity.is_empty());
+}

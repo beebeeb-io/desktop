@@ -580,6 +580,14 @@ pub(super) fn status(ui: &Ui, viewing: &Viewing) -> String {
     super::viewer::status(viewing)
 }
 
+/// "Link copied" said by Files' poll for a link the engine's source made on Photos' press (`files::link::poll` puts
+/// it on the clipboard and sets Files' toast, which Photos does not draw): the same words over Photos, for as long as
+/// Files' toast lives, unless Photos has a message of its own.
+pub(super) fn link_toast(s: &State) -> Option<Toast> {
+    (s.photos.toast.is_none() && s.live_toast() == Some(crate::frames::files::Toast::LinkCopied))
+        .then_some(Toast::Words("Link copied"))
+}
+
 /// A sync check finished (`shell::host::poll`): what this PC knows of the account may have changed.
 pub fn after_a_check(s: &mut State) {
     s.photos.later.reread_due = true;

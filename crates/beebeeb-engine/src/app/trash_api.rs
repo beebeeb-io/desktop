@@ -212,6 +212,12 @@ impl<C: CredentialStores> Engine<C> {
         self.unlocked()
     }
 
+    /// How far the listing of the account's files has come while a snapshot is being ingested (`(listed, total)`):
+    /// `None` when none is, or when the host keeps no transfer board. In memory, never waits.
+    pub fn first_listing(&self) -> Option<(u64, u64)> {
+        self.host.transfer_board()?.first_listing()
+    }
+
     /// Wake the host's loop, as the engine does when its own view changed: for a host's worker that has an answer
     /// for the window. Nothing is queued.
     pub fn wake_host(&self) {

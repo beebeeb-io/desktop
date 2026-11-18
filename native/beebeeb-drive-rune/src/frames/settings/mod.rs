@@ -589,7 +589,10 @@ pub fn sync(s: &mut State) {
             s.settings.source.opened(section);
             s.settings.drive.opened(section);
         }
-        None => s.settings.reset(),
+        None => {
+            s.settings.reset();
+            s.settings.drive.closed();
+        }
     }
 }
 

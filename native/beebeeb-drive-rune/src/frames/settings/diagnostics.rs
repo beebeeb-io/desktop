@@ -232,7 +232,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             0,
             Some("App activity"),
             rows,
-            Some("Beebeeb's own use of this PC, sampled every 2 seconds while this page is open."),
+            Some("Beebeeb's own use of this PC, sampled every 2 seconds while this page is open. Upload and download are the latest bandwidth sample, not a live rate."),
             t,
         ));
     }

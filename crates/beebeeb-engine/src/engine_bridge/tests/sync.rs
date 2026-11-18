@@ -1135,3 +1135,28 @@ async fn test_sync_tick_empty_snapshot_does_not_prune_existing_tree() {
 }
 
 // ── Task 1247: hydrate destination allow-list + real IPC entry point ──────
+
+/// DW-0802b: while a snapshot is ingested the board says how far the first listing is (so Search can say "Still
+/// getting your files ready" with a count), and says nothing once it is whole.
+#[test]
+fn applying_a_snapshot_reports_how_far_the_first_listing_is() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let mk = [9u8; 32];
+    let board = crate::transfer_progress::TransferBoard::new();
+    let bridge = test_bridge(&dir.path().join("state.db")).with_transfers(board.clone());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    {
+        let (seen, board) = (seen.clone(), board.clone());
+        board.clone().set_wake(move || seen.lock().unwrap().push(board.first_listing()));
+    }
+    let nodes = (0..3)
+        .map(|i| snap_node(&mk, &format!("lst0000{i}-0000-4000-8000-00000000000{i}"), &format!("f{i}.txt"), None, false, 50))
+        .collect();
+    let snapshot = crate::api_client::SyncSnapshot { seq_id: 9, nodes };
+    apply_snapshot(&bridge, dir.path(), &snapshot, 200, 200, &mut Vec::new()).unwrap();
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.first(), Some(&Some((0, 3))), "the total is known before the first row: {seen:?}");
+    assert_eq!(seen.last(), Some(&None), "and it is gone once the list is whole: {seen:?}");
+    assert_eq!(board.first_listing(), None);
+}

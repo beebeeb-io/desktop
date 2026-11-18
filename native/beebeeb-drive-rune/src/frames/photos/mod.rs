@@ -757,6 +757,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     // The folder dialog of Files, opened by Add a folder… / Move…: its own layer, in front of all of it.
     front.extend(crate::frames::files::dialogs::layer(s, &t));
+    // "Link copied" from the engine's source is said by Files' poll, in Files' toast: over Photos it is drawn here.
+    if let Some(toast) = session::link_toast(s) {
+        let viewing = ui.viewing().is_some();
+        front.push(overlay::toast_layer(&toast, if viewing { 118.0 } else { 24.0 }, !viewing, &t));
+    }
     match ui.viewing() {
         Some(viewing) => chrome::window(
             s,
