@@ -608,6 +608,9 @@ impl Ui {
             Step::Done => return,
             // The sync folder is not skipped from its own question ("Skip setup" leaves the first run).
             Step::Explorer if self.asks_folder() => return,
+            // Works like "Continue" with the switch off: Windows Hello is asked first, and a prompt that did not
+            // confirm leaves app lock as it was ("Not changed", never "Off").
+            Step::Lock if self.available(Step::Lock) => self.ask_lock_off(),
             Step::Notifications if self.available(Step::Notifications) => {
                 self.source.set_notifications(false);
                 self.results.notifications = false;
@@ -623,9 +626,20 @@ impl Ui {
         if self.compare.is_some() || self.step == Step::Done {
             return;
         }
+        // "Skip setup" from the Lock step is "Not now" there (the switch off, asked like "Continue").
+        if self.step == Step::Lock && self.available(Step::Lock) {
+            self.ask_lock_off();
+        }
         self.leave_passkey_step();
         self.step = Step::Done;
         self.focus = Some(TITLE_KEY);
+    }
+
+    /// Step 2 with the switch off, whatever the switch shows: the source asks Windows Hello first.
+    fn ask_lock_off(&mut self) {
+        self.source.set_app_lock(false, self.lock_after);
+        self.results.app_lock = false;
+        self.asked(Switch::AppLock);
     }
 
     pub fn toggle_lock(&mut self) {
