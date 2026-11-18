@@ -582,7 +582,7 @@ fn office_sheets_words_over_the_op_limit_are_refused_not_sent() {
     rig.click(7, 1);
     rig.text("a");
     let long = "x".repeat(MAX_OP_TEXT_BYTES + 1);
-    with(|g| g.edit.replace_text(long));
+    with(&rig.rt.state, |g| g.edit.replace_text(long));
     rig.key(Key::Enter);
     assert!(rig.sets().is_empty());
     assert!(rig.editing().is_some(), "kept open, nothing lost");
@@ -745,7 +745,7 @@ fn office_sheets_geometry_hits_the_cell_it_drew() {
     let mut rig = rig();
     rig.settle();
     let grid = rig.find("sh-grid").expect("the grid").rect;
-    let geometry = with(|g| g.geometry.clone());
+    let geometry = with(&rig.rt.state, |g| g.geometry.clone());
     for (r, c) in [(0, 0), (3, 2), (10, 5)] {
         let (x, y) = rig.middle(r, c);
         assert_eq!(
@@ -810,7 +810,7 @@ fn office_sheets_the_grid_asks_for_the_keyboard_once_when_opened() {
     let mut rig = rig();
     // The window's poll hands the ask to Rune (`take_focus`, next to the viewer's own one-shot focus): the grid has
     // the keyboard, and nothing asks again.
-    assert!(!with(|g| g.wants_focus), "the ask was taken by the window's poll");
+    assert!(!with(&rig.rt.state, |g| g.wants_focus), "the ask was taken by the window's poll");
     let mut focused = None;
     rig.rt.update(|_, tx| focused = tx.focused().map(str::to_string));
     assert_eq!(focused.as_deref(), Some(GRID_KEY), "the grid has the keyboard when the file opens");
