@@ -797,6 +797,7 @@ fn double_click_with_frame(rt: &mut Runtime<State>, key: &str) {
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(0.016);
+    for e in rt.elements() { if e.key.as_deref().is_some_and(|k| k.starts_with("row-0")) { eprintln!("E {:?} exiting={} rect={:?} path={}", e.key, e.exiting, e.rect, e.path); } }
     let (x, y) = centre(rt, key);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
