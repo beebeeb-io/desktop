@@ -105,6 +105,7 @@ pub mod trash_purge_api;
 pub mod versions_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;
+pub mod office_edit_api;
 pub mod viewer_edit_api;
 
 pub use credential_stores::{CredentialStores, PlatformCredentials};
