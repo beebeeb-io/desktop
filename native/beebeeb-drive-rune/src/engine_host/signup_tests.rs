@@ -365,6 +365,20 @@ fn the_account_exists_but_this_computer_could_not_sign_in_to_it_says_so_and_ends
 }
 
 #[test]
+fn the_terms_version_goes_with_the_registration_when_the_server_requires_it() {
+    let server = server(OPEN);
+    let (_engine, mut source, _store) = source_on(&server);
+    to_the_phrase(&mut source);
+    let right = right_words(&source);
+    source.begin_sign_up_confirm(&typed(&right));
+    assert_eq!(next(&mut source), SignUpEvent::PhraseConfirmed(true));
+    source.begin_sign_up_create("A computer of mine");
+    assert_eq!(next(&mut source), SignUpEvent::Created(Ok(())));
+    assert_eq!(server.state.finish_terms.lock().unwrap().as_deref(), Some("2026-09-29"));
+    assert!(server.state.registered.lock().unwrap().is_some());
+}
+
+#[test]
 fn a_registration_the_server_refuses_stores_nothing_and_can_be_tried_again() {
     let server = server(OPEN);
     server.state.finish_fails.store(true, Ordering::SeqCst);
