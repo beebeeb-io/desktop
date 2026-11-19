@@ -415,7 +415,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             match end.0 {
                 // The server confirmed it: the file's recovery blob is not needed any more.
                 Settled::Saved { .. } => {
-                    discard_blob_before(engine, session, &id, pressed_at);
+                    let _ = engine.recovery_discard(session, &id);
                 }
                 // Stored here only: the blob stays until the version is known to be in Beebeeb
                 // (`office_discard_when_landed`).

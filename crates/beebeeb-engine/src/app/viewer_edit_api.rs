@@ -367,6 +367,7 @@ impl<C: CredentialStores> Engine<C> {
         seal_kind: Option<u8>,
     ) -> Result<SaveEnd, EditRefused> {
         let (token, key) = self.edit_credentials(session)?;
+        let asking = (token.clone(), key.clone());
         let state = self.local_state_for_changes().map_err(|_| EditRefused::Unavailable)?;
         if state.session() != session {
             return Err(EditRefused::NotSignedIn);
@@ -480,7 +481,12 @@ impl<C: CredentialStores> Engine<C> {
         // A save the server refused as stale (409) is a Conflict, never "saved" (w26, v5 bug 8); one that will not be
         // sent by itself, or left the queue without landing, is not saved.
         let deadline = Instant::now() + LAND_WAIT;
-        let (mut gone_since, mut parked_stale) = (None::<Instant>, false);
+        let (mut gone_since, mut parked_stale, mut asked) = (None::<Instant>, false, None::<Instant>);
+        // A save that is not saved leaves no claim on the file: the next save of this opening is judged by what is
+        // really queued (an unsent write of the file refuses it), never queued behind a refused one.
+        let forget = || {
+            with_saves(saves, file_id, session, opening, |saves| saves.queued = None);
+        };
         while self.is_syncing() && Instant::now() < deadline {
             use viewer_edit_landing::{Fate, look};
             match state.with(|db| look(db, file_id, &queued, base)) {
@@ -492,19 +498,32 @@ impl<C: CredentialStores> Engine<C> {
                 }
                 Ok(Ok(Fate::Conflict { theirs })) => {
                     // The refused save is out of the queue: the person's choice starts from the file as it is.
-                    with_saves(saves, file_id, session, opening, |saves| saves.queued = None);
+                    forget();
                     return Ok(SaveEnd::Conflict { theirs });
                 }
-                Ok(Ok(Fate::Failed)) => return Err(EditRefused::Failed),
+                Ok(Ok(Fate::Failed)) => {
+                    forget();
+                    return Err(EditRefused::Failed);
+                }
                 Ok(Ok(Fate::Gone)) => {
                     // A landing and the op's end are one transaction; a short grace for any other order of reads.
                     if gone_since.get_or_insert_with(Instant::now).elapsed() > GONE_GRACE {
+                        forget();
                         return Err(EditRefused::Failed);
                     }
                     std::thread::sleep(LAND_POLL);
                 }
                 Ok(Ok(Fate::ParkedStale)) => {
                     parked_stale = true;
+                    // The server refused the upload as stale (409): final. This PC's pull learns the newer version at
+                    // its next tick (30 s); the server is asked now, so the person is asked at once.
+                    if asked.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+                        asked = Some(Instant::now());
+                        if let Some(theirs) = self.server_version(&asking.0, &asking.1, file_id).filter(|v| *v > base) {
+                            forget();
+                            return Ok(SaveEnd::Conflict { theirs });
+                        }
+                    }
                     std::thread::sleep(LAND_POLL);
                 }
                 Ok(Ok(Fate::Waiting)) => {
@@ -513,11 +532,20 @@ impl<C: CredentialStores> Engine<C> {
                 }
             }
         }
-        // Refused as stale and this PC never saw the newer version in time: not saved (the change stays in Sync history).
+        // Refused as stale and neither this PC nor the server named the newer version in time: not saved (the change
+        // stays in Sync history).
         if parked_stale {
+            forget();
             return Err(EditRefused::Failed);
         }
         Ok(SaveEnd::Queued { base })
+    }
+
+    /// The version the server holds for `file_id` now (one request; a worker's). `None`: it could not be read.
+    fn server_version(&self, token: &str, key: &Zeroizing<[u8; 32]>, file_id: &str) -> Option<i64> {
+        let api = ApiClient::new(self.config.api_base.clone(), token.to_string(), **key);
+        let meta = self.runtime.block_on(api.get_file(file_id)).ok()?;
+        meta["current_version"].as_i64().or_else(|| meta["version"].as_i64())
     }
 
     /// Ask the runner for a queue step now (it would otherwise send the save at its next tick). No runner: nothing.

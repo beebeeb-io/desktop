@@ -56,7 +56,8 @@ pub(super) fn look(db: &StateDb, file_id: &str, queued: &QueuedSave, base: i64) 
             }
             Ok(Fate::Conflict { theirs })
         }
-        // Moved under this look (the file or the op): look again.
-        None => Ok(Fate::Waiting),
+        // Not settleable now (a later op of the file, a folder on the move): the save was refused and is still parked,
+        // never "saved".
+        None => Ok(Fate::ParkedStale),
     }
 }
