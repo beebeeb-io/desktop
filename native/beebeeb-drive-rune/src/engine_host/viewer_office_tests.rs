@@ -2174,18 +2174,25 @@ fn a_queued_save_keeps_the_blob_until_it_landed() {
     }
 }
 
-/// A blob kept after the person pressed Save may hold what was typed since: a landed save does not delete it.
+/// A save confirmed later does not delete a blob kept after the person pressed Save: it may hold what was typed since.
 #[test]
-fn a_landed_save_keeps_a_blob_made_after_the_press() {
+fn a_save_confirmed_later_keeps_a_blob_made_after_the_press() {
     let mut e = editor("Invented.docx", false);
     snapshot(&e.fake, b"SNAP", 2);
     let _ = e.source.poll_edit("f1");
-    // A blob from the far future of this clock is "newer than the press".
-    e.engine.s().blobs.insert("f1".into(), (i64::MAX / 2, 3, b"TYPED-AFTER".to_vec()));
+    e.engine.s().save_says = Some(Ok(SaveEnd::Queued { base: 3 }));
     assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
     e.source.poll("f1");
     e.fake.saved(b"PK saved package", 4);
     let settled = until_settled(&mut e.source, "f1", || {});
-    assert!(matches!(settled, crate::frames::viewers::source::Settled::Saved { .. }));
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Queued { .. }));
+    // A blob from the far future of this clock is "newer than the press"; then the upload lands.
+    e.engine.s().blobs.insert("f1".into(), (i64::MAX / 2, 3, b"TYPED-AFTER".to_vec()));
+    e.engine.s().own = true;
+    let end = Instant::now() + Duration::from_millis(3500);
+    while Instant::now() < end {
+        e.source.poll("f1");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(e.engine.s().blobs.contains_key("f1"), "what was typed after the press is not in the saved version");
 }
