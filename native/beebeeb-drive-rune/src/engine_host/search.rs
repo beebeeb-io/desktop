@@ -38,7 +38,7 @@
 //!
 //! Must not: log a query, a recent search, a name or a path; keep a name or a search of a session that ended.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -96,6 +96,11 @@ pub trait SearchHost: Send + Sync + 'static {
     /// WRITES (disk work, Clear): the recent searches of the account of the session `turn` are deleted. `Err`: they
     /// were not.
     fn clear_recent_searches(&self, turn: Self::Turn) -> Result<(), ()>;
+    /// How the account shares its items, by item id ("Anyone with the link"): a network read, so a worker calls it.
+    /// Empty when it cannot be read: a line is then left unsaid, never "Only you".
+    fn shared_words(&self) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
     fn wake(&self);
 }
 
@@ -139,6 +144,22 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
         self.clear_recent_searches_for(turn).map_err(|_| ())
     }
 
+    fn shared_words(&self) -> HashMap<String, String> {
+        let Ok(overview) = self.shares_overview() else {
+            return HashMap::new();
+        };
+        let mut words = HashMap::new();
+        for share in &overview.by_me {
+            let people = share.members.len();
+            let line = if people == 1 { "1 person".to_string() } else { format!("{people} people") };
+            words.insert(share.item_id.clone(), line);
+        }
+        for link in &overview.links {
+            words.insert(link.item_id.clone(), "Anyone with the link".to_string());
+        }
+        words
+    }
+
     fn wake(&self) {
         self.wake_host();
     }
@@ -179,6 +200,9 @@ enum Landed<T> {
     /// The index or why there is none, and the session it was built in (`None`: the session was not the same after
     /// the build as before).
     Built(u64, Option<Session<T>>, Result<LocalSearchIndex, LocalStateRefused>),
+    /// How the account shares its items, read after a build, and the session it was read in (`None`: the session
+    /// was not the same after the read as before).
+    Shared(Option<Session<T>>, HashMap<String, String>),
     /// A query's results, and the session whose index it ran on.
     Found(u64, Session<T>, Asked, Vec<Hit>),
     /// The recent searches as the engine keeps them after a read or a change, and the session the work ran in
@@ -225,6 +249,10 @@ pub struct EngineSearchSource<H: SearchHost> {
     asked: Option<(u64, Asked)>,
     /// The last result, and the query it answers.
     found: Option<(Asked, Vec<Hit>)>,
+    /// How the account shares its items (item id to words), and the session it was read in. Read after a build.
+    shared: Option<(Session<H::Turn>, HashMap<String, String>)>,
+    /// A read of the shares is on its way.
+    shared_out: bool,
     /// The recent searches as the engine last answered them, newest first, and the session that work ran in.
     recent: Option<(Session<H::Turn>, Vec<String>)>,
     /// The work on the recent searches that is on its way (one at a time), by job number.
@@ -267,6 +295,8 @@ impl<H: SearchHost> EngineSearchSource<H> {
             wanted: None,
             asked: None,
             found: None,
+            shared: None,
+            shared_out: false,
             recent: None,
             recent_out: None,
             recent_next: VecDeque::new(),
@@ -363,8 +393,20 @@ impl<H: SearchHost> EngineSearchSource<H> {
                 )
             }));
             let (of, index) = built.unwrap_or((None, Err(LocalStateRefused::Unreadable)));
+            let built = of.is_some() && index.is_ok();
             let _ = answers.send(Landed::Built(job, of, index));
             host.wake();
+            if built {
+                // The shares are a call to the server: after the index is in, never before it.
+                let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let before = session_of(&*host);
+                    let words = host.shared_words();
+                    (before.filter(|before| session_of(&*host).as_ref() == Some(before)), words)
+                }));
+                let (of, words) = read.unwrap_or((None, HashMap::new()));
+                let _ = answers.send(Landed::Shared(of, words));
+                host.wake();
+            }
         });
         if started.is_ok() {
             self.building = Some(job);
@@ -493,6 +535,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
                 self.built_at = Some(Instant::now());
                 match (of, result) {
                     (Some(of), Ok(index)) => {
+                        self.shared_out = true;
                         self.installed += 1;
                         self.held = Some(Held {
                             of,
@@ -512,6 +555,12 @@ impl<H: SearchHost> EngineSearchSource<H> {
                     }
                     // Not reached: a build of no session returned above.
                     (None, _) => {}
+                }
+            }
+            Landed::Shared(of, words) => {
+                self.shared_out = false;
+                if let Some(of) = of.filter(|of| Some(of) == self.of.as_ref()) {
+                    self.shared = Some((of, words));
                 }
             }
             Landed::Found(job, of, asked, hits) => {
@@ -621,7 +670,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         }
         Pumped {
             changed,
-            busy: self.building.is_some() || self.asked.is_some() || self.recent_out.is_some() || waiting,
+            busy: self.building.is_some() || self.shared_out || self.asked.is_some() || self.recent_out.is_some() || waiting,
         }
     }
 
@@ -683,7 +732,17 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     fn details(&self, id: &str) -> Option<Details> {
         let held = self.current()?;
         let record = held.index.records.get(id).filter(|record| !record.shared_with_me)?;
-        Some(details_of(record))
+        let now = session_of(&*self.host)?;
+        let shared = self
+            .shared
+            .as_ref()
+            .filter(|(of, _)| *of == now)
+            .and_then(|(_, words)| words.get(id))
+            .cloned()
+            .unwrap_or_default();
+        let mut details = details_of(record);
+        details.shared = shared;
+        Some(details)
     }
 }
 

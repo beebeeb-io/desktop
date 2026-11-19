@@ -70,7 +70,8 @@ fn bodies(account: &FakeAccount) -> [Value; 4] {
               "expires_at": "2026-12-01T00:00:00Z", "has_passphrase": true },
             { "id": INV_IN, "file_id": TRIP, "token": SECRETS[0] },
             { "id": INV_MINE, "file_id": PLAN, "token": SECRETS[0], "revoked": true },
-            { "id": INV_A, "file_id": THEIRS, "token": SECRETS[0] },
+            { "id": INV_A, "file_id": THEIRS, "token": SECRETS[0],
+              "file": { "name_encrypted": encrypted(account, THEIRS, "Linked only.txt"), "size_bytes": 3 } },
         ] }),
         json!({ "file_requests": [
             { "id": INV_A, "title": "Invented request", "files_received": 3, "max_files": 50, "closed": false,
@@ -191,7 +192,7 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
         ]
     );
 
-    // Links: one per item, never a revoked one; the name is the share's, else the fixed words.
+    // Links: one per item, never a revoked one; the name is the item's (read from the link row when no invite names it), else the fixed words.
     let links: Vec<_> = overview
         .links
         .iter()
@@ -206,7 +207,7 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
         .collect();
     assert_eq!(
         links,
-        [(TRIP, "Invented trip", true, true), (THEIRS, SHARED_ITEM, false, false)]
+        [(TRIP, "Invented trip", true, true), (THEIRS, "Linked only.txt", false, false)]
     );
 
     assert_eq!(overview.requests.len(), 2);

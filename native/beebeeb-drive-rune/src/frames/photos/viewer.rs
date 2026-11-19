@@ -46,7 +46,7 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
     if viewing.kind == Kind::Photo {
         let whole = megabytes(viewing.original_bytes, true);
         let original_words = match original {
-            Original::Downloading { done } => format!("Original \u{00B7} {} of {whole}", megabytes(done, false)),
+            Original::Downloading { done } => format!("Original \u{00B7} {} of {whole}", super::grid::sized_like(done, viewing.original_bytes, false)),
             _ => format!("Original \u{00B7} {whole}"),
         };
         middle = middle.child(

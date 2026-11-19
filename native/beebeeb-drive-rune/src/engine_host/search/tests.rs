@@ -55,6 +55,8 @@ struct Host {
     recents: Mutex<HashMap<String, Vec<String>>>,
     /// How often the recent searches were asked of the host (read, kept or cleared).
     recent_calls: AtomicUsize,
+    /// What the account's shares say of an item (the engine's Shared lists): id to words.
+    shared: Mutex<HashMap<String, String>>,
 }
 
 impl Host {
@@ -182,6 +184,10 @@ impl SearchHost for Host {
         Ok(())
     }
 
+    fn shared_words(&self) -> HashMap<String, String> {
+        self.shared.lock().unwrap().clone()
+    }
+
     fn wake(&self) {
         self.woken.fetch_add(1, Ordering::SeqCst);
     }
@@ -259,6 +265,7 @@ fn host(account: Option<&str>) -> Arc<Host> {
         woken: AtomicUsize::new(0),
         recents: Mutex::new(HashMap::new()),
         recent_calls: AtomicUsize::new(0),
+        shared: Mutex::default(),
         listing: Mutex::new(None),
     })
 }
@@ -267,7 +274,7 @@ fn host(account: Option<&str>) -> Arc<Host> {
 fn settle(source: &mut EngineSearchSource<Host>) {
     let began = Instant::now();
     // A refusal that waits to be built again is not an answer on its way.
-    while source.pump().busy && (source.building.is_some() || source.asked.is_some() || source.recent_out.is_some()) {
+    while source.pump().busy && (source.building.is_some() || source.shared_out || source.asked.is_some() || source.recent_out.is_some()) {
         assert!(began.elapsed() < HOLD_FOR, "an answer did not come back");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -1232,4 +1239,16 @@ fn while_the_first_listing_runs_the_answer_carries_how_far_it_is() {
     }
     *host.listing.lock().unwrap() = Some((40_112, 40_112));
     assert!(matches!(source.search("contract", Narrow::All), Answer::Found { loading: None, .. }));
+}
+
+#[test]
+fn a_results_shared_line_says_how_it_is_shared_once_the_shares_are_read() {
+    let host = host(Some(ME));
+    host.shared
+        .lock()
+        .unwrap()
+        .insert("f-signed".into(), "Anyone with the link".into());
+    let source = opened(&host);
+    assert_eq!(source.details("f-signed").unwrap().shared, "Anyone with the link");
+    assert_eq!(source.details("f-draft").unwrap().shared, "", "not shared, or not known: never invented");
 }

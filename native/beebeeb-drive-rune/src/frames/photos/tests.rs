@@ -693,3 +693,14 @@ fn ctrl_click_checks_a_photo_and_starts_selecting() {
     click(&mut rt, "ph-tile-0-2");
     assert!(!rt.state.photos.selecting && rt.state.photos.selected.is_empty());
 }
+
+/// A small original reads in KB: "0 MB" says nothing about a 40 KB picture.
+#[test]
+fn a_small_original_is_written_in_kilobytes() {
+    use super::grid::megabytes;
+    assert_eq!(megabytes(40_960, true), "41 KB");
+    assert_eq!(megabytes(999, true), "1 KB");
+    assert_eq!(megabytes(0, true), "0 KB");
+    assert_eq!(megabytes(1_000_000, true), "1 MB");
+    assert_eq!(megabytes(30_900_000, true), "30.9 MB");
+}

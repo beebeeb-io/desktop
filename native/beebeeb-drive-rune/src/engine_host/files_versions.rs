@@ -308,11 +308,25 @@ fn read<C: CredentialStores>(
     }
 }
 
+/// When a version was made, on this PC's clock: "3 Nov 2026, 10:00". The server writes fractions of a second and may
+/// write an offset; anything unreadable is left empty.
+fn version_when(iso: &str) -> String {
+    use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
+    let at: DateTime<Local> = match DateTime::parse_from_rfc3339(iso) {
+        Ok(at) => at.with_timezone(&Local),
+        Err(_) => match NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S%.f") {
+            Ok(naive) => Utc.from_utc_datetime(&naive).with_timezone(&Local),
+            Err(_) => return String::new(),
+        },
+    };
+    at.format("%-d %b %Y, %H:%M").to_string()
+}
+
 /// A version as the dialog draws it. The server names no device, so none is invented.
 fn shown(entry: &VersionEntry) -> Version {
     Version {
         id: entry.id.clone(),
-        when: crate::ui::file_list::format_date(&entry.created_at),
+        when: version_when(&entry.created_at),
         size: crate::source::format_size(entry.size),
         current: entry.current,
         changed_on: None,
