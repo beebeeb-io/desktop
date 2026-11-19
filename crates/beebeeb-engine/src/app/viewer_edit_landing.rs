@@ -61,3 +61,15 @@ pub(super) fn look(db: &StateDb, file_id: &str, queued: &QueuedSave, base: i64) 
         None => Ok(Fate::ParkedStale),
     }
 }
+
+/// `look`, once the server itself has named the file's head version (`head`, asked at once after a stale-base refusal:
+/// this PC's pull would only learn it at its next tick, 30 s). STUB (red test first): not yet used.
+pub(super) fn look_with_head(
+    db: &StateDb,
+    file_id: &str,
+    queued: &QueuedSave,
+    base: i64,
+    _head: Option<(i64, i64)>,
+) -> Result<Fate, rusqlite::Error> {
+    look(db, file_id, queued, base)
+}
