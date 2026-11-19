@@ -7,13 +7,16 @@
 //! place, so the binding refuses B as it always did. The order: the folder's items (through the port), the files the
 //! rows point at, then the one transaction that clears every row and the owner record.
 //!
+//! The account's entries in desktop.toml go with it ([`forget_in_settings`]), just before the owner record.
+//!
 //! Must not: remove anything while a queued change, a staged copy, a held edit or a file of unknown content is left;
 //! clear the owner record before every item is gone; log a name, a path, an email or an id.
 
 use std::path::Path;
 
 use super::{CredentialStores, Engine, LocalState};
-use crate::account_binding::Identity;
+use crate::account_binding::{Identity, canonical_email};
+use crate::config::DesktopConfig;
 use crate::sync_root_port::SyncRootPort;
 
 impl<C: CredentialStores> Engine<C> {
@@ -34,7 +37,8 @@ impl<C: CredentialStores> Engine<C> {
         if !other_account {
             return;
         }
-        match self.remove_the_previous_account(data, sync_root, port) {
+        let Some(previous) = owner.as_ref() else { return };
+        match self.remove_the_previous_account(data, previous, sync_root, port) {
             Ok(()) => tracing::info!("account switch: the previous account's local data was removed"),
             Err(why) => tracing::warn!(why, "account switch: the previous account's local data stays"),
         }
@@ -43,6 +47,7 @@ impl<C: CredentialStores> Engine<C> {
     fn remove_the_previous_account(
         &self,
         data: &LocalState,
+        previous: &Identity,
         sync_root: &Path,
         port: &dyn SyncRootPort,
     ) -> Result<(), &'static str> {
@@ -66,7 +71,51 @@ impl<C: CredentialStores> Engine<C> {
             }
         }
         db.forget_share_trust_rows().map_err(|_| "the share marks stay")?;
+        self.forget_its_settings(previous)?;
         // The owner record goes in this transaction, last: until it commits, B is still refused.
         db.clear_account_data(false).map_err(|_| "the rows stay")
     }
+
+    /// The account's entries in desktop.toml go with its data: its chosen backup folders and their switches, its
+    /// selective-sync ids and the address the sign-in form prefills (see [`forget_in_settings`]). Before the owner
+    /// record goes, so a settings file that cannot be written keeps the refusal like any other leftover.
+    fn forget_its_settings(&self, previous: &Identity) -> Result<(), &'static str> {
+        let path = DesktopConfig::path_for(self.identity).map_err(|_| "the settings stay")?;
+        DesktopConfig::update_at(&path, |config| {
+            let changed = forget_in_settings(config, previous);
+            (changed, ())
+        })
+        .map_err(|_| "the settings stay")
+    }
+}
+
+/// `previous`'s entries out of `config`: the chosen backup folders tagged with its id (and the `custom:<name>` switch
+/// of each), the selective-sync ids (folder ids of its vault, meaningless for another account), and the prefilled
+/// address when it is its own. Another account's entries and untagged ones stay. Whether anything changed.
+fn forget_in_settings(config: &mut DesktopConfig, previous: &Identity) -> bool {
+    let mut changed = false;
+    let mut gone = Vec::new();
+    config.backup_chosen_folders.retain(|folder| {
+        let its = crate::app::bindings::backup_folders::is_owners(folder, Some(previous));
+        if its {
+            gone.push(format!("custom:{}", folder.name));
+        }
+        changed |= its;
+        !its
+    });
+    let switches = config.known_folder_backup.len();
+    config.known_folder_backup.retain(|key| !gone.contains(key));
+    changed |= config.known_folder_backup.len() != switches;
+    if config.excluded_folder_ids.take().is_some() {
+        changed = true;
+    }
+    let prefilled_is_its = match (config.last_signed_in_email.as_deref(), previous.email.as_deref()) {
+        (Some(prefilled), Some(email)) => canonical_email(prefilled) == canonical_email(email),
+        _ => false,
+    };
+    if prefilled_is_its {
+        config.last_signed_in_email = None;
+        changed = true;
+    }
+    changed
 }
