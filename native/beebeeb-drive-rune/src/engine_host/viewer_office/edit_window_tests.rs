@@ -697,7 +697,7 @@ fn after_a_screen_lock_with_unsaved_edits_files_and_the_settings_gear_answer_at_
     {
         let ui = w.rt.state.viewer.ui.as_ref().unwrap();
         eprintln!("PROBE body_stopped={} edit={:?} over={} dialog={}", matches!(ui.file.body, viewers::source::Body::Stopped(_)), ui.office.edit.as_ref().map(|e| (e.stopped, e.unsaved())), ui.office.over.is_some(), ui.dialog.is_some());
-        eprintln!("PROBE screen {:?} unopened {:?}", w.rt.state.shell.app.screen(), w.rt.state.viewer.unopened);
+        eprintln!("PROBE screen {:?}", w.rt.state.shell.app.screen());
     }
     w.until("Files left the closed document", |w| {
         w.rt.state.viewer.ui.is_none() && viewers::route_item(&w.rt.state).is_none()
