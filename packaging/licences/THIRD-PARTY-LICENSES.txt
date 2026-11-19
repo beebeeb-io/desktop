@@ -19,8 +19,8 @@ have installed is available to everyone, free of charge:
 
   Beebeeb desktop 0.9.0:  https://github.com/beebeeb-io/desktop
                            release tag desktop-v0.9.0 (https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.9.0)
-  Part of the build, pinned: https://github.com/beebeeb-io/core at commit ea04ee49b0b21a0c3632165201a7683dbb630ee7
-                           (https://github.com/beebeeb-io/core/tree/ea04ee49b0b21a0c3632165201a7683dbb630ee7; crates: beebeeb-api, beebeeb-backup, beebeeb-core, beebeeb-sync, beebeeb-transfer, beebeeb-types)
+  Part of the build, pinned: https://github.com/beebeeb-io/core at commit 5c77c3bfba90f9472c93df50d245e4ccc7fd58e3
+                           (https://github.com/beebeeb-io/core/tree/5c77c3bfba90f9472c93df50d245e4ccc7fd58e3; crates: beebeeb-api, beebeeb-backup, beebeeb-core, beebeeb-sync, beebeeb-transfer, beebeeb-types)
   Part of the build, pinned: https://github.com/beebeeb-io/desktop-office at commit 0d7a58368f3af07b918eedb42e81ed22dc117f86
                            (https://github.com/beebeeb-io/desktop-office/tree/0d7a58368f3af07b918eedb42e81ed22dc117f86; crates: filmcraft-aac, filmcraft-ac3, filmcraft-av1, filmcraft-avi, filmcraft-bitstream, filmcraft-codecs, filmcraft-color, filmcraft-dnx, filmcraft-frame, filmcraft-h264, filmcraft-isobmff, filmcraft-matroska, filmcraft-media, filmcraft-mpa, filmcraft-mpeg2v, filmcraft-mpegts, filmcraft-ogg, filmcraft-opus, filmcraft-prores, filmcraft-time, filmcraft-vp8, filmcraft-vp9)
   Part of the build, pinned: https://github.com/beebeeb-io/desktop-office at commit f2a372b19c9e0313aea01300c4a8c45196e227e6

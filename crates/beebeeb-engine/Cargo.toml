@@ -20,11 +20,11 @@ serde_json = "1"
 sha2 = "0.10"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "ea04ee49b0b21a0c3632165201a7683dbb630ee7" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "ea04ee49b0b21a0c3632165201a7683dbb630ee7" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "5c77c3bfba90f9472c93df50d245e4ccc7fd58e3" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "5c77c3bfba90f9472c93df50d245e4ccc7fd58e3" }
 # The two-level lock's rules (`flows::lock`): I/O-free, no transport and no store of its own.
-beebeeb-api = { git = "https://github.com/beebeeb-io/core", rev = "ea04ee49b0b21a0c3632165201a7683dbb630ee7" }
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "ea04ee49b0b21a0c3632165201a7683dbb630ee7" }
+beebeeb-api = { git = "https://github.com/beebeeb-io/core", rev = "5c77c3bfba90f9472c93df50d245e4ccc7fd58e3" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "5c77c3bfba90f9472c93df50d245e4ccc7fd58e3" }
 # The running engine (API client, sync bridge, credential stores).
 toml = "0.8"
 dirs = "6"
@@ -43,8 +43,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 bytes = "1"
 rand = "0.8"
 bip39 = { version = "2", default-features = false, features = ["std"] }
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "ea04ee49b0b21a0c3632165201a7683dbb630ee7" }
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "ea04ee49b0b21a0c3632165201a7683dbb630ee7" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "5c77c3bfba90f9472c93df50d245e4ccc7fd58e3" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "5c77c3bfba90f9472c93df50d245e4ccc7fd58e3" }
 hostname = "0.4"
 # Production on unix (staged copies) and the test-support helpers.
 tempfile = "3"
@@ -177,7 +177,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aes-gcm = "0.10"
 json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "ea04ee49b0b21a0c3632165201a7683dbb630ee7", features = ["test-support"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "5c77c3bfba90f9472c93df50d245e4ccc7fd58e3", features = ["test-support"] }
 # The crate's own integration tests (`tests/`) link the lib with its test helpers (the in-memory credential store,
 # the fake API, the sandboxed config dir): a dev edge only, as in the native app.
 beebeeb-engine = { path = ".", features = ["test-support"] }
