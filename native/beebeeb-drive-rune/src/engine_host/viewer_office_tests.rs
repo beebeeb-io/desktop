@@ -362,6 +362,8 @@ struct EngineState {
     copies: Vec<(String, Vec<u8>)>,
     /// New documents: (folder, name, bytes).
     created: Vec<(Option<String>, String, Vec<u8>)>,
+    /// The copy on this PC of a file made by New document cannot be read yet (the real engine: queued, not yet on disk).
+    new_unreadable: bool,
     /// Answer saves with this instead of storing (`None`: store).
     save_says: Option<Result<SaveEnd, EditRefused>>,
     /// The recovery blobs this PC keeps: file id -> (time, base, bytes). Survives a source (a restart of the app).
@@ -389,6 +391,7 @@ impl TestEngine {
                 stored: Vec::new(),
                 copies: Vec::new(),
                 created: Vec::new(),
+                new_unreadable: false,
                 save_says: None,
                 blobs: Default::default(),
             }),
@@ -428,7 +431,8 @@ impl ViewerEngine for TestEngine {
             name,
             folders: Vec::new(),
             size,
-            on_this_pc: None,
+            on_this_pc: (self.s().new_unreadable && file_id.starts_with("new"))
+                .then_some(beebeeb_engine::app::viewer_api::OnThisPc::NotSentYet),
             unsettled_here: false,
         })
     }
@@ -455,7 +459,10 @@ impl ViewerEngine for TestEngine {
         })
     }
 
-    fn local(&self, _file_id: &str, _max_bytes: u64, _cancel: &AtomicBool) -> Result<LocalCopy, OpenFileError> {
+    fn local(&self, file_id: &str, _max_bytes: u64, _cancel: &AtomicBool) -> Result<LocalCopy, OpenFileError> {
+        if self.s().new_unreadable && file_id.starts_with("new") {
+            return Err(OpenFileError::CopyNotReadable);
+        }
         Ok(LocalCopy::NotHere)
     }
 
@@ -1054,6 +1061,44 @@ fn new_document_creates_the_file_and_opens_it() {
     assert_eq!(edits.lock().unwrap().len(), 1);
     fake.set(pages(1));
     assert!(source.poll("new1").is_some() && source.can_edit("new1"));
+}
+
+/// v3 bug 2 (DW-1558): the new file's copy on this PC is not readable yet (queued, not on disk). The editor opens on
+/// the bytes the app just made, not on the copy: no "Couldn't read the copy on this PC".
+#[test]
+fn new_document_opens_on_its_own_bytes_when_the_local_copy_is_not_readable_yet() {
+    let fake = Fake::default();
+    let template = Fake::default();
+    let engine = TestEngine::new(&[]);
+    engine.s().new_unreadable = true;
+    let (opened, edits) = (Opened::default(), Edits::default());
+    let mut source = editor_with(engine.clone(), &fake, opened, edits.clone(), &template);
+    assert!(source.create_document(None, "Invented.docx", EditKind::Docx, Template::Blank));
+    template.set(pages(1));
+    let mut delivered = false;
+    let settled = until_settled(&mut source, "", || {
+        if !delivered && template.asked_count("save") == 1 {
+            template.saved(b"PK blank letter", 1);
+            delivered = true;
+        }
+    });
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Saved { .. }));
+    fake.set(pages(1));
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        if source.can_edit("new1") {
+            break;
+        }
+        if let Some(body) = source.poll("new1") {
+            assert!(
+                !matches!(body, Body::Stopped(Stopped::CopyNotReadable)),
+                "the new file's editor stopped on its own copy"
+            );
+        }
+        assert!(Instant::now() < end, "the editor never opened");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(edits.lock().unwrap().as_slice(), &[(EditKind::Docx, b"PK blank letter".len())]);
 }
 
 #[test]

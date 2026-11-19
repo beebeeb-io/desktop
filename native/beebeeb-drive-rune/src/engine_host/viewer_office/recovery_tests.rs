@@ -71,7 +71,7 @@ fn recovery_restore_after_app_restart_opens_the_snapshots_bytes() {
     drop(first);
     // A new app run: a new store over the same blobs.
     let second = Recovery::new(fake, SessionGeneration::for_test(0));
-    assert_eq!(second.offer(FILE).unwrap().at, "14:32");
+    assert_eq!(second.offer(FILE).unwrap().at, local_1432());
     assert_eq!(&**second.restore(FILE).unwrap(), b"kept text");
     // The blob stays after a restore (a crash right after loses nothing).
     assert!(second.offer(FILE).is_some());
@@ -105,6 +105,13 @@ fn recovery_another_session_keeps_and_lists_nothing() {
     assert!(stale.offer(FILE).is_none());
 }
 
+/// The blob's 14:32:07 UTC, on this PC's clock.
+fn local_1432() -> String {
+    chrono::DateTime::<chrono::Local>::from(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400 * 100 + 14 * 3600 + 32 * 60 + 7))
+        .format("%H:%M")
+        .to_string()
+}
+
 #[test]
 fn recovery_pending_lists_the_accounts_blobs_for_the_notice() {
     let (_fake, recovery) = store();
@@ -113,7 +120,7 @@ fn recovery_pending_lists_the_accounts_blobs_for_the_notice() {
     recovery.keep(OTHER, 1, &bytes("y"));
     let pending = recovery.pending();
     assert_eq!(pending.len(), 2);
-    assert!(pending.iter().all(|p| p.at == "14:32"));
+    assert!(pending.iter().all(|p| p.at == local_1432()));
     assert_eq!(
         words::unlocked_words(2, None).unwrap(),
         "Unsaved changes to 2 files were kept on this PC."
@@ -138,4 +145,25 @@ fn recovery_words_follow_the_editor_state() {
     let read_only = words::banner(Some(&edit), None).unwrap();
     assert!(matches!(read_only, words::Banner::ReadOnly { at: Some(_) }));
     assert!(words::words(&read_only, "Plan.docx").contains("read-only"));
+}
+
+/// v3 bug 3: the notice's time is this PC's clock, not UTC.
+#[test]
+fn recovery_times_are_shown_in_the_local_zone() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let zone = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+    let at = UNIX_EPOCH + Duration::from_secs(86_400 * 100 + 14 * 3600 + 32 * 60 + 7);
+    assert_eq!(super::super::clock_in(at, &zone), "16:32");
+}
+
+/// v3 bug 4: after the person's own Restore no editor stopped, and the bar must not say so.
+#[test]
+fn restore_by_the_person_does_not_say_the_editor_stopped() {
+    let mut edit = EditUi::new(beebeeb_office_protocol::office::EditKind::Docx);
+    edit.restored = Some("14:32".to_string());
+    edit.restored_by_you = true;
+    let banner = words::banner(Some(&edit), None).unwrap();
+    let said = words::words(&banner, "Plan.docx");
+    assert!(!said.contains("stopped"), "{said}");
+    assert!(said.contains("14:32") && said.contains("restored"), "{said}");
 }

@@ -54,6 +54,10 @@ pub struct EditUi {
     pub stopped: bool,
     /// A recovery was restored, saved at this time.
     pub restored: Option<String>,
+    /// Restore (the kept editing) was pressed and its answer is not here yet.
+    pub restore_asked: bool,
+    /// `restored` is the person's own Restore of kept changes, not a helper restart: no editor stopped.
+    pub restored_by_you: bool,
 }
 
 impl EditUi {
@@ -74,6 +78,8 @@ impl EditUi {
             layouts: Vec::new(),
             stopped: false,
             restored: None,
+            restore_asked: false,
+            restored_by_you: false,
         }
     }
 
@@ -114,6 +120,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             // of the old one's caret or undo holds, and no version holds it until it is saved.
             EditAnswer::Restored { at } => {
                 edit.restored = Some(at);
+                edit.restored_by_you = std::mem::take(&mut edit.restore_asked);
                 edit.revision = 0;
                 edit.saved_revision = u64::MAX;
                 edit.caret = None;

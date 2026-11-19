@@ -30,6 +30,8 @@ pub const DISCARD: &str = "Discard";
 pub enum Banner {
     /// The helper restarted; the document is the snapshot from `at`.
     Restored { at: String },
+    /// The person's own Restore of kept changes: no editor stopped.
+    Brought { at: String },
     /// A second crash: read-only; the last snapshot (from `at`, when there is one) can be saved as a copy.
     ReadOnly { at: Option<String> },
     /// A kept editing of this file from `at`.
@@ -39,6 +41,11 @@ pub enum Banner {
 /// After a restart.
 pub fn restored_words(at: &str) -> String {
     format!("The editor stopped. Your changes up to {at} are restored. The undo history is gone.")
+}
+
+/// After the person pressed Restore on kept changes.
+pub fn brought_words(at: &str) -> String {
+    format!("Your unsaved changes from {at} are restored. The undo history is gone.")
 }
 
 /// After a second crash.
@@ -70,7 +77,8 @@ pub fn banner(edit: Option<&EditUi>, offer: Option<&RecoveryOffer>) -> Option<Ba
             });
         }
         if let Some(at) = &edit.restored {
-            return Some(Banner::Restored { at: at.clone() });
+            let at = at.clone();
+            return Some(if edit.restored_by_you { Banner::Brought { at } } else { Banner::Restored { at } });
         }
     }
     offer.map(|offer| Banner::Offer { at: offer.at.clone() })
@@ -80,6 +88,7 @@ pub fn banner(edit: Option<&EditUi>, offer: Option<&RecoveryOffer>) -> Option<Ba
 pub fn words(banner: &Banner, name: &str) -> String {
     match banner {
         Banner::Restored { at } => restored_words(at),
+        Banner::Brought { at } => brought_words(at),
         Banner::ReadOnly { at: Some(at) } => format!("{} Your changes up to {at} can be kept as a copy.", read_only_words()),
         Banner::ReadOnly { at: None } => read_only_words().to_string(),
         Banner::Offer { at } => offer_words(name, at),
@@ -123,7 +132,7 @@ pub fn view(banner: &Banner, name: &str, t: &Theme) -> El {
                 .min_w(0.0),
         );
     match banner {
-        Banner::Restored { .. } => {}
+        Banner::Restored { .. } | Banner::Brought { .. } => {}
         Banner::ReadOnly { at: Some(_) } => b = b.child(button("recovery-keep", KEEP_BOTH, keep_both)),
         Banner::ReadOnly { at: None } => {}
         Banner::Offer { .. } => {
@@ -168,6 +177,9 @@ fn restore_now(s: &mut State) -> bool {
     let id = id.to_string();
     let restored = source.restore(&id);
     if restored {
+        if let Some(edit) = ui.office.edit.as_mut() {
+            edit.restore_asked = true;
+        }
         // The offer is answered: what shows next is what the editor says of the restored document.
         ui.office.recovery = None;
     } else {
