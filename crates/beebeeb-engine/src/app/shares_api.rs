@@ -393,11 +393,12 @@ fn list<'a>(body: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> {
 }
 
 /// An incoming invite as a row: `invited` waits for an answer, `approved` is shared with the account. A `claimed`
-/// one (accepted, the owner has not approved yet) is neither: there is nothing to answer and nothing to open.
+/// one (accepted, the owner has not approved yet) is listed too, named by its placeholder until the sealed key arrives.
 fn incoming_share(invite: &Value, master: &MasterKey) -> Option<IncomingShare> {
     let waiting = match text(invite, "status")? {
         "invited" => true,
-        "approved" => false,
+        // Accepted, not approved yet: no key is sealed for this account, so it reads as still opening.
+        "approved" | "claimed" => false,
         _ => return None,
     };
     let is_folder = flag(invite, "is_folder") || flag(invite, "is_folder_share");
