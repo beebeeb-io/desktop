@@ -412,3 +412,112 @@ fn the_shells_close_during_a_screen_lock_flush_waits_for_the_seal() {
     assert_eq!(again.state(), OfficeState::Closed(CloseWhy::Locked));
     let _ = again.poll();
 }
+
+fn saved_for(got: &[EditEvent], purpose: Purpose) -> usize {
+    got.iter()
+        .filter(|event| matches!(event, EditEvent::Saved { purpose: p, .. } if *p == purpose))
+        .count()
+}
+
+/// w23: Ctrl+S after a restart gives the document's bytes (the window's save asks `Purpose::Save`).
+#[test]
+fn a_save_after_a_restart_answers_with_the_documents_bytes() {
+    let registry = Registry::new();
+    let mut host = start(mortal(), cadence(40, 400, 60_000), &registry);
+    let mut got = Vec::new();
+    host.edit(EditOp::InsertText("a".to_owned())).expect("sent");
+    assert!(wait_events(&mut host, &mut got, |got| snapshots(got) == 1));
+    host.edit(die()).expect("sent");
+    assert!(wait_events(&mut host, &mut got, |got| restored(got) == 1), "{got:?}");
+    let id = host.save_bytes(Purpose::Save).expect("the restarted session takes a save");
+    assert!(
+        wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1),
+        "the save is answered: {got:?}"
+    );
+    assert!(got.iter().any(|event| matches!(event, EditEvent::Saved { id: i, purpose: Purpose::Save, .. } if *i == id)));
+}
+
+/// A helper that serves an editing session; the first helper started exits at its `exit_at`'th message (0: never),
+/// every later one lives.
+fn dies_once_at(exit_at: usize) -> Fake {
+    let links = Arc::new(AtomicUsize::new(0));
+    Fake::new(move |link| {
+        let first = links.fetch_add(1, SeqCst) == 0;
+        let mut seen = 0;
+        let mut revision = 0;
+        while let Some((id, message)) = link.next() {
+            seen += 1;
+            if first && seen == exit_at {
+                return;
+            }
+            let reply = match message {
+                Message::Open(_) | Message::OpenEdit(_) | Message::NewDoc(_) => opened(&[LETTER]),
+                Message::Edit(_) => {
+                    revision += 1;
+                    edited(revision)
+                }
+                Message::SaveSize(_) => Message::SaveReady(office::SaveReady {
+                    token: 7,
+                    len: SNAPSHOT_LEN,
+                    revision,
+                }),
+                Message::SaveInto(into) => {
+                    link.paint(into.out, 0x5a);
+                    Message::SavedInto(office::SavedInto { len: into.out.len })
+                }
+                _ => Message::Error(office::Error {
+                    code: office::ErrorCode::Internal,
+                }),
+            };
+            link.answer(id, reply);
+        }
+    })
+}
+
+/// w23: the helper is killed while the document is still opening (a slow first start): the session starts again from
+/// the opened bytes instead of ending as "stopped".
+#[test]
+fn a_helper_killed_while_the_document_opens_is_started_again_from_the_opened_bytes() {
+    let registry = Registry::new();
+    let fake = dies_once_at(1);
+    let log = fake.log.clone();
+    let mut host = open_mode_cadence(
+        fake,
+        &registry,
+        TEST_TIMEOUTS,
+        cadence(40, 400, 60_000),
+        Mode::Edit(EditKind::Docx),
+        DocKind::Docx,
+        Some(Zeroizing::new(doc())),
+        noop_wake(),
+    );
+    let mut events = Vec::new();
+    assert!(until_open(&mut host, &mut events), "{:?}", host.state());
+    assert!(matches!(host.state(), OfficeState::Pages { .. }), "opened on the second helper: {:?}", host.state());
+    assert_eq!(log.starts(), 2);
+    host.edit(EditOp::InsertText("a".to_owned())).expect("the session edits");
+    host.save_bytes(Purpose::Save).expect("and saves");
+    let mut got = Vec::new();
+    assert!(wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1), "{got:?}");
+    assert_eq!(restored(&got), 0, "nothing was open to restore: {got:?}");
+}
+
+/// w23: the helper is killed while a save's size is asked: that save is answered failed, the session restarts, and the
+/// next Ctrl+S saves.
+#[test]
+fn a_helper_killed_during_a_save_restarts_and_the_next_save_answers() {
+    let registry = Registry::new();
+    // Messages of the first helper: OpenEdit, Edit, SaveSize (the third) -> it exits.
+    let mut host = start(dies_once_at(3), cadence(30_000, 30_000, 60_000), &registry);
+    let mut got = Vec::new();
+    host.edit(EditOp::InsertText("a".to_owned())).expect("sent");
+    let first = host.save_bytes(Purpose::Save).expect("sent");
+    assert!(wait_events(&mut host, &mut got, |got| restored(got) == 1), "{got:?}");
+    assert!(
+        got.iter().any(|event| matches!(event, EditEvent::Failed { id, .. } if *id == first)),
+        "the save that was out is answered: {got:?}"
+    );
+    let second = host.save_bytes(Purpose::Save).expect("the restarted session takes a save");
+    assert!(wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1), "{got:?}");
+    assert!(got.iter().any(|event| matches!(event, EditEvent::Saved { id, .. } if *id == second)));
+}
