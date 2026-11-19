@@ -581,7 +581,7 @@ pub fn ui(s: &mut State) -> Option<&mut Ui> {
     s.viewer.ui.as_mut()
 }
 
-fn route_item(s: &State) -> Option<String> {
+pub(crate) fn route_item(s: &State) -> Option<String> {
     match s.shell.app.screen() {
         Screen::Drive(route) => route.item,
         _ => None,

@@ -706,6 +706,24 @@ fn a_sidebar_click_ends_a_name_being_typed_in_a_row() {
     assert_eq!(rt.state.actions.name_edit.text, "", "and what was typed is gone");
 }
 
+/// Bug 10 (VM 401 run 7): the word typed in the Search names box was still in the box on the screens after Search.
+/// A sidebar press is the person going somewhere else: Search over the Files window ends, as a lock ends it. (An
+/// opened result keeps it behind the item, so Back shows the same results again: only a section press ends it.)
+#[test]
+fn a_sidebar_click_ends_search_and_its_typed_word() {
+    let (_engine, _platform, mut rt) = fixture();
+    rt.update(|s, tx| {
+        crate::frames::search::open(s, tx);
+        s.search = rune::TextEdit::new("contract");
+    });
+    settle(&mut rt);
+    assert!(rt.state.frames.find.open && rt.state.search.text == "contract");
+    rt.update(|s, _| s.sidebar_section = crate::ui::sidebar::SidebarSection::Photos);
+    settle(&mut rt);
+    assert_eq!(rt.state.search.text, "", "the typed word did not come along to Photos");
+    assert!(!rt.state.frames.find.open, "Search is over");
+}
+
 /// A message that went takes what its Try again held with it.
 #[test]
 fn what_try_again_holds_goes_when_its_message_goes() {

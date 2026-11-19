@@ -659,6 +659,55 @@ fn text_typed_before_the_snapshot_timer_is_offered_after_a_screen_lock_and_an_un
     w.until("the last text is offered", |w| offered(w));
 }
 
+/// Bug 8 (VM 401 run 7): an edited document open, the screen locked and unlocked; the pane says the file was closed,
+/// and Files and the Settings gear must answer at once (the recording saw ~60 s of nothing).
+#[test]
+fn after_a_screen_lock_with_unsaved_edits_files_and_the_settings_gear_answer_at_once() {
+    let mut w = window("lockfreeze");
+    w.sign_in();
+    w.open_in_the_editor();
+    w.helper.answer(HostEdit::Edited(Box::new(edited(1, Dirty::All))));
+    w.until("the edit is unsaved", |w| w.edit().is_some_and(|edit| edit.0));
+    use beebeeb_engine::app::office_session_end::SessionEnding;
+    let sink = w.helper.flush_sink().expect("the editor registered the door a lock seals through");
+    let last_text = Zeroizing::new(edited_version());
+    let sealed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = sealed.clone();
+    w.engine.set_office_session_end_hook(Arc::new(move |ending| {
+        if ending != SessionEnding::ScreenLock {
+            return;
+        }
+        let (sink, text, done) = (sink.clone(), last_text.clone(), done.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            sink(&text);
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }));
+    w.engine.lock_screen().expect("the screen locks");
+    w.settle();
+    w.until("the seal landed", |_| sealed.load(std::sync::atomic::Ordering::SeqCst));
+    w.engine
+        .unlock_screen_platform_verified(w.engine.session_turn())
+        .expect("the platform's yes unlocks the screen");
+    w.until("the notice after unlock", |w| w.rt.state.actions.toast == Some(Toast::KeptEdits(1)));
+    let began = Instant::now();
+    w.settle();
+    w.click("Photos-row");
+    w.until("Photos left the closed document", |w| {
+        w.rt.state.viewer.ui.is_none() && viewers::route_item(&w.rt.state).is_none()
+    });
+    assert!(began.elapsed() < Duration::from_secs(5), "the sidebar answered late");
+    w.click("settings-btn");
+    let screen = w.rt.state.shell.app.screen();
+    eprintln!("after the gear: {screen:?} in {:?}", began.elapsed());
+    assert!(
+        matches!(screen, crate::shell::app::Screen::Settings(_)),
+        "the gear did not open Settings: {screen:?}; the window draws:\n{}",
+        w.drawn()
+    );
+}
+
 /// Recovery: a snapshot the helper handed over is kept (sealed by the engine); after a lock and an unlock the
 /// window says so, the reopened document offers it, and Restore opens the editor on the kept bytes, unsaved.
 #[test]
