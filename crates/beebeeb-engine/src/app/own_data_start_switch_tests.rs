@@ -71,6 +71,12 @@ fn a_signed_out(pc: &Pc, owner: &Identity) {
     row(&db, IDS[0], A_NAME, false, 3);
     row(&db, IDS[1], "Taxes 2026", true, 3);
     db.set_owner(owner).unwrap();
+    drop(db);
+    // A row synced the usual way knows its content; a bare row is a file of unknown content (the guarded set).
+    rusqlite::Connection::open(pc.state_db())
+        .unwrap()
+        .execute("UPDATE files SET local_hash = 'h', fetched_min_version = 0 WHERE item_kind = 'file'", [])
+        .unwrap();
     std::fs::write(pc.root().join(A_NAME), b"ten bytes!").unwrap();
     std::fs::create_dir_all(pc.root().join("Taxes 2026")).unwrap();
 }
