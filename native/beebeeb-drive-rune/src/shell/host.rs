@@ -731,6 +731,9 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         // The sidebar's route event does not go through `dispatch`: the Files window still
         // closes what was open in it (a name being typed in a row is not modal).
         crate::frames::files::reset::sync(s);
+        // A section press is the person going somewhere else: Search over the window ends (its typed word is in the
+        // box of Photos and the viewer too). A result opened from Search keeps it, so Back shows the results again.
+        crate::frames::files::reset::end_search(s);
         changed |= outcome == Outcome::Changed;
     }
     // A message that went takes what its Try again held with it.

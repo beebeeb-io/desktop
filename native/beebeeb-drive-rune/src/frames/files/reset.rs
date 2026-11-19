@@ -184,6 +184,11 @@ pub fn session_closed(s: &mut State) {
     close_search(s);
 }
 
+/// A section press ends Search over the window.
+pub(crate) fn end_search(s: &mut State) {
+    close_search(s);
+}
+
 /// Search over the window ends: what was typed, what was narrowed to, the selected result.
 fn close_search(s: &mut State) {
     s.search = rune::TextEdit::new("");
