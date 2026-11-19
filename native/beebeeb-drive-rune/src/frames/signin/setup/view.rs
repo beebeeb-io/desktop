@@ -853,18 +853,31 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 .on_press_tx(act(move |ui: &mut Ui| ui.open_setting(setting)))
         })
         .collect();
-    // What was asked and did not happen, said in words (the rows show what is set).
-    let not_changed: Vec<&str> = [
+    // What was asked and did not happen, said in words (the rows show what is set). App lock is apart: a Windows
+    // Hello that was cancelled leaves it as it was, and that is not an error.
+    let unchanged = |names: [(Switch, &'static str); 3]| -> Vec<&'static str> {
+        names
+            .into_iter()
+            .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))
+            .map(|(_, name)| name)
+            .collect()
+    };
+    let not_changed = unchanged([
         (Switch::Notifications, "notifications"),
         (Switch::OpenAtLogin, "open at login"),
         (Switch::Backup, "backup"),
-        (Switch::AppLock, "app lock"),
-        (Switch::LockAfter, "lock delay"),
-    ]
-    .into_iter()
-    .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))
-    .map(|(_, name)| name)
-    .collect();
+    ]);
+    let lock_kept: Vec<&str> = [(Switch::AppLock, "app lock"), (Switch::LockAfter, "lock delay")]
+        .into_iter()
+        .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))
+        .map(|(_, name)| name)
+        .collect();
+    let note = |key: &'static str, k: &mut Keys, words: String| {
+        el().key(key)
+            .role("alert")
+            .w_full()
+            .child(setup::note(k, &words, type_::CAPTION, 0.0, t))
+    };
     setup::column()
         .child(au::heading(
             "You're set up",
@@ -874,18 +887,22 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         ))
         .child(setup::list(k, rows, None, t))
         .children((!not_changed.is_empty()).then(|| {
-            el().key("not-changed").role("alert").w_full().child(setup::note(
+            note(
+                "not-changed",
                 k,
-                &format!(
-                    "{} {} changed. You can set {} in Settings.",
-                    capitalised(&not_changed.join(" and ")),
-                    if not_changed.len() == 1 { "wasn't" } else { "weren't" },
-                    if not_changed.len() == 1 { "it" } else { "them" }
+                format!("Couldn't change {}. You can set it in Settings.", not_changed.join(" and ")),
+            )
+        }))
+        .children((!lock_kept.is_empty()).then(|| {
+            let verb = if lock_kept.len() == 1 { "wasn't" } else { "weren't" };
+            note(
+                "lock-not-changed",
+                k,
+                format!(
+                    "{} {verb} changed. You can set it in Settings.",
+                    capitalised(&lock_kept.join(" and "))
                 ),
-                type_::CAPTION,
-                0.0,
-                t,
-            ))
+            )
         }))
         .child(setup::note(
             k,
