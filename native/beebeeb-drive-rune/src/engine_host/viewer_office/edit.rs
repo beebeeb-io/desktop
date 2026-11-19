@@ -27,6 +27,7 @@
 #![cfg_attr(not(test), allow(dead_code))] // the editor's window reaches these through `ViewerSource` once it is wired
 
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::viewer_edit_api::{EditRefused, SaveEnd};
 
