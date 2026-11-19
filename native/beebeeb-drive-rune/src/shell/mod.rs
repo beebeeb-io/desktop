@@ -184,8 +184,17 @@ const CONTROL_SEND_WAIT: Duration = Duration::from_secs(5);
 
 /// The control channel's handler: hands the request to the window thread and waits for it to
 /// be taken, so the caller's acknowledgement means "the app has it", not "a pipe exists".
-fn control_handler(target: Arc<Mutex<Option<rune::AppHandle<State>>>>) -> platform::ControlHandler {
+fn control_handler(
+    target: Arc<Mutex<Option<rune::AppHandle<State>>>>,
+    own_origin: String,
+) -> platform::ControlHandler {
     Arc::new(move |request| {
+        // A launch that named another server than this instance runs on: nothing is shown (bug 9: the same one is).
+        let request = match request {
+            control::Request::ShowOn(origin) if origin == own_origin => control::Request::Show,
+            control::Request::ShowOn(_) => return Reply::OtherServer,
+            other => other,
+        };
         let main = target.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         // Not up yet (the first moments of a start).
         let Some(main) = main else { return Reply::Busy };
@@ -248,7 +257,7 @@ pub fn run() {
     let (claim, _control_server) = if launch.tooling {
         (Claim::First, None)
     } else {
-        match platform.serve_control(identity, control_handler(control_target.clone())) {
+        match platform.serve_control(identity, control_handler(control_target.clone(), api_base.origin().to_owned())) {
             Ok(server) => (Claim::First, Some(server)),
             Err(ServeError::AlreadyRunning) => (Claim::Running, None),
             Err(ServeError::NotBuilt(what)) => {
@@ -297,7 +306,11 @@ pub fn run() {
         Plan::BeTheApp => Some(instance::start(&launch, engine.profile_holder())),
         Plan::Hand(request) => Some(instance::after_hand(platform.send_control(
             identity,
-            &request,
+            // The checked origin (the parser's own serialization), the form the running instance compares.
+            &match request {
+                control::Request::ShowOn(_) => control::Request::ShowOn(api_base.origin().to_owned()),
+                other => other,
+            },
             CONTROL_SEND_WAIT,
         ))),
         Plan::Refuse(refusal) => Some(Start::Refuse(refusal)),

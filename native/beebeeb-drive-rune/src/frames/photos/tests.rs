@@ -704,3 +704,13 @@ fn a_small_original_is_written_in_kilobytes() {
     assert_eq!(megabytes(1_000_000, true), "1 MB");
     assert_eq!(megabytes(30_900_000, true), "30.9 MB");
 }
+
+/// W20 bug 7: the Settings gear in the Photos window's sidebar did nothing (from Files it opens), whether or not a
+/// viewer had been open before.
+#[test]
+fn w20_the_gear_in_the_photos_window_opens_settings() {
+    let mut rt = runtime("DW-0601");
+    assert!(!rt.state.shell.app.in_settings());
+    click(&mut rt, "settings-btn");
+    assert!(rt.state.shell.app.in_settings(), "the gear opened nothing on Photos");
+}

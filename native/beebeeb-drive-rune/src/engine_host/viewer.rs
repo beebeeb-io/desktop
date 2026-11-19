@@ -1224,7 +1224,10 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     /// An audio or a video file kept on this PC still opens in the player when playback is available (D-MED-13); an
     /// Office file opens in the viewer while its route is on ("Open in another app…" stays one press away).
     fn opens_here_when_kept(&self, name: &str) -> bool {
-        self.media_previews(name) || matches!(self.office_route(name), Some(kinds::OfficeRoute::Shows(_)))
+        // A PDF too (W20): a kept one went to the browser; the viewer shows it, the other app stays one press away.
+        self.media_previews(name)
+            || shows(name) == Shows::Pdf
+            || matches!(self.office_route(name), Some(kinds::OfficeRoute::Shows(_)))
     }
 
     fn office_live(&self) -> bool {

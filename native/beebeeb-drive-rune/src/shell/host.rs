@@ -1066,7 +1066,8 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
 /// opens the window's own surface on an item of the account it shows (`platform::windows_verbs`).
 pub fn on_control(s: &mut State, request: Request, tx: &mut Tx) {
     match request {
-        Request::Show => s.shell.open_main(),
+        // `ShowOn` is answered (and turned into `Show`) by the control handler before it gets here.
+        Request::Show | Request::ShowOn(_) => s.shell.open_main(),
         Request::Open(link) => on_open_url(s, &link, tx),
         // Slice B6: the window comes forward (a locked one to its lock screen); the verb is checked again there.
         Request::Explorer { verb, item } => {
