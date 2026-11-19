@@ -58,7 +58,8 @@ fn bodies(account: &FakeAccount) -> [Value; 4] {
             { "id": INV_MINE, "file_id": PLAN, "status": "approved", "sender_email": "other@example.eu",
               "file_name_encrypted": "{\"not\":\"for this key\"}", "encrypted_file_key": SECRETS[3],
               "sender_public_key": "AAAA", "size_bytes": 2048, "approved_at": "2026-11-02T10:00:00Z" },
-            { "id": INV_CLAIMED, "file_id": TRIP, "status": "claimed", "sender_email": "other@example.eu" },
+            { "id": INV_CLAIMED, "file_id": TRIP, "status": "claimed", "sender_email": "other@example.eu",
+              "is_folder": true, "created_at": "2026-11-03T10:00:00Z" },
         ] }),
         json!({ "invites": [
             sent(INV_A, TRIP, "Invented trip", "one@example.eu", "approved", "write"),
@@ -155,7 +156,7 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
     assert_eq!(overview.session, engine.session_turn());
     assert_eq!(overview.owner_email.as_deref(), Some(fake.account.email.as_str()));
 
-    // Incoming: the invitation waits, the approved one is shared with the account, the claimed one is neither. A
+    // Incoming: the invitation waits, the approved one is shared with the account, the claimed one (accepted, no sealed key yet) is shown as still opening. A
     // name that is not an envelope, or does not open, is the fixed words.
     let incoming: Vec<_> = overview
         .incoming
@@ -166,7 +167,8 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
         incoming,
         [
             (INV_IN, OPENING_SHARED_FOLDER, true, true),
-            (INV_MINE, ENCRYPTED_ITEM, false, false)
+            (INV_MINE, ENCRYPTED_ITEM, false, false),
+            (INV_CLAIMED, OPENING_SHARED_FOLDER, false, true)
         ]
     );
     assert_eq!(overview.incoming[0].from_email, "sender@example.eu");

@@ -451,13 +451,16 @@ fn test_shared_invite_mapping_filters_approved_and_permissions() {
             {
                 "id": "invite-pending",
                 "file_id": "root-pending",
-                "status": "claimed"
+                "status": "claimed",
+                "is_folder_share": true
             }
         ]
     });
 
     let roots = shared_roots_from_invite_response(&body);
-    assert_eq!(roots.len(), 2);
+    assert_eq!(roots.len(), 3);
+    assert_eq!(roots[2].display_name, "Opening shared folder…");
+    assert!(roots[2].claimed && !roots[0].claimed);
     assert_eq!(roots[0].display_name, "Encrypted folder");
     assert_eq!(roots[0].permission_bits, PERMISSION_READ | PERMISSION_SHARE);
     assert_eq!(roots[1].permission_bits, PERMISSION_READ | PERMISSION_WRITE);
