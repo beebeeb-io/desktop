@@ -248,6 +248,7 @@ fn ingestion_writes_a_new_row_with_its_parent_and_namespace() {
         file_name_encrypted: None,
         permission_bits: PERMISSION_READ,
         approved_at: None,
+        claimed: false,
     };
     apply_shared_metadata_file_row(
         &bridge.db,

@@ -38,9 +38,11 @@ pub(super) fn shared_invite_id_matches(invite: &serde_json::Value, share_id: &st
 }
 
 pub(super) fn shared_root_from_invite(invite: &serde_json::Value) -> Option<SharedRootMapping> {
-    if invite.get("status").and_then(|value| value.as_str()) != Some("approved") {
-        return None;
-    }
+    let claimed = match invite.get("status").and_then(|value| value.as_str()) {
+        Some("approved") => false,
+        Some("claimed") => true,
+        _ => return None,
+    };
 
     let invite_id = string_field(invite, &["id", "invite_id"])?;
     let file_id = string_field(invite, &["file_id"])?;
@@ -50,7 +52,12 @@ pub(super) fn shared_root_from_invite(invite: &serde_json::Value) -> Option<Shar
         .or_else(|| invite.get("is_folder").and_then(|value| value.as_bool()))
         .unwrap_or(false);
     let item_kind = if is_folder { ItemKind::Folder } else { ItemKind::File };
-    let display_name = shared_placeholder_name(&item_kind).to_string();
+    let display_name = if claimed {
+        shared_claimed_name(&item_kind)
+    } else {
+        shared_placeholder_name(&item_kind)
+    }
+    .to_string();
     let content_type = string_field(invite, &["mime_type", "content_type"]);
     let size_bytes = invite.get("size_bytes").and_then(|value| value.as_i64()).unwrap_or(0);
     let mut permission_bits = PERMISSION_READ;
@@ -82,6 +89,7 @@ pub(super) fn shared_root_from_invite(invite: &serde_json::Value) -> Option<Shar
             .get("approved_at")
             .and_then(|value| value.as_str())
             .and_then(parse_rfc3339_secs),
+        claimed,
     })
 }
 
@@ -281,6 +289,14 @@ pub(super) fn item_kind_from_metadata(f: &serde_json::Value) -> ItemKind {
         ItemKind::Folder
     } else {
         ItemKind::File
+    }
+}
+
+/// The name of an accepted share whose sealed key has not arrived (w24).
+pub(super) fn shared_claimed_name(item_kind: &ItemKind) -> &'static str {
+    match item_kind {
+        ItemKind::Folder => "Opening shared folder…",
+        ItemKind::File => "Opening shared file…",
     }
 }
 

@@ -62,6 +62,8 @@ pub struct SharedRootMapping {
     pub(super) file_name_encrypted: Option<String>,
     pub(super) permission_bits: i64,
     pub(super) approved_at: Option<i64>,
+    /// Accepted, but the sealed key has not arrived yet (status "claimed").
+    pub claimed: bool,
 }
 
 pub(super) fn owned_key_and_pin(

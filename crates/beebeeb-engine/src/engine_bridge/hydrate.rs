@@ -696,6 +696,9 @@ impl EngineBridge {
             .ok_or_else(|| anyhow::anyhow!("shared invite {share_id} was not returned by the server"))?;
         let mapping = shared_root_from_invite(invite)
             .ok_or_else(|| anyhow::anyhow!("shared invite {share_id} is not approved or is malformed"))?;
+        if mapping.claimed {
+            return Err(anyhow::anyhow!("shared invite {share_id} is still opening: its key has not arrived").into());
+        }
         let sender_public_key = mapping
             .sender_public_key
             .as_deref()
