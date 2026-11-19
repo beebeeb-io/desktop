@@ -693,3 +693,13 @@ fn ctrl_click_checks_a_photo_and_starts_selecting() {
     click(&mut rt, "ph-tile-0-2");
     assert!(!rt.state.photos.selecting && rt.state.photos.selected.is_empty());
 }
+
+/// W20 bug 7: the Settings gear in the Photos window's sidebar did nothing (from Files it opens), whether or not a
+/// viewer had been open before.
+#[test]
+fn w20_the_gear_in_the_photos_window_opens_settings() {
+    let mut rt = runtime("DW-0601");
+    assert!(!rt.state.shell.app.in_settings());
+    click(&mut rt, "settings-btn");
+    assert!(rt.state.shell.app.in_settings(), "the gear opened nothing on Photos");
+}
