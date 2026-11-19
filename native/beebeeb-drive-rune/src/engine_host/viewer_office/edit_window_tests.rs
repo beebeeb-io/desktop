@@ -698,6 +698,13 @@ fn after_a_screen_lock_with_unsaved_edits_files_and_the_settings_gear_answer_at_
     eprintln!("after Photos: {:?}", w.rt.state.shell.app.screen());
     w.click("Files-row");
     eprintln!("after Files: {:?}; viewer open {}", w.rt.state.shell.app.screen(), w.rt.state.viewer.ui.is_some());
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(75) {
+        w.settle();
+        if w.rt.state.viewer.ui.is_none() { break; }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    eprintln!("viewer left after {:?}: {:?}", t0.elapsed(), w.rt.state.shell.app.screen());
     w.click("settings-btn");
     let screen = w.rt.state.shell.app.screen();
     eprintln!("after the gear: {screen:?} in {:?}", began.elapsed());
