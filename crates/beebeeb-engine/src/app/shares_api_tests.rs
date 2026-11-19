@@ -165,7 +165,7 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
     assert_eq!(
         incoming,
         [
-            (INV_IN, ENCRYPTED_ITEM, true, true),
+            (INV_IN, OPENING_SHARED_FOLDER, true, true),
             (INV_MINE, ENCRYPTED_ITEM, false, false)
         ]
     );

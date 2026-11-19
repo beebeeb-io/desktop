@@ -237,7 +237,7 @@ fn the_lists_are_read_when_shared_opens_and_drawn_from_what_beebeeb_answered() {
     assert_eq!(invitations.len(), 1);
     assert_eq!(
         (invitations[0].id.as_str(), invitations[0].name.as_str()),
-        (INV_IN, "Encrypted item")
+        (INV_IN, "Opening shared folder\u{2026}")
     );
     assert_eq!(invitations[0].kind, Kind::Folder);
     assert_eq!(invitations[0].from_line, "sender@example.eu wants to share this folder");
