@@ -37,6 +37,10 @@ const MINE: &str = "/api/v1/shares/mine";
 
 /// The name of an incoming item whose name cannot be opened (not sealed for this account yet, or a folder's).
 pub const ENCRYPTED_ITEM: &str = "Encrypted item";
+/// The name of an incoming folder whose key is not sealed for this account yet: neutral, never a misleading label.
+pub const OPENING_SHARED_FOLDER: &str = "Opening shared folder\u{2026}";
+/// The same for an incoming file.
+pub const OPENING_SHARED_ITEM: &str = "Opening shared item\u{2026}";
 /// The name of one of the account's own shared items whose name cannot be opened.
 pub const SHARED_ITEM: &str = "Shared item";
 
@@ -396,11 +400,12 @@ fn incoming_share(invite: &Value, master: &MasterKey) -> Option<IncomingShare> {
         "approved" => false,
         _ => return None,
     };
+    let is_folder = flag(invite, "is_folder") || flag(invite, "is_folder_share");
     Some(IncomingShare {
         invite_id: text(invite, "id")?.to_string(),
         item_id: text(invite, "file_id")?.to_string(),
-        name: incoming_name(invite, master).unwrap_or_else(|| ENCRYPTED_ITEM.to_string()),
-        is_folder: flag(invite, "is_folder") || flag(invite, "is_folder_share"),
+        name: incoming_name(invite, master).unwrap_or_else(|| unopened_name(invite, is_folder).to_string()),
+        is_folder,
         from_email: text(invite, "sender_email").unwrap_or_default().to_string(),
         size_bytes: invite.get("size_bytes").and_then(Value::as_i64).unwrap_or(0),
         waiting,
@@ -409,6 +414,17 @@ fn incoming_share(invite: &Value, master: &MasterKey) -> Option<IncomingShare> {
             .unwrap_or_default()
             .to_string(),
     })
+}
+
+/// The words for an incoming name that did not open: while no key is sealed for this account yet it is still being
+/// opened (a placeholder); a sealed key that does not open is [`ENCRYPTED_ITEM`].
+fn unopened_name(invite: &Value, is_folder: bool) -> &'static str {
+    let sealed = text(invite, "encrypted_file_key").is_some_and(|k| !k.is_empty());
+    match (sealed, is_folder) {
+        (true, _) => ENCRYPTED_ITEM,
+        (false, true) => OPENING_SHARED_FOLDER,
+        (false, false) => OPENING_SHARED_ITEM,
+    }
 }
 
 /// An incoming item's name, opened with core's member key flow. Only an encrypted envelope is opened: a name field
