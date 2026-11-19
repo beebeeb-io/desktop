@@ -500,10 +500,20 @@ impl<C: CredentialStores> Engine<C> {
         if !attempt.current(epoch) {
             return Err(Left);
         }
-        let finish = attempt
+        let mut finish = attempt
             .with_flow(|flow| flow.on_register_start(&answered))
             .ok_or(Left)?
             .map_err(refusal)?;
+        // The server (with the email code on) wants the terms version the person accepted in the register-finish
+        // body; core's request for it carries none, so the version core's own terms request names is added here.
+        let version = attempt
+            .with_flow(|flow| flow.terms_request())
+            .flatten()
+            .and_then(|request| request.body)
+            .and_then(|body| body.get("version").cloned());
+        if let (Some(version), Some(serde_json::Value::Object(body))) = (version, finish.body.as_mut()) {
+            body.insert("terms_version".to_string(), version);
+        }
         let answered = auth_transport::send_to(&self.config.api_base, &self.client, None, finish)
             .await
             .map_err(|_| NothingStored)?;
