@@ -155,7 +155,13 @@ struct Window {
     state_path: PathBuf,
     root: tempfile::TempDir,
     _state: tempfile::TempDir,
+    /// Held for the window's life, dropped last: see [`ONE_AT_A_TIME`].
+    _one_at_a_time: std::sync::MutexGuard<'static, ()>,
 }
+
+/// The windows share the process's state folder, and so one session-end hook slot and one screen-lock grant (keyed by
+/// the folder): a lock in one ends another's grant and a second hook replaces the first. One window at a time.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 const ENV: Env = Env {
     system_dark: false,
@@ -204,6 +210,7 @@ fn source_of(
 }
 
 fn window(tag: &str) -> Window {
+    let one_at_a_time = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
     let (account, _) = FakeAccount::register(&format!("office-window-{tag}@example.eu"), PASSWORD, TEST_PHRASE);
     let account = Arc::new(account);
     account.add_file_with_content(DOC, None, DOC_NAME, &first_version());
@@ -301,6 +308,7 @@ fn window(tag: &str) -> Window {
         state_path,
         root,
         _state: dir,
+        _one_at_a_time: one_at_a_time,
     }
 }
 
