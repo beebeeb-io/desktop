@@ -39,7 +39,6 @@ pub const SOURCE_URL: &str = concat!(
 );
 /// The desktop repository's release tag for this build (`BEEBEEB_RELEASE_VERSION`, set by the release build; a
 /// development build falls back to the crate version). Same tag the licence notice names: `desktop-v<version>`.
-#[allow(dead_code)] // the About page (another task's file) takes it; tested here
 pub const DESKTOP_SOURCE_URL: &str = concat!(
     "https://github.com/beebeeb-io/desktop/releases/tag/desktop-v",
     env!("BEEBEEB_SOURCE_VERSION")

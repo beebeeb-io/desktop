@@ -460,6 +460,18 @@ fn about_goes_back_copies_checks_and_shows_the_notes() {
 }
 
 #[test]
+fn about_links_to_this_versions_desktop_source() {
+    let mut rt = runtime("DW-0751");
+    assert_eq!(info(&rt, "item-2-2").role, "link");
+    click(&mut rt, "item-2-2");
+    assert_eq!(rt.state.settings.intents, vec![Intent::Web("desktop-source")]);
+    assert_eq!(
+        crate::shell::web_pages::url("desktop-source"),
+        Some(crate::frames::office::dialogs::DESKTOP_SOURCE_URL)
+    );
+}
+
+#[test]
 fn the_release_channel_is_chosen_from_its_menu_by_keyboard() {
     let mut rt = runtime("DW-0751");
     tab_to(&mut rt, "item-1-1");
