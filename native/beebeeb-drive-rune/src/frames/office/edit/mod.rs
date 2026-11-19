@@ -54,6 +54,10 @@ pub struct EditUi {
     pub stopped: bool,
     /// A recovery was restored, saved at this time.
     pub restored: Option<String>,
+    /// Restore (the kept editing) was pressed and its answer is not here yet.
+    pub restore_asked: bool,
+    /// `restored` is the person's own Restore of kept changes, not a helper restart: no editor stopped.
+    pub restored_by_you: bool,
 }
 
 impl EditUi {
@@ -74,6 +78,8 @@ impl EditUi {
             layouts: Vec::new(),
             stopped: false,
             restored: None,
+            restore_asked: false,
+            restored_by_you: false,
         }
     }
 

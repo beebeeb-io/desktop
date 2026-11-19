@@ -391,6 +391,11 @@ impl Host for Live {
 
 /// A time of day as "09:41" (UTC; the words only say roughly when).
 fn clock_words(at: std::time::SystemTime) -> String {
+    clock_in(at, &chrono::Utc)
+}
+
+/// "14:32" in `zone`.
+fn clock_in<Z: chrono::TimeZone>(at: std::time::SystemTime, _zone: &Z) -> String {
     let secs = at.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) % 86_400;
     format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60)
 }
