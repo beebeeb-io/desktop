@@ -48,6 +48,10 @@ impl SyncRootPort for SwitchPort {
     fn engine_lock_held(&self, _state_dir: &Path) -> bool {
         false
     }
+    /// A fake of Windows' answer: an item that is there with bytes in it.
+    fn may_hold_bytes(&self, folder: &Path, path: &str) -> bool {
+        std::fs::metadata(folder.join(path)).is_ok_and(|item| item.len() > 0)
+    }
     fn remove_synced_items(&self, _db: &StateDb, folder: &Path) -> Result<(), String> {
         self.removals.fetch_add(1, Ordering::SeqCst);
         if self.removal == Removal::Fails {
@@ -146,6 +150,49 @@ fn a_file_of_unknown_content_keeps_the_refusal_and_deletes_nothing() {
     assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData));
 
     assert_eq!(port.removals.load(Ordering::SeqCst), 0);
+    assert_eq!(pc.contents(), contents);
+    assert_eq!(listing(&pc.root()), files);
+}
+
+/// A name of A's the database lists with no agreed content (a document made in the app: the row is there, the folder
+/// holds no bytes of it).
+const A_MADE_IN_THE_APP: &str = "Budget of A.docx";
+
+/// w27 (VM 401: a document A made in the app kept B out, "guarded file"): a file of unknown content with no bytes on
+/// this PC holds nothing a person could lose, so it does not keep B out. It goes with A's other rows.
+#[test]
+fn a_file_of_unknown_content_with_no_bytes_on_this_pc_does_not_keep_the_second_account_out() {
+    let pc = Pc::new();
+    a_signed_out(&pc, &owner());
+    row(&pc.db(), IDS[2], A_MADE_IN_THE_APP, false, 1);
+    pc.sign_in(&other());
+    let port = SwitchPort::new(Removal::Works);
+
+    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+
+    assert_eq!(port.removals.load(Ordering::SeqCst), 1);
+    assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
+    assert!(!pc.contents().join("\n").contains(A_MADE_IN_THE_APP), "A's name is in B's rows");
+    nothing_of_a_left(&pc);
+}
+
+/// The same row with bytes in the folder may be A's unsent edit: never deleted unasked (D11). B stays refused, every
+/// row and file as it was.
+#[test]
+fn a_file_of_unknown_content_with_bytes_on_this_pc_keeps_the_refusal_and_deletes_nothing() {
+    let pc = Pc::new();
+    a_signed_out(&pc, &owner());
+    row(&pc.db(), IDS[2], A_MADE_IN_THE_APP, false, 1);
+    std::fs::write(pc.root().join(A_MADE_IN_THE_APP), b"typed by A, not sent").unwrap();
+    let (contents, files) = (pc.contents(), listing(&pc.root()));
+    pc.sign_in(&other());
+    let port = SwitchPort::new(Removal::Works);
+
+    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData));
+
+    assert_eq!(port.removals.load(Ordering::SeqCst), 0);
+    assert_eq!(port.registers.load(Ordering::SeqCst), 0);
+    assert_eq!(pc.db().owner().unwrap(), Some(owner()));
     assert_eq!(pc.contents(), contents);
     assert_eq!(listing(&pc.root()), files);
 }

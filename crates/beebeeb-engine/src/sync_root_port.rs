@@ -28,6 +28,13 @@ pub trait SyncRootPort: Send + Sync {
     fn remove_synced_items(&self, _db: &StateDb, _folder: &Path) -> Result<(), String> {
         Err("this OS cannot remove another account's synced items".to_string())
     }
+    /// Whether the item at `path` (as the database writes it, under `folder`) may hold bytes on this PC. Asked for a
+    /// file of unknown content before an account switch: one that may is never deleted unasked (sign-out's D11 rule).
+    /// `false` only when the OS proves there are none: no item there, or a placeholder with nothing on disk. An OS
+    /// that cannot tell says `true`.
+    fn may_hold_bytes(&self, _folder: &Path, _path: &str) -> bool {
+        true
+    }
 }
 
 /// The OS's answers, for the identity the handle was opened with.
