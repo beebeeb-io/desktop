@@ -412,3 +412,27 @@ fn the_shells_close_during_a_screen_lock_flush_waits_for_the_seal() {
     assert_eq!(again.state(), OfficeState::Closed(CloseWhy::Locked));
     let _ = again.poll();
 }
+
+fn saved_for(got: &[EditEvent], purpose: Purpose) -> usize {
+    got.iter()
+        .filter(|event| matches!(event, EditEvent::Saved { purpose: p, .. } if *p == purpose))
+        .count()
+}
+
+/// w23: Ctrl+S after a restart gives the document's bytes (the window's save asks `Purpose::Save`).
+#[test]
+fn a_save_after_a_restart_answers_with_the_documents_bytes() {
+    let registry = Registry::new();
+    let mut host = start(mortal(), cadence(40, 400, 60_000), &registry);
+    let mut got = Vec::new();
+    host.edit(EditOp::InsertText("a".to_owned())).expect("sent");
+    assert!(wait_events(&mut host, &mut got, |got| snapshots(got) == 1));
+    host.edit(die()).expect("sent");
+    assert!(wait_events(&mut host, &mut got, |got| restored(got) == 1), "{got:?}");
+    let id = host.save_bytes(Purpose::Save).expect("the restarted session takes a save");
+    assert!(
+        wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1),
+        "the save is answered: {got:?}"
+    );
+    assert!(got.iter().any(|event| matches!(event, EditEvent::Saved { id: i, purpose: Purpose::Save, .. } if *i == id)));
+}
