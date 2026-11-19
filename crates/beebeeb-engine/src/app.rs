@@ -59,6 +59,7 @@ pub(crate) mod credential_stores;
 mod session_revoke;
 mod session_watch;
 mod unfinished_sign_out;
+mod account_switch;
 use session_revoke::revoke;
 pub mod account_twofactor_status_api;
 pub mod backups_api;
@@ -851,6 +852,7 @@ impl<C: CredentialStores> Engine<C> {
             }
             // (7) The local data is bound to the session's account (another account's data refuses, nothing reset).
             let data = self.local_data_for_start(&sync_root, &identity)?;
+            self.clear_the_previous_account(&data, &identity, &sync_root, port); // another account's data goes first.
             account_binding::bind_before_engine_start(&data, &identity, false)
                 .map_err(|error| self.proof_owed_on(SyncStartRefused::of_binding(&error), &sync_root))?;
             crate::app::bindings::backup_folders::retag_at_start(self.identity, &identity); // P3-5: re-tag to the id.
