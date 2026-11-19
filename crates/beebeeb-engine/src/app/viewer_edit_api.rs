@@ -651,8 +651,8 @@ impl<C: CredentialStores> Engine<C> {
 /// (the response has no `current_version`; w27 found the old read of that key never matched, so the server was asked
 /// every second and never answered). `None`: no version in it.
 fn head_of(meta: &serde_json::Value) -> Option<(i64, i64)> {
-    let _ = meta;
-    None
+    let version = meta["download_version"]["version_number"].as_i64()?;
+    Some((version, meta["size_bytes"].as_i64().unwrap_or(0)))
 }
 
 pub(in crate::app) fn anonymous_file(bytes: &[u8]) -> Option<std::fs::File> {
