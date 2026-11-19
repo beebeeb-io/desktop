@@ -31,8 +31,19 @@ pub const LINKS: [&str; 2] = [
 /// The first link's label, and the address after it.
 const SOURCE_LABEL: &str = "Source code ";
 const SOURCE_ADDRESS: &str = "github.com/beebeeb-io/desktop-office";
-/// What the source link opens: the repository at this build's version tag (AGPL-3.0 section 13).
-pub const SOURCE_URL: &str = concat!("https://github.com/beebeeb-io/desktop-office/tree/v", env!("CARGO_PKG_VERSION"));
+/// What the source link opens: desktop-office at the exact commit the shipped helper is built from (AGPL-3.0
+/// section 13). Derived from the office-render Cargo.lock at build time, so a bump of the pin moves the link.
+pub const SOURCE_URL: &str = concat!(
+    "https://github.com/beebeeb-io/desktop-office/tree/",
+    env!("BEEBEEB_OFFICE_REV")
+);
+/// The desktop repository's release tag for this build (`BEEBEEB_RELEASE_VERSION`, set by the release build; a
+/// development build falls back to the crate version). Same tag the licence notice names: `desktop-v<version>`.
+#[allow(dead_code)] // the About page (another task's file) takes it; tested here
+pub const DESKTOP_SOURCE_URL: &str = concat!(
+    "https://github.com/beebeeb-io/desktop/releases/tag/desktop-v",
+    env!("BEEBEEB_SOURCE_VERSION")
+);
 /// 11px mono: the address (`.t-cap` in the machine font).
 const ADDRESS: TextStyle = TextStyle::new(11.0, 400.0).family(rune::tok::Family::Mono).lh(14.0);
 
@@ -135,6 +146,12 @@ mod tests {
             .expect("the office-render lock");
         let at = lock.find("desktop-office?rev=").expect("a desktop-office git source") + "desktop-office?rev=".len();
         lock[at..].chars().take_while(char::is_ascii_hexdigit).collect()
+    }
+
+    #[test]
+    fn desktop_source_offer_is_the_release_tag_the_notice_names() {
+        assert!(DESKTOP_SOURCE_URL.starts_with("https://github.com/beebeeb-io/desktop/releases/tag/desktop-v"));
+        assert!(!DESKTOP_SOURCE_URL.contains("desktop-office"));
     }
 
     #[test]

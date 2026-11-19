@@ -101,7 +101,26 @@ fn embed_windows_resource() {
     );
 }
 
+/// The source offer's two addresses, derived here so no source link is typed by hand: the commit of desktop-office
+/// that `../beebeeb-office-render/Cargo.lock` pins (`BEEBEEB_OFFICE_REV`) and the version the desktop release tag
+/// carries (`BEEBEEB_SOURCE_VERSION`: the release version, else the crate version).
+fn emit_source_offer() {
+    let lock = "../beebeeb-office-render/Cargo.lock";
+    println!("cargo:rerun-if-changed={lock}");
+    println!("cargo:rerun-if-env-changed=BEEBEEB_RELEASE_VERSION");
+    let text = std::fs::read_to_string(lock).expect("reading the office-render lock");
+    let marker = "desktop-office?rev=";
+    let at = text.find(marker).expect("the office-render lock has a desktop-office git source") + marker.len();
+    let rev: String = text[at..].chars().take_while(char::is_ascii_hexdigit).collect();
+    assert!(rev.len() == 40, "the desktop-office rev in the lock is not a full commit: {rev:?}");
+    println!("cargo:rustc-env=BEEBEEB_OFFICE_REV={rev}");
+    let release = std::env::var("BEEBEEB_RELEASE_VERSION").ok().filter(|v| !v.trim().is_empty());
+    let version = release.unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION"));
+    println!("cargo:rustc-env=BEEBEEB_SOURCE_VERSION={}", version.trim());
+}
+
 fn main() {
+    emit_source_offer();
     emit_app_identifier();
     emit_windows_resource();
     emit_core_rev();
