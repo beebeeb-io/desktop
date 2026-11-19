@@ -12,7 +12,10 @@ use super::EditUi;
 pub const SAVING: &str = "Saving\u{2026}";
 
 /// The toast, and the status line, of a save kept on this PC while Beebeeb cannot be reached.
-pub const QUEUED_TOAST: &str = "Saved on this PC \u{00B7} sends when Beebeeb can be reached";
+pub const QUEUED_TOAST: &str = "Saved on this PC, uploads when online";
+
+/// The status line says the same.
+pub const QUEUED_STATUS: &str = QUEUED_TOAST;
 
 /// A save that was asked and has not answered: the revision it holds, and the file as it was then.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,16 +44,24 @@ pub fn can_begin(edit: &EditUi) -> bool {
 pub fn landed(edit: &mut EditUi, sent: &Sent) {
     edit.saved_revision = sent.revision;
     edit.saving = false;
+    edit.queued = None;
 }
 
 /// The save of `sent` is kept on this PC only: nothing is unsaved, but it is not a version yet.
 pub fn queued(edit: &mut EditUi, sent: &Sent) {
     landed(edit, sent);
+    edit.queued = Some(sent.version);
 }
 
 /// How the document is kept, as the status line says it after Encrypted (Word, sheet and deck alike).
 pub fn kept_words(edit: &EditUi, version: u32) -> String {
-    if edit.unsaved() { "unsaved changes".to_string() } else { format!("saved as version {version}") }
+    if edit.unsaved() {
+        "unsaved changes".to_string()
+    } else if edit.queued == Some(version) {
+        QUEUED_STATUS.to_string()
+    } else {
+        format!("saved as version {version}")
+    }
 }
 
 /// The edit was dropped (Discard my changes and reopen): nothing is unsaved any more.
@@ -60,12 +71,13 @@ pub fn dropped(edit: &mut EditUi) {
 }
 
 /// Read the window's file and toast for what became of `sent`. A moved version (or another file: a Keep both)
-/// is a landing, so is "Saved on this PC"; any other words after "Saving..." are a save that did not happen.
+/// is a landing; "Saved on this PC" is a save kept here, not yet a version; any other words after "Saving..." are a save that did not happen.
 pub fn seen(sent: &Sent, file_id: &str, version: u32, toast: Option<&str>) -> Seen {
     if sent.id != file_id || sent.version != version {
         return Seen::Landed;
     }
     match toast {
+        Some(QUEUED_TOAST) => Seen::Queued,
         Some(words) if words.starts_with("Saved") => Seen::Landed,
         Some(words) if words != SAVING => Seen::Failed,
         _ => Seen::Waiting,
@@ -80,6 +92,7 @@ pub fn keeping(ui: &Ui) -> Keeping {
         (Some(_), Some(Over::Conflict(_))) => Keeping::Conflict,
         (Some(edit), _) if edit.saving => Keeping::Saving,
         (Some(edit), _) if edit.unsaved() => Keeping::Unsaved,
+        (Some(edit), _) if edit.queued.is_some() => Keeping::Queued,
         _ => Keeping::Saved,
     }
 }
