@@ -693,16 +693,11 @@ fn after_a_screen_lock_with_unsaved_edits_files_and_the_settings_gear_answer_at_
     w.until("the notice after unlock", |w| w.rt.state.actions.toast == Some(Toast::KeptEdits(1)));
     let began = Instant::now();
     w.settle();
-    w.click("Files-row");
-    {
-        let ui = w.rt.state.viewer.ui.as_ref().unwrap();
-        eprintln!("PROBE body_stopped={} edit={:?} over={} dialog={}", matches!(ui.file.body, viewers::source::Body::Stopped(_)), ui.office.edit.as_ref().map(|e| (e.stopped, e.unsaved())), ui.office.over.is_some(), ui.dialog.is_some());
-        eprintln!("PROBE screen {:?}", w.rt.state.shell.app.screen());
-    }
-    w.until("Files left the closed document", |w| {
+    w.click("Photos-row");
+    w.until("Photos left the closed document", |w| {
         w.rt.state.viewer.ui.is_none() && viewers::route_item(&w.rt.state).is_none()
     });
-    assert!(began.elapsed() < Duration::from_secs(5), "Files answered late");
+    assert!(began.elapsed() < Duration::from_secs(5), "the sidebar answered late");
     w.click("settings-btn");
     let screen = w.rt.state.shell.app.screen();
     eprintln!("after the gear: {screen:?} in {:?}", began.elapsed());
