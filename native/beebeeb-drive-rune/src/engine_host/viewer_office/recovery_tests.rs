@@ -146,7 +146,7 @@ fn recovery_times_are_shown_in_the_local_zone() {
     use std::time::{Duration, UNIX_EPOCH};
     let zone = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
     let at = UNIX_EPOCH + Duration::from_secs(86_400 * 100 + 14 * 3600 + 32 * 60 + 7);
-    assert_eq!(crate::engine_host::viewer_office::clock_in(at, &zone), "16:32");
+    assert_eq!(super::super::clock_in(at, &zone), "16:32");
 }
 
 /// v3 bug 4: after the person's own Restore no editor stopped, and the bar must not say so.
