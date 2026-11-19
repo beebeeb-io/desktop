@@ -26,7 +26,7 @@
 
 #![cfg_attr(not(test), allow(dead_code))] // the editor's window reaches these through `ViewerSource` once it is wired
 
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::viewer_edit_api::{EditRefused, SaveEnd};
@@ -53,6 +53,18 @@ struct Pending {
     base: i64,
     how: How,
     request: u64,
+    /// This PC's clock (seconds) when the person pressed Save: a recovery blob kept after it may hold edits typed since.
+    pressed_at: i64,
+}
+
+/// A save answered "stored here, not sent yet": its recovery blob goes once the server has the version (w26, v5 bug 7:
+/// a save confirmed later left Restore/Discard to be offered again).
+struct Unconfirmed {
+    file_id: String,
+    session: SessionGeneration,
+    epoch: u64,
+    pressed_at: i64,
+    last_look: Instant,
 }
 
 /// A new document being made: its session, until the bytes are here.
@@ -85,6 +97,8 @@ pub(super) struct Work {
     after_revision: Option<Settled>,
     made_tx: mpsc::Sender<Made>,
     made_rx: mpsc::Receiver<Made>,
+    /// The latest save of an open file that was stored here and not sent yet (set by its worker).
+    unconfirmed: Arc<Mutex<Option<Unconfirmed>>>,
     /// The bytes of the document just made, held for the window's own open of it (`Ui::open` asks the source to open
     /// the new file once more, after `Settled::Saved`): that open reads these, never the copy on this PC (queued, not
     /// on disk, or a placeholder on Windows: "Couldn't read the copy on this PC"). Taken by that open.
@@ -115,6 +129,7 @@ impl Default for Work {
             after_revision: None,
             made_tx,
             made_rx,
+            unconfirmed: Arc::default(),
             made_on: None,
         }
     }
@@ -136,6 +151,22 @@ fn wait_until_landed<E: ViewerEngine>(engine: &E, session: SessionGeneration, fi
             _ => return,
         }
     }
+}
+
+/// This PC's clock, in seconds since 1970 (what a recovery blob's time is).
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// Drop `file_id`'s recovery blob, but only one kept before `pressed_at`: a blob kept after the person pressed Save may
+/// hold what was typed since, and that is not in the version the server confirmed. `true`: it went.
+fn discard_blob_before<E: ViewerEngine>(engine: &E, session: SessionGeneration, file_id: &str, pressed_at: i64) -> bool {
+    let older = engine
+        .recovery_list(session)
+        .is_ok_and(|all| all.iter().any(|entry| entry.file_id == file_id && entry.saved_at < pressed_at));
+    older && engine.recovery_discard(session, file_id).is_ok()
 }
 
 /// "09:41", this PC's clock.
@@ -271,15 +302,41 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             base,
             how,
             request,
+            pressed_at: unix_now(),
         });
         // The file is not opened again while its save is on its way (`begin`), and the window says so (`saving`).
         self.changes.busy = true;
         SaveOutcome::Working
     }
 
+    /// A save stored here and not sent yet: once its upload has landed (the version the file is at is one of this
+    /// opening's own saves), its recovery blob goes. Looked at once a second, on the window's poll.
+    fn office_discard_when_landed(&mut self, file_id: &str) {
+        let Ok(mut slot) = self.office.work.unconfirmed.lock() else {
+            return;
+        };
+        let Some(unconfirmed) = slot.as_mut().filter(|u| u.file_id == file_id) else {
+            return;
+        };
+        if unconfirmed.last_look.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        unconfirmed.last_look = Instant::now();
+        let (session, epoch, pressed_at) = (unconfirmed.session, unconfirmed.epoch, unconfirmed.pressed_at);
+        if !(self.engine.has_session() && self.engine.session_turn() == session) {
+            *slot = None;
+            return;
+        }
+        if self.engine.edit_facts(session, file_id, epoch).is_some_and(|facts| facts.own) {
+            discard_blob_before(&*self.engine, session, file_id, pressed_at);
+            *slot = None;
+        }
+    }
+
     /// The save waiting for its bytes: the engine call starts when they are here, the save ends as not done when
     /// they never will be.
     pub(in crate::engine_host::viewer) fn office_pump_save(&mut self, file_id: &str) {
+        self.office_discard_when_landed(file_id);
         let Some(pending) = self.office.work.saving.as_ref().filter(|pending| pending.file_id == file_id) else {
             return;
         };
@@ -323,8 +380,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             stamp,
             base,
             how,
+            pressed_at,
             ..
         } = pending;
+        let unconfirmed = self.office.work.unconfirmed.clone();
         let (session, epoch, name, id) = (stamp.session, stamp.epoch, stamp.name.clone(), file_id.clone());
         let started = self.spawn(&file_id, stamp, move |engine| {
             let end = match how {
@@ -353,9 +412,25 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 }
             }
             };
-            // The save landed: the file's recovery blob is not needed any more.
-            if matches!(end.0, Settled::Saved { .. }) {
-                let _ = engine.recovery_discard(session, &id);
+            match end.0 {
+                // The server confirmed it: the file's recovery blob is not needed any more.
+                Settled::Saved { .. } => {
+                    discard_blob_before(engine, session, &id, pressed_at);
+                }
+                // Stored here only: the blob stays until the version is known to be in Beebeeb
+                // (`office_discard_when_landed`).
+                Settled::Queued { .. } => {
+                    if let Ok(mut slot) = unconfirmed.lock() {
+                        *slot = Some(Unconfirmed {
+                            file_id: id.clone(),
+                            session,
+                            epoch,
+                            pressed_at,
+                            last_look: Instant::now(),
+                        });
+                    }
+                }
+                _ => {}
             }
             end
         });

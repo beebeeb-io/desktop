@@ -36,7 +36,9 @@ use crate::write_token::ChainAfter;
 
 /// How long a save waits for the upload to land before it says "stored here, sent later".
 pub const LAND_WAIT: Duration = Duration::from_secs(20);
-const LAND_POLL: Duration = Duration::from_millis(150);
+const LAND_POLL: Duration = Duration::from_millis(100);
+/// How long a save whose op left the queue without a landing is waited for before it is called not saved.
+const GONE_GRACE: Duration = Duration::from_secs(2);
 
 /// A save that ended as [`SaveEnd::Queued`]: which upload carries it, from which base, for which session and which
 /// opening (`epoch`), under which write. Once that upload has landed, the version it became (the landing records it
@@ -267,6 +269,11 @@ pub enum SaveEnd {
 
 #[path = "viewer_edit_held.rs"]
 mod viewer_edit_held;
+#[path = "viewer_edit_landing.rs"]
+mod viewer_edit_landing;
+#[cfg(test)]
+#[path = "viewer_edit_landing_tests.rs"]
+mod viewer_edit_landing_tests;
 
 /// The file Keep both made.
 #[derive(Clone, PartialEq, Eq)]
@@ -466,21 +473,60 @@ impl<C: CredentialStores> Engine<C> {
         // this viewer's own by its read of the version (`EditFacts::own`), also one between the last look below and
         // the Queued answer.
         remember_queued(saves, file_id, queued.clone());
+        // The runner sends it now, not at its next tick (w26, v5 bug 3: a save waited for the tick, 20 s).
+        self.nudge_runner();
         // Wait, bounded, for the upload to land: the op leaves the queue, and the version it became is the one the
         // landing recorded for this save's write (never a version read off the row, which may be another device's).
+        // A save the server refused as stale (409) is a Conflict, never "saved" (w26, v5 bug 8); one that will not be
+        // sent by itself, or left the queue without landing, is not saved.
         let deadline = Instant::now() + LAND_WAIT;
+        let (mut gone_since, mut parked_stale) = (None::<Instant>, false);
         while self.is_syncing() && Instant::now() < deadline {
-            match state.with(|db| landed_version(db, file_id, &queued)) {
-                Err(_) => return Err(EditRefused::NotSignedIn),
-                Ok(Some(version)) if version > base => {
+            use viewer_edit_landing::{Fate, look};
+            match state.with(|db| look(db, file_id, &queued, base)) {
+                Err(_) | Ok(Err(_)) => return Err(EditRefused::NotSignedIn),
+                Ok(Ok(Fate::Landed(version))) => {
                     // Noted, never forgotten: a read between here and the answer finds it the view's own.
                     note_landed(saves, file_id, &queued, version);
                     return Ok(SaveEnd::Saved { version });
                 }
-                Ok(_) => std::thread::sleep(LAND_POLL),
+                Ok(Ok(Fate::Conflict { theirs })) => {
+                    // The refused save is out of the queue: the person's choice starts from the file as it is.
+                    with_saves(saves, file_id, session, opening, |saves| saves.queued = None);
+                    return Ok(SaveEnd::Conflict { theirs });
+                }
+                Ok(Ok(Fate::Failed)) => return Err(EditRefused::Failed),
+                Ok(Ok(Fate::Gone)) => {
+                    // A landing and the op's end are one transaction; a short grace for any other order of reads.
+                    if gone_since.get_or_insert_with(Instant::now).elapsed() > GONE_GRACE {
+                        return Err(EditRefused::Failed);
+                    }
+                    std::thread::sleep(LAND_POLL);
+                }
+                Ok(Ok(Fate::ParkedStale)) => {
+                    parked_stale = true;
+                    std::thread::sleep(LAND_POLL);
+                }
+                Ok(Ok(Fate::Waiting)) => {
+                    (gone_since, parked_stale) = (None, false);
+                    std::thread::sleep(LAND_POLL);
+                }
             }
         }
+        // Refused as stale and this PC never saw the newer version in time: not saved (the change stays in Sync history).
+        if parked_stale {
+            return Err(EditRefused::Failed);
+        }
         Ok(SaveEnd::Queued { base })
+    }
+
+    /// Ask the runner for a queue step now (it would otherwise send the save at its next tick). No runner: nothing.
+    fn nudge_runner(&self) {
+        self.runtime.block_on(async {
+            if let Some(runner) = self.acct.engine.lock().await.as_ref() {
+                runner.send_phase().nudge();
+            }
+        });
     }
 
     /// See the module's doc: Keep both. `device` and `hhmm` name the copy as every conflict copy is named.

@@ -368,6 +368,8 @@ struct EngineState {
     save_says: Option<Result<SaveEnd, EditRefused>>,
     /// The recovery blobs this PC keeps: file id -> (time, base, bytes). Survives a source (a restart of the app).
     blobs: std::collections::BTreeMap<String, (i64, i64, Vec<u8>)>,
+    /// The version the file is at is one this opening's saves became (`EditFacts::own`): a queued save that landed.
+    own: bool,
 }
 
 struct TestEngine {
@@ -394,6 +396,7 @@ impl TestEngine {
                 new_unreadable: false,
                 save_says: None,
                 blobs: Default::default(),
+                own: false,
             }),
         })
     }
@@ -511,7 +514,7 @@ impl ViewerEngine for TestEngine {
             version: s.versions.get(file_id).copied().unwrap_or(3),
             kept: false,
             can_write: !s.read_only.iter().any(|id| id == file_id),
-            own: false,
+            own: s.own,
         })
     }
 
@@ -2137,4 +2140,52 @@ fn a_viewer_and_a_read_only_file_keep_nothing() {
     let _ = e.source.poll_edit("f1");
     assert!(e.engine.s().blobs.is_empty());
     assert!(!e.source.office_restore("f1"));
+}
+
+/// v5 bug 7: a save stored here and not sent yet keeps the blob (nothing is in Beebeeb), and once its upload landed
+/// the blob goes, so reopening never offers Restore/Discard for a save the server has.
+#[test]
+fn a_queued_save_keeps_the_blob_until_it_landed() {
+    use crate::frames::viewers::source::Settled;
+    let mut e = editor("Invented.docx", false);
+    snapshot(&e.fake, b"SNAP", 2);
+    let _ = e.source.poll_edit("f1");
+    e.engine.s().save_says = Some(Ok(SaveEnd::Queued { base: 3 }));
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK saved package", 4);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(matches!(settled, Settled::Queued { .. }));
+    assert!(e.engine.s().blobs.contains_key("f1"), "not in Beebeeb yet: the blob stays");
+    // Not landed: still there after the poll's looks.
+    let end = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < end {
+        e.source.poll("f1");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(e.engine.s().blobs.contains_key("f1"), "still queued: the blob stays");
+    // The upload lands.
+    e.engine.s().own = true;
+    let end = Instant::now() + Duration::from_secs(10);
+    while e.engine.s().blobs.contains_key("f1") {
+        assert!(Instant::now() < end, "the blob went when the save landed");
+        e.source.poll("f1");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A blob kept after the person pressed Save may hold what was typed since: a landed save does not delete it.
+#[test]
+fn a_landed_save_keeps_a_blob_made_after_the_press() {
+    let mut e = editor("Invented.docx", false);
+    snapshot(&e.fake, b"SNAP", 2);
+    let _ = e.source.poll_edit("f1");
+    // A blob from the far future of this clock is "newer than the press".
+    e.engine.s().blobs.insert("f1".into(), (i64::MAX / 2, 3, b"TYPED-AFTER".to_vec()));
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK saved package", 4);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Saved { .. }));
+    assert!(e.engine.s().blobs.contains_key("f1"), "what was typed after the press is not in the saved version");
 }
