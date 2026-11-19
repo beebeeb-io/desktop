@@ -96,6 +96,11 @@ pub trait SearchHost: Send + Sync + 'static {
     /// WRITES (disk work, Clear): the recent searches of the account of the session `turn` are deleted. `Err`: they
     /// were not.
     fn clear_recent_searches(&self, turn: Self::Turn) -> Result<(), ()>;
+    /// How the account shares its items, by item id ("Anyone with the link"): a network read, so a worker calls it.
+    /// Empty when it cannot be read: a line is then left unsaid, never "Only you".
+    fn shared_words(&self) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
     fn wake(&self);
 }
 
