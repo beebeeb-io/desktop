@@ -382,11 +382,18 @@ fn a_windows_refusal_over_unowned_data_asks_for_the_proof_and_only_an_adoption_s
     let rows = db.list_files().unwrap().len();
     drop(db);
     pc.sign_in(&owner());
-    pc.seams(|seams| seams.listing = Some(answering(Listing::Nodes(tree(MINE)))));
+    // The listing is held until the refused start has been checked: an answer at once lets the proof adopt and start
+    // sync again by itself before the check below runs (it did on a fast Windows PC: "asked Windows nothing: 1 vs 0").
+    let (asked, listing_asked) = mpsc::channel();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    pc.seams(|seams| seams.listing = Some(gated(asked, gate.clone(), tree(MINE))));
     pc.engine.serve_own_data_proofs();
 
     assert_eq!(pc.start(), Err(SyncStartRefused::OtherAccountsData));
     assert_eq!(pc.port.registers(), 0, "the refused start asked Windows nothing");
+    listing_asked.recv_timeout(WAIT).expect("the refusal asked for the proof");
+    assert_eq!(pc.port.registers(), 0, "and nothing starts while the proof waits for its answer");
+    gate.notify_one();
     pc.wait_for_outcomes(1);
 
     assert_eq!(pc.outcomes(), vec!["adopted"]);

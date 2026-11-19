@@ -155,7 +155,13 @@ struct Window {
     state_path: PathBuf,
     root: tempfile::TempDir,
     _state: tempfile::TempDir,
+    /// Held for the window's life, dropped last: see [`ONE_AT_A_TIME`].
+    _one_at_a_time: std::sync::MutexGuard<'static, ()>,
 }
+
+/// The windows share the process's state folder, and so one session-end hook slot and one screen-lock grant (keyed by
+/// the folder): a lock in one ends another's grant and a second hook replaces the first. One window at a time.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 const ENV: Env = Env {
     system_dark: false,
@@ -204,6 +210,7 @@ fn source_of(
 }
 
 fn window(tag: &str) -> Window {
+    let one_at_a_time = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
     let (account, _) = FakeAccount::register(&format!("office-window-{tag}@example.eu"), PASSWORD, TEST_PHRASE);
     let account = Arc::new(account);
     account.add_file_with_content(DOC, None, DOC_NAME, &first_version());
@@ -301,6 +308,7 @@ fn window(tag: &str) -> Window {
         state_path,
         root,
         _state: dir,
+        _one_at_a_time: one_at_a_time,
     }
 }
 
@@ -723,4 +731,25 @@ fn an_editing_this_pc_kept_is_said_after_unlock_and_restored_from_the_offer() {
     });
     assert_eq!(w.upload(), 1);
     assert_eq!(w.account.item_state(DOC).map(|state| state.0), Some(2));
+}
+
+/// The windows of this file share the process's state folder, so one session-end hook slot and one screen-lock grant
+/// (both keyed by that folder): another window's lock ends this one's grant and its hook is replaced. They are one at
+/// a time. A second window is not made while the first is alive.
+#[test]
+fn windows_on_the_shared_state_folder_are_one_at_a_time() {
+    let first = window("one-at-a-time-a");
+    let (made, made_at) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        let second = window("one-at-a-time-b");
+        made.send(()).unwrap();
+        drop(second);
+    });
+    assert!(
+        made_at.recv_timeout(Duration::from_millis(1_500)).is_err(),
+        "a second window was made while the first was alive: its lock would end the first's grant"
+    );
+    drop(first);
+    made_at.recv_timeout(Duration::from_secs(60)).expect("the second window is made once the first is gone");
+    second.join().unwrap();
 }
