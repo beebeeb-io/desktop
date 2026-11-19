@@ -599,7 +599,11 @@ fn a_new_document_opens_in_the_editor_before_its_upload_lands_and_ctrl_s_saves_i
     // the window must not open it before, or it comes up as the viewer.
     w.helper.set(pages(1));
     w.until("the new document is open in the editor", |w| {
-        w.upload();
+        let n = w.upload();
+        let db = StateDb::open(&w.state_path).unwrap();
+        let ids = w.account.live_file_ids();
+        let local: Vec<_> = ids.iter().map(|id| db.get_file_contract_state(id).ok().flatten().map(|c| (c.current_version, c.can_write()))).collect();
+        eprintln!("DBG uploaded {n}; server {ids:?}; local {local:?}; ui {:?}", w.rt.state.viewer.ui.as_ref().map(|u| (u.file.name.clone(), u.file.version)));
         w.edit().is_some()
     });
     assert!(w.has("edit-chrome"), "the editor's frame is drawn: {}", w.drawn());
