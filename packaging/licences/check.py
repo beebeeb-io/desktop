@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from render import INDEX_BEGIN, INDEX_END, LOCKS, lock_packages, lock_sha  # noqa: E402
+from render import INDEX_BEGIN, INDEX_END, LOCKS, git_sources, lock_packages, lock_sha  # noqa: E402
 
 NAME = "THIRD-PARTY-LICENSES.txt"
 REQUIRED = [
@@ -52,6 +52,13 @@ def check(root: Path, staged: Path | None, version: str | None) -> list[str]:
     for needle in REQUIRED:
         if needle not in text:
             bad.append(f"the notice lacks: {needle}")
+    # The source offer names desktop-office at the commit each lock pins (the notice derives it from the locks).
+    for _label, rel in LOCKS:
+        for (url, rev) in git_sources(lock_packages(root / rel)):
+            if "/beebeeb-io/" not in url:
+                continue  # other people's git crates are credited in section 5
+            if f"{url}/tree/{rev}" not in text:
+                bad.append(f"the notice does not offer the source of {url} at {rev} ({rel})")
     if version:
         if f"release-version: {version}" not in text:
             bad.append(f"the notice is for another release than {version}")
