@@ -482,14 +482,15 @@ impl<C: CredentialStores> Engine<C> {
         // sent by itself, or left the queue without landing, is not saved.
         let deadline = Instant::now() + LAND_WAIT;
         let (mut gone_since, mut parked_stale, mut asked) = (None::<Instant>, false, None::<Instant>);
+        let mut head = None::<(i64, i64)>;
         // A save that is not saved leaves no claim on the file: the next save of this opening is judged by what is
         // really queued (an unsent write of the file refuses it), never queued behind a refused one.
         let forget = || {
             with_saves(saves, file_id, session, opening, |saves| saves.queued = None);
         };
         while self.is_syncing() && Instant::now() < deadline {
-            use viewer_edit_landing::{Fate, look};
-            match state.with(|db| look(db, file_id, &queued, base)) {
+            use viewer_edit_landing::{Fate, look_with_head};
+            match state.with(|db| look_with_head(db, file_id, &queued, base, head)) {
                 Err(_) | Ok(Err(_)) => return Err(EditRefused::NotSignedIn),
                 Ok(Ok(Fate::Landed(version))) => {
                     // Noted, never forgotten: a read between here and the answer finds it the view's own.
@@ -516,12 +517,13 @@ impl<C: CredentialStores> Engine<C> {
                 Ok(Ok(Fate::ParkedStale)) => {
                     parked_stale = true;
                     // The server refused the upload as stale (409): final. This PC's pull learns the newer version at
-                    // its next tick (30 s); the server is asked now, so the person is asked at once.
+                    // its next tick (30 s); the server is asked now (once a second), and its head settles the refused
+                    // save in the next look, so the person is asked at once.
                     if asked.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
                         asked = Some(Instant::now());
-                        if let Some(theirs) = self.server_version(&asking.0, &asking.1, file_id).filter(|v| *v > base) {
-                            forget();
-                            return Ok(SaveEnd::Conflict { theirs });
+                        head = self.server_head(&asking.0, &asking.1, file_id).filter(|(v, _)| *v > base);
+                        if head.is_some() {
+                            continue;
                         }
                     }
                     std::thread::sleep(LAND_POLL);
@@ -541,11 +543,13 @@ impl<C: CredentialStores> Engine<C> {
         Ok(SaveEnd::Queued { base })
     }
 
-    /// The version the server holds for `file_id` now (one request; a worker's). `None`: it could not be read.
-    fn server_version(&self, token: &str, key: &Zeroizing<[u8; 32]>, file_id: &str) -> Option<i64> {
+    /// The head the server holds for `file_id` now, its version and size (one request; a worker's). `None`: it could
+    /// not be read.
+    fn server_head(&self, token: &str, key: &Zeroizing<[u8; 32]>, file_id: &str) -> Option<(i64, i64)> {
         let api = ApiClient::new(self.config.api_base.clone(), token.to_string(), **key);
         let meta = self.runtime.block_on(api.get_file(file_id)).ok()?;
-        meta["current_version"].as_i64().or_else(|| meta["version"].as_i64())
+        let version = meta["current_version"].as_i64().or_else(|| meta["version"].as_i64())?;
+        Some((version, meta["size_bytes"].as_i64().or_else(|| meta["size"].as_i64()).unwrap_or(0)))
     }
 
     /// Ask the runner for a queue step now (it would otherwise send the save at its next tick). No runner: nothing.

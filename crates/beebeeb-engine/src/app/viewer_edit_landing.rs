@@ -62,14 +62,24 @@ pub(super) fn look(db: &StateDb, file_id: &str, queued: &QueuedSave, base: i64) 
     }
 }
 
-/// `look`, once the server itself has named the file's head version (`head`, asked at once after a stale-base refusal:
-/// this PC's pull would only learn it at its next tick, 30 s). STUB (red test first): not yet used.
+/// `look`, once the server itself has named the file's head (`head`: its version and size, asked at once after a
+/// stale-base refusal; this PC's pull would only learn it at its next tick, 30 s). A head past `base` that this PC has
+/// not seen is taken in the way a snapshot's newer version is (only the version moves, the queued write keeps its own
+/// size), so the refused save is settled in this very look: the person is asked now, and Keep mine saves from the head.
 pub(super) fn look_with_head(
     db: &StateDb,
     file_id: &str,
     queued: &QueuedSave,
     base: i64,
-    _head: Option<(i64, i64)>,
+    head: Option<(i64, i64)>,
 ) -> Result<Fate, rusqlite::Error> {
+    let fate = look(db, file_id, queued, base)?;
+    let (Fate::ParkedStale, Some((version, size))) = (fate, head) else {
+        return Ok(fate);
+    };
+    if version <= base {
+        return Ok(fate);
+    }
+    db.apply_snapshot_version(file_id, version, size, false)?;
     look(db, file_id, queued, base)
 }
