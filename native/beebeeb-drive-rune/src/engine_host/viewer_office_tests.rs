@@ -1101,6 +1101,49 @@ fn new_document_opens_on_its_own_bytes_when_the_local_copy_is_not_readable_yet()
     assert_eq!(edits.lock().unwrap().as_slice(), &[(EditKind::Docx, b"PK blank letter".len())]);
 }
 
+/// w23 (the w20 fix held only on the fake platform): the window opens the made file with `Ui::open`, that is a SECOND
+/// `open` of the same source after `Settled::Saved`. That open used to read the copy on this PC again (Windows: queued,
+/// not on disk, or a placeholder: "Couldn't read the copy on this PC", 3 of 3 on VM 401). It opens on the made bytes.
+#[test]
+fn new_document_opened_by_the_window_after_saved_uses_its_own_bytes() {
+    let fake = Fake::default();
+    let template = Fake::default();
+    let engine = TestEngine::new(&[]);
+    engine.s().new_unreadable = true;
+    let (opened, edits) = (Opened::default(), Edits::default());
+    let mut source = editor_with(engine.clone(), &fake, opened, edits.clone(), &template);
+    assert!(source.create_document(None, "Invented.docx", EditKind::Docx, Template::Blank));
+    template.set(pages(1));
+    let mut delivered = false;
+    let settled = until_settled(&mut source, "", || {
+        if !delivered && template.asked_count("save") == 1 {
+            template.saved(b"PK blank letter", 1);
+            delivered = true;
+        }
+    });
+    let crate::frames::viewers::source::Settled::Saved { id, .. } = settled else {
+        panic!("created")
+    };
+    // What `new_file::open_made` does next: `Ui::open(source, id)` -> `source.open(id)`.
+    assert!(source.open(&id).is_ok());
+    fake.set(pages(1));
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        if source.can_edit(&id) {
+            break;
+        }
+        if let Some(body) = source.poll(&id) {
+            assert!(
+                !matches!(body, Body::Stopped(Stopped::CopyNotReadable)),
+                "the new file's editor stopped on its own copy"
+            );
+        }
+        assert!(Instant::now() < end, "the editor never opened");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(edits.lock().unwrap().as_slice(), &[(EditKind::Docx, b"PK blank letter".len())]);
+}
+
 #[test]
 fn new_document_ends_as_failed_when_the_template_never_opens() {
     let template = Fake::default();
