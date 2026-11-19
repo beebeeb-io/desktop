@@ -5,6 +5,7 @@
 //! invented.
 
 use super::*;
+use crate::config::DesktopConfig;
 
 /// A name of account A's that account B must never see, in a row or on disk.
 const A_NAME: &str = "Secret plans of A.docx";
@@ -198,4 +199,79 @@ fn the_same_account_signing_back_in_keeps_everything() {
     assert_eq!(port.removals.load(Ordering::SeqCst), 0);
     assert_eq!(pc.contents(), contents);
     assert_eq!(listing(&pc.root()), files);
+}
+
+/// A chosen backup folder with its tag, as `app::bindings::backup_folders` makes one.
+fn chosen(name: &str, owner: &Identity) -> crate::backup::sources::ChosenFolder {
+    crate::backup::sources::ChosenFolder {
+        name: name.to_string(),
+        path: PathBuf::from(format!("C:/Invented/{name}")),
+        owner: crate::app::bindings::backup_folders::owner_tag(owner),
+        folder_id: Some(format!("folder-of-{name}")),
+    }
+}
+
+/// desktop.toml as a session leaves it: `who`'s chosen folder (with its switch), its selective-sync ids, and the address
+/// the sign-in form prefills.
+fn settings_of(who: &Identity, name: &str) {
+    let path = DesktopConfig::path_for(&TEST).unwrap();
+    DesktopConfig::update_at(&path, |config| {
+        config.backup_chosen_folders.push(chosen(name, who));
+        config.known_folder_backup.push(format!("custom:{name}"));
+        config.excluded_folder_ids = Some(vec![format!("vault-folder-of-{name}")]);
+        config.last_signed_in_email = who.email.clone();
+        (true, ())
+    })
+    .unwrap();
+}
+
+fn settings_now() -> DesktopConfig {
+    DesktopConfig::load_for(&TEST).unwrap()
+}
+
+/// The account's entries in desktop.toml (its chosen backup folders and their switches, its address) go with its data:
+/// B's start leaves nothing of A's there, and every entry of B's own stays.
+#[test]
+fn the_first_accounts_entries_in_the_settings_file_go_with_its_data() {
+    let a = Identity::new(Some("user-w27-settings-a"), Some("w27-settings-a@example.eu"));
+    let b = Identity::new(Some("user-w27-settings-b"), Some("w27-settings-b@example.eu"));
+    let pc = Pc::new();
+    a_signed_out(&pc, &a);
+    settings_of(&a, "w27-a-photos");
+    let path = DesktopConfig::path_for(&TEST).unwrap();
+    DesktopConfig::update_at(&path, |config| {
+        config.backup_chosen_folders.push(chosen("w27-b-music", &b));
+        config.known_folder_backup.push("custom:w27-b-music".to_string());
+        (true, ())
+    })
+    .unwrap();
+    pc.sign_in(&b);
+    let port = SwitchPort::new(Removal::Works);
+
+    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+
+    let config = settings_now();
+    let names: Vec<&str> = config.backup_chosen_folders.iter().map(|f| f.name.as_str()).collect();
+    assert!(!names.contains(&"w27-a-photos"), "A's chosen folder is still in desktop.toml: {names:?}");
+    assert!(names.contains(&"w27-b-music"), "B's own chosen folder stays: {names:?}");
+    assert!(!config.known_folder_backup.iter().any(|key| key == "custom:w27-a-photos"), "A's switch stays");
+    assert!(config.known_folder_backup.iter().any(|key| key == "custom:w27-b-music"), "B's switch stays");
+    assert_ne!(config.last_signed_in_email.as_deref(), Some("w27-settings-a@example.eu"), "A's address stays");
+}
+
+/// An account whose work waits for a person keeps its entries in desktop.toml as it keeps everything else.
+#[test]
+fn a_refused_switch_keeps_the_first_accounts_entries_in_the_settings_file() {
+    let a = Identity::new(Some("user-w27-kept-a"), Some("w27-kept-a@example.eu"));
+    let pc = Pc::new();
+    a_signed_out(&pc, &a);
+    pc.db().put_unknown_orphan(A_NAME, IDS[0], false).unwrap();
+    settings_of(&a, "w27-kept-photos");
+    pc.sign_in(&other());
+    let port = SwitchPort::new(Removal::Works);
+
+    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData));
+
+    let names: Vec<String> = settings_now().backup_chosen_folders.into_iter().map(|f| f.name).collect();
+    assert!(names.iter().any(|name| name == "w27-kept-photos"), "{names:?}");
 }
