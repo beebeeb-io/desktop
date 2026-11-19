@@ -11,6 +11,9 @@ use super::EditUi;
 /// The toast while a save is on its way.
 pub const SAVING: &str = "Saving\u{2026}";
 
+/// The toast, and the status line, of a save kept on this PC while Beebeeb cannot be reached.
+pub const QUEUED_TOAST: &str = "Saved on this PC \u{00B7} sends when Beebeeb can be reached";
+
 /// A save that was asked and has not answered: the revision it holds, and the file as it was then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sent {
@@ -24,6 +27,8 @@ pub struct Sent {
 pub enum Seen {
     Waiting,
     Landed,
+    /// Kept on this PC, not sent yet (offline): the file has not moved.
+    Queued,
     Failed,
 }
 
@@ -36,6 +41,16 @@ pub fn can_begin(edit: &EditUi) -> bool {
 pub fn landed(edit: &mut EditUi, sent: &Sent) {
     edit.saved_revision = sent.revision;
     edit.saving = false;
+}
+
+/// The save of `sent` is kept on this PC only: nothing is unsaved, but it is not a version yet.
+pub fn queued(edit: &mut EditUi, sent: &Sent) {
+    landed(edit, sent);
+}
+
+/// How the document is kept, as the status line says it after Encrypted (Word, sheet and deck alike).
+pub fn kept_words(edit: &EditUi, version: u32) -> String {
+    if edit.unsaved() { "unsaved changes".to_string() } else { format!("saved as version {version}") }
 }
 
 /// The edit was dropped (Discard my changes and reopen): nothing is unsaved any more.
@@ -66,5 +81,35 @@ pub fn keeping(ui: &Ui) -> Keeping {
         (Some(edit), _) if edit.saving => Keeping::Saving,
         (Some(edit), _) if edit.unsaved() => Keeping::Unsaved,
         _ => Keeping::Saved,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frames::office::edit::EditKind;
+
+    fn sent() -> Sent {
+        Sent { revision: 3, id: "f1".into(), version: 7 }
+    }
+
+    #[test]
+    fn a_save_kept_on_this_pc_is_not_a_landing() {
+        assert_eq!(seen(&sent(), "f1", 7, Some(QUEUED_TOAST)), Seen::Queued);
+        assert_eq!(seen(&sent(), "f1", 7, Some("Saved as version 8")), Seen::Landed);
+    }
+
+    #[test]
+    fn offline_the_status_says_where_the_save_is_not_a_version() {
+        let mut edit = EditUi::new(EditKind::Docx);
+        edit.revision = 3;
+        queued(&mut edit, &sent());
+        assert!(!edit.unsaved());
+        assert_eq!(kept_words(&edit, 7), "Saved on this PC, uploads when online");
+        // Typing on after it is unsaved again, and a later landing is a version again.
+        edit.revision = 4;
+        assert_eq!(kept_words(&edit, 7), "unsaved changes");
+        landed(&mut edit, &Sent { revision: 4, ..sent() });
+        assert_eq!(kept_words(&edit, 8), "saved as version 8");
     }
 }
