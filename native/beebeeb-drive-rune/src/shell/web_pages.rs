@@ -24,6 +24,8 @@ pub const NAMES: &[(&str, &str)] = &[
     // The public core repository: a link, not data.
     ("encryption-core-on-github", "https://github.com/beebeeb-io/core"),
     ("beebeeb.io", "https://beebeeb.io"),
+    // This build's release tag of the desktop repository (the AGPL source offer; the same tag the licence notice names).
+    ("desktop-source", crate::frames::office::dialogs::DESKTOP_SOURCE_URL),
     // `repos/web/src/app.tsx`, route `/settings/billing`.
     ("plan", "https://app.beebeeb.io/settings/billing"),
     // `repos/web/src/app.tsx`, route `/settings/delete-account`.

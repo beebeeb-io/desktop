@@ -10,6 +10,7 @@ fn every_name_the_frames_ask_for_resolves_or_its_control_is_not_drawn() {
         "terms-and-privacy-policy",
         "encryption-core-on-github",
         "beebeeb.io",
+        "desktop-source",
         "plan",
         "delete-account",
         "privacy",

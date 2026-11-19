@@ -177,6 +177,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             web(2, 0, "Encryption core on GitHub", "encryption-core-on-github", false),
             lists::item(2, 1, &Item::new(None, "Open-source licences").opens().ruled(), t)
                 .on_press(|s: &mut State| s.settings.ask(Intent::Open("open-source-licences"))),
+            web(2, 2, "Source code for this version", "desktop-source", true),
         ],
         Some(SOURCE_LINE),
         t,
