@@ -36,8 +36,7 @@ use crate::write_token::ChainAfter;
 
 /// How long a save waits for the upload to land before it says "stored here, sent later".
 pub const LAND_WAIT: Duration = Duration::from_secs(20);
-/// How often the landing is looked at: one read of the local state, so cheap; 100 ms of it was added to every save.
-const LAND_POLL: Duration = Duration::from_millis(20);
+const LAND_POLL: Duration = Duration::from_millis(100);
 /// How long a save whose op left the queue without a landing is waited for before it is called not saved.
 const GONE_GRACE: Duration = Duration::from_secs(2);
 
