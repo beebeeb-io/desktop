@@ -680,6 +680,14 @@ mod tests {
         );
     }
 
+    /// W20 bug 9: the same `--api-base` as the running instance's must just bring its window back. The launch
+    /// is handed over (the running instance compares the server); only a different server is refused.
+    #[test]
+    fn w20_a_second_launch_with_api_base_is_handed_over_to_be_compared() {
+        let named = parse_as(&["--api-base", "http://127.0.0.1:9"], false, true);
+        assert!(matches!(plan(&named, Claim::Running, AppIdentity::Test), Plan::Hand(_)));
+    }
+
     #[test]
     fn a_dev_build_reads_the_tooling_flags_and_db() {
         let launch = parse(&["--snap", "out.png", "--db", "a/state.db", "--scale", "2"], true);
