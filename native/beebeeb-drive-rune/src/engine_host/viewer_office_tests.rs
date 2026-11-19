@@ -431,7 +431,8 @@ impl ViewerEngine for TestEngine {
             name,
             folders: Vec::new(),
             size,
-            on_this_pc: None,
+            on_this_pc: (self.s().new_unreadable && file_id.starts_with("new"))
+                .then_some(beebeeb_engine::app::viewer_api::OnThisPc::NotSentYet),
             unsettled_here: false,
         })
     }
