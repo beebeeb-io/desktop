@@ -356,6 +356,13 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         }))
     }
 
+    /// The bytes of a document just made are for that file's own open, no other.
+    pub(in crate::engine_host::viewer) fn office_forget_made_but(&mut self, file_id: &str) {
+        if self.office.work.made_on.as_ref().is_some_and(|made| made.file_id != file_id) {
+            self.office.work.made_on = None;
+        }
+    }
+
     /// The Office file is left: its renderer ends, its pictures and text go.
     pub(in crate::engine_host::viewer) fn office_left(&mut self) {
         if let Some(mut shown) = self.office.shown.take() {
