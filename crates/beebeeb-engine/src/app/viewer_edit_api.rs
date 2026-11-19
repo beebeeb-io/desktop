@@ -36,7 +36,8 @@ use crate::write_token::ChainAfter;
 
 /// How long a save waits for the upload to land before it says "stored here, sent later".
 pub const LAND_WAIT: Duration = Duration::from_secs(20);
-const LAND_POLL: Duration = Duration::from_millis(100);
+/// How often the landing is looked at: one read of the local state, so cheap; 100 ms of it was added to every save.
+const LAND_POLL: Duration = Duration::from_millis(20);
 /// How long a save whose op left the queue without a landing is waited for before it is called not saved.
 const GONE_GRACE: Duration = Duration::from_secs(2);
 
@@ -366,6 +367,7 @@ impl<C: CredentialStores> Engine<C> {
         opening: u64,
         seal_kind: Option<u8>,
     ) -> Result<SaveEnd, EditRefused> {
+        let began = Instant::now();
         let (token, key) = self.edit_credentials(session)?;
         let asking = (token.clone(), key.clone());
         let state = self.local_state_for_changes().map_err(|_| EditRefused::Unavailable)?;
@@ -474,6 +476,7 @@ impl<C: CredentialStores> Engine<C> {
         // this viewer's own by its read of the version (`EditFacts::own`), also one between the last look below and
         // the Queued answer.
         remember_queued(saves, file_id, queued.clone());
+        tracing::debug!(queued_after_ms = began.elapsed().as_millis() as u64, "viewer save queued");
         // The runner sends it now, not at its next tick (w26, v5 bug 3: a save waited for the tick, 20 s).
         self.nudge_runner();
         // Wait, bounded, for the upload to land: the op leaves the queue, and the version it became is the one the
@@ -495,6 +498,7 @@ impl<C: CredentialStores> Engine<C> {
                 Ok(Ok(Fate::Landed(version))) => {
                     // Noted, never forgotten: a read between here and the answer finds it the view's own.
                     note_landed(saves, file_id, &queued, version);
+                    tracing::debug!(landed_after_ms = began.elapsed().as_millis() as u64, "viewer save landed");
                     return Ok(SaveEnd::Saved { version });
                 }
                 Ok(Ok(Fate::Conflict { theirs })) => {
