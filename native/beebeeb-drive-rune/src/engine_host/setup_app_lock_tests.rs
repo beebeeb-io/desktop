@@ -359,6 +359,9 @@ fn leave_the_lock_step_with(skip: bool, result: HelloResult) {
     prompts.answer(result);
     wait_for(&mut rt, "not changed", |rt| says(rt, "App lock, Not changed"));
     assert!(!says(&rt, "App lock, Off") && !says(&rt, "App lock, On"));
+    // Option A: a cancelled Hello is not an error. No "Couldn't change", the words say it was not changed.
+    assert!(!says(&rt, "Couldn't change"), "a cancelled Hello is not an error ({result:?})");
+    assert!(says(&rt, "App lock wasn't changed"), "the note says so ({result:?})");
     assert!(
         engine.app_lock.lock().unwrap().is_empty(),
         "nothing was written for a prompt that did not confirm ({result:?})"

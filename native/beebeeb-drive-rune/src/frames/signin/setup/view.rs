@@ -877,8 +877,10 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             el().key("not-changed").role("alert").w_full().child(setup::note(
                 k,
                 &format!(
-                    "Couldn't change {}. You can set it in Settings.",
-                    not_changed.join(" and ")
+                    "{} {} changed. You can set {} in Settings.",
+                    capitalised(&not_changed.join(" and ")),
+                    if not_changed.len() == 1 { "wasn't" } else { "weren't" },
+                    if not_changed.len() == 1 { "it" } else { "them" }
                 ),
                 type_::CAPTION,
                 0.0,
@@ -1139,4 +1141,10 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
             .child(foot),
         t,
     )
+}
+
+/// First letter up, for a name that starts a sentence.
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
