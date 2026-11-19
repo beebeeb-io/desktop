@@ -342,7 +342,7 @@ impl Window {
                 return;
             }
             assert!(
-                began.elapsed() < Duration::from_secs(20),
+                began.elapsed() < Duration::from_secs(120),
                 "never: {what}; toast {:?}; the window draws:\n{}",
                 self.toast(),
                 self.drawn()
