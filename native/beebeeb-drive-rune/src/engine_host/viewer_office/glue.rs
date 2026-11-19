@@ -94,7 +94,7 @@ pub(super) struct Shown {
     /// The version the editor's file was opened from (the recovery blob's base).
     pub(super) base: i64,
     /// The read's answer, while it is on its way.
-    inbox: Option<mpsc::Receiver<Read>>,
+    pub(super) inbox: Option<mpsc::Receiver<Read>>,
     pub(super) view: Option<OfficeView>,
     pub(super) ended: bool,
 }
