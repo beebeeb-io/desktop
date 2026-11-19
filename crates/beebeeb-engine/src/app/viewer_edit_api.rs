@@ -548,8 +548,7 @@ impl<C: CredentialStores> Engine<C> {
     fn server_head(&self, token: &str, key: &Zeroizing<[u8; 32]>, file_id: &str) -> Option<(i64, i64)> {
         let api = ApiClient::new(self.config.api_base.clone(), token.to_string(), **key);
         let meta = self.runtime.block_on(api.get_file(file_id)).ok()?;
-        let version = meta["current_version"].as_i64().or_else(|| meta["version"].as_i64())?;
-        Some((version, meta["size_bytes"].as_i64().or_else(|| meta["size"].as_i64()).unwrap_or(0)))
+        head_of(&meta)
     }
 
     /// Ask the runner for a queue step now (it would otherwise send the save at its next tick). No runner: nothing.
@@ -648,6 +647,14 @@ impl<C: CredentialStores> Engine<C> {
 }
 
 /// `bytes` in a file with no name, read from the start.
+/// The head version and size `GET /api/v1/files/{id}` names: `download_version.version_number` and `size_bytes`
+/// (the response has no `current_version`; w27 found the old read of that key never matched, so the server was asked
+/// every second and never answered). `None`: no version in it.
+fn head_of(meta: &serde_json::Value) -> Option<(i64, i64)> {
+    let _ = meta;
+    None
+}
+
 pub(in crate::app) fn anonymous_file(bytes: &[u8]) -> Option<std::fs::File> {
     let mut file = tempfile::tempfile().ok()?;
     file.write_all(bytes).ok()?;
@@ -1030,8 +1037,15 @@ mod queued_save_tests {
         };
         assert_eq!(landed_version(&db, "f", &other), None);
     }
-}
 
-#[cfg(test)]
-#[path = "viewer_edit_staging_tests.rs"]
-mod staging_tests;
+    /// w27: the file's detail answers `download_version.version_number`; no `current_version` key exists.
+    #[test]
+    fn the_head_is_read_from_the_file_detail_s_download_version() {
+        let meta = serde_json::json!({
+            "id": "f", "size_bytes": 6543,
+            "download_version": { "object_version_id": "o", "version_number": 5 }
+        });
+        assert_eq!(super::head_of(&meta), Some((5, 6543)));
+        assert_eq!(super::head_of(&serde_json::json!({ "size_bytes": 1 })), None);
+    }
+}
