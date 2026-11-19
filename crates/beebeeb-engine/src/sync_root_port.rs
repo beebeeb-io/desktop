@@ -70,8 +70,11 @@ impl SyncRootPort for OsSyncRoots {
     }
 
     /// Windows' sign-out purge, which deletes only items proven clean while it holds each one, and refuses (deleting
-    /// nothing it was not sure of) the rest. `UnknownFiles::Delete` never meets a file of unknown content or unsent work:
-    /// the engine asks for the removal only when the database holds none (`work_waiting_for_a_person`).
+    /// nothing it was not sure of) the rest. `UnknownFiles::Delete` never meets unsent work, nor a file of unknown
+    /// content with bytes on this PC: the engine asks for the removal only when the database holds no such work
+    /// (`work_waiting_for_a_person`) and every file of unknown content was answered `false` by `may_hold_bytes`. One
+    /// that gets bytes after that answer is no placeholder of ours any more (nothing is fetched while sync is off),
+    /// and the purge refuses an item it cannot prove clean.
     #[cfg(target_os = "windows")]
     fn remove_synced_items(&self, db: &StateDb, folder: &Path) -> Result<(), String> {
         crate::windows_cf::signout::purge(
@@ -82,6 +85,38 @@ impl SyncRootPort for OsSyncRoots {
         )
         .map(|_| ())
         .map_err(|_| "the purge refused".to_string())
+    }
+    /// No item at the path: no bytes. A placeholder of which nothing is on disk: no bytes. Anything else (an ordinary
+    /// file, a placeholder with a range on disk, a folder, an item that cannot be opened or read) may hold some.
+    #[cfg(target_os = "windows")]
+    fn may_hold_bytes(&self, folder: &Path, path: &str) -> bool {
+        use crate::windows_cf::placeholders;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let at = folder.join(path.trim_start_matches('/').replace('/', "\\"));
+        // Opening reads nothing, so it fetches nothing; the reparse point itself is opened, never followed.
+        let file = match std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES.0 | FILE_READ_DATA.0)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(&at)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        };
+        let Ok(metadata) = file.metadata() else { return true };
+        let (placeholder, _) = placeholders::handle_identity(&file);
+        if metadata.is_dir() || !placeholder || placeholders::held_fully_on_disk(&file) {
+            return true;
+        }
+        match placeholders::on_disk_ranges(&file, metadata.len()) {
+            Ok(ranges) => ranges.iter().any(|(_, length)| *length != 0),
+            Err(_) => true,
+        }
     }
 }
 
@@ -129,5 +164,42 @@ mod tests {
             os.engine_lock_held(dir.path()),
             "a lock that cannot be read refuses, as acquire does"
         );
+    }
+
+    /// A port that was not taught the question never lets a file of unknown content go: it says "may hold bytes".
+    #[test]
+    fn a_port_that_cannot_tell_says_the_item_may_hold_bytes() {
+        struct Untaught;
+        impl SyncRootPort for Untaught {
+            fn registration(&self, _folder: &Path) -> Registration {
+                Registration::Nobody
+            }
+            fn register(&self, _folder: &Path) -> Result<(), Option<i32>> {
+                Ok(())
+            }
+            fn engine_lock_held(&self, _state_dir: &Path) -> bool {
+                false
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Untaught.may_hold_bytes(dir.path(), "nothing here.docx"));
+    }
+
+    /// Windows: no item at the path holds no bytes (also under a folder that is not there); an ordinary file, even
+    /// an empty one, and a folder may. (A placeholder with nothing on disk is the VM proof's case.)
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_says_no_bytes_only_where_no_item_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let os = OsSyncRoots::new(&crate::identity::TEST);
+        assert!(!os.may_hold_bytes(dir.path(), "Budget.docx"), "no item");
+        assert!(!os.may_hold_bytes(dir.path(), "/Plans/Budget.docx"), "no folder, no item");
+        std::fs::write(dir.path().join("Budget.docx"), b"typed, not sent").unwrap();
+        assert!(os.may_hold_bytes(dir.path(), "Budget.docx"), "an ordinary file");
+        assert!(os.may_hold_bytes(dir.path(), "/Budget.docx"), "the same, as the database writes it");
+        std::fs::write(dir.path().join("Empty.docx"), b"").unwrap();
+        assert!(os.may_hold_bytes(dir.path(), "Empty.docx"), "an ordinary file is never proven empty of work");
+        std::fs::create_dir(dir.path().join("Plans")).unwrap();
+        assert!(os.may_hold_bytes(dir.path(), "Plans"), "a folder where the file should be");
     }
 }

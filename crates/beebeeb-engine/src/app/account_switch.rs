@@ -9,7 +9,8 @@
 //!
 //! The account's entries in desktop.toml go with it ([`forget_in_settings`]), just before the owner record.
 //!
-//! Must not: remove anything while a queued change, a staged copy, a held edit or a file of unknown content is left;
+//! Must not: remove anything while a queued change, a staged copy, a held edit or a file of unknown content that may
+//! hold bytes on this PC is left;
 //! clear the owner record before every item is gone; log a name, a path, an email or an id.
 
 use std::path::Path;
@@ -54,6 +55,12 @@ impl<C: CredentialStores> Engine<C> {
         let db = &data.db;
         if let Some(kind) = db.work_waiting_for_a_person().map_err(|_| "unreadable")? {
             return Err(kind);
+        }
+        // A file of unknown content keeps B out only while its item in the folder may hold bytes (an edit of A's
+        // nobody sent). With none on this PC there is nothing a person could lose: the row goes with the others.
+        let guarded = db.guarded_paths().map_err(|_| "unreadable")?;
+        if guarded.iter().any(|path| port.may_hold_bytes(sync_root, path)) {
+            return Err("guarded file");
         }
         if db.has_account_data().map_err(|_| "unreadable")? {
             port.remove_synced_items(db, sync_root).map_err(|_| "the folder's items stay")?;
