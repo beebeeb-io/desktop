@@ -694,6 +694,10 @@ fn after_a_screen_lock_with_unsaved_edits_files_and_the_settings_gear_answer_at_
     let began = Instant::now();
     w.settle();
     eprintln!("after unlock the window draws:\n{}", w.drawn());
+    w.click("Photos-row");
+    eprintln!("after Photos: {:?}", w.rt.state.shell.app.screen());
+    w.click("Files-row");
+    eprintln!("after Files: {:?}; viewer open {}", w.rt.state.shell.app.screen(), w.rt.state.viewer.ui.is_some());
     w.click("settings-btn");
     let screen = w.rt.state.shell.app.screen();
     eprintln!("after the gear: {screen:?} in {:?}", began.elapsed());
