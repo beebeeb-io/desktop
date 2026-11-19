@@ -514,6 +514,7 @@ impl<C: CredentialStores> Engine<C> {
 impl<C: CredentialStores> Drop for Engine<C> {
     fn drop(&mut self) {
         self.recovery_forget();
+        super::super::office_session_end::forget_slots(&self.office_slot());
     }
 }
 

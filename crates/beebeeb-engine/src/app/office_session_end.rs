@@ -47,7 +47,12 @@ pub enum SessionEnding {
 /// What the host registers.
 pub type SessionEndHook = Arc<dyn Fn(SessionEnding) + Send + Sync>;
 
-static HOOKS: Mutex<Option<HashMap<PathBuf, SessionEndHook>>> = Mutex::new(None);
+/// One slot per engine: its state dir and the engine's own identity (the address of its account runtime, which no
+/// other live engine shares). Two engines on one state dir (tests, a re-opened handle) never share a hook or a grant;
+/// the slot is emptied when the engine drops ([`forget_slots`]).
+pub(super) type Slot = (PathBuf, usize);
+
+static HOOKS: Mutex<Option<HashMap<Slot, SessionEndHook>>> = Mutex::new(None);
 
 /// What a screen lock lets through: recovery puts of the session `from` (the one open before the lock) while the
 /// session's turn is still `to` (the lock's), the screen is still locked and `until` is not past. It holds a copy of
@@ -66,13 +71,13 @@ pub(super) struct OpenBeforeLock {
     key: Zeroizing<[u8; 32]>,
 }
 
-static GRANTS: Mutex<Option<HashMap<PathBuf, ScreenFlushGrant>>> = Mutex::new(None);
+static GRANTS: Mutex<Option<HashMap<Slot, ScreenFlushGrant>>> = Mutex::new(None);
 
-fn set_grant(state_dir: &Path, grant: Option<ScreenFlushGrant>) {
+fn set_grant(state_dir: &Slot, grant: Option<ScreenFlushGrant>) {
     let mut all = GRANTS.lock().unwrap_or_else(|p| p.into_inner());
     match grant {
         Some(grant) => {
-            all.get_or_insert_with(HashMap::new).insert(state_dir.to_path_buf(), grant);
+            all.get_or_insert_with(HashMap::new).insert(state_dir.clone(), grant);
         }
         None => {
             if let Some(all) = all.as_mut() {
@@ -83,7 +88,7 @@ fn set_grant(state_dir: &Path, grant: Option<ScreenFlushGrant>) {
 }
 
 /// The bound is past: drop the grant of the turn `to` (a later lock's own grant stays).
-fn end_grant_of(state_dir: &Path, to: SessionGeneration) {
+fn end_grant_of(state_dir: &Slot, to: SessionGeneration) {
     let mut all = GRANTS.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(all) = all.as_mut() {
         if all.get(state_dir).is_some_and(|g| g.to == to) {
@@ -92,12 +97,12 @@ fn end_grant_of(state_dir: &Path, to: SessionGeneration) {
     }
 }
 
-fn set_in(state_dir: &Path, hook: SessionEndHook) {
+fn set_in(state_dir: &Slot, hook: SessionEndHook) {
     let mut all = HOOKS.lock().unwrap_or_else(|p| p.into_inner());
-    all.get_or_insert_with(HashMap::new).insert(state_dir.to_path_buf(), hook);
+    all.get_or_insert_with(HashMap::new).insert(state_dir.clone(), hook);
 }
 
-fn run_in(state_dir: &Path, ending: SessionEnding) {
+fn run_in(state_dir: &Slot, ending: SessionEnding) {
     // Cloned out: the hook runs with no lock of this module held.
     let hook = HOOKS
         .lock()
@@ -109,10 +114,23 @@ fn run_in(state_dir: &Path, ending: SessionEnding) {
     }
 }
 
+/// An engine that goes takes its hook and grant (and the key copy in it) with it.
+pub(super) fn forget_slots(slot: &Slot) {
+    set_grant(slot, None);
+    let mut all = HOOKS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(all) = all.as_mut() {
+        all.remove(slot);
+    }
+}
+
 impl<C: CredentialStores> Engine<C> {
+    pub(super) fn office_slot(&self) -> Slot {
+        (self.config.state_dir.clone(), Arc::as_ptr(&self.acct) as *const () as usize)
+    }
+
     /// Register the host's hook for this engine's state dir (a second call replaces the first).
     pub fn set_office_session_end_hook(&self, hook: SessionEndHook) {
-        set_in(&self.config.state_dir, hook);
+        set_in(&self.office_slot(), hook);
     }
 
     /// Read BEFORE the screen lock is taken (a locked screen refuses the read): the open session's turn and key.
@@ -129,7 +147,7 @@ impl<C: CredentialStores> Engine<C> {
     pub(super) fn office_after_screen_lock(&self, open: Option<OpenBeforeLock>) {
         if let Some(open) = open {
             let to = self.acct.session_generation();
-            let dir = self.config.state_dir.clone();
+            let dir = self.office_slot();
             let grant = ScreenFlushGrant {
                 from: open.turn,
                 to,
@@ -143,14 +161,15 @@ impl<C: CredentialStores> Engine<C> {
                 end_grant_of(&dir, to);
             });
         }
-        run_in(&self.config.state_dir, SessionEnding::ScreenLock);
+        run_in(&self.office_slot(), SessionEnding::ScreenLock);
     }
 
     /// The key for a recovery put of `session` while a screen lock's grant holds, else `None`. The turn and the lock
     /// state are read in the hold every lock move takes, so an unlock, a lock or a sign-out ends it at once.
     pub(super) fn screen_flush_key(&self, session: SessionGeneration) -> Option<Zeroizing<[u8; 32]>> {
+        let slot = self.office_slot();
         let all = GRANTS.lock().unwrap_or_else(|p| p.into_inner());
-        let grant = all.as_ref()?.get(&self.config.state_dir)?;
+        let grant = all.as_ref()?.get(&slot)?;
         if grant.from != session || Instant::now() >= grant.until {
             return None;
         }
@@ -164,8 +183,9 @@ impl<C: CredentialStores> Engine<C> {
     /// Called by the lock and sign-out paths before anything of the session ends. Blocks as long as the hook does.
     pub(super) fn office_before_session_end(&self, ending: SessionEnding) {
         // A lock or a sign-out ends the screen lock's grant (and zeroizes its key copy) before anything else.
-        set_grant(&self.config.state_dir, None);
-        run_in(&self.config.state_dir, ending);
+        let slot = self.office_slot();
+        set_grant(&slot, None);
+        run_in(&slot, ending);
     }
 }
 

@@ -17,7 +17,7 @@ const FILE: &str = "11111111-1111-4111-8111-111111111111";
 
 #[test]
 fn the_hook_of_a_state_dir_runs_with_the_ending_and_a_panic_is_caught() {
-    let dir = PathBuf::from("/nonexistent/session-end-a");
+    let dir = (PathBuf::from("/nonexistent/session-end-a"), 1usize);
     let seen = Arc::new(AtomicUsize::new(0));
     let s = seen.clone();
     set_in(
@@ -28,7 +28,7 @@ fn the_hook_of_a_state_dir_runs_with_the_ending_and_a_panic_is_caught() {
     );
     run_in(&dir, SessionEnding::Lock);
     run_in(&dir, SessionEnding::SignOut);
-    run_in(Path::new("/nonexistent/other"), SessionEnding::Lock);
+    run_in(&(PathBuf::from("/nonexistent/other"), 2), SessionEnding::Lock);
     assert_eq!(seen.load(Ordering::SeqCst), 11);
     set_in(&dir, Arc::new(|_| panic!("boom")));
     run_in(&dir, SessionEnding::Lock);
@@ -185,4 +185,24 @@ fn a_screen_lock_calls_the_hook_after_the_lock_and_the_open_session_may_still_se
         engine.put_office_snapshot_for(session, FILE, 4, &package()).is_err(),
         "no put after the vault locked"
     );
+}
+
+/// Two engines on one state dir keep a hook each: a lock of one never runs (or replaces) the other's.
+#[test]
+fn two_engines_on_one_state_dir_keep_their_own_hook() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let (a, b) = (engine_with_a_session("an-invented-slot-a"), engine_with_a_session("an-invented-slot-b"));
+    let (hit_a, hit_b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (x, y) = (hit_a.clone(), hit_b.clone());
+    a.set_office_session_end_hook(Arc::new(move |_| {
+        x.fetch_add(1, Ordering::SeqCst);
+    }));
+    b.set_office_session_end_hook(Arc::new(move |_| {
+        y.fetch_add(1, Ordering::SeqCst);
+    }));
+    a.office_before_session_end(SessionEnding::Lock);
+    assert_eq!((hit_a.load(Ordering::SeqCst), hit_b.load(Ordering::SeqCst)), (1, 0));
+    drop(b);
+    a.office_before_session_end(SessionEnding::Lock);
+    assert_eq!(hit_a.load(Ordering::SeqCst), 2);
 }
