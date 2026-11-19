@@ -12,6 +12,7 @@
 use std::path::Path;
 
 use crate::identity::EngineIdentity;
+use crate::state_db::StateDb;
 use crate::sync_root_owner::Registration;
 
 pub trait SyncRootPort: Send + Sync {
@@ -21,6 +22,12 @@ pub trait SyncRootPort: Send + Sync {
     fn register(&self, folder: &Path) -> Result<(), Option<i32>>;
     /// Whether the engine lock in `state_dir` is held by a live process (the read half of `LockFile::acquire`).
     fn engine_lock_held(&self, state_dir: &Path) -> bool;
+    /// Remove the previous account's synced items from `folder`, the items `db` lists, for an account switch.
+    /// `Err`: nothing may be assumed removed beyond what the OS did; the switch then goes no further. An OS with no
+    /// way to do it safely refuses.
+    fn remove_synced_items(&self, _db: &StateDb, _folder: &Path) -> Result<(), String> {
+        Err("this OS cannot remove another account's synced items".to_string())
+    }
 }
 
 /// The OS's answers, for the identity the handle was opened with.
