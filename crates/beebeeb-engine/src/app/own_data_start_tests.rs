@@ -32,6 +32,10 @@ mod race;
 #[path = "own_data_start_stop_tests.rs"]
 mod stop;
 
+/// w26-account-switch: A signed out, B starts (v5 bug 6).
+#[path = "own_data_start_switch_tests.rs"]
+mod switch;
+
 type TestEngine = Engine<MemoryCredentials>;
 type Answer = std::pin::Pin<Box<dyn std::future::Future<Output = Listing> + Send>>;
 
