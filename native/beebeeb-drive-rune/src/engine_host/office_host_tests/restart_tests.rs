@@ -499,6 +499,7 @@ fn a_helper_killed_while_the_document_opens_is_started_again_from_the_opened_byt
     host.save_bytes(Purpose::Save).expect("and saves");
     let mut got = Vec::new();
     assert!(wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1), "{got:?}");
+    assert_eq!(restored(&got), 0, "nothing was open to restore: {got:?}");
 }
 
 /// w23: the helper is killed while a save's size is asked: that save is answered failed, the session restarts, and the

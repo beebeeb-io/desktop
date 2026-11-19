@@ -8,6 +8,8 @@
 //!   are answered `Failed`, a new helper is started and told `OpenEdit` with the snapshot (the opened bytes when there is
 //!   none; `NewDoc` again for a new document with no snapshot), and once it has opened the window gets
 //!   [`EditEvent::Restored`]. The undo history is gone ([`RESTORED_WORDS`]).
+//! - A helper that exits while the document is still opening (not yet `Pages`) is replaced the same way, from the opened
+//!   bytes and without `Restored`.
 //! - **Second crash within [`Cadence::crash_window`]**: the document is opened read-only (the viewer's `Open`), the window
 //!   gets [`EditEvent::ReadOnly`] with the snapshot as a copy, and `edit` calls are refused.
 
@@ -230,7 +232,10 @@ impl<S: Starter> Worker<S> {
     /// The helper exited. `true`: the session goes on with a new helper (or read-only); `false`: not an editing session
     /// that can be restarted, the caller stops as before.
     pub(super) fn try_restart(&mut self) -> bool {
-        let open = self.rs.restarting || matches!(self.phase, Phase::Pages { .. } | Phase::Sheets);
+        // A helper that dies before its document is open (a slow first start, a kill while it loads) is replaced as
+        // well: there is nothing to restore then, only the opened bytes to open again.
+        let before_open = !self.rs.restarting && matches!(self.phase, Phase::Opening);
+        let open = self.rs.restarting || before_open || matches!(self.phase, Phase::Pages { .. } | Phase::Sheets);
         if matches!(self.mode, Mode::View) || !open || self.run.is_none() || self.shared.is_closed() {
             return false;
         }
@@ -273,7 +278,8 @@ impl<S: Starter> Worker<S> {
             self.shared.push(Out::Edit(EditEvent::ReadOnly { at, copy }));
         } else {
             self.rs.restarting = true;
-            self.rs.restored = Some((at, from_snapshot));
+            // No `Restored` for a helper that never opened: the window has no edits to say are back.
+            self.rs.restored = (!before_open).then_some((at, from_snapshot));
         }
         self.phase = Phase::Opening;
         self.shared.push(Out::State(OfficeState::Opening));
