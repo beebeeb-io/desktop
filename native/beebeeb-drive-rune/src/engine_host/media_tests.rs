@@ -554,12 +554,22 @@ fn a_videos_poll_runs_the_view_for_its_first_frame_and_its_place() {
     assert!(source.poll("v1").is_none(), "paused: nothing new, the view is not run");
 }
 
+/// W20: a PDF opened from Files went to Edge. A kept PDF opens in the in-app viewer (playback or not).
+#[test]
+fn w20_a_kept_pdf_opens_in_the_viewer() {
+    for ready in [true, false] {
+        let source = source(&World::new(ready));
+        assert!(source.previews("c.pdf"));
+        assert!(source.opens_here_when_kept("c.pdf") && source.opens_here_when_kept("C.PDF"));
+    }
+}
+
 #[test]
 fn kept_audio_opens_in_the_player_when_playback_is_available() {
     let ready = source(&World::new(true));
     assert!(ready.opens_here_when_kept("a.mp3") && ready.opens_here_when_kept("b.mp4"));
     assert!(ready.previews("a.mp3") && ready.previews("b.mp4"));
-    assert!(!ready.opens_here_when_kept("c.pdf") && !ready.opens_here_when_kept("d.txt"));
+    assert!(!ready.opens_here_when_kept("d.txt"));
     let not_ready = source(&World::new(false));
     assert!(!not_ready.opens_here_when_kept("a.mp3") && !not_ready.opens_here_when_kept("b.mp4"));
 }
