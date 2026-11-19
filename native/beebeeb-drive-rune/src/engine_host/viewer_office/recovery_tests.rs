@@ -71,7 +71,7 @@ fn recovery_restore_after_app_restart_opens_the_snapshots_bytes() {
     drop(first);
     // A new app run: a new store over the same blobs.
     let second = Recovery::new(fake, SessionGeneration::for_test(0));
-    assert_eq!(second.offer(FILE).unwrap().at, "14:32");
+    assert_eq!(second.offer(FILE).unwrap().at, local_1432());
     assert_eq!(&**second.restore(FILE).unwrap(), b"kept text");
     // The blob stays after a restore (a crash right after loses nothing).
     assert!(second.offer(FILE).is_some());
@@ -105,6 +105,13 @@ fn recovery_another_session_keeps_and_lists_nothing() {
     assert!(stale.offer(FILE).is_none());
 }
 
+/// The blob's 14:32:07 UTC, on this PC's clock.
+fn local_1432() -> String {
+    chrono::DateTime::<chrono::Local>::from(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400 * 100 + 14 * 3600 + 32 * 60 + 7))
+        .format("%H:%M")
+        .to_string()
+}
+
 #[test]
 fn recovery_pending_lists_the_accounts_blobs_for_the_notice() {
     let (_fake, recovery) = store();
@@ -113,7 +120,7 @@ fn recovery_pending_lists_the_accounts_blobs_for_the_notice() {
     recovery.keep(OTHER, 1, &bytes("y"));
     let pending = recovery.pending();
     assert_eq!(pending.len(), 2);
-    assert!(pending.iter().all(|p| p.at == "14:32"));
+    assert!(pending.iter().all(|p| p.at == local_1432()));
     assert_eq!(
         words::unlocked_words(2, None).unwrap(),
         "Unsaved changes to 2 files were kept on this PC."

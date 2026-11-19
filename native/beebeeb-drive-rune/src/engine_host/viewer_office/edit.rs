@@ -69,6 +69,8 @@ struct Made {
     session: SessionGeneration,
     account: Option<String>,
     result: Result<String, EditRefused>,
+    /// The document's own bytes: the new file opens on these, not on its copy on this PC (queued, maybe not on disk yet).
+    bytes: Zeroizing<Vec<u8>>,
 }
 
 /// What the editor has on its way.
@@ -426,6 +428,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                         session: creating.session,
                         account: creating.account,
                         result,
+                        bytes,
                     });
                     engine.wake();
                 });
@@ -439,6 +442,21 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         }
     }
 
+    /// The new file's reader (started by `begin`, on its copy on this PC) is replaced by the bytes just made: that
+    /// copy can be queued and not on disk yet, which showed "Couldn't read the copy on this PC".
+    fn office_open_on_made_bytes(&mut self, file_id: &str, session: SessionGeneration, bytes: Zeroizing<Vec<u8>>) {
+        let Some(shown) = self.office.shown.as_mut().filter(|shown| shown.file_id == file_id) else {
+            return;
+        };
+        if shown.inbox.is_none() || shown.session != session {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let _ = tx.send(Ok((session, bytes)));
+        shown.inbox = Some(rx);
+        self.engine.wake();
+    }
+
     /// The worker of a New document ended: the file is opened as any file is, and answered under its own id.
     fn office_made(&mut self, made: Made) -> Settled {
         self.changes.busy = false;
@@ -450,13 +468,16 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         }
         match made.result {
             Ok(id) => match self.begin(&id) {
-                Ok(file) => Settled::Saved {
-                    id: file.id,
-                    name: file.name,
-                    body: file.body,
-                    version: file.version.max(1),
-                    at: hhmm(),
-                },
+                Ok(file) => {
+                    self.office_open_on_made_bytes(&file.id, made.session, made.bytes);
+                    Settled::Saved {
+                        id: file.id,
+                        name: file.name,
+                        body: file.body,
+                        version: file.version.max(1),
+                        at: hhmm(),
+                    }
+                }
                 Err(_) => Settled::Said("Your new document was made, but it could not be opened here.".to_string()),
             },
             Err(EditRefused::ReadOnly) => Settled::Refused("You can't add files to this folder.".to_string()),

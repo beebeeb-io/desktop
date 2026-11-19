@@ -120,6 +120,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             // of the old one's caret or undo holds, and no version holds it until it is saved.
             EditAnswer::Restored { at } => {
                 edit.restored = Some(at);
+                edit.restored_by_you = std::mem::take(&mut edit.restore_asked);
                 edit.revision = 0;
                 edit.saved_revision = u64::MAX;
                 edit.caret = None;
