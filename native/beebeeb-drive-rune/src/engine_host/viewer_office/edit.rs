@@ -84,6 +84,17 @@ pub(super) struct Work {
     after_revision: Option<Settled>,
     made_tx: mpsc::Sender<Made>,
     made_rx: mpsc::Receiver<Made>,
+    /// The bytes of the document just made, held for the window's own open of it (`Ui::open` asks the source to open
+    /// the new file once more, after `Settled::Saved`): that open reads these, never the copy on this PC (queued, not
+    /// on disk, or a placeholder on Windows: "Couldn't read the copy on this PC"). Taken by that open.
+    pub(super) made_on: Option<MadeOn>,
+}
+
+/// The document a New document made: the file, the session it was made for, its bytes.
+pub(super) struct MadeOn {
+    pub(super) file_id: String,
+    pub(super) session: SessionGeneration,
+    pub(super) bytes: Zeroizing<Vec<u8>>,
 }
 
 impl Work {
@@ -103,6 +114,7 @@ impl Default for Work {
             after_revision: None,
             made_tx,
             made_rx,
+            made_on: None,
         }
     }
 }
@@ -469,6 +481,12 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         match made.result {
             Ok(id) => match self.begin(&id) {
                 Ok(file) => {
+                    // The window opens this file again (`Ui::open`): that open too is on these bytes.
+                    self.office.work.made_on = Some(MadeOn {
+                        file_id: file.id.clone(),
+                        session: made.session,
+                        bytes: made.bytes.clone(),
+                    });
                     self.office_open_on_made_bytes(&file.id, made.session, made.bytes);
                     Settled::Saved {
                         id: file.id,

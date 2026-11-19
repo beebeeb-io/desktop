@@ -859,6 +859,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             return Err(OpenError::NotNow);
         }
         let (session, account, facts) = self.facts_now(file_id)?;
+        // The bytes of a document just made are for that file's own open, no other.
+        self.office_forget_made_but(file_id);
         // The new opening holds none of the viewer's earlier saves: none of them is its own, however late it lands.
         let epoch = self.engine.begin_opening(session, file_id);
         if let Some(mut before) = self.open.take() {
