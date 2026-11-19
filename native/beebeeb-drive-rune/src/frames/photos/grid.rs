@@ -30,16 +30,29 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
-/// A size as the board writes it: "216 GB", "42 MB", "30.9 MB"; `unit: false` leaves the unit out.
-pub fn megabytes(bytes: u64, unit: bool) -> String {
-    let (value, name) = if bytes >= 1_000_000_000 {
-        (bytes as f64 / 1e9, "GB")
+/// The unit a size of `bytes` is written in, and what one of it is.
+fn unit_of(bytes: u64) -> (f64, &'static str) {
+    if bytes >= 1_000_000_000 {
+        (1e9, "GB")
+    } else if bytes >= 1_000_000 {
+        (1e6, "MB")
     } else {
-        (bytes as f64 / 1e6, "MB")
-    };
+        (1e3, "KB")
+    }
+}
+
+/// A size as the board writes it: "216 GB", "42 MB", "30.9 MB", "41 KB"; `unit: false` leaves the unit out.
+pub fn megabytes(bytes: u64, unit: bool) -> String {
+    sized_like(bytes, bytes, unit)
+}
+
+/// `bytes` in the unit that `whole` is written in ("12.4" of "30.9 MB").
+pub fn sized_like(bytes: u64, whole: u64, unit: bool) -> String {
+    let (per, name) = unit_of(whole);
+    let value = bytes as f64 / per;
     let tenths = (value * 10.0).round() / 10.0;
-    let figure = if tenths.fract() == 0.0 {
-        format!("{tenths:.0}")
+    let figure = if name == "KB" || tenths.fract() == 0.0 {
+        format!("{:.0}", if name == "KB" { value.ceil() } else { tenths })
     } else {
         format!("{tenths:.1}")
     };

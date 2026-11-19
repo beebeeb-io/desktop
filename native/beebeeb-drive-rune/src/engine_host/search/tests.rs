@@ -274,7 +274,7 @@ fn host(account: Option<&str>) -> Arc<Host> {
 fn settle(source: &mut EngineSearchSource<Host>) {
     let began = Instant::now();
     // A refusal that waits to be built again is not an answer on its way.
-    while source.pump().busy && (source.building.is_some() || source.asked.is_some() || source.recent_out.is_some()) {
+    while source.pump().busy && (source.building.is_some() || source.shared_out || source.asked.is_some() || source.recent_out.is_some()) {
         assert!(began.elapsed() < HOLD_FOR, "an answer did not come back");
         std::thread::sleep(Duration::from_millis(5));
     }

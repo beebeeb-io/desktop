@@ -224,7 +224,7 @@ impl<C: CredentialStores> Engine<C> {
             incoming: list(&bodies[0], "invites")
                 .filter_map(|i| incoming_share(i, &master))
                 .collect(),
-            links: owned_links(&bodies[2], &by_me),
+            links: owned_links(&bodies[2], &by_me, &key),
             by_me,
             requests: list(&bodies[3], "file_requests").filter_map(request_row).collect(),
         };
@@ -464,9 +464,17 @@ fn own_name(row: &Value, field: &str, item: &str, master_key: &[u8; 32]) -> Stri
         .unwrap_or_else(|| SHARED_ITEM.to_string())
 }
 
-/// The account's live links, one per item. The listing carries no name: an item also shared with people has the
-/// name read there, any other reads [`SHARED_ITEM`].
-fn owned_links(mine: &Value, by_me: &[SentShare]) -> Vec<OwnedLink> {
+/// The name of a link's item from the row's `file.name_encrypted`; [`SHARED_ITEM`] when it does not open.
+fn link_name(share: &Value, item: &str, master_key: &[u8; 32]) -> String {
+    match share.get("file") {
+        Some(file) => own_name(file, "name_encrypted", item, master_key),
+        None => SHARED_ITEM.to_string(),
+    }
+}
+
+/// The account's live links, one per item. An item also shared with people has the name read there, any other the
+/// name sealed on its link row, and only a name that does not open reads [`SHARED_ITEM`].
+fn owned_links(mine: &Value, by_me: &[SentShare], master_key: &[u8; 32]) -> Vec<OwnedLink> {
     let mut out: Vec<OwnedLink> = Vec::new();
     for share in list(mine, "shares") {
         let (Some(item), Some(id)) = (text(share, "file_id"), text(share, "id")) else {
@@ -484,10 +492,11 @@ fn owned_links(mine: &Value, by_me: &[SentShare]) -> Vec<OwnedLink> {
             share_id: id.to_string(),
             share_ids: vec![id.to_string()],
             item_id: item.to_string(),
-            name: by_me
-                .iter()
-                .find(|s| s.item_id == item)
-                .map_or_else(|| SHARED_ITEM.to_string(), |s| s.name.clone()),
+            // The invite names it; else the link row's own sealed name (`file`); else the fixed words.
+            name: by_me.iter().find(|s| s.item_id == item).map_or_else(
+                || link_name(share, item, master_key),
+                |s| s.name.clone(),
+            ),
             expires_at: text(share, "expires_at").map(str::to_string),
             has_password: flag(share, "has_passphrase"),
         });
