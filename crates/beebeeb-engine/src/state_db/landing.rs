@@ -241,6 +241,21 @@ impl StateDb {
                     )?;
                     record_file_change_conn(&tx, accept.file_id, FpChangeKind::Reparented, None)?;
                 }
+                // The row's contract starts with no permission at all (the column's default), so a file made here
+                // read as one the account may not change until the next metadata pass wrote the right bits: the
+                // viewer opened a New document read-only and Ctrl+S saved nothing (w24, VM 401). It takes its
+                // parent's permission; at the vault root it is ours (the bits the metadata pass gives our own files).
+                let parent_bits = match accept.parent_id {
+                    Some(parent) => get_file_contract_state_conn(&tx, parent)?.map(|parent| parent.permission_bits),
+                    None => None,
+                };
+                let bits = parent_bits
+                    .filter(|bits| *bits != 0)
+                    .unwrap_or(PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER);
+                if let Some(mut contract) = get_file_contract_state_conn(&tx, accept.file_id)? {
+                    contract.permission_bits = bits;
+                    set_file_contract_state_conn(&tx, &contract)?;
+                }
                 (None, None)
             }
             FinderAcceptKind::Modify { incoming_base } => {

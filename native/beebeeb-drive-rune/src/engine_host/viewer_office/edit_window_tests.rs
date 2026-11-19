@@ -577,6 +577,43 @@ fn new_document_from_the_files_menu_makes_a_new_file_on_the_server() {
     assert_eq!(files.len(), 2, "the fake server holds the new document beside the first: {files:?}");
 }
 
+/// w24: the file a New document made is only queued when Create answers (its upload has not landed, so the local state
+/// holds no version for it yet). It opened as the read-only viewer ("Open in another app...", no Save), so Ctrl+S never
+/// saved (VM 401, run 9). It must open in the editor once it landed, and Ctrl+S there must store a new version.
+#[test]
+fn a_new_document_opens_in_the_editor_before_its_upload_lands_and_ctrl_s_saves_it() {
+    let mut w = window("new-save");
+    w.sign_in();
+    let source = (w.make)();
+    w.rt.update(|s, _| {
+        let doc = new_document::Doc::new(Some(source));
+        s.viewer.new_file = Some(viewers::new_file::NewFile::document(None, viewers::new_file::Kind::Word, doc));
+    });
+    w.settle();
+    w.rt.update(|s, _| new_document::create(s));
+    w.settle();
+    w.template.set(pages(1));
+    w.until("the template's bytes are asked", |w| w.template.asked_count("save") == 1);
+    w.template.saved(&first_version(), 0);
+    // The new file is queued only until the uploader's pass sends it (a running sync does that between two looks):
+    // the window must not open it before, or it comes up as the viewer.
+    w.helper.set(pages(1));
+    w.until("the new document is open in the editor", |w| {
+        w.upload();
+        w.edit().is_some()
+    });
+    assert!(w.has("edit-chrome"), "the editor's frame is drawn: {}", w.drawn());
+
+    w.helper.answer(HostEdit::Edited(Box::new(edited(1, Dirty::All))));
+    w.until("the edit is unsaved", |w| w.edit().is_some_and(|edit| edit.0));
+    w.ctrl('s');
+    w.until("the helper is asked for the document's bytes", |w| w.helper.asked_count("save") == 1);
+    w.helper.saved(&edited_version(), 1);
+    w.until("the save answered", |w| w.edit() == Some((false, false, None)));
+    let said = w.toast().unwrap_or_default();
+    assert!(said.starts_with("Saved"), "the window says it is saved: {said:?}");
+}
+
 /// A lock before any snapshot timer fired: the host's flush seals the typed text through the door the editor registered
 /// (here the fake host's hook calls that door, as the real host's worker does), while the session is still in memory;
 /// after the unlock the reopened document offers it.

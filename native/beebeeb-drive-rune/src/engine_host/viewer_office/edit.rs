@@ -27,6 +27,7 @@
 #![cfg_attr(not(test), allow(dead_code))] // the editor's window reaches these through `ViewerSource` once it is wired
 
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::viewer_edit_api::{EditRefused, SaveEnd};
 
@@ -115,6 +116,24 @@ impl Default for Work {
             made_tx,
             made_rx,
             made_on: None,
+        }
+    }
+}
+
+/// How long a New document waits for its upload to land before the window opens it.
+const CREATE_LAND_WAIT: Duration = Duration::from_secs(20);
+const CREATE_LAND_POLL: Duration = Duration::from_millis(100);
+
+/// A new file is only queued when `create_office` answers: the local state holds no version for it (0) until its
+/// upload lands, and the window offers the editor only for a file with a version (`office_begin`). Opened at once, on
+/// Windows the new document came up as the read-only viewer, and Ctrl+S saved nothing (w24, VM 401). A worker's:
+/// bounded, and it ends at once when the version cannot be read.
+fn wait_until_landed<E: ViewerEngine>(engine: &E, session: SessionGeneration, file_id: &str) {
+    let deadline = Instant::now() + CREATE_LAND_WAIT;
+    while Instant::now() < deadline {
+        match engine.edit_facts(session, file_id, 0) {
+            Some(facts) if facts.version == 0 => std::thread::sleep(CREATE_LAND_POLL),
+            _ => return,
         }
     }
 }
@@ -433,7 +452,14 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 let (engine, tx) = (self.engine.clone(), self.office.work.made_tx.clone());
                 let started = std::thread::Builder::new().name("viewer-office-create".into()).spawn(move || {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        engine.create_office(creating.session, creating.folder.as_deref(), &creating.name, &bytes)
+                        let id = engine.create_office(
+                            creating.session,
+                            creating.folder.as_deref(),
+                            &creating.name,
+                            &bytes,
+                        )?;
+                        wait_until_landed(&*engine, creating.session, &id);
+                        Ok(id)
                     }))
                     .unwrap_or(Err(EditRefused::Failed));
                     let _ = tx.send(Made {
