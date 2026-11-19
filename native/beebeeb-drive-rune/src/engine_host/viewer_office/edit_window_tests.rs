@@ -706,7 +706,7 @@ fn an_editing_this_pc_kept_is_said_after_unlock_and_restored_from_the_offer() {
     );
     let (unsaved, _, restored) = w.edit().expect("the editor");
     assert!(unsaved, "no version holds the restored document yet");
-    assert!(w.drawn().contains(&recovery::restored_words(&restored.expect("when it is from"))));
+    assert!(w.drawn().contains(&recovery::brought_words(&restored.expect("when it is from"))));
     assert!(
         w.rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.office.recovery.is_none()),
         "the offer is answered"
