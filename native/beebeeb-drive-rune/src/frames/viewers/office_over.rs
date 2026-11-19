@@ -25,6 +25,7 @@ use super::chrome::{ButtonKind, button};
 use super::dialogs::{self, Look};
 use super::office::{self, WordDoc};
 use super::office_icons as oi;
+use super::source::Body;
 use super::source::{Conflict, Keep, SaveOutcome};
 use super::{Intent, Ui, icons, style};
 use crate::State;
@@ -280,7 +281,10 @@ impl Ui {
     /// question is up (DW-1525) and the document stays. For `viewers::hold_for_changes`.
     pub fn office_hold_for_changes(&mut self) -> bool {
         let Some(edit) = self.office.edit.as_ref() else { return false };
-        if edit.stopped || !edit.unsaved() {
+        // A lock or sign-out closed the document (its pane says so, and its text was sealed as a recovery snapshot
+        // or left with the key): nothing is on screen to keep, and a question about it would be drawn nowhere, so
+        // Files and the gear would answer nothing.
+        if edit.stopped || !edit.unsaved() || matches!(self.file.body, Body::Stopped(_)) {
             return false;
         }
         if self.office.over.is_none() {
