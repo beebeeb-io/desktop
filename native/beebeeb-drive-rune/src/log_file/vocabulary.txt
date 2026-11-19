@@ -1079,6 +1079,7 @@ whole
 whole-file
 wholly
 whose
+why
 will
 window
 windows
