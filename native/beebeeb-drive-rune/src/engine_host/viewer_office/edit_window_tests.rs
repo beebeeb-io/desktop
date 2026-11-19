@@ -724,3 +724,24 @@ fn an_editing_this_pc_kept_is_said_after_unlock_and_restored_from_the_offer() {
     assert_eq!(w.upload(), 1);
     assert_eq!(w.account.item_state(DOC).map(|state| state.0), Some(2));
 }
+
+/// The windows of this file share the process's state folder, so one session-end hook slot and one screen-lock grant
+/// (both keyed by that folder): another window's lock ends this one's grant and its hook is replaced. They are one at
+/// a time. A second window is not made while the first is alive.
+#[test]
+fn windows_on_the_shared_state_folder_are_one_at_a_time() {
+    let first = window("one-at-a-time-a");
+    let (made, made_at) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        let second = window("one-at-a-time-b");
+        made.send(()).unwrap();
+        drop(second);
+    });
+    assert!(
+        made_at.recv_timeout(Duration::from_millis(1_500)).is_err(),
+        "a second window was made while the first was alive: its lock would end the first's grant"
+    );
+    drop(first);
+    made_at.recv_timeout(Duration::from_secs(60)).expect("the second window is made once the first is gone");
+    second.join().unwrap();
+}
