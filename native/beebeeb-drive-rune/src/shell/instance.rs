@@ -253,6 +253,8 @@ pub enum Delivery {
     NoAnswer,
     /// The channel exists and cannot be reached.
     Unreachable,
+    /// It is there, and was started on another server than the launch named.
+    OtherServer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,7 +296,10 @@ pub fn plan(launch: &Launch, claim: Claim, identity: AppIdentity) -> Plan {
     match claim {
         Claim::First if launch.quit_for_update => Plan::ExitQuietly,
         Claim::First => Plan::BeTheApp,
-        Claim::Running if launch.api_base.is_some() => Plan::Refuse(Refusal::ServerAlreadyChosen),
+        // The running instance compares servers (`Request::ShowOn`): the same one just shows its window.
+        Claim::Running if launch.api_base.is_some() && launch.link.is_none() && !launch.quit_for_update => {
+            Plan::Hand(Request::ShowOn(launch.api_base.clone().unwrap_or_default()))
+        }
         Claim::Running => Plan::Hand(request_for(launch, identity)),
         Claim::Unavailable => Plan::Refuse(Refusal::ChannelUnavailable),
     }
@@ -347,6 +352,7 @@ pub fn after_hand(delivery: Delivery) -> Start {
         Delivery::Acknowledged => Start::Forwarded,
         Delivery::NoAnswer => Start::Refuse(Refusal::NotAnswering),
         Delivery::Unreachable => Start::Refuse(Refusal::ChannelUnavailable),
+        Delivery::OtherServer => Start::Refuse(Refusal::ServerAlreadyChosen),
     }
 }
 
@@ -663,8 +669,9 @@ mod tests {
         let named = parse_as(&["--api-base", "http://127.0.0.1:9"], false, true);
         assert_eq!(
             plan(&named, Claim::Running, AppIdentity::Test),
-            Plan::Refuse(Refusal::ServerAlreadyChosen)
+            Plan::Hand(Request::ShowOn("http://127.0.0.1:9".to_owned()))
         );
+        assert_eq!(after_hand(Delivery::OtherServer), Start::Refuse(Refusal::ServerAlreadyChosen));
         assert!(refusal_is_shown(&named));
         // The first instance starts with it; a later launch without it is handed over as before.
         assert_eq!(plan(&named, Claim::First, AppIdentity::Test), Plan::BeTheApp);
