@@ -47,8 +47,8 @@ impl<C: CredentialStores> Engine<C> {
         port: &dyn SyncRootPort,
     ) -> Result<(), &'static str> {
         let db = &data.db;
-        if db.holds_work_for_a_person().map_err(|_| "unreadable")? {
-            return Err("work waits for its owner");
+        if let Some(kind) = db.work_waiting_for_a_person().map_err(|_| "unreadable")? {
+            return Err(kind);
         }
         if db.has_account_data().map_err(|_| "unreadable")? {
             port.remove_synced_items(db, sync_root).map_err(|_| "the folder's items stay")?;

@@ -64,7 +64,7 @@ impl SyncRootPort for OsSyncRoots {
 
     /// Windows' sign-out purge, which deletes only items proven clean while it holds each one, and refuses (deleting
     /// nothing it was not sure of) the rest. `UnknownFiles::Delete` never meets a file of unknown content or unsent work:
-    /// the engine asks for the removal only when the database holds none (`holds_work_for_a_person`).
+    /// the engine asks for the removal only when the database holds none (`work_waiting_for_a_person`).
     #[cfg(target_os = "windows")]
     fn remove_synced_items(&self, db: &StateDb, folder: &Path) -> Result<(), String> {
         crate::windows_cf::signout::purge(
