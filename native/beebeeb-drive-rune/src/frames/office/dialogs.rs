@@ -129,6 +129,23 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
 mod tests {
     use super::*;
 
+    /// The rev the shipped helper builds desktop-office at, read straight from its Cargo.lock.
+    fn locked_office_rev() -> String {
+        let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../beebeeb-office-render/Cargo.lock"))
+            .expect("the office-render lock");
+        let at = lock.find("desktop-office?rev=").expect("a desktop-office git source") + "desktop-office?rev=".len();
+        lock[at..].chars().take_while(char::is_ascii_hexdigit).collect()
+    }
+
+    #[test]
+    fn source_link_is_the_pinned_office_rev_not_a_crate_version_tag() {
+        assert_eq!(
+            SOURCE_URL,
+            format!("https://github.com/beebeeb-io/desktop-office/tree/{}", locked_office_rev()),
+            "AGPL source offer: desktop-office at the commit the lock pins"
+        );
+    }
+
     fn all_words() -> String {
         format!("{NOTICE} {TITLE} {} {}", LINKS[0], LINKS[1])
     }
