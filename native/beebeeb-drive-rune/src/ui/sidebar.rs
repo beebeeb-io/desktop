@@ -464,6 +464,13 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
             .press(t.press)
             .focusable(open)
             .disabled(!open)
+            // W20 bug 7: this gear had no press at all, so on Photos it did nothing.
+            .on_press(|s: &mut State| {
+                crate::shell::host::dispatch(
+                    s,
+                    crate::shell::app::Event::OpenSettings(crate::shell::app::SettingsPane::General),
+                );
+            })
             .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
     );
 
