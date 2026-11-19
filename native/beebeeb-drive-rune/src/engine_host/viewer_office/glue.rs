@@ -151,39 +151,52 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         }
         .filter(|edit| self.office.edit_on && self.office.edits.allows(*edit))
         .filter(|_| opening.edit.is_some_and(|facts| facts.can_write && facts.version > 0));
+        // The file a New document just made opens on the bytes it was made from, never on its copy on this PC.
+        let made = self
+            .office
+            .work
+            .made_on
+            .take()
+            .filter(|made| made.file_id == opening.file_id && made.session == opening.session);
+        let cancel = opening.cancel.clone();
         let (answers, inbox) = mpsc::channel();
-        let (engine, file_id, cancel) = (self.engine.clone(), opening.file_id.clone(), opening.cancel.clone());
-        let worker_cancel = cancel.clone();
-        let started = std::thread::Builder::new()
-            .name("viewer-office-open".into())
-            .spawn(move || {
-                let cancel = worker_cancel;
-                let answer: Read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    read(
-                        &*engine,
-                        &file_id,
-                        recorded,
-                        check::MAX_INPUT_BYTES,
-                        &|_: u64, _: u64| {},
-                        &cancel,
-                    )
-                    .map(|(session, bytes, _)| (session, bytes))
-                }))
-                .unwrap_or(Err(OpenFileError::Failed));
-                // Nobody waits any more: the bytes are dropped here (wiped), never queued.
-                let answer = if cancel.load(Ordering::SeqCst) {
-                    drop(answer);
-                    Err(OpenFileError::Cancelled)
-                } else {
-                    answer
-                };
-                let _ = answers.send(answer);
-                engine.wake();
-            })
-            .is_ok();
-        if !started {
-            log("viewer: could not start a thread for an open file");
-            return Body::Failed;
+        if let Some(made) = made {
+            let _ = answers.send(Ok((opening.session, made.bytes)));
+            self.engine.wake();
+        } else {
+            let (engine, file_id) = (self.engine.clone(), opening.file_id.clone());
+            let worker_cancel = cancel.clone();
+            let started = std::thread::Builder::new()
+                .name("viewer-office-open".into())
+                .spawn(move || {
+                    let cancel = worker_cancel;
+                    let answer: Read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        read(
+                            &*engine,
+                            &file_id,
+                            recorded,
+                            check::MAX_INPUT_BYTES,
+                            &|_: u64, _: u64| {},
+                            &cancel,
+                        )
+                        .map(|(session, bytes, _)| (session, bytes))
+                    }))
+                    .unwrap_or(Err(OpenFileError::Failed));
+                    // Nobody waits any more: the bytes are dropped here (wiped), never queued.
+                    let answer = if cancel.load(Ordering::SeqCst) {
+                        drop(answer);
+                        Err(OpenFileError::Cancelled)
+                    } else {
+                        answer
+                    };
+                    let _ = answers.send(answer);
+                    engine.wake();
+                })
+                .is_ok();
+            if !started {
+                log("viewer: could not start a thread for an open file");
+                return Body::Failed;
+            }
         }
         self.office.shown = Some(Shown {
             file_id: opening.file_id.clone(),
