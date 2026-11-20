@@ -43,6 +43,8 @@ pub struct Packets {
     /// The last key that went down was a packet, or the key after a dead key: the characters that follow are
     /// taken.
     after_packet: bool,
+    /// The key that went down is the one after a dead key (not a packet).
+    after_dead: bool,
     /// A dead key went down and the key it waits for has not.
     dead: bool,
     /// The first half of a character outside the BMP (an emoji arrives as two packets).
@@ -59,6 +61,7 @@ impl Packets {
             // Shift between the dead key and its letter (`'` then Shift+E): the dead key still waits.
             KeyMessage::Down(vk) if self.dead && is_modifier(vk) => Verdict::Pass,
             KeyMessage::Down(vk) => {
+                self.after_dead = self.dead && vk != VK_PACKET;
                 self.after_packet = vk == VK_PACKET || self.dead;
                 self.dead = false;
                 if !self.after_packet {
@@ -67,8 +70,9 @@ impl Packets {
                 Verdict::Pass
             }
             KeyMessage::Char(_) if !self.after_packet => Verdict::Pass,
-            // A control character (Backspace, Enter, Escape after a dead key) is the key's own: winit's.
-            KeyMessage::Char(unit) if unit < 0x20 || unit == 0x7F => {
+            // A control character after a dead key (Backspace, Enter, Escape) is that key's own: winit's. A
+            // packet's is taken: no key comes with it (`key_of` makes it one).
+            KeyMessage::Char(unit) if self.after_dead && (unit < 0x20 || unit == 0x7F) => {
                 self.after_packet = false;
                 Verdict::Pass
             }
@@ -226,6 +230,12 @@ mod tests {
         let (taken, passed) = run(&[KeyMessage::Down(QUOTE), KeyMessage::Dead, KeyMessage::Down(0x08), KeyMessage::Char(0x08)]);
         assert!(taken.is_empty(), "taken: {taken:?}");
         assert_eq!(passed.last(), Some(&KeyMessage::Char(0x08)));
+    }
+
+    #[test]
+    fn a_packets_control_character_is_taken() {
+        let (taken, _) = run(&[KeyMessage::Down(VK_PACKET), KeyMessage::Char(0x0D)]);
+        assert_eq!(taken, ["\r"]);
     }
 
     #[test]
