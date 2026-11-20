@@ -15,7 +15,7 @@ use super::*;
 use crate::shell::tray::{EngineState, tray_model};
 use crate::ui::status_line as words;
 
-const KINDS: [SyncStartRefused; 10] = [
+const KINDS: [SyncStartRefused; 11] = [
     SyncStartRefused::FolderOfAnotherProvider,
     SyncStartRefused::FolderUnreadable,
     SyncStartRefused::FolderMissing,
