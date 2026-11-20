@@ -102,42 +102,11 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
             tool_button("back", "Back", &icons::CHEVRON_LEFT, 16.0, ToolState::Idle, t)
                 .shortcut_hint("Alt+Left")
                 .on_press(super::close),
-        )
-        .child(
-            tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, ToolState::Off, t)
-                .shortcut_hint("Alt+Right"),
         );
 
     let more = tool_button("more-btn", "More actions", &icons::MORE, 17.0, ToolState::Idle, t);
     // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
     let file_tools = row().key("file-tools").center_y().gap(6.0).children(tools).child(more);
-
-    // The folder's view switch does nothing for an open file: drawn, dimmed, not operable.
-    let view_toggle = el()
-        .key("view-toggle-dim")
-        .radius(9.0)
-        .fill(t.field)
-        .opacity(0.45)
-        .child(segmented(
-            "view-toggle",
-            "View",
-            vec![
-                segment("view-list", "as List", &icons::VIEW_LIST, false, t)
-                    .disabled(true)
-                    .focusable(false),
-                segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t)
-                    .disabled(true)
-                    .focusable(false),
-            ],
-            t,
-        ));
-
-    let sort_btn = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, ToolState::Off, t).child(kit::glyph(
-        "sort-caret",
-        &icons::CHEVRON_DOWN,
-        11.0,
-        t.text_quaternary,
-    ));
 
     let panel_btn = tool_button(
         "panel-toggle-btn",
@@ -192,64 +161,6 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
         }
     });
 
-    let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
-
-    let new_btn = row()
-        .key("new-btn")
-        .role("button")
-        .label("New")
-        .h(28.0)
-        .pl(8.0)
-        .pr(9.0)
-        .gap(5.0)
-        .center_y()
-        .radius(radius::CONTROL)
-        .fill(t.accent)
-        .hover(t.press)
-        .press(t.press)
-        .focusable(true)
-        .on_press(|s: &mut State| {
-            if let Some(ui) = super::ui(s) {
-                ui.intent(super::Intent::NewMenu);
-            }
-        })
-        .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
-        .child(style::fitted("new-label", "New", type_::LABEL, t.accent_text_on))
-        .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
-
-    kit::note_text(
-        "search-placeholder",
-        "search-input",
-        SEARCH_PLACEHOLDER,
-        type_::SEARCH,
-        t.text_tertiary,
-    );
-    let search_field = row()
-        .key("search-box")
-        .role("search")
-        .w(210.0)
-        .h(28.0)
-        .gap(6.0)
-        .pl(9.0)
-        .pr(6.0)
-        .radius(8.0)
-        .fill(t.field)
-        .box_shadow(kit::ring_inset(t.separator))
-        .center_y()
-        .child(kit::glyph("search-icon", &icons::SEARCH, 13.0, t.text_tertiary))
-        .child(
-            text_input(&s.search, type_::SEARCH)
-                .key("search-input")
-                .label("Search names")
-                .shortcut_hint("Ctrl+F")
-                .single_line()
-                .color(t.text)
-                .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)
-                .on_edit(|s: &mut State| &mut s.search)
-                .grow(1.0),
-        )
-        .child(kbd("kbd-hint", "Ctrl+F", t));
-
     row()
         .key("toolbar")
         .role("toolbar")
@@ -267,14 +178,9 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
         .child(title(&ui.file, head, t))
         .child(el().key("toolbar-spacer").grow(1.0))
         .child(file_tools)
-        .child(view_toggle)
-        .child(sort_btn)
         .child(panel_btn)
         .child(reveal_btn)
         .child(explorer_btn)
-        .child(sep)
-        .child(new_btn)
-        .child(search_field)
 }
 
 /// The status line (`.mk-foot`) with this frame's words.

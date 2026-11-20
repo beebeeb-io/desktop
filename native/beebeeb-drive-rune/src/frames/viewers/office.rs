@@ -1076,7 +1076,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .grow(1.0),
         t,
     );
-    tb::bar(
+    tb::file_bar(
         Bar {
             name: file.name.clone(),
             back: (true, press(|s, _| super::close(s))),

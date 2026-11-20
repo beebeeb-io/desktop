@@ -943,16 +943,15 @@ fn the_folder_controls_that_do_nothing_for_a_file_cannot_be_operated() {
     for dead in ["view-list", "view-grid", "sort-btn", "forward"] {
         assert!(!stops.iter().any(|k| k == dead), "{dead} takes no focus: {stops:?}");
     }
-    for live in ["back", "more-btn", "panel-toggle-btn", "new-btn", "state-btn-0"] {
+    for live in ["back", "more-btn", "panel-toggle-btn", "state-btn-0"] {
         assert!(stops.iter().any(|k| k == live), "{live} is reached by Tab: {stops:?}");
     }
 }
 
 #[test]
-fn back_and_new_leave_through_the_shell() {
+fn back_leaves_through_the_shell() {
     let mut rt = runtime("DW-1512");
-    operate(&mut rt, "new-btn");
-    assert_eq!(intents(&mut rt), [Intent::NewMenu]);
+    assert!(!has(&rt, "new-btn"), "an open file's bar has no New");
     operate(&mut rt, "back");
     assert!(!on_a_file(&rt));
     assert!(

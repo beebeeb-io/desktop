@@ -226,6 +226,16 @@ pub fn search_box(input_key: &'static str, placeholder: &'static str, input: El,
 /// window's own controls, then the same five in every window (the list/grid switch, Sort, the
 /// details panel, Open in File Explorer, New) and the search field.
 pub fn bar(bar: Bar, t: &Theme) -> El {
+    bar_for(bar, false, t)
+}
+
+/// The toolbar of an open file (preview or editor): only what applies to that file. No Forward,
+/// no list/grid switch, no Sort, no New, no folder search; Back closes the file.
+pub fn file_bar(bar: Bar, t: &Theme) -> El {
+    bar_for(bar, true, t)
+}
+
+fn bar_for(bar: Bar, file: bool, t: &Theme) -> El {
     let nav_button = |key, name, ic, hint: &'static str, (live, press): (bool, Option<Press>)| {
         let button = tool_button(
             key,
@@ -241,16 +251,18 @@ pub fn bar(bar: Bar, t: &Theme) -> El {
             None => button,
         }
     };
-    let nav = row()
+    let mut nav = row()
         .key("nav")
-        .child(nav_button("back", "Back", &icons::CHEVRON_LEFT, "Alt+Left", bar.back))
-        .child(nav_button(
+        .child(nav_button("back", "Back", &icons::CHEVRON_LEFT, "Alt+Left", bar.back));
+    if !file {
+        nav = nav.child(nav_button(
             "forward",
             "Forward",
             &icons::CHEVRON_RIGHT,
             "Alt+Right",
             bar.forward,
         ));
+    }
 
     let on_view = bar.on_view.map(std::rc::Rc::new);
     let side = |key, name, ic, grid: bool| {
@@ -395,7 +407,7 @@ pub fn bar(bar: Bar, t: &Theme) -> El {
         }
     };
 
-    row()
+    let out = row()
         .key("toolbar")
         .role("toolbar")
         .label(bar.name)
@@ -411,8 +423,11 @@ pub fn bar(bar: Bar, t: &Theme) -> El {
         .child(nav)
         .child(bar.title)
         .child(el().key("toolbar-spacer").grow(1.0))
-        .children(bar.slot)
-        .child(view_toggle)
+        .children(bar.slot);
+    if file {
+        return out.child(panel_btn).child(explorer_btn);
+    }
+    out.child(view_toggle)
         .child(sort_btn)
         .child(panel_btn)
         .child(explorer_btn)
