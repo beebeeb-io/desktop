@@ -93,7 +93,7 @@ pub fn text_with(system_decoder_on: bool, why: &Refusal) -> Text {
                  app.",
                 codec_name(*codec)
             ),
-            OPEN_DEFAULT,
+            if system_decoder_on { OPEN_DEFAULT } else { OPEN_ELSEWHERE },
             None,
             "no system media",
         ),
