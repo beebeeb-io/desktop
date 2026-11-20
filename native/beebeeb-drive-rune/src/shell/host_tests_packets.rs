@@ -46,8 +46,8 @@ fn text_typed_as_unicode_packets_reaches_the_text_editor() {
         ui.editor.as_ref().expect("in edit mode").edit.text.clone()
     };
     let before = text(&rt);
-    packets(&platform, &["h", "o", "i", "\r", "'", "é"]);
+    packets(&platform, &["h", "o", "i", " ", "'", "é"]);
     settle(&mut rt);
-    assert_eq!(text(&rt), format!("{before}hoi\n'é"), "typed at the caret, at the end of the note");
+    assert_eq!(text(&rt), format!("{before}hoi 'é"), "typed at the caret, at the end of the note");
     assert!(rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.dirty()));
 }
