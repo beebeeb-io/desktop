@@ -9,7 +9,6 @@ $home
 1s
 24h
 2xx
-?
 a
 aac
 abandon
@@ -601,6 +600,7 @@ object
 of
 off
 office
+offline
 offset
 ok
 old
@@ -622,6 +622,7 @@ open-time
 open_conflict_window
 opened
 opened_ms
+opening
 operation
 operations
 oplock
@@ -761,6 +762,7 @@ read
 read-only
 read_dir
 read_ms
+readable
 reads
 real
 reaps
@@ -782,7 +784,6 @@ refetch
 refresh
 refresh_placeholders
 refusal
-refusal_log_tests
 refused
 refused_at
 refusing
@@ -850,7 +851,6 @@ roots
 route
 row
 rows
-rs
 run
 running
 runs
@@ -1134,4 +1134,5 @@ write
 written
 wrong
 yet
+yours
 —

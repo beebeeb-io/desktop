@@ -615,3 +615,29 @@ fn mfx_a_recordings_doc_is_its_own_while_another_plays() {
     let current: Vec<&str> = doc.queue.iter().filter(|t| t.current).map(|t| t.id.as_str()).collect();
     assert_eq!(current, ["t2"], "the queue marks the open file");
 }
+
+/// ux-02: the engine's kind of refusal is written in the log, every word readable, and nothing else.
+#[test]
+fn media_open_refusals_are_logged_by_kind() {
+    let kinds = [
+        (OpenFileError::NotSignedIn, "kind=not signed in"),
+        (OpenFileError::SessionEnded, "kind=session ended"),
+        (OpenFileError::NotYours, "kind=not yours"),
+        (OpenFileError::NothingSynced, "kind=nothing synced"),
+        (OpenFileError::NotFound, "kind=not found"),
+        (OpenFileError::TooLarge { size: 123_456_789 }, "kind=too large"),
+        (OpenFileError::OverLimit, "kind=over limit"),
+        (OpenFileError::CopyNotReadable, "kind=copy not readable"),
+        (OpenFileError::Cancelled, "kind=cancelled"),
+        (OpenFileError::Offline, "kind=offline"),
+        (OpenFileError::NoAccess, "kind=no access"),
+        (OpenFileError::ChangedWhileOpening, "kind=changed while opening"),
+        (OpenFileError::Failed, "kind=failed"),
+    ];
+    for (error, want) in kinds {
+        let text = crate::media::refusal_log::tests::logged(|| {
+            let _ = refusal_of(error);
+        });
+        assert!(text.trim_end().ends_with(&format!("media file not opened {want}")), "{error:?}: {text}");
+    }
+}

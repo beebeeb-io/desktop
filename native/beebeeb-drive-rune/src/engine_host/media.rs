@@ -44,6 +44,25 @@ impl<C: CredentialStores> EngineMediaOpener<C> {
 /// What the player says when the engine refuses: not signed in for a session that is gone or locked, else the file
 /// could not be played. Never the engine's own words.
 pub(super) fn refusal_of(error: OpenFileError) -> Refusal {
+    // ux-02: the kind is written (fixed words, no size and nothing of the file); the window says less.
+    tracing::warn!(
+        kind = match error {
+            OpenFileError::NotSignedIn => "not signed in",
+            OpenFileError::SessionEnded => "session ended",
+            OpenFileError::NotYours => "not yours",
+            OpenFileError::NothingSynced => "nothing synced",
+            OpenFileError::NotFound => "not found",
+            OpenFileError::TooLarge { .. } => "too large",
+            OpenFileError::OverLimit => "over limit",
+            OpenFileError::CopyNotReadable => "copy not readable",
+            OpenFileError::Cancelled => "cancelled",
+            OpenFileError::Offline => "offline",
+            OpenFileError::NoAccess => "no access",
+            OpenFileError::ChangedWhileOpening => "changed while opening",
+            OpenFileError::Failed => "failed",
+        },
+        "media file not opened"
+    );
     match error {
         OpenFileError::NotSignedIn | OpenFileError::SessionEnded | OpenFileError::NotYours => Refusal::NotSignedIn,
         _ => Refusal::CouldNotPlay,
