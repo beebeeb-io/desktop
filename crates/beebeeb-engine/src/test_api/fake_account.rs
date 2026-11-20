@@ -142,6 +142,8 @@ pub struct FakeAccount {
     plan_state: Mutex<String>,
     /// The subscription route hangs up ([`Self::set_plan_unreachable`]).
     plan_unreachable: AtomicBool,
+    /// How long the subscription route waits before it answers, in ms ([`Self::set_plan_delay_ms`]).
+    plan_delay_ms: std::sync::atomic::AtomicU64,
     /// Two-factor, region, deletion, email resend, health and speedtest ([`super::fake_rest`]).
     pub(super) rest: super::fake_rest::RestState,
 }
@@ -164,6 +166,11 @@ impl FakeAccount {
     /// `billing/subscription` hangs up without an answer (the server cannot be reached for the plan).
     pub fn set_plan_unreachable(&self, unreachable: bool) {
         self.plan_unreachable.store(unreachable, Ordering::SeqCst);
+    }
+
+    /// `billing/subscription` answers only after `ms` milliseconds (a slow plan answer).
+    pub fn set_plan_delay_ms(&self, ms: u64) {
+        self.plan_delay_ms.store(ms, Ordering::SeqCst);
     }
 
     /// Whether `me/two-factor` says two-factor is on.
@@ -214,6 +221,7 @@ impl FakeAccount {
             two_factor_on: AtomicBool::new(false),
             plan_state: Mutex::new("active".to_string()),
             plan_unreachable: AtomicBool::new(false),
+            plan_delay_ms: std::sync::atomic::AtomicU64::new(0),
             rest: Default::default(),
         };
         (account, recovery_phrase.to_string())
@@ -758,6 +766,10 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
             "GET /api/v1/billing/subscription" => {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
+                }
+                let delay = account.plan_delay_ms.load(Ordering::SeqCst);
+                if delay > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
                 }
                 if account.plan_unreachable.load(Ordering::SeqCst) {
                     return Reply::hang_up();

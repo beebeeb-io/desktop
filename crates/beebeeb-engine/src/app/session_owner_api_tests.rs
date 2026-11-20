@@ -35,6 +35,11 @@ fn a_session_from_before_the_owner_tag(tag: &str) -> (Engine<MemoryCredentials>,
     engine
         .unlock_with_phrase(Zeroizing::new(phrase))
         .expect("the phrase unlocks");
+    // The unlock's plan question runs in the background: let it land so it is not counted as a later request.
+    let waited = std::time::Instant::now();
+    while !api.routes().iter().any(|r| r == "GET /api/v1/billing/subscription") && waited.elapsed().as_secs() < 10 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let vault = engine.vault();
     let token = vault.session_token().unwrap().expect("a stored token");
     // Storing the token again removes its owner tag first (`AuthVault::install_session`).

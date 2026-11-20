@@ -90,6 +90,11 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
         .expect("the fixture's phrase is the account's");
     assert_eq!(engine.gate(), GateState::Ready);
 
+    // The plan check runs in the background: let it be served before the lines are read.
+    let waited = std::time::Instant::now();
+    while served.load(Ordering::SeqCst) < 7 && waited.elapsed().as_secs() < 10 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let written = lines.lock().unwrap().clone();
     // Six sign-in requests and the one plan check at the unlock (the No plan gate).
     assert_eq!(served.load(Ordering::SeqCst), 7);

@@ -270,7 +270,7 @@ pub struct Engine<C: CredentialStores> {
     /// [`Engine::watch_session`] ran on this handle.
     session_watch_started: AtomicBool,
     /// What the server last said about the plan, for the No plan gate ([`Engine::gate`]).
-    plan: Mutex<PlanKnown>,
+    plan: Arc<Mutex<PlanKnown>>,
     /// Items moved to or from Trash through this handle (`trash_api`), for a window that keeps a Trash count.
     trash_moves: AtomicU64,
     /// The two-level lock: core's state machine, moved only by `lock_api`.
@@ -341,7 +341,7 @@ impl<C: CredentialStores> Engine<C> {
             lock_password: lock_password_api::LockPassword::default(),
             failures: AtomicU32::new(0),
             session_watch_started: AtomicBool::new(false),
-            plan: Mutex::new(PlanKnown::default()),
+            plan: Arc::new(Mutex::new(PlanKnown::default())),
             trash_moves: AtomicU64::new(0),
             lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
             view,

@@ -14,7 +14,11 @@ fn the_gate_follows_what_the_server_says_and_the_last_known_state_when_it_cannot
     s.account.set_plan_state("none");
     s.sign_in();
     s.unlock();
-    assert_eq!(s.engine.view().gate, GateState::NoPlan, "no plan: blocked");
+    // The first ask is in the background: the gate follows when the answer lands.
+    assert!(
+        common::wait_until(10, || s.engine.view().gate == GateState::NoPlan),
+        "no plan: blocked"
+    );
 
     // Unreachable, last known none: stays blocked.
     s.account.set_plan_unreachable(true);

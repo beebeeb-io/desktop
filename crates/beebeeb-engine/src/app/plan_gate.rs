@@ -7,7 +7,8 @@
 
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
-use crate::signin::gate::has_no_plan;
+use crate::api_client::ApiClient;
+use crate::signin::gate::{has_no_plan, GateState};
 
 #[derive(Default)]
 pub(super) struct PlanKnown {
@@ -24,9 +25,11 @@ impl<C: CredentialStores> Engine<C> {
         matches!(known.answer, Some((generation, none)) if generation == now && none)
     }
 
-    /// Ask the server for the plan of the unlocked session. `again` false: only once per session (the end of each
-    /// transition asks; a server that is down costs one try, not one per transition). Skipped inside an async
-    /// context, where the blocking call is not allowed, and when nobody is unlocked.
+    /// Ask the server for the plan of the unlocked session. `again` false (the end of each transition, so the start
+    /// path): only once per session, IN THE BACKGROUND with a timeout, so a slow or silent server never holds up a
+    /// start or the first pull; the answer is applied when it lands. `again` true (Check again, a button the person
+    /// pressed): asks now and waits. Skipped inside an async context, where the blocking call is not allowed, and
+    /// when nobody is unlocked.
     pub(super) fn ask_plan(&self, again: bool) {
         if tokio::runtime::Handle::try_current().is_ok() || !self.unlocked() {
             return;
@@ -39,16 +42,55 @@ impl<C: CredentialStores> Engine<C> {
             }
             known.asked = Some(generation);
         }
-        let Ok(stamped) = self.account_subscription() else {
+        if again {
+            let Ok(stamped) = self.account_subscription() else {
+                return;
+            };
+            self.plan.lock().unwrap_or_else(|p| p.into_inner()).answer =
+                Some((stamped.session, none_of(&stamped.value)));
+            return;
+        }
+        let Ok((mut token, session)) = self.token_of_this_session() else {
             return;
         };
-        let plan = &stamped.value;
-        let none = has_no_plan(
-            plan.plan_state.as_deref(),
-            Some(plan.plan.as_str()),
-            Some(plan.status.as_str()),
-            Some(plan.quota_bytes),
-        );
-        self.plan.lock().unwrap_or_else(|p| p.into_inner()).answer = Some((stamped.session, none));
+        let api = ApiClient::new(self.config.api_base.clone(), std::mem::take(&mut *token), [0; 32]);
+        let (plan, acct, view, host) = (self.plan.clone(), self.acct.clone(), self.view.clone(), self.host.clone());
+        self.runtime.spawn(async move {
+            // No answer in time changes nothing: the gate never blocks without one.
+            let Ok(Ok(subscription)) = tokio::time::timeout(PLAN_TIMEOUT, api.subscription()).await else {
+                return;
+            };
+            let none = none_of(&subscription);
+            let mut known = plan.lock().unwrap_or_else(|p| p.into_inner());
+            // The answer of an earlier session is not this one's.
+            if acct.session_generation() != session {
+                return;
+            }
+            known.answer = Some((session, none));
+            drop(known);
+            // The gate was Ready when the transition published; a no-plan answer blocks Files now.
+            let mut changed = false;
+            view.write(|v| {
+                if none && v.gate == GateState::Ready {
+                    v.gate = GateState::NoPlan;
+                    changed = true;
+                }
+            });
+            if changed {
+                host.wake();
+            }
+        });
     }
+}
+
+/// How long the background plan question waits before it gives up (the safe default: not blocked).
+const PLAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn none_of(plan: &crate::account_dto::Subscription) -> bool {
+    has_no_plan(
+        plan.plan_state.as_deref(),
+        Some(plan.plan.as_str()),
+        Some(plan.status.as_str()),
+        Some(plan.quota_bytes),
+    )
 }
