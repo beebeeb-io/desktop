@@ -43,6 +43,8 @@ pub enum SaveRefused {
     Offline,
     /// The file is gone, or no longer shared with this account.
     NotThere,
+    /// The place is inside the Beebeeb folder: a copy is not renamed in there (it would skip the 8.3-alias check).
+    InSyncRoot,
     /// The place could not be written (full, no right to write, in use) or the copy could not be read.
     Failed,
 }
@@ -59,6 +61,9 @@ impl SaveRefused {
             ),
             Self::Offline => "Not saved: Beebeeb could not be reached".into(),
             Self::NotThere => "Not saved: the file is gone or no longer shared with you".into(),
+            Self::InSyncRoot => {
+                "Not saved: save the copy outside the Beebeeb folder, or use Save to keep it in Beebeeb".into()
+            }
             Self::Failed => "Not saved: the copy could not be written there".into(),
         }
     }
@@ -108,6 +113,11 @@ pub fn save_copy<C: CredentialStores>(
     cancel: &AtomicBool,
 ) -> Result<(), SaveRefused> {
     let still = || engine.session_turn() == session;
+    if let Ok(root) = engine.sync_root()
+        && inside_root(dest, &root)
+    {
+        return Err(SaveRefused::InSyncRoot);
+    }
     place(dest, &still, cancel, |out| {
         if let Some(source) = kept_path(engine, file_id) {
             return copy_stream(&source, out, &still, cancel, progress);
@@ -123,6 +133,16 @@ pub fn save_copy<C: CredentialStores>(
         progress(total, total);
         Ok(())
     })
+}
+
+/// Whether `dest` is at or below `root`. The destination itself may not exist yet, so its folder is resolved; a
+/// destination whose folder cannot be resolved is compared as written.
+fn inside_root(dest: &Path, root: &Path) -> bool {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let folder = dest.parent().map(Path::to_path_buf).unwrap_or_default();
+    let folder = folder.canonicalize().unwrap_or(folder);
+    let name = dest.file_name().map(PathBuf::from).unwrap_or_default();
+    folder.join(name).starts_with(&root)
 }
 
 /// The item's file in the Beebeeb folder, while sync is on and the file is there.
@@ -344,6 +364,19 @@ mod tests {
         let end = place(&dest, &|| true, &cancel, |out| copy_stream(&src, out, &|| true, &cancel, &progress));
         assert_eq!(end, Err(SaveRefused::Cancelled));
         assert_eq!(names(dir.path()), ["a.bin"]);
+    }
+
+    #[test]
+    fn save_copy_refuses_a_destination_inside_the_sync_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        assert!(inside_root(&root.join("copy.bin"), &root));
+        assert!(inside_root(&root.join("sub").join("copy.bin"), &root));
+        assert!(!inside_root(&dir.path().join("copy.bin"), &root));
+        // A sibling that only shares the prefix is outside.
+        assert!(!inside_root(&dir.path().join("Beebeeb2").join("c.bin"), &root));
+        assert!(SaveRefused::InSyncRoot.words().contains("outside the Beebeeb folder"));
     }
 
     #[test]
