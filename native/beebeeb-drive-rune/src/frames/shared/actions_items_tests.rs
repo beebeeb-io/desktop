@@ -176,9 +176,7 @@ fn open_on_a_link_row_opens_the_item_not_the_share_id() {
 fn open_on_a_shared_file_goes_through_open_file() {
     // A viewer that shows no kind: only `open_file` sends the file on to the system's app (step 2).
     let (mut rt, _) = window(scenes::dw_0501);
-    let (state, calls) = crate::frames::open_file::testing::state(false);
-    rt.state.actions.source = state.actions.source;
-    rt.state.viewer.route = state.viewer.route;
+    let calls = crate::frames::open_file::testing::wire_into(&mut rt.state, false);
     let id = rt.state.frames.shared.source.with_me()[0].id.clone();
     rt.state.frames.intents.push(Intent::OpenItem(id));
     drain(&mut rt);

@@ -91,6 +91,7 @@ fn four_starts(tag: &str, between: impl FnOnce(&Set, tokio::runtime::Runtime)) -
     set.source.starts = Starts {
         open: moved_open,
         reveal: moved_reveal,
+        has_default_app: |_| true,
         app: Some(moved_app),
     };
     MOVED_ASKED.store(0, SeqCst);
@@ -198,6 +199,7 @@ fn a_session_end_empties_the_launch_queue() {
     set.source.starts = Starts {
         open: queued_open,
         reveal: queued_reveal,
+        has_default_app: |_| true,
         app: None,
     };
     let chooser = Chooser::open();
@@ -297,6 +299,7 @@ fn after_the_launch_worker_ended_a_press_runs_its_own_start() {
     set.source.starts = Starts {
         open: panicking_open,
         reveal: recorded_reveal,
+        has_default_app: |_| true,
         app: None,
     };
     let notes = row(NOTES, "Invented notes.txt", false);

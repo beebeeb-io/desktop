@@ -148,13 +148,19 @@ pub(crate) mod testing {
 
     pub type Calls = Arc<Mutex<Vec<Call>>>;
 
-    /// The app's state over a spy source and a viewer that shows every kind (`shows`) or none.
-    pub fn state(shows: bool) -> (State, Calls) {
-        let mut s = crate::init();
-        crate::frames::viewers::wire(&mut s, Box::new(move || Box::new(Viewer { shows })));
+    /// Wires `s` with a viewer that shows every kind (`shows`) or none, and a spy source; the spy's calls.
+    pub fn wire_into(s: &mut State, shows: bool) -> Calls {
+        crate::frames::viewers::wire(s, Box::new(move || Box::new(Viewer { shows })));
         let fixture = FilesFixture::default();
         let calls = fixture.calls.clone();
         s.actions.source = Box::new(fixture);
+        calls
+    }
+
+    /// The app's state over a spy source and a viewer that shows every kind (`shows`) or none.
+    pub fn state(shows: bool) -> (State, Calls) {
+        let mut s = crate::init();
+        let calls = wire_into(&mut s, shows);
         (s, calls)
     }
 }

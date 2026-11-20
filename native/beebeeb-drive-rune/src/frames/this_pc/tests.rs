@@ -1169,9 +1169,7 @@ mod reread {
 #[test]
 fn a_kept_file_opens_through_open_file() {
     let (mut rt, _, _) = recording(scenes::dw_0715);
-    let (state, calls) = crate::frames::open_file::testing::state(false);
-    rt.state.actions.source = state.actions.source;
-    rt.state.viewer.route = state.viewer.route;
+    let calls = crate::frames::open_file::testing::wire_into(&mut rt.state, false);
     let file = rt
         .state
         .this_pc
