@@ -38,8 +38,12 @@ impl State {
             return;
         }
         match self.actions.source.new_file(folder, name) {
-            // The engine sees the new file in the sync folder and lists and uploads it as any other.
-            Ok(()) => self.forget_undo(),
+            // The source listed the new file and queued its upload (w36): the folder shown is read again in this
+            // poll, so its row stands there now, not after the engine's next finished check.
+            Ok(()) => {
+                self.forget_undo();
+                self.shell.reread_files();
+            }
             Err(why) => self.failed(Action::NewFile, why, tx),
         }
     }

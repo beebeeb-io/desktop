@@ -1275,11 +1275,14 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn new_file(&mut self, folder: Option<&str>, name: &str) -> Result<(), ActionError> {
-        self.local(|db, sync_root| {
+        let made = self.local(|db, sync_root| {
             let folder_entry = file_ops::resolve_folder(db, folder).map_err(map_drive_err)?;
-            file_ops::create_file(db, sync_root, folder_entry.as_ref(), name, &[]).map_err(map_new_file_err)?;
-            Ok(())
-        })
+            file_ops::create_file(db, sync_root, folder_entry.as_ref(), name, &[]).map_err(map_new_file_err)
+        })?;
+        // w36: listed and queued now, not when the folder scan next finds it (the window reads the folder again
+        // right after this, `frames::files::create_file`). Not queued here: the scan finds it, as before.
+        self.engine.list_new_file(&made);
+        Ok(())
     }
 
     fn rename(&mut self, item: &DriveItem, name: &str) -> Result<(), ActionError> {

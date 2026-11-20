@@ -296,3 +296,43 @@ fn create_file_does_not_replace_a_name_taken_after_the_checks() {
         "the partial file was removed"
     );
 }
+
+/// w36 (Guus's PC, bff1af87): New file made a 0-byte file that no list showed until the folder scan found it, and a
+/// second New file of that name was refused by the file on disk. The file is listed and queued by the call itself:
+/// its row is in its folder's rows with no scan, and a second New file of the name is refused as a taken name.
+/// Mutant: `list_new_file` returning `false` without the dispatch -> red (no row).
+#[test]
+fn new_file_is_listed_and_queued_at_once_without_a_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Beebeeb");
+    std::fs::create_dir(&root).unwrap();
+    let db = std::sync::Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+    let api = std::sync::Arc::new(crate::api_client::ApiClient::new(
+        "https://api.beebeeb.io".into(),
+        "token".into(),
+        [17u8; 32],
+    ));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::TEST, db.clone(), api);
+
+    let rel = create_file(&db, &root, None, "Beebeeb typing test.txt", &[]).unwrap();
+    assert!(db.get_file_by_path(&rel).unwrap().is_none(), "made on disk only so far");
+    assert!(super::list_new_file(&bridge, &root, &rel), "queued by the call");
+
+    let (rows, _) = db.children_paged(None, 0, i64::MAX).unwrap();
+    let listed: Vec<&str> = rows.iter().map(|(entry, _, _)| entry.path.as_str()).collect();
+    assert_eq!(listed, ["Beebeeb typing test.txt"], "the folder's rows hold it, with no scan");
+    assert_eq!(rows[0].0.status, FileStatus::Uploading);
+    assert_eq!(rows[0].0.size_bytes, 0, "an empty file is a file");
+    let queued = db.list_due_operations(i64::MAX).unwrap();
+    assert_eq!(queued.len(), 1, "its upload is queued once: {queued:?}");
+    assert_eq!(queued[0].target_path.as_deref(), Some("Beebeeb typing test.txt"));
+
+    // The scan that comes later queues nothing more for it.
+    crate::watcher::run_one_scan(&bridge, &root);
+    assert_eq!(db.list_due_operations(i64::MAX).unwrap().len(), 1, "never queued twice");
+    // A second New file of the name: a taken name, and the first file is as it was.
+    assert_eq!(
+        create_file(&db, &root, None, "Beebeeb typing test.txt", &[]),
+        Err(DriveError::NameTaken)
+    );
+}

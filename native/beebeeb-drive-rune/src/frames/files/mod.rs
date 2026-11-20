@@ -204,6 +204,11 @@ impl Toast {
             // The viewers' words for a full disk ("Not enough space to decrypt", "free on this PC").
             ActionError::NoRoom => " There is not enough space on this PC.",
             ActionError::TooLarge => " It is too large to make here.",
+            // w36: a name the folder refused after the dialog's own check (a file that is not listed yet, a name
+            // Windows reads as another's): said, so Try again is asked with another name.
+            ActionError::NameTaken if action == Action::NewFile => {
+                " Something here already has that name. Try again with another name."
+            }
             ActionError::NameShared => {
                 " Another item here has the same name. Rename one on the web to use it on this PC."
             }

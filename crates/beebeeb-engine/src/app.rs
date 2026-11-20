@@ -85,6 +85,7 @@ pub mod settings_api;
 pub mod setup_api;
 pub mod speed_test_api;
 // Storage use and quota from the server.
+mod new_file_api;
 mod storage_usage_api;
 pub mod support_bundle_api;
 // A link to one of the account's files, for the native Files window's Copy link.
