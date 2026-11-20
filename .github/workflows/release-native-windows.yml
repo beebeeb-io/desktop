@@ -279,10 +279,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for h in beebeeb-office-render beebeeb-media-helper; do
-            (cd "native/$h" && cargo build --release --locked --target x86_64-pc-windows-msvc)
-            test -f "native/$h/target/x86_64-pc-windows-msvc/release/$h.exe"
-          done
+          (cd native/beebeeb-office-render && cargo build --release --locked --target x86_64-pc-windows-msvc)
+          test -f native/beebeeb-office-render/target/x86_64-pc-windows-msvc/release/beebeeb-office-render.exe
+          (cd native/beebeeb-media-helper && cargo build --release --locked --target x86_64-pc-windows-msvc)
+          test -f native/beebeeb-media-helper/target/x86_64-pc-windows-msvc/release/beebeeb-media-helper.exe
 
       # What is checked is the binary that ships, not the environment it was meant to be built in: it must carry
       # the updater's mark with exactly the commit's time, once, and that time must be a plausible one (not before
