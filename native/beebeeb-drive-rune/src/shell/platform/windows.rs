@@ -21,6 +21,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const WDA_NONE: u32 = 0x00;
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
 
+/// The flyout's window and what every window was last told, so the switch reaches the flyout too, and a flyout
+/// that appears after it is set starts out the same.
+static FLYOUT_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static EXCLUDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn affinity_of(exclude: bool) -> u32 {
+    if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE }
+}
+
 use super::{
     ControlHandler, ControlServer, Platform, PlatformError, ServeError, TrayHandler, TrayIcon, windows_control,
     windows_tray,
@@ -261,6 +270,11 @@ impl Platform for WindowsPlatform {
             SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW as isize);
         }
         round_corners(hwnd as HWND);
+        FLYOUT_HWND.store(hwnd as isize, std::sync::atomic::Ordering::SeqCst);
+        if EXCLUDED.load(std::sync::atomic::Ordering::SeqCst) {
+            // SAFETY: as above; a failure leaves the flyout visible to captures, which the main window's call reports.
+            unsafe { SetWindowDisplayAffinity(hwnd as HWND, WDA_EXCLUDEFROMCAPTURE) };
+        }
     }
 
     fn show_start_refusal(&self, title: &str, message: &str) {
@@ -309,11 +323,17 @@ impl Platform for WindowsPlatform {
         let Ok(Some(hwnd)) = hwnd else {
             return Err(PlatformError::Os("no Win32 window handle".into()));
         };
-        let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        let affinity = affinity_of(exclude);
         // SAFETY: `hwnd` is this process's own live window, obtained from `WindowHandle::with_raw_handle`.
         // `SetWindowDisplayAffinity` reads the u32 and returns; no callback, no message dispatch.
         let ok = unsafe { SetWindowDisplayAffinity(hwnd as HWND, affinity) };
         if ok != 0 {
+            EXCLUDED.store(exclude, std::sync::atomic::Ordering::SeqCst);
+            let flyout = FLYOUT_HWND.load(std::sync::atomic::Ordering::SeqCst);
+            if flyout != 0 {
+                // SAFETY: the flyout's own window, stored when it was adopted; same call, same contract.
+                unsafe { SetWindowDisplayAffinity(flyout as HWND, affinity) };
+            }
             Ok(())
         } else {
             Err(os_error("SetWindowDisplayAffinity"))

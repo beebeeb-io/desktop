@@ -20,7 +20,6 @@ Modules 1–41, sorted by path.
 | `flyout.rs` | The flyout's window rules (DW-1201), as pure functions: where it opens, and what a click on the b does to it. | — |
 | `flyout_window.rs` | The flyout as a Rune window: borderless, always on top, 340 x 520 points, hidden until the b is clicked; it closes on Esc and when it loses | — |
 | `host.rs` | The running shell: the part of the root state that owns the route machine, the b and the two windows' handles, and the hooks Rune calls (key | — |
-| `host_capture_build_tests.rs` | Which build hides its secret screens from capture: the real app on every one of them, the test build on none (it is what a release is record | — |
 | `host_tests.rs` | Headless tests of the shell in a Rune runtime: scripted keys and state, no window, no OS. | — |
 | `host_tests_files.rs` | The shell's tests of what the Files window forgets (`frames::files::reset`): a session that ends (lock, sign-out, another account) takes the | — |
 | `host_tests_flows.rs` | The shell's tests of what happens around a session: the first sync, an approval under a lock or a sign-out, sign-up in the sign-in window, c | — |

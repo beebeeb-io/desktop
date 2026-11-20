@@ -21,6 +21,7 @@ pub mod app;
 // The pure half of Windows-only code: used by `platform/windows.rs`, tested on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod autostart;
+pub mod capture_setting;
 pub mod away;
 // The transport is Windows-only (`platform/windows_control.rs`); the protocol is tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -356,6 +357,8 @@ pub fn run() {
     };
     let state_file = dirs.as_ref().map(|dirs| dirs.state().join(window_state::FILE_NAME));
     let saved = state_file.as_deref().map(window_state::load).unwrap_or_default();
+    let capture_file = dirs.as_ref().map(|dirs| dirs.state().join(capture_setting::FILE_NAME));
+    let hide_from_capture = capture_file.as_deref().is_some_and(capture_setting::load);
     let saved_main = saved.get(WindowKind::Main.key()).copied();
     // The 0.8.x app's frame, once: only while this app has no window file of its own.
     let legacy_frame = match (&dirs, &state_file) {
@@ -436,6 +439,8 @@ pub fn run() {
         flyout_hidden_at: flyout_hidden_at.clone(),
         saved,
         state_file,
+        capture_file,
+        hide_from_capture,
     };
     let (shell_actions, shell_platform) = (actions.clone(), platform.clone());
     let init_engine = real_engine

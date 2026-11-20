@@ -1,7 +1,8 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Native rung (task 2460): the TEST build's sign-in screen is excluded from screen capture.
+    Native rung (task 2460, w30): the app's sign-in screen shows in screen capture by default (every identity), and is
+    excluded from it once "Hide Beebeeb from screen capture and remote desktop" is on (-Hide).
 .DESCRIPTION
     Microsoft's SetWindowDisplayAffinity documentation: with WDA_EXCLUDEFROMCAPTURE (0x11) "the
     window does not appear at all" in a capture; with WDA_MONITOR (0x01) it "appears with no
@@ -10,8 +11,10 @@
 
     Method: a full-screen magenta backdrop (not topmost) goes up first; the app's window is put in
     front of it; the app's on-screen rect is captured with GDI CopyFromScreen.
-      excluded     -> the capture is the backdrop colour (or black: WDA_MONITOR behaviour)
-      not excluded -> the app's own pixels show
+      excluded (-Hide)       -> the capture is the backdrop colour (or black: WDA_MONITOR behaviour)
+      not excluded (default) -> the app's own pixels show (what RustDesk and other remote desktops see)
+    -Hide writes the setting file (native-capture.json, hide_from_capture true) into the TEST app's state folder
+    before it starts; the run removes the folder afterwards like everything else it created.
     Controls prove the method: a plain window reads as its own colour on the desktop (C1); the bare
     backdrop reads as magenta (C2); a plain window in front of the backdrop does NOT read as the
     backdrop (C3: the method can fail).
@@ -44,6 +47,7 @@ param(
     [string]$Binary,
     [bool]$RequireCleanState = $true,
     [switch]$SkipFirewall,
+    [switch]$Hide,
     [switch]$ParseOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -238,13 +242,19 @@ try {
     Write-Host "  own colour $(Ratio $r[0]), magenta $(Ratio $m[0])"
     Check ($r[0] -ge 0.90 -and $m[0] -le 0.05) "C3 a window that is not excluded is told apart from the backdrop"
 
-    Write-Host "`n=== The app: the TEST build on a clean machine opens on sign-in (a secret screen) ==="
+    Write-Host "`n=== The app: the TEST build on a clean machine opens on sign-in (shows in a capture unless -Hide) ==="
     if (-not $SkipFirewall) {
         $ruleName = "bb-rung-capture-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
         $firewallRule = New-NetFirewallRule -DisplayName $ruleName -Direction Outbound -Program $Binary -Action Block -Profile Any
         Write-Host "  outbound firewall block added for the binary ($ruleName)"
     } else {
         Write-Host "  -SkipFirewall: no firewall block; only the proxy layer below keeps it off the network"
+    }
+    if ($Hide) {
+        $capDir = Join-Path $env:LOCALAPPDATA 'io.beebeeb.app.test'
+        New-Item -ItemType Directory -Force -Path $capDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $capDir 'native-capture.json') -Value '{"hide_from_capture":true}' -Encoding ASCII
+        Write-Host "  -Hide: the setting file says hide_from_capture"
     }
     # reqwest honours these: every HTTP(S) request of the app goes to a closed local port.
     $env:HTTPS_PROXY = 'http://127.0.0.1:9'; $env:HTTP_PROXY = 'http://127.0.0.1:9'; $env:ALL_PROXY = 'http://127.0.0.1:9'; $env:NO_PROXY = ''
@@ -290,12 +300,17 @@ try {
                 elseif ($r[1] -ge 0.95) { 'black in the capture (WDA_MONITOR behaviour)' }
                 else { 'its own pixels show: NOT excluded' }
         Write-Host "  the sign-in window is $seen"
-        Check ($r[0] -ge 0.95 -or $r[1] -ge 0.95) "C6 the secret screen does not show in a screen capture"
+        if ($Hide) {
+            Check ($r[0] -ge 0.95 -or $r[1] -ge 0.95) "C6 with the setting on, the window does not show in a screen capture"
+        } else {
+            Check ($r[0] -lt 0.5 -and $r[1] -lt 0.95) "C6 by default, the window shows in a screen capture"
+        }
 
         $a = [BbRung]::Affinity($hwnd)
         if ($a -ge 0) {
             Write-Host ("  GetWindowDisplayAffinity: 0x{0:X2}" -f $a)
-            Check ($a -eq 0x11 -or $a -eq 0x01) "C7 Windows reports the window's display affinity as excluded"
+            if ($Hide) { Check ($a -eq 0x11 -or $a -eq 0x01) "C7 Windows reports the window's display affinity as excluded" }
+            else { Check ($a -eq 0x00) "C7 Windows reports the window's display affinity as none (WDA_NONE)" }
         } else {
             Write-Host "  GetWindowDisplayAffinity did not answer (Win32 error $(-1 - $a)); judged on pixels only (C6)"
         }
