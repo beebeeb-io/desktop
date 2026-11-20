@@ -39,6 +39,10 @@ pub mod thumb_frame;
 pub mod transport;
 pub mod video;
 
+#[cfg(test)]
+#[path = "release_layout_tests.rs"]
+mod release_layout_tests;
+
 use std::sync::{Mutex, PoisonError};
 
 use crate::shell::app::GateState;
