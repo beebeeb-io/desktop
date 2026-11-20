@@ -6,7 +6,7 @@ use rune::{Color, El, SurfaceFit, col, el, row};
 use super::chrome::{self, Bar, rgb, style};
 use super::grid::{length, megabytes, thousands};
 use super::source::{Kind, Shape, Viewing};
-use super::{Menu, Original, Ui, icons, overlay};
+use super::{Intent, Menu, Original, Ui, icons, overlay};
 use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
@@ -73,6 +73,13 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
                 ),
         );
     }
+    let open = viewing.id;
+    let show_label = crate::frames::show_in_folder::label();
+    middle = middle.child(
+        chrome::tbtn("ph-show-in-folder", show_label, &crate::theme::icons_settings::FOLDER, 16.0, false, t)
+            .help(show_label)
+            .on_press(move |s: &mut State| s.photos.ask(Intent::ShowInFolder(open))),
+    );
     middle = middle.child(
         chrome::tbtn("ph-more", "More", &icons::MORE, 17.0, false, t)
             .expanded(ui.menu.is_some_and(|m| m.which == Menu::More))

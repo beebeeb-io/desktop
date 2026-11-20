@@ -172,6 +172,26 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
     .help("Open in File Explorer")
     .on_press_tx(crate::ui::toolbar::open_beebeeb_location);
 
+    // Show in File Explorer / Finder: this file in its folder, selected (the placeholder, never hydrated).
+    let reveal_btn = tool_button(
+        "show-in-folder",
+        super::super::show_in_folder::label(),
+        &crate::theme::icons_settings::FOLDER,
+        16.0,
+        ToolState::Idle,
+        t,
+    )
+    .help(super::super::show_in_folder::label())
+    .on_press(|s: &mut State| {
+        let Some((id, name)) = super::ui(s).map(|ui| (ui.file.id.clone(), ui.file.name.clone())) else {
+            return;
+        };
+        let answer = super::super::show_in_folder::show(s, &id, &name);
+        if let Some(ui) = super::ui(s) {
+            ui.toast = answer.err().map(str::to_string);
+        }
+    });
+
     let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
 
     let new_btn = row()
@@ -250,6 +270,7 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
         .child(view_toggle)
         .child(sort_btn)
         .child(panel_btn)
+        .child(reveal_btn)
         .child(explorer_btn)
         .child(sep)
         .child(new_btn)

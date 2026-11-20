@@ -83,6 +83,8 @@ pub enum Intent {
     RememberAcross(usize),
     /// Play or pause the video (DW-0611).
     PlayPause(PhotoId),
+    /// The open photo, shown in its folder on this PC with it selected (`frames::show_in_folder`).
+    ShowInFolder(PhotoId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

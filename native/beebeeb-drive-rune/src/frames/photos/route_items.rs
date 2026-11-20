@@ -21,6 +21,7 @@ pub fn handle(s: &mut State, tx: &mut Tx, intent: Intent) -> Result<(), Intent> 
     match intent {
         Intent::Duplicate(id) => duplicate(s, tx, id),
         Intent::Rename(id) => rename::open(s, tx, id),
+        Intent::ShowInFolder(id) => show_in_folder(s, id),
         other => return Err(other),
     }
     Ok(())
@@ -44,6 +45,18 @@ fn duplicate(s: &mut State, tx: &mut Tx, id: super::PhotoId) {
             s.photos.toast = Some(Toast::Words("Duplicated \u{00B7} the copy uploads as a new file"));
         }
         Err(why) => s.photos.toast = Some(Toast::Words(words(Action::Duplicate, why))),
+    }
+}
+
+/// Show in File Explorer / Finder: the photo's placeholder in its folder, selected; never opened or hydrated.
+fn show_in_folder(s: &mut State, id: super::PhotoId) {
+    let items = s.photos.source.file_items(&[id]).filter(|items| !items.is_empty());
+    let Some(items) = items else {
+        s.photos.toast = Some(Toast::Words(NOT_HERE));
+        return;
+    };
+    if let Err(words) = crate::frames::show_in_folder::show(s, &items[0].id, &items[0].name) {
+        s.photos.toast = Some(Toast::Words(words));
     }
 }
 

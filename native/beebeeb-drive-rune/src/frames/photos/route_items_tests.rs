@@ -219,3 +219,18 @@ fn a_protected_place_says_so_and_nothing_is_asked() {
     assert!(rt.state.photos.dialog.is_none(), "no name dialog for it");
     assert!(matches!(rt.state.photos.toast, Some(Toast::Words(w)) if w.contains("Couldn\u{2019}t rename")));
 }
+
+#[test]
+fn show_in_folder_reveals_the_photos_file_and_nothing_else() {
+    let (mut rt, calls) = window(false);
+    rt.state.photos.ask(Intent::ShowInFolder(A));
+    settle(&mut rt);
+    assert_eq!(*calls.lock().unwrap(), [Call::ShowInFileExplorer(vec!["f-a".to_string()])]);
+    assert_eq!(rt.state.photos.toast, None);
+    // A photo with no file on this PC: the line, no call.
+    calls.lock().unwrap().clear();
+    rt.state.photos.ask(Intent::ShowInFolder(PhotoId(99)));
+    settle(&mut rt);
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(matches!(rt.state.photos.toast, Some(Toast::Words(_))));
+}
