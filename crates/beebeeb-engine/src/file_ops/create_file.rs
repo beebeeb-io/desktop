@@ -49,7 +49,7 @@ pub fn create_file(
 /// still finds it, as before).
 pub fn list_new_file(bridge: &crate::engine_bridge::EngineBridge, sync_root: &Path, rel: &str) -> bool {
     match full_path(sync_root, rel) {
-        Ok(path) => { let _ = (bridge, &path); false } // RED
+        Ok(path) => crate::watcher::dispatch_local_create(bridge, sync_root, &path, "new_file"),
         Err(_) => false,
     }
 }
