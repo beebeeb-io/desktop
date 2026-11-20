@@ -217,7 +217,7 @@ fn a_tile_is_plain_until_its_thumbnail_arrives() {
     let rt = scene("DW-0119");
     let items = &rt.state.listing.items;
     let kind = |thumbs: &dyn ThumbSource, i: usize| match thumb_of(&items[i], thumbs) {
-        Thumb::Glyph(_, size) => format!("glyph {size}"),
+        Thumb::Type(_, size) => format!("glyph {size}"),
         Thumb::Plain => "plain".to_string(),
         Thumb::Picture => "picture".to_string(),
         Thumb::Sample(n) => format!("sample {n}"),
@@ -403,4 +403,44 @@ fn a_preview_without_a_connection_opens_the_panel() {
     press(&mut rt, Key::Text(" ".into()));
     assert!(find(&rt, "preview-card").is_none(), "there is a connection");
     assert_eq!(rt.state.actions.intents, [FilesIntent::Frame("DW-0408")]);
+}
+
+/// The grid draws the registry's icon in the registry's colour: "Music", "a.xlsx", "b.mp4".
+#[test]
+fn a_grid_tile_wears_its_kinds_icon_colour() {
+    use crate::theme::file_icon_colors::tint_color;
+    use crate::theme::file_icons::Tint;
+    use crate::ui::{grid_tiles::{Tile, tile}, kit};
+    let rt = scene("DW-0119");
+    let proto = rt.state.listing.items[2].clone();
+    let item = |name: &str, folder: bool, mime: Option<&str>| {
+        let mut i = proto.clone();
+        i.name = name.to_string();
+        i.is_folder = folder;
+        i.mime = mime.map(str::to_string);
+        i.has_thumbnail = false;
+        i
+    };
+    let items = [
+        item("Music", true, None),
+        item("a.xlsx", false, None),
+        item("b.mp4", false, None),
+    ];
+    let t = crate::theme::tokens::theme(false);
+    let want = [Tint::Audio, Tint::Excel, Tint::Video];
+    let sizes = [44.0, 34.0, 34.0];
+    kit::record();
+    for (i, it) in items.iter().enumerate() {
+        let th = thumb_of(it, &NoThumbs);
+        match th {
+            Thumb::Type(_, size) => assert_eq!(size, sizes[i]),
+            _ => panic!("tile {i} is not a type icon"),
+        }
+        let _ = tile(i, &Tile { name: &it.name, sub: "", thumb: th, pixels: None, length: None, selected: false }, &t);
+    }
+    let notes = kit::take();
+    for (i, tint) in want.iter().enumerate() {
+        let n = notes.get(&format!("grid-{i}-icon")).expect("icon note");
+        assert_eq!(n.color, Some(tint_color(*tint, false)), "tile {i}");
+    }
 }

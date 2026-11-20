@@ -5,11 +5,12 @@
 //! Keys: `grid` (the padded area), `rows` (the tiles' box: the grid's one Tab stop, as the list's),
 //! `grid-<i>`, `grid-<i>-thumb`, `-icon`, `-badge`, `-badge-icon`, `-badge-text`, `-name`, `-sub`.
 
+use crate::theme::file_icons::FileIcon;
 use crate::theme::tokens::Theme;
 use rune::tok::Family;
-use rune::{Align, Color, El, Icon, TextStyle, col, el, row};
+use rune::{Align, Color, El, TextStyle, col, el, row};
 
-use super::{file_list, global_icons, kit};
+use super::{file_icon, file_list, global_icons, kit};
 
 /// `.mk-gcell`: 128 x 150 (`grid-template-columns: repeat(auto-fill, 128px)`, `grid-auto-rows: 150px`).
 pub const CELL_W: f32 = 128.0;
@@ -29,8 +30,8 @@ pub const BADGE: TextStyle = TextStyle::new(10.0, 600.0).family(Family::Mono).lh
 /// What the tile shows.
 #[derive(Clone, Copy)]
 pub enum Thumb {
-    /// A kind's glyph, `size` points across (a folder 44, a document 34).
-    Glyph(&'static Icon, f32),
+    /// A kind's icon and colour from the registry, `size` points across (a folder 44, a document 34).
+    Type(FileIcon, f32),
     /// A picture or a video whose thumbnail has not arrived: a plain tile.
     Plain,
     /// The thumbnail arrived.
@@ -98,11 +99,9 @@ pub fn tile(i: usize, item: &Tile, t: &Theme) -> El {
         .clip_rounded(9.0)
         .center();
     thumb = match item.thumb {
-        Thumb::Glyph(ic, size) => {
-            thumb
-                .fill(t.text.alpha(0.06))
-                .child(kit::glyph(format!("{k}-icon"), ic, size, t.text_tertiary))
-        }
+        Thumb::Type(fi, size) => thumb
+            .fill(t.text.alpha(0.06))
+            .child(file_icon::file_icon(format!("{k}-icon"), fi, size, t)),
         Thumb::Plain => thumb.fill(t.text.alpha(0.08)),
         Thumb::Picture => match &item.pixels {
             // The real picture, covering the tile (the toolkit crops what does not fit).
