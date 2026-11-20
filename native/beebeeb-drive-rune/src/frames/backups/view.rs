@@ -12,6 +12,8 @@ use crate::shell::{placeholder, registry};
 use crate::theme::icons as drive_icons;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
+use crate::theme::file_icons::icon_for;
+use crate::ui::file_icon::file_icon;
 use crate::ui::backups_kit::{self as bk, Leading, Md, RowItem, TileTone};
 use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, Emphasis};
@@ -460,13 +462,20 @@ fn device_page(device: &Device, links: bool, t: &Theme) -> Vec<El> {
     page
 }
 
-fn file_glyph(kind: FileKind) -> &'static rune::Icon {
-    match kind {
-        FileKind::Video => &pc_icons::DOC_VIDEO,
-        FileKind::Document => &ic::DOCUMENT,
-        FileKind::Sheet => &drive_icons::DOC_SPREADSHEET,
-        FileKind::Image => &ic::IMAGE,
-    }
+/// A file row's 28 pt tile (`bk::tile`'s keys and wash) with the registry's icon for the name.
+fn file_tile(index: usize, name: &str, t: &Theme) -> El {
+    rune::el()
+        .key(format!("tile-{index}"))
+        .size(28.0, 28.0)
+        .radius(8.0)
+        .fill(t.text.alpha(0.07))
+        .center()
+        .child(file_icon(
+            format!("tile-{index}-icon"),
+            icon_for(name, false, None),
+            14.0,
+            t,
+        ))
 }
 
 /// DW-0741: what could not back up, and what never does. Returns the children and how many
@@ -498,7 +507,7 @@ fn failures_page(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
                     list,
                     i,
                     RowItem {
-                        leading: Leading::El(bk::tile(i, TileTone::Neutral, file_glyph(f.kind), 28.0, t)),
+                        leading: Leading::El(file_tile(i, &f.name, t)),
                         title: f.name.clone(),
                         title_color: None,
                         sub: Some(format!("{} \u{00B7} {}", f.folder, f.why)),
@@ -530,13 +539,7 @@ fn failures_page(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
                     list,
                     i,
                     RowItem {
-                        leading: Leading::El(bk::tile(
-                            failed.len() + i,
-                            TileTone::Neutral,
-                            file_glyph(f.kind),
-                            28.0,
-                            t,
-                        )),
+                        leading: Leading::El(file_tile(failed.len() + i, &f.name, t)),
                         title: f.name.clone(),
                         title_color: None,
                         sub: Some(f.folder.clone()),
@@ -804,3 +807,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(body)
 }
+
+#[cfg(test)]
+#[path = "icon_tests.rs"]
+mod icon_tests;

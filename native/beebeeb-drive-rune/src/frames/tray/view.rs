@@ -10,6 +10,8 @@ use rune::{Align, Color, Cursor, El, Icon, ScrollFade, ScrollPos, ScrollSpec, Te
 use super::source::{Change, Changes, MAX_ROWS, Origin, Snapshot, Status, Tile, Tone, What};
 use super::{Host, Ui, icons};
 use crate::theme::tokens::{self, Theme, type_};
+use crate::theme::file_icons::icon_for;
+use crate::ui::file_icon::file_icon;
 use crate::ui::kit;
 use crate::ui::settings_controls::{self, Emphasis};
 
@@ -305,21 +307,6 @@ fn changes_label(snapshot: &Snapshot, t: &Theme) -> El {
         ))
 }
 
-fn tile_icon(tile: Tile) -> Option<&'static Icon> {
-    Some(match tile {
-        Tile::Document => &icons::FILE_DOC,
-        Tile::Sheet => &icons::FILE_SHEET,
-        Tile::Deck => &icons::FILE_DECK,
-        Tile::Video => &icons::FILE_VIDEO,
-        Tile::Audio => &icons::FILE_AUDIO,
-        Tile::Archive => &icons::FILE_ARCHIVE,
-        Tile::Folder => &icons::FOLDER,
-        Tile::Trashed => &icons::FILE_TRASHED,
-        Tile::Image => &icons::FILE_IMAGE,
-        Tile::Photo(_) => return None,
-    })
-}
-
 /// The board's sample photos (`.mk-ph1` to `.mk-ph6`): the angle in CSS degrees and the stops.
 fn photo(n: u8) -> (f32, [(f32, &'static str); 3]) {
     match n {
@@ -333,25 +320,31 @@ fn photo(n: u8) -> (f32, [(f32, &'static str); 3]) {
 }
 
 /// A row's tile (`.mk-ftile`, 30 in the flyout): the file's glyph, or the photo.
-fn file_tile(key: &str, tile: Tile, t: &Theme) -> El {
+fn file_tile(key: &str, name: &str, tile: Tile, t: &Theme) -> El {
     let base = el()
         .key(format!("{key}-tile"))
         .size(30.0, 30.0)
         .radius(7.0)
         .clip_rounded(7.0)
         .center();
-    match (tile, tile_icon(tile)) {
-        (_, Some(icon)) => base
-            .fill(t.tile)
-            .child(kit::glyph(format!("{key}-icon"), icon, 19.0, t.text_secondary)),
-        (Tile::Photo(n), _) => {
+    match tile {
+        Tile::Trashed => base.fill(t.tile).child(kit::glyph(
+            format!("{key}-icon"),
+            &icons::FILE_TRASHED,
+            19.0,
+            t.text_secondary,
+        )),
+        Tile::Photo(n) => {
             let (degrees, stops) = photo(n);
             base.linear_gradient(
                 degrees.to_radians(),
                 stops.map(|(at, hex)| (at, rune::color::hex(hex).unwrap_or(Color::BLACK))),
             )
         }
-        _ => base.fill(t.tile),
+        _ => {
+            let fi = icon_for(name, matches!(tile, Tile::Folder), None);
+            base.fill(t.tile).child(file_icon(format!("{key}-icon"), fi, 19.0, t))
+        }
     }
 }
 
@@ -434,7 +427,7 @@ fn change_row<S: 'static>(i: usize, change: &Change, selected: bool, host: Host<
         .hover(t.selection)
         .cursor(Cursor::Pointer)
         .on_press_tx(host.act(move |ui| ui.open_row(i)))
-        .child(file_tile(&key, change.tile, t))
+        .child(file_tile(&key, &change.name, change.tile, t))
         .child(words)
         .child(
             kit::label(
@@ -643,3 +636,7 @@ fn footer<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
         .child(explorer)
         .child(settings)
 }
+
+#[cfg(test)]
+#[path = "icon_tests.rs"]
+mod icon_tests;
