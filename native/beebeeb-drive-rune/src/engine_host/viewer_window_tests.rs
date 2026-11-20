@@ -57,6 +57,10 @@ fn report_pdf() -> Vec<u8> {
     super::viewer_pdf::tests::sample_pdf(2, 612, 792)
 }
 
+const CLIP: &str = "b0000000-0000-4000-8000-000000000607";
+const CLIP_NAME: &str = "clip-of-the-first-account-viewer.mp4";
+const DOC: &str = "b0000000-0000-4000-8000-000000000608";
+const DOC_NAME: &str = "letter-of-the-first-account-viewer.docx";
 const LETTER: &str = "b0000000-0000-4000-8000-000000000606";
 const LETTER_NAME: &str = "letter-of-the-first-account-viewer.pdf";
 
@@ -233,6 +237,8 @@ fn window(tag: &str) -> Window {
     first.add_file_with_content(REPORT, None, REPORT_NAME, &report_pdf());
     first.add_file_with_content(LETTER, None, LETTER_NAME, &letter_pdf());
     first.add_file_with_content(LONG, None, LONG_NAME, long_text().as_bytes());
+    first.add_file_with_content(CLIP, None, CLIP_NAME, b"not really a video");
+    first.add_file_with_content(DOC, None, DOC_NAME, b"PK not really a document");
     first.add_file_with_content(PICTURE, None, PICTURE_NAME, &super::tests::png_bytes(8, 6));
     let hold = Arc::new(Hold::default());
     let fake = two_accounts(first.clone(), second.clone(), hold.clone());
@@ -257,6 +263,8 @@ fn window(tag: &str) -> Window {
     put(&db, REPORT, REPORT_NAME, report_pdf().len() as i64);
     put(&db, LETTER, LETTER_NAME, letter_pdf().len() as i64);
     put(&db, LONG, LONG_NAME, long_text().len() as i64);
+    put(&db, CLIP, CLIP_NAME, 18);
+    put(&db, DOC, DOC_NAME, 24);
     put(&db, PICTURE, PICTURE_NAME, super::tests::png_bytes(8, 6).len() as i64);
     db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
         .unwrap();
@@ -890,3 +898,56 @@ fn a_picture_is_shown_and_no_action_claims_a_state_that_was_not_read() {
 
 #[path = "viewer_edit_lock_tests.rs"]
 mod edit_lock;
+
+/// w29: a PDF, a picture, a video, a text, a Word document and a kind with no viewer, each opened from Files (a row
+/// and Enter) and from Search (its route), on the real engine: every one is the window's own viewer, the unknown kind
+/// with its "No preview" frame and its "Open in another app" button, and none is handed to the system.
+#[test]
+fn six_kinds_open_in_the_app_from_files_and_from_search() {
+    let mut w = window("sixkinds");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    let kinds = [
+        (REPORT_NAME, REPORT),
+        (PICTURE_NAME, PICTURE),
+        (CLIP_NAME, CLIP),
+        (NOTE_NAME, NOTE),
+        (DOC_NAME, DOC),
+        (PLAN_NAME, PLAN),
+    ];
+    let leave = |w: &mut Window| {
+        w.rt.update(|s, _| {
+            s.viewer.ui = None;
+            host::dispatch(s, Event::Escape);
+        });
+        w.settle();
+        assert_eq!(w.route_item(), None);
+    };
+    let mut in_app = 0;
+    for (name, id) in kinds {
+        w.open_row(name);
+        w.settle();
+        if w.route_item().as_deref() == Some(id) && w.rt.state.viewer.ui.is_some() {
+            in_app += 1;
+        } else {
+            panic!("Files: {name} did not open in the app; the window draws:\n{}", w.drawn());
+        }
+        leave(&mut w);
+        w.rt.update(|s, _| {
+            host::dispatch(s, Event::OpenItem(id.to_string()));
+        });
+        w.settle();
+        if w.route_item().as_deref() == Some(id) {
+            in_app += 1;
+        } else {
+            panic!("Search: {name} did not open in the app");
+        }
+        if id == PLAN {
+            let drawn = w.drawn();
+            assert!(drawn.contains("No preview for this kind of file yet"), "{drawn}");
+            assert!(drawn.contains("Open in another app\u{2026}"), "{drawn}");
+        }
+        leave(&mut w);
+    }
+    assert_eq!(in_app, 12, "6 kinds, from Files and from Search");
+}
