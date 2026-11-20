@@ -353,15 +353,38 @@ fn choose_app(
     }
 }
 
+/// The one raw argument explorer.exe is given to select `path`: `/select,"<path>"`, the path always quoted.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn explorer_select_arg(path: &std::path::Path) -> String {
+    format!("/select,\"{}\"", path.display())
+}
+
+#[cfg(test)]
+mod explorer_select_tests {
+    use super::explorer_select_arg;
+    use std::path::Path;
+
+    #[test]
+    fn the_path_is_quoted_inside_the_select_argument() {
+        assert_eq!(
+            explorer_select_arg(Path::new("C:\\Users\\Jo Doe\\Beebeeb\\my folder\\r\u{e9}sum\u{e9} \u{4e2d}.pdf")),
+            "/select,\"C:\\Users\\Jo Doe\\Beebeeb\\my folder\\r\u{e9}sum\u{e9} \u{4e2d}.pdf\""
+        );
+        assert_eq!(explorer_select_arg(Path::new(r"C:\a\b.txt")), "/select,\"C:\\a\\b.txt\"");
+    }
+}
+
 /// Reveal a file or folder in File Explorer / Finder / Files. Never passes the
 /// path through a shell interpreter. `still`: as [`open_path`]'s.
 fn reveal_in_file_explorer(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), files_source::ActionError> {
     #[cfg(target_os = "windows")]
     {
-        // `explorer.exe /select,<path>` as ONE argv element: the process is started directly
-        // via `CreateProcessW`, no shell in between. The path is never parsed by cmd.exe.
-        let select = format!("/select,{}", path.display());
-        launch::locked(|| still().then(|| std::process::Command::new("explorer.exe").arg(select).spawn()))
+        // `explorer.exe /select,"<path>"`: the process is started directly via `CreateProcessW`, no shell in
+        // between. explorer.exe parses its own command line, so the argument is passed raw (std would quote the
+        // whole `/select,<path>` element when the path has a space, and explorer opens with nothing selected).
+        use std::os::windows::process::CommandExt;
+        let select = explorer_select_arg(path);
+        launch::locked(|| still().then(|| std::process::Command::new("explorer.exe").raw_arg(select).spawn()))
             .ok_or(files_source::ActionError::Unavailable)?
             .map_err(|_| files_source::ActionError::Failed)?;
     }
