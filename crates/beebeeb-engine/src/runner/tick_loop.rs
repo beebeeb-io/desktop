@@ -121,6 +121,24 @@ pub(super) fn finish_tick_payload(
     payload
 }
 
+/// w31: has the account's file list never arrived in this local state? True only when the cursor reads as unset: a
+/// read that fails changes nothing (the tick's own read of it reports that).
+pub(super) fn first_list_owed(db: &StateDb) -> bool {
+    matches!(db.get_sync_cursor(), Ok(None))
+}
+
+/// w31: what the board says of the first list after a tick's pull. `still_owed`: the cursor is still unset.
+/// `reached_server`: the pull came back. A pull that did not, with no list yet, is a failure a window must say: its
+/// rows are not the account's files.
+pub(super) fn first_list_after_pull(still_owed: bool, reached_server: bool) -> crate::transfer_progress::FirstList {
+    use crate::transfer_progress::FirstList;
+    match (still_owed, reached_server) {
+        (false, _) => FirstList::Here,
+        (true, true) => FirstList::Awaited,
+        (true, false) => FirstList::Failed,
+    }
+}
+
 /// How often the pulse looks. The look itself is free while nothing is moving.
 pub(super) const STATUS_PULSE_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -360,5 +378,30 @@ mod tests {
             assert_eq!(RunMode::of_flag(paused), mode, "paused = {paused}");
             assert_eq!(mode.is_paused(), paused, "paused = {paused}");
         }
+    }
+
+    /// w31 (Guus's PC, 2026-11-20): a local state that never got the account's file list (no cursor) owes it, also
+    /// when this PC's own sync folder already gave it folder rows; the backup passes wait for it and the board says
+    /// it is awaited. A cursor of 0 is a list that arrived (an account with an empty op log), not an owed one.
+    #[test]
+    fn w31_a_state_with_no_cursor_owes_the_first_list_and_one_with_a_cursor_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        assert!(first_list_owed(&db), "never listed: owed");
+        db.set_sync_cursor(0).unwrap();
+        assert!(!first_list_owed(&db), "a cursor of 0 is a list that arrived");
+        db.set_sync_cursor(177_670).unwrap();
+        assert!(!first_list_owed(&db));
+    }
+
+    /// w31: after a pull, a list that is still owed is awaited while the server answers and failed when it did not;
+    /// once the cursor is there it is here, whatever that pull said.
+    #[test]
+    fn w31_the_board_says_awaited_failed_or_here_after_a_pull() {
+        use crate::transfer_progress::FirstList;
+        assert_eq!(first_list_after_pull(true, true), FirstList::Awaited);
+        assert_eq!(first_list_after_pull(true, false), FirstList::Failed);
+        assert_eq!(first_list_after_pull(false, true), FirstList::Here);
+        assert_eq!(first_list_after_pull(false, false), FirstList::Here);
     }
 }

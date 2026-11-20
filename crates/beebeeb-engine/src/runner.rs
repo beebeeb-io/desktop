@@ -133,11 +133,14 @@ async fn next_wake(
     cancel: &mut oneshot::Receiver<()>,
     tick: &mut tokio::time::Interval,
     send_phase: &SendPhaseLink,
+    transfers: &crate::transfer_progress::TransferBoard,
 ) -> Wake {
     tokio::select! {
         biased;
         _ = cancel => Wake::Cancel,
         _ = tick.tick() => Wake::Tick,
+        // w31: Try again on a first file list that failed: the whole tick now, not up to 30 s later.
+        _ = transfers.pull_asked() => Wake::Tick,
         _ = send_phase.wake.notified() => Wake::Phase,
         _ = send_phase.nudge.notified() => Wake::Nudge,
     }
@@ -567,8 +570,18 @@ async fn run(
     #[cfg(not(target_os = "macos"))]
     let kept_refetch = Arc::new(crate::engine_bridge::KeptRefetch::default());
 
+    // w31: the account's file list has never arrived on this PC (no cursor). Until it has, the pull goes first: the
+    // backup passes wait (on a large backup they took minutes, and the windows showed no file all that time), and the
+    // board says so, so a window draws "getting your files" and not a finished, empty list.
+    let mut awaiting_first_list = first_list_owed(&db);
+    transfers.set_first_list(if awaiting_first_list {
+        crate::transfer_progress::FirstList::Awaited
+    } else {
+        crate::transfer_progress::FirstList::Here
+    });
+
     loop {
-        match next_wake(&mut cancel, &mut tick, &send_phase).await {
+        match next_wake(&mut cancel, &mut tick, &send_phase, &transfers).await {
             Wake::Cancel => break,
             Wake::Tick => {
                 // Task 1670 round 3: run BEFORE the `sync_paused` check below
@@ -679,7 +692,9 @@ async fn run(
                 // LD-0113: the backup passes. Each reads a backed-up folder in place and queues its uploads
                 // (`origin = 'backup'`), which this tick's queue sends; nothing is written under the sync root.
                 // An unreadable config runs no pass, as the mirror did.
+                // w31: not before the account's first file list is here (see `first_list_owed`).
                 match crate::config::DesktopConfig::load_for(identity) {
+                    Ok(_) if awaiting_first_list => {}
                     Ok(cfg) => {
                         let mut sources = crate::backup::sources::backup_sources(
                             &db,
@@ -724,7 +739,15 @@ async fn run(
                         tracing::warn!(error = %e, "shared root refresh failed");
                     }
                 }
-                match sync_tick_outcome(&*bridge, &sync_root).await {
+                let pulled = sync_tick_outcome(&*bridge, &sync_root).await;
+                if awaiting_first_list {
+                    awaiting_first_list = first_list_owed(&db);
+                    transfers.set_first_list(first_list_after_pull(
+                        awaiting_first_list,
+                        pulled.as_ref().is_ok_and(|tick| tick.reached_server),
+                    ));
+                }
+                match pulled {
                     Ok(tick) => {
                         // `Ok` is not proof the session works: a refused pull also returns `Ok` (task 2521). Only a
                         // pull that came back clears the auth-failure streak (task 1546 finding 5); a 401 pull adds

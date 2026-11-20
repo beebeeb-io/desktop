@@ -353,3 +353,43 @@ fn the_session_watcher_starts_once_where_the_real_app_opens_its_engine() {
         "open.rs"
     );
 }
+
+/// w31 (Guus's PC, 2026-11-20): the first sign-in on a PC. Until the account's file list arrived the local state
+/// holds the sync folder's own folders and no file; the window showed that as a finished list for minutes. While an
+/// engine runs and the list is awaited the status says loading (no count before the size is known, then the count);
+/// a try that failed is said as failed; and nothing of it without a running engine, while paused, or once it is here.
+#[test]
+fn w31_before_the_first_file_list_the_status_says_loading_or_failed_never_nothing() {
+    use beebeeb_engine::transfer_progress::FirstList;
+    let now = chrono::Local::now();
+    let running = ready(Start::Running);
+
+    let awaited = global_status_with(&running, FirstList::Awaited, None, now);
+    let loading = awaited.loading.expect("the first list is on its way: loading");
+    assert_eq!((loading.listed, loading.total), (0, 0));
+    assert!(!awaited.list_failed);
+
+    let ingesting = global_status_with(&running, FirstList::Awaited, Some((18_240, 40_112)), now);
+    let loading = ingesting.loading.expect("still loading while it is ingested");
+    assert_eq!((loading.listed, loading.total), (18_240, 40_112));
+
+    let failed = global_status_with(&running, FirstList::Failed, None, now);
+    assert!(failed.list_failed, "a failed first list is said");
+    assert_eq!(failed.loading, None);
+
+    // The list is here: a later snapshot's ingest is no first load.
+    let here = global_status_with(&running, FirstList::Here, Some((1, 2)), now);
+    assert_eq!((here.loading, here.list_failed), (None, false));
+    assert_eq!(global_status(&running, now), global_status_with(&running, FirstList::Here, None, now));
+
+    // Nothing is on its way while sync is paused, and never without a running engine.
+    let paused = SyncView { paused: true, ..running };
+    for first in [FirstList::Awaited, FirstList::Failed] {
+        let status = global_status_with(&paused, first, None, now);
+        assert_eq!((status.loading, status.list_failed), (None, false), "paused, {first:?}");
+        for view in without_an_engine() {
+            let status = global_status_with(&view, first, None, now);
+            assert_eq!((status.loading, status.list_failed), (None, false), "{view:?}, {first:?}");
+        }
+    }
+}
