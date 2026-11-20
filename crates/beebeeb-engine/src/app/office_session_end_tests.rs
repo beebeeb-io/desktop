@@ -206,3 +206,42 @@ fn two_engines_on_one_state_dir_keep_their_own_hook() {
     a.office_before_session_end(SessionEnding::Lock);
     assert_eq!(hit_a.load(Ordering::SeqCst), 2);
 }
+
+/// A sign-out with an open editor that holds unsaved edits is refused: nothing is ended, wiped or signed out, the
+/// hook is not called. Only the explicit discard signs out (and then the hook runs and the blobs go).
+#[test]
+fn a_sign_out_with_unsaved_edits_is_refused_and_only_a_discard_signs_out() {
+    use super::super::account_actions_api::ActionError;
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let engine = engine_with_a_session("an-invented-slot-unsaved");
+    let session = engine.acct.session_generation();
+    let state_dir = engine.config.state_dir.clone();
+    engine.put_office_snapshot_for(session, FILE, 3, &package()).expect("kept");
+    let called = Arc::new(AtomicUsize::new(0));
+    let c = called.clone();
+    engine.set_office_session_end_hook(Arc::new(move |_| {
+        c.fetch_add(1, Ordering::SeqCst);
+    }));
+    let unsaved = Arc::new(AtomicUsize::new(1));
+    let u = unsaved.clone();
+    engine.set_office_unsaved_probe(Arc::new(move || u.load(Ordering::SeqCst)));
+
+    assert_eq!(engine.sign_out_for(session), Err(ActionError::UnsavedEdits));
+    assert_eq!(called.load(Ordering::SeqCst), 0, "no editor was ended");
+    assert!(engine.has_session(), "still signed in");
+    assert!(files_under(&state_dir.join("office-recovery")) > 0, "the recovery blob stays");
+
+    assert_eq!(engine.sign_out_discarding_unsaved_for(session), Ok(()));
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert!(!engine.has_session());
+}
+
+/// Nothing unsaved (every editor saved, or none open): the sign-out goes through as before.
+#[test]
+fn a_sign_out_with_nothing_unsaved_goes_through() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let engine = engine_with_a_session("an-invented-slot-saved");
+    let session = engine.acct.session_generation();
+    engine.set_office_unsaved_probe(Arc::new(|| 0));
+    assert_eq!(engine.sign_out_for(session), Ok(()));
+}

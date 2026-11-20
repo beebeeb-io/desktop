@@ -71,6 +71,12 @@ pub(super) struct OpenBeforeLock {
     key: Zeroizing<[u8; 32]>,
 }
 
+/// What the host registers to say how many open editors hold edits that no save has landed
+/// ([`Engine::office_unsaved_count`]).
+pub type UnsavedProbe = Arc<dyn Fn() -> usize + Send + Sync>;
+
+static PROBES: Mutex<Option<HashMap<Slot, UnsavedProbe>>> = Mutex::new(None);
+
 static GRANTS: Mutex<Option<HashMap<Slot, ScreenFlushGrant>>> = Mutex::new(None);
 
 fn set_grant(state_dir: &Slot, grant: Option<ScreenFlushGrant>) {
@@ -117,6 +123,9 @@ fn run_in(state_dir: &Slot, ending: SessionEnding) {
 /// An engine that goes takes its hook and grant (and the key copy in it) with it.
 pub(super) fn forget_slots(slot: &Slot) {
     set_grant(slot, None);
+    if let Some(all) = PROBES.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+        all.remove(slot);
+    }
     let mut all = HOOKS.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(all) = all.as_mut() {
         all.remove(slot);
@@ -131,6 +140,23 @@ impl<C: CredentialStores> Engine<C> {
     /// Register the host's hook for this engine's state dir (a second call replaces the first).
     pub fn set_office_session_end_hook(&self, hook: SessionEndHook) {
         set_in(&self.office_slot(), hook);
+    }
+
+    /// Register the host's count of open editors with unsaved edits (a second call replaces the first). A sign-out
+    /// is refused while it says more than none, unless the person chose to discard them.
+    pub fn set_office_unsaved_probe(&self, probe: UnsavedProbe) {
+        let mut all = PROBES.lock().unwrap_or_else(|p| p.into_inner());
+        all.get_or_insert_with(HashMap::new).insert(self.office_slot(), probe);
+    }
+
+    /// How many open editors hold edits no save has landed (0 with no probe). Runs the probe with no lock held.
+    pub(super) fn office_unsaved_count(&self) -> usize {
+        let probe = PROBES
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(|all| all.get(&self.office_slot()).cloned());
+        probe.map_or(0, |probe| catch_unwind(AssertUnwindSafe(|| probe())).unwrap_or(0))
     }
 
     /// Read BEFORE the screen lock is taken (a locked screen refuses the read): the open session's turn and key.
