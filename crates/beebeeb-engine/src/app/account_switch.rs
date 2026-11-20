@@ -63,7 +63,7 @@ impl<C: CredentialStores> Engine<C> {
             return Err("guarded file");
         }
         if db.has_account_data().map_err(|_| "unreadable")? {
-            port.remove_synced_items(db, sync_root).map_err(|_| "the folder's items stay")?;
+            port.remove_synced_items(db, sync_root, &[]).map_err(|_| "the folder's items stay")?;
         }
         let purge = db.purge_all_local_state().map_err(|_| "the rows stay")?;
         for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {

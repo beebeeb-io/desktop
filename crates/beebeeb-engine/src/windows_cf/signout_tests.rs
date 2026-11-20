@@ -661,3 +661,64 @@ fn sign_out_stops_plainly_when_it_cannot_keep_a_pending_file() {
     );
     assert_eq!(f.db.list_files().unwrap().len(), 1);
 }
+
+// ---- w28: an account switch's purge never deletes a file the engine does not know is synced and unchanged ----
+
+/// The purge an account switch runs: the real port, as the engine calls it.
+fn switch_purge(f: &Fixture, unasked: &[&str]) -> Result<(), String> {
+    use crate::sync_root_port::SyncRootPort;
+    let unasked: Vec<String> = unasked.iter().map(|path| path.to_string()).collect();
+    crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST).remove_synced_items(&f.db, &f.root, &unasked)
+}
+
+/// w28 (the window w27 left): the engine was told nothing is at the path of a file of unknown content, then a person
+/// made a file there. The switch's purge refuses and deletes nothing; the file keeps every byte; no row is cleared.
+#[test]
+fn w28_switch_purge_keeps_a_file_made_at_a_path_that_was_empty_when_checked() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    f.track_unknown("Budget.docx", ItemKind::File, FileStatus::Local);
+    std::fs::write(f.root.join("Budget.docx"), b"typed while the account switched").unwrap();
+
+    assert!(switch_purge(&f, &["Budget.docx"]).is_err());
+
+    assert_eq!(
+        std::fs::read(f.root.join("Budget.docx")).unwrap(),
+        b"typed while the account switched"
+    );
+    assert!(f.root.join("Plans").is_dir(), "nothing else was removed either");
+    assert_eq!(f.db.list_files().unwrap().len(), 2, "no row was cleared");
+}
+
+/// The same, with the engine's list naming the path: an item the engine did not know (here a folder that is
+/// otherwise a synced plain one) at a path it was told was empty is never removed.
+#[test]
+fn w28_switch_purge_refuses_any_item_at_a_path_the_engine_was_told_was_empty() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    assert!(switch_purge(&f, &["Plans"]).is_err());
+    assert!(f.root.join("Plans").is_dir());
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+/// With nothing at those paths the purge still does its work: the synced items go, the rows are cleared.
+#[test]
+fn w28_switch_purge_still_removes_synced_items_when_nothing_unexpected_is_there() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    f.track_unknown("Budget.docx", ItemKind::File, FileStatus::Local);
+    switch_purge(&f, &["Budget.docx"]).unwrap();
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+/// A file made in a synced folder (a path no row has) after the check: refused too, nothing deleted.
+#[test]
+fn w28_switch_purge_keeps_a_file_made_in_a_synced_folder() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    std::fs::write(f.root.join("Plans").join("late.txt"), b"made during the switch").unwrap();
+    assert!(switch_purge(&f, &[]).is_err());
+    assert_eq!(std::fs::read(f.root.join("Plans").join("late.txt")).unwrap(), b"made during the switch");
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}

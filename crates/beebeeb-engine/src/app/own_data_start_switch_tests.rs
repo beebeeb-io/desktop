@@ -25,6 +25,9 @@ struct SwitchPort {
     removal: Removal,
     removals: AtomicU32,
     registers: AtomicU32,
+    /// w28: a file a person drops at `(path, bytes)` right after the engine was told nothing is there, before the
+    /// removal runs (the window between the check and the purge).
+    dropped_after_the_check: std::sync::Mutex<Option<(String, Vec<u8>)>>,
 }
 
 impl SwitchPort {
@@ -33,6 +36,7 @@ impl SwitchPort {
             removal,
             removals: AtomicU32::new(0),
             registers: AtomicU32::new(0),
+            dropped_after_the_check: std::sync::Mutex::new(None),
         }
     }
 }
@@ -50,12 +54,24 @@ impl SyncRootPort for SwitchPort {
     }
     /// A fake of Windows' answer: an item that is there with bytes in it.
     fn may_hold_bytes(&self, folder: &Path, path: &str) -> bool {
-        std::fs::metadata(folder.join(path)).is_ok_and(|item| item.len() > 0)
+        let answer = std::fs::metadata(folder.join(path)).is_ok_and(|item| item.len() > 0);
+        let mut dropped = self.dropped_after_the_check.lock().unwrap();
+        if dropped.as_ref().is_some_and(|(at, _)| at == path) {
+            let (at, bytes) = dropped.take().unwrap();
+            std::fs::write(folder.join(at), bytes).unwrap();
+        }
+        answer
     }
-    fn remove_synced_items(&self, _db: &StateDb, folder: &Path) -> Result<(), String> {
+    /// A fake of the Windows purge's contract (w28): it refuses, deleting nothing, when an item is at a path of
+    /// `unasked` (the engine was told nothing was there, so whatever is now is not the first account's to delete);
+    /// otherwise it deletes every item under the folder.
+    fn remove_synced_items(&self, _db: &StateDb, folder: &Path, unasked: &[String]) -> Result<(), String> {
         self.removals.fetch_add(1, Ordering::SeqCst);
         if self.removal == Removal::Fails {
             return Err("refused".to_string());
+        }
+        if unasked.iter().any(|path| folder.join(path.trim_start_matches('/')).symlink_metadata().is_ok()) {
+            return Err("an item that was not there".to_string());
         }
         for entry in std::fs::read_dir(folder).map_err(|e| e.to_string())? {
             let path = entry.map_err(|e| e.to_string())?.path();
@@ -174,6 +190,37 @@ fn a_file_of_unknown_content_with_no_bytes_on_this_pc_does_not_keep_the_second_a
     assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
     assert!(!pc.contents().join("\n").contains(A_MADE_IN_THE_APP), "A's name is in B's rows");
     nothing_of_a_left(&pc);
+}
+
+/// w28 (the window w27 left): a file made at a guarded path after the check said "no bytes" and before the removal
+/// is not A's synced item. The removal refuses, B stays refused, and the file keeps every byte.
+#[test]
+fn a_file_made_between_the_check_and_the_removal_survives_and_the_second_account_is_refused() {
+    let pc = Pc::new();
+    a_signed_out(&pc, &owner());
+    row(&pc.db(), IDS[2], A_MADE_IN_THE_APP, false, 1);
+    let contents = pc.contents();
+    let mut files = listing(&pc.root());
+    pc.sign_in(&other());
+    let port = SwitchPort::new(Removal::Works);
+    *port.dropped_after_the_check.lock().unwrap() = Some((A_MADE_IN_THE_APP.to_string(), b"typed by B just now".to_vec()));
+
+    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData));
+
+    assert_eq!(port.removals.load(Ordering::SeqCst), 1, "the removal was asked, and refused");
+    assert_eq!(port.registers.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read(pc.root().join(A_MADE_IN_THE_APP)).unwrap(),
+        b"typed by B just now",
+        "the file made during the switch is untouched"
+    );
+    assert_eq!(pc.db().owner().unwrap(), Some(owner()), "no row was cleared");
+    assert_eq!(pc.contents(), contents);
+    files.push(A_MADE_IN_THE_APP.to_string());
+    files.sort();
+    let mut now = listing(&pc.root());
+    now.sort();
+    assert_eq!(now, files, "nothing else was removed either");
 }
 
 /// The same row with bytes in the folder may be A's unsent edit: never deleted unasked (D11). B stays refused, every

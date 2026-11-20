@@ -25,7 +25,7 @@ pub trait SyncRootPort: Send + Sync {
     /// Remove the previous account's synced items from `folder`, the items `db` lists, for an account switch.
     /// `Err`: nothing may be assumed removed beyond what the OS did; the switch then goes no further. An OS with no
     /// way to do it safely refuses.
-    fn remove_synced_items(&self, _db: &StateDb, _folder: &Path) -> Result<(), String> {
+    fn remove_synced_items(&self, _db: &StateDb, _folder: &Path, _unasked: &[String]) -> Result<(), String> {
         Err("this OS cannot remove another account's synced items".to_string())
     }
     /// Whether the item at `path` (as the database writes it, under `folder`) may hold bytes on this PC. Asked for a
@@ -77,7 +77,7 @@ impl SyncRootPort for OsSyncRoots {
     /// answer and the purge (the same call, one after the other) would go with the rest. Closing it needs a purge
     /// that refuses bytes at those paths, in `windows_cf::signout`.
     #[cfg(target_os = "windows")]
-    fn remove_synced_items(&self, db: &StateDb, folder: &Path) -> Result<(), String> {
+    fn remove_synced_items(&self, db: &StateDb, folder: &Path, _unasked: &[String]) -> Result<(), String> {
         crate::windows_cf::signout::purge(
             self.identity,
             db,
