@@ -1186,6 +1186,7 @@ mod tests {
 
     mod abort;
     mod heartbeat;
+    mod mid_tick;
     mod tick;
     mod working_set;
 }
