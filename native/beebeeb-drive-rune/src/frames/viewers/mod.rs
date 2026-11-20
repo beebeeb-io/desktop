@@ -719,6 +719,10 @@ pub fn open_from(s: &mut State, source: Box<dyn ViewerSource>, file_id: &str) ->
         return false;
     };
     sync(s);
+    // The route machine refuses OpenItem while Settings is in front (About's licence row opens from there): leave
+    // Settings first, to the Drive route it came from, or the viewer's file is never the route's item and `sync` drops it.
+    let here = s.shell.app.route().clone();
+    host::dispatch(s, Event::Navigate(here));
     host::dispatch(s, Event::OpenItem(file_id.to_string()));
     s.viewer.ui = Some(ui);
     true
