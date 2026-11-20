@@ -223,6 +223,24 @@ fn a_file_made_between_the_check_and_the_removal_survives_and_the_second_account
     assert_eq!(now, files, "nothing else was removed either");
 }
 
+/// w29 (VM 401: A's old CLI-replaced files, never opened here, kept B out 5/5): a file of unknown content whose item
+/// is there but holds no bytes (a cloud placeholder nothing was fetched into) is a synced item like any other. The
+/// removal is asked to delete it, and B starts.
+#[test]
+fn a_file_of_unknown_content_that_is_an_empty_placeholder_goes_with_the_rest() {
+    let pc = Pc::new();
+    a_signed_out(&pc, &owner());
+    row(&pc.db(), IDS[2], A_MADE_IN_THE_APP, false, 1);
+    std::fs::write(pc.root().join(A_MADE_IN_THE_APP), b"").unwrap();
+    pc.sign_in(&other());
+    let port = SwitchPort::new(Removal::Works);
+
+    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+
+    assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
+    nothing_of_a_left(&pc);
+}
+
 /// The same row with bytes in the folder may be A's unsent edit: never deleted unasked (D11). B stays refused, every
 /// row and file as it was.
 #[test]
