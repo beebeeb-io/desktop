@@ -397,19 +397,24 @@ fn shared_cell(k: &str, item: &DriveItem, meta: Color, surface: Color, t: &Theme
 }
 
 /// A date as the board shows it: "Today, 07:02", "Yesterday, 16:42", "Sunday" within the
-/// last week, else "28 Oct 2026".
+/// last week, else "28 Oct 2026". One rule for every list and row, in this PC's local time: a
+/// UTC stamp (`...Z`) is moved to local time and compared with the local date of now.
 pub fn format_date(iso: &str) -> String {
-    use chrono::{Datelike, Duration, NaiveDateTime, Weekday};
+    use chrono::{Local, NaiveDateTime, TimeZone, Utc};
 
-    let Ok(dt) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ")
-        .or_else(|_| NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S"))
-    else {
+    let local = if let Ok(utc) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ") {
+        Utc.from_utc_datetime(&utc).with_timezone(&Local).naive_local()
+    } else if let Ok(naive) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S") {
+        naive
+    } else {
         return String::new();
     };
-    // The fixture's "now" (5 Nov 2026); the engine's source brings its own clock.
-    let Ok(now) = NaiveDateTime::parse_from_str("2026-11-05T12:00:00", "%Y-%m-%dT%H:%M:%S") else {
-        return String::new();
-    };
+    format_date_at(local, Local::now().naive_local())
+}
+
+/// [`format_date`] for a local time against a local "now" (the rule, testable).
+pub fn format_date_at(dt: chrono::NaiveDateTime, now: chrono::NaiveDateTime) -> String {
+    use chrono::{Datelike, Duration, Weekday};
 
     let (date, today) = (dt.date(), now.date());
     let time = format!("{:02}:{:02}", dt.hour(), dt.minute());

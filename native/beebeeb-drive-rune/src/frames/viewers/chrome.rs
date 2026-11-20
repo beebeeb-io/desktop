@@ -57,12 +57,13 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
             // When the toolbar is full the separators give way first, as the board's do.
             .child(kit::glyph(format!("crumb-sep-{i}"), &icons::CHEVRON_RIGHT, 12.0, t.text_tertiary).shrink());
     }
-    crumbs = crumbs.child(style::fitted(
-        "crumb-name",
-        &file.name,
-        style::CRUMB_NAME,
-        t.text_tertiary,
-    ));
+    // The name gives way with an ellipsis before the controls do: it never runs under them.
+    crumbs = crumbs.child(
+        kit::label("crumb-name", &file.name, style::CRUMB_NAME, t.text_tertiary)
+            .truncate()
+            .min_w(0.0)
+            .shrink(),
+    );
     if head.unsaved {
         crumbs = crumbs.child(
             el().key("crumb-dot")
@@ -89,6 +90,7 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
         .role("group")
         .label(format!("{}, {}", file.name, facts))
         .px(4.0)
+        .min_w(0.0)
         .shrink()
         .child(crumbs)
         .child(kit::label("item-count", facts, type_::TITLE_SUB, t.text_tertiary).w_full())
