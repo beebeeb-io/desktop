@@ -20,6 +20,8 @@ use crate::{State, init, view};
 struct Held {
     library: FixturePhotos,
     files: Vec<(PhotoId, DriveItem)>,
+    /// w31: the library holds HEIC/RAW files; photo A is one.
+    unshowable: bool,
 }
 
 fn file(id: &str, name: &str, protected: bool) -> DriveItem {
@@ -41,6 +43,12 @@ fn file(id: &str, name: &str, protected: bool) -> DriveItem {
 }
 
 impl PhotosSource for Held {
+    fn holds_unshowable(&self) -> bool {
+        self.unshowable
+    }
+    fn original_refused(&self, id: PhotoId) -> Option<&'static str> {
+        (self.unshowable && id == A).then_some("HEIC")
+    }
     fn answers_later(&self) -> bool {
         true
     }
@@ -102,6 +110,10 @@ const B: PhotoId = PhotoId(1);
 /// A window on Photos whose photos 0 and 1 are "harbour.jpg" and "dock.jpg" of one folder; `protected` makes the
 /// first one's file a protected one. The calls the source of Files was asked.
 fn window(protected: bool) -> (Runtime<State>, Arc<Mutex<Vec<Call>>>) {
+    window_with(protected, false)
+}
+
+fn window_with(protected: bool, unshowable: bool) -> (Runtime<State>, Arc<Mutex<Vec<Call>>>) {
     let mut rt = Runtime::new(init(), view, (1278.0, 798.0), Env { system_dark: false, scale: 2.0 });
     rt.on_key = Some(crate::shell::host::on_key);
     rt.poll = Some(crate::shell::host::poll);
@@ -111,6 +123,7 @@ fn window(protected: bool) -> (Runtime<State>, Arc<Mutex<Vec<Call>>>) {
     rt.state.photos = Ui::new(Box::new(Held {
         library: FixturePhotos::new(),
         files: vec![(A, file("f-a", "harbour.jpg", protected)), (B, file("f-b", "dock.jpg", false))],
+        unshowable,
     }));
     let fixture = FilesFixture::default();
     let calls = fixture.calls.clone();
@@ -233,4 +246,53 @@ fn show_in_folder_reveals_the_photos_file_and_nothing_else() {
     settle(&mut rt);
     assert!(calls.lock().unwrap().is_empty());
     assert!(matches!(rt.state.photos.toast, Some(Toast::Words(_))));
+}
+
+fn has(rt: &mut Runtime<State>, key: &str) -> bool {
+    rt.settle_all();
+    rt.frame(0.0);
+    rt.elements().into_iter().any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+}
+
+#[test]
+fn photos_says_heic_and_raw_cannot_be_shown_only_when_the_view_holds_such_files() {
+    let (mut rt, _) = window_with(false, false);
+    assert!(!has(&mut rt, "ph-heic-notice"));
+    let (mut rt, _) = window_with(false, true);
+    assert!(has(&mut rt, "ph-heic-notice"));
+}
+
+#[test]
+fn the_open_heic_photo_has_the_notice_and_open_in_the_os_app_and_a_jpeg_has_neither() {
+    let (mut rt, calls) = window_with(false, true);
+    rt.state.photos.ask(Intent::OpenInOsApp(A));
+    settle(&mut rt);
+    // The shared open chain's outside steps: the default app; never a reveal-only call here.
+    assert_eq!(*calls.lock().unwrap(), [Call::OpenDefault("f-a".to_string())]);
+
+    rt.state.photos.viewer = Some(viewer(A));
+    settle(&mut rt);
+    assert!(has(&mut rt, "ph-viewer-notice"));
+    assert!(has(&mut rt, "ph-open-in-os-app"));
+    rt.state.photos.viewer = Some(viewer(B));
+    settle(&mut rt);
+    assert!(!has(&mut rt, "ph-viewer-notice"));
+    assert!(!has(&mut rt, "ph-open-in-os-app"));
+}
+
+#[test]
+fn a_pc_with_no_default_app_gets_the_file_selected_in_its_folder() {
+    let (mut rt, calls) = window_with(false, true);
+    let fixture = FilesFixture::default();
+    fixture.no_default_app.store(true, std::sync::atomic::Ordering::SeqCst);
+    let c = fixture.calls.clone();
+    rt.state.actions.source = Box::new(fixture);
+    rt.state.photos.ask(Intent::OpenInOsApp(A));
+    settle(&mut rt);
+    assert_eq!(*c.lock().unwrap(), [Call::OpenRevealed("f-a".to_string())]);
+    let _ = calls;
+}
+
+fn viewer(id: PhotoId) -> super::super::Viewer {
+    super::super::Viewer { id, original: super::super::Original::Preview, playing: false, gone: None }
 }
