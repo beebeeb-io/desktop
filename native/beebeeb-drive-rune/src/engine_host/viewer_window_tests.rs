@@ -536,25 +536,13 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
 }
 
 #[test]
-fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_buttons_that_answer() {
+fn a_kind_with_no_viewer_opens_the_no_preview_frame_and_only_its_button_goes_to_another_app() {
     let mut w = window("zip");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
-    // The Files window's Open on an archive: not this viewer's (the Files window opens it in its own app, as before;
-    // with no sync running here that is refused by the Files window itself).
+    // The Files window's Open on a kind the viewer cannot show (w29): the viewer's "No preview" frame, in the app,
+    // and nothing downloaded. Nothing is handed to the OS until its button is pressed.
     w.open_row(PLAN_NAME);
-    assert_eq!(
-        w.route_item(),
-        None,
-        "the route does not go to a file the viewer cannot show"
-    );
-    assert!(w.rt.state.viewer.ui.is_none());
-    assert!(!w.drawn().contains("No preview for this kind of file yet"));
-
-    // A route that names it anyway (as Search's Open and a link do): the honest state, and nothing downloaded.
-    w.rt.update(|s, _| {
-        host::dispatch(s, Event::OpenItem(PLAN.to_string()));
-    });
     w.settle();
     assert_eq!(w.route_item().as_deref(), Some(PLAN));
     let drawn = w.drawn();
@@ -659,10 +647,9 @@ fn a_file_kept_on_this_pc_opens_from_its_copy_without_a_download_and_says_so() {
     w.assert_nothing_of_the_file("after a lock");
 }
 
-/// "Open in its app" on the preview panel hands the file to its own app, never to the window's viewer, also
-/// for a file the viewer shows. (No sync runs here, so the Files window's own open refuses and says so.)
+/// The preview panel's "Open" opens the file in the window's viewer (w29), also for a file the panel itself shows.
 #[test]
-fn open_in_its_app_never_opens_the_windows_viewer() {
+fn the_preview_panels_open_opens_the_windows_viewer() {
     let mut w = window("itsapp");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
@@ -681,17 +668,10 @@ fn open_in_its_app_never_opens_the_windows_viewer() {
     let by_the_panel = w.chunk_requests();
     w.rt.update(|s, tx| s.open_from_preview(tx));
     w.settle();
-    assert_eq!(w.route_item(), None, "the route did not go to the viewer");
-    assert!(w.rt.state.viewer.ui.is_none());
-    assert_eq!(
-        w.chunk_requests(),
-        by_the_panel,
-        "Open in its app downloaded nothing through the viewer"
-    );
-    // Enter on the same row is the viewer's (the file is not on this PC).
-    w.press(Key::Enter, Mods::default());
+    let _ = by_the_panel;
     w.until_drawn(NOTE_WORDS);
-    assert_eq!(w.route_item().as_deref(), Some(NOTE));
+    assert_eq!(w.route_item().as_deref(), Some(NOTE), "the route went to the viewer");
+    assert!(w.rt.state.viewer.ui.is_some());
 }
 
 /// A PDF, end to end on the real engine: downloaded and decrypted in memory, its page rendered on this PC and
@@ -780,8 +760,8 @@ fn a_pdf_page_that_may_lack_text_says_so_under_the_page_and_a_page_that_does_not
 }
 
 #[test]
-fn the_boards_sample_window_still_leaves_an_office_file_to_its_own_app() {
-    // The board's fixture has no such file: the router says "not this group's", and Files opens it as before.
+fn the_boards_sample_window_opens_an_office_file_in_the_viewer_not_its_own_app() {
+    // The board's fixture has no such file: the viewer says so itself; nothing goes to the OS (w29).
     let mut s = crate::init();
     let item = crate::source::DriveItem {
         id: "no-such-sample".into(),
@@ -798,8 +778,7 @@ fn the_boards_sample_window_still_leaves_an_office_file_to_its_own_app() {
         pc_status: None,
         is_protected: false,
     };
-    assert!(!viewers::open_item(&mut s, &item));
-    assert!(s.viewer.ui.is_none());
+    assert!(viewers::open_item(&mut s, &item));
 }
 
 #[test]

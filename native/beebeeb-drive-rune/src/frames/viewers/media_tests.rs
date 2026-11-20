@@ -243,9 +243,10 @@ fn a_file_of_each_type_opens_its_viewer_through_the_router() {
         assert_eq!(viewer(&rt).file.name, name);
         assert!(has(&rt, key), "{name}: its viewer draws {key}");
     }
-    // A type with no viewer and a folder: not this group's.
+    // A type with no viewer opens the viewer's "No preview" frame (w29); a folder is not this group's.
     let mut state = init();
-    assert!(!open_item(&mut state, &item("q4plan", "Q4 plan.key")));
+    assert!(open_item(&mut state, &item("q4plan", "Q4 plan.key")));
+    state.viewer.ui = None;
     let folder = DriveItem {
         is_folder: true,
         ..item(board::PDF, "Studio plan.pdf")

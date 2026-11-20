@@ -183,7 +183,7 @@ fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
     // A listed file works at once; then the card gives way to the strip (DW-0118).
     click(&mut rt, "row-5-date");
     press(&mut rt, Key::Enter, NONE);
-    assert_eq!(asked(&calls), [Call::Open(ids(&["budget"]))]);
+    assert!(asked(&calls).is_empty(), "the viewer opens it, not another app");
     assert!(rt.state.actions.toast != Some(Toast::LinkCopied));
     assert!(find(&rt, "ready-card").is_none(), "the card is gone");
     assert_eq!(

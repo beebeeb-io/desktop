@@ -269,13 +269,18 @@ fn beebeeb_in_the_submenu_makes_the_same_open_call_as_open_beebeeb() {
     assert_eq!(info(&rt, "menu-item-0-label").text.as_deref(), Some("Open (Beebeeb)"));
     click(&mut rt, "menu-item-0");
     let opened = asked(&by_open);
-    assert_eq!(opened, [Call::Open(ids(&[AGREEMENT_ID]))]);
+    assert!(opened.is_empty(), "the viewer opens it, not another app: {opened:?}");
+    let on_viewer = |rt: &Runtime<State>| {
+        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(AGREEMENT_ID))
+    };
+    assert!(on_viewer(&rt));
     // …is what Beebeeb in the submenu does, and no other app is asked.
     let (mut rt, by_line) = spied_with(true, Some(vec![app(1)]));
     open_the_submenu(&mut rt);
     click(&mut rt, "menu-1-item-0");
     assert!(rt.state.actions.menu.is_none());
     assert_eq!(asked(&by_line), opened);
+    assert!(on_viewer(&rt));
 }
 
 #[test]
