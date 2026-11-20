@@ -369,3 +369,80 @@ fn a_refused_switch_keeps_the_first_accounts_entries_in_the_settings_file() {
     let names: Vec<String> = settings_now().backup_chosen_folders.into_iter().map(|f| f.name).collect();
     assert!(names.iter().any(|name| name == "w27-kept-photos"), "{names:?}");
 }
+
+/// w28's VM 401 probe, at the engine with the REAL Windows port (the purge, the exclusive handles, NTFS): the same
+/// switch as above, but the file a person makes lands inside the real window between the check and the purge, in a
+/// folder the purge walks. Windows only (the unit run on VM 401 reaches it).
+#[cfg(target_os = "windows")]
+mod real_purge {
+    use super::*;
+    use crate::sync_root_port::OsSyncRoots;
+
+    const FOLDER: &str = "Plans of A";
+    const MADE_IN_THE_APP: &str = "Plans of A/Budget of A.docx";
+
+    /// The OS's own answers (`OsSyncRoots`), but for a file dropped at `MADE_IN_THE_APP` the moment the check has
+    /// answered "nothing is there": exactly what a person's save does between the check and the purge.
+    struct DropsAfterTheCheck {
+        os: OsSyncRoots,
+        drop_bytes: &'static [u8],
+        dropped: AtomicU32,
+        registers: AtomicU32,
+    }
+
+    impl SyncRootPort for DropsAfterTheCheck {
+        fn registration(&self, _folder: &Path) -> Registration {
+            Registration::Nobody
+        }
+        fn register(&self, _folder: &Path) -> Result<(), Option<i32>> {
+            self.registers.fetch_add(1, Ordering::SeqCst);
+            Err(Some(CODE))
+        }
+        fn engine_lock_held(&self, _state_dir: &Path) -> bool {
+            false
+        }
+        fn may_hold_bytes(&self, folder: &Path, path: &str) -> bool {
+            let answer = self.os.may_hold_bytes(folder, path);
+            if !answer && path.trim_start_matches('/') == MADE_IN_THE_APP && self.dropped.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::fs::write(folder.join(MADE_IN_THE_APP), self.drop_bytes).unwrap();
+            }
+            answer
+        }
+        fn remove_synced_items(&self, db: &StateDb, folder: &Path, unasked: &[String]) -> Result<(), String> {
+            self.os.remove_synced_items(db, folder, unasked)
+        }
+    }
+
+    #[test]
+    fn a_file_dropped_in_the_folder_during_the_switch_survives_and_the_second_account_is_refused() {
+        let pc = Pc::new();
+        let db = pc.db();
+        row(&db, IDS[1], FOLDER, true, 3);
+        row(&db, IDS[2], MADE_IN_THE_APP, false, 1);
+        db.set_owner(&owner()).unwrap();
+        drop(db);
+        std::fs::create_dir(pc.root().join(FOLDER)).unwrap();
+        let contents = pc.contents();
+        pc.sign_in(&other());
+        let port = DropsAfterTheCheck {
+            os: OsSyncRoots::new(&crate::identity::TEST),
+            drop_bytes: b"made during the switch",
+            dropped: AtomicU32::new(0),
+            registers: AtomicU32::new(0),
+        };
+
+        let started = pc.engine.start_sync_with(pc.root(), &port);
+
+        assert_eq!(port.dropped.load(Ordering::SeqCst), 1, "the file was dropped after the check");
+        assert_eq!(
+            std::fs::read(pc.root().join(MADE_IN_THE_APP)).unwrap(),
+            b"made during the switch",
+            "the file made during the switch keeps every byte"
+        );
+        assert!(pc.root().join(FOLDER).is_dir());
+        assert_eq!(started, Err(SyncStartRefused::OtherAccountsData), "the second account is refused");
+        assert_eq!(port.registers.load(Ordering::SeqCst), 0);
+        assert_eq!(pc.db().owner().unwrap(), Some(owner()), "no row was cleared");
+        assert_eq!(pc.contents(), contents);
+    }
+}
