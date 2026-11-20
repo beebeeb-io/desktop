@@ -49,6 +49,7 @@ pub fn refusal_words(why: &Refusal) -> String {
 /// not use it, and the PC may have it already): it says Beebeeb can't play the format yet.
 pub fn refusal_words_with(system_decoder_on: bool, why: &Refusal) -> String {
     match why {
+        Refusal::NoDecoder(name) if name.is_empty() => "This PC can't play this kind of file here.".into(),
         Refusal::NoDecoder(name) => format!("This PC can't play {name} files here."),
         Refusal::NoSystemDecoder(Codec::Hevc) if !system_decoder_on => {
             "Beebeeb can't play HEVC video yet. Open it in another app.".into()

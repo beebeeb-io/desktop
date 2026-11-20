@@ -46,6 +46,7 @@ use beebeeb_office_sandbox::{Child, Limits, Profile, Sandbox, SandboxError};
 use zeroize::Zeroize;
 
 use super::player::{Link, LinkFactory, Refusal};
+use super::refusal_log;
 
 /// The helper's committed memory: 1 GiB (decision D-MED-3).
 pub const HELPER_LIMITS: Limits = Limits { memory_bytes: 1 << 30 };
@@ -117,7 +118,10 @@ pub(crate) fn excluded_then<T>(
     spawn: impl FnOnce() -> Result<T, Refusal>,
 ) -> Result<T, Refusal> {
     if excluded.0.get().is_none() {
-        reports.exclude(HELPER_NAME).map_err(|_| Refusal::NoSandbox)?;
+        reports.exclude(HELPER_NAME).map_err(|_| {
+            refusal_log::not_started("exclusion");
+            Refusal::NoSandbox
+        })?;
         let _ = excluded.0.set(());
     }
     spawn()
@@ -201,6 +205,7 @@ pub enum LinkError {
 /// What a sandbox error means to the player: a Windows too old for the sandbox says so (logged once per app start,
 /// the reason only); every other error is "no sandbox".
 pub(crate) fn sandbox_refusal(error: SandboxError) -> Refusal {
+    refusal_log::sandbox_failed(&error);
     if error == SandboxError::NeedsNewerWindows {
         crate::windows_floor::note_needs_windows_update();
         Refusal::NeedsWindowsUpdate
@@ -249,6 +254,7 @@ impl HelperLink {
         let mut child = sandbox.spawn(exe).map_err(sandbox_refusal)?;
         let Some(pipes) = child.take_pipes() else {
             let _ = child.kill();
+            refusal_log::not_started("pipes");
             return Err(Refusal::NoSandbox);
         };
         match HelperLink::over(Box::new(pipes.from_helper), Box::new(pipes.to_helper)) {
@@ -258,6 +264,7 @@ impl HelperLink {
             }
             Err(_) => {
                 let _ = child.kill();
+                refusal_log::not_started("threads");
                 Err(Refusal::CouldNotPlay)
             }
         }
@@ -512,7 +519,10 @@ impl LinkFactory for SandboxedHelpers {
     }
 
     fn start_in(&self, profile: Profile) -> Result<Box<dyn Link>, Refusal> {
-        let exe = helper_exe().ok_or(Refusal::NotInstalled)?;
+        let exe = helper_exe().ok_or_else(|| {
+            refusal_log::not_started("no helper");
+            Refusal::NotInstalled
+        })?;
         Ok(Box::new(HelperLink::start_in(&exe, profile)?))
     }
 }

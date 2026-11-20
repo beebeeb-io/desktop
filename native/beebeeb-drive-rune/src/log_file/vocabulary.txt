@@ -10,12 +10,14 @@ $home
 24h
 2xx
 a
+aac
 abandon
 abandoned
 abandoning
 abort
 absent
 absolute
+ac3
 accept
 acceptance
 accepted
@@ -28,6 +30,7 @@ acquire
 activity
 add
 added
+administrators
 adopted
 adoption
 after
@@ -37,6 +40,7 @@ age-bound
 agent
 agreed
 ahead
+alac
 alias
 all
 alone
@@ -49,6 +53,7 @@ and
 another
 answer
 answer_ms
+answered
 anyway
 api
 app
@@ -75,6 +80,7 @@ authenticate
 authenticated
 auto-resolving
 auto_resolve_keep_both
+av1
 away
 back
 backed-up
@@ -130,6 +136,8 @@ candidate
 candidates
 cannot
 cap
+capabilities
+capability
 category
 cf
 cf_callback_info
@@ -192,6 +200,7 @@ conflict
 connect
 connected
 connection
+container
 content
 content_unknown
 context
@@ -236,6 +245,7 @@ declared
 decline
 declined
 decoded
+decoder
 decrypted
 deferred
 degraded
@@ -266,6 +276,7 @@ discarded
 disk
 dispatch
 dispatched
+dnxhd
 does
 done
 down
@@ -280,6 +291,7 @@ due
 duplicate
 duplicates
 during
+eac3
 each
 earlier
 earlier-build
@@ -318,8 +330,10 @@ every_backup
 evicted
 exceeded
 exclude
+exclusion
 existing
 exists
+exit
 exited
 expires_in
 explorer
@@ -351,6 +365,7 @@ finished
 fired
 first
 first_pass
+flac
 flagged
 flipped
 flushing
@@ -389,6 +404,7 @@ graceful
 grant
 guard
 guarded
+h264
 had
 half-made
 handed-over
@@ -405,6 +421,7 @@ held_for_review
 held_key_replaced
 helper
 helper_ms
+hevc
 hit
 holds
 home
@@ -421,6 +438,7 @@ icon
 id
 id_kind
 idempotent
+identifier
 identity
 idle
 ignored
@@ -432,10 +450,13 @@ in-sync
 incoming
 index
 indexed_file_count
+inheritable
 init
 initialized
 inside
 inspect
+integrity
+internal
 interrupted
 interval
 into
@@ -454,6 +475,7 @@ item
 items
 its
 itself
+job
 joined
 joined_ms
 journal
@@ -464,6 +486,7 @@ keeps
 kept
 kept-folder
 key
+kill
 kind
 known
 landed
@@ -484,6 +507,7 @@ len
 length
 lifetime
 limit
+limits
 linux
 list
 list_by_status
@@ -502,10 +526,12 @@ longer
 looked
 lookup
 loop
+lpac
 machine
 macos
 made
 manifest
+map
 mark
 mark_failed
 mark_not_in_sync
@@ -522,6 +548,7 @@ max_new_uploads
 may
 meanwhile
 media
+membership
 merged
 message
 met
@@ -542,6 +569,10 @@ moved_files
 moved_items
 moved_legacy_device_identity
 moved_legacy_lock
+mp2
+mp3
+mpeg2
+mpeg4
 name
 name_check_errors
 name_conflicts
@@ -607,6 +638,7 @@ operation
 operations
 oplock
 ops
+opus
 or
 original
 original_removed
@@ -646,6 +678,7 @@ path
 paused
 payload
 pc
+pcm
 peer
 peer_uid
 pending
@@ -657,6 +690,7 @@ photo
 phrase
 pin
 pinned
+pipes
 place
 placed
 placeholder
@@ -694,13 +728,16 @@ processed
 processing
 produced
 producer
+profile
 progress
 progressive
 promoted
 promotion
 proof
+prores
 protected
 protection
+protocol
 prove
 proven
 proven_changes
@@ -723,6 +760,7 @@ queued
 queued_after_ms
 raised
 ran
+random
 range
 rc
 re-bootstrapping
@@ -733,6 +771,7 @@ reach
 reaches
 reactivation
 read
+read-back
 read-only
 read_dir
 read_ms
@@ -805,6 +844,8 @@ restarting
 restore
 restore_bookkeeping_failed
 restored
+restricted
+restrictions
 resume
 resumed
 ret
@@ -844,6 +885,7 @@ scheduling
 scope
 sealed-key
 search
+section
 seeded
 seeding
 seen
@@ -979,6 +1021,7 @@ there
 they
 this
 thread
+threads
 through
 thumbnail
 thumbnail-provider
@@ -992,6 +1035,7 @@ timed
 to
 toast
 toggle
+token
 tokio
 toml
 too
@@ -1012,6 +1056,7 @@ ttl
 turned
 turned_off
 type
+ui
 uid
 unaffected
 unavailable
@@ -1056,14 +1101,20 @@ vacated
 valid
 variant
 vault
+vc1
 verify
 version
 version_number
 via
+view
 viewer
 violation
+vorbis
+vp8
+vp9
 w2
 w3
+wait
 waiting
 waits
 walked
@@ -1091,8 +1142,10 @@ withheld
 within
 without
 without_id
+wma
 won
 work
+worker
 working
 working-set
 write
