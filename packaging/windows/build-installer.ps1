@@ -155,7 +155,7 @@ Copy-Item -LiteralPath $OfficeRenderExe -Destination $stagedOffice
 Copy-Item -LiteralPath $MediaHelperExe -Destination $stagedMedia
 # The third-party licence notice goes in every installer (legal review 2026-11-18). It is generated and committed
 # (packaging\licences\generate.sh); refuse a missing, stale or other-release one rather than ship an installer without.
-$licenceSrc = Join-Path $repo 'packaging\licences\THIRD-PARTY-LICENSES.txt'
+$licenceSrc = Join-Path $repo 'packaging\licences\THIRD-PARTY-LICENSES.md'
 if (!(Test-Path -LiteralPath $licenceSrc) -or (Get-Item -LiteralPath $licenceSrc).Length -lt 10000) {
   Fail "the licence notice is missing or empty: $licenceSrc (run packaging/licences/generate.sh)"
 }
@@ -167,7 +167,7 @@ foreach ($lk in @(@('app', 'native\beebeeb-drive-rune'), @('office-render', 'nat
   $sha = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([byte[]]$bytes)).Replace('-', '').ToLowerInvariant()
   if ($noticeText -notmatch "(?m)^cargo-lock-sha256 $($lk[0]): $sha\r?$") { Fail "the licence notice is stale: $($lk[1])\Cargo.lock changed since it was generated (run packaging/licences/generate.sh)" }
 }
-$stagedLicence = Join-Path $stage 'THIRD-PARTY-LICENSES.txt'
+$stagedLicence = Join-Path $stage 'THIRD-PARTY-LICENSES.md'
 Copy-Item -LiteralPath $licenceSrc -Destination $stagedLicence
 if (!(Test-Path -LiteralPath $stagedLicence)) { Fail 'the licence notice did not reach the staged files' }
 $outFile = Join-Path $OutDir ("{0}_{1}_x64-setup.exe" -f $product, $Version)

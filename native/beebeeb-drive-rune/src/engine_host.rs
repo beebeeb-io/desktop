@@ -272,6 +272,41 @@ fn open_path(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), fil
     Ok(())
 }
 
+/// Whether the system has an app for the kind of this file (`open_file` step 2). Windows asks the file association
+/// of the extension; the other systems cannot say cheaply, and their `open` / `xdg-open` handles the rest.
+fn has_default_app(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let Some(ext) = path.extension() else { return false };
+        let dotted: Vec<u16> = std::ffi::OsStr::new(".")
+            .encode_wide()
+            .chain(ext.encode_wide())
+            .chain(std::iter::once(0))
+            .collect();
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+        let mut out = [0u16; 520];
+        let mut len = out.len() as u32;
+        // SAFETY: valid null-terminated wide strings and a buffer of `len` u16s; the call writes at most `len`.
+        // ASSOCF_INIT_IGNOREUNKNOWN (0x400): no answer for a kind Windows does not know. ASSOCSTR_EXECUTABLE (2).
+        let hr = unsafe {
+            windows_sys::Win32::UI::Shell::AssocQueryStringW(
+                0x400,
+                2,
+                dotted.as_ptr(),
+                verb.as_ptr(),
+                out.as_mut_ptr(),
+                &mut len,
+            )
+        };
+        hr == 0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.extension().is_some()
+    }
+}
+
 /// Windows' "Open with" chooser for this file, on a thread of its own (the dialog is modal for the thread that
 /// shows it: never the window's). `OAIF_EXEC`: the app picked opens the file; no `OAIF_ALLOW_REGISTRATION`, so
 /// the chooser cannot change the PC's default app. `Ok`: the thread started. Every other system: not there.
@@ -834,6 +869,19 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             .map_err(|()| ActionError::Failed)
     }
 
+    /// Starts `path` with the system's app when it has one for the kind (and the kind may be run), else in the file
+    /// manager with the file selected, on the launch worker.
+    fn start_outside(&mut self, path: PathBuf, openable: bool) -> Result<files_source::Outside, ActionError> {
+        let default = openable && (self.starts.has_default_app)(&path);
+        let (outside, start) = if default {
+            (files_source::Outside::DefaultApp, self.starts.open)
+        } else {
+            (files_source::Outside::Explorer, self.starts.reveal)
+        };
+        self.start_later(files_source::Action::Open, vec![path], start)?;
+        Ok(outside)
+    }
+
     /// Is the file with this id kept on this PC, by the engine, for the session `turn`: kept (by its own pin or a kept
     /// folder's) AND its bytes here. A copy that is only listed, or still coming down, is not: handing it to an app
     /// would make Windows fetch it and decrypt it for that app.
@@ -962,6 +1010,25 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
 
     /// Other… (Windows' app chooser). It opens only while the session of this press is still the one once the
     /// launch lock is taken: another chooser that holds it may stay open across a lock or a sign-out.
+    /// `open_file` steps 2 and 3: the app the system has for the kind, else the file manager with the file selected.
+    /// The path is resolved under the account-bound handle first, as for every hand-over of a file; a kind that is not
+    /// opened for safety (`path_the_system_opens` refuses it) is only ever shown in the file manager, never run.
+    fn open_outside(&mut self, item: &DriveItem) -> Result<files_source::Outside, ActionError> {
+        if item.is_folder {
+            return Err(ActionError::Failed);
+        }
+        let (path, openable) = self.local(|db, sync_root| {
+            let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
+            let path = file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)?;
+            Ok((path, path_the_system_opens(db, sync_root, &item.id).is_ok()))
+        })?;
+        self.start_outside(path, openable)
+    }
+
+    fn open_path_outside(&mut self, path: &Path) -> Result<files_source::Outside, ActionError> {
+        self.start_outside(path.to_path_buf(), true)
+    }
+
     fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
         let (engine, turn) = (self.engine.clone(), self.engine.session_turn());
         self.open_with_by(item, move |path| {

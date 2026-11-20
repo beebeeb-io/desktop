@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# generate.sh: writes packaging/licences/THIRD-PARTY-LICENSES.txt, the notice the installer ships beside the exes.
+# generate.sh: writes packaging/licences/THIRD-PARTY-LICENSES.md, the notice the installer ships beside the exes.
 #
 #   packaging/licences/generate.sh            regenerate the committed file
 #   packaging/licences/generate.sh --check    regenerate to a temp file and fail when the committed one differs
@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 VERSION="${VERSION:-0.9.0}"
 MODE=write; [ "${1:-}" = "--check" ] && MODE=check
-OUT="$HERE/THIRD-PARTY-LICENSES.txt"
+OUT="$HERE/THIRD-PARTY-LICENSES.md"
 
 if ! cargo about --version >/dev/null 2>&1; then
   echo "[licences] installing cargo-about"

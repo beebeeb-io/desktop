@@ -745,9 +745,10 @@ impl State {
         self.forget_undo();
         let several = files.len() > 1;
         if let Some(first) = files.first()
-            && !crate::frames::viewers::open_item(self, first)
+            && let crate::frames::open_file::Opened::Failed(why) =
+                crate::frames::open_file::open_file(self, crate::frames::open_file::Target::Item(first))
         {
-            self.failed(Action::Open, ActionError::Unavailable, tx);
+            self.failed(Action::Open, why, tx);
             return false;
         }
         if several {

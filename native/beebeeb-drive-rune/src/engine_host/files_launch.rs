@@ -27,6 +27,8 @@ pub(super) type Start = fn(&Path, &dyn Fn() -> bool) -> Result<(), ActionError>;
 pub(super) struct Starts {
     pub(super) open: Start,
     pub(super) reveal: Start,
+    /// Whether the system has an app for this file's kind (`open_file` step 2).
+    pub(super) has_default_app: fn(&Path) -> bool,
     /// Open With ▸ an app, on the copy kept on this PC. `None`: this system has no handlers to start.
     pub(super) app: Option<super::open_with_apps::Invoke>,
 }
@@ -36,6 +38,7 @@ impl Default for Starts {
         Starts {
             open: super::open_path,
             reveal: super::reveal_in_file_explorer,
+            has_default_app: super::has_default_app,
             app: super::open_with_apps::SYSTEM,
         }
     }

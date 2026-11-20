@@ -25,6 +25,7 @@ mod fixture_text;
 pub mod icons;
 pub mod kinds;
 mod markdown;
+mod local_file;
 mod md_source;
 pub mod media;
 mod media_icons;
@@ -695,6 +696,17 @@ pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
         s.viewer.ui = Some(ui);
     }
     true
+}
+
+/// Whether the window's viewer source shows a file of this name (`ViewerSource::previews`); `false` with no source.
+pub fn previews(s: &State, name: &str) -> bool {
+    route_source(s).is_some_and(|source| source.previews(name))
+}
+
+/// Open a text or Markdown file that is not in the drive in the viewer (`frames::open_file`): the licence notice.
+/// `false`: it could not be read, or the session gate is closed.
+pub fn open_local(s: &mut State, path: &std::path::Path) -> bool {
+    open_from(s, Box::new(local_file::LocalFile), &path.to_string_lossy())
 }
 
 /// [`open`] with the source to read from (the engine's, once it is wired).

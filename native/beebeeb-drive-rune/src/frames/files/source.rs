@@ -37,6 +37,15 @@ pub struct Details {
     pub picture: bool,
 }
 
+/// Where a file went that has no preview in the app (`frames::open_file`, steps 2 and 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outside {
+    /// The app the system has for its kind.
+    DefaultApp,
+    /// The system has none: its file manager shows the file selected in its folder.
+    Explorer,
+}
+
 /// Why an action did not happen. The window says it in words (DW-0109), never as a code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionError {
@@ -196,6 +205,13 @@ pub enum Call {
     RestoreVersion(String, String),
     /// Windows' app chooser for the file with this id (DW-0408b).
     OpenWith(String),
+    /// The file with this id went outside the app, to the app the system has for its kind (`open_file` step 2).
+    OpenDefault(String),
+    /// The file with this id went outside the app, to the file manager with it selected (`open_file` step 3).
+    OpenRevealed(String),
+    /// The same for a path that is not an item of the drive.
+    OpenPathDefault(std::path::PathBuf),
+    OpenPathRevealed(std::path::PathBuf),
     /// The file with this id (its copy kept on this PC) opened in the app with this id (DW-1562).
     OpenInApp(String, String),
     /// The file with this id that changed in two places: what is kept (DW-0429).
@@ -383,6 +399,16 @@ pub trait FilesSource: Send + 'static {
     fn cancel_preview(&mut self) {}
     /// Windows' app chooser for this file; it is decrypted for the app picked (DW-0408b).
     fn open_with(&mut self, _item: &DriveItem) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// Steps 2 and 3 of `frames::open_file`: the file (its copy on this PC) with the app the system has for its
+    /// kind, else the system's file manager with the file selected. Only `open_file` calls it, after the in-app
+    /// preview was ruled out. Never decrypts or copies anything for the app.
+    fn open_outside(&mut self, _item: &DriveItem) -> Result<Outside, ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// [`FilesSource::open_outside`] for a file that is not an item of the drive (the licence notice beside the exe).
+    fn open_path_outside(&mut self, _path: &std::path::Path) -> Result<Outside, ActionError> {
         Err(ActionError::Unavailable)
     }
     /// The apps Windows reports for this file's type (DW-1562), at most 8, never Beebeeb. Called on the window's thread
@@ -586,6 +612,8 @@ pub struct FilesFixture {
     pub apps: Option<Vec<AppChoice>>,
     /// Ids the engine would say are not here yet (kept, still coming down): `kept_here` is false whatever the row says.
     pub not_here: Vec<String>,
+    /// Whether the system has an app for the kind of file asked (`open_outside`): a test turns it off.
+    pub no_default_app: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// How often a session end told it to forget its starts. Shared like `calls` (and kept out of them).
     pub starts_forgotten: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// What New folder, Rename and Move changed in the board's folders: shared with the
@@ -962,6 +990,27 @@ impl FilesSource for FilesFixture {
 
     fn preview(&mut self, item: &DriveItem) -> Option<super::actions_data::PreviewOf> {
         super::actions_data::More::preview(item)
+    }
+
+    fn open_outside(&mut self, item: &DriveItem) -> Result<Outside, ActionError> {
+        self.refuse(Action::Open, std::slice::from_ref(item))?;
+        if self.no_default_app.load(std::sync::atomic::Ordering::SeqCst) {
+            self.record(Call::OpenRevealed(item.id.clone()));
+            Ok(Outside::Explorer)
+        } else {
+            self.record(Call::OpenDefault(item.id.clone()));
+            Ok(Outside::DefaultApp)
+        }
+    }
+
+    fn open_path_outside(&mut self, path: &std::path::Path) -> Result<Outside, ActionError> {
+        if self.no_default_app.load(std::sync::atomic::Ordering::SeqCst) {
+            self.record(Call::OpenPathRevealed(path.to_path_buf()));
+            Ok(Outside::Explorer)
+        } else {
+            self.record(Call::OpenPathDefault(path.to_path_buf()));
+            Ok(Outside::DefaultApp)
+        }
     }
 
     fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {

@@ -59,7 +59,7 @@ ${StrLoc}
 !insertmacro RequireDefine MAINBINARYSRCPATH      ; the built native exe, already named ${MAINBINARYNAME}.exe
 !insertmacro RequireDefine OFFICERENDERSRCPATH    ; beebeeb-office-render.exe, the Office viewer's helper (beside the app exe)
 !insertmacro RequireDefine MEDIAHELPERSRCPATH     ; beebeeb-media-helper.exe, the video/audio helper (beside the app exe)
-!insertmacro RequireDefine LICENSESRCPATH         ; THIRD-PARTY-LICENSES.txt (packaging/licences), the notice installed beside the exes
+!insertmacro RequireDefine LICENSESRCPATH         ; THIRD-PARTY-LICENSES.md (packaging/licences), the notice installed beside the exes
 !insertmacro RequireDefine INSTALLERICON          ; packaging/windows/icon.ico
 !insertmacro RequireDefine OUTFILE
 !insertmacro RequireDefine ADDITIONALPLUGINSPATH  ; the folder that holds nsis_tauri_utils.dll
@@ -615,7 +615,7 @@ Section Install
   ; an update too, so the file always matches the exes.
   File "${LICENSESRCPATH}"
   ${If} $NoShortcutMode = 0
-    CreateShortcut "$SMPROGRAMS\${PRODUCTNAME} licences.lnk" "$INSTDIR\THIRD-PARTY-LICENSES.txt"
+    CreateShortcut "$SMPROGRAMS\${PRODUCTNAME} licences.lnk" "$INSTDIR\THIRD-PARTY-LICENSES.md"
   ${EndIf}
 
   ; Create file associations
@@ -737,7 +737,7 @@ Section Uninstall
   ; Delete external binaries
   Delete "$INSTDIR\beebeeb-office-render.exe"
   Delete "$INSTDIR\beebeeb-media-helper.exe"
-  Delete "$INSTDIR\THIRD-PARTY-LICENSES.txt"
+  Delete "$INSTDIR\THIRD-PARTY-LICENSES.md"
 
   ; Delete app associations
 

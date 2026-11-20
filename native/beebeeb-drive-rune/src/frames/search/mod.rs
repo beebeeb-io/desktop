@@ -404,10 +404,15 @@ fn open_result(s: &mut State, hits: &[Hit], i: usize) -> bool {
     s.frames.find.source.remember(&query);
     // "Double-click a result: opens it" (DW-0408). The search stays as it is behind the open
     // item, so Back shows the same results again.
-    // THE ONE OPENING PATH: this is Search's single call site. When the viewers lane's router
-    // (`viewers::open_item(state, &DriveItem) -> bool`, by file type) is on the branch, this
-    // line becomes that call, with today's dispatch as what it falls back to.
-    crate::shell::host::dispatch(s, crate::shell::app::Event::OpenItem(hit.id.clone()));
+    // A folder goes to its place; a file goes through `open_file` like every other open in the app.
+    if hit.kind == crate::frames::shared::parts::table::Kind::Folder {
+        crate::shell::host::dispatch(s, crate::shell::app::Event::OpenItem(hit.id.clone()));
+        return true;
+    }
+    let item = crate::frames::open_file::item_named(&hit.id, &hit.name);
+    // A refusal says nothing here: the viewer's own frame says why a file could not be shown, and an outside open
+    // that failed is logged by the source.
+    let _ = crate::frames::open_file::open_file(s, crate::frames::open_file::Target::Item(&item));
     true
 }
 
