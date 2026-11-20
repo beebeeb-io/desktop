@@ -542,6 +542,7 @@ pub fn pane(
     source: &dyn AccountSource,
     dialog: Option<&Dialog>,
     signing: &SigningOut,
+    unsaved_name: &str,
     hide_capture: bool,
     t: &Theme,
 ) -> (El, Option<El>) {
@@ -553,6 +554,7 @@ pub fn pane(
             "Sign out",
             false,
             signing,
+            unsaved_name,
             t,
         )),
         Some(Dialog::SignOutAllApps) if facts.can_sign_out_all => Some(sign_out_confirm(
@@ -561,6 +563,7 @@ pub fn pane(
             "Sign out of all",
             true,
             signing,
+            unsaved_name,
             t,
         )),
         Some(Dialog::LockDelay(hot)) => match &facts.app_lock {
@@ -589,7 +592,14 @@ pub struct SigningOut {
     pub waiting: Option<bool>,
     /// It was refused: the confirm says why, and that nothing was signed out.
     pub refused: Option<&'static str>,
+    /// An open editor holds unsaved changes: the confirm asks Save, Discard and sign out, or Cancel.
+    pub unsaved: bool,
+    /// Save was pressed: the confirm waits for the editor's save, then signs out. A save that did not land says so.
+    pub saving: bool,
 }
+
+/// What the confirm says when the save it waited for did not land.
+pub(super) const NOT_SAVED: &str = "The changes were not saved. Nothing was signed out.";
 
 /// What the confirm says while its sign-out is out.
 pub(super) const SIGNING_OUT: &str = "Signing out. Nothing is signed out until Beebeeb has answered.";
@@ -605,17 +615,124 @@ pub(super) fn settle_sign_out(s: &mut State, all: bool, answer: SignOutAnswer) {
         }
         SignOutAnswer::Refused(why) => {
             s.account.signing_out = SigningOut {
-                waiting: None,
                 refused: Some(why),
+                ..SigningOut::default()
+            };
+        }
+        SignOutAnswer::Unsaved => {
+            // The editor's name, read where the open document is (nothing else says which one holds the changes).
+            s.account.unsaved_name = s
+                .viewer
+                .ui
+                .as_ref()
+                .map(|ui| ui.file.name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "an open document".to_string());
+            s.account.signing_out = SigningOut {
+                unsaved: true,
+                ..SigningOut::default()
             };
         }
         SignOutAnswer::Pending => s.account.signing_out.waiting = Some(all),
     }
 }
 
+/// The sign-out met an open editor with changes no save has landed: "You have unsaved changes in <name>." with
+/// Save (saves, then signs out), Discard and sign out (the only way they are dropped) and Cancel (Enter).
+fn unsaved_confirm(title: &str, name: &str, saving: bool, t: &Theme) -> El {
+    let words = if saving {
+        format!("Saving {name}. Nothing is signed out until it is saved.")
+    } else {
+        format!("You have unsaved changes in {name}.")
+    };
+    let mut save = set::button("btn-1", "Save", None, Look::Primary, Size::Medium, saving, t);
+    let mut discard = set::button("btn-2", "Discard and sign out", None, Look::Danger, Size::Medium, saving, t)
+        .label("Discard and sign out, destructive");
+    let mut cancel = set::button("btn-3", "Cancel", None, Look::Plain, Size::Medium, saving, t).default_button();
+    if !saving {
+        save = save.on_press(|s: &mut State| {
+            // Save is the editor's own save; the sign-out follows when it landed (`follow_save`).
+            let asked = s.viewer.ui.as_mut().is_some_and(|ui| {
+                ui.office_save();
+                ui.office.edit.is_some()
+            });
+            if asked {
+                s.account.signing_out = SigningOut {
+                    saving: true,
+                    ..SigningOut::default()
+                };
+            } else {
+                s.account.signing_out = SigningOut {
+                    refused: Some(NOT_SAVED),
+                    ..SigningOut::default()
+                };
+            }
+        });
+        discard = discard.on_press(|s: &mut State| {
+            let Some(source) = s.account.source.as_mut() else {
+                return;
+            };
+            let answer = source.sign_out_discarding_unsaved();
+            settle_sign_out(s, false, answer);
+        });
+        cancel = cancel.on_press(|s: &mut State| {
+            s.account.signing_out = SigningOut::default();
+            s.account.dialog = None;
+        });
+    }
+    let foot = vec![(save, false), (discard, false), (cancel, true)];
+    set::dialog(title, 440.0, title, &words, Vec::new(), foot, t).modal(false, |s: &mut State| {
+        if !s.account.signing_out.saving {
+            s.account.signing_out = SigningOut::default();
+            s.account.dialog = None;
+        }
+    })
+}
+
+/// While Save waits for the editor: when its save landed the sign-out goes on (the engine asks again, and
+/// refuses if anything is still unsaved); a save that did not land says so and signs out nothing. `true`: changed.
+pub(super) fn follow_save(s: &mut State, tx: &mut rune::Tx) -> bool {
+    if !s.account.signing_out.saving {
+        return false;
+    }
+    let state = s.viewer.ui.as_ref().and_then(|ui| ui.office.edit.as_ref().map(|e| (e.saving, e.unsaved())));
+    match state {
+        Some((true, _)) => {
+            tx.wake_after(std::time::Duration::from_millis(100));
+            false
+        }
+        Some((false, true)) => {
+            s.account.signing_out = SigningOut {
+                refused: Some(NOT_SAVED),
+                ..SigningOut::default()
+            };
+            true
+        }
+        // Saved (or the editor is gone): the engine decides whether anything is still unsaved.
+        _ => {
+            s.account.signing_out = SigningOut::default();
+            let Some(source) = s.account.source.as_mut() else { return true };
+            let answer = source.sign_out_this_app();
+            settle_sign_out(s, false, answer);
+            true
+        }
+    }
+}
+
 /// DW-A57 and DW-A57a: the scope sentence is read before the buttons; Enter is Cancel. While the sign-out is
 /// out the confirm says so and neither button takes a press; it closes only with the answer.
-fn sign_out_confirm(title: &str, words: &str, action: &str, all: bool, signing: &SigningOut, t: &Theme) -> El {
+fn sign_out_confirm(
+    title: &str,
+    words: &str,
+    action: &str,
+    all: bool,
+    signing: &SigningOut,
+    unsaved_name: &str,
+    t: &Theme,
+) -> El {
+    if signing.unsaved || signing.saving {
+        return unsaved_confirm(title, unsaved_name, signing.saving, t);
+    }
     let waiting = signing.waiting.is_some();
     let words = match (waiting, signing.refused) {
         (true, _) => SIGNING_OUT,

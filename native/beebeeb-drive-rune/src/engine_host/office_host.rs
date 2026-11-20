@@ -41,7 +41,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -155,6 +155,19 @@ pub fn on_session_end(ending: beebeeb_engine::app::office_session_end::SessionEn
         }
         SessionEnding::SignOut => kill_all(CloseWhy::SignedOut),
     }
+}
+
+/// How many live editors of the process hold edits that no save has landed: what a sign-out asks about.
+pub fn unsaved_count() -> usize {
+    unsaved_count_in(&PROCESS)
+}
+
+pub(crate) fn unsaved_count_in(registry: &Registry) -> usize {
+    lock(&registry.hosts)
+        .iter()
+        .filter_map(Weak::upgrade)
+        .filter(|shared| lock(&shared.inner).closed.is_none() && shared.unsaved.load(Ordering::SeqCst))
+        .count()
 }
 
 /// Every live editing host of `registry` seals its unsaved work (all asked at once, one deadline for all).
@@ -650,6 +663,8 @@ struct Shared {
     frames_wiped: AtomicUsize,
     /// The snapshot flush a lock asks for ([`flush_all_in`]): where the worker seals, and when it is done.
     flush: (Mutex<Flush>, Condvar),
+    /// Edits are held that no save has landed (the worker's `unsaved`, read by [`unsaved_count`] for a sign-out).
+    unsaved: AtomicBool,
 }
 
 /// Where a snapshot the worker takes for a lock is sealed: the file's recovery blob (called on the worker's thread).
@@ -1277,6 +1292,7 @@ pub(crate) fn open_mode_held<S: Starter>(
         wiped: AtomicUsize::new(0),
         frames_wiped: AtomicUsize::new(0),
         flush: (Mutex::new(Flush::default()), Condvar::new()),
+        unsaved: AtomicBool::new(false),
     });
     let host = OfficeHost {
         shared: shared.clone(),

@@ -293,6 +293,9 @@ pub struct Engine<C: CredentialStores> {
     forget_hook_for_test: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
+/// The refusal of a sign-out while an open editor holds edits that no save has landed.
+pub const UNSAVED_EDITS: &str = "unsaved edits in an open document";
+
 impl<C: CredentialStores> Engine<C> {
     /// Build the handle; a 0.8.x PC's flat-layout session moves into the account's slot. Then [`Engine::restore`].
     pub fn open(
@@ -1049,6 +1052,15 @@ impl<C: CredentialStores> Engine<C> {
     /// The sign-out itself, for a caller that holds the step (`transition`) already: a step that decides to sign
     /// out and does it in the same hold (`signin_api::discard_partial_sign_in`).
     async fn sign_out_holding_step(&self) -> Result<(), String> {
+        self.sign_out_holding_step_as(false).await
+    }
+
+    /// [`Self::sign_out_holding_step`]. An open editor with edits no save has landed refuses the sign-out (nothing
+    /// is stopped, wiped or sent) unless `discard_unsaved`: only the person's explicit Discard drops them.
+    async fn sign_out_holding_step_as(&self, discard_unsaved: bool) -> Result<(), String> {
+        if !discard_unsaved && self.office_unsaved_count() > 0 {
+            return Err(UNSAVED_EDITS.to_string());
+        }
         {
             let _ = self.stop_proofs().await; // Not ended in time: its seat refuses starts, the sign-out goes on.
             if unfinished_sign_out::a_task_may_hold_the_keys(&self.acct, self.stop_holding_step().await) {

@@ -488,3 +488,41 @@ fn the_scheduled_deletion_scene_names_the_boards_date() {
         "Your account will be deleted after 5 December at 18:42."
     );
 }
+
+/// An open editor holds unsaved changes: the confirm asks Save, Discard and sign out, or Cancel, and signs nothing out.
+#[test]
+fn a_sign_out_with_unsaved_changes_asks_save_discard_or_cancel() {
+    let mut rt = sign_out_page(SignOutMode::Unsaved);
+    click(&mut rt, "btn-1");
+    assert_eq!(rt.state.account.dialog, Some(Dialog::SignOutApp), "the question stays");
+    assert_eq!(says(&rt, "dlg-text-0"), "You have unsaved changes in an open document.");
+    assert_eq!(name(&rt, "btn-1"), "Save");
+    assert_eq!(name(&rt, "btn-2"), "Discard and sign out, destructive");
+    assert_eq!(name(&rt, "btn-3"), "Cancel");
+    assert_eq!(asked(&rt), Vec::new(), "nothing was signed out");
+    // Cancel closes it; the next confirm starts clean.
+    click(&mut rt, "btn-3");
+    assert_eq!(rt.state.account.dialog, None);
+    assert!(!rt.state.account.signing_out.unsaved);
+    assert_eq!(asked(&rt), Vec::new());
+}
+
+/// Only an explicit Discard drops the changes: it signs out and leaves for the sign-in screen.
+#[test]
+fn a_sign_out_with_unsaved_changes_is_done_only_by_discard() {
+    let mut rt = sign_out_page(SignOutMode::Unsaved);
+    click(&mut rt, "btn-1");
+    assert_eq!(asked(&rt), Vec::new());
+    click(&mut rt, "btn-2");
+    assert_eq!(asked(&rt), vec![Intent::Show("DW-A02")]);
+}
+
+/// Save with no editor to save in signs nothing out and says so.
+#[test]
+fn a_sign_out_save_that_cannot_be_asked_says_so_and_signs_nothing_out() {
+    let mut rt = sign_out_page(SignOutMode::Unsaved);
+    click(&mut rt, "btn-1");
+    click(&mut rt, "btn-1");
+    assert_eq!(says(&rt, "dlg-text-0"), super::security_overview::NOT_SAVED);
+    assert_eq!(asked(&rt), Vec::new());
+}

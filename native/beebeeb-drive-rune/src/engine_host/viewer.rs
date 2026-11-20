@@ -474,6 +474,8 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
     fn office_install_session_end_hook(&self) {
         self.engine
             .set_office_session_end_hook(std::sync::Arc::new(crate::engine_host::office_host::on_session_end));
+        self.engine
+            .set_office_unsaved_probe(std::sync::Arc::new(crate::engine_host::office_host::unsaved_count));
     }
 
     fn recovery_put(

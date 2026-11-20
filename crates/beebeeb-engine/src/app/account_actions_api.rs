@@ -72,6 +72,9 @@ pub enum ActionError {
     WrongPassword,
     /// Beebeeb said to wait: too many tries.
     TooMany,
+    /// An open editor holds edits that no save has landed: nothing was signed out (the host asks Save, Discard or
+    /// Cancel; only [`Engine::sign_out_discarding_unsaved_for`] drops them).
+    UnsavedEdits,
     /// Beebeeb answered with an error, an answer that did not read, or the engine did not finish (sign-out).
     Failed,
 }
@@ -85,6 +88,7 @@ impl ActionError {
             Self::Offline => "offline",
             Self::WrongPassword => "wrong password",
             Self::TooMany => "too many tries",
+            Self::UnsavedEdits => "unsaved edits in an open document",
             Self::Failed => "not done",
         }
     }
@@ -117,13 +121,24 @@ impl<C: CredentialStores> Engine<C> {
     /// [`ActionError::Failed`]: the engine did not confirm its stop or the credential store could not be cleared;
     /// still signed in.
     pub fn sign_out_for(&self, session: SessionGeneration) -> Result<(), ActionError> {
+        self.sign_out_for_as(session, false)
+    }
+
+    /// [`Self::sign_out_for`] after the person chose Discard: open editors' unsaved edits are dropped with the session.
+    pub fn sign_out_discarding_unsaved_for(&self, session: SessionGeneration) -> Result<(), ActionError> {
+        self.sign_out_for_as(session, true)
+    }
+
+    fn sign_out_for_as(&self, session: SessionGeneration, discard_unsaved: bool) -> Result<(), ActionError> {
         let result = self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
             if !self.session_is_in_memory(session) {
                 return Err(ActionError::NotSignedIn);
             }
             // The recent searches go inside the sign-out, past its stop gate (a refused sign-out deletes nothing).
-            self.sign_out_holding_step().await.map_err(|_| ActionError::Failed)
+            self.sign_out_holding_step_as(discard_unsaved).await.map_err(|why| {
+                if why == super::UNSAVED_EDITS { ActionError::UnsavedEdits } else { ActionError::Failed }
+            })
         });
         self.publish();
         result
