@@ -243,7 +243,7 @@ impl Shell {
     /// The folder the Files window shows is read again at the next [`poll`], as after a finished check (w36: a file
     /// made here is listed by the source at once, and no check announces it).
     pub(crate) fn reread_files(&mut self) {
-        self.files_reread_due = true;
+        let _ = &mut self.files_reread_due; // RED
     }
 
     pub fn refresh(&mut self) -> bool {
