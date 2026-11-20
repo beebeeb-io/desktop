@@ -82,7 +82,9 @@ impl<C: CredentialStores> Engine<C> {
                 sync_root.join(path.trim_start_matches('/')).symlink_metadata(),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound
             );
-            if port.may_hold_bytes(sync_root, path) {
+            // An OS that cannot tell (the port's default says `true`) is believed only for an item that is there: a
+            // path with no item cannot hold an unsent edit, so the refusal stays the plain `OtherAccountsData`.
+            if port.may_hold_bytes(sync_root, path) && !nothing_there {
                 return Err(GUARDED_FILE);
             }
             if nothing_there {
