@@ -456,3 +456,20 @@ fn the_list_behind_the_dialog_keeps_its_identity() {
     press(&mut rt, Key::Escape);
     assert_eq!(path(&rt), before, "closing the dialog moved the list again");
 }
+
+#[test]
+fn dialog_continue_by_mouse_puts_the_keyboard_in_the_name_field() {
+    let (mut rt, _calls) = runtime();
+    open_dialog(&mut rt);
+    press(&mut rt, Key::Right);
+    rt.frame(1.0);
+    let [x, y, w, h] = info(&rt, "btn-0").rect;
+    rt.pointer_down(x + w / 2.0, y + h / 2.0);
+    rt.pointer_up(x + w / 2.0, y + h / 2.0);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(dialog_step(&rt), Some(Step::Name));
+    assert_eq!(focused(&rt).as_deref(), Some(super::new_file::NAME_INPUT));
+    let nf = rt.state.viewer.new_file.as_ref().expect("the dialog is open");
+    assert_eq!(nf.name.range(), (0, UNTITLED.len()));
+}
