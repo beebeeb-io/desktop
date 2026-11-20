@@ -10,6 +10,8 @@ use super::{Filter, Section, Ui, icons};
 use crate::State;
 use crate::theme::icons as base;
 use crate::theme::tokens::{self, Theme, type_};
+use crate::theme::file_icons::icon_for;
+use crate::ui::file_icon::file_icon;
 use crate::ui::kit;
 
 const SEARCH_PLACEHOLDER: &str = "Search history";
@@ -221,20 +223,6 @@ fn list(ui: &Ui, t: &Theme) -> El {
         .child(days)
 }
 
-fn kind_icon(change: &Change) -> &'static Icon {
-    if matches!(change.what, What::MovedToTrash { .. }) {
-        return &base::TRASH;
-    }
-    match change.kind {
-        Kind::Document | Kind::Photo(_) => &base::DOC_GENERIC,
-        Kind::Sheet => &base::DOC_SPREADSHEET,
-        Kind::Deck => &base::DOC_MINIMAL,
-        Kind::Video => &icons::DOC_VIDEO,
-        Kind::Audio => &icons::DOC_AUDIO,
-        Kind::Folder => &base::FILES,
-    }
-}
-
 fn origin_icon(origin: &Origin) -> &'static Icon {
     match origin {
         Origin::ThisPc => &icons::LAPTOP,
@@ -258,12 +246,14 @@ fn tile(k: &str, change: &Change, t: &Theme) -> El {
             |c: [u8; 3]| rune::color::hex(&format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])).unwrap_or(Color::BLACK);
         return tile.linear_gradient(angle.to_radians(), stops.map(|(at, c)| (at, rgb(c))));
     }
-    tile.fill(t.tile).child(kit::glyph(
-        format!("{k}-icon"),
-        kind_icon(change),
-        19.0,
-        t.text_secondary,
-    ))
+    let key = format!("{k}-icon");
+    if matches!(change.what, What::MovedToTrash { .. }) {
+        return tile
+            .fill(t.tile)
+            .child(kit::glyph(key, &base::TRASH, 19.0, t.text_secondary));
+    }
+    let fi = icon_for(&change.name, matches!(change.kind, Kind::Folder), None);
+    tile.fill(t.tile).child(file_icon(key, fi, 19.0, t))
 }
 
 /// One change (`.grid` 30 · rest · 150 · 96 · 48, 44 pt). Keys: `change-<i>` and
@@ -387,3 +377,7 @@ fn empty(t: &Theme) -> El {
         t,
     )
 }
+
+#[cfg(test)]
+#[path = "icon_tests.rs"]
+mod icon_tests;
