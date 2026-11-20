@@ -1039,6 +1039,10 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         self.actions.sign_out_this_app()
     }
 
+    fn sign_out_discarding_unsaved(&mut self) -> SignOutAnswer {
+        self.actions.sign_out_discarding_unsaved()
+    }
+
     fn sign_out_result(&mut self) -> Option<SignOutAnswer> {
         self.actions.sign_out_result()
     }

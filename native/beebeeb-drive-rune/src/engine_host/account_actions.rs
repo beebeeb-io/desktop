@@ -30,9 +30,6 @@ const CONFIRMATION_LASTS: Duration = Duration::from_secs(4 * 60);
 /// What the Sign out confirm says when the sign-out was not done and Beebeeb or the engine could not finish it.
 pub(super) const NOT_SIGNED_OUT_APP: &str = "Drive could not sign out. You are still signed in. Try again.";
 /// The window's press was made under a session that is over (another sign-in, another account).
-/// A sign-out met an open editor with edits no save has landed.
-pub(super) const UNSAVED_EDITS: &str =
-    "You have unsaved changes in an open document. Save it or close it first. Nothing was signed out.";
 pub(super) const SESSION_MOVED: &str = "Your session changed. Nothing was signed out.";
 /// No session at all: nothing to sign out.
 pub(super) const NO_SESSION: &str = "You are not signed in. Nothing was signed out.";
@@ -142,6 +139,15 @@ impl<C: CredentialStores + 'static> Actions<C> {
 
     /// DW-S02: sign THIS app out. `Pending` once sent; the answer comes through [`Actions::sign_out_result`].
     pub(super) fn sign_out_this_app(&mut self) -> SignOutAnswer {
+        self.sign_out_app_as(false)
+    }
+
+    /// "Discard and sign out": [`Self::sign_out_this_app`] that drops the open editors' unsaved changes.
+    pub(super) fn sign_out_discarding_unsaved(&mut self) -> SignOutAnswer {
+        self.sign_out_app_as(true)
+    }
+
+    fn sign_out_app_as(&mut self, discard_unsaved: bool) -> SignOutAnswer {
         // One that is out for this session and account is waited for; one of a session that is over is forgotten
         // (its answer, when it comes, is for nobody).
         match &self.signing_out {
@@ -158,7 +164,13 @@ impl<C: CredentialStores + 'static> Actions<C> {
             &self.engine,
             &self.sign_out_end.0,
             asked_as.clone(),
-            move |engine| engine.sign_out_for(session),
+            move |engine| {
+                if discard_unsaved {
+                    engine.sign_out_discarding_unsaved_for(session)
+                } else {
+                    engine.sign_out_for(session)
+                }
+            },
         );
         if !started {
             log("account: could not start a thread for the sign-out");
@@ -184,7 +196,7 @@ impl<C: CredentialStores + 'static> Actions<C> {
                 // What was refused is for the window that asked: not the one of another session or account.
                 Err(_) if !self.is_now(&end.stamp) => None,
                 Err(ActionError::NotSignedIn) => Some(SignOutAnswer::Refused(SESSION_MOVED)),
-                Err(ActionError::UnsavedEdits) => Some(SignOutAnswer::Refused(UNSAVED_EDITS)),
+                Err(ActionError::UnsavedEdits) => Some(SignOutAnswer::Unsaved),
                 Err(error) => {
                     log(format!("account: the sign-out was not done ({})", error.words()));
                     Some(SignOutAnswer::Refused(NOT_SIGNED_OUT_APP))

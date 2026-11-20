@@ -302,6 +302,8 @@ pub struct AccountUi {
     told_open: Option<Pane>,
     /// A sign-out asked from the Security page's confirm: waiting for its answer, or refused.
     pub signing_out: security_overview::SigningOut,
+    /// The open document that holds the unsaved changes a sign-out met (for its question).
+    pub unsaved_name: String,
     /// A password change answered while its page was not open, to be said wherever the person is (`late`). Outside
     /// the form: leaving the account's sections keeps it; the end of the session drops it.
     pub late_change: Option<late::Late>,
@@ -317,6 +319,7 @@ impl Default for AccountUi {
             source: source::first(instance::DEV_BUILD),
             told_open: None,
             signing_out: security_overview::SigningOut::default(),
+            unsaved_name: String::new(),
             late_change: None,
         }
     }
@@ -416,6 +419,8 @@ fn showing(s: &State) -> Option<Pane> {
 /// The window's poll for the account sections: tells the source which pane shows when that changed (it reads
 /// then, never from a draw), and takes in what its workers answered. `true`: something a pane draws changed.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    // Save asked by a sign-out's question: wait for the editor, then sign out.
+    let followed = security_overview::follow_save(s, tx);
     let now = showing(s);
     let ui = &mut s.account;
     let Some(source) = ui.source.as_mut() else {
@@ -477,7 +482,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if show_late_codes(s) {
         return true;
     }
-    pumped.changed || step_closed
+    pumped.changed || step_closed || followed
 }
 
 /// The toast over a pane. Something that worked is the settings toast, as before. Something that was not done
@@ -970,7 +975,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
         Pane::Security => {
-            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, s.shell.hide_from_capture(), &t);
+            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, &ui.unsaved_name, s.shell.hide_from_capture(), &t);
             (page, over.or_else(|| app_lock_password::over(source, form, dialog, &t)))
         }
         Pane::Sessions => sessions::pane(source, dialog, &t),
