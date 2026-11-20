@@ -64,7 +64,7 @@ impl Root {
                 content_hash: None,
                 remote_updated_at: 1,
                 parent_id: None,
-                item_kind: kind,
+                item_kind: kind.clone(),
             })
             .unwrap();
         self.db
