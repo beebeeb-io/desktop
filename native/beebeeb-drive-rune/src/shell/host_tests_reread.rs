@@ -315,3 +315,40 @@ fn a_finished_check_asks_shared_this_pc_and_trash_to_read_again_and_a_menu_holds
         "read on the first poll after they closed"
     );
 }
+
+/// w31 (Guus's PC, 2026-11-20): the first file list lands in the middle of a long tick (the engine is still syncing,
+/// no check has finished). The moment the window stops saying it is loading, the folder shown is read again: the
+/// files show then, not minutes later at the end of that tick.
+#[test]
+fn w31_when_the_first_list_lands_the_folder_is_read_again_without_waiting_for_the_check_to_finish() {
+    use crate::frames::global::source::{Loading, Step};
+    use crate::frames::global::{GlobalFixture, GlobalStatus, Ui};
+    let shelf = Elsewhere::with(&["m-1.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    engine.set_inputs(inputs(EngineState::Syncing));
+    rt.update(|s, _| {
+        s.global = Ui::new(Box::new(GlobalFixture::of(GlobalStatus {
+            loading: Some(Loading {
+                listed: 0,
+                total: 0,
+                left: None,
+                file_list: Step::InProgress,
+                thumbnails: Step::WaitingForFileList,
+            }),
+            ..GlobalStatus::default()
+        })));
+    });
+    settle(&mut rt);
+    assert_eq!(rt.state.listing.items.len(), 1);
+
+    // The list landed; the tick goes on (still Syncing, no finished check).
+    shelf.add(&SEVEN);
+    rt.update(|s, _| s.global = Ui::new(Box::new(GlobalFixture::of(GlobalStatus::default()))));
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.listing.items.len(),
+        8,
+        "the first list's files show as soon as it landed: {:?}",
+        ids(&rt.state)
+    );
+}

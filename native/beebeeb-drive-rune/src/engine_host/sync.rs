@@ -15,9 +15,10 @@ use beebeeb_engine::app::{CredentialStores, Engine, SyncStartRefused};
 use beebeeb_engine::engine_status::{EngineStatusView, State as Reported};
 use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::sync_view::{Explorer, Start, SyncView};
+use beebeeb_engine::transfer_progress::FirstList;
 
 use crate::frames::global::samples::OFFLINE;
-use crate::frames::global::source::{GlobalSource, GlobalStatus, ListedAt};
+use crate::frames::global::source::{GlobalSource, GlobalStatus, ListedAt, Loading, Step};
 use crate::frames::global::sync_off::{Refused, SyncOff};
 use crate::shell::tray::{EngineState, TrayInputs};
 use crate::ui::status_line as words;
@@ -179,26 +180,64 @@ impl<C: CredentialStores> EngineGlobalSource<C> {
 
 impl<C: CredentialStores> GlobalSource for EngineGlobalSource<C> {
     fn status(&self) -> GlobalStatus {
-        global_status(&self.engine.view(), chrono::Local::now())
+        // w31: the view, and the two in-memory reads of the first file list (the board's); none of them waits.
+        global_status_with(
+            &self.engine.view(),
+            self.engine.first_list(),
+            self.engine.first_listing(),
+            chrono::Local::now(),
+        )
     }
 
     /// What the engine says now: a check happens on its own ticks, never from the window's thread.
     fn check_connection(&mut self) -> bool {
         !self.engine.view().offline
     }
+
+    /// w31: Try again on a file list that could not be loaded: the running engine pulls now. Never waits.
+    fn retry_list(&mut self) {
+        self.engine.retry_first_list();
+    }
 }
 
 /// The banner's two fields for `view`. Offline only while an engine runs and said so, with the time of its last
 /// finished check ("This list is from today at 09:12"); before its first one the status line says it alone.
 pub fn global_status(view: &SyncView, now: chrono::DateTime<chrono::Local>) -> GlobalStatus {
+    global_status_with(view, FirstList::Here, None, now)
+}
+
+/// [`global_status`], and what the engine says of the account's first file list on this PC (w31; Guus's PC,
+/// 2026-11-20: the first sign-in showed the sync folder's own folders and no file for minutes, as a finished list).
+/// While an engine runs and the list never arrived:
+/// - awaited: `loading` (the Files list's card and strip, Photos' "Getting your photos ready"), with the count once
+///   the engine ingests the list (`listing`: listed, total), and a total of 0 before that;
+/// - the last try failed: `list_failed` (the banner with Try again), and no `loading`.
+///
+/// Not while sync is paused (nothing is on its way), and never without a running engine.
+pub fn global_status_with(
+    view: &SyncView,
+    first_list: FirstList,
+    listing: Option<(u64, u64)>,
+    now: chrono::DateTime<chrono::Local>,
+) -> GlobalStatus {
     let ready = view.gate == EngineGate::Ready;
     let running = ready && view.start == Start::Running;
+    let getting = running && !view.paused && !view.session_ended;
+    let (listed, total) = listing.unwrap_or((0, 0));
     GlobalStatus {
         signed_out: ready && view.session_ended,
         offline: (running && view.offline)
             .then_some(view.last_check_at)
             .flatten()
             .and_then(|at| listed_at(at, now)),
+        loading: (getting && first_list == FirstList::Awaited).then_some(Loading {
+            listed,
+            total,
+            left: None,
+            file_list: Step::InProgress,
+            thumbnails: Step::WaitingForFileList,
+        }),
+        list_failed: getting && first_list == FirstList::Failed,
         ..GlobalStatus::default()
     }
 }

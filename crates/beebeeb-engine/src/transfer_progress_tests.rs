@@ -573,3 +573,34 @@ fn ld0105_u1_a_stop_is_no_failure_and_a_new_engine_forgets_failed_rows() {
         "the names go with the rows"
     );
 }
+
+/// w31: the board keeps where the first file list is, rings the window only when that changed, and keeps a Try
+/// again's ask for the runner that is busy (a permit).
+#[test]
+fn w31_the_first_list_state_is_kept_and_rings_on_a_change_only() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let board = TransferBoard::new();
+    assert_eq!(board.first_list(), FirstList::Here);
+    let rings = Arc::new(AtomicUsize::new(0));
+    let counted = rings.clone();
+    board.set_wake(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+    });
+    board.set_first_list(FirstList::Awaited);
+    board.set_first_list(FirstList::Awaited);
+    assert_eq!(board.first_list(), FirstList::Awaited);
+    assert_eq!(rings.load(Ordering::SeqCst), 1);
+    board.set_first_list(FirstList::Failed);
+    assert_eq!(board.first_list(), FirstList::Failed);
+    board.set_first_list(FirstList::Here);
+    assert_eq!(board.first_list(), FirstList::Here);
+    assert_eq!(rings.load(Ordering::SeqCst), 3);
+
+    board.ask_pull_now();
+    let asked = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), board.pull_asked()).await });
+    assert!(asked.is_ok(), "an ask made before the runner waits is kept");
+}

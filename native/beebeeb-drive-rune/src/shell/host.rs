@@ -101,6 +101,9 @@ pub struct Shell {
     /// `TrayInputs::last_check`): Photos reads its library again, and the Files window the folder it shows
     /// ([`read_again_after_a_check`]).
     check_finished: bool,
+    /// w31: the last [`poll`] saw the account's first file list still on its way (or failed). When it is no longer,
+    /// the list landed: the windows read again at once, not at the end of the (long) tick that brought it.
+    first_list_awaited: bool,
     /// A finished check whose read of the folder shown waits for what is open over the rows to close
     /// (`State::reread_waits`).
     files_reread_due: bool,
@@ -159,6 +162,7 @@ impl Shell {
             #[cfg(test)]
             sync_off_opened: 0,
             check_finished: false,
+            first_list_awaited: false,
             files_reread_due: false,
             away: super::away::AwayLock::default(),
             flyout_covered: None,
@@ -621,6 +625,14 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     }
     // A refused sync start says so, once per attempt (the refusal modal, Q3).
     changed |= open_sync_refusal(s);
+    // w31: the first file list landed since the last poll (the loading card or the failure banner goes): the lists
+    // are read as after a finished check, now. The tick that brought the list goes on for minutes on a large account
+    // (the reconcile pass, the queue), and until its end the rows would still be the ones from before the list.
+    let first_list = s.global.source.status();
+    let awaited = first_list.loading.is_some() || first_list.list_failed;
+    if std::mem::replace(&mut s.shell.first_list_awaited, awaited) && !awaited {
+        s.shell.check_finished = true;
+    }
     // Photos reads its library again once a check finished (`frames::photos::after_a_check`).
     if s.shell.check_finished {
         crate::frames::photos::after_a_check(s);

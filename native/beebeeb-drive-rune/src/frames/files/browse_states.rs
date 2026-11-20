@@ -45,11 +45,15 @@ fn loading(s: &State) -> Option<Loading> {
 }
 
 fn listed_words(loading: &Loading) -> String {
-    format!(
-        "{} of {} listed",
-        super::protected::grouped(loading.listed as i64),
-        super::protected::grouped(loading.total as i64)
-    )
+    match figure(loading) {
+        Some(figure) => format!("{figure} listed"),
+        // w31: the list's size is not known yet.
+        None => crate::frames::global::source::LIST_ON_ITS_WAY.to_string(),
+    }
+}
+
+fn figure(loading: &Loading) -> Option<String> {
+    loading.figure(|n| super::protected::grouped(n as i64))
 }
 
 /// The words under the window's title while the first list arrives: how many are listed so far.
@@ -133,11 +137,9 @@ pub fn card(s: &State, t: &Theme) -> Option<El> {
     if s.actions.first_load_strip || s.global.banner().is_some() {
         return None;
     }
-    let figure = format!(
-        "{} of {}",
-        super::protected::grouped(loading.listed as i64),
-        super::protected::grouped(loading.total as i64)
-    );
+    // w31: while the list's size is not known yet the card stands with no count ("0 of 0" is no count).
+    let known = figure(&loading);
+    let figure = known.clone().unwrap_or_default();
     let left = loading.left.as_ref().map(|left| format!(" \u{00B7} {left} left"));
     // The bar moves in whole percents, as the strip's does.
     let percent = (loading.listed.saturating_mul(100))
@@ -158,12 +160,15 @@ pub fn card(s: &State, t: &Theme) -> Option<El> {
             ))
             .child(kit::label(format!("ready-{key}-value"), value, CARD_STEP_VALUE, t.text))
     };
-    let mut count = row().key("ready-count").items_center().child(kit::label(
-        "ready-figure",
-        figure.clone(),
-        CARD_FIGURE,
-        t.text_secondary,
-    ));
+    let mut count = row().key("ready-count").items_center();
+    if known.is_some() {
+        count = count.child(kit::label(
+            "ready-figure",
+            figure.clone(),
+            CARD_FIGURE,
+            t.text_secondary,
+        ));
+    }
     if let Some(left) = &left {
         count = count.child(kit::label("ready-left", left.clone(), CARD_TEXT, t.text_secondary));
     }
@@ -213,8 +218,10 @@ pub fn card(s: &State, t: &Theme) -> Option<El> {
             .key("ready-card")
             .role("status")
             .label(format!(
-                "{title}. {words} {figure}{}. File list: {}. Thumbnails: {}.",
-                left.unwrap_or_default(),
+                "{title}. {words}{} File list: {}. Thumbnails: {}.",
+                known
+                    .map(|figure| format!(" {figure}{}.", left.unwrap_or_default()))
+                    .unwrap_or_default(),
                 loading.file_list.words(),
                 loading.thumbnails.words()
             ))

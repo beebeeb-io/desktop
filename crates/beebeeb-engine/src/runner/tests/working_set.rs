@@ -391,13 +391,13 @@ async fn a_phase_armed_while_the_runner_waits_wakes_it_at_once() {
     let (_keep_open, mut cancel) = oneshot::channel::<()>();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
     assert_eq!(
-        next_wake(&mut cancel, &mut tick, &send_phase).await,
+        next_wake(&mut cancel, &mut tick, &send_phase, &crate::transfer_progress::TransferBoard::new()).await,
         Wake::Tick,
         "an interval's first tick is at once"
     );
     let waiter = {
         let send_phase = send_phase.clone();
-        tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase).await })
+        tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase, &crate::transfer_progress::TransferBoard::new()).await })
     };
     // Paused clock: the waiter runs first and starts waiting, then the clock moves 50 ms. It now waits, 29.95 s
     // from its next tick.
@@ -538,10 +538,13 @@ async fn a_nudge_while_the_runner_waits_wakes_it_at_once() {
     let send_phase = Arc::new(SendPhaseLink::default());
     let (_keep_open, mut cancel) = oneshot::channel::<()>();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
-    assert_eq!(next_wake(&mut cancel, &mut tick, &send_phase).await, Wake::Tick);
+    assert_eq!(
+        next_wake(&mut cancel, &mut tick, &send_phase, &crate::transfer_progress::TransferBoard::new()).await,
+        Wake::Tick
+    );
     let waiter = {
         let send_phase = send_phase.clone();
-        tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase).await })
+        tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase, &crate::transfer_progress::TransferBoard::new()).await })
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
     send_phase.nudge();
@@ -608,4 +611,25 @@ fn the_nudge_runs_the_queue_step_alone_and_waits_for_the_first_pass() {
         wait.contains("_ = send_phase.nudge.notified() => Wake::Nudge,"),
         "{wait}"
     );
+}
+
+/// w31: Try again on a first file list that failed wakes a runner that waits between ticks at once, for a whole
+/// tick (the pull), not at its next tick up to 30 s on (tokio's paused clock, as above).
+#[tokio::test(start_paused = true)]
+async fn w31_a_pull_asked_while_the_runner_waits_wakes_it_for_a_whole_tick_at_once() {
+    let send_phase = Arc::new(SendPhaseLink::default());
+    let board = crate::transfer_progress::TransferBoard::new();
+    let (_keep_open, mut cancel) = oneshot::channel::<()>();
+    let mut tick = tokio::time::interval(TICK_INTERVAL);
+    assert_eq!(next_wake(&mut cancel, &mut tick, &send_phase, &board).await, Wake::Tick);
+    let waiter = {
+        let (send_phase, board) = (send_phase.clone(), board.clone());
+        tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase, &board).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    board.ask_pull_now();
+    let woke = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("woken within a second of the ask, not at the next tick");
+    assert_eq!(woke.unwrap(), Wake::Tick);
 }

@@ -392,8 +392,52 @@ fn line(ui: &Ui, i: usize, t: &Theme) -> El {
     out.child(tiles)
 }
 
-/// "No photos yet" (`.kit-empty`, DW-0116): also when a device filter has nothing.
-fn empty(t: &Theme) -> El {
+/// w31: what the account's file list on this PC is, for a library with nothing in it: only a list that arrived
+/// makes "No photos yet" true.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListState {
+    Here,
+    OnItsWay,
+    Failed,
+}
+
+/// As the window's global source says it now (the same read the Files list's card and banner make).
+pub fn list_state(s: &State) -> ListState {
+    let status = s.global.source.status();
+    if status.list_failed {
+        ListState::Failed
+    } else if status.loading.is_some() {
+        ListState::OnItsWay
+    } else {
+        ListState::Here
+    }
+}
+
+/// "No photos yet" (`.kit-empty`, DW-0116): also when a device filter has nothing. w31: while the file list is on
+/// its way it says that, and when it could not be loaded it says so, with Try again.
+fn empty(list: ListState, t: &Theme) -> El {
+    let (title, sub) = match list {
+        ListState::Here => (
+            "No photos yet",
+            "Photos backed up from your iPhone or iPad appear here. Turn on photo backup in Beebeeb on the iPhone or iPad.",
+        ),
+        ListState::OnItsWay => (
+            "Getting your photos ready",
+            "Your file list is downloading and being decrypted on this PC. Your photos appear here when it's finished.",
+        ),
+        ListState::Failed => (
+            "Your photos couldn't be loaded",
+            "Beebeeb couldn't get your file list. It keeps trying; you can also try again now.",
+        ),
+    };
+    let again = (list == ListState::Failed).then(|| {
+        chrome::button("ph-empty-retry", "Try again", None, Tone::Plain, 28.0, type_::BUTTON_SM, t)
+            .on_press(|s: &mut State| s.global.source.retry_list())
+    });
+    empty_of(title, sub, again, t)
+}
+
+fn empty_of(title: &'static str, sub: &'static str, again: Option<El>, t: &Theme) -> El {
     col()
         .key("ph-empty-area")
         .grow(1.0)
@@ -414,25 +458,21 @@ fn empty(t: &Theme) -> El {
                         .center()
                         .child(kit::glyph("ph-empty-icon", &icons::PHOTOS, 26.0, t.text_secondary)),
                 )
-                .child(kit::label("ph-empty-title", "No photos yet", style::TITLE, t.text).role("heading"))
+                .child(kit::label("ph-empty-title", title, style::TITLE, t.text).role("heading"))
                 .child(
-                    kit::label(
-                        "ph-empty-sub",
-                        "Photos backed up from your iPhone or iPad appear here. Turn on photo backup in Beebeeb on the iPhone or iPad.",
-                        style::SUB,
-                        t.text_tertiary,
-                    )
-                    // `max-width: 30ch`.
-                    .w(227.11)
-                    .wrap()
-                    .align(rune::Align::Center),
-                ),
+                    kit::label("ph-empty-sub", sub, style::SUB, t.text_tertiary)
+                        // `max-width: 30ch`.
+                        .w(227.11)
+                        .wrap()
+                        .align(rune::Align::Center),
+                )
+                .children(again),
         )
 }
 
-pub fn body(ui: &Ui, t: &Theme) -> El {
+pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
     let content = if ui.lines.is_empty() {
-        empty(t)
+        empty(list, t)
     } else {
         let t = *t;
         col()

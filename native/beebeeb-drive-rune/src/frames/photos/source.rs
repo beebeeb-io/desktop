@@ -288,6 +288,11 @@ pub trait PhotosSource {
     fn download_original(&mut self, _id: PhotoId) -> bool {
         false
     }
+    /// w31: why the original of `id` is not downloaded at all on this PC (a format no decoder here opens, such as
+    /// HEIC or a RAW): the words to say. `None`: it can be asked for. Nothing is downloaded to find out.
+    fn original_refused(&self, _id: PhotoId) -> Option<&'static str> {
+        None
+    }
     /// Stops the original's download and wipes what is held of it. The preview is untouched.
     fn stop_original(&mut self, _id: PhotoId) {}
     /// The decoded original of `id`, once it is here.

@@ -273,3 +273,84 @@ fn a_folder_keeps_its_own_view_and_the_panel_follows_the_selection() {
     settle(&mut rt);
     assert!(find(&rt, "row-0-date").is_some());
 }
+
+/// w31 (Guus's PC, 2026-11-20): what the local state holds before the account's file list ever arrived: the sync
+/// folder's own folders, and no file.
+struct FoldersOnly(BoardDrive);
+
+impl crate::source::DriveSource for FoldersOnly {
+    fn list(&self, folder_id: Option<&str>) -> Result<crate::source::Listing, crate::source::SourceError> {
+        let mut listing = self.0.list(folder_id)?;
+        listing.items.retain(|item| item.is_folder);
+        Ok(listing)
+    }
+
+    fn storage(&self) -> Option<crate::source::StorageSummary> {
+        self.0.storage()
+    }
+}
+
+fn before_the_first_list(status: crate::frames::global::GlobalStatus) -> (Runtime<State>, GlobalFixture) {
+    let mut state = init();
+    state.source = Box::new(FoldersOnly(BoardDrive::new()));
+    (state.listing, state.list_error) = crate::load(state.source.as_ref(), None);
+    assert!(
+        !state.listing.items.is_empty() && state.listing.items.iter().all(|item| item.is_folder),
+        "folders and no file, as on that PC"
+    );
+    let fixture = GlobalFixture::of(status);
+    let seen = GlobalFixture {
+        status: fixture.status.clone(),
+        back_online: false,
+        checks: fixture.checks.clone(),
+        list_retries: fixture.list_retries.clone(),
+    };
+    state.global = Ui::new(Box::new(fixture));
+    state.show_detail_pane = false;
+    state.clear_selection();
+    let (rt, _, _) = spied_on(state);
+    (rt, seen)
+}
+
+/// w31: while the account's file list is on its way (its size not known yet) the window says so, above the folders
+/// it has: never a finished list of folders with no word, and never "0 of 0".
+#[test]
+fn w31_before_the_first_list_arrives_the_window_says_it_is_loading() {
+    use crate::frames::global::source::{Loading, Step};
+    let (rt, _) = before_the_first_list(crate::frames::global::GlobalStatus {
+        loading: Some(Loading {
+            listed: 0,
+            total: 0,
+            left: None,
+            file_list: Step::InProgress,
+            thumbnails: Step::WaitingForFileList,
+        }),
+        ..Default::default()
+    });
+    assert_eq!(text(&rt, "ready-title"), "Getting your files ready");
+    assert!(find(&rt, "ready-figure").is_none(), "no count before the list's size is known");
+    let bar = info(&rt, "ready-bar");
+    assert_eq!(
+        (bar.role, bar.label.as_deref()),
+        ("progressbar", Some("Getting your files ready: 0 percent"))
+    );
+    assert_eq!(text(&rt, "status-text"), "Getting your files ready");
+    assert_eq!(text(&rt, "status-details"), "Loading your file list");
+    assert_eq!(text(&rt, "item-count"), "Loading your file list");
+}
+
+/// w31: a first file list that could not be loaded is said, with Try again, which asks the engine for it now.
+#[test]
+fn w31_a_first_list_that_failed_is_said_with_try_again() {
+    let (mut rt, seen) = before_the_first_list(crate::frames::global::GlobalStatus {
+        list_failed: true,
+        ..Default::default()
+    });
+    assert!(find(&rt, "ready-card").is_none());
+    assert!(find(&rt, "banner").is_some(), "the failure is said");
+    let button = info(&rt, "banner-action");
+    assert_eq!((button.role, button.label.as_deref()), ("button", Some("Try again")));
+    assert!(find(&rt, "banner-dismiss").is_none(), "it cannot be dismissed while it is true");
+    click(&mut rt, "banner-action");
+    assert_eq!(seen.list_retries.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

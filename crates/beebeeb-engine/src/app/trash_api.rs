@@ -218,6 +218,22 @@ impl<C: CredentialStores> Engine<C> {
         self.host.transfer_board()?.first_listing()
     }
 
+    /// w31: where the account's first file list on this PC is, as the running engine last said it; `Here` when the
+    /// host keeps no transfer board. In memory, never waits: a window asks on every frame.
+    pub fn first_list(&self) -> crate::transfer_progress::FirstList {
+        self.host
+            .transfer_board()
+            .map(|board| board.first_list())
+            .unwrap_or_default()
+    }
+
+    /// w31: Try again on a first file list that failed: the running engine pulls now. Never waits; no engine: nothing.
+    pub fn retry_first_list(&self) {
+        if let Some(board) = self.host.transfer_board() {
+            board.ask_pull_now();
+        }
+    }
+
     /// Wake the host's loop, as the engine does when its own view changed: for a host's worker that has an answer
     /// for the window. Nothing is queued.
     pub fn wake_host(&self) {

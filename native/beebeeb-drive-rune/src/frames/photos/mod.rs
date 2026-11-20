@@ -782,7 +782,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             grid::bar(ui, &t),
             ui.selecting.then(|| grid::bulk(ui, &t)),
             // While there is no library: why, in words; never an empty library that is not one.
-            session::not_here_body(ui, &t).unwrap_or_else(|| grid::body(ui, &t)),
+            // w31: nor "No photos yet" while the account's file list has not arrived on this PC.
+            session::not_here_body(ui, &t).unwrap_or_else(|| grid::body(ui, grid::list_state(s), &t)),
             &ui.source.origin(),
             front,
         ),

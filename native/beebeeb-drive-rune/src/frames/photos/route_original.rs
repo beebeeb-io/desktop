@@ -10,6 +10,17 @@ use crate::State;
 pub fn handle(s: &mut State, _tx: &mut Tx, intent: Intent) -> Result<(), Intent> {
     match intent {
         Intent::DownloadOriginal(id) => {
+            // w31: a format this PC cannot decode (HEIC, RAW) is said, and nothing is downloaded: before, the whole
+            // original came down and was then refused.
+            if let Some(words) = s.photos.source.original_refused(id) {
+                if let Some(viewer) = &mut s.photos.viewer
+                    && viewer.id == id
+                {
+                    viewer.original = Original::Preview;
+                }
+                s.photos.toast = Some(super::Toast::Words(words));
+                return Ok(());
+            }
             if s.photos.source.download_original(id) {
                 return Ok(());
             }
