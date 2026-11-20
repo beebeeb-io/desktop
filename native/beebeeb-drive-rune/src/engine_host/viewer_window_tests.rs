@@ -544,13 +544,22 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
 }
 
 #[test]
-fn a_kind_with_no_viewer_opens_the_no_preview_frame_and_only_its_button_goes_to_another_app() {
+fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_so_with_two_buttons() {
     let mut w = window("zip");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
-    // The Files window's Open on a kind the viewer cannot show (w29): the viewer's "No preview" frame, in the app,
-    // and nothing downloaded. Nothing is handed to the OS until its button is pressed.
+    // The Files window's Open on a kind the viewer has no preview for goes on by `open_file`'s steps 2 and 3 (the
+    // system's app, else the file manager): the route stays on the list. No sync runs here, so the file is not on
+    // this PC and nothing is started; the window says so (and nothing was downloaded).
     w.open_row(PLAN_NAME);
+    assert_eq!(w.route_item(), None, "a list's Open does not go to a file the viewer cannot show");
+    assert!(w.rt.state.viewer.ui.is_none());
+    assert_eq!(w.chunk_requests(), 0);
+
+    // A route that names it anyway (a link, Back and Forward): the viewer's honest state, and nothing downloaded.
+    w.rt.update(|s, _| {
+        host::dispatch(s, Event::OpenItem(PLAN.to_string()));
+    });
     w.settle();
     assert_eq!(w.route_item().as_deref(), Some(PLAN));
     let drawn = w.drawn();
@@ -899,11 +908,12 @@ fn a_picture_is_shown_and_no_action_claims_a_state_that_was_not_read() {
 #[path = "viewer_edit_lock_tests.rs"]
 mod edit_lock;
 
-/// w29: a PDF, a picture, a video, a text, a Word document and a kind with no viewer, each opened from Files (a row
-/// and Enter) and from Search (its route), on the real engine: every one is the window's own viewer, the unknown kind
-/// with its "No preview" frame and its "Open in another app" button, and none is handed to the system.
+/// w29: a PDF, a picture, a video, a text and a Word document, each opened from Files (a row and Enter) and from
+/// Search (`open_file`), on the real engine: every one is the window's own viewer. A kind with no preview
+/// (`.zip` here) is not: `open_file` sends it on to steps 2 and 3, and with no sync running here nothing is started.
 #[test]
-fn six_kinds_open_in_the_app_from_files_and_from_search() {
+fn five_kinds_open_in_the_app_from_files_and_from_search_and_an_unknown_kind_does_not() {
+    use crate::frames::open_file::{Opened, Target, item_named, open_file};
     let mut w = window("sixkinds");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
@@ -913,7 +923,6 @@ fn six_kinds_open_in_the_app_from_files_and_from_search() {
         (CLIP_NAME, CLIP),
         (NOTE_NAME, NOTE),
         (DOC_NAME, DOC),
-        (PLAN_NAME, PLAN),
     ];
     let leave = |w: &mut Window| {
         w.rt.update(|s, _| {
@@ -927,27 +936,35 @@ fn six_kinds_open_in_the_app_from_files_and_from_search() {
     for (name, id) in kinds {
         w.open_row(name);
         w.settle();
-        if w.route_item().as_deref() == Some(id) && w.rt.state.viewer.ui.is_some() {
-            in_app += 1;
-        } else {
-            panic!("Files: {name} did not open in the app; the window draws:\n{}", w.drawn());
-        }
+        assert!(
+            w.route_item().as_deref() == Some(id) && w.rt.state.viewer.ui.is_some(),
+            "Files: {name} did not open in the app; the window draws:\n{}",
+            w.drawn()
+        );
+        in_app += 1;
         leave(&mut w);
-        w.rt.update(|s, _| {
-            host::dispatch(s, Event::OpenItem(id.to_string()));
-        });
+        let mut opened = Opened::Failed(crate::frames::files::source::ActionError::Failed);
+        w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(id, name))));
         w.settle();
-        if w.route_item().as_deref() == Some(id) {
-            in_app += 1;
-        } else {
-            panic!("Search: {name} did not open in the app");
-        }
-        if id == PLAN {
-            let drawn = w.drawn();
-            assert!(drawn.contains("No preview for this kind of file yet"), "{drawn}");
-            assert!(drawn.contains("Open in another app\u{2026}"), "{drawn}");
-        }
+        assert_eq!((opened, w.route_item().as_deref()), (Opened::InApp, Some(id)), "Search: {name}");
+        in_app += 1;
         leave(&mut w);
     }
-    assert_eq!(in_app, 12, "6 kinds, from Files and from Search");
+    assert_eq!(in_app, 10, "5 kinds, from Files and from Search");
+    // The kind with no preview: not in the app, nothing downloaded, nothing started (no copy on this PC).
+    w.open_row(PLAN_NAME);
+    assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
+    let mut opened = Opened::InApp;
+    w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(PLAN, PLAN_NAME))));
+    assert_eq!(opened, Opened::Failed(crate::frames::files::source::ActionError::Unavailable));
+    assert_eq!(w.chunk_requests(), 0);
+}
+
+/// The real Windows port of step 2: the system knows an app for `.txt`, and none for a kind nobody registered.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_knows_an_app_for_text_and_none_for_an_unregistered_kind() {
+    assert!(crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\notes.txt")));
+    assert!(!crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\file.bbunregisteredkind")));
+    assert!(!crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\no-extension")));
 }

@@ -221,6 +221,7 @@ mod tests {
         assert_eq!(open_file(&mut s, Target::Item(&folder)), Opened::Failed(ActionError::Failed));
         assert!(calls.lock().unwrap().is_empty());
         let mut s = crate::init();
+        s.actions.source = Box::new(crate::frames::files::source::NoEngine);
         assert_eq!(
             open_file(&mut s, Target::Item(&item("a.blend"))),
             Opened::Failed(ActionError::Unavailable)
