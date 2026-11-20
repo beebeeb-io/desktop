@@ -226,6 +226,16 @@ pub fn search_box(input_key: &'static str, placeholder: &'static str, input: El,
 /// window's own controls, then the same five in every window (the list/grid switch, Sort, the
 /// details panel, Open in File Explorer, New) and the search field.
 pub fn bar(bar: Bar, t: &Theme) -> El {
+    bar_for(bar, false, t)
+}
+
+/// The toolbar of an open file (preview or editor): only what applies to that file. No Forward,
+/// no list/grid switch, no Sort, no New, no folder search; Back closes the file.
+pub fn file_bar(bar: Bar, t: &Theme) -> El {
+    bar_for(bar, true, t)
+}
+
+fn bar_for(bar: Bar, file: bool, t: &Theme) -> El {
     let nav_button = |key, name, ic, hint: &'static str, (live, press): (bool, Option<Press>)| {
         let button = tool_button(
             key,
@@ -241,16 +251,18 @@ pub fn bar(bar: Bar, t: &Theme) -> El {
             None => button,
         }
     };
-    let nav = row()
+    let mut nav = row()
         .key("nav")
-        .child(nav_button("back", "Back", &icons::CHEVRON_LEFT, "Alt+Left", bar.back))
-        .child(nav_button(
+        .child(nav_button("back", "Back", &icons::CHEVRON_LEFT, "Alt+Left", bar.back));
+    if !file {
+        nav = nav.child(nav_button(
             "forward",
             "Forward",
             &icons::CHEVRON_RIGHT,
             "Alt+Right",
             bar.forward,
         ));
+    }
 
     let on_view = bar.on_view.map(std::rc::Rc::new);
     let side = |key, name, ic, grid: bool| {
@@ -344,7 +356,8 @@ pub fn bar(bar: Bar, t: &Theme) -> El {
     }
 
     // Open in File Explorer (board b4ffef881): the last icon button, never dimmed.
-    let on_explorer = bar.on_explorer;
+    let on_explorer: std::rc::Rc<dyn Fn(&mut State, &mut rune::Tx)> = std::rc::Rc::from(bar.on_explorer);
+    let on_reveal = on_explorer.clone();
     let explorer_btn = tool_button(
         "open-explorer",
         "Open in File Explorer",
@@ -395,7 +408,7 @@ pub fn bar(bar: Bar, t: &Theme) -> El {
         }
     };
 
-    row()
+    let out = row()
         .key("toolbar")
         .role("toolbar")
         .label(bar.name)
@@ -411,8 +424,22 @@ pub fn bar(bar: Bar, t: &Theme) -> El {
         .child(nav)
         .child(bar.title)
         .child(el().key("toolbar-spacer").grow(1.0))
-        .children(bar.slot)
-        .child(view_toggle)
+        .children(bar.slot);
+    if file {
+        // One action for the file's folder: Show in File Explorer (Finder), the file selected.
+        let reveal = tool_button(
+            "show-in-folder",
+            crate::frames::show_in_folder::label(),
+            &crate::theme::icons_settings::FOLDER,
+            16.0,
+            ToolState::Idle,
+            t,
+        )
+        .help(crate::frames::show_in_folder::label())
+        .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| on_reveal(s, tx));
+        return out.child(panel_btn).child(reveal);
+    }
+    out.child(view_toggle)
         .child(sort_btn)
         .child(panel_btn)
         .child(explorer_btn)

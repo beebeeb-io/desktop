@@ -1076,7 +1076,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .grow(1.0),
         t,
     );
-    tb::bar(
+    tb::file_bar(
         Bar {
             name: file.name.clone(),
             back: (true, press(|s, _| super::close(s))),
@@ -1100,7 +1100,16 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
                 }
             }),
             inert: false,
-            on_explorer: Box::new(tb::open_beebeeb_location),
+            // The file's folder, this file selected (file_bar draws it as Show in File Explorer).
+            on_explorer: Box::new(|s, _| {
+                let Some((id, name)) = super::ui(s).map(|ui| (ui.file.id.clone(), ui.file.name.clone())) else {
+                    return;
+                };
+                let answer = super::super::show_in_folder::show(s, &id, &name);
+                if let Some(ui) = super::ui(s) {
+                    ui.toast = answer.err().map(str::to_string);
+                }
+            }),
             new: New::Idle,
             on_new: press(|s, _| {
                 if let Some(ui) = super::ui(s) {
