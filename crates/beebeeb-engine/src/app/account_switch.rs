@@ -9,6 +9,10 @@
 //!
 //! The account's entries in desktop.toml go with it ([`forget_in_settings`]), just before the owner record.
 //!
+//! The folder is not locked between the check and the removal, so the removal is told which paths were found empty
+//! (`remove_synced_items`' `unasked`) and deletes only what it can prove synced and unchanged when it reaches each
+//! item; an item made since refuses the switch, nothing deleted (w28).
+//!
 //! Must not: remove anything while a queued change, a staged copy, a held edit or a file of unknown content that may
 //! hold bytes on this PC is left;
 //! clear the owner record before every item is gone; log a name, a path, an email or an id.
@@ -63,7 +67,7 @@ impl<C: CredentialStores> Engine<C> {
             return Err("guarded file");
         }
         if db.has_account_data().map_err(|_| "unreadable")? {
-            port.remove_synced_items(db, sync_root, &[]).map_err(|_| "the folder's items stay")?;
+            port.remove_synced_items(db, sync_root, &guarded).map_err(|_| "the folder's items stay")?;
         }
         let purge = db.purge_all_local_state().map_err(|_| "the rows stay")?;
         for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {

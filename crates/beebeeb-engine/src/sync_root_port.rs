@@ -23,6 +23,10 @@ pub trait SyncRootPort: Send + Sync {
     /// Whether the engine lock in `state_dir` is held by a live process (the read half of `LockFile::acquire`).
     fn engine_lock_held(&self, state_dir: &Path) -> bool;
     /// Remove the previous account's synced items from `folder`, the items `db` lists, for an account switch.
+    /// Only an item known to be synced and unchanged goes, checked per item at the moment it is deleted. `unasked` are
+    /// the paths the engine asked [`may_hold_bytes`](Self::may_hold_bytes) about and was told nothing is there: an
+    /// item of any kind found at one of them was made since, is no one's to delete, and refuses the whole removal
+    /// before anything is deleted (so does any other item the database has no row for).
     /// `Err`: nothing may be assumed removed beyond what the OS did; the switch then goes no further. An OS with no
     /// way to do it safely refuses.
     fn remove_synced_items(&self, _db: &StateDb, _folder: &Path, _unasked: &[String]) -> Result<(), String> {
@@ -68,21 +72,19 @@ impl SyncRootPort for OsSyncRoots {
         crate::lockfile::held_by_a_live_process(state_dir)
     }
 
-    /// Windows' sign-out purge, which deletes only items proven clean while it holds each one, and refuses (deleting
-    /// nothing it was not sure of) the rest. The engine asks for the removal only when the database holds no unsent
-    /// work (`work_waiting_for_a_person`) and every file of unknown content was answered `false` by `may_hold_bytes`.
-    ///
-    /// Not closed here: `UnknownFiles::Delete` deletes an ordinary file it finds at the path of a file of unknown
-    /// content (`unknown_check::unknown_at_signout`). So a file a person creates at exactly such a path between that
-    /// answer and the purge (the same call, one after the other) would go with the rest. Closing it needs a purge
-    /// that refuses bytes at those paths, in `windows_cf::signout`.
+    /// Windows' purge in its `UnknownFiles::Refuse` mode: it deletes only items proven clean while it holds each one
+    /// (an exclusive handle binds the identity and in-sync check to the deletion), and refuses, deleting nothing, at
+    /// any other item: an ordinary file, a placeholder with changes, a file at a path of `unasked` or of a file of
+    /// unknown content (made after the engine's check), or one in a folder no row names. The engine asks for the
+    /// removal only when the database holds no unsent work (`work_waiting_for_a_person`) and every file of unknown
+    /// content was answered `false` by `may_hold_bytes`.
     #[cfg(target_os = "windows")]
-    fn remove_synced_items(&self, db: &StateDb, folder: &Path, _unasked: &[String]) -> Result<(), String> {
+    fn remove_synced_items(&self, db: &StateDb, folder: &Path, unasked: &[String]) -> Result<(), String> {
         crate::windows_cf::signout::purge(
             self.identity,
             db,
             Some(folder),
-            &crate::windows_cf::signout::UnknownFiles::Delete,
+            &crate::windows_cf::signout::UnknownFiles::refuse_at(unasked.iter().map(String::as_str)),
         )
         .map(|_| ())
         .map_err(|_| "the purge refused".to_string())
