@@ -102,3 +102,138 @@ pub fn item_named(id: &str, name: &str) -> DriveItem {
         is_protected: false,
     }
 }
+
+/// A viewer source and a spy for the tests of every entry point: what the window's viewer shows, and what went
+/// outside the app.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::sync::{Arc, Mutex};
+
+    use crate::State;
+    use crate::frames::files::source::{Call, FilesFixture};
+    use crate::frames::viewers::source::{Body, Details, OpenError, OpenFile, TextDoc, ViewerSource, plain_lines};
+
+    /// Shows every file as text, or (`shows: false`) says it has no preview for any kind.
+    pub struct Viewer {
+        pub shows: bool,
+    }
+
+    impl ViewerSource for Viewer {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            Ok(OpenFile {
+                id: id.to_string(),
+                path: vec!["Files".into()],
+                name: "x".into(),
+                facts: String::new(),
+                version: 0,
+                body: Body::Text(TextDoc {
+                    lines: plain_lines("shown in the app"),
+                    truncated: None,
+                }),
+                details: Details::default(),
+                newer: None,
+            })
+        }
+        fn poll(&mut self, _: &str) -> Option<Body> {
+            None
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.open(id)
+        }
+        fn previews(&self, _: &str) -> bool {
+            self.shows
+        }
+    }
+
+    pub type Calls = Arc<Mutex<Vec<Call>>>;
+
+    /// The app's state over a spy source and a viewer that shows every kind (`shows`) or none.
+    pub fn state(shows: bool) -> (State, Calls) {
+        let mut s = crate::init();
+        crate::frames::viewers::wire(&mut s, Box::new(move || Box::new(Viewer { shows })));
+        let fixture = FilesFixture::default();
+        let calls = fixture.calls.clone();
+        s.actions.source = Box::new(fixture);
+        (s, calls)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::state;
+    use super::*;
+    use crate::frames::files::source::{Call, FilesFixture};
+    use std::sync::atomic::Ordering;
+
+    fn item(name: &str) -> DriveItem {
+        item_named("f-1", name)
+    }
+
+    #[test]
+    fn step_1_a_kind_with_a_preview_opens_in_the_app_and_nothing_goes_outside() {
+        let (mut s, calls) = state(true);
+        assert_eq!(open_file(&mut s, Target::Item(&item("a.pdf"))), Opened::InApp);
+        assert!(s.viewer.ui.is_some());
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn step_1_has_no_exception_for_a_kept_file_and_office_without_a_preview_goes_on_to_step_2() {
+        // `.ppt` has no preview here even from a viewer that shows everything else.
+        let (mut s, calls) = state(true);
+        assert_eq!(open_file(&mut s, Target::Item(&item("old.ppt"))), Opened::DefaultApp);
+        assert_eq!(*calls.lock().unwrap(), [Call::OpenDefault("f-1".into())]);
+    }
+
+    #[test]
+    fn step_2_a_kind_with_no_preview_goes_to_the_app_the_system_has_for_it() {
+        let (mut s, calls) = state(false);
+        assert_eq!(open_file(&mut s, Target::Item(&item("a.blend"))), Opened::DefaultApp);
+        assert_eq!(*calls.lock().unwrap(), [Call::OpenDefault("f-1".into())]);
+        assert!(s.viewer.ui.is_none(), "the viewer was not opened");
+    }
+
+    #[test]
+    fn step_3_with_no_app_for_the_kind_the_file_manager_shows_the_file_selected() {
+        let (mut s, _) = state(false);
+        let fixture = FilesFixture::default();
+        fixture.no_default_app.store(true, Ordering::SeqCst);
+        let calls = fixture.calls.clone();
+        s.actions.source = Box::new(fixture);
+        assert_eq!(open_file(&mut s, Target::Item(&item("a.unknownkind"))), Opened::Explorer);
+        assert_eq!(*calls.lock().unwrap(), [Call::OpenRevealed("f-1".into())]);
+    }
+
+    #[test]
+    fn a_folder_is_not_a_file_and_a_source_that_cannot_open_outside_says_so() {
+        let (mut s, calls) = state(false);
+        let folder = DriveItem {
+            is_folder: true,
+            ..item("Folder")
+        };
+        assert_eq!(open_file(&mut s, Target::Item(&folder)), Opened::Failed(ActionError::Failed));
+        assert!(calls.lock().unwrap().is_empty());
+        let mut s = crate::init();
+        assert_eq!(
+            open_file(&mut s, Target::Item(&item("a.blend"))),
+            Opened::Failed(ActionError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn a_local_text_or_markdown_file_opens_in_the_app_and_any_other_kind_goes_outside() {
+        let dir = std::env::temp_dir().join(format!("bb-open-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (md, bin) = (dir.join("notice.md"), dir.join("notice.bin"));
+        std::fs::write(&md, "# Title\n\n- item\n\n```\ncode\n```\n").unwrap();
+        std::fs::write(&bin, [0u8; 4]).unwrap();
+        let (mut s, calls) = state(false);
+        assert_eq!(open_file(&mut s, Target::Path(md)), Opened::InApp);
+        let body = &s.viewer.ui.as_ref().unwrap().file.body;
+        assert!(matches!(body, crate::frames::viewers::source::Body::Markdown(_)), "{body:?}");
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(open_file(&mut s, Target::Path(bin.clone())), Opened::DefaultApp);
+        assert_eq!(*calls.lock().unwrap(), [Call::OpenPathDefault(bin)]);
+    }
+}

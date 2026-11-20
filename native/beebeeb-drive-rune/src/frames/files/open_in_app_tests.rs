@@ -12,7 +12,9 @@ use rune::{Key, Runtime};
 
 /// Shows every file as text and says every file is kept here (the case that used to go to Edge, Photos or Word).
 /// The "No preview" frame of a kind with no viewer is the engine source's (`viewer_tests`).
-struct Kept;
+struct Kept {
+    shows: bool,
+}
 
 impl ViewerSource for Kept {
     fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
@@ -44,11 +46,18 @@ impl ViewerSource for Kept {
     fn opens_here_when_kept(&self, _: &str) -> bool {
         false
     }
+    fn previews(&self, _: &str) -> bool {
+        self.shows
+    }
 }
 
 fn window(names: [&str; 2]) -> (Runtime<State>, Calls) {
+    window_with(names, true)
+}
+
+fn window_with(names: [&str; 2], shows: bool) -> (Runtime<State>, Calls) {
     let mut state = init();
-    crate::frames::viewers::wire(&mut state, Box::new(|| Box::new(Kept)));
+    crate::frames::viewers::wire(&mut state, Box::new(move || Box::new(Kept { shows })));
     let (mut rt, calls, _) = spied_on(state);
     rt.update(|s, _| {
         s.listing.items[6].name = names[0].into();
@@ -131,4 +140,28 @@ fn without_a_viewer_wired_a_file_is_still_never_handed_to_the_os() {
     press(&mut rt, Key::Enter, NONE);
     settle(&mut rt);
     assert!(!asked(&calls).iter().any(|c| matches!(c, Call::Open(_))), "{:?}", asked(&calls));
+}
+
+/// Every Files entry goes through `open_file`: with a viewer that shows no kind, each one ends in step 2 (the
+/// system's app for the kind, `Call::OpenDefault`), which only `open_file` asks for; none shows the viewer.
+#[test]
+fn enter_double_click_and_the_details_pane_open_all_go_through_open_file() {
+    type Way = fn(&mut Runtime<State>);
+    let ways: [(&str, Way); 3] = [
+        ("Enter", |rt| press(rt, Key::Enter, NONE)),
+        ("double-click", |rt| {
+            rt.update(|s, tx| {
+                s.open_row(6, tx);
+            })
+        }),
+        ("details pane Open", |rt| rt.update(|s, tx| s.open_from_preview(tx))),
+    ];
+    for (way, go) in ways {
+        let (mut rt, calls) = window_with(["Invented.blend", "Invented other.txt"], false);
+        let id = rt.state.listing.items[6].id.clone();
+        go(&mut rt);
+        settle(&mut rt);
+        assert_eq!(asked(&calls), [Call::OpenDefault(id)], "{way}");
+        assert!(rt.state.viewer.ui.is_none(), "{way}");
+    }
 }

@@ -1165,3 +1165,23 @@ mod reread {
         assert_eq!(rt.state.this_pc.selected, None, "and no other item is chosen");
     }
 }
+
+#[test]
+fn a_kept_file_opens_through_open_file() {
+    let (mut rt, _, _) = recording(scenes::dw_0715);
+    let (state, calls) = crate::frames::open_file::testing::state(false);
+    rt.state.actions.source = state.actions.source;
+    rt.state.viewer.route = state.viewer.route;
+    let file = rt
+        .state
+        .this_pc
+        .kept()
+        .iter()
+        .find(|k| k.kind != super::source::Kind::Folder)
+        .unwrap()
+        .id
+        .clone();
+    rt.state.this_pc.ask(Intent::Open(file.clone()));
+    poll(&mut rt);
+    assert_eq!(*calls.lock().unwrap(), [Call::OpenDefault(file)]);
+}

@@ -966,3 +966,23 @@ mod acting {
         assert!(rt.state.frames.find.notice.is_none());
     }
 }
+
+#[test]
+fn a_result_opens_through_open_file() {
+    // A viewer that shows no kind: only `open_file` sends the file on to the system's app (step 2).
+    let (mut s, calls) = crate::frames::open_file::testing::state(false);
+    let hits = vec![super::source::Hit {
+        id: "r-1".into(),
+        name: "Invented.blend".into(),
+        kind: crate::frames::shared::parts::table::Kind::Document,
+        changed: String::new(),
+        size: String::new(),
+        place: String::new(),
+        pc: None,
+    }];
+    assert!(super::open_result(&mut s, &hits, 0));
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [crate::frames::files::source::Call::OpenDefault("r-1".into())]
+    );
+}
