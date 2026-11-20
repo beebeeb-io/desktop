@@ -40,6 +40,7 @@ mod source;
 // outside its tests so far (`--db`, dev builds).
 #[cfg_attr(not(test), allow(dead_code, unused_imports))]
 mod source_engine;
+mod text_kit;
 mod theme;
 mod ui;
 mod windows_floor;
