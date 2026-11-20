@@ -356,7 +356,8 @@ fn bar_for(bar: Bar, file: bool, t: &Theme) -> El {
     }
 
     // Open in File Explorer (board b4ffef881): the last icon button, never dimmed.
-    let on_explorer = bar.on_explorer;
+    let on_explorer: std::rc::Rc<dyn Fn(&mut State, &mut rune::Tx)> = std::rc::Rc::from(bar.on_explorer);
+    let on_reveal = on_explorer.clone();
     let explorer_btn = tool_button(
         "open-explorer",
         "Open in File Explorer",
@@ -425,7 +426,18 @@ fn bar_for(bar: Bar, file: bool, t: &Theme) -> El {
         .child(el().key("toolbar-spacer").grow(1.0))
         .children(bar.slot);
     if file {
-        return out.child(panel_btn).child(explorer_btn);
+        // One action for the file's folder: Show in File Explorer (Finder), the file selected.
+        let reveal = tool_button(
+            "show-in-folder",
+            crate::frames::show_in_folder::label(),
+            &crate::theme::icons_settings::FOLDER,
+            16.0,
+            ToolState::Idle,
+            t,
+        )
+        .help(crate::frames::show_in_folder::label())
+        .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| on_reveal(s, tx));
+        return out.child(panel_btn).child(reveal);
     }
     out.child(view_toggle)
         .child(sort_btn)

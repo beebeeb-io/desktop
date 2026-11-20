@@ -128,19 +128,6 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
         }
     });
 
-    // Open in File Explorer (board b4ffef881): the last icon button, never dimmed; the viewer shows no folder of its
-    // own, so it opens the Beebeeb location.
-    let explorer_btn = tool_button(
-        "open-explorer",
-        "Open in File Explorer",
-        &crate::theme::icons_settings::FOLDER,
-        16.0,
-        ToolState::Idle,
-        t,
-    )
-    .help("Open in File Explorer")
-    .on_press_tx(crate::ui::toolbar::open_beebeeb_location);
-
     // Show in File Explorer / Finder: this file in its folder, selected (the placeholder, never hydrated).
     let reveal_btn = tool_button(
         "show-in-folder",
@@ -180,7 +167,6 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
         .child(file_tools)
         .child(panel_btn)
         .child(reveal_btn)
-        .child(explorer_btn)
 }
 
 /// The status line (`.mk-foot`) with this frame's words.
