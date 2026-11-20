@@ -132,6 +132,28 @@ pub struct EngineSignInSource<C: CredentialStores> {
 }
 
 impl<C: CredentialStores> EngineSignInSource<C> {
+    /// The no-plan screen's sign-out: the session as it is now, signed out by the engine's own call (which refuses
+    /// an open editor's unsaved changes unless `discard`).
+    fn sign_out_gate_as(&mut self, discard: bool) {
+        let job: Job<C> = Box::new(move |engine| {
+            if engine.has_session() {
+                let session = engine.session_turn();
+                let done = if discard {
+                    engine.sign_out_discarding_unsaved_for(session)
+                } else {
+                    engine.sign_out_for(session)
+                };
+                if done.is_err() {
+                    log("sign-in: the sign-out from the gate was not done");
+                }
+            }
+            engine.wake_host();
+        });
+        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
+            log("sign-in: the sign-out could not be passed to the engine");
+        }
+    }
+
     /// Without a Windows Hello prompt: the lock screen's Unlock answers "not available" and offers the password.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
         Self::with_tick(engine, Duration::from_secs(1))
@@ -478,18 +500,11 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
 
     /// w16-gates: the no-plan screen's sign-out: the session as it is now, signed out by the engine's own call.
     fn sign_out_from_gate(&mut self) {
-        let job: Job<C> = Box::new(|engine| {
-            if engine.has_session() {
-                let session = engine.session_turn();
-                if engine.sign_out_for(session).is_err() {
-                    log("sign-in: the sign-out from the gate was not done");
-                }
-            }
-            engine.wake_host();
-        });
-        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
-            log("sign-in: the sign-out could not be passed to the engine");
-        }
+        self.sign_out_gate_as(false);
+    }
+
+    fn sign_out_from_gate_discarding_unsaved(&mut self) {
+        self.sign_out_gate_as(true);
     }
 
     /// No other Beebeeb app's session is read on this computer, and no Windows Hello prompt exists for this app

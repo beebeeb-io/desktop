@@ -47,6 +47,7 @@ mod states;
 mod style;
 mod table;
 mod text;
+pub(crate) mod unsaved_guard;
 pub mod video;
 use open_route::is_this_groups;
 
@@ -629,6 +630,8 @@ pub struct Slot {
     /// Where a key goes that reaches a text field of this group after the field's owner closed
     /// (two keys in one frame): a field nobody shows, never the Files window's search.
     pub(crate) stray: rune::TextEdit,
+    /// The unsaved-changes question a quit or the gate's sign-out raised ([`unsaved_guard`]).
+    pub(crate) leave: Option<unsaved_guard::Leave>,
 }
 
 #[cfg(test)]

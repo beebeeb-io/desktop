@@ -596,6 +596,8 @@ pub struct SigningOut {
     pub unsaved: bool,
     /// Save was pressed: the confirm waits for the editor's save, then signs out. A save that did not land says so.
     pub saving: bool,
+    /// The question is for "Sign out of all" (not this app only).
+    pub all: bool,
 }
 
 /// What the confirm says when the save it waited for did not land.
@@ -621,15 +623,10 @@ pub(super) fn settle_sign_out(s: &mut State, all: bool, answer: SignOutAnswer) {
         }
         SignOutAnswer::Unsaved => {
             // The editor's name, read where the open document is (nothing else says which one holds the changes).
-            s.account.unsaved_name = s
-                .viewer
-                .ui
-                .as_ref()
-                .map(|ui| ui.file.name.clone())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| "an open document".to_string());
+            s.account.unsaved_name = crate::frames::viewers::unsaved_guard::name(s);
             s.account.signing_out = SigningOut {
                 unsaved: true,
+                all,
                 ..SigningOut::default()
             };
         }
@@ -637,28 +634,22 @@ pub(super) fn settle_sign_out(s: &mut State, all: bool, answer: SignOutAnswer) {
     }
 }
 
-/// The sign-out met an open editor with changes no save has landed: "You have unsaved changes in <name>." with
+/// The sign-out met an open editor with changes no save has landed: the shared question (`unsaved_guard`) with
 /// Save (saves, then signs out), Discard and sign out (the only way they are dropped) and Cancel (Enter).
 fn unsaved_confirm(title: &str, name: &str, saving: bool, t: &Theme) -> El {
-    let words = if saving {
-        format!("Saving {name}. Nothing is signed out until it is saved.")
-    } else {
-        format!("You have unsaved changes in {name}.")
-    };
-    let mut save = set::button("btn-1", "Save", None, Look::Primary, Size::Medium, saving, t);
-    let mut discard = set::button("btn-2", "Discard and sign out", None, Look::Danger, Size::Medium, saving, t)
-        .label("Discard and sign out, destructive");
-    let mut cancel = set::button("btn-3", "Cancel", None, Look::Plain, Size::Medium, saving, t).default_button();
-    if !saving {
-        save = save.on_press(|s: &mut State| {
+    use crate::frames::viewers::unsaved_guard as guard;
+    guard::question(
+        title,
+        &guard::words(name, saving),
+        saving,
+        "Discard and sign out",
+        |s: &mut State, _tx: &mut rune::Tx| {
             // Save is the editor's own save; the sign-out follows when it landed (`follow_save`).
-            let asked = s.viewer.ui.as_mut().is_some_and(|ui| {
-                ui.office_save();
-                ui.office.edit.is_some()
-            });
-            if asked {
+            let all = s.account.signing_out.all;
+            if guard::save_open_editor(s) {
                 s.account.signing_out = SigningOut {
                     saving: true,
+                    all,
                     ..SigningOut::default()
                 };
             } else {
@@ -667,26 +658,25 @@ fn unsaved_confirm(title: &str, name: &str, saving: bool, t: &Theme) -> El {
                     ..SigningOut::default()
                 };
             }
-        });
-        discard = discard.on_press(|s: &mut State| {
+        },
+        |s: &mut State, _tx: &mut rune::Tx| {
+            let all = s.account.signing_out.all;
             let Some(source) = s.account.source.as_mut() else {
                 return;
             };
-            let answer = source.sign_out_discarding_unsaved();
-            settle_sign_out(s, false, answer);
-        });
-        cancel = cancel.on_press(|s: &mut State| {
+            let answer = if all {
+                source.sign_out_all_apps()
+            } else {
+                source.sign_out_discarding_unsaved()
+            };
+            settle_sign_out(s, all, answer);
+        },
+        |s: &mut State, _tx: &mut rune::Tx| {
             s.account.signing_out = SigningOut::default();
             s.account.dialog = None;
-        });
-    }
-    let foot = vec![(save, false), (discard, false), (cancel, true)];
-    set::dialog(title, 440.0, title, &words, Vec::new(), foot, t).modal(false, |s: &mut State| {
-        if !s.account.signing_out.saving {
-            s.account.signing_out = SigningOut::default();
-            s.account.dialog = None;
-        }
-    })
+        },
+        t,
+    )
 }
 
 /// While Save waits for the editor: when its save landed the sign-out goes on (the engine asks again, and
@@ -710,10 +700,11 @@ pub(super) fn follow_save(s: &mut State, tx: &mut rune::Tx) -> bool {
         }
         // Saved (or the editor is gone): the engine decides whether anything is still unsaved.
         _ => {
+            let all = s.account.signing_out.all;
             s.account.signing_out = SigningOut::default();
             let Some(source) = s.account.source.as_mut() else { return true };
-            let answer = source.sign_out_this_app();
-            settle_sign_out(s, false, answer);
+            let answer = if all { source.sign_out_all_apps() } else { source.sign_out_this_app() };
+            settle_sign_out(s, all, answer);
             true
         }
     }
@@ -744,6 +735,11 @@ fn sign_out_confirm(
     let mut cancel = set::button("btn-2", "Cancel", None, Look::Plain, Size::Medium, waiting, t).default_button();
     if !waiting {
         act = act.on_press(move |s: &mut State| {
+            // "Sign out of all" ends this app's editors too: the same question as for this app's sign-out.
+            if all && crate::frames::viewers::unsaved_guard::holds(s) {
+                settle_sign_out(s, true, SignOutAnswer::Unsaved);
+                return;
+            }
             let Some(source) = s.account.source.as_mut() else {
                 return;
             };

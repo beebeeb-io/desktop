@@ -115,7 +115,20 @@ fn recheck(s: &mut State) {
 /// "Sign out" on the no-plan screen: the existing sign-out of this app.
 fn sign_out(s: &mut State) {
     s.frames.gate_notice = None;
-    ask_source(s, SIGN_OUT, |source| source.sign_out_from_gate());
+    // An open editor with unsaved changes asks first (Save, Discard and sign out, Cancel).
+    if crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::GateSignOut) {
+        return;
+    }
+    sign_out_now(s, false);
+}
+
+/// The gate's sign-out itself, once nothing unsaved is in the way (or the person chose to discard it).
+pub(crate) fn sign_out_now(s: &mut State, discard: bool) {
+    if discard {
+        ask_source(s, SIGN_OUT, |source| source.sign_out_from_gate_discarding_unsaved());
+    } else {
+        ask_source(s, SIGN_OUT, |source| source.sign_out_from_gate());
+    }
 }
 
 /// Opens one of the website's pages by its name in `shell::web_pages`; says so when it did not open.
