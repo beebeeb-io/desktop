@@ -1179,7 +1179,10 @@ impl OfficeView {
                 doc.view.page_sizes_pt = sizes.iter().map(|size| (size.w_pt, size.h_pt)).collect();
                 doc.page = doc.page.clamp(1, pages.max(1));
             }
-            Body::Deck(deck) => set_deck_count(deck, pages),
+            Body::Deck(deck) => {
+                set_deck_count(deck, pages);
+                deck.view.page_pt = deck_page_pt(&sizes).unwrap_or(deck.view.page_pt);
+            }
             _ => {}
         }
         model.sizes = sizes;
@@ -1285,7 +1288,9 @@ impl OfficeView {
         match (phase, state) {
             (Phase::Pages(pages), HostState::Pages { sizes, .. }) => {
                 if kind == OfficeKind::Pptx {
-                    model.body = Body::Deck(DeckBody::new(DeckView::of(pages)));
+                    let mut view = DeckView::of(pages);
+                    view.page_pt = deck_page_pt(&sizes).unwrap_or(view.page_pt);
+                    model.body = Body::Deck(DeckBody::new(view));
                 } else {
                     let view = DocView {
                         pages,
@@ -1503,6 +1508,14 @@ fn wipe_answer(answer: EditAnswer) {
             html.zeroize();
         }
     }
+}
+
+/// The size of a deck's slides, in whole points, as the renderer states it (a deck has one slide size: the first
+/// slide's). `None`: no slide, or a size no slide has (the view keeps the one it has).
+fn deck_page_pt(sizes: &[PageSize]) -> Option<(u32, u32)> {
+    let size = sizes.first()?;
+    let whole = |pt: f32| (pt.is_finite() && (1.0..=100_000.0).contains(&pt)).then(|| pt.round() as u32);
+    Some((whole(size.w_pt)?, whole(size.h_pt)?))
 }
 
 /// A deck of `count` slides: the filmstrip's slides again, the slide on the stage kept when it is still there.

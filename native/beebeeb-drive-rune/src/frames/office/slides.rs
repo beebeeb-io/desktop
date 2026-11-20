@@ -481,7 +481,8 @@ fn thumbnail(i: usize, n: u32, page: Option<SlidePage>, current: bool, t: &Theme
     let page = page.unwrap_or_default();
     let Some(words) = page.words else {
         return match page.pixels {
-            Some(p) => frame.pixels_fit(&p, SurfaceFit::Fill),
+            // The slide whole, in its own proportions (a 4:3 slide leaves the frame's white beside it).
+            Some(p) => frame.pixels_fit(&p, SurfaceFit::Fit),
             None => frame,
         };
     };
@@ -587,15 +588,18 @@ fn strip_wheel(s: &mut State, ev: rune::WheelEvent, _: &mut rune::Tx) -> bool {
     viewers::deck_mut(s).is_some_and(|deck| deck.strip_wheel(&ev))
 }
 
-/// RED STUB (the fix replaces it): the old fixed 16:9 box, whatever the slide's size.
-pub fn slide_box(_page_pt: (u32, u32), zoom: u16) -> (f32, f32) {
-    (SLIDE_W * f32::from(zoom) / 100.0, SLIDE_H * f32::from(zoom) / 100.0)
+/// A slide of `page_pt` points drawn at `zoom` per cent, in layout points: in the slide's own proportions, as large
+/// as fits the board's [`SLIDE_W`] by [`SLIDE_H`] at 100 % (a 16:9 slide fills it; a 4:3 one is narrower, never
+/// stretched).
+pub fn slide_box(page_pt: (u32, u32), zoom: u16) -> (f32, f32) {
+    let (pw, ph) = (page_pt.0.max(1) as f32, page_pt.1.max(1) as f32);
+    let k = (SLIDE_W / pw).min(SLIDE_H / ph) * f32::from(zoom) / 100.0;
+    (pw * k, ph * k)
 }
 
 /// The stage's slide in layout points at the deck's zoom.
 fn stage_size(deck: &DeckBody) -> (f32, f32) {
-    let zoom = f32::from(deck.view.zoom) / 100.0;
-    (SLIDE_W * zoom, SLIDE_H * zoom)
+    slide_box(deck.view.page_pt, deck.view.zoom)
 }
 
 fn stage(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, edit: Option<&EditUi>, t: &Theme) -> El {
@@ -916,7 +920,7 @@ pub fn present_live(cx: &mut Cx<State>, deck: &DeckBody, live: &Live) -> El {
     });
     let slide = match pixels {
         Some(p) => {
-            let (w, h) = (SLIDE_W * f32::from(zoom) / 100.0, SLIDE_H * f32::from(zoom) / 100.0);
+            let (w, h) = slide_box(deck.view.page_pt, zoom);
             el().key("pres-picture")
                 .role("image")
                 .label(format!("Slide {}", deck.view.current))

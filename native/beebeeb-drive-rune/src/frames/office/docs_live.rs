@@ -5,7 +5,10 @@ use std::collections::HashMap;
 
 use rune::{El, Pixels, SurfaceFit, el};
 
-use super::{DocBody, PAGE_GAP, box_pt, paper_box, shell};
+use beebeeb_office_protocol::check;
+use beebeeb_office_protocol::office::PageSize;
+
+use super::{DocBody, PAGE_GAP, box_pt, paper_box, shell, size_pt};
 use crate::frames::viewers::kinds::{OfficePicture, TILE_PX, uses_tiles};
 
 /// What a live document asks its renderer for: every key at most once per frame (the answer is kept for the frame),
@@ -87,20 +90,22 @@ pub(super) fn paper_live(n: u32, doc: &DocBody, live: &Live, top: f32) -> El {
     }
     let (w, h) = box_pt(doc, n);
     let device = f32::from(live.dpi) / 96.0;
-    let (cols, rows) = (
-        ((w * device).ceil() as u32).div_ceil(TILE_PX),
-        ((h * device).ceil() as u32).div_ceil(TILE_PX),
-    );
+    // The renderer's raster of this page at this scale (the host cuts its tiles from the same one), and the layout
+    // points one of its pixels takes in the page's box: the raster is sized from the file's points, the box from the
+    // board's width, so the two differ by more than the device factor.
+    let Some(grid) = TileGrid::of(doc, n, live.dpi) else {
+        return paper_box(n, doc, None);
+    };
     // The band, in this page's own points from its top: one screen above the first page, one below the screen.
     let (band_top, band_bottom) = (-live.screen.1 - top, 2.0 * live.screen.1 - top);
-    let side = TILE_PX as f32 / device;
+    let side = TILE_PX as f32 * grid.fy;
     let mut page = shell(n, doc).h(h);
     let mut tiles = Vec::new();
     // Only the rows that touch the band: the page's size is the file's, so the loop never walks every row of it.
     let first = (band_top / side).floor().max(0.0) as u32;
-    let last = ((band_bottom / side).ceil().max(0.0) as u32).min(rows);
+    let last = ((band_bottom / side).ceil().max(0.0) as u32).min(grid.rows);
     for row_ in first..last {
-        for col_ in 0..cols {
+        for col_ in 0..grid.cols {
             tiles.push((
                 col_,
                 row_,
@@ -132,13 +137,55 @@ pub(super) fn paper_live(n: u32, doc: &DocBody, live: &Live, top: f32) -> El {
     }
     for (col_, row_, pixels) in tiles {
         let Some(p) = pixels else { continue };
-        let (pw, ph) = p.size();
+        let [x, y, tw, th] = grid.place(col_, row_, device);
         page = page.child(
             el().key(format!("page-{n}-tile-{col_}-{row_}"))
-                .absolute((col_ * TILE_PX) as f32 / device, (row_ * TILE_PX) as f32 / device)
-                .size(pw as f32 / device, ph as f32 / device)
+                .absolute(x, y)
+                .size(tw, th)
                 .pixels_fit(&p, SurfaceFit::Fill),
         );
     }
     page
+}
+
+/// The tiles of one page: the renderer's raster of it (pixels), cut in [`TILE_PX`] squares, on the page's box.
+struct TileGrid {
+    /// The raster's size, in pixels.
+    raster: (u32, u32),
+    cols: u32,
+    rows: u32,
+    /// Layout points per raster pixel, across and down: the page's box over the raster.
+    fx: f32,
+    fy: f32,
+}
+
+impl TileGrid {
+    /// Page `n`'s grid at the stage's zoom and `dpi`: the raster is [`check::page_pixels`] at [`check::render_scale`],
+    /// the rule the host cuts tiles by (`engine_host::viewer_office::tile_region`). `None`: no raster of that size.
+    fn of(doc: &DocBody, n: u32, dpi: u16) -> Option<Self> {
+        let (w_pt, h_pt) = size_pt(doc, n);
+        let scale = check::render_scale(f32::from(doc.view.zoom) / 100.0, f32::from(dpi));
+        let raster = check::page_pixels(&PageSize { w_pt, h_pt }, scale)?;
+        let (w, h) = box_pt(doc, n);
+        Some(TileGrid {
+            raster,
+            cols: raster.0.div_ceil(TILE_PX),
+            rows: raster.1.div_ceil(TILE_PX),
+            fx: w / raster.0 as f32,
+            fy: h / raster.1 as f32,
+        })
+    }
+
+    /// Where tile (`col`, `row`) is drawn in the page's box, `[x, y, w, h]` in layout points: its pixels of the
+    /// raster times the box's factor, each edge on a whole device pixel so two tiles share their edge exactly.
+    fn place(&self, col: u32, row: u32, device: f32) -> [f32; 4] {
+        let edge = |px: u32, f: f32| (px as f32 * f * device).round() / device;
+        let (x0, y0) = (col.saturating_mul(TILE_PX), row.saturating_mul(TILE_PX));
+        let (x1, y1) = (
+            x0.saturating_add(TILE_PX).min(self.raster.0),
+            y0.saturating_add(TILE_PX).min(self.raster.1),
+        );
+        let (left, top) = (edge(x0, self.fx), edge(y0, self.fy));
+        [left, top, edge(x1, self.fx) - left, edge(y1, self.fy) - top]
+    }
 }
