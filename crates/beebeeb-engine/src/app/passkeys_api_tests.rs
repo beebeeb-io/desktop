@@ -518,6 +518,16 @@ fn a_closed_dialog_signs_nobody_in_and_an_empty_address_sends_nothing() {
 fn a_passkey_sign_in_over_a_session_that_is_there_sends_nothing() {
     let fake = fake("signin-present");
     let engine = engine(&fake, true);
+    // Signing in starts the plan question in the background (`plan_gate`); let it land first, or it is counted as
+    // something the passkey sign-in sent.
+    let asked = |fake: &Fake| fake.api.routes().iter().any(|r| r == "GET /api/v1/billing/subscription");
+    for _ in 0..200 {
+        if asked(&fake) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(asked(&fake), "the plan question was never asked");
     let before = fake.api.routes().len();
     assert_eq!(
         engine
