@@ -268,12 +268,12 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
     assert!(with.rt.state.viewer.ui.is_some(), "the PDF opened in the viewer");
     assert!(asked(&with.calls).is_empty(), "no source call: the viewer handles it");
     assert_eq!(with.rt.state.actions.session.asked, 0);
-    // A file without a viewer (.key) still reaches the source (the guard is what refuses).
+    // A file without a viewer (.key) opens the viewer's "No preview" frame too, never another app (w29).
     let mut with_key = app(false);
     click(&mut with_key.rt, "row-9-date");
     press(&mut with_key.rt, Key::Enter, NONE);
-    assert_eq!(asked(&with_key.calls).len(), 1, "the .key file called source.open");
-    assert!(with_key.rt.state.viewer.ui.is_none(), "no viewer for .key");
+    assert!(asked(&with_key.calls).is_empty(), "the .key file was not handed to another app");
+    assert!(with_key.rt.state.viewer.ui.is_some(), "the viewer's own frame for .key");
     assert_eq!(with_key.rt.state.actions.session.asked, 0);
 }
 

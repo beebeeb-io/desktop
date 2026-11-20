@@ -184,6 +184,7 @@ fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
     click(&mut rt, "row-5-date");
     press(&mut rt, Key::Enter, NONE);
     assert!(asked(&calls).is_empty(), "the viewer opens it, not another app");
+    press(&mut rt, Key::Escape, NONE);
     assert!(rt.state.actions.toast != Some(Toast::LinkCopied));
     assert!(find(&rt, "ready-card").is_none(), "the card is gone");
     assert_eq!(

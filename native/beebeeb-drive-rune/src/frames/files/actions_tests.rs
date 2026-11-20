@@ -779,8 +779,6 @@ fn open_goes_to_the_viewer_for_every_file_and_never_to_the_files_app() {
         matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(other.as_str()))
     );
     press(&mut rt, Key::Escape, NONE);
-    rt.update(|s, _| crate::frames::viewers::close(s));
-    settle(&mut rt);
     // A file the viewer renders (its sample's notes): Open shows it in the window.
     let notes = crate::frames::viewers::source::board::NOTES;
     rt.update(|s, _| {
@@ -793,7 +791,7 @@ fn open_goes_to_the_viewer_for_every_file_and_never_to_the_files_app() {
         matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(notes)),
         "the route is on the file"
     );
-    assert_eq!(asked(&calls).len(), 1, "it was not also handed to another app");
+    assert!(asked(&calls).is_empty(), "it was not handed to another app");
 }
 
 // ---- Two versions (DW-0429) ----
