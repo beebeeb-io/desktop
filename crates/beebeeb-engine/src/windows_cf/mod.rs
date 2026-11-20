@@ -1178,7 +1178,7 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
     // be reachable before we create any placeholder below.
     set_bridge(bridge.clone());
     crate::backup_protect::reconcile_backups_tree_soon(bridge.db_arc(), sync_root); // LD-0113 review #4
-    let created = populate_placeholders(bridge.db(), sync_root).created;
+    let created = populate_placeholders(bridge.db(), sync_root, &mut placed_memo()).created;
     // Zero-knowledge (task 2240 slice 2): a count, never the sync root's path.
     tracing::info!(placeholders = created, "Cloud Files placeholders seeded");
 }
@@ -1210,9 +1210,11 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
     };
     // Task 2240 slice 2 (spec D6): what the refresh costs, measured every tick before anyone optimises it.
     // Counts and milliseconds only, never a path.
-    let s = populate_placeholders(bridge.db(), sync_root);
+    let s = populate_placeholders(bridge.db(), sync_root, &mut placed_memo());
     tracing::debug!(
         rows = s.rows,
+        visited = s.visited,
+        dirs_listed = s.dirs_listed,
         skipped = s.skipped,
         ensure_dir_errors = s.ensure_dir_errors,
         create_calls = s.create_calls,
@@ -1225,6 +1227,15 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         elapsed_ms = s.elapsed_ms,
         "placeholder refresh"
     );
+}
+
+/// w36: the tick's memo of placed rows ([`populate::PlacedMemo`]); it resets itself for another sync root.
+fn placed_memo() -> std::sync::MutexGuard<'static, populate::PlacedMemo> {
+    static PLACED: OnceLock<std::sync::Mutex<populate::PlacedMemo>> = OnceLock::new();
+    PLACED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 /// Per-tick reconcile of on-disk Cloud Files placeholder state back into the

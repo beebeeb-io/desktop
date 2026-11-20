@@ -339,13 +339,13 @@ fn t16_populate_counts_created_and_already_existing() {
     let r = Root::new();
     r.track("one.bin", FileStatus::CloudOnly, PinState::Inherit);
     r.track("two.bin", FileStatus::CloudOnly, PinState::Inherit);
-    let first = populate_placeholders(&r.db, &r.root);
+    let first = populate_placeholders(&r.db, &r.root, &mut Default::default());
     assert_eq!((first.create_calls, first.created), (2, 2), "{first:?}");
     r.track("three.bin", FileStatus::CloudOnly, PinState::Inherit);
-    let second = populate_placeholders(&r.db, &r.root);
+    let second = populate_placeholders(&r.db, &r.root, &mut Default::default());
     assert_eq!(
         (second.rows, second.create_calls, second.created, second.already_existed),
-        (3, 3, 1, 2),
+        (3, 1, 1, 2), // w36: an existing placeholder gets no create call
         "{second:?}"
     );
     assert_eq!(
@@ -362,7 +362,7 @@ fn ld0105_review_a_placeholder_minted_without_an_identity_gains_it_at_the_next_r
     let r = Root::new();
     r.track("old.bin", FileStatus::CloudOnly, PinState::Inherit);
     r.db.set_versions_for_test("old.bin", Some(A), None);
-    let first = populate_placeholders(&r.db, &r.root);
+    let first = populate_placeholders(&r.db, &r.root, &mut Default::default());
     assert_eq!(first.created, 1, "{first:?}");
     assert_eq!(
         r.db.minted_version("old.bin").unwrap().as_deref(),
@@ -371,7 +371,7 @@ fn ld0105_review_a_placeholder_minted_without_an_identity_gains_it_at_the_next_r
     );
     // As a 0.8.21 database holds it: the placeholder exists, no identity.
     r.db.set_versions_for_test("old.bin", Some(A), None);
-    let second = populate_placeholders(&r.db, &r.root);
+    let second = populate_placeholders(&r.db, &r.root, &mut Default::default());
     assert_eq!(second.already_existed, 1, "{second:?}");
     assert_eq!(
         r.db.minted_version("old.bin").unwrap().as_deref(),
