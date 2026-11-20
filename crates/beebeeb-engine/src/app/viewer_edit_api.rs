@@ -483,6 +483,9 @@ impl<C: CredentialStores> Engine<C> {
         // A save the server refused as stale (409) is a Conflict, never "saved" (w26, v5 bug 8); one that will not be
         // sent by itself, or left the queue without landing, is not saved.
         let deadline = Instant::now() + LAND_WAIT;
+        let began_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
         let (mut gone_since, mut parked_stale, mut asked) = (None::<Instant>, false, None::<Instant>);
         let mut head = None::<(i64, i64)>;
         // A save that is not saved leaves no claim on the file: the next save of this opening is judged by what is
@@ -533,6 +536,11 @@ impl<C: CredentialStores> Engine<C> {
                 }
                 Ok(Ok(Fate::Waiting)) => {
                     (gone_since, parked_stale) = (None, false);
+                    // w29: offline (or the server not answering) the upload cannot start: the save is stored here and
+                    // says so now, not after the whole land wait (VM 401 run 11: 20 s of "saving").
+                    if viewer_edit_landing::link_down_since(self.link_failure(), began_unix) {
+                        return Ok(SaveEnd::Queued { base });
+                    }
                     std::thread::sleep(LAND_POLL);
                 }
             }
@@ -554,8 +562,14 @@ impl<C: CredentialStores> Engine<C> {
         head_of(&meta)
     }
 
+    /// The link monitor's latest failure (the runner's), `None`: none since its last good answer, or no runner.
+    fn link_failure(&self) -> Option<(crate::link_health::LinkFailure, i64)> {
+        self.runtime
+            .block_on(async { self.acct.engine.lock().await.as_ref().and_then(|runner| runner.send_phase().link_failure()) })
+    }
+
     /// Ask the runner for a queue step now (it would otherwise send the save at its next tick). No runner: nothing.
-    fn nudge_runner(&self) {
+    pub(in crate::app) fn nudge_runner(&self) {
         self.runtime.block_on(async {
             if let Some(runner) = self.acct.engine.lock().await.as_ref() {
                 runner.send_phase().nudge();

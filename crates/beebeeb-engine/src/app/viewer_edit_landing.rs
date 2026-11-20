@@ -12,6 +12,14 @@ use crate::state_db::StateDb;
 /// The class a stale-base park carries (`ParkReason::StaleBase`).
 const STALE_BASE: &str = "stale_base";
 
+/// w29: has the link to the server failed at or after `since` (unix seconds, when the save began)? The upload this save
+/// queued is tried at once (the runner is nudged), so a failure noted since says it cannot start: offline, or the server
+/// not answering. The save then ends as "stored here, sent later" without waiting out the land wait. A failure from
+/// before the save says nothing about it, and no failure is a link that works (or not tried yet): wait for the upload.
+pub(super) fn link_down_since(failure: Option<(crate::link_health::LinkFailure, i64)>, since: i64) -> bool {
+    failure.is_some_and(|(_, at)| at >= since)
+}
+
 /// One look at `queued`'s fate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fate {
