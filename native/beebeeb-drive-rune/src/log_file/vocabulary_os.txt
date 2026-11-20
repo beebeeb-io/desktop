@@ -143,5 +143,8 @@ certificate verify failed
 client error
 Connect
 request or response body error
+# The sandbox crate's step names (crates/beebeeb-office-sandbox, SandboxError::Os), written by media/refusal_log.rs
+UI administrators capabilities capability container exit identifier inheritable integrity job kill
+lpac map membership profile random restricted restrictions section token view wait
 # Units
 ms s KB MB GB

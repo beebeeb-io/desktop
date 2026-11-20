@@ -119,7 +119,7 @@ pub(crate) fn excluded_then<T>(
 ) -> Result<T, Refusal> {
     if excluded.0.get().is_none() {
         reports.exclude(HELPER_NAME).map_err(|_| {
-            refusal_log::not_started("exclusion");
+            refusal_log::not_started(refusal_log::NotStarted::Exclusion);
             Refusal::NoSandbox
         })?;
         let _ = excluded.0.set(());
@@ -254,7 +254,7 @@ impl HelperLink {
         let mut child = sandbox.spawn(exe).map_err(sandbox_refusal)?;
         let Some(pipes) = child.take_pipes() else {
             let _ = child.kill();
-            refusal_log::not_started("pipes");
+            refusal_log::not_started(refusal_log::NotStarted::Pipes);
             return Err(Refusal::NoSandbox);
         };
         match HelperLink::over(Box::new(pipes.from_helper), Box::new(pipes.to_helper)) {
@@ -264,7 +264,7 @@ impl HelperLink {
             }
             Err(_) => {
                 let _ = child.kill();
-                refusal_log::not_started("threads");
+                refusal_log::not_started(refusal_log::NotStarted::Threads);
                 Err(Refusal::CouldNotPlay)
             }
         }
@@ -520,7 +520,7 @@ impl LinkFactory for SandboxedHelpers {
 
     fn start_in(&self, profile: Profile) -> Result<Box<dyn Link>, Refusal> {
         let exe = helper_exe().ok_or_else(|| {
-            refusal_log::not_started("no helper");
+            refusal_log::not_started(refusal_log::NotStarted::NoHelper);
             Refusal::NotInstalled
         })?;
         Ok(Box::new(HelperLink::start_in(&exe, profile)?))

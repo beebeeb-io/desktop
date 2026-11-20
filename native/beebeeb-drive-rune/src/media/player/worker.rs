@@ -20,7 +20,7 @@ use super::{
     Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, Waker, lock,
 };
 use crate::media::os_controls::{NowPlaying, OsButton};
-use crate::media::refusal_log;
+use crate::media::refusal_log::{self, Broke};
 use crate::media::transport::{LinkError, profile_for_file_with, wipe, wipe_answer};
 
 /// Why a worker stopped.
@@ -40,12 +40,12 @@ impl From<Refusal> for Exit {
 /// The helper broke a rule (or a read failed): it is killed, and "This file could not be played." is shown.
 #[track_caller]
 fn broke() -> Exit {
-    broke_as("check")
+    broke_as(Broke::Check)
 }
 
 /// [`broke`], saying which kind of rule in the log: `gone`, `protocol`, `timeout`, `read` or a `check` of an answer.
 #[track_caller]
-fn broke_as(what: &'static str) -> Exit {
+fn broke_as(what: Broke) -> Exit {
     refusal_log::broke(what, std::panic::Location::caller().line());
     Exit::Refused(Refusal::CouldNotPlay)
 }
@@ -419,7 +419,7 @@ impl Worker {
                 Err(LinkError::Timeout) => break,
                 Err(gone @ (LinkError::Gone | LinkError::Protocol(_))) => {
                     batch.iter_mut().for_each(wipe_answer);
-                    return Err(broke_as(if gone == LinkError::Gone { "gone" } else { "protocol" }));
+                    return Err(broke_as(if gone == LinkError::Gone { Broke::Gone } else { Broke::Protocol }));
                 }
             }
             wait = Duration::ZERO;
@@ -710,7 +710,7 @@ impl Worker {
             }
             let mut buf = match got {
                 Ok(buf) if buf.len() == read.len as usize => buf,
-                _ => return Err(broke_as("read")),
+                _ => return Err(broke_as(Broke::Read)),
             };
             let mut msg = ToHelper::Data {
                 id: read.id,
@@ -742,7 +742,7 @@ impl Worker {
         let video_late = self.want_video.as_ref().is_some_and(|want| now > want.by);
         let audio_late = self.want_audio.as_ref().is_some_and(|want| now > want.by);
         if opened_late || video_late || audio_late {
-            return Err(broke_as("timeout"));
+            return Err(broke_as(Broke::Timeout));
         }
         Ok(())
     }

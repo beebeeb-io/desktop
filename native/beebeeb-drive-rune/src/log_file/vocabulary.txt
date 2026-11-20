@@ -9,6 +9,7 @@ $home
 1s
 24h
 2xx
+?
 a
 aac
 abandon
@@ -30,7 +31,6 @@ acquire
 activity
 add
 added
-administrators
 adopted
 adoption
 after
@@ -136,8 +136,6 @@ candidate
 candidates
 cannot
 cap
-capabilities
-capability
 category
 cf
 cf_callback_info
@@ -200,7 +198,6 @@ conflict
 connect
 connected
 connection
-container
 content
 content_unknown
 context
@@ -333,7 +330,6 @@ exclude
 exclusion
 existing
 exists
-exit
 exited
 expires_in
 explorer
@@ -438,7 +434,6 @@ icon
 id
 id_kind
 idempotent
-identifier
 identity
 idle
 ignored
@@ -450,12 +445,10 @@ in-sync
 incoming
 index
 indexed_file_count
-inheritable
 init
 initialized
 inside
 inspect
-integrity
 internal
 interrupted
 interval
@@ -475,7 +468,6 @@ item
 items
 its
 itself
-job
 joined
 joined_ms
 journal
@@ -486,7 +478,6 @@ keeps
 kept
 kept-folder
 key
-kill
 kind
 known
 landed
@@ -526,12 +517,10 @@ longer
 looked
 lookup
 loop
-lpac
 machine
 macos
 made
 manifest
-map
 mark
 mark_failed
 mark_not_in_sync
@@ -548,7 +537,6 @@ max_new_uploads
 may
 meanwhile
 media
-membership
 merged
 message
 met
@@ -729,7 +717,6 @@ processed
 processing
 produced
 producer
-profile
 progress
 progressive
 promoted
@@ -761,7 +748,6 @@ queued
 queued_after_ms
 raised
 ran
-random
 range
 rc
 re-bootstrapping
@@ -772,7 +758,6 @@ reach
 reaches
 reactivation
 read
-read-back
 read-only
 read_dir
 read_ms
@@ -797,6 +782,7 @@ refetch
 refresh
 refresh_placeholders
 refusal
+refusal_log_tests
 refused
 refused_at
 refusing
@@ -845,8 +831,6 @@ restarting
 restore
 restore_bookkeeping_failed
 restored
-restricted
-restrictions
 resume
 resumed
 ret
@@ -866,6 +850,7 @@ roots
 route
 row
 rows
+rs
 run
 running
 runs
@@ -886,7 +871,6 @@ scheduling
 scope
 sealed-key
 search
-section
 seeded
 seeding
 seen
@@ -1033,10 +1017,10 @@ ticks
 tiles
 time
 timed
+timeout
 to
 toast
 toggle
-token
 tokio
 toml
 too
@@ -1057,7 +1041,6 @@ ttl
 turned
 turned_off
 type
-ui
 uid
 unaffected
 unavailable
@@ -1107,7 +1090,6 @@ verify
 version
 version_number
 via
-view
 viewer
 violation
 vorbis
@@ -1115,7 +1097,6 @@ vp8
 vp9
 w2
 w3
-wait
 waiting
 waits
 walked

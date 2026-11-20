@@ -21,8 +21,8 @@ pub(crate) fn logged(body: impl FnOnce()) -> String {
 fn every_refusal_is_a_readable_line_with_its_codec() {
     let all = [
         (Refusal::NoDecoder("AC-3".into()), "reason=no decoder"),
-        (Refusal::NoSystemDecoder(Codec::Hevc), "reason=system decoder off codec=hevc"),
-        (Refusal::NoSystemMedia(Codec::H264), "reason=no system media codec=h264"),
+        (Refusal::NoSystemDecoder(Codec::Hevc), "reason=system decoder off"),
+        (Refusal::NoSystemMedia(Codec::H264), "reason=no system media"),
         (Refusal::CouldNotPlay, "reason=failed"),
         (Refusal::NotSignedIn, "reason=not signed in"),
         (Refusal::NeedsWindowsUpdate, "reason=needs windows update"),
@@ -63,11 +63,15 @@ fn every_codec_word_and_helper_code_passes_the_filter() {
         Codec::Wma,
         Codec::Other,
     ];
+    let mut words = std::collections::BTreeSet::new();
     for codec in codecs {
         let text = logged(|| helper_error(ErrorCode::Unsupported(codec)));
-        let want = format!("answer=unsupported codec={}", codec_word(codec));
-        assert!(text.contains(&want), "{codec:?}: {text}");
+        let word = text.trim_end().rsplit("answer=unsupported codec=").next().unwrap().to_owned();
+        assert!(text.contains("answer=unsupported codec="), "{codec:?}: {text}");
+        assert!(!word.contains('<') && !word.contains(' '), "{codec:?} is one readable word: {text}");
+        words.insert(word);
     }
+    assert_eq!(words.len(), codecs.len(), "each format has its own word: {words:?}");
     let codes = [
         (ErrorCode::NoSystemDecoder(Codec::Hevc), "answer=no system decoder codec=hevc"),
         (ErrorCode::NoSystemMedia(Codec::Hevc), "answer=no system media codec=hevc"),
@@ -89,18 +93,21 @@ fn every_codec_word_and_helper_code_passes_the_filter() {
 fn a_sandbox_failure_says_its_step_and_code_once() {
     let seen = Mutex::new(Vec::new());
     let text = logged(|| {
-        start_failed(&seen, "create process", 5);
-        start_failed(&seen, "create process", 5);
-        start_failed(&seen, "job limits", 87);
+        os_failed(&seen, "create process", 5);
+        os_failed(&seen, "create process", 5);
+        os_failed(&seen, "job limits", 87);
+        not_started_in(&seen, NotStarted::Pipes);
+        not_started_in(&seen, NotStarted::Pipes);
     });
-    assert_eq!(text.matches("media helper not started").count(), 2, "{text}");
+    assert_eq!(text.matches("media helper not started").count(), 3, "{text}");
+    assert!(text.contains("step=pipes"), "{text}");
     assert!(text.contains("step=create process os_error=5"), "{text}");
     assert!(text.contains("step=job limits os_error=87"), "{text}");
 }
 
 #[test]
 fn a_broken_rule_says_what_and_where() {
-    let text = logged(|| broke("timeout", 731));
+    let text = logged(|| broke(Broke::Timeout, 731));
     assert!(text.contains("media helper stopped by the player"), "{text}");
     assert!(text.contains("what=timeout at=731"), "{text}");
 }
@@ -160,7 +167,39 @@ fn every_sandbox_step_name_is_readable_in_the_log() {
     ];
     for step in steps {
         let seen = Mutex::new(Vec::new());
-        let text = logged(|| start_failed(&seen, step, 5));
-        assert!(text.contains(&format!("step={step} os_error=5")), "{step}: {text}");
+        let text = logged(|| os_failed(&seen, step, 5));
+        let want = format!("step={} os_error=5", step.replace('-', " "));
+        assert!(text.contains(&want), "{step}: {text}");
+    }
+}
+
+#[test]
+fn every_step_of_ours_and_every_broken_rule_is_readable() {
+    let steps = [
+        (NotStarted::Exclusion, "step=exclusion"),
+        (NotStarted::Pipes, "step=pipes"),
+        (NotStarted::Threads, "step=threads"),
+        (NotStarted::WorkerThread, "step=worker thread"),
+        (NotStarted::NoHelper, "step=no helper"),
+        (NotStarted::Unsupported, "step=unsupported"),
+        (NotStarted::HelperPath, "step=helper path"),
+        (NotStarted::Limits, "step=limits"),
+        (NotStarted::NotConfined, "step=not confined"),
+    ];
+    for (step, want) in steps {
+        let seen = Mutex::new(Vec::new());
+        let text = logged(|| not_started_in(&seen, step));
+        assert!(text.trim_end().ends_with(want), "{step:?}: {text}");
+    }
+    let rules = [
+        (Broke::Check, "what=check"),
+        (Broke::Gone, "what=gone"),
+        (Broke::Protocol, "what=protocol"),
+        (Broke::Timeout, "what=timeout"),
+        (Broke::Read, "what=read"),
+    ];
+    for (rule, want) in rules {
+        let text = logged(|| broke(rule, 7));
+        assert!(text.contains(&format!("{want} at=7")), "{rule:?}: {text}");
     }
 }
