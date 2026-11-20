@@ -28,6 +28,16 @@ fn engine_on(base: &str) -> TestEngine {
     Arc::new(engine)
 }
 
+/// What the fake was asked for by the password's own calls. The engine fetches the plan (`GET /billing/subscription`)
+/// on its own thread after an unlock, and under load that request lands at any moment: it is not the change's, so
+/// counting it would make "sent nothing" depend on timing.
+fn asked_by_the_change(fake: &beebeeb_engine::test_api::FakeApi) -> usize {
+    fake.routes()
+        .iter()
+        .filter(|route| !route.ends_with("/billing/subscription"))
+        .count()
+}
+
 /// Signed in and unlocked on the fake of `test_account`.
 fn signed_in() -> (TestEngine, beebeeb_engine::test_api::FakeApi) {
     let (_account, phrase, fake) = test_account();
@@ -82,7 +92,7 @@ fn a_kept_password_serves_one_change_for_its_own_confirmation() {
     let mut calls = PasswordCalls::new(engine);
     assert_eq!(calls.pane_state(false), PaneState::Ready);
     assert_eq!(calls.pane_state(true), PaneState::SessionEnded);
-    let asked = fake.routes().len();
+    let asked = asked_by_the_change(&fake);
 
     // A confirmation of another purpose, and a number nobody made: nothing is sent, and the kept password goes.
     let first = calls.keep(Password::from_field("correct horse battery")).expect("kept");
@@ -108,7 +118,7 @@ fn a_kept_password_serves_one_change_for_its_own_confirmation() {
         calls.change(stale, Password::from_field("A New Password 42")).err(),
         Some(Refused::NotConfirmed)
     );
-    assert_eq!(fake.routes().len(), asked, "none of these sent anything");
+    assert_eq!(asked_by_the_change(&fake), asked, "none of these sent anything");
 }
 
 #[test]
@@ -116,7 +126,7 @@ fn a_kept_password_is_dropped_when_the_session_moves_on() {
     let (engine, fake) = signed_in();
     let mut calls = PasswordCalls::new(engine.clone());
     let confirmation = calls.keep(Password::from_field("correct horse battery")).expect("kept");
-    let asked = fake.routes().len();
+    let asked = asked_by_the_change(&fake);
     // The vault locks: another session than the one the password was typed under.
     engine.lock();
     assert_eq!(
@@ -125,7 +135,7 @@ fn a_kept_password_is_dropped_when_the_session_moves_on() {
             .err(),
         Some(Refused::NotConfirmed)
     );
-    assert_eq!(fake.routes().len(), asked, "a session that moved on sends nothing");
+    assert_eq!(asked_by_the_change(&fake), asked, "a session that moved on sends nothing");
     assert_eq!(calls.pane_state(false), PaneState::SignedOut);
 }
 
