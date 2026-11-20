@@ -639,3 +639,27 @@ fn a_file_that_is_left_takes_its_name_its_folders_and_its_details_and_none_is_pr
     assert!(file.details.facts.iter().all(|(_, value, _)| value.is_empty()));
     assert!(file.newer.as_ref().is_some_and(|newer| newer.from.is_empty()));
 }
+
+/// The toolbar of every open file has the reveal button; pressing it shows THAT file in its folder through the Files
+/// source's reveal step, and nothing else (no open, no hydrate). A file with no place here gets a line, never a crash.
+#[test]
+fn the_toolbar_shows_the_open_file_in_its_folder_through_the_reveal_step() {
+    use crate::frames::files::source::{Call, FilesFixture, NoEngine};
+    let (mut rt, _script) = window(Script::default());
+    let fixture = FilesFixture::default();
+    let calls = fixture.calls.clone();
+    rt.update(|s, _| s.actions.source = Box::new(fixture));
+    route_to_file(&mut rt);
+    let label = crate::frames::show_in_folder::label();
+    assert!(drawn(&rt).contains(label), "the toolbar says {label}:\n{}", drawn(&rt));
+    click(&mut rt, "show-in-folder");
+    assert_eq!(*calls.lock().unwrap(), [Call::ShowInFileExplorer(vec![FILE.into()])]);
+    assert_eq!(rt.state.viewer.ui.as_ref().unwrap().toast, None);
+    // No place on this PC: the line, in the window's own toast.
+    rt.update(|s, _| s.actions.source = Box::new(NoEngine));
+    click(&mut rt, "show-in-folder");
+    assert_eq!(
+        rt.state.viewer.ui.as_ref().unwrap().toast.as_deref(),
+        Some(crate::frames::show_in_folder::NOT_HERE)
+    );
+}

@@ -18,6 +18,7 @@ pub mod open_file;
 pub mod photos;
 pub mod placeholder;
 pub mod search;
+pub mod show_in_folder;
 pub mod settings;
 pub mod shared;
 pub mod signin;
