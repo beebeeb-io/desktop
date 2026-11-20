@@ -312,6 +312,7 @@ pub fn editor(editor: &super::Editor, lines: &[Vec<Run>], t: &Theme) -> El {
             .color(Color::TRANSPARENT)
             .caret(Color::TRANSPARENT, t.selection)
             .on_edit(super::editor_edit)
+            .on_input_key(super::editor_key)
             .pin(Some(GUTTER_W), Some(0.0), Some(0.0), Some(0.0)),
     );
     if let Some(current) = current {
