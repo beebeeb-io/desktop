@@ -249,14 +249,14 @@ fn the_late_notice_keeps_the_window_behind_it_working() {
     let mut r = change_password(HeldCalls::default());
     click(&mut r.rt, "btn-0");
     assert_eq!(r.pane(), Pane::Security);
-    super::tests::tab_to(&mut r.rt, "item-1-0");
+    super::tests::tab_to(&mut r.rt, "item-1-1");
     r.answer(Answered::Refused(Refused::Unconfirmed));
     assert_eq!(
         says(&r.rt, "late-change-text"),
         "Your password change could not be confirmed"
     );
     assert!(
-        super::tests::info(&r.rt, "item-1-0").focused,
+        super::tests::info(&r.rt, "item-1-1").focused,
         "the page behind keeps its focus when the notice comes"
     );
     let window = [0.0, 0.0, 958.0, 638.0];
