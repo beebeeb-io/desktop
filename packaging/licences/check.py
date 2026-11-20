@@ -26,6 +26,7 @@ REQUIRED = [
     "Redistribution and use in source and binary forms",  # PDFium (Foxit) and Adobe CMaps, BSD-3-Clause
     "https://github.com/beebeeb-io/desktop",
     "release tag desktop-v",
+    "Lucide and Feather icons in the Beebeeb app",  # the app's own file and folder icons (Lucide 1.77.0, ISC + MIT)
 ]
 
 
