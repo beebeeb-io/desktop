@@ -408,3 +408,11 @@ fn a_too_old_windows_says_so_in_the_media_view() {
         "This file can't be shown until Windows is updated."
     );
 }
+
+/// ux-02: the helper's `NoDecoder` names no format; the sentence had a hole ("can't play  files here").
+#[test]
+fn media_no_decoder_without_a_name_says_this_kind_of_file() {
+    let words = refusal_words(&Refusal::NoDecoder(String::new()));
+    assert_eq!(words, "This PC can't play this kind of file here.");
+    assert!(!words.contains("  "), "{words}");
+}

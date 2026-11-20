@@ -10,12 +10,14 @@ $home
 24h
 2xx
 a
+aac
 abandon
 abandoned
 abandoning
 abort
 absent
 absolute
+ac3
 accept
 acceptance
 accepted
@@ -37,6 +39,7 @@ age-bound
 agent
 agreed
 ahead
+alac
 alias
 all
 alone
@@ -49,6 +52,7 @@ and
 another
 answer
 answer_ms
+answered
 anyway
 api
 app
@@ -75,6 +79,7 @@ authenticate
 authenticated
 auto-resolving
 auto_resolve_keep_both
+av1
 away
 back
 backed-up
@@ -236,6 +241,7 @@ declared
 decline
 declined
 decoded
+decoder
 decrypted
 deferred
 degraded
@@ -266,6 +272,7 @@ discarded
 disk
 dispatch
 dispatched
+dnxhd
 does
 done
 down
@@ -280,6 +287,7 @@ due
 duplicate
 duplicates
 during
+eac3
 each
 earlier
 earlier-build
@@ -318,6 +326,7 @@ every_backup
 evicted
 exceeded
 exclude
+exclusion
 existing
 exists
 exited
@@ -351,6 +360,7 @@ finished
 fired
 first
 first_pass
+flac
 flagged
 flipped
 flushing
@@ -389,6 +399,7 @@ graceful
 grant
 guard
 guarded
+h264
 had
 half-made
 handed-over
@@ -405,6 +416,7 @@ held_for_review
 held_key_replaced
 helper
 helper_ms
+hevc
 hit
 holds
 home
@@ -436,6 +448,7 @@ init
 initialized
 inside
 inspect
+internal
 interrupted
 interval
 into
@@ -484,6 +497,7 @@ len
 length
 lifetime
 limit
+limits
 linux
 list
 list_by_status
@@ -542,6 +556,10 @@ moved_files
 moved_items
 moved_legacy_device_identity
 moved_legacy_lock
+mp2
+mp3
+mpeg2
+mpeg4
 name
 name_check_errors
 name_conflicts
@@ -582,6 +600,7 @@ object
 of
 off
 office
+offline
 offset
 ok
 old
@@ -603,15 +622,18 @@ open-time
 open_conflict_window
 opened
 opened_ms
+opening
 operation
 operations
 oplock
 ops
+opus
 or
 original
 original_removed
 orphaned
 os
+os_error
 other
 ours
 out
@@ -646,6 +668,7 @@ path
 paused
 payload
 pc
+pcm
 peer
 peer_uid
 pending
@@ -657,6 +680,7 @@ photo
 phrase
 pin
 pinned
+pipes
 place
 placed
 placeholder
@@ -699,8 +723,10 @@ progressive
 promoted
 promotion
 proof
+prores
 protected
 protection
+protocol
 prove
 proven
 proven_changes
@@ -736,6 +762,7 @@ read
 read-only
 read_dir
 read_ms
+readable
 reads
 real
 reaps
@@ -979,6 +1006,7 @@ there
 they
 this
 thread
+threads
 through
 thumbnail
 thumbnail-provider
@@ -989,6 +1017,7 @@ ticks
 tiles
 time
 timed
+timeout
 to
 toast
 toggle
@@ -1056,12 +1085,16 @@ vacated
 valid
 variant
 vault
+vc1
 verify
 version
 version_number
 via
 viewer
 violation
+vorbis
+vp8
+vp9
 w2
 w3
 waiting
@@ -1091,12 +1124,15 @@ withheld
 within
 without
 without_id
+wma
 won
 work
+worker
 working
 working-set
 write
 written
 wrong
 yet
+yours
 —

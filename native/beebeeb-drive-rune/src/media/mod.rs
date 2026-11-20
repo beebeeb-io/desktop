@@ -35,6 +35,7 @@
 pub mod audio_out;
 pub mod os_controls;
 pub mod player;
+pub(crate) mod refusal_log;
 pub mod thumb_frame;
 pub mod transport;
 pub mod video;

@@ -221,3 +221,30 @@ fn a_picture_from_the_helper_is_never_kept() {
         "not 2 x 2 x 4 bytes"
     );
 }
+
+/// ux-02: a REAL build writes why nothing plays, and nothing of the file. The id stands in for a name here (the
+/// worker is given nothing else of the file).
+#[test]
+fn a_refusal_in_a_real_build_is_logged_without_the_file_name() {
+    let (mut worker, _handle, _commands) = worker(KindHint::Video);
+    worker.item.file_id = "Holiday-Rome-Anna.mp4".to_owned();
+    let text = crate::media::refusal_log::tests::logged(|| worker.run());
+    assert!(text.contains("media refused"), "the refusal is written: {text}");
+    assert!(text.contains("reason=failed"), "{text}");
+    for word in ["Holiday", "Rome", "Anna", "mp4"] {
+        assert!(!text.contains(word), "nothing of the file: {text}");
+    }
+}
+
+/// ux-02: a rule the helper broke names the kind of rule and the worker's line, and the helper's own code is
+/// written before it is folded into "could not play".
+#[test]
+fn a_broken_rule_and_a_helper_code_are_logged() {
+    let (mut worker, _handle, _commands) = worker(KindHint::Video);
+    let text = crate::media::refusal_log::tests::logged(|| {
+        assert!(broke(worker.handle(FromHelper::Ended)));
+        let _ = worker.on_error(beebeeb_media_protocol::ErrorCode::NoSystemDecoder(Codec::Hevc));
+    });
+    assert!(text.contains("media helper stopped by the player what=check at="), "{text}");
+    assert!(text.contains("media helper answered an error answer=no system decoder codec=hevc"), "{text}");
+}

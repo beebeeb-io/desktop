@@ -556,6 +556,7 @@ impl Player {
                 Ok(())
             }
             Err(_) => {
+                super::refusal_log::not_started(super::refusal_log::NotStarted::WorkerThread);
                 self.failed(Refusal::CouldNotPlay);
                 Err(Refusal::CouldNotPlay)
             }
