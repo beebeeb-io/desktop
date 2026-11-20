@@ -287,6 +287,18 @@ fn sign_up_opens_in_the_sign_in_window() {
     rt.frame(1.0);
     rt.update(|s, _| assert_eq!(s.signin.as_ref().unwrap().screen, Screen::Create(Step::Email)));
 
+    let mut secret_screens = 0;
+    for (i, frame) in FRAME_IDS.iter().enumerate() {
+        rt.update(|s, _| s.signin = crate::frames::signin::scene(frame));
+        rt.frame(2.0 + i as f64);
+        assert!(registry::route_shows_secret(&rt.state.shell.app), "{frame}");
+        if let Screen::Create(step) = rt.state.signin.as_ref().unwrap().screen {
+            secret_screens += usize::from(step.shows_secret());
+        }
+    }
+    assert_eq!(secret_screens, 6, "DW-A36 to DW-A41");
+}
+
 /// A session on a computer that holds no key of the account (the gate `NeedsRecoveryPhrase`, from a sign-in or
 /// at a start): the window is the sign-in window on its twelve words (DW-A23), never the "not built" frame,.
 #[test]
