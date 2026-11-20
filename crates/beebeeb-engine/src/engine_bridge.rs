@@ -72,6 +72,10 @@ pub struct EngineBridge {
     /// landing takes the op off the queue before they are uploaded, and until they are, the
     /// server holds the previous version's (one per file): [`Self::finder_thumbnail`] refuses.
     thumbnails_pending: std::sync::Mutex<HashSet<String>>,
+    /// w36: the ops a queue step is sending right now ([`Self::process_due_operations`], [`Self::process_due_changes`]).
+    /// Two steps can run at once (the tick's, and a nudge's beside it): an op in here is skipped by the other, so no
+    /// change is ever sent twice.
+    ops_in_flight: std::sync::Mutex<HashSet<String>>,
     /// Ids whose listing carries a 2236 request envelope (L12). A cache only:
     /// the authoritative fact is persisted on the record (P3-3).
     request_rows: std::sync::Mutex<std::collections::HashSet<String>>,
