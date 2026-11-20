@@ -16,6 +16,7 @@ use super::tray_icon::TaskbarTheme;
 
 #[cfg(test)]
 pub mod fake;
+pub mod packet_text;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -26,6 +27,8 @@ mod windows;
 mod windows_control;
 #[cfg(windows)]
 mod windows_folder;
+#[cfg(windows)]
+mod windows_packet;
 #[cfg(windows)]
 mod windows_photo;
 #[cfg(windows)]
@@ -202,7 +205,22 @@ pub trait Platform: Send + Sync {
     fn set_capture_exclusion(&self, _window: Option<&rune::WindowHandle>, _exclude: bool) -> Result<(), PlatformError> {
         Ok(())
     }
+    /// Starts taking the text that reaches the main window as Unicode packets (`packet_text`): what a remote
+    /// desktop, an on-screen keyboard and `SendInput`'s Unicode mode type with. Called on the window's thread,
+    /// from the poll, until it answers true. `wake` is called (on that thread) when there is text to take, so the
+    /// next poll runs. The default has nothing to watch: only Windows sends text this way.
+    fn watch_packet_text(&self, _window: Option<&rune::WindowHandle>, _wake: PacketWake) -> bool {
+        true
+    }
+    /// The packets' text since the last call, in the order it was typed. `shell::host::poll` hands it to the
+    /// field that has the keyboard.
+    fn take_packet_text(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
+
+/// What [`Platform::watch_packet_text`] calls when text arrived.
+pub type PacketWake = Arc<dyn Fn() + Send + Sync>;
 
 /// The platform this build runs on.
 pub fn current() -> Arc<dyn Platform> {

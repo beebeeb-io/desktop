@@ -80,6 +80,8 @@ pub struct Shell {
     /// the desired state changes. Capped at 3: after 3 failures the call is not retried until
     /// the desired state changes (a navigation away and back resets it).
     capture_exclusion_retries: u8,
+    /// The platform is taking Unicode packets' text for the main window (`Platform::watch_packet_text`).
+    packets_watched: bool,
     /// The b's inputs changed since the flyout last read them. A hidden flyout is not read
     /// ([`Shell::refresh`]); this says it reads them once it shows.
     flyout_behind: bool,
@@ -154,6 +156,7 @@ impl Shell {
             session_seen: None,
             gate_open_seen: false,
             capture_exclusion_retries: 0,
+            packets_watched: false,
             flyout_behind: false,
             #[cfg(test)]
             flyout_reads: 0,
@@ -554,6 +557,7 @@ fn request_as(s: &mut State, intent: Intent, link: bool) -> Outcome {
 /// section by writing `State::sidebar_section`; this turns that write into a navigation, so
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
+    poll_packet_text(s, tx);
     let mut changed = poll_screen(s, _seconds, tx);
     changed |= poll_capture(s, tx);
     // Last, so a clear that `media::stop_all` posted above (a lock, a sign-out) reaches Windows in this same poll.
@@ -785,6 +789,29 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
 fn poll_capture(s: &mut State, _tx: &mut Tx) -> bool {
     s.shell.apply_capture_exclusion(s.shell.hide_from_capture);
     false
+}
+
+/// Text typed as Unicode packets (a remote desktop such as RustDesk, an on-screen keyboard, a password manager's
+/// auto-type): Rune drops it, so the platform takes it (`platform::packet_text`) and it is typed here, to the
+/// field that has the keyboard and then the key handlers, as a key is.
+fn poll_packet_text(s: &mut State, tx: &mut Tx) {
+    let shell = &mut s.shell;
+    if !shell.packets_watched {
+        let wake: super::platform::PacketWake = match shell.wiring.main.clone() {
+            Some(main) => Arc::new(move || main.wake()),
+            None => Arc::new(|| {}),
+        };
+        let window = unpoisoned(&shell.wiring.window);
+        shell.packets_watched = shell.platform.watch_packet_text(window.as_ref(), wake);
+    }
+    for text in shell.platform.take_packet_text() {
+        if let Some(key) = super::platform::packet_text::key_of(&text) {
+            tx.send_key(KeyEvent {
+                key,
+                mods: rune::Mods::default(),
+            });
+        }
+    }
 }
 
 fn open_web_page(url: &str) {

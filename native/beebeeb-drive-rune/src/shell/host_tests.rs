@@ -1053,6 +1053,8 @@ mod files;
 mod flows;
 #[path = "host_tests_owned_state.rs"]
 mod owned_state;
+#[path = "host_tests_packets.rs"]
+mod packets;
 #[path = "host_tests_reread.rs"]
 mod reread;
 #[path = "host_tests_session_gate.rs"]
