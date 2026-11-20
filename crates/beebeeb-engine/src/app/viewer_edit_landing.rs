@@ -12,12 +12,20 @@ use crate::state_db::StateDb;
 /// The class a stale-base park carries (`ParkReason::StaleBase`).
 const STALE_BASE: &str = "stale_base";
 
-/// w29: has the link to the server failed at or after `since` (unix seconds, when the save began)? The upload this save
-/// queued is tried at once (the runner is nudged), so a failure noted since says it cannot start: offline, or the server
-/// not answering. The save then ends as "stored here, sent later" without waiting out the land wait. A failure from
-/// before the save says nothing about it, and no failure is a link that works (or not tried yet): wait for the upload.
-pub(super) fn link_down_since(failure: Option<(crate::link_health::LinkFailure, i64)>, since: i64) -> bool {
-    failure.is_some_and(|(_, at)| at >= since)
+/// How long a save waits for its upload to land (and clear an older link failure) before an older failure counts.
+pub(super) const LINK_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// w29: can this save's upload not start? `failure`: the link monitor's latest failure since its last good answer;
+/// `since`: unix seconds when the save began; `waited`: how long it has waited. A failure noted since the save began is
+/// its own try failing. An older one stays until some request gets an answer: the queued op may be backing off (no new
+/// request), so after [`LINK_GRACE`] without a landing it counts too. The save then ends as "stored here, sent later"
+/// instead of waiting out the land wait (VM 401 run 11: 20 s of "saving" offline). No failure: wait for the upload.
+pub(super) fn link_down_since(
+    failure: Option<(crate::link_health::LinkFailure, i64)>,
+    since: i64,
+    waited: std::time::Duration,
+) -> bool {
+    failure.is_some_and(|(_, at)| at >= since || waited >= LINK_GRACE)
 }
 
 /// One look at `queued`'s fate.
