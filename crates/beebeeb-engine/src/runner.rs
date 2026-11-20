@@ -580,8 +580,27 @@ async fn run(
         crate::transfer_progress::FirstList::Here
     });
 
+    // w36: a nudge (a save, a New file, Try again) that arrives while the loop is inside a tick is sent beside that
+    // tick, not after it: the sync changes only, the backup's uploads stay the tick's.
+    let loop_state = Arc::new(LoopState::default());
+    loop_state.set_reconciled(cfg!(target_os = "macos"));
+    let mid_tick_sender = tokio::spawn(send_nudges_mid_tick(
+        Arc::clone(&send_phase),
+        Arc::clone(&loop_state),
+        Arc::clone(&sync_paused),
+        {
+            let (bridge, sync_root, send_phase) = (bridge.clone(), sync_root.clone(), Arc::clone(&send_phase));
+            move || mid_tick_step(bridge.clone(), sync_root.clone(), Arc::clone(&send_phase))
+        },
+    ));
+    // A forced abort of this task ends the sender too: it holds the bridge.
+    let _mid_tick_abort = AbortWorkerOnDrop(mid_tick_sender.abort_handle());
+
     loop {
-        match next_wake(&mut cancel, &mut tick, &send_phase, &transfers).await {
+        loop_state.set_busy(false);
+        let wake = next_wake(&mut cancel, &mut tick, &send_phase, &transfers).await;
+        loop_state.set_busy(true);
+        match wake {
             Wake::Cancel => break,
             Wake::Tick => {
                 // Task 1670 round 3: run BEFORE the `sync_paused` check below
@@ -723,6 +742,10 @@ async fn run(
                 let syncing_before_tick = sync_in_flight_count(&db);
                 let tick_started_at = now_secs() as i64;
 
+                // w36: from the pull to the end of the passes no mid-tick step sends (they read the rows a landing
+                // writes), and these wait for one that is being sent.
+                let pull_and_passes = loop_state.pull.lock().await;
+
                 match bridge.refresh_shared_roots().await {
                     Ok(outcome) if !outcome.removed_shared_file_ids.is_empty() => {
                         tracing::info!(
@@ -787,6 +810,8 @@ async fn run(
                                 "the reconcile pass did not complete; held changes stay paused, next tick retries"
                             );
                         }
+                        #[cfg(not(target_os = "macos"))]
+                        loop_state.set_reconciled(reconciled_this_run);
                         // Task 2523 (F1): another device's version reaches the copy on this PC. Only at a tick whose
                         // pull came back (the rows the pass reads are fresh), before the queue step (on Linux that
                         // step sends the re-downloads it queues). Off the async workers: it may hash files. Windows:
@@ -828,6 +853,7 @@ async fn run(
                         if tick.reached_server && !send_phase.is_armed() {
                             crate::engine_bridge::queue_kept_step(&bridge, &sync_root, &kept_refetch).await;
                         }
+                        drop(pull_and_passes);
                         let completed_sync_work = queue_step(
                             &bridge,
                             &sync_root,
@@ -940,6 +966,7 @@ async fn run(
                         // Network blips and 401s during token rotation
                         // are normal — log and continue, surface the
                         // error to the WebView so the tray reflects it.
+                        drop(pull_and_passes);
                         tracing::warn!(error = %e, "sync tick failed");
                         // Task 1546 finding 5: a run of these that classify as
                         // auth failures (not network blips) is what flips
@@ -1013,6 +1040,10 @@ async fn run(
             }
         }
     }
+
+    // w36: the sender holds the bridge (the database, the key): it ends before the teardown below.
+    mid_tick_sender.abort();
+    let _ = mid_tick_sender.await;
 
     emit_payload(&app, tracker.stopped());
 
@@ -1162,6 +1193,28 @@ async fn queue_step(
             }
             0
         }
+    }
+}
+
+/// w36: the queue step a nudge gets while the loop is inside a tick ([`send_nudges_mid_tick`]): the due sync changes,
+/// never the backup's uploads (a long backup queue must not stand before a save; the tick sends those). On a Mac the
+/// items it changed are owed to the tick's one working-set signal; elsewhere that signal is a no-op.
+async fn mid_tick_step(bridge: Arc<EngineBridge>, sync_root: PathBuf, send_phase: Arc<SendPhaseLink>) {
+    match bridge.process_due_changes(&sync_root, now_secs()).await {
+        Ok(outcome) => {
+            if send_phase.is_armed() {
+                send_phase.note(&outcome);
+            }
+            #[cfg(target_os = "macos")]
+            owe_working_set_signal(&outcome.invalidated_item_ids);
+            tracing::debug!(
+                completed = outcome.completed_op_ids.len(),
+                paused = outcome.paused_op_ids.len(),
+                retried = outcome.retried_op_ids.len(),
+                "queue step beside a running tick"
+            );
+        }
+        Err(error) => tracing::warn!(%error, "queue step beside a running tick failed; the tick's own step retries"),
     }
 }
 

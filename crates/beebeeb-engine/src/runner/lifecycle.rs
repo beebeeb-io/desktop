@@ -143,8 +143,32 @@ pub(super) async fn send_nudges_mid_tick<F, Fut>(
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let _ = (link, state, paused, step);
-    std::future::pending::<()>().await
+    let mut step = step;
+    let is_paused = || paused.load(Ordering::Relaxed);
+    let mut last_run: Option<std::time::Instant> = None;
+    loop {
+        link.mid_tick.notified().await;
+        if !state.is_busy() {
+            tokio::time::sleep(MID_TICK_SETTLE).await;
+        }
+        // D11b: the tick this nudge met runs the first pass; the nudge is sent once that pass committed.
+        while state.is_busy() && !state.is_reconciled() {
+            tokio::time::sleep(MID_TICK_POLL).await;
+        }
+        if !state.is_busy() || is_paused() {
+            continue;
+        }
+        if let Some(wait) = nudge_wait(last_run, tokio::time::Instant::now().into_std()) {
+            tokio::time::sleep(wait).await;
+        }
+        let _not_in_the_pull = state.pull.lock().await;
+        // The tick ended while this waited: the loop's own nudge step runs now.
+        if !state.is_busy() || is_paused() {
+            continue;
+        }
+        last_run = Some(tokio::time::Instant::now().into_std());
+        step().await;
+    }
 }
 
 /// What woke the runner's loop (spec 2026-10-10 §6.2).

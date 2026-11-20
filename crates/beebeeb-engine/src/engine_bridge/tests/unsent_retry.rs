@@ -69,3 +69,56 @@ async fn after_try_again_the_next_queue_step_sends_a_given_up_and_a_backing_off_
         "sent: no longer counted"
     );
 }
+
+/// w36: a nudge's step beside a running tick sends the sync changes and leaves the backup's uploads to the tick's own
+/// step: a long backup queue never stands before a save.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn w36_the_changes_only_step_leaves_the_backups_uploads_to_the_whole_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = SyncMockServer::start(vec![
+        ("200 OK".into(), serde_json::json!({ "id": "folder-change" })),
+        ("200 OK".into(), serde_json::json!({ "id": "folder-backup" })),
+    ]);
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+    let mut backup = folder_create("backup", 0, 0);
+    backup.backup_source_key = Some("music".into());
+    backup.created_at = 50;
+    bridge.db.enqueue_operation(&backup).unwrap();
+    bridge.db.enqueue_operation(&folder_create("change", 0, 0)).unwrap();
+
+    let changes = bridge.process_due_changes(dir.path(), 200).await.unwrap();
+    assert_eq!(changes.completed_op_ids, ["change".to_string()], "the older backup op is not in its way");
+    let whole = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+    assert_eq!(whole.completed_op_ids, ["backup".to_string()]);
+    assert_eq!(server.finish().len(), 2, "one request each");
+}
+
+/// w36: two queue steps can run at once (the tick's, and a nudge's beside it). An op one of them is sending is skipped
+/// by the other, so a change is never sent twice; once the first is done with it, a step takes it again.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn w36_an_op_another_step_is_sending_is_not_sent_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = SyncMockServer::start(vec![("200 OK".into(), serde_json::json!({ "id": "folder-one" }))]);
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+    bridge.db.enqueue_operation(&folder_create("one", 0, 0)).unwrap();
+
+    let other_step = bridge.begin_op("one").expect("nobody sends it yet");
+    assert!(bridge.begin_op("one").is_none(), "one sender at a time");
+    for outcome in [
+        bridge.process_due_operations(dir.path(), 200).await.unwrap(),
+        bridge.process_due_changes(dir.path(), 200).await.unwrap(),
+    ] {
+        assert!(
+            outcome.completed_op_ids.is_empty() && outcome.retried_op_ids.is_empty(),
+            "skipped, not attempted: {outcome:?}"
+        );
+    }
+    assert_eq!(bridge.db.get_operation("one").unwrap().unwrap().attempts, 0);
+
+    drop(other_step);
+    let after = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+    assert_eq!(after.completed_op_ids, ["one".to_string()]);
+    assert_eq!(server.finish().len(), 1, "sent once");
+}
