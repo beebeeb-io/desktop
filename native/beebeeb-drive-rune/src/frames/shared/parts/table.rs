@@ -5,6 +5,8 @@ use super::style;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::file_list::{PcState, pc_glyph};
+use crate::theme::file_icons::icon_for;
+use crate::ui::file_icon::file_icon;
 use crate::ui::kit;
 use rune::{Align, Color, El, Icon, col, el, row};
 
@@ -88,7 +90,7 @@ fn photo(tile: El) -> El {
 }
 
 /// A tile `d` points across (`.mk-ftile`). Keys: `<key>-tile` and `<icon_key>`.
-pub fn tile(key: &str, icon_key: String, kind: Kind, d: f32, r: f32, glyph: f32, t: &Theme) -> El {
+pub fn tile(key: &str, icon_key: String, name: &str, kind: Kind, d: f32, r: f32, glyph: f32, t: &Theme) -> El {
     let tile = el()
         .key(format!("{key}-tile"))
         .size(d, d)
@@ -100,8 +102,8 @@ pub fn tile(key: &str, icon_key: String, kind: Kind, d: f32, r: f32, glyph: f32,
         Kind::Photo(Some(Thumb::BoardDusk)) => return crate::ui::file_list::thumbnail(tile),
         _ => {}
     }
-    tile.fill(t.tile)
-        .child(kit::glyph(icon_key, kind.icon(), glyph, t.text_secondary))
+    let fi = icon_for(name, kind == Kind::Folder, None);
+    tile.fill(t.tile).child(file_icon(icon_key, fi, glyph, t))
 }
 
 /// The column headers (`.mk-thead`); the date column carries the sort arrow (newest first).
@@ -172,7 +174,7 @@ pub fn table_row(i: usize, r: &Row, selected: bool, c: &Columns, t: &Theme) -> E
         .min_w(0.0)
         .center_y()
         .gap(8.0)
-        .child(tile(&k, format!("{k}-icon"), r.kind, 22.0, 6.0, 14.0, t))
+        .child(tile(&k, format!("{k}-icon"), &r.name, r.kind, 22.0, 6.0, 14.0, t))
         .child(
             kit::label(format!("{k}-name"), r.name.clone(), type_::LIST_ITEM, t.text)
                 .truncate()
@@ -251,4 +253,26 @@ pub fn rows(name: &str, rows: Vec<El>) -> El {
         .px(6.0)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .children(rows)
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+    use crate::theme::file_icon_colors::tint_color;
+    use crate::theme::file_icons::Tint;
+    use crate::theme::tokens;
+
+    fn drawn(name: &str, kind: Kind) -> Option<Color> {
+        kit::record();
+        let _ = tile("row-0", "row-0-icon".into(), name, kind, 22.0, 6.0, 14.0, &tokens::theme(false));
+        kit::take().get("row-0-icon").and_then(|n| n.color)
+    }
+
+    #[test]
+    fn a_row_draws_the_registry_icon_in_its_tint() {
+        assert_eq!(drawn("Documents", Kind::Folder), Some(tint_color(Tint::Word, false)));
+        assert_eq!(drawn("notes.md", Kind::Document), Some(tint_color(Tint::Markdown, false)));
+        assert_eq!(drawn("song.flac", Kind::Document), Some(tint_color(Tint::Audio, false)));
+        assert_eq!(drawn("deck.pptx", Kind::Document), Some(tint_color(Tint::PowerPoint, false)));
+    }
 }
