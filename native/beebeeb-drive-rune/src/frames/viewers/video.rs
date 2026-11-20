@@ -7,14 +7,14 @@
 //! Photos viewer's stage. The stage's size goes to the player in device pixels (`PlayerHandle::set_view_size`).
 //! A source that hands no player draws what a kind without a viewer draws, and nothing is downloaded.
 
-use beebeeb_media_protocol::{Codec, MEDIA_SYSTEM_DECODER_ON};
+use beebeeb_media_protocol::Codec;
 use rune::tok::Family;
 use rune::{Align, Color, El, SurfaceFit, TextStyle, col, el, row};
 
 use super::chrome::{Dot, Status};
 use super::kinds::clock;
 use super::source::{Body, NoPreview};
-use super::{Intent, Ui, media_icons, states, style};
+use super::{Intent, Ui, media_icons, refusal_text, states, style};
 use crate::State;
 use crate::media::player::{NoSound, PlayState, PlayerHandle, Refusal};
 use crate::theme::tokens::Theme;
@@ -39,47 +39,14 @@ const SEEK_STEP_MS: u64 = 5_000;
 const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
 const TIME: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(16.0);
 
-/// The words of a refusal. `NoDecoder` names the FORMAT, never the file.
+/// The words of a refusal (the table is `refusal_text`).
 pub fn refusal_words(why: &Refusal) -> String {
-    refusal_words_with(MEDIA_SYSTEM_DECODER_ON, why)
+    refusal_text::text(why).sentence
 }
 
-/// [`refusal_words`] for a given state of `MEDIA_SYSTEM_DECODER_ON` (on as shipped: the owner's ruling of
-/// 2026-11-20). With the switch on, `NoSystemDecoder` is the PC's own answer (Windows was asked, in the
-/// system-decoder profile, and has no decoder for the format): the words say so, say what to install where there is
-/// something to install, and point at "Open in default app" ([`refusal_action`]). While the switch is off the app
-/// does not use the PC's own decoders, so a refusal that comes from their absence never tells a person to install
-/// one (the app would not use it, and the PC may have it already): it says Beebeeb can't play the format yet.
+/// [`refusal_words`] for a given state of `MEDIA_SYSTEM_DECODER_ON`.
 pub fn refusal_words_with(system_decoder_on: bool, why: &Refusal) -> String {
-    match why {
-        Refusal::NoDecoder(name) if name.is_empty() => "This PC can't play this kind of file here.".into(),
-        Refusal::NoDecoder(name) => format!("This PC can't play {name} files here."),
-        Refusal::NoSystemDecoder(Codec::Hevc) if !system_decoder_on => {
-            "Beebeeb can't play HEVC video yet. Open it in another app.".into()
-        }
-        Refusal::NoSystemDecoder(codec) if !system_decoder_on => {
-            format!(
-                "Beebeeb can't play {} files yet. Open it in another app.",
-                codec_name(*codec)
-            )
-        }
-        Refusal::NoSystemDecoder(Codec::Hevc) => "This PC has no HEVC video decoder. Install \u{201C}HEVC Video \
-             Extensions\u{201D} from the Microsoft Store, or open the file in its default app."
-            .into(),
-        Refusal::NoSystemDecoder(codec) => format!(
-            "Windows has no {} decoder on this PC. Open the file in its default app.",
-            codec_name(*codec)
-        ),
-        Refusal::NoSystemMedia(codec) => format!(
-            "This PC can't play {} files: this edition of Windows has no media codecs. Open the file in its default \
-             app.",
-            codec_name(*codec)
-        ),
-        Refusal::CouldNotPlay => "This file could not be played.".into(),
-        Refusal::NotSignedIn => "Sign in to play this file.".into(),
-        Refusal::NeedsWindowsUpdate => crate::windows_floor::NEEDS_WINDOWS_UPDATE.into(),
-        Refusal::NotInstalled | Refusal::NoSandbox => "Playback isn't available on this PC.".into(),
-    }
+    refusal_text::text_with(system_decoder_on, why).sentence
 }
 
 /// The line for a file whose sound this PC cannot play (decision of 2026-11-15 19:50): the video keeps playing.
@@ -118,24 +85,16 @@ fn codec_name(codec: Codec) -> &'static str {
     codec.name().unwrap_or("this")
 }
 
-/// "Open in another app\u{2026}": the button of every refusal that is not about the PC's decoders.
-pub const OPEN_ELSEWHERE: &str = "Open in another app\u{2026}";
-/// The button where this PC has no system decoder for the format (the owner's ruling of 2026-11-20). The press is
-/// the same one: the system opens the file with its own app for the type.
-pub const OPEN_DEFAULT: &str = "Open in default app";
+pub use super::refusal_text::{OPEN_DEFAULT, OPEN_ELSEWHERE};
 
 /// The button's words for a refusal, as shipped.
 pub fn refusal_action(why: &Refusal) -> &'static str {
-    refusal_action_with(MEDIA_SYSTEM_DECODER_ON, why)
+    refusal_text::text(why).action
 }
 
-/// [`refusal_action`] for a given state of the switch: "Open in default app" only where the PC itself answered that
-/// it has no decoder (with the switch off the PC was never asked).
+/// [`refusal_action`] for a given state of the switch.
 pub fn refusal_action_with(system_decoder_on: bool, why: &Refusal) -> &'static str {
-    match why {
-        Refusal::NoSystemDecoder(_) | Refusal::NoSystemMedia(_) if system_decoder_on => OPEN_DEFAULT,
-        _ => OPEN_ELSEWHERE,
-    }
+    refusal_text::text_with(system_decoder_on, why).action
 }
 
 /// The state of the refusal `why`: its words ([`refusal_words`]) and its button ([`refusal_action`]).

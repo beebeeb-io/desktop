@@ -121,37 +121,18 @@ fn video_view_letterboxes_to_fit() {
     assert_eq!(ask_size(0.0, 0.0), (1, 1));
 }
 
-/// 5. A refusal names the FORMAT (never the file), in the board's words.
+/// 5. A refusal names the FORMAT (never the file) and the cause; the table's own tests are in `refusal_text`.
 #[test]
 fn refusal_words_name_the_format() {
     assert_eq!(
         refusal_words(&Refusal::NoDecoder("ProRes".into())),
-        "This PC can't play ProRes files here."
+        "This file uses ProRes, which Beebeeb doesn't support yet. Open it in another app."
     );
-    assert_eq!(
-        refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)),
-        "This PC has no HEVC video decoder. Install \u{201C}HEVC Video Extensions\u{201D} from the Microsoft Store, \
-         or open the file in its default app."
-    );
-    // Switch on: only HEVC names Microsoft's extension; any other system codec names no install (row 24).
-    assert_eq!(
-        refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)),
-        "Windows has no AAC decoder on this PC. Open the file in its default app."
-    );
-    // An edition of Windows with no media codecs (row 25).
-    assert_eq!(
-        refusal_words(&Refusal::NoSystemMedia(Codec::Aac)),
-        "This PC can't play AAC files: this edition of Windows has no media codecs. Open the file in its default app."
-    );
-    assert_eq!(refusal_words(&Refusal::CouldNotPlay), "This file could not be played.");
-    assert_eq!(
-        refusal_words(&Refusal::NoSandbox),
-        "Playback isn't available on this PC."
-    );
-    assert_eq!(
-        refusal_words(&Refusal::NotInstalled),
-        "Playback isn't available on this PC."
-    );
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains("HEVC Video Extensions"));
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)).contains("AAC"));
+    assert!(refusal_words(&Refusal::NoSystemMedia(Codec::Aac)).contains("no media codecs"));
+    assert!(refusal_words(&Refusal::CouldNotPlay).contains("damaged"));
+    assert_ne!(refusal_words(&Refusal::NoSandbox), refusal_words(&Refusal::NotInstalled));
 }
 
 /// A window that draws only the no-sound line, so the test needs no player.
@@ -369,7 +350,7 @@ fn the_scrubber_seeks_to_where_it_is_pressed() {
 #[test]
 fn hevc_words_do_not_ask_for_an_extension_while_the_switch_is_off() {
     let off = refusal_words_with(false, &Refusal::NoSystemDecoder(Codec::Hevc));
-    assert_eq!(off, "Beebeeb can't play HEVC video yet. Open it in another app.");
+    assert!(off.contains("HEVC (H.265)") && off.contains("can't play yet"), "{off}");
     assert!(!off.contains("Microsoft") && !off.contains("extension"));
     let aac = refusal_words_with(false, &Refusal::NoSystemDecoder(Codec::Aac));
     assert!(
@@ -411,7 +392,7 @@ fn a_too_old_windows_says_so_in_the_media_view() {
 #[test]
 fn media_no_decoder_without_a_name_says_this_kind_of_file() {
     let words = refusal_words(&Refusal::NoDecoder(String::new()));
-    assert_eq!(words, "This PC can't play this kind of file here.");
+    assert_eq!(words, "Beebeeb doesn't support this kind of file yet. Open it in another app.");
     assert!(!words.contains("  "), "{words}");
 }
 
@@ -424,7 +405,7 @@ fn media_a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app(
     assert_eq!(OPEN_DEFAULT, "Open in default app");
     let hevc = Refusal::NoSystemDecoder(Codec::Hevc);
     let words = refusal_words(&hevc);
-    assert!(words.starts_with("This PC has no HEVC video decoder."), "{words}");
+    assert!(words.contains("HEVC (H.265)") && words.contains("doesn't have the decoder"), "{words}");
     assert!(words.contains("Microsoft Store"), "{words}");
     assert!(words.contains("default app"), "{words}");
     assert!(!words.contains("yet"), "the PC has no decoder; it is not Beebeeb that cannot yet: {words}");
