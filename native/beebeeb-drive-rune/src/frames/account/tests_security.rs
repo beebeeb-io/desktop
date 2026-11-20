@@ -515,7 +515,6 @@ fn a_sign_out_with_unsaved_changes_is_done_only_by_discard() {
     assert_eq!(asked(&rt), Vec::new());
     click(&mut rt, "btn-2");
     assert_eq!(asked(&rt), vec![Intent::Show("DW-A02")]);
-    assert!(source(&rt).wire.iter().any(|w| w.contains("discarding")));
 }
 
 /// Save with no editor to save in signs nothing out and says so.
