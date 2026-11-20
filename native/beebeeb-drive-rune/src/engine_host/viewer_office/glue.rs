@@ -150,7 +150,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             OfficeKind::Doc | OfficeKind::Xls | OfficeKind::Ppt => None,
         }
         .filter(|edit| self.office.edit_on && self.office.edits.allows(*edit))
-        .filter(|_| opening.edit.is_some_and(|facts| facts.can_write && facts.version > 0));
+        // A document made here has no version until its upload lands, and is this PC's own until then: the editor too.
+        .filter(|_| {
+            let made_here = self.office_made_here(&opening.file_id, opening.session);
+            opening.edit.is_some_and(|facts| facts.can_write && (facts.version > 0 || made_here))
+        });
         // The file a New document just made opens on the bytes it was made from, never on its copy on this PC.
         let made = self
             .office
@@ -207,7 +211,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             helper,
             cancel,
             edit,
-            base: opening.edit.map_or(0, |facts| facts.version),
+            // A document made here is edited from the version its upload becomes: a new file's first.
+            base: opening.edit.map_or(0, |facts| facts.version.max(i64::from(edit.is_some()))),
             inbox: Some(inbox),
             view: None,
             ended: false,
