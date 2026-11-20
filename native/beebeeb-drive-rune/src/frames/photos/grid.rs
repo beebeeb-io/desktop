@@ -488,7 +488,7 @@ fn unshowable_notice(t: &Theme) -> El {
 }
 
 /// The notice's words (also the viewer's).
-pub const UNSHOWABLE: &str = "HEIC and RAW photos can\u{2019}t be shown in Beebeeb yet";
+pub use crate::frames::viewers::refusal_text::UNSHOWABLE;
 
 pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
     let content = if ui.lines.is_empty() {

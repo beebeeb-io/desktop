@@ -17,16 +17,7 @@ use super::player::Refusal;
 /// a format follows the helper's own line ([`helper_error`]), which has the format.
 pub(crate) fn refused(why: &Refusal) {
     tracing::warn!(
-        reason = match why {
-            Refusal::NoDecoder(_) => "no decoder",
-            Refusal::NoSystemDecoder(_) => "no system decoder",
-            Refusal::NoSystemMedia(_) => "no system media",
-            Refusal::CouldNotPlay => "failed",
-            Refusal::NotSignedIn => "not signed in",
-            Refusal::NeedsWindowsUpdate => "needs windows update",
-            Refusal::NotInstalled => "no helper",
-            Refusal::NoSandbox => "no sandbox",
-        },
+        reason = crate::frames::viewers::refusal_text::text(why).log_word,
         "media refused"
     );
 }
