@@ -801,8 +801,7 @@ fn poll_packet_text(s: &mut State, tx: &mut Tx) {
             Some(main) => Arc::new(move || main.wake()),
             None => Arc::new(|| {}),
         };
-        let window = unpoisoned(&shell.wiring.window);
-        shell.packets_watched = shell.platform.watch_packet_text(window.as_ref(), wake);
+        shell.packets_watched = shell.platform.watch_packet_text(wake);
     }
     for text in shell.platform.take_packet_text() {
         if let Some(key) = super::platform::packet_text::key_of(&text) {

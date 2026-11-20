@@ -26,6 +26,11 @@ const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
 static FLYOUT_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static EXCLUDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The flyout's window (0: none yet), for `windows_packet.rs`.
+pub(super) fn flyout_hwnd() -> isize {
+    FLYOUT_HWND.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 fn affinity_of(exclude: bool) -> u32 {
     if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE }
 }
@@ -312,8 +317,8 @@ impl Platform for WindowsPlatform {
         pc_idle()
     }
 
-    fn watch_packet_text(&self, window: Option<&rune::WindowHandle>, wake: super::PacketWake) -> bool {
-        super::windows_packet::watch(window, wake)
+    fn watch_packet_text(&self, wake: super::PacketWake) -> bool {
+        super::windows_packet::watch(wake)
     }
 
     fn take_packet_text(&self) -> Vec<String> {
