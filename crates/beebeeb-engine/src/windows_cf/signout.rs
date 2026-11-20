@@ -55,12 +55,8 @@ const SWITCH_BYTES_HELD: &str = "A file in the Beebeeb folder may hold changes t
 /// nothing (the reparse point is opened, never followed, never read). `false` for anything else or anything that
 /// cannot be read: only a proof of nothing frees an account switch to remove an item of unknown content.
 pub fn placeholder_holds_nothing(path: &Path) -> bool {
-    let Ok(file) = std::fs::OpenOptions::new()
-        .access_mode(FILE_READ_ATTRIBUTES.0 | FILE_READ_DATA.0)
-        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
-        .open(path)
-    else {
+    // Attribute access only: a read open of a cloud placeholder asks the provider for the whole file (0.8.14).
+    let Ok(file) = super::placeholders::open_for_state(path) else {
         return false;
     };
     let Ok(metadata) = file.metadata() else { return false };
@@ -307,7 +303,13 @@ fn prepare(
         // Task 2191 (D11): a file of unknown content, or a placeholder left at another path that
         // holds unknown bytes, is never deleted unasked: decided from the database, never from
         // the platform's in-sync state (which 0.8.12 set over edits).
-        if let Some(expected) = unknown_set.get(&relative).filter(|_| !path.is_dir()) {
+        if let (UnknownFiles::Refuse { .. }, true) = (unknown, unknown_set.contains_key(&relative) && !path.is_dir()) {
+            // w29, an account switch: a file of unknown content is removed only when it provably holds no bytes on
+            // this PC (a placeholder nothing was fetched into; read with attribute access, which fetches nothing).
+            // Anything else may be a person's unsent work: the purge refuses before it deletes anything. What holds
+            // nothing is then judged by the ordinary rules below (its identity, in sync, no changes).
+            anyhow::ensure!(placeholder_holds_nothing(&path), "{}", SWITCH_BYTES_HELD);
+        } else if let Some(expected) = unknown_set.get(&relative).filter(|_| !path.is_dir()) {
             if prepare_unknown(db, &path, &relative, expected, unknown, kept, handles)? {
                 continue;
             }
@@ -558,14 +560,6 @@ fn prepare_unknown(
     let holds_nothing = ranges
         .as_ref()
         .is_some_and(|ranges| ranges.iter().all(|(_, length)| *length == 0));
-    // w29, an account switch: a file of unknown content is removed only when it provably holds no bytes on this PC (a
-    // placeholder nothing was fetched into, as seen through this exclusive handle). Anything else may be a person's
-    // unsent work: the purge refuses before it deletes anything. A placeholder that holds nothing is then judged by
-    // the ordinary rules (its identity, in sync, no changes), so it is deleted like any synced item.
-    if let UnknownFiles::Refuse { .. } = unknown {
-        anyhow::ensure!(holds_nothing, "{}", SWITCH_BYTES_HELD);
-        return Ok(false);
-    }
     match unknown {
         UnknownFiles::Keep { dir } if !holds_nothing => {
             let dest = dir.join(relative);
