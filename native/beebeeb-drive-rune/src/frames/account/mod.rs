@@ -970,7 +970,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
         Pane::Security => {
-            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, &t);
+            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, s.shell.hide_from_capture(), &t);
             (page, over.or_else(|| app_lock_password::over(source, form, dialog, &t)))
         }
         Pane::Sessions => sessions::pane(source, dialog, &t),

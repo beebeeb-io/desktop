@@ -45,6 +45,10 @@ pub struct Wiring {
     pub saved: SavedWindows,
     /// Where window places are saved; None: nowhere (tooling runs, tests).
     pub state_file: Option<PathBuf>,
+    /// Where the "hide from capture" switch is stored; None: nowhere (tooling runs, tests).
+    pub capture_file: Option<PathBuf>,
+    /// The stored switch at start (`shell::capture_setting`). Off unless the person turned it on.
+    pub hide_from_capture: bool,
 }
 
 pub struct Shell {
@@ -65,13 +69,13 @@ pub struct Shell {
     /// What the platform was last **successfully** told about capture exclusion. `false` at
     /// startup: the platform has not been told anything until the first `poll` calls it.
     capture_excluded: bool,
+    /// The person's switch: hide every window from capture and remote desktop. Off by default.
+    hide_from_capture: bool,
     /// The gate and the account the last poll saw (`poll` ends the account lane's flows when
     /// the session ends under them).
     session_seen: Option<(super::app::GateState, Option<String>)>,
     /// The last poll saw the session gate open (`session_gate::open`).
     gate_open_seen: bool,
-    /// The last poll saw a screen with a secret (`poll_capture` drops exclusion one poll late).
-    secret_seen: bool,
     /// Consecutive failures of the capture-exclusion platform call. Reset on success or when
     /// the desired state changes. Capped at 3: after 3 failures the call is not retried until
     /// the desired state changes (a navigation away and back resets it).
@@ -119,6 +123,7 @@ impl Shell {
         let window_kind = surfaces::kind_for(&app.screen());
         let tray_inputs = actions.tray_inputs();
         let tray_model = tray_model(&tray_inputs);
+        let hide_from_capture = wiring.hide_from_capture;
         let window_slot = wiring.window.clone();
         let media_pump: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             let window = window_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -142,9 +147,9 @@ impl Shell {
             // The platform has not been told anything yet. The first poll that sees a secret
             // route (or any route, if a window handle exists) will apply it.
             capture_excluded: false,
+            hide_from_capture,
             session_seen: None,
             gate_open_seen: false,
-            secret_seen: false,
             capture_exclusion_retries: 0,
             flyout_behind: false,
             #[cfg(test)]
@@ -262,8 +267,23 @@ impl Shell {
         changed
     }
 
-    /// Applies capture exclusion to the window. `desired`: whether the current route shows a
-    /// secret. Called from the ONE choke point at the end of `poll`.
+    /// The person's "Hide Beebeeb from screen capture and remote desktop" switch.
+    pub fn hide_from_capture(&self) -> bool {
+        self.hide_from_capture
+    }
+
+    /// Turns the switch on or off and stores it for this PC. The next poll tells the platform.
+    pub fn set_hide_from_capture(&mut self, hide: bool) {
+        self.hide_from_capture = hide;
+        self.capture_exclusion_retries = 0;
+        if let Some(path) = self.wiring.capture_file.clone()
+            && let Err(error) = super::capture_setting::save(&path, hide)
+        {
+            log(format!("the capture setting was not saved ({})", error.kind()));
+        }
+    }
+
+    /// Applies capture exclusion to the window. `desired`: the person's switch. Called from the ONE choke point at the end of `poll`.
     ///
     /// `self.capture_excluded` tracks what the platform was last **successfully** told, not what
     /// the route wants. When `desired != capture_excluded`, the platform is called. On failure
@@ -745,54 +765,14 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed
 }
 
-/// The ONE place capture exclusion is decided: every path of the poll (gate change, sign-in
-/// intents, sidebar navigation, viewer, an answer of Windows Hello) that may change what is on
-/// screen has run. A new path cannot forget this: it runs unconditionally at the end of every poll.
-/// The decision combines the route-level check (SignIn, Locked, RecoveryPhrase, FirstRun) with
-/// the account pane's per-screen check (change password, 2FA setup, backup codes, the approval code).
-///
-/// Leaving a secret screen, exclusion drops ONE POLL LATE. The poll runs before the frame it
-/// belongs to is built and shown, and a press animates what it removes: on the poll that first
-/// sees "no secret" the last shown frame still holds it, and the leaving elements would go on
-/// painting it for the length of their animation. So that poll keeps the window excluded and
-/// lands every running animation (the leaving elements are gone from the frame it builds); the
-/// next poll, which it asks for, tells the platform.
-///
-/// The test build is the exception (Guus, 2026-11-17): it holds no real account and is what a release is
-/// recorded from, so it never asks for exclusion, on any screen ([`hides_secrets_from_capture`]).
-fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
-    let secret = hides_secrets_from_capture(s.identity)
-        && (registry::route_shows_secret(&s.shell.app) || {
-        let group = registry::group_for(&s.shell.app);
-        matches!(
-            group,
-            registry::FrameGroup::Settings(pane) if crate::frames::account::Pane::root(pane).is_some()
-        ) && s.account.shows_secret()
-    }
-    // A link's password being typed in the Files window's Share dialog (DW-0407).
-    || (matches!(registry::group_for(&s.shell.app), registry::FrameGroup::Section(_))
-        && crate::frames::files::share::shows_secret(s))
-    // A link's password being typed in Photos' own Share dialog.
-    || matches!(&s.photos.dialog, Some(crate::frames::photos::Dialog::Share(d)) if d.password)
-    // A link's password being typed in Shared's Password… dialog.
-    || matches!(s.frames.shared.dialog, Some(crate::frames::shared::dialogs::Dialog::LinkPassword { .. }))
-    // A deck in Present (the viewer contract §5.4): its slides stay out of captures and screen shares.
-    || crate::frames::office::slides::presenting(s));
-    let leaving = std::mem::replace(&mut s.shell.secret_seen, secret) && !secret;
-    if leaving {
-        tx.settle();
-        tx.wake_after(std::time::Duration::from_millis(1));
-    }
-    s.shell.apply_capture_exclusion(secret || leaving);
-    leaving
-}
-
-/// Whether this build keeps its secret screens out of screenshots, recordings and screen shares: every build
-/// but the test build. The answer comes from the identity the window was started with (`State::identity`,
-/// fixed when the binary was built), never from a flag, a file, a setting or the environment: nothing a person
-/// can change turns the released app's exclusion off. Anything that is not exactly the test build excludes.
-fn hides_secrets_from_capture(identity: super::identity::AppIdentity) -> bool {
-    identity.bundle_identifier() != super::identity::TEST_BUNDLE_IDENTIFIER
+/// The ONE place capture exclusion is decided, at the end of every poll: the person's switch "Hide Beebeeb from
+/// screen capture and remote desktop" (`Shell::hide_from_capture`, off by default, on every identity). Off, nothing
+/// asks the platform for exclusion and the windows show in captures, screen shares and remote desktop (RustDesk).
+/// On, every window is excluded, on every screen. Guus, 2026-11-20: this replaces "the real build always hides its
+/// secret screens" (a signed-in remote session could not see the sign-in screen).
+fn poll_capture(s: &mut State, _tx: &mut Tx) -> bool {
+    s.shell.apply_capture_exclusion(s.shell.hide_from_capture);
+    false
 }
 
 fn open_web_page(url: &str) {

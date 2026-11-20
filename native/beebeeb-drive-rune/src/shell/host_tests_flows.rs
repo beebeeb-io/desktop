@@ -107,26 +107,6 @@ fn the_approval_code_screens_are_secret_and_the_window_is_excluded_while_they_sh
         !Pane::ApproveReview.shows_secret(),
         "the pane under the dialogs has no secret of its own"
     );
-
-    // End to end: the platform is told when the code page opens, and told again when it closes.
-    let engine = Arc::new(FixtureEngine::ready());
-    let platform = Arc::new(FakePlatform::default());
-    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
-    assert!(platform.capture_exclusions.lock().unwrap().is_empty());
-    rt.update(|s, _| crate::frames::account::go(s, "DW-A12"));
-    rt.frame(1.0);
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true],
-        "DW-A12 excludes the window"
-    );
-    rt.update(|s, _| crate::frames::account::go(s, "DW-A52"));
-    rt.frame(2.0);
-    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true]);
-    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
-    // leaving elements; the next one tells the platform.
-    rt.frame(2.5);
-    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true, false]);
 }
 
 /// A window on the review of another device's sign-in (DW-A13), its code typed on DW-A12, with the
@@ -291,15 +271,15 @@ fn a_lock_wipes_what_was_typed_in_an_account_form() {
 }
 
 /// Sign-up (DW-A31 to DW-A44) is a set of screens of the sign-in window: "Create a Beebeeb account" opens
-/// it on the shell's next poll, and the window stays excluded from capture on every one of its screens:
+/// it on the shell's next poll, on every one of its screens:
 /// the password (DW-A36 to DW-A38), the recovery phrase shown (DW-A39) and typed back (DW-A40, DW-A41).
 #[test]
-fn sign_up_opens_in_the_sign_in_window_and_every_screen_of_it_stays_excluded_from_capture() {
+fn sign_up_opens_in_the_sign_in_window() {
     use crate::frames::signin::create::{FRAME_IDS, Step};
     use crate::frames::signin::{Intent as SignIn, Screen};
     let engine = Arc::new(FixtureEngine::signed_out());
     let platform = Arc::new(FakePlatform::default());
-    let mut rt = runtime(state::init_with(Shell::fixture_on(engine, platform.clone())));
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine, platform)));
     rt.update(|s, _| {
         s.signin = crate::frames::signin::scene("DW-A01");
         s.signin.as_mut().unwrap().leave(SignIn::CreateAccount);
@@ -312,142 +292,17 @@ fn sign_up_opens_in_the_sign_in_window_and_every_screen_of_it_stays_excluded_fro
         rt.update(|s, _| s.signin = crate::frames::signin::scene(frame));
         rt.frame(2.0 + i as f64);
         assert!(registry::route_shows_secret(&rt.state.shell.app), "{frame}");
-        assert!(rt.state.shell.capture_excluded, "{frame} can be captured");
         if let Screen::Create(step) = rt.state.signin.as_ref().unwrap().screen {
             secret_screens += usize::from(step.shows_secret());
         }
     }
     assert_eq!(secret_screens, 6, "DW-A36 to DW-A41");
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true],
-        "excluded once, at the start, and never lifted between the screens"
-    );
-}
-/// The reviewer's open point: capture exclusion must not drop while the code can still be
-/// painted. Rune keeps a leaving element in the tree while it animates out, and the poll that
-/// drops exclusion runs before the frame without the code is shown. So on every way out of a
-/// screen that holds the code (a press, Windows Hello's answer inside the poll, a lock), at every
-/// frame where the platform was last told "not excluded", the code field is not in the tree, not
-/// even as a leaving element.
-#[test]
-fn capture_exclusion_drops_only_after_the_code_is_out_of_the_tree() {
-    use crate::frames::account::Dialog as AccountDialog;
-    use crate::frames::account::approve::{self, CODE_KEY};
-    use crate::frames::account::source::BoardAccount;
-    type Way = fn(&Arc<FixtureEngine>, &mut Runtime<State>);
-    let ways: [(&str, Way); 5] = [
-        // A key inside a frame: its handler runs after that frame's poll, and its commit animates.
-        ("Esc (Deny), pressed inside a frame", |_, rt| {
-            rt.key(KeyEvent {
-                key: Key::Escape,
-                mods: Mods::default(),
-            })
-        }),
-        ("Deny between frames", |_, rt| {
-            rt.update(|s, _| assert!(approve::on_escape(s)))
-        }),
-        ("the answer of Windows Hello, inside the poll", |_, rt| {
-            rt.update(|s, _| approve::press_approve(s))
-        }),
-        ("leaving the section", |_, rt| {
-            rt.update(|s, _| crate::frames::account::go(s, "DW-A51"))
-        }),
-        ("a sign-out to another account", |engine, _| {
-            engine.set_account("user-b")
-        }),
-    ];
-    for (way, leave) in ways {
-        let engine = Arc::new(FixtureEngine::ready());
-        let platform = Arc::new(FakePlatform::default());
-        let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
-        rt.update(|s, _| {
-            s.account.source = Some(Box::new(BoardAccount::new()));
-            crate::frames::account::go(s, "DW-A12");
-        });
-        settle(&mut rt);
-        press(
-            &mut rt,
-            Key::Text(approve::BOARD_REQUEST_CODE.replace('-', "")),
-            Mods::default(),
-        );
-        press(&mut rt, Key::Enter, Mods::default());
-        assert_eq!(rt.state.account.dialog, Some(AccountDialog::ApproveReview), "{way}");
-        let excluded = |platform: &FakePlatform| platform.capture_exclusions.lock().unwrap().last().copied();
-        assert_eq!(excluded(&platform), Some(true), "{way}: the review is excluded");
-        leave(&engine, &mut rt);
-        let mut frames_with_the_code = 0;
-        for frame in 0..60 {
-            rt.frame(0.016);
-            let code_in_tree = rt.elements().iter().any(|e| e.key.as_deref() == Some(CODE_KEY));
-            frames_with_the_code += usize::from(code_in_tree);
-            assert!(
-                !(code_in_tree && excluded(&platform) == Some(false)),
-                "{way}: frame {frame} still has the code field in the tree and capture is not excluded"
-            );
-        }
-        assert_eq!(excluded(&platform), Some(false), "{way}: exclusion drops in the end");
-        assert!(!rt.state.account.shows_secret(), "{way}");
-        // At most the one frame of a press inside a frame (still excluded) holds the leaving field.
-        assert!(frames_with_the_code <= 1, "{way}: {frames_with_the_code} frames");
-    }
-}
-
-/// The Share dialog's password field (DW-0407) is a secret on a route that is not one: the
-/// window is excluded from capture exactly while the field shows. The link itself is never
-/// drawn, so the dialog without the field leaves the window capturable.
-#[test]
-fn a_links_password_field_excludes_the_window_from_capture_while_it_shows() {
-    let (_engine, platform, mut rt) = fixture();
-    let exclusions = || platform.capture_exclusions.lock().unwrap().clone();
-    let centre_of = |rt: &Runtime<State>, key: &str| {
-        let e = rt
-            .elements()
-            .into_iter()
-            .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
-            .unwrap_or_else(|| panic!("no element keyed {key}"));
-        (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
-    };
-    let click = |rt: &mut Runtime<State>, key: &str| {
-        let (x, y) = centre_of(rt, key);
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        for i in 0..3 {
-            rt.frame(10.0 + f64::from(i));
-        }
-    };
-    // Share…, from the details panel's button: the dialog alone shows no secret.
-    click(&mut rt, "share-box");
-    assert!(matches!(
-        rt.state.actions.dialog,
-        Some(crate::frames::files::dialogs::Dialog::Share(_))
-    ));
-    assert!(
-        exclusions().is_empty(),
-        "the dialog without a password field is capturable"
-    );
-    // Password on: the field shows, and the platform is told to exclude the window.
-    click(&mut rt, "item-0-2-switch");
-    assert!(crate::frames::files::share::shows_secret(&rt.state));
-    assert_eq!(exclusions(), vec![true]);
-    assert!(rt.state.shell.capture_excluded);
-    // Password off again: capturable again.
-    click(&mut rt, "item-0-2-switch");
-    assert_eq!(exclusions(), vec![true, false]);
-    // On, then Cancel: the dialog and the field are gone, and so is the exclusion.
-    click(&mut rt, "item-0-2-switch");
-    assert_eq!(exclusions(), vec![true, false, true]);
-    click(&mut rt, "btn-2");
-    assert!(rt.state.actions.dialog.is_none());
-    assert_eq!(exclusions(), vec![true, false, true, false]);
-    assert!(!rt.state.shell.capture_excluded);
 }
 
 /// A session on a computer that holds no key of the account (the gate `NeedsRecoveryPhrase`, from a sign-in or
-/// at a start): the window is the sign-in window on its twelve words (DW-A23), never the "not built" frame, and it
-/// is excluded from capture from the form to the words without a gap.
+/// at a start): the window is the sign-in window on its twelve words (DW-A23), never the "not built" frame,.
 #[test]
-fn a_session_without_a_key_here_shows_the_twelve_words_in_the_sign_in_window_excluded_from_capture() {
+fn a_session_without_a_key_here_shows_the_twelve_words_in_the_sign_in_window() {
     use crate::frames::signin::Screen;
     use crate::frames::signin::steps::WORD_KEYS;
     let engine = Arc::new(FixtureEngine::signed_out());
@@ -479,19 +334,12 @@ fn a_session_without_a_key_here_shows_the_twelve_words_in_the_sign_in_window_exc
         "the same window, not the main one"
     );
     assert!(registry::route_shows_secret(&rt.state.shell.app));
-    assert!(rt.state.shell.capture_excluded, "the words can be captured");
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true],
-        "excluded once, at the start, and never lifted on the way to the words"
-    );
 
     // Escape (Back) on the words: the form, and it stays the form on the next frames while the gate has not
-    // moved yet (the engine's sign-out is a round trip). The window is still excluded from capture.
+    // moved yet (the engine's sign-out is a round trip).
     press(&mut rt, Key::Escape, Mods::default());
     rt.frame(3.0);
     settle(&mut rt);
     assert_eq!(rt.state.signin.as_ref().unwrap().screen, Screen::SignIn);
     assert!(rt.find(WORD_KEYS[0]).is_none(), "the words are gone");
-    assert!(rt.state.shell.capture_excluded);
 }

@@ -335,6 +335,29 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
     )
 }
 
+/// "Hide Beebeeb from screen capture and remote desktop": a per-PC switch, off by default (`shell::capture_setting`).
+/// Off, the windows show in screenshots, screen shares and remote desktop; on, every window is left out of them.
+fn capture_row(on: bool, t: &Theme) -> El {
+    let it = Row::new(Lead::Icon(&icons::EYE_OFF), "Hide Beebeeb from screen capture and remote desktop").sub(
+        if on {
+            "On: screenshots, recordings and remote desktop show nothing of Beebeeb"
+        } else {
+            "Off: Beebeeb shows in screenshots, screen shares and remote desktop"
+        },
+    );
+    set::item(
+        1,
+        3,
+        &it,
+        vec![
+            lists::switch("item-1-3", "Hide Beebeeb from screen capture and remote desktop", on, t).on_press(
+                move |s: &mut State| s.shell.set_hide_from_capture(!on),
+            ),
+        ],
+        t,
+    )
+}
+
 /// Approving a sign-in from another device. A source that has it opens it; one that has not says so, with the
 /// way that works (the web), and no code field behind the row.
 fn approve_row(source: &dyn AccountSource, t: &Theme) -> El {
@@ -353,7 +376,7 @@ fn approve_row(source: &dyn AccountSource, t: &Theme) -> El {
     set::item(1, 2, &it.sub(APPROVE_ON_WEB), Vec::new(), t)
 }
 
-fn devices(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
+fn devices(facts: &SecurityFacts, source: &dyn AccountSource, hide_capture: bool, t: &Theme) -> El {
     // "N signed in": true of devices and of sessions alike (a source lists one or the other).
     let sessions =
         Row::new(Lead::Icon(&icons::DEVICE_PHONE), "Devices and sessions").sub("Where your account is signed in");
@@ -369,6 +392,7 @@ fn devices(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
             app_lock_row(facts, t),
             leads(1, 1, sessions, State_::Marked(signed_in), "DW-A55", source, t),
             approve_row(source, t),
+            capture_row(hide_capture, t),
         ],
         None,
         t,
@@ -514,7 +538,13 @@ pub fn arrive(ui: &mut super::AccountUi) {
 
 /// The page, and the confirm or the menu over it when one is open. `signing`: where a sign-out asked from the
 /// confirm stands.
-pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &SigningOut, t: &Theme) -> (El, Option<El>) {
+pub fn pane(
+    source: &dyn AccountSource,
+    dialog: Option<&Dialog>,
+    signing: &SigningOut,
+    hide_capture: bool,
+    t: &Theme,
+) -> (El, Option<El>) {
     let facts = source.security_facts();
     let over = match dialog {
         Some(Dialog::SignOutApp) if facts.can_sign_out => Some(sign_out_confirm(
@@ -543,7 +573,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &Signi
         set::heading("Sign-in and security", None, None, t),
         score_card(&facts, source, t),
         sign_in(&facts, source, t),
-        devices(&facts, source, t),
+        devices(&facts, source, hide_capture, t),
         activity(&facts, source, t),
         sign_out(&facts, t),
         delete(source, t),
