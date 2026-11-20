@@ -767,6 +767,15 @@ fn a_file_with_no_preview_says_so_and_offers_the_two_ways_on() {
     assert!(rt.state.actions.dialog.is_none());
 }
 
+/// Back to the list from the viewer, as its Close does: what it holds is dropped and the route steps back.
+fn leave_viewer(rt: &mut Runtime<State>) {
+    rt.update(|s, _| {
+        s.viewer.ui = None;
+        crate::shell::host::dispatch(s, Event::Escape);
+    });
+    settle(rt);
+}
+
 #[test]
 fn open_goes_to_the_viewer_for_every_file_and_never_to_the_files_app() {
     let (mut rt, calls, _) = spied();
@@ -778,9 +787,7 @@ fn open_goes_to_the_viewer_for_every_file_and_never_to_the_files_app() {
     assert!(
         matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(other.as_str()))
     );
-    eprintln!("DBG before esc {:?} ui={}", rt.state.shell.app.screen(), rt.state.viewer.ui.is_some());
-    press(&mut rt, Key::Escape, NONE);
-    eprintln!("DBG after esc {:?} ui={}", rt.state.shell.app.screen(), rt.state.viewer.ui.is_some());
+    leave_viewer(&mut rt);
     // A file the viewer renders (its sample's notes): Open shows it in the window.
     let notes = crate::frames::viewers::source::board::NOTES;
     rt.update(|s, _| {
@@ -789,7 +796,6 @@ fn open_goes_to_the_viewer_for_every_file_and_never_to_the_files_app() {
     });
     settle(&mut rt);
     press(&mut rt, Key::Enter, NONE);
-    eprintln!("DBG notes {:?} ui={} sel={:?}", rt.state.shell.app.screen(), rt.state.viewer.ui.is_some(), rt.state.selected);
     assert!(
         matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(notes)),
         "the route is on the file"

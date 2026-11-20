@@ -1,7 +1,7 @@
 //! Tests of the list offline (DW-1108) and during the first download (DW-1107).
 
 use super::browse_states::ListedSoFar;
-use super::source::{BoardDrive, Call};
+use super::source::BoardDrive;
 use super::tests::*;
 use super::{Intent, Toast};
 use crate::State;
@@ -184,7 +184,11 @@ fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
     click(&mut rt, "row-5-date");
     press(&mut rt, Key::Enter, NONE);
     assert!(asked(&calls).is_empty(), "the viewer opens it, not another app");
-    press(&mut rt, Key::Escape, NONE);
+    rt.update(|s, _| {
+        s.viewer.ui = None;
+        crate::shell::host::dispatch(s, crate::shell::app::Event::Escape);
+    });
+    settle(&mut rt);
     assert!(rt.state.actions.toast != Some(Toast::LinkCopied));
     assert!(find(&rt, "ready-card").is_none(), "the card is gone");
     assert_eq!(

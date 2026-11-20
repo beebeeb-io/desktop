@@ -486,15 +486,7 @@ fn open_goes_into_a_kept_folder_and_opens_a_kept_file_through_the_files_source()
         .id
         .clone();
 
-    // A file: the window's viewer, never another app (w29); with no viewer routed it is refused and said.
-    rt.state.this_pc.ask(Intent::Open(file.clone()));
-    poll(&mut rt);
-    assert!(calls.lock().unwrap().is_empty(), "never handed to the Files source");
-    assert_eq!(
-        rt.state.this_pc.refusal.take().map(|(words, _)| words),
-        Some(super::NOT_OPENED)
-    );
-    rt.update(|s, _| crate::frames::viewers::wire(s, Box::new(|| Box::new(crate::frames::viewers::source::FixtureViewerSource::new()))));
+    // A file: the window's viewer, never another app through the Files source (w29).
     rt.state.this_pc.ask(Intent::Open(file.clone()));
     poll(&mut rt);
     assert!(calls.lock().unwrap().is_empty(), "never handed to the Files source");

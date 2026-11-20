@@ -6,7 +6,7 @@
 use super::menus::file_menu;
 use super::open_with_menu::{self, OPEN_WITH};
 use super::source::{AppChoice, Call, FilesFixture};
-use super::tests::{Calls, NONE, asked, click, find, focused, ids, info, press, right_click, runtime_of, settle};
+use super::tests::{Calls, NONE, asked, click, find, focused, info, press, right_click, runtime_of, settle};
 use super::{MenuKind, Toast};
 use crate::State;
 use crate::shell::app::Screen;
