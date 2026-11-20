@@ -71,7 +71,7 @@ fn the_status_is_never_up_to_date_without_an_engine() {
         OFFLINE,
     ];
     let views = without_an_engine();
-    assert_eq!(views.len(), 24);
+    assert_eq!(views.len(), 2 * (2 + KINDS.len()));
     for view in &views {
         let word = sync_word(view).expect("signed in and unlocked: the line says something");
         assert!(!running_words.contains(&word), "{:?} says {word}", view.start);
