@@ -10,8 +10,10 @@ use super::chrome::{self, Bar, Tone, rgb, style};
 use super::source::{Kind, Photo, Shape, Totals};
 use super::{Intent, Menu, Ui, icons};
 use crate::State;
+use crate::theme::file_icons::icon_for;
 use crate::theme::icons as shared;
 use crate::theme::tokens::{Theme, type_};
+use crate::ui::file_icon::file_icon;
 use crate::ui::kit;
 
 /// The gap between tiles (`gap-[3px]`).
@@ -297,7 +299,13 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
     // A thumbnail that is not there yet: the neutral tile, never a broken picture.
     tile = match ui.source.thumbnail(photo.id, Shape::Square) {
         Some(pixels) => tile.pixels(&pixels),
-        None => tile.fill(t.tile),
+        None => {
+            let mime = if matches!(photo.kind, Kind::Video(_)) { "video/*" } else { "image/*" };
+            let fi = icon_for("", false, Some(mime));
+            tile.fill(t.tile)
+                .center()
+                .child(file_icon(format!("{key}-type-icon"), fi, 28.0, t))
+        }
     };
     if checked {
         tile = tile.child(

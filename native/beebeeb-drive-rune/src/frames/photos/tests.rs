@@ -714,3 +714,27 @@ fn w20_the_gear_in_the_photos_window_opens_settings() {
     click(&mut rt, "settings-btn");
     assert!(rt.state.shell.app.in_settings(), "the gear opened nothing on Photos");
 }
+
+#[test]
+fn a_tile_without_a_thumbnail_shows_the_photo_or_video_icon() {
+    use crate::theme::file_icon_colors::tint_color;
+    use crate::theme::file_icons::{Tint, icon_for};
+    use crate::ui::kit;
+    let colours = |ui: Ui| {
+        let mut rt = runtime_of(ui);
+        kit::record();
+        rt.state.photos.take_intents();
+        rt.frame(0.0);
+        kit::take()
+            .into_iter()
+            .filter(|(k, _)| k.ends_with("-type-icon"))
+            .map(|(_, n)| n.color)
+            .collect::<Vec<_>>()
+    };
+    let none = colours(Ui::new(Box::new(NoThumbnails(FixturePhotos::new()))));
+    let photo = Some(tint_color(icon_for("", false, Some("image/*")).tint, false));
+    let video = Some(tint_color(icon_for("", false, Some("video/*")).tint, false));
+    assert_eq!(icon_for("", false, Some("image/*")).tint, Tint::Image);
+    assert!(none.contains(&photo) && none.contains(&video), "photo and video icons drawn");
+    assert!(colours(Ui::new(Box::new(FixturePhotos::new()))).is_empty(), "a thumbnail, no type icon");
+}
