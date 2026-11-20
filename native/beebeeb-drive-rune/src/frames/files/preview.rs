@@ -96,11 +96,11 @@ impl State {
         true
     }
 
-    /// Open in its app, from the panel: the panel closes and the file goes to its own app, never to the window's
-    /// viewer (the button names where it opens).
+    /// Open, from the panel: the panel closes and the file opens in the window's viewer (w29: nothing opens in
+    /// another app without "Open in another app").
     pub fn open_from_preview(&mut self, tx: &mut Tx) {
         self.close_dialog(tx);
-        self.open_selection_with(tx, false);
+        self.open_selection(tx);
     }
 
     /// Open in another app…: Windows' app chooser; the file is decrypted for the app picked.

@@ -459,10 +459,7 @@ fn open_kept(s: &mut State, id: &str) -> Option<&'static str> {
         crate::shell::host::dispatch(s, Event::Navigate(route));
         return None;
     }
-    if crate::frames::viewers::open_item(s, &item) {
-        return None;
-    }
-    s.actions.source.open(&[item]).err().map(|_| NOT_OPENED)
+    (!crate::frames::viewers::open_item(s, &item)).then_some(NOT_OPENED)
 }
 
 /// What the sections asked of the window ([`carry_out`]) and what the source's workers answered since the last

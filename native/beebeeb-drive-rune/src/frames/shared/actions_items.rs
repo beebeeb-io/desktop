@@ -64,10 +64,7 @@ fn open(s: &mut State, id: &str) {
         }
         Some(RowTarget::Item { id: item, .. }) => {
             let item = drive_item(&item, &name, false);
-            if crate::frames::viewers::open_item(s, &item) {
-                return;
-            }
-            if s.actions.source.open(&[item]).is_err() {
+            if !crate::frames::viewers::open_item(s, &item) {
                 say(s, Notice::NotOnThisPc);
             }
         }

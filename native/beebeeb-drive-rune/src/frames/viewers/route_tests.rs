@@ -692,32 +692,3 @@ fn a_file_that_is_left_takes_its_name_its_folders_and_its_details_and_none_is_pr
     assert!(file.details.facts.iter().all(|(_, value, _)| value.is_empty()));
     assert!(file.newer.as_ref().is_some_and(|newer| newer.from.is_empty()));
 }
-
-#[test]
-fn a_document_goes_to_its_own_app_and_code_a_script_or_a_web_page_does_not() {
-    use super::kinds::its_app_shows_it;
-    for name in [
-        "a.txt",
-        "a.LOG",
-        "a.md",
-        "a.markdown",
-        "a.csv",
-        "a.tsv",
-        "a.pdf",
-        "a.png",
-        "a.jpg",
-        "a.gif",
-        "a.webp",
-        // Not this group's to route at all: left as it was.
-        "a.docx",
-        "no-extension",
-    ] {
-        assert!(its_app_shows_it(name), "{name}");
-    }
-    for name in [
-        "a.py", "a.sh", "a.js", "a.ts", "a.html", "a.HTML", "a.xml", "a.css", "a.json", "a.toml", "a.yaml", "a.yml",
-        "a.rs",
-    ] {
-        assert!(!its_app_shows_it(name), "{name}");
-    }
-}
