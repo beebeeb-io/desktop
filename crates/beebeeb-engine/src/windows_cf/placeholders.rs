@@ -41,7 +41,8 @@ use windows::core::PCWSTR;
 // The single-placeholder create (LD-0113: read-only under Backups), in its own file under the size ratchet.
 #[path = "placeholder_create.rs"]
 mod create;
-pub use create::{create_placeholder, create_placeholder_with};
+pub(super) use create::mint;
+pub use create::{create_placeholder, create_placeholder_with, entry_name_at};
 
 /// Remove the on-disk Cloud Files placeholder at `path` as part of reconciling a
 /// REMOTE deletion (a file/folder trashed or hard-deleted on another client) back

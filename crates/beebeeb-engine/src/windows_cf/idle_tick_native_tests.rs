@@ -193,3 +193,101 @@ fn w36_an_idle_tick_keeps_no_handle_and_does_no_work_per_row() {
     let (after_move, _, _) = tick(&r, &mut memo, &cursor);
     assert_eq!((after_move.visited, after_move.created), (1, 1), "{after_move:?}");
 }
+
+/// The 8.3 short name of the entry at `path`; `None` when the volume gave it none.
+fn short_name_of(path: &std::path::Path) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut buffer = vec![0u16; 1024];
+    // SAFETY: a NUL-terminated path and a buffer that outlive the call.
+    let written = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buffer)) } as usize;
+    assert!(written != 0 && written < buffer.len(), "GetShortPathNameW failed");
+    let short = std::path::PathBuf::from(String::from_utf16_lossy(&buffer[..written]));
+    let (short, long) = (short.file_name()?.to_str()?.to_string(), path.file_name()?.to_str()?);
+    (!short.eq_ignore_ascii_case(long)).then_some(short)
+}
+
+/// w37: a row whose name the folder shows in another case, or that reaches its entry through the entry's 8.3 short
+/// name, is "already exists" too. Before, the listing did not show it under the row's exact characters, so every
+/// tick called `CfCreatePlaceholders` for it and kept one Process handle per row.
+#[test]
+fn w37_placeholder_rows_named_in_another_case_or_by_a_short_name_keep_no_handle() {
+    const EACH: usize = 40;
+    let r = Root::new();
+    r.track("dir", ItemKind::Folder);
+    for n in 0..EACH {
+        r.track(&format!("dir/case{n}.bin"), ItemKind::File);
+        r.track(&format!("dir/a long name number {n}.data"), ItemKind::File);
+    }
+    let rows = 1 + 2 * EACH;
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    let (first, _, _) = tick(&r, &mut populate::PlacedMemo::default(), &cursor);
+    assert_eq!((first.created, first.create_calls), (rows, rows), "{first:?}");
+
+    // The rows now name their entries in another case, and by the entry's short name.
+    let mut by_short_name = 0;
+    for n in 0..EACH {
+        let mut row = r.db.get_file(&format!("dir/case{n}.bin")).unwrap().unwrap();
+        row.path = format!("dir/CASE{n}.BIN");
+        r.db.upsert_file(&row).unwrap();
+        let long = format!("dir/a long name number {n}.data");
+        if let Some(short) = short_name_of(&r.root.join("dir").join(format!("a long name number {n}.data"))) {
+            let mut row = r.db.get_file(&long).unwrap().unwrap();
+            row.path = format!("dir/{short}");
+            r.db.upsert_file(&row).unwrap();
+            by_short_name += 1;
+        }
+    }
+    println!("W37 rows={rows} by_case={EACH} by_short_name={by_short_name}");
+    assert_eq!(
+        by_short_name, EACH,
+        "this volume gives no 8.3 short names: the short-name half did not run"
+    );
+
+    // The first tick after a start (an empty memo), then three idle ticks: no create call, no handle kept.
+    let mut memo = populate::PlacedMemo::default();
+    let (start, start_handles, _) = tick(&r, &mut memo, &cursor);
+    assert_eq!(
+        (start.already_existed, start.create_calls, start.created),
+        (rows, 0, 0),
+        "{start:?}"
+    );
+    let mut idle_handles = Vec::new();
+    for _ in 0..3 {
+        let (idle, tick_handles, _) = tick(&r, &mut memo, &cursor);
+        assert_eq!((idle.visited, idle.create_calls, idle.created), (0, 0, 0), "{idle:?}");
+        idle_handles.push(tick_handles);
+    }
+    println!("W37 start_handles={start_handles:+} idle_handles={idle_handles:?}");
+    // The counter is the whole test process's (other tests only add): well under one per row.
+    assert!(
+        start_handles < EACH as i64 / 2,
+        "the first tick kept {start_handles} handles"
+    );
+    let least = *idle_handles.iter().min().unwrap();
+    assert!(
+        least < EACH as i64 / 2,
+        "an idle tick kept {least} handles for {} such rows",
+        2 * EACH
+    );
+    // Nothing was made beside the entries: the folder still holds one entry per row.
+    assert_eq!(std::fs::read_dir(r.root.join("dir")).unwrap().count(), 2 * EACH);
+    // An entry deleted on disk is minted again under the row's own name.
+    std::fs::remove_file(r.root.join("dir").join("case0.bin")).unwrap();
+    let (again, _, _) = tick(&r, &mut memo, &cursor);
+    assert_eq!(
+        (again.visited, again.created, again.create_calls),
+        (1, 1, 1),
+        "{again:?}"
+    );
+    assert!(names_of(&r.root.join("dir")).contains(&"CASE0.BIN".to_string()));
+}
+
+/// The exact names in `dir`.
+fn names_of(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
+}
