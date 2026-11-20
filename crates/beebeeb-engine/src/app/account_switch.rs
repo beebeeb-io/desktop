@@ -63,11 +63,24 @@ impl<C: CredentialStores> Engine<C> {
         // A file of unknown content keeps B out only while its item in the folder may hold bytes (an edit of A's
         // nobody sent). With none on this PC there is nothing a person could lose: the row goes with the others.
         let guarded = db.guarded_paths().map_err(|_| "unreadable")?;
-        if guarded.iter().any(|path| port.may_hold_bytes(sync_root, path)) {
-            return Err("guarded file");
+        // w29: an item that is there and holds no bytes (a cloud placeholder nothing was fetched into) is a synced
+        // item like any other: the removal deletes it after proving that, holding it. Only a path with no item at all
+        // is `unasked`: whatever is found there later was made since and refuses the switch.
+        let mut unasked = Vec::new();
+        for path in &guarded {
+            let nothing_there = matches!(
+                sync_root.join(path.trim_start_matches('/')).symlink_metadata(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            );
+            if port.may_hold_bytes(sync_root, path) {
+                return Err("guarded file");
+            }
+            if nothing_there {
+                unasked.push(path.clone());
+            }
         }
         if db.has_account_data().map_err(|_| "unreadable")? {
-            port.remove_synced_items(db, sync_root, &guarded).map_err(|_| "the folder's items stay")?;
+            port.remove_synced_items(db, sync_root, &unasked).map_err(|_| "the folder's items stay")?;
         }
         let purge = db.purge_all_local_state().map_err(|_| "the rows stay")?;
         for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {

@@ -89,13 +89,16 @@ impl SyncRootPort for OsSyncRoots {
         .map(|_| ())
         .map_err(|_| "the purge refused".to_string())
     }
-    /// No item at the path: no bytes. Any item there (an ordinary file, a placeholder whatever is on disk of it, a
-    /// folder, something that cannot be read) may hold some. The reparse point itself is asked, never followed, and
-    /// nothing is opened, so nothing is fetched.
+    /// No item at the path: no bytes. A placeholder with no byte on disk (never fetched into) holds none either (w29:
+    /// proven through a handle that fetches nothing). Any other item (an ordinary file, a placeholder with anything
+    /// on disk, a folder, something that cannot be read) may hold some.
     #[cfg(target_os = "windows")]
     fn may_hold_bytes(&self, folder: &Path, path: &str) -> bool {
         let at = folder.join(path.trim_start_matches('/').replace('/', "\\"));
-        !matches!(std::fs::symlink_metadata(&at), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        match std::fs::symlink_metadata(&at) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            _ => !crate::windows_cf::signout::placeholder_holds_nothing(&at),
+        }
     }
 }
 
