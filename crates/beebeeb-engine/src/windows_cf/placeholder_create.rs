@@ -51,6 +51,57 @@ pub fn create_placeholder_with(
     is_dir: bool,
     read_only: bool,
 ) -> anyhow::Result<bool> {
+    // w37: an entry this name reaches is "already exists" without the call (see `entry_name_at`).
+    if entry_name_at(parent_dir, name).is_some() {
+        return Ok(false);
+    }
+    mint(parent_dir, file_id, name, size_bytes, modified_at, is_dir, read_only)
+}
+
+/// The name the folder lists for the entry `name` reaches in `parent_dir`, as NTFS resolves it: the entry's own long
+/// name, also when `name` differs from it in case or is its 8.3 short name. `None`: no entry (or it could not be
+/// asked). One `FindFirstFile` on the exact path: nothing is opened but the folder, and that is closed again.
+///
+/// w37: `CfCreatePlaceholders` keeps one Process handle (on this process) each time it answers "already exists", and
+/// has no flag or per-call handle to prevent that, so the question is put to the file system first. w36 asked the
+/// folder's listing, which only knows a name under its exact characters.
+pub fn entry_name_at(parent_dir: &std::path::Path, name: &str) -> Option<std::ffi::OsString> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW};
+    // A wildcard would match some other entry; such a name is no file name, and the create call refuses it.
+    if name.is_empty() || name.contains(['*', '?', '<', '>', '"', '/', '\\']) {
+        return None;
+    }
+    let wide: Vec<u16> = parent_dir
+        .join(name)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut found = WIN32_FIND_DATAW::default();
+    // SAFETY: a NUL-terminated path and an out-struct that outlive the call; the search handle is closed once.
+    unsafe {
+        let search = FindFirstFileW(PCWSTR(wide.as_ptr()), &mut found).ok()?;
+        let _ = FindClose(search);
+    }
+    let len = found
+        .cFileName
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(found.cFileName.len());
+    Some(std::ffi::OsString::from_wide(&found.cFileName[..len]))
+}
+
+/// [`create_placeholder_with`] without asking first: for a caller that has just asked [`entry_name_at`] itself.
+pub(in crate::windows_cf) fn mint(
+    parent_dir: &std::path::Path,
+    file_id: &str,
+    name: &str,
+    size_bytes: i64,
+    modified_at: i64,
+    is_dir: bool,
+    read_only: bool,
+) -> anyhow::Result<bool> {
     let parent_wide: Vec<u16> = parent_dir
         .to_string_lossy()
         .encode_utf16()

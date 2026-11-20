@@ -239,7 +239,10 @@ fn w37_placeholder_rows_named_in_another_case_or_by_a_short_name_keep_no_handle(
         }
     }
     println!("W37 rows={rows} by_case={EACH} by_short_name={by_short_name}");
-    assert_eq!(by_short_name, EACH, "this volume gives no 8.3 short names: the short-name half did not run");
+    assert_eq!(
+        by_short_name, EACH,
+        "this volume gives no 8.3 short names: the short-name half did not run"
+    );
 
     // The first tick after a start (an empty memo), then three idle ticks: no create call, no handle kept.
     let mut memo = populate::PlacedMemo::default();
@@ -257,19 +260,34 @@ fn w37_placeholder_rows_named_in_another_case_or_by_a_short_name_keep_no_handle(
     }
     println!("W37 start_handles={start_handles:+} idle_handles={idle_handles:?}");
     // The counter is the whole test process's (other tests only add): well under one per row.
-    assert!(start_handles < EACH as i64 / 2, "the first tick kept {start_handles} handles");
+    assert!(
+        start_handles < EACH as i64 / 2,
+        "the first tick kept {start_handles} handles"
+    );
     let least = *idle_handles.iter().min().unwrap();
-    assert!(least < EACH as i64 / 2, "an idle tick kept {least} handles for {} such rows", 2 * EACH);
+    assert!(
+        least < EACH as i64 / 2,
+        "an idle tick kept {least} handles for {} such rows",
+        2 * EACH
+    );
     // Nothing was made beside the entries: the folder still holds one entry per row.
     assert_eq!(std::fs::read_dir(r.root.join("dir")).unwrap().count(), 2 * EACH);
     // An entry deleted on disk is minted again under the row's own name.
     std::fs::remove_file(r.root.join("dir").join("case0.bin")).unwrap();
     let (again, _, _) = tick(&r, &mut memo, &cursor);
-    assert_eq!((again.visited, again.created, again.create_calls), (1, 1, 1), "{again:?}");
+    assert_eq!(
+        (again.visited, again.created, again.create_calls),
+        (1, 1, 1),
+        "{again:?}"
+    );
     assert!(names_of(&r.root.join("dir")).contains(&"CASE0.BIN".to_string()));
 }
 
 /// The exact names in `dir`.
 fn names_of(dir: &std::path::Path) -> Vec<String> {
-    std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
 }
