@@ -13,6 +13,7 @@ pub mod detail_pane;
 pub mod dialog;
 pub mod empty;
 pub mod field;
+pub mod file_icon;
 pub mod file_list;
 pub mod gate;
 pub mod global_icons;
