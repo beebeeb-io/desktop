@@ -1028,3 +1028,17 @@ fn the_original_reports_its_progress_then_swaps_the_picture_in_and_stop_keeps_no
     assert_eq!(answered, [OriginalAnswer::Failed(harbour)]);
     assert!(source.original(harbour).is_none());
 }
+
+/// w31 (Guus's PC, 2026-11-20): the Original tab of a HEIC or a RAW downloaded the whole file and then refused it
+/// (the decoder here opens PNG, JPEG, GIF and WebP only). Such a format is refused by its name, before any download,
+/// with words to say; the formats that open are asked for as before.
+#[test]
+fn w31_an_original_no_decoder_here_opens_is_refused_by_name_before_any_download() {
+    for name in ["IMG_0001.HEIC", "a.heic", "b.heif", "c.dng", "d.cr2", "e.arw"] {
+        assert!(original_refused_for(name).is_some(), "{name}");
+    }
+    assert!(original_refused_for("a.heic").unwrap().starts_with("HEIC photos can"));
+    for name in ["a.jpg", "b.JPEG", "c.png", "d.gif", "e.webp"] {
+        assert_eq!(original_refused_for(name), None, "{name}");
+    }
+}

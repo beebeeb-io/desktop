@@ -141,6 +141,21 @@ struct OriginalJob {
     pixels: Option<Pixels>,
 }
 
+/// w31: why the original of the photo `name` is never downloaded for the Original tab: the decoder here opens PNG,
+/// JPEG, GIF and WebP only (`viewer_picture::check`), so a HEIC or a RAW came down whole (2 MB to 80 MB each on
+/// Guus's account) and was then refused. `None`: a format that opens here.
+pub(crate) fn original_refused_for(name: &str) -> Option<&'static str> {
+    use super::viewer::{Shows, shows};
+    if shows(name) == Shows::Picture {
+        return None;
+    }
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()).unwrap_or_default();
+    Some(match ext.as_str() {
+        "heic" | "heif" => "HEIC photos can\u{2019}t be shown at full size on this PC yet. This is the preview.",
+        _ => "This format can\u{2019}t be shown at full size on this PC yet. This is the preview.",
+    })
+}
+
 /// An original over this is not downloaded into memory.
 const ORIGINAL_MAX: u64 = 256 * 1024 * 1024;
 
@@ -1260,7 +1275,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             return false;
         }
         let Some(photo) = self.file_of(id) else { return false };
-        if photo.video || photo.bytes > ORIGINAL_MAX {
+        if photo.video || photo.bytes > ORIGINAL_MAX || original_refused_for(&photo.name).is_some() {
             return false;
         }
         let file_id = photo.id.clone();
@@ -1301,6 +1316,11 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         }
         self.original = Some(OriginalJob { number, file_id, pressed, cancel, pixels: None });
         true
+    }
+
+    fn original_refused(&self, id: PhotoId) -> Option<&'static str> {
+        let photo = self.file_of(id)?;
+        (!photo.video).then(|| original_refused_for(&photo.name)).flatten()
     }
 
     fn stop_original(&mut self, _id: PhotoId) {
