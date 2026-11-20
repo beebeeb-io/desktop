@@ -710,7 +710,7 @@ fn result_tile(i: usize, hit: &Hit, query: &str, selected: bool, t: &Theme) -> E
         .focusable(true)
         .focus_selected(selected)
         .tab_index(if selected { 0 } else { -1 })
-        .child(tile(&k, format!("{k}-icon"), hit.kind, 48.0, 10.0, 26.0, t))
+        .child(tile(&k, format!("{k}-icon"), &hit.name, hit.kind, 48.0, 10.0, 26.0, t))
         .child(name)
         .child(
             kit::label(format!("{k}-dash"), hit.place.clone(), style::CELL, t.text_tertiary)
@@ -739,7 +739,7 @@ fn result_row(i: usize, hit: &Hit, query: &str, selected: bool, t: &Theme) -> El
         .min_w(0.0)
         .center_y()
         .gap(8.0)
-        .child(tile(&k, format!("{k}-icon"), hit.kind, 22.0, 6.0, 14.0, t))
+        .child(tile(&k, format!("{k}-icon"), &hit.name, hit.kind, 22.0, 6.0, 14.0, t))
         .child(name);
     let place = row().key("where-cell").w(WHERE_W).min_w(0.0).center_y().child(
         kit::label(format!("{k}-dash"), hit.place.clone(), style::CELL, meta)

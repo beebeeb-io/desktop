@@ -563,7 +563,7 @@ fn invitation_card(n: usize, inv: &source::Invitation, t: &Theme) -> El {
             .fill(t.card)
             .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)))
             .box_shadow(kit::ring(kit::HAIR, t.separator))
-            .child(tile(&k, format!("{k}-icon"), inv.kind, 36.0, 9.0, 22.0, t))
+            .child(tile(&k, format!("{k}-icon"), &inv.name, inv.kind, 36.0, 9.0, 22.0, t))
             .child(words)
             .child(
                 button("Decline", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
