@@ -10,7 +10,7 @@ pub fn open(s: &mut State, tx: &mut Tx, target: &str) {
     let taken = match target {
         // The installed licence notice (w17-licence-notice): About's row opens the file beside the exe.
         "open-source-licences" => {
-            if let Err(why) = crate::frames::settings::about::open_licences() {
+            if let Err(why) = crate::frames::settings::about::open_licences(s) {
                 log("an Open licences file did not open");
                 s.settings.toast = Some(why);
             }

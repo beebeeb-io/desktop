@@ -126,6 +126,7 @@ fn set(tag: &str) -> Set {
     source.starts = Starts {
         open: record_open,
         reveal: record_reveal,
+        has_default_app: |_| true,
         app: None,
     };
     Set {

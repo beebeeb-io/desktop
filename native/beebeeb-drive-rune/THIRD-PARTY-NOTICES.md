@@ -2,7 +2,7 @@
 
 Data that is compiled into the app through the PDF renderer (`hayro`, Apache-2.0 OR MIT) and whose licence asks
 that its notice goes with a binary. The installer ships it: `packaging/licences/generate.sh` copies this file into
-`THIRD-PARTY-LICENSES.txt` (section 3), which sits beside the exes and opens from Settings > About > Open-source
+`THIRD-PARTY-LICENSES.md` (section 3), which sits beside the exes and opens from Settings > About > Open-source
 licences. Edit this file, then run that script (its `--check` and `packaging/licences/check.py` fail on a stale copy).
 
 Also compiled in, with nothing asked of a binary: two colour profiles in `hayro-interpret`
@@ -14,7 +14,7 @@ Also compiled in, with nothing asked of a binary: two colour profiles in `hayro-
 (`symphonia`, `symphonia-core`, `symphonia-metadata`, `symphonia-utils-xiph`, `symphonia-bundle-flac`, `symphonia-bundle-mp3`,
 `symphonia-codec-alac`, `symphonia-codec-pcm`, `symphonia-codec-vorbis`, `symphonia-format-isomp4`, `symphonia-format-ogg`
 and `symphonia-format-riff`, version 0.5.5): MPL-2.0, used unmodified, accepted for the editor on 2026-11-18. Their
-source links are in section 4 of `THIRD-PARTY-LICENSES.txt`, which `packaging/licences/generate.sh` writes from the lock
+source links are in section 4 of `THIRD-PARTY-LICENSES.md`, which `packaging/licences/generate.sh` writes from the lock
 files, and the licence text is in its section 5.
 
 ## Ubuntu Light, in the Office viewer's helper

@@ -3,7 +3,7 @@
 
   check.py [--root <repo>] [--staged <dir>] [--version <x.y.z>]
 
-Offline. Checks THIRD-PARTY-LICENSES.txt against the three Cargo.lock files (hash stamps; every non-path package of
+Offline. Checks THIRD-PARTY-LICENSES.md against the three Cargo.lock files (hash stamps; every non-path package of
 every lock is in the crate index), that the sections a release must carry are present, that the release version
 matches, that the installer script and build script wire it in, and, with --staged, that the installer's staging
 folder holds a byte-identical copy beside the exes.
@@ -17,7 +17,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from render import INDEX_BEGIN, INDEX_END, LOCKS, git_sources, lock_packages, lock_sha  # noqa: E402
 
-NAME = "THIRD-PARTY-LICENSES.txt"
+NAME = "THIRD-PARTY-LICENSES.md"
 REQUIRED = [
     "GNU AFFERO GENERAL PUBLIC LICENSE",
     "SIL Open Font License",

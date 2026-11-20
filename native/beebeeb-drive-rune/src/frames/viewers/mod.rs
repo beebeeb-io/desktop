@@ -25,6 +25,7 @@ mod fixture_text;
 pub mod icons;
 pub mod kinds;
 mod markdown;
+mod local_file;
 mod md_source;
 pub mod media;
 mod media_icons;
@@ -675,8 +676,8 @@ pub fn open(s: &mut State, file_id: &str) -> bool {
 
 /// The router by file type, and the ONE way a file of a list opens here: a file whose type has
 /// a viewer (`kinds::viewer_of`) and that the window's source has goes to the route
-/// (`Event::OpenItem`). `false`: not a file for this group; the caller opens it as it did before
-/// (its own app).
+/// (`Event::OpenItem`), and so does every other file (the "No preview" frame). `false`: a folder, or the window has
+/// no source: the caller never hands a file to the system's app (w29).
 ///
 /// `true` is "this group's", NOT "it opened": a file this group reads that cannot be opened right now is shown
 /// as that (it is gone, the session ended, or it could not be read, with Try again), and with no session
@@ -697,14 +698,15 @@ pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
     true
 }
 
-/// Whether `item` is a file a list's Open only ever READS here: source code, a script, a web page, a data file
-/// that the window's source shows. With several files selected such a file is left out of what the system is
-/// asked to open (`frames::files`), as one alone opens in the viewer.
-pub fn only_read_here(s: &State, item: &crate::source::DriveItem) -> bool {
-    !item.is_folder
-        && kinds::viewer_of(&item.name).is_some()
-        && !kinds::its_app_shows_it(&item.name)
-        && route_source(s).is_some_and(|source| source.previews(&item.name))
+/// Whether the window's viewer source shows a file of this name (`ViewerSource::previews`); `false` with no source.
+pub fn previews(s: &State, name: &str) -> bool {
+    route_source(s).is_some_and(|source| source.previews(name))
+}
+
+/// Open a text or Markdown file that is not in the drive in the viewer (`frames::open_file`): the licence notice.
+/// `false`: it could not be read, or the session gate is closed.
+pub fn open_local(s: &mut State, path: &std::path::Path) -> bool {
+    open_from(s, Box::new(local_file::LocalFile), &path.to_string_lossy())
 }
 
 /// [`open`] with the source to read from (the engine's, once it is wired).

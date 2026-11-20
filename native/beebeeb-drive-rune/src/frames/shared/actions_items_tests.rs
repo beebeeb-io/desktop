@@ -67,6 +67,12 @@ impl SharedSource for Spy {
         true
     }
     fn target_of(&self, id: &str) -> Option<RowTarget> {
+        if self.with_me().iter().any(|r| r.id == id) {
+            return Some(RowTarget::Item {
+                id: "the-file".into(),
+                is_folder: false,
+            });
+        }
         self.links().iter().any(|l| l.id == id).then(|| RowTarget::Item {
             id: "the-item".into(),
             is_folder: true,
@@ -164,4 +170,18 @@ fn open_on_a_link_row_opens_the_item_not_the_share_id() {
     rt.state.frames.intents.push(Intent::OpenItem("l-budget".into()));
     drain(&mut rt);
     assert_eq!(rt.state.shell.app.route().folder.as_deref(), Some("the-item"));
+}
+
+#[test]
+fn open_on_a_shared_file_goes_through_open_file() {
+    // A viewer that shows no kind: only `open_file` sends the file on to the system's app (step 2).
+    let (mut rt, _) = window(scenes::dw_0501);
+    let calls = crate::frames::open_file::testing::wire_into(&mut rt.state, false);
+    let id = rt.state.frames.shared.source.with_me()[0].id.clone();
+    rt.state.frames.intents.push(Intent::OpenItem(id));
+    drain(&mut rt);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [crate::frames::files::source::Call::OpenDefault("the-file".into())]
+    );
 }

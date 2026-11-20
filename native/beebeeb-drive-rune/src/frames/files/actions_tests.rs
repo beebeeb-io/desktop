@@ -711,14 +711,14 @@ fn the_previews_open_opens_the_file_and_its_share_goes_to_the_share_dialog() {
     press(&mut rt, Key::Text(" ".into()), NONE);
     click(&mut rt, "pv-open");
     assert!(rt.state.actions.dialog.is_none());
-    // "Open in its app" hands the file to its own app, as the button says, also for a kind the window's
-    // viewer shows (a PDF): the route stays on the list, and the source is asked to open it, once.
+    // The panel's Open shows the file in the window's viewer, never in another app (w29).
     assert!(
-        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.is_none()),
-        "Open in its app never opens the window's viewer"
+        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some("contract")),
+        "Open opens the window's viewer"
     );
-    assert_eq!(asked(&calls), [Call::Open(ids(&["contract"]))]);
-    calls.lock().unwrap().clear();
+    assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
+    rt.update(|s, _| crate::frames::viewers::close(s));
+    settle(&mut rt);
     click(&mut rt, "row-6-date");
     press(&mut rt, Key::Text(" ".into()), NONE);
     click(&mut rt, "pv-share");
@@ -767,15 +767,27 @@ fn a_file_with_no_preview_says_so_and_offers_the_two_ways_on() {
     assert!(rt.state.actions.dialog.is_none());
 }
 
+/// Back to the list from the viewer, as its Close does: what it holds is dropped and the route steps back.
+fn leave_viewer(rt: &mut Runtime<State>) {
+    rt.update(|s, _| {
+        s.viewer.ui = None;
+        crate::shell::host::dispatch(s, Event::Escape);
+    });
+    settle(rt);
+}
+
 #[test]
-fn open_goes_to_the_viewer_for_a_file_it_renders_and_to_the_files_app_otherwise() {
+fn open_goes_to_the_viewer_for_every_file_and_never_to_the_files_app() {
     let (mut rt, calls, _) = spied();
-    // A file of a type the window has no viewer for goes to its own app.
+    // A file of a type the window has no viewer for opens the viewer's own frame, not its own app (w29).
     click(&mut rt, "row-9-date");
     let other = rt.state.listing.items[9].id.clone();
     press(&mut rt, Key::Enter, NONE);
-    assert_eq!(asked(&calls), [Call::Open(vec![other])]);
-    assert!(matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.is_none()));
+    assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
+    assert!(
+        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(other.as_str()))
+    );
+    leave_viewer(&mut rt);
     // A file the viewer renders (its sample's notes): Open shows it in the window.
     let notes = crate::frames::viewers::source::board::NOTES;
     rt.update(|s, _| {
@@ -783,12 +795,15 @@ fn open_goes_to_the_viewer_for_a_file_it_renders_and_to_the_files_app_otherwise(
         s.select_only(6);
     });
     settle(&mut rt);
-    press(&mut rt, Key::Enter, NONE);
+    rt.update(|s, tx| {
+        s.open_selection(tx);
+    });
+    settle(&mut rt);
     assert!(
         matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(notes)),
         "the route is on the file"
     );
-    assert_eq!(asked(&calls).len(), 1, "it was not also handed to another app");
+    assert!(asked(&calls).is_empty(), "it was not handed to another app");
 }
 
 // ---- Two versions (DW-0429) ----
@@ -1042,42 +1057,23 @@ fn enter_on_a_script_the_viewer_cannot_open_says_why_and_never_hands_it_to_anoth
 }
 
 #[test]
-fn enter_on_several_files_never_hands_a_script_or_a_web_page_to_another_app() {
-    // A script and a text file selected: the text file goes to its own app, the script does not, and the window
-    // says so.
-    let (mut rt, calls) = with_refusing_viewer(OpenError::NotNow, ["Invented deploy.py", "Invented notes.txt"]);
-    let text = rt.state.listing.items[7].id.clone();
-    rt.update(|s, _| {
-        s.actions.selection.insert(7);
-    });
-    press(&mut rt, Key::Enter, NONE);
-    settle(&mut rt);
-    assert_eq!(asked(&calls), [Call::Open(vec![text])]);
-    assert_eq!(rt.state.live_toast(), Some(Toast::ReadOneAtATime));
-    assert!(all_words(&rt).contains(Toast::READ_ONE_AT_A_TIME));
-    assert!(matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.is_none()));
-
-    // Only scripts and web pages selected: nothing is handed over at all.
-    let (mut rt, calls) = with_refusing_viewer(OpenError::NotNow, ["Invented deploy.py", "Invented page.html"]);
-    rt.update(|s, _| {
-        s.actions.selection.insert(7);
-    });
-    press(&mut rt, Key::Enter, NONE);
-    settle(&mut rt);
-    assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
-    assert_eq!(rt.state.live_toast(), Some(Toast::ReadOneAtATime));
-
-    // Two documents: both go to their own apps, as before, and nothing is said.
-    let (mut rt, calls) = with_refusing_viewer(OpenError::NotNow, ["Invented letter.txt", "Invented notes.md"]);
-    let both = vec![
-        rt.state.listing.items[6].id.clone(),
-        rt.state.listing.items[7].id.clone(),
-    ];
-    rt.update(|s, _| {
-        s.actions.selection.insert(7);
-    });
-    press(&mut rt, Key::Enter, NONE);
-    settle(&mut rt);
-    assert_eq!(asked(&calls), [Call::Open(both)]);
-    assert_eq!(rt.state.live_toast(), None);
+fn enter_on_several_files_opens_the_first_in_the_viewer_and_says_one_at_a_time() {
+    for names in [
+        ["Invented deploy.py", "Invented notes.txt"],
+        ["Invented deploy.py", "Invented page.html"],
+        ["Invented letter.txt", "Invented notes.md"],
+    ] {
+        let (mut rt, calls) = with_refusing_viewer(OpenError::NotNow, names);
+        let first = rt.state.listing.items[6].id.clone();
+        rt.update(|s, _| {
+            s.actions.selection.insert(7);
+        });
+        press(&mut rt, Key::Enter, NONE);
+        settle(&mut rt);
+        assert!(asked(&calls).is_empty(), "{names:?}: {:?}", asked(&calls));
+        assert_eq!(rt.state.live_toast(), Some(Toast::ReadOneAtATime));
+        assert!(
+            matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(first.as_str()))
+        );
+    }
 }

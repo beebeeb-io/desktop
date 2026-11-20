@@ -54,6 +54,8 @@ mod browse_states_tests;
 #[cfg(test)]
 mod long_list_tests;
 #[cfg(test)]
+mod open_in_app_tests;
+#[cfg(test)]
 mod open_with_menu_tests;
 #[cfg(test)]
 mod protected_tests;
@@ -705,15 +707,10 @@ impl State {
         }
     }
 
-    /// Open the selection: one folder opens in place; files go to their apps, all of them.
-    /// Returns whether the folder shown changed.
+    /// Open the selection: one folder opens in place; a file opens in the window's viewer (w29: never in another
+    /// app from here; "Open in another app" in the viewer is that press). Several files: the first opens, and the
+    /// window says one opens at a time. Returns whether the folder shown changed.
     pub fn open_selection(&mut self, tx: &mut Tx) -> bool {
-        self.open_selection_with(tx, true)
-    }
-
-    /// [`Self::open_selection`]. `viewer`: one file of a type the window shows itself may open in the window's
-    /// viewer. `false` ("Open in its app"): every file goes to its own app, as the button says.
-    pub(crate) fn open_selection_with(&mut self, tx: &mut Tx, viewer: bool) -> bool {
         if self.needs_session(tx) {
             return false;
         }
@@ -745,24 +742,16 @@ impl State {
         if files.is_empty() {
             return false;
         }
-        // One file of a type the window shows itself: its viewer (`frames::viewers`, the router).
-        if viewer && matches!(&files[..], [only] if crate::frames::viewers::open_item(self, only)) {
-            return true;
-        }
-        // Several files: source code, scripts and web pages are never handed to another app (one alone opens in
-        // the window's viewer, where it is read and not run). The others open as before, and the toast says
-        // which were left.
-        let (read_here, files): (Vec<DriveItem>, Vec<DriveItem>) = files
-            .into_iter()
-            .partition(|file| viewer && crate::frames::viewers::only_read_here(self, file));
         self.forget_undo();
-        if !files.is_empty() {
-            if let Err(why) = self.actions.source.open(&files) {
-                self.failed(Action::Open, why, tx);
-                return false;
-            }
+        let several = files.len() > 1;
+        if let Some(first) = files.first()
+            && let crate::frames::open_file::Opened::Failed(why) =
+                crate::frames::open_file::open_file(self, crate::frames::open_file::Target::Item(first))
+        {
+            self.failed(Action::Open, why, tx);
+            return false;
         }
-        if !read_here.is_empty() {
+        if several {
             self.show_toast(Toast::ReadOneAtATime, tx);
         }
         false

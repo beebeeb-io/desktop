@@ -471,7 +471,7 @@ fn show_in_beebeeb_goes_to_trash_for_a_trashed_file_and_to_files_otherwise() {
 
 #[test]
 fn open_goes_into_a_kept_folder_and_opens_a_kept_file_through_the_files_source() {
-    let (mut rt, calls, fails) = recording(scenes::dw_0715);
+    let (mut rt, calls, _) = recording(scenes::dw_0715);
     let kept = rt.state.this_pc.kept();
     let folder = kept
         .iter()
@@ -486,20 +486,12 @@ fn open_goes_into_a_kept_folder_and_opens_a_kept_file_through_the_files_source()
         .id
         .clone();
 
-    // A file: its own app, through the Files source (no viewer is routed in this section).
+    // A file: the window's viewer, never another app through the Files source (w29).
     rt.state.this_pc.ask(Intent::Open(file.clone()));
     poll(&mut rt);
-    assert_eq!(*calls.lock().unwrap(), [Call::Open(vec![file.clone()])]);
-    assert_eq!(rt.state.shell.app.route().section, super::Section::AvailableOffline);
-
-    // Refused: said.
-    fails.lock().unwrap().push((Action::Open, ActionError::Offline));
-    rt.state.this_pc.ask(Intent::Open(file));
-    poll(&mut rt);
-    assert_eq!(
-        rt.state.this_pc.refusal.map(|(words, _)| words),
-        Some(super::NOT_OPENED)
-    );
+    assert!(calls.lock().unwrap().is_empty(), "never handed to the Files source");
+    assert!(rt.state.this_pc.refusal.is_none());
+    assert_eq!(rt.state.shell.app.route().item.as_deref(), Some(file.as_str()));
 
     // An id the list does not hold: nothing is asked of anyone.
     let before = calls.lock().unwrap().len();
@@ -1172,4 +1164,22 @@ mod reread {
         assert!(rt.state.this_pc.menu.is_none(), "the item left: the menu closes");
         assert_eq!(rt.state.this_pc.selected, None, "and no other item is chosen");
     }
+}
+
+#[test]
+fn a_kept_file_opens_through_open_file() {
+    let (mut rt, _, _) = recording(scenes::dw_0715);
+    let calls = crate::frames::open_file::testing::wire_into(&mut rt.state, false);
+    let file = rt
+        .state
+        .this_pc
+        .kept()
+        .iter()
+        .find(|k| k.kind != super::source::Kind::Folder)
+        .unwrap()
+        .id
+        .clone();
+    rt.state.this_pc.ask(Intent::Open(file.clone()));
+    poll(&mut rt);
+    assert_eq!(*calls.lock().unwrap(), [Call::OpenDefault(file)]);
 }

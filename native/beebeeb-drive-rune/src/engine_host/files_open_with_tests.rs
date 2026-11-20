@@ -305,6 +305,7 @@ fn files_open_never_waits_on_the_launch_lock() {
     set.source.starts = files_launch::Starts {
         open: open_stand_in,
         reveal: reveal_stand_in,
+        has_default_app: |_| true,
         app: None,
     };
     let (holding, held) = std::sync::mpsc::channel();

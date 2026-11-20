@@ -70,7 +70,7 @@ fn link(index: usize, words: &str, t: &Theme) -> El {
     // opens the tagged source address in the browser. A failure to open says so in the toast, as About does.
     let link = if index == 1 {
         link.on_press(|s: &mut State| {
-            if let Err(why) = crate::frames::settings::about::open_licences() {
+            if let Err(why) = crate::frames::settings::about::open_licences(s) {
                 s.settings.toast = Some(why);
             }
         })

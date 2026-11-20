@@ -14,6 +14,7 @@ pub mod files;
 pub mod global;
 pub mod item;
 pub mod office;
+pub mod open_file;
 pub mod photos;
 pub mod placeholder;
 pub mod search;

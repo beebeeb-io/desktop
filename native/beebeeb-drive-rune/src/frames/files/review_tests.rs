@@ -296,7 +296,10 @@ fn duplicate_keep_offline_copy_link_and_open_act_on_every_selected_item() {
     let (first, second) = (names(&rt)[6].clone(), names(&rt)[8].clone());
 
     press(&mut rt, Key::Enter, NONE);
-    assert_eq!(asked(&calls), [Call::Open(both.clone())]);
+    // Several files: the first opens in the viewer, none in another app (w29).
+    assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
+    rt.update(|s, _| crate::frames::viewers::close(s));
+    settle(&mut rt);
 
     right_click(&mut rt, "row-6-date");
     let pick = |rt: &mut Runtime<State>, label: &str| {

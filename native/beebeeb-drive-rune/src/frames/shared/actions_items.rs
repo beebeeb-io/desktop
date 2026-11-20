@@ -64,10 +64,8 @@ fn open(s: &mut State, id: &str) {
         }
         Some(RowTarget::Item { id: item, .. }) => {
             let item = drive_item(&item, &name, false);
-            if crate::frames::viewers::open_item(s, &item) {
-                return;
-            }
-            if s.actions.source.open(&[item]).is_err() {
+            use crate::frames::open_file::{Opened, Target, open_file};
+            if let Opened::Failed(_) = open_file(s, Target::Item(&item)) {
                 say(s, Notice::NotOnThisPc);
             }
         }
