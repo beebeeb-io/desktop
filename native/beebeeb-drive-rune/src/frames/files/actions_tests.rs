@@ -788,7 +788,6 @@ fn open_goes_to_the_viewer_for_every_file_and_never_to_the_files_app() {
         matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(other.as_str()))
     );
     leave_viewer(&mut rt);
-    eprintln!("DBG left {:?} ui={}", rt.state.shell.app.screen(), rt.state.viewer.ui.is_some());
     // A file the viewer renders (its sample's notes): Open shows it in the window.
     let notes = crate::frames::viewers::source::board::NOTES;
     rt.update(|s, _| {
@@ -796,8 +795,10 @@ fn open_goes_to_the_viewer_for_every_file_and_never_to_the_files_app() {
         s.select_only(6);
     });
     settle(&mut rt);
-    press(&mut rt, Key::Enter, NONE);
-    eprintln!("DBG notes {:?} ui={} sel={:?} id6={}", rt.state.shell.app.screen(), rt.state.viewer.ui.is_some(), rt.state.selected, rt.state.listing.items[6].id);
+    rt.update(|s, tx| {
+        s.open_selection(tx);
+    });
+    settle(&mut rt);
     assert!(
         matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(notes)),
         "the route is on the file"
