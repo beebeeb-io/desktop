@@ -206,10 +206,10 @@ pub trait Platform: Send + Sync {
         Ok(())
     }
     /// Starts taking the text that reaches the main window as Unicode packets (`packet_text`): what a remote
-    /// desktop, an on-screen keyboard and `SendInput`'s Unicode mode type with. Called on the window's thread,
-    /// from the poll, until it answers true. `wake` is called (on that thread) when there is text to take, so the
+    /// desktop, an on-screen keyboard and `SendInput`'s Unicode mode type with, and what the key after a dead key
+    /// types. Called on the window's thread, from the poll, until it answers true. `wake` is called (on that thread) when there is text to take, so the
     /// next poll runs. The default has nothing to watch: only Windows sends text this way.
-    fn watch_packet_text(&self, _window: Option<&rune::WindowHandle>, _wake: PacketWake) -> bool {
+    fn watch_packet_text(&self, _wake: PacketWake) -> bool {
         true
     }
     /// The packets' text since the last call, in the order it was typed. `shell::host::poll` hands it to the

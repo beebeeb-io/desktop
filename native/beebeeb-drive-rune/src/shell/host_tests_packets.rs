@@ -30,3 +30,24 @@ fn a_packets_backspace_is_the_key_and_a_control_character_types_nothing() {
     settle(&mut rt);
     assert_eq!(rt.state.search.text, "ac");
 }
+
+/// Where Guus met it: a text file in edit mode. The packets' text lands in the editor and marks it unsaved.
+#[test]
+fn text_typed_as_unicode_packets_reaches_the_text_editor() {
+    use crate::frames::viewers::source::{FixtureViewerSource, board};
+    let (_, platform, mut rt) = fixture();
+    rt.update(|s, _| {
+        assert!(crate::frames::viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::NOTES));
+    });
+    settle(&mut rt);
+    press(&mut rt, Key::Command('e'), ctrl());
+    let text = |rt: &Runtime<State>| {
+        let ui = rt.state.viewer.ui.as_ref().expect("the note is open");
+        ui.editor.as_ref().expect("in edit mode").edit.text.clone()
+    };
+    let before = text(&rt);
+    packets(&platform, &["h", "o", "i", " ", "'", "é"]);
+    settle(&mut rt);
+    assert_eq!(text(&rt), format!("{before}hoi 'é"), "typed at the caret, at the end of the note");
+    assert!(rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.dirty()));
+}

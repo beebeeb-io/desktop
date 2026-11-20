@@ -5,12 +5,12 @@
 //! queue, before winit does. It reads key-downs and dead keys (to know whether a packet, or the key after a dead
 //! key, went down) and turns such a key's
 //! `WM_CHAR` into `WM_NULL`, so winit never sees a character it would report without a key; the character goes
-//! on [`TAKEN`] and the poll is woken. Only messages of the main window are touched; a peek that leaves the
+//! on [`TAKEN`] and the poll is woken. The flyout's messages are left alone; a peek that leaves the
 //! message on the queue is not acted on (it would be counted twice).
 
 use std::cell::RefCell;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -22,8 +22,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::PacketWake;
 use super::packet_text::{KeyMessage, Packets, Verdict};
 
-/// The main window (0: not watched yet).
-static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+/// The hook is in place.
+static HOOKED: AtomicBool = AtomicBool::new(false);
 /// The text taken since the poll last asked.
 static TAKEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// What wakes the poll.
@@ -38,21 +38,11 @@ fn unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Starts the hook on the calling thread (the window's) for `window`. True: watching (also when it already was).
-pub(super) fn watch(window: Option<&rune::WindowHandle>, wake: PacketWake) -> bool {
-    if MAIN_HWND.load(Ordering::SeqCst) != 0 {
+/// Starts the hook on the calling thread (the window's). True: watching (also when it already was).
+pub(super) fn watch(wake: PacketWake) -> bool {
+    if HOOKED.load(Ordering::SeqCst) {
         return true;
     }
-    let hwnd = window.and_then(|window| {
-        window
-            .with_raw_handle(|handle| match handle.as_raw() {
-                raw_window_handle::RawWindowHandle::Win32(win32) => Some(win32.hwnd.get()),
-                _ => None,
-            })
-            .ok()
-            .flatten()
-    });
-    let Some(hwnd) = hwnd else { return false };
     *unpoisoned(&WAKE) = Some(wake);
     // SAFETY: a thread hook of the calling thread with a `extern "system"` procedure that lives as long as the
     // process; no module handle is needed for a hook of the caller's own thread. It is never removed: the thread
@@ -61,7 +51,7 @@ pub(super) fn watch(window: Option<&rune::WindowHandle>, wake: PacketWake) -> bo
     if hook.is_null() {
         return false;
     }
-    MAIN_HWND.store(hwnd, Ordering::SeqCst);
+    HOOKED.store(true, Ordering::SeqCst);
     true
 }
 
@@ -102,12 +92,13 @@ unsafe extern "system" fn on_message(code: i32, wparam: WPARAM, lparam: LPARAM) 
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 
-/// The message is the main window's (or a child's of it).
+/// The message is the main window's: any window of this thread but the flyout (which has no field; the main
+/// window may be closed and made again, so its handle is not kept).
 fn is_main(hwnd: HWND) -> bool {
-    let main = MAIN_HWND.load(Ordering::SeqCst);
-    if main == 0 || hwnd.is_null() {
+    if hwnd.is_null() {
         return false;
     }
+    let flyout = super::windows::flyout_hwnd();
     // SAFETY: `GetAncestor` reads a window handle of this thread's message; a stale one answers null.
-    hwnd as isize == main || unsafe { GetAncestor(hwnd, GA_ROOT) } as isize == main
+    flyout == 0 || (hwnd as isize != flyout && unsafe { GetAncestor(hwnd, GA_ROOT) } as isize != flyout)
 }
