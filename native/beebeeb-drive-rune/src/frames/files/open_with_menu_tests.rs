@@ -9,6 +9,7 @@ use super::source::{AppChoice, Call, FilesFixture};
 use super::tests::{Calls, NONE, asked, click, find, focused, ids, info, press, right_click, runtime_of, settle};
 use super::{MenuKind, Toast};
 use crate::State;
+use crate::shell::app::Screen;
 use crate::frames::office::open_with::{
     AGREEMENT_ID, AGREEMENT_ROW, BOARD_STATUS, WORD_ON, agreement, scene_open_with,
 };
