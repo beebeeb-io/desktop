@@ -63,6 +63,9 @@ mod registration;
 pub use registration::*;
 #[cfg(test)]
 mod reconcile_tests;
+// w36: an idle tick keeps no handle and does no per-row work.
+#[cfg(test)]
+mod idle_tick_native_tests;
 // LD-0105 part 1: the Windows-native rungs (S0, W1, S6), each on its own QA sync root.
 #[cfg(test)]
 mod ld0105_native_tests;
