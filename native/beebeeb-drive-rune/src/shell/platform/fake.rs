@@ -38,6 +38,8 @@ pub struct FakePlatform {
     pub shared: Mutex<Vec<std::path::PathBuf>>,
     /// What `idle_for` answers: how long the PC has had no input. Tests set it.
     pub idle: Mutex<Option<Duration>>,
+    /// What `take_packet_text` answers next: the text a remote desktop typed as Unicode packets. Tests set it.
+    pub packet_text: Mutex<Vec<String>>,
 }
 
 impl Default for FakePlatform {
@@ -59,6 +61,7 @@ impl Default for FakePlatform {
             save_asks: Mutex::default(),
             shared: Mutex::default(),
             idle: Mutex::new(Some(Duration::ZERO)),
+            packet_text: Mutex::default(),
         }
     }
 }
@@ -197,6 +200,10 @@ impl Platform for FakePlatform {
 
     fn idle_for(&self) -> Option<Duration> {
         *self.idle.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn take_packet_text(&self) -> Vec<String> {
+        std::mem::take(&mut *self.packet_text.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
     fn set_capture_exclusion(&self, _window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {
