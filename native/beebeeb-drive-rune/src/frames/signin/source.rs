@@ -279,6 +279,11 @@ pub trait SignInSource {
     /// The no-plan screen's "Sign out": the existing sign-out of this app (the engine's `sign_out_for`), with the
     /// gate closed. The window follows the engine's gate when it ends. The default does nothing.
     fn sign_out_from_gate(&mut self) {}
+    /// [`Self::sign_out_from_gate`] after the person chose "Discard and sign out": an open editor's unsaved changes
+    /// are dropped with the session. The default is the plain sign-out.
+    fn sign_out_from_gate_discarding_unsaved(&mut self) {
+        self.sign_out_from_gate()
+    }
     /// `None`: no other Beebeeb app is signed in here, or Windows Hello is not set up (DW-A03).
     fn shared_session(&self) -> Option<SharedSession>;
     /// Engine: `auth_v2::sign_in` (OPAQUE login + vault unlock).

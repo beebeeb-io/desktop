@@ -1143,3 +1143,30 @@ fn the_office_edit_bar_has_no_files_view_buttons() {
     let rt = runtime("DW-1507e");
     assert_file_bar(&rt, "office edit", &["back", "panel-toggle-btn", "show-in-folder"]);
 }
+
+/// w36: a quit with unsaved changes asks first (the one shared question); Cancel keeps the edit, Save saves, and the
+/// quit follows only an answer. With nothing unsaved it asks nothing.
+#[test]
+fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
+    use super::unsaved_guard::{Then, ask, holds};
+    let (mut rt, calls) = note(false, false);
+    assert!(!ask(&mut rt.state, Then::Quit), "nothing unsaved: no question");
+    edit_and_type(&mut rt);
+    assert!(holds(&rt.state));
+    assert!(ask(&mut rt.state, Then::Quit), "unsaved: the question is up");
+    rt.invalidate();
+    rt.frame(0.0);
+    assert_eq!(info(&rt, "dlg-text-0").text.as_deref(), Some("You have unsaved changes in meeting-notes-4-nov.md."));
+    assert_eq!(info(&rt, "btn-2").label.as_deref(), Some("Discard and quit, destructive"));
+    // Cancel keeps the edit and nothing was saved.
+    operate(&mut rt, "btn-3");
+    assert!(rt.state.viewer.leave.is_none() && viewer(&rt).dirty());
+    assert!(!calls.borrow().iter().any(|c| c.starts_with("save")));
+    // Save saves the text editor at once; the question is gone with the edit.
+    assert!(ask(&mut rt.state, Then::Quit));
+    rt.invalidate();
+    rt.frame(0.0);
+    operate(&mut rt, "btn-1");
+    assert!(calls.borrow().iter().any(|c| c.starts_with("save")));
+    assert!(!holds(&rt.state));
+}

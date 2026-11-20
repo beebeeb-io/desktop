@@ -570,6 +570,8 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
 fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The open file: the engine's answers, and a route that left it (lane f-viewers).
     let mut changed = crate::frames::viewers::poll(s, tx);
+    // The unsaved-changes question of a quit or the gate's sign-out: Save's follow-up.
+    changed |= crate::frames::viewers::unsaved_guard::poll(s, tx);
     // What the New file dialog asked for: the file made in the folder it was opened on (`frames::files::create_file`).
     changed |= crate::frames::files::create_file::poll(s, tx);
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
@@ -1123,7 +1125,9 @@ pub fn on_menu(s: &mut State, action: MenuAction, tx: &mut Tx) {
             Ok(())
         }
         MenuAction::Quit => {
-            tx.quit();
+            if !crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::Quit) {
+                tx.quit();
+            }
             Ok(())
         }
     };
@@ -1143,7 +1147,10 @@ const QUIT_HELLO_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 pub fn on_close(s: &mut State, tx: &mut Tx) {
     s.shell.save_window_place();
     if s.shell.close_quits() {
-        tx.quit();
+        // Unsaved changes in an open editor: the window stays and asks first.
+        if !crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::Quit) {
+            tx.quit();
+        }
         return;
     }
     // The window went to the tray: nothing typed into sign-in waits in it, nor a half-done step's proof.

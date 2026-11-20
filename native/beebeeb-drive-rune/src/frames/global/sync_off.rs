@@ -263,7 +263,9 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
             Action::TryAgain => button.on_press(crate::shell::host::try_sync_again),
             Action::Quit => button.on_press_tx(|s: &mut State, tx: &mut rune::Tx| {
                 crate::shell::host::dispatch(s, Event::Escape);
-                tx.quit();
+                if !crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::Quit) {
+                    tx.quit();
+                }
             }),
             Action::Close => button.on_press(|s: &mut State| {
                 crate::shell::host::dispatch(s, Event::Escape);
