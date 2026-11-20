@@ -1532,6 +1532,18 @@ fn host_states_become_their_bodies() {
     }
     assert!(matches!(body_for(Doc, pages(1)), Some(Body::Doc(doc)) if doc.view.older_format));
     assert!(matches!(body_for(Pptx, pages(3)), Some(Body::Deck(deck)) if deck.view.count == 3));
+    // A deck's slides are the size the file says (4:3 here), not the 16:9 the view starts from.
+    let four_three = HostState::Pages {
+        pages: 2,
+        sizes: vec![
+            PageSize {
+                w_pt: 720.0,
+                h_pt: 540.0
+            };
+            2
+        ],
+    };
+    assert!(matches!(body_for(Pptx, four_three), Some(Body::Deck(deck)) if deck.view.page_pt == (720, 540)));
     match body_for(Xlsx, sheets(10, 4)) {
         Some(Body::Sheet(sheet)) => {
             assert_eq!(sheet.tabs, vec!["Invented sheet".to_string()]);

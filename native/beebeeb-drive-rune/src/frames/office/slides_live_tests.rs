@@ -233,3 +233,52 @@ fn office_slides_filmstrip_wheel_scrolls_the_strip_not_the_slide() {
     wheel_over(&mut rt, "fs-list", 100_000.0, false);
     assert!(find(&rt, "fs-0").is_some(), "and back to the top it stops");
 }
+
+/// A deck whose slides are `page_pt` points.
+fn deck_of_size(page_pt: (u32, u32)) -> DeckBody {
+    let mut view = DeckView::of(3);
+    view.page_pt = page_pt;
+    DeckBody::new(view)
+}
+
+#[test]
+fn office_slides_a_4_3_slide_keeps_its_proportions_on_the_stage() {
+    // 720 x 540 points (PowerPoint's 4:3): on the board's 640 x 360 it is 480 x 360, never stretched to 16:9.
+    let (rt, _) = live_runtime(Body::Deck(deck_of_size((720, 540))), 1.0, Some((960, 720)));
+    let slide = find(&rt, "slide").expect("the slide on the stage");
+    assert!(
+        (slide.rect[2] - 480.0).abs() < 0.6 && (slide.rect[3] - 360.0).abs() < 0.6,
+        "4:3: {:?}",
+        slide.rect
+    );
+    // The same at a display scale of 150 %: layout points do not change with it.
+    let (rt, _) = live_runtime(Body::Deck(deck_of_size((720, 540))), 1.5, Some((1440, 1080)));
+    let slide = find(&rt, "slide").expect("the slide on the stage");
+    assert!((slide.rect[2] / slide.rect[3] - 4.0 / 3.0).abs() < 0.01, "{:?}", slide.rect);
+    // A 16:9 slide is the board's.
+    let (rt, _) = live_runtime(Body::Deck(deck_of_size(PAGE_PT)), 1.0, Some((1280, 720)));
+    let slide = find(&rt, "slide").expect("the slide on the stage");
+    assert!((slide.rect[2] - 640.0).abs() < 0.6 && (slide.rect[3] - 360.0).abs() < 0.6);
+}
+
+#[test]
+fn office_slides_present_keeps_a_4_3_slide_in_proportion() {
+    let mut body = deck_of_size((720, 540));
+    body.presenting = true;
+    let (rt, _) = live_runtime(Body::Deck(body), 1.0, Some((1433, 1075)));
+    let picture = find(&rt, "pres-picture").expect("the slide's pixels");
+    assert!(
+        (picture.rect[2] / picture.rect[3] - 4.0 / 3.0).abs() < 0.01,
+        "{:?}",
+        picture.rect
+    );
+}
+
+#[test]
+fn office_slides_box_fits_the_board_in_the_slides_proportions() {
+    assert_eq!(slide_box((960, 540), 100), (640.0, 360.0));
+    assert_eq!(slide_box((720, 540), 100), (480.0, 360.0));
+    assert_eq!(slide_box((720, 540), 50), (240.0, 180.0));
+    // A portrait slide: the height decides.
+    assert_eq!(slide_box((540, 960), 100), (202.5, 360.0));
+}

@@ -191,34 +191,93 @@ fn office_docs_asks_tiles_at_150_and_whole_pages_below() {
     );
 }
 
+/// Page 1's box and tile (`col`, `row`) of it, as `[x, y, w, h]` from the page's corner.
+fn tile_in_page(rt: &Runtime<State>, col: u32, row: u32) -> Option<[f32; 4]> {
+    let page = find(rt, "page").expect("page 1");
+    let tile = find(rt, &format!("page-1-tile-{col}-{row}"))?;
+    Some([
+        tile.rect[0] - page.rect[0],
+        tile.rect[1] - page.rect[1],
+        tile.rect[2],
+        tile.rect[3],
+    ])
+}
+
 #[test]
 fn office_docs_tiles_sit_at_their_place() {
-    // Every tile answers 512 x 512 px; page 1 at 150 %: its tile (1, 2) sits at (512, 1024) points from the page's corner.
+    // A4 at 150 % and 96 dpi is a raster of 1190 x 1684 px (2 px a point) on a box of 780 points: a pixel is
+    // 780 / 1190 of a point, so tile (1, 2) starts at (512, 1024) px = (335.6, 671.2) points, on whole pixels.
     let (rt, _log) = live_runtime(doc_of(4, 150, 1), 1.0, Some((TILE_PX, TILE_PX)));
+    let tile = tile_in_page(&rt, 1, 2).expect("tile (1, 2) of page 1 is drawn");
+    assert!((tile[0] - 336.0).abs() < 0.6, "x: {tile:?}");
+    assert!((tile[1] - 671.0).abs() < 0.6, "y: {tile:?}");
+}
+
+#[test]
+fn office_docs_tiles_cover_the_page_box_at_150_per_cent_display_scaling() {
+    // Windows at 150 % (144 dpi), the stage at 100 %: tiles (100 x 144 = 14 400). The renderer's raster of A4 is
+    // 1190 x 1684 px (2 px a point): 3 columns and 4 rows of tiles, which together are the page's box and no more.
+    let (rt, log) = live_runtime(doc_of(1, 100, 1), 1.5, Some((TILE_PX, TILE_PX)));
     let page = find(&rt, "page").expect("page 1");
-    let tile = find(&rt, "page-1-tile-1-2").expect("tile (1, 2) of page 1 is drawn");
+    let (w, h) = (page.rect[2], page.rect[3]);
+    assert!((w - 520.0).abs() < 0.6, "the box is the board's width: {w}");
+    let last = tile_in_page(&rt, 2, 3).expect("the last tile (2, 3) is drawn");
     assert!(
-        (tile.rect[0] - page.rect[0] - 512.0).abs() < 0.6,
-        "x: {:?} in {:?}",
-        tile.rect,
-        page.rect
+        (last[0] + last[2] - w).abs() < 0.7,
+        "the last column ends at the page's right edge: {last:?} in {w}"
     );
     assert!(
-        (tile.rect[1] - page.rect[1] - 1024.0).abs() < 0.6,
-        "y: {:?} in {:?}",
-        tile.rect,
-        page.rect
+        (last[1] + last[3] - h).abs() < 0.7,
+        "the last row ends at the page's foot: {last:?} in {h}"
     );
+    assert!(
+        log.pictures
+            .borrow()
+            .iter()
+            .all(|k| !matches!(k, OfficePicture::Tile { col: 3.., .. } | OfficePicture::Tile { row: 4.., .. })),
+        "no tile past the raster is asked"
+    );
+    // Two tiles share their edge: no gap and no overlap.
+    let (a, b) = (
+        tile_in_page(&rt, 0, 0).expect("tile (0, 0)"),
+        tile_in_page(&rt, 1, 1).expect("tile (1, 1)"),
+    );
+    assert!((a[0] + a[2] - b[0]).abs() < 0.01 && (a[1] + a[3] - b[1]).abs() < 0.01, "{a:?} {b:?}");
+}
+
+#[test]
+fn office_docs_a_tile_is_drawn_at_the_scale_the_pointer_and_the_caret_use() {
+    // What the person sees and what a press means are one scale. Tile (1, 1) starts at pixel (512, 512) of a raster
+    // of 2 px a point, the page's point (256, 256): drawn where the caret of that point is drawn, and a press there
+    // is that point.
+    let (mut rt, _log) = live_runtime(doc_of(1, 100, 1), 1.5, Some((TILE_PX, TILE_PX)));
+    let tile = tile_in_page(&rt, 1, 1).expect("tile (1, 1)");
+    let doc = viewers::doc_mut(&mut rt.state).expect("a document");
+    let caret = doc.page_rect(&beebeeb_office_protocol::office::PageRect {
+        page: 0,
+        rect: beebeeb_office_protocol::office::RectPt {
+            x: 256.0,
+            y: 256.0,
+            w: 1.0,
+            h: 12.0,
+        },
+    });
+    let top = doc.page_top(1);
+    assert!((tile[0] - caret[0]).abs() < 0.7, "x: tile {tile:?}, caret {caret:?}");
+    assert!((tile[1] - (caret[1] - top)).abs() < 0.7, "y: tile {tile:?}, caret {caret:?}");
+    let (page, x, y) = doc.page_point(tile[0], top + tile[1]);
+    assert_eq!(page, 0);
+    assert!((x - 256.0).abs() < 1.0 && (y - 256.0).abs() < 1.0, "a press on it is ({x}, {y})");
 }
 
 #[test]
 fn office_docs_tiles_divide_by_the_device_factor() {
-    // At 192 dpi (scale 2) a 512 px tile is 256 points; tile (1, 1) sits at (256, 256).
+    // At 192 dpi (scale 2) A4 at 100 % is a raster of 1587 px on a box of 520 points: tile (1, 1) starts at pixel
+    // 512, which is 512 x 520 / 1587 = 167.8 points, on a whole device pixel (half a point).
     let (rt, _log) = live_runtime(doc_of(4, 100, 1), 2.0, Some((TILE_PX, TILE_PX)));
-    let page = find(&rt, "page").expect("page 1");
-    let tile = find(&rt, "page-1-tile-1-1").expect("tile (1, 1) is drawn at 200 % scale");
-    assert!((tile.rect[0] - page.rect[0] - 256.0).abs() < 0.6);
-    assert!((tile.rect[1] - page.rect[1] - 256.0).abs() < 0.6);
+    let tile = tile_in_page(&rt, 1, 1).expect("tile (1, 1) is drawn at 200 % scale");
+    assert!((tile[0] - 168.0).abs() < 0.3, "{tile:?}");
+    assert!((tile[1] - 168.0).abs() < 0.3, "{tile:?}");
 }
 
 #[test]
@@ -257,7 +316,7 @@ fn office_docs_an_absurd_page_size_is_bounded() {
 
 #[test]
 fn office_docs_a_tall_page_asks_only_the_tile_rows_near_the_screen() {
-    // A page the size rule allows (20:1) but far taller than the screen: at 150 % it is 35 tile rows. Only the rows that
+    // A page the size rule allows (20:1) but far taller than the screen: at 150 % it is 47 tile rows. Only the rows that
     // touch the band (one screen above, the screen, one below) may be asked, however tall the page is.
     const WINDOW_H: f32 = 798.0; // live_runtime's window
     let (w, h) = (595.0, 11_900.0);
@@ -266,9 +325,10 @@ fn office_docs_a_tall_page_asks_only_the_tile_rows_near_the_screen() {
         d.view.page_sizes_pt = vec![(w, h); 3];
     }
     let (_rt, log) = live_runtime(body, 1.0, None);
-    // At scale 1 a tile is TILE_PX points; the band ends at most two screens below page 1's top.
-    let side = TILE_PX as f32;
-    let page_rows = (h * 1.5 / side).ceil() as u32;
+    // The raster is 2 px a point (150 % at 96 dpi) on a box 780 points wide, so a tile is TILE_PX x 780 / 1190 points;
+    // the band ends at most two screens below page 1's top.
+    let side = TILE_PX as f32 * 780.0 / 1190.0;
+    let page_rows = (h * 2.0 / TILE_PX as f32).ceil() as u32;
     let band_rows = (2.0 * WINDOW_H / side).ceil() as u32;
     assert!(
         page_rows > 4 * band_rows,

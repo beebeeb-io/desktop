@@ -587,6 +587,11 @@ fn strip_wheel(s: &mut State, ev: rune::WheelEvent, _: &mut rune::Tx) -> bool {
     viewers::deck_mut(s).is_some_and(|deck| deck.strip_wheel(&ev))
 }
 
+/// RED STUB (the fix replaces it): the old fixed 16:9 box, whatever the slide's size.
+pub fn slide_box(_page_pt: (u32, u32), zoom: u16) -> (f32, f32) {
+    (SLIDE_W * f32::from(zoom) / 100.0, SLIDE_H * f32::from(zoom) / 100.0)
+}
+
 /// The stage's slide in layout points at the deck's zoom.
 fn stage_size(deck: &DeckBody) -> (f32, f32) {
     let zoom = f32::from(deck.view.zoom) / 100.0;
