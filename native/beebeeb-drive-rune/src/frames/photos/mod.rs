@@ -85,6 +85,9 @@ pub enum Intent {
     PlayPause(PhotoId),
     /// The open photo, shown in its folder on this PC with it selected (`frames::show_in_folder`).
     ShowInFolder(PhotoId),
+    /// w31: a photo this PC cannot show (HEIC, RAW), opened in the app the system has for it
+    /// (`frames::open_file::open_outside_app`).
+    OpenInOsApp(PhotoId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

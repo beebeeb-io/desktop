@@ -14,7 +14,7 @@ pub fn route(s: &mut State, tx: &mut Tx, intent: Intent) -> bool {
         Intent::ShareSeveral(_) | Intent::CopyLink { .. } | Intent::ChooseExpiry(_) | Intent::VersionHistory(_) => {
             ("route_share", route_share::handle(s, tx, intent))
         }
-        Intent::Rename(_) | Intent::Duplicate(_) | Intent::ShowInFolder(_) => ("route_items", route_items::handle(s, tx, intent)),
+        Intent::Rename(_) | Intent::Duplicate(_) | Intent::ShowInFolder(_) | Intent::OpenInOsApp(_) => ("route_items", route_items::handle(s, tx, intent)),
         Intent::SaveToPc(_) | Intent::SendCopy(_) => ("route_save_send", route_save_send::handle(s, tx, intent)),
         Intent::DownloadOriginal(_) | Intent::StopOriginal(_) => {
             ("route_original", route_original::handle(s, tx, intent))

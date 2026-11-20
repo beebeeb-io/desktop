@@ -277,6 +277,28 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         );
     }
 
+    // w31: a HEIC or RAW original is said, and the system's app is offered for it.
+    if viewing.kind == Kind::Photo && ui.source.original_refused(viewer.id).is_some() {
+        let id = viewer.id;
+        let app = crate::frames::show_in_folder::os_app_label();
+        stage = stage.child(
+            row()
+                .key("ph-viewer-notice")
+                .role("status")
+                .label(super::grid::UNSHOWABLE)
+                .w_full()
+                .px(20.0)
+                .py(8.0)
+                .gap(12.0)
+                .center_y()
+                .child(kit::label("ph-viewer-notice-words", super::grid::UNSHOWABLE, style::SUB, white.alpha(0.75)))
+                .child(
+                    chrome::button("ph-open-in-os-app", &format!("Open in {app}"), None, chrome::Tone::Plain, 28.0, crate::theme::tokens::type_::BUTTON_SM, t)
+                        .on_press(move |s: &mut State| s.photos.ask(Intent::OpenInOsApp(id))),
+                ),
+        );
+    }
+
     // The photo on the stage: the open one, or the next one while a trashed one can come back.
     let shown = ui.source.viewing(viewer.id);
     let shown = shown.as_ref().unwrap_or(viewing);

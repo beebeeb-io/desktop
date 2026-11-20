@@ -22,6 +22,7 @@ pub fn handle(s: &mut State, tx: &mut Tx, intent: Intent) -> Result<(), Intent> 
         Intent::Duplicate(id) => duplicate(s, tx, id),
         Intent::Rename(id) => rename::open(s, tx, id),
         Intent::ShowInFolder(id) => show_in_folder(s, id),
+        Intent::OpenInOsApp(id) => open_in_os_app(s, id),
         other => return Err(other),
     }
     Ok(())
@@ -57,6 +58,19 @@ fn show_in_folder(s: &mut State, id: super::PhotoId) {
     };
     if let Err(words) = crate::frames::show_in_folder::show(s, &items[0].id, &items[0].name) {
         s.photos.toast = Some(Toast::Words(words));
+    }
+}
+
+/// w31: the shared open chain's outside steps (the system's app, else the folder with the file selected). Never the
+/// app's own viewer: this file is one it cannot show.
+fn open_in_os_app(s: &mut State, id: super::PhotoId) {
+    let items = s.photos.source.file_items(&[id]).filter(|items| !items.is_empty());
+    let Some(items) = items else {
+        s.photos.toast = Some(Toast::Words(NOT_HERE));
+        return;
+    };
+    if let crate::frames::open_file::Opened::Failed(_) = crate::frames::open_file::open_outside_app(s, &items[0]) {
+        s.photos.toast = Some(Toast::Words("Couldn\u{2019}t open it \u{00B7} not available right now"));
     }
 }
 

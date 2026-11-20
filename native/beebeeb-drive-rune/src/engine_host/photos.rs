@@ -1323,6 +1323,12 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         (!photo.video).then(|| original_refused_for(&photo.name)).flatten()
     }
 
+    fn holds_unshowable(&self) -> bool {
+        self.current().is_some_and(|library| {
+            library.photos.iter().any(|photo| !photo.video && original_refused_for(&photo.name).is_some())
+        })
+    }
+
     fn stop_original(&mut self, _id: PhotoId) {
         self.end_original();
     }

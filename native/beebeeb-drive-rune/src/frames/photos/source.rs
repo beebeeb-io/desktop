@@ -293,6 +293,11 @@ pub trait PhotosSource {
     fn original_refused(&self, _id: PhotoId) -> Option<&'static str> {
         None
     }
+    /// w31: whether the photos in view hold a file this PC cannot show at any size (HEIC, RAW): Photos then says so
+    /// at the top. Only the stored thumbnail of such a file shows.
+    fn holds_unshowable(&self) -> bool {
+        false
+    }
     /// Stops the original's download and wipes what is held of it. The preview is untouched.
     fn stop_original(&mut self, _id: PhotoId) {}
     /// The decoded original of `id`, once it is here.

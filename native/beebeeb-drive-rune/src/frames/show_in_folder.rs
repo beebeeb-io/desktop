@@ -21,6 +21,15 @@ pub fn label() -> &'static str {
     label_for(std::env::consts::OS)
 }
 
+/// w31: the system's own app for a photo, in the words of "Open in ...".
+pub fn os_app_label() -> &'static str {
+    match std::env::consts::OS {
+        "windows" => "Photos",
+        "macos" => "Preview",
+        _ => "default app",
+    }
+}
+
 /// What is said when the file has no place in the folder on this PC (not an error of the app: it is just not here).
 pub const NOT_CONNECTED: &str = "Couldn\u{2019}t show it \u{00B7} nothing is connected right now.";
 

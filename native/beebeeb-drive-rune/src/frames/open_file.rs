@@ -56,6 +56,15 @@ fn open_item(s: &mut State, item: &DriveItem) -> Opened {
     outside(s.actions.source.open_outside(item))
 }
 
+/// w31: steps 2 and 3 only, for a file the app has no preview of even though its name has a kind (HEIC, RAW): the
+/// system's app, else the file manager with it selected. Photos' "Open in Photos / Preview".
+pub fn open_outside_app(s: &mut State, item: &DriveItem) -> Opened {
+    if item.is_folder {
+        return Opened::Failed(ActionError::Failed);
+    }
+    outside(s.actions.source.open_outside(item))
+}
+
 fn open_path(s: &mut State, path: PathBuf) -> Opened {
     if local_has_preview(&path) && viewers::open_local(s, &path) {
         return Opened::InApp;

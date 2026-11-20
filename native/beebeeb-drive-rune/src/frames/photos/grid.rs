@@ -470,6 +470,26 @@ fn empty_of(title: &'static str, sub: &'static str, again: Option<El>, t: &Theme
         )
 }
 
+/// w31: HEIC and RAW originals cannot be shown here; said once at the top, only when the view holds some.
+fn unshowable_notice(t: &Theme) -> El {
+    row()
+        .key("ph-heic-notice")
+        .role("status")
+        .label(UNSHOWABLE)
+        .w_full()
+        .px(20.0)
+        .py(8.0)
+        .gap(8.0)
+        .center_y()
+        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
+        .border_layout()
+        .child(kit::glyph("ph-heic-notice-icon", &icons::MORE, 14.0, t.text_tertiary))
+        .child(kit::label("ph-heic-notice-words", UNSHOWABLE, style::SUB, t.text_secondary))
+}
+
+/// The notice's words (also the viewer's).
+pub const UNSHOWABLE: &str = "HEIC and RAW photos can\u{2019}t be shown in Beebeeb yet";
+
 pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
     let content = if ui.lines.is_empty() {
         empty(list, t)
@@ -499,7 +519,11 @@ pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
                     .virtual_rows_version((ui.lines.len(), ui.across, ui.filter)),
             )
     };
-    let mut body = col().key("ph-body").child(head(ui, t)).child(content);
+    let mut body = col().key("ph-body").child(head(ui, t));
+    if ui.source.holds_unshowable() {
+        body = body.child(unshowable_notice(t));
+    }
+    let mut body = body.child(content);
     if let Some(toast) = &ui.toast {
         body = body.child(super::overlay::toast_layer(toast, 24.0, true, t));
     }
