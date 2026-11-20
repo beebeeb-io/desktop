@@ -24,28 +24,38 @@ use crate::account_binding::{Identity, canonical_email};
 use crate::config::DesktopConfig;
 use crate::sync_root_port::SyncRootPort;
 
+/// The reason a file that may hold unsent bytes keeps the switch out.
+const GUARDED_FILE: &str = "guarded file";
+
 impl<C: CredentialStores> Engine<C> {
     /// Step 7's part: see the module. A no-op unless `data` is recorded as another account's by user id. Best effort in
-    /// the sense that a failure changes nothing the binding reads: the start then refuses as before.
+    /// the sense that a failure changes nothing the binding reads: the start then refuses as before. `true` when it
+    /// stopped at a file that may hold bytes a person never sent (w29: the refusal then says what to do).
     pub(super) fn clear_the_previous_account(
         &self,
         data: &LocalState,
         session: &Identity,
         sync_root: &Path,
         port: &dyn SyncRootPort,
-    ) {
+    ) -> bool {
         let owner = data.db.owner().ok().flatten();
         let other_account = match (owner.as_ref().and_then(|o| o.user_id.as_deref()), session.user_id.as_deref()) {
             (Some(recorded), Some(now)) => recorded != now,
             _ => false,
         };
         if !other_account {
-            return;
+            return false;
         }
-        let Some(previous) = owner.as_ref() else { return };
+        let Some(previous) = owner.as_ref() else { return false };
         match self.remove_the_previous_account(data, previous, sync_root, port) {
-            Ok(()) => tracing::info!("account switch: the previous account's local data was removed"),
-            Err(why) => tracing::warn!(why, "account switch: the previous account's local data stays"),
+            Ok(()) => {
+                tracing::info!("account switch: the previous account's local data was removed");
+                false
+            }
+            Err(why) => {
+                tracing::warn!(why, "account switch: the previous account's local data stays");
+                why == GUARDED_FILE
+            }
         }
     }
 
@@ -73,7 +83,7 @@ impl<C: CredentialStores> Engine<C> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound
             );
             if port.may_hold_bytes(sync_root, path) {
-                return Err("guarded file");
+                return Err(GUARDED_FILE);
             }
             if nothing_there {
                 unasked.push(path.clone());

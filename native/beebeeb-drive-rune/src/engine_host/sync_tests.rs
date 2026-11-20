@@ -21,6 +21,7 @@ const KINDS: [SyncStartRefused; 10] = [
     SyncStartRefused::FolderMissing,
     SyncStartRefused::RegistrationFailed { code: Some(5) },
     SyncStartRefused::OtherAccountsData,
+    SyncStartRefused::UnsentFileOfAnotherAccount,
     SyncStartRefused::IdentityUnknown,
     SyncStartRefused::StopUnconfirmed,
     SyncStartRefused::StopFinishing,

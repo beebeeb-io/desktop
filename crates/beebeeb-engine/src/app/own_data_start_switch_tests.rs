@@ -163,7 +163,7 @@ fn a_file_of_unknown_content_keeps_the_refusal_and_deletes_nothing() {
     pc.sign_in(&other());
     let port = SwitchPort::new(Removal::Works);
 
-    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData));
+    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::UnsentFileOfAnotherAccount));
 
     assert_eq!(port.removals.load(Ordering::SeqCst), 0);
     assert_eq!(pc.contents(), contents);
@@ -253,7 +253,7 @@ fn a_file_of_unknown_content_with_bytes_on_this_pc_keeps_the_refusal_and_deletes
     pc.sign_in(&other());
     let port = SwitchPort::new(Removal::Works);
 
-    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData));
+    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::UnsentFileOfAnotherAccount));
 
     assert_eq!(port.removals.load(Ordering::SeqCst), 0);
     assert_eq!(port.registers.load(Ordering::SeqCst), 0);
@@ -382,7 +382,7 @@ fn a_refused_switch_keeps_the_first_accounts_entries_in_the_settings_file() {
     pc.sign_in(&other());
     let port = SwitchPort::new(Removal::Works);
 
-    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData));
+    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::UnsentFileOfAnotherAccount));
 
     let names: Vec<String> = settings_now().backup_chosen_folders.into_iter().map(|f| f.name).collect();
     assert!(names.iter().any(|name| name == "w27-kept-photos"), "{names:?}");

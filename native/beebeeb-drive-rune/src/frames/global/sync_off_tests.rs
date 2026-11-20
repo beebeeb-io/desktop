@@ -38,7 +38,7 @@ fn each_refusal_says_what_happened_and_offers_a_fix_only_where_one_exists() {
     sentences.dedup();
     assert_eq!(
         (titles.len(), sentences.len()),
-        (10, 10),
+        (11, 11),
         "one title and one sentence per kind"
     );
     for (kind, words) in Refused::ALL.iter().zip(&all) {

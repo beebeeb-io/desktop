@@ -153,6 +153,9 @@ pub enum SyncStartRefused {
     RegistrationFailed { code: Option<i32> },
     /// This PC's local data could not be proven the signed-in account's (`account_binding`).
     OtherAccountsData,
+    /// w29: the previous account left a file here that may hold changes it never sent: it is never removed unasked.
+    /// The only way on is that account's (it sends them) or the person's (the file moves out of the folder).
+    UnsentFileOfAnotherAccount,
     /// Whose this PC's local data is, or whose the session is, could not be confirmed.
     IdentityUnknown,
     /// An earlier engine did not confirm it stopped: only a restart of the app helps.
@@ -174,6 +177,7 @@ impl SyncStartRefused {
             Self::FolderMissing => "folder_missing",
             Self::RegistrationFailed { .. } => "registration_failed",
             Self::OtherAccountsData => "other_accounts_data",
+            Self::UnsentFileOfAnotherAccount => "unsent_file_of_another_account",
             Self::IdentityUnknown => "identity_unknown",
             Self::StopUnconfirmed => "stop_unconfirmed",
             Self::StopFinishing => "stop_finishing",
@@ -214,6 +218,9 @@ impl std::fmt::Display for SyncStartRefused {
                 f.write_str("Windows did not register the sync folder. Nothing was changed.")
             }
             Self::OtherAccountsData => f.write_str(account_binding::OTHER_ACCOUNT_ON_WINDOWS),
+            Self::UnsentFileOfAnotherAccount => f.write_str(
+                "A file left in the sync folder by the account that was signed in before may hold changes that were never sent. Nothing was uploaded or deleted.",
+            ),
             Self::IdentityUnknown => f.write_str(account_binding::IDENTITY_UNKNOWN),
             Self::StopUnconfirmed => f.write_str(account_binding::ENGINE_STOP_UNCONFIRMED),
             Self::StopFinishing => f.write_str(account_binding::ENGINE_STOP_FINISHING),
@@ -852,9 +859,14 @@ impl<C: CredentialStores> Engine<C> {
             }
             // (7) The local data is bound to the session's account (another account's data refuses, nothing reset).
             let data = self.local_data_for_start(&sync_root, &identity)?;
-            self.clear_the_previous_account(&data, &identity, &sync_root, port); // another account's data goes first.
-            account_binding::bind_before_engine_start(&data, &identity, false)
-                .map_err(|error| self.proof_owed_on(SyncStartRefused::of_binding(&error), &sync_root))?;
+            let unsent_file = self.clear_the_previous_account(&data, &identity, &sync_root, port); // another account's data goes first.
+            account_binding::bind_before_engine_start(&data, &identity, false).map_err(|error| {
+                let refused = match (unsent_file, SyncStartRefused::of_binding(&error)) {
+                    (true, SyncStartRefused::OtherAccountsData) => SyncStartRefused::UnsentFileOfAnotherAccount,
+                    (_, other) => other,
+                };
+                self.proof_owed_on(refused, &sync_root)
+            })?;
             crate::app::bindings::backup_folders::retag_at_start(self.identity, &identity); // P3-5: re-tag to the id.
             self.settle_an_interrupted_keep(data, &sync_root, &slot);
             // (8) The folder exists.
