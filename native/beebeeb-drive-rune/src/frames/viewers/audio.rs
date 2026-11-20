@@ -396,7 +396,7 @@ pub fn body(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
     let live = Live::of(ui);
     // A refusal: the words, and "Open in another app\u{2026}" one press away.
     if let Some(why) = live.as_ref().and_then(|l| l.state.refused.as_ref()) {
-        return video::refused(&video::refusal_words(why), t);
+        return video::refused_for(why, t);
     }
     row()
         .key("viewer-body")
