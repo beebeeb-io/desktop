@@ -412,6 +412,26 @@ pub fn format_date(iso: &str) -> String {
     format_date_at(local, Local::now().naive_local())
 }
 
+/// A fixture stamp for the board's mock "now" (5 Nov 2026): 4 and 5 Nov move to yesterday and
+/// today of this PC's local clock (same time of day, no zone), so "Today, 09:12" and "Yesterday,
+/// 16:42" hold on any day. Every other stamp is returned as it is.
+pub fn board_stamp(iso: &str) -> String {
+    use chrono::{Duration, Local, NaiveDate, NaiveDateTime};
+
+    let Ok(at) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ") else {
+        return iso.to_string();
+    };
+    let (yesterday, board_today) = (
+        NaiveDate::from_ymd_opt(2026, 11, 4).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 11, 5).unwrap(),
+    );
+    if at.date() < yesterday || at.date() > board_today {
+        return iso.to_string();
+    }
+    let shift = Local::now().date_naive() - board_today;
+    (at + shift).format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
 /// [`format_date`] for a local time against a local "now" (the rule, testable).
 pub fn format_date_at(dt: chrono::NaiveDateTime, now: chrono::NaiveDateTime) -> String {
     use chrono::{Datelike, Duration, Weekday};

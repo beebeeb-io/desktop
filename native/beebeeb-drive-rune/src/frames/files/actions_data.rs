@@ -245,7 +245,7 @@ impl More {
             id: conflict.file.clone(),
             name: conflict.name.clone(),
             size: Some(bytes as i64),
-            modified_at: format!("2026-11-05T{clock}:00Z"),
+            modified_at: crate::ui::file_list::board_stamp(&format!("2026-11-05T{clock}:00Z")),
             mime: conflict.name.ends_with(".pdf").then(|| "application/pdf".to_string()),
             pc_status: Some("on_this_pc".to_string()),
             ..blank_item()
