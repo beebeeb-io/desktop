@@ -107,8 +107,13 @@ fn edited(revision: u64, caret: Option<PageRect>, selection: Vec<PageRect>, mark
 
 /// A four-page document open for editing from a source that answers what the test queues.
 fn editor(editing: bool) -> (Runtime<State>, Rc<Shared>) {
+    editor_at(editing, 100, 1.0)
+}
+
+/// [`editor`] with the stage at `zoom` per cent on a display of `scale` (1.5: Windows at 150 %).
+fn editor_at(editing: bool, zoom: u16, scale: f32) -> (Runtime<State>, Rc<Shared>) {
     let mut file = docs_fixture::file(false);
-    file.body = doc_of(4, 100, 1);
+    file.body = doc_of(4, zoom, 1);
     let shared = Rc::new(Shared::default());
     let mut state = init();
     let id = file.id.clone();
@@ -122,7 +127,7 @@ fn editor(editing: bool) -> (Runtime<State>, Rc<Shared>) {
     }
     let env = Env {
         system_dark: false,
-        scale: 1.0,
+        scale,
     };
     let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
     rt.on_key = Some(crate::shell::host::on_key);
@@ -382,6 +387,38 @@ fn a_press_sends_a_hit() {
         panic!("a place on page 1: {calls:?}");
     };
     assert!((hx - 100.0 / K).abs() < 0.5 && (hy - 50.0 / K).abs() < 0.5, "{hx} {hy}");
+}
+
+/// The display's scale changes nothing of what a press means: at 150 % (144 dpi) a press on a point of the page is
+/// that point, and the caret answered for it is drawn under the press, with the page a whole picture (90 %) and in
+/// tiles (100 %: 100 x 144 = 14 400).
+#[test]
+fn a_press_is_the_same_point_of_the_page_at_150_per_cent_display_scaling() {
+    for zoom in [90u16, 100] {
+        let (mut rt, shared) = editor_at(true, zoom, 1.5);
+        let k = K * f32::from(zoom) / 100.0;
+        let page = rect(&rt, "page");
+        let (x, y) = (page[0] + 180.0, page[1] + 240.0);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        let calls = calls(&shared);
+        let Some(Call::Hit(0, hx, hy, HitMode::Place)) = calls.first().cloned() else {
+            panic!("a place on page 1 at {zoom} %: {calls:?}");
+        };
+        assert!(
+            (hx - 180.0 / k).abs() < 0.5 && (hy - 240.0 / k).abs() < 0.5,
+            "{zoom} %: {hx} {hy}"
+        );
+        // The editor answers a caret at that point: it is drawn where the press was.
+        answer(&mut rt, &shared, edited(1, Some(at(0, hx, hy)), Vec::new(), marks()));
+        let caret = rect(&rt, CARET);
+        let page = rect(&rt, "page");
+        assert!(
+            (caret[0] - page[0] - 180.0).abs() < 0.7 && (caret[1] - page[1] - 240.0).abs() < 0.7,
+            "{zoom} %: the caret {caret:?} on the page {page:?}"
+        );
+    }
 }
 
 #[test]
