@@ -76,7 +76,7 @@ pub(crate) fn helper_error(code: ErrorCode) {
         ErrorCode::Internal => ("internal", None),
     };
     let codec = codec.map_or("none", codec_word);
-    tracing::warn!(code, codec, "media helper answered an error");
+    tracing::warn!(answer = code, codec, "media helper answered an error");
 }
 
 /// The helper was killed for breaking a rule of the player's: `what` is the kind of rule, `line` where the worker
@@ -120,7 +120,7 @@ pub(crate) fn sandbox_failed(error: &SandboxError) {
 
 fn start_failed(seen: &Mutex<Vec<(&'static str, u32)>>, step: &'static str, code: u32) {
     if first_time(seen, step, code) {
-        tracing::warn!(step, code, "media helper not started");
+        tracing::warn!(step, os_error = code, "media helper not started");
     }
 }
 

@@ -65,18 +65,18 @@ fn every_codec_word_and_helper_code_passes_the_filter() {
     ];
     for codec in codecs {
         let text = logged(|| helper_error(ErrorCode::Unsupported(codec)));
-        let want = format!("code=unsupported codec={}", codec_word(codec));
+        let want = format!("answer=unsupported codec={}", codec_word(codec));
         assert!(text.contains(&want), "{codec:?}: {text}");
     }
     let codes = [
-        (ErrorCode::NoSystemDecoder(Codec::Hevc), "code=no system decoder codec=hevc"),
-        (ErrorCode::NoSystemMedia(Codec::Hevc), "code=no system media codec=hevc"),
-        (ErrorCode::NoDecoder, "code=no decoder codec=none"),
-        (ErrorCode::Corrupt, "code=corrupt"),
-        (ErrorCode::TooLarge, "code=too large"),
-        (ErrorCode::ReadFailed, "code=read failed"),
-        (ErrorCode::Timeout, "code=timeout"),
-        (ErrorCode::Internal, "code=internal"),
+        (ErrorCode::NoSystemDecoder(Codec::Hevc), "answer=no system decoder codec=hevc"),
+        (ErrorCode::NoSystemMedia(Codec::Hevc), "answer=no system media codec=hevc"),
+        (ErrorCode::NoDecoder, "answer=no decoder codec=none"),
+        (ErrorCode::Corrupt, "answer=corrupt"),
+        (ErrorCode::TooLarge, "answer=too large"),
+        (ErrorCode::ReadFailed, "answer=read failed"),
+        (ErrorCode::Timeout, "answer=timeout"),
+        (ErrorCode::Internal, "answer=internal"),
     ];
     for (code, want) in codes {
         let text = logged(|| helper_error(code));
@@ -94,8 +94,8 @@ fn a_sandbox_failure_says_its_step_and_code_once() {
         start_failed(&seen, "job limits", 87);
     });
     assert_eq!(text.matches("media helper not started").count(), 2, "{text}");
-    assert!(text.contains("step=create process code=5"), "{text}");
-    assert!(text.contains("step=job limits code=87"), "{text}");
+    assert!(text.contains("step=create process os_error=5"), "{text}");
+    assert!(text.contains("step=job limits os_error=87"), "{text}");
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn every_sandbox_error_has_a_step_but_the_windows_floor() {
         sandbox_failed(&SandboxError::Os { step: "resume", code: 1450 });
         sandbox_failed(&SandboxError::NeedsNewerWindows);
     });
-    assert!(text.contains("step=resume code=1450"), "{text}");
+    assert!(text.contains("step=resume os_error=1450"), "{text}");
     assert_eq!(text.lines().count(), 1, "{text}");
 }
 
@@ -161,6 +161,6 @@ fn every_sandbox_step_name_is_readable_in_the_log() {
     for step in steps {
         let seen = Mutex::new(Vec::new());
         let text = logged(|| start_failed(&seen, step, 5));
-        assert!(text.contains(&format!("step={step} code=5")), "{step}: {text}");
+        assert!(text.contains(&format!("step={step} os_error=5")), "{step}: {text}");
     }
 }
