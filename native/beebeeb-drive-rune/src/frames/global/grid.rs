@@ -14,7 +14,7 @@ use rune::{El, Key, KeyEvent, PointerPress, Tx, row};
 use crate::State;
 use crate::source::DriveItem;
 use crate::theme::tokens::Theme;
-use crate::ui::file_list::file_type_icon;
+use crate::theme::file_icons::icon_for_item;
 use crate::ui::grid_tiles::{self, Thumb, Tile};
 
 /// What the grid knows about a picture or a video beyond the list's row.
@@ -166,7 +166,7 @@ pub fn thumb_of(item: &DriveItem, thumbs: &dyn ThumbSource) -> Thumb {
             Thumb::Plain
         };
     }
-    Thumb::Glyph(file_type_icon(item), if item.is_folder { 44.0 } else { 34.0 })
+    Thumb::Type(icon_for_item(item), if item.is_folder { 44.0 } else { 34.0 })
 }
 
 /// What a screen reader says of a tile: "Tram 28.mov, video, 0:41, 82 MB".
