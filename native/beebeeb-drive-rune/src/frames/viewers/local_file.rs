@@ -72,3 +72,20 @@ impl ViewerSource for LocalFile {
         crate::frames::open_file::local_has_preview(Path::new(name))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::markdown::{Block, parse};
+
+    /// The notice the installer ships is formatted Markdown: headings, lists, links and code blocks, not raw text.
+    #[test]
+    fn the_shipped_licence_notice_renders_as_markdown_blocks() {
+        let notice = include_str!("../../../../../packaging/licences/THIRD-PARTY-LICENSES.md");
+        let blocks = parse(notice);
+        let count = |f: fn(&Block) -> bool| blocks.iter().filter(|b| f(b)).count();
+        assert!(matches!(blocks.first(), Some(Block::Heading(1, _))), "starts with its title");
+        assert!(count(|b| matches!(b, Block::Heading(2, _))) >= 6, "its six sections");
+        assert!(count(|b| matches!(b, Block::List(_))) > 100, "lists of crates");
+        assert!(count(|b| matches!(b, Block::Code(_))) > 200, "licence texts as code blocks");
+    }
+}
