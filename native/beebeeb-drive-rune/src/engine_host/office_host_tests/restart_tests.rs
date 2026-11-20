@@ -521,3 +521,26 @@ fn a_helper_killed_during_a_save_restarts_and_the_next_save_answers() {
     assert!(wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1), "{got:?}");
     assert!(got.iter().any(|event| matches!(event, EditEvent::Saved { id, .. } if *id == second)));
 }
+
+/// What a sign-out asks (`unsaved_count_in`): an editor counts from its first edit until a save lands.
+#[test]
+fn the_sign_out_question_counts_an_editor_from_its_first_edit_until_its_save_lands() {
+    let registry = Registry::new();
+    let mut host = start(mortal(), cadence(30_000, 30_000, 60_000), &registry);
+    assert_eq!(unsaved_count_in(&registry), 0, "nothing typed");
+    host.edit(EditOp::InsertText("a".to_owned())).expect("sent");
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while unsaved_count_in(&registry) != 1 && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(unsaved_count_in(&registry), 1, "typed, not saved");
+    let id = host.save_bytes(Purpose::Save).expect("sent");
+    let mut got = Vec::new();
+    assert!(
+        wait_events(&mut host, &mut got, |got| got
+            .iter()
+            .any(|e| matches!(e, EditEvent::Saved { id: got_id, purpose: Purpose::Save, .. } if *got_id == id))),
+        "{got:?}"
+    );
+    assert_eq!(unsaved_count_in(&registry), 0, "saved");
+}

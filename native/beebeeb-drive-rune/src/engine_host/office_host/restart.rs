@@ -110,6 +110,7 @@ impl<S: Starter> Worker<S> {
         let now = Instant::now();
         self.rs.edit_seq += 1;
         self.rs.unsaved = true;
+        self.shared.unsaved.store(true, std::sync::atomic::Ordering::SeqCst);
         if !self.rs.dirty {
             self.rs.dirty = true;
             self.rs.dirty_since = now;

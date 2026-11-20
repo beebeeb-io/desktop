@@ -140,7 +140,7 @@ fn from_action(error: ActionError) -> DeletionError {
         ActionError::Offline => DeletionError::Offline,
         ActionError::WrongPassword => DeletionError::WrongPassword,
         ActionError::TooMany => DeletionError::TooManyTries,
-        ActionError::Failed => DeletionError::Failed,
+        ActionError::Failed | ActionError::UnsavedEdits => DeletionError::Failed,
     }
 }
 

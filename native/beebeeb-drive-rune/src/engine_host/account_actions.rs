@@ -30,6 +30,9 @@ const CONFIRMATION_LASTS: Duration = Duration::from_secs(4 * 60);
 /// What the Sign out confirm says when the sign-out was not done and Beebeeb or the engine could not finish it.
 pub(super) const NOT_SIGNED_OUT_APP: &str = "Drive could not sign out. You are still signed in. Try again.";
 /// The window's press was made under a session that is over (another sign-in, another account).
+/// A sign-out met an open editor with edits no save has landed.
+pub(super) const UNSAVED_EDITS: &str =
+    "You have unsaved changes in an open document. Save it or close it first. Nothing was signed out.";
 pub(super) const SESSION_MOVED: &str = "Your session changed. Nothing was signed out.";
 /// No session at all: nothing to sign out.
 pub(super) const NO_SESSION: &str = "You are not signed in. Nothing was signed out.";
@@ -181,6 +184,7 @@ impl<C: CredentialStores + 'static> Actions<C> {
                 // What was refused is for the window that asked: not the one of another session or account.
                 Err(_) if !self.is_now(&end.stamp) => None,
                 Err(ActionError::NotSignedIn) => Some(SignOutAnswer::Refused(SESSION_MOVED)),
+                Err(ActionError::UnsavedEdits) => Some(SignOutAnswer::Refused(UNSAVED_EDITS)),
                 Err(error) => {
                     log(format!("account: the sign-out was not done ({})", error.words()));
                     Some(SignOutAnswer::Refused(NOT_SIGNED_OUT_APP))

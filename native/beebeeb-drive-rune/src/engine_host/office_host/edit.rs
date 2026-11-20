@@ -718,6 +718,7 @@ impl<S: Starter> Worker<S> {
         self.keep(&bytes, revision);
         if purpose == Purpose::Save && self.rs.save_started == self.rs.edit_seq {
             self.rs.unsaved = false;
+            self.shared.unsaved.store(false, std::sync::atomic::Ordering::SeqCst);
         }
         if self.rs.flush_id == Some(id) {
             // The snapshot a lock asked for: sealed here, on this thread, before the window could poll it.
