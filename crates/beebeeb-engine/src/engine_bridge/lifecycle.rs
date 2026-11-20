@@ -150,8 +150,7 @@ impl EngineBridge {
         self.resume.pass_wanted.load(Ordering::SeqCst) > self.resume.pass_served.load(Ordering::SeqCst)
     }
 
-    /// Tests, and a Windows range session's Activity row (LD-0105 W2).
-    #[cfg(any(any(test, feature = "test-support"), target_os = "windows"))]
+    /// The transfer board: the first listing (syncflow), tests, and a Windows range session's Activity row (LD-0105 W2).
     pub fn transfers(&self) -> &Arc<crate::transfer_progress::TransferBoard> {
         &self.transfers
     }
