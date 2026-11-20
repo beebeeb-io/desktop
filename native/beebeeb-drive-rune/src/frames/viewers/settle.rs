@@ -3,6 +3,7 @@
 use super::source::{OpenFile, SaveOutcome, Settled};
 use super::office_over::Over;
 use super::{Dialog, Ui};
+use crate::frames::office::edit::save::Seen;
 
 impl Ui {
     /// What a save, a keep or its answer came to, applied.
@@ -53,6 +54,7 @@ impl Ui {
                     newer: None,
                     ..self.file.clone()
                 };
+                self.office_answer(Seen::Landed);
                 self.outcome(SaveOutcome::Saved { file, at });
             }
             // Stored here, not sent yet: a newer version noticed while the save waited stays offered (its banner is
@@ -65,6 +67,7 @@ impl Ui {
                     ..self.file.clone()
                 };
                 self.show(file);
+                self.office_answer(Seen::Queued);
                 self.toast = Some(crate::frames::office::edit::save::QUEUED_TOAST.to_string());
             }
             Settled::Opened { body, version } => {
@@ -97,12 +100,14 @@ impl Ui {
             // A change of an earlier opening: said, nothing on screen changes.
             Settled::Said(words) => self.toast = Some(words),
             Settled::Failed => {
+                self.office_answer(Seen::Failed);
                 self.dialog = None;
                 self.toast = Some("Not saved".to_string());
             }
             // Not saved, and why: the edit stays as it is. The words go in the editor's banner, which offers Save a
             // copy (task 2530, item 1); said once, never also as a toast.
             Settled::Refused(words) => {
+                self.office_answer(Seen::Failed);
                 self.dialog = None;
                 match self.editor.as_mut() {
                     Some(editor) => {

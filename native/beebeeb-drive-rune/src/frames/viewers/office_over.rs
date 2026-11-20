@@ -163,6 +163,7 @@ impl Ui {
             revision: edit.revision,
             id: self.file.id.clone(),
             version: self.file.version,
+            answer: None,
         };
         let version = self.file.version;
         let (source, id) = self.edit_source();
@@ -209,6 +210,13 @@ impl Ui {
         }
     }
 
+    /// The engine's answer for the Office save on its way, kept on it for [`Ui::office_settle_save`].
+    pub(super) fn office_answer(&mut self, answer: Seen) {
+        if let Some(sent) = self.office.save.as_mut() {
+            sent.answer = Some(answer);
+        }
+    }
+
     /// What a save that left the window's thread became, read from the window's file and toast (`viewers::settle`
     /// applied it). `true`: something changed, the view must run again.
     pub fn office_settle_save(&mut self) -> bool {
@@ -224,7 +232,7 @@ impl Ui {
             self.office.over = Some(Over::Conflict(other));
             return true;
         }
-        match save::seen(&sent, &self.file.id, self.file.version, self.toast.as_deref()) {
+        match save::seen(&sent, &self.file.id, self.file.version) {
             Seen::Waiting => false,
             Seen::Landed => {
                 self.office.save = None;
@@ -1353,6 +1361,32 @@ mod tests {
         assert!(ui.pump() && ui.office_settle_save());
         assert_eq!(ui.toast.as_deref(), Some(NOT_SAVED));
         assert!(unsaved(&ui) && !ui.office.edit.as_ref().is_some_and(|e| e.saving));
+    }
+
+    #[test]
+    fn a_saved_a_copy_toast_during_a_save_is_not_its_landing() {
+        let (mut ui, _, settled) = live();
+        ui.office_save();
+        // Save a copy finishes while the Office save is on its way: it says so in the toast, nothing more.
+        ui.toast = Some("Saved a copy".to_string());
+        assert!(!ui.office_settle_save());
+        assert!(unsaved(&ui) && ui.office.edit.as_ref().is_some_and(|e| e.saving));
+        // The real save then fails: still unsaved, and told.
+        settled.borrow_mut().push_back(Settled::Failed);
+        assert!(ui.pump() && ui.office_settle_save());
+        assert!(unsaved(&ui) && !ui.office.edit.as_ref().is_some_and(|e| e.saving));
+        assert_eq!(ui.toast.as_deref(), Some(NOT_SAVED));
+    }
+
+    #[test]
+    fn a_not_saved_toast_does_not_fail_a_save_that_lands() {
+        let (mut ui, _, settled) = live();
+        ui.office_save();
+        ui.toast = Some("Not saved".to_string());
+        assert!(!ui.office_settle_save());
+        settled.borrow_mut().push_back(saved_as(&ui, 8));
+        assert!(ui.pump() && ui.office_settle_save());
+        assert!(!unsaved(&ui));
     }
 
     #[test]

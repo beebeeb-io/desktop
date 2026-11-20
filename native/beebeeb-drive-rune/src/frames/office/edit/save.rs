@@ -23,6 +23,9 @@ pub struct Sent {
     pub revision: u64,
     pub id: String,
     pub version: u32,
+    /// How the engine answered, once it has (`viewers::settle`). Never read from a toast: any other part of the
+    /// window (Save a copy) may say "Saved" or "Not saved" while this save is still on its way.
+    pub answer: Option<Seen>,
 }
 
 /// What the window can tell of a save on its way.
@@ -70,18 +73,16 @@ pub fn dropped(edit: &mut EditUi) {
     edit.saving = false;
 }
 
-/// Read the window's file and toast for what became of `sent`. A moved version (or another file: a Keep both)
-/// is a landing; "Saved on this PC" is a save kept here, not yet a version; any other words after "Saving..." are a save that did not happen.
-pub fn seen(sent: &Sent, file_id: &str, version: u32, toast: Option<&str>) -> Seen {
+/// What became of `sent`: the engine's answer if it came ([`Sent::answer`]), else a moved version (or another
+/// file: a Keep both) is a landing. The toast is never read.
+pub fn seen(sent: &Sent, file_id: &str, version: u32) -> Seen {
+    if let Some(answer) = sent.answer {
+        return answer;
+    }
     if sent.id != file_id || sent.version != version {
         return Seen::Landed;
     }
-    match toast {
-        Some(QUEUED_TOAST) => Seen::Queued,
-        Some(words) if words.starts_with("Saved") => Seen::Landed,
-        Some(words) if words != SAVING => Seen::Failed,
-        _ => Seen::Waiting,
-    }
+    Seen::Waiting
 }
 
 /// How the open live document is kept, for the dot, Save and the status line.
@@ -103,13 +104,15 @@ mod tests {
     use crate::frames::office::edit::EditKind;
 
     fn sent() -> Sent {
-        Sent { revision: 3, id: "f1".into(), version: 7 }
+        Sent { revision: 3, id: "f1".into(), version: 7, answer: None }
     }
 
     #[test]
-    fn a_save_kept_on_this_pc_is_not_a_landing() {
-        assert_eq!(seen(&sent(), "f1", 7, Some(QUEUED_TOAST)), Seen::Queued);
-        assert_eq!(seen(&sent(), "f1", 7, Some("Saved as version 8")), Seen::Landed);
+    fn only_the_engines_answer_settles_a_save_never_a_toast() {
+        assert_eq!(seen(&sent(), "f1", 7), Seen::Waiting);
+        assert_eq!(seen(&Sent { answer: Some(Seen::Queued), ..sent() }, "f1", 7), Seen::Queued);
+        assert_eq!(seen(&Sent { answer: Some(Seen::Failed), ..sent() }, "f1", 7), Seen::Failed);
+        assert_eq!(seen(&sent(), "f1", 8), Seen::Landed);
     }
 
     #[test]
