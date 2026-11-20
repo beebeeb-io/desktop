@@ -3,10 +3,13 @@
 
 use crate::State;
 use crate::frames::files::source::Account;
+use crate::theme::file_icon_colors::tint_color;
+use crate::theme::file_icons::{FileIcon, IconId, Tint};
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Span, col, el, row};
 
+use super::file_icon::file_icon;
 use super::kit;
 
 const SIDEBAR_W: f32 = 220.0;
@@ -52,6 +55,18 @@ impl SidebarSection {
         }
     }
 
+    /// The folder art a place is drawn with; Trash keeps its line glyph.
+    pub fn file_icon(self) -> Option<FileIcon> {
+        let (id, tint) = match self {
+            Self::Files => (IconId::Folder, Tint::Folder),
+            Self::Photos => (IconId::FolderPhotos, Tint::Image),
+            Self::Shared => (IconId::FolderShared, Tint::Folder),
+            Self::Backups => (IconId::FolderBackups, Tint::Folder),
+            Self::Trash => return None,
+        };
+        Some(FileIcon { id, tint })
+    }
+
     /// The board's tooltip: the name and its shortcut.
     pub fn shortcut(self) -> &'static str {
         match self {
@@ -83,6 +98,39 @@ pub fn side_item(
     shortcut: &str,
     t: &Theme,
 ) -> El {
+    let glyph = kit::glyph(
+        format!("{label}-icon"),
+        ic,
+        16.0,
+        if on { t.text } else { t.text_tertiary },
+    );
+    side_row(label, glyph, count, on, shortcut, t)
+}
+
+/// A sidebar place: the folder art in its tint (a selected row keeps the tint), or the line
+/// glyph for Trash.
+pub fn section_item(
+    section: SidebarSection,
+    count: Option<Count>,
+    on: bool,
+    t: &Theme,
+) -> El {
+    let label = section.label();
+    let Some(fi) = section.file_icon() else {
+        return side_item(label, section.icon(), count, on, section.shortcut(), t);
+    };
+    let glyph = file_icon(format!("{label}-icon"), fi, 16.0, t);
+    side_row(label, glyph, count, on, section.shortcut(), t)
+}
+
+fn side_row(
+    label: &'static str,
+    glyph: El,
+    count: Option<Count>,
+    on: bool,
+    shortcut: &str,
+    t: &Theme,
+) -> El {
     let mut item = row()
         .key(format!("{label}-row"))
         .role("button")
@@ -98,12 +146,7 @@ pub fn side_item(
         .hover(t.hover)
         .press(t.press)
         .focusable(true)
-        .child(kit::glyph(
-            format!("{label}-icon"),
-            ic,
-            16.0,
-            if on { t.text } else { t.text_tertiary },
-        ))
+        .child(glyph)
         .child(
             kit::label(
                 label,
@@ -528,3 +571,7 @@ pub(crate) fn format_storage(bytes: i64) -> String {
         format!("{} MB", bytes / 1_000_000)
     }
 }
+
+#[cfg(test)]
+#[path = "sidebar_icon_tests.rs"]
+mod sidebar_icon_tests;

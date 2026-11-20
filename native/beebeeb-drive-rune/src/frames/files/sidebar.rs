@@ -7,7 +7,7 @@ use crate::State;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::kit;
-use crate::ui::sidebar::{Count, SidebarSection, brand, side_item};
+use crate::ui::sidebar::{Count, SidebarSection, brand, section_item, side_item};
 use rune::{El, col, el, row};
 
 const SIDEBAR_W: f32 = 220.0;
@@ -30,14 +30,7 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
             _ => None,
         };
         sections = sections.child(
-            side_item(
-                section.label(),
-                section.icon(),
-                count,
-                active == section,
-                section.shortcut(),
-                t,
-            )
+            section_item(section, count, active == section, t)
             .on_press(move |s: &mut State| s.sidebar_section = section),
         );
     }
