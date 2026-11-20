@@ -120,6 +120,15 @@ def norm_path(d):
     return re.sub(r"\s+", " ", d.strip())
 
 
+# Item-type icons are the app's own (the registry), not the board's art: no glyph or pixel check.
+OWN_ICON = re.compile(r"^(row|grid|change)-\d+-icon$|-tile-icon$|-type-icon$")
+OWN_ICON_KEYS = {"viewer-title-icon", "preview-head-icon", "Files-icon", "Shared-icon", "Photos-icon", "Backups-icon"}
+
+
+def own_icon(key):
+    return key in OWN_ICON_KEYS or bool(OWN_ICON.search(key))
+
+
 def icon_check(b, n):
     issues = []
     if b.get("mark"):
@@ -334,6 +343,8 @@ def main():
             issues = ["MISSING in the native tree"] if n is None else fill_check(b, n)
             if issues:
                 fill_fail.append((key, "; ".join(issues)))
+        if own_icon(key):
+            continue
         if b["kind"] == "icon":
             icon_n += 1
             issues = ["MISSING in the native tree"] if n is None else icon_check(b, n)

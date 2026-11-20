@@ -505,10 +505,7 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
     let date = format_date(&item.modified_at);
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
 
-    let icon = match entry.as_ref().map(|e| e.kind) {
-        None | Some(BackupKind::Folder) => crate::ui::file_list::file_type_icon(item),
-        Some(kind) => kind.icon(),
-    };
+
     let tile = el()
         .key(format!("{k}-tile"))
         .size(22.0, 22.0)
@@ -516,7 +513,15 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
         .clip_rounded(6.0)
         .center()
         .fill(t.tile)
-        .child(kit::glyph(format!("{k}-icon"), icon, 14.0, t.text_secondary));
+        .child(match entry.as_ref().map(|e| e.kind) {
+            None | Some(BackupKind::Folder) => crate::ui::file_icon::file_icon(
+                format!("{k}-icon"),
+                crate::theme::file_icons::icon_for_item(item),
+                14.0,
+                t,
+            ),
+            Some(kind) => kit::glyph(format!("{k}-icon"), kind.icon(), 14.0, t.text_secondary),
+        });
     let mut name = row()
         .key("name-cell")
         .grow(1.0)
