@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use beebeeb_media_helper::session::run_with;
+use beebeeb_media_helper::session::run_with_system;
 use beebeeb_media_helper::{ROUTES, Route};
 use beebeeb_media_protocol::{Codec, ErrorCode, FromHelper, KindHint, ToHelper, WireError, read_to_app, write_msg};
 
@@ -62,7 +62,9 @@ impl App {
             buf: Vec::new(),
             pos: 0,
         };
-        let join = std::thread::spawn(move || run_with(input, ChanWrite(helper_out), table));
+        // The switch held off: this helper's own decoders alone, the same on every OS (the shipped switch is on,
+        // ux-02; Windows' decoders are `tests/system_decoder.rs`).
+        let join = std::thread::spawn(move || run_with_system(input, ChanWrite(helper_out), table, false));
         App {
             to_helper,
             from_helper: ChanRead {

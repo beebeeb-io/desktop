@@ -20,8 +20,8 @@
 //!
 //! **Two profiles** (decision 2541): every helper starts in the sandbox's default profile (no capability). A file
 //! whose stream the helper answers `NoSystemDecoder(codec)` for is restarted once in the system-decoder profile
-//! ([`profile_for_file`]); while the switch `MEDIA_SYSTEM_DECODER_ON` is off, that answer is always `None` and no
-//! helper ever starts in it.
+//! ([`profile_for_file`]). The switch `MEDIA_SYSTEM_DECODER_ON` is on as shipped (the owner's ruling of 2026-11-20);
+//! held off, that answer is always `None` and no helper ever starts in it.
 //!
 //! **Crash reports:** before the first helper of this process starts, the app writes the per-user Windows Error
 //! Reporting exclusion for the helper's exe ([`ErrorReports`]), so a crash of the helper (which holds decrypted
@@ -59,7 +59,7 @@ pub(crate) const HELPER_NAME: &str = if cfg!(windows) {
 };
 
 /// The profile to restart a helper in for a stream of `codec` (decision 2541), with the shipped switch
-/// (`MEDIA_SYSTEM_DECODER_ON`, off). `None`: the default profile. The app has no route table: a helper started in the
+/// (`MEDIA_SYSTEM_DECODER_ON`, on). `None`: the default profile. The app has no route table: a helper started in the
 /// default profile that answers `NoSystemDecoder(codec)` names a stream whose route is `System`.
 pub fn profile_for_file(codec: Option<Codec>) -> Option<Profile> {
     profile_for_file_with(MEDIA_SYSTEM_DECODER_ON, codec)

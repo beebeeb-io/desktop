@@ -21,7 +21,7 @@ pub(crate) fn logged(body: impl FnOnce()) -> String {
 fn every_refusal_is_a_readable_line_with_its_codec() {
     let all = [
         (Refusal::NoDecoder("AC-3".into()), "reason=no decoder"),
-        (Refusal::NoSystemDecoder(Codec::Hevc), "reason=system decoder off"),
+        (Refusal::NoSystemDecoder(Codec::Hevc), "reason=no system decoder"),
         (Refusal::NoSystemMedia(Codec::H264), "reason=no system media"),
         (Refusal::CouldNotPlay, "reason=failed"),
         (Refusal::NotSignedIn, "reason=not signed in"),

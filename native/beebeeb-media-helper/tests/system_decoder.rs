@@ -4,7 +4,7 @@
 //!
 //! What the sandbox's system-decoder profile allows is the sandbox crate's tests; that the decode works inside it is
 //! the VM rung's. The switch is given as on (`run_with_system(…, true)`, contract C6), so these tests keep their
-//! meaning while the shipped switch `MEDIA_SYSTEM_DECODER_ON` is off.
+//! meaning whatever the shipped switch `MEDIA_SYSTEM_DECODER_ON` is (on since 2026-11-20).
 #![cfg(windows)]
 
 use std::io::{self, Read, Write};

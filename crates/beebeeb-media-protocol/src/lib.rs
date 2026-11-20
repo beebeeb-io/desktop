@@ -253,10 +253,13 @@ pub enum Route {
 }
 
 /// Whether a stream whose route is [`Route::System`] is played at all. It needs the helper to start in the
-/// sandbox's system-decoder profile, which may read the registry (decision 2541). OFF until the media checkpoint's
-/// build, the attack probe against both profiles and the security review are green; while it is off,
-/// [`profile_for`] answers `None`, the app keeps the default profile, and such a file shows "Open in another app…".
-pub const MEDIA_SYSTEM_DECODER_ON: bool = false;
+/// sandbox's system-decoder profile, which may read the registry (decision 2541). ON (the owner's ruling of
+/// 2026-11-20, ux-02: with it off no HEVC clip played at all, nor an interlaced or 10-bit H.264 one, and an H.264
+/// clip with AAC sound played silent, on a PC that has Windows' decoders for all of them). The PC's own decoder
+/// plays such a stream when the PC has one; a PC without one answers [`ErrorCode::NoSystemDecoder`] from the
+/// system-decoder profile, and the app says so with "Open in default app" one press away. With the switch off,
+/// [`profile_for`] answers `None`, the app keeps the default profile and no such stream plays.
+pub const MEDIA_SYSTEM_DECODER_ON: bool = true;
 
 /// What the sandbox's system-decoder profile must allow for one file. The app makes it
 /// `beebeeb_office_sandbox::Profile::SystemDecoder { hevc }` (this crate has no dependency, so it cannot name it).

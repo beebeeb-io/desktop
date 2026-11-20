@@ -168,7 +168,8 @@ impl Track {
 /// The operating system's decoders, as one file's decision sees them (contract C6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemState {
-    /// The switch (`beebeeb_media_protocol::MEDIA_SYSTEM_DECODER_ON`) is off: never Media Foundation.
+    /// The switch (`beebeeb_media_protocol::MEDIA_SYSTEM_DECODER_ON`, on as shipped) is held off: never Media
+    /// Foundation.
     Off,
     /// The switch is on, but Media Foundation does not start in this process (the sandbox's default profile, or not
     /// Windows): the app may restart the helper once in the system-decoder profile.

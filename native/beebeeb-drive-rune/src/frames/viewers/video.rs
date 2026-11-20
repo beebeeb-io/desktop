@@ -44,9 +44,12 @@ pub fn refusal_words(why: &Refusal) -> String {
     refusal_words_with(MEDIA_SYSTEM_DECODER_ON, why)
 }
 
-/// [`refusal_words`] for a given state of `MEDIA_SYSTEM_DECODER_ON`. While the switch is off the app does not use the
-/// PC's own decoders, so a refusal that comes from their absence never tells a person to install one (the app would
-/// not use it, and the PC may have it already): it says Beebeeb can't play the format yet.
+/// [`refusal_words`] for a given state of `MEDIA_SYSTEM_DECODER_ON` (on as shipped: the owner's ruling of
+/// 2026-11-20). With the switch on, `NoSystemDecoder` is the PC's own answer (Windows was asked, in the
+/// system-decoder profile, and has no decoder for the format): the words say so, say what to install where there is
+/// something to install, and point at "Open in default app" ([`refusal_action`]). While the switch is off the app
+/// does not use the PC's own decoders, so a refusal that comes from their absence never tells a person to install
+/// one (the app would not use it, and the PC may have it already): it says Beebeeb can't play the format yet.
 pub fn refusal_words_with(system_decoder_on: bool, why: &Refusal) -> String {
     match why {
         Refusal::NoDecoder(name) if name.is_empty() => "This PC can't play this kind of file here.".into(),
@@ -60,12 +63,16 @@ pub fn refusal_words_with(system_decoder_on: bool, why: &Refusal) -> String {
                 codec_name(*codec)
             )
         }
-        Refusal::NoSystemDecoder(Codec::Hevc) => {
-            "This PC can't play HEVC video without Microsoft's HEVC extension.".into()
-        }
-        Refusal::NoSystemDecoder(codec) => format!("This PC can't play {} files here.", codec_name(*codec)),
+        Refusal::NoSystemDecoder(Codec::Hevc) => "This PC has no HEVC video decoder. Install \u{201C}HEVC Video \
+             Extensions\u{201D} from the Microsoft Store, or open the file in its default app."
+            .into(),
+        Refusal::NoSystemDecoder(codec) => format!(
+            "Windows has no {} decoder on this PC. Open the file in its default app.",
+            codec_name(*codec)
+        ),
         Refusal::NoSystemMedia(codec) => format!(
-            "This PC can't play {} files: this edition of Windows has no media codecs.",
+            "This PC can't play {} files: this edition of Windows has no media codecs. Open the file in its default \
+             app.",
             codec_name(*codec)
         ),
         Refusal::CouldNotPlay => "This file could not be played.".into(),
@@ -111,8 +118,37 @@ fn codec_name(codec: Codec) -> &'static str {
     codec.name().unwrap_or("this")
 }
 
+/// "Open in another app\u{2026}": the button of every refusal that is not about the PC's decoders.
+pub const OPEN_ELSEWHERE: &str = "Open in another app\u{2026}";
+/// The button where this PC has no system decoder for the format (the owner's ruling of 2026-11-20). The press is
+/// the same one: the system opens the file with its own app for the type.
+pub const OPEN_DEFAULT: &str = "Open in default app";
+
+/// The button's words for a refusal, as shipped.
+pub fn refusal_action(why: &Refusal) -> &'static str {
+    refusal_action_with(MEDIA_SYSTEM_DECODER_ON, why)
+}
+
+/// [`refusal_action`] for a given state of the switch: "Open in default app" only where the PC itself answered that
+/// it has no decoder (with the switch off the PC was never asked).
+pub fn refusal_action_with(system_decoder_on: bool, why: &Refusal) -> &'static str {
+    match why {
+        Refusal::NoSystemDecoder(_) | Refusal::NoSystemMedia(_) if system_decoder_on => OPEN_DEFAULT,
+        _ => OPEN_ELSEWHERE,
+    }
+}
+
+/// The state of the refusal `why`: its words ([`refusal_words`]) and its button ([`refusal_action`]).
+pub fn refused_for(why: &Refusal, t: &Theme) -> El {
+    refused_with(&refusal_words(why), refusal_action(why), t)
+}
+
 /// The refusal's state: the words and "Open in another app\u{2026}" one press away.
 pub fn refused(words: &str, t: &Theme) -> El {
+    refused_with(words, OPEN_ELSEWHERE, t)
+}
+
+fn refused_with(words: &str, action: &'static str, t: &Theme) -> El {
     col()
         .key("viewer-body")
         .grow(1.0)
@@ -122,7 +158,7 @@ pub fn refused(words: &str, t: &Theme) -> El {
         .fill(style::stage(t))
         .child(kit::label("refused-words", words.to_string(), style::TITLE, t.text).align(Align::Center))
         .child(
-            super::text::tool_action("refused-open", "Open in another app\u{2026}", None, None, t).on_press(
+            super::text::tool_action("refused-open", action, None, None, t).on_press(
                 |s: &mut State| {
                     if let Some(ui) = super::ui(s) {
                         ui.intent(Intent::OpenInAnotherApp);
@@ -424,7 +460,7 @@ pub fn view(ui: &Ui, t: &Theme) -> El {
     if let Some(handle) = ui.source.player() {
         let state = handle.state_of(&ui.file.id);
         if let Some(why) = state.as_ref().and_then(|s| s.refused.as_ref()) {
-            return refused(&refusal_words(why), t);
+            return refused_for(why, t);
         }
         let times = state.as_ref().map_or(
             Times {
