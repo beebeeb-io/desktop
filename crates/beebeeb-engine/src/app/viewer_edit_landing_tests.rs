@@ -163,11 +163,13 @@ fn a_stale_refusal_is_a_conflict_at_once_when_the_server_names_the_head() {
 }
 
 /// w29 (VM 401, run 11, bug 2): offline, a save waited the whole land wait (20 s) for an upload that could not start.
-/// The link monitor's failure, noted at or after the save began, ends the wait at once; a failure from before the save
-/// (the link has since been up again, or not tried) and a healthy link do not.
+/// A link failure noted at or after the save began ends the wait at once. One from before the save (the queued op may
+/// be backing off, so no new request is made) ends it once the upload has had a moment (`LINK_GRACE`) to land and
+/// clear it; a healthy link never does.
 #[test]
-fn a_link_failure_noted_since_the_save_began_ends_the_land_wait() {
+fn a_link_failure_ends_the_land_wait() {
     use crate::link_health::{LinkFailure, LinkFailureKind, LinkReason};
+    use std::time::Duration;
     let failure = |at| {
         Some((
             LinkFailure {
@@ -177,8 +179,11 @@ fn a_link_failure_noted_since_the_save_began_ends_the_land_wait() {
             at,
         ))
     };
-    assert!(super::viewer_edit_landing::link_down_since(failure(100), 100), "same second: the save's own try");
-    assert!(super::viewer_edit_landing::link_down_since(failure(103), 100));
-    assert!(!super::viewer_edit_landing::link_down_since(failure(99), 100), "an older failure says nothing now");
-    assert!(!super::viewer_edit_landing::link_down_since(None, 100), "no failure: wait for the upload");
+    let gives_up = super::viewer_edit_landing::link_down_since;
+    let (now, soon, later) = (Duration::from_millis(100), Duration::from_millis(900), Duration::from_millis(1600));
+    assert!(gives_up(failure(100), 100, now), "same second: the save's own try");
+    assert!(gives_up(failure(103), 100, now));
+    assert!(!gives_up(failure(99), 100, soon), "an older failure: the upload may still clear it");
+    assert!(gives_up(failure(99), 100, later), "and when it has not by now, the link is down");
+    assert!(!gives_up(None, 100, later), "no failure: wait for the upload");
 }
