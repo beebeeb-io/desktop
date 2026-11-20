@@ -161,3 +161,24 @@ fn a_stale_refusal_is_a_conflict_at_once_when_the_server_names_the_head() {
     let session = engine.acct.session_generation();
     assert_eq!(engine.save_text_for(session, DOC, "an invented edit", 5, queued.epoch), Ok(SaveEnd::Queued { base: 5 }));
 }
+
+/// w29 (VM 401, run 11, bug 2): offline, a save waited the whole land wait (20 s) for an upload that could not start.
+/// The link monitor's failure, noted at or after the save began, ends the wait at once; a failure from before the save
+/// (the link has since been up again, or not tried) and a healthy link do not.
+#[test]
+fn a_link_failure_noted_since_the_save_began_ends_the_land_wait() {
+    use crate::link_health::{LinkFailure, LinkFailureKind, LinkReason};
+    let failure = |at| {
+        Some((
+            LinkFailure {
+                kind: LinkFailureKind::Offline,
+                reason: LinkReason::Connect,
+            },
+            at,
+        ))
+    };
+    assert!(super::viewer_edit_landing::link_down_since(failure(100), 100), "same second: the save's own try");
+    assert!(super::viewer_edit_landing::link_down_since(failure(103), 100));
+    assert!(!super::viewer_edit_landing::link_down_since(failure(99), 100), "an older failure says nothing now");
+    assert!(!super::viewer_edit_landing::link_down_since(None, 100), "no failure: wait for the upload");
+}
