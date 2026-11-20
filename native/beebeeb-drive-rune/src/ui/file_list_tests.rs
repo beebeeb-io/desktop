@@ -25,7 +25,7 @@ fn item(name: &str, folder: bool, protected: bool, mime: Option<&str>) -> DriveI
 fn rows_draw_the_registry_icon_in_its_tint() {
     let t = tokens::theme(false);
     let items = [
-        (item("Photos", true, false, None), Tint::Folder),
+        (item("Photos", true, false, None), Tint::Image),
         (item("Backups", true, true, None), Tint::Folder),
         (item("a.pdf", false, false, None), Tint::Pdf),
         (item("main.rs", false, false, None), Tint::Code),
