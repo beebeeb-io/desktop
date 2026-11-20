@@ -722,3 +722,58 @@ fn w28_switch_purge_keeps_a_file_made_in_a_synced_folder() {
     assert_eq!(std::fs::read(f.root.join("Plans").join("late.txt")).unwrap(), b"made during the switch");
     assert_eq!(f.db.list_files().unwrap().len(), 1);
 }
+
+// ---- w29: a file of unknown content that is only a placeholder (nothing fetched) is a synced item, not unsent work ----
+
+/// VM 401 (a CLI-replaced file never opened here kept every switch out, "guarded file" 5/5): a REAL cloud placeholder
+/// with nothing on disk holds no bytes; the real port says so and the switch's purge removes it with its row.
+#[test]
+fn w29_an_unfetched_placeholder_of_unknown_content_holds_nothing_and_the_switch_removes_it() {
+    use crate::sync_root_port::SyncRootPort;
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    assert!(crate::windows_cf::placeholders::create_placeholder(&f.root, "Old.docx", "Old.docx", 4096, 1_700_000_000, false).unwrap());
+    f.track_unknown("Old.docx", ItemKind::File, FileStatus::CloudOnly);
+    let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
+
+    assert!(!os.may_hold_bytes(&f.root, "/Old.docx"), "a placeholder with nothing on disk holds nothing");
+    switch_purge(f, &[]).unwrap();
+
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+/// The same row with bytes on disk may be a person's: the real port says it may hold bytes, and a purge that is asked
+/// anyway refuses, deleting nothing.
+#[test]
+fn w29_a_placeholder_of_unknown_content_with_bytes_on_disk_is_never_removed() {
+    use crate::sync_root_port::SyncRootPort;
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    let path = f.root.join("Budget.docx");
+    std::fs::write(&path, b"typed by A, not sent").unwrap();
+    crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, "Budget.docx").unwrap();
+    crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&path, "Budget.docx").unwrap();
+    f.track_unknown("Budget.docx", ItemKind::File, FileStatus::Local);
+    let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
+
+    assert!(os.may_hold_bytes(&f.root, "/Budget.docx"));
+    assert!(switch_purge(f, &[]).is_err());
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"typed by A, not sent");
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+/// A plain file (no placeholder at all) at the path may hold anything: it is never removed.
+#[test]
+fn w29_a_plain_file_at_a_path_of_unknown_content_is_never_removed() {
+    use crate::sync_root_port::SyncRootPort;
+    let f = Fixture::new();
+    f.track_unknown("Plain.docx", ItemKind::File, FileStatus::Local);
+    std::fs::write(f.root.join("Plain.docx"), b"").unwrap();
+    let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
+
+    assert!(os.may_hold_bytes(&f.root, "/Plain.docx"));
+    assert!(switch_purge(&f, &[]).is_err());
+    assert!(f.root.join("Plain.docx").exists());
+}
