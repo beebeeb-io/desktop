@@ -363,7 +363,7 @@ impl Shell {
         }
     }
 
-    fn open_main(&self) {
+    pub(crate) fn open_main(&self) {
         if let Some(main) = &self.wiring.main {
             main.open();
         }
