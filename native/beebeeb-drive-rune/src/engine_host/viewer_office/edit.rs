@@ -55,6 +55,9 @@ struct Pending {
     request: u64,
     /// This PC's clock (seconds) when the person pressed Save: a recovery blob kept after it may hold edits typed since.
     pressed_at: i64,
+    /// The file is a document made here whose upload had not landed when it was opened (no version then): the save
+    /// waits for that landing first.
+    unlanded: bool,
 }
 
 /// A save answered "stored here, not sent yet": its recovery blob goes once the server has the version (w26, v5 bug 7:
@@ -103,6 +106,10 @@ pub(super) struct Work {
     /// the new file once more, after `Settled::Saved`): that open reads these, never the copy on this PC (queued, not
     /// on disk, or a placeholder on Windows: "Couldn't read the copy on this PC"). Taken by that open.
     pub(super) made_on: Option<MadeOn>,
+    /// The documents New document made here, with the session they were made for. Such a file is this PC's own
+    /// until its upload lands: it opens in the editor although the local state holds no version for it yet (w36,
+    /// Guus's PC: the upload took minutes to land, and the new document came up read-only, also when reopened).
+    pub(super) made_here: Vec<(String, SessionGeneration)>,
 }
 
 /// The document a New document made: the file, the session it was made for, its bytes.
@@ -131,20 +138,26 @@ impl Default for Work {
             made_rx,
             unconfirmed: Arc::default(),
             made_on: None,
+            made_here: Vec::new(),
         }
     }
 }
 
-/// How long a New document waits for its upload to land before the window opens it.
-const CREATE_LAND_WAIT: Duration = Duration::from_secs(20);
+/// How long a New document waits for its upload to land before the window opens it. Short: the document opens in
+/// the editor either way (`Work::made_here`); a landing within it only spares the first save its wait.
+const CREATE_LAND_WAIT: Duration = Duration::from_secs(2);
+/// How long the save of a document made here waits for that document's upload to land.
+const SAVE_LAND_WAIT: Duration = Duration::from_secs(20);
 const CREATE_LAND_POLL: Duration = Duration::from_millis(100);
 
+/// The save of a document made here whose own upload has not landed yet: nothing is stored, the edit stays open.
+pub(super) const NEW_NOT_SENT: &str = "Not saved yet: your new document is still being sent to Beebeeb. \
+     Your edit stays open: save again in a moment.";
+
 /// A new file is only queued when `create_office` answers: the local state holds no version for it (0) until its
-/// upload lands, and the window offers the editor only for a file with a version (`office_begin`). Opened at once, on
-/// Windows the new document came up as the read-only viewer, and Ctrl+S saved nothing (w24, VM 401). A worker's:
-/// bounded, and it ends at once when the version cannot be read.
-fn wait_until_landed<E: ViewerEngine>(engine: &E, session: SessionGeneration, file_id: &str) {
-    let deadline = Instant::now() + CREATE_LAND_WAIT;
+/// upload lands (w24, VM 401). A worker's: bounded by `wait`, and it ends at once when the version cannot be read.
+fn wait_until_landed<E: ViewerEngine>(engine: &E, session: SessionGeneration, file_id: &str, wait: Duration) {
+    let deadline = Instant::now() + wait;
     while Instant::now() < deadline {
         match engine.edit_facts(session, file_id, 0) {
             Some(facts) if facts.version == 0 => std::thread::sleep(CREATE_LAND_POLL),
@@ -280,9 +293,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// The press: the stamp and the base now, the session asked for the document's bytes. `Working`: they come on a
     /// later poll (`office_pump_save`).
     fn office_ask_save(&mut self, file_id: &str, base: i64, how: How) -> SaveOutcome {
-        let writable = self
-            .change_facts()
-            .is_some_and(|(_, facts)| facts.can_write && facts.version > 0);
+        // A document made here is saved although it had no version when it was opened: its save waits for its upload.
+        let facts = self.change_facts().map(|(opening, facts)| (opening.session, facts));
+        let unlanded = facts.is_some_and(|(session, facts)| facts.version == 0 && self.office_made_here(file_id, session));
+        let writable = facts.is_some_and(|(_, facts)| facts.can_write && (facts.version > 0 || unlanded));
         let Some(stamp) = self.stamp_of(file_id).filter(|_| writable) else {
             return SaveOutcome::Failed;
         };
@@ -303,6 +317,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             how,
             request,
             pressed_at: unix_now(),
+            unlanded,
         });
         // The file is not opened again while its save is on its way (`begin`), and the window says so (`saving`).
         self.changes.busy = true;
@@ -381,12 +396,25 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             base,
             how,
             pressed_at,
+            unlanded,
             ..
         } = pending;
         let unconfirmed = self.office.work.unconfirmed.clone();
         let (session, epoch, name, id) = (stamp.session, stamp.epoch, stamp.name.clone(), file_id.clone());
         let started = self.spawn(&file_id, stamp, move |engine| {
             let end = match how {
+            // A document made here, opened before its upload landed: saved from the version that upload became (a
+            // new file's first, 1; a file already past it answers Conflict). Not landed in time: said, nothing stored.
+            How::Save if unlanded => {
+                wait_until_landed(engine, session, &id, SAVE_LAND_WAIT);
+                match engine.edit_facts(session, &id, epoch) {
+                    Some(now) if now.version > 0 => {
+                        settle(engine.save_office(session, &id, &bytes, base.max(1), epoch), &id, &name)
+                    }
+                    Some(_) => (Settled::Refused(NEW_NOT_SENT.to_string()), None),
+                    None => (Settled::Failed, None),
+                }
+            }
             How::Save => settle(engine.save_office(session, &id, &bytes, base, epoch), &id, &name),
             // Mine becomes the newest version: saved from the version the file is at now.
             How::Mine => match engine.edit_facts(session, &id, epoch) {
@@ -533,7 +561,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                             &creating.name,
                             &bytes,
                         )?;
-                        wait_until_landed(&*engine, creating.session, &id);
+                        wait_until_landed(&*engine, creating.session, &id, CREATE_LAND_WAIT);
                         Ok(id)
                     }))
                     .unwrap_or(Err(EditRefused::Failed));
@@ -553,6 +581,15 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 None
             }
         }
+    }
+
+    /// `file_id` is a document New document made here, for `session`.
+    pub(in crate::engine_host::viewer) fn office_made_here(&self, file_id: &str, session: SessionGeneration) -> bool {
+        self.office
+            .work
+            .made_here
+            .iter()
+            .any(|(id, made_for)| id == file_id && *made_for == session)
     }
 
     /// The new file's reader (started by `begin`, on its copy on this PC) is replaced by the bytes just made: that
@@ -580,7 +617,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             return Settled::Said("Your new document was made. Find it in Files.".to_string());
         }
         match made.result {
-            Ok(id) => match self.begin(&id) {
+            Ok(id) => match {
+                self.office.work.made_here.push((id.clone(), made.session));
+                self.begin(&id)
+            } {
                 Ok(file) => {
                     // The window opens this file again (`Ui::open`): that open too is on these bytes.
                     self.office.work.made_on = Some(MadeOn {
