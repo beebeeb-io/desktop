@@ -271,6 +271,19 @@ jobs:
           echo "BUILD_NOT_BEFORE=$BEEBEEB_BUILD_NOT_BEFORE" >> "$GITHUB_ENV"
           cargo build --release --locked --target x86_64-pc-windows-msvc
 
+      # The two helpers the installer ships beside the app exe (the app starts each confined, looking for it next to
+      # its own exe: media::transport::HELPER_NAME, office_host::helper_exe). They are their own crates with their own
+      # target folders, so build-installer.ps1's default (beside the app exe) never finds them: build them here and
+      # hand their paths over below. Without the media helper a video opens as "No preview" (0.9.0 real install).
+      - name: Build the media and Office helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          for h in beebeeb-office-render beebeeb-media-helper; do
+            (cd "native/$h" && cargo build --release --locked --target x86_64-pc-windows-msvc)
+            test -f "native/$h/target/x86_64-pc-windows-msvc/release/$h.exe"
+          done
+
       # What is checked is the binary that ships, not the environment it was meant to be built in: it must carry
       # the updater's mark with exactly the commit's time, once, and that time must be a plausible one (not before
       # 2026-11-11, the day the v2 key was made). A binary without the mark has no updater in it, or was built
@@ -335,6 +348,8 @@ jobs:
         run: |
           & .\packaging\windows\build-installer.ps1 -Mode release -Version $env:RELEASE_VERSION `
             -Exe 'native\beebeeb-drive-rune\target\x86_64-pc-windows-msvc\release\beebeeb-drive.exe' `
+            -OfficeRenderExe 'native\beebeeb-office-render\target\x86_64-pc-windows-msvc\release\beebeeb-office-render.exe' `
+            -MediaHelperExe 'native\beebeeb-media-helper\target\x86_64-pc-windows-msvc\release\beebeeb-media-helper.exe' `
             -OutDir 'release-assets' -NsisDir $env:NSIS_DIR -PluginDir $env:NSIS_PLUGIN_DIR
           if ($LASTEXITCODE -ne 0) { throw "build-installer.ps1 failed (exit $LASTEXITCODE)" }
           Remove-Item -Recurse -Force 'release-assets\stage-release'
