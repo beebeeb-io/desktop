@@ -19,7 +19,7 @@ pub(crate) fn refused(why: &Refusal) {
     tracing::warn!(
         reason = match why {
             Refusal::NoDecoder(_) => "no decoder",
-            Refusal::NoSystemDecoder(_) => "system decoder off",
+            Refusal::NoSystemDecoder(_) => "no system decoder",
             Refusal::NoSystemMedia(_) => "no system media",
             Refusal::CouldNotPlay => "failed",
             Refusal::NotSignedIn => "not signed in",

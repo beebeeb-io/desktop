@@ -8,7 +8,7 @@
 //!
 //! **Where it runs.** Only in the sandbox's system-decoder profile do Windows' decoders start (COM is refused in the
 //! default profile: measured, 49 of 49 runs). The app starts the helper in that profile only for a `System` stream,
-//! and only once the switch `beebeeb_media_protocol::MEDIA_SYSTEM_DECODER_ON` is on (it is off).
+//! and only once the switch `beebeeb_media_protocol::MEDIA_SYSTEM_DECODER_ON` is on (it is: the owner's ruling of 2026-11-20).
 //!
 //! **Nothing of Media Foundation is loaded at the helper's start.** Its libraries are absent on Windows N and KN
 //! editions without the Media Feature Pack; a load-time import would stop the helper from starting at all there, for

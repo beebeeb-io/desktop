@@ -213,17 +213,18 @@ impl fmt::Debug for MediaItem {
     }
 }
 
-/// Why nothing plays. The view says it with "Open in another app…" one press away.
+/// Why nothing plays. The view says it with "Open in another app…" one press away ("Open in default app" where the
+/// PC has no system decoder). The sentences are the view's (`frames::viewers::video::refusal_words`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// No decoder here for this format, or its route is off: "This PC can't play <name> files here." The name is
     /// the format's (`Codec::name`), never the file's; empty when the format has no name (the view says "this
     /// kind of file").
     NoDecoder(String),
-    /// The codec's route is the system's decoder and this PC has none for it. HEVC (decision D-MED-2): "This PC
-    /// can't play HEVC video without Microsoft's HEVC extension."; any other `System` codec (H.264 streams FilmCraft
-    /// cannot decode, AAC, E-AC-3, MPEG-4 Part 2, VC-1, WMA): "This PC can't play <name> files here.", the name
-    /// from `Codec::name`. Never the helper's own decoder in its place.
+    /// The codec's route is the system's decoder and this PC has none for it. HEVC (decision D-MED-2): the words
+    /// name Microsoft's "HEVC Video Extensions"; any other `System` codec (H.264 streams FilmCraft cannot decode,
+    /// AAC, E-AC-3, MPEG-4 Part 2, VC-1, WMA): "Windows has no <name> decoder on this PC.", the name from
+    /// `Codec::name`. Never the helper's own decoder in its place.
     NoSystemDecoder(Codec),
     /// The codec's route is the system's decoder and this Windows has no media codecs at all (an N or KN edition
     /// without the Media Feature Pack; the legal brief of 2026-11-15, F3 caveat 1): "This PC can't play <name>

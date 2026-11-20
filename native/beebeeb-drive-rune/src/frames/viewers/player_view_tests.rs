@@ -130,17 +130,18 @@ fn refusal_words_name_the_format() {
     );
     assert_eq!(
         refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)),
-        "This PC can't play HEVC video without Microsoft's HEVC extension."
+        "This PC has no HEVC video decoder. Install \u{201C}HEVC Video Extensions\u{201D} from the Microsoft Store, \
+         or open the file in its default app."
     );
-    // Switch on: only HEVC names Microsoft's extension; any other system codec says "here" (row 24).
+    // Switch on: only HEVC names Microsoft's extension; any other system codec names no install (row 24).
     assert_eq!(
         refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)),
-        "This PC can't play AAC files here."
+        "Windows has no AAC decoder on this PC. Open the file in its default app."
     );
     // An edition of Windows with no media codecs (row 25).
     assert_eq!(
         refusal_words(&Refusal::NoSystemMedia(Codec::Aac)),
-        "This PC can't play AAC files: this edition of Windows has no media codecs."
+        "This PC can't play AAC files: this edition of Windows has no media codecs. Open the file in its default app."
     );
     assert_eq!(refusal_words(&Refusal::CouldNotPlay), "This file could not be played.");
     assert_eq!(
@@ -375,11 +376,8 @@ fn hevc_words_do_not_ask_for_an_extension_while_the_switch_is_off() {
         !aac.contains("This PC can't"),
         "the cause is Beebeeb's, not the PC's: {aac}"
     );
-    // With the switch on, today's words.
-    assert_eq!(
-        refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)),
-        "This PC can't play HEVC video without Microsoft's HEVC extension."
-    );
+    // With the switch on, the PC's own answer: what to install.
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains("HEVC Video Extensions"));
     // The app's own words follow the protocol's constant.
     assert_eq!(
         refusal_words(&Refusal::NoSystemDecoder(Codec::Hevc)),
@@ -415,4 +413,63 @@ fn media_no_decoder_without_a_name_says_this_kind_of_file() {
     let words = refusal_words(&Refusal::NoDecoder(String::new()));
     assert_eq!(words, "This PC can't play this kind of file here.");
     assert!(!words.contains("  "), "{words}");
+}
+
+/// ux-02 (the owner's ruling of 2026-11-20): as shipped, a PC without the system decoder for a format says so in
+/// plain words, and the button under them is "Open in default app". Every other refusal keeps its own button, and
+/// so does every refusal while the switch is held off (the PC was never asked).
+#[test]
+fn a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app() {
+    use super::{OPEN_DEFAULT, OPEN_ELSEWHERE, refusal_action, refusal_action_with};
+    assert_eq!(OPEN_DEFAULT, "Open in default app");
+    let hevc = Refusal::NoSystemDecoder(Codec::Hevc);
+    let words = refusal_words(&hevc);
+    assert!(words.starts_with("This PC has no HEVC video decoder."), "{words}");
+    assert!(words.contains("Microsoft Store"), "{words}");
+    assert!(words.contains("default app"), "{words}");
+    assert!(!words.contains("yet"), "the PC has no decoder; it is not Beebeeb that cannot yet: {words}");
+    for why in [
+        hevc.clone(),
+        Refusal::NoSystemDecoder(Codec::H264),
+        Refusal::NoSystemDecoder(Codec::Aac),
+        Refusal::NoSystemMedia(Codec::Hevc),
+    ] {
+        assert_eq!(refusal_action(&why), OPEN_DEFAULT, "{why:?}");
+        assert!(refusal_words(&why).contains("default app"), "{why:?}");
+        assert_eq!(refusal_action_with(false, &why), OPEN_ELSEWHERE, "{why:?}");
+    }
+    for why in [
+        Refusal::NoDecoder("ProRes".into()),
+        Refusal::CouldNotPlay,
+        Refusal::NotSignedIn,
+        Refusal::NotInstalled,
+        Refusal::NoSandbox,
+    ] {
+        assert_eq!(refusal_action(&why), OPEN_ELSEWHERE, "{why:?}");
+    }
+    // The button on screen carries the words.
+    fn refused_view(_: &State, _: &mut rune::Cx<State>) -> rune::El {
+        rune::col().key("window").child(super::refused_for(
+            &Refusal::NoSystemDecoder(Codec::Hevc),
+            &theme(false),
+        ))
+    }
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(init(), refused_view, (900.0, 400.0), env);
+    rt.frame(0.0);
+    let texts: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| e.text)
+        .collect();
+    assert!(texts.iter().any(|text| text == OPEN_DEFAULT), "the button: {texts:?}");
+    assert!(texts.iter().any(|text| *text == words), "the words: {texts:?}");
+    assert!(
+        !texts.iter().any(|text| text.contains("another app")),
+        "one button, the default app's: {texts:?}"
+    );
 }
