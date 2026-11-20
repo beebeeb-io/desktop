@@ -42,6 +42,18 @@ pub fn create_file(
     create_file_with(db, sync_root, parent, name, bytes, CREATE_FILE_LIMIT, write_and_sync)
 }
 
+/// The file [`create_file`] just made at `rel`, listed and queued NOW (w36): its row is written and its upload queued
+/// before this returns, by the one sequence the folder scan uses ([`crate::watcher::dispatch_local_create`]). Without
+/// it the file has no row until the next scan finds it (8 s, longer on a large folder), so no list shows it, while a
+/// second New file of the same name is refused as taken by the file on disk. `false`: not queued here (the scan
+/// still finds it, as before).
+pub fn list_new_file(bridge: &crate::engine_bridge::EngineBridge, sync_root: &Path, rel: &str) -> bool {
+    match full_path(sync_root, rel) {
+        Ok(path) => crate::watcher::dispatch_local_create(bridge, sync_root, &path, "new_file"),
+        Err(_) => false,
+    }
+}
+
 /// The bytes, on the disk: written, then synced (a write the disk only took into its cache is not made yet).
 fn write_and_sync(file: &mut File, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;

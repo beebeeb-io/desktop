@@ -240,6 +240,12 @@ impl Shell {
     /// Reads the session and the engine again and brings the gate, the b and the flyout in
     /// line. The engine lane calls this (through `AppHandle::update`) on every status event.
     /// True when the window's screen changed.
+    /// The folder the Files window shows is read again at the next [`poll`], as after a finished check (w36: a file
+    /// made here is listed by the source at once, and no check announces it).
+    pub(crate) fn reread_files(&mut self) {
+        self.files_reread_due = true;
+    }
+
     pub fn refresh(&mut self) -> bool {
         let changed = self.app.apply(Event::Session(self.actions.session())) == Outcome::Changed;
         let inputs = self.actions.tray_inputs();

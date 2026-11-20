@@ -20,7 +20,7 @@ use crate::state_db::{FileEntry, FileStatus, Namespace, PERMISSION_WRITE, StateD
 use crate::vault_tree;
 
 mod create_file;
-pub use create_file::{CREATE_FILE_LIMIT, create_file};
+pub use create_file::{CREATE_FILE_LIMIT, create_file, list_new_file};
 
 // ---------------------------------------------------------------------------
 // Name validation (same rules as `fsops::validate_name`)

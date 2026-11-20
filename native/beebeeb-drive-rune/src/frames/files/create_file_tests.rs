@@ -79,9 +79,15 @@ fn create_file_refused_by_the_source_is_said_and_try_again_opens_new_file_again(
         rt.state.live_toast(),
         Some(Toast::Failed(Action::NewFile, ActionError::NameTaken))
     );
+    // w36: the reason is said, not only "Couldn't make the file."
     assert_eq!(
         Toast::failure(Action::NewFile, ActionError::NameTaken),
-        "Couldn't make the file."
+        "Couldn't make the file. Something here already has that name. Try again with another name."
+    );
+    assert_eq!(
+        Toast::failure(Action::NewFolder, ActionError::NameTaken),
+        "Couldn't make the folder.",
+        "the other actions' words are unchanged"
     );
     assert!(rt.state.offers_try_again(Action::NewFile, ActionError::NameTaken));
     assert!(rt.state.viewer.new_file.is_none());

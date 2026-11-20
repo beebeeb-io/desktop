@@ -352,3 +352,31 @@ fn w31_when_the_first_list_lands_the_folder_is_read_again_without_waiting_for_th
         ids(&rt.state)
     );
 }
+
+/// w36 (Guus's PC, bff1af87): New file made its file, and the window showed no row for it until the engine's next
+/// finished check, minutes later on a busy engine. The source lists the file as it makes it, and the window reads
+/// the folder shown again in the same poll: the row stands there with no check. Mutant: drop `reread_files()` from
+/// `State::create_file` -> red (the row is missing).
+#[test]
+fn a_new_file_made_here_is_listed_at_once_with_no_finished_check() {
+    use crate::frames::files::Actions;
+    use crate::frames::files::source::FilesFixture;
+    use crate::frames::viewers::Intent as ViewerIntent;
+    let shelf = Elsewhere::with(&["m-1.txt"]);
+    let (_engine, mut rt) = window(&shelf);
+    rt.state.actions = Actions::new(Box::new(FilesFixture::default()));
+    settle(&mut rt);
+    let reads = shelf.reads();
+
+    // Create file: the source makes it and lists it before it answers.
+    shelf.add(&["a-new.txt"]);
+    rt.state.viewer.asked.push(ViewerIntent::CreateFile {
+        folder: None,
+        name: "a-new.txt".into(),
+    });
+    settle(&mut rt);
+
+    assert_eq!(rt.state.live_toast(), None, "nothing failed");
+    assert_eq!(ids(&rt.state), ["a-new.txt", "m-1.txt"], "listed with no finished check");
+    assert_eq!(shelf.reads(), reads + 1, "the folder is read once for it");
+}
