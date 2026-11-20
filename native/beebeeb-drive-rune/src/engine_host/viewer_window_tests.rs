@@ -950,6 +950,7 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
         leave(&mut w);
     }
     assert_eq!(in_app, 8, "4 kinds, from Files and from Search");
+    let before = w.chunk_requests();
     // The kind with no preview: not in the app, nothing downloaded, nothing started (no copy on this PC).
     w.open_row(PLAN_NAME);
     assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
@@ -959,7 +960,7 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
     // A video, in this window (no player here), is the same: step 2, never the viewer's frame.
     w.open_row(CLIP_NAME);
     assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
-    assert_eq!(w.chunk_requests(), 0);
+    assert_eq!(w.chunk_requests(), before, "nothing was downloaded for them");
 }
 
 /// The real Windows port of step 2: the system knows an app for `.txt`, and none for a kind nobody registered.
