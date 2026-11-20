@@ -1102,3 +1102,44 @@ fn wrap_breaks_a_long_lines_text_at_the_windows_width_and_no_wrap_keeps_it_on_on
     operate(&mut rt, "seg-1");
     assert_eq!(info(&rt, "run-0-0").rect[3], 21.0, "No wrap again");
 }
+
+/// w35-edit-toolbar: the top bar of an open file holds what applies to that file, and none of the
+/// Files view's buttons (no New, no list/grid switch, no Sort, no search of the folder).
+const FOLDER_ONLY: [&str; 7] = [
+    "new-btn",
+    "view-toggle",
+    "view-list",
+    "view-grid",
+    "sort-btn",
+    "search-box",
+    "forward",
+];
+
+fn assert_file_bar(rt: &Runtime<State>, what: &str, wanted: &[&str]) {
+    for key in FOLDER_ONLY {
+        assert!(!has(rt, key), "{what}: the bar has {key}");
+    }
+    for key in wanted {
+        assert!(has(rt, key), "{what}: the bar lacks {key}");
+    }
+}
+
+#[test]
+fn the_preview_bar_has_no_files_view_buttons() {
+    let rt = runtime("DW-1512");
+    assert_file_bar(&rt, "preview", &["back", "panel-toggle-btn", "open-explorer", "more-btn"]);
+}
+
+#[test]
+fn the_text_edit_bar_has_no_files_view_buttons() {
+    let mut rt = runtime("DW-1512");
+    operate(&mut rt, "tb-btn-0");
+    assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some());
+    assert_file_bar(&rt, "text edit", &["back", "tb-btn-0", "open-explorer", "panel-toggle-btn"]);
+}
+
+#[test]
+fn the_office_edit_bar_has_no_files_view_buttons() {
+    let rt = runtime("DW-1507e");
+    assert_file_bar(&rt, "office edit", &["back", "panel-toggle-btn", "open-explorer"]);
+}
