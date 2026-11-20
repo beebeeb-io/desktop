@@ -236,7 +236,11 @@ impl<C: CredentialStores> Engine<C> {
             .map_err(|_| EditRefused::NotSignedIn)?
             .map_err(|_| EditRefused::Failed)?;
         match outcome {
-            FinderWriteOutcome::Queued { file_id: Some(id), .. } => Ok(id),
+            FinderWriteOutcome::Queued { file_id: Some(id), .. } => {
+                // w29: sent now, not at the runner's next tick (VM 401 run 11: a New document took 11-26 s to open).
+                self.nudge_runner();
+                Ok(id)
+            }
             _ => Err(EditRefused::Failed),
         }
     }

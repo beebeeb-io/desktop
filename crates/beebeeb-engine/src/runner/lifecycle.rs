@@ -53,6 +53,10 @@ impl SendPhaseLink {
     pub fn link_failed(&self) -> bool {
         self.link.get().is_some_and(|link| link.snapshot().failure.is_some())
     }
+    /// w29: the link monitor's latest failure since its last good answer, and when (unix seconds).
+    pub fn link_failure(&self) -> Option<(crate::link_health::LinkFailure, i64)> {
+        self.link.get().and_then(|link| link.snapshot().failure)
+    }
     #[cfg_attr(not(any(target_os = "macos", any(test, feature = "test-support"))), allow(dead_code))]
     pub fn signals(&self) -> AttemptSignals {
         *self.signals.lock().unwrap_or_else(|p| p.into_inner())
