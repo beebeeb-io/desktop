@@ -692,9 +692,7 @@ async fn run(
                 // LD-0113: the backup passes. Each reads a backed-up folder in place and queues its uploads
                 // (`origin = 'backup'`), which this tick's queue sends; nothing is written under the sync root.
                 // An unreadable config runs no pass, as the mirror did.
-                // w31: not before the account's first file list is here (see `first_list_owed`).
                 match crate::config::DesktopConfig::load_for(identity) {
-                    Ok(_) if awaiting_first_list => {}
                     Ok(cfg) => {
                         let mut sources = crate::backup::sources::backup_sources(
                             &db,
@@ -711,9 +709,13 @@ async fn run(
                         // LD-0113 §6.2: a moved original (a Known Folder Move) or a newly resolved device folder
                         // changes what is protected; the folder switch refreshes at once (`set_known_folder_backup`).
                         crate::backup_protect::set_own_backups(crate::backup::own_backups_for(&db, &sources));
-                        backup_scheduler
-                            .tick(&bridge, &sync_root, sources, std::time::Instant::now())
-                            .await;
+                        // w31: the passes themselves wait until the account's first file list is here (see
+                        // `first_list_owed`); what is protected is still said, as on every tick.
+                        if !awaiting_first_list {
+                            backup_scheduler
+                                .tick(&bridge, &sync_root, sources, std::time::Instant::now())
+                                .await;
+                        }
                     }
                     Err(error) => tracing::debug!(%error, "backup: config unreadable; no pass this tick"),
                 }
