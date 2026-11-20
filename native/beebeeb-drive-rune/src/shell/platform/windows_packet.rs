@@ -2,7 +2,8 @@
 //! (`packet_text.rs` has the rule and why). Compiled only for Windows.
 //!
 //! A `WH_GETMESSAGE` hook of the window's own thread: it sees each message as the event loop takes it off the
-//! queue, before winit does. It reads key-downs (to know whether a packet went down) and turns a packet's
+//! queue, before winit does. It reads key-downs and dead keys (to know whether a packet, or the key after a dead
+//! key, went down) and turns such a key's
 //! `WM_CHAR` into `WM_NULL`, so winit never sees a character it would report without a key; the character goes
 //! on [`TAKEN`] and the poll is woken. Only messages of the main window are touched; a peek that leaves the
 //! message on the queue is not acted on (it would be counted twice).
@@ -14,8 +15,8 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GA_ROOT, GetAncestor, MSG, PM_REMOVE, SetWindowsHookExW, WH_GETMESSAGE, WM_CHAR, WM_KEYDOWN,
-    WM_NULL, WM_SYSKEYDOWN,
+    CallNextHookEx, GA_ROOT, GetAncestor, MSG, PM_REMOVE, SetWindowsHookExW, WH_GETMESSAGE, WM_CHAR, WM_DEADCHAR,
+    WM_KEYDOWN, WM_NULL, WM_SYSDEADCHAR, WM_SYSKEYDOWN,
 };
 
 use super::PacketWake;
@@ -78,6 +79,7 @@ unsafe extern "system" fn on_message(code: i32, wparam: WPARAM, lparam: LPARAM) 
         let key = match message.message {
             WM_KEYDOWN | WM_SYSKEYDOWN => Some(KeyMessage::Down(message.wParam as u16)),
             WM_CHAR => Some(KeyMessage::Char(message.wParam as u16)),
+            WM_DEADCHAR | WM_SYSDEADCHAR => Some(KeyMessage::Dead),
             _ => None,
         };
         if let Some(key) = key {

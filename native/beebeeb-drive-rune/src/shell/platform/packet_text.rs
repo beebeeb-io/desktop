@@ -8,6 +8,11 @@
 //! the window's messages, and nothing else: a character that follows a real key stays winit's, so no key types
 //! twice. The Windows hook that feeds it is `windows_packet.rs`; `shell::host::poll` hands what it took to the
 //! field that has the keyboard.
+//!
+//! The key after a dead key is the second case of the same loss (US-International, the usual Dutch layout): `'`
+//! then Space is the Space key with the text `'`, and `'` then `t` is the T key with the text `'t`; Rune typed a
+//! space and a `t`, so an apostrophe or a quote could not be typed. The characters of the key that follows a dead
+//! key are taken here too, all of them (`é` as well), so that key types what Windows composed and nothing else.
 
 /// `VK_PACKET`: the virtual key of a Unicode packet.
 pub const VK_PACKET: u16 = 0xE7;
@@ -19,6 +24,8 @@ pub enum KeyMessage {
     Down(u16),
     /// `WM_CHAR` with its UTF-16 code unit.
     Char(u16),
+    /// `WM_DEADCHAR` / `WM_SYSDEADCHAR`: the key that went down is a dead key, waiting for the next one.
+    Dead,
 }
 
 /// What to do with the message.
@@ -33,8 +40,11 @@ pub enum Verdict {
 /// The messages of one window thread, in the order they are taken off the queue.
 #[derive(Debug, Default)]
 pub struct Packets {
-    /// The last key that went down was a packet: the characters that follow are its.
+    /// The last key that went down was a packet, or the key after a dead key: the characters that follow are
+    /// taken.
     after_packet: bool,
+    /// A dead key went down and the key it waits for has not.
+    dead: bool,
     /// The first half of a character outside the BMP (an emoji arrives as two packets).
     high: Option<u16>,
 }
@@ -42,14 +52,26 @@ pub struct Packets {
 impl Packets {
     pub fn on(&mut self, message: KeyMessage) -> Verdict {
         match message {
+            KeyMessage::Dead => {
+                self.dead = true;
+                Verdict::Pass
+            }
+            // Shift between the dead key and its letter (`'` then Shift+E): the dead key still waits.
+            KeyMessage::Down(vk) if self.dead && is_modifier(vk) => Verdict::Pass,
             KeyMessage::Down(vk) => {
-                self.after_packet = vk == VK_PACKET;
+                self.after_packet = vk == VK_PACKET || self.dead;
+                self.dead = false;
                 if !self.after_packet {
                     self.high = None;
                 }
                 Verdict::Pass
             }
             KeyMessage::Char(_) if !self.after_packet => Verdict::Pass,
+            // A control character (Backspace, Enter, Escape after a dead key) is the key's own: winit's.
+            KeyMessage::Char(unit) if unit < 0x20 || unit == 0x7F => {
+                self.after_packet = false;
+                Verdict::Pass
+            }
             KeyMessage::Char(unit @ 0xD800..=0xDBFF) => {
                 self.high = Some(unit);
                 Verdict::Take(None)
@@ -64,6 +86,12 @@ impl Packets {
             }
         }
     }
+}
+
+/// Shift, Ctrl, Alt, Caps Lock and the Windows keys (`VK_SHIFT`.., `VK_CAPITAL`, `VK_LWIN`/`VK_RWIN`, the
+/// left/right variants).
+fn is_modifier(vk: u16) -> bool {
+    matches!(vk, 0x10..=0x12 | 0x14 | 0x5B | 0x5C | 0xA0..=0xA5)
 }
 
 /// The key a packet's text is, as the keyboard would have sent it: Enter, Tab and Backspace are keys, every other
@@ -148,6 +176,56 @@ mod tests {
             KeyMessage::Char(u16::from(b'a')),
         ]);
         assert_eq!(taken, ["a"]);
+    }
+
+    const QUOTE: u16 = 0xDE; // VK_OEM_7
+    const SHIFT: u16 = 0x10;
+
+    #[test]
+    fn the_key_after_a_dead_key_types_what_windows_composed() {
+        // ' then e: é.
+        let (taken, passed) = run(&[KeyMessage::Down(QUOTE), KeyMessage::Dead, KeyMessage::Down(0x45), KeyMessage::Char(0xE9)]);
+        assert_eq!(taken, ["é"]);
+        assert!(!passed.contains(&KeyMessage::Char(0xE9)));
+        // ' then Space: the apostrophe, not a space.
+        let (taken, _) = run(&[KeyMessage::Down(QUOTE), KeyMessage::Dead, KeyMessage::Down(0x20), KeyMessage::Char(0x27)]);
+        assert_eq!(taken, ["'"]);
+        // ' then t: both characters.
+        let (taken, _) = run(&[
+            KeyMessage::Down(QUOTE),
+            KeyMessage::Dead,
+            KeyMessage::Down(0x54),
+            KeyMessage::Char(0x27),
+            KeyMessage::Char(u16::from(b't')),
+        ]);
+        assert_eq!(taken, ["'", "t"]);
+        // ' then Shift+E: É; the Shift in between does not end the wait.
+        let (taken, _) = run(&[
+            KeyMessage::Down(QUOTE),
+            KeyMessage::Dead,
+            KeyMessage::Down(SHIFT),
+            KeyMessage::Down(0x45),
+            KeyMessage::Char(0xC9),
+        ]);
+        assert_eq!(taken, ["É"]);
+    }
+
+    #[test]
+    fn the_key_after_that_is_winits_again_and_a_control_key_after_a_dead_key_stays_a_key() {
+        let (taken, passed) = run(&[
+            KeyMessage::Down(QUOTE),
+            KeyMessage::Dead,
+            KeyMessage::Down(0x45),
+            KeyMessage::Char(0xE9),
+            KeyMessage::Down(0x41),
+            KeyMessage::Char(u16::from(b'a')),
+        ]);
+        assert_eq!(taken, ["é"]);
+        assert_eq!(passed.last(), Some(&KeyMessage::Char(u16::from(b'a'))));
+        // ' then Backspace: the Backspace key, its character left to winit.
+        let (taken, passed) = run(&[KeyMessage::Down(QUOTE), KeyMessage::Dead, KeyMessage::Down(0x08), KeyMessage::Char(0x08)]);
+        assert!(taken.is_empty(), "taken: {taken:?}");
+        assert_eq!(passed.last(), Some(&KeyMessage::Char(0x08)));
     }
 
     #[test]
