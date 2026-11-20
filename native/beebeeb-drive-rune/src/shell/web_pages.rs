@@ -8,10 +8,12 @@ use crate::engine_host::drive_settings::tools::{SUPPORT, percent};
 pub const RECOVERY_PAGE: &str = "https://app.beebeeb.io/forgot-password";
 /// Creating an account on the web, where this build has no sign-up screens (`repos/web`, route `/signup`).
 pub const SIGN_UP_PAGE: &str = "https://app.beebeeb.io/signup";
+/// The legal index (Settings' combined terms and privacy row).
+pub const LEGAL_PAGE: &str = "https://beebeeb.io/legal/";
 /// Sign-in's Terms (`repos/site`: `legalDocs.ts`, slug `terms`).
-pub const TERMS_PAGE: &str = "https://beebeeb.io/terms";
+pub const TERMS_PAGE: &str = "https://beebeeb.io/legal/terms/";
 /// Sign-in's Privacy (`repos/site/src/pages/privacy.astro`).
-pub const PRIVACY_PAGE: &str = "https://beebeeb.io/privacy";
+pub const PRIVACY_PAGE: &str = "https://beebeeb.io/legal/privacy/";
 /// Windows Settings › Notifications.
 pub const WINDOWS_NOTIFICATIONS: &str = "ms-settings:notifications";
 
@@ -20,7 +22,7 @@ pub const WINDOWS_NOTIFICATIONS: &str = "ms-settings:notifications";
 /// responsible disclosure), so About does not draw that row.
 pub const NAMES: &[(&str, &str)] = &[
     // `repos/site/src/pages/legal.astro`.
-    ("terms-and-privacy-policy", "https://beebeeb.io/legal"),
+    ("terms-and-privacy-policy", LEGAL_PAGE),
     // The public core repository: a link, not data.
     ("encryption-core-on-github", "https://github.com/beebeeb-io/core"),
     ("beebeeb.io", "https://beebeeb.io"),

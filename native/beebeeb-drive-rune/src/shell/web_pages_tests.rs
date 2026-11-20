@@ -69,3 +69,17 @@ fn the_opener_refuses_file_javascript_and_a_bare_path() {
     }
     assert_eq!(OPENED.with(|o| o.borrow().len()), 4);
 }
+
+#[test]
+fn legal_links_open_the_live_legal_pages_from_one_constant() {
+    assert_eq!(TERMS_PAGE, "https://beebeeb.io/legal/terms/");
+    assert_eq!(PRIVACY_PAGE, "https://beebeeb.io/legal/privacy/");
+    assert_eq!(LEGAL_PAGE, "https://beebeeb.io/legal/");
+    assert_eq!(url("terms-and-privacy-policy"), Some(LEGAL_PAGE));
+    assert!(crate::engine_host::signin::is_allowed_address(TERMS_PAGE));
+    assert!(crate::engine_host::signin::is_allowed_address(PRIVACY_PAGE));
+    // No legal text points at the web app, and the sign-up rows name the real addresses.
+    let signup = include_str!("../frames/signin/view_create.rs");
+    assert!(signup.contains("Opens beebeeb.io/legal/terms"));
+    assert!(signup.contains("Opens beebeeb.io/legal/privacy"));
+}

@@ -318,4 +318,18 @@ mod about_tests {
         assert!(router.contains("\"open-source-licences\" => {"), "the shell routes the row to open_licences");
         assert!(router.contains("about::open_licences(s)"));
     }
+
+    #[test]
+    fn about_licence_notice_stays_open_when_settings_was_in_front() {
+        // Guus's PC, 2026-11-20: About lives inside Settings. The route machine refuses OpenItem while Settings is
+        // open, so the viewer's file was never the route's item and `sync` dropped it: the row did nothing.
+        let (mut s, _calls) = spied();
+        crate::shell::host::dispatch(&mut s, crate::shell::app::Event::OpenSettings(crate::shell::app::SettingsPane::General));
+        let f = a_file(LICENCES_FILE);
+        assert_eq!(open_licences_at(&mut s, Some(f.clone())), Ok(()));
+        crate::frames::viewers::sync(&mut s);
+        assert!(s.viewer.ui.is_some(), "the notice is still open after the route settled");
+        assert!(matches!(s.shell.app.screen(), crate::shell::app::Screen::Drive(_)), "Settings made way for the viewer");
+        assert_eq!(crate::frames::viewers::route_item(&s), Some(f.to_string_lossy().into_owned()));
+    }
 }
