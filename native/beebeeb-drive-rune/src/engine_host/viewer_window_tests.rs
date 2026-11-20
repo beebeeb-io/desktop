@@ -908,11 +908,11 @@ fn a_picture_is_shown_and_no_action_claims_a_state_that_was_not_read() {
 #[path = "viewer_edit_lock_tests.rs"]
 mod edit_lock;
 
-/// w29: a PDF, a picture, a video, a text and a Word document, each opened from Files (a row and Enter) and from
+/// w29: a PDF, a picture, a text and a Word document, each opened from Files (a row and Enter) and from
 /// Search (`open_file`), on the real engine: every one is the window's own viewer. A kind with no preview
-/// (`.zip` here) is not: `open_file` sends it on to steps 2 and 3, and with no sync running here nothing is started.
+/// (`.zip` here; a video too, in a window with no player) is not: `open_file` sends it on to steps 2 and 3, and with no sync running here nothing is started.
 #[test]
-fn five_kinds_open_in_the_app_from_files_and_from_search_and_an_unknown_kind_does_not() {
+fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_preview_does_not() {
     use crate::frames::open_file::{Opened, Target, item_named, open_file};
     let mut w = window("sixkinds");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
@@ -920,7 +920,6 @@ fn five_kinds_open_in_the_app_from_files_and_from_search_and_an_unknown_kind_doe
     let kinds = [
         (REPORT_NAME, REPORT),
         (PICTURE_NAME, PICTURE),
-        (CLIP_NAME, CLIP),
         (NOTE_NAME, NOTE),
         (DOC_NAME, DOC),
     ];
@@ -950,13 +949,16 @@ fn five_kinds_open_in_the_app_from_files_and_from_search_and_an_unknown_kind_doe
         in_app += 1;
         leave(&mut w);
     }
-    assert_eq!(in_app, 10, "5 kinds, from Files and from Search");
+    assert_eq!(in_app, 8, "4 kinds, from Files and from Search");
     // The kind with no preview: not in the app, nothing downloaded, nothing started (no copy on this PC).
     w.open_row(PLAN_NAME);
     assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
     let mut opened = Opened::InApp;
     w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(PLAN, PLAN_NAME))));
     assert_eq!(opened, Opened::Failed(crate::frames::files::source::ActionError::Unavailable));
+    // A video, in this window (no player here), is the same: step 2, never the viewer's frame.
+    w.open_row(CLIP_NAME);
+    assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
     assert_eq!(w.chunk_requests(), 0);
 }
 
