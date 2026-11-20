@@ -10,6 +10,7 @@
 
 use crate::State;
 use crate::source::DriveItem;
+use crate::theme::file_icons::icon_for_item;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use chrono::Timelike;
@@ -103,11 +104,11 @@ pub fn file_tile(key: &str, item: &DriveItem, t: &Theme) -> El {
     if item.has_thumbnail {
         return thumbnail(tile);
     }
-    tile.fill(t.tile).child(kit::glyph(
+    tile.fill(t.tile).child(super::file_icon::file_icon(
         format!("{key}-icon"),
-        file_type_icon(item),
+        icon_for_item(item),
         14.0,
-        t.text_secondary,
+        t,
     ))
 }
 
@@ -125,26 +126,9 @@ pub fn thumbnail(tile: El) -> El {
     )
 }
 
-/// The board draws one outlined glyph per kind, all in ink-2 (no per-type colour in the
-/// desktop list): a folder, the Backups drive, a sheet, a deck or media file, a document.
+/// The registry's art for an item (folder, Backups root, or its file type).
 pub fn file_type_icon(item: &DriveItem) -> &'static Icon {
-    if item.is_folder {
-        return if item.is_protected {
-            &icons::BACKUPS
-        } else {
-            &icons::FILES
-        };
-    }
-    match item.mime.as_deref() {
-        Some(m) if m.contains("spreadsheet") || m.contains("excel") || m == "text/csv" => &icons::DOC_SPREADSHEET,
-        Some(m) if m.contains("presentation") || m.contains("keynote") || m.contains("powerpoint") => {
-            &icons::DOC_MINIMAL
-        }
-        Some(m) if m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/") => &icons::DOC_MINIMAL,
-        // A file of no known kind: the plain sheet (the board's `file`, DW-0408b).
-        Some("application/octet-stream") => &crate::theme::icons_files::DOC_BLANK,
-        _ => &icons::DOC_GENERIC,
-    }
+    crate::theme::file_icon_art::art(icon_for_item(item).id)
 }
 
 /// A header cell's label.
@@ -461,3 +445,7 @@ pub fn format_date_at(dt: chrono::NaiveDateTime, now: chrono::NaiveDateTime) -> 
         format!("{} {} {}", date.day(), MONTHS[date.month0() as usize], date.year())
     }
 }
+
+#[cfg(test)]
+#[path = "file_list_tests.rs"]
+mod tests;

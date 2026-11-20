@@ -297,11 +297,11 @@ pub fn big_tile(key: &str, item: &DriveItem, size: f32, t: &Theme) -> El {
     if item.has_thumbnail {
         return crate::ui::file_list::thumbnail(tile);
     }
-    tile.fill(t.tile).child(kit::glyph(
+    tile.fill(t.tile).child(crate::ui::file_icon::file_icon(
         format!("{key}-icon"),
-        crate::ui::file_list::file_type_icon(item),
+        crate::theme::file_icons::icon_for_item(item),
         (size * 0.62).round(),
-        t.text_secondary,
+        t,
     ))
 }
 
