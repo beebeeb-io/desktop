@@ -593,8 +593,13 @@ fn strip_wheel(s: &mut State, ev: rune::WheelEvent, _: &mut rune::Tx) -> bool {
 /// stretched).
 pub fn slide_box(page_pt: (u32, u32), zoom: u16) -> (f32, f32) {
     let (pw, ph) = (page_pt.0.max(1) as f32, page_pt.1.max(1) as f32);
-    let k = (SLIDE_W / pw).min(SLIDE_H / ph) * f32::from(zoom) / 100.0;
-    (pw * k, ph * k)
+    let zoom = f32::from(zoom) / 100.0;
+    // The side that decides is the board's exactly (no rounding of a product back to it).
+    if pw * SLIDE_H >= ph * SLIDE_W {
+        (SLIDE_W * zoom, SLIDE_W * ph / pw * zoom)
+    } else {
+        (SLIDE_H * pw / ph * zoom, SLIDE_H * zoom)
+    }
 }
 
 /// The stage's slide in layout points at the deck's zoom.

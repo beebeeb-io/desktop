@@ -276,8 +276,10 @@ fn office_docs_tiles_divide_by_the_device_factor() {
     // 512, which is 512 x 520 / 1587 = 167.8 points, on a whole device pixel (half a point).
     let (rt, _log) = live_runtime(doc_of(4, 100, 1), 2.0, Some((TILE_PX, TILE_PX)));
     let tile = tile_in_page(&rt, 1, 1).expect("tile (1, 1) is drawn at 200 % scale");
-    assert!((tile[0] - 168.0).abs() < 0.3, "{tile:?}");
-    assert!((tile[1] - 168.0).abs() < 0.3, "{tile:?}");
+    assert!((tile[0] - 167.8).abs() < 0.6, "{tile:?}");
+    assert!((tile[1] - 167.8).abs() < 0.6, "{tile:?}");
+    // On whole device pixels: half points.
+    assert!((tile[0] * 2.0).fract().abs() < 0.01 && (tile[1] * 2.0).fract().abs() < 0.01, "{tile:?}");
 }
 
 #[test]
