@@ -803,6 +803,29 @@ pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
     }
 }
 
+/// Enter in the editor starts a new line (w36-txt-save-enter). Rune's field reads a plain Return as "send" (a
+/// chat's composer) and breaks the line only with Shift; the editor has nothing to send, so the plain key did
+/// nothing. It is handed to the field as the line break, so undo and a held key work as for any typing.
+pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let m = ev.mods;
+    if ev.key != Key::Enter || m.shift || m.alt || m.cmd || m.ctrl {
+        return false;
+    }
+    let Some(editor) = s.viewer.ui.as_mut().and_then(|ui| ui.editor.as_mut()) else {
+        return false;
+    };
+    let line_break = KeyEvent {
+        key: Key::Enter,
+        mods: rune::Mods {
+            shift: true,
+            ..rune::Mods::default()
+        },
+    };
+    editor.edit.key(&line_break, None);
+    tx.scroll_into_view(format!("caret-{}", editor.caret_line()));
+    true
+}
+
 fn close_stale(s: &mut State) {
     if let Some(mut ui) = s.viewer.ui.take() {
         ui.cancel();
