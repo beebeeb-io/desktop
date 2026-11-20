@@ -54,6 +54,8 @@ mod browse_states_tests;
 #[cfg(test)]
 mod long_list_tests;
 #[cfg(test)]
+mod open_in_app_tests;
+#[cfg(test)]
 mod open_with_menu_tests;
 #[cfg(test)]
 mod protected_tests;
