@@ -1156,7 +1156,7 @@ fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
     assert!(ask(&mut rt.state, Then::Quit), "unsaved: the question is up");
     rt.invalidate();
     rt.frame(0.0);
-    assert_eq!(info(&rt, "dlg-text-0").text.as_deref(), Some("You have unsaved changes in meeting-notes-4-nov.md."));
+    assert_eq!(info(&rt, "dlg-text-0").text.as_deref(), Some("You have unsaved changes in Meeting notes 4 Nov.md."));
     assert_eq!(info(&rt, "btn-2").label.as_deref(), Some("Discard and quit, destructive"));
     // Cancel keeps the edit and nothing was saved.
     operate(&mut rt, "btn-3");
