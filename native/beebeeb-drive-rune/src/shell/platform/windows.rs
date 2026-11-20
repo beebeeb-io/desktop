@@ -312,6 +312,14 @@ impl Platform for WindowsPlatform {
         pc_idle()
     }
 
+    fn watch_packet_text(&self, window: Option<&rune::WindowHandle>, wake: super::PacketWake) -> bool {
+        super::windows_packet::watch(window, wake)
+    }
+
+    fn take_packet_text(&self) -> Vec<String> {
+        super::windows_packet::take()
+    }
+
     fn set_capture_exclusion(&self, window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {
         let Some(window) = window else {
             return Err(PlatformError::Os("no window handle yet".into()));
