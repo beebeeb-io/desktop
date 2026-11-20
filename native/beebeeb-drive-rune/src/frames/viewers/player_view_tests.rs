@@ -419,7 +419,7 @@ fn media_no_decoder_without_a_name_says_this_kind_of_file() {
 /// plain words, and the button under them is "Open in default app". Every other refusal keeps its own button, and
 /// so does every refusal while the switch is held off (the PC was never asked).
 #[test]
-fn a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app() {
+fn media_a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app() {
     use super::{OPEN_DEFAULT, OPEN_ELSEWHERE, refusal_action, refusal_action_with};
     assert_eq!(OPEN_DEFAULT, "Open in default app");
     let hevc = Refusal::NoSystemDecoder(Codec::Hevc);
