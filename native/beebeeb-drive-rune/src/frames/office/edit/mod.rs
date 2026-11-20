@@ -42,6 +42,8 @@ pub struct EditUi {
     pub can_redo: bool,
     /// A save is on its way (typing during it stays unsaved).
     pub saving: bool,
+    /// The last save is kept on this PC only (offline), made on this version: not yet a version of its own.
+    pub queued: Option<u32>,
     /// An editor surface has the keyboard.
     pub has_keyboard: bool,
     /// The input method's text not yet committed.
@@ -72,6 +74,7 @@ impl EditUi {
             can_undo: false,
             can_redo: false,
             saving: false,
+            queued: None,
             has_keyboard: false,
             preedit: None,
             clip: None,

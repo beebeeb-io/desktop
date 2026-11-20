@@ -905,11 +905,7 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
         // The editor's frame, with the sheet's own status line: the figures of the selection, then how it is kept
         // (`edit::chrome`'s is the document's: pages and words).
         Some(edit) if editing => {
-            let kept = if edit.unsaved() {
-                "unsaved changes".to_string()
-            } else {
-                format!("saved as version {}", ui.file.version)
-            };
+            let kept = super::edit::save::kept_words(edit, ui.file.version);
             main.child(
                 col()
                     .key("edit-chrome")

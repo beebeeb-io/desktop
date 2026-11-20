@@ -65,7 +65,7 @@ impl Ui {
                     ..self.file.clone()
                 };
                 self.show(file);
-                self.toast = Some("Saved on this PC \u{00B7} sends when Beebeeb can be reached".to_string());
+                self.toast = Some(crate::frames::office::edit::save::QUEUED_TOAST.to_string());
             }
             Settled::Opened { body, version } => {
                 let file = OpenFile {

@@ -772,6 +772,8 @@ pub(crate) enum Keeping {
     Unsaved,
     /// A save is on its way: the status stays on the old version until it lands (DW-1553).
     Saving,
+    /// The last save is kept on this PC only: it uploads when Beebeeb can be reached.
+    Queued,
     /// The last save found a newer version; the question is open (DW-1554).
     Conflict,
     /// The editor did not start: the file is shown by nothing here (DW-1556).
@@ -801,7 +803,7 @@ pub(crate) fn status_live(ui: &Ui, keeping: Keeping, t: &Theme) -> El {
 fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at: Option<&str>, t: &Theme) -> El {
     // A live document the editor holds: its numbers, never "Preparing".
     let live = match (&file.body, doc, keeping) {
-        (super::source::Body::Doc(d), None, Keeping::Saved | Keeping::Unsaved | Keeping::Saving | Keeping::Conflict) => Some(d),
+        (super::source::Body::Doc(d), None, Keeping::Saved | Keeping::Queued | Keeping::Unsaved | Keeping::Saving | Keeping::Conflict) => Some(d),
         _ => None,
     };
     let plain = |key: String, words: &str| style::fitted(key, words, type_::STATUS, t.text_tertiary);
@@ -873,6 +875,7 @@ fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at:
         (Keeping::Saved, None) if live.is_some() => format!("saved as version {}", file.version),
         (Keeping::Unsaved, _) => "unsaved changes".to_string(),
         (Keeping::Saving, _) => "saving\u{2026}".to_string(),
+        (Keeping::Queued, _) => crate::frames::office::edit::save::QUEUED_STATUS.to_string(),
         (Keeping::Conflict, _) => "not saved \u{00B7} conflict".to_string(),
         (Keeping::NoEditor, _) | (Keeping::Saved, None) => "read-only for now".to_string(),
     };
@@ -1120,6 +1123,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: Option<&WordDoc>) -> 
         (Some(_), Some(super::office_over::Over::Conflict(_))) => Keeping::Conflict,
         (Some(_), _) if ui.office.edit.as_ref().is_some_and(|edit| edit.saving) => Keeping::Saving,
         (Some(doc), _) if doc.kept == Kept::Unsaved => Keeping::Unsaved,
+        (Some(_), _) if ui.office.edit.as_ref().is_some_and(|edit| edit.queued == Some(ui.file.version)) => Keeping::Queued,
         (Some(_), _) => Keeping::Saved,
     };
     // Save is off while it saves; the dot stays (what is typed meanwhile is still unsaved).

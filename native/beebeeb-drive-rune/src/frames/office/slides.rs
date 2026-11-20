@@ -826,10 +826,8 @@ fn window_with(
 fn kept_words(edit: &EditUi, version: u32) -> String {
     if edit.stopped {
         "read-only for now".to_string()
-    } else if edit.unsaved() {
-        "unsaved changes".to_string()
     } else {
-        format!("saved as version {version}")
+        super::edit::save::kept_words(edit, version)
     }
 }
 

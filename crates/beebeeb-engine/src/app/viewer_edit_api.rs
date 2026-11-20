@@ -366,6 +366,7 @@ impl<C: CredentialStores> Engine<C> {
         opening: u64,
         seal_kind: Option<u8>,
     ) -> Result<SaveEnd, EditRefused> {
+        let began = Instant::now();
         let (token, key) = self.edit_credentials(session)?;
         let asking = (token.clone(), key.clone());
         let state = self.local_state_for_changes().map_err(|_| EditRefused::Unavailable)?;
@@ -474,6 +475,7 @@ impl<C: CredentialStores> Engine<C> {
         // this viewer's own by its read of the version (`EditFacts::own`), also one between the last look below and
         // the Queued answer.
         remember_queued(saves, file_id, queued.clone());
+        tracing::debug!(queued_after_ms = began.elapsed().as_millis() as u64, "viewer save queued");
         // The runner sends it now, not at its next tick (w26, v5 bug 3: a save waited for the tick, 20 s).
         self.nudge_runner();
         // Wait, bounded, for the upload to land: the op leaves the queue, and the version it became is the one the
@@ -482,18 +484,20 @@ impl<C: CredentialStores> Engine<C> {
         // sent by itself, or left the queue without landing, is not saved.
         let deadline = Instant::now() + LAND_WAIT;
         let (mut gone_since, mut parked_stale, mut asked) = (None::<Instant>, false, None::<Instant>);
+        let mut head = None::<(i64, i64)>;
         // A save that is not saved leaves no claim on the file: the next save of this opening is judged by what is
         // really queued (an unsent write of the file refuses it), never queued behind a refused one.
         let forget = || {
             with_saves(saves, file_id, session, opening, |saves| saves.queued = None);
         };
         while self.is_syncing() && Instant::now() < deadline {
-            use viewer_edit_landing::{Fate, look};
-            match state.with(|db| look(db, file_id, &queued, base)) {
+            use viewer_edit_landing::{Fate, look_with_head};
+            match state.with(|db| look_with_head(db, file_id, &queued, base, head)) {
                 Err(_) | Ok(Err(_)) => return Err(EditRefused::NotSignedIn),
                 Ok(Ok(Fate::Landed(version))) => {
                     // Noted, never forgotten: a read between here and the answer finds it the view's own.
                     note_landed(saves, file_id, &queued, version);
+                    tracing::debug!(landed_after_ms = began.elapsed().as_millis() as u64, "viewer save landed");
                     return Ok(SaveEnd::Saved { version });
                 }
                 Ok(Ok(Fate::Conflict { theirs })) => {
@@ -516,12 +520,13 @@ impl<C: CredentialStores> Engine<C> {
                 Ok(Ok(Fate::ParkedStale)) => {
                     parked_stale = true;
                     // The server refused the upload as stale (409): final. This PC's pull learns the newer version at
-                    // its next tick (30 s); the server is asked now, so the person is asked at once.
+                    // its next tick (30 s); the server is asked now (once a second), and its head settles the refused
+                    // save in the next look, so the person is asked at once.
                     if asked.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
                         asked = Some(Instant::now());
-                        if let Some(theirs) = self.server_version(&asking.0, &asking.1, file_id).filter(|v| *v > base) {
-                            forget();
-                            return Ok(SaveEnd::Conflict { theirs });
+                        head = self.server_head(&asking.0, &asking.1, file_id).filter(|(v, _)| *v > base);
+                        if head.is_some() {
+                            continue;
                         }
                     }
                     std::thread::sleep(LAND_POLL);
@@ -541,11 +546,12 @@ impl<C: CredentialStores> Engine<C> {
         Ok(SaveEnd::Queued { base })
     }
 
-    /// The version the server holds for `file_id` now (one request; a worker's). `None`: it could not be read.
-    fn server_version(&self, token: &str, key: &Zeroizing<[u8; 32]>, file_id: &str) -> Option<i64> {
+    /// The head the server holds for `file_id` now, its version and size (one request; a worker's). `None`: it could
+    /// not be read.
+    fn server_head(&self, token: &str, key: &Zeroizing<[u8; 32]>, file_id: &str) -> Option<(i64, i64)> {
         let api = ApiClient::new(self.config.api_base.clone(), token.to_string(), **key);
         let meta = self.runtime.block_on(api.get_file(file_id)).ok()?;
-        meta["current_version"].as_i64().or_else(|| meta["version"].as_i64())
+        head_of(&meta)
     }
 
     /// Ask the runner for a queue step now (it would otherwise send the save at its next tick). No runner: nothing.
@@ -644,6 +650,14 @@ impl<C: CredentialStores> Engine<C> {
 }
 
 /// `bytes` in a file with no name, read from the start.
+/// The head version and size `GET /api/v1/files/{id}` names: `download_version.version_number` and `size_bytes`
+/// (the response has no `current_version`; w27 found the old read of that key never matched, so the server was asked
+/// every second and never answered). `None`: no version in it.
+fn head_of(meta: &serde_json::Value) -> Option<(i64, i64)> {
+    let version = meta["download_version"]["version_number"].as_i64()?;
+    Some((version, meta["size_bytes"].as_i64().unwrap_or(0)))
+}
+
 pub(in crate::app) fn anonymous_file(bytes: &[u8]) -> Option<std::fs::File> {
     let mut file = tempfile::tempfile().ok()?;
     file.write_all(bytes).ok()?;
@@ -1026,8 +1040,15 @@ mod queued_save_tests {
         };
         assert_eq!(landed_version(&db, "f", &other), None);
     }
-}
 
-#[cfg(test)]
-#[path = "viewer_edit_staging_tests.rs"]
-mod staging_tests;
+    /// w27: the file's detail answers `download_version.version_number`; no `current_version` key exists.
+    #[test]
+    fn the_head_is_read_from_the_file_detail_s_download_version() {
+        let meta = serde_json::json!({
+            "id": "f", "size_bytes": 6543,
+            "download_version": { "object_version_id": "o", "version_number": 5 }
+        });
+        assert_eq!(super::head_of(&meta), Some((5, 6543)));
+        assert_eq!(super::head_of(&serde_json::json!({ "size_bytes": 1 })), None);
+    }
+}

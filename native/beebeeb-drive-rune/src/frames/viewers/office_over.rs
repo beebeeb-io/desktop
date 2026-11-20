@@ -239,6 +239,14 @@ impl Ui {
                 }
                 true
             }
+            Seen::Queued => {
+                self.office.save = None;
+                self.office.over = None;
+                if let Some(edit) = self.office.edit.as_mut() {
+                    save::queued(edit, &sent);
+                }
+                true
+            }
             Seen::Failed => {
                 self.office.save = None;
                 if let Some(edit) = self.office.edit.as_mut() {
