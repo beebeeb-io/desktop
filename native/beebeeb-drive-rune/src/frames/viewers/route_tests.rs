@@ -660,6 +660,6 @@ fn the_toolbar_shows_the_open_file_in_its_folder_through_the_reveal_step() {
     click(&mut rt, "show-in-folder");
     assert_eq!(
         rt.state.viewer.ui.as_ref().unwrap().toast.as_deref(),
-        Some(crate::frames::show_in_folder::NOT_HERE)
+        Some(crate::frames::show_in_folder::NOT_CONNECTED)
     );
 }

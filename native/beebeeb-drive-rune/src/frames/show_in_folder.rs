@@ -22,6 +22,9 @@ pub fn label() -> &'static str {
 }
 
 /// What is said when the file has no place in the folder on this PC (not an error of the app: it is just not here).
+pub const NOT_CONNECTED: &str = "Couldn\u{2019}t show it \u{00B7} nothing is connected right now.";
+
+/// As above, for a file with no place in the folder.
 pub const NOT_HERE: &str = "This file isn\u{2019}t in your Beebeeb folder on this PC yet.";
 
 /// Show the file in its folder, selected. `Err`: nothing was shown, and the words for it ([`NOT_HERE`] unless the
@@ -36,7 +39,7 @@ pub fn show(s: &mut State, id: &str, name: &str) -> Result<(), &'static str> {
 
 fn refusal(why: ActionError) -> &'static str {
     match why {
-        ActionError::Unavailable => "Couldn\u{2019}t show it \u{00B7} nothing is connected right now.",
+        ActionError::Unavailable => NOT_CONNECTED,
         _ => NOT_HERE,
     }
 }
