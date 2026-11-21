@@ -174,6 +174,71 @@ pub fn seed(account: &FakeAccount, spec: &LargeAccount) {
     }
 }
 
+/// The id of the biggest folder (`Camera Roll`), the first folder [`seed`] makes.
+pub fn camera_roll_id() -> String {
+    id(1, 1)
+}
+
+/// One item as this PC's local state holds it after a sync: what a bench writes into its `state.db` so the app's
+/// Files window lists the account without a sync run.
+#[derive(Debug, Clone)]
+pub struct LocalRow {
+    pub id: String,
+    pub parent_id: Option<String>,
+    /// `/Folder/Sub/name`, built from the names (the way the engine's rows are).
+    pub path: String,
+    pub is_folder: bool,
+    pub size_bytes: u64,
+    pub updated_at: i64,
+}
+
+/// Every live item of `account`, folders before files, each group by id: parents come first, so a writer can insert
+/// the rows in this order.
+pub fn local_rows(account: &FakeAccount) -> Vec<LocalRow> {
+    let items = account.items.lock().expect("vault items");
+    let mut paths: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    let folders: Vec<_> = items.values().filter(|i| i.is_folder && !i.is_trashed).collect();
+    fn path_of<'a>(
+        items: &'a std::collections::HashMap<String, super::fake_account::VaultItem>,
+        id: &'a str,
+    ) -> String {
+        let item = &items[id];
+        match &item.parent_id {
+            Some(parent) => format!("{}/{}", path_of(items, parent), item.name_plaintext),
+            None => format!("/{}", item.name_plaintext),
+        }
+    }
+    let mut rows = Vec::with_capacity(items.len());
+    let mut folder_rows: Vec<&super::fake_account::VaultItem> = folders;
+    folder_rows.sort_by_key(|i| (path_of(&items, &i.id).matches('/').count(), i.id.clone()));
+    for i in folder_rows {
+        let path = path_of(&items, &i.id);
+        paths.insert(i.id.as_str(), path.clone());
+        rows.push(LocalRow {
+            id: i.id.clone(),
+            parent_id: i.parent_id.clone(),
+            path,
+            is_folder: true,
+            size_bytes: 0,
+            updated_at: i.updated_at,
+        });
+    }
+    let mut files: Vec<_> = items.values().filter(|i| !i.is_folder && !i.is_trashed).collect();
+    files.sort_by(|a, b| a.id.cmp(&b.id));
+    for i in files {
+        let parent = i.parent_id.as_deref().and_then(|p| paths.get(p).cloned()).unwrap_or_default();
+        rows.push(LocalRow {
+            id: i.id.clone(),
+            parent_id: i.parent_id.clone(),
+            path: format!("{parent}/{}", i.name_plaintext),
+            is_folder: false,
+            size_bytes: i.size_bytes,
+            updated_at: i.updated_at,
+        });
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::fake_account::TEST_PHRASE;
@@ -225,5 +290,14 @@ mod tests {
         };
         seed(&account, &spec);
         assert_eq!(counts(&account), (300, 20, 80, 150, 40));
+        let rows = local_rows(&account);
+        assert_eq!(rows.len(), 320);
+        let mut seen = std::collections::HashSet::new();
+        for row in &rows {
+            assert!(row.parent_id.as_ref().is_none_or(|p| seen.contains(p)), "a parent comes first");
+            seen.insert(row.id.clone());
+            assert!(row.path.starts_with('/'));
+        }
+        assert!(rows.iter().any(|r| r.id == camera_roll_id() && r.path == "/Camera Roll"));
     }
 }
