@@ -75,6 +75,25 @@ enum SizeDecision {
     ResolveTo { corrected_size: i64 },
 }
 
+/// No new body byte for this long fails a whole-file hydration (the deadline; any progress resets it).
+const HYDRATE_STALL_SECS: u64 = 90;
+
+/// Resolves once `meter` has seen no new byte for [`HYDRATE_STALL_SECS`].
+async fn hydrate_stalled(meter: &crate::transfer_progress::ReceiveMeter) {
+    let mut seen = meter.received();
+    let mut since = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let now = meter.received();
+        if now != seen {
+            seen = now;
+            since = std::time::Instant::now();
+        } else if since.elapsed().as_secs() >= HYDRATE_STALL_SECS {
+            return;
+        }
+    }
+}
+
 /// Pure size-resolution policy for the hydration path (task 0783). Given the
 /// placeholder's recorded `file_size` and the decrypted `plaintext_len`, decide
 /// whether to transfer as-is or to resolve to the authenticated decrypted
@@ -297,6 +316,9 @@ pub unsafe extern "system" fn fetch_data_callback(
             result = bridge.hydrate_file_to_memory_metered(&file_id, Some(&meter)) => result,
             never = super::fetch_progress::keep_fetch_alive(connection_key, transfer_key, file_size, &meter) => match never {},
             never = row.follow(&meter) => match never {},
+            // Hydration deadline: a link that delivers no new byte for HYDRATE_STALL_SECS fails the
+            // open, so Explorer never spins on a dead link.
+            _ = hydrate_stalled(&meter) => Err(anyhow::anyhow!("hydration stalled: no data for {HYDRATE_STALL_SECS} s")),
         }
     });
     let crate::engine_bridge::FetchedBytes {

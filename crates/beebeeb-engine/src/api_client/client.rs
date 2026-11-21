@@ -325,19 +325,39 @@ impl ApiClient {
     ) -> ApiResult<reqwest::Response> {
         let mut spent: u64 = 0;
         let mut attempt: u32 = 0;
+        // Transport/5xx retries are counted apart from 429 retries; each class is bounded on its own.
+        let mut transport_attempt: u32 = 0;
+        // The last 502/503/504 seen: surfaced if the retry that followed it fails to connect at all.
+        let mut held: Option<reqwest::Response> = None;
         loop {
-            let resp = match build()
+            let request = build()
                 .header("Authorization", format!("Bearer {}", self.token))
-                .send()
-                .await
-            {
+                .build()?;
+            let idempotent = is_idempotent(request.method());
+            let resp = match self.client.execute(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    if let Some(old) = held.take() {
+                        return Self::check_status(old).await;
+                    }
+                    if let Some(wait) = transport_retry_decision(transport_attempt, e.is_connect(), e.is_timeout(), idempotent) {
+                        tokio::time::sleep(wait).await;
+                        transport_attempt += 1;
+                        continue;
+                    }
                     self.link.note_reqwest_error(&e, now_unix_secs() as i64);
                     return Err(e.into());
                 }
             };
             self.link.note_status(resp.status(), now_unix_secs() as i64);
+            if matches!(resp.status().as_u16(), 502 | 503 | 504) {
+                if let Some(wait) = transport_retry_decision(transport_attempt, false, true, idempotent) {
+                    tokio::time::sleep(wait).await;
+                    transport_attempt += 1;
+                    held = Some(resp);
+                    continue;
+                }
+            }
             if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Self::check_status(resp).await;
             }
