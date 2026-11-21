@@ -152,6 +152,7 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
         .is_none_or(|since| now.duration_since(since) >= FULL_RECHECK_INTERVAL)
     {
         memo.settled.clear();
+        memo.untracked.clear();
         memo.since = Some(now);
     }
     memo.classified = 0;
@@ -209,6 +210,11 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
                 );
                 return;
             }
+            // R3: no scaffold while the account's first file list is owed: the pull writes the folders'
+            // rows, and 2,741 CreateFolder ops queued first held the first backup tick for minutes.
+            if matches!(bridge.db().get_sync_cursor(), Ok(None)) {
+                return;
+            }
             bridge.ensure_local_folder(sync_root, dir_path);
         },
         &mut |file_path, meta| {
@@ -236,6 +242,10 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
             let disk = DiskStamp::of(meta);
             let row = crate::engine_bridge::relative_db_path(sync_root, file_path)
                 .and_then(|rel| bridge.db().file_row_stamp_by_path(&rel).ok().flatten());
+            if row.is_none() && memo.untracked.get(file_path) == Some(&disk) {
+                memo.skipped += 1;
+                return;
+            }
             if let (Some(row), Some(&(seen_disk, seen_row))) = (row, memo.settled.get(file_path))
                 && seen_disk == disk
                 && seen_row == row
@@ -267,6 +277,14 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
                 }
                 (verdict, _) => {
                     memo.settled.remove(file_path);
+                    // R3: an untracked placeholder is recorded (once, by the classifier); remember its listing.
+                    if row.is_none()
+                        && verdict == ScanDispatch::NotQueued
+                        && crate::engine_bridge::relative_db_path(sync_root, file_path)
+                            .is_some_and(|rel| bridge.db().has_unknown_orphan(&rel).unwrap_or(false))
+                    {
+                        memo.untracked.insert(file_path.to_path_buf(), disk);
+                    }
                     if verdict == ScanDispatch::Queued {
                         dispatched += 1;
                     } else {

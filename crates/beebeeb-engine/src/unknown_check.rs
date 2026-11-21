@@ -24,6 +24,10 @@ use std::sync::Mutex;
 /// joining the guarded set (a first snapshot) never stalls one tick.
 pub const MARK_RETRIES_PER_TICK: usize = 2000;
 
+/// R3: at most this many recorded orphans are verified per tick (about 2.4 ms each on a sync root), so
+/// the first tick of a folder with tens of thousands of untracked placeholders is never held for a minute.
+pub const ORPHAN_VERIFIES_PER_TICK: usize = 200;
+
 /// Desktop 0.8.15: the start-up guard reports its progress (an info line, counts only) every
 /// this many rows, and records the empty placeholders it found in one transaction per this many.
 pub const GUARD_PROGRESS_EVERY: usize = 2000;
@@ -351,11 +355,11 @@ pub fn retry_marks(
     if summary.stopped {
         return Ok(marked);
     }
-    for (path, _, pending) in db.list_unknown_orphans()? {
+    for path in db.list_pending_unknown_orphans(ORPHAN_VERIFIES_PER_TICK)? {
         if stop() {
             break;
         }
-        if pending && verify_orphan(db, sync_root, &path, view, mark)? {
+        if verify_orphan(db, sync_root, &path, view, mark)? {
             marked += 1;
         }
     }
@@ -1368,5 +1372,35 @@ mod tests {
             partial_hash,
             "a change is seen"
         );
+    }
+
+    #[test]
+    fn r3_a_tick_verifies_a_bounded_number_of_orphans() {
+        let (dir, db) = db_with(&[]);
+        let root = dir.path().join("root");
+        for i in 0..23_000 {
+            db.note_untracked_orphan(&format!("p{i}.txt")).unwrap();
+        }
+        let views = std::cell::Cell::new(0usize);
+        let view = |_: &Path| {
+            views.set(views.get() + 1);
+            PlatformView::Missing
+        };
+        retry(&db, &root, &view, &mut |_: &Path| Ok(())).unwrap();
+        assert!(views.get() <= ORPHAN_VERIFIES_PER_TICK, "view calls: {}", views.get());
+        assert!(views.get() > 0);
+    }
+
+    #[test]
+    fn r3_noting_an_untracked_placeholder_twice_keeps_a_verified_row_verified() {
+        let (_dir, db) = db_with(&[]);
+        db.note_untracked_orphan("a.txt").unwrap();
+        db.note_untracked_orphan("a.txt").unwrap();
+        assert_eq!(db.list_unknown_orphans().unwrap(), vec![("a.txt".into(), "".into(), true)]);
+        db.put_unknown_orphan("a.txt", "id", false).unwrap(); // verified
+        db.note_untracked_orphan("a.txt").unwrap();
+        db.note_untracked_orphan("a.txt").unwrap();
+        assert_eq!(db.list_unknown_orphans().unwrap(), vec![("a.txt".into(), "id".into(), false)]);
+        assert!(db.list_pending_unknown_orphans(10).unwrap().is_empty());
     }
 }

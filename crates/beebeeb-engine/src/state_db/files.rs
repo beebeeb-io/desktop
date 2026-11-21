@@ -199,6 +199,34 @@ impl StateDb {
         )?;
         Ok(())
     }
+    /// R3: record an untracked placeholder at `path` once. A row already there (pending, or verified
+    /// and `mark_pending = 0`) is left exactly as it is: the scan never puts a verified row back to pending.
+    pub fn note_untracked_orphan(&self, path: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT OR IGNORE INTO unknown_orphans(path, file_id, mark_pending, updated_at)
+             VALUES (?1, '', 1, CAST(strftime('%s', 'now') AS INTEGER))",
+            params![path],
+        )?;
+        Ok(())
+    }
+    /// R3: the recorded orphans whose mark is still pending, oldest first, at most `limit`.
+    pub fn list_pending_unknown_orphans(&self, limit: usize) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT path FROM unknown_orphans WHERE mark_pending = 1 ORDER BY updated_at, path LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| r.get(0))?;
+        rows.collect()
+    }
+    /// R3: whether an orphan is recorded at `path`.
+    pub fn has_unknown_orphan(&self, path: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row("SELECT 1 FROM unknown_orphans WHERE path = ?1", params![path], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
     /// Task 2191 (D12): every recorded orphan: (path, the identity's file id, mark still pending).
     pub fn list_unknown_orphans(&self) -> Result<Vec<(String, String, bool)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");

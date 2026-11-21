@@ -161,7 +161,7 @@ impl EngineBridge {
         if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
             // Task 2191 (D12): an untracked placeholder may be one a remote rename left behind,
             // holding unknown bytes; the tick's retry checks its identity.
-            if let Err(e) = self.db.put_unknown_orphan(&rel, "", true) {
+            if let Err(e) = self.db.note_untracked_orphan(&rel) {
                 tracing::debug!(error = %e, "classify_local_path: could not record an untracked placeholder");
             }
             tracing::debug!(
