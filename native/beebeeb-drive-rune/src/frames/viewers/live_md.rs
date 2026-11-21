@@ -8,7 +8,7 @@ use std::rc::Rc;
 use rune::El;
 
 use super::super::Ui;
-use super::markdown::{self, Block};
+use super::super::markdown::{self, Block};
 use crate::theme::tokens::Theme;
 
 thread_local! {
