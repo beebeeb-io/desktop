@@ -26,6 +26,27 @@ pub fn path_is_engine_internal(sync_root: &Path, path: &Path) -> bool {
         .any(|c| matches!(c.as_os_str().to_str(), Some(SYNC_STATE_DIR)))
 }
 
+/// `path` in its one canonical form: symlinks/junctions resolved, 8.3 names expanded, on-disk case, and
+/// no `\\?\` verbatim prefix (so an already-canonical drive path is returned unchanged). A path that
+/// cannot be resolved (missing, no access) is returned as given. LD-0116.
+pub fn canonical_root(path: &Path) -> std::path::PathBuf {
+    let Ok(canon) = std::fs::canonicalize(path) else {
+        return path.to_path_buf();
+    };
+    if let Some(s) = canon.to_str() {
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return std::path::PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            let b = rest.as_bytes();
+            if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+                return std::path::PathBuf::from(rest);
+            }
+        }
+    }
+    canon
+}
+
 /// Map an absolute on-disk path under `sync_root` to the server-relative,
 /// '/'-separated, leading-slash-free key the state DB stores in `files.path`
 /// (the same shape [`crate::state_db::StateDb::get_file_by_path`] expects, and
@@ -36,7 +57,16 @@ pub fn path_is_engine_internal(sync_root: &Path, path: &Path) -> bool {
 /// [`EngineBridge::resolve_parent_id_for`] so the DB lookup key is computed in
 /// exactly one place.
 pub fn relative_db_path(sync_root: &Path, path: &Path) -> Option<String> {
-    let rel = path.strip_prefix(sync_root).ok()?;
+    let canonical;
+    let rel = match path.strip_prefix(sync_root) {
+        Ok(rel) => rel,
+        Err(_) => {
+            // Not a plain prefix: the root may be reached through a junction, an 8.3 name or another
+            // case (LD-0116). Compare canonical forms.
+            canonical = (canonical_root(sync_root), canonical_root(path));
+            canonical.1.strip_prefix(&canonical.0).ok()?
+        }
+    };
     let mut out = String::new();
     for (i, comp) in rel.components().enumerate() {
         let part = comp.as_os_str().to_str()?;
@@ -357,4 +387,32 @@ pub(super) fn existing_parent_rel_path(bridge: &EngineBridge, id: &str) -> Strin
             p.rsplit_once('/').map(|(parent, _leaf)| parent.to_string())
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod canonical_root_tests {
+    use super::*;
+
+    #[test]
+    fn a_root_reached_another_way_maps_to_the_same_key() {
+        let dir = std::env::temp_dir().join(format!("bb-canon-{}", std::process::id()));
+        let real = dir.join("real");
+        std::fs::create_dir_all(real.join("a")).unwrap();
+        std::fs::write(real.join("a").join("f.txt"), b"x").unwrap();
+        let via = dir.join("via");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &via).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &via).or_else(|_| {
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"]).arg(&via).arg(&real)
+                .output().map(|_| ())
+        }).unwrap();
+        let file = real.join("a").join("f.txt");
+        assert_eq!(relative_db_path(&real, &file).as_deref(), Some("a/f.txt"));
+        assert_eq!(relative_db_path(&via, &file).as_deref(), Some("a/f.txt"));
+        assert_eq!(relative_db_path(&real, &via.join("a").join("f.txt")).as_deref(), Some("a/f.txt"));
+        assert_eq!(relative_db_path(&real, &dir.join("other")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
