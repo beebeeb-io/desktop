@@ -584,3 +584,51 @@ fn a_4xx_answer_at_the_start_settles_the_owed_token() {
     assert_eq!(up.server.heard_within(Duration::from_secs(5)).len(), 1);
     assert!(eventually(Duration::from_secs(5), || owed.owed().is_empty()));
 }
+
+fn status_event(state: crate::engine_status::State) -> crate::host::EngineEvent {
+    crate::host::EngineEvent::Status(crate::host::EngineStatus {
+        status: crate::engine_status::StatusPayload {
+            state,
+            legacy_state: "running",
+            sync_root: None,
+            error: None,
+            activity: None,
+            last_tick_ok_at: None,
+            reason: None,
+        },
+        startup_guard: Default::default(),
+    })
+}
+
+/// dc-102b: the host every engine reports through pays the owed list when Offline is followed by an online state:
+/// exactly one logout request for the one owed token, none while offline, none for a second online report.
+#[test]
+fn the_network_coming_back_pays_the_owed_list_once() {
+    use crate::engine_status::State;
+    use crate::host::EngineHost;
+    let (_memory, owed) = owed_list();
+    let token = invented_token();
+    owed.owe(&token).unwrap();
+    let server = TestServer::start(Server::Answers(200), None);
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let (inner, _messages) = ChannelHost::new(|| {});
+    let host = super::super::owed_online::OwedPayingHost::new(
+        inner,
+        runtime.handle().clone(),
+        client_for(&server.base),
+        server.base.clone(),
+        owed.clone(),
+    );
+    host.event(status_event(State::Syncing));
+    host.event(status_event(State::Offline));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(server.heard.lock().unwrap().is_empty(), "nothing is paid while offline");
+    host.event(status_event(State::Syncing));
+    let heard = server.heard_within(Duration::from_secs(5));
+    assert_eq!(heard.len(), 1);
+    assert_eq!(heard[0].bearer.as_deref(), Some(token.as_str()));
+    assert!(eventually(Duration::from_secs(5), || owed.owed().is_empty()));
+    host.event(status_event(State::Idle));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(server.heard.lock().unwrap().len(), 1, "one pay per return");
+}
