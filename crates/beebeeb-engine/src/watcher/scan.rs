@@ -11,6 +11,11 @@ pub struct DiskStamp {
     pub(super) modified: Option<std::time::SystemTime>,
     #[cfg(target_os = "windows")]
     pub(super) attributes: u32,
+    /// Task 2241 (Windows): `ChangeTime` and the 128-bit file id, read through a handle opened for no
+    /// data ([`DiskStamp::at`]). The listing alone may show an old size and time for a file still open
+    /// for writing; the handle shows the live values. `None` when the file could not be opened.
+    #[cfg(target_os = "windows")]
+    pub(super) identity: Option<(i64, u64, [u8; 16])>,
     #[cfg(unix)]
     pub(super) inode_and_change: (u64, i64, i64),
 }
@@ -22,6 +27,8 @@ impl DiskStamp {
             modified: meta.modified().ok(),
             #[cfg(target_os = "windows")]
             attributes: std::os::windows::fs::MetadataExt::file_attributes(meta),
+            #[cfg(target_os = "windows")]
+            identity: None,
             #[cfg(unix)]
             inode_and_change: {
                 use std::os::unix::fs::MetadataExt;
@@ -29,6 +36,62 @@ impl DiskStamp {
             },
         }
     }
+}
+
+impl DiskStamp {
+    /// The stamp the scan compares: [`DiskStamp::of`] and, on Windows, the live `ChangeTime` and file id
+    /// of `path` (one attribute-only open per file; nothing is read or hydrated).
+    pub fn at(path: &std::path::Path, meta: &std::fs::Metadata) -> Self {
+        #[allow(unused_mut)]
+        let mut stamp = Self::of(meta);
+        #[cfg(target_os = "windows")]
+        {
+            stamp.identity = windows_identity(path);
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = path;
+        stamp
+    }
+}
+
+/// `(ChangeTime, volume serial, file id)` of `path` through a no-data handle that never follows a
+/// reparse point; `None` when it cannot be opened or read.
+#[cfg(target_os = "windows")]
+fn windows_identity(path: &std::path::Path) -> Option<(i64, u64, [u8; 16])> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .ok()?;
+    let handle = HANDLE(file.as_raw_handle());
+    let mut basic = FILE_BASIC_INFO::default();
+    let mut id = FILE_ID_INFO::default();
+    // SAFETY: each struct is the one its info class names and its size is passed; `handle` is open for the calls.
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            (&mut basic as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+        .ok()?;
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&mut id as *mut FILE_ID_INFO).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+        .ok()?;
+    }
+    Some((basic.ChangeTime, id.VolumeSerialNumber, id.FileId.Identifier))
 }
 
 /// Task 2229: the files a pass found settled or held ([`ScanDispatch::Settled`]), with the disk stamp
@@ -148,7 +211,6 @@ pub(super) fn walk_dir(
     // never even read its children — cheaper and impossible to misclassify.
     if crate::engine_bridge::path_is_engine_internal(sync_root, dir) {
         tracing::debug!(
-            path = %dir.display(),
             "enumeration scan: skipped engine-internal directory"
         );
         return;
@@ -158,7 +220,6 @@ pub(super) fn walk_dir(
         Ok(e) => e,
         Err(e) => {
             tracing::debug!(
-                path = %dir.display(),
                 error = %e,
                 "enumeration scan: read_dir failed; skipping directory"
             );
@@ -171,7 +232,6 @@ pub(super) fn walk_dir(
             Ok(e) => e,
             Err(e) => {
                 tracing::debug!(
-                    path = %dir.display(),
                     error = %e,
                     "enumeration scan: dir entry error; skipping"
                 );
@@ -184,7 +244,6 @@ pub(super) fn walk_dir(
         // nested `.beebeeb`). Cheap and defensive.
         if crate::engine_bridge::path_is_engine_internal(sync_root, &path) {
             tracing::debug!(
-                path = %path.display(),
                 "enumeration scan: skipped engine-internal entry"
             );
             continue;
@@ -199,7 +258,6 @@ pub(super) fn walk_dir(
             Ok(m) => m,
             Err(e) => {
                 tracing::debug!(
-                    path = %path.display(),
                     error = %e,
                     "enumeration scan: stat failed; skipping entry"
                 );
@@ -209,7 +267,6 @@ pub(super) fn walk_dir(
         let ft = meta.file_type();
         if ft.is_symlink() {
             tracing::debug!(
-                path = %path.display(),
                 "enumeration scan: skipped symlink"
             );
             continue;
@@ -223,10 +280,50 @@ pub(super) fn walk_dir(
             on_file(&path, &meta);
         } else {
             tracing::debug!(
-                path = %path.display(),
                 "enumeration scan: skipped non-file entry"
             );
         }
         // Other entry kinds (sockets, devices) are ignored.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Zero-knowledge: the non-test text of the scan, the watcher and the classifier logs no path or name.
+    #[test]
+    fn scan_and_classify_logs_carry_no_paths() {
+        for (name, src) in [
+            ("watcher.rs", include_str!("../watcher.rs")),
+            ("watcher/scan.rs", include_str!("scan.rs")),
+            ("engine_bridge/local_classify.rs", include_str!("../engine_bridge/local_classify.rs")),
+        ] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            for (n, line) in production.lines().enumerate() {
+                let t = line.trim();
+                if t.starts_with("//") {
+                    continue;
+                }
+                for bad in ["path = %", "path = ?", "path=%", "filename = %", "dir.display()", "path.display()"] {
+                    assert!(!t.contains(bad), "{name}:{}: log carries a path: {t}", n + 1);
+                }
+            }
+        }
+    }
+
+    /// The stamp the scan compares changes when the file's bytes do, and is stable otherwise.
+    #[test]
+    fn scan_stamp_follows_the_file() {
+        let dir = std::env::temp_dir().join(format!("bb-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.bin");
+        std::fs::write(&f, b"one").unwrap();
+        let a = DiskStamp::at(&f, &std::fs::metadata(&f).unwrap());
+        assert_eq!(a, DiskStamp::at(&f, &std::fs::metadata(&f).unwrap()));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&f, b"two").unwrap();
+        assert_ne!(a, DiskStamp::at(&f, &std::fs::metadata(&f).unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

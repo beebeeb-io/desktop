@@ -205,7 +205,6 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
             // subtree — same disable-race gate as files.
             if backup_disabled(dir_path) {
                 tracing::debug!(
-                    path = %dir_path.display(),
                     "enumeration scan: skipped disabled backup directory"
                 );
                 return;
@@ -219,7 +218,6 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
         },
         &mut |file_path, meta| {
             tracing::debug!(
-                path = %file_path.display(),
                 "enumeration scan: found file"
             );
 
@@ -230,7 +228,6 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
             // the key returns to the set and the next scan picks it back up.)
             if backup_disabled(file_path) {
                 tracing::debug!(
-                    path = %file_path.display(),
                     "enumeration scan: skipped disabled backup file"
                 );
                 return;
@@ -239,7 +236,7 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
             // Task 2229: a file found settled whose listing and row are both unchanged needs
             // nothing, and skipping it opens no handle. The row stamp is read before
             // classifying, so a write to the row during the pass makes the next pass ask again.
-            let disk = DiskStamp::of(meta);
+            let disk = DiskStamp::at(file_path, meta);
             let row = crate::engine_bridge::relative_db_path(sync_root, file_path)
                 .and_then(|rel| bridge.db().file_row_stamp_by_path(&rel).ok().flatten());
             if row.is_none() && memo.untracked.get(file_path) == Some(&disk) {
@@ -260,7 +257,6 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
             // dispatching files — the next pass picks up the remainder.
             if dispatched >= MAX_NEW_UPLOADS_PER_SCAN {
                 tracing::debug!(
-                    path = %file_path.display(),
                     max_new_uploads = MAX_NEW_UPLOADS_PER_SCAN,
                     "enumeration scan: skipped file due to per-scan upload cap"
                 );
@@ -289,7 +285,6 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
                         dispatched += 1;
                     } else {
                         tracing::debug!(
-                            path = %file_path.display(),
                             "enumeration scan: file was not queued"
                         );
                     }
