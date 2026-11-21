@@ -15,12 +15,19 @@ fn an_engine_that_ends_by_itself_is_not_running() {
     let s = common::setup();
     s.sign_in();
     s.unlock();
-    // A lock naming this live process: the engine task's own `LockFile::acquire` refuses and the task ends. The port
+    // A lock naming another live process (this test's parent; a lock naming our own pid is reclaimed): the engine
+    // task's own `LockFile::acquire` refuses and the task ends. The port
     // says the lock is free, so the start itself goes on (as when the lock is taken between the two).
     std::fs::create_dir_all(&s.state_dir).unwrap();
+    #[cfg(unix)]
+    let other_live_pid = std::os::unix::process::parent_id();
+    #[cfg(not(unix))]
+    let mut other = std::process::Command::new("cmd").args(["/C", "ping", "-n", "60", "127.0.0.1"]).spawn().unwrap();
+    #[cfg(not(unix))]
+    let other_live_pid = other.id();
     let lock = format!(
         r#"{{"pid":{},"agent":"desktop","hostname":"pc","started_at":"2026-11-12T10:00:00Z"}}"#,
-        std::process::id()
+        other_live_pid
     );
     std::fs::write(s.state_dir.join(".beebeeb-sync.lock"), lock).unwrap();
     let port = common::Port::free();
@@ -40,6 +47,8 @@ fn an_engine_that_ends_by_itself_is_not_running() {
     );
     assert_eq!(s.engine.view().attempt, attempt + 1, "a new attempt");
     assert!(common::wait_until(10, || s.engine.view().start != Start::Running));
+    #[cfg(not(unix))]
+    let _ = other.kill();
 }
 
 #[cfg(target_os = "macos")]
