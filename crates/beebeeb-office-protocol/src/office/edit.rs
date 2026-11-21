@@ -73,10 +73,41 @@ tag_enum!(
     EditKind { Docx = 1, Xlsx = 2, Pptx = 3 }
 );
 tag_enum!(
-    /// A kind of package part the editor's engines do not keep on save (office-editor-090 look-back): a file that
-    /// holds one opens in the viewer instead, so a save can never remove it.
-    DroppedPart { Chart = 1, Ole = 2, Vml = 3, SmartArt = 4, Other = 5 }
+    /// A kind of package part the editor's engines do not keep on save (office-editor-090 look-back; since 008b only
+    /// what desktop-office 139/145 still drops): a file that holds one opens in the viewer instead, so a save can never
+    /// remove it. Tags 1-4 (chart, OLE, VML, SmartArt) were retired when the editor began keeping those parts.
+    DroppedPart {
+        /// Package parts the guard could not read in full: kept view-only rather than risk a lossy save.
+        Other = 5,
+        /// Speaker notes (`notesSlide`, `notesMaster`).
+        SpeakerNotes = 6,
+        /// ActiveX controls.
+        ActiveX = 7,
+        /// Ink drawings (InkML).
+        Ink = 8,
+    }
 );
+
+impl DroppedPart {
+    /// What the app says when a file holding this kind opens in the viewer instead of the editor: what the file has,
+    /// what editing here would do to it, and where to edit it instead. Plain words, no part names.
+    pub fn notice(self) -> &'static str {
+        match self {
+            DroppedPart::SpeakerNotes => {
+                "This deck has speaker notes; editing here would drop them. Open in PowerPoint to edit."
+            }
+            DroppedPart::ActiveX => {
+                "This file has form controls; editing here would drop them. Open in Microsoft Office to edit."
+            }
+            DroppedPart::Ink => {
+                "This file has ink drawings; editing here would drop them. Open in Microsoft Office to edit."
+            }
+            DroppedPart::Other => {
+                "This file has parts this editor could not check, so editing here might drop them. Open in Microsoft Office to edit."
+            }
+        }
+    }
+}
 tag_enum!(
     /// The starting point of a new document.
     Template { Blank = 1, Letter = 2, Invoice = 3, MeetingNotes = 4, Report = 5 }
@@ -1077,7 +1108,7 @@ pub struct EditGuarded {
 }
 
 /// The most kinds an [`EditGuarded`] names: one of each [`DroppedPart`].
-const MAX_DROPPED: usize = 5;
+const MAX_DROPPED: usize = 4;
 
 impl EditGuarded {
     pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
@@ -1117,16 +1148,35 @@ mod guarded_tests {
     #[test]
     fn edit_guarded_round_trips_and_refuses_nonsense() {
         let all = EditGuarded {
-            dropped: vec![DroppedPart::Chart, DroppedPart::Ole, DroppedPart::Vml, DroppedPart::SmartArt, DroppedPart::Other],
+            dropped: vec![
+                DroppedPart::SpeakerNotes,
+                DroppedPart::ActiveX,
+                DroppedPart::Ink,
+                DroppedPart::Other,
+            ],
         };
         assert_eq!(EditGuarded::decode(&all.encode().unwrap()), Ok(all));
-        let one = EditGuarded { dropped: vec![DroppedPart::Vml] };
+        let one = EditGuarded { dropped: vec![DroppedPart::SpeakerNotes] };
         assert_eq!(EditGuarded::decode(&one.encode().unwrap()), Ok(one));
         let empty = EditGuarded { dropped: vec![] }.encode().unwrap();
         assert_eq!(EditGuarded::decode(&empty), Err(DecodeError::BadTag));
-        let twice = EditGuarded { dropped: vec![DroppedPart::Chart, DroppedPart::Chart] }.encode().unwrap();
+        let twice = EditGuarded { dropped: vec![DroppedPart::Ink, DroppedPart::Ink] }.encode().unwrap();
         assert_eq!(EditGuarded::decode(&twice), Err(DecodeError::BadTag));
+        // The tags of the kinds 139 made editable (chart 1, OLE 2, VML 3, SmartArt 4) are gone from the wire.
+        for gone in 1..=4u8 {
+            assert_eq!(EditGuarded::decode(&[1, 0, 0, 0, gone]), Err(DecodeError::BadTag));
+        }
         assert_eq!(EditGuarded::decode(&[1, 0, 0, 0, 9]), Err(DecodeError::BadTag));
-        assert_eq!(EditGuarded::decode(&[1, 0, 0, 0, 1, 0]), Err(DecodeError::TrailingBytes));
+        assert_eq!(EditGuarded::decode(&[1, 0, 0, 0, 5, 0]), Err(DecodeError::TrailingBytes));
+    }
+
+    /// The notice names each kind in plain words, and says what editing here would do and where to edit instead.
+    #[test]
+    fn edit_guarded_notice_names_the_kind_honestly() {
+        let notes = DroppedPart::SpeakerNotes.notice();
+        assert!(notes.contains("speaker notes") && notes.contains("drop") && notes.contains("PowerPoint"), "{notes}");
+        assert!(DroppedPart::ActiveX.notice().contains("controls"));
+        assert!(DroppedPart::Ink.notice().contains("ink"));
+        assert!(!DroppedPart::Other.notice().is_empty());
     }
 }

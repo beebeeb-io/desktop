@@ -3,12 +3,12 @@
 //! `EditGuarded` with the kinds, and the app opens the file in the viewer and says so.
 //!
 //! Since desktop-office 139/145 a save keeps charts, OLE objects, embedded workbooks, VML drawings and SmartArt (in a
-//! .pptx under the engine's own names, `ppt/media/media1.bin`, `kept*`), the thumbnail, and macro projects (or the save
-//! refuses). What still goes: speaker notes (`notesSlide`, `notesMaster`), ActiveX controls and ink. So the guard
-//! decides by KIND, never by part name or folder: every entry's content type the OPC way (an `Override` for its part
-//! name, else the `Default` for its extension, from `[Content_Types].xml`), and every relationship's type whose target
-//! is in the package. A `Default` with no entry of its extension names nothing. The protocol has no notes kind: notes
-//! are named [`DroppedPart::Other`].
+//! .pptx under the engine's own names, `ppt/media/media1.bin`, `kept*`), the thumbnail, handout masters, and macro
+//! projects byte-equal (tested below through the real engines). What still goes: speaker notes (`notesSlide`,
+//! `notesMaster`), ActiveX controls and ink. So the guard decides by KIND, never by part name or folder: every entry's
+//! content type the OPC way (an `Override` for its part name, else the `Default` for its extension, from
+//! `[Content_Types].xml`), and every relationship's type whose target is in the package. A `Default` with no entry of
+//! its extension names nothing.
 //!
 //! A package this cannot read (not a zip, no or an over-long `[Content_Types].xml`) names nothing here: the engine's
 //! own open then says what is wrong with it, as before. Relationship files past the read budget name `Other`: the
@@ -42,7 +42,7 @@ pub fn dropped_parts(package: &[u8]) -> Vec<DroppedPart> {
         .filter(|name| !name.ends_with('/'))
         .map(|name| name.trim_start_matches('/').to_ascii_lowercase())
         .collect();
-    let mut found = [false; 5];
+    let mut found = [false; ORDER.len()];
     for part in &parts {
         if let Some(kind) = type_kind(types.of(part)) {
             found[slot(kind)] = true;
@@ -69,16 +69,19 @@ pub fn dropped_parts(package: &[u8]) -> Vec<DroppedPart> {
     ORDER.iter().copied().filter(|kind| found[slot(*kind)]).collect()
 }
 
-const ORDER: [DroppedPart; 5] =
-    [DroppedPart::Chart, DroppedPart::Ole, DroppedPart::Vml, DroppedPart::SmartArt, DroppedPart::Other];
+const ORDER: [DroppedPart; 4] = [
+    DroppedPart::SpeakerNotes,
+    DroppedPart::ActiveX,
+    DroppedPart::Ink,
+    DroppedPart::Other,
+];
 
 fn slot(kind: DroppedPart) -> usize {
     match kind {
-        DroppedPart::Chart => 0,
-        DroppedPart::Ole => 1,
-        DroppedPart::Vml => 2,
-        DroppedPart::SmartArt => 3,
-        DroppedPart::Other => 4,
+        DroppedPart::SpeakerNotes => 0,
+        DroppedPart::ActiveX => 1,
+        DroppedPart::Ink => 2,
+        DroppedPart::Other => 3,
     }
 }
 
@@ -86,18 +89,26 @@ fn slot(kind: DroppedPart) -> usize {
 fn type_kind(declared: Option<&str>) -> Option<DroppedPart> {
     let ty = declared?.to_ascii_lowercase();
     let ty = ty.split(';').next().unwrap_or("").trim();
-    let dropped = ty.ends_with("presentationml.notesslide+xml")
-        || ty.ends_with("presentationml.notesmaster+xml")
-        || ty.contains("activex")
-        || ty == "application/inkml+xml";
-    dropped.then_some(DroppedPart::Other)
+    if ty.ends_with("presentationml.notesslide+xml") || ty.ends_with("presentationml.notesmaster+xml") {
+        Some(DroppedPart::SpeakerNotes)
+    } else if ty.contains("activex") {
+        Some(DroppedPart::ActiveX)
+    } else if ty == "application/inkml+xml" {
+        Some(DroppedPart::Ink)
+    } else {
+        None
+    }
 }
 
 /// What a part reached by a relationship of type `ty` is, when the engines still drop it.
 fn rel_kind(ty: &str) -> Option<DroppedPart> {
     let last = ty.trim().rsplit('/').next().unwrap_or("").to_ascii_lowercase();
-    matches!(last.as_str(), "notesslide" | "notesmaster" | "control" | "activexcontrol" | "activexcontrolbinary" | "ink")
-        .then_some(DroppedPart::Other)
+    match last.as_str() {
+        "notesslide" | "notesmaster" => Some(DroppedPart::SpeakerNotes),
+        "control" | "activexcontrol" | "activexcontrolbinary" => Some(DroppedPart::ActiveX),
+        "ink" => Some(DroppedPart::Ink),
+        _ => None,
+    }
 }
 
 /// The part name (lower-case, no leading `/`) a relationship in `rels` (`dir/_rels/name.rels`) points at with
@@ -316,16 +327,16 @@ mod tests {
         assert_eq!(dropped_parts(&xlsx), vec![]);
     }
 
-    /// What still drops besides notes, ActiveX controls and ink, is named once as `Other`, by type whatever its name.
+    /// What still drops besides notes, ActiveX controls and ink, is named by kind, by type whatever its name.
     #[test]
-    fn edit_guard_activex_and_ink_are_guarded_once() {
+    fn edit_guard_activex_and_ink_are_guarded() {
         let overrides = format!(
             "{DOC}{}{}",
             r#"<Override PartName="/WORD/ODD/A1.XML" ContentType="application/vnd.ms-office.activeX+xml"/>"#,
             r#"<Override PartName="/word/ink/ink1.xml" ContentType="application/inkml+xml"/>"#,
         );
         let docx = package(&overrides, &["word/document.xml", "word/odd/a1.xml", "word/ink/ink1.xml"]);
-        assert_eq!(dropped_parts(&docx), vec![DroppedPart::Other]);
+        assert_eq!(dropped_parts(&docx), vec![DroppedPart::ActiveX, DroppedPart::Ink]);
     }
 
     const PRES: &str = r#"<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#;
@@ -374,7 +385,7 @@ mod tests {
         assert_eq!(dropped_parts(&saved), vec![]);
     }
 
-    /// 008b: speaker notes are still dropped on save: a deck with them stays view-only (named as `Other`).
+    /// 008b: speaker notes are still dropped on save: a deck with them stays view-only, the notice names them.
     #[test]
     fn edit_guard_pptx_with_notes_is_guarded() {
         let overrides = format!(
@@ -383,13 +394,13 @@ mod tests {
             r#"<Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/>"#,
         );
         let pptx = package(&overrides, &["ppt/presentation.xml", "ppt/slides/slide1.xml", "ppt/notesSlides/notesSlide1.xml", "ppt/notesMasters/notesMaster1.xml"]);
-        assert_eq!(dropped_parts(&pptx), vec![DroppedPart::Other]);
+        assert_eq!(dropped_parts(&pptx), vec![DroppedPart::SpeakerNotes]);
         // A chart beside the notes does not change the answer.
         let both = package(
             &format!("{overrides}{}", r#"<Override PartName="/ppt/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#),
             &["ppt/presentation.xml", "ppt/notesSlides/notesSlide1.xml", "ppt/charts/chart1.xml"],
         );
-        assert_eq!(dropped_parts(&both), vec![DroppedPart::Other]);
+        assert_eq!(dropped_parts(&both), vec![DroppedPart::SpeakerNotes]);
         // Notes under an odd name, declared only by the relationship that points at them: still guarded.
         let by_rel = package_with(
             PRES,
@@ -403,7 +414,7 @@ mod tests {
                 ("ppt/odd/n1.xml", "<p/>"),
             ],
         );
-        assert_eq!(dropped_parts(&by_rel), vec![DroppedPart::Other]);
+        assert_eq!(dropped_parts(&by_rel), vec![DroppedPart::SpeakerNotes]);
         // A relationship whose target is not in the package names nothing.
         let dangling = package_with(
             PRES,
@@ -413,6 +424,133 @@ mod tests {
             )],
         );
         assert_eq!(dropped_parts(&dangling), vec![]);
+    }
+
+    /// `src` with each `(name, bytes)` put in: an existing entry replaced, a new one added at the end.
+    fn repack(src: &[u8], put: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut from = zip::ZipArchive::new(std::io::Cursor::new(src)).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        for i in 0..from.len() {
+            let mut entry = from.by_index(i).unwrap();
+            let name = entry.name().to_owned();
+            let mut body = Vec::new();
+            entry.read_to_end(&mut body).unwrap();
+            let body = put.iter().find(|(n, _)| *n == name).map(|(_, b)| b.clone()).unwrap_or(body);
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(&body).unwrap();
+        }
+        for (name, body) in put {
+            if from.index_for_name(name).is_none() {
+                zip.start_file(*name, opts).unwrap();
+                zip.write_all(body).unwrap();
+            }
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn entry(package: &[u8], name: &str) -> Option<Vec<u8>> {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(package)).ok()?;
+        let mut e = zip.by_name(name).ok()?;
+        let mut body = Vec::new();
+        e.read_to_end(&mut body).ok()?;
+        Some(body)
+    }
+
+    fn text(package: &[u8], name: &str) -> String {
+        String::from_utf8(entry(package, name).unwrap()).unwrap()
+    }
+
+    /// Opens `package` in the real editor, applies `op`, saves: the saved bytes.
+    fn edit_and_save(kind: beebeeb_office_protocol::office::EditKind, package: &[u8], op: beebeeb_office_protocol::office::EditOp) -> Vec<u8> {
+        use crate::engine::Engine;
+        let mut doc = crate::engine::Office.open_edit(kind, package).unwrap_or_else(|e| panic!("open_edit: {e:?}"));
+        doc.apply(op).unwrap_or_else(|e| panic!("apply: {e:?}"));
+        doc.save().unwrap_or_else(|e| panic!("save: {e:?}")).0
+    }
+
+    /// Bytes no engine writes itself: kept only if carried.
+    fn macro_bytes() -> Vec<u8> {
+        let mut b = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        b.extend((0..4096u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8));
+        b
+    }
+
+    const VBA_REL: &str = "http://schemas.microsoft.com/office/2006/relationships/vbaProject";
+    const VBA_TYPES: &str = r#"<Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>"#;
+
+    /// 008b: a macro project is not guarded because a save keeps it byte-equal (desktop-office `carry`, or GridCraft's
+    /// own for .xlsm; a project that cannot be carried makes the save answer `Unsupported`): never lost silently.
+    #[test]
+    fn edit_guard_xlsm_macros_kept_or_guarded() {
+        use beebeeb_office_protocol::office::{EditKind, EditOp};
+        let base = include_bytes!("../tests/fixtures/sheets-3.xlsx");
+        let types = text(base, "[Content_Types].xml")
+            .replace("spreadsheetml.sheet.main+xml", "PLACEHOLDER")
+            .replace("application/vnd.openxmlformats-officedocument.PLACEHOLDER", "application/vnd.ms-excel.sheet.macroEnabled.main+xml")
+            .replace("</Types>", &format!("{VBA_TYPES}</Types>"));
+        let rels = text(base, "xl/_rels/workbook.xml.rels")
+            .replace("</Relationships>", &format!(r#"<Relationship Id="rId99" Type="{VBA_REL}" Target="vbaProject.bin"/></Relationships>"#));
+        let xlsm = repack(base, &[("[Content_Types].xml", types.into_bytes()), ("xl/_rels/workbook.xml.rels", rels.into_bytes()), ("xl/vbaProject.bin", macro_bytes())]);
+        assert_eq!(dropped_parts(&xlsm), vec![], "a macro project alone does not guard: the save keeps it");
+        let saved = edit_and_save(EditKind::Xlsx, &xlsm, EditOp::SetCell { sheet: 1, row: 4, col: 0, text: "x".into() });
+        assert_eq!(entry(&saved, "xl/vbaProject.bin"), Some(macro_bytes()), "the macro project is kept byte-equal");
+    }
+
+    #[test]
+    fn edit_guard_docm_macros_kept_or_guarded() {
+        use beebeeb_office_protocol::office::{EditKind, EditOp};
+        let base = include_bytes!("../tests/fixtures/letter-1.docx");
+        let types = text(base, "[Content_Types].xml")
+            .replace("application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml", "application/vnd.ms-word.document.macroEnabled.main+xml")
+            .replace("</Types>", &format!("{VBA_TYPES}</Types>"));
+        let rels = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId99" Type="{VBA_REL}" Target="vbaProject.bin"/></Relationships>"#);
+        let docm = repack(base, &[("[Content_Types].xml", types.into_bytes()), ("word/_rels/document.xml.rels", rels.into_bytes()), ("word/vbaProject.bin", macro_bytes())]);
+        assert_eq!(dropped_parts(&docm), vec![], "a macro project alone does not guard: the save keeps it");
+        let saved = edit_and_save(EditKind::Docx, &docm, EditOp::InsertText("x".into()));
+        assert_eq!(entry(&saved, "word/vbaProject.bin"), Some(macro_bytes()), "the macro project is kept byte-equal");
+    }
+
+    /// 008b: a deck's handout master is not guarded because a save keeps it: the part, its relationship and the
+    /// presentation's reference to it.
+    #[test]
+    fn edit_guard_pptx_handout_master_is_kept() {
+        use beebeeb_office_protocol::office::{EditKind, EditOp};
+        let pptx = handout_deck();
+        assert_eq!(dropped_parts(&pptx), vec![]);
+        let saved = edit_and_save(EditKind::Pptx, &pptx, EditOp::NewSlide { layout: None });
+        assert!(entry(&saved, "ppt/handoutMasters/handoutMaster1.xml").is_some(), "the handout master is kept");
+        assert!(text(&saved, "ppt/_rels/presentation.xml.rels").contains("relationships/handoutMaster\""));
+        assert!(text(&saved, "ppt/presentation.xml").contains("<p:handoutMasterId "));
+    }
+
+    fn handout_deck() -> Vec<u8> {
+        let base = include_bytes!("../tests/fixtures/deck-3.pptx");
+        let types = text(base, "[Content_Types].xml").replace(
+            "</Types>",
+            r#"<Override PartName="/ppt/handoutMasters/handoutMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.handoutMaster+xml"/><Override PartName="/ppt/theme/theme2.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>"#,
+        );
+        let rels = text(base, "ppt/_rels/presentation.xml.rels").replace(
+            "</Relationships>",
+            r#"<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/handoutMaster" Target="handoutMasters/handoutMaster1.xml"/></Relationships>"#,
+        );
+        let pres = text(base, "ppt/presentation.xml").replace(
+            "<p:sldIdLst>",
+            r#"<p:handoutMasterIdLst><p:handoutMasterId r:id="rId99"/></p:handoutMasterIdLst><p:sldIdLst>"#,
+        );
+        let master = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:handoutMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/></p:handoutMaster>"#;
+        let master_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme2.xml"/></Relationships>"#;
+        repack(
+            base,
+            &[
+                ("[Content_Types].xml", types.into_bytes()),
+                ("ppt/_rels/presentation.xml.rels", rels.into_bytes()),
+                ("ppt/presentation.xml", pres.into_bytes()),
+                ("ppt/handoutMasters/handoutMaster1.xml", master.as_bytes().to_vec()),
+                ("ppt/handoutMasters/_rels/handoutMaster1.xml.rels", master_rels.as_bytes().to_vec()),
+                ("ppt/theme/theme2.xml", entry(base, "ppt/theme/theme1.xml").unwrap()),
+            ],
+        )
     }
 
     #[test]
