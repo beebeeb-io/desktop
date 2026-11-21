@@ -150,6 +150,17 @@ async fn next_wake(
 /// builds the API client + engine bridge, ticks every
 /// [`TICK_INTERVAL`] running [`sync_tick`], exits when the cancel
 /// channel fires.
+/// One INFO line for a finished phase of engine start or the first tick: its name, the milliseconds it took and a row
+/// count. No name or path (spec §11).
+fn phase_timing(phase: &'static str, started: std::time::Instant, rows: usize) {
+    tracing::info!(
+        phase,
+        ms = started.elapsed().as_millis() as u64,
+        rows,
+        "engine phase timing"
+    );
+}
+
 async fn run(
     identity: &'static crate::identity::EngineIdentity,
     app: Host,
@@ -182,6 +193,7 @@ async fn run(
     // However this task ends (a return below, the loop's end, an abort that drops it), the host hears that it
     // ended: a handle's view then never says sync runs when it does not (`crate::sync_view`).
     let _ended = EndedGuard(app.clone());
+    let gate_started = std::time::Instant::now();
 
     #[cfg(target_os = "windows")]
     if let Err(error) = crate::windows_cf::wait_for_credential_release().await {
@@ -247,6 +259,8 @@ async fn run(
             return;
         }
     };
+    phase_timing("gate", gate_started, 0);
+    let open_started = std::time::Instant::now();
     let db = match StateDb::open(state_dir.join(state_paths::STATE_DB_FILENAME)) {
         Ok(d) => Arc::new(d),
         Err(e) => {
@@ -256,6 +270,7 @@ async fn run(
             return;
         }
     };
+    phase_timing("state-open", open_started, 0);
     // LD-0113 §6.3: what this device backs up now (the device folder from the state DB's resolved layout), before
     // the engine bridge is registered for the delete and rename callbacks to ask.
     crate::backup_protect::refresh_own_backups(identity, &db);
@@ -351,6 +366,7 @@ async fn run(
 
     // The token's buffer MOVES into the client (nothing is copied); the key is copied into it once. Both
     // wrappers are dropped right here, so the wiped originals do not live as long as this task.
+    let binding_started = std::time::Instant::now();
     let mut session_token = session_token;
     let api = Arc::new(ApiClient::new(
         api_base,
@@ -404,6 +420,8 @@ async fn run(
     // teardown below (after the loop breaks) fires the cancel so the producer
     // stops — and drops its session token — on logout/lock/shutdown alongside
     // the rest of the engine.
+    phase_timing("account-binding", binding_started, 0);
+    let plan_started = std::time::Instant::now();
     let telemetry = Arc::new(Mutex::new(TelemetryState {
         engine_state: "running".to_string(),
         current_file: None,
@@ -430,6 +448,7 @@ async fn run(
             None => None,
         };
 
+    phase_timing("plan-ask", plan_started, usize::from(heartbeat.is_some()));
     // Windows forced runner abort must also abort the separately spawned
     // heartbeat future; dropping a JoinHandle alone would detach its API owner.
     #[cfg(target_os = "windows")]
@@ -437,6 +456,7 @@ async fn run(
         .as_ref()
         .map(|(_, task, _)| AbortWorkerOnDrop(task.abort_handle()));
 
+    let scaffold_started = std::time::Instant::now();
     // Task 1670 round 2: purge the macOS hydrate-cache staging dir on every
     // (re)start of this runner — this IS "daemon startup" in this
     // single-process architecture (there is no separate boot phase distinct
@@ -534,6 +554,7 @@ async fn run(
     #[cfg(target_os = "windows")]
     let _upload_watcher = crate::watcher::spawn(bridge.clone(), sync_root.clone());
 
+    phase_timing("driver-scaffold", scaffold_started, 0);
     emit_payload(&app, tracker.running());
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
@@ -542,6 +563,7 @@ async fn run(
     let mut quota_warning_notifications = QuotaWarningNotificationState::default();
     // Working-set signals a busy bridge gate dropped (Task 9 fix round 1, item B): owed to the next tick.
     // It opens with the rows the startup reconcile reset, which no signal has carried yet.
+    let mut first_tick_logged = false;
     let mut owed_working_set_signal = OwedWorkingSetSignal::owing(reset_item_ids);
     let mut last_search_index_signature: Option<u64> = None;
 
@@ -730,10 +752,15 @@ async fn run(
                         crate::backup_protect::set_own_backups(crate::backup::own_backups_for(&db, &sources));
                         // w31: the passes themselves wait until the account's first file list is here (see
                         // `first_list_owed`); what is protected is still said, as on every tick.
+                        let scheduler_started = std::time::Instant::now();
+                        let source_count = sources.len();
                         if !awaiting_first_list {
                             backup_scheduler
                                 .tick(&bridge, &sync_root, sources, std::time::Instant::now())
                                 .await;
+                        }
+                        if !first_tick_logged {
+                            phase_timing("backup-scheduler", scheduler_started, source_count);
                         }
                     }
                     Err(error) => tracing::debug!(%error, "backup: config unreadable; no pass this tick"),
@@ -764,7 +791,15 @@ async fn run(
                         tracing::warn!(error = %e, "shared root refresh failed");
                     }
                 }
+                let pull_started = std::time::Instant::now();
                 let pulled = sync_tick_outcome(&*bridge, &sync_root).await;
+                if !first_tick_logged {
+                    phase_timing(
+                        "first-pull",
+                        pull_started,
+                        pulled.as_ref().map_or(0, |tick| tick.applied_item_ids.len()),
+                    );
+                }
                 if awaiting_first_list {
                     awaiting_first_list = first_list_owed(&db);
                     transfers.set_first_list(first_list_after_pull(
@@ -799,6 +834,7 @@ async fn run(
                         // gate keeps a ghost's children waiting), as before this pass existed. Only at a tick whose
                         // pull came back (review P1): `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
                         // 5xx, a 401), which proves no token and leaves the rows the pass plans against stale.
+                        let reconcile_started = std::time::Instant::now();
                         #[cfg(not(target_os = "macos"))]
                         if tick.reached_server
                             && let Err(error) = bridge
@@ -812,6 +848,9 @@ async fn run(
                         }
                         #[cfg(not(target_os = "macos"))]
                         loop_state.set_reconciled(reconciled_this_run);
+                        if !first_tick_logged {
+                            phase_timing("reconcile", reconcile_started, tick.applied_item_ids.len());
+                        }
                         // Task 2523 (F1): another device's version reaches the copy on this PC. Only at a tick whose
                         // pull came back (the rows the pass reads are fresh), before the queue step (on Linux that
                         // step sends the re-downloads it queues). Off the async workers: it may hash files. Windows:
@@ -870,8 +909,13 @@ async fn run(
                         // rows discovered by this and later ticks need a
                         // placeholder minted now. Idempotent — existing
                         // placeholders are a no-op (ERROR_ALREADY_EXISTS → Ok).
+                        let placeholders_started = std::time::Instant::now();
                         #[cfg(target_os = "windows")]
                         crate::windows_cf::refresh_placeholders(&sync_root);
+                        if !first_tick_logged {
+                            phase_timing("placeholders", placeholders_started, 0);
+                            first_tick_logged = true;
+                        }
 
                         // Reconcile native Explorer pin / "Free up space" changes
                         // (which never touch our DB) back into state_db so the app
