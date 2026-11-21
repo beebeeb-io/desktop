@@ -158,3 +158,28 @@ fn without_a_live_editor_no_operation_is_listed() {
     key(&mut rt, Key::Enter, false);
     assert!(ops.borrow().is_empty());
 }
+
+#[test]
+fn slide_commands_are_listed_only_with_a_current_slide() {
+    let pptx = Some(EditKind::Pptx);
+    let none = names(&found_at(pptx, None, "slide", Vec::new()));
+    assert_eq!(none, ["New slide"]);
+    let two = names(&found_at(pptx, Some(Stage { current: 2, count: 3 }), "slide", Vec::new()));
+    assert_eq!(two, ["New slide", "Duplicate slide", "Delete slide"]);
+    // A deck keeps one slide: Delete is not offered for it.
+    let one = names(&found_at(pptx, Some(Stage { current: 1, count: 1 }), "slide", Vec::new()));
+    assert_eq!(one, ["New slide", "Duplicate slide"]);
+    // Never in a document or a sheet.
+    assert!(names(&found_at(Some(EditKind::Docx), Some(Stage { current: 1, count: 3 }), "slide", Vec::new())).is_empty());
+    let dup = found_at(pptx, Some(Stage { current: 2, count: 3 }), "duplicate", Vec::new());
+    assert_eq!(dup[0].commands[0].shortcut.as_deref(), Some("Ctrl+D"));
+}
+
+#[test]
+fn slide_commands_resolve_to_the_slide_editor() {
+    let st = Some(Stage { current: 2, count: 3 });
+    let p = Some(EditKind::Pptx);
+    assert_eq!(resolve_at(p, st, "Slides", "Duplicate slide", None), Run::Slide(SlideCmd::Duplicate));
+    assert_eq!(resolve_at(p, st, "Slides", "Delete slide", None), Run::Slide(SlideCmd::Delete));
+    assert_eq!(resolve_at(p, None, "Slides", "Delete slide", None), Run::Unknown);
+}
