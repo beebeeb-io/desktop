@@ -10,6 +10,7 @@
 
 use crate::frames::files::source::Details;
 use crate::frames::shared::parts::table::Kind;
+use std::sync::Arc;
 use crate::ui::file_list::PcState;
 
 /// What the pills narrow a search to (DW-0802: All · Folders · Photos · Documents).
@@ -97,7 +98,7 @@ pub enum Answer {
     Unavailable,
     /// The matches, in the order to show (none is an answer too: DW-0803), and while the list is
     /// still loading, how far it is: some matches may be missing (DW-0802b).
-    Found { hits: Vec<Hit>, loading: Option<Loading> },
+    Found { hits: Arc<[Hit]>, loading: Option<Loading> },
     /// The query is being answered (off the window's thread); the view says so, never "no results".
     Searching,
     /// This PC's local state is another account's: nothing of it is searched or shown. The view says search is not
@@ -123,6 +124,8 @@ pub trait SearchSource {
     fn search(&self, query: &str, narrow: Narrow) -> Answer;
     /// The details panel's facts of the result with this id; `None`: not known, and no panel.
     fn details(&self, id: &str) -> Option<Details>;
+    /// Try again after search was unavailable: a source that builds an index builds it again now. Never from a draw.
+    fn rebuild(&mut self) {}
     /// Search opened: a source that reads late reads now, when what it holds is old. Never from a draw.
     fn opened(&mut self) {}
     /// The words in the field or the pill changed: a source that answers late starts on this query now, and
@@ -268,15 +271,16 @@ impl SearchSource for BoardSearch {
 
     fn search(&self, query: &str, narrow: Narrow) -> Answer {
         let needle = query.trim().to_lowercase();
-        let hits = if needle.is_empty() {
-            Vec::new()
+        let hits: Arc<[Hit]> = if needle.is_empty() {
+            Arc::from([])
         } else {
             self.items
                 .iter()
                 .map(|(h, _)| h)
                 .filter(|h| narrow.keeps(h.kind) && h.name.to_lowercase().contains(&needle))
                 .cloned()
-                .collect()
+                .collect::<Vec<_>>()
+                .into()
         };
         Answer::Found {
             hits,

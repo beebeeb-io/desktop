@@ -21,6 +21,7 @@ mod tests;
 mod view;
 pub use view::PLAIN_NOTE;
 
+use std::sync::Arc;
 use rune::{El, Key, KeyEvent, TextEdit, Tx};
 
 use crate::State;
@@ -184,7 +185,7 @@ pub enum Shows {
     /// The field is empty: the recent searches (DW-0801).
     Recent(Vec<String>),
     /// The matches (DW-0802), and how far the list has loaded while it still loads (DW-0802b).
-    Results { hits: Vec<Hit>, loading: Option<Loading> },
+    Results { hits: Arc<[Hit]>, loading: Option<Loading> },
     /// No match (DW-0803).
     Nothing { loading: Option<Loading> },
     /// The query is being answered.
@@ -352,16 +353,16 @@ pub fn run(s: &mut State, query: &str, tx: &mut Tx) {
 }
 
 /// The results for the field as it is now (empty while there is none).
-fn hits(s: &State) -> Vec<Hit> {
+fn hits(s: &State) -> Arc<[Hit]> {
     match actions::shows(s) {
         Shows::Results { hits, .. } => hits,
-        _ => Vec::new(),
+        _ => Arc::from([]),
     }
 }
 
 /// The result of `id` among the results shown now (`frames::item`'s Details over Search).
 pub fn hit(s: &State, id: &str) -> Option<Hit> {
-    hits(s).into_iter().find(|hit| hit.id == id)
+    hits(s).iter().find(|hit| hit.id == id).cloned()
 }
 
 /// The result of `id` is no longer among results that are all here: the field changed, or the search answered

@@ -535,7 +535,7 @@ fn the_toolbar_says_what_was_found() {
     let words = |shows: Shows| shows.count_words();
     assert_eq!(
         words(Shows::Results {
-            hits: hits[..1].to_vec(),
+            hits: hits[..1].into(),
             loading: None
         }),
         "1 result"
@@ -840,7 +840,7 @@ mod acting {
     }
 
     fn names(s: &State) -> Vec<String> {
-        super::super::hits(s).into_iter().map(|h| h.name).collect()
+        super::super::hits(s).iter().map(|h| h.name.clone()).collect()
     }
 
     #[test]

@@ -248,7 +248,7 @@ pub struct EngineSearchSource<H: SearchHost> {
     /// The query on its way.
     asked: Option<(u64, Asked)>,
     /// The last result, and the query it answers.
-    found: Option<(Asked, Vec<Hit>)>,
+    found: Option<(Asked, Arc<[Hit]>)>,
     /// How the account shares its items (item id to words), and the session it was read in. Read after a build.
     shared: Option<(Session<H::Turn>, HashMap<String, String>)>,
     /// A read of the shares is on its way.
@@ -570,7 +570,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
                 self.asked = None;
                 let mine = Some(&of) == self.of.as_ref() && self.current().is_some_and(|held| held.number == asked.2);
                 if mine {
-                    self.found = Some((asked, hits));
+                    self.found = Some((asked, hits.into()));
                 }
             }
             Landed::Recent(job, of, list) => {
@@ -643,6 +643,13 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         }
     }
 
+    /// Try again: build the index now, for the session of the moment (a build on its way is kept).
+    fn rebuild(&mut self) {
+        self.follow();
+        self.watching = self.of.is_some();
+        self.build();
+    }
+
     /// The words or the pill changed: the query runs on a worker (now, or when the index lands).
     fn ask(&mut self, query: &str, narrow: Narrow) {
         self.follow();
@@ -699,7 +706,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
             return if self.getting_ready() && self.listing_now().is_some() {
                 // The first sign-in still lists the files: no match yet, and the note says how far it is.
                 Answer::Found {
-                    hits: Vec::new(),
+                    hits: Arc::from([]),
                     loading: self.listing_now(),
                 }
             } else if self.building_now() || self.getting_ready() {
@@ -714,14 +721,14 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         let query = query.trim();
         if query.is_empty() {
             return Answer::Found {
-                hits: Vec::new(),
+                hits: Arc::from([]),
                 loading: None,
             };
         }
         match &self.found {
             Some(((words, pill, number), hits)) if words == query && *pill == narrow && *number == held.number => {
                 Answer::Found {
-                    hits: hits.clone(),
+                    hits: Arc::clone(hits),
                     loading: self.listing_now(),
                 }
             }

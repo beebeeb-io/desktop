@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 use rune::{Key, KeyEvent, Tx};
 
 use super::source::Hit;
+use std::sync::Arc;
+
 use super::{Shows, close, hits, open_result};
 use crate::State;
 use crate::frames::Intent;
@@ -74,7 +76,7 @@ pub fn shows(s: &State) -> Shows {
 }
 
 /// `hits` in the chosen order (the source's own when none was chosen).
-pub fn sorted(s: &State, hits: Vec<Hit>) -> Vec<Hit> {
+pub fn sorted(s: &State, hits: Arc<[Hit]>) -> Arc<[Hit]> {
     let Some(sort) = s.frames.find.sort else {
         return hits;
     };
@@ -94,7 +96,7 @@ pub fn sorted(s: &State, hits: Vec<Hit>) -> Vec<Hit> {
             changed,
         )
     };
-    let mut keyed: Vec<_> = hits.into_iter().map(|hit| (facts(&hit), hit)).collect();
+    let mut keyed: Vec<_> = hits.iter().map(|hit| (facts(hit), hit.clone())).collect();
     keyed.sort_by(|(a, ha), (b, hb)| {
         let (fa, fb) = (ha.kind == Kind::Folder, hb.kind == Kind::Folder);
         if sort.folders_first && fa != fb {
@@ -108,7 +110,7 @@ pub fn sorted(s: &State, hits: Vec<Hit>) -> Vec<Hit> {
         };
         if sort.reversed { order.reverse() } else { order }
     });
-    keyed.into_iter().map(|(_, hit)| hit).collect()
+    keyed.into_iter().map(|(_, hit)| hit).collect::<Vec<_>>().into()
 }
 
 /// The result as Files' actions take it: Files' own item when it knows it, else one made from the row.
