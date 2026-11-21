@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+mod edit_guard;
 mod edit_map;
 mod engine;
 mod fit;

@@ -400,7 +400,7 @@ fn office_decode_refuses_trailing_bytes() {
 
 #[test]
 fn office_decode_refuses_an_unknown_kind() {
-    for kind in [0u16, 0x0100, 0x0111, 0x0200, 0x020C, 0x02FE, 0x0301, u16::MAX] {
+    for kind in [0u16, 0x0100, 0x0111, 0x0200, 0x020D, 0x02FE, 0x0301, u16::MAX] {
         assert_eq!(Message::decode(kind, &[]), Err(DecodeError::UnknownKind), "{kind:#06x}");
     }
 }
