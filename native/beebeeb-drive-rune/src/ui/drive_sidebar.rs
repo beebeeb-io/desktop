@@ -91,6 +91,17 @@ fn closed(item: El, open: bool) -> El {
     }
 }
 
+/// A sidebar row as a tree item: role, the count in its name, selected when it is the window's own,
+/// and the one roving Tab stop of the tree when lit.
+fn tree_item(item: El, name: &str, count: Option<String>, lit: bool) -> El {
+    let label = match count {
+        Some(c) => format!("{name}, {c}"),
+        None => name.to_string(),
+    };
+    let item = item.role("treeitem").label(label).focus_selected(lit);
+    if lit { item.a11y_value("selected") } else { item }
+}
+
 /// A count that needs the person (`.mk-badge.is-red`): the items that did not sync.
 fn red_pill(label: &str, n: u32, t: &Theme) -> El {
     el().key(format!("{label}-pill"))
@@ -134,7 +145,17 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
             SidebarSection::Trash => c.trash.map(Count::Plain),
             _ => None,
         };
-        let item = section_item(place, count, lit == Lit::Section(place), t);
+        let words = match count {
+            Some(Count::Pill(n)) => Some(format!("{n} waiting")),
+            Some(Count::Plain(n)) => Some(format!("{n} items")),
+            None => None,
+        };
+        let item = tree_item(
+            section_item(place, count, lit == Lit::Section(place), t),
+            place.label(),
+            words,
+            lit == Lit::Section(place),
+        );
         sections = sections.child(if open {
             item.on_press(go(section(place)))
         } else {
@@ -171,6 +192,18 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
             if offline_on { t.text_secondary } else { t.text_tertiary },
         ));
     }
+    let history = tree_item(
+        history,
+        "Sync history",
+        c.sync_problems.map(|n| format!("{n} didn't sync")),
+        lit == Lit::SyncHistory,
+    );
+    let offline = tree_item(
+        offline,
+        "Available offline",
+        c.available_offline.map(|n| format!("{n} items")),
+        offline_on,
+    );
     let (history, offline) = if open {
         (
             history.on_press(go(Section::SyncHistory)),
@@ -193,16 +226,16 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
 
     let nav = col()
         .key("sidebar-nav")
-        .role("navigation")
-        .label("Sections")
+        .role("tree")
+        .label("Drive")
+        .focus_group()
         .gap(12.0)
         .grow(1.0)
         .min_h(0.0)
         .child(sections)
         .child(this_pc);
 
-    let side = col()
-        .key("sidebar")
+    let side = crate::ui::focus::pane(col(), "sidebar")
         .w(SIDEBAR_W)
         .h_full()
         .fill(t.sidebar_bg)

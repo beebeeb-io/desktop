@@ -197,7 +197,7 @@ pub fn tile_name(item: &DriveItem, sub: &str, length: Option<&str>) -> String {
     parts.join(", ")
 }
 
-/// The arrows inside the grid: Left and Right one tile, Up and Down one row of tiles. Every other
+/// The arrows inside the grid: Left and Right one tile, Up and Down one row of tiles, PageUp and PageDown one screen. Every other
 /// key is the Files window's (Enter, Space, Delete, the menu key, Home and End).
 fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
@@ -218,6 +218,13 @@ fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         (Key::Up | Key::Down, Some(i)) => i,
         (Key::Home, _) => 0,
         (Key::End, _) => count - 1,
+        // PageUp / PageDown: one screen of tile lines, keeping the column.
+        (Key::PageUp | Key::PageDown, sel) => {
+            let r = s.global.grid.near_lines();
+            let page = r.end.saturating_sub(r.start).max(1) * columns;
+            let i = sel.unwrap_or(0);
+            if ev.key == Key::PageUp { i.saturating_sub(page) } else { (i + page).min(count - 1) }
+        }
         _ => return false,
     };
     if m.shift {
