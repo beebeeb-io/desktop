@@ -25,6 +25,7 @@
 //! BLOCKS: every call here is a worker's (the state database, the network, a decode). Must not: log or return a
 //! name, a path, a key or a pixel outside the answer types.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,12 +36,12 @@ use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
-use crate::drive_v2::model::{is_photo_or_video, leaf_name, live_rows, mime_for_name};
+use crate::drive_v2::model::{is_photo_or_video, leaf_name, live_rows_pinned, mime_for_name};
 use crate::drive_v2::photo_meta::{self, PhotoMeta};
 use crate::engine_bridge::{
     EngineBridge, ThumbnailNotYet, UnknownItem, error_http_status, local_file_path_under_sync_root,
 };
-use crate::state_db::{FileStatus, PinState, StateDb};
+use crate::state_db::{FileStatus, StateDb};
 
 #[cfg(test)]
 #[path = "photos_api_tests.rs"]
@@ -447,7 +448,11 @@ pub(crate) fn at_or_under(path: &str, folder: &str) -> bool {
 /// longer exists is ignored). `None`: it could not be read.
 fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
     let roots: Vec<String> = db.backups_roots().ok()?.into_iter().map(|(_, path)| path).collect();
-    let live = live_rows(db).ok()?;
+    let (live, pinned): (Vec<_>, HashSet<String>) = {
+        let rows = live_rows_pinned(db).ok()?;
+        let pinned = rows.iter().filter(|(_, p)| *p).map(|(row, _)| row.file_id.clone()).collect();
+        (rows.into_iter().map(|(row, _)| row).collect(), pinned)
+    };
     // Each hidden folder's path, from its own row.
     let hidden_paths: Vec<String> = if hidden.is_empty() {
         Vec::new()
@@ -472,9 +477,15 @@ fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
             .cmp(&a.0.modified_at)
             .then_with(|| a.0.path.cmp(&b.0.path))
     });
+    // One read of every row's version, not one contract query per photo. Pinned comes with `live_rows`.
+    let versions: HashMap<String, i64> = db
+        .list_tree_rows()
+        .ok()?
+        .into_iter()
+        .map(|row| (row.file_id, row.current_version))
+        .collect();
     let mut photos = Vec::with_capacity(rows.len());
     for (row, name) in rows {
-        let contract = db.get_file_contract_state(&row.file_id).ok()?;
         let mut folders: Vec<String> = row
             .path
             .split('/')
@@ -488,13 +499,11 @@ fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
             folders,
             bytes: u64::try_from(row.size_bytes).unwrap_or(0),
             modified_at: row.modified_at,
-            kept: contract
-                .as_ref()
-                .is_some_and(|contract| contract.effective_pin_state() == PinState::Pinned),
+            kept: pinned.contains(&row.file_id),
             on_this_pc: row.status == FileStatus::Local,
             uploading: row.status == FileStatus::Uploading,
             device: photo_meta::backup_device(&roots, &row.path),
-            versions: contract.as_ref().map_or(1, |contract| contract.current_version.max(1)),
+            versions: versions.get(&row.file_id).copied().unwrap_or(1).max(1),
             id: row.file_id,
         });
     }
