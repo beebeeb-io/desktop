@@ -25,8 +25,8 @@ pub enum ToolState {
 /// A toolbar button: 28 pt tall, at least 28 wide, one or more 15/16 pt glyphs.
 /// Keys: `<key>` and `<key>-icon` (further glyphs are added by the caller).
 pub fn tool_button(
-    key: &'static str,
-    name: &'static str,
+    key: &str,
+    name: &str,
     ic: &'static Icon,
     icon_size: f32,
     state: ToolState,
@@ -205,6 +205,10 @@ pub fn search_box(input_key: &'static str, placeholder: &'static str, input: El,
         type_::SEARCH,
         t.text_tertiary,
     );
+    search_field_box(input, t)
+}
+
+fn search_field_box(input: El, t: &Theme) -> El {
     row()
         .key("search-box")
         .role("search")
@@ -220,6 +224,25 @@ pub fn search_box(input_key: &'static str, placeholder: &'static str, input: El,
         .child(kit::glyph("search-icon", &icons::SEARCH, 13.0, t.text_tertiary))
         .child(input)
         .child(kbd("kbd-hint", "Ctrl+F", t))
+}
+
+/// The title block (`.mk-title`, key `folder-info`): the title, and under it the info line
+/// (item count, "No plan yet") where there is one.
+pub fn title_block(title: &str, info: Option<&str>, t: &Theme) -> El {
+    let mut block = col()
+        .key("folder-info")
+        .px(4.0)
+        .min_w(0.0)
+        .child(kit::label("folder-title", title.to_string(), type_::TITLE, t.text).truncate());
+    if let Some(info) = info {
+        block = block.child(kit::label("item-count", info.to_string(), type_::TITLE_SUB, t.text_tertiary));
+    }
+    block
+}
+
+/// The one tool button: 28 pt, one 16 pt glyph, ready. Keys `<key>` and `<key>-icon`.
+pub fn tool(key: &str, label: &str, icon: &'static Icon, t: &Theme) -> El {
+    tool_button(key, label, icon, 16.0, ToolState::Idle, t)
 }
 
 /// THE window toolbar (`.mk-tb`, the board's `MacToolbar`): Back and Forward, the title, the
@@ -482,152 +505,37 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     toolbar_in(s, t, trailing_inset, None)
 }
 
-/// The toolbar; with `closed`, as it stands while the gate is closed.
+/// The toolbar; with `closed`, as it stands while the gate is closed: the one [`bar`], every
+/// control drawn in its dimmed state.
 pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Closed<'_>>) -> El {
-    let item_count = s.listing.items.len();
     let off = closed.is_some();
-    let idle = if off { ToolState::Off } else { ToolState::Idle };
-
-    let nav = row()
-        .key("nav")
-        .child(
-            tool_button(
-                "back",
-                "Back",
-                &icons::CHEVRON_LEFT,
-                16.0,
-                if s.can_go_back() && !off {
-                    ToolState::Idle
-                } else {
-                    ToolState::Off
-                },
-                t,
-            )
-            .shortcut_hint("Alt+Left")
-            .on_press(|s: &mut State| {
-                s.go_back();
-            }),
-        )
-        .child(
-            tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, ToolState::Off, t)
-                .shortcut_hint("Alt+Right"),
+    let item_count = s.listing.items.len();
+    let (title, info) = match closed {
+        Some(c) => (c.title.to_string(), c.sub.map(str::to_string)),
+        None if item_count == 1 => (s.listing.folder.name.clone(), Some("1 item".to_string())),
+        None => (s.listing.folder.name.clone(), Some(format!("{item_count} items"))),
+    };
+    let search = if off {
+        // Nothing is searched while the gate is closed: the field's words, and no input.
+        kit::note_text(
+            "search-placeholder",
+            "search-input",
+            SEARCH_PLACEHOLDER,
+            type_::SEARCH,
+            t.text_tertiary,
         );
-
-    let mut title = col().key("folder-info").px(4.0).min_w(0.0).child(
-        kit::label(
-            "folder-title",
-            closed.map_or_else(|| s.listing.folder.name.clone(), |c| c.title.to_string()),
-            type_::TITLE,
-            t.text,
-        )
-        .truncate(),
-    );
-    let count = match closed {
-        Some(c) => c.sub.map(str::to_string),
-        None if item_count == 1 => Some("1 item".to_string()),
-        None => Some(format!("{item_count} items")),
-    };
-    if let Some(count) = count {
-        title = title.child(kit::label("item-count", count, type_::TITLE_SUB, t.text_tertiary));
-    }
-
-    let view_toggle = segmented(
-        "view-toggle",
-        "View",
-        vec![
-            // Closed: neither view is the chosen one, and neither can be chosen.
-            out_of_reach(segment("view-list", "as List", &icons::VIEW_LIST, !off, t), off),
-            out_of_reach(segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t), off),
-        ],
-        t,
-    );
-
-    // `.mk-tgroup` at 45 % while the gate is closed.
-    let view_toggle = if off {
-        view_toggle.opacity(0.45).disabled(true)
-    } else {
-        view_toggle
-    };
-
-    let sort_btn = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, idle, t).child(kit::glyph(
-        "sort-caret",
-        &icons::CHEVRON_DOWN,
-        11.0,
-        if off { t.text_quaternary } else { t.text_secondary },
-    ));
-
-    let panel_btn = tool_button(
-        "panel-toggle-btn",
-        "Details panel",
-        &icons::PANEL_TOGGLE,
-        16.0,
-        if off {
-            ToolState::Off
-        } else if s.show_detail_pane {
-            ToolState::On
-        } else {
-            ToolState::Idle
-        },
-        t,
-    )
-    .shortcut_hint("Alt+Shift+P")
-    .checked(s.show_detail_pane)
-    .on_press(|s: &mut State| s.show_detail_pane = !s.show_detail_pane);
-
-    let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
-
-    let new_btn = row()
-        .key("new-btn")
-        .role("button")
-        .label("New")
-        .h(28.0)
-        .pl(8.0)
-        .pr(9.0)
-        .gap(5.0)
-        .center_y()
-        .radius(radius::CONTROL)
-        .fill(t.accent)
-        .hover(t.press)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
-        .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
-        .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
-    // `.mk-new.is-off`: 40 %.
-    let new_btn = if off {
-        new_btn.opacity(0.4).disabled(true).focusable(false)
-    } else {
-        new_btn
-    };
-
-    kit::note_text(
-        "search-placeholder",
-        "search-input",
-        SEARCH_PLACEHOLDER,
-        type_::SEARCH,
-        t.text_tertiary,
-    );
-    let search_field = row()
-        .key("search-box")
-        .role("search")
-        .w(210.0)
-        .h(28.0)
-        .gap(6.0)
-        .pl(9.0)
-        .pr(6.0)
-        .radius(8.0)
-        .fill(t.field)
-        .box_shadow(kit::ring_inset(t.separator))
-        .center_y()
-        .child(kit::glyph("search-icon", &icons::SEARCH, 13.0, t.text_tertiary))
-        .child(if off {
-            // Nothing is searched while the gate is closed: the field's words, and no input.
+        search_field_box(
             row().key("search-input").a11y_hidden().grow(1.0).center_y().child(
                 rune::text(SEARCH_PLACEHOLDER)
                     .font(type_::SEARCH)
                     .color(t.text_tertiary),
-            )
-        } else {
+            ),
+            t,
+        )
+    } else {
+        search_box(
+            "search-input",
+            SEARCH_PLACEHOLDER,
             text_input(&s.search, type_::SEARCH)
                 .key("search-input")
                 .label("Search names")
@@ -636,41 +544,49 @@ pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Clo
                 .color(t.text)
                 .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)
                 .on_edit(|s: &mut State| &mut s.search)
-                .grow(1.0)
-        })
-        .child(kbd("kbd-hint", "Ctrl+F", t));
-
-    let bar = row()
-        .key("toolbar")
-        .role("toolbar")
-        .label("Files")
-        .h(46.0)
-        .w_full()
-        .fill(t.toolbar_bg)
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .pl(10.0)
-        .pr(trailing_inset.max(12.0))
-        .center_y()
-        .gap(8.0)
-        .child(nav)
-        .child(title)
-        .child(el().key("toolbar-spacer").grow(1.0))
-        .child(view_toggle)
-        .child(sort_btn)
-        .child(panel_btn);
-    // The board's toolbar has "Open in File Explorer" as its last icon button since b4ffef881. The
-    // Files frame draws its own (`frames/files/toolbar.rs`); closed, it is here and off like the rest.
-    let bar = match closed {
-        Some(_) => bar.child(tool_button(
-            "open-explorer",
-            "Open in File Explorer",
-            &crate::theme::icons_settings::FOLDER,
-            16.0,
-            ToolState::Off,
+                .grow(1.0),
             t,
-        )),
-        None => bar,
+        )
     };
-    bar.child(sep).child(new_btn).child(search_field)
+    let back: Option<Press> = press(|s: &mut State, _| {
+        s.go_back();
+    });
+    let on_explorer: Press = if off {
+        Box::new(|_, _| {})
+    } else {
+        Box::new(open_beebeeb_location)
+    };
+    bar(
+        Bar {
+            name: "Files".to_string(),
+            back: (s.can_go_back() && !off, back),
+            forward: (false, None),
+            title: title_block(&title, info.as_deref(), t),
+            slot: None,
+            slot_sep: false,
+            view: if off { View::NotHere } else { View::List },
+            on_view: None,
+            sort: if off { Sort::NotHere } else { Sort::Idle },
+            on_sort: None,
+            details: if off {
+                Details::NotHere
+            } else if s.show_detail_pane {
+                Details::Open
+            } else {
+                Details::Closed
+            },
+            on_details: if off {
+                None
+            } else {
+                press(|s: &mut State, _| s.show_detail_pane = !s.show_detail_pane)
+            },
+            inert: false,
+            on_explorer,
+            new: if off { New::Off } else { New::Idle },
+            on_new: None,
+            search,
+            trailing_inset,
+        },
+        t,
+    )
 }
