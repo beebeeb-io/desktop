@@ -3,6 +3,69 @@
 use super::*;
 
 impl StateDb {
+    /// dc-163: open a write batch on this thread: the rows written on it commit together, every
+    /// `every` rows (see [`super::WriteBatch`]). Other threads wait while a batch is open, so keep
+    /// the work between two commits free of anything that waits on another thread.
+    pub fn write_batch(&self, every: usize) -> Result<super::WriteBatch<'_>> {
+        super::WriteBatch::open(&self.0, every)
+    }
+    /// dc-163: [`Self::put_owned_key_record_at_revision`] for many rows in ONE transaction: all of
+    /// them, or (the account changed, or a write failed) none.
+    pub fn put_owned_key_records_at_revision(
+        &self,
+        rows: &[crate::owner_keys::OwnedKeyRecord],
+        revision: u64,
+    ) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        if self.1.load(std::sync::atomic::Ordering::Acquire) != revision {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO owned_key_records (file_id, record) VALUES (?1, ?2)
+                 ON CONFLICT(file_id) DO UPDATE SET record = excluded.record",
+            )?;
+            for row in rows {
+                let record =
+                    serde_json::to_string(row).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                stmt.execute(params![row.file_id, record])?;
+            }
+        }
+        tx.commit()
+    }
+    /// dc-163 test hook: stop SQLite's automatic checkpoints, so every commit stays in the WAL
+    /// file and [`Self::wal_commits_for_test`] can count them.
+    #[cfg(test)]
+    pub(crate) fn keep_wal_for_test(&self) {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    }
+    /// dc-163 test hook: the commits in the WAL file (its frames that end a transaction, of the
+    /// WAL's current generation), so a test counts what the disk saw, autocommit writes included.
+    #[cfg(test)]
+    pub(crate) fn wal_commits_for_test(&self) -> usize {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let wal = std::fs::read(format!("{}-wal", conn.path().expect("a file database"))).unwrap_or_default();
+        if wal.len() < 32 {
+            return 0;
+        }
+        let be = |at: usize| u32::from_be_bytes(wal[at..at + 4].try_into().unwrap());
+        let page = be(8) as usize;
+        let salts = &wal[16..24];
+        let mut commits = 0;
+        let mut at = 32;
+        while at + 24 + page <= wal.len() {
+            if &wal[at + 8..at + 16] != salts {
+                break;
+            }
+            if be(at + 4) != 0 {
+                commits += 1;
+            }
+            at += 24 + page;
+        }
+        commits
+    }
     /// Insert or update a row keyed by `file_id`. ON CONFLICT replaces
     /// the entire row except the primary key.
     pub fn upsert_file(&self, e: &FileEntry) -> Result<()> {

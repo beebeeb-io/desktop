@@ -32,7 +32,7 @@ impl StateDb {
             Self::migrate_schema(&migration)?;
             migration.commit()?;
         }
-        Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
+        Ok(Self(conn_lock::ConnLock::new(conn), std::sync::atomic::AtomicU64::new(0)))
     }
     /// Open an existing state database for reading only: no table is created or migrated, no row is written and
     /// the journal mode is left as it is, so a viewer can look at a database the engine owns. (SQLite itself may
@@ -79,7 +79,7 @@ impl StateDb {
         }
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| ReadOnlyOpenError::classify(&e))?;
-        let db = Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0));
+        let db = Self(conn_lock::ConnLock::new(conn), std::sync::atomic::AtomicU64::new(0));
         // The listing statement itself, for no rows: it names every column a listing reads.
         db.children_paged(None, 0, 0)
             .map_err(|e| ReadOnlyOpenError::classify(&e))?;

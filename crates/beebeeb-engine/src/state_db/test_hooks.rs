@@ -23,7 +23,7 @@ impl StateDb {
     /// Test hook: hold the database lock so a test can park every writer behind
     /// it and force two requests to overlap deterministically (task 1684).
     #[cfg(any(test, feature = "test-support"))]
-    pub fn hold_lock_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub fn hold_lock_for_test(&self) -> conn_lock::ConnGuard<'_> {
         self.0.lock().expect("state_db mutex poisoned")
     }
     #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]

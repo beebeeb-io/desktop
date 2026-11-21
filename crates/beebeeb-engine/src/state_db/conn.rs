@@ -560,7 +560,7 @@ pub(super) fn finder_write_conn(conn: &Connection, op_id: &str) -> Result<Option
 
 /// The claim's transaction ends in a wait, which is not an attempt (S3 steps 2–4). After
 /// a hand-over it commits that, and the caller logs it and releases the payload (S6).
-pub(super) fn finish_wait(tx: rusqlite::Transaction<'_>, took_over: Option<TookOver>) -> Result<ClaimOutcome> {
+pub(super) fn finish_wait(tx: super::conn_lock::WriteTx<'_>, took_over: Option<TookOver>) -> Result<ClaimOutcome> {
     tx.commit()?;
     Ok(match took_over {
         None => ClaimOutcome::Wait,
@@ -609,7 +609,7 @@ pub(super) fn settle_status_after_park_conn<C: std::ops::Deref<Target = Connecti
 
 /// The claim parks the op with its bytes (spec §8.4, S5), in its own transaction.
 pub(super) fn park_in_claim(
-    tx: rusqlite::Transaction<'_>,
+    tx: super::conn_lock::WriteTx<'_>,
     op: &PendingOperation,
     reason: ParkReason,
     took_over: Option<TookOver>,
