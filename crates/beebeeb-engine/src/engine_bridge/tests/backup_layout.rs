@@ -459,10 +459,10 @@ async fn legacy_duplicate_roots_merged_then_claimed() {
     let fx = Fixture::new();
     let old = fx.add(None, "Backups", true, 0, "2026-01-01T10:00:00Z");
     let new = fx.add(None, "Backups", true, 0, "2026-06-01T10:00:00Z");
-    let old_device = fx.add(Some(&old), "TestPC", true, 0, "2026-01-01T10:00:00Z");
+    let old_device = fx.add(Some(&old), "Alpha-PC", true, 0, "2026-01-01T10:00:00Z");
     let old_pictures = fx.add(Some(&old_device), "Pictures", true, 0, "2026-01-01T10:00:00Z");
     fx.add(Some(&old_pictures), "a.jpg", false, 5, "2026-01-01T10:00:00Z");
-    let new_device = fx.add(Some(&new), "TestPC", true, 0, "2026-06-01T10:00:00Z");
+    let new_device = fx.add(Some(&new), "Alpha-PC", true, 0, "2026-06-01T10:00:00Z");
     let new_pictures = fx.add(Some(&new_device), "Pictures", true, 0, "2026-06-01T10:00:00Z");
     let clash = fx.add(Some(&new_pictures), "a.jpg", false, 6, "2026-06-01T10:00:00Z");
     let new_documents = fx.add(Some(&new_device), "Documents", true, 0, "2026-06-01T10:00:00Z");
@@ -490,7 +490,7 @@ async fn legacy_duplicate_roots_merged_then_claimed() {
         Some(old.as_str()),
         "another device's folder moved into the survivor"
     );
-    assert_eq!(fx.names(&old), ["TestPC", "Sam's iPhone"]);
+    assert_eq!(fx.names(&old), ["Alpha-PC", "Sam's iPhone"]);
     assert_eq!(fx.names(&old_device), ["Documents", "Pictures"]);
     let pictures = fx.names(&old_pictures);
     assert_eq!(pictures.len(), 2, "both files kept: {pictures:?}");
