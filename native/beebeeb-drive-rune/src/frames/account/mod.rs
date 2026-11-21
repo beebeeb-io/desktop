@@ -969,7 +969,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .min_w(0.0)
                 .min_h(0.0)
                 .h_full()
-                .child(crate::ui::focus::pane(pane_el, "settings-page")),
+                .child(crate::ui::focus::pane(row().grow(1.0).min_w(0.0).h_full().child(pane_el), "settings-page")),
         );
     if let Some(overlay) = overlay {
         body = body.child(overlay);
