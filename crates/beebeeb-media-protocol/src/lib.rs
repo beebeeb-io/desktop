@@ -26,6 +26,8 @@ use std::io::{self, Read, Write};
 #[cfg(test)]
 mod tests;
 
+pub mod image;
+
 // ---- Limits ----
 
 /// The largest control message (everything that is not bulk), in bytes.
