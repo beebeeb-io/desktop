@@ -494,6 +494,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 log("account: could not start a thread for a request's expiry");
             }
         }
+        // DW-A11: a request reached this PC.
+        #[cfg(windows)]
+        crate::shell::platform::windows_toast::show_sign_in_request();
         Lookup::Found(shown)
     }
 
