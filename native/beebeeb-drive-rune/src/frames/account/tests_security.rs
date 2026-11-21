@@ -494,8 +494,27 @@ fn a_sign_out_save_that_cannot_be_asked_says_so_and_signs_nothing_out() {
 #[test]
 fn a_pane_without_an_answer_is_loading_empty_or_failed_with_a_retry() {
     use super::source::PaneState;
-    let t = crate::theme::tokens::theme(false);
-    let drawn = |state| format!("{:?}", super::state_pane(Pane::Security, state, &t));
+    let drawn = |state: PaneState| {
+        let rt = rune::Runtime::new(
+            state,
+            |state: &PaneState| {
+                let t = crate::theme::tokens::theme(false);
+                super::state_pane(Pane::Security, *state, &t)
+            },
+            (600.0, 400.0),
+            rune::Env {
+                system_dark: false,
+                scale: 1.0,
+            },
+        );
+        let mut rt = rt;
+        rt.frame(0.0);
+        rt.elements()
+            .into_iter()
+            .map(|e| format!("{} {}", e.key.unwrap_or_default(), e.text.unwrap_or_default()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let loading = drawn(PaneState::Loading);
     assert!(loading.contains("loading-words"), "Loading says it is loading");
     let signed_out = drawn(PaneState::SignedOut);
