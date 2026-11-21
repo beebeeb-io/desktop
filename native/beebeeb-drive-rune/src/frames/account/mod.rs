@@ -869,71 +869,20 @@ pub fn scene(id: &str, s: &mut State) -> bool {
     }
 }
 
-/// One entry of the settings sidebar: its label, its icon, the frame it shows, and the
-/// section it is (for the selection), when it is one of this lane's.
-struct Section {
-    label: &'static str,
-    icon: &'static Icon,
-    frame: &'static str,
-    section: Option<SettingsPane>,
-}
-
-const fn entry(
-    label: &'static str,
-    icon: &'static Icon,
-    frame: &'static str,
-    section: Option<SettingsPane>,
-) -> Section {
-    Section {
-        label,
-        icon,
-        frame,
-        section,
+/// The sidebar label of the account section that is open.
+fn section_label(section: SettingsPane) -> Option<&'static str> {
+    match section {
+        SettingsPane::Account => Some("Account"),
+        SettingsPane::Security => Some("Security"),
+        SettingsPane::DevicesAndSessions => Some("Devices and sessions"),
+        _ => None,
     }
 }
 
-const SETTINGS_SECTIONS: &[Section] = &[
-    entry("General", &icons::GEAR, "DW-0701", None),
-    entry("Account", &icons::PEOPLE, "DW-A51", Some(SettingsPane::Account)),
-    entry("Security", &icons::SHIELD, "DW-A52", Some(SettingsPane::Security)),
-    entry(
-        "Devices and sessions",
-        &icons::DEVICE_PHONE,
-        "DW-A55",
-        Some(SettingsPane::DevicesAndSessions),
-    ),
-    entry("Notifications", &icons::BELL, "DW-0750", None),
-];
-
-// The board draws the Drive group's items with a chevron where the other group has a glyph.
-const DRIVE_SECTIONS: &[Section] = &[
-    entry("Storage", &icons::CHEV_RIGHT, "DW-0712", None),
-    entry("Backups", &icons::CHEV_RIGHT, "DW-0737", None),
-    entry("Sync and File Explorer", &icons::CHEV_RIGHT, "DW-0746", None),
-    entry("Thumbnails and previews", &icons::CHEV_RIGHT, "DW-0744", None),
-    entry("Bandwidth", &icons::CHEV_RIGHT, "DW-0785", None),
-];
-
-fn sidebar(section: SettingsPane, t: &Theme) -> El {
-    let items = |sections: &'static [Section]| -> Vec<El> {
-        sections
-            .iter()
-            .map(|sec| {
-                let frame = sec.frame;
-                set::nav_item(sec.label, sec.icon, sec.section == Some(section), t)
-                    .on_press(move |s: &mut State| go(s, frame))
-            })
-            .collect()
-    };
-    let back = set::nav_back("Back to Drive", &icons::BACK, t)
-        .shortcut_hint("Esc")
-        .on_press(|s: &mut State| go(s, "DW-0401"));
-    set::sidebar(
-        back,
-        vec![("Settings", items(SETTINGS_SECTIONS)), ("Drive", items(DRIVE_SECTIONS))],
-        "Settings open inside the app. Esc goes back.",
-        t,
-    )
+/// The one settings sidebar (`settings_shell::app_sidebar`), never a copy of it.
+fn sidebar(s: &State, section: SettingsPane, t: &Theme) -> El {
+    let previews = s.settings.drive.photo_previews() != settings::previews::PhotoPreviews::Unavailable;
+    crate::ui::settings_shell::app_sidebar(section_label(section), previews, go, t)
 }
 
 /// The window while one of the account sections is open.
@@ -997,7 +946,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(section, &t))
+        .child(sidebar(s, section, &t))
         // One scroller per pane (Rune keeps a scroller's offset by its path): a page opened from a page that
         // was scrolled down starts at its own top, never at the other's offset.
         .child(

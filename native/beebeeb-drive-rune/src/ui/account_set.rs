@@ -2,15 +2,12 @@
 //! sessions panes (DW-A51 to DW-A84a).
 //!
 //! The board draws these panes with the shared account kit, not with Drive's own settings
-//! classes: the same sidebar entries, in `.kit-side` (30 pt items, 14 pt between groups), and a
-//! 520 pt column. The lists are the kit's lists, so [`settings_list::list`] holds the rows; the
+//! classes: the sidebar is the shared one (`settings_shell::app_sidebar`), and the column is 520 pt. The lists are the kit's lists, so [`settings_list::list`] holds the rows; the
 //! rows here add what an account row has and a settings row does not (an avatar or a toned tile
 //! in front, a pill at the end, a destructive title).
 //!
 //! | Piece | Function | Keys it gives |
 //! | --- | --- | --- |
-//! | Sidebar item, the way back | `nav_item(label, icon, on, t)`, `nav_back(label, icon, t)` | `<label>-row`, `<label>-icon`, `<label>` |
-//! | Sidebar | `sidebar(back, sections, foot, t)` | `sidebar`, `side-title-<slug>`, `side-foot-box`, `side-foot` |
 //! | Pane | `pane(children, t)` | `set-main`, `set-col` |
 //! | Heading | `heading(title, sub, trailing, t)` | `set-title`, `set-sub` |
 //! | Row | `item(list, index, &Row, extra, t)` | `item-<L>-<I>` + `-icon`, `-avatar`, `-initials`, `-tile`, `-tile-icon`, `-title`, `-sub`, `-value`, `-pill`, `-pill-dot`, `-pill-label`, `-check`, `-chev` |
@@ -60,114 +57,6 @@ pub const RING_COUNT: TextStyle = TextStyle::new(13.0, 600.0)
 /// `--kit-sel`: the neutral selection of the account kit's sidebar (ink at 6 %, 9 % in dark).
 pub fn selection(t: &Theme) -> Color {
     t.text.alpha(if t.dark { 0.09 } else { 0.06 })
-}
-
-/// One item of the sidebar (`.kit-side-item`): a 30 pt row, selected in the neutral tint.
-/// A link: it shows another pane. Keys: `<label>-row`, `<label>-icon`, `<label>`.
-pub fn nav_item(label: &str, ic: &'static Icon, on: bool, t: &Theme) -> El {
-    row()
-        .key(format!("{label}-row"))
-        .role("link")
-        .label(label)
-        .h(30.0)
-        .px(10.0)
-        .gap(10.0)
-        .center_y()
-        .radius(8.0)
-        .fill(if on { selection(t) } else { Color::TRANSPARENT })
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph(
-            format!("{label}-icon"),
-            ic,
-            16.0,
-            if on { t.text } else { t.text_tertiary },
-        ))
-        .child(
-            kit::label(
-                label,
-                label,
-                type_::LIST_ITEM,
-                if on { t.text } else { t.text_secondary },
-            )
-            .grow(1.0)
-            .truncate(),
-        )
-}
-
-/// The way back at the top of the sidebar: the same row, its chevron 6 pt from words that are
-/// as wide as they are (the board's `.au-row` inside the item).
-pub fn nav_back(label: &str, ic: &'static Icon, t: &Theme) -> El {
-    row()
-        .key(format!("{label}-row"))
-        .role("link")
-        .label(label)
-        .h(30.0)
-        .px(10.0)
-        .gap(6.0)
-        .center_y()
-        .radius(8.0)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph(format!("{label}-icon"), ic, 15.0, t.text_tertiary))
-        .child(kit::label(label, label, type_::LIST_ITEM, t.text_secondary))
-}
-
-/// The sidebar (`.kit-side`): the way back on top, the titled groups, a foot note under a hairline.
-pub fn sidebar(back: El, sections: Vec<(&str, Vec<El>)>, foot: &str, t: &Theme) -> El {
-    let mut nav = col()
-        .key("settings-nav")
-        .role("navigation")
-        .label("Settings sections")
-        .gap(14.0)
-        .grow(1.0)
-        .min_h(0.0);
-    for (title, items) in sections {
-        let mut group = col()
-            .key(format!("side-sec-{}", slug(title)))
-            .role("group")
-            .label(title)
-            .gap(1.0)
-            .child(
-                el().key(format!("side-title-box-{}", slug(title)))
-                    .px(10.0)
-                    .pb(4.0)
-                    .child(kit::label(
-                        format!("side-title-{}", slug(title)),
-                        title.to_uppercase(),
-                        SIDE_TITLE,
-                        t.text_tertiary,
-                    )),
-            );
-        for item in items {
-            group = group.child(item);
-        }
-        nav = nav.child(group);
-    }
-    col()
-        .key("sidebar")
-        .w(SIDEBAR_W)
-        .h_full()
-        .fill(t.sidebar_bg)
-        .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
-        .border_layout()
-        .gap(14.0)
-        .py(14.0)
-        .px(10.0)
-        .child(back)
-        .child(nav)
-        .child(
-            col()
-                .key("side-foot-box")
-                .items_start()
-                .pt(10.0)
-                .px(6.0)
-                .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-                .border_layout()
-                .child(kit::label("side-foot", foot, type_::CAPTION, t.text_tertiary).wrap()),
-        )
 }
 
 /// A pane (`.au-set-main` > `.au-set-col`): 22 pt above and 30 pt beside a 520 pt column whose
