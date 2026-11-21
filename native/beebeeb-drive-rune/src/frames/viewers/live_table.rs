@@ -6,9 +6,7 @@ use std::hash::{Hash, Hasher};
 
 use rune::El;
 
-use super::super::Ui;
-use super::kinds::{Column, TableDoc};
-use super::table;
+use super::super::{Ui, kinds::{Column, TableDoc}, table};
 use crate::theme::tokens::Theme;
 
 const MAX_ROWS: usize = 1_000;
