@@ -13,10 +13,11 @@ $Switch = 'C:\bb\dc086\backups.on'
 $Expected = 41510   # 38,764 files + 2,739 folders + the fixture's 7 sample items
 $global:t0 = Get-Date
 function L([string]$s) { $line = '{0} +{1,7:0.0}s {2}' -f (Get-Date).ToUniversalTime().ToString('HH:mm:ss.fff'), ((Get-Date) - $global:t0).TotalSeconds, $s; Add-Content -LiteralPath "$O\marks.log" -Value $line -Encoding UTF8; Write-Host $line }
-$global:nextWU = (Get-Date).AddSeconds(-1)
+$global:nextWU = (Get-Date).AddSeconds(-1); $global:NoJiggle = $false; $global:nextJig = Get-Date
 function Pump([int]$ms) { $u = (Get-Date).AddMilliseconds($ms); while ((Get-Date) -lt $u) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
   if ((Get-Date) -gt $global:nextWU) { $global:nextWU = (Get-Date).AddSeconds(8)
-    foreach ($n in 'PickerHost', 'OpenWith') { foreach ($p in @(Get-Process $n -ea 0)) { Stop-Process -Id $p.Id -Force -ea 0; L "closed a stray $n window" } } } }
+    foreach ($n in 'PickerHost', 'OpenWith') { foreach ($p in @(Get-Process $n -ea 0)) { Stop-Process -Id $p.Id -Force -ea 0; L "closed a stray $n window" } } }
+  if (-not $global:NoJiggle -and (Get-Date) -gt $global:nextJig) { $global:nextJig = (Get-Date).AddSeconds(45); [M]::mouse_event(1, 1, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 30; [M]::mouse_event(1, -1, 0, 0, [IntPtr]::Zero) } }
 function Texts2 { @((Dump '.') | ? { $_ -match '^Text\|' } | % { ($_ -split '\|')[1] }) }
 function Btns2 { @((Dump '.') | ? { $_ -match '^Button\|' } | % { ($_ -split '\|')[1] }) }
 function TypeNew([string]$name, [string]$text) { $f = Wait-El $name 'Edit' 15; if (-not $f) { return "no $name" }; Click-El $f | Out-Null; Send '^a'; Pump 150; Send '{DEL}'; Type-Slow $text; 'typed' }
@@ -191,6 +192,7 @@ foreach ($l in (Log-Lines 'engine phase timing' 60)) { L "phase: $l" }
 if ($ok) {
   # the app's own word for done
   $u = (Get-Date).AddMinutes(6); while ((Get-Date) -lt $u) { $word = Status-Word; if ($word -eq 'Up to date') { break }; Pump 10000 }
+  L "locked now: $([bool]@(Texts2 | ? { $_ -match '^Beebeeb is locked$' }).Count)"
   L "status after the population: '$word' at $([Math]::Round(((Get-Date) - $global:tSign).TotalSeconds, 1)) s; $(App-Line)"
   $c = Count-Entries; L "entries now $($c[0]) (dirs $($c[1]); listing took $($c[2]) ms)"
   # ---- Explorer on the 5,000-item folder
@@ -205,12 +207,21 @@ if ($ok) {
   Snap 'after-explorer'
   # ---- idle
   L "IDLE start ($IDLE_MIN min)"
+  # Minutes 1-12: the session gets a 1-pixel mouse move every 45 s, so the app's lock (5 minutes without input) stays
+  # away. From minute 12 no input: the app locks itself about minute 17. Minimised from minute 25 to 29.
+  $locked = $false; $hw = $null
   for ($m = 1; $m -le $IDLE_MIN; $m++) {
-    if ($m -eq 4) { Threads 'idle, window shown' 20 }
-    if ($IDLE_MIN -ge 20 -and $m -eq 13) { $hw = @(App-Windows)[0]; if ($hw) { [M]::ShowWindow($hw, 6) | Out-Null; L 'IDLE window minimised (test: is the CPU the window drawing?)' } }
-    if ($IDLE_MIN -ge 20 -and $m -eq 15) { Threads 'idle, window minimised' 30 }
-    if ($IDLE_MIN -ge 20 -and $m -eq 17) { if ($hw) { [M]::ShowWindow($hw, 9) | Out-Null; $null = Front; L 'IDLE window restored' } }
-    Pump 60000; if (($m % 5) -eq 0) { Snap "idle-$m-min" } else { L "IDLE $m min | $(App-Line)" } }
+    if ($m -eq 4) { Threads 'idle, unlocked, window shown' 20 }
+    if ($IDLE_MIN -ge 30) {
+      if ($m -eq 12) { $global:NoJiggle = $true; L 'IDLE no more input from here (the app locks after 5 minutes without input)' }
+      if ($m -eq 22) { Threads 'idle, locked, window shown' 20 }
+      if ($m -eq 25) { $hw = @(App-Windows)[0]; if ($hw) { [M]::ShowWindow($hw, 6) | Out-Null; L 'IDLE window minimised' } }
+      if ($m -eq 27) { Threads 'idle, locked, window minimised' 30 }
+      if ($m -eq 29) { if ($hw) { [M]::ShowWindow($hw, 9) | Out-Null; L 'IDLE window restored' } }
+    }
+    Pump 60000
+    if (-not $locked -and @(Texts2 | ? { $_ -match '^Beebeeb is locked$' }).Count) { $locked = $true; L "IDLE the app shows 'Beebeeb is locked' (first seen in minute $m)"; S 'locked' }
+    if (($m % 5) -eq 0) { Snap "idle-$m-min" } else { L "IDLE $m min | status '$(Status-Word)' | $(App-Line)" } }
   L "IDLE end; status '$(Status-Word)'"; S 'idle-end'
 }
 # ---- a backup pass (Documents turned on in the settings file while the app is stopped, then a restart)
