@@ -1063,6 +1063,7 @@ pub enum Message {
     SavedInto(SavedInto),
     Clip(Clip),
     LayoutList(LayoutList),
+    EditGuarded(EditGuarded),
 }
 
 impl Message {
@@ -1097,6 +1098,7 @@ impl Message {
             Message::SavedInto(_) => KIND_SAVED_INTO,
             Message::Clip(_) => KIND_CLIP,
             Message::LayoutList(_) => KIND_LAYOUT_LIST,
+            Message::EditGuarded(_) => KIND_EDIT_GUARDED,
         }
     }
 
@@ -1131,6 +1133,7 @@ impl Message {
             Message::SavedInto(m) => m.encode(),
             Message::Clip(m) => m.encode(),
             Message::LayoutList(m) => m.encode(),
+            Message::EditGuarded(m) => m.encode(),
         }
     }
 
@@ -1165,6 +1168,7 @@ impl Message {
             KIND_SAVED_INTO => Message::SavedInto(SavedInto::decode(payload)?),
             KIND_CLIP => Message::Clip(Clip::decode(payload)?),
             KIND_LAYOUT_LIST => Message::LayoutList(LayoutList::decode(payload)?),
+            KIND_EDIT_GUARDED => Message::EditGuarded(EditGuarded::decode(payload)?),
             _ => return Err(DecodeError::UnknownKind),
         })
     }

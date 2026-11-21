@@ -137,6 +137,7 @@ dependencies = [
  "beebeeb-office-protocol",
  "beebeeb-office-sandbox",
  "log",
+ "zip",
 ]
 
 [[package]]

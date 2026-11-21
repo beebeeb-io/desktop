@@ -232,6 +232,7 @@ fn take(queue: &mut Queue, input: Input) -> Step {
         | Message::SavedInto(_)
         | Message::Clip(_)
         | Message::LayoutList(_)
+        | Message::EditGuarded(_)
         | Message::Opened(_)
         | Message::OpenedSheets(_)
         | Message::Rendered(_)
@@ -271,19 +272,36 @@ fn open_document(
                 saves: Saves::default(),
             })
         }
-        Err(code) => {
+        Err(NotOpened::Code(code)) => {
             answers.error(id, code)?;
+            Err(EXIT_OK)
+        }
+        // The editor would drop parts of this file on save: no editing session; the app opens the viewer.
+        Err(NotOpened::Guarded(dropped)) => {
+            answers.send(id, &Message::EditGuarded(office::EditGuarded { dropped }))?;
             Err(EXIT_OK)
         }
     }
 }
 
-fn opened(ask: Ask, memory: &dyn Memory, engine: &dyn Engine) -> Result<(Doc, Message), ErrorCode> {
+/// Why no document session started: an error code, or the edit-open guard ([`crate::edit_guard`]).
+enum NotOpened {
+    Code(ErrorCode),
+    Guarded(Vec<office::DroppedPart>),
+}
+
+impl From<ErrorCode> for NotOpened {
+    fn from(code: ErrorCode) -> Self {
+        NotOpened::Code(code)
+    }
+}
+
+fn opened(ask: Ask, memory: &dyn Memory, engine: &dyn Engine) -> Result<(Doc, Message), NotOpened> {
     let doc = match ask {
         Ask::Open(open) => {
             // Over the app's own input limit: refused without mapping anything (the helper ends right after).
             if open.doc.len > MAX_INPUT_BYTES {
-                return Err(ErrorCode::TooLarge);
+                return Err(ErrorCode::TooLarge.into());
             }
             let mapped = memory.read(open.doc)?;
             let doc = engine.open(open.kind, mapped.as_slice());
@@ -294,9 +312,13 @@ fn opened(ask: Ask, memory: &dyn Memory, engine: &dyn Engine) -> Result<(Doc, Me
         }
         Ask::OpenEdit(open) => {
             if open.doc.len > MAX_INPUT_BYTES {
-                return Err(ErrorCode::TooLarge);
+                return Err(ErrorCode::TooLarge.into());
             }
             let mapped = memory.read(open.doc)?;
+            let dropped = crate::edit_guard::dropped_parts(mapped.as_slice());
+            if !dropped.is_empty() {
+                return Err(NotOpened::Guarded(dropped));
+            }
             let doc = engine.open_edit(open.kind, mapped.as_slice());
             drop(mapped);
             Doc::Edit(doc?)
@@ -304,13 +326,13 @@ fn opened(ask: Ask, memory: &dyn Memory, engine: &dyn Engine) -> Result<(Doc, Me
         // No grant: a new document is built from a template the engine holds.
         Ask::NewDoc(new) => Doc::Edit(engine.new_doc(new.kind, new.template)?),
         // `work` calls this for the three opening asks only.
-        _ => return Err(ErrorCode::Internal),
+        _ => return Err(ErrorCode::Internal.into()),
     };
     let first = match doc.view().opened() {
         Opening::Pages(pages) => {
             // At most the engine's 2,000 pages, which fit one frame; more than a frame holds is more than allowed.
             if pages.encode().is_err() {
-                return Err(ErrorCode::TooLarge);
+                return Err(ErrorCode::TooLarge.into());
             }
             Message::Opened(pages)
         }

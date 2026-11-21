@@ -41,6 +41,8 @@ pub const KIND_SAVE_READY: u16 = 0x0208;
 pub const KIND_SAVED_INTO: u16 = 0x0209;
 /// Helper -> app: the selection as text and, when it fits, html.
 pub const KIND_CLIP: u16 = 0x020A;
+/// Helper -> app: the answer to `OpenEdit` when the file holds parts the editor would drop on save; the helper ends.
+pub const KIND_EDIT_GUARDED: u16 = 0x020C;
 /// Helper -> app: the slide layouts' names.
 pub const KIND_LAYOUT_LIST: u16 = 0x020B;
 
@@ -69,6 +71,11 @@ macro_rules! tag_enum {
 tag_enum!(
     /// What the editor edits.
     EditKind { Docx = 1, Xlsx = 2, Pptx = 3 }
+);
+tag_enum!(
+    /// A kind of package part the editor's engines do not keep on save (office-editor-090 look-back): a file that
+    /// holds one opens in the viewer instead, so a save can never remove it.
+    DroppedPart { Chart = 1, Ole = 2, Vml = 3, SmartArt = 4, Other = 5 }
 );
 tag_enum!(
     /// The starting point of a new document.
@@ -1060,3 +1067,66 @@ impl LayoutList {
     }
 }
 
+
+/// The answer to `OpenEdit` for a file the editor would damage on save: the kinds of part it would drop (one of
+/// each, in [`DroppedPart`] order, never empty). No editing session exists; the helper ends after sending it, and the
+/// app opens the file in the viewer and says which parts editing would remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditGuarded {
+    pub dropped: Vec<DroppedPart>,
+}
+
+/// The most kinds an [`EditGuarded`] names: one of each [`DroppedPart`].
+const MAX_DROPPED: usize = 5;
+
+impl EditGuarded {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        let mut o = Out::new();
+        let n = o.count(self.dropped.len());
+        for part in self.dropped.iter().take(n) {
+            o.u8(part.tag());
+        }
+        o.finish()
+    }
+
+    /// Refuses an empty list, a repeated kind or more kinds than exist (`BadTag`): a guard that names nothing is not
+    /// a guard.
+    pub fn decode(payload: &[u8]) -> Result<EditGuarded, DecodeError> {
+        let mut i = In::new(payload);
+        let n = i.count(1)?;
+        if n == 0 || n > MAX_DROPPED {
+            return Err(DecodeError::BadTag);
+        }
+        let mut dropped = Vec::with_capacity(n);
+        for _ in 0..n {
+            let part = DroppedPart::from_tag(i.u8()?)?;
+            if dropped.contains(&part) {
+                return Err(DecodeError::BadTag);
+            }
+            dropped.push(part);
+        }
+        i.finish()?;
+        Ok(EditGuarded { dropped })
+    }
+}
+
+#[cfg(test)]
+mod guarded_tests {
+    use super::*;
+
+    #[test]
+    fn edit_guarded_round_trips_and_refuses_nonsense() {
+        let all = EditGuarded {
+            dropped: vec![DroppedPart::Chart, DroppedPart::Ole, DroppedPart::Vml, DroppedPart::SmartArt, DroppedPart::Other],
+        };
+        assert_eq!(EditGuarded::decode(&all.encode().unwrap()), Ok(all));
+        let one = EditGuarded { dropped: vec![DroppedPart::Vml] };
+        assert_eq!(EditGuarded::decode(&one.encode().unwrap()), Ok(one));
+        let empty = EditGuarded { dropped: vec![] }.encode().unwrap();
+        assert_eq!(EditGuarded::decode(&empty), Err(DecodeError::BadTag));
+        let twice = EditGuarded { dropped: vec![DroppedPart::Chart, DroppedPart::Chart] }.encode().unwrap();
+        assert_eq!(EditGuarded::decode(&twice), Err(DecodeError::BadTag));
+        assert_eq!(EditGuarded::decode(&[1, 0, 0, 0, 9]), Err(DecodeError::BadTag));
+        assert_eq!(EditGuarded::decode(&[1, 0, 0, 0, 1, 0]), Err(DecodeError::TrailingBytes));
+    }
+}
