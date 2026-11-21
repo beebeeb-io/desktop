@@ -52,6 +52,7 @@ pub mod state;
 pub mod storage_view;
 pub mod surfaces;
 pub mod tray;
+pub mod tray_tip_window;
 // Rendered by `platform/windows.rs`; tested (and looked at) on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod tray_icon;
