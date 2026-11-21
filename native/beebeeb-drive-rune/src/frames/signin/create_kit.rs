@@ -37,7 +37,6 @@ pub static DOWNLOAD: Icon = Icon {
 };
 
 /// `.kit-btn-sm`'s label: 12px/500 on its own line.
-const BUTTON_SM: TextStyle = TextStyle::new(12.0, 500.0).lh(17.1429).tracking(-0.06);
 /// A checkbox's sentence: 12px on a relaxed line.
 const CHECK_LABEL: TextStyle = TextStyle::new(12.0, 400.0).lh(19.5);
 /// `.kit-chip`: 12px/600.
@@ -218,26 +217,16 @@ pub fn meter(key: &str, lit: u8, words: &str, t: &Theme) -> El {
 
 /// A small outline button that is as wide as its words (`.kit-btn-sm`): Copy, Save as file, Print.
 pub fn small_button(k: &mut Keys, label: &str, icon: &'static Icon, t: &Theme) -> El {
-    let key = k.next("btn");
-    row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(6.0)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .hover(t.paper2)
-        .press(t.paper3)
-        .focusable(true)
-        .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(rune::Cursor::Pointer)
-        .child(kit::glyph(format!("{key}-icon"), icon, 14.0, t.text))
-        .child(kit::label(format!("{key}-label"), label, BUTTON_SM, t.text))
+    use crate::ui::button::{ButtonState, Size, Variant, button, keys};
+    button(
+        keys(&k.next("btn")),
+        label,
+        Some(icon),
+        Variant::Secondary,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    )
 }
 
 /// The "Next" card of DW-A44: the product's own step, named. Keys `next-0`, `-tile`, `-icon`,
