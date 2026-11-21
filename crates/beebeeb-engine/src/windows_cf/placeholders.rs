@@ -461,6 +461,26 @@ fn win32_code(error: &anyhow::Error) -> Option<u32> {
     (code & 0xFFFF_0000 == 0x8007_0000).then_some(code & 0xFFFF)
 }
 
+/// Task 028: open `path` for a CF call with the least access it needs. A placeholder that is not wholly on disk is
+/// opened with no oplock and no write access (an EXCLUSIVE+WRITE open of a cloud-only file asks the provider for
+/// the whole file first); a file on disk is opened EXCLUSIVE and only gets write access when that is refused
+/// (a read-only file).
+unsafe fn open_cf_least_access(
+    path: &std::path::Path,
+    path_wide: &[u16],
+) -> windows::core::Result<windows::Win32::Foundation::HANDLE> {
+    if is_cloud_placeholder(path) && !fully_on_disk(path) {
+        return CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE);
+    }
+    match CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_EXCLUSIVE) {
+        Err(e) if e.code() == windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult() => CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        ),
+        other => other,
+    }
+}
+
 /// Convert a brand-new plain local file at `path` into a Cloud Files
 /// placeholder WITHOUT marking it in-sync, called the moment we decide to upload
 /// it (task 0780) and BEFORE the upload completes.
@@ -503,10 +523,7 @@ pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -
     // SAFETY: `path_wide` / `identity` live for the whole call; the handle is
     // closed on every exit path.
     unsafe {
-        let handle = CfOpenFileWithOplock(
-            PCWSTR(path_wide.as_ptr()),
-            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
-        )
+        let handle = open_cf_least_access(path, &path_wide)
         .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert-unsynced): {e}"))?;
 
         // NONE: become a placeholder, keep bytes on disk, do NOT claim in-sync.
@@ -561,6 +578,10 @@ pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -
 /// SAFETY: opens a CF handle via `CfOpenFileWithOplock` and always closes it
 /// via `CfCloseHandle` before returning.
 pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
+    // Task 028: a placeholder not wholly on disk has nothing to free; open nothing (no fetch, no write access).
+    if is_cloud_placeholder(path) && !fully_on_disk(path) {
+        return Ok(0);
+    }
     // LD-0113 Amendment 7: the engine's own change of a read-only Backups file (the open needs write access).
     let _read_only = super::read_only::Lifted::new(path);
     // Logical size = bytes currently materialised on disk for a fully-hydrated
@@ -576,10 +597,7 @@ pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
     // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
     // every exit path.
     unsafe {
-        let handle = CfOpenFileWithOplock(
-            PCWSTR(path_wide.as_ptr()),
-            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
-        )
+        let handle = open_cf_least_access(path, &path_wide)
         .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (dehydrate): {e}"))?;
 
         // length = -1 → dehydrate from `startingoffset` to EOF. NONE flags =
@@ -739,10 +757,7 @@ pub fn set_pin_state(path: &std::path::Path, pinned: bool, recurse: bool) -> any
     // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
     // every exit path.
     unsafe {
-        let handle = CfOpenFileWithOplock(
-            PCWSTR(path_wide.as_ptr()),
-            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
-        )
+        let handle = open_cf_least_access(path, &path_wide)
         .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (set_pin_state): {e}"))?;
 
         let result = CfSetPinState(handle, pin_state, pin_flags, None);
