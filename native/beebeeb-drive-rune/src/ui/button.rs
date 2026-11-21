@@ -149,7 +149,8 @@ pub fn button(
         b = b.opacity(0.5);
     }
     b = if matches!(state, ButtonState::Busy | ButtonState::Disabled) {
-        b.disabled(true)
+        // `inert`: a press the caller chains runs neither from the pointer nor from the keyboard.
+        b.disabled(true).inert()
     } else {
         b.focusable(true)
             .focus_ring(2.0, 2.0, t.accent_deep)

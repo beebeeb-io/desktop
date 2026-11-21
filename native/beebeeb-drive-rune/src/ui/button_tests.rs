@@ -1,7 +1,7 @@
 //! The one button, rendered in a runtime: each variant and size, its keys, its states, and the
 //! width it hugs.
 
-use rune::{Color, Cx, El, ElementInfo, Env, Key, KeyEvent, Mods, Runtime, col};
+use rune::{Color, Cx, El, ElementInfo, Env, Key, KeyEvent, Mods, Runtime, row};
 
 use super::*;
 use crate::theme::icons;
@@ -38,7 +38,7 @@ impl Page {
 fn view(p: &Page, _: &mut Cx<Page>) -> El {
     let t = theme(false);
     let ic = p.icon.then_some(&icons::PLUS);
-    col().key("page").px(20.0).pt(20.0).child(
+    row().key("page").px(20.0).pt(20.0).child(
         button(p.keys.clone(), p.label, ic, p.variant, p.size, p.state, &t).on_press(|p: &mut Page| p.pressed += 1),
     )
 }
