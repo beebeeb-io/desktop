@@ -555,3 +555,143 @@ fn old_presets_press_their_enter_button() {
     press(&mut rt, Key::Enter);
     assert!(rt.state.pressed.is_empty());
 }
+
+/// A window with an opener behind the modal: `open` shows the dialog, `menu` shows the menu row
+/// that opens it in the `modal_from` case (the row goes as the dialog opens).
+struct F {
+    open: bool,
+    menu: bool,
+    from: bool,
+}
+
+fn focus_button(key: &str, f: impl Fn(&mut F) + 'static) -> El {
+    el().key(key.to_string())
+        .role("button")
+        .focusable(true)
+        .size(80.0, 24.0)
+        .on_press(f)
+}
+
+fn focus_view(s: &F, _: &mut Cx<F>) -> El {
+    let t = theme(false);
+    let mut root = col()
+        .key("root")
+        .w_full()
+        .h_full()
+        .child(focus_button("opener", |s| {
+            if s.from {
+                s.menu = true
+            } else {
+                s.open = true
+            }
+        }))
+        .child(focus_button("behind", |_| {}));
+    if s.menu {
+        root = root.child(focus_button("menu-row", |s| {
+            s.menu = false;
+            s.open = true;
+        }));
+    }
+    if s.open {
+        let card = dialog(
+            Dialog {
+                foot: Foot::Row(vec![
+                    focus_button("save", |_| {}),
+                    focus_button("cancel", |s: &mut F| s.open = false),
+                ]),
+                ..Dialog::new("dlg", "M", 380.0)
+            },
+            &t,
+        );
+        root = root.child(if s.from {
+            modal_from(32.0, card, "opener", |s: &mut F| s.open = false, &t)
+        } else {
+            modal(32.0, card, |s: &mut F| s.open = false, &t)
+        });
+    }
+    root
+}
+
+fn focus_window(from: bool) -> Runtime<F> {
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(F { open: false, menu: false, from }, focus_view, (1000.0, 800.0), env);
+    rt.frame(0.0);
+    rt
+}
+
+fn focus_key(rt: &mut Runtime<F>, key: Key, shift: bool) {
+    rt.key(KeyEvent {
+        key,
+        mods: Mods {
+            shift,
+            ..Mods::default()
+        },
+    });
+    rt.frame(0.0);
+    rt.settle_all();
+    rt.frame(0.0);
+}
+
+fn focused_key(rt: &Runtime<F>) -> Option<String> {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.focused && !e.exiting)
+        .and_then(|e| e.key)
+}
+
+fn space(rt: &mut Runtime<F>) {
+    focus_key(rt, Key::Text(" ".into()), false);
+}
+
+#[test]
+fn tab_stays_inside_an_open_dialog_and_esc_hands_focus_back_to_the_opener() {
+    let mut rt = focus_window(false);
+    focus_key(&mut rt, Key::Tab, false);
+    assert_eq!(focused_key(&rt).as_deref(), Some("opener"));
+    space(&mut rt);
+    assert!(rt.state.open);
+    for _ in 0..4 {
+        focus_key(&mut rt, Key::Tab, false);
+        let now = focused_key(&rt);
+        assert!(
+            matches!(now.as_deref(), Some("save" | "cancel")),
+            "Tab stays in the dialog, got {now:?}"
+        );
+    }
+    focus_key(&mut rt, Key::Tab, true);
+    assert!(matches!(focused_key(&rt).as_deref(), Some("save" | "cancel")), "and Shift+Tab");
+    focus_key(&mut rt, Key::Escape, false);
+    assert!(!rt.state.open, "Esc closes it");
+    assert_eq!(focused_key(&rt).as_deref(), Some("opener"), "focus is back on the opener");
+}
+
+#[test]
+fn a_button_that_closes_the_dialog_hands_focus_back_to_the_opener() {
+    let mut rt = focus_window(false);
+    focus_key(&mut rt, Key::Tab, false);
+    space(&mut rt);
+    rt.update(|_, tx| tx.focus("cancel", true));
+    rt.frame(0.0);
+    assert_eq!(focused_key(&rt).as_deref(), Some("cancel"));
+    space(&mut rt);
+    assert!(!rt.state.open);
+    assert_eq!(focused_key(&rt).as_deref(), Some("opener"));
+}
+
+#[test]
+fn a_dialog_opened_from_a_row_that_went_away_hands_focus_to_the_named_opener() {
+    let mut rt = focus_window(true);
+    focus_key(&mut rt, Key::Tab, false);
+    space(&mut rt);
+    assert!(rt.state.menu);
+    rt.update(|_, tx| tx.focus("menu-row", true));
+    rt.frame(0.0);
+    space(&mut rt);
+    assert!(rt.state.open && !rt.state.menu, "the row went, the dialog opened");
+    focus_key(&mut rt, Key::Escape, false);
+    assert!(!rt.state.open);
+    assert_eq!(focused_key(&rt).as_deref(), Some("opener"), "focus goes to the named opener, not nowhere");
+}

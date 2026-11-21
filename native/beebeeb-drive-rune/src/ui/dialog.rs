@@ -3,7 +3,8 @@
 //! | Piece | Function | Keys it gives |
 //! | --- | --- | --- |
 //! | Any dialog: surface, head, body, foot, Enter | `dialog(Dialog { .. }, t)` | `key`; `p-clip`, `p-head`, `p-title`, `p-sub`, `p-words`, `p-body`, `p-foot` (`p` = `prefix`) |
-//! | The scrim, modal: Esc dismisses, Tab stays inside | `modal(top, card, dismiss, t)` | `scrim` |
+//! | The scrim, modal: Esc dismisses, Tab stays inside, focus back on the opener | `modal(top, card, dismiss, t)` | `scrim` |
+//! | The same, focus back on a named opener (one that went away) | `modal_from(top, card, opener, dismiss, t)` | `scrim` |
 //! | The card: title, line under it, body, foot (delegate) | `card(name, width, title, sub, body, foot, t)` | `dlg`, `dlg-clip`, `dlg-head`, `dlg-title`, `dlg-sub`, `dlg-body`, `dlg-foot` |
 //! | The scrim with the card in its middle | `scrim(top, card, t)` | `scrim` |
 //!
@@ -127,6 +128,19 @@ pub fn dialog(d: Dialog, t: &Theme) -> El {
 /// `dismiss`, Tab stays inside, rune's autofocus picks the first field or Tab stop.
 pub fn modal<S: 'static>(top: f32, card: El, dismiss: impl Fn(&mut S) + 'static, t: &Theme) -> El {
     scrim(top, card, t).modal(false, dismiss)
+}
+
+/// [`modal`] that hands focus to the control keyed `opener` as it closes (Esc, a button), for
+/// an opener that is gone by then: a menu's row, a toolbar overflow item. An opener that stays
+/// gets focus back from [`modal`] alone.
+pub fn modal_from<S: 'static>(
+    top: f32,
+    card: El,
+    opener: &str,
+    dismiss: impl Fn(&mut S) + 'static,
+    t: &Theme,
+) -> El {
+    modal(top, card, dismiss, t).focus_return(opener)
 }
 
 /// A dialog's card. `foot`: the buttons in the caller's layout, the primary first, the way out
