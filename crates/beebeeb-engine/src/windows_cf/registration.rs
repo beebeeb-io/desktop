@@ -229,9 +229,22 @@ pub fn shell_sync_root_id_as(sync_root: &std::path::Path, provider_name: &str) -
     // both register + unregister agree.
     // A root reached through a junction, an 8.3 name or another case resolves to one form first
     // (LD-0116); an already-canonical drive path is unchanged, so existing installs keep their Id.
-    let resolved = crate::engine_bridge::fs::canonical_root(sync_root);
+    let resolved = canonical_root(sync_root);
     let canonical = resolved.to_string_lossy();
     format!("{}!{:016x}", provider_name, fnv1a64(canonical.as_bytes()))
+}
+
+/// The root in its one canonical form (junction resolved, 8.3 name expanded, on-disk case, no `\\?\`
+/// prefix on a drive path); as given when it cannot be resolved. Same rule as `engine_bridge::fs`'s
+/// `canonical_root` (a private module, kept in step by hand). LD-0116.
+fn canonical_root(path: &std::path::Path) -> std::path::PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(canon) => match canon.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+            Some(rest) if !rest.starts_with("UNC\\") => std::path::PathBuf::from(rest),
+            _ => canon,
+        },
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 /// LD-0105 S7: what to do about the Explorer (WinRT) registration of a root.
@@ -320,5 +333,27 @@ mod identity_tests {
         );
         assert_ne!(status_ui_factory_clsid(&TEST), status_ui_factory_clsid(&REAL));
         assert_ne!(thumbnail_provider_clsid(&TEST), thumbnail_provider_clsid(&REAL));
+    }
+}
+
+#[cfg(test)]
+mod canonical_id_tests {
+    use super::*;
+
+    /// A root reached through a junction gets the Id of the folder it points at (LD-0116).
+    #[test]
+    fn a_junction_to_the_root_has_the_same_shell_id() {
+        let dir = std::env::temp_dir().join(format!("bb-canon-id-{}", std::process::id()));
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let via = dir.join("via");
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"]).arg(&via).arg(&real).output().unwrap();
+        assert!(out.status.success(), "mklink /J failed");
+        assert_eq!(
+            shell_sync_root_id_as(&via, "BeebeebQA"),
+            shell_sync_root_id_as(&real, "BeebeebQA")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
