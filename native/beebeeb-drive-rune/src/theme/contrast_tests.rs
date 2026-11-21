@@ -1,9 +1,9 @@
 //! WCAG contrast of the theme's pairs, light and dark. Pairs that fail today are in [`KNOWN_FAILING`];
-//! that list may only shrink (drive-complete-035 fixes them): a listed pair that now passes fails the
-//! test until it is removed from the list.
+//! that list is now empty and stays so.
 
 use super::contrast_ratio;
-use crate::theme::tokens::{Theme, theme};
+use super::{SystemColors, system_contrast, theme_from_system, themed as theme};
+use crate::theme::tokens::Theme;
 use rune::Color;
 
 #[test]
@@ -34,17 +34,8 @@ fn pairs(t: &Theme) -> Vec<Pair> {
     v
 }
 
-/// Today's failures: "<light|dark>/<fg>/<bg>". May only shrink.
-const KNOWN_FAILING: &[&str] = &[
-    "dark/card_border/bg",
-    "dark/card_border/surface",
-    "dark/text_quaternary/bg",
-    "dark/text_quaternary/surface",
-    "light/card_border/bg",
-    "light/card_border/surface",
-    "light/text_quaternary/bg",
-    "light/text_quaternary/surface",
-];
+/// Pairs allowed to fail: none; the override layer (`themed`) lifts what the generated tokens miss.
+const KNOWN_FAILING: &[&str] = &[];
 
 fn key(dark: bool, p: &Pair, bg_name: &str) -> String {
     format!("{}/{}/{}", if dark { "dark" } else { "light" }, p.0, bg_name)
@@ -75,4 +66,29 @@ fn a11y_walk_contrast_pairs_pass_or_are_listed() {
     let listing: String = failing.iter().map(|(k, r, m)| format!("    \"{k}\", // {r:.2} < {m}\n")).collect();
     assert!(new.is_empty(), "pairs below their minimum (add to KNOWN_FAILING only if unfixable now):\n{listing}");
     assert!(stale.is_empty(), "pairs that now pass: remove from KNOWN_FAILING: {stale:?}");
+}
+
+#[test]
+fn contrast_theme_is_opaque_and_readable() {
+    // Windows "High Contrast Black".
+    let t = theme_from_system(SystemColors {
+        window: 0x000000,
+        window_text: 0xffffff,
+        highlight: 0xffff00,
+        highlight_text: 0x000000,
+        gray_text: 0x00ff00,
+        hot_light: 0xffff00,
+        btn_face: 0x000000,
+        btn_text: 0xffffff,
+    });
+    for c in [t.bg, t.text, t.card_border, t.selection, t.accent, t.hover, t.scrollbar] {
+        assert_eq!(c.a, 1.0);
+    }
+    assert!(contrast_ratio(t.text, t.bg) >= 7.0);
+    assert!(contrast_ratio(t.card_border, t.bg) >= 7.0);
+    assert!(contrast_ratio(t.text_quaternary, t.bg) >= 4.5);
+    assert!(t.dark);
+    assert_eq!(t.shadow.a, 0.0);
+    #[cfg(not(windows))]
+    assert!(system_contrast().is_none());
 }
