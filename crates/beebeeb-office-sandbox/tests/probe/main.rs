@@ -66,6 +66,8 @@
 //!                                                         less-privileged container flag and integrity level)
 //!   memory               -> memory private=<bytes> shared=<bytes> job=<bytes|none> peak-job=<bytes|none>
 //!                                                        (Windows: its own commit, and its job's, if it has one)
+//!   decoders             -> ok | err <step> <code>      (Windows: starts COM, Media Foundation, the AAC decoder and the
+//!                                                         WIC imaging factory, as the media helper's system route does)
 //!   hang                 -> hanging, then sleeps for ever
 //!   spin                 -> spinning, then burns one core for ever
 //!   exit <code>          -> exits with that code
@@ -1218,6 +1220,7 @@ fn main() {
             "strict-handles" => hardening::strict_handles(),
             "token" => hardening::token(),
             "memory" => hardening::memory(),
+            "decoders" => hardening::decoders(),
             "hang" | "spin" => {
                 let _ = writeln!(stdout, "{}", if request == "hang" { "hanging" } else { "spinning" });
                 let _ = stdout.flush();

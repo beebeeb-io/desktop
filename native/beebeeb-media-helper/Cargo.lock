@@ -25,6 +25,7 @@ name = "beebeeb-media-helper"
 version = "0.0.1"
 dependencies = [
  "beebeeb-media-protocol",
+ "beebeeb-office-sandbox",
  "filmcraft-codecs",
  "filmcraft-media",
  "symphonia",
@@ -35,6 +36,13 @@ dependencies = [
 [[package]]
 name = "beebeeb-media-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "beebeeb-office-sandbox"
+version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
 
 [[package]]
 name = "bitflags"
@@ -1034,6 +1042,15 @@ name = "windows-strings"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
 ]
