@@ -11,7 +11,7 @@ use super::{PASSWORD_KEY, Ui, act, icons, lock};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
-use crate::ui::au_entry::{self, DigitsState, FocusedSpec, WordState};
+use crate::ui::au_entry::{self, Caret, CaretAt, DigitsState, FocusedSpec, WordState, WordStep};
 use crate::ui::kit;
 
 pub(super) fn open(s: &mut State) -> &mut Ui {
@@ -318,12 +318,22 @@ pub(super) fn word_grid(ui: &Ui, t: &Theme) -> El {
                 .on_edit(edit_access(move |s: &mut State| &mut open(s).words[i]))
                 .on_input_change(then(move |ui| ui.word_changed(i)))
                 .on_input_key(move |s: &mut State, ev: &rune::KeyEvent, tx: &mut Tx| {
-                    // Enter moves to the next word; in the last box it is the screen's button.
-                    if ev.key == Key::Enter && i + 1 < WORD_KEYS.len() {
-                        tx.focus(WORD_KEYS[i + 1], tx.focus_visible());
-                        return true;
+                    // The twelve boxes are one grid (`au_entry::word_step`); in the last box
+                    // Enter is the screen's button.
+                    let ui = open(s);
+                    match au_entry::word_step(i, &ev.key, ev.mods, Caret::of(&ui.words[i])) {
+                        WordStep::Pass => escape_first(s, ev, tx),
+                        WordStep::Swallow => true,
+                        WordStep::Move { to, caret } => {
+                            let next = &mut ui.words[to];
+                            next.set_caret(match caret {
+                                CaretAt::Start => 0,
+                                CaretAt::End => next.text.len(),
+                            });
+                            tx.focus(WORD_KEYS[to], tx.focus_visible());
+                            true
+                        }
                     }
-                    escape_first(s, ev, tx)
                 })
                 // Twelve words pasted into any box fill them all.
                 .on_input_paste(move |s: &mut State, content: &rune::ClipboardContent, tx: &mut Tx| {

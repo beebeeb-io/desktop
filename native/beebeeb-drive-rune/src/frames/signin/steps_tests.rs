@@ -1051,3 +1051,107 @@ fn two_factor_then_the_recovery_phrase_never_says_the_account_changed() {
     assert_eq!(ui(&mut rt).take_intents(), vec![Intent::Next(NextAfterSignIn::Drive)]);
     assert!(!a11y(&rt).to_lowercase().contains("account changed"));
 }
+
+// ---------------------------------------------------------------------------
+// The twelve words as one grid (dc-155)
+// ---------------------------------------------------------------------------
+
+/// Every accessibility node keyed `key`, anywhere in the tree.
+pub(super) fn a11y_nodes(rt: &Runtime<State>, key: &str) -> Vec<serde_json::Value> {
+    fn walk(v: &serde_json::Value, key: &str, out: &mut Vec<serde_json::Value>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                if map.get("key").and_then(|k| k.as_str()) == Some(key) {
+                    out.push(v.clone());
+                }
+                map.values().for_each(|c| walk(c, key, out));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|c| walk(c, key, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&rt.accessibility_json(), key, &mut out);
+    out
+}
+
+/// The set size Rune reports for the item keyed `key`: AccessKit carries it on the item's
+/// nearest container (the node whose children hold it).
+pub(super) fn a11y_set_size_of(rt: &Runtime<State>, key: &str) -> Option<u64> {
+    fn walk(v: &serde_json::Value, key: &str) -> Option<Option<u64>> {
+        match v {
+            serde_json::Value::Object(map) => {
+                let holds = map.values().any(|c| {
+                    c.as_array().is_some_and(|kids| kids.iter().any(|k| k.get("key").and_then(|k| k.as_str()) == Some(key)))
+                });
+                if holds {
+                    return Some(map.get("setSize").and_then(|s| s.as_u64()));
+                }
+                map.values().find_map(|c| walk(c, key))
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(|c| walk(c, key)),
+            _ => None,
+        }
+    }
+    walk(&rt.accessibility_json(), key).flatten()
+}
+
+#[test]
+fn each_word_box_says_its_place_of_twelve() {
+    let (rt, _) = signed_in(phrase_script());
+    for (i, key) in WORD_KEYS.iter().enumerate() {
+        let nodes = a11y_nodes(&rt, key);
+        assert_eq!(nodes.len(), 1, "{key}");
+        assert_eq!(nodes[0]["name"], format!("Recovery word {}", i + 1));
+        assert_eq!(nodes[0]["position"], i + 1, "{} of 12", i + 1);
+        assert_eq!(a11y_set_size_of(&rt, key), Some(12), "{key}");
+    }
+}
+
+#[test]
+fn the_arrows_space_and_backspace_move_word_to_word_through_the_grid() {
+    let (mut rt, _) = signed_in(phrase_script());
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    type_(&mut rt, "harbor");
+    // Left at the start of the first box: nothing before it.
+    press(&mut rt, Key::Home);
+    press(&mut rt, Key::Left);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    // Right inside the word stays; at its end goes to the next box's start.
+    press(&mut rt, Key::Right);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    press(&mut rt, Key::End);
+    press(&mut rt, Key::Right);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[1]));
+    // Left at the start goes back with the caret at the word's end.
+    press(&mut rt, Key::Left);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    let w = &ui(&mut rt).words[0];
+    assert_eq!((w.anchor, w.focus), (6, 6), "the caret at the end of the word");
+    // Space at the end of a word: the next box. A space is never typed into a word.
+    press(&mut rt, Key::Text(" ".into()));
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[1]));
+    press(&mut rt, Key::Text(" ".into()));
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[1]), "an empty box keeps its place");
+    assert!(ui(&mut rt).words[1].text.is_empty());
+    // Backspace in an empty box: back one, the word untouched.
+    press(&mut rt, Key::Backspace);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    assert_eq!(ui(&mut rt).words[0].text, "harbor");
+    // Up and Down keep the column; nothing above the top row, nothing below the bottom.
+    press(&mut rt, Key::Up);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    for row in 1..4 {
+        press(&mut rt, Key::Down);
+        assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[row * 3]));
+    }
+    press(&mut rt, Key::Down);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[9]));
+    press(&mut rt, Key::Up);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[6]));
+    // Right at the end of the last box: nothing after it.
+    click(&mut rt, WORD_KEYS[11]);
+    press(&mut rt, Key::Right);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[11]));
+    assert_eq!(ui(&mut rt).words[0].text, "harbor", "no move touched a word");
+}

@@ -716,3 +716,21 @@ fn setup_add_passkey_the_password_is_wiped_after_the_call() {
         assert!(log.borrow().is_empty(), "nothing was sent");
     }
 }
+
+#[test]
+fn the_compare_view_keeps_tab_inside_and_gives_focus_back_to_compare() {
+    let mut rt = runtime("DW-0204");
+    click(&mut rt, "btn-0");
+    assert_eq!(focused(&rt).as_deref(), Some("cmp-done"));
+    let inside = |rt: &Runtime<State>| {
+        let key = focused(rt).unwrap_or_default();
+        key.starts_with("cmp") || key.starts_with("sheet")
+    };
+    for _ in 0..40 {
+        press(&mut rt, Key::Tab);
+        assert!(inside(&rt), "Tab left the compare view: {:?}", focused(&rt));
+    }
+    press(&mut rt, Key::Escape);
+    assert_eq!(count(&rt, "sheet"), 0);
+    assert_eq!(focused(&rt).as_deref(), Some("btn-0"), "focus returns to Compare");
+}
