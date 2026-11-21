@@ -16,6 +16,8 @@ LangString uninstallApp ${LANG_ENGLISH} "Uninstall ${PRODUCTNAME}"
 LangString uninstallBeforeInstalling ${LANG_ENGLISH} "Uninstall before installing"
 LangString unknown ${LANG_ENGLISH} "unknown"
 LangString needsBridgeFirst ${LANG_ENGLISH} "This version of ${PRODUCTNAME} can only replace ${PRODUCTNAME} ${MINUPGRADEFROM} or later, and an older version is installed. Setup has not changed anything.$\n$\nOpen ${PRODUCTNAME}, choose Check for updates and install the update it offers (${MINUPGRADEFROM} or a later 0.8 version). After that, ${PRODUCTNAME} offers this version by itself."
-; Honest about what the box does not do: the sign-in lives in Windows Credential Manager and the folder is registered
-; with Explorer by the app; an uninstaller that has already removed the app cannot undo either (spec section 5).
-LangString deleteAppData ${LANG_ENGLISH} "Delete the application data on this PC (settings and sync state). This does not sign you out and does not remove the ${PRODUCTNAME} folder from Explorer: to remove both, sign out in ${PRODUCTNAME} before uninstalling."
+; Honest about what each choice does. Ticked: everything of THIS app on this PC is removed (settings, the plaintext copies
+; kept while files are open or being saved, the saved sign-in). Not ticked: the uninstaller lists what stays.
+; Not removed either way: your files in the ${PRODUCTNAME} folder and the folder's entry in Explorer (sign out in the app first).
+LangString deleteAppData ${LANG_ENGLISH} "Delete the application data on this PC: settings, temporary copies of opened files, and the saved sign-in (session and key). Your files in the ${PRODUCTNAME} folder and its entry in Explorer stay: to remove the entry, sign out in ${PRODUCTNAME} before uninstalling."
+LangString uninstallKeepsData ${LANG_ENGLISH} "${PRODUCTNAME} has been uninstalled. These stay on this PC: your settings and sync state, any temporary copies of opened files, the saved sign-in (session and key), and your files in the ${PRODUCTNAME} folder. Uninstall again with 'Delete the application data' ticked to remove the settings, copies and sign-in."
