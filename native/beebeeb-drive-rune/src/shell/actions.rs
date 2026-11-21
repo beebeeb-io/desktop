@@ -13,6 +13,7 @@ use super::instance::ProfileHolder;
 use super::platform::{Platform, PlatformError};
 use super::tray::{EngineState, TrayInputs};
 use crate::frames::global::sync_off::SyncOff;
+use crate::frames::signin::discard_switch::Ask as DiscardAsk;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionError {
@@ -97,6 +98,15 @@ pub trait EngineActions: Send + Sync {
     fn sync_refusal(&self) -> Option<SyncOff> {
         None
     }
+    /// dc-111: what "Discard and switch" would lose (the previous account's unsent files). Only reads. BLOCKS briefly
+    /// (the local state is read).
+    fn discard_ask(&self) -> Result<DiscardAsk, ActionError> {
+        Err(ActionError::NotBuilt("discard and switch"))
+    }
+    /// dc-111: discard exactly `ask` (each file kept first) and switch, on a worker. `Ok` means "asked".
+    fn discard_and_switch(&self, _ask: DiscardAsk) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("discard and switch"))
+    }
     /// The away lock's look at `seen`, as a job for a worker ([`AwayJob`]). `None`: this engine has no automatic
     /// lock (the fixture), and the shell asks nothing more.
     fn away_job(&self, _seen: Away) -> Option<AwayJob> {
@@ -135,6 +145,14 @@ pub trait ShellActions: Send + Sync {
     fn lock_vault_now(&self) {}
     /// See [`EngineActions::sync_refusal`].
     fn sync_refusal(&self) -> Option<SyncOff>;
+    /// See [`EngineActions::discard_ask`].
+    fn discard_ask(&self) -> Result<DiscardAsk, ActionError> {
+        Err(ActionError::NotBuilt("discard and switch"))
+    }
+    /// See [`EngineActions::discard_and_switch`].
+    fn discard_and_switch(&self, _ask: DiscardAsk) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("discard and switch"))
+    }
     /// See [`EngineActions::away_job`].
     fn away_job(&self, _seen: Away) -> Option<AwayJob> {
         None
@@ -205,6 +223,12 @@ impl ShellActions for HostActions {
     }
     fn sync_refusal(&self) -> Option<SyncOff> {
         self.engine.sync_refusal()
+    }
+    fn discard_ask(&self) -> Result<DiscardAsk, ActionError> {
+        self.engine.discard_ask()
+    }
+    fn discard_and_switch(&self, ask: DiscardAsk) -> Result<(), ActionError> {
+        self.engine.discard_and_switch(ask)
     }
     fn away_job(&self, seen: Away) -> Option<AwayJob> {
         self.engine.away_job(seen)
