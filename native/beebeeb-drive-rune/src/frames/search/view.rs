@@ -176,7 +176,9 @@ fn toolbar(s: &State, sub: &str, t: &Theme) -> El {
     );
     bar(
         Bar {
+            gate_closed: false,
             name: "Search".into(),
+            gate_closed: false,
             // The board draws Back and Forward off while searching: Esc is the way back.
             back: (false, None),
             forward: (false, None),
@@ -196,6 +198,7 @@ fn toolbar(s: &State, sub: &str, t: &Theme) -> El {
             details: if s.show_detail_pane { PaneBtn::Open } else { PaneBtn::Closed },
             on_details: press(|s, _| s.show_detail_pane = !s.show_detail_pane),
             inert: false,
+            gate_closed: false,
             on_explorer: Box::new(|s, tx| {
                 crate::shell::host::on_menu(s, crate::shell::tray::MenuAction::OpenInFileExplorer, tx);
             }),

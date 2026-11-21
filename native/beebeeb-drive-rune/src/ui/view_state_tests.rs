@@ -169,3 +169,29 @@ fn failed_has_title_reason_try_again_and_a_polite_live_region() {
     let rt = render(Which::Failed { retry: false });
     assert!(find(&rt, "oops-retry").is_none());
 }
+
+#[test]
+fn sized_view_state_takes_the_loading_prefix_and_a_compact_tile() {
+    fn v(_: &Page, _: &mut Cx<Page>) -> El {
+        let t = theme(false);
+        rune::col()
+            .key("page")
+            .w(400.0)
+            .child(view_state_sized(ViewState::Loading { words: "Wait" }, "set-load", Size::Sm, &t))
+            .child(view_state_sized(
+                ViewState::Empty { key: "e", icon: &icons::PLUS, title: "T", body: "B", action: None },
+                "x",
+                Size::Sm,
+                &t,
+            ))
+    }
+    let mut rt = Runtime::new(Page { which: Which::Loading, retried: 0 }, v, (400.0, 600.0), Env { system_dark: false, scale: 2.0 });
+    rt.frame(0.0);
+    rt.settle_all();
+    rt.frame(0.0);
+    for k in ["set-load", "set-load-words", "set-load-bar", "set-load-bar-fill"] {
+        assert!(find(&rt, k).is_some(), "{k}");
+    }
+    assert!(find(&rt, "loading").is_none());
+    assert_eq!(find(&rt, "e-tile").expect("tile").rect[2], 40.0);
+}

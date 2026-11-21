@@ -192,18 +192,18 @@ fn clearing_downloads_asks_first_and_clearing_previews_says_so() {
 #[test]
 fn insights_say_loading_failed_and_empty_and_try_again_loads() {
     let rt = runtime("DW-0783b");
-    assert_eq!(info(&rt, "card-0").label.as_deref(), Some("Loading"));
-    assert!(find(&rt, "skel-8").is_some(), "three cards of three shapes");
+    assert!(find(&rt, "loading").is_some());
+    assert!(find(&rt, "insbar-0").is_none());
 
     let rt = runtime("DW-0783d");
-    assert_eq!(info(&rt, "card-0-head").text.as_deref(), Some("Nothing is stored yet"));
+    assert_eq!(info(&rt, "insights-empty-title").text.as_deref(), Some("Nothing is stored yet"));
 
     let mut rt = runtime("DW-0783c");
-    assert_eq!(info(&rt, "card-0").role, "alert");
+    assert!(find(&rt, "insights-failed").is_some());
     assert!(find(&rt, "insbar-0").is_none(), "no stale numbers beside the failure");
-    press(&mut rt, "btn-0");
+    press(&mut rt, "insights-failed-retry");
     assert_eq!(ui(&rt).drive.insights(), &Insights::Loading, "Try again loads again");
-    assert!(find(&rt, "skel-0").is_some());
+    assert!(find(&rt, "loading").is_some());
 }
 
 #[test]

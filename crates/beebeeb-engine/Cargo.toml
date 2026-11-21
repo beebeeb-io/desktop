@@ -25,6 +25,8 @@ beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "a5176f97464
 # The two-level lock's rules (`flows::lock`): I/O-free, no transport and no store of its own.
 beebeeb-api = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1" }
 beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1" }
+# The kept-key rule (`auth::kept_key`): when a key this computer kept may be offered, and what the proof means.
+beebeeb-client = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1", default-features = false, features = ["auth"] }
 # The running engine (API client, sync bridge, credential stores).
 toml = "0.8"
 dirs = "6"

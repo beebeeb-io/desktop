@@ -5,10 +5,10 @@
 use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::Theme;
-use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell as shell;
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use rune::El;
 
 use super::SettingsUi;
@@ -25,28 +25,22 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     // No answer, or an answer without a single choice: said, with a way to ask again. Never
     // an empty list, and never a guess at what the choice was.
     let answer = ui.source.locations();
-    // Asked for, nothing known yet (the board has no frame for it): one sentence, never a blank pane.
+    // Asked for, nothing known yet: said, never a blank pane.
     if answer.is_none() && ui.source.locations_loading() {
-        children.push(notices::note(
-            0,
-            Tone::Neutral,
-            &ic::GLOBE,
-            "Loading storage locations…",
-            "Asking Beebeeb for the list.",
-            t,
-        ));
+        children.push(view_state(ViewState::Loading { words: "Loading storage locations…" }, t));
         return (shell::pane(children, t), None);
     }
     let chosen = answer.as_ref().and_then(|l| l.chosen().cloned());
     let (Some(l), Some(chosen)) = (answer, chosen) else {
-        let again = controls::button(0, "Try again", None, Emphasis::Plain, t)
-            .on_press(|s: &mut State| s.settings.source.reload_locations());
-        children.push(notices::problem(
-            0,
-            0,
-            "Couldn't load storage locations",
-            "Your files stay where they are. New files keep going to the location you chose before.",
-            Some(again),
+        children.push(view_state(
+            ViewState::Failed {
+                key: "locations-failed",
+                title: "Couldn't load storage locations",
+                why: "Your files stay where they are. New files keep going to the location you chose before.",
+                retry: Some(
+                    try_again("locations-failed", t).on_press(|s: &mut State| s.settings.source.reload_locations()),
+                ),
+            },
             t,
         ));
         return (shell::pane(children, t), None);

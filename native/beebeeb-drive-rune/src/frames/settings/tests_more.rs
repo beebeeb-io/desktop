@@ -528,8 +528,8 @@ fn a_source_that_does_not_know_these_pages_shows_no_sample_values() {
     super::go(&mut state, "DW-0790b");
     let rt = window(state);
     assert_eq!(
-        says(&rt, "item-0-0-title"),
-        "Not available in this version yet.",
+        says(&rt, "activity-empty-title"),
+        "No measurements yet",
         "no App activity without a measurement: the page says so"
     );
     assert!(find(&rt, "note-0").is_none(), "no banner without a saved file");
@@ -782,4 +782,52 @@ fn app_activity_says_that_upload_and_download_are_the_latest_sample() {
         .filter_map(|e| e.text.clone())
         .any(|t| t.contains("Upload and download are the latest bandwidth sample"));
     assert!(said, "the footer names what the two rates are");
+}
+
+/// Every target a pane raises is one the shell takes: no `Intent::Open`, `Intent::Web` or `Intent::Show` a pane
+/// can queue ends as `NotWired`.
+#[test]
+fn no_pane_raises_a_target_nothing_takes() {
+    let panes = [
+        include_str!("general.rs"),
+        include_str!("notifications.rs"),
+        include_str!("recent.rs"),
+        include_str!("about.rs"),
+        include_str!("more.rs"),
+        include_str!("diagnostics.rs"),
+        include_str!("sync.rs"),
+        include_str!("previews.rs"),
+    ];
+    let quoted = |text: &str, head: &str| -> Vec<String> {
+        text.split(head)
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next().map(str::to_string))
+            .collect()
+    };
+    let mut seen = 0;
+    for text in panes {
+        for target in quoted(text, "Intent::Open(\"") {
+            seen += 1;
+            assert!(super::OPEN_TARGETS.contains(&target.as_str()), "Open({target}) has no taker");
+        }
+        for page in quoted(text, "Intent::Web(\"") {
+            seen += 1;
+            assert!(crate::shell::web_pages::url(&page).is_some(), "Web({page}) has no address");
+        }
+        for frame in quoted(text, "Intent::Show(\"") {
+            seen += 1;
+            assert!(super::TRAY_FRAMES.contains(&frame.as_str()), "Show({frame}) is not taken");
+        }
+    }
+    assert!(seen >= 10, "the scan found only {seen} targets");
+    // The alert places go() routes itself, so none reaches the shell as a Show.
+    for target in [
+        super::source::AlertTarget::DevicesAndSessions,
+        super::source::AlertTarget::Shared,
+        super::source::AlertTarget::SharedRequests,
+        super::source::AlertTarget::SecurityLog,
+    ] {
+        let frame = super::frame_of(target);
+        assert!(["DW-A55", "DW-0501", "DW-0503", "DW-A77"].contains(&frame));
+    }
 }

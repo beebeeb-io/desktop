@@ -6,9 +6,8 @@ use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::settings_card as cards;
-use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_meter as meters;
-use crate::ui::settings_notice::{self as notices, Tone};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::settings_shell::{self as shell, SUB};
 use rune::tok::Family;
 use rune::{El, TextStyle, col, el, row};
@@ -42,15 +41,24 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         ),
     ];
     match ui.drive.insights() {
-        Insights::Loading => children.extend(loading(t)),
-        Insights::Failed(why) => children.push(failed(why, t)),
-        Insights::Empty => children.push(notices::empty_sized(
-            0,
-            0,
-            &ic::CLOUD,
-            "Nothing is stored yet",
-            "Once you add files, you'll see where your storage goes, by type and by your largest files.",
-            333.09,
+        Insights::Loading => children.push(view_state(ViewState::Loading { words: "Loading your insights…" }, t)),
+        Insights::Failed(why) => children.push(view_state(
+            ViewState::Failed {
+                key: "insights-failed",
+                title: "Couldn't load your insights",
+                why,
+                retry: Some(try_again("insights-failed", t).on_press(|s: &mut State| s.settings.drive.reload_insights())),
+            },
+            t,
+        )),
+        Insights::Empty => children.push(view_state(
+            ViewState::Empty {
+                key: "insights-empty",
+                icon: &ic::CLOUD,
+                title: "Nothing is stored yet",
+                body: "Once you add files, you'll see where your storage goes, by type and by your largest files.",
+                action: None,
+            },
             t,
         )),
         Insights::Ready(data) => children.extend(ready(data, t)),
@@ -220,48 +228,6 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
     }
     let largest = cards::column(2, 0.0, 0.0, t).child(rows);
     vec![usage, by_type, largest]
-}
-
-/// The page's shape while it loads (DW-0783b): three cards of skeletons.
-fn loading(t: &Theme) -> Vec<El> {
-    let shapes: [[(Option<f32>, f32); 3]; 3] = [
-        [(Some(120.0), 10.0), (Some(220.0), 24.0), (None, 26.0)],
-        [(Some(120.0), 10.0), (Some(INNER * 0.7), 11.0), (None, 50.0)],
-        [(Some(120.0), 10.0), (Some(INNER * 0.7), 11.0), (None, 80.0)],
-    ];
-    shapes
-        .iter()
-        .enumerate()
-        .map(|(c, lines)| {
-            let mut card = cards::column(c, 16.0, 12.0, t).role("status").label("Loading");
-            for (i, (w, h)) in lines.iter().enumerate() {
-                card = card.child(meters::skeleton(c * 3 + i, *w, *h, t));
-            }
-            card
-        })
-        .collect()
-}
-
-/// Could not load (DW-0783c): said plainly, with the engine's reason and one way to try again.
-fn failed(why: &str, t: &Theme) -> El {
-    const HEAD: &str = "Couldn't load your insights";
-    let again = controls::button(0, "Try again", None, Emphasis::Plain, t)
-        .on_press(|s: &mut State| s.settings.drive.reload_insights());
-    cards::card(0, t)
-        .items_start()
-        .role("alert")
-        .label(format!("{HEAD}. {why}"))
-        .child(notices::tile(0, Tone::Red, &ic::WARN_CIRCLE, t))
-        .child(
-            col()
-                .key("card-0-words")
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(4.0)
-                .child(cards::head(0, HEAD, t))
-                .child(kit::label("card-0-sub", why, SUB.family(Family::Mono), t.text_tertiary))
-                .child(row().key("card-0-actions").pt(8.0).child(again)),
-        )
 }
 
 #[cfg(test)]
