@@ -560,7 +560,8 @@ fn a_read_that_fails_after_an_answered_sign_out_is_followed_by_the_read_for_that
     assert_eq!(
         server.asked("GET /api/v1/account/sessions"),
         4,
-        "the read and its two retries that failed, and the one after the answer"
+        "the read and its two retries that failed, and the one after the answer: {:?}",
+        server.fake.routes()
     );
     assert_eq!(ids(&source), ["s-this", "s-web"]);
     assert_eq!(source.notice(), Some(SIGNED_OUT));
