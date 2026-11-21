@@ -538,7 +538,7 @@ fn bar(key: &str, share: f32, direction: Direction, t: &Theme) -> El {
 /// otherwise. The word says the state; the colour only repeats it.
 fn state_pill(i: usize, state: DeviceState, t: &Theme) -> El {
     if state != DeviceState::UpToDate {
-        return notices::pill(i, state.label(), t);
+        return crate::ui::pill::pill(&format!("pill-{}", i), state.label(), crate::ui::pill::Tone::Neutral, true, t);
     }
     let key = format!("pill-{i}");
     row()
