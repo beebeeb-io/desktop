@@ -18,7 +18,9 @@ use super::{Intent, Ui, media_icons, refusal_text, states, style};
 use crate::State;
 use crate::media::player::{NoSound, PlayState, PlayerHandle, Refusal};
 use crate::theme::tokens::Theme;
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::kit;
+use crate::ui::view_state::{ViewState, view_state};
 
 #[cfg(test)]
 #[path = "player_view_tests.rs"]
@@ -108,33 +110,49 @@ pub fn refused(words: &str, t: &Theme) -> El {
 /// `store`: the Microsoft Store page to offer beside the button, only where the refusal says Windows lacks the
 /// extension (`refusal_text::Text::link`).
 fn refused_with(words: &str, action: &'static str, store: Option<&'static str>, t: &Theme) -> El {
-    let mut body = col()
+    // A refusal is final for this file here: it offers the other app, never "Try again".
+    let mut buttons = row().key("refused-actions").gap(8.0).child(
+        button(keys("refused-open"), action, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
+            |s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.intent(Intent::OpenInAnotherApp);
+                }
+            },
+        ),
+    );
+    if let Some(url) = store {
+        buttons = buttons.child(
+            button(
+                keys("refused-store"),
+                "Get HEVC Video Extensions",
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(move |s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.intent(Intent::OpenInBrowser(url.to_string()));
+                }
+            }),
+        );
+    }
+    col()
         .key("viewer-body")
         .grow(1.0)
         .h_full()
         .center()
-        .gap(12.0)
         .fill(style::stage(t))
-        .child(kit::label("refused-words", words.to_string(), style::TITLE, t.text).align(Align::Center))
-        .child(
-            super::text::tool_action("refused-open", action, None, None, t).on_press(
-                |s: &mut State| {
-                    if let Some(ui) = super::ui(s) {
-                        ui.intent(Intent::OpenInAnotherApp);
-                    }
-                },
-            ),
-        );
-    if let Some(url) = store {
-        body = body.child(super::text::tool_action("refused-store", "Get HEVC Video Extensions", None, None, t).on_press(
-            move |s: &mut State| {
-                if let Some(ui) = super::ui(s) {
-                    ui.intent(Intent::OpenInBrowser(url.to_string()));
-                }
+        .child(view_state(
+            ViewState::Failed {
+                key: "refused",
+                title: "Can\u{2019}t play this here",
+                why: words,
+                retry: Some(buttons),
             },
-        ));
-    }
-    body
+            t,
+        ))
 }
 
 /// The size a `frame` takes in a `stage`, both in the same unit: scaled to fit, never enlarged past the stage,

@@ -5,14 +5,13 @@
 //! search field) is `ui::toolbar`'s, drawn again here because that file builds it in one private
 //! function (a request to the design-system lane in the PR body: make the halves public).
 
-use rune::{Cx, El, col, el, row, text_input};
+use rune::{Cx, El, col, el, row};
 
 use super::source::OpenFile;
-use super::{Ui, icons, style};
+use super::{Ui, icons};
 use crate::State;
-use crate::theme::tokens::{Theme, radius, type_};
-use crate::ui::toolbar::{ToolState, kbd, segment, segmented, tool_button};
-use crate::ui::{caption, kit, sidebar, status_bar};
+use crate::theme::tokens::Theme;
+use crate::ui::{caption, sidebar, status_bar, toolbar};
 
 /// The status line's dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,8 +30,6 @@ pub struct Status {
     pub details: String,
 }
 
-const SEARCH_PLACEHOLDER: &str = "Search names";
-
 /// What the toolbar says about the file beyond its path.
 #[derive(Default)]
 pub struct Head {
@@ -42,142 +39,77 @@ pub struct Head {
     pub unsaved: bool,
 }
 
-/// The path and the line under it (`.mk-title` with `.mk-crumbs`).
+/// The file's name and the line under it, with its icon (and the unsaved dot): the shared title block.
 fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
     let facts = head.facts.clone().unwrap_or_else(|| file.facts.clone());
-    let mut crumbs = row().key("crumbs").w_full().min_w(0.0).center_y().gap(4.0);
-    for (i, folder) in file.path.iter().enumerate() {
-        crumbs = crumbs
-            .child(style::fitted(
-                format!("crumb-{i}"),
-                folder,
-                style::CRUMB,
-                t.text_tertiary,
-            ))
-            // When the toolbar is full the separators give way first, as the board's do.
-            .child(kit::glyph(format!("crumb-sep-{i}"), &icons::CHEVRON_RIGHT, 12.0, t.text_tertiary).shrink());
-    }
-    // The name gives way with an ellipsis before the controls do: it never runs under them.
-    crumbs = crumbs.child(
-        kit::label("crumb-name", &file.name, style::CRUMB_NAME, t.text_tertiary)
-            .truncate()
-            .min_w(0.0)
-            .shrink(),
-    );
-    if head.unsaved {
-        crumbs = crumbs.child(
-            el().key("crumb-dot")
-                .role("image")
-                .label("Not saved")
-                .size(7.0, 7.0)
-                .radius(3.5)
-                .ml(2.0)
-                .fill(t.text)
-                // As the status dot: a little of the ground inside the edge, for Chromium's
-                // lighter outermost rows ("Rune limitations", PR body).
-                .box_shadow(rune::Shadow {
-                    x: 0.0,
-                    y: 0.0,
-                    blur: 0.0,
-                    spread: 0.05,
-                    color: t.toolbar_bg,
-                    inset: true,
-                }),
-        );
-    }
-    let info = col()
-        .key("file-info")
-        .role("group")
-        .label(format!("{}, {}", file.name, facts))
-        .px(4.0)
-        .min_w(0.0)
-        .shrink()
-        .child(crumbs)
-        .child(kit::label("item-count", facts, type_::TITLE_SUB, t.text_tertiary).w_full());
     let icon = crate::theme::file_icons::icon_for(&file.name, false, None);
-    row()
+    let mut block = row()
         .key("viewer-title")
+        .role("group")
+        .label(format!("{}, {}, {}", file.path.join(" / "), file.name, facts))
         .min_w(0.0)
         .shrink()
         .center_y()
         .gap(6.0)
         .child(crate::ui::file_icon::file_icon("viewer-title-icon", icon, 16.0, t))
-        .child(info)
+        .child(toolbar::title_block(&file.name, Some(&facts), t).shrink());
+    if head.unsaved {
+        block = block.child(
+            el().key("crumb-dot")
+                .role("image")
+                .label("Not saved")
+                .size(7.0, 7.0)
+                .radius(3.5)
+                .fill(t.text),
+        );
+    }
+    block
 }
 
 /// The toolbar of an open file. `tools` are the file's own controls, drawn before the "more" button.
-pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El {
-    let nav = row()
-        .key("nav")
-        .child(
-            tool_button("back", "Back", &icons::CHEVRON_LEFT, 16.0, ToolState::Idle, t)
-                .shortcut_hint("Alt+Left")
-                .on_press(super::close),
-        );
-
-    let more = tool_button("more-btn", "More actions", &icons::MORE, 17.0, ToolState::Idle, t);
+pub fn toolbar(_s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El {
+    let more = toolbar::tool("more-btn", "More actions", &icons::MORE, t);
     // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
     let file_tools = row().key("file-tools").center_y().gap(6.0).children(tools).child(more);
-
-    let panel_btn = tool_button(
-        "panel-toggle-btn",
-        "Details panel",
-        &icons::PANEL_TOGGLE,
-        16.0,
-        if ui.show_details {
-            ToolState::On
-        } else {
-            ToolState::Idle
+    toolbar::file_bar(
+        toolbar::Bar {
+            name: ui.file.name.clone(),
+            back: (true, toolbar::press(|s, _| super::close(s))),
+            forward: (false, None),
+            title: title(&ui.file, head, t),
+            slot: Some(file_tools),
+            slot_sep: false,
+            view: toolbar::View::NotHere,
+            on_view: None,
+            sort: toolbar::Sort::NotHere,
+            on_sort: None,
+            details: if ui.show_details {
+                toolbar::Details::Open
+            } else {
+                toolbar::Details::Closed
+            },
+            on_details: toolbar::press(|s, _| {
+                if let Some(ui) = super::ui(s) {
+                    ui.toggle_details();
+                }
+            }),
+            inert: false,
+            on_explorer: Box::new(|s, _| {
+                let Some((id, name)) = super::ui(s).map(|ui| (ui.file.id.clone(), ui.file.name.clone())) else {
+                    return;
+                };
+                let answer = super::super::show_in_folder::show(s, &id, &name);
+                if let Some(ui) = super::ui(s) {
+                    ui.toast = answer.err().map(str::to_string);
+                }
+            }),
+            new: toolbar::New::Off,
+            on_new: None,
+            search: el(),
+            trailing_inset: 12.0,
         },
         t,
     )
-    .shortcut_hint("Alt+Shift+P")
-    .checked(ui.show_details)
-    .on_press(|s: &mut State| {
-        if let Some(ui) = super::ui(s) {
-            ui.toggle_details();
-        }
-    });
-
-    // Show in File Explorer / Finder: this file in its folder, selected (the placeholder, never hydrated).
-    let reveal_btn = tool_button(
-        "show-in-folder",
-        super::super::show_in_folder::label(),
-        &crate::theme::icons_settings::FOLDER,
-        16.0,
-        ToolState::Idle,
-        t,
-    )
-    .help(super::super::show_in_folder::label())
-    .on_press(|s: &mut State| {
-        let Some((id, name)) = super::ui(s).map(|ui| (ui.file.id.clone(), ui.file.name.clone())) else {
-            return;
-        };
-        let answer = super::super::show_in_folder::show(s, &id, &name);
-        if let Some(ui) = super::ui(s) {
-            ui.toast = answer.err().map(str::to_string);
-        }
-    });
-
-    row()
-        .key("toolbar")
-        .role("toolbar")
-        .label(ui.file.name.clone())
-        .h(46.0)
-        .w_full()
-        .fill(t.toolbar_bg)
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .pl(10.0)
-        .pr(12.0)
-        .center_y()
-        .gap(8.0)
-        .child(nav)
-        .child(title(&ui.file, head, t))
-        .child(el().key("toolbar-spacer").grow(1.0))
-        .child(file_tools)
-        .child(panel_btn)
-        .child(reveal_btn)
 }
 
 /// The status line (`.mk-foot`) with this frame's words.

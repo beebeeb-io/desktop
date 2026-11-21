@@ -163,28 +163,12 @@ fn fact_key(label: &str) -> &'static str {
     }
 }
 
-/// `ui::detail_pane::switch_card` with the board's ON knob: the knob of a switch that is on is
-/// the paper's colour (light on ink, dark on light ink), where the shared switch keeps white (a
-/// request to the design-system lane in the PR body). Keys as the shared card's.
+/// The card of a switch: title and sub at the left, the shared `ui::switch` at the right. The card is the one
+/// control (role `switch`, one focus stop); the drawn switch inside it is its picture. Keys as the shared card's.
 fn switch_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
-    let switch = row()
-        .key(format!("{key}-switch"))
-        .size(36.0, 20.0)
-        .radius(10.0)
-        .fill(if on { t.text } else { t.paper3 })
-        .border(1.0, if on { t.text } else { t.separator_strong })
-        .border_layout()
-        .center_y()
-        .child(
-            el().key(format!("{key}-knob"))
-                .size(14.0, 14.0)
-                .radius(7.0)
-                .fill(if on { t.paper } else { t.white })
-                // `shadow-1`: the ink at 4 % and 6 %, the same in both themes.
-                .box_shadow(kit::drop(1.0, 3.0, style::knob_shadow(0.04)))
-                .box_shadow(kit::drop(1.0, 2.0, style::knob_shadow(0.06)))
-                .ml(if on { 18.0 } else { 2.0 }),
-        );
+    let switch = crate::ui::switch::switch(&format!("{key}-switch"), "", on, true, t)
+        .role("presentation")
+        .focusable(false);
     row()
         .key(format!("{key}-card"))
         .role("switch")

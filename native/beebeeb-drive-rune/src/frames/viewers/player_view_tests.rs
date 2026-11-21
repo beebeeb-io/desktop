@@ -72,7 +72,7 @@ fn audio_view_without_player_draws_the_fixture() {
     ] {
         assert!(keys.iter().any(|k| k == key), "the fixture draws {key}");
     }
-    for key in ["audio-reduced", "refused-words", "refused-open", "video-stage"] {
+    for key in ["audio-reduced", "refused-text", "refused-open", "video-stage"] {
         assert!(!keys.iter().any(|k| k == key), "{key} belongs to the player's views");
     }
     let track = rt
