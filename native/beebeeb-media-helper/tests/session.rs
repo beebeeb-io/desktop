@@ -55,6 +55,12 @@ struct App {
 
 impl App {
     fn start(file: Vec<u8>, table: &'static [(Codec, Route)]) -> App {
+        // The switch held off: this helper's own decoders alone, the same on every OS (the shipped switch is on,
+        // ux-02; Windows' decoders are `tests/system_decoder.rs`).
+        App::start_with(file, table, false)
+    }
+
+    fn start_with(file: Vec<u8>, table: &'static [(Codec, Route)], system_on: bool) -> App {
         let (to_helper, helper_in) = channel();
         let (helper_out, from_helper) = channel();
         let input = ChanRead {
@@ -62,9 +68,7 @@ impl App {
             buf: Vec::new(),
             pos: 0,
         };
-        // The switch held off: this helper's own decoders alone, the same on every OS (the shipped switch is on,
-        // ux-02; Windows' decoders are `tests/system_decoder.rs`).
-        let join = std::thread::spawn(move || run_with_system(input, ChanWrite(helper_out), table, false));
+        let join = std::thread::spawn(move || run_with_system(input, ChanWrite(helper_out), table, system_on));
         App {
             to_helper,
             from_helper: ChanRead {
@@ -465,4 +469,31 @@ fn helper_decodes_an_mp3_track_beside_the_h264_picture() {
         "the picture is a second on too"
     );
     app.send(&ToHelper::Close);
+}
+
+/// ux-57: H.264 + AAC with the switch on, in a process where the system's decoders do not start (every OS but
+/// Windows; on Windows the sandbox's profiles). The first helper asks for the restart by naming AAC; the last helper
+/// (`LastHelper` before `Open`) plays the picture and names the track that stays silent.
+#[cfg(not(windows))]
+#[test]
+fn the_last_helper_plays_h264_without_the_aac_the_system_cannot_decode() {
+    let mut first = App::start_with(fixture("h264-aac.mkv"), ROUTES, true);
+    assert_eq!(
+        first.open(KindHint::Video),
+        FromHelper::Error(ErrorCode::NoSystemDecoder(Codec::Aac)),
+        "the first helper asks for the system decoder's profile"
+    );
+    first.send(&ToHelper::Close);
+
+    let mut last = App::start_with(fixture("h264-aac.mkv"), ROUTES, true);
+    last.send(&ToHelper::LastHelper);
+    let FromHelper::Opened(opened) = last.open(KindHint::Video) else {
+        panic!("the last helper opens the video");
+    };
+    assert_eq!(opened.video.map(|video| video.codec), Some(Codec::H264));
+    assert_eq!(opened.audio, None, "no audio stream is offered");
+    assert_eq!(opened.no_sound, Some(Codec::Aac), "the silent track is named");
+    last.send(&ToHelper::WantVideo { w: 64, h: 36 });
+    assert!(matches!(last.next(), FromHelper::Frame { .. }), "the picture plays");
+    last.send(&ToHelper::Close);
 }

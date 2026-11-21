@@ -63,6 +63,7 @@ fn to_helper_messages() -> Vec<ToHelper> {
         },
         ToHelper::Seek { at_ms: 72_000 },
         ToHelper::Close,
+        ToHelper::LastHelper,
     ]
 }
 
@@ -166,12 +167,12 @@ fn protocol_round_trips_every_variant() {
     let to_helper = to_helper_messages();
     let from_helper = from_helper_messages();
 
-    // Each of the 7 + 7 kinds is in the lists.
+    // Each of the 8 + 7 kinds is in the lists.
     let to_kinds = to_helper
         .iter()
         .map(|m| wire(m)[4])
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(to_kinds.len(), 7, "every ToHelper kind is written once at least");
+    assert_eq!(to_kinds.len(), 8, "every ToHelper kind is written once at least");
     let from_kinds = from_helper
         .iter()
         .map(|m| wire(m)[4])

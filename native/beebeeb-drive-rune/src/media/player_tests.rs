@@ -1102,6 +1102,16 @@ fn system_answer_restarts_once_in_the_system_profile() {
         .filter(|msg| matches!(msg, ToHelper::Open { .. }))
         .count();
     assert_eq!((opens, r.refused()), (2, None));
+    // ux-57: only the second helper is told it is the last one, and before its `Open`.
+    let seen = r.seen();
+    let last: Vec<usize> = (0..seen.len())
+        .filter(|i| matches!(seen[*i], ToHelper::LastHelper))
+        .collect();
+    let second_open = seen
+        .iter()
+        .rposition(|msg| matches!(msg, ToHelper::Open { .. }))
+        .expect("the second open");
+    assert_eq!(last, [second_open - 1], "one `LastHelper`, right before the second `Open`");
     r.handle.stop(StopReason::Closed);
     // The system profile's helper answers the same: that is the PC's answer. Never a third start.
     let pc = rig(1_000, no_system_aac);

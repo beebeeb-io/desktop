@@ -81,6 +81,18 @@ pub(crate) fn helper_error(code: ErrorCode) {
     );
 }
 
+/// Where the helper's error came from (ux-57): `system` when the helper ran in the system decoder's profile (the
+/// second helper of the item), `opened` when it had already answered `Opened`. Follows [`helper_error`].
+pub(crate) fn helper_error_at(system: bool, opened: bool) {
+    tracing::warn!(system, opened, "media helper state at its error");
+}
+
+/// The helper answered that the stream needs the system's decoder, and one new helper was started in that profile
+/// (`hevc`: with the Store decoder's capabilities).
+pub(crate) fn started_again(hevc: bool) {
+    tracing::info!(hevc, "media helper started again for the system decoder");
+}
+
 /// The kind of rule the helper broke.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Broke {

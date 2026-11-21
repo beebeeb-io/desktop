@@ -318,6 +318,11 @@ impl Worker {
         if !self.slots.put_link(link) {
             return Err(Exit::Done);
         }
+        // The helper in the system decoder's profile is the item's last one: where Windows' decoders do not start
+        // in it either, it plays the video without that sound instead of asking again (ux-57).
+        if self.profile != Profile::NoCapabilities {
+            self.send(&ToHelper::LastHelper)?;
+        }
         self.send(&ToHelper::Open {
             len: self.len,
             hint: self.item.kind,
@@ -335,9 +340,11 @@ impl Worker {
             && self.profile == Profile::NoCapabilities
             && let Some(profile) = profile_for_file_with(self.system_on, Some(codec))
         {
+            refusal_log::started_again(matches!(profile, Profile::SystemDecoder { hevc: true }));
             return self.restart_in(profile);
         }
         refusal_log::helper_error(code);
+        refusal_log::helper_error_at(self.profile != Profile::NoCapabilities, self.opened.is_some());
         Err(Exit::Refused(refusal_of(code)))
     }
 
