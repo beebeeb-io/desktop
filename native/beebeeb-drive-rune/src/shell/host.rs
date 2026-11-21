@@ -127,6 +127,8 @@ pub struct Shell {
     media_pump: Arc<dyn Fn() + Send + Sync>,
     /// Stops what plays when the session closes under the window (`media::stop_all`). Held so a test sees the stop.
     media_stop: Arc<dyn Fn(crate::media::StopReason) + Send + Sync>,
+    /// dc-165: what the views read from the engine as the last ring left it (`redraw::follow_engine`).
+    pub(super) seen: Option<super::redraw::Seen>,
 }
 
 impl Shell {
@@ -184,6 +186,7 @@ impl Shell {
             files_reread_due: false,
             away: super::away::AwayLock::default(),
             flyout_covered: None,
+            seen: None,
         }
     }
 
@@ -614,6 +617,8 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // Last, so a clear that `media::stop_all` posted above (a lock, a sign-out) reaches Windows in this same poll.
     // The poll also runs for a hidden window whenever it is woken (rune's `poll_hidden`), so the tray case is covered.
     (s.shell.media_pump)();
+    // dc-165: what the views read from the engine while they draw (the status line's words), after a ring only.
+    changed |= super::redraw::follow_engine(s, changed);
     changed
 }
 

@@ -42,6 +42,8 @@ struct Live {
     engine: TestEngine,
     platform: Arc<FakePlatform>,
     rt: Runtime<State>,
+    /// dc-165: how often an engine thread asked the window to wake (the real app's hook is `shell::engine_woke`).
+    wakes: Arc<std::sync::atomic::AtomicUsize>,
     _api: FakeApi,
     _local_state: tempfile::TempDir,
 }
@@ -67,7 +69,11 @@ fn live_on(first_run: bool, wiring: Wiring) -> Live {
     account.add_item(FILE_ID, None, FILE_NAME, false, 2_048);
     let owner = Identity::new(Some(&account.user_id), Some(&account.email));
     let api = FakeApi::start(account_handler(Arc::new(account)));
-    let (engine_host, messages) = ChannelHost::new(|| {});
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = wakes.clone();
+    let (engine_host, messages) = ChannelHost::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
     let config = EngineConfig {
         account_id: "away-lock-test-slot".into(),
         state_dir: crate::engine_host::tests::process_state_dir(),
@@ -135,6 +141,7 @@ fn live_on(first_run: bool, wiring: Wiring) -> Live {
         engine,
         platform,
         rt,
+        wakes,
         _api: api,
         _local_state: local_state,
     }
@@ -1080,3 +1087,7 @@ fn closing_to_the_tray_with_immediately_locks_and_the_reopened_window_shows_it()
         live.rt.state.shell.app.gate() == GateState::Locked
     });
 }
+
+// dc-165: what the locked window and a progress burst ask to be drawn.
+#[path = "redraw_tests.rs"]
+mod redraw;
