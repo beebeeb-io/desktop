@@ -10,7 +10,7 @@ cargo-lock-sha256 app: 5c55690d3b71db64e2df92192e3e6c62818a9d11f428da9663d0c167a
 
 cargo-lock-sha256 office-render: 17b7767237e0c12e4507f7d4aa13761ca2e60b90c41607156322bcf61bb54529
 
-cargo-lock-sha256 media-helper: 77600beeed948aa54ef12eed3c20f8222de472b3489870212ace7d01293776b2
+cargo-lock-sha256 media-helper: d7cefdd1bdbd111ec4c326154253abccb813f09cb0c0467893983d70a4ccb413
 
 release-version: 0.9.0
 
