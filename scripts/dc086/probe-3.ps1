@@ -1,6 +1,6 @@
 # dc-086 probe (diagnosis only, not product code): the installed TEST build signed in to the fake server seeded
 # with LargeAccount::GUUS. Times, counts and sizes only. Runs in the VM's desktop session.
-$RUN = 2; $IDLE_MIN = 30; $BACKUP = $true
+$RUN = 3; $IDLE_MIN = 0; $BACKUP = $false
 . C:\bb\dc086\rec-lib.ps1
 . C:\bb\dc086\ks.ps1
 $ErrorActionPreference = 'Continue'
