@@ -5,7 +5,6 @@ use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size, Tail};
 use crate::ui::au::Tone;
-use crate::ui::settings_list as lists;
 use rune::{El, row};
 
 use super::source::{AccountSource, DeviceKind, Session};

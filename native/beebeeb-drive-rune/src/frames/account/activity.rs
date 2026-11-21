@@ -7,7 +7,6 @@ use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::account_form as fm;
 use crate::ui::account_set::{self as set, Lead, Row};
-use crate::ui::settings_list as lists;
 use rune::El;
 
 use super::form::{self, Form, Problem};

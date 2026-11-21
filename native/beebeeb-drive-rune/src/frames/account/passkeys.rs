@@ -9,7 +9,6 @@ use crate::theme::tokens::Theme;
 use crate::ui::account_form::{self as fm, Field};
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size};
 use crate::ui::kit;
-use crate::ui::settings_list as lists;
 use crate::ui::menu;
 use rune::{El, Tx, el};
 

@@ -6,7 +6,6 @@ use crate::theme::tokens::{Theme, type_};
 use crate::ui::account_set::{self as set, Lead, Row, Tail};
 use crate::ui::au::Tone;
 use crate::ui::kit;
-use crate::ui::settings_list as lists;
 use rune::{El, col, row};
 
 use super::source::{AccountSource, PaneState, Plan, ProductKind, ProductState};

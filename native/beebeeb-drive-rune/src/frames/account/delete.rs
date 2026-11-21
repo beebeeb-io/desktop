@@ -17,7 +17,6 @@ use crate::ui::account_form::{self as fm, Field};
 use crate::ui::account_set::{self as set, Lead, Look, Row};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
 use crate::ui::kit;
-use crate::ui::settings_list as lists;
 use rune::{Cx, El, col};
 
 use super::form::{self, Form, Problem};
