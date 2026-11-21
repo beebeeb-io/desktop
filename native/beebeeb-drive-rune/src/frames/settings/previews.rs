@@ -214,7 +214,7 @@ impl SettingsUi {
     fn stored_previews(&self) -> Option<(PreviewSize, PreviewFormat)> {
         match self.drive.photo_previews() {
             PhotoPreviews::Ready(p) => Some((p.size, p.format)),
-            PhotoPreviews::Unavailable | PhotoPreviews::Loading | PhotoPreviews::Failed(_) => None,
+            _ => None,
         }
     }
 
