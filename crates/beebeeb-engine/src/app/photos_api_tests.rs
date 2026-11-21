@@ -591,3 +591,27 @@ fn video_seconds_of_a_dehydrated_placeholder_reads_nothing() {
     std::fs::write(dir.path().join("Trip").join("shot.png"), picture(31, 17)).unwrap();
     assert_eq!(facts_of_copy(dir.path(), "Trip/shot.png", false).width, Some(31));
 }
+
+/// A library of 8,816 photos among 38,764 files reads in a constant number of queries (no query per photo), fast.
+#[test]
+fn large_library_reads_without_a_query_per_photo() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    for i in 0..38_764 {
+        let (name, folder) = if i < 8_816 { ("jpg", "Camera") } else { ("txt", "Docs") };
+        row(
+            &db,
+            &format!("c0000000-0000-4000-8000-{i:012}"),
+            &format!("{folder}/f{i}.{name}"),
+            i64::from(i),
+            FileStatus::CloudOnly,
+            false,
+        );
+    }
+    let started = std::time::Instant::now();
+    let photos = library(&db, &[]).expect("library");
+    let took = started.elapsed();
+    assert_eq!(photos.len(), 8_816);
+    assert!(photos.iter().all(|p| p.versions >= 1));
+    assert!(took < Duration::from_millis(300), "library took {took:?}");
+}

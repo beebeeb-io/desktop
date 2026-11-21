@@ -25,6 +25,7 @@
 //! BLOCKS: every call here is a worker's (the state database, the network, a decode). Must not: log or return a
 //! name, a path, a key or a pixel outside the answer types.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,7 +41,7 @@ use crate::drive_v2::photo_meta::{self, PhotoMeta};
 use crate::engine_bridge::{
     EngineBridge, ThumbnailNotYet, UnknownItem, error_http_status, local_file_path_under_sync_root,
 };
-use crate::state_db::{FileStatus, PinState, StateDb};
+use crate::state_db::{FileStatus, StateDb};
 
 #[cfg(test)]
 #[path = "photos_api_tests.rs"]
@@ -472,9 +473,21 @@ fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
             .cmp(&a.0.modified_at)
             .then_with(|| a.0.path.cmp(&b.0.path))
     });
+    // One read of every row's version, not one contract query per photo. Pinned comes with `live_rows`.
+    let versions: HashMap<String, i64> = db
+        .list_tree_rows()
+        .ok()?
+        .into_iter()
+        .map(|row| (row.file_id, row.current_version))
+        .collect();
+    let pinned: HashSet<String> = db
+        .file_overview_rows()
+        .ok()?
+        .into_iter()
+        .filter_map(|(row, pinned)| pinned.then_some(row.file_id))
+        .collect();
     let mut photos = Vec::with_capacity(rows.len());
     for (row, name) in rows {
-        let contract = db.get_file_contract_state(&row.file_id).ok()?;
         let mut folders: Vec<String> = row
             .path
             .split('/')
@@ -488,13 +501,11 @@ fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
             folders,
             bytes: u64::try_from(row.size_bytes).unwrap_or(0),
             modified_at: row.modified_at,
-            kept: contract
-                .as_ref()
-                .is_some_and(|contract| contract.effective_pin_state() == PinState::Pinned),
+            kept: pinned.contains(&row.file_id),
             on_this_pc: row.status == FileStatus::Local,
             uploading: row.status == FileStatus::Uploading,
             device: photo_meta::backup_device(&roots, &row.path),
-            versions: contract.as_ref().map_or(1, |contract| contract.current_version.max(1)),
+            versions: versions.get(&row.file_id).copied().unwrap_or(1).max(1),
             id: row.file_id,
         });
     }
