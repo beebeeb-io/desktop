@@ -57,12 +57,7 @@ pub fn focus(tx: &mut Tx) {
 
 /// Whether a Word document is open with its editor running: only then the surface takes anything.
 fn editing(s: &mut State) -> bool {
-    viewers::ui(s).is_some_and(|ui| {
-        ui.office
-            .edit
-            .as_ref()
-            .is_some_and(|e| !e.stopped && e.kind == EditKind::Docx)
-    })
+    viewers::ui(s).is_some_and(|ui| ui.office.edit.as_ref().is_some_and(|e| !e.stopped && e.kind == EditKind::Docx))
 }
 
 /// Hand `f` the source and the open file's id.
@@ -215,10 +210,7 @@ pub fn op_for(ev: &KeyEvent, marks: Option<&Marks>) -> Option<EditOp> {
         Key::Enter if m.shift && !ctrl => Some(EditOp::InsertLineBreak),
         Key::Enter if !ctrl => Some(EditOp::InsertParagraph),
         Key::Backspace => Some(EditOp::Delete { back: true, word: ctrl }),
-        Key::Delete if !m.shift => Some(EditOp::Delete {
-            back: false,
-            word: ctrl,
-        }),
+        Key::Delete if !m.shift => Some(EditOp::Delete { back: false, word: ctrl }),
         Key::Left | Key::Right | Key::Home | Key::End => {
             motion(&ev.key, ctrl).map(|to| EditOp::Move { to, extend: m.shift })
         }
@@ -234,12 +226,7 @@ pub fn op_for(ev: &KeyEvent, marks: Option<&Marks>) -> Option<EditOp> {
 /// A Ctrl chord: select all, undo, redo, bold, italic, underline.
 fn command(ev: &KeyEvent, marks: Option<&Marks>) -> Option<EditOp> {
     let shift = ev.mods.shift;
-    let toggle = |mark: Mark, now: Option<bool>| {
-        (!shift).then(|| EditOp::Mark {
-            mark,
-            on: !now.unwrap_or(false),
-        })
-    };
+    let toggle = |mark: Mark, now: Option<bool>| (!shift).then(|| EditOp::Mark { mark, on: !now.unwrap_or(false) });
     if ev.is_command('a') && !shift {
         Some(EditOp::SelectAll)
     } else if ev.is_command('z') {
@@ -266,9 +253,7 @@ pub fn on_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
     if clipboard::on_clip_key(s, tx, ev) {
         return true;
     }
-    let marks = viewers::ui(s)
-        .and_then(|ui| ui.office.edit.as_ref())
-        .and_then(|e| e.marks);
+    let marks = viewers::ui(s).and_then(|ui| ui.office.edit.as_ref()).and_then(|e| e.marks);
     let Some(op) = op_for(ev, marks.as_ref()) else {
         return false;
     };
@@ -338,8 +323,7 @@ pub fn surface(pages: El, doc: &DocBody, edit: &EditUi, stage: Option<[f32; 4]>,
     };
     if let (Some(from), Some(stage)) = (doc.reveal, stage) {
         let at = (caret.page, caret.rect.x, caret.rect.y);
-        mark =
-            mark.on_layout_tx(move |s: &mut State, r: [f32; 4], tx: &mut Tx| reveal(s, r, [x, y], stage, from, at, tx));
+        mark = mark.on_layout_tx(move |s: &mut State, r: [f32; 4], tx: &mut Tx| reveal(s, r, [x, y], stage, from, at, tx));
     }
     surface = surface.child(mark);
     if edit.has_keyboard

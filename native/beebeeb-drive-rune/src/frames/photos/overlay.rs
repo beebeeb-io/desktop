@@ -4,9 +4,9 @@
 
 use rune::{Color, El, Icon, Tx, col, el, row, text_input};
 
+use super::route_items::rename::Draft;
 use super::chrome::{self, Tone, style};
 use super::grid::megabytes;
-use super::route_items::rename::Draft;
 use super::source::{DeviceKind, Shape, SourceRef};
 use super::{ACROSS, Dialog, Intent, Menu, OpenMenu, ShareDraft, SourcesDraft, Toast, Ui, icons};
 use crate::State;
@@ -120,23 +120,13 @@ pub fn toast_layer(toast: &Toast, bottom: f32, _over_photos: bool, t: &Theme) ->
         }
     };
     let action = if matches!(toast, Toast::Trashed(_)) {
-        Some(toast_action(
-            "Undo",
-            Some("Ctrl+Z"),
-            |s: &mut State| {
-                s.photos.undo();
-            },
-            t,
-        ))
+        Some(toast_action("Undo", Some("Ctrl+Z"), |s: &mut State| {
+            s.photos.undo();
+        }, t))
     } else if toast.can_retry() {
-        Some(toast_action(
-            "Try again",
-            None,
-            |s: &mut State| {
-                s.photos.try_again();
-            },
-            t,
-        ))
+        Some(toast_action("Try again", None, |s: &mut State| {
+            s.photos.try_again();
+        }, t))
     } else {
         None
     };
@@ -378,9 +368,7 @@ pub const SHARE_PASSWORD: &str = "ph-share-password";
 
 /// The expiry choices of the Share dialog (Files' four), under the Link expires button.
 pub fn expiry_menu(ui: &Ui, t: &Theme) -> Option<El> {
-    let Some(Dialog::Share(draft)) = &ui.dialog else {
-        return None;
-    };
+    let Some(Dialog::Share(draft)) = &ui.dialog else { return None };
     if !draft.menu {
         return None;
     }
@@ -455,11 +443,13 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
             Some(&icons::CLOCK),
             "Link expires",
             None,
-            vec![pop("ph-item-0-1", "Link expires", expiry, t).on_press(|s: &mut State| {
-                if let Some(id) = s.photos.viewer.as_ref().map(|v| v.id) {
-                    s.photos.ask(Intent::ChooseExpiry(id));
-                }
-            })],
+            vec![
+                pop("ph-item-0-1", "Link expires", expiry, t).on_press(|s: &mut State| {
+                    if let Some(id) = s.photos.viewer.as_ref().map(|v| v.id) {
+                        s.photos.ask(Intent::ChooseExpiry(id));
+                    }
+                }),
+            ],
             t,
         ),
         item(
@@ -469,14 +459,12 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
             "Password",
             None,
             vec![
-                switch("ph-item-0-2-switch", "Password", draft.password, true, t).on_press_tx(
-                    |s: &mut State, tx: &mut Tx| {
-                        s.photos.toggle_share_password();
-                        if matches!(&s.photos.dialog, Some(Dialog::Share(d)) if d.password) {
-                            tx.focus(SHARE_PASSWORD, false);
-                        }
-                    },
-                ),
+                switch("ph-item-0-2-switch", "Password", draft.password, true, t).on_press_tx(|s: &mut State, tx: &mut Tx| {
+                    s.photos.toggle_share_password();
+                    if matches!(&s.photos.dialog, Some(Dialog::Share(d)) if d.password) {
+                        tx.focus(SHARE_PASSWORD, false);
+                    }
+                }),
             ],
             t,
         ),
@@ -498,18 +486,16 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
             &ui.share_password,
             SHARE_PASSWORD,
             |s: &mut State| &mut s.photos.share_password,
-            |input| {
-                input
-                    .autofocus()
-                    .on_submit(|s: &mut State, _: &mut Tx| s.photos.confirm_dialog())
-            },
+            |input| input.autofocus().on_submit(|s: &mut State, _: &mut Tx| s.photos.confirm_dialog()),
             t,
         ));
     }
-    body.push(note(
-        "Copy link keeps it encrypted. Send a copy decrypts it, so it leaves Beebeeb's protection.",
-        t,
-    ));
+    body.push(
+        note(
+            "Copy link keeps it encrypted. Send a copy decrypts it, so it leaves Beebeeb's protection.",
+            t,
+        ),
+    );
     let foot = vec![
         foot_button("ph-dlg-btn-0", "Send a copy\u{2026}", None, Tone::Plain, t, |b| {
             b.on_press(|s: &mut State| {
@@ -614,11 +600,7 @@ fn rename(draft: &Draft, t: &Theme) -> (f32, Vec<El>, Foot) {
         .child(input);
     let mut body = vec![well];
     if let Some(why) = error {
-        body.push(
-            kit::label("ph-rename-error", why.message(), style::CAP, t.red)
-                .w_full()
-                .wrap(),
-        );
+        body.push(kit::label("ph-rename-error", why.message(), style::CAP, t.red).w_full().wrap());
     }
     let foot = vec![
         foot_button("ph-dlg-btn-0", "Rename", None, Tone::Primary, t, |b| {

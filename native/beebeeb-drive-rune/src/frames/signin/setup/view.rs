@@ -410,12 +410,7 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
 fn previews_loading(k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading("Thumbnails and previews", None, false, t))
-        .child(view_state(
-            ViewState::Loading {
-                words: "Reading your preview settings\u{2026}",
-            },
-            t,
-        ))
+        .child(view_state(ViewState::Loading { words: "Reading your preview settings\u{2026}" }, t))
         .child(
             actions()
                 .child(primary(k, "Continue", ButtonState::Disabled, t, Ui::go_on))
@@ -613,11 +608,7 @@ const NOTHING_SYNCS: &str = "Your files are safe in Beebeeb. Nothing syncs with 
 /// folder was kept yet, so another one can be chosen (the folder may be what was refused).
 fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Keys, t: &Theme) -> El {
     let lead = "Try again in a moment.";
-    let why = if code.is_empty() {
-        lead.to_string()
-    } else {
-        format!("{lead} {code}")
-    };
+    let why = if code.is_empty() { lead.to_string() } else { format!("{lead} {code}") };
     let retry = try_again("explorer-failed", t).on_press_tx(act(Ui::go_on));
     setup::column()
         .child(au::heading(
@@ -627,12 +618,7 @@ fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Ke
             t,
         ))
         .child(view_state(
-            ViewState::Failed {
-                key: "explorer-failed",
-                title,
-                why: &why,
-                retry: Some(retry),
-            },
+            ViewState::Failed { key: "explorer-failed", title, why: &why, retry: Some(retry) },
             t,
         ))
         .child(
@@ -838,10 +824,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             note(
                 "not-changed",
                 k,
-                format!(
-                    "Couldn't change {}. You can set it in Settings.",
-                    not_changed.join(" and ")
-                ),
+                format!("Couldn't change {}. You can set it in Settings.", not_changed.join(" and ")),
             )
         }))
         .children((!lock_kept.is_empty()).then(|| {
@@ -1114,7 +1097,5 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
 /// First letter up, for a name that starts a sentence.
 fn capitalised(s: &str) -> String {
     let mut c = s.chars();
-    c.next()
-        .map(|f| f.to_uppercase().chain(c).collect())
-        .unwrap_or_default()
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }

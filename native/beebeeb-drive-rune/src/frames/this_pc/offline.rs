@@ -31,9 +31,7 @@ const COLUMNS: [Column; 5] = [
     Column::new("status", "Status", Width::Fixed(COL_STATUS_W)),
     Column::new("size", "Size", Width::Fixed(COL_SIZE_W)).align(Align::End),
     Column::new("contains", "Contains", Width::Fixed(COL_CONTAINS_W)),
-    Column::new("pc", "PC", Width::Fixed(COL_PC_W))
-        .align(Align::Center)
-        .spoken("On this PC"),
+    Column::new("pc", "PC", Width::Fixed(COL_PC_W)).align(Align::Center).spoken("On this PC"),
 ];
 
 /// "3 items · 1.4 GB", or "No items".
@@ -64,16 +62,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     // "Remove all is hidden" when nothing is kept (DW-0120).
     if !kept.is_empty() {
         right.push(
-            button::button(
-                button::keys("btn-remove-all-from-this-pc"),
-                "Remove all from this PC",
-                None,
-                button::Variant::Secondary,
-                button::Size::Sm,
-                button::ButtonState::Enabled,
-                &t,
-            )
-            .on_press(|s: &mut State| s.this_pc.ask(super::Intent::AskRemoveAll)),
+            button::button(button::keys("btn-remove-all-from-this-pc"), "Remove all from this PC", None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, &t)
+                .on_press(|s: &mut State| s.this_pc.ask(super::Intent::AskRemoveAll)),
         );
     }
     let toolbar = chrome::toolbar(
@@ -102,7 +92,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(toolbar);
     if let Some(state) = not_ready(standing, &t) {
         // No lists: the section says why, and the status line names no count.
-        main = main.child(state).child(chrome::status_line(s, ui, String::new(), &t));
+        main = main
+            .child(state)
+            .child(chrome::status_line(s, ui, String::new(), &t));
     } else if kept.is_empty() {
         main = main
             .child(area(view_state::view_state(
@@ -168,13 +160,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 
 /// A centred area for a state that stands in place of the list.
 fn area(state: El) -> El {
-    col()
-        .key("empty-area")
-        .grow(1.0)
-        .min_h(0.0)
-        .w_full()
-        .center()
-        .child(state)
+    col().key("empty-area").grow(1.0).min_h(0.0).w_full().center().child(state)
 }
 
 /// What a section says in place of its list while the source has none: Loading while the first answer is out,
@@ -183,19 +169,21 @@ pub fn not_ready(standing: Standing, t: &Theme) -> Option<El> {
     let state = match standing {
         Standing::Ready => return None,
         Standing::Reading => {
-            return Some(col().key("empty-area").w_full().child(view_state::view_state(
-                ViewState::Loading {
-                    words: "Reading this PC",
-                },
-                t,
-            )));
+            return Some(
+                col()
+                    .key("empty-area")
+                    .w_full()
+                    .child(view_state::view_state(ViewState::Loading { words: "Reading this PC" }, t)),
+            );
         }
         Standing::Unreadable => view_state::view_state(
             ViewState::Failed {
                 key: "unreadable",
                 title: "Couldn't read this PC",
                 why: "What this PC keeps couldn't be read just now.",
-                retry: Some(view_state::try_again("unreadable", t).on_press(|s: &mut State| s.this_pc.read_again())),
+                retry: Some(
+                    view_state::try_again("unreadable", t).on_press(|s: &mut State| s.this_pc.read_again()),
+                ),
             },
             t,
         ),

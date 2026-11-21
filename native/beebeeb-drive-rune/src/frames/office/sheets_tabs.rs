@@ -141,10 +141,7 @@ pub fn name_problem(name: &str, others: &[&str]) -> Option<&'static str> {
     if name.contains(NAME_BAD) {
         return Some("A sheet name can't have : \\ / ? * [ ]");
     }
-    if others
-        .iter()
-        .any(|o| o.eq_ignore_ascii_case(name) || o.to_lowercase() == name.to_lowercase())
-    {
+    if others.iter().any(|o| o.eq_ignore_ascii_case(name) || o.to_lowercase() == name.to_lowercase()) {
         return Some("Another sheet has that name");
     }
     None
@@ -197,13 +194,7 @@ fn commit_rename(s: &mut State, tx: &mut Tx) {
         Some(ui) => {
             let (source, id) = ui.edit_source();
             let id = id.to_string();
-            source.edit(
-                &id,
-                EditOp::RenameSheet {
-                    sheet,
-                    name: name.clone(),
-                },
-            )
+            source.edit(&id, EditOp::RenameSheet { sheet, name: name.clone() })
         }
         None => false,
     };

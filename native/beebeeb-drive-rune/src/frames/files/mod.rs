@@ -32,8 +32,8 @@ pub mod protected_fixture;
 pub mod rename;
 pub mod reread;
 pub mod reset;
-pub mod retry;
 pub mod reveal;
+pub mod retry;
 mod row_facts;
 pub mod scenes_waveb;
 pub mod select_bar;
@@ -174,11 +174,7 @@ impl Toast {
     pub fn stays(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
             Toast::Trashed => 6,
-            Toast::Failed(..)
-            | Toast::ReadOneAtATime
-            | Toast::UploadCancelled
-            | Toast::KeepFirst
-            | Toast::KeptEdits(_) => 8,
+            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled | Toast::KeepFirst | Toast::KeptEdits(_) => 8,
             _ => 3,
         })
     }

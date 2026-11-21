@@ -464,12 +464,7 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
     let mut n = first;
     let (body, sum, changed) = match ui.drive.keep() {
         Keep::Loading => (
-            vec![tree_box().child(view_state(
-                ViewState::Loading {
-                    words: "Loading your folders…",
-                },
-                t,
-            ))],
+            vec![tree_box().child(view_state(ViewState::Loading { words: "Loading your folders…" }, t))],
             None,
             false,
         ),

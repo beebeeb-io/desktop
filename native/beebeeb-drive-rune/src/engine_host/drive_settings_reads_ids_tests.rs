@@ -20,13 +20,9 @@ fn entry(id: &str, path: &str, size: i64) -> FileEntry {
 
 #[test]
 fn the_largest_files_carry_their_file_id() {
-    let (a, b) = (
-        entry("f-big", "Backups/Archive.zip", 900),
-        entry("f-small", "Notes.txt", 5),
-    );
-    let Insights::Ready(data) = insights_of(&[&b, &a], (905, 1000)) else {
-        panic!("ready")
-    };
+    let (a, b) = (entry("f-big", "Backups/Archive.zip", 900), entry("f-small", "Notes.txt", 5));
+    let Insights::Ready(data) = insights_of(&[&b, &a], (905, 1000)) else { panic!("ready") };
     assert_eq!(data.largest[0].id, "f-big");
     assert_eq!(data.largest[1].id, "f-small");
 }
+

@@ -658,12 +658,7 @@ fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
     // Keyboard as Windows has it: Tab visits every control.
     cx.web_focus();
     let t = crate::theme::tokens::theme(cx.system_dark());
-    let main_pane = |main: El| {
-        crate::ui::focus::pane(
-            rune::col().grow(1.0).min_w(0.0).min_h(0.0).h_full().child(main),
-            "this-pc-main",
-        )
-    };
+    let main_pane = |main: El| crate::ui::focus::pane(rune::col().grow(1.0).min_w(0.0).min_h(0.0).h_full().child(main), "this-pc-main");
     rune::col()
         .key("window")
         .role("window")
@@ -678,19 +673,7 @@ fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .child(crate::ui::focus::pane(
-                    rune::row().h_full().child(crate::ui::drive_sidebar::drive_sidebar(
-                        s,
-                        if here == Section::SyncHistory {
-                            crate::ui::drive_sidebar::Lit::SyncHistory
-                        } else {
-                            crate::ui::drive_sidebar::Lit::AvailableOffline
-                        },
-                        crate::ui::sidebar::Standing::Open,
-                        &t,
-                    )),
-                    "this-pc-sidebar",
-                ))
+                .child(crate::ui::focus::pane(rune::row().h_full().child(crate::ui::drive_sidebar::drive_sidebar(s, if here == Section::SyncHistory { crate::ui::drive_sidebar::Lit::SyncHistory } else { crate::ui::drive_sidebar::Lit::AvailableOffline }, crate::ui::sidebar::Standing::Open, &t)), "this-pc-sidebar"))
                 .child(match (s.this_pc.refusal, s.this_pc.said) {
                     // A refused change: said over the section, never only in a log line.
                     (Some((words, _)), _) => main_pane(main.child(crate::ui::toast::layer(crate::ui::toast::toast(
@@ -701,15 +684,13 @@ fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
                         &t,
                     )))),
                     // Task 2530: what a way out did.
-                    (None, Some((words, _))) => {
-                        main_pane(main.child(crate::ui::toast::layer(crate::ui::toast::toast(
-                            &crate::theme::icons_files::CHECK,
-                            crate::ui::toast::Tone::Done,
-                            words,
-                            None,
-                            &t,
-                        ))))
-                    }
+                    (None, Some((words, _))) => main_pane(main.child(crate::ui::toast::layer(crate::ui::toast::toast(
+                        &crate::theme::icons_files::CHECK,
+                        crate::ui::toast::Tone::Done,
+                        words,
+                        None,
+                        &t,
+                    )))),
                     (None, None) => main_pane(main),
                 }),
         )

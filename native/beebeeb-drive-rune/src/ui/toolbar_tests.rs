@@ -249,9 +249,7 @@ fn viewer_bar_has_one_show_in_file_explorer_and_no_open_explorer() {
     assert_eq!(button.role, "button");
     assert!(button.focusable);
     assert!(
-        !rt.elements()
-            .into_iter()
-            .any(|e| e.key.as_deref() == Some("open-explorer") && !e.exiting),
+        !rt.elements().into_iter().any(|e| e.key.as_deref() == Some("open-explorer") && !e.exiting),
         "no duplicate open-explorer button in the viewer bar"
     );
 }

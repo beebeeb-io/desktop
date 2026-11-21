@@ -167,27 +167,9 @@ impl Conv {
                     self.piece("\n".into());
                 }
             }
-            "strong" | "b" => {
-                self.bold = if close {
-                    self.bold.saturating_sub(1)
-                } else {
-                    self.bold + 1
-                }
-            }
-            "em" | "i" => {
-                self.italic = if close {
-                    self.italic.saturating_sub(1)
-                } else {
-                    self.italic + 1
-                }
-            }
-            "code" => {
-                self.code = if close {
-                    self.code.saturating_sub(1)
-                } else {
-                    self.code + 1
-                }
-            }
+            "strong" | "b" => self.bold = if close { self.bold.saturating_sub(1) } else { self.bold + 1 },
+            "em" | "i" => self.italic = if close { self.italic.saturating_sub(1) } else { self.italic + 1 },
+            "code" => self.code = if close { self.code.saturating_sub(1) } else { self.code + 1 },
             "a" => self.link = if close { None } else { attr(attrs, "href") },
             "img" if !close => {
                 let alt = attr(attrs, "alt").unwrap_or_default();
@@ -205,8 +187,7 @@ fn attr(attrs: &str, name: &str) -> Option<String> {
     while let Some(i) = lower[from..].find(name) {
         let at = from + i;
         from = at + name.len();
-        let before_ok =
-            at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric() && lower.as_bytes()[at - 1] != b'-';
+        let before_ok = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric() && lower.as_bytes()[at - 1] != b'-';
         let rest = attrs[from..].trim_start();
         if !before_ok || !rest.starts_with('=') {
             continue;
@@ -214,11 +195,7 @@ fn attr(attrs: &str, name: &str) -> Option<String> {
         let v = rest[1..].trim_start();
         return Some(match v.chars().next() {
             Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or("").to_string(),
-            _ => v
-                .split(|c: char| c.is_whitespace() || c == '>')
-                .next()
-                .unwrap_or("")
-                .to_string(),
+            _ => v.split(|c: char| c.is_whitespace() || c == '>').next().unwrap_or("").to_string(),
         });
     }
     None
@@ -310,9 +287,7 @@ pub fn to_blocks(source: &str) -> Vec<Block> {
             Some(i) => (true, i),
             None => (false, inner),
         };
-        let name_len = inner
-            .find(|ch: char| !ch.is_ascii_alphanumeric())
-            .unwrap_or(inner.len());
+        let name_len = inner.find(|ch: char| !ch.is_ascii_alphanumeric()).unwrap_or(inner.len());
         let name = inner[..name_len].to_ascii_lowercase();
         if name.is_empty() {
             continue;

@@ -1070,10 +1070,7 @@ fn closing_to_the_tray_with_immediately_locks_and_the_reopened_window_shows_it()
         .set_lock_after_for(live.engine.session_turn(), LockAfter::Immediately, None)
         .unwrap();
     live.rt.state.shell.attach_tray(Arc::new(|_| {}));
-    assert!(
-        !live.rt.state.shell.close_quits(),
-        "the premise: closing keeps the app in the tray"
-    );
+    assert!(!live.rt.state.shell.close_quits(), "the premise: closing keeps the app in the tray");
     live.rt.update(host::on_close);
     until(&mut live, "closing did not lock", |live| {
         live.engine.lock_state() == LockState::ScreenLocked

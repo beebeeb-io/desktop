@@ -98,8 +98,8 @@ pub fn bar(ui: &Ui, t: &Theme) -> Bar {
             t.text_secondary,
         ))
         .on_press(|s: &mut State| s.photos.toggle_menu(Menu::Across));
-    let sources =
-        tool("ph-sources", "Photo sources", &icons::SOURCES, t).on_press(|s: &mut State| s.photos.open_sources());
+    let sources = tool("ph-sources", "Photo sources", &icons::SOURCES, t)
+        .on_press(|s: &mut State| s.photos.open_sources());
     let select = tool("ph-select", "Select", &icons::CHECK, t)
         .checked(ui.selecting)
         .on_press(|s: &mut State| {
@@ -285,11 +285,7 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
         .radius(3.0)
         .focusable(true)
         // One Tab stop for the whole grid: the cursor's tile (the first before there is one); arrows rove.
-        .tab_index(if ui.cursor.map_or((day, index) == (0, 0), |c| c == (day, index)) {
-            0
-        } else {
-            -1
-        })
+        .tab_index(if ui.cursor.map_or((day, index) == (0, 0), |c| c == (day, index)) { 0 } else { -1 })
         .position_in_set(ui.position_of(day, index), ui.total())
         // Ctrl+click checks a photo and starts selecting (DW-0601, DW-0602).
         .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| {
@@ -307,11 +303,7 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
     tile = match ui.source.thumbnail(photo.id, Shape::Square) {
         Some(pixels) => tile.pixels(&pixels),
         None => {
-            let mime = if matches!(photo.kind, Kind::Video(_)) {
-                "video/*"
-            } else {
-                "image/*"
-            };
+            let mime = if matches!(photo.kind, Kind::Video(_)) { "video/*" } else { "image/*" };
             let fi = icon_for("", false, Some(mime));
             tile.fill(t.tile)
                 .center()
@@ -474,12 +466,7 @@ fn unshowable_notice(t: &Theme) -> El {
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
         .child(kit::glyph("ph-heic-notice-icon", &icons::MORE, 14.0, t.text_tertiary))
-        .child(kit::label(
-            "ph-heic-notice-words",
-            UNSHOWABLE,
-            style::SUB,
-            t.text_secondary,
-        ))
+        .child(kit::label("ph-heic-notice-words", UNSHOWABLE, style::SUB, t.text_secondary))
 }
 
 /// The notice's words (also the viewer's).
@@ -513,9 +500,7 @@ pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
                     .virtual_rows_version((ui.lines.len(), ui.across, ui.filter)),
             )
     };
-    let mut body = col()
-        .key("ph-body")
-        .child(crate::ui::focus::pane(head(ui, t), "ph-head"));
+    let mut body = col().key("ph-body").child(crate::ui::focus::pane(head(ui, t), "ph-head"));
     if ui.source.holds_unshowable() {
         body = body.child(unshowable_notice(t));
     }

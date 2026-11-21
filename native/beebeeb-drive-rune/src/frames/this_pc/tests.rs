@@ -287,7 +287,10 @@ fn the_row_menu_opens_from_the_keyboard_and_removes_the_copy() {
     press(&mut rt, Key::ContextMenu);
     assert!(has(&rt, "menu"), "the Menu key opens the row's menu");
     assert_eq!(info(&rt, "menu").role, "menu");
-    assert_eq!(info(&rt, "menu-item-2").label.as_deref(), Some("Remove from this PC"));
+    assert_eq!(
+        info(&rt, "menu-item-2").label.as_deref(),
+        Some("Remove from this PC")
+    );
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Enter);
@@ -694,11 +697,7 @@ fn without_lists_each_section_says_why_and_never_that_the_pc_is_empty() {
     let cases = [
         (Standing::Reading, "Reading this PC", "loading-words"),
         (Standing::Unreadable, "Couldn't read this PC", "unreadable-title"),
-        (
-            Standing::AnotherAccounts,
-            "Not available for this account",
-            "another-account-title",
-        ),
+        (Standing::AnotherAccounts, "Not available for this account", "another-account-title"),
     ];
     for (standing, title, key) in cases {
         for section in [super::Section::SyncHistory, super::Section::AvailableOffline] {

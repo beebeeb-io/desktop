@@ -104,16 +104,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             1,
             &Item::new(Some(&ic::POWER), "Open Beebeeb when you log in").ruled(),
             vec![
-                crate::ui::switch::switch_sized(
-                    &format!("{}-switch", "item-1-1"),
-                    "",
-                    login,
-                    true,
-                    crate::ui::button::Size::Md,
-                    t,
-                )
-                .label("Open Beebeeb when you log in")
-                .on_press(move |s: &mut State| s.settings.drive.set_open_at_login(!login)),
+                crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-1"), "", login, true, crate::ui::button::Size::Md, t).label("Open Beebeeb when you log in")
+                    .on_press(move |s: &mut State| s.settings.drive.set_open_at_login(!login)),
             ],
             t,
         ),

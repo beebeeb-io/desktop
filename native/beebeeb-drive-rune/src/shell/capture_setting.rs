@@ -16,9 +16,7 @@ pub fn load(path: &Path) -> bool {
         Ok(meta) if meta.is_file() && meta.len() <= MAX_FILE_BYTES => {}
         _ => return false,
     }
-    std::fs::read_to_string(path)
-        .map(|text| from_json(&text))
-        .unwrap_or(false)
+    std::fs::read_to_string(path).map(|text| from_json(&text)).unwrap_or(false)
 }
 
 pub fn save(path: &Path, hide: bool) -> std::io::Result<()> {

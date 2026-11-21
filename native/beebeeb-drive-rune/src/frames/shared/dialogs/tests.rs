@@ -721,13 +721,7 @@ fn share_invite_for_an_item_shared_with_no_one_yet_is_titled_by_its_name() {
 fn the_new_dialogs_open_draw_and_close_on_escape() {
     let new = [
         (Dialog::LinkExpiry { share_id: "s".into() }, "dialog-link-change"),
-        (
-            Dialog::LinkPassword {
-                share_id: "s".into(),
-                has_password: false,
-            },
-            "dialog-link-change",
-        ),
+        (Dialog::LinkPassword { share_id: "s".into(), has_password: false }, "dialog-link-change"),
         (Dialog::ConfirmLeave { id: "i".into() }, "alert-confirm-leave"),
         (Dialog::ConfirmStop { id: "i".into() }, "alert-confirm-stop"),
         (Dialog::ConfirmClose { id: "i".into() }, "alert-confirm-close"),
@@ -749,10 +743,10 @@ fn the_new_dialogs_open_draw_and_close_on_escape() {
 
 mod new_request {
     use super::*;
-    use crate::frames::shared::parts::table::Row;
     use crate::frames::shared::source::{
         BoardShared, Invitation, LinkShare, PeopleShare, Request, RequestForm, SharedSource,
     };
+    use crate::frames::shared::parts::table::Row;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -997,10 +991,7 @@ mod link_cards {
     fn the_password_card_opens_on_its_field_and_says_what_it_is() {
         let (rt, sent) = open(password());
         assert_eq!(dialog(&rt), Some(password()));
-        assert_eq!(
-            focused(&rt).as_deref(),
-            Some(super::super::link_change::LINK_PASSWORD_INPUT)
-        );
+        assert_eq!(focused(&rt).as_deref(), Some(super::super::link_change::LINK_PASSWORD_INPUT));
         assert!(typed(&rt).is_empty());
         assert!(super::super::link_change::shows_secret(&rt.state));
         assert!(sent.borrow().is_empty(), "opening sends nothing");
@@ -1063,9 +1054,7 @@ mod link_cards {
     fn a_dialog_opened_over_a_typed_password_starts_with_an_empty_field() {
         let (mut rt, _) = open(password());
         type_password(&mut rt, "left behind");
-        rt.state.frames.shared.open_dialog(Dialog::LinkExpiry {
-            share_id: "link-1".into(),
-        });
+        rt.state.frames.shared.open_dialog(Dialog::LinkExpiry { share_id: "link-1".into() });
         settle(&mut rt);
         assert!(typed(&rt).is_empty());
     }
@@ -1079,10 +1068,7 @@ mod link_cards {
         assert_eq!(dialog(&rt), None);
         assert!(sent.borrow().is_empty());
 
-        rt.state
-            .frames
-            .shared
-            .open_dialog(Dialog::LinkExpiry { share_id: link.clone() });
+        rt.state.frames.shared.open_dialog(Dialog::LinkExpiry { share_id: link.clone() });
         settle(&mut rt);
         click(&mut rt, "expiry-7-days");
         assert_eq!(dialog(&rt), None);

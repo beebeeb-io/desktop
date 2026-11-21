@@ -243,10 +243,7 @@ pub enum SafetyState {
     Asking(SafetyAsk),
     Number(Vec<String>),
     /// The mark was written; `number` is the one compared.
-    Marked {
-        matched: bool,
-        number: Vec<String>,
-    },
+    Marked { matched: bool, number: Vec<String> },
     /// "Share anyway" shared with them.
     Shared,
     /// "Share anyway" on a folder: the refused invite was withdrawn, nothing is shared.
@@ -885,21 +882,13 @@ impl SharedSource for BoardShared {
         };
         let next = match ask {
             SafetyAsk::Number => SafetyState::Number((1..=12).map(|i| format!("{:05}", i * 111)).collect()),
-            SafetyAsk::Matches => SafetyState::Marked {
-                matched: true,
-                number: held,
-            },
-            SafetyAsk::Differs => SafetyState::Marked {
-                matched: false,
-                number: held,
-            },
+            SafetyAsk::Matches => SafetyState::Marked { matched: true, number: held },
+            SafetyAsk::Differs => SafetyState::Marked { matched: false, number: held },
             SafetyAsk::Anyway => SafetyState::Shared,
         };
         map.insert(key, next);
         if ask == SafetyAsk::Matches
-            && let Some(m) = self
-                .people_of(share)
-                .and_then(|p| p.iter_mut().find(|m| m.id == person))
+            && let Some(m) = self.people_of(share).and_then(|p| p.iter_mut().find(|m| m.id == person))
         {
             m.compared = true;
         }

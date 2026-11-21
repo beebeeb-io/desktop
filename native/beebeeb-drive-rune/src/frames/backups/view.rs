@@ -9,18 +9,18 @@ use crate::State;
 use crate::frames::settings;
 use crate::frames::this_pc::icons as pc_icons;
 use crate::shell::{placeholder, registry};
-use crate::theme::file_icons::icon_for;
 use crate::theme::icons as drive_icons;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
-use crate::ui::backups_kit::{self as bk, Leading, Md, RowItem, TileTone};
+use crate::theme::file_icons::icon_for;
 use crate::ui::file_row::RowLook;
 use crate::ui::file_tile::{self, TilePicture, TileSize};
+use crate::ui::view_state::{ViewState, try_again, view_state};
+use crate::ui::backups_kit::{self as bk, Leading, Md, RowItem, TileTone};
 use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_dialog as dialogs;
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
-use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::{caption, settings_shell as shell};
 
 /// `1820` as "1,820".
@@ -157,16 +157,8 @@ fn folder_row(index: usize, folder: &Folder, button: usize, t: &Theme) -> El {
         bk::ghost_button(button, "Remove", &format!("Remove {}", folder.name), t)
             .on_press(move |s: &mut State| s.backups.ask_stop_folder(&id))
     } else {
-        crate::ui::switch::switch_sized(
-            &format!("{}-switch", &format!("item-0-{index}")),
-            "",
-            folder.on,
-            true,
-            crate::ui::button::Size::Md,
-            t,
-        )
-        .label(&folder.name)
-        .on_press(move |s: &mut State| s.backups.toggle_folder(&id))
+        crate::ui::switch::switch_sized(&format!("{}-switch", &format!("item-0-{index}")), "", folder.on, true, crate::ui::button::Size::Md, t).label(&folder.name)
+            .on_press(move |s: &mut State| s.backups.toggle_folder(&id))
     };
     lists::item_with(0, index, &item, vec![control], t)
 }
@@ -234,12 +226,7 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
         return (
             vec![
                 shell::heading("Backups", None, t),
-                view_state(
-                    ViewState::Loading {
-                        words: "Reading this PC's backup\u{2026}",
-                    },
-                    t,
-                ),
+                view_state(ViewState::Loading { words: "Reading this PC's backup\u{2026}" }, t),
             ],
             0,
         );
@@ -841,14 +828,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(crate::ui::focus::pane(
-            row().h_full().child(sidebar(&t)),
-            "backups-sidebar",
-        ))
-        .child(crate::ui::focus::pane(
-            row().grow(1.0).min_w(0.0).h_full().child(shell::pane(children, &t)),
-            "backups-main",
-        ));
+        .child(crate::ui::focus::pane(row().h_full().child(sidebar(&t)), "backups-sidebar"))
+        .child(crate::ui::focus::pane(row().grow(1.0).min_w(0.0).h_full().child(shell::pane(children, &t)), "backups-main"));
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }

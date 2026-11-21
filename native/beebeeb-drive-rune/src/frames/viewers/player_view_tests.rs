@@ -132,10 +132,7 @@ fn refusal_words_name_the_format() {
     assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)).contains("AAC"));
     assert!(refusal_words(&Refusal::NoSystemMedia(Codec::Aac)).contains("no media codecs"));
     assert!(refusal_words(&Refusal::CouldNotPlay).contains("damaged"));
-    assert_ne!(
-        refusal_words(&Refusal::NoSandbox),
-        refusal_words(&Refusal::NotInstalled)
-    );
+    assert_ne!(refusal_words(&Refusal::NoSandbox), refusal_words(&Refusal::NotInstalled));
 }
 
 /// A window that draws only the no-sound line, so the test needs no player.
@@ -172,10 +169,7 @@ fn no_sound_line_names_the_missing_track() {
         .into_iter()
         .find(|e| e.key.as_deref() == Some("video-no-sound-words") && !e.exiting)
         .expect("the line is drawn");
-    assert_eq!(
-        words.text.as_deref(),
-        Some("No sound: this PC has no decoder for AAC audio")
-    );
+    assert_eq!(words.text.as_deref(), Some("No sound: this PC has no decoder for AAC audio"));
 }
 
 /// 7. The line offers "Open in another app\u{2026}" one press away.
@@ -398,10 +392,7 @@ fn a_too_old_windows_says_so_in_the_media_view() {
 #[test]
 fn media_no_decoder_without_a_name_says_this_kind_of_file() {
     let words = refusal_words(&Refusal::NoDecoder(String::new()));
-    assert_eq!(
-        words,
-        "Beebeeb doesn't support this kind of file yet. Open it in another app."
-    );
+    assert_eq!(words, "Beebeeb doesn't support this kind of file yet. Open it in another app.");
     assert!(!words.contains("  "), "{words}");
 }
 
@@ -414,16 +405,10 @@ fn media_a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app(
     assert_eq!(OPEN_DEFAULT, "Open in default app");
     let hevc = Refusal::NoSystemDecoder(Codec::Hevc);
     let words = refusal_words(&hevc);
-    assert!(
-        words.contains("HEVC (H.265)") && words.contains("doesn't have the decoder"),
-        "{words}"
-    );
+    assert!(words.contains("HEVC (H.265)") && words.contains("doesn't have the decoder"), "{words}");
     assert!(words.contains("Microsoft Store"), "{words}");
     assert!(words.contains("default app"), "{words}");
-    assert!(
-        !words.contains("yet"),
-        "the PC has no decoder; it is not Beebeeb that cannot yet: {words}"
-    );
+    assert!(!words.contains("yet"), "the PC has no decoder; it is not Beebeeb that cannot yet: {words}");
     for why in [
         hevc.clone(),
         Refusal::NoSystemDecoder(Codec::H264),

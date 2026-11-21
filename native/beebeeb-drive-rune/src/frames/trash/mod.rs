@@ -12,21 +12,21 @@ mod tests_live;
 
 use crate::State;
 use crate::frames::shared::dialogs::{Dialog, PASSWORD_INPUT};
-use crate::frames::shared::parts::chrome;
 use crate::frames::shared::parts::controls::{ButtonKind, button};
 use crate::frames::shared::parts::menu::{Entry, Open, Took, menu};
 use crate::frames::shared::parts::table::{Columns, Row, header, rows, table_row};
 use crate::frames::shared::parts::toolbar::{Bar, toolbar};
+use crate::frames::shared::parts::chrome;
 use crate::frames::shared::state_body;
+use crate::ui::file_row::ROW_H;
+use crate::ui::view_state::{ViewState, try_again};
 use crate::frames::{self, Intent};
 use crate::theme::{icons, tokens};
-use crate::ui::file_row::ROW_H;
 use crate::ui::kit;
-use crate::ui::view_state::{ViewState, try_again};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el};
-use source::{BoardTrash, Loaded, Notice, PurgeEnd, TrashSource};
 use std::borrow::Cow;
 use std::sync::Arc;
+use source::{BoardTrash, Loaded, Notice, PurgeEnd, TrashSource};
 
 const COLUMNS: Columns = Columns {
     names: ["Name", "Deleted", "Size", "Where it was", ""],
@@ -611,11 +611,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     move |s: &State, i| match s.frames.trash.rows().get(i) {
                         Some(r) => table_row(i, r, s.frames.trash.selected == Some(i), &COLUMNS, &t)
                             // The list is one Tab stop: the selected row, or the first.
-                            .tab_index(if s.frames.trash.selected.unwrap_or(0) == i {
-                                0
-                            } else {
-                                -1
-                            })
+                            .tab_index(if s.frames.trash.selected.unwrap_or(0) == i { 0 } else { -1 })
                             // The place in the whole list, not in the rows built.
                             .position_in_set(i + 1, s.frames.trash.rows().len())
                             .on_press(move |s: &mut State| s.frames.trash.pick_row(i))
@@ -659,7 +655,18 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         "Items in Trash are deleted for good after 30 days",
         ui.menu.as_ref().map(|open| {
             let (name, entries, w) = menu_of(open);
-            menu(name, entries, open, w, window, &t, pick, close_menu, light, on_key)
+            menu(
+                name,
+                entries,
+                open,
+                w,
+                window,
+                &t,
+                pick,
+                close_menu,
+                light,
+                on_key,
+            )
         }),
     )
 }

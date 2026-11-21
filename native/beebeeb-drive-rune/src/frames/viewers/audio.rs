@@ -79,11 +79,7 @@ fn skip(key: &'static str, name: &'static str, icon: &'static Icon, delta: isize
     let button = toolbar::tool(key, name, icon, t).on_press(move |s: &mut State| {
         media::step(s, delta);
     });
-    if can {
-        button
-    } else {
-        button.disabled(true).focusable(false)
-    }
+    if can { button } else { button.disabled(true).focusable(false) }
 }
 
 /// What the player says of THIS recording, when the source hands a player whose current item it is. Another

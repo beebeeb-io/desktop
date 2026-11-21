@@ -1184,16 +1184,8 @@ fn the_delete_subtitle_is_the_boards_two_lines_and_names_no_length_of_time() {
 #[test]
 fn every_settings_pane_draws_the_same_sidebar() {
     const NAMES: [&str; 10] = [
-        "General",
-        "Account",
-        "Security",
-        "Devices and sessions",
-        "Notifications",
-        "Storage",
-        "Backups",
-        "Sync and File Explorer",
-        "Thumbnails and previews",
-        "Bandwidth",
+        "General", "Account", "Security", "Devices and sessions", "Notifications", "Storage", "Backups",
+        "Sync and File Explorer", "Thumbnails and previews", "Bandwidth",
     ];
     let sidebar = |frame: &str| -> (Vec<String>, Vec<String>) {
         let mut state = init();
@@ -1207,14 +1199,9 @@ fn every_settings_pane_draws_the_same_sidebar() {
         for e in rt.elements().into_iter().filter(|e| !e.exiting) {
             let Some(k) = e.key.as_deref() else { continue };
             let labelled = |suffix: &str| {
-                k.strip_suffix(suffix)
-                    .is_some_and(|l| l == "Back to Drive" || NAMES.contains(&l))
+                k.strip_suffix(suffix).is_some_and(|l| l == "Back to Drive" || NAMES.contains(&l))
             };
-            let side = k == "sidebar"
-                || k == "settings-nav"
-                || k.starts_with("side-")
-                || labelled("-row")
-                || labelled("-icon");
+            let side = k == "sidebar" || k == "settings-nav" || k.starts_with("side-") || labelled("-row") || labelled("-icon");
             if side {
                 shape.push(format!("{k}|{:?}|{:?}", e.role, e.label));
                 if k.ends_with("-row") && e.fill.a > 0.0 {
@@ -1228,10 +1215,7 @@ fn every_settings_pane_draws_the_same_sidebar() {
         "DW-0701", "DW-A51", "DW-S01", "DW-A55", "DW-0750", "DW-0712", "DW-0746", "DW-0744", "DW-0785",
     ];
     let (first, _) = sidebar(frames[0]);
-    assert!(
-        first.iter().any(|k| k.starts_with("Security-row")),
-        "the sidebar is there"
-    );
+    assert!(first.iter().any(|k| k.starts_with("Security-row")), "the sidebar is there");
     assert!(first.iter().any(|k| k.starts_with("Bandwidth-icon")));
     for frame in frames {
         let (shape, selected) = sidebar(frame);

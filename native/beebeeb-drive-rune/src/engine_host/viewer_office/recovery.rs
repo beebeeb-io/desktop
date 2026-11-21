@@ -98,11 +98,7 @@ pub(crate) struct Tap {
 
 impl Tap {
     pub(crate) fn new(recovery: Recovery, file_id: &str, base: i64) -> Tap {
-        Tap {
-            recovery,
-            file_id: file_id.to_string(),
-            base,
-        }
+        Tap { recovery, file_id: file_id.to_string(), base }
     }
 
     /// Keep `bytes` as the blob. A refusal only means the safety net is missing; the document goes on.
@@ -126,9 +122,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// The account's kept editings, newest first, for the notice after unlock (the shell's hook calls this).
     pub(in crate::engine_host::viewer) fn office_recovery_pending(&self) -> Vec<Pending> {
-        self.office_recovery_store()
-            .map(|store| store.pending())
-            .unwrap_or_default()
+        self.office_recovery_store().map(|store| store.pending()).unwrap_or_default()
     }
 
     /// Drop the kept editing of `file_id`.
@@ -214,9 +208,7 @@ impl Recovery {
     pub(crate) fn offer(&self, file_id: &str) -> Option<RecoveryOffer> {
         let entries = self.blobs.list(self.session).ok()?;
         let entry = entries.iter().find(|entry| entry.file_id == file_id)?;
-        Some(RecoveryOffer {
-            at: clock(entry.saved_at),
-        })
+        Some(RecoveryOffer { at: clock(entry.saved_at) })
     }
 
     /// The bytes of the file's blob. The blob stays until [`Recovery::saved`] or [`Recovery::discard`].

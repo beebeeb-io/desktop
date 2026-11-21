@@ -84,8 +84,7 @@ fn starts_fn(line: &str) -> bool {
         return true;
     }
     // `pub(...) fn `
-    t.strip_prefix("pub(")
-        .is_some_and(|r| r.split_once(") fn ").is_some_and(|(a, _)| !a.contains(' ')))
+    t.strip_prefix("pub(").is_some_and(|r| r.split_once(") fn ").is_some_and(|(a, _)| !a.contains(' ')))
 }
 
 /// Body of `fn <name>(` up to the next line that starts a function; None when not found.
@@ -154,11 +153,7 @@ fn call_with_number(files: &[(String, String)], skip: &[&str], needle: &str) -> 
     let mut n = 0;
     for (_, body) in files.iter().filter(|(p, _)| !skip.iter().any(|s| p.starts_with(s))) {
         for (i, _) in body.match_indices(needle) {
-            if body[i + needle.len()..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit())
-            {
+            if body[i + needle.len()..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 n += 1;
             }
         }
@@ -270,63 +265,33 @@ fn measure() -> BTreeMap<&'static str, usize> {
         .collect();
     let mut m = BTreeMap::new();
     m.insert("sidebar_assemblies", count(&files, "", &[], &["fn sidebar("]));
-    m.insert(
-        "button_builders_role_button_outside_ui",
-        count(&files, "", &["ui/"], &["role(\"button\")"]),
-    );
-    m.insert(
-        "status_bars_key_outside_ui",
-        count(&files, "", &["ui/"], &["key(\"status-bar\")"]),
-    );
-    m.insert(
-        "dialog_cards_role_dialog_outside_ui",
-        count(&files, "", &["ui/"], &["role(\"dialog\")"]),
-    );
+    m.insert("button_builders_role_button_outside_ui", count(&files, "", &["ui/"], &["role(\"button\")"]));
+    m.insert("status_bars_key_outside_ui", count(&files, "", &["ui/"], &["key(\"status-bar\")"]));
+    m.insert("dialog_cards_role_dialog_outside_ui", count(&files, "", &["ui/"], &["role(\"dialog\")"]));
     // `fn empty() -> Self` is a plain constructor (shared/source.rs, trash/source.rs), not a state view.
     let ctors = count(&files, "", &[], &["fn empty() -> Self"]);
-    m.insert(
-        "empty_states",
-        count(&files, "", &[], &["fn empty_state(", "fn empty("]) - ctors,
-    );
-    m.insert(
-        "toasts",
-        count(&files, "", &[], &["fn toast(", "fn toast_on(", "fn toast_layer("]),
-    );
+    m.insert("empty_states", count(&files, "", &[], &["fn empty_state(", "fn empty("]) - ctors);
+    m.insert("toasts", count(&files, "", &[], &["fn toast(", "fn toast_on(", "fn toast_layer("]));
     m.insert("family_file_rows", fns_present(&files, ROWS));
     m.insert("family_file_tiles", fns_present(&files, TILES));
-    m.insert(
-        "family_toolbars_key_outside_ui",
-        count(&files, "", &["ui/"], &["key(\"toolbar\")"]),
-    );
+    m.insert("family_toolbars_key_outside_ui", count(&files, "", &["ui/"], &["key(\"toolbar\")"]));
     m.insert("family_tool_buttons", fns_present(&files, TOOL_BUTTONS));
     m.insert("family_toast_copies", fns_present(&files, TOASTS));
     m.insert("family_state_views", fns_present(&files, STATES));
     m.insert("family_pills", fns_present(&files, PILLS));
     m.insert("family_switches", fns_present(&files, SWITCHES));
     m.insert("family_menus_outside_ui_menu", fns_present(&files, MENUS));
-    m.insert(
-        "radius_number_literals",
-        call_with_number(&files, &["theme/"], ".radius("),
-    );
+    m.insert("radius_number_literals", call_with_number(&files, &["theme/"], ".radius("));
     m.insert(
         "colour_literals_outside_theme",
         count(&files, "", &["theme/"], &["oklch(", "hex(", "Color::rgb"]),
     );
-    m.insert(
-        "local_textstyle_new_outside_theme",
-        count(&files, "", &["theme/"], &["TextStyle::new("]),
-    );
+    m.insert("local_textstyle_new_outside_theme", count(&files, "", &["theme/"], &["TextStyle::new("]));
     m.insert("spacing_literals_in_frames", spacing_literals(&files));
     m.insert("family_button_builders", family_button_builders(&files));
     m.insert("family_status_bars", files_holding(&files, &[], "key(\"status-bar\")"));
-    m.insert(
-        "family_dialog_cards",
-        files_holding(&files, &[], "kit::drop(24.0, 60.0") + files_holding(&files, &[], "kit::drop(18.0, 50.0"),
-    );
-    m.insert(
-        "family_drive_sidebars",
-        files_holding(&files, &["theme/"], "\"THIS PC\""),
-    );
+    m.insert("family_dialog_cards", files_holding(&files, &[], "kit::drop(24.0, 60.0") + files_holding(&files, &[], "kit::drop(18.0, 50.0"));
+    m.insert("family_drive_sidebars", files_holding(&files, &["theme/"], "\"THIS PC\""));
     m
 }
 
@@ -335,16 +300,9 @@ fn component_ratchet() {
     let table_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/component_ratchet.txt");
     let table = fs::read_to_string(&table_path).unwrap_or_default();
     let mut limits: BTreeMap<String, usize> = BTreeMap::new();
-    for line in table
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-    {
+    for line in table.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         if let Some((k, v)) = line.split_once(char::is_whitespace) {
-            limits.insert(
-                k.to_string(),
-                v.trim().parse().expect("bad count in component_ratchet.txt"),
-            );
+            limits.insert(k.to_string(), v.trim().parse().expect("bad count in component_ratchet.txt"));
         }
     }
     let now = measure();
@@ -403,9 +361,6 @@ mod tests {
     #[test]
     fn missing_file_counts_zero() {
         let files = vec![("ui/x.rs".to_string(), format!("fn a() {{ {B} }}"))];
-        assert_eq!(
-            builders_holding(&files, &[("ui/x.rs", "a"), ("ui/none.rs", "a"), ("ui/x.rs", "z")]),
-            1
-        );
+        assert_eq!(builders_holding(&files, &[("ui/x.rs", "a"), ("ui/none.rs", "a"), ("ui/x.rs", "z")]), 1);
     }
 }

@@ -121,11 +121,7 @@ impl AppActivity {
     /// One tick at `at`: a sample when the pane is shown and `every` has passed. `rates` is the engine's latest
     /// (up, down) in bytes per second, asked only when a sample is due. `true` when a sample was added.
     pub fn tick(&mut self, at: Instant, rates: impl FnOnce() -> (u64, u64)) -> bool {
-        if !self.shown
-            || self
-                .last
-                .is_some_and(|last| at.saturating_duration_since(last) < self.every)
-        {
+        if !self.shown || self.last.is_some_and(|last| at.saturating_duration_since(last) < self.every) {
             return false;
         }
         self.last = Some(at);

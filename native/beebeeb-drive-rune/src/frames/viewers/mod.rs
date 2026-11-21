@@ -19,15 +19,15 @@ mod chrome;
 pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
 pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
 pub(crate) mod details;
-pub(crate) mod dialogs;
-mod editor_minimap;
 mod editor_view;
+mod editor_minimap;
+pub(crate) mod dialogs;
 mod fixture_media;
 mod fixture_text;
 pub mod icons;
 pub mod kinds;
-mod local_file;
 mod markdown;
+mod local_file;
 mod md_source;
 pub mod media;
 mod media_icons;
@@ -43,7 +43,6 @@ pub mod office_over;
 mod open_route;
 mod pdf;
 mod photo;
-pub mod refusal_text;
 mod settle;
 pub mod source;
 mod states;
@@ -51,6 +50,7 @@ mod style;
 mod table;
 mod text;
 pub(crate) mod unsaved_guard;
+pub mod refusal_text;
 pub mod video;
 use open_route::is_this_groups;
 
@@ -889,13 +889,7 @@ fn apply_edit(edit: &mut rune::TextEdit, new: &str, sel: std::ops::Range<usize>)
         pre -= 1;
     }
     let max_suf = old.len().min(new.len()) - pre;
-    let mut suf = old
-        .bytes()
-        .rev()
-        .zip(new.bytes().rev())
-        .take(max_suf)
-        .take_while(|(a, b)| a == b)
-        .count();
+    let mut suf = old.bytes().rev().zip(new.bytes().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
     while !old.is_char_boundary(old.len() - suf) || !new.is_char_boundary(new.len() - suf) {
         suf -= 1;
     }
@@ -1014,12 +1008,7 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
             // Share and Version history of the open file are Files' dialogs: they stand over the viewer.
             let theme = tokens::theme(cx.system_dark());
             match crate::frames::files::window::dialog_over_viewer(s, &theme) {
-                Some(dialog) => rune::el()
-                    .key("viewer-root")
-                    .w_full()
-                    .h_full()
-                    .child(page)
-                    .child(dialog),
+                Some(dialog) => rune::el().key("viewer-root").w_full().h_full().child(page).child(dialog),
                 None => page,
             }
         }

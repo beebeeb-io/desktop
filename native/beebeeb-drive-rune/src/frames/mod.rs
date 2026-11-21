@@ -18,9 +18,9 @@ pub mod open_file;
 pub mod photos;
 pub mod placeholder;
 pub mod search;
+pub mod show_in_folder;
 pub mod settings;
 pub mod shared;
-pub mod show_in_folder;
 pub mod signin;
 pub mod this_pc;
 pub mod trash;
@@ -153,11 +153,7 @@ pub fn sync_words(s: &State) -> String {
 /// How much is on this PC, for a section with nothing of its own to count: the PC's summary, else Files' own words.
 pub fn pc_summary(s: &State) -> String {
     let own = s.frames.pc.summary();
-    if own.is_empty() {
-        files::window::pc_summary(s)
-    } else {
-        own
-    }
+    if own.is_empty() { files::window::pc_summary(s) } else { own }
 }
 
 /// What the lane's groups keep on `State` (ONE field: `State::frames`).

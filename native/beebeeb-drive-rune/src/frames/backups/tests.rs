@@ -749,10 +749,7 @@ impl BackupsSource for Quiet {
     }
 }
 
-fn quiet_runtime(
-    loading: bool,
-    refusal: Option<&'static str>,
-) -> (Runtime<State>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+fn quiet_runtime(loading: bool, refusal: Option<&'static str>) -> (Runtime<State>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut state = init();
     crate::frames::settings::go(&mut state, "DW-0737");
@@ -777,10 +774,7 @@ fn the_section_says_loading_empty_and_failed_and_try_again_reads_again() {
     assert!(!has(&rt, "backups-empty"));
 
     let (rt, _) = quiet_runtime(false, None);
-    assert!(
-        has(&rt, "backups-empty"),
-        "no folders: an empty state, not a blank list"
-    );
+    assert!(has(&rt, "backups-empty"), "no folders: an empty state, not a blank list");
 
     let (mut rt, flag) = quiet_runtime(false, Some("Could not read."));
     assert!(has(&rt, "backups-failed"));

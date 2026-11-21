@@ -16,8 +16,8 @@ use rune::{El, Key, KeyEvent, Tx, row};
 
 use super::sheet;
 use crate::State;
-use crate::frames::office::sheets::sheets_scroll;
 use crate::frames::office::sheets::{self, Cell, SheetView};
+use crate::frames::office::sheets::sheets_scroll;
 use crate::frames::viewers::office::{self as vo, Face, Tool, ico};
 use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Intent, Ui};
@@ -193,11 +193,7 @@ impl<'a> Tools<'a> {
             .preserve_focus_on_press(true)
             .on_press_tx(act)
             .child(kit::glyph(format!("{key}-icon"), icon, 15.0, t.text_secondary))
-            .child(
-                kit::label(format!("{key}-label"), word, TOOL_WORD, t.text)
-                    .w(w)
-                    .a11y_hidden(),
-            );
+            .child(kit::label(format!("{key}-label"), word, TOOL_WORD, t.text).w(w).a11y_hidden());
         if let Some(hint) = hint {
             b = b.shortcut_hint(hint);
         }
@@ -277,20 +273,8 @@ fn home_tools(ui: &Ui, t: &Theme) -> (Vec<El>, Vec<(Pop, f32)>) {
         Tool::Idle,
         ops(EditOp::AutoSum, "Sum"),
     );
-    r.worded(
-        "Sort",
-        "Sort",
-        &ico::LIST_NUMBERS,
-        None,
-        ops(EditOp::Sort { ascending: true }, "Sort"),
-    );
-    r.worded(
-        "AutoFilter",
-        "AutoFilter",
-        &ico::TABLE,
-        None,
-        ops(EditOp::Filter, "AutoFilter"),
-    );
+    r.worded("Sort", "Sort", &ico::LIST_NUMBERS, None, ops(EditOp::Sort { ascending: true }, "Sort"));
+    r.worded("AutoFilter", "AutoFilter", &ico::TABLE, None, ops(EditOp::Filter, "AutoFilter"));
     (r.tools, r.at)
 }
 
@@ -302,13 +286,7 @@ pub fn is_auto_sum(ev: &KeyEvent) -> bool {
 /// Data's tools: Sort A to Z, Filter, Table.
 pub fn data_tools(t: &Theme) -> Vec<El> {
     let mut r = Tools::new(t);
-    r.worded(
-        "Sort A to Z",
-        "Sort A to Z",
-        &ico::LIST_NUMBERS,
-        None,
-        ops(EditOp::Sort { ascending: true }, "Sort A to Z"),
-    );
+    r.worded("Sort A to Z", "Sort A to Z", &ico::LIST_NUMBERS, None, ops(EditOp::Sort { ascending: true }, "Sort A to Z"));
     r.worded("Filter", "Filter", &ico::TABLE, None, ops(EditOp::Filter, "Filter"));
     r.worded("Table", "Table", &ico::TABLE, None, ops(EditOp::MakeTable, "Table"));
     r.tools
@@ -324,13 +302,7 @@ fn insert_tools(t: &Theme) -> Vec<El> {
 /// What the web editor has under Formulas: Sum.
 pub fn formulas_tools(t: &Theme) -> Vec<El> {
     let mut r = Tools::new(t);
-    r.worded(
-        "Sum",
-        "Sum",
-        &ico::LIST_NUMBERS,
-        Some("Alt+="),
-        ops(EditOp::AutoSum, "Sum"),
-    );
+    r.worded("Sum", "Sum", &ico::LIST_NUMBERS, Some("Alt+="), ops(EditOp::AutoSum, "Sum"));
     r.tools
 }
 
@@ -380,10 +352,7 @@ fn entries(pop: Pop) -> Vec<Entry> {
 /// The edit an entry stands for.
 fn op_of(pop: Pop, id: &str) -> Option<(EditOp, &'static str)> {
     Some(match pop {
-        Pop::Font => (
-            EditOp::FontFamily(FONTS.iter().find(|f| **f == id)?.to_string()),
-            "Fonts",
-        ),
+        Pop::Font => (EditOp::FontFamily(FONTS.iter().find(|f| **f == id)?.to_string()), "Fonts"),
         Pop::Fill if id == "none" => (EditOp::FillColour(None), "Fill colour"),
         Pop::Fill => (EditOp::FillColour(Some(rgb(id)?)), "Fill colour"),
     })
@@ -399,9 +368,7 @@ fn name_of(pop: Pop) -> (&'static str, f32) {
 fn pick(s: &mut State, index: usize, tx: &mut Tx) {
     let Some(pop) = open_pop() else { return };
     let all = entries(pop);
-    let Some(id) = all.get(index).and_then(Entry::id) else {
-        return;
-    };
+    let Some(id) = all.get(index).and_then(Entry::id) else { return };
     set_open(None);
     if let Some((op, asked)) = op_of(pop, id) {
         send(s, tx, op, asked);

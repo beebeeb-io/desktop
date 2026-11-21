@@ -9,8 +9,8 @@ use super::source::{Kind, Shape, Viewing};
 use super::{Intent, Menu, Original, Ui, icons, overlay};
 use crate::State;
 use crate::theme::tokens::Theme;
-use crate::ui::kit;
 use crate::ui::toolbar::tool;
+use crate::ui::kit;
 
 fn tab(i: usize, words: String, on: bool, t: &Theme) -> El {
     let mut tab = el()
@@ -47,10 +47,7 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
     if viewing.kind == Kind::Photo {
         let whole = megabytes(viewing.original_bytes, true);
         let original_words = match original {
-            Original::Downloading { done } => format!(
-                "Original \u{00B7} {} of {whole}",
-                super::grid::sized_like(done, viewing.original_bytes, false)
-            ),
+            Original::Downloading { done } => format!("Original \u{00B7} {} of {whole}", super::grid::sized_like(done, viewing.original_bytes, false)),
             _ => format!("Original \u{00B7} {whole}"),
         };
         middle = middle.child(
@@ -81,14 +78,9 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
     let open = viewing.id;
     let show_label = crate::frames::show_in_folder::label();
     middle = middle.child(
-        tool(
-            "ph-show-in-folder",
-            show_label,
-            &crate::theme::icons_settings::FOLDER,
-            t,
-        )
-        .help(show_label)
-        .on_press(move |s: &mut State| s.photos.ask(Intent::ShowInFolder(open))),
+        tool("ph-show-in-folder", show_label, &crate::theme::icons_settings::FOLDER, t)
+            .help(show_label)
+            .on_press(move |s: &mut State| s.photos.ask(Intent::ShowInFolder(open))),
     );
     middle = middle.child(
         tool("ph-more", "More", &icons::MORE, t)
@@ -288,11 +280,7 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
     }
 
     // w31: a HEIC or RAW original is said, and the system's app is offered for it.
-    if let Some(words) = ui
-        .source
-        .original_refused(viewer.id)
-        .filter(|_| viewing.kind == Kind::Photo)
-    {
+    if let Some(words) = ui.source.original_refused(viewer.id).filter(|_| viewing.kind == Kind::Photo) {
         let id = viewer.id;
         let app = crate::frames::show_in_folder::os_app_label();
         stage = stage.child(
@@ -305,23 +293,10 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
                 .py(8.0)
                 .gap(12.0)
                 .center_y()
-                .child(kit::label(
-                    "ph-viewer-notice-words",
-                    words,
-                    style::SUB,
-                    white.alpha(0.75),
-                ))
+                .child(kit::label("ph-viewer-notice-words", words, style::SUB, white.alpha(0.75)))
                 .child(
-                    chrome::button(
-                        "ph-open-in-os-app",
-                        &format!("Open in {app}"),
-                        None,
-                        chrome::Tone::Plain,
-                        28.0,
-                        crate::theme::tokens::type_::BUTTON_SM,
-                        t,
-                    )
-                    .on_press(move |s: &mut State| s.photos.ask(Intent::OpenInOsApp(id))),
+                    chrome::button("ph-open-in-os-app", &format!("Open in {app}"), None, chrome::Tone::Plain, 28.0, crate::theme::tokens::type_::BUTTON_SM, t)
+                        .on_press(move |s: &mut State| s.photos.ask(Intent::OpenInOsApp(id))),
                 ),
         );
     }

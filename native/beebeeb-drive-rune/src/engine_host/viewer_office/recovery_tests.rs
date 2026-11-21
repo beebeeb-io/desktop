@@ -17,22 +17,13 @@ struct Fake {
 }
 
 impl Blobs for Fake {
-    fn put(
-        &self,
-        session: SessionGeneration,
-        id: &str,
-        base: i64,
-        bytes: &Zeroizing<Vec<u8>>,
-    ) -> Result<(), RecoveryRefused> {
+    fn put(&self, session: SessionGeneration, id: &str, base: i64, bytes: &Zeroizing<Vec<u8>>) -> Result<(), RecoveryRefused> {
         if session != SessionGeneration::for_test(self.turn) {
             return Err(RecoveryRefused::NotSignedIn);
         }
         // 14:32:07 UTC on a day.
         let at = 86_400 * 100 + 14 * 3600 + 32 * 60 + 7;
-        self.blobs
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), (at, base, bytes.to_vec()));
+        self.blobs.lock().unwrap().insert(id.to_string(), (at, base, bytes.to_vec()));
         Ok(())
     }
     fn list(&self, session: SessionGeneration) -> Result<Vec<RecoveryEntry>, RecoveryRefused> {
@@ -44,28 +35,14 @@ impl Blobs for Fake {
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, (at, base, _))| RecoveryEntry {
-                file_id: id.clone(),
-                saved_at: *at,
-                base: *base,
-            })
+            .map(|(id, (at, base, _))| RecoveryEntry { file_id: id.clone(), saved_at: *at, base: *base })
             .collect())
     }
     fn take(&self, _session: SessionGeneration, id: &str) -> Result<Zeroizing<Vec<u8>>, RecoveryRefused> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(id)
-            .map(|b| Zeroizing::new(b.2.clone()))
-            .ok_or(RecoveryRefused::NotFound)
+        self.blobs.lock().unwrap().get(id).map(|b| Zeroizing::new(b.2.clone())).ok_or(RecoveryRefused::NotFound)
     }
     fn discard(&self, _session: SessionGeneration, id: &str) -> Result<(), RecoveryRefused> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .remove(id)
-            .map(|_| ())
-            .ok_or(RecoveryRefused::NotFound)
+        self.blobs.lock().unwrap().remove(id).map(|_| ()).ok_or(RecoveryRefused::NotFound)
     }
 }
 
@@ -130,11 +107,9 @@ fn recovery_another_session_keeps_and_lists_nothing() {
 
 /// The blob's 14:32:07 UTC, on this PC's clock.
 fn local_1432() -> String {
-    chrono::DateTime::<chrono::Local>::from(
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400 * 100 + 14 * 3600 + 32 * 60 + 7),
-    )
-    .format("%H:%M")
-    .to_string()
+    chrono::DateTime::<chrono::Local>::from(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400 * 100 + 14 * 3600 + 32 * 60 + 7))
+        .format("%H:%M")
+        .to_string()
 }
 
 #[test]
@@ -156,24 +131,15 @@ fn recovery_pending_lists_the_accounts_blobs_for_the_notice() {
 fn recovery_words_follow_the_editor_state() {
     let mut edit = EditUi::new(beebeeb_office_protocol::office::EditKind::Docx);
     assert_eq!(words::banner(Some(&edit), None), None);
-    let offer = RecoveryOffer {
-        at: "14:32".to_string(),
-    };
+    let offer = RecoveryOffer { at: "14:32".to_string() };
     assert_eq!(
         words::banner(Some(&edit), Some(&offer)),
-        Some(words::Banner::Offer {
-            at: "14:32".to_string()
-        })
+        Some(words::Banner::Offer { at: "14:32".to_string() })
     );
-    assert_eq!(
-        words::offer_words("Plan.docx", "14:32"),
-        "Unsaved changes to Plan.docx from 14:32."
-    );
+    assert_eq!(words::offer_words("Plan.docx", "14:32"), "Unsaved changes to Plan.docx from 14:32.");
     edit.restored = Some("14:32".to_string());
     let restored = words::banner(Some(&edit), Some(&offer)).unwrap();
-    assert!(
-        words::words(&restored, "Plan.docx").starts_with("The editor stopped. Your changes up to 14:32 are restored.")
-    );
+    assert!(words::words(&restored, "Plan.docx").starts_with("The editor stopped. Your changes up to 14:32 are restored."));
     // Two crashes: read-only, with the restored copy as the Keep both path.
     edit.stopped = true;
     let read_only = words::banner(Some(&edit), None).unwrap();

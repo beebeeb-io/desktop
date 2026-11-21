@@ -39,12 +39,7 @@ fn previews_row_shown(shows: bool, previews: &KeptOnPc) -> bool {
 fn unanswered(ui: &SettingsUi, st: &super::drive::Storage, t: &Theme) -> Option<El> {
     let why = match ui.drive.insights() {
         Insights::Loading => {
-            return Some(view_state(
-                ViewState::Loading {
-                    words: "Loading your storage…",
-                },
-                t,
-            ));
+            return Some(view_state(ViewState::Loading { words: "Loading your storage…" }, t));
         }
         Insights::Failed(why) => why.as_str(),
         _ if st.used.is_empty() || st.total.is_empty() => "Beebeeb could not read how much space you use.",
@@ -326,10 +321,7 @@ mod tests {
         let mut state = crate::init();
         assert!(crate::frames::settings::scene("DW-0712", &mut state));
         state.settings.drive = Box::new(BoardDrive::new().with_insights(insights));
-        let env = rune::Env {
-            system_dark: false,
-            scale: 2.0,
-        };
+        let env = rune::Env { system_dark: false, scale: 2.0 };
         let mut rt = rune::Runtime::new(state, crate::view, (958.0, 718.0), env);
         rt.frame(0.0);
         rt.frame(0.016);

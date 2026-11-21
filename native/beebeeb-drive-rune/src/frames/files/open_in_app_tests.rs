@@ -139,11 +139,7 @@ fn without_a_viewer_wired_a_file_is_still_never_handed_to_the_os() {
     let (mut rt, calls, _) = spied();
     press(&mut rt, Key::Enter, NONE);
     settle(&mut rt);
-    assert!(
-        !asked(&calls).iter().any(|c| matches!(c, Call::Open(_))),
-        "{:?}",
-        asked(&calls)
-    );
+    assert!(!asked(&calls).iter().any(|c| matches!(c, Call::Open(_))), "{:?}", asked(&calls));
 }
 
 /// Every Files entry goes through `open_file`: with a viewer that shows no kind, each one ends in step 2 (the

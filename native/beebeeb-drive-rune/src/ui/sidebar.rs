@@ -8,8 +8,8 @@ use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Span, col, el, row};
 
-use super::drive_sidebar::Lit;
 use super::file_icon::file_icon;
+use super::drive_sidebar::Lit;
 use super::kit;
 
 /// Which sidebar section is active.
@@ -107,7 +107,12 @@ pub fn side_item(
 
 /// A sidebar place: the folder art in its tint (a selected row keeps the tint), or the line
 /// glyph for Trash.
-pub fn section_item(section: SidebarSection, count: Option<Count>, on: bool, t: &Theme) -> El {
+pub fn section_item(
+    section: SidebarSection,
+    count: Option<Count>,
+    on: bool,
+    t: &Theme,
+) -> El {
     let label = section.label();
     let Some(fi) = section.file_icon() else {
         return side_item(label, section.icon(), count, on, section.shortcut(), t);
@@ -116,7 +121,14 @@ pub fn section_item(section: SidebarSection, count: Option<Count>, on: bool, t: 
     side_row(label, glyph, count, on, section.shortcut(), t)
 }
 
-fn side_row(label: &'static str, glyph: El, count: Option<Count>, on: bool, shortcut: &str, t: &Theme) -> El {
+fn side_row(
+    label: &'static str,
+    glyph: El,
+    count: Option<Count>,
+    on: bool,
+    shortcut: &str,
+    t: &Theme,
+) -> El {
     let mut item = row()
         .key(format!("{label}-row"))
         .role("button")

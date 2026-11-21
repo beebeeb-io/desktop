@@ -1,9 +1,9 @@
 //! How a local file operation's `DriveError` reads in the UI (`ActionError`): the one mapping every Files action uses,
 //! and New file's, which says a full disk and a too-large file in their own words.
 
-use crate::frames::files::source::ActionError;
-use beebeeb_engine::drive_v2::DriveError;
 use beebeeb_engine::drive_v2::case_place::Clash;
+use beebeeb_engine::drive_v2::DriveError;
+use crate::frames::files::source::ActionError;
 
 /// Map a `DriveError` to the UI's `ActionError`.
 pub(super) fn map_drive_err(e: DriveError) -> ActionError {

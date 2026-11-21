@@ -75,9 +75,9 @@ fn node<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
 fn states(rt: &Runtime<Page>, key: &str) -> Vec<String> {
     let tree = rt.accessibility_json();
     let n = node(&tree, key).unwrap_or_else(|| panic!("no node keyed {key}: {tree:#}"));
-    n["states"].as_array().map_or(Vec::new(), |s| {
-        s.iter().filter_map(|v| v.as_str().map(String::from)).collect()
-    })
+    n["states"]
+        .as_array()
+        .map_or(Vec::new(), |s| s.iter().filter_map(|v| v.as_str().map(String::from)).collect())
 }
 
 #[test]
@@ -87,7 +87,10 @@ fn loading_is_the_strip_with_its_words_and_a_busy_bar() {
     assert_eq!(root.role, "status");
     assert_eq!(root.label.as_deref(), Some("Opening your Drive"));
     assert_eq!(root.radius, 10.0, "the strip's radius");
-    assert_eq!(info(&rt, "loading-words").text.as_deref(), Some("Opening your Drive"));
+    assert_eq!(
+        info(&rt, "loading-words").text.as_deref(),
+        Some("Opening your Drive")
+    );
     let bar = info(&rt, "loading-bar");
     assert_eq!(bar.role, "progressbar");
     assert_eq!(bar.rect[3], 4.0, "the strip's bar height");
@@ -112,10 +115,7 @@ fn empty_has_tile_icon_title_text_and_the_action_only_when_given() {
         );
         assert_eq!(find(&rt, "none-add").is_some(), action, "action drawn: {action}");
         if action {
-            assert!(
-                info(&rt, "none-add").rect[1] > info(&rt, "none-text").rect[1],
-                "the action sits under the text"
-            );
+            assert!(info(&rt, "none-add").rect[1] > info(&rt, "none-text").rect[1], "the action sits under the text");
         }
     }
 }
@@ -177,37 +177,15 @@ fn sized_view_state_takes_the_loading_prefix_and_a_compact_tile() {
         rune::col()
             .key("page")
             .w(400.0)
+            .child(view_state_sized(ViewState::Loading { words: "Wait" }, "set-load", Size::Sm, &t))
             .child(view_state_sized(
-                ViewState::Loading { words: "Wait" },
-                "set-load",
-                Size::Sm,
-                &t,
-            ))
-            .child(view_state_sized(
-                ViewState::Empty {
-                    key: "e",
-                    icon: &icons::PLUS,
-                    title: "T",
-                    body: "B",
-                    action: None,
-                },
+                ViewState::Empty { key: "e", icon: &icons::PLUS, title: "T", body: "B", action: None },
                 "x",
                 Size::Sm,
                 &t,
             ))
     }
-    let mut rt = Runtime::new(
-        Page {
-            which: Which::Loading,
-            retried: 0,
-        },
-        v,
-        (400.0, 600.0),
-        Env {
-            system_dark: false,
-            scale: 2.0,
-        },
-    );
+    let mut rt = Runtime::new(Page { which: Which::Loading, retried: 0 }, v, (400.0, 600.0), Env { system_dark: false, scale: 2.0 });
     rt.frame(0.0);
     rt.settle_all();
     rt.frame(0.0);

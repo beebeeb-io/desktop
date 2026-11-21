@@ -79,11 +79,7 @@ pub fn banner(edit: Option<&EditUi>, offer: Option<&RecoveryOffer>) -> Option<Ba
         }
         if let Some(at) = &edit.restored {
             let at = at.clone();
-            return Some(if edit.restored_by_you {
-                Banner::Brought { at }
-            } else {
-                Banner::Restored { at }
-            });
+            return Some(if edit.restored_by_you { Banner::Brought { at } } else { Banner::Restored { at } });
         }
     }
     offer.map(|offer| Banner::Offer { at: offer.at.clone() })
@@ -94,9 +90,7 @@ pub fn words(banner: &Banner, name: &str) -> String {
     match banner {
         Banner::Restored { at } => restored_words(at),
         Banner::Brought { at } => brought_words(at),
-        Banner::ReadOnly { at: Some(at) } => {
-            format!("{} Your changes up to {at} can be kept as a copy.", read_only_words())
-        }
+        Banner::ReadOnly { at: Some(at) } => format!("{} Your changes up to {at} can be kept as a copy.", read_only_words()),
         Banner::ReadOnly { at: None } => read_only_words().to_string(),
         Banner::Offer { at } => offer_words(name, at),
     }
@@ -106,16 +100,7 @@ pub fn words(banner: &Banner, name: &str) -> String {
 /// `recovery-discard`.
 pub fn view(banner: &Banner, name: &str, t: &Theme) -> El {
     let button = |key: &str, label: &str, press: fn(&mut State)| {
-        button::button(
-            button::keys(key),
-            label,
-            None,
-            Variant::Secondary,
-            Size::Sm,
-            ButtonState::Enabled,
-            t,
-        )
-        .on_press(press)
+        button::button(button::keys(key), label, None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t).on_press(press)
     };
     let mut b = row()
         .key("recovery")
@@ -129,15 +114,10 @@ pub fn view(banner: &Banner, name: &str, t: &Theme) -> El {
         .radius(10.0)
         .fill(crate::ui::banner::tone(crate::ui::banner::Tone::Neutral, t).0)
         .child(
-            kit::label(
-                "recovery-text",
-                words(banner, name),
-                tokens::type_::CAPTION,
-                t.text_secondary,
-            )
-            .wrap()
-            .grow(1.0)
-            .min_w(0.0),
+            kit::label("recovery-text", words(banner, name), tokens::type_::CAPTION, t.text_secondary)
+                .wrap()
+                .grow(1.0)
+                .min_w(0.0),
         );
     match banner {
         Banner::Restored { .. } | Banner::Brought { .. } => {}

@@ -273,11 +273,7 @@ fn office_slides_a_4_3_slide_keeps_its_proportions_on_the_stage() {
     // The same at a display scale of 150 %: layout points do not change with it.
     let (rt, _) = live_runtime(Body::Deck(deck_of_size((720, 540))), 1.5, Some((1440, 1080)));
     let slide = find(&rt, "slide").expect("the slide on the stage");
-    assert!(
-        (slide.rect[2] / slide.rect[3] - 4.0 / 3.0).abs() < 0.01,
-        "{:?}",
-        slide.rect
-    );
+    assert!((slide.rect[2] / slide.rect[3] - 4.0 / 3.0).abs() < 0.01, "{:?}", slide.rect);
     // A 16:9 slide is the board's.
     let (rt, _) = live_runtime(Body::Deck(deck_of_size(PAGE_PT)), 1.0, Some((1280, 720)));
     let slide = find(&rt, "slide").expect("the slide on the stage");

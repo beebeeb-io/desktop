@@ -430,23 +430,10 @@ fn file_row_full(
     cells.push(shared_cell(&k, item, meta, surface, t));
     cells.push(pc);
     let tile = tile.unwrap_or_else(|| file_tile(&k, item, t));
-    let look = RowLook {
-        selected,
-        ..RowLook::default()
-    };
+    let look = RowLook { selected, ..RowLook::default() };
     let shown = if marks_has_field { "" } else { item.name.as_str() };
     // The list's one Tab stop is the table (`rows`): a row takes no focus of its own.
-    file_row::row_with(
-        &k,
-        &row_name(item, &date, &size_text),
-        tile,
-        shown,
-        marks,
-        cells,
-        look,
-        t,
-    )
-    .focusable(false)
+    file_row::row_with(&k, &row_name(item, &date, &size_text), tile, shown, marks, cells, look, t).focusable(false)
 }
 
 /// What the PC column says of a row whose place on this PC is another item's (`case_place`, the engine's mark): its

@@ -245,12 +245,6 @@ fn a_broken_rule_and_a_helper_code_are_logged() {
         assert!(broke(worker.handle(FromHelper::Ended)));
         let _ = worker.on_error(beebeeb_media_protocol::ErrorCode::NoSystemDecoder(Codec::Hevc));
     });
-    assert!(
-        text.contains("media helper stopped by the player what=check at="),
-        "{text}"
-    );
-    assert!(
-        text.contains("media helper answered an error answer=no system decoder codec=hevc"),
-        "{text}"
-    );
+    assert!(text.contains("media helper stopped by the player what=check at="), "{text}");
+    assert!(text.contains("media helper answered an error answer=no system decoder codec=hevc"), "{text}");
 }

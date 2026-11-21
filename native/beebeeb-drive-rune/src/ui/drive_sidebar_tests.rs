@@ -19,22 +19,10 @@ const WINDOWS: [(&str, fn(&mut State), &str); 8] = [
     ("Search", |s| s.frames.find.open = true, "Files-row"),
     ("Shared", crate::frames::shared::scenes::dw_0501, "Shared-row"),
     ("Trash", crate::frames::trash::scenes::dw_0747, "Trash-row"),
-    (
-        "Photos",
-        |s| crate::frames::photos::set_scene(s, "DW-0601"),
-        "Photos-row",
-    ),
+    ("Photos", |s| crate::frames::photos::set_scene(s, "DW-0601"), "Photos-row"),
     ("Viewer", |s| crate::frames::viewers::set_scene(s, "DW-1512"), ""),
-    (
-        "Sync history",
-        crate::frames::this_pc::scenes::dw_1301,
-        "Sync history-row",
-    ),
-    (
-        "Available offline",
-        crate::frames::this_pc::scenes::dw_0715,
-        "Available offline-row",
-    ),
+    ("Sync history", crate::frames::this_pc::scenes::dw_1301, "Sync history-row"),
+    ("Available offline", crate::frames::this_pc::scenes::dw_0715, "Available offline-row"),
 ];
 
 fn window(scene: fn(&mut State)) -> Runtime<State> {
@@ -195,23 +183,12 @@ fn locked_and_no_plan_are_dimmed_and_inert() {
             assert!(!e.focusable, "{gate:?}: {:?} takes no focus", e.key);
         }
         assert!(
-            rt.elements()
-                .iter()
-                .any(|e| e.key.as_deref() == Some("sidebar") && e.opacity < 0.6),
+            rt.elements().iter().any(|e| e.key.as_deref() == Some("sidebar") && e.opacity < 0.6),
             "{gate:?}: dimmed"
         );
-        for key in [
-            "Shared-row",
-            "Sync history-row",
-            "Available offline-row",
-            "settings-btn",
-        ] {
+        for key in ["Shared-row", "Sync history-row", "Available offline-row", "settings-btn"] {
             click(&mut rt, key);
         }
-        assert_eq!(
-            rt.state.shell.app.screen(),
-            Screen::Gate(gate),
-            "{gate:?}: the window stays"
-        );
+        assert_eq!(rt.state.shell.app.screen(), Screen::Gate(gate), "{gate:?}: the window stays");
     }
 }

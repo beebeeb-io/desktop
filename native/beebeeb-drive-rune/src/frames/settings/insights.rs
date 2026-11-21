@@ -7,8 +7,8 @@ use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::settings_card as cards;
 use crate::ui::settings_meter as meters;
-use crate::ui::settings_shell::{self as shell, SUB};
 use crate::ui::view_state::{ViewState, try_again, view_state};
+use crate::ui::settings_shell::{self as shell, SUB};
 use rune::tok::Family;
 use rune::{El, TextStyle, col, el, row};
 
@@ -41,20 +41,13 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         ),
     ];
     match ui.drive.insights() {
-        Insights::Loading => children.push(view_state(
-            ViewState::Loading {
-                words: "Loading your insights…",
-            },
-            t,
-        )),
+        Insights::Loading => children.push(view_state(ViewState::Loading { words: "Loading your insights…" }, t)),
         Insights::Failed(why) => children.push(view_state(
             ViewState::Failed {
                 key: "insights-failed",
                 title: "Couldn't load your insights",
                 why,
-                retry: Some(
-                    try_again("insights-failed", t).on_press(|s: &mut State| s.settings.drive.reload_insights()),
-                ),
+                retry: Some(try_again("insights-failed", t).on_press(|s: &mut State| s.settings.drive.reload_insights())),
             },
             t,
         )),

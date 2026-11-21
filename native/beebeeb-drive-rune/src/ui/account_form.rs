@@ -586,13 +586,7 @@ pub fn codes(list: &[&str], t: &Theme) -> El {
 /// An empty state (`.kit-empty`): a neutral tile, a title and one paragraph, centred.
 pub fn empty(icon: &'static Icon, title: &str, words: &str, t: &Theme) -> El {
     super::view_state::view_state(
-        super::view_state::ViewState::Empty {
-            key: "empty",
-            icon,
-            title,
-            body: words,
-            action: None,
-        },
+        super::view_state::ViewState::Empty { key: "empty", icon, title, body: words, action: None },
         t,
     )
 }

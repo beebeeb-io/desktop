@@ -275,9 +275,7 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
                 }
             }),
             Action::DiscardAndSwitch => button.on_press(|s: &mut State| {
-                let Some(attempt) = s.shell.sync_off().map(|off| off.attempt) else {
-                    return;
-                };
+                let Some(attempt) = s.shell.sync_off().map(|off| off.attempt) else { return };
                 let actions = s.shell.actions.clone();
                 crate::frames::signin::discard_switch::CONFIRMATION.open(attempt, &*actions);
             }),

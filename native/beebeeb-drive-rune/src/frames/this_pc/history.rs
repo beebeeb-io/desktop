@@ -8,15 +8,15 @@ use super::chrome::{self, FilesControls};
 use super::source::{Change, Exit, Kind, Origin};
 use super::{Filter, Section, Ui, icons};
 use crate::State;
-use crate::theme::file_icons::icon_for;
+use crate::ui::button;
 use crate::theme::icons as base;
 use crate::theme::tokens::{self, Theme, type_};
-use crate::ui::button;
+use crate::theme::file_icons::icon_for;
 use crate::ui::file_list::ROW_H;
 use crate::ui::file_row::{self, RowLook};
 use crate::ui::file_tile::{self, TilePicture, TileSize};
-use crate::ui::kit;
 use crate::ui::view_state::{self, ViewState};
+use crate::ui::kit;
 
 const SEARCH_PLACEHOLDER: &str = "Search history";
 
@@ -151,16 +151,8 @@ fn problems_bar(try_all: bool, t: &Theme) -> El {
     // Task 2524: held edits have no Try again; the bar offers it only while something can be tried again.
     if try_all {
         bar = bar.child(
-            button::button(
-                button::keys("btn-try-all-again"),
-                "Try all again",
-                Some(&icons::RETRY),
-                button::Variant::Secondary,
-                button::Size::Sm,
-                button::ButtonState::Enabled,
-                t,
-            )
-            .on_press(|s: &mut State| s.this_pc.retry_all()),
+            button::button(button::keys("btn-try-all-again"), "Try all again", Some(&icons::RETRY), button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t)
+                .on_press(|s: &mut State| s.this_pc.retry_all()),
         );
     }
     bar
@@ -299,42 +291,18 @@ fn change_row(i: usize, change: &Change, retry_no: usize, count: usize, t: &Them
             "btn-try-again".to_string()
         };
         retry = retry.child(
-            button::button(
-                button::keys(&key),
-                "Try again",
-                Some(&icons::RETRY),
-                button::Variant::Secondary,
-                button::Size::Sm,
-                button::ButtonState::Enabled,
-                t,
-            )
-            .on_press(move |s: &mut State| s.this_pc.retry(&problem)),
+            button::button(button::keys(&key), "Try again", Some(&icons::RETRY), button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t)
+                .on_press(move |s: &mut State| s.this_pc.retry(&problem)),
         );
     } else if let Some(problem) = failed.clone().filter(|_| exits.iter().any(|exit| exit.is_keep())) {
         retry = retry.child(
-            button::button(
-                button::keys(&format!("{k}-choose")),
-                "Choose",
-                None,
-                button::Variant::Secondary,
-                button::Size::Sm,
-                button::ButtonState::Enabled,
-                t,
-            )
-            .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, false)),
+            button::button(button::keys(&format!("{k}-choose")), "Choose", None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t)
+                .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, false)),
         );
     } else if let Some(problem) = failed.clone().filter(|_| exits.contains(&Exit::RemoveFromList)) {
         retry = retry.child(
-            button::button(
-                button::keys(&format!("{k}-remove")),
-                "Remove",
-                None,
-                button::Variant::Secondary,
-                button::Size::Sm,
-                button::ButtonState::Enabled,
-                t,
-            )
-            .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, true)),
+            button::button(button::keys(&format!("{k}-remove")), "Remove", None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t)
+                .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, true)),
         );
     }
 
@@ -354,11 +322,7 @@ fn change_row(i: usize, change: &Change, retry_no: usize, count: usize, t: &Them
             format!("{k}-sub"),
             line.clone(),
             type_::CAPTION,
-            if failed.is_some() {
-                icons::red_text(t)
-            } else {
-                t.text_tertiary
-            },
+            if failed.is_some() { icons::red_text(t) } else { t.text_tertiary },
         )
         .grow(1.0)
         .min_w(0.0)
@@ -400,22 +364,16 @@ fn change_row(i: usize, change: &Change, retry_no: usize, count: usize, t: &Them
 
 /// DW-1305: a PC that just signed in has no history yet.
 fn empty(t: &Theme) -> El {
-    col()
-        .key("empty-area")
-        .grow(1.0)
-        .min_h(0.0)
-        .w_full()
-        .center()
-        .child(view_state::view_state(
-            ViewState::Empty {
-                key: "empty",
-                icon: &base::SYNC_HISTORY,
-                title: "No changes yet",
-                body: "Changes from this PC and your other devices show here for 30 days.",
-                action: None,
-            },
-            t,
-        ))
+    col().key("empty-area").grow(1.0).min_h(0.0).w_full().center().child(view_state::view_state(
+        ViewState::Empty {
+            key: "empty",
+            icon: &base::SYNC_HISTORY,
+            title: "No changes yet",
+            body: "Changes from this PC and your other devices show here for 30 days.",
+            action: None,
+        },
+        t,
+    ))
 }
 
 #[cfg(test)]

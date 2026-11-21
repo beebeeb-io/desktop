@@ -1072,9 +1072,7 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     // Esc on a presentation that is on leaves Present, not the file.
-    if matches!(ev.key, Key::Escape)
-        && (crate::frames::viewers::leave_present(s) || crate::frames::viewers::close_find(s))
-    {
+    if matches!(ev.key, Key::Escape) && (crate::frames::viewers::leave_present(s) || crate::frames::viewers::close_find(s)) {
         return true;
     }
     let event = match ev.key {

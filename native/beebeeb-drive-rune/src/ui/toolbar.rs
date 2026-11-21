@@ -24,7 +24,14 @@ pub enum ToolState {
 
 /// A toolbar button: 28 pt tall, at least 28 wide, one or more 15/16 pt glyphs.
 /// Keys: `<key>` and `<key>-icon` (further glyphs are added by the caller).
-pub fn tool_button(key: &str, name: &str, ic: &'static Icon, icon_size: f32, state: ToolState, t: &Theme) -> El {
+pub fn tool_button(
+    key: &str,
+    name: &str,
+    ic: &'static Icon,
+    icon_size: f32,
+    state: ToolState,
+    t: &Theme,
+) -> El {
     let ink = match state {
         ToolState::Idle => t.text_secondary,
         ToolState::On => t.text,
@@ -230,12 +237,7 @@ pub fn title_block(title: &str, info: Option<&str>, t: &Theme) -> El {
         .min_w(0.0)
         .child(kit::label("folder-title", title.to_string(), type_::TITLE, t.text).truncate());
     if let Some(info) = info {
-        block = block.child(kit::label(
-            "item-count",
-            info.to_string(),
-            type_::TITLE_SUB,
-            t.text_tertiary,
-        ));
+        block = block.child(kit::label("item-count", info.to_string(), type_::TITLE_SUB, t.text_tertiary));
     }
     block
 }

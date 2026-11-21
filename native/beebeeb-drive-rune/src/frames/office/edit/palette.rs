@@ -88,18 +88,8 @@ fn catalogue(kind: EditKind) -> Vec<Entry> {
             all.push(mark("Italic", "Ctrl+I", Mark::Italic));
             all.push(mark("Underline", "Ctrl+U", Mark::Underline));
             all.push(mark("Strikethrough", "", Mark::Strike));
-            all.push(e(
-                "Format",
-                "Bulleted list",
-                None,
-                Run::Op(EditOp::List(ListKind::Bullet)),
-            ));
-            all.push(e(
-                "Format",
-                "Numbered list",
-                None,
-                Run::Op(EditOp::List(ListKind::Number)),
-            ));
+            all.push(e("Format", "Bulleted list", None, Run::Op(EditOp::List(ListKind::Bullet))));
+            all.push(e("Format", "Numbered list", None, Run::Op(EditOp::List(ListKind::Number))));
             for (name, align) in [
                 ("Align left", TextAlign::Left),
                 ("Align centre", TextAlign::Center),
@@ -128,29 +118,14 @@ fn catalogue(kind: EditKind) -> Vec<Entry> {
                 all.push(e("Format", name, None, Run::Op(EditOp::NumberFormat(f))));
             }
             all.push(e("Data", "AutoSum", Some("Alt+="), Run::Op(EditOp::AutoSum)));
-            all.push(e(
-                "Data",
-                "Sort A to Z",
-                None,
-                Run::Op(EditOp::Sort { ascending: true }),
-            ));
-            all.push(e(
-                "Data",
-                "Sort Z to A",
-                None,
-                Run::Op(EditOp::Sort { ascending: false }),
-            ));
+            all.push(e("Data", "Sort A to Z", None, Run::Op(EditOp::Sort { ascending: true })));
+            all.push(e("Data", "Sort Z to A", None, Run::Op(EditOp::Sort { ascending: false })));
             all.push(e("Data", "Filter", None, Run::Op(EditOp::Filter)));
             all.push(e("Data", "Make table", None, Run::Op(EditOp::MakeTable)));
             all.extend(history());
         }
         EditKind::Pptx => {
-            all.push(e(
-                "Slides",
-                "New slide",
-                None,
-                Run::Op(EditOp::NewSlide { layout: None }),
-            ));
+            all.push(e("Slides", "New slide", None, Run::Op(EditOp::NewSlide { layout: None })));
             all.push(mark("Bold", "Ctrl+B", Mark::Bold));
             all.push(mark("Italic", "Ctrl+I", Mark::Italic));
             all.extend(history());
@@ -162,19 +137,9 @@ fn catalogue(kind: EditKind) -> Vec<Entry> {
 /// Duplicate and Delete slide: only with a slide on the stage; a deck keeps one slide, so Delete needs two.
 fn slide_entries(stage: Option<Stage>) -> Vec<Entry> {
     let Some(stage) = stage else { return Vec::new() };
-    let mut all = vec![e(
-        "Slides",
-        "Duplicate slide",
-        Some("Ctrl+D"),
-        Run::Slide(SlideCmd::Duplicate),
-    )];
+    let mut all = vec![e("Slides", "Duplicate slide", Some("Ctrl+D"), Run::Slide(SlideCmd::Duplicate))];
     if stage.count > 1 {
-        all.push(e(
-            "Slides",
-            "Delete slide",
-            Some("Delete"),
-            Run::Slide(SlideCmd::Delete),
-        ));
+        all.push(e("Slides", "Delete slide", Some("Delete"), Run::Slide(SlideCmd::Delete)));
     }
     all
 }
@@ -202,12 +167,7 @@ pub fn found(kind: Option<EditKind>, typed: &str, from_source: Vec<CommandGroup>
 }
 
 /// [`found`] with the slide on the stage (a deck in the live editor): Duplicate and Delete slide act on it.
-pub fn found_at(
-    kind: Option<EditKind>,
-    stage: Option<Stage>,
-    typed: &str,
-    from_source: Vec<CommandGroup>,
-) -> Vec<CommandGroup> {
+pub fn found_at(kind: Option<EditKind>, stage: Option<Stage>, typed: &str, from_source: Vec<CommandGroup>) -> Vec<CommandGroup> {
     let mut groups: Vec<CommandGroup> = Vec::new();
     if let Some(kind) = kind {
         let mut entries = catalogue(kind);
@@ -248,10 +208,7 @@ pub fn resolve(kind: Option<EditKind>, group: &str, name: &str, marks: Option<&M
 /// [`resolve`] with the slide on the stage.
 pub fn resolve_at(kind: Option<EditKind>, stage: Option<Stage>, group: &str, name: &str, marks: Option<&Marks>) -> Run {
     if kind == Some(EditKind::Pptx) {
-        if let Some(entry) = slide_entries(stage)
-            .into_iter()
-            .find(|x| x.group == group && x.name == name)
-        {
+        if let Some(entry) = slide_entries(stage).into_iter().find(|x| x.group == group && x.name == name) {
             return entry.run;
         }
     }

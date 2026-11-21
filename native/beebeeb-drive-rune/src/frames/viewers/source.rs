@@ -898,12 +898,7 @@ impl FixtureViewerSource {
             revision,
             caret: Some(PageRect {
                 page: 0,
-                rect: RectPt {
-                    x: 72.0,
-                    y: 96.0,
-                    w: 1.0,
-                    h: 14.0,
-                },
+                rect: RectPt { x: 72.0, y: 96.0, w: 1.0, h: 14.0 },
             }),
             selection: Vec::new(),
             can_undo: revision > 0,
@@ -1117,8 +1112,7 @@ impl ViewerSource for FixtureViewerSource {
     fn hit(&mut self, file_id: &str, _page: u32, _x_pt: f32, _y_pt: f32, _mode: HitMode) -> bool {
         self.calls.push(format!("hit {file_id}"));
         file_id == board::DOCX && {
-            self.edit_answers
-                .push(EditAnswer::Edited(Self::edited(self.edit_revision, false)));
+            self.edit_answers.push(EditAnswer::Edited(Self::edited(self.edit_revision, false)));
             true
         }
     }

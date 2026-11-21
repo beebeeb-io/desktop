@@ -377,11 +377,7 @@ fn a_new_file_made_here_is_listed_at_once_with_no_finished_check() {
     settle(&mut rt);
 
     assert_eq!(rt.state.live_toast(), None, "nothing failed");
-    assert_eq!(
-        ids(&rt.state),
-        ["a-new.txt", "m-1.txt"],
-        "listed with no finished check"
-    );
+    assert_eq!(ids(&rt.state), ["a-new.txt", "m-1.txt"], "listed with no finished check");
     assert_eq!(shelf.reads(), reads + 1, "the folder is read once for it");
 }
 

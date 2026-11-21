@@ -30,13 +30,7 @@ fn full() -> SheetView {
     view.row_heights = vec![24.0; (CELLS / COLS) as usize];
     view.extent = (CELLS / COLS, COLS);
     // A selection over every cell: the status line sums them all each frame.
-    view.selection = Some((
-        Cell { row: 0, col: 0 },
-        Cell {
-            row: CELLS / COLS - 1,
-            col: COLS - 1,
-        },
-    ));
+    view.selection = Some((Cell { row: 0, col: 0 }, Cell { row: CELLS / COLS - 1, col: COLS - 1 }));
     view
 }
 

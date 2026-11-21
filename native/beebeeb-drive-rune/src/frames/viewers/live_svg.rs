@@ -5,7 +5,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use rune::{El, Image, ImageCache, SurfaceFit, col, el};
+use rune::{Image, ImageCache, SurfaceFit, El, col, el};
 
 use super::super::{Ui, style};
 use crate::theme::tokens::Theme;
@@ -74,18 +74,9 @@ pub(super) fn outcome(source: &str) -> Outcome {
 
 pub fn view(source: &str, _ui: &Ui, t: &Theme) -> El {
     match outcome(source) {
-        Outcome::Drawn(image) => col()
-            .key("live-preview-svg")
-            .w_full()
-            .h_full()
-            .fill(t.paper)
-            .padding(16.0)
-            .child(
-                el().key("live-svg-image")
-                    .w_full()
-                    .h_full()
-                    .pixels_fit(image.pixels(), SurfaceFit::Fit),
-            ),
+        Outcome::Drawn(image) => col().key("live-preview-svg").w_full().h_full().fill(t.paper).padding(16.0).child(
+            el().key("live-svg-image").w_full().h_full().pixels_fit(image.pixels(), SurfaceFit::Fit),
+        ),
         Outcome::Outside => notice(OUTSIDE, t),
         Outcome::Invalid => notice(INVALID, t),
     }

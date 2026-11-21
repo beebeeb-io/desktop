@@ -12,9 +12,9 @@ use rune::{El, col, el, row};
 
 use super::icons;
 use crate::State;
+use crate::ui::button;
 use crate::theme::icons as base;
 use crate::theme::tokens::{Theme, type_};
-use crate::ui::button;
 use crate::ui::{banner, kit};
 
 /// What the engine's review says is held, by kind, with the ids Upload and Keep send back.
@@ -154,12 +154,7 @@ impl Card {
 
     /// The note before a keep about a service that syncs the folder they would move into.
     pub fn synced_note(&self) -> Option<String> {
-        self.held
-            .as_ref()
-            .filter(|h| h.total() > 0)?
-            .synced_by
-            .as_deref()
-            .map(synced_by_note)
+        self.held.as_ref().filter(|h| h.total() > 0)?.synced_by.as_deref().map(synced_by_note)
     }
 }
 
@@ -186,13 +181,12 @@ pub fn view(card: &Card, press: fn(&mut State, Action), t: &Theme) -> Option<El>
         )
         .w_full()
     };
-    let mut words =
-        col()
-            .key("fwp-words")
-            .grow(1.0)
-            .min_w(0.0)
-            .gap(4.0)
-            .child(kit::label("fwp-title", TITLE, type_::HEAD, t.text));
+    let mut words = col().key("fwp-words").grow(1.0).min_w(0.0).gap(4.0).child(kit::label(
+        "fwp-title",
+        TITLE,
+        type_::HEAD,
+        t.text,
+    ));
     if let Some(found) = card.found_line() {
         words = words.child(line("fwp-found", found, false));
         words = words.child(line("fwp-keep-words", KEEP_WORDS.to_string(), false));
@@ -212,22 +206,8 @@ pub fn view(card: &Card, press: fn(&mut State, Action), t: &Theme) -> Option<El>
     if card.held.as_ref().is_some_and(|h| !h.op_ids.is_empty()) {
         let on = card.can_decide();
         buttons = buttons
-            .child(button(
-                "btn-fwp-upload",
-                busy(Action::Upload, UPLOAD, "Uploading…"),
-                on,
-                Action::Upload,
-                press,
-                t,
-            ))
-            .child(button(
-                "btn-fwp-keep",
-                busy(Action::Keep, KEEP, "Moving…"),
-                on,
-                Action::Keep,
-                press,
-                t,
-            ));
+            .child(button("btn-fwp-upload", busy(Action::Upload, UPLOAD, "Uploading…"), on, Action::Upload, press, t))
+            .child(button("btn-fwp-keep", busy(Action::Keep, KEEP, "Moving…"), on, Action::Keep, press, t));
     }
     if card.kept.as_ref().is_some_and(|k| k.moved_items > 0) {
         buttons = buttons.child(button("btn-fwp-show", SHOW, card.can_show(), Action::Show, press, t));
@@ -254,15 +234,7 @@ pub fn view(card: &Card, press: fn(&mut State, Action), t: &Theme) -> Option<El>
 
 /// An outline button that does nothing while it is off (an action is in flight, or there is nothing to decide).
 fn button(key: &str, words: &str, on: bool, action: Action, press: fn(&mut State, Action), t: &Theme) -> El {
-    let b = button::button(
-        button::keys(key),
-        words,
-        None,
-        button::Variant::Secondary,
-        button::Size::Sm,
-        button::ButtonState::Enabled,
-        t,
-    );
+    let b = button::button(button::keys(key), words, None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t);
     if on {
         b.on_press(move |s: &mut State| press(s, action))
     } else {

@@ -19,12 +19,7 @@ type Pair = (&'static str, Color, Color, f32);
 
 fn pairs(t: &Theme) -> Vec<Pair> {
     let mut v: Vec<Pair> = Vec::new();
-    for (bn, bg) in [
-        ("bg", t.bg),
-        ("surface", t.surface),
-        ("card", t.card),
-        ("sidebar_bg", t.sidebar_bg),
-    ] {
+    for (bn, bg) in [("bg", t.bg), ("surface", t.surface), ("card", t.card), ("sidebar_bg", t.sidebar_bg)] {
         v.push(("text", t.text, bg, 4.5));
         v.push(("text_secondary", t.text_secondary, bg, 4.5));
         v.push(("text_tertiary", t.text_tertiary, bg, 4.5));
@@ -54,7 +49,10 @@ fn a11y_walk_contrast_pairs_pass_or_are_listed() {
         let bgs = [t.bg, t.surface, t.card, t.sidebar_bg];
         let names = ["bg", "surface", "card", "sidebar_bg"];
         for p in pairs(&t) {
-            let bg_name = bgs.iter().position(|b| *b == p.2).map_or("accent", |i| names[i]);
+            let bg_name = bgs
+                .iter()
+                .position(|b| *b == p.2)
+                .map_or("accent", |i| names[i]);
             let r = contrast_ratio(p.1, p.2);
             if r < p.3 {
                 failing.push((key(dark, &p, bg_name), r, p.3));
@@ -63,26 +61,11 @@ fn a11y_walk_contrast_pairs_pass_or_are_listed() {
     }
     failing.sort_by(|a, b| a.0.cmp(&b.0));
     failing.dedup_by(|a, b| a.0 == b.0);
-    let new: Vec<_> = failing
-        .iter()
-        .filter(|(k, ..)| !KNOWN_FAILING.contains(&k.as_str()))
-        .collect();
-    let stale: Vec<_> = KNOWN_FAILING
-        .iter()
-        .filter(|k| !failing.iter().any(|(f, ..)| f == *k))
-        .collect();
-    let listing: String = failing
-        .iter()
-        .map(|(k, r, m)| format!("    \"{k}\", // {r:.2} < {m}\n"))
-        .collect();
-    assert!(
-        new.is_empty(),
-        "pairs below their minimum (add to KNOWN_FAILING only if unfixable now):\n{listing}"
-    );
-    assert!(
-        stale.is_empty(),
-        "pairs that now pass: remove from KNOWN_FAILING: {stale:?}"
-    );
+    let new: Vec<_> = failing.iter().filter(|(k, ..)| !KNOWN_FAILING.contains(&k.as_str())).collect();
+    let stale: Vec<_> = KNOWN_FAILING.iter().filter(|k| !failing.iter().any(|(f, ..)| f == *k)).collect();
+    let listing: String = failing.iter().map(|(k, r, m)| format!("    \"{k}\", // {r:.2} < {m}\n")).collect();
+    assert!(new.is_empty(), "pairs below their minimum (add to KNOWN_FAILING only if unfixable now):\n{listing}");
+    assert!(stale.is_empty(), "pairs that now pass: remove from KNOWN_FAILING: {stale:?}");
 }
 
 #[test]

@@ -9,12 +9,12 @@ use rune::tok::Family;
 use rune::{Color, El, SurfaceFit, TextStyle, col, el, row, text_input};
 
 use super::chrome::{Dot, Head, Status};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::media::{FIND_KEY, ZOOMS};
 use super::source::{PdfDoc, Picture};
 use super::{Intent, Ui, details, media_icons, style, ui};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::kit;
 use crate::ui::toolbar::{ToolState, tool_button};
 
@@ -261,18 +261,7 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
             .child(nav("find-nav-0", "Next match", 1, "Enter", false))
             .child(nav("find-nav-1", "Previous match", -1, "Shift+Enter", true))
             .child(el().key("find-spacer").grow(1.0))
-            .child(
-                button(
-                    keys("find-done"),
-                    "Done",
-                    None,
-                    Variant::Ghost,
-                    Size::Sm,
-                    ButtonState::Enabled,
-                    t,
-                )
-                .on_press(with_ui(Ui::close_find)),
-            ),
+            .child(button(keys("find-done"), "Done", None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t).on_press(with_ui(Ui::close_find))),
     )
 }
 

@@ -69,9 +69,7 @@ pub const NOT_TAKEN: &str = "That change was not taken. Try again.";
 /// (the board's sample document): the router's "Not built yet".
 fn office_command(s: &mut State) -> bool {
     let Some(ui) = viewers::ui(s) else { return false };
-    let Some(edit) = ui.office.edit.as_ref() else {
-        return false;
-    };
+    let Some(edit) = ui.office.edit.as_ref() else { return false };
     let words = if edit.stopped {
         crate::frames::office::edit::recovery::read_only_words()
     } else {
@@ -229,9 +227,7 @@ fn resolve_in_folder(path: &str, here: &[String]) -> Option<String> {
     }
     let (rooted, parts): (bool, Vec<&str>) = (
         path.starts_with('/'),
-        path.split('/')
-            .filter(|part| !part.is_empty() && *part != ".")
-            .collect(),
+        path.split('/').filter(|part| !part.is_empty() && *part != ".").collect(),
     );
     if parts.contains(&"..") {
         return None;

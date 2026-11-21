@@ -368,6 +368,7 @@ impl DriveSettings for Probe {
     }
 }
 
+
 fn probed(answer: PhotoPreviews) -> (Runtime<State>, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     let mut state = init();
     assert!(super::scene("DW-0744", &mut state));
@@ -390,11 +391,7 @@ fn loading_empty_and_failed_say_what_they_are() {
     assert!(find(&rt, "previews-failed").is_some() && says(&rt, "Couldn't reach Beebeeb."));
     assert!(find(&rt, "item-0-0-switch").is_none());
     press(&mut rt, "previews-failed-retry");
-    assert_eq!(
-        reloads.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "Try again reads again"
-    );
+    assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1, "Try again reads again");
 }
 
 #[test]

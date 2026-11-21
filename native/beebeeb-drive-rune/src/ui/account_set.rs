@@ -435,11 +435,7 @@ pub fn button(
         Size::Small => button::Size::Sm,
         Size::Medium => button::Size::Md,
     };
-    let state = if dimmed {
-        button::ButtonState::Disabled
-    } else {
-        button::ButtonState::Enabled
-    };
+    let state = if dimmed { button::ButtonState::Disabled } else { button::ButtonState::Enabled };
     button::button(button::keys(key), label, icon, variant, size, state, t)
 }
 

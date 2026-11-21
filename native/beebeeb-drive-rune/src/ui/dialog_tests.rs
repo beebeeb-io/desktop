@@ -532,56 +532,16 @@ fn card_keeps_its_keys_and_boxes() {
 fn old_presets_press_their_enter_button() {
     use crate::ui::{account_set as set, settings_dialog as sd};
     fn unsaved(t: &Theme) -> El {
-        set::dialog_enter(
-            "U",
-            440.0,
-            "U",
-            "words",
-            vec![],
-            vec![
-                (btn(0, "Save", t), false),
-                (btn(1, "Discard", t), false),
-                (btn(2, "Cancel", t), true),
-            ],
-            Some(0),
-            t,
-        )
+        set::dialog_enter("U", 440.0, "U", "words", vec![], vec![(btn(0, "Save", t), false), (btn(1, "Discard", t), false), (btn(2, "Cancel", t), true)], Some(0), t)
     }
     fn account(t: &Theme) -> El {
-        set::dialog_with_enter(
-            "A",
-            440.0,
-            "A",
-            kit::label("p", "w", SUB, t.text),
-            vec![],
-            vec![(btn(0, "Ok", t), false), (btn(1, "Cancel", t), false)],
-            Some(0),
-            t,
-        )
+        set::dialog_with_enter("A", 440.0, "A", kit::label("p", "w", SUB, t.text), vec![], vec![(btn(0, "Ok", t), false), (btn(1, "Cancel", t), false)], Some(0), t)
     }
     fn settings(t: &Theme) -> El {
-        sd::dialog_enter(
-            "S",
-            440.0,
-            "S",
-            None,
-            vec![],
-            vec![btn(0, "Ok", t), btn(1, "Cancel", t)],
-            Some(0),
-            t,
-        )
+        sd::dialog_enter("S", 440.0, "S", None, vec![], vec![btn(0, "Ok", t), btn(1, "Cancel", t)], Some(0), t)
     }
     fn alert(t: &Theme) -> El {
-        sd::alert_enter(
-            "L",
-            440.0,
-            el(),
-            "L",
-            "w",
-            vec![btn(0, "Ok", t), btn(1, "Cancel", t)],
-            Some(0),
-            t,
-        )
+        sd::alert_enter("L", 440.0, el(), "L", "w", vec![btn(0, "Ok", t), btn(1, "Cancel", t)], Some(0), t)
     }
     fn plain(t: &Theme) -> El {
         sd::dialog("P", 440.0, "P", None, vec![], vec![btn(0, "Ok", t)], t)
@@ -619,7 +579,11 @@ fn focus_view(s: &F, _: &mut Cx<F>) -> El {
         .w_full()
         .h_full()
         .child(focus_button("opener", |s| {
-            if s.from { s.menu = true } else { s.open = true }
+            if s.from {
+                s.menu = true
+            } else {
+                s.open = true
+            }
         }))
         .child(focus_button("behind", |_| {}));
     if s.menu {
@@ -653,16 +617,7 @@ fn focus_window(from: bool) -> Runtime<F> {
         system_dark: false,
         scale: 2.0,
     };
-    let mut rt = Runtime::new(
-        F {
-            open: false,
-            menu: false,
-            from,
-        },
-        focus_view,
-        (1000.0, 800.0),
-        env,
-    );
+    let mut rt = Runtime::new(F { open: false, menu: false, from }, focus_view, (1000.0, 800.0), env);
     rt.frame(0.0);
     rt
 }
@@ -707,17 +662,10 @@ fn tab_stays_inside_an_open_dialog_and_esc_hands_focus_back_to_the_opener() {
         );
     }
     focus_key(&mut rt, Key::Tab, true);
-    assert!(
-        matches!(focused_key(&rt).as_deref(), Some("save" | "cancel")),
-        "and Shift+Tab"
-    );
+    assert!(matches!(focused_key(&rt).as_deref(), Some("save" | "cancel")), "and Shift+Tab");
     focus_key(&mut rt, Key::Escape, false);
     assert!(!rt.state.open, "Esc closes it");
-    assert_eq!(
-        focused_key(&rt).as_deref(),
-        Some("opener"),
-        "focus is back on the opener"
-    );
+    assert_eq!(focused_key(&rt).as_deref(), Some("opener"), "focus is back on the opener");
 }
 
 #[test]
@@ -745,9 +693,5 @@ fn a_dialog_opened_from_a_row_that_went_away_hands_focus_to_the_named_opener() {
     assert!(rt.state.open && !rt.state.menu, "the row went, the dialog opened");
     focus_key(&mut rt, Key::Escape, false);
     assert!(!rt.state.open);
-    assert_eq!(
-        focused_key(&rt).as_deref(),
-        Some("opener"),
-        "focus goes to the named opener, not nowhere"
-    );
+    assert_eq!(focused_key(&rt).as_deref(), Some("opener"), "focus goes to the named opener, not nowhere");
 }

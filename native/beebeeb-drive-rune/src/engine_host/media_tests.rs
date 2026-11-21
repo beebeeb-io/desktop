@@ -638,9 +638,6 @@ fn media_open_refusals_are_logged_by_kind() {
         let text = crate::media::refusal_log::tests::logged(|| {
             let _ = refusal_of(error);
         });
-        assert!(
-            text.trim_end().ends_with(&format!("media file not opened {want}")),
-            "{error:?}: {text}"
-        );
+        assert!(text.trim_end().ends_with(&format!("media file not opened {want}")), "{error:?}: {text}");
     }
 }

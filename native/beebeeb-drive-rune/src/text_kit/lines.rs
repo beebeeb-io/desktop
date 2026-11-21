@@ -3,12 +3,7 @@
 /// Byte offset of each line's first byte. Always at least `[0]`; a trailing newline adds a final empty line.
 pub fn line_starts(text: &str) -> Vec<usize> {
     let mut v = vec![0];
-    v.extend(
-        text.bytes()
-            .enumerate()
-            .filter(|(_, b)| *b == b'\n')
-            .map(|(i, _)| i + 1),
-    );
+    v.extend(text.bytes().enumerate().filter(|(_, b)| *b == b'\n').map(|(i, _)| i + 1));
     v
 }
 

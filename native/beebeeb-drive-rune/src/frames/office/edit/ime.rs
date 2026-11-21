@@ -27,9 +27,7 @@ thread_local! {
 /// or there is no pre-edit.
 pub fn preedit_range(edit: &EditUi) -> Option<(usize, usize)> {
     let text = edit.preedit.as_deref().filter(|t| !t.is_empty())?;
-    RANGE
-        .get()
-        .filter(|&(a, b)| a < b && b <= text.len() && text.is_char_boundary(a) && text.is_char_boundary(b))
+    RANGE.get().filter(|&(a, b)| a < b && b <= text.len() && text.is_char_boundary(a) && text.is_char_boundary(b))
 }
 
 /// End the composition, wiping its text.
@@ -100,11 +98,7 @@ pub fn caret_el(s: &State) -> Option<El> {
         return None;
     }
     let rect = edit.caret?.rect;
-    Some(
-        el().key("office-caret")
-            .size(rect.w.max(1.0), rect.h.max(1.0))
-            .ime_cursor(),
-    )
+    Some(el().key("office-caret").size(rect.w.max(1.0), rect.h.max(1.0)).ime_cursor())
 }
 
 /// The pre-edit drawn as a short line of text at `size` px in `ink`, every character underlined and the marked

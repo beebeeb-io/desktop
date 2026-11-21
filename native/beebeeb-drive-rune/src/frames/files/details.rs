@@ -35,8 +35,7 @@ fn offline_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
                 .child(kit::label(format!("{key}-detail"), sub, type_::BODY.lh(15.0), t.text_tertiary).truncate()),
         )
         .child(
-            crate::ui::switch::switch_sized(&format!("{key}-switch"), "", on, true, crate::ui::button::Size::Md, t)
-                .label(title)
+            crate::ui::switch::switch_sized(&format!("{key}-switch"), "", on, true, crate::ui::button::Size::Md, t).label(title)
                 .description(sub)
                 .on_press_tx(|s: &mut State, tx: &mut Tx| {
                     s.toggle_keep_offline(tx);

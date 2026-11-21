@@ -9,12 +9,12 @@ use rune::{Align, Color, Cursor, El, Icon, ScrollFade, ScrollPos, ScrollSpec, Te
 
 use super::source::{Change, Changes, MAX_ROWS, Origin, Snapshot, Status, Tile, Tone, What};
 use super::{Host, Ui, icons};
-use crate::theme::file_icons::icon_for;
 use crate::theme::tokens::{self, Theme, type_};
+use crate::theme::file_icons::icon_for;
 use crate::ui::file_row::{self, RowLook};
-use crate::ui::settings_controls::{self, Emphasis};
 use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::{file_list, kit};
+use crate::ui::settings_controls::{self, Emphasis};
 
 /// The flyout's size (`.mk-pop`): fixed in every state (DW-1201).
 pub const SIZE: (f32, f32) = (340.0, 520.0);
@@ -340,25 +340,10 @@ fn change_row<S: 'static>(i: usize, change: &Change, selected: bool, host: Host<
     };
     let mut what = row().key(format!("{key}-what")).w(WHAT_W).gap(4.0).center_y();
     if let Some(origin) = origin {
-        what = what.child(kit::glyph(
-            format!("{key}-sub-icon"),
-            origin_icon(origin),
-            12.0,
-            t.text_tertiary,
-        ));
+        what = what.child(kit::glyph(format!("{key}-sub-icon"), origin_icon(origin), 12.0, t.text_tertiary));
     }
-    what = what.child(
-        kit::label(format!("{key}-sub"), said.clone(), type_fly::WHAT, color)
-            .min_w(0.0)
-            .truncate(),
-    );
-    let when = kit::label(
-        format!("{key}-time"),
-        change.when.clone(),
-        type_fly::WHEN,
-        t.text_tertiary,
-    )
-    .w(WHEN_W);
+    what = what.child(kit::label(format!("{key}-sub"), said.clone(), type_fly::WHAT, color).min_w(0.0).truncate());
+    let when = kit::label(format!("{key}-time"), change.when.clone(), type_fly::WHEN, t.text_tertiary).w(WHEN_W);
     let look = RowLook {
         selected,
         ..RowLook::default()
@@ -409,14 +394,7 @@ fn changes_list<S: 'static>(ui: &Ui, name: &str, host: Host<S>, t: &Theme) -> El
     let (rows, complete) = match &ui.snapshot().changes {
         Changes::Hidden(why) => return list.child(empty(&icons::LOCK, why.title(), &why.sentence(name))),
         Changes::Empty { text } => return list.child(empty(&icons::CLOCK, "No changes yet", text)),
-        Changes::Loading => {
-            return list.child(view_state(
-                ViewState::Loading {
-                    words: "Loading recent changes",
-                },
-                t,
-            ));
-        }
+        Changes::Loading => return list.child(view_state(ViewState::Loading { words: "Loading recent changes" }, t)),
         Changes::Failed => {
             return list.child(view_state(
                 ViewState::Failed {

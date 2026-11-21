@@ -110,17 +110,11 @@ fn app_index(kind: Kind) -> usize {
 }
 
 fn tab_key(i: usize) -> &'static str {
-    ["doc-tab-0", "doc-tab-1", "doc-tab-2"]
-        .get(i)
-        .copied()
-        .unwrap_or("doc-tab-0")
+    ["doc-tab-0", "doc-tab-1", "doc-tab-2"].get(i).copied().unwrap_or("doc-tab-0")
 }
 
 fn tpl_key(i: usize) -> &'static str {
-    ["tpl-0", "tpl-1", "tpl-2", "tpl-3", "tpl-4"]
-        .get(i)
-        .copied()
-        .unwrap_or("tpl-0")
+    ["tpl-0", "tpl-1", "tpl-2", "tpl-3", "tpl-4"].get(i).copied().unwrap_or("tpl-0")
 }
 
 /// A tab (Docs, Sheets, Slides): another app; the template goes back to Blank. A name still the default follows.
@@ -185,11 +179,7 @@ pub fn create(s: &mut State) {
         }
         Ok(name) => {
             nf.error = None;
-            let template = if kind == Kind::Word {
-                d.template
-            } else {
-                Template::Blank
-            };
+            let template = if kind == Kind::Word { d.template } else { Template::Blank };
             let folder = nf.folder.clone();
             let taken = d
                 .source
@@ -344,41 +334,19 @@ pub fn card(nf: &NewFile, t: &Theme) -> El {
     );
     let mut body = vec![tabs, templates, name_field];
     if let Some(why) = nf.doc.as_ref().and_then(|d| d.failed.as_deref()) {
-        body.push(
-            kit::label("doc-failed", why, type_::BODY, t.text)
-                .role("alert")
-                .wrap()
-                .w_full(),
-        );
+        body.push(kit::label("doc-failed", why, type_::BODY, t.text).role("alert").wrap().w_full());
     }
-    body.push(
-        kit::label("doc-encrypted", ENCRYPTED, type_::BODY, t.text_tertiary)
-            .wrap()
-            .w_full(),
-    );
+    body.push(kit::label("doc-encrypted", ENCRYPTED, type_::BODY, t.text_tertiary).wrap().w_full());
     let foot = row()
         .center_y()
         .justify_end()
         .child(
-            button(
-                0,
-                if creating { "Creating\u{2026}" } else { "Create" },
-                Weight::Primary,
-                t,
-            )
-            .default_button()
-            .on_press(create),
+            button(0, if creating { "Creating\u{2026}" } else { "Create" }, Weight::Primary, t)
+                .default_button()
+                .on_press(create),
         )
         .child(button(1, "Cancel", Weight::Quiet, t).on_press(new_file::close));
-    dialog::card(
-        TITLE,
-        460.0,
-        TITLE,
-        Some(Sub::Wrap("Docs, Sheets or Slides")),
-        body,
-        foot,
-        t,
-    )
+    dialog::card(TITLE, 460.0, TITLE, Some(Sub::Wrap("Docs, Sheets or Slides")), body, foot, t)
 }
 
 #[cfg(test)]

@@ -107,20 +107,13 @@ pub fn refused_for(why: &Refusal, t: &Theme) -> El {
 fn refused_with(words: &str, action: &'static str, store: Option<&'static str>, t: &Theme) -> El {
     // A refusal is final for this file here: it offers the other app, never "Try again".
     let mut buttons = row().key("refused-actions").gap(8.0).child(
-        button(
-            keys("refused-open"),
-            action,
-            None,
-            Variant::Secondary,
-            Size::Md,
-            ButtonState::Enabled,
-            t,
-        )
-        .on_press(|s: &mut State| {
-            if let Some(ui) = super::ui(s) {
-                ui.intent(Intent::OpenInAnotherApp);
-            }
-        }),
+        button(keys("refused-open"), action, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
+            |s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.intent(Intent::OpenInAnotherApp);
+                }
+            },
+        ),
     );
     if let Some(url) = store {
         buttons = buttons.child(

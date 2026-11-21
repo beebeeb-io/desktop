@@ -16,8 +16,8 @@ use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
-use crate::ui::button::{self, ButtonState, Size, Variant};
 use crate::ui::settings_dialog::{BUTTON_MD, DIALOG_TITLE};
+use crate::ui::button::{self, ButtonState, Size, Variant};
 use crate::ui::view_state::{self, ViewState};
 use crate::ui::{caption, kit, sidebar};
 
@@ -314,23 +314,19 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
     });
     let mut actions = row().key("empty-actions").gap(8.0).center_y();
     if body.state.open_elsewhere_offered(body.kept) {
-        actions = actions.child(
-            ui_button("empty-btn-1", OPEN_ELSEWHERE, false, t).on_press(|s: &mut State| {
-                if let Some(ui) = viewers::ui(s) {
-                    ui.intent(Intent::OpenInAnotherApp);
-                }
-            }),
-        );
+        actions = actions.child(ui_button("empty-btn-1", OPEN_ELSEWHERE, false, t).on_press(|s: &mut State| {
+            if let Some(ui) = viewers::ui(s) {
+                ui.intent(Intent::OpenInAnotherApp);
+            }
+        }));
     } else {
         actions = actions
             .child(kit::label("empty-keep-first", KEEP_FIRST, SUB, t.text_secondary))
-            .child(
-                ui_button("empty-keep", KEEP_ACTION, false, t).on_press(|s: &mut State| {
-                    if let Some(ui) = viewers::ui(s) {
-                        ui.intent(Intent::KeepOffline);
-                    }
-                }),
-            );
+            .child(ui_button("empty-keep", KEEP_ACTION, false, t).on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.intent(Intent::KeepOffline);
+                }
+            }));
     }
     col()
         .key("failure")
@@ -636,10 +632,7 @@ mod tests {
     #[test]
     fn office_states_try_again_only_once() {
         assert!(OfficeState::Stopped { retried: false }.try_again_shown());
-        assert!(
-            OfficeState::Stopped { retried: true }.try_again_shown(),
-            "a second stop still offers it"
-        );
+        assert!(OfficeState::Stopped { retried: true }.try_again_shown(), "a second stop still offers it");
         for s in [
             OfficeState::Opening,
             OfficeState::Ready,
@@ -731,10 +724,7 @@ mod tests {
     #[test]
     fn office_states_failure_says_reason_and_not_changed() {
         let rt = showing(StateBody::new(OfficeState::Stopped { retried: false }, true));
-        assert!(
-            keyed(&rt, "empty-title") && keyed(&rt, "empty-text"),
-            "title and reason are drawn"
-        );
+        assert!(keyed(&rt, "empty-title") && keyed(&rt, "empty-text"), "title and reason are drawn");
         let words = said(&rt);
         assert!(
             words

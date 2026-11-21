@@ -127,17 +127,12 @@ pub struct NewFile {
 
 impl NewFile {
     /// The dialog on New document (DW-1558): `kind` is an office type, the name its default.
-    pub(crate) fn document(
-        folder: Option<String>,
-        kind: Kind,
-        doc: crate::frames::office::edit::new_document::Doc,
-    ) -> NewFile {
+    pub(crate) fn document(folder: Option<String>, kind: Kind, doc: crate::frames::office::edit::new_document::Doc) -> NewFile {
         let mut nf = NewFile::new(folder);
         nf.step = Step::Document;
         nf.kind = kind;
         nf.name = TextEdit::new(crate::frames::office::edit::new_document::default_name(kind));
-        nf.name
-            .set_selection(0, crate::frames::office::edit::new_document::UNTITLED.len());
+        nf.name.set_selection(0, crate::frames::office::edit::new_document::UNTITLED.len());
         nf.focus = Some(NAME_INPUT);
         nf.doc = Some(doc);
         nf

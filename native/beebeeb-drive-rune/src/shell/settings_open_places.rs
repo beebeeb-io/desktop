@@ -37,12 +37,12 @@ mod tests {
 
     use rune::{Env, Runtime};
 
-    use crate::State;
     use crate::frames::settings::drive::{BoardDrive, DriveSettings};
     use crate::shell::actions::FixtureEngine;
     use crate::shell::host::{Shell, poll};
     use crate::shell::platform::fake::FakePlatform;
     use crate::shell::{registry, state};
+    use crate::State;
 
     /// A source that counts the hand-offs it was asked for.
     struct Counting(Rc<RefCell<(u32, u32)>>);
@@ -101,10 +101,6 @@ mod tests {
             assert!(super::open(s, tx, "file-explorer"));
             assert!(!super::open(s, tx, "privacy"));
         });
-        assert_eq!(
-            *counts.borrow(),
-            (1, 1),
-            "the bundle was shown once, the picker asked once"
-        );
+        assert_eq!(*counts.borrow(), (1, 1), "the bundle was shown once, the picker asked once");
     }
 }

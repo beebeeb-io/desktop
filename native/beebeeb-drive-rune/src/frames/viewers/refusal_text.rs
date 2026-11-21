@@ -21,8 +21,7 @@ pub const UNSHOWABLE: &str = "HEIC and RAW photos can\u{2019}t be shown in Beebe
 /// The Photos Original tab's words for a HEIC (ux-24: its own reason, not the combined one).
 pub const HEIC_WORDS: &str = "HEIC photos can\u{2019}t be shown at full size on this PC yet. This is the preview.";
 /// The same for a camera RAW.
-pub const RAW_WORDS: &str =
-    "RAW photos can\u{2019}t be shown at full size on this PC yet. This is the camera\u{2019}s preview.";
+pub const RAW_WORDS: &str = "RAW photos can\u{2019}t be shown at full size on this PC yet. This is the camera\u{2019}s preview.";
 
 /// A refusal in full.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,12 +148,7 @@ pub fn text_with(system_decoder_on: bool, why: &Refusal) -> Text {
             "no sandbox",
         ),
     };
-    Text {
-        sentence,
-        action,
-        link,
-        log_word,
-    }
+    Text { sentence, action, link, log_word }
 }
 
 /// The notice of a video that plays WITHOUT sound (ux-57): (sentence, button). Only a video whose VIDEO cannot be
@@ -207,10 +201,7 @@ mod tests {
                 assert!(!t.sentence.contains("  "), "{why:?}: double space");
                 assert!(!t.sentence.contains("can't play  "), "{why:?}");
                 assert!(!t.action.is_empty() && !t.log_word.is_empty(), "{why:?}");
-                assert!(
-                    seen.insert(t.sentence.clone()),
-                    "{why:?} repeats another reason's sentence"
-                );
+                assert!(seen.insert(t.sentence.clone()), "{why:?} repeats another reason's sentence");
             }
         }
     }
@@ -258,11 +249,7 @@ mod tests {
         let (device, _) = no_sound(NoSound::Device);
         assert_ne!(device, words);
         // A video that cannot be decoded is still refused, with its own words.
-        assert!(
-            text(&Refusal::NoSystemDecoder(Codec::H264))
-                .sentence
-                .contains("no decoder")
-        );
+        assert!(text(&Refusal::NoSystemDecoder(Codec::H264)).sentence.contains("no decoder"));
     }
 
     #[test]

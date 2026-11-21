@@ -1,13 +1,14 @@
 //! The largest file in Storage insights opens Files on its folder with that file selected (audit S4).
 
 use crate::State;
-use crate::frames::files::Toast;
-use crate::frames::files::actions_data::ShareOptions;
-use crate::frames::files::source::ActionError;
 use crate::frames::files::source::{Account, Change, Counts, Details, FilesSource, NoEngine, StorageSplit};
+use crate::frames::files::actions_data::ShareOptions;
+use crate::frames::files::Toast;
+use crate::frames::files::source::ActionError;
 use crate::source::{Crumb, DriveItem, DriveSource, Listing, SourceError, StorageSummary};
 use rune::{Env, Runtime};
 use std::path::PathBuf;
+
 
 type R = Result<(), ActionError>;
 
@@ -34,26 +35,13 @@ impl DriveSource for Drive {
     fn list(&self, folder: Option<&str>) -> Result<Listing, SourceError> {
         let (crumb, items) = match folder {
             Some("f-backups") => (
-                Crumb {
-                    id: Some("f-backups".into()),
-                    name: "Backups".into(),
-                },
+                Crumb { id: Some("f-backups".into()), name: "Backups".into() },
                 vec![item("other", Some("f-backups")), item("f-big", Some("f-backups"))],
             ),
-            None => (
-                Crumb {
-                    id: None,
-                    name: "Files".into(),
-                },
-                vec![item("near", None)],
-            ),
+            None => (Crumb { id: None, name: "Files".into() }, vec![item("near", None)]),
             _ => return Err(SourceError::NotFound),
         };
-        Ok(Listing {
-            folder: crumb.clone(),
-            path: vec![crumb],
-            items,
-        })
+        Ok(Listing { folder: crumb.clone(), path: vec![crumb], items })
     }
     fn storage(&self) -> Option<StorageSummary> {
         None
@@ -95,22 +83,14 @@ fn showing_a_largest_file_lands_on_its_folder_with_it_selected() {
     let mut state = crate::init();
     state.source = Box::new(Drive);
     state.actions.source = Box::new(Source);
-    let env = Env {
-        system_dark: false,
-        scale: 2.0,
-    };
+    let env = Env { system_dark: false, scale: 2.0 };
     let mut rt = Runtime::new(state, crate::view, (1278.0, 798.0), env);
     rt.frame(0.0);
     rt.update(|s: &mut State, tx| {
         s.settings.ask(super::Intent::ShowInFiles("f-big".into()));
         assert!(crate::shell::intents::drain_settings_intents(s, tx));
         assert_eq!(s.listing.folder.id.as_deref(), Some("f-backups"));
-        let picked: Vec<&str> = s
-            .actions
-            .selection
-            .iter()
-            .map(|&r| s.listing.items[r].id.as_str())
-            .collect();
+        let picked: Vec<&str> = s.actions.selection.iter().map(|&r| s.listing.items[r].id.as_str()).collect();
         assert_eq!(picked, ["f-big"]);
         assert_eq!(s.live_toast(), None::<Toast>);
     });

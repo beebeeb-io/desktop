@@ -317,11 +317,7 @@ fn back_selects_the_folder_it_came_from_when_the_read_lands_late() {
     let came_from = rt.state.listing.items.len(); // the 212 of Lisbon trip, still shown while the read is out
     rt.update(|s, _| assert!(s.back()));
     assert!(rt.state.folder_reads.pending.is_some(), "the read is out");
-    assert_eq!(
-        rt.state.listing.items.len(),
-        came_from,
-        "the rows stay until it answers"
-    );
+    assert_eq!(rt.state.listing.items.len(), came_from, "the rows stay until it answers");
     let_one_read.send(()).unwrap();
     // What `host::take_folder_read` does with the answer, once the worker has it.
     let taken = loop {

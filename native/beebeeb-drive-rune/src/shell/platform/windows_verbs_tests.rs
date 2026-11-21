@@ -365,8 +365,7 @@ fn a_verb_on_a_slow_folder_read_selects_its_row_once_it_lands() {
         state::load(&BoardDrive::sharing(&FilesFixture::default().edits), folder)
     }));
     let (folder_s, file_s): (&'static str, &'static str) = (Box::leak(folder.into()), Box::leak(file.into()));
-    let held: &'static [(&'static str, Option<&'static str>)] =
-        Box::leak(vec![(file_s, Some(folder_s))].into_boxed_slice());
+    let held: &'static [(&'static str, Option<&'static str>)] = Box::leak(vec![(file_s, Some(folder_s))].into_boxed_slice());
     let engine = Items {
         account: ACCOUNT,
         held,
@@ -383,11 +382,7 @@ fn a_verb_on_a_slow_folder_read_selects_its_row_once_it_lands() {
         std::thread::sleep(std::time::Duration::from_millis(5));
         settle(&mut rt);
     }
-    assert_eq!(
-        row_id(&rt),
-        Some(file_s.to_string()),
-        "the row is selected once the read landed"
-    );
+    assert_eq!(row_id(&rt), Some(file_s.to_string()), "the row is selected once the read landed");
 }
 
 /// The window locked: the verb is dropped, the engine is not asked, nothing opens, and nothing is kept for after the

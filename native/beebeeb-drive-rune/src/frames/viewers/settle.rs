@@ -1,7 +1,7 @@
 //! What a change that left the window's thread became, applied to the open file.
 
-use super::office_over::Over;
 use super::source::{OpenFile, SaveOutcome, Settled};
+use super::office_over::Over;
 use super::{Dialog, Ui};
 use crate::frames::office::edit::save::Seen;
 

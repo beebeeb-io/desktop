@@ -426,11 +426,7 @@ impl Worker {
                 Err(LinkError::Timeout) => break,
                 Err(gone @ (LinkError::Gone | LinkError::Protocol(_))) => {
                     batch.iter_mut().for_each(wipe_answer);
-                    return Err(broke_as(if gone == LinkError::Gone {
-                        Broke::Gone
-                    } else {
-                        Broke::Protocol
-                    }));
+                    return Err(broke_as(if gone == LinkError::Gone { Broke::Gone } else { Broke::Protocol }));
                 }
             }
             wait = Duration::ZERO;

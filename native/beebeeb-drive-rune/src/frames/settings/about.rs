@@ -280,19 +280,10 @@ mod about_tests {
     #[test]
     fn about_licence_file_sits_beside_the_exe_by_the_installers_name() {
         let exe = Path::new("C:/Users/x/AppData/Local/Beebeeb/beebeeb-desktop.exe");
-        assert_eq!(
-            licences_beside(exe),
-            Path::new("C:/Users/x/AppData/Local/Beebeeb/THIRD-PARTY-LICENSES.md")
-        );
+        assert_eq!(licences_beside(exe), Path::new("C:/Users/x/AppData/Local/Beebeeb/THIRD-PARTY-LICENSES.md"));
         let nsi = include_str!("../../../../../packaging/windows/installer.nsi");
-        assert!(
-            nsi.contains(&format!("$INSTDIR\\{LICENCES_FILE}")),
-            "the installer installs it under this name"
-        );
-        assert!(
-            nsi.contains(&format!("Delete \"$INSTDIR\\{LICENCES_FILE}\"")),
-            "and the uninstaller removes it"
-        );
+        assert!(nsi.contains(&format!("$INSTDIR\\{LICENCES_FILE}")), "the installer installs it under this name");
+        assert!(nsi.contains(&format!("Delete \"$INSTDIR\\{LICENCES_FILE}\"")), "and the uninstaller removes it");
         assert!(nsi.contains("licences.lnk"), "and gives it a Start Menu entry");
     }
 
@@ -304,10 +295,7 @@ mod about_tests {
         assert_eq!(open_licences_at(&mut s, Some(f.clone())), Ok(()));
         assert!(calls.lock().unwrap().is_empty(), "nothing went outside the app");
         assert!(s.viewer.ui.is_some(), "the notice is in the viewer");
-        assert!(matches!(
-            s.viewer.ui.as_ref().unwrap().file.body,
-            crate::frames::viewers::source::Body::Markdown(_)
-        ));
+        assert!(matches!(s.viewer.ui.as_ref().unwrap().file.body, crate::frames::viewers::source::Body::Markdown(_)));
         let gone = std::env::temp_dir().join("bb-about-none").join(LICENCES_FILE);
         assert_eq!(open_licences_at(&mut s, Some(gone)), Err(LICENCES_MISSING));
         assert_eq!(open_licences_at(&mut s, None), Err(LICENCES_MISSING));
@@ -327,10 +315,7 @@ mod about_tests {
     #[test]
     fn about_licences_row_is_routed_to_the_opener() {
         let router = include_str!("../../shell/settings_open.rs");
-        assert!(
-            router.contains("\"open-source-licences\" => {"),
-            "the shell routes the row to open_licences"
-        );
+        assert!(router.contains("\"open-source-licences\" => {"), "the shell routes the row to open_licences");
         assert!(router.contains("about::open_licences(s)"));
     }
 
@@ -339,24 +324,12 @@ mod about_tests {
         // the Windows test machine, 2026-11-20: About lives inside Settings. The route machine refuses OpenItem while Settings is
         // open, so the viewer's file was never the route's item and `sync` dropped it: the row did nothing.
         let (mut s, _calls) = spied();
-        crate::shell::host::dispatch(
-            &mut s,
-            crate::shell::app::Event::OpenSettings(crate::shell::app::SettingsPane::General),
-        );
+        crate::shell::host::dispatch(&mut s, crate::shell::app::Event::OpenSettings(crate::shell::app::SettingsPane::General));
         let f = a_file(LICENCES_FILE);
         assert_eq!(open_licences_at(&mut s, Some(f.clone())), Ok(()));
         crate::frames::viewers::sync(&mut s);
-        assert!(
-            s.viewer.ui.is_some(),
-            "the notice is still open after the route settled"
-        );
-        assert!(
-            matches!(s.shell.app.screen(), crate::shell::app::Screen::Drive(_)),
-            "Settings made way for the viewer"
-        );
-        assert_eq!(
-            crate::frames::viewers::route_item(&s),
-            Some(f.to_string_lossy().into_owned())
-        );
+        assert!(s.viewer.ui.is_some(), "the notice is still open after the route settled");
+        assert!(matches!(s.shell.app.screen(), crate::shell::app::Screen::Drive(_)), "Settings made way for the viewer");
+        assert_eq!(crate::frames::viewers::route_item(&s), Some(f.to_string_lossy().into_owned()));
     }
 }

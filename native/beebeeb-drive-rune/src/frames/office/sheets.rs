@@ -551,10 +551,8 @@ fn anchors_of(view: &SheetView, shown: &Shown, live: Option<&Live>, t: &Theme) -
 /// The grid: the corner and the column letters, then each row with its number and its cells.
 fn grid(view: &SheetView, shown: &Shown, anchors: El, layer: Option<El>, t: &Theme) -> El {
     // Only the cells on a drawn row and column are indexed: a sheet held at its cell cap costs a scan, not 65,536 inserts.
-    let (rows_in, cols_in): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) = (
-        shown.rows.iter().copied().collect(),
-        shown.cols.iter().copied().collect(),
-    );
+    let (rows_in, cols_in): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) =
+        (shown.rows.iter().copied().collect(), shown.cols.iter().copied().collect());
     let by_place: HashMap<(u32, u32), &CellText> = view
         .cells
         .iter()
@@ -850,9 +848,9 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
             .is_some_and(|e| e.kind == beebeeb_office_protocol::office::EditKind::Xlsx);
     let (layer, cellbox, formula) = if editing {
         let geometry = Geometry::of(view, &shown.rows, &shown.cols);
-        let room = cx.layout_size("sh-grid").map_or((800.0, 600.0), |[w, h]| {
-            ((w - ROW_HEAD_W).max(0.0), (h - HEADER_H).max(0.0))
-        });
+        let room = cx
+            .layout_size("sh-grid")
+            .map_or((800.0, 600.0), |[w, h]| ((w - ROW_HEAD_W).max(0.0), (h - HEADER_H).max(0.0)));
         (
             Some(edit_sheet::layer(&ui.office.grid, view, geometry, room, &t)),
             Some(edit_sheet::cell_box(&ui.office.grid, view, &t)),

@@ -26,8 +26,8 @@ use crate::State;
 use crate::frames::office::docs::DocBody;
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::toolbar::{self as tb, Bar, Details, New, Sort, View, press};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::{caption, kit, sidebar, status_bar};
 
 /// 12px/600 on 15px: the ribbon's tab that is open.
@@ -382,15 +382,7 @@ pub(crate) fn small_button(
     hint: Option<&'static str>,
     t: &Theme,
 ) -> El {
-    let mut b = button(
-        keys(key),
-        label,
-        Some(icon),
-        Variant::Secondary,
-        Size::Sm,
-        ButtonState::Enabled,
-        t,
-    );
+    let mut b = button(keys(key), label, Some(icon), Variant::Secondary, Size::Sm, ButtonState::Enabled, t);
     if let Some(hint) = hint {
         b = b.shortcut_hint(hint).child(
             el().key(format!("{key}-hint-box"))
@@ -405,10 +397,7 @@ pub(crate) fn small_button(
 /// The ribbon's first row: the tabs, the command search, Share, Save.
 pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let mut r = row().key("rib-tabs").w_full().h(32.0).px(12.0).gap(4.0).center_y();
-    for (i, (tab, word)) in Tab::row_of(ui.office.edit.as_ref().map(|e| e.kind))
-        .into_iter()
-        .enumerate()
-    {
+    for (i, (tab, word)) in Tab::row_of(ui.office.edit.as_ref().map(|e| e.kind)).into_iter().enumerate() {
         let on = ui.office.tab == tab;
         let mut cell = el()
             .key(format!("rib-tab-{i}-cell"))
@@ -817,11 +806,7 @@ pub(crate) fn status_live(ui: &Ui, keeping: Keeping, t: &Theme) -> El {
 fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at: Option<&str>, t: &Theme) -> El {
     // A live document the editor holds: its numbers, never "Preparing".
     let live = match (&file.body, doc, keeping) {
-        (
-            super::source::Body::Doc(d),
-            None,
-            Keeping::Saved | Keeping::Queued | Keeping::Unsaved | Keeping::Saving | Keeping::Conflict,
-        ) => Some(d),
+        (super::source::Body::Doc(d), None, Keeping::Saved | Keeping::Queued | Keeping::Unsaved | Keeping::Saving | Keeping::Conflict) => Some(d),
         _ => None,
     };
     let plain = |key: String, words: &str| style::fitted(key, words, type_::STATUS, t.text_tertiary);
@@ -1172,15 +1157,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: Option<&WordDoc>) -> 
         (Some(_), Some(super::office_over::Over::Conflict(_))) => Keeping::Conflict,
         (Some(_), _) if ui.office.edit.as_ref().is_some_and(|edit| edit.saving) => Keeping::Saving,
         (Some(doc), _) if doc.kept == Kept::Unsaved => Keeping::Unsaved,
-        (Some(_), _)
-            if ui
-                .office
-                .edit
-                .as_ref()
-                .is_some_and(|edit| edit.queued == Some(ui.file.version)) =>
-        {
-            Keeping::Queued
-        }
+        (Some(_), _) if ui.office.edit.as_ref().is_some_and(|edit| edit.queued == Some(ui.file.version)) => Keeping::Queued,
         (Some(_), _) => Keeping::Saved,
     };
     // Save is off while it saves; the dot stays (what is typed meanwhile is still unsaved).

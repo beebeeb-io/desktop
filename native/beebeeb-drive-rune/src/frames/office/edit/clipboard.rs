@@ -44,13 +44,7 @@ pub fn on_clip_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
             if ask_copy(ui) && (kind != EditKind::Docx || has_selection) {
                 let (source, id) = ui.edit_source();
                 let id = id.to_string();
-                source.edit(
-                    &id,
-                    EditOp::Delete {
-                        back: false,
-                        word: false,
-                    },
-                );
+                source.edit(&id, EditOp::Delete { back: false, word: false });
             }
         }
         _ => tx.read_clipboard(paste),

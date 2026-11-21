@@ -114,12 +114,7 @@ pub fn status_line(s: &State, t: &Theme) -> Option<El> {
     if !s.session_ended() {
         return None;
     }
-    Some(bar(
-        Some(Dot::Red),
-        Some("Signed out"),
-        "Nothing syncs until you sign in",
-        t,
-    ))
+    Some(bar(Some(Dot::Red), Some("Signed out"), "Nothing syncs until you sign in", t))
 }
 
 /// The board frame: the window as it was, the session ended.

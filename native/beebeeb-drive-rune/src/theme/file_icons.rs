@@ -579,20 +579,14 @@ const FOLDER_NAMES: &[(&str, IconId, Tint)] = &[
 ];
 
 fn lookup(table: &[(&str, IconId, Tint)], key: &str) -> Option<FileIcon> {
-    table
-        .iter()
-        .find(|(k, _, _)| *k == key)
-        .map(|&(_, id, tint)| FileIcon { id, tint })
+    table.iter().find(|(k, _, _)| *k == key).map(|&(_, id, tint)| FileIcon { id, tint })
 }
 
 pub fn icon_for(name: &str, is_dir: bool, mime: Option<&str>) -> FileIcon {
     let lower = name.to_lowercase();
     let n = lower.trim();
     if is_dir {
-        return lookup(FOLDER_NAMES, n).unwrap_or(FileIcon {
-            id: IconId::Folder,
-            tint: Tint::Folder,
-        });
+        return lookup(FOLDER_NAMES, n).unwrap_or(FileIcon { id: IconId::Folder, tint: Tint::Folder });
     }
     if let Some(fi) = lookup(FILE_NAMES, n) {
         return fi;
@@ -620,18 +614,12 @@ pub fn icon_for(name: &str, is_dir: bool, mime: Option<&str>) -> FileIcon {
         };
         return FileIcon { id, tint };
     }
-    FileIcon {
-        id: IconId::File,
-        tint: Tint::Default,
-    }
+    FileIcon { id: IconId::File, tint: Tint::Default }
 }
 
 pub fn icon_for_item(item: &crate::source::DriveItem) -> FileIcon {
     if item.is_folder && item.is_protected {
-        return FileIcon {
-            id: IconId::FolderBackups,
-            tint: Tint::Folder,
-        };
+        return FileIcon { id: IconId::FolderBackups, tint: Tint::Folder };
     }
     icon_for(&item.name, item.is_folder, item.mime.as_deref())
 }

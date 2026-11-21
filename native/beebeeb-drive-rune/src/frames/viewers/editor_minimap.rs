@@ -147,7 +147,12 @@ pub fn minimap(edit: &rune::TextEdit, file_name: &str, scroll: f32, t: &Theme) -
                 tx.scroll_to_y(SCROLL_KEY, scroll_for(line));
             }
         })
-        .child(el().key("minimap-picture").w_full().h_full().pixels(&pixels))
+        .child(
+            el().key("minimap-picture")
+                .w_full()
+                .h_full()
+                .pixels(&pixels),
+        )
         .child(
             el().key("minimap-view")
                 .absolute(0.0, top * h)
