@@ -1451,7 +1451,8 @@ impl OfficeView {
     /// The window polls at the start of every frame and builds the view only when something changed, so most polls
     /// follow no build (a pointer that moves, a popover that closes: 240 a second on a fast screen). Such a poll
     /// says nothing about what the view wants, and counts against no ask: counted, every ask of the last build was
-    /// cancelled two frames later, its answer discarded, and nothing asked again until the next build (dc-R3). A
+    /// cancelled on the third poll after it (12 ms at 240 Hz), its answer discarded, and nothing asked again until the
+    /// next build (dc-R3). A
     /// build is known by what it wanted: one that wants no picture at all (a sheet with no chart in view) counts
     /// nothing either, and the asks still out then are answered and held under the cap.
     fn end_turn(&mut self) {
