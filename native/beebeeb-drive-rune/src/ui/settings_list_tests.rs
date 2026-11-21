@@ -117,12 +117,14 @@ fn focused(rt: &Runtime<State>) -> String {
         .unwrap_or_default()
 }
 
-/// The accessibility node keyed `key`.
-fn node(tree: &Value, key: &str) -> Option<Value> {
+/// The accessibility node keyed `key`, and the size of the set it is in (Rune puts `setSize`
+/// on the set: the nearest node above it that has one).
+fn node(tree: &Value, key: &str, set: Option<u64>) -> Option<(Value, Option<u64>)> {
     if tree["key"].as_str() == Some(key) {
-        return Some(tree.clone());
+        return Some((tree.clone(), set));
     }
-    tree["children"].as_array()?.iter().find_map(|c| node(c, key))
+    let set = tree["setSize"].as_u64().or(set);
+    tree["children"].as_array()?.iter().find_map(|c| node(c, key, set))
 }
 
 #[test]
@@ -136,9 +138,9 @@ fn each_list_numbers_its_own_rows() {
         ("item-1-3", 4, 4),
         ("item-2-1", 2, 2),
     ] {
-        let n = node(&tree, key).unwrap_or_else(|| panic!("no node {key}"));
+        let (n, set) = node(&tree, key, None).unwrap_or_else(|| panic!("no node {key}"));
         assert_eq!(n["position"], position, "{key}: {n}");
-        assert_eq!(n["setSize"], size, "{key}: {n}");
+        assert_eq!(set, Some(size), "{key}: the set's size");
     }
 }
 
