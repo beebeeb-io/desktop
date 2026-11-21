@@ -374,6 +374,8 @@ impl Window {
     /// The Files window's own Open on the row of `name`: a click on the row, then Enter.
     #[track_caller]
     fn open_row(&mut self, name: &str) {
+        // The Files list is read on a worker: the rows are there once it lands.
+        self.until_drawn(name);
         let row = self
             .rt
             .state
@@ -428,8 +430,8 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     w.assert_nothing_of_the_file("signed out");
 
     sign_in(&w.engine, &w.first, TEST_PHRASE);
-    w.settle();
-    assert!(w.drawn().contains(NOTE_NAME), "the first account sees its list");
+    // The list is read on a worker: wait for it to land.
+    w.until_drawn(NOTE_NAME);
 
     // Open: the viewer is there at once, saying what it is doing, while Beebeeb still holds the first chunk.
     w.hold.hold();
