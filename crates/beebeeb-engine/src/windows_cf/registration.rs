@@ -227,7 +227,10 @@ pub fn shell_sync_root_id_as(sync_root: &std::path::Path, provider_name: &str) -
     // Normalise the path string the same way `register_sync_root` does (lossy
     // UTF-8 of the OS path) so the Id is computed from a canonical byte form and
     // both register + unregister agree.
-    let canonical = sync_root.to_string_lossy();
+    // A root reached through a junction, an 8.3 name or another case resolves to one form first
+    // (LD-0116); an already-canonical drive path is unchanged, so existing installs keep their Id.
+    let resolved = crate::engine_bridge::fs::canonical_root(sync_root);
+    let canonical = resolved.to_string_lossy();
     format!("{}!{:016x}", provider_name, fnv1a64(canonical.as_bytes()))
 }
 
