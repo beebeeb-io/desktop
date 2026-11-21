@@ -13,6 +13,7 @@ use crate::State;
 use crate::frames::signin::setup::source::{BUNDLED_SAMPLE_PNG, Sample};
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
+use crate::ui::button as ui_button;
 use crate::ui::kit;
 use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, Emphasis};
@@ -765,31 +766,6 @@ fn option(j: usize, label: &str, weight: Option<String>, on: bool, t: &Theme) ->
     o
 }
 
-/// A small button of the compare view (`.kit-btn.kit-btn-sm`, as `settings_controls::button`),
-/// its words exactly as wide as they measure: a hugging text is snapped up to a device pixel,
-/// which moves the words of a centred row by a fraction. Keys: `btn-<N>`, `btn-<N>-label`.
-fn word_button(index: usize, label: &str, t: &Theme) -> El {
-    let key = format!("btn-{index}");
-    row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .center()
-        .radius(radius::MD)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(
-            kit::label(format!("{key}-label"), label, type_::BUTTON_SM, t.text)
-                .w(rune::text::advance(label, type_::BUTTON_SM)),
-        )
-}
-
 /// DW-0745: a preview against the original, before choosing a size.
 fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
     let dim = Color::WHITE.alpha(0.7);
@@ -805,9 +781,17 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         .gap(12.0)
         .center_y()
         .child(
-            word_button(1, "Done", t)
-                .default_button()
-                .on_press(|s: &mut State| s.settings.close_compare()),
+            ui_button::button(
+                ui_button::keys("btn-1"),
+                "Done",
+                None,
+                ui_button::Variant::Secondary,
+                ui_button::Size::Sm,
+                ui_button::ButtonState::Enabled,
+                t,
+            )
+            .default_button()
+            .on_press(|s: &mut State| s.settings.close_compare()),
         )
         .child(setup::segmented(
             "cmp-seg",
@@ -869,7 +853,16 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         );
     }
     foot = foot.child(
-        word_button(2, "Choose photo", t).on_press(|s: &mut State| s.settings.ask(Intent::Open("choose-photo"))),
+        ui_button::button(
+            ui_button::keys("btn-2"),
+            "Choose photo",
+            None,
+            ui_button::Variant::Secondary,
+            ui_button::Size::Sm,
+            ui_button::ButtonState::Enabled,
+            t,
+        )
+        .on_press(|s: &mut State| s.settings.ask(Intent::Open("choose-photo"))),
     );
     // The buttons are the light theme's paper on the dark ground in both themes, as the
     // board draws them; the sheet hangs from the caption, centred across the window.
