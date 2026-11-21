@@ -680,15 +680,11 @@ async fn run(
                 }
 
                 // Task 2191 (D2, review-157 F2): the "not in sync" marks still to be made are local
-                // work, so they run on every tick: paused, offline or not.
-                #[cfg(target_os = "windows")]
-                {
-                    let mark_root = sync_root.clone();
-                    if let Err(e) =
-                        tokio::task::spawn_blocking(move || crate::windows_cf::retry_pending_marks(&mark_root)).await
-                    {
-                        tracing::warn!(error = %e, "pending-mark retry panicked; continuing");
-                    }
+                // work, so they run on every tick: paused, offline or not. R3: while the account's first
+                // list is owed the pull goes first (the mark retry follows it, below), so the first
+                // `/sync/snapshot` request never waits behind a walk of the old folder's placeholders.
+                if !awaiting_first_list {
+                    retry_marks_step(&sync_root).await;
                 }
                 // LD-0105 S6: empty the placeholders a failed fetch wrote into, on every tick (so at engine
                 // start too: a poison outlives a restart, and no close event comes after one).
@@ -708,6 +704,9 @@ async fn run(
                 // signal and so it wakes up promptly when resumed.
                 let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));
                 if mode.is_paused() {
+                    if awaiting_first_list {
+                        retry_marks_step(&sync_root).await;
+                    }
                     emit_payload(&app, tracker.paused());
                     set_telemetry_state(&telemetry, "paused");
                     // Windows breadcrumb flyout: reflect the paused state.
@@ -799,6 +798,10 @@ async fn run(
                         pull_started,
                         pulled.as_ref().map_or(0, |tick| tick.applied_item_ids.len()),
                     );
+                }
+                // R3: the marks the tick's start held back while the first list was owed.
+                if awaiting_first_list {
+                    retry_marks_step(&sync_root).await;
                 }
                 if awaiting_first_list {
                     awaiting_first_list = first_list_owed(&db);
@@ -1277,8 +1280,36 @@ impl Drop for AbortWorkerOnDrop {
 
 // ── Task 13: 24-hour auto-resolution timer ────────────────────────────────────
 
+/// The tick's pending-mark retry (task 2191 D2): Windows only, off the async thread.
+async fn retry_marks_step(sync_root: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let mark_root = sync_root.to_path_buf();
+        if let Err(e) = tokio::task::spawn_blocking(move || crate::windows_cf::retry_pending_marks(&mark_root)).await {
+            tracing::warn!(error = %e, "pending-mark retry panicked; continuing");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = sync_root;
+}
+
 #[cfg(test)]
 mod tests {
+    /// R3: with no cursor the pull comes before the mark retry in the tick (the retry itself lives in
+    /// `retry_marks_step`, defined after the loop), and the start-of-tick call waits while the first list is owed.
+    #[test]
+    fn r3_with_no_cursor_the_pull_comes_before_the_mark_retry() {
+        let src = include_str!("runner.rs");
+        let src = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        let pull = src.find("sync_tick_outcome(").expect("the pull");
+        let retry = src.find("retry_pending_marks(").expect("the retry");
+        assert!(pull < retry, "sync_tick_outcome( must come before retry_pending_marks(");
+        assert!(
+            src.contains("if !awaiting_first_list {\n                    retry_marks_step"),
+            "the start-of-tick retry waits while the first list is owed"
+        );
+    }
+
     use super::*;
 
     mod abort;
