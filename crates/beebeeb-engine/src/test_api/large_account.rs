@@ -115,10 +115,10 @@ pub fn seed(account: &FakeAccount, spec: &LargeAccount) {
     const K_PHOTO: u16 = 2;
     const K_BACKUP: u16 = 3;
     const K_DOC: u16 = 4;
-    let mut folders = 0usize;
-    let mut folder = |name: &str, parent: Option<&str>| -> String {
-        folders += 1;
-        let fid = id(K_FOLDER, folders);
+    let folders = std::cell::Cell::new(0usize);
+    let folder = |name: &str, parent: Option<&str>| -> String {
+        folders.set(folders.get() + 1);
+        let fid = id(K_FOLDER, folders.get());
         account.add_item(&fid, parent, name, true, 0);
         fid
     };
@@ -135,7 +135,7 @@ pub fn seed(account: &FakeAccount, spec: &LargeAccount) {
     let month_ids: Vec<String> = (0..months)
         .map(|m| folder(&format!("{}-{:02} Camera", 2021 + m / 12, 1 + m % 12), None))
         .collect();
-    let left = spec.folders - folders;
+    let left = spec.folders - folders.get();
     let project_dirs = left / 4;
     let backup_dirs = left - project_dirs;
     assert!(backup_dirs > 0, "at least one backup folder");
@@ -145,7 +145,7 @@ pub fn seed(account: &FakeAccount, spec: &LargeAccount) {
     let backup_ids: Vec<String> = (0..backup_dirs)
         .map(|n| folder(&format!("{} {n}", WORDS[(n * 7) % 24]), Some(&devices[n % devices.len()])))
         .collect();
-    assert_eq!(folders, spec.folders);
+    assert_eq!(folders.get(), spec.folders);
 
     // Photos: the roll first, then the months.
     for n in 0..spec.photos {
