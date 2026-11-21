@@ -261,15 +261,16 @@ impl StateDb {
     /// given first, then the leading-slash-toggled variant. This is a read-only
     /// defense-in-depth lookup — it never mutates state.
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileEntry>> {
-        // One lookup for both slash shapes; the path as given wins.
-        let alt = toggled_slash(path);
+        // One lock and one prepared statement for both slash shapes; the path as given wins.
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare_cached(FILE_BY_EITHER_PATH_SQL)?;
-        let mut rows = stmt.query(params![path, alt])?;
-        match rows.next()? {
-            Some(row) => Ok(Some(file_entry_from_path_row(row)?)),
-            None => Ok(None),
+        let mut stmt = conn.prepare_cached(FILE_BY_PATH_SQL)?;
+        for candidate in [path.to_string(), toggled_slash(path)] {
+            let mut rows = stmt.query(params![candidate])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(file_entry_from_path_row(row)?));
+            }
         }
+        Ok(None)
     }
     /// The rows of `ids`, by id, in as few queries as the variable limit allows (rows that are not there are absent).
     pub fn get_files_by_ids(&self, ids: &[&str]) -> Result<std::collections::HashMap<String, FileEntry>> {
@@ -909,13 +910,21 @@ mod listing_tests {
     fn seeded(files: usize) -> (tempfile::TempDir, StateDb) {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(&dir.path().join("state.db")).unwrap();
-        db.upsert_file(&row("d", "d", None, ItemKind::Folder)).unwrap();
-        db.upsert_file(&row("d1", "d/sub", Some("d"), ItemKind::Folder)).unwrap();
-        db.upsert_file(&row("g1", "d/sub/x", Some("d1"), ItemKind::File)).unwrap();
-        db.upsert_file(&row("g2", "d/sub/y", Some("d1"), ItemKind::File)).unwrap();
+        let put = |id: &str, path: &str, parent: Option<&str>, kind: ItemKind| {
+            let e = row(id, path, parent, kind.clone());
+            let parent = parent.map(str::to_string);
+            db.upsert_file_with_contract(&e, |c| {
+                c.parent_id = parent;
+                c.item_kind = kind;
+            })
+            .unwrap();
+        };
+        put("d", "d", None, ItemKind::Folder);
+        put("d1", "d/sub", Some("d"), ItemKind::Folder);
+        put("g1", "d/sub/x", Some("d1"), ItemKind::File);
+        put("g2", "d/sub/y", Some("d1"), ItemKind::File);
         for i in 0..files {
-            db.upsert_file(&row(&format!("f{i:05}"), &format!("d/f{i:05}"), Some("d"), ItemKind::File))
-                .unwrap();
+            put(&format!("f{i:05}"), &format!("d/f{i:05}"), Some("d"), ItemKind::File);
         }
         (dir, db)
     }
