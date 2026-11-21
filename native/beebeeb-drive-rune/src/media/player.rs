@@ -221,6 +221,14 @@ pub enum Refusal {
     /// the format's (`Codec::name`), never the file's; empty when the format has no name (the view says "this
     /// kind of file").
     NoDecoder(String),
+    /// A 10-bit H.264 stream no decoder on this PC takes (ux-24).
+    TenBit,
+    /// The video is a codec Beebeeb does not recognise at all, e.g. in a Matroska file (ux-24).
+    UnknownCodec,
+    /// A HEIC photo: the picture decoder here does not open it (ux-24).
+    Heic,
+    /// A camera RAW photo: the picture decoder here does not open it (ux-24).
+    Raw,
     /// The codec's route is the system's decoder and this PC has none for it. HEVC (decision D-MED-2): the words
     /// name Microsoft's "HEVC Video Extensions"; any other `System` codec (H.264 streams FilmCraft cannot decode,
     /// AAC, E-AC-3, MPEG-4 Part 2, VC-1, WMA): "Windows has no <name> decoder on this PC.", the name from

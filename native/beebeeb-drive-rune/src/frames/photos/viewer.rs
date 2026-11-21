@@ -278,20 +278,20 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
     }
 
     // w31: a HEIC or RAW original is said, and the system's app is offered for it.
-    if viewing.kind == Kind::Photo && ui.source.original_refused(viewer.id).is_some() {
+    if let Some(words) = ui.source.original_refused(viewer.id).filter(|_| viewing.kind == Kind::Photo) {
         let id = viewer.id;
         let app = crate::frames::show_in_folder::os_app_label();
         stage = stage.child(
             row()
                 .key("ph-viewer-notice")
                 .role("status")
-                .label(super::grid::UNSHOWABLE)
+                .label(words)
                 .w_full()
                 .px(20.0)
                 .py(8.0)
                 .gap(12.0)
                 .center_y()
-                .child(kit::label("ph-viewer-notice-words", super::grid::UNSHOWABLE, style::SUB, white.alpha(0.75)))
+                .child(kit::label("ph-viewer-notice-words", words, style::SUB, white.alpha(0.75)))
                 .child(
                     chrome::button("ph-open-in-os-app", &format!("Open in {app}"), None, chrome::Tone::Plain, 28.0, crate::theme::tokens::type_::BUTTON_SM, t)
                         .on_press(move |s: &mut State| s.photos.ask(Intent::OpenInOsApp(id))),

@@ -194,6 +194,11 @@ pub enum ErrorCode {
     Timeout,
     /// Anything else inside the helper.
     Internal,
+    /// A 10-bit H.264 stream that no decoder on this PC takes (ux-24): said as itself, not as "no decoder".
+    TenBit,
+    /// The file's video is a codec this build does not recognise at all, in any container (an unknown codec in a
+    /// Matroska file, ux-24): said as itself, not as "no decoder".
+    UnknownCodec,
 }
 
 impl ErrorCode {
@@ -209,6 +214,8 @@ impl ErrorCode {
             ErrorCode::Timeout => [6, 0],
             ErrorCode::Internal => [7, 0],
             ErrorCode::NoSystemMedia(codec) => [8, codec.byte()],
+            ErrorCode::TenBit => [9, 0],
+            ErrorCode::UnknownCodec => [10, 0],
         }
     }
 
@@ -230,6 +237,8 @@ impl ErrorCode {
             6 => plain(ErrorCode::Timeout),
             7 => plain(ErrorCode::Internal),
             8 => Ok(ErrorCode::NoSystemMedia(Codec::of(codec)?)),
+            9 => plain(ErrorCode::TenBit),
+            10 => plain(ErrorCode::UnknownCodec),
             _ => Err(WireError::Malformed),
         }
     }
