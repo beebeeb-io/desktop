@@ -103,7 +103,7 @@ pub fn text_with(system_decoder_on: bool, why: &Refusal) -> Text {
             "no system media",
         ),
         Refusal::TenBit => (
-            "This video is 10-bit H.264, which this PC can\u{2019}t play in Beebeeb. Open it in its default app.".into(),
+            "This video is 10-bit H.264/HEVC; Windows\u{2019} decoder on this PC can\u{2019}t play it. Open it in its default app.".into(),
             OPEN_DEFAULT,
             None,
             "ten bit",
