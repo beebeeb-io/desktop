@@ -124,6 +124,9 @@ fn style_words(marks: Option<Marks>) -> &'static str {
 /// Hand `op` to the editor through the source. A source that does not take it says "Not built yet", never nothing.
 pub fn send(s: &mut State, tx: &mut Tx, op: EditOp, asked: &'static str) {
     tx.instant();
+    // The press that reached the tool (or its menu) took the keyboard with it. The tool has acted: the keyboard is
+    // the page's again, so the next key is typed into the document and not handed to the tool.
+    super::word::focus(tx);
     if let Some(ui) = viewers::ui(s) {
         let (source, id) = ui.edit_source();
         let id = id.to_string();
