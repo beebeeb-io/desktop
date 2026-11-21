@@ -150,6 +150,8 @@ pub fn is_ignored_finder_name(name: &str) -> bool {
         ".DS_Store" | ".DocumentRevisions-V100" | ".Spotlight-V100" | ".TemporaryItems" | ".Trashes" | "TemporaryItems"
     ) || trimmed.starts_with("._")
         || trimmed.starts_with("~$")
+        // LibreOffice/OpenOffice lock file: `.~lock.<name>#`
+        || (trimmed.starts_with(".~lock.") && trimmed.ends_with('#'))
         || trimmed.ends_with('~')
         || lower.ends_with(".tmp")
         || lower.ends_with(".temp")
@@ -1329,5 +1331,18 @@ mod windows_cf {
         assert_eq!(r.names(), ["same.txt"], "no copy is made");
         r.trash("aaaa0000-0000-4000-8000-00000000a283");
         assert!(r.names().is_empty(), "the row's own entry is removed");
+    }
+}
+
+#[cfg(test)]
+mod ignore_rule_tests {
+    use super::is_ignored_finder_name;
+
+    #[test]
+    fn libreoffice_lock_files_are_ignored() {
+        assert!(is_ignored_finder_name(".~lock.report.odt#"));
+        assert!(is_ignored_finder_name(".~lock.a b.docx#"));
+        assert!(!is_ignored_finder_name("report.odt"));
+        assert!(!is_ignored_finder_name(".~lock.notes"));
     }
 }
