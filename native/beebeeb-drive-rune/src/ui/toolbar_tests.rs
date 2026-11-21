@@ -253,3 +253,21 @@ fn viewer_bar_has_one_show_in_file_explorer_and_no_open_explorer() {
         "no duplicate open-explorer button in the viewer bar"
     );
 }
+
+#[test]
+fn title_block_has_the_folder_info_key_and_an_optional_info_line() {
+    let t = crate::theme::tokens::Theme::light();
+    let with = super::toolbar::title_block("Docs", Some("3 items"), &t);
+    assert_eq!(with.key.as_deref(), Some("folder-info"));
+    assert_eq!(with.children.len(), 2);
+    let without = super::toolbar::title_block("Docs", None, &t);
+    assert_eq!(without.children.len(), 1);
+}
+
+#[test]
+fn tool_is_one_idle_button_with_its_icon_key() {
+    let t = crate::theme::tokens::Theme::light();
+    let b = super::toolbar::tool("photos-tool", "Photos", &crate::theme::icons::SEARCH, &t);
+    assert_eq!(b.key.as_deref(), Some("photos-tool"));
+    assert_eq!(b.children.len(), 1);
+}
