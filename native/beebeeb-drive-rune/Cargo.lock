@@ -557,6 +557,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "beebeeb-client"
+version = "0.3.0"
+source = "git+https://github.com/beebeeb-io/core?rev=a5176f974649bf6c69000188b982898b216046a1#a5176f974649bf6c69000188b982898b216046a1"
+dependencies = [
+ "base64 0.23.1",
+ "beebeeb-api",
+ "beebeeb-core",
+ "chrono",
+ "security-framework",
+ "security-framework-sys",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "beebeeb-core"
 version = "0.3.0"
 source = "git+https://github.com/beebeeb-io/core?rev=a5176f974649bf6c69000188b982898b216046a1#a5176f974649bf6c69000188b982898b216046a1"
@@ -640,6 +660,7 @@ dependencies = [
  "base64 0.22.1",
  "beebeeb-api",
  "beebeeb-backup",
+ "beebeeb-client",
  "beebeeb-core",
  "beebeeb-sync",
  "beebeeb-transfer",
