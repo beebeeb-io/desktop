@@ -959,7 +959,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(crate::ui::focus::pane(sidebar(s, section, &t), "settings-sidebar"))
+        .child(crate::ui::focus::pane(row().h_full().child(sidebar(s, section, &t)), "settings-sidebar"))
         // One scroller per pane (Rune keeps a scroller's offset by its path): a page opened from a page that
         // was scrolled down starts at its own top, never at the other's offset.
         .child(
