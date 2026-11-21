@@ -57,6 +57,7 @@ fn each_refusal_says_what_happened_and_offers_a_fix_only_where_one_exists() {
         let expected: &[Action] = match kind {
             Refused::OtherAccountsData | Refused::IdentityUnknown => &[Action::Close],
             Refused::StopUnconfirmed => &[Action::Quit, Action::Close],
+            Refused::UnsentFileOfAnotherAccount => &[Action::TryAgain, Action::DiscardAndSwitch, Action::Close],
             _ => &[Action::TryAgain, Action::Close],
         };
         assert_eq!(words.actions, expected, "{kind:?}");

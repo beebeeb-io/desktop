@@ -241,6 +241,73 @@ pub fn is_the_upgrade_candidate(candidate: Option<&Identity>, session: &Identity
         && candidate.is_some_and(|candidate| candidate.is_known() && same_account(candidate, session) == Some(true))
 }
 
+// dc-111, "Discard and switch" (`app::account_switch`): what the confirmation shows, and its two answers.
+
+/// How many names the confirmation shows; the rest are a count.
+pub const NAMES_SHOWN: usize = 5;
+
+/// What "Discard and switch" would lose, as the confirmation shows it: every unsent file of the previous account, by
+/// count, and the names (never a path) of the first [`NAMES_SHOWN`]. The full set is held here, so the discard does
+/// exactly what was confirmed or nothing. Made by `Engine::discard_and_switch_ask`; dropping it is the Cancel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardAsk {
+    /// How many files would be taken out of the sync folder (each kept as a copy first).
+    pub files: usize,
+    /// The names of the first of them, at most [`NAMES_SHOWN`].
+    pub names: Vec<String>,
+    pub(crate) paths: Vec<String>,
+}
+
+impl DiscardAsk {
+    pub(crate) fn of(paths: Vec<String>) -> Self {
+        let names = paths
+            .iter()
+            .take(NAMES_SHOWN)
+            .map(|path| path.rsplit('/').find(|part| !part.is_empty()).unwrap_or(path).to_string())
+            .collect();
+        Self {
+            files: paths.len(),
+            names,
+            paths,
+        }
+    }
+
+    /// The files beyond the named ones ("and 3 more").
+    pub fn more(&self) -> usize {
+        self.files - self.names.len()
+    }
+}
+
+/// Why "Discard and switch" did nothing. No variant carries a name, a path or an id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardRefused {
+    /// No session, or nothing of another account's is unsent here (the plain start is the way on).
+    NothingToDiscard,
+    /// What is unsent now is not what the person confirmed: ask again.
+    Changed,
+    /// Something else of the previous account's needs a person's answer (a queued change, a held edit…).
+    OtherWork,
+    /// The previous account's key could not be kept in its own slot: nothing was copied or removed (R4).
+    KeyNotKept,
+    /// A copy could not be made or recorded: nothing was removed from the sync folder.
+    KeepFailed,
+    /// Sync runs: there is nothing to switch.
+    SyncRunning,
+    /// This OS cannot remove another account's synced items, so a switch cannot finish here: nothing is offered.
+    Unsupported,
+    /// The local state could not be read.
+    Unreadable,
+}
+
+/// A discard that went through: where the copies are, and the start that followed (014's clear, then B's start).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardDone {
+    pub kept_in: std::path::PathBuf,
+    pub kept: usize,
+    pub start: Result<crate::app::SyncStart, crate::app::SyncStartRefused>,
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

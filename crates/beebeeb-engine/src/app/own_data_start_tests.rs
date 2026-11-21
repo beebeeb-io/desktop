@@ -36,6 +36,10 @@ mod stop;
 #[path = "own_data_start_switch_tests.rs"]
 mod switch;
 
+/// dc-111: "Discard and switch" over another account's unsent files.
+#[path = "account_switch_discard_tests.rs"]
+mod account_switch_discard;
+
 type TestEngine = Engine<MemoryCredentials>;
 type Answer = std::pin::Pin<Box<dyn std::future::Future<Output = Listing> + Send>>;
 

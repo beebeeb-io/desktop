@@ -75,6 +75,8 @@ pub enum Action {
     TryAgain,
     /// Quit the app (a restart is the fix).
     Quit,
+    /// dc-111: the previous account's unsent files are kept as copies, then the switch goes on (after a confirmation).
+    DiscardAndSwitch,
     Close,
 }
 
@@ -83,6 +85,7 @@ impl Action {
         match self {
             Action::TryAgain => "Try again",
             Action::Quit => "Quit",
+            Action::DiscardAndSwitch => "Discard and switch",
             Action::Close => "Close",
         }
     }
@@ -103,6 +106,7 @@ pub struct Words {
 const RETRY: &[Action] = &[Action::TryAgain, Action::Close];
 const RESTART: &[Action] = &[Action::Quit, Action::Close];
 const NO_FIX: &[Action] = &[Action::Close];
+const UNSENT: &[Action] = &[Action::TryAgain, Action::DiscardAndSwitch, Action::Close];
 const SUPPORT: &str = "support@beebeeb.io";
 
 /// The words for `off`, with the app's name (`AppIdentity::product_name`: "Beebeeb Test" in a test build).
@@ -166,9 +170,9 @@ pub fn words(off: &SyncOff, product: &str) -> Words {
                  never sent, so {product} didn\u{2019}t sync. Nothing was uploaded or deleted."
             ),
             "Sign in to that account again so it can send them, or move the files you want to keep out of the \
-             sync folder, then try again."
+             sync folder, then try again. Or discard them: a copy of each is kept first."
                 .to_string(),
-            RETRY,
+            UNSENT,
         ),
         Refused::IdentityUnknown => (
             "Sync can\u{2019}t confirm your account".to_string(),
@@ -242,6 +246,9 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
         folder: None,
     };
     let off = s.shell.sync_off().unwrap_or(&unknown);
+    if let Some(pending) = crate::frames::signin::discard_switch::CONFIRMATION.for_attempt(off.attempt) {
+        return crate::frames::signin::discard_switch::card(&pending, cx);
+    }
     let words = words(off, s.identity.product_name());
     let body = vec![
         kit::label("sync-off-happened", &words.happened, type_::BODY, t.text).wrap(),
@@ -266,6 +273,11 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
                 if !crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::Quit) {
                     tx.quit();
                 }
+            }),
+            Action::DiscardAndSwitch => button.on_press(|s: &mut State| {
+                let Some(attempt) = s.shell.sync_off().map(|off| off.attempt) else { return };
+                let actions = s.shell.actions.clone();
+                crate::frames::signin::discard_switch::CONFIRMATION.open(attempt, &*actions);
             }),
             Action::Close => button.on_press(|s: &mut State| {
                 crate::shell::host::dispatch(s, Event::Escape);
