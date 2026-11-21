@@ -109,19 +109,7 @@ pub fn heading(title: &str, sub: Option<&str>, trailing: Option<El>, t: &Theme) 
 /// A pill (`.kit-pill`): a short state, with a dot before it when `dot`. The state is in the
 /// words, never only in the colour. Keys: `<key>`, `<key>-dot`, `<key>-label`.
 pub fn pill(key: &str, label: &str, tone: Tone, dot: bool, t: &Theme) -> El {
-    let (mark, ink, wash) = au::tone(tone, t);
-    let mut p = row()
-        .key(key.to_string())
-        .h(20.0)
-        .px(8.0)
-        .gap(5.0)
-        .center_y()
-        .radius(10.0)
-        .fill(wash);
-    if dot {
-        p = p.child(el().key(format!("{key}-dot")).size(6.0, 6.0).radius(3.0).fill(mark));
-    }
-    p.child(kit::label(format!("{key}-label"), label, PILL, ink))
+    super::pill::pill(key, label, au::pill_tone(tone), dot, t)
 }
 
 /// A toned tile (`.kit-tile`): a glyph half the tile's size on the tone's wash.

@@ -519,23 +519,20 @@ pub fn banner(
         .child(words)
 }
 
-/// A pill: a short state, with a dot before it when `dot`.
+/// A pill: a short state, with a dot before it when `dot`. Drawn by `ui::pill`.
 pub fn pill(key: &str, label: &str, tone_: Tone, dot: bool, t: &Theme) -> El {
-    let (mark, ink, wash) = tone(tone_, t);
-    let mut p = row()
-        .key(key.to_string())
-        .role("status")
-        .label(label)
-        .h(20.0)
-        .px(8.0)
-        .gap(5.0)
-        .center_y()
-        .radius(10.0)
-        .fill(wash);
-    if dot {
-        p = p.child(el().key("status-dot").size(6.0, 6.0).radius(3.0).fill(mark));
+    super::pill::pill(key, label, pill_tone(tone_), dot, t)
+}
+
+/// The shared pill's tone for an account tone.
+pub fn pill_tone(tone_: Tone) -> super::pill::Tone {
+    use super::pill::Tone as P;
+    match tone_ {
+        Tone::Neutral | Tone::Ink => P::Neutral,
+        Tone::Green => P::Good,
+        Tone::Red => P::Bad,
+        Tone::Amber => P::Warn,
     }
-    p.child(kit::label(format!("{key}-text"), label, type_au::PILL, ink))
 }
 
 // ---------------------------------------------------------------------------
