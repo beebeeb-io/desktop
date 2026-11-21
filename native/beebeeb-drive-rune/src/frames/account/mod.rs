@@ -959,7 +959,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(s, section, &t))
+        .child(crate::ui::focus::pane(sidebar(s, section, &t), "settings-sidebar"))
         // One scroller per pane (Rune keeps a scroller's offset by its path): a page opened from a page that
         // was scrolled down starts at its own top, never at the other's offset.
         .child(
@@ -969,7 +969,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .min_w(0.0)
                 .min_h(0.0)
                 .h_full()
-                .child(pane_el),
+                .child(crate::ui::focus::pane(pane_el, "settings-page")),
         );
     if let Some(overlay) = overlay {
         body = body.child(overlay);
@@ -987,6 +987,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.surface)
         .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(body)
+}
+
+/// `lists::list` with every row told its place in the whole list (position_in_set), for a screen reader.
+pub(super) fn numbered_list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>, t: &Theme) -> El {
+    let n = rows.len();
+    let rows = rows.into_iter().enumerate().map(|(i, r)| r.position_in_set(i + 1, n)).collect();
+    crate::ui::settings_list::list(index, title, rows, foot, t)
 }
 
 /// The account sections' keyboard. Esc closes what is open, innermost first: a confirm, a page

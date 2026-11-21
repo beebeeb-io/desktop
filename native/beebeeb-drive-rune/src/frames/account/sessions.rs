@@ -81,7 +81,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
             None,
             t,
         ),
-        lists::list(0, None, rows, None, t),
+        super::numbered_list(0, None, rows, None, t),
     ];
     if !behind && sessions.iter().any(|s| !s.this_device) {
         children.push(

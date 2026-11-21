@@ -96,7 +96,7 @@ fn list_of(
     t: &Theme,
 ) -> Option<El> {
     let rows: Vec<El> = rows.into_iter().flatten().collect();
-    (!rows.is_empty()).then(|| lists::list(list, head, rows, foot, t))
+    (!rows.is_empty()).then(|| super::numbered_list(list, head, rows, foot, t))
 }
 
 /// The factors, when there is a score to say: known and not empty.

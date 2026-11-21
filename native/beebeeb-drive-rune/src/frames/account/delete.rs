@@ -63,7 +63,7 @@ fn what_goes(f: &Form, t: &Theme) -> El {
                 t,
             ),
             fm::steps(1, 4, "What goes", t),
-            lists::list(
+            super::numbered_list(
                 0,
                 Some("What gets deleted"),
                 vec![

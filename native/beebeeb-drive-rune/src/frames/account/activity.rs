@@ -53,7 +53,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     });
     let mut children = vec![
         set::heading("Sign-in activity", sub, None, t),
-        lists::list(
+        super::numbered_list(
             0,
             None,
             vec![if fixed_on {
@@ -113,7 +113,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
                         )
                     })
                     .collect();
-                children.push(lists::list(
+                children.push(super::numbered_list(
                     p + 1,
                     Some(title),
                     rows,
