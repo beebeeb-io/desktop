@@ -139,4 +139,71 @@ impl ApiClient {
         resp.error_for_status()?;
         Ok(())
     }
+
+    /// Reconciles an upload whose `complete` answer was lost and whose session is gone (404/410): did the
+    /// server commit `object_version_id` for `file_id`? `Some(answer)` is shaped like `complete`'s answer
+    /// (`version_number`, `current_object_version_id`), so the caller lands it once instead of uploading
+    /// again. `None` means the version is not there (or the file is not): a fresh upload is then right.
+    /// Never abandons or trashes anything.
+    pub async fn committed_upload(
+        &self,
+        file_id: &str,
+        object_version_id: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let versions = match self.list_versions(file_id).await {
+            Ok(versions) => versions,
+            Err(error) if error_is_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(committed_answer(&versions, object_version_id))
+    }
+}
+
+fn error_is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|e| e.status() == Some(reqwest::StatusCode::NOT_FOUND))
+}
+
+/// The `complete`-shaped answer for `object_version_id` out of a versions listing (a bare array, or
+/// `{ "versions": [...] }`), or `None` when the listing does not hold it.
+pub(crate) fn committed_answer(listing: &serde_json::Value, object_version_id: &str) -> Option<serde_json::Value> {
+    let list = listing.get("versions").unwrap_or(listing).as_array()?;
+    let found = list.iter().find(|v| v["id"].as_str() == Some(object_version_id))?;
+    let number = found["number"].as_i64().or_else(|| found["version_number"].as_i64());
+    let mut answer = serde_json::json!({
+        "current_object_version_id": object_version_id,
+        "already_completed": true,
+    });
+    if let Some(number) = number {
+        answer["version_number"] = number.into();
+    }
+    if let Some(size) = found["size_bytes"].as_u64() {
+        answer["size_bytes"] = size.into();
+    }
+    Some(answer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::committed_answer;
+    use serde_json::json;
+
+    /// A lost `complete` answer plus a reaped session: the committed version is found, once, by its id.
+    #[test]
+    fn upload_ack_lost_after_commit_is_found_by_its_version_id() {
+        let listing = json!({ "versions": [
+            { "id": "v1", "number": 1, "size_bytes": 5 },
+            { "id": "v2", "number": 2, "size_bytes": 9 },
+        ]});
+        let answer = committed_answer(&listing, "v2").expect("committed");
+        assert_eq!(answer["version_number"], 2);
+        assert_eq!(answer["size_bytes"], 9);
+        assert_eq!(answer["current_object_version_id"], "v2");
+        // Bare array shape, and an upload that never committed.
+        assert!(committed_answer(&json!([{ "id": "v1", "version_number": 1 }]), "v1").is_some());
+        assert!(committed_answer(&listing, "v3").is_none());
+        assert!(committed_answer(&json!({}), "v1").is_none());
+    }
 }
