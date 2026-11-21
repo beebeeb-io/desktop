@@ -58,7 +58,7 @@ pub mod files;
 #[cfg(any(target_os = "windows", test))]
 pub mod found_while_paused;
 #[cfg(test)]
-#[path = "engine_host/files_case_twins_tests.rs"]
+#[path = "files_case_twins_tests.rs"]
 mod files_case_twins_tests;
 mod files_conflicts;
 mod files_downloads;
