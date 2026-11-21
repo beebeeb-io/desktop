@@ -14,7 +14,7 @@ use crate::shell::host;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::kit;
-use crate::ui::sidebar::{SidebarSection, brand, side_item};
+use crate::ui::sidebar::{SidebarSection, brand, section_item, side_item};
 
 /// Whether the search field has the keyboard (Rune reports a focused field's caret).
 pub fn search_focused(cx: &rune::Cx<State>) -> bool {
@@ -68,7 +68,7 @@ pub fn sidebar(s: &State, ui: &Ui, here: Section, t: &Theme) -> El {
     for &section in SidebarSection::all() {
         let count = crate::ui::sidebar::badge_for(s, section);
         sections = sections.child(
-            side_item(section.label(), section.icon(), count, false, section.shortcut(), t)
+            section_item(section, count, false, t)
                 .on_press(go(drive_section(section))),
         );
     }

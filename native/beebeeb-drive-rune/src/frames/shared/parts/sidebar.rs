@@ -105,14 +105,7 @@ pub fn sidebar(s: &State, counts: Counts, t: &Theme) -> El {
             _ => None,
         };
         sections = sections.child(
-            side_item(
-                section.label(),
-                section.icon(),
-                count,
-                active == section,
-                section.shortcut(),
-                t,
-            )
+            crate::ui::sidebar::section_item(section, count, active == section, t)
             .on_press(move |s: &mut State| s.sidebar_section = section),
         );
     }
