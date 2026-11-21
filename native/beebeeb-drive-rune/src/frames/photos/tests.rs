@@ -738,3 +738,35 @@ fn a_tile_without_a_thumbnail_shows_the_photo_or_video_icon() {
     assert!(none.contains(&photo) && none.contains(&video), "photo and video icons drawn");
     assert!(colours(Ui::new(Box::new(FixturePhotos::new()))).is_empty(), "a thumbnail, no type icon");
 }
+
+/// The status line says the PC's real sync state, not a fixed "Up to date": each state its own words and dot.
+#[test]
+fn the_status_line_says_the_real_sync_state() {
+    use crate::frames::PcStatus;
+    use crate::ui::status_bar::{Dot, PAUSED, SIGN_IN_AGAIN, SYNCING, SYNC_STOPPED, UP_TO_DATE, dot_for};
+    struct Pc(&'static str);
+    impl PcStatus for Pc {
+        fn sync_words(&self) -> String {
+            self.0.into()
+        }
+        fn summary(&self) -> String {
+            String::new()
+        }
+    }
+    let cases = [
+        (UP_TO_DATE, Dot::Green),
+        (SYNCING, Dot::Busy),
+        (PAUSED, Dot::Idle),
+        ("Offline", Dot::Idle),
+        (SYNC_STOPPED, Dot::Idle),
+        (SIGN_IN_AGAIN, Dot::Idle),
+    ];
+    for (words, dot) in cases {
+        let mut rt = runtime("DW-0601");
+        rt.state.frames.pc = Box::new(Pc(words));
+        rt.frame(0.0);
+        assert_eq!(text(&rt, "status-text"), words);
+        assert_eq!(dot_for(words), dot, "{words}");
+        assert!(has(&rt, "status-dot"), "{words} has its dot");
+    }
+}
