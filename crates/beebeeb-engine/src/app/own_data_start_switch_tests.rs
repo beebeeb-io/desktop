@@ -467,7 +467,7 @@ mod real_purge {
 
 /// dc-014: the share pins and the guide mark a sign-out keeps, of A, of a third account C on this PC, and A's vault key
 /// with A's tag (a token-only sign-in of B leaves it: `key_owner::remove_foreign_key`).
-mod clear_first_forget_last {
+mod account_switch_order {
     use super::*;
     use crate::keychain::SecretBytes;
 

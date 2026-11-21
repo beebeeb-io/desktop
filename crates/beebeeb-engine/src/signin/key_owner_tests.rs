@@ -247,7 +247,7 @@ fn a_stale_key_and_a_different_account_the_key_is_removed_and_the_gate_asks_for_
 /// dc-014: a key still tagged with A's id stays at B's sign-in, and is never B's: the loader refuses it and the gate
 /// asks B for the twelve words.
 #[test]
-fn a_key_tagged_with_another_account_stays_but_is_never_loaded() {
+fn account_switch_a_key_tagged_with_another_account_stays_but_is_never_loaded() {
     let store = signed_in_as_a();
     store.vault().clear_session_token().unwrap();
     assert_eq!(token_only_sign_in(&store, "tok-b", "user-b", "b@beebeeb.io"), Ok(false));
@@ -264,7 +264,7 @@ fn a_key_tagged_with_another_account_stays_but_is_never_loaded() {
 /// dc-014's red test at the sign-in: A -> B (B never got further than its token), then A signs in again. A's key was
 /// kept for A, so A needs no twelve words.
 #[test]
-fn the_first_account_signs_back_in_after_another_ones_sign_in_without_the_twelve_words() {
+fn account_switch_the_first_account_signs_back_in_without_the_twelve_words() {
     let store = signed_in_as_a();
     store.vault().clear_session_token().unwrap();
     assert_eq!(token_only_sign_in(&store, "tok-b", "user-b", "b@beebeeb.io"), Ok(false));
