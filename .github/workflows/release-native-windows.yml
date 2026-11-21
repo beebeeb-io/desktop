@@ -408,7 +408,10 @@ jobs:
 
   release:
     name: Create GitHub Release
-    if: ${{ !inputs.publish_existing }}
+    # A status function is required: without one the implicit success() also demands every transitive need
+    # (a skipped verify-branch-point on a dispatch from main) succeeded, so nothing published.
+    # validate-release-notes (RELEASE_BLOCKERS.md, fail closed) is upstream of build, so build success implies it passed.
+    if: ${{ !cancelled() && !inputs.publish_existing && needs.build.result == 'success' }}
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -418,6 +421,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
+
+      # The website changelog entry is read from this hidden block (site: scripts/changelog-publish.ts).
+      - name: Require the changelog block in the release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -Eq '^<!--[[:space:]]*changelog([[:space:]]|$)' RELEASE_NOTES.md || ! grep -q -- '-->' RELEASE_NOTES.md; then
+            echo "::error file=RELEASE_NOTES.md::RELEASE_NOTES.md has no '<!-- changelog ... -->' block. Author it at the end of the notes. See docs/RELEASING.md."
+            exit 1
+          fi
+          echo "RELEASE_NOTES.md carries a changelog block"
 
       - name: Download artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
