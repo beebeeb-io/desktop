@@ -137,7 +137,7 @@ fn the_tick_loop_reports_through_the_tracker() {
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     for needle in [
         "emit_payload(&app, tracker.running());",
-        "emit_payload(&app, tracker.paused());",
+        "emit_payload(&app, paused_payload(&tracker, hold));",
         "emit_payload(&app, tracker.stopped());",
         "finish_tick_payload(&tracker, Ok(()), &link, tick_started_at, &db, &transfers)",
         "finish_tick_payload(&tracker, Err(&e), &link, tick_started_at, &db, &transfers)",

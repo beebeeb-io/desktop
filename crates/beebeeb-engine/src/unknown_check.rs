@@ -935,7 +935,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} not found"))
         };
         // D-P2-7 named the mode: the pause check reads `RunMode::of_flag` before its `is_paused` arm.
-        const PAUSED: &str = "let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));";
+        const PAUSED: &str = "let mode = RunMode::of_flag(user_paused || hold.is_some());";
         let retry = after(tick, "retry_marks_step(&sync_root).await;");
         let paused = after(retry, PAUSED);
         let stamp = after(paused, "crate::windows_cf::stamp_local_files_in_sync(&stamp_root);");
