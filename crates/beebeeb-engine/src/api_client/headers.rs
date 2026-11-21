@@ -132,3 +132,26 @@ pub(super) fn retry_decision(attempt: u32, spent: u64, retry_after: Option<u64>,
     let wait = wait.min(remaining);
     Some(wait)
 }
+
+// ── Transport / 5xx retry (bounded) ────────────────────────────────────────────
+
+/// Extra attempts after a connect failure, a timeout or a 502/503/504 (so up to 1 + this requests).
+pub(super) const MAX_TRANSPORT_RETRIES: u32 = 2;
+
+/// First backoff; doubles each retry (250 ms, 500 ms). Worst case adds under a second to a call.
+pub(super) const TRANSPORT_RETRY_BASE_MS: u64 = 250;
+
+/// GET/HEAD/PUT/DELETE/OPTIONS are safe to send twice; POST/PATCH are not.
+pub(super) fn is_idempotent(method: &reqwest::Method) -> bool {
+    !matches!(*method, reqwest::Method::POST | reqwest::Method::PATCH)
+}
+
+/// Pure decision after a failure. `connect`: the request never left. `maybe_sent`: a timeout or a 5xx
+/// answer, where the server may have acted. Connect failures retry for any method; the rest only for
+/// idempotent ones. Returns the wait before the next try, or `None` to give up.
+pub(super) fn transport_retry_decision(attempt: u32, connect: bool, maybe_sent: bool, idempotent: bool) -> Option<Duration> {
+    if attempt >= MAX_TRANSPORT_RETRIES || !(connect || (maybe_sent && idempotent)) {
+        return None;
+    }
+    Some(Duration::from_millis(TRANSPORT_RETRY_BASE_MS << attempt))
+}
