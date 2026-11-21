@@ -305,7 +305,6 @@ fn office_slides_edit_without_text_in_hand_typing_sends_nothing_and_arrows_step(
     log.borrow_mut().edits.clear();
     plain(&mut rt, Key::Text("a".into()));
     plain(&mut rt, Key::Backspace);
-    plain(&mut rt, Key::Delete);
     assert!(log.borrow().edits.is_empty(), "{:?}", log.borrow().edits);
     assert_eq!(deck(&mut rt), (1, 3));
     plain(&mut rt, Key::Right);
@@ -576,4 +575,52 @@ fn office_slides_edit_dragging_in_text_extends_the_selection() {
     assert_eq!(hits[0].3, HitMode::Place);
     assert!(hits.len() >= 2, "{hits:?}");
     assert!(hits[1..].iter().all(|h| h.3 == HitMode::Extend), "{hits:?}");
+}
+
+fn run_cmd(rt: &mut Runtime<State>, cmd: crate::frames::office::edit::palette::SlideCmd) {
+    rt.update(|s, _| run_command(s, cmd));
+    rt.frame(0.0);
+}
+
+#[test]
+fn office_slides_edit_the_stage_is_what_the_palette_reads() {
+    let (mut rt, _log) = editing();
+    rt.update(|s, _| viewers::deck_mut(s).unwrap().go(2));
+    let st = stage(&rt.state).expect("a live deck has a current slide");
+    assert_eq!((st.current, st.count), (2, 3));
+}
+
+#[test]
+fn office_slides_edit_palette_duplicate_and_delete_act_on_the_current_slide() {
+    use crate::frames::office::edit::palette::SlideCmd;
+    let (mut rt, log) = editing();
+    rt.update(|s, _| viewers::deck_mut(s).unwrap().go(2));
+    click_in(&mut rt, "edit-slide", 0.5, 0.5);
+    run_cmd(&mut rt, SlideCmd::Duplicate);
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::DuplicateSlide(1)));
+    assert_eq!(deck(&mut rt), (3, 4), "the copy shows");
+    run_cmd(&mut rt, SlideCmd::Delete);
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::DeleteSlide(2)));
+    assert_eq!(deck(&mut rt), (3, 3));
+    // Undo goes through the existing history.
+    key(&mut rt, Key::Command('z'), ctrl());
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::Undo));
+}
+
+#[test]
+fn office_slides_edit_keys_duplicate_and_delete_the_current_slide() {
+    let (mut rt, log) = editing();
+    rt.update(|s, _| viewers::deck_mut(s).unwrap().go(2));
+    click_in(&mut rt, "edit-slide", 0.5, 0.5);
+    key(&mut rt, Key::Command('d'), ctrl());
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::DuplicateSlide(1)));
+    assert_eq!(deck(&mut rt), (3, 4));
+    plain(&mut rt, Key::Delete);
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::DeleteSlide(2)));
+    assert_eq!(deck(&mut rt), (3, 3));
+    // With text in hand Delete edits the text, not the deck.
+    with_caret(&mut rt, &log);
+    plain(&mut rt, Key::Delete);
+    assert!(matches!(log.borrow().edits.last(), Some(EditOp::Delete { .. })));
+    assert_eq!(deck(&mut rt), (3, 3));
 }
