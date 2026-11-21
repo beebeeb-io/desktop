@@ -295,7 +295,7 @@ fn found(source: &mut EngineSearchSource<Host>, query: &str, narrow: Narrow) -> 
     match source.search(query, narrow) {
         Answer::Found { hits, loading } => {
             assert_eq!(loading, None);
-            hits
+            hits.to_vec()
         }
         Answer::Searching => panic!("the query was not answered"),
         Answer::Unavailable => panic!("search answered Unavailable"),
@@ -1213,7 +1213,7 @@ fn while_the_first_listing_runs_the_answer_carries_how_far_it_is() {
     assert_eq!(
         source.search("contract", Narrow::All),
         Answer::Found {
-            hits: Vec::new(),
+            hits: Vec::new().into(),
             loading: Some(Loading { listed: 0, total: 40_112 })
         }
     );

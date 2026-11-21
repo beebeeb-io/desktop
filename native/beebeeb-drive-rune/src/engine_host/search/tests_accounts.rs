@@ -103,7 +103,7 @@ fn found(source: &mut Source, query: &str) -> Option<Vec<String>> {
     source.ask(query, Narrow::All);
     settle(source);
     match source.search(query, Narrow::All) {
-        Answer::Found { hits, .. } => Some(hits.into_iter().map(|hit| hit.id).collect()),
+        Answer::Found { hits, .. } => Some(hits.iter().map(|hit| hit.id.clone()).collect()),
         Answer::Searching => panic!("the query was not answered"),
         // Not available, and why (row S8): no result list either way.
         Answer::Unavailable | Answer::NotThisAccounts => None,
