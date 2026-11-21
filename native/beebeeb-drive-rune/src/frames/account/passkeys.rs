@@ -9,7 +9,6 @@ use crate::theme::tokens::Theme;
 use crate::ui::account_form::{self as fm, Field};
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size};
 use crate::ui::kit;
-use crate::ui::settings_list as lists;
 use crate::ui::menu;
 use rune::{El, Tx, el};
 
@@ -142,7 +141,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     let mut list = rune::col()
         .key("passkeys")
         .w_full()
-        .child(lists::list(0, None, rows, None, t).w_full());
+        .child(super::numbered_list(0, None, rows, None, t).w_full());
     let mut overlay = None;
     match dialog {
         Some(Dialog::PasskeyMenu(id)) => {

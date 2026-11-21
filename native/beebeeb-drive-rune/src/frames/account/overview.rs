@@ -6,7 +6,6 @@ use crate::theme::tokens::{Theme, type_};
 use crate::ui::account_set::{self as set, Lead, Row, Tail};
 use crate::ui::au::Tone;
 use crate::ui::kit;
-use crate::ui::settings_list as lists;
 use rune::{El, col, row};
 
 use super::source::{AccountSource, PaneState, Plan, ProductKind, ProductState};
@@ -28,7 +27,7 @@ fn who_row(index: usize, row: Row, to: (Pane, &'static str), source: &dyn Accoun
 
 pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
     let who = source.identity();
-    let identity = lists::list(
+    let identity = super::numbered_list(
         0,
         None,
         vec![
@@ -60,7 +59,7 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
 
     // The phrase was shown once, at sign-up, and never again: this row only says so. It is
     // text, not a button: no reveal, no re-authentication, no regenerate.
-    let recovery = lists::list(
+    let recovery = super::numbered_list(
         1,
         Some("Recovery"),
         vec![set::item(
@@ -111,7 +110,7 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
             )
         })
         .collect();
-    let uses = lists::list(
+    let uses = super::numbered_list(
         2,
         Some("This account uses"),
         products,

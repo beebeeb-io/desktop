@@ -7,7 +7,6 @@ use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::account_form as fm;
 use crate::ui::account_set::{self as set, Lead, Row};
-use crate::ui::settings_list as lists;
 use rune::El;
 
 use super::form::{self, Form, Problem};
@@ -53,7 +52,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     });
     let mut children = vec![
         set::heading("Sign-in activity", sub, None, t),
-        lists::list(
+        super::numbered_list(
             0,
             None,
             vec![if fixed_on {
@@ -113,7 +112,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
                         )
                     })
                     .collect();
-                children.push(lists::list(
+                children.push(super::numbered_list(
                     p + 1,
                     Some(title),
                     rows,

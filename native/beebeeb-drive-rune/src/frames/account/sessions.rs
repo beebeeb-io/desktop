@@ -5,7 +5,6 @@ use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size, Tail};
 use crate::ui::au::Tone;
-use crate::ui::settings_list as lists;
 use rune::{El, row};
 
 use super::source::{AccountSource, DeviceKind, Session};
@@ -81,7 +80,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
             None,
             t,
         ),
-        lists::list(0, None, rows, None, t),
+        super::numbered_list(0, None, rows, None, t),
     ];
     if !behind && sessions.iter().any(|s| !s.this_device) {
         children.push(
