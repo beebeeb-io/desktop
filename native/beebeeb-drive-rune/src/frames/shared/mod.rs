@@ -201,6 +201,7 @@ fn notice_note(notice: Notice, t: &Theme) -> El {
         col()
             .key("notice")
             .role("status")
+            .live_region(rune::LiveRegion::Polite)
             .label(notice_words(notice))
             .w_full()
             .pt(9.0)
@@ -428,6 +429,21 @@ impl SharedUi {
         entries
             .iter()
             .position(|e| matches!(e.trail, Trail::Keys(k) if k == keys))
+    }
+
+    /// The names of the current tab's items in list order: what typed letters jump over.
+    fn names(&self) -> Vec<String> {
+        let snap = self.snapshot();
+        match self.tab {
+            Tab::WithMe => snap.with_me.iter().map(|r| r.name.clone()).collect(),
+            Tab::ByMe => snap
+                .people
+                .iter()
+                .map(|p| p.name.clone())
+                .chain(snap.links.iter().map(|l| l.name.clone()))
+                .collect(),
+            Tab::Requests => snap.requests.iter().map(|r| r.title.clone()).collect(),
+        }
     }
 
     /// Move the selection to item `i`.
@@ -727,6 +743,7 @@ fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 move |s: &State, i| match s.frames.shared.snapshot().with_me.get(i) {
                     Some(r) => table_row(i, r, s.frames.shared.selected == Some(i), &COLUMNS, &t)
                         .tab_index(stop(&s.frames.shared, i))
+                        .position_in_set(i + 1, s.frames.shared.snapshot().with_me.len())
                         .on_press(select(i))
                         .on_double_press(open(i))
                         .on_secondary_press(menu(i)),
@@ -805,6 +822,7 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 t,
             )
             .tab_index(stop(ui, m))
+            .position_in_set(m + 1, count)
             .on_press(select(m))
             .on_double_press(open(m))
             .on_secondary_press(menu(m))
@@ -850,6 +868,7 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 t,
             )
             .tab_index(stop(ui, i))
+            .position_in_set(i + 1, count)
             .on_press(select(i))
             .on_double_press(open(i))
             .on_secondary_press(menu(i))
@@ -931,6 +950,7 @@ fn requests(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 t,
             )
             .tab_index(stop(ui, m))
+            .position_in_set(m + 1, requests.len())
             .on_press(select(m))
             .on_double_press(open(m))
             .on_secondary_press(menu(m))
@@ -1083,6 +1103,21 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Up => ui.select(ui.selected.map_or(0, |i| i.saturating_sub(1)), tx),
         Key::Home => ui.select(0, tx),
         Key::End => ui.select(count - 1, tx),
+        Key::PageDown | Key::PageUp => {
+            let to = parts::table::page_to(ui.selected, count, ev.key == Key::PageDown);
+            ui.select(to, tx)
+        }
+        Key::Text(_) => {
+            let names = ui.names();
+            match parts::table::jump_to(names.iter().map(String::as_str), ui.selected, ev) {
+                Some(i) => ui.select(i, tx),
+                None => return false,
+            }
+        }
+        Key::Delete => match ui.hinted("Delete") {
+            Some(n) => pick(s, n, tx),
+            None => return false,
+        },
         Key::Enter => match ui.open_selected() {
             Some(intent) => s.frames.intents.push(intent),
             // People with access opened here: the key is taken.

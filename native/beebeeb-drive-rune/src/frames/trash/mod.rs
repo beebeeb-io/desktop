@@ -377,6 +377,7 @@ fn notice_note(notice: &Notice, t: &tokens::Theme) -> El {
         col()
             .key("notice")
             .role("status")
+            .live_region(rune::LiveRegion::Polite)
             .label(notice_words(notice))
             .w_full()
             .pt(9.0)
@@ -611,6 +612,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                         Some(r) => table_row(i, r, s.frames.trash.selected == Some(i), &COLUMNS, &t)
                             // The list is one Tab stop: the selected row, or the first.
                             .tab_index(if s.frames.trash.selected.unwrap_or(0) == i { 0 } else { -1 })
+                            // The place in the whole list, not in the rows built.
+                            .position_in_set(i + 1, s.frames.trash.rows().len())
                             .on_press(move |s: &mut State| s.frames.trash.pick_row(i))
                             .on_secondary_press(move |s: &mut State, press, _| {
                                 s.frames.trash.pick_row(i);
@@ -731,6 +734,17 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Up => ui.select(ui.selected.map_or(0, |i| i.saturating_sub(1)), tx),
         Key::Home => ui.select(0, tx),
         Key::End => ui.select(count - 1, tx),
+        Key::PageDown | Key::PageUp => {
+            let to = crate::frames::shared::parts::table::page_to(ui.selected, count, ev.key == Key::PageDown);
+            ui.select(to, tx)
+        }
+        Key::Text(_) => {
+            let rows = ui.rows();
+            match crate::frames::shared::parts::table::jump_to(rows.iter().map(|r| r.name.as_str()), ui.selected, ev) {
+                Some(i) => ui.select(i, tx),
+                None => return false,
+            }
+        }
         Key::Delete => match ui.selected_id() {
             Some(_) if !ui.source.purge_available() => ui.notice = Some(Notice::NotAvailable),
             Some(id) => open_purge(s, Dialog::DeleteForever(id), tx),

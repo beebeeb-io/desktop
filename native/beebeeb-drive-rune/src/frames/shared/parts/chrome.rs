@@ -21,10 +21,14 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar)
+        // The toolbar and the list are F6 stops (`ui::focus::pane`); the sidebar is the third.
+        .child(crate::ui::focus::pane(col().w_full().child(toolbar), "pane-toolbar"))
         // The one banner of the whole window (`frames::global`: "on every view of the window").
         .children(crate::frames::global::banner_under_toolbar(s, t))
-        .child(body.grow(1.0).min_h(0.0).w_full())
+        .child(crate::ui::focus::pane(
+            col().grow(1.0).min_h(0.0).w_full().child(body.grow(1.0).min_h(0.0).w_full()),
+            "pane-list",
+        ))
         .child(status_line(&crate::frames::sync_words(s), status, t));
     let mut window = col()
         .key("window")
