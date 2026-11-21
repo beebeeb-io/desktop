@@ -1035,6 +1035,10 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             _ => return true,
         }
     }
+    // F6 / Shift+F6 from outside every pane: the first / last pane (a pane moves on itself).
+    if registry::dialog_group_for(&s.shell.app).is_none() && crate::ui::focus::cycle(ev, tx) {
+        return true;
+    }
     // A dialog in front takes the keys; the frame behind it gets none.
     let keys = match registry::dialog_group_for(&s.shell.app) {
         Some(dialog) => registry::dialog_frame(dialog).and_then(|frame| frame.on_key),
