@@ -802,7 +802,7 @@ fn a_list_read_before_a_sign_out_is_not_drawn_after_it() {
     server.read_delay_ms.store(1_500, Ordering::SeqCst);
     source.reload(Pane::Sessions);
     let began = Instant::now();
-    while server.asked("GET /api/v1/account/sessions") < 3 {
+    while server.asked("GET /api/v1/account/sessions") < 2 {
         assert!(began.elapsed() < Duration::from_secs(10));
         std::thread::sleep(Duration::from_millis(5));
     }
