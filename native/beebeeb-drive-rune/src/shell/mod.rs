@@ -604,7 +604,7 @@ fn open_engine(
         .ok_or_else(|| "The folder for app data could not be found.".to_string())?;
     // Never a reason not to start: a closed or broken stdout loses the line, it does not stop the app.
     let _ = writeln!(std::io::stdout(), "{}", api_base.start_line());
-    // The local log file (`log_file.rs`), before the engine starts so its first warning is kept. Best effort.
+    // The local log file (`log_file/mod.rs`), before the engine starts so its first warning is kept. Best effort.
     let _ = crate::log_file::install(&local_data_of(&dirs, std::env::consts::OS));
     // Slice B5: what Windows needs to show this app's toasts (`platform::windows_toast`). Nothing yet.
     #[cfg(windows)]

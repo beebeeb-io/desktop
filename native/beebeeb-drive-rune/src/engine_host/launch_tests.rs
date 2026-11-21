@@ -255,8 +255,8 @@ fn every_launch_takes_the_launch_lock() {
     files.sort();
     assert!(files.len() > 100, "the scan reads the crate: {} files", files.len());
     assert!(
-        files.iter().any(|f| f.ends_with("engine_host.rs")),
-        "engine_host.rs is scanned"
+        files.iter().any(|f| f.ends_with("engine_host/mod.rs")),
+        "engine_host/mod.rs is scanned"
     );
     let (mut bare, mut held) = (Vec::new(), Vec::new());
     for file in files.iter().filter(|f| **f != lock_file) {
@@ -283,7 +283,7 @@ fn every_launch_takes_the_launch_lock() {
     assert_eq!(
         held,
         [
-            ("src/engine_host.rs".to_string(), 7),
+            ("src/engine_host/mod.rs".to_string(), 7),
             ("src/engine_host/open_with_apps.rs".to_string(), 1)
         ],
         "the starts held by the lock"
