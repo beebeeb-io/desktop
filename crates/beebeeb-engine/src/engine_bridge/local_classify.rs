@@ -248,6 +248,29 @@ impl EngineBridge {
     fn row_judging_bytes_at(&self, rel: &str, path: &Path) -> Result<RowAtPath, EngineError> {
         let mut rows = self.db.file_rows_at_path(rel)?;
         if rows.len() < 2 {
+            // Task 2230: a lone `Trashing` row answers only for the file it records; bytes of
+            // another size or hash are a file re-created at the path before the trash landed.
+            if let Some(row) = rows.first() {
+                if row.status == FileStatus::Trashing && !row.is_dir() {
+                    let recreated = match std::fs::metadata(path) {
+                        Ok(m) if m.len() as i64 != row.size_bytes => true,
+                        Ok(_) => match &row.content_hash {
+                            Some(recorded) => {
+                                #[cfg(target_os = "windows")]
+                                if !crate::windows_cf::placeholders::fully_on_disk(path) {
+                                    return Ok(RowAtPath::NotWhollyOnDisk);
+                                }
+                                cached_sha256_file_hex(&row.file_id, path)? != *recorded
+                            }
+                            None => false,
+                        },
+                        Err(_) => false,
+                    };
+                    if recreated {
+                        return Ok(RowAtPath::None);
+                    }
+                }
+            }
             return Ok(rows.pop().map_or(RowAtPath::None, RowAtPath::One));
         }
         let mut recorded = Vec::new();
