@@ -18,6 +18,7 @@ use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::settings_dialog::{BUTTON_MD, DIALOG_TITLE};
 use crate::ui::button::{self, ButtonState, Size, Variant};
+use crate::ui::view_state::{self, ViewState};
 use crate::ui::{caption, kit, sidebar};
 
 // ---------------------------------------------------------------------------
@@ -58,13 +59,14 @@ pub const TITLE: &str = "We couldn't show this file here.";
 pub const NOT_CHANGED: &str = "The file was not changed.";
 pub const TRY_AGAIN: &str = "Try again";
 pub const OPEN_ELSEWHERE: &str = "Open in another app\u{2026}";
-pub const TRY_HINT: &str = "Try again once; if it stops again, open the file in another app.";
 pub const KEEP_FIRST: &str = "Keep this file on this PC first.";
 pub const KEEP_ACTION: &str = "Keep on this PC";
 pub const QUIET_LINE: &str = "Some content isn't shown.";
 pub const OPENING: &str = "Opening\u{2026}";
 pub const ENCRYPTED: &str = "Encrypted";
 pub const ABOUT: &str = "About";
+pub const EMPTY_TITLE: &str = "This document is empty";
+pub const EMPTY_BODY: &str = "Nothing to show yet. Open it for editing to add the first words.";
 
 pub const REASON_TYPE: &str = "No preview for this type (.ppt, .odp, password-protected)";
 pub const REASON_DAMAGED: &str = "Damaged or over a size limit";
@@ -87,9 +89,9 @@ impl OfficeState {
         }
     }
 
-    /// Try again is offered after "The viewer stopped", once: a second failure hides it.
+    /// Try again is offered every time the viewer stopped; the source decides whether the file opens.
     pub fn try_again_shown(self) -> bool {
-        matches!(self, OfficeState::Stopped { retried: false })
+        matches!(self, OfficeState::Stopped { .. })
     }
 
     /// "Open in another app…" is offered only for a file kept on this PC: the viewer makes no temporary decrypted copy
@@ -129,7 +131,7 @@ impl StateBody {
         StateBody { state, kept, tries: 0 }
     }
 
-    /// Try again: only after a stop that was not retried yet. The file opens once more (`Opening`); the host answers.
+    /// Try again: after a stop, every time. The file opens once more (`Opening`); the host answers.
     /// `true`: it was taken.
     pub fn try_again(&mut self) -> bool {
         if !self.state.try_again_shown() {
@@ -140,7 +142,7 @@ impl StateBody {
         true
     }
 
-    /// The host's answer after a retry: it stopped again. Try again is hidden from now on.
+    /// The host's answer after a retry: it stopped again. Try again stays.
     pub fn stopped_again(&mut self) {
         self.state = OfficeState::Stopped {
             retried: self.tries > 0,
@@ -210,7 +212,6 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[("DW-1563", scene_opening
 const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 const STATUS_STATE: TextStyle = TextStyle::new(11.5, 500.0).lh(17.0);
 const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
-const HINT: TextStyle = TextStyle::new(11.0, 500.0).lh(13.5);
 const BAR_LABEL: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
 
@@ -300,87 +301,60 @@ fn viewer_bar(t: &Theme) -> El {
         )
 }
 
-/// DW-1556's panel. Exactly one reason line; the actions that still work.
+/// DW-1556's panel, drawn by `ui::view_state` Failed: the title, the reason with "The file was not changed.", and
+/// Try again every time the viewer stopped (a second stop shows it again). Under it, the actions that still work.
 pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
     let reason = body.state.reason_line().unwrap_or_default();
-    let line = format!("{reason}. {NOT_CHANGED}");
-
-    let mut actions = row().key("empty-actions").gap(8.0).mt(8.0).center_y();
-    if body.state.try_again_shown() {
-        actions = actions.child(
-            ui_button("empty-add", TRY_AGAIN, true, t).on_press(|s: &mut State| {
-                // A file in a renderer is opened again by its source (`viewers::office_try_again`).
-                viewers::office_try_again(s);
-            }),
-        );
-    }
+    let why = format!("{reason}. {NOT_CHANGED}");
+    let retry = body.state.try_again_shown().then(|| {
+        view_state::try_again("empty", t).on_press(|s: &mut State| {
+            // A file in a renderer is opened again by its source (`viewers::office_try_again`).
+            viewers::office_try_again(s);
+        })
+    });
+    let mut actions = row().key("empty-actions").gap(8.0).center_y();
     if body.state.open_elsewhere_offered(body.kept) {
-        actions = actions.child(
-            ui_button("empty-btn-1", OPEN_ELSEWHERE, false, t).on_press(|s: &mut State| {
-                if let Some(ui) = viewers::ui(s) {
-                    ui.intent(Intent::OpenInAnotherApp);
-                }
-            }),
-        );
+        actions = actions.child(ui_button("empty-btn-1", OPEN_ELSEWHERE, false, t).on_press(|s: &mut State| {
+            if let Some(ui) = viewers::ui(s) {
+                ui.intent(Intent::OpenInAnotherApp);
+            }
+        }));
     } else {
         actions = actions
             .child(kit::label("empty-keep-first", KEEP_FIRST, SUB, t.text_secondary))
-            .child(
-                ui_button("empty-keep", KEEP_ACTION, false, t).on_press(|s: &mut State| {
-                    if let Some(ui) = viewers::ui(s) {
-                        ui.intent(Intent::KeepOffline);
-                    }
-                }),
-            );
+            .child(ui_button("empty-keep", KEEP_ACTION, false, t).on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.intent(Intent::KeepOffline);
+                }
+            }));
     }
-    kit::note_text(
-        "empty-text",
-        "empty-text-box",
-        &format!("{line}{TRY_HINT}"),
-        SUB,
-        t.text_tertiary,
-    );
     col()
-        .key("empty")
-        .role("alert")
-        .py(28.0)
-        .px(24.0)
-        .gap(8.0)
+        .key("failure")
         .items_center()
-        .child(
-            el().key("empty-tile")
-                .size(52.0, 52.0)
-                .radius(15.0)
-                .fill(t.red.alpha(0.12))
-                .center()
-                .child(kit::glyph("empty-icon", &viewers::icons::ALERT, 26.0, t.red)),
-        )
-        .child(
-            kit::label("empty-title", TITLE, DIALOG_TITLE, t.text)
-                .role("heading")
-                .level(1),
-        )
-        .child(
-            // The board's text block: the reason, then the one hint under it. The gate reads the block as ONE text,
-            // `empty-text` (both lines, in the board's grey); the hint keeps its own key inside it.
-            col()
-                .key("empty-text-box")
-                .w(227.0)
-                .items_center()
-                .child(
-                    kit::label("empty-reason", line.clone(), SUB, t.text_tertiary)
-                        .wrap()
-                        .w_full()
-                        .align(rune::Align::Center),
-                )
-                .child(
-                    kit::label("empty-hint", TRY_HINT, HINT, t.text_tertiary)
-                        .wrap()
-                        .w(216.68)
-                        .align(rune::Align::Center),
-                ),
-        )
+        .child(view_state::view_state(
+            ViewState::Failed {
+                key: "empty",
+                title: TITLE,
+                why: &why,
+                retry,
+            },
+            t,
+        ))
         .child(actions)
+}
+
+/// An empty document: nothing in the file to show, and what to do about it.
+pub fn empty_document(t: &Theme) -> El {
+    view_state::view_state(
+        ViewState::Empty {
+            key: "doc-empty",
+            icon: &icons::DOC_GENERIC,
+            title: EMPTY_TITLE,
+            body: EMPTY_BODY,
+            action: None,
+        },
+        t,
+    )
 }
 
 /// The page's skeleton on grey, and the outline's: nothing is drawn as the document before the first page.
@@ -658,7 +632,7 @@ mod tests {
     #[test]
     fn office_states_try_again_only_once() {
         assert!(OfficeState::Stopped { retried: false }.try_again_shown());
-        assert!(!OfficeState::Stopped { retried: true }.try_again_shown());
+        assert!(OfficeState::Stopped { retried: true }.try_again_shown(), "a second stop still offers it");
         for s in [
             OfficeState::Opening,
             OfficeState::Ready,
@@ -674,12 +648,13 @@ mod tests {
         assert_eq!(b.state, OfficeState::Opening);
         b.stopped_again();
         assert_eq!(b.state, OfficeState::Stopped { retried: true });
-        assert!(!b.try_again(), "a second failure hides it");
+        assert!(b.try_again(), "a second failure keeps it");
         assert!(keyed(
             &showing(StateBody::new(OfficeState::Stopped { retried: false }, true)),
-            "empty-add"
+            "empty-retry"
         ));
-        assert!(!keyed(&showing(b), "empty-add"));
+        b.stopped_again();
+        assert!(keyed(&showing(b), "empty-retry"));
     }
 
     #[test]
@@ -747,35 +722,30 @@ mod tests {
     }
 
     #[test]
-    fn office_states_failure_tile_is_red_and_says_both_lines() {
+    fn office_states_failure_says_reason_and_not_changed() {
         let rt = showing(StateBody::new(OfficeState::Stopped { retried: false }, true));
-        let t = tokens::theme(false);
-        let fill_of = |key: &str| {
-            rt.elements()
-                .into_iter()
-                .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
-                .map(|e| e.fill.hex())
-        };
-        assert_eq!(
-            fill_of("empty-tile"),
-            Some(t.red.alpha(0.12).hex()),
-            "the tile is the theme's red"
-        );
-        assert_ne!(fill_of("empty-tile"), Some(t.tile.hex()), "not the grey tile");
-        assert!(
-            keyed(&rt, "empty-text-box") && keyed(&rt, "empty-hint"),
-            "both lines are drawn"
-        );
+        assert!(keyed(&rt, "empty-title") && keyed(&rt, "empty-text"), "title and reason are drawn");
         let words = said(&rt);
         assert!(
             words
                 .iter()
                 .any(|w| w.contains("the viewer stopped. the file was not changed."))
         );
-        assert!(
-            words.iter().any(|w| w == &TRY_HINT.to_lowercase()),
-            "the hint line says {TRY_HINT}"
-        );
+    }
+
+    #[test]
+    fn office_states_empty_document_has_a_state() {
+        fn page(_: &(), _: &mut Cx<()>) -> El {
+            row().key("page").w(400.0).child(empty_document(&tokens::theme(false)))
+        }
+        let env = Env {
+            system_dark: false,
+            scale: 2.0,
+        };
+        let mut rt = Runtime::new((), page, (400.0, 400.0), env);
+        rt.frame(0.0);
+        let has = |key: &str| rt.elements().into_iter().any(|e| e.key.as_deref() == Some(key));
+        assert!(has("doc-empty-title") && has("doc-empty-text"));
     }
 
     #[test]
