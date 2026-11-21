@@ -15,6 +15,7 @@ pub mod fake_sessions;
 pub mod fake_sharing;
 pub mod fake_signup;
 pub mod fake_uploads;
+pub mod large_account;
 pub mod password_change;
 pub mod server;
 
