@@ -200,3 +200,114 @@ fn a_file_named_by_the_command_search_asks_about_unsaved_changes_first_and_opens
         assert_ne!(said.as_deref(), Some("Couldn't find that in this folder"));
     });
 }
+
+mod slide_palette {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use beebeeb_office_protocol::office::{EditKind, EditOp};
+    use rune::{Key, KeyEvent, Mods};
+
+    use super::*;
+    use crate::frames::office::edit::EditUi;
+    use crate::frames::office::slides::{DeckBody, DeckView, slides_fixture};
+    use crate::frames::viewers::source::{Body, EditAnswer, OpenError, OpenFile, ViewerSource};
+    use crate::frames::viewers::office_over::Over;
+
+    struct DeckSource {
+        file: OpenFile,
+        edits: Rc<RefCell<Vec<EditOp>>>,
+    }
+
+    impl ViewerSource for DeckSource {
+        fn open(&mut self, _id: &str) -> Result<OpenFile, OpenError> {
+            Ok(self.file.clone())
+        }
+        fn poll(&mut self, _id: &str) -> Option<Body> {
+            None
+        }
+        fn cancel(&mut self, _id: &str) {}
+        fn retry(&mut self, _id: &str) -> Result<OpenFile, OpenError> {
+            Ok(self.file.clone())
+        }
+        fn office_live(&self) -> bool {
+            true
+        }
+        fn can_edit(&self, _id: &str) -> bool {
+            true
+        }
+        fn edit(&mut self, _id: &str, op: EditOp) -> bool {
+            self.edits.borrow_mut().push(op);
+            true
+        }
+        fn poll_edit(&mut self, _id: &str) -> Option<EditAnswer> {
+            None
+        }
+    }
+
+    fn deck_open(count: u32, current: u32) -> (Runtime<State>, Rc<RefCell<Vec<EditOp>>>) {
+        let mut rt = runtime();
+        rt.on_key = Some(crate::shell::host::on_key);
+        let mut file = slides_fixture::file();
+        file.body = Body::Deck(DeckBody::new(DeckView::of(count)));
+        let edits = Rc::new(RefCell::new(Vec::new()));
+        let id = file.id.clone();
+        rt.update(|s, _| {
+            assert!(viewers::open_from(s, Box::new(DeckSource { file, edits: edits.clone() }), &id));
+            let ui = viewers::ui(s).expect("open");
+            ui.office.edit = Some(EditUi::new(EditKind::Pptx));
+            viewers::deck_mut(s).unwrap().go(current);
+        });
+        rt.frame(1.0);
+        (rt, edits)
+    }
+
+    fn palette_run(rt: &mut Runtime<State>, typed: &str) {
+        rt.update(|s, _| {
+            let ui = viewers::ui(s).expect("open");
+            ui.office_palette();
+            let Some(Over::Palette(p)) = &mut ui.office.over else { panic!("palette") };
+            p.query.insert(typed);
+        });
+        rt.frame(1.0);
+        rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+        rt.frame(1.0);
+        rt.frame(1.0);
+    }
+
+    fn deck(rt: &mut Runtime<State>) -> (u32, u32) {
+        let d = viewers::deck_mut(&mut rt.state).expect("a deck");
+        (d.view.current, d.view.count)
+    }
+
+    #[test]
+    fn palette_duplicate_slide_adds_one_and_undo_goes_through_history() {
+        let (mut rt, edits) = deck_open(3, 2);
+        palette_run(&mut rt, "duplicate slide");
+        assert_eq!(edits.borrow().last(), Some(&EditOp::DuplicateSlide(1)));
+        assert_eq!(deck(&mut rt), (3, 4), "one more slide, on the copy");
+        let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("edit-slide")).expect("stage").rect;
+        let (x, y) = (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+        rt.pointer_move(x, y);
+        rt.frame(0.0);
+        rt.pointer_down(x, y);
+        rt.frame(0.0);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        rt.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ctrl: true, ..Mods::default() } });
+        rt.frame(0.0);
+        assert_eq!(edits.borrow().last(), Some(&EditOp::Undo));
+    }
+
+    #[test]
+    fn palette_delete_slide_removes_the_current_with_two_or_more_and_is_not_offered_with_one() {
+        let (mut rt, edits) = deck_open(2, 2);
+        palette_run(&mut rt, "delete slide");
+        assert_eq!(edits.borrow().last(), Some(&EditOp::DeleteSlide(1)));
+        assert_eq!(deck(&mut rt), (1, 1));
+        edits.borrow_mut().clear();
+        palette_run(&mut rt, "delete slide");
+        assert!(edits.borrow().is_empty(), "the last slide stays");
+        assert_eq!(deck(&mut rt), (1, 1));
+    }
+}

@@ -105,6 +105,9 @@ pub enum Intent {
     OpenInDrive(String),
     /// A link in a note to the web: the browser opens it, never this window.
     OpenInBrowser(String),
+    /// A slide command from the editor's command search (Duplicate slide, Delete slide): the host applies it to the
+    /// deck with its `State` (`office::edit::slide::run_command`).
+    Slide(crate::frames::office::edit::palette::SlideCmd),
     /// DW-1522's Create file: make `name` in `folder` (`None`: the top of Files), encrypted on this PC before it
     /// uploads. Files makes it (`frames::files::create_file`); opening it in the editor (DW-1523) is not bound yet.
     CreateFile { folder: Option<String>, name: String },
