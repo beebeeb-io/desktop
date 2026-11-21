@@ -233,18 +233,41 @@ fn search_field(s: &State, t: &Theme) -> El {
 /// builds the index again (`SearchSource::rebuild`). With a reason (`SearchUi::unavailable_reason`: this PC's local
 /// state is another account's) it says why, in Photos' words; never an account's name, email or count.
 fn unavailable(reason: Option<(&'static str, &'static str)>, t: &Theme) -> El {
-    let (title, why) = reason.unwrap_or((UNAVAILABLE_TITLE, UNAVAILABLE_TEXT));
     let retry = try_again("search-unavailable", t).on_press(|s: &mut State| s.frames.find.source.rebuild());
+    let why = reason.map(|(title, line)| {
+        col()
+            .key("search-why")
+            .items_center()
+            .gap(4.0)
+            .child(
+                kit::label("search-why-title", title, style::SUB, t.text_secondary)
+                    .w(227.11)
+                    .wrap()
+                    .align(Align::Center),
+            )
+            .child(
+                kit::label("search-why-line", line, style::SUB, t.text_tertiary)
+                    .w(227.11)
+                    .wrap()
+                    .align(Align::Center),
+            )
+    });
     col().key("search-body").w_full().child(
-        el().key("empty-area").center().grow(1.0).w_full().child(view_state(
-            ViewState::Failed {
-                key: "search-unavailable",
-                title,
-                why,
-                retry: Some(retry),
-            },
-            t,
-        )),
+        col()
+            .key("empty-area")
+            .center()
+            .grow(1.0)
+            .w_full()
+            .child(view_state(
+                ViewState::Failed {
+                    key: "search-unavailable",
+                    title: UNAVAILABLE_TITLE,
+                    why: UNAVAILABLE_TEXT,
+                    retry: Some(retry),
+                },
+                t,
+            ))
+            .children(why),
     )
 }
 
