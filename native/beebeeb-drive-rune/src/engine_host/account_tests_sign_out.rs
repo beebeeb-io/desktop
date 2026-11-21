@@ -545,12 +545,12 @@ fn a_read_that_fails_after_an_answered_sign_out_is_followed_by_the_read_for_that
     let mut source = Source::new(signed_in(&server));
     opened(&mut source, Pane::Sessions);
     // The read is asked first and dropped by the fake 400 ms later; the engine asks a dropped read twice more
-    // (`api_client`'s bounded transport retries). The sign-out is answered while the last of the three is out.
+    // (`api_client`'s bounded transport retries). The sign-out is answered while the last of the three is out (the opening's read is the first ask).
     server.read_mode.store(DROP_CONNECTION, Ordering::SeqCst);
     *server.during_failed_read.lock().unwrap() = Some(Box::new(|| std::thread::sleep(Duration::from_millis(400))));
     source.reload(Pane::Sessions);
     let began = Instant::now();
-    while server.asked("GET /api/v1/account/sessions") < 3 {
+    while server.asked("GET /api/v1/account/sessions") < 4 {
         assert!(began.elapsed() < Duration::from_secs(10));
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -559,9 +559,8 @@ fn a_read_that_fails_after_an_answered_sign_out_is_followed_by_the_read_for_that
     settle(&mut source);
     assert_eq!(
         server.asked("GET /api/v1/account/sessions"),
-        4,
-        "the read and its two retries that failed, and the one after the answer: {:?}",
-        server.fake.routes()
+        5,
+        "the opening's, the read and its two retries that failed, and the one after the answer"
     );
     assert_eq!(ids(&source), ["s-this", "s-web"]);
     assert_eq!(source.notice(), Some(SIGNED_OUT));

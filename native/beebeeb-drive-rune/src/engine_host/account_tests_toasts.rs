@@ -348,7 +348,9 @@ fn everywhere_else_one_by_one_stops_at_a_call_that_gets_no_answer() {
     server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
     source.run_notice_action();
     settle(&mut source);
-    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-web"]);
+    let mut sent = server.deleted.lock().unwrap().clone();
+    sent.dedup(); // a dropped call is sent again by the engine, the same session
+    assert_eq!(sent, ["s-phone", "s-web"]);
     assert_eq!(source.notice(), Some(UNCONFIRMED_SIGN_OUT));
     assert_eq!(source.notice_action(), None, "not known is not \"send it again\"");
 }
