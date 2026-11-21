@@ -13,6 +13,7 @@ use crate::State;
 use crate::frames::files::actions_data::{LinkAccess, LinkExpiry};
 use crate::ui::settings_controls as controls;
 use crate::theme::tokens::{Theme, type_};
+use crate::ui::dialog as ui_dialog;
 use crate::ui::{field, kit};
 
 /// The caption bar's height: menus and dialogs sit in the window under it.
@@ -752,10 +753,6 @@ fn rename_commit(s: &mut State, tx: &mut Tx) {
     super::route_items::rename::commit(s, tx);
 }
 
-/// A dialog (`.wn-dlg`), centred in the window under the caption.
-/// How far a dialog's foot ends above the card's edge (see `dialog`).
-const FOOT_INSET: f32 = 0.125;
-
 /// A dialog's foot, left to right: its buttons, each with its width on the board, and `None`
 /// for the space that pushes what follows to the right.
 type Foot = Vec<(El, Option<f32>)>;
@@ -776,96 +773,28 @@ fn foot_button(
     )
 }
 
-/// The foot's buttons with their edges on whole device pixels, counted from the dialog's own
-/// left edge. The dialog does not snap (it sits on a quarter point, see `dialog`), and a
-/// button's width follows its words, so its left and right would fall between pixels and draw
-/// soft. The board snaps each edge inside the dialog and moves the dialog as a whole.
-fn foot_on_pixels(foot: Foot, width: f32, scale: f32) -> Vec<El> {
-    const PAD: f32 = 24.0;
-    const GAP: f32 = 8.0;
-    let snap = |x: f32| (x * scale + 0.5).floor() / scale;
-    // No space: the board's foot is `justify-content: flex-end`, so all of it sits right.
-    let split = foot.iter().position(|(_, w)| w.is_none()).unwrap_or(0);
-    let right: f32 = foot[split..].iter().filter_map(|(_, w)| *w).map(|w| w + GAP).sum();
-    let mut x = PAD;
-    let mut at = PAD;
-    let mut out = Vec::new();
-    for (i, (button, w)) in foot.into_iter().enumerate() {
-        if i == split {
-            x = width - PAD - (right - GAP).max(0.0);
-        }
-        let Some(w) = w else { continue };
-        let (l, r) = (snap(x), snap(x + w));
-        out.push(el().w((l - at).max(0.0)));
-        out.push(button.w(r - l));
-        at = r;
-        x += w + GAP;
-    }
-    out
-}
-
 /// A dialog (`.wn-dlg`), centred in the window under the caption. `scale`: device pixels a point.
-pub fn dialog(ui: &Ui, dialog: &Dialog, scale: f32, t: &Theme) -> El {
+pub fn dialog(ui: &Ui, dialog: &Dialog, _scale: f32, t: &Theme) -> El {
     let (title, (width, body, foot)) = match dialog {
         Dialog::Sources(draft) => ("Photo sources", sources(ui, draft, t)),
         Dialog::Share(draft) => ("Share", share(ui, draft, t)),
         Dialog::Details => ("Details", details(ui, t)),
         Dialog::Rename(draft) => ("Rename", rename(draft, t)),
     };
-    let card = col()
-        .key("ph-dlg")
-        .role("dialog")
-        .label(title)
-        // A dialog whose height ends in a half point is centred on a quarter point; the board
-        // draws it there, every edge inside it half covered (as `ui::settings_dialog` does).
-        .pixel_snap(false)
-        .w(width)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        // `.wn-dlg { overflow: hidden }` rounds the foot's corners. On the board the dialog's last
-        // row of pixels is half covered and the clip halves the foot there once more: a quarter.
-        // Rune's rounded clip multiplies the rectangle's edge ramp by the rounded one's
-        // (`clip.wgsl` `clip_alpha`), an eighth; so the foot rounds its own corners and ends a
-        // quarter of a device pixel (at 200 %) above the card's edge.
-        .child(
-            col()
-                .key("ph-dlg-clip")
-                .w_full()
-                .pb(FOOT_INSET)
-                .child(
-                    el().key("ph-dlg-head").w_full().px(24.0).pt(20.0).pb(4.0).child(
-                        kit::label("ph-dlg-title", title, style::TITLE, t.text)
-                            .role("heading")
-                            .w_full(),
-                    ),
-                )
-                .child(
-                    col()
-                        .key("ph-dlg-body")
-                        .w_full()
-                        .px(24.0)
-                        .pt(10.0)
-                        .pb(18.0)
-                        .gap(12.0)
-                        .children(body),
-                )
-                .child(
-                    row()
-                        .key("ph-dlg-foot")
-                        .w_full()
-                        .px(24.0)
-                        .pt(16.0)
-                        .pb(16.0 - FOOT_INSET)
-                        .center_y()
-                        .corners([0.0, 0.0, 8.0, 8.0])
-                        .fill(t.surface)
-                        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-                        .border_layout()
-                        .children(foot_on_pixels(foot, width, scale)),
-                ),
-        );
+    // The foot's buttons at their natural widths; `None` is the space that pushes what follows right.
+    let foot: Vec<El> = foot
+        .into_iter()
+        .map(|(button, w)| if w.is_none() { el().grow(1.0) } else { button })
+        .collect();
+    let card = ui_dialog::dialog(
+        ui_dialog::Dialog {
+            head: ui_dialog::Head::Title { title, sub: None },
+            body,
+            foot: ui_dialog::Foot::Row(foot),
+            ..ui_dialog::Dialog::new("ph-dlg", title, width)
+        },
+        t,
+    );
     col()
         .key("ph-dlg-layer")
         .pin(Some(0.0), Some(CAPTION), Some(0.0), Some(0.0))

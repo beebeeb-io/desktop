@@ -4,13 +4,13 @@
 //! The toolbar is the one window toolbar (`ui::toolbar::bar`) with this section's title, its
 //! controls in the slot and its states for the standard ones.
 
-use rune::{Color, El, Icon, TextStyle, col, el, row, text_input};
+use rune::{Color, El, Icon, TextStyle, col, row, text_input};
 
 use super::Intent;
 use crate::State;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::toolbar as tb;
-use crate::ui::{caption, kit, sidebar};
+use crate::ui::{button, caption, kit, sidebar, status_bar};
 
 /// The group's own type styles, by the board's class.
 pub mod style {
@@ -173,28 +173,11 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
     )
 }
 
-/// The status line (`.mk-foot`): the PC's sync state at the left, this view's words at the right.
-pub fn status_line(details: &str, t: &Theme) -> El {
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(t.green))
-        .child(kit::label(
-            "status-text",
-            "Up to date",
-            type_::STATUS_STRONG,
-            t.text_secondary,
-        ))
-        .child(el().key("status-spacer").grow(1.0))
-        .child(kit::label("status-details", details, type_::STATUS, t.text_tertiary))
+/// The status line (`.mk-foot`): the PC's sync state at the left (the same words and dot as Files), this
+/// view's words at the right. No words, no dot.
+pub fn status_line(sync: &str, details: &str, t: &Theme) -> El {
+    let state = (!sync.is_empty()).then_some(sync);
+    status_bar::bar(state.map(status_bar::dot_for), state, details, t)
 }
 
 /// The window. `front` is drawn over the whole client area, in order (a menu; a scrim and its dialog).
@@ -221,7 +204,7 @@ pub fn window(
     }
     let main = main
         .child(body.grow(1.0).min_h(0.0).w_full())
-        .child(status_line(status, t));
+        .child(status_line(&crate::frames::sync_words(s), status, t));
     col()
         .key("window")
         .role("window")
@@ -250,40 +233,29 @@ pub enum Tone {
     Primary,
 }
 
-/// A button's width on the board: the words as the font gives them, the icon and its gap, 12 pt
-/// each side (and a plain button's two borders).
-pub fn button_width(label: &str, icon: bool, tone: Tone, h: f32, font: TextStyle) -> f32 {
-    let icon_size = if h > 24.0 { 16.0 } else { 14.0 };
-    let content = advance(label, font) + if icon { icon_size + 7.0 } else { 0.0 };
-    content + if tone == Tone::Plain { 26.0 } else { 24.0 }
+fn mapped(tone: Tone, h: f32) -> (button::Variant, button::Size) {
+    let variant = match tone {
+        Tone::Plain => button::Variant::Secondary,
+        Tone::Quiet => button::Variant::Ghost,
+        Tone::Primary => button::Variant::Primary,
+    };
+    let size = if h <= 24.0 {
+        button::Size::Sm
+    } else if h <= 30.0 {
+        button::Size::Md
+    } else {
+        button::Size::Lg
+    };
+    (variant, size)
 }
 
-pub fn button(key: &str, label: &str, ic: Option<&'static Icon>, tone: Tone, h: f32, font: TextStyle, t: &Theme) -> El {
-    let ink = match tone {
-        Tone::Plain => t.text,
-        Tone::Quiet => t.text_secondary,
-        Tone::Primary => t.accent_text_on,
-    };
-    let icon_size = if h > 24.0 { 16.0 } else { 14.0 };
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(h)
-        .w(button_width(label, ic.is_some(), tone, h, font))
-        .gap(7.0)
-        .center()
-        .radius(6.0)
-        .focusable(true)
-        .hover(t.hover)
-        .press(t.press);
-    b = match tone {
-        Tone::Plain => b.fill(t.paper).border(1.0, t.card_border).border_layout(),
-        Tone::Quiet => b,
-        Tone::Primary => b.fill(t.accent),
-    };
-    if let Some(ic) = ic {
-        b = b.child(kit::glyph(format!("{key}-icon"), ic, icon_size, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, font, ink))
+/// A button's width on the board (`ui::button::natural_width`).
+pub fn button_width(label: &str, icon: bool, tone: Tone, h: f32, _font: TextStyle) -> f32 {
+    let (variant, size) = mapped(tone, h);
+    button::natural_width(label, icon, variant, size)
+}
+
+pub fn button(key: &str, label: &str, ic: Option<&'static Icon>, tone: Tone, h: f32, _font: TextStyle, t: &Theme) -> El {
+    let (variant, size) = mapped(tone, h);
+    button::button(button::keys(key), label, ic, variant, size, button::ButtonState::Enabled, t)
 }
