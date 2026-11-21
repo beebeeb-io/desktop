@@ -56,6 +56,7 @@ pub mod account_password_api;
 pub mod account_twofactor_api;
 pub mod backup_devices_api;
 pub(crate) mod credential_stores;
+mod owed_online;
 mod session_revoke;
 mod session_watch;
 mod unfinished_sign_out;
@@ -254,6 +255,9 @@ pub struct Engine<C: CredentialStores> {
     acct: Arc<AccountRuntime>,
     runtime: tokio::runtime::Runtime,
     client: reqwest::Client,
+    /// The session tokens this process still owes the server a logout for (LD-0028): sign-out records into it, the
+    /// engine start and the network coming back pay from it.
+    owed: Arc<crate::keychain::owed_revocations::OwedRevocations>,
     /// One session step at a time (a sign-in step, a lock, a sign-out, an engine start or stop).
     transition: tokio::sync::Mutex<()>,
     /// The order of the credential-store writes and the session generation.
@@ -306,6 +310,29 @@ impl<C: CredentialStores> Engine<C> {
         host: Arc<dyn EngineHost>,
         stores: C,
     ) -> Result<Self, String> {
+        // A test build keeps its list in memory, one per handle: the machine's own store is never touched and one
+        // test's owed token is never paid to another test's server.
+        #[cfg(test)]
+        let owed = Arc::new(crate::keychain::owed_revocations::OwedRevocations::with_backend(Box::new(
+            crate::keychain::owed_revocations::MemoryOwed::default(),
+        )));
+        #[cfg(not(test))]
+        let owed = Arc::new(crate::keychain::owed_revocations::OwedRevocations::platform(identity));
+        let handle = Self::open_owing(identity, config, host, stores, owed.clone())?;
+        #[cfg(not(test))]
+        session_revoke::install_owed(owed);
+        Ok(handle)
+    }
+
+    /// [`Engine::open`] with the owed list given: what is owed is paid at once, and again each time the engine
+    /// reports the network back.
+    pub(crate) fn open_owing(
+        identity: &'static EngineIdentity,
+        config: EngineConfig,
+        host: Arc<dyn EngineHost>,
+        stores: C,
+        owed: Arc<crate::keychain::owed_revocations::OwedRevocations>,
+    ) -> Result<Self, String> {
         if let Some(refusal) = identity.refusal_on(std::env::consts::OS) {
             return Err(refusal.to_string());
         }
@@ -326,10 +353,22 @@ impl<C: CredentialStores> Engine<C> {
         let acct = accounts.active_account()?;
         // Every engine started from here reports through the view's host, which goes on to the host given here.
         let view = Arc::new(ViewCell::default());
+        let host: Arc<dyn EngineHost> = Arc::new(owed_online::OwedPayingHost::new(
+            host,
+            runtime.handle().clone(),
+            client.clone(),
+            config.api_base.clone(),
+            owed.clone(),
+        ));
         let host: Arc<dyn EngineHost> = Arc::new(ViewHost::new(host, view.clone()));
         downloads_api::wake_the_host_for_downloads(&host);
         credential_stores::adopt_legacy_flat(identity, &config.account_id, &stores);
         session_watch::start(&runtime, &acct, &config.api_base);
+        {
+            // What an earlier sign-out could not tell the server is paid now (and again when the network is back).
+            let _enter = runtime.enter();
+            session_revoke::pay_owed_detached(client.clone(), config.api_base.clone(), owed.clone());
+        }
         Ok(Self {
             identity,
             config,
@@ -339,6 +378,7 @@ impl<C: CredentialStores> Engine<C> {
             acct,
             runtime,
             client,
+            owed,
             transition: tokio::sync::Mutex::new(()),
             writes: std::sync::RwLock::new(()),
             auth_present: Mutex::new(false),
@@ -1096,7 +1136,13 @@ impl<C: CredentialStores> Engine<C> {
             self.acct.auth_health.note_result(None);
             self.set_auth_present(false);
             if let Some(token) = token {
-                revoke(&self.client, &self.config.api_base, &token).await;
+                // Recorded as owed before this returns; the server is asked by a task of its own (task 1886).
+                session_revoke::revoke_detached(
+                    self.client.clone(),
+                    self.config.api_base.clone(),
+                    token.to_string(),
+                    self.owed.clone(),
+                );
             }
             Ok(())
         }
