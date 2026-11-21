@@ -950,7 +950,17 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
         leave(&mut w);
     }
     assert_eq!(in_app, 8, "4 kinds, from Files and from Search");
-    let before = w.chunk_requests();
+    // The last open's decrypt may still be on its way when its window is left (the viewer is drawn before the
+    // content is in): let the downloads of the opens above finish, so only the no-preview opens are counted.
+    let mut before = w.chunk_requests();
+    let mut quiet = 0;
+    while quiet < 10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        w.settle();
+        let now = w.chunk_requests();
+        quiet = if now == before { quiet + 1 } else { 0 };
+        before = now;
+    }
     // The kind with no preview: not in the app, nothing downloaded, nothing started (no copy on this PC).
     w.open_row(PLAN_NAME);
     assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
