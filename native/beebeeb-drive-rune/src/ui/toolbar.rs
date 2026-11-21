@@ -176,6 +176,8 @@ pub struct Bar {
     /// The switch, Sort and the details button are drawn in their states and take nothing: no
     /// focus, no press, disabled to assistive technology (Sync history draws them as Files does).
     pub inert: bool,
+    /// The gate is closed: Open in File Explorer is drawn but out of reach too.
+    pub gate_closed: bool,
     /// Open in File Explorer: live in every window.
     pub on_explorer: Press,
     pub new: New,
@@ -391,7 +393,7 @@ fn bar_for(bar: Bar, file: bool, t: &Theme) -> El {
     )
     .help("Open in File Explorer")
     .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| on_explorer(s, tx));
-    if bar.inert {
+    if bar.gate_closed {
         explorer_btn = explorer_btn.disabled(true).focusable(false);
     }
 
@@ -584,6 +586,7 @@ pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Clo
                 press(|s: &mut State, _| s.show_detail_pane = !s.show_detail_pane)
             },
             inert: off,
+            gate_closed: off,
             on_explorer,
             new: if off { New::Off } else { New::Idle },
             on_new: None,

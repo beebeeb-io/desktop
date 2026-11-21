@@ -21,6 +21,8 @@ pub struct State {
     pub(crate) listing: Listing,
     /// Why `listing` could not be read, when it could not: the window shows this instead of rows.
     pub(crate) list_error: Option<source::SourceError>,
+    /// The folder reads the running app makes on a worker (`frames::files::reread::FolderReads`); a scene reads at once.
+    pub(crate) folder_reads: crate::frames::files::reread::FolderReads,
     pub(crate) storage: source::StorageSummary,
     /// `false`: the source cannot know the account's storage (a `--db` source never asks the server).
     pub(crate) storage_known: bool,
@@ -115,6 +117,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         source,
         listing,
         list_error,
+        folder_reads: Default::default(),
         storage_known: storage.is_some(),
         storage: storage.unwrap_or(source::StorageSummary {
             used_bytes: 0,
@@ -195,6 +198,10 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     let drive: Box<dyn DriveSource> = Box::new(crate::engine_host::EngineDriveSource::new(engine.clone()));
     let mut s = init_from(shell, drive, None);
     s.identity = AppIdentity::CURRENT;
+    // Every later folder read of the Files window (a finished check, an opened folder, a gate that opened) is made on
+    // a worker: a large account's folder takes long to read, and the window never waits for it (task 050).
+    let reads = crate::engine_host::EngineDriveSource::new(engine.clone());
+    s.folder_reads.reader = Some(std::sync::Arc::new(move |folder: Option<&str>| load(&reads, folder)));
     s.actions =
         crate::frames::files::Actions::new(Box::new(crate::engine_host::EngineFilesSource::new(engine.clone())));
     // The banner's two fields S1 feeds from the engine's view (the session ended, offline).
