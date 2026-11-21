@@ -122,11 +122,10 @@ fn empty_has_tile_icon_title_text_and_the_action_only_when_given() {
 
 #[test]
 fn empty_state_draws_through_view_state_with_the_same_keys() {
-    let t = theme(false);
     let mut rt = Runtime::new(
         (),
-        move |_: &(), _: &mut Cx<()>| {
-            super::super::empty::empty_state("e", &icons::PLUS, "Empty", "No files.", &t)
+        |_: &(), _: &mut Cx<()>| {
+            super::super::empty::empty_state("e", &icons::PLUS, "Empty", "No files.", &theme(false))
         },
         (400.0, 400.0),
         Env::new(false, 2.0),
