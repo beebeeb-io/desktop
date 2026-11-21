@@ -22,6 +22,7 @@ use super::tray::{EngineState, LeftClick, MenuAction, TrayInputs, TrayModel, tra
 use super::window_state::{self, Observed, SavedWindows};
 use super::{registry, surfaces};
 use crate::State;
+use crate::frames::files::reread::ReadFor;
 use crate::frames::global::sync_off::SyncOff;
 use crate::ui::sidebar::SidebarSection;
 
@@ -654,6 +655,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         crate::frames::trash::after_a_check(s);
     }
     // The folder shown, read again once a check finished: the first sync's files (R1.1), and what arrived since.
+    changed |= take_folder_read(s, tx);
     changed |= read_again_after_a_check(s, tx);
     // A lock, a sign-out or another account ends what was open inside the account sections: a
     // review of another device's sign-in, a typed code or password, a Windows Hello that is up.
@@ -865,9 +867,15 @@ pub fn drain_signin_intents(s: &mut State) -> bool {
 /// logged, while another agent holds the profile).
 fn on_gate_change(s: &mut State) {
     // A gate that closed reads nothing: the window holds the empty root until it opens again.
-    let (listing, list_error) = if s.shell.app.gate() == super::app::GateState::Ready {
+    // A read still out was asked under the old gate: its answer is dropped.
+    s.folder_reads.drop_pending();
+    let ready = s.shell.app.gate() == super::app::GateState::Ready;
+    let account = s.shell.app.account().map(str::to_owned);
+    let (listing, list_error) = if ready && !s.folder_reads.ask(None, account, ReadFor::Gate) {
         super::state::load(s.source.as_ref(), None)
     } else {
+        // A gate that opened in the running app: its root is read on the worker ([`take_folder_read`]); until it
+        // answers the window holds the empty root, never the earlier session's rows.
         let root = crate::source::Crumb {
             id: None,
             name: "Files".into(),
@@ -960,15 +968,63 @@ fn read_again_after_a_check(s: &mut State, tx: &mut Tx) -> bool {
     if s.reread_waits() {
         return false;
     }
+    // A read out already (an open, or the last re-read): this one is asked once it answered.
+    if s.folder_reads.pending.is_some() {
+        return false;
+    }
     s.shell.files_reread_due = false;
     let folder = s.listing.folder.id.clone();
+    let account = s.shell.app.account().map(str::to_owned);
+    // The running app reads on a worker: the rows shown stay until [`take_folder_read`] merges its answer.
+    if s.folder_reads.ask(folder.clone(), account, ReadFor::Reread) {
+        return false;
+    }
     let (read, error) = super::state::load(s.source.as_ref(), folder.as_deref());
     let scroll = s.take_reread(read, error);
-    // Only while the Files list shows: the lists of other sections use the same key.
+    scroll_files_to(s, tx, scroll);
+    true
+}
+
+/// Only while the Files list shows: the lists of other sections use the same key.
+fn scroll_files_to(s: &State, tx: &mut Tx, scroll: Option<f32>) {
     let files_shown =
         matches!(s.shell.app.screen(), super::app::Screen::Drive(route) if route.section == Section::Files);
     if let Some(y) = scroll.filter(|_| files_shown) {
         tx.scroll_to_y("rows", y);
+    }
+}
+
+/// The answer of a folder read made on the worker (task 050), taken on the first poll after it came. Taken only while
+/// the session that asked is still open, for the same account. A re-read is merged by id, and only into the folder
+/// it read (a folder no longer shown drops it); one that came while something opened over the rows is asked again
+/// once that closed. An open or a gate's root replaces the rows. `true`: the window changed.
+fn take_folder_read(s: &mut State, tx: &mut Tx) -> bool {
+    let Some((asked, read, error)) = s.folder_reads.take() else {
+        return false;
+    };
+    if !super::session_gate::open(s) || asked.account.as_deref() != s.shell.app.account() {
+        return false;
+    }
+    match asked.kind {
+        ReadFor::Reread => {
+            if asked.folder != s.listing.folder.id {
+                return false;
+            }
+            if s.reread_waits() {
+                s.shell.files_reread_due = true;
+                return false;
+            }
+            let scroll = s.take_reread(read, error);
+            scroll_files_to(s, tx, scroll);
+        }
+        ReadFor::Open => {
+            let scroll = s.take_opened(read, error);
+            scroll_files_to(s, tx, scroll);
+        }
+        ReadFor::Gate => {
+            (s.listing, s.list_error) = (read, error);
+            s.selected = None;
+        }
     }
     true
 }

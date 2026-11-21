@@ -48,6 +48,11 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",      # IPropertyStore; CreateObjectFromByteStream is gated on it
 ] }
 
+# `tests/confined.rs`: the helper started as the app starts it, through the sandbox, in the system-decoder profile.
+# Test-only; the sandbox brings only the `windows-sys` family.
+[target.'cfg(windows)'.dev-dependencies]
+beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
+
 # The codecs decoded with FilmCraft's own decoders (decision D-MED-2; the legal brief on media codec patents,
 # 2026-11-15, finding F1). A codec whose feature is off is NOT IN THE BINARY: its crate is not linked and its call sites
 # in FilmCraft are compiled out (the Office engine's vendored copy makes each one optional), so turning a route off is
