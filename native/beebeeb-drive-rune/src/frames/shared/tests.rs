@@ -189,7 +189,7 @@ fn an_account_with_nothing_shared_shows_the_three_empty_states() {
         (super::scenes::dw_0510, "No file requests"),
     ] {
         let rt = runtime(scene);
-        assert_eq!(info(&rt, "empty-title").text.as_deref(), Some(title));
+        assert_eq!(info(&rt, "shared-empty-title").text.as_deref(), Some(title));
         assert_eq!(info(&rt, "item-count").text.as_deref(), Some("No items"));
         assert!(rt.find("row-0").is_none() && rt.find("item-0-0").is_none());
     }

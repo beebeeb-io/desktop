@@ -306,6 +306,15 @@ pub trait SharedSource {
     fn wired(&self) -> bool {
         true
     }
+    /// A number that changes whenever the answer's rows change; `None`: the source cannot say, so the view never
+    /// holds a copy of its rows (a sample or a stub that changes under it).
+    fn rev(&self) -> Option<u64> {
+        None
+    }
+    /// "Try again" on a view that failed: read the list now, even if the last answer is not old.
+    fn retry(&mut self) {
+        self.opened();
+    }
     fn invitations(&self) -> Vec<Invitation>;
     /// Shared with the person, newest first.
     fn with_me(&self) -> Vec<Row>;
