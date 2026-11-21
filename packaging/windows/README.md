@@ -7,7 +7,8 @@ Plain `makensis`, no Tauri CLI. Spec: `docs/superpowers/specs/2026-11-11-native-
 | `installer.nsi`, `utils.nsh`, `English.nsh` | The installer script Tauri generated for 0.8.x, kept line for line; the changes are listed at the top of `installer.nsi`. |
 | `hooks.nsh` | Our hooks: remove the WebView2 profile after install, grant the helpers to the sandbox group, the staged updates on uninstall. |
 | `build-installer.ps1` | Builds the installer; refuses a script that still handles WebView2. `-Mode test` ("Beebeeb Test", `io.beebeeb.app.test`, unsigned) or `-Mode release` (signed, fails closed). |
-| `verify-install.ps1` | Read-only checks of an installed or uninstalled state; ends with a count line. |
+| `verify-install.ps1` | Read-only checks of an installed or uninstalled state; ends with a count line. The install-folder check reads the file list from the `Delete` lines of `installer.nsi`'s uninstall section (binary, both helpers, licence notice, `uninstall.exe`). |
+| `verify-install.tests.ps1` | Self test of that file check on fake folders in `$env:TEMP` (plain PowerShell, no Pester): `powershell -NoProfile -File verify-install.tests.ps1`. |
 | `rehearsal/serve.ts`, `rehearsal/db-fingerprint.ts` | Helpers for the upgrade rehearsal below. |
 
 **Status.** Section A and native check 1 ran on Windows for the first time on 2026-11-12, on the build VM
