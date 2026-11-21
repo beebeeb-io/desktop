@@ -27,6 +27,17 @@ pub enum Tone {
     Failed,
 }
 
+/// The warning glyph (a ringed exclamation mark; the theme set has none).
+static WARN: Icon = Icon {
+    name: "toast-warn",
+    view: 24.0,
+    body: concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">"#,
+        r#"<path d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z"></path><path d="M12 8v4.6"></path><path d="M12 15.9v.1"></path>"#,
+        "</g>"
+    ),
+};
+
 /// The glyph that leads a toast: none, a check (done), a lock (kept private) or a warning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lead {
@@ -68,7 +79,7 @@ pub fn toast_with(key: &str, words: &str, lead: Lead, action: Option<El>, t: &Th
         Lead::None => None,
         Lead::Check => Some((&icons::CHECK_CIRCLE, t.green)),
         Lead::Lock => Some((&icons::LOCK, t.text_secondary)),
-        Lead::Warn => Some((&icons::ALERT, t.red)),
+        Lead::Warn => Some((&WARN, t.red)),
     };
     build(key, words, lead, "status", action, t)
 }
