@@ -4,7 +4,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
-use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 
 use beebeeb_core::kdf::MasterKey;
@@ -153,31 +152,32 @@ pub fn syncing_response(query: String) -> DesktopSearchResponse {
     }
 }
 
-pub fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex> {
+/// Every searchable row of `state.db`, keyed by file id. One read of the key records (the blocked ones), never one
+/// lookup per file.
+fn collect_records(db: &StateDb) -> anyhow::Result<BTreeMap<String, LocalSearchRecord>> {
     let mut records = BTreeMap::new();
-    let mut pairs = Vec::new();
     // One read for every shared row (roots and their children): quick search must not offer them for Finder.
     let shared: HashSet<String> = db
         .list_contract_states_by_namespace(Namespace::SharedWithMe)?
         .into_iter()
         .map(|contract| contract.file_id)
         .collect();
+    let blocked: HashSet<String> = db
+        .list_owned_key_records()?
+        .into_iter()
+        .filter(|record| record.blocked_fingerprint.is_some())
+        .map(|record| record.file_id)
+        .collect();
     // LD-0113 (core's `is_hidden_backup_item`): a device folder's manifest in Backups is never offered.
     let backups = crate::backup_protect::BackupsTree::read(db);
     for entry in db.list_files()? {
-        if entry.is_dir()
-            || backups.is_hidden(&entry.path)
-            || db
-                .get_owned_key_record(&entry.file_id)?
-                .is_some_and(|record| record.blocked_fingerprint.is_some())
-        {
+        if entry.is_dir() || backups.is_hidden(&entry.path) || blocked.contains(&entry.file_id) {
             continue;
         }
         let name = leaf_name(&entry.path);
         if name.trim().is_empty() {
             continue;
         }
-        pairs.push((entry.file_id.clone(), name.clone()));
         let shared_with_me = shared.contains(&entry.file_id);
         records.insert(
             entry.file_id.clone(),
@@ -192,10 +192,78 @@ pub fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex> {
             },
         );
     }
+    Ok(records)
+}
+
+pub fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex> {
+    let records = collect_records(db)?;
+    let pairs: Vec<(String, String)> = records.iter().map(|(id, r)| (id.clone(), r.name.clone())).collect();
     Ok(LocalSearchIndex {
         index: SearchIndex::build(&pairs, DEFAULT_NUM_SHARDS),
         records,
     })
+}
+
+/// The local index kept between ticks: [`refresh`](Self::refresh) applies only the rows that changed (added, renamed,
+/// removed) to the index instead of building it again.
+#[derive(Default)]
+pub struct IncrementalLocalIndex {
+    local: Option<LocalSearchIndex>,
+    /// Bumped when a name was added, renamed or removed: what the shard sync needs to run for.
+    generation: u64,
+}
+
+impl IncrementalLocalIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bring the index up to date with `state.db`; returns how many names changed (0 = nothing to sync).
+    pub fn refresh(&mut self, db: &StateDb) -> anyhow::Result<usize> {
+        let fresh = collect_records(db)?;
+        let Some(local) = self.local.as_mut() else {
+            let changed = fresh.len();
+            let pairs: Vec<(String, String)> = fresh.iter().map(|(id, r)| (id.clone(), r.name.clone())).collect();
+            self.local = Some(LocalSearchIndex {
+                index: SearchIndex::build(&pairs, DEFAULT_NUM_SHARDS),
+                records: fresh,
+            });
+            self.generation += 1;
+            return Ok(changed);
+        };
+        let mut changed = 0usize;
+        let gone: Vec<String> = local.records.keys().filter(|id| !fresh.contains_key(*id)).cloned().collect();
+        for id in gone {
+            local.index.remove(&id);
+            local.records.remove(&id);
+            changed += 1;
+        }
+        for (id, record) in fresh {
+            match local.records.get(&id) {
+                Some(old) if *old == record => {}
+                Some(old) if old.name == record.name => {
+                    local.records.insert(id, record);
+                }
+                _ => {
+                    local.index.upsert(&id, &record.name);
+                    local.records.insert(id, record);
+                    changed += 1;
+                }
+            }
+        }
+        if changed > 0 {
+            self.generation += 1;
+        }
+        Ok(changed)
+    }
+
+    pub fn local(&self) -> Option<&LocalSearchIndex> {
+        self.local.as_ref()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 /// `exclude_shared` drops shared-with-me rows BEFORE the result limit (task 1885 fix round 2, n1): a Mac's quick search
@@ -243,18 +311,6 @@ pub fn query_local_index(
     }
 }
 
-pub fn local_index_signature(db: &StateDb) -> anyhow::Result<u64> {
-    let local = build_local_index(db)?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    local.index.file_count().hash(&mut hasher);
-    for (file_id, record) in &local.records {
-        file_id.hash(&mut hasher);
-        record.name.hash(&mut hasher);
-        record.rel_path.hash(&mut hasher);
-    }
-    Ok(hasher.finish())
-}
-
 #[cfg(any(test, feature = "test-support"))]
 async fn load_remote_index_from_store(store: &impl SearchShardStore) -> anyhow::Result<Option<SearchIndex>> {
     let manifest = store.fetch_manifest().await?;
@@ -279,15 +335,19 @@ async fn load_remote_index_from_store(store: &impl SearchShardStore) -> anyhow::
     )?))
 }
 
-pub async fn sync_local_index_to_remote(db: &StateDb, api: &ApiClient) -> anyhow::Result<SearchIndexSyncSummary> {
-    sync_local_index_to_store(db, api).await
+pub async fn sync_local_index_to_remote(
+    db: &StateDb,
+    local: &LocalSearchIndex,
+    api: &ApiClient,
+) -> anyhow::Result<SearchIndexSyncSummary> {
+    sync_local_index_to_store(db, local, api).await
 }
 
 async fn sync_local_index_to_store(
     db: &StateDb,
+    local: &LocalSearchIndex,
     store: &impl SearchShardStore,
 ) -> anyhow::Result<SearchIndexSyncSummary> {
-    let local = build_local_index(db)?;
     let master_key = MasterKey::from_bytes(store.master_key_bytes());
     let remote_manifest = store.fetch_manifest().await?;
     let partial = db
@@ -467,6 +527,50 @@ mod tests {
             contract.item_kind = ItemKind::Folder;
             db.set_file_contract_state(&contract).expect("mark folder");
         }
+    }
+
+    #[test]
+    fn test_081_a_change_updates_the_index_without_a_rebuild() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        seed_file(&db, "a", "Docs/alpha.txt", ItemKind::File);
+        seed_file(&db, "b", "Docs/beta.txt", ItemKind::File);
+        let mut cache = super::IncrementalLocalIndex::new();
+        assert_eq!(cache.refresh(&db).unwrap(), 2);
+        let first = cache.generation();
+        assert_eq!(cache.refresh(&db).unwrap(), 0, "nothing changed");
+        assert_eq!(cache.generation(), first);
+
+        seed_file(&db, "c", "Docs/gamma.txt", ItemKind::File);
+        seed_file(&db, "a", "Docs/delta.txt", ItemKind::File);
+        db.delete_file("b").expect("delete");
+        assert_eq!(cache.refresh(&db).unwrap(), 3, "one added, one renamed, one removed");
+        assert_ne!(cache.generation(), first);
+        let local = cache.local().unwrap();
+        let fresh = super::build_local_index(&db).unwrap();
+        assert_eq!(local.records, fresh.records);
+        for q in ["alpha", "beta", "gamma", "delta"] {
+            assert_eq!(local.index.query(q), fresh.index.query(q), "{q}");
+        }
+        assert_eq!(local.index.file_count(), 2);
+    }
+
+    /// LargeAccount-sized first build (prints the time; run with `--nocapture`).
+    #[test]
+    fn test_081_large_account_first_build_time_is_recorded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        let n = crate::test_api::large_account::LargeAccount::GUUS.files;
+        for i in 0..n {
+            seed_file(&db, &format!("f{i}"), &format!("Dir{}/file number {i}.txt", i % 50), ItemKind::File);
+        }
+        let started = std::time::Instant::now();
+        let mut cache = super::IncrementalLocalIndex::new();
+        assert_eq!(cache.refresh(&db).unwrap(), n);
+        eprintln!("081 first build of {n} files: {:?}", started.elapsed());
+        let started = std::time::Instant::now();
+        assert_eq!(cache.refresh(&db).unwrap(), 0);
+        eprintln!("081 unchanged refresh of {n} files: {:?}", started.elapsed());
     }
 
     #[test]
@@ -662,7 +766,7 @@ mod tests {
             .build()
             .expect("runtime");
         let summary = rt
-            .block_on(super::sync_local_index_to_store(&db, &store))
+            .block_on(super::sync_local_index_to_store(&db, &super::build_local_index(&db).unwrap(), &store))
             .expect("sync local index");
 
         assert_eq!(summary.indexed_file_count, 2);
