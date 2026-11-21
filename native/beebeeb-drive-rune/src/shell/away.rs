@@ -32,7 +32,7 @@
 //!   locked leaves the cover until a later poll sees the session open again, so no frame shows the content between
 //!   the engine's lock and the window's next read of the gate. A look that failed (it panicked) decided nothing: the
 //!   cover holds and the wake is said again as the longest time away, so the engine locks unless nothing can lock
-//!   (fail closed, as a resume with no idle reading: P3-2). A retry that fails too does NOT lift the cover (Guus's
+//!   (fail closed, as a resume with no idle reading: P3-2). A retry that fails too does NOT lift the cover (the owner's
 //!   ruling, fail closed): [`Cover::Failed`] stays, asks again each [`LOOK_AT_MOST_EVERY`], and offers the sign-in path
 //!   ([`AwayLock::sign_in_offered`]), never an Unlock that asks nothing. Where nothing an idle time says could lock (app lock off:
 //!   the engine's last idle answer; an engine without the automatic lock), nothing is covered: app lock off never

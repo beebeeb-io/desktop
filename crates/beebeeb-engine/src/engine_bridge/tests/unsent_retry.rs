@@ -1,4 +1,4 @@
-//! Task 2409 (Guus, 13:39: "Add in the try again directly if it failed"): Try again, end to end through the queue step.
+//! Task 2409 (owner, 13:39: "Add in the try again directly if it failed"): Try again, end to end through the queue step.
 //! A change that stopped after repeated errors is sent by the next queue step after Try again; one waiting out a
 //! backoff is sent by the step right after it, not at its retry time.
 

@@ -143,7 +143,7 @@ struct OriginalJob {
 
 /// w31: why the original of the photo `name` is never downloaded for the Original tab: the decoder here opens PNG,
 /// JPEG, GIF and WebP only (`viewer_picture::check`), so a HEIC or a RAW came down whole (2 MB to 80 MB each on
-/// Guus's account) and was then refused. `None`: a format that opens here.
+/// the owner's account) and was then refused. `None`: a format that opens here.
 pub(crate) fn original_refused_for(name: &str) -> Option<&'static str> {
     use super::viewer::{Shows, shows};
     if shows(name) == Shows::Picture {

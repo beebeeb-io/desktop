@@ -218,13 +218,13 @@ then listed add up to 15 (9 small-disc rim, 4 Windows Hello, 2 overlaid text).
 - **One test hangs on the Linux build VM.** `source_engine::tests::timings_and_query_plan_for_5000_children_in_a_70000_row_db`
   (`src/source_engine_tests.rs`, added by #280): it builds a 5,204-row and a 70,000-row database, prints the time
   of a 500-row page and of the whole 5,000-child folder, and asserts SQLite's plan for the listing query (no time
-  is asserted). On the loaded 16-core build VM it did not finish in over 25 minutes (during #306); on the Legion
-  it passes within the suite's 30 to 40 seconds. Since then the VM run skips it by exact name and the Legion run
+  is asserted). On the loaded 16-core build VM it did not finish in over 25 minutes (during #306); on the Windows test machine
+  it passes within the suite's 30 to 40 seconds. Since then the VM run skips it by exact name and the Windows test machine run
   includes it. Not fixed, not investigated.
-- On the tree of #304: the Linux VM, that test skipped: 534 passed, 0 failed, 1 filtered out; the Legion, nothing
+- On the tree of #304: the Linux VM, that test skipped: 534 passed, 0 failed, 1 filtered out; the Windows test machine, nothing
   skipped: 535 passed, 0 failed. The identity pin (`crates/beebeeb-engine`, filter `identity_pin`): 6 passed, 0
   failed.
-- Legion only: the engine's `ipc_socket::framing_tests::changes_and_thumbnail::fetch_thumbnail_reports_daemon_side_failures_without_writing_the_dest`
+- the Windows test machine only: the engine's `ipc_socket::framing_tests::changes_and_thumbnail::fetch_thumbnail_reports_daemon_side_failures_without_writing_the_dest`
   fails there ("no delimited reply within 5s", 3 of 3) and passes in CI's Linux job on the same engine code. Known
   under load (lead); CI decides.
 - Not run in this batch: `cargo test --features feedback`; the Windows build VM (CI's "Native Rune app (Windows
@@ -246,7 +246,7 @@ then listed add up to 15 (9 small-disc rim, 4 Windows Hello, 2 overlaid text).
 
 ## 2f. The app names itself from the build's identity: open
 
-Ruling (Guus, 2026-11-12 08:00, relayed by the lead): "use the build name dynamicly". Every place the app names
+Ruling (owner, 2026-11-12 08:00, relayed by the lead): "use the build name dynamicly". Every place the app names
 ITSELF takes the name from the build's identity (`src/shell/identity.rs`), not from a literal. Done so far: the
 window titles (`shell/mod.rs`), the tray's tooltip, the flyout's accessible name (2e). Still literals, seen by a
 search for `Beebeeb` in production text on the tree of #304 (not a complete audit: 181 string literals hold the

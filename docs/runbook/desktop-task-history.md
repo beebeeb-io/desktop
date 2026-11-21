@@ -205,7 +205,7 @@ include the exact app group above. Do not mask this as a UI timeout or switch to
 a fake local folder root; fix signing/provisioning first.
 
 The Tauri warning that `io.beebeeb.app` ends in `.app` is known. Keep this
-identifier unless Guus creates a new macOS App Store Connect record and chooses
+identifier unless the owner creates a new macOS App Store Connect record and chooses
 to migrate. Expo is unrelated to desktop builds; it only applies to mobile.
 
 **Removing the Finder location keeps un-synced files (task 1882, P0).** Every
@@ -446,7 +446,7 @@ new updates — they'll need a manual reinstall to onboard the new pubkey.
 
 ## Storage location (task 1919, by COUNTRY since task 2050)
 
-Guus, 2026-10-19: a storage location is a COUNTRY, never a city (cities together identify the hosting
+the owner, 2026-10-19: a storage location is a COUNTRY, never a city (cities together identify the hosting
 provider; `docs/canon/data-residency.md` in the workspace). "Europe" is the default: any of our European
 data centers, the server places the data. Below it the person can pick one live country (Germany,
 Finland); a coming-soon country (the Netherlands) is listed and cannot be picked. While a country is

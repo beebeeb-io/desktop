@@ -180,7 +180,7 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub known_folder_backup: Vec<String>,
 
-    /// LD-0113 Amendment 9 (Guus, decision 2338, "Ask once"): for a known folder OneDrive's Known Folder Move has
+    /// LD-0113 Amendment 9 (owner, decision 2338, "Ask once"): for a known folder OneDrive's Known Folder Move has
     /// moved, which folder the person chose to back up (`onedrive`: where the files are; `default`: the default
     /// location). A moved folder with no answer here is not backed up until the person answers.
     #[serde(default)]

@@ -34,7 +34,7 @@ pub struct PopulateStats {
 /// at. A row in it whose name is still in its folder's listing gets no per-row work at all: before, every tick did
 /// the path check, the parent check and a `CfCreatePlaceholders` call for every cloud-only row (8 to 19 metadata
 /// operations per row), and that call keeps one Process handle (access 0x1410, on this process) each time it answers
-/// "already exists" (VM 401: 500 calls, +500 handles; a 41k-row root reaches the 16.7 M per-process limit about
+/// "already exists" (the Windows test machine: 500 calls, +500 handles; a 41k-row root reaches the 16.7 M per-process limit about
 /// 4 hours after start). A row missing from the listing (deleted, restored after the fact), moved, or new is done
 /// in full. One memo belongs to one sync root; [`PlacedMemo::default`] is a full pass.
 ///

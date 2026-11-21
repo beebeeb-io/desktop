@@ -19,7 +19,7 @@ pub(super) const LINK_GRACE: std::time::Duration = std::time::Duration::from_mil
 /// `since`: unix seconds when the save began; `waited`: how long it has waited. A failure noted since the save began is
 /// its own try failing. An older one stays until some request gets an answer: the queued op may be backing off (no new
 /// request), so after [`LINK_GRACE`] without a landing it counts too. The save then ends as "stored here, sent later"
-/// instead of waiting out the land wait (VM 401 run 11: 20 s of "saving" offline). No failure: wait for the upload.
+/// instead of waiting out the land wait (the Windows test machine run 11: 20 s of "saving" offline). No failure: wait for the upload.
 pub(super) fn link_down_since(
     failure: Option<(crate::link_health::LinkFailure, i64)>,
     since: i64,

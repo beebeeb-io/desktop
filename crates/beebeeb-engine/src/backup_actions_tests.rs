@@ -246,30 +246,30 @@ fn row(db: &StateDb, file_id: &str, path: &str, parent_id: Option<&str>, kind: I
     .unwrap();
 }
 
-/// `Backups` (flagged) with this device's folder `GLegion` (manifest, `Pictures` on, `Music` off) and another
+/// `Backups` (flagged) with this device's folder `TestPC` (manifest, `Pictures` on, `Music` off) and another
 /// device's `Mac/Desktop`; beside it `Apple` and `zebra.txt`.
 fn fixture() -> (tempfile::TempDir, StateDb, OwnBackups) {
     let dir = tempfile::tempdir().unwrap();
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
     row(&db, ROOT_ID, "Backups", None, ItemKind::Folder);
-    row(&db, "dev-own", "Backups/GLegion", Some(ROOT_ID), ItemKind::Folder);
-    let manifest = format!("Backups/GLegion/{MANIFEST_NAME}");
+    row(&db, "dev-own", "Backups/TestPC", Some(ROOT_ID), ItemKind::Folder);
+    let manifest = format!("Backups/TestPC/{MANIFEST_NAME}");
     row(&db, "manifest", &manifest, Some("dev-own"), ItemKind::File);
     row(
         &db,
         "pictures",
-        "Backups/GLegion/Pictures",
+        "Backups/TestPC/Pictures",
         Some("dev-own"),
         ItemKind::Folder,
     );
     row(
         &db,
         "photo",
-        "Backups/GLegion/Pictures/a.jpg",
+        "Backups/TestPC/Pictures/a.jpg",
         Some("pictures"),
         ItemKind::File,
     );
-    row(&db, "music", "Backups/GLegion/Music", Some("dev-own"), ItemKind::Folder);
+    row(&db, "music", "Backups/TestPC/Music", Some("dev-own"), ItemKind::Folder);
     row(&db, "dev-mac", "Backups/Mac", Some(ROOT_ID), ItemKind::Folder);
     row(
         &db,
@@ -282,7 +282,7 @@ fn fixture() -> (tempfile::TempDir, StateDb, OwnBackups) {
     row(&db, "zebra", "zebra.txt", None, ItemKind::File);
     assert!(db.set_system_role(ROOT_ID, Some(SystemRole::BackupsRoot)).unwrap());
     let own = OwnBackups {
-        device_folder: Some("GLegion".into()),
+        device_folder: Some("TestPC".into()),
         folders: vec![OwnBackupFolder {
             display_name: "Pictures".into(),
             source_path: PathBuf::from("/data/a/Pictures"),

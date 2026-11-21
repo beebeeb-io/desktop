@@ -1026,7 +1026,7 @@ fn the_upgrade_candidate_rule() {
     }
 }
 
-/// For the lead's VM 401 rung R-UP-owner: the statements that read, remove and shut a 0.8.25 `state.db`'s owner record
+/// For the lead's the Windows test machine rung R-UP-owner: the statements that read, remove and shut a 0.8.25 `state.db`'s owner record
 /// and adoption window, run on a copy of the release's own image (`tests/fixtures/state-db-0.8.25/closed`).
 #[test]
 fn the_r_up_owner_statements_work_on_a_0_8_25_state_db() {

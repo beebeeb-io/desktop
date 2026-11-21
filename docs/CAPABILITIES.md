@@ -65,7 +65,7 @@ schema, dependency, installer identity, or File Provider changes.
 
 ## Capability presentation ruling — 2026-09-29 polish
 
-Guus: “style it with the existing design tokens/components used on the same
+the owner: “style it with the existing design tokens/components used on the same
 page (an info/notice row inside the card system, muted body text size, consistent
 spacing), and reuse that component for every alternative-text instance across
 shells”. Sync, cache-limit and unsupported-route explanations share a neutral
@@ -99,7 +99,7 @@ and Explorer against a non-default configured root, including after a root chang
 ## Backups protection — 2026-11-06 (LD-0113 D1, D2, Amendments 6, 7, 8a)
 
 The Backups root is the folder the server flags `system_role = "backups_root"` (state.db
-`files.system_role`), never a folder found by its name. Guus, 2026-11-06: "Protect the whole
+`files.system_role`), never a folder found by its name. the owner, 2026-11-06: "Protect the whole
 tree", and (19:30) Backups are read-only, contents included. In the drive (Explorer, Finder)
 nothing at or under the root is deleted, trashed, renamed, moved or written, and nothing is moved
 into it; backups are managed in the app, and opening and downloading them stay. The rule and its

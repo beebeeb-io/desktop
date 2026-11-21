@@ -8,7 +8,7 @@ use super::*;
 
 // ── 2b. Data residency / region — GET /api/v1/me/region ───────────────────────
 //
-// Task 2050 (Guus, 2026-10-19): storage location is described by COUNTRY, never by city. The wire
+// Task 2050 (owner, 2026-10-19): storage location is described by COUNTRY, never by city. The wire
 // key of the legacy list is `available_regions` (alias keeps the desktop IPC name `regions`). The
 // server still sends `example_city` for one release; it is NOT read: no field here carries it, so a
 // city can neither be decoded nor reach the UI. The country is `example_country`. The server omits

@@ -22,7 +22,7 @@ fn the_window_is_woken_for_the_first_frame_no_sound_and_a_refusal() {
         }));
         seen
     }
-    // An H.264 + MP3 file on a PC without a sound device (VM 401).
+    // An H.264 + MP3 file on a PC without a sound device (the Windows test machine).
     let r = rig(1_000, || plays_video(None));
     r.sound.no_device.store(true, SeqCst);
     let seen = woken(&r);
@@ -49,7 +49,7 @@ fn the_window_is_woken_for_the_first_frame_no_sound_and_a_refusal() {
 }
 
 /// w12-video-start: without sound the clock was a wall clock that ran on whether frames came or not. On a PC that
-/// decodes slower than the file plays (VM 401: 12 frames a second of a 30 frames a second file) every frame was late,
+/// decodes slower than the file plays (the Windows test machine: 12 frames a second of a 30 frames a second file) every frame was late,
 /// 4 a second were shown, and the place said ran ahead of the picture to the end of the file. Now a late frame is
 /// shown and the clock goes on from its time: every frame is shown, and the place is the picture's.
 #[test]

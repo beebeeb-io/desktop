@@ -12,7 +12,7 @@ Plain `makensis`, no Tauri CLI. Spec: `docs/superpowers/specs/2026-11-11-native-
 | `rehearsal/serve.ts`, `rehearsal/db-fingerprint.ts` | Helpers for the upgrade rehearsal below. |
 
 **Status.** Section A and native check 1 ran on Windows for the first time on 2026-11-12, on the build VM
-`bb-build-win11` (Windows 11 23H2, beside an installed Beebeeb 0.8.25), and the scripts needed no change: steps 1 to
+`the Windows build box` (Windows 11 23H2, beside an installed Beebeeb 0.8.25), and the scripts needed no change: steps 1 to
 7 printed what they say below. Two parts are still open: that VM has no interactive desktop, so the app started
 there but drew no window and step 5's "look at it" was not done; and 0.8.25 was not running, so step 8 had nothing to
 compare. Native check 4 runs in CI; native checks 2 and 3 and section B have never run.

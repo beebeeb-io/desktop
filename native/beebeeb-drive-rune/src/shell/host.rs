@@ -792,7 +792,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
 /// The ONE place capture exclusion is decided, at the end of every poll: the person's switch "Hide Beebeeb from
 /// screen capture and remote desktop" (`Shell::hide_from_capture`, off by default, on every identity). Off, nothing
 /// asks the platform for exclusion and the windows show in captures, screen shares and remote desktop (RustDesk).
-/// On, every window is excluded, on every screen. Guus, 2026-11-20: this replaces "the real build always hides its
+/// On, every window is excluded, on every screen. the owner, 2026-11-20: this replaces "the real build always hides its
 /// secret screens" (a signed-in remote session could not see the sign-in screen).
 fn poll_capture(s: &mut State, _tx: &mut Tx) -> bool {
     s.shell.apply_capture_exclusion(s.shell.hide_from_capture);

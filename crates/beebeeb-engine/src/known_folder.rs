@@ -251,12 +251,12 @@ mod tests {
     fn backup_source_key_maps_vault_paths_to_origin_key() {
         // A nested backup file under THIS device resolves to its catalog key.
         assert_eq!(
-            backup_source_key_for_rel_path("Backups/Legion/Music/Artist/Album/song.mp3", "Legion").as_deref(),
+            backup_source_key_for_rel_path("Backups/TestPC/Music/Artist/Album/song.mp3", "TestPC").as_deref(),
             Some("music")
         );
         // The display-name folder root itself is still tagged.
         assert_eq!(
-            backup_source_key_for_rel_path("Backups/Legion/Pictures", "Legion").as_deref(),
+            backup_source_key_for_rel_path("Backups/TestPC/Pictures", "TestPC").as_deref(),
             Some("pictures")
         );
         // A leading slash is tolerated.
@@ -269,19 +269,19 @@ mod tests {
     #[test]
     fn backup_source_key_rejects_non_backup_paths() {
         // A normal top-level user file.
-        assert_eq!(backup_source_key_for_rel_path("report.pdf", "Legion"), None);
+        assert_eq!(backup_source_key_for_rel_path("report.pdf", "TestPC"), None);
         // A user folder that merely happens to be named `Backups` but doesn't
         // match the device/display-name shape (display name isn't a catalog one).
         assert_eq!(
-            backup_source_key_for_rel_path("Backups/Legion/Holiday/pic.jpg", "Legion"),
+            backup_source_key_for_rel_path("Backups/TestPC/Holiday/pic.jpg", "TestPC"),
             None
         );
         // `Backups` with too few segments to identify a folder.
-        assert_eq!(backup_source_key_for_rel_path("Backups/Legion", "Legion"), None);
-        assert_eq!(backup_source_key_for_rel_path("Backups", "Legion"), None);
+        assert_eq!(backup_source_key_for_rel_path("Backups/TestPC", "TestPC"), None);
+        assert_eq!(backup_source_key_for_rel_path("Backups", "TestPC"), None);
         // A different first segment.
         assert_eq!(
-            backup_source_key_for_rel_path("Documents/Music/song.mp3", "Legion"),
+            backup_source_key_for_rel_path("Documents/Music/song.mp3", "TestPC"),
             None
         );
     }
@@ -293,13 +293,13 @@ mod tests {
         // catalog folder would purge the user's unrelated upload. Only the real
         // device segment this machine's mirror writes qualifies.
         assert_eq!(
-            backup_source_key_for_rel_path("Backups/SomeoneElse/Documents/notes.txt", "Legion"),
+            backup_source_key_for_rel_path("Backups/SomeoneElse/Documents/notes.txt", "TestPC"),
             None
         );
         // Same path WITH the matching device segment is the mirror's own subtree
         // and IS tagged.
         assert_eq!(
-            backup_source_key_for_rel_path("Backups/Legion/Documents/notes.txt", "Legion").as_deref(),
+            backup_source_key_for_rel_path("Backups/TestPC/Documents/notes.txt", "TestPC").as_deref(),
             Some("documents")
         );
     }

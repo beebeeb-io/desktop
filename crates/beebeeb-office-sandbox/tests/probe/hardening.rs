@@ -246,7 +246,7 @@ const NOT_A_HANDLE: usize = 0x7FFF_FFF8;
 
 /// Uses a handle value this process does not hold. First the proof that it holds none: closing the value fails
 /// (`err live` if it does not). A close never ends a process, strict handle checks or not: they act on a handle that
-/// is USED, not closed (measured on VM 401, 22631.6199: a close of such a value answers code 6 in a confined probe
+/// is USED, not closed (measured on the Windows test machine, 22631.6199: a close of such a value answers code 6 in a confined probe
 /// too). Then a wait on it, which uses it: under strict handle checks the process ends here (0xC0000008); without
 /// them the wait fails, `ok refused <code>`.
 #[cfg(windows)]

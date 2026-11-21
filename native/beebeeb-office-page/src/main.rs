@@ -21,7 +21,7 @@
 //! window has closed and Rune's event loop has returned. Were the process to end any other way, the helper ends with
 //! it: its job is closed with the process.
 //!
-//! How the lead runs it on VM 401 (lanes cannot drive PowerShell there), under `with-lock`, from the desktop session.
+//! How the lead runs it on the Windows test machine (lanes cannot drive PowerShell there), from the desktop session.
 //! It builds in release: this package has no engine and no test support (the integration lane writes its lockfile):
 //!
 //! ```text

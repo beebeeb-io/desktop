@@ -1,6 +1,6 @@
 //! Task 2409: the changes on this computer that are not sent yet, one row each: the list behind the "Not sent" count.
 //!
-//! On Guus's PC Home said "Not sent 2" and the tray "2 changes waiting to sync", and no screen named them: the count
+//! On the Windows test machine Home said "Not sent 2" and the tray "2 changes waiting to sync", and no screen named them: the count
 //! read the queue ([`StateDb::queue_hold_summary`]) and the one per-item list, the review feed, read other rows and was
 //! never shown on Windows. This read selects exactly the rows the count counts, through the same predicates
 //! ([`UNSENT_KINDS_SQL`], the pause and attempt columns, `HELD_FOLDER_CTE`, the finalizations held for review), and puts
@@ -47,7 +47,7 @@ pub struct UnsentChange {
     /// queue's own rule (spec D8, `held_queue::types::QueueRow::parked`, the reconcile pass): a park is never re-armed,
     /// so it has no Try again.
     pub parked: bool,
-    /// Try again applies (Guus, 13:39): it stopped after repeated errors, or it waits out a backoff after an error.
+    /// Try again applies (owner, 13:39): it stopped after repeated errors, or it waits out a backoff after an error.
     /// Never a held row (it keeps its own action), a parked one, one being sent, or one [`Self::blocked`].
     pub retryable: bool,
     /// Task 2414: a change that failed which Try again would not send, by spec D8's checks (the reconcile pass's):
@@ -329,7 +329,7 @@ impl StateDb {
         Ok(UnsentPage { total, items })
     }
 
-    /// Task 2409 (Guus, 13:39, "Add in the try again directly if it failed"): a change that stopped after repeated
+    /// Task 2409 (owner, 13:39, "Add in the try again directly if it failed"): a change that stopped after repeated
     /// errors, or waits out a backoff after one, is made due now with its attempts back to 0, so the next queue step
     /// sends it. Only that row changes, in one transaction. A held, parked, unknown or download row is refused and
     /// nothing changes; a row already due or being sent is left as it is. A Finder upload whose give-up presented its

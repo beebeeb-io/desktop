@@ -354,7 +354,7 @@ fn the_session_watcher_starts_once_where_the_real_app_opens_its_engine() {
     );
 }
 
-/// w31 (Guus's PC, 2026-11-20): the first sign-in on a PC. Until the account's file list arrived the local state
+/// w31 (the Windows test machine, 2026-11-20): the first sign-in on a PC. Until the account's file list arrived the local state
 /// holds the sync folder's own folders and no file; the window showed that as a finished list for minutes. While an
 /// engine runs and the list is awaited the status says loading (no count before the size is known, then the count);
 /// a try that failed is said as failed; and nothing of it without a running engine, while paused, or once it is here.

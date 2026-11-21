@@ -297,7 +297,7 @@ fn create_file_does_not_replace_a_name_taken_after_the_checks() {
     );
 }
 
-/// w36 (Guus's PC, bff1af87): New file made a 0-byte file that no list showed until the folder scan found it, and a
+/// w36 (the Windows test machine, bff1af87): New file made a 0-byte file that no list showed until the folder scan found it, and a
 /// second New file of that name was refused by the file on disk. The file is listed and queued by the call itself:
 /// its row is in its folder's rows with no scan, and a second New file of the name is refused as a taken name.
 /// Mutant: `list_new_file` returning `false` without the dispatch -> red (no row).

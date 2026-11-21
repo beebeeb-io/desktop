@@ -1,6 +1,6 @@
 //! w31-video-playback: the release installer carries the media helper.
 //!
-//! Guus's REAL 0.9.0 had no `beebeeb-media-helper.exe` beside the app exe, so `transport::helper_exe()` was `None`,
+//! the owner's REAL 0.9.0 had no `beebeeb-media-helper.exe` beside the app exe, so `transport::helper_exe()` was `None`,
 //! `playback_ready()` was false and a video opened as "No preview". The release workflow built the app only; the
 //! helper is its own crate with its own target folder, so `build-installer.ps1`'s default (beside the app exe) never
 //! found it. The workflow must build both helpers and hand their paths to the packager.

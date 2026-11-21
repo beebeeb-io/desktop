@@ -13,7 +13,7 @@
 # Linux values to 5% under those counts.
 # Step 3 of the engine move (2026-11-11, PR 296): 60 tests moved from the desktop lib to the engine crate (the
 # gate's rules, the key-owner rules, the password legs) and the engine gained 11 of its own, so the desktop floors
-# go DOWN by 60 and the engine floors go UP by 70. Executed on Linux (Legion): desktop lib 894, engine lib 1,863.
+# go DOWN by 60 and the engine floors go UP by 70. Executed on Linux (the Windows test machine): desktop lib 894, engine lib 1,863.
 # Windows and macOS are the last measured counts (921 / 1,236 and 1,689 / 1,854) moved by the same tests, not yet
 # measured after the move.
 linux 840 deps/beebeeb_desktop_lib-

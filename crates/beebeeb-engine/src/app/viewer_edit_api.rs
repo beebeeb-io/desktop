@@ -537,7 +537,7 @@ impl<C: CredentialStores> Engine<C> {
                 Ok(Ok(Fate::Waiting)) => {
                     (gone_since, parked_stale) = (None, false);
                     // w29: offline (or the server not answering) the upload cannot start: the save is stored here and
-                    // says so now, not after the whole land wait (VM 401 run 11: 20 s of "saving").
+                    // says so now, not after the whole land wait (the Windows test machine run 11: 20 s of "saving").
                     if viewer_edit_landing::link_down_since(self.link_failure(), began_unix, began.elapsed()) {
                         return Ok(SaveEnd::Queued { base });
                     }

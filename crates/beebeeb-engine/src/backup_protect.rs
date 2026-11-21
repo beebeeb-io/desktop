@@ -1,6 +1,6 @@
 //! LD-0113 (spec §6.2, §6.3, Amendments 6, 7 and 8): what this device refuses to change in its drive.
 //!
-//! Guus, 2026-11-06 17:49, "Protect the whole tree", and 19:30, "Makes sense, do it" (read-only,
+//! the owner, 2026-11-06 17:49, "Protect the whole tree", and 19:30, "Makes sense, do it" (read-only,
 //! contents included): in Explorer (and Finder) nothing at or under the Backups root (the row the
 //! server flagged `backups_root`, `files.system_role`) is trashed, deleted, renamed, moved or written,
 //! and nothing is moved into it from elsewhere in the drive. Backups are managed in the app; opening and
@@ -43,7 +43,7 @@ pub struct OwnBackupFolder {
 /// What this device backs up now, and under which device folder of the Backups root.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OwnBackups {
-    /// The device folder's name under the root (`"GLegion"`); `None` when the device has none.
+    /// The device folder's name under the root (`"TestPC"`); `None` when the device has none.
     pub device_folder: Option<String>,
     /// The folders that are on, in the catalog's order.
     pub folders: Vec<OwnBackupFolder>,
@@ -76,7 +76,7 @@ pub fn with_own_backups<T>(f: impl FnOnce(&OwnBackups) -> T) -> T {
 
 /// Read what this device backs up now and set it: the folders that are on (`desktop.toml`), each with where its
 /// original is read from, under the device folder the backup layout resolved (core's `find_device_folder`, so
-/// `GLegion (a3f2)` after a name collision; never re-derived from the hostname). No network. A config that cannot
+/// `TestPC (a3f2)` after a name collision; never re-derived from the hostname). No network. A config that cannot
 /// be read keeps the last answer: a read error never lifts a protection. See [`crate::backup::own_backups`].
 pub fn refresh_own_backups(identity: &'static crate::identity::EngineIdentity, db: &StateDb) {
     match crate::backup::own_backups(identity, db) {
@@ -241,7 +241,7 @@ fn position_below(below_root: &str) -> BackupPosition {
     BackupPosition::at_depth(Some(depth), name)
 }
 
-/// The original of the item at `below_root` (`GLegion/Pictures/2024/a.jpg`) when it is this device's
+/// The original of the item at `below_root` (`TestPC/Pictures/2024/a.jpg`) when it is this device's
 /// own backup of a folder it backs up now: that folder's backup and everything under it. The device
 /// folder itself holds several backups, not one, so it has none.
 fn own_active_source(own: &OwnBackups, below_root: &str) -> Option<String> {

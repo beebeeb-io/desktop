@@ -700,7 +700,7 @@ fn a_sidebar_click_ends_a_name_being_typed_in_a_row() {
     assert_eq!(rt.state.actions.name_edit.text, "", "and what was typed is gone");
 }
 
-/// Bug 10 (VM 401 run 7): the word typed in the Search names box was still in the box on the screens after Search.
+/// Bug 10 (the Windows test machine run 7): the word typed in the Search names box was still in the box on the screens after Search.
 /// A sidebar press is the person going somewhere else: Search over the Files window ends, as a lock ends it. (An
 /// opened result keeps it behind the item, so Back shows the same results again: only a section press ends it.)
 #[test]

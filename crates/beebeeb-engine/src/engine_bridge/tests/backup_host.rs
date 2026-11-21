@@ -279,7 +279,7 @@ impl Fixture {
             _dir: dir,
         };
         fixture.root = fixture.add(None, "Backups", true, 0);
-        fixture.device = fixture.add(Some(&fixture.root.clone()), "GLegion", true, 0);
+        fixture.device = fixture.add(Some(&fixture.root.clone()), "TestPC", true, 0);
         fixture
     }
 
@@ -325,7 +325,7 @@ impl Fixture {
         let layout = BackupLayout {
             root_id: self.root.clone(),
             device_folder_id: self.device.clone(),
-            device_folder_name: "GLegion".into(),
+            device_folder_name: "TestPC".into(),
         };
         self.bridge.db.set_backup_layout(&layout).unwrap();
         layout
@@ -745,7 +745,7 @@ async fn zero_bytes_added_under_sync_root() {
     fx.host(vec![Category::Documents]);
     let source = tempfile::tempdir().unwrap();
     let sync_root = source.path().join("Beebeeb");
-    std::fs::create_dir_all(sync_root.join("Backups").join("GLegion")).unwrap();
+    std::fs::create_dir_all(sync_root.join("Backups").join("TestPC")).unwrap();
     std::fs::write(sync_root.join("in-the-drive.txt"), b"already synced").unwrap();
     for i in 0..50 {
         std::fs::write(source.path().join(format!("doc-{i:02}.txt")), vec![b'x'; 1000 + i]).unwrap();

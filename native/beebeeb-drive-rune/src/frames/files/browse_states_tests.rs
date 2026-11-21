@@ -274,7 +274,7 @@ fn a_folder_keeps_its_own_view_and_the_panel_follows_the_selection() {
     assert!(find(&rt, "row-0-date").is_some());
 }
 
-/// w31 (Guus's PC, 2026-11-20): what the local state holds before the account's file list ever arrived: the sync
+/// w31 (the Windows test machine, 2026-11-20): what the local state holds before the account's file list ever arrived: the sync
 /// folder's own folders, and no file.
 struct FoldersOnly(BoardDrive);
 

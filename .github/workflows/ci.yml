@@ -51,6 +51,9 @@ jobs:
           # A pull request is checked out as its merge commit: parent 1 is the base, so two commits hold the diff.
           fetch-depth: 2
 
+      - name: No internal infra names
+        run: bash scripts/check-infra-names.sh
+
       - name: Classifier self-test
         run: python3 scripts/ci-changed-areas.py --self-test
 

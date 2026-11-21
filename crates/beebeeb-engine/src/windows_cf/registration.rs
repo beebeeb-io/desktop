@@ -246,7 +246,7 @@ pub enum ShellStep {
 /// Learn, `CfUnregisterSyncRoot`), so neither an unreadable version (before: `""` ≠ the current
 /// version, then Unregister on any start) nor an older one may cost the person their placeholders.
 /// The policies an existing registration carries are not in effect anyway: the Win32 registration,
-/// re-applied with UPDATE on every start, is (measured on the Legion: modifier 0, 2026-11-05).
+/// re-applied with UPDATE on every start, is (measured on the Windows test machine: modifier 0, 2026-11-05).
 pub fn shell_step(registered: Option<Option<&str>>) -> ShellStep {
     match registered {
         None => ShellStep::Register,

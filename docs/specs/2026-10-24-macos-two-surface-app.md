@@ -1,8 +1,8 @@
 # 2026-10-24 — macOS: two surfaces, the menu-bar popover and one Beebeeb window (task 1683)
 
-**Status:** ~~design for Guus's review.~~ Approved by Guus on 24 Oct 2026, with the four rulings in §0; slice 1 starts
+**Status:** ~~design for the owner's review.~~ Approved by the owner on 24 Oct 2026, with the four rulings in §0; slice 1 starts
 after this amendment merges. This PR changes no code; it adds this spec and the hi-fi file, and amends three
-earlier specs in place (§2). ~~Code starts only after Guus approves (task 1683, "Next, design before code").~~ — rulings
+earlier specs in place (§2). ~~Code starts only after the owner approves (task 1683, "Next, design before code").~~ — rulings
 amendment, 2026-10-24
 **Date:** 24 Oct 2026
 **Repo:** desktop. macOS only. Windows and Linux keep their windows (§12, every slice says what it leaves alone).
@@ -18,9 +18,9 @@ built, tasks 1747/1748), spec 2026-10-10 (task 1887, sign-out keeps waiting Find
 **Read at:** desktop `origin/main` `5ef050dd` (24 Oct 2026). `file:line` cites that tree; `lib.rs` means
 `src-tauri/src/lib.rs`, `.tsx`/`.ts` paths are under `src/`.
 
-## 0. Rulings (Guus, 2026-10-24)
+## 0. Rulings (owner, 2026-10-24)
 
-Guus answered the three questions of §13 and the go/no-go on 24 Oct 2026. The lead relayed them to this lane; the
+the owner answered the three questions of §13 and the go/no-go on 24 Oct 2026. The lead relayed them to this lane; the
 option he chose is quoted verbatim in each row, and the description after it is the lead's, as relayed. At the time of
 writing they were not yet in task 1683's file.
 
@@ -30,7 +30,7 @@ writing they were not yet in task 1683's file.
 | 2 | Windows-shell pages that do not come to the Mac (§13 question 2) | **"Drop them (Recommended)"**: the Bandwidth chart and sessions, App Activity, the account notifications list, and the 4 switches macOS never honours stay off the Mac app (still available in the web app). | Rows E10, E15, E17, E18, E20, E29 and E30 stay Removed, now by ruling. |
 | 3 | The app menu's "Sign Out…" (§13 question 3) | **"Yes, same sheet (Recommended)"**: once the 1887 device rung (workspace task 2175) passes, the app-menu Sign Out… goes through the same confirm sheet, so there is no silent sign-out from the menu. | Rows F4 and A14, §8.1 entry point 5, and a new slice 1b gated on task 2175. |
 | 4 | Go / no-go | **"Yes, start slice 1"**: implementation starts after this amendment merges. | Status line; slice 0. |
-| 5 | Updates on a Mac (task 2176; the lead's decision of 24 Oct 2026 22:47 under Guus's standing "take decisions, follow your recommendation") | **"Download update", never an in-place install.** The App Sandbox denies the install, so on a Mac an update is a link to `https://beebeeb.io/download/macos-dmg` with the line "Drag Beebeeb into Applications to replace this version." | Rows C15, E27, #27, #28 and §7.8's About row below, and the popover's update row (A19, §6.3, the popover lane's). The confirm-downgrade sheet (E27) is out on a Mac until an install mechanism exists (task 2176's next step). — slice 5, 2026-10-25, lead-approved (macos-beebeeb-teamlead) |
+| 5 | Updates on a Mac (task 2176; the lead's decision of 24 Oct 2026 22:47 under the owner's standing "take decisions, follow your recommendation") | **"Download update", never an in-place install.** The App Sandbox denies the install, so on a Mac an update is a link to `https://beebeeb.io/download/macos-dmg` with the line "Drag Beebeeb into Applications to replace this version." | Rows C15, E27, #27, #28 and §7.8's About row below, and the popover's update row (A19, §6.3, the popover lane's). The confirm-downgrade sheet (E27) is out on a Mac until an install mechanism exists (task 2176's next step). — slice 5, 2026-10-25, lead-approved (macos-beebeeb-teamlead) |
 
 **One correction to ruling 2's description, checked against web `fc4b9aa` (24 Oct 2026).** "Still available in the web
 app" holds for the account notifications list only: the web app has its notification inbox
@@ -40,7 +40,7 @@ app, which this spec does not change. The ruling itself, "drop them" on a Mac, i
 
 ## 1. The ruling
 
-Guus, 24 Oct 2026, verbatim (during the 1887 device rung; recorded in task 1683 on workspace `origin/main`):
+the owner, 24 Oct 2026, verbatim (during the 1887 device rung; recorded in task 1683 on workspace `origin/main`):
 
 > "we already created an artifact, but how the signin is right now and that we have multiple screens doesnt make
 > sense. So i want max 2 screens, the little one below the B in the topbar and just the app itself where you get
@@ -363,7 +363,7 @@ The 1887 ask (A0–A5) is never shown in the popover: a question with consequenc
 ### 6.5 Decided while building slice 3 (for review)
 
 The table above leaves these open. The popover slice decided each one, pinned it in `tests/popoverModel.test.ts` or
-`tests/popoverApp.test.tsx`, and flags it in its PR for the lead and Guus. — popover slice, 2026-10-25
+`tests/popoverApp.test.tsx`, and flags it in its PR for the lead and the owner. — popover slice, 2026-10-25
 
 - **Finder missing** (spec A, "Where `Missing` rests"): the popover claims nothing about Finder. It shows the sync part
   (`sync_phase`, task 2179), with Open in Finder disabled.
@@ -637,7 +637,7 @@ subtitle (§10).
 
 The two kept rows (1887's K2 with "Show in Finder" and "Dismiss"; 1882's with "Dismiss") stay in Settings › Sync, where
 both specs put them. Home's "Needs your attention" shows the same component with the same words and buttons, reading
-the same `kept_unsent_folder` / `kept_unsynced_folder` state, so a dismiss in either place clears both. Reason: Guus
+the same `kept_unsent_folder` / `kept_unsynced_folder` state, so a dismiss in either place clears both. Reason: the owner
 would otherwise have to open Settings › Sync to learn that files were kept.
 
 ### 8.4 The device rung
@@ -794,7 +794,7 @@ can run as two lanes (Rust + TypeScript) under the two-lane cap.
 
 | # | Slice | What changes | Verification rung |
 | --- | --- | --- | --- |
-| 0 | This design | spec + hi-fi + the three amendments; then the rulings amendment (§0) | ~~Guus approves (open questions answered)~~ Answered 24 Oct (§0, ruling 4: "Yes, start slice 1"); slice 1 starts when this amendment merges |
+| 0 | This design | spec + hi-fi + the three amendments; then the rulings amendment (§0) | ~~the owner approves (open questions answered)~~ Answered 24 Oct (§0, ruling 4: "Yes, start slice 1"); slice 1 starts when this amendment merges |
 | 1 | **The Beebeeb window and Settings in it** | Rust: `main` window config (`create: false`, Overlay title bar), `main_window_label` macOS → `main`, registry `[popover, main]`, close = destroy, window-state for `main` only with SIZE \| POSITION and the off-screen guard, activation policy (§9.1), menus F1–F15, `main-app`/`tray`/`windows-onboarding` not built on macOS (a `tauri.macos.conf.json` override or `create: false` with Windows building them), `macos-settings` retired, every 1887 owner label → `main`. TS: `MacApp.tsx` shell (sidebar, sections, `main:navigate`, 1887's flow object and listeners), ~~the Settings pane hosting the shipped tab components~~ Settings in System Settings style (ruling 1, §7.8): the sidebar switching to the Settings list (back control, account row, General, Sync, About; Security joins in slice 5) and the pane hosting the shipped section bodies with the tab strip removed, and Home's first cut (status, Finder row, storage, the kept rows). Launch and every opener that showed the compact window now show `main`; until slice 3 a tray click still shows today's compact flyout, and nothing else opens the compact window. | `cargo test` per-binary counts (registry, labels, menu specs incl. View › Back, window-list pins, 1887 `sign_out_flow_window_closed` with `main`); `bun test` count (~~tabs reused~~ section bodies reused; sidebar switch and back, focus to the gear on back; ↑/↓/Home/End, ⌘[; last section remembered; the View items and ⌘, disabled while a sheet is open, §8.2; sheets; F11 flow-reset tests with `main`); tsc, eslint; Chromium renders light and dark vs the hi-fi. **Device:** ⌘, / menu / gear / popover-less tray click open one window, and Settings swaps the sidebar in that window; back and ⌘[ return; close and reopen keeps the frame; unplug-display guard; then **1887's D2–D11, D10b, D2b on this build** (§8.4, task 2175) |
 | 1b | **Sign Out… through the confirm sheet** (ruling 3) | Starts only after task 2175 passes. Rust: the menu's SignOut arm stops calling `clear_session_impl` and stores a flow request that starts at the confirm sheet; it opens `main` on Settings › Account. The menu's immediate alerts retire; late results keep `show_late_result` (A14). TS: the window shell answers that request with `flow.open()`. 1887's pins on the menu arm are updated in the same change, never deleted. | cargo (the arm calls no sign-out; the request kind; pins red first on today's arm); `bun test` (menu request opens the confirm sheet, Cancel changes nothing, focus on Cancel). **Device:** 1887 D4 (⇧⌘L) and D3 (Cancel keeps everything) on this path |
 | 2 | **Sign-in and setting up this Mac in the window** | Signed-out content (§7.4): spec C's sign-in screen and the shared browser-code component, email/2FA, Sign in again (R8), switch step, recovery phrase, Finder status → Home; `onboarding` window and `open_onboarding_window`/`open_reauth_window` route to `main` on macOS; spec C §11 removals. Spec C's Rust account view (1747) is its own lane; this slice renders today's `sync_status` and gains C-R3/C-R5/C-R11 screens when 1747 lands. | `bun test` (screen routing per state, copy pins, switch ask, focus on Cancel); cargo (open-sign-in routes to `main`; `onboarding` never built on macOS). **Device:** fresh install → sign-in → browser and password paths → recovery → Finder Ready → Home in one window; Sign in again after a revoked session keeps Finder |
@@ -802,9 +802,9 @@ can run as two lanes (Rust + TypeScript) under the two-lane cap.
 | 4 | **Review and Trash** | Review (conflict sheet, version history sheet, kind labels), `conflict_auto_opens_window(Macos) = false`, notification click → Review; Trash from the Windows shell; `ConflictWindow` not opened on macOS. | `bun test` (rows, actions, sheet keys); cargo (no conflict window on macOS; notification route). **Device:** a real conflict (Mac + web edit) resolved three ways; restore from Trash |
 | 5 | **Settings additions and the copy sweep** | Security ~~tab~~ section (its sidebar row); General Appearance and "From your account"; About release channel, downgrade, speed test; Account storage details and web row; every §10.2 change; a copy guard test that fails on the §10.1 word list in any string reachable on macOS (proven red on today's tree). | `bun test` incl. the guard's red-then-green; screenshots of each ~~tab~~ section both themes. **Device:** each ~~tab's~~ section's controls write and read back |
 | 6 | **Launch and lifecycle** | Login launch shows nothing (spec C C-W1, depends on 1845 for a working login item), manual launch / `RunEvent::Reopen` → window, updater relaunch flag, first-run hint once. | cargo (pure launch-kind and relaunch-flag functions, red first). **Device:** login item launch, Dock and Finder reopen, an alpha update relaunch |
-| 7 | **Device rung on a signed alpha** (Guus or Bram) | The whole two-surface pass, light and dark, with VoiceOver on for the popover and one Settings ~~tab~~ section, including the sidebar switch and back. | Evidence under the workspace `_qa-evidence/1683/`; nothing ships to stable before it |
+| 7 | **Device rung on a signed alpha** (the owner or Bram) | The whole two-surface pass, light and dark, with VoiceOver on for the popover and one Settings ~~tab~~ section, including the sidebar switch and back. | Evidence under the workspace `_qa-evidence/1683/`; nothing ships to stable before it |
 
-## 13. ~~Open questions for Guus~~ Questions for Guus, answered 24 Oct 2026
+## 13. ~~Open questions for the owner~~ Questions for the owner, answered 24 Oct 2026
 
 1. ~~**Settings look.** Recommended: icon tabs in the window's toolbar (drawn), the look approved on 30 Sep, now inside
    the main window; it reuses the shipped tab components and keeps 1887's code where it is. Alternative: System

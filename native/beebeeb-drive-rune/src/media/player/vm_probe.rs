@@ -1,9 +1,9 @@
 //! A measurement, not a gate: the real player against the REAL confined helper and the PC's real sound device, with a
 //! clip read from disk, printing where the time from the press to the first frame goes and how the picture keeps up.
-//! `BB_PROBE_SOUND=timed` puts a device that only keeps time in the place of the PC's own (VM 401 has none): it takes
+//! `BB_PROBE_SOUND=timed` puts a device that only keeps time in the place of the PC's own (the Windows test machine has none): it takes
 //! PCM at the rate a device would, so the file's audio track is decoded by the confined helper and its clock paces
 //! the frames; the probe prints how much sound it took and its level. Sound proven by decode and clock, not by ear.
-//! Run on a Windows PC (VM 401) with the helper built:
+//! Run on a Windows PC (the Windows test machine) with the helper built:
 //! `BB_PROBE_HELPER=<beebeeb-media-helper.exe> BB_PROBE_CLIPS=<a.mp4;b.mp4> cargo test --release media::player::vm_probe -- --ignored --nocapture`
 
 use std::path::PathBuf;

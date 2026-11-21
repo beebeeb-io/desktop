@@ -333,7 +333,7 @@ mod tests {
     /// The instrument first, on a type every Windows has: `.txt` has handlers, Notepad among them.
     #[cfg(windows)]
     #[test]
-    #[ignore = "O-CP3: VM 401"]
+    #[ignore = "O-CP3: the Windows test machine"]
     fn windows_reports_handlers_for_txt() {
         let _com = win::Com::enter().expect("COM");
         let reported: Vec<(String, String)> = win::handlers(".txt").iter().filter_map(win::names).collect();
@@ -348,7 +348,7 @@ mod tests {
     /// by its PID. Mutant: invoke with an empty data object → no process.
     #[cfg(windows)]
     #[test]
-    #[ignore = "O-CP3: VM 401"]
+    #[ignore = "O-CP3: the Windows test machine"]
     fn invoke_opens_the_kept_path() {
         let notepads = || -> Vec<u32> {
             let out = std::process::Command::new("tasklist")

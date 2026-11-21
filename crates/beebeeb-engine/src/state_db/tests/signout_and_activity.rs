@@ -168,7 +168,7 @@ fn round5_legacy_resume_inventory_is_handed_back_by_the_operation_purge() {
     );
 }
 
-/// Desktop 0.8.15 (deliverable 3): changes held back (on Guus's PC, 2,832 folder creates and
+/// Desktop 0.8.15 (deliverable 3): changes held back (on the Windows test machine, 2,832 folder creates and
 /// 92 versions paused for `auth` since 4 Oct) are counted as on hold. They are never transfer
 /// work, so they cannot keep the engine at "syncing"; they are not resumed here either.
 #[test]
@@ -256,7 +256,7 @@ fn windows_signout_refuses_conflicted_content_even_without_queue() {
     assert_eq!(db.list_files().unwrap().len(), 1);
 }
 
-/// Task 2190 (glegion's constraint 1): a held edit is written once; the same reason and
+/// Task 2190 (the Windows test machine's constraint 1): a held edit is written once; the same reason and
 /// fingerprint again write nothing (a scan pass that finds it again writes no page); a new
 /// fingerprint writes again, and the first detection's time is kept.
 #[test]
@@ -284,7 +284,7 @@ fn task_2190_a_held_edit_is_written_once_per_fingerprint() {
     assert!(!db.release_unsent_edit("h1").unwrap(), "nothing left to release");
 }
 
-/// Task 2190 (glegion's constraint 2): the paths that skip the classify clear the record, so no
+/// Task 2190 (the Windows test machine's constraint 2): the paths that skip the classify clear the record, so no
 /// feed entry goes stale: the row's delete, its trash, a rename or move (its path), any status
 /// away from `local`, and a re-key of its id. A write that changes none of them keeps it.
 #[test]
@@ -321,7 +321,7 @@ fn task_2190_a_held_edit_goes_with_its_row_path_status_and_id() {
     }
 }
 
-/// Task 2190 (glegion's constraint 3): the feed's read of held edits is an index read: the
+/// Task 2190 (the Windows test machine's constraint 3): the feed's read of held edits is an index read: the
 /// held rows by `idx_held_edits_detected`, each file by its key, and `files` never scanned.
 #[test]
 fn task_2190_the_feed_reads_held_edits_by_index() {

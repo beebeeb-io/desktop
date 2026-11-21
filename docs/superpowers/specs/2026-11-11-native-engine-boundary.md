@@ -1,6 +1,6 @@
 # Desktop 0.9.0: the engine without Tauri (boundary, measurements, plan)
 
-Lane E, 2026-11-11. Ruling (Guus, 2026-11-11): "for 0.9.0 we go full rust, one big bang, one shot". Companion to
+Lane E, 2026-11-11. Ruling (owner, 2026-11-11): "for 0.9.0 we go full rust, one big bang, one shot". Companion to
 `2026-11-11-desktop-v2-native-rune-design.md`, whose §3 claims are checked here against `v2-native` at `b9e73441`.
 Every number is measured; §1 says how.
 
