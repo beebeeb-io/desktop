@@ -30,6 +30,7 @@ pub enum WindowKind {
 
 pub const MAIN_KEY: &str = "main";
 pub const FLYOUT_KEY: &str = "flyout";
+pub const TRAY_TIP_KEY: &str = "tray-tip";
 /// Not a Rune window key of its own (the first-run window is the one window in that mode);
 /// the name a first-run lane's saved state would go under.
 pub const FIRST_RUN_KEY: &str = "first-run";
