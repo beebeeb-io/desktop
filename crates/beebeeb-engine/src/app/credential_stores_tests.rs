@@ -737,21 +737,19 @@ mod key_slot_per_account {
     }
 
     #[test]
-    fn a_switch_back_needs_no_twelve_words_and_removing_b_leaves_a() {
+    fn a_switch_back_needs_no_twelve_words_and_signing_out_of_b_leaves_a() {
         let credentials = MemoryCredentials::default();
         sign_in(&credentials, USER_A, "a@example.eu");
         unlock_with_words(&credentials, KEY_A);
         assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
 
-        // Switch to B (Windows: a sign-out clears the working key).
-        sign_out(&credentials);
+        // Switch to B: A is not signed out (Guus, 2026-11-21), so nothing of A is forgotten.
         sign_in(&credentials, USER_B, "b@example.eu");
         assert_eq!(unlocks_without_words(&credentials), None, "B never gets A's key");
         unlock_with_words(&credentials, KEY_B);
         assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_B[..]));
 
         // And back to A: no twelve words.
-        sign_out(&credentials);
         sign_in(&credentials, USER_A, "a@example.eu");
         assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
 
@@ -764,12 +762,46 @@ mod key_slot_per_account {
         assert_eq!(kept(&credentials, USER_B), None);
         assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]));
         assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
+    }
 
-        // And back to B: B's key is gone, so B asks for its words; A's stays.
-        sign_out(&credentials);
+    /// A sign-out leaves nothing of the account signing out (task 2447 d), and keeps the slot of an account that was
+    /// only switched away from.
+    #[test]
+    fn signing_out_removes_that_accounts_slot_only() {
+        let credentials = MemoryCredentials::default();
+        sign_in(&credentials, USER_A, "a@example.eu");
+        unlock_with_words(&credentials, KEY_A);
         sign_in(&credentials, USER_B, "b@example.eu");
-        assert_eq!(unlocks_without_words(&credentials), None);
+        unlock_with_words(&credentials, KEY_B);
+
+        sign_out(&credentials);
+        assert_eq!(kept(&credentials, USER_B), None, "B signed out: its key is gone");
+        assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]), "A was switched away from");
+        let install = credentials.store_for(SLOT);
+        assert!(install.load_wrapped_master_key().unwrap().is_none());
+        assert!(install.load_session_token().unwrap().is_none());
+
+        sign_in(&credentials, USER_B, "b@example.eu");
+        assert_eq!(unlocks_without_words(&credentials), None, "B asks for its words again");
+        sign_in(&credentials, USER_A, "a@example.eu");
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
+
+        // A signs out too: nothing of either account is left.
+        sign_out(&credentials);
+        assert!(credentials.is_empty(), "a sign-out leaves nothing");
+    }
+
+    /// dc-014's case, with A's working key left behind by B's sign-out: A's key stays A's (it was not A signing out).
+    #[test]
+    fn a_sign_out_of_b_beside_a_working_key_of_a_keeps_it_in_as_slot() {
+        let credentials = MemoryCredentials::default();
+        sign_in(&credentials, USER_A, "a@example.eu");
+        unlock_with_words(&credentials, KEY_A);
+        sign_in(&credentials, USER_B, "b@example.eu");
+        sign_out(&credentials);
         assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]));
+        sign_in(&credentials, USER_A, "a@example.eu");
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
     }
 
     /// dc-014's case: B signs in while A's tagged key is still the working key (A's clear failed, or a store that
@@ -817,9 +849,8 @@ mod key_slot_per_account {
         let credentials = MemoryCredentials::default();
         sign_in(&credentials, USER_A, "a@example.eu");
         unlock_with_words(&credentials, KEY_A);
-        sign_out(&credentials);
 
-        // A device approval of B: token and key, untagged until bound.
+        // A device approval of B (a switch: A stays signed in on this PC): token and key, untagged until bound.
         let vault = vault(&credentials);
         vault
             .install_session(SessionToken::new("token-of-b").unwrap())

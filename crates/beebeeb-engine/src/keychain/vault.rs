@@ -545,12 +545,23 @@ impl<S: AuthSecretStore> AuthVault<S> {
     /// The full sign-out. Every removal is tried, and the first failure is the result (task 2447): a token that
     /// cannot be removed must not leave the vault key, the email or the owner tags behind as well.
     ///
-    /// R4: the working key goes; the account's kept key stays in its own slot (kept there first when the working key
-    /// is tagged and the slot is empty), so the account signs back in without the twelve words after another one
-    /// used this computer. Only [`Self::forget_account_key`] removes an account's slot.
+    /// R4 (Guus, 2026-11-21): signing out of an account removes that account's kept key too, so a sign-out still leaves
+    /// nothing of it. The account signing out is the session's owner (or, when that is unknown, the working key's).
+    /// Another account's working key (one that was switched away from, still signed in on this PC) goes from the
+    /// working slot but is kept in its own slot first. A switch never calls this.
     pub fn clear_session(&mut self) -> AuthResult<()> {
         self.lock();
-        self.keep_tagged_working_key();
+        let session_owner_id = self.session_owner();
+        let key_owner_id = self.vault_key_owner();
+        let leaving = match (&session_owner_id, &key_owner_id) {
+            (Ok(Some(owner)), _) => Some(owner.clone()),
+            (Ok(None), Ok(Some(owner))) => Some(owner.clone()),
+            _ => None,
+        };
+        let others_key = matches!(&key_owner_id, Ok(Some(owner)) if !leaving.as_deref().is_some_and(|l| same_account(l, owner)));
+        if others_key {
+            self.keep_tagged_working_key();
+        }
         // App lock goes FIRST (core's device sign-out): a sign-out cut short must never leave `lock.app_lock = 0`
         // for the next account. Tried again with the other lock entries below.
         let app_lock = self.store.delete_lock_flag(LockFlag::AppLock);
@@ -565,6 +576,12 @@ impl<S: AuthSecretStore> AuthVault<S> {
         // The lock's flags belong to the account on this computer: they leave with its session (core removes them
         // at the same place).
         let flags = self.clear_lock_entries();
+        // The signing-out account's kept key. An owner that could not be read is a sign-out that cannot name what it
+        // left: it fails like any other removal.
+        let kept = match leaving {
+            Some(owner) => self.store.delete_account_key(&owner),
+            None => session_owner_id.and(key_owner_id).map(|_| ()),
+        };
         app_lock
             .and(token)
             .and(key)
@@ -572,6 +589,7 @@ impl<S: AuthSecretStore> AuthVault<S> {
             .and(key_owner)
             .and(session_owner)
             .and(flags)
+            .and(kept)
     }
 
     pub fn master_key(&self) -> AuthResult<&[u8]> {
