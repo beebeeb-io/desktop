@@ -147,6 +147,7 @@ fn head(ui: &Ui, t: &Theme) -> El {
     let mut pills = row()
         .key("ph-pills")
         .role("radiogroup")
+        .focus_group()
         .label("Source")
         .gap(6.0)
         .center_y()
@@ -217,6 +218,7 @@ pub fn bulk(ui: &Ui, t: &Theme) -> El {
     row()
         .key("ph-bulk")
         .role("toolbar")
+        .focus_group()
         .label("Selection")
         .w_full()
         .px(14.0)
@@ -282,6 +284,9 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
         .size(side, side)
         .radius(3.0)
         .focusable(true)
+        // One Tab stop for the whole grid: the cursor's tile (the first before there is one); arrows rove.
+        .tab_index(if ui.cursor.map_or((day, index) == (0, 0), |c| c == (day, index)) { 0 } else { -1 })
+        .position_in_set(ui.position_of(day, index), ui.total())
         // Ctrl+click checks a photo and starts selecting (DW-0601, DW-0602).
         .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| {
             if tx.mods().ctrl {
@@ -472,8 +477,7 @@ pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
         empty(list, t)
     } else {
         let t = *t;
-        col()
-            .key("ph-scroll")
+        crate::ui::focus::pane(col(), "ph-scroll")
             // The tiles are sized from the width the grid really has.
             .on_layout(|s: &mut State, rect: [f32; 4]| s.photos.set_width(rect[2]))
             .scroll(ScrollSpec { stick_bottom: false })
@@ -496,7 +500,7 @@ pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
                     .virtual_rows_version((ui.lines.len(), ui.across, ui.filter)),
             )
     };
-    let mut body = col().key("ph-body").child(head(ui, t));
+    let mut body = col().key("ph-body").child(crate::ui::focus::pane(head(ui, t), "ph-head"));
     if ui.source.holds_unshowable() {
         body = body.child(unshowable_notice(t));
     }
