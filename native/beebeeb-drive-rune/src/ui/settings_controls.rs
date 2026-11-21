@@ -13,6 +13,7 @@ use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Icon, TextStyle, col, el, row};
 
+use super::button::{self as btn, ButtonKeys, ButtonState, Size, Variant};
 use super::kit;
 
 /// 13px/600 on a 17px line: a notice's first line (`.kit-banner-text b`).
@@ -33,37 +34,11 @@ pub enum Emphasis {
 
 /// A small button (`.kit-btn.kit-btn-sm`, 22 pt). Keys: `btn-<N>`, `btn-<N>-icon`, `btn-<N>-label`.
 pub fn button(index: usize, label: &str, icon: Option<&'static Icon>, emphasis: Emphasis, t: &Theme) -> El {
-    let key = format!("btn-{index}");
-    let (fill, ink) = match emphasis {
-        Emphasis::Primary => (t.accent, t.accent_text_on),
-        Emphasis::Plain => (t.paper, t.text),
+    let variant = match emphasis {
+        Emphasis::Primary => Variant::Primary,
+        Emphasis::Plain => Variant::Secondary,
     };
-    let mut b = row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD)
-        .fill(fill)
-        .focusable(true);
-    b = match emphasis {
-        // `hover:brightness-95`, `active:brightness-90`: ink over the Amber.
-        Emphasis::Primary => b
-            .hover(fill.mix(Color::BLACK, 0.05))
-            .press(fill.mix(Color::BLACK, 0.10)),
-        Emphasis::Plain => b
-            .border(1.0, t.card_border)
-            .border_layout()
-            .hover(t.hover)
-            .press(t.press),
-    };
-    if let Some(icon) = icon {
-        b = b.child(kit::glyph(format!("{key}-icon"), icon, 14.0, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, type_::BUTTON_SM, ink))
+    btn::button(btn::keys(&format!("btn-{index}")), label, icon, variant, Size::Sm, ButtonState::Enabled, t)
 }
 
 /// An inline notice (`.kit-banner.tone-neutral`): a glyph, a strong first line, the words,

@@ -6,6 +6,7 @@ use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Icon, Span, col, el, row};
 
+use super::button::{self as btn, ButtonKeys, ButtonState, Size, Variant};
 use super::kit;
 
 const PANE_W: f32 = 284.0;
@@ -257,23 +258,8 @@ pub fn switch_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El
 
 /// A small outlined button (`.kit-btn.kit-btn-sm`). Keys: `<key>-box`, `<key>-icon`, `<key>-btn`.
 pub fn action_button(key: &str, label: &str, ic: &'static Icon, t: &Theme) -> El {
-    row()
-        .key(format!("{key}-box"))
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph(format!("{key}-icon"), ic, 14.0, t.text))
-        .child(kit::label(format!("{key}-btn"), label, type_::BUTTON_SM, t.text))
+    let keys = ButtonKeys { root: format!("{key}-box"), icon: format!("{key}-icon"), label: format!("{key}-btn") };
+    btn::button(keys, label, Some(ic), Variant::Secondary, Size::Sm, ButtonState::Enabled, t)
 }
 
 fn kind_of(item: &DriveItem) -> &'static str {
