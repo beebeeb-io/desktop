@@ -759,3 +759,43 @@ fn sign_out_confirm(
         }
     })
 }
+
+/// dc-005: what a sign-out keeps and removes, with counts. Sealed staged copies stay encrypted on this PC and open
+/// again after sign-in; unsaved Office recovery copies are removed. `waiting`: uploads not sent yet.
+pub fn sign_out_counts_words(waiting: u64, sealed: u64, office_recovery: u64) -> String {
+    let plural = |n: u64, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let mut out = Vec::new();
+    if waiting > 0 {
+        out.push(format!(
+            "{} not sent yet stay on this PC and send after you sign in again.",
+            plural(waiting, "change is", "changes are")
+        ));
+    }
+    if sealed > 0 {
+        out.push(format!(
+            "{} stay encrypted on this PC and open again after you sign in.",
+            plural(sealed, "saved copy", "saved copies")
+        ));
+    }
+    if office_recovery > 0 {
+        out.push(format!(
+            "{} of unsaved Office work will be removed.",
+            plural(office_recovery, "recovery copy", "recovery copies")
+        ));
+    }
+    out.join(" ")
+}
+
+#[cfg(test)]
+mod sign_out_counts_words_tests {
+    use super::sign_out_counts_words;
+
+    #[test]
+    fn says_each_count_and_what_is_removed() {
+        assert_eq!(sign_out_counts_words(0, 0, 0), "");
+        let w = sign_out_counts_words(1, 2, 1);
+        assert!(w.contains("1 change is not sent yet"), "{w}");
+        assert!(w.contains("2 saved copies stay encrypted"), "{w}");
+        assert!(w.contains("1 recovery copy of unsaved Office work will be removed"), "{w}");
+    }
+}
