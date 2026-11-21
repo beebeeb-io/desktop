@@ -26,6 +26,8 @@ use rune::tok::Family;
 use rune::{Color, El, Icon, LineCap, Shape, TextStyle, canvas, col, el, row};
 
 use super::au::{self, Tone};
+use super::button;
+use super::dialog::{self, Dialog, Foot, Head, scrim};
 use super::kit;
 use super::settings_dialog::{BUTTON_MD, DIALOG_TITLE, scrim_color};
 use super::settings_list::{VALUE, VALUE_MONO};
@@ -435,46 +437,18 @@ pub fn button(
     dimmed: bool,
     t: &Theme,
 ) -> El {
-    let (fill, ink) = match look {
-        Look::Primary => (t.accent, t.accent_text_on),
-        Look::Plain => (t.paper, t.text),
-        Look::Quiet => (Color::TRANSPARENT, t.text_secondary),
-        // `--color-red-fill`, the same in both themes.
-        Look::Danger => (rune::oklch(0.55, 0.2, 25.0), t.white),
+    let variant = match look {
+        Look::Primary => button::Variant::Primary,
+        Look::Plain => button::Variant::Secondary,
+        Look::Quiet => button::Variant::Ghost,
+        Look::Danger => button::Variant::Danger,
     };
-    let (h, style) = match size {
-        Size::Small => (22.0, type_::BUTTON_SM.lh(17.1429)),
-        Size::Medium => (28.0, BUTTON_MD),
+    let size = match size {
+        Size::Small => button::Size::Sm,
+        Size::Medium => button::Size::Md,
     };
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(h)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD)
-        .fill(fill);
-    if dimmed {
-        b = b.opacity(0.5).disabled(true);
-    } else {
-        b = b.focusable(true);
-        b = match look {
-            Look::Plain | Look::Quiet => b.hover(t.paper2).press(t.paper3),
-            _ => b
-                .hover(fill.mix(Color::BLACK, 0.05))
-                .press(fill.mix(Color::BLACK, 0.10)),
-        };
-    }
-    if look == Look::Plain {
-        b = b.border(1.0, t.card_border).border_layout();
-    }
-    if let Some(icon) = icon {
-        let glyph = if size == Size::Medium { 16.0 } else { 14.0 };
-        b = b.child(kit::glyph(format!("{key}-icon"), icon, glyph, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, style, ink))
+    let state = if dimmed { button::ButtonState::Disabled } else { button::ButtonState::Enabled };
+    button::button(button::keys(key), label, icon, variant, size, state, t)
 }
 
 /// A confirm over a pane (`.au-scrim` + `.wn-dlg`): a title, what happens in one paragraph,
@@ -508,61 +482,40 @@ pub fn dialog_with(
     foot: Vec<(El, bool)>,
     t: &Theme,
 ) -> El {
-    let mut body = col()
-        .key("dlg-body")
-        .w_full()
-        .pt(22.0)
-        .px(24.0)
-        .pb(18.0)
-        .gap(12.0)
-        .child(
-            col()
-                .key("dlg-h")
-                .w_full()
-                .gap(6.0)
-                .child(
-                    kit::label("dlg-title", title, DIALOG_TITLE, t.text)
-                        .role("heading")
-                        .level(2)
-                        .wrap()
-                        .w_full(),
-                )
-                .child(paragraph),
-        );
-    for child in extra {
-        body = body.child(child);
-    }
-    let mut f = row()
-        .key("dlg-foot")
-        .w_full()
-        .center_y()
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
+    let mut body = vec![
+        col()
+            .key("dlg-h")
+            .w_full()
+            .gap(6.0)
+            .child(
+                kit::label("dlg-title", title, DIALOG_TITLE, t.text)
+                    .role("heading")
+                    .level(2)
+                    .wrap()
+                    .w_full(),
+            )
+            .child(paragraph),
+    ];
+    body.extend(extra);
     let count = foot.len().max(1) as f32;
     let fixed = |bordered: bool| 24.0 + if bordered { 2.0 } else { 0.0 };
     let free = width - 48.0 - 8.0 * (count - 1.0) - foot.iter().map(|(_, bordered)| fixed(*bordered)).sum::<f32>();
-    for (child, bordered) in foot {
-        f = f.child(child.w(free / count + fixed(bordered)));
-    }
-    let dlg = col()
-        .key("dlg")
-        .role("dialog")
-        .label(name)
-        .pixel_snap(false)
-        .w(width)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(col().key("dlg-clip").w_full().clip_rounded(8.0).child(body).child(f));
-    col()
-        .key("scrim")
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .center()
-        .fill(scrim_color(t))
-        .child(dlg)
+    let buttons = foot
+        .into_iter()
+        .map(|(child, bordered)| child.w(free / count + fixed(bordered)))
+        .collect();
+    scrim(
+        0.0,
+        dialog::dialog(
+            Dialog {
+                head: Head::None,
+                body,
+                body_top: Some(22.0),
+                foot: Foot::Row(buttons),
+                ..Dialog::new("dlg", name, width)
+            },
+            t,
+        ),
+        t,
+    )
 }

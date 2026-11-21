@@ -15,7 +15,7 @@ use rune::{
     text_input,
 };
 
-use super::{caption, kit};
+use super::{button, caption, kit};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
 
@@ -436,18 +436,7 @@ pub enum ButtonKind {
     Ghost,
 }
 
-/// How a button stands: the board draws a working button at half strength when pressing it
-/// only re-checks (offline), and a running one at full strength with its handler off.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ButtonState {
-    Enabled,
-    /// Half strength, still pressable (DW-A20: "dimmed but tappable").
-    Dim,
-    /// Work is running: full strength, takes no press and no focus (DW-A18).
-    Busy,
-    /// Not yet possible: half strength, takes no press and no focus.
-    Disabled,
-}
+pub use crate::ui::button::ButtonState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonSize {
@@ -467,57 +456,16 @@ pub fn button(
     state: ButtonState,
     t: &Theme,
 ) -> El {
-    let key = keys.next("btn");
-    let (ink, style, h) = (
-        match kind {
-            ButtonKind::Primary => t.accent_text_on,
-            ButtonKind::Outline => t.text,
-            ButtonKind::Ghost => t.text_secondary,
-        },
-        if size == ButtonSize::Lg {
-            type_au::BUTTON_LG
-        } else {
-            type_au::BUTTON_MD
-        },
-        if size == ButtonSize::Lg { 32.0 } else { 28.0 },
-    );
-    let mut b = row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .w_full()
-        .h(h)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(6.0);
-    b = match kind {
-        ButtonKind::Primary => b
-            .fill(t.accent)
-            .hover(oklch(0.78, 0.17, 84.0))
-            .press(oklch(0.74, 0.17, 84.0)),
-        ButtonKind::Outline => b
-            .fill(t.paper)
-            .border(1.0, t.card_border)
-            .border_layout()
-            .hover(t.paper2)
-            .press(t.paper3),
-        ButtonKind::Ghost => b.hover(t.hover).press(t.press),
+    let variant = match kind {
+        ButtonKind::Primary => button::Variant::Primary,
+        ButtonKind::Outline => button::Variant::Secondary,
+        ButtonKind::Ghost => button::Variant::Ghost,
     };
-    if matches!(state, ButtonState::Dim | ButtonState::Disabled) {
-        b = b.opacity(0.5);
-    }
-    b = if matches!(state, ButtonState::Busy | ButtonState::Disabled) {
-        b.disabled(true)
-    } else {
-        b.focusable(true)
-            .focus_ring(2.0, 2.0, t.accent_deep)
-            .cursor(rune::Cursor::Pointer)
+    let size = match size {
+        ButtonSize::Lg => button::Size::Lg,
+        ButtonSize::Md => button::Size::Md,
     };
-    if let Some(icon) = icon {
-        b = b.child(kit::glyph(format!("{key}-icon"), icon, 16.0, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, style, ink))
+    button::button(button::keys(&keys.next("btn")), label, icon, variant, size, state, t).w_full()
 }
 
 // ---------------------------------------------------------------------------
