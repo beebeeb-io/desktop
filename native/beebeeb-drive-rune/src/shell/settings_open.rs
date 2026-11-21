@@ -16,8 +16,16 @@ pub fn open(s: &mut State, tx: &mut Tx, target: &str) {
             }
             true
         }
+        // Diagnostics' Log file row: the folder the log lives in, opened like any folder.
+        "log-folder" => {
+            use crate::frames::open_file::{Target, open_file};
+            if let Some(dir) = crate::log_file::dir() {
+                open_file(s, Target::Path(dir.to_path_buf()));
+            }
+            true
+        }
         "privacy" | "export-my-data" => super::settings_open_pages::open(s, tx, target),
-        "file-explorer" | "support-bundle" | "log-folder" | "choose-photo" => super::settings_open_places::open(s, tx, target),
+        "file-explorer" | "support-bundle" | "choose-photo" => super::settings_open_places::open(s, tx, target),
         _ => false,
     };
     if !taken {

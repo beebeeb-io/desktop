@@ -643,7 +643,7 @@ fn new_folder(s: &State, new: &NewFolder, t: &Theme) -> El {
 
 /// One folder of the Move dialog (`.kit-item`): its icon, name, how much it holds, and the
 /// chevron that says a double-click goes into it.
-fn folder_row(index: usize, folder: &DriveItem, picked: bool, t: &Theme) -> El {
+fn folder_row(index: usize, of: usize, folder: &DriveItem, picked: bool, t: &Theme) -> El {
     let key = format!("item-0-{index}");
     let count = item_count(folder);
     // `.kit-item + .kit-item::before`: a hairline above every row but the first, from 10 pt in.
@@ -655,7 +655,10 @@ fn folder_row(index: usize, folder: &DriveItem, picked: bool, t: &Theme) -> El {
     });
     let mut r = row()
         .key(key.clone())
-        .role("option")
+        .role("treeitem")
+        .level(1)
+        .expanded(false)
+        .position_in_set(index + 1, of)
         .label(format!("{}, {count}", folder.name))
         .checked(picked)
         .w_full()
@@ -774,11 +777,11 @@ fn move_to(m: &MoveTo, t: &Theme) -> El {
     } else {
         let mut rows = col().key("list-0-rows").w_full().clip_rounded(radius::LG);
         for (i, folder) in m.choices.iter().enumerate() {
-            rows = rows.child(folder_row(i, folder, m.picked == Some(i), t));
+            rows = rows.child(folder_row(i, m.choices.len(), folder, m.picked == Some(i), t));
         }
         let mut list = col()
             .key(MOVE_LIST)
-            .role("listbox")
+            .role("tree")
             .label("Folders")
             .focusable(true)
             .no_focus_ring()

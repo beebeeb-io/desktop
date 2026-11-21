@@ -378,7 +378,7 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
             2,
             &Item::new(Some(&icons::LOCK), "Password").ruled(),
             vec![banner::pressable(
-                lists::switch("item-0-2", "Password", share.password_on, t)
+                crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-2"), "", share.password_on, true, crate::ui::button::Size::Md, t).label("Password")
                     .description("The link then asks for a password you choose."),
                 State::share_toggle_password,
             )],

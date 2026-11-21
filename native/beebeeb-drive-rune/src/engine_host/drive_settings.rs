@@ -1090,13 +1090,6 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         }
     }
 
-    fn reveal_log_file(&mut self) -> bool {
-        match crate::log_file::dir() {
-            Some(dir) => (self.os.reveal)(&dir.join(crate::log_file::FILE_NAME)),
-            None => false,
-        }
-    }
-
     /// "Choose photo": the OS's photo picker (a worker's call: it blocks), then the pick measured here.
     fn choose_photo(&mut self) {
         let platform = self.platform.clone();

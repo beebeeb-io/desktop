@@ -93,6 +93,7 @@ pub fn segments(n: usize, name: &str, tabs: &[(&'static str, bool)], t: &Theme, 
         .key(format!("seg-{n}"))
         .role("tablist")
         .label(name)
+        .focus_group()
         .padding(2.0)
         .radius(10.0)
         .fill(t.field)

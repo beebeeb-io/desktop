@@ -428,7 +428,7 @@ fn close_upload_menu(s: &mut State, _: &mut Tx) {
     s.actions.upload_menu = None;
 }
 
-fn upload_row(i: usize, upload: &Upload, menu_open: bool, t: &Theme) -> El {
+fn upload_row(i: usize, of: usize, upload: &Upload, menu_open: bool, t: &Theme) -> El {
     let key = format!("upload-{i}");
     let (sub, ink, done) = match &upload.state {
         UploadState::Failed(why) => (why.clone(), crate::theme::tokens::red_text(t.dark), None),
@@ -455,7 +455,7 @@ fn upload_row(i: usize, upload: &Upload, menu_open: bool, t: &Theme) -> El {
         &upload.name,
         Vec::new(),
         cells,
-        RowLook::default(),
+        RowLook { position: Some((i + 1, of)), ..RowLook::default() },
         t,
     )
     .on_secondary_press(move |s: &mut State, _: rune::PointerPress, _: &mut Tx| {
@@ -524,6 +524,7 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
         for (i, upload) in rows {
             body.push(upload_row(
                 i,
+                uploads.items.len(),
                 upload,
                 menu == Some(upload.id.as_str()) && s.actions.source.cancels_upload(&upload.id),
                 t,

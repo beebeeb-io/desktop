@@ -201,6 +201,7 @@ dev-viewer = []
 # Test helpers (`*_for_test`, in-memory databases, injected failures) for the tests of a crate that depends on this
 # one. Never enabled by a release build: the native app turns it on under `[dev-dependencies]` only.
 test-support = ["direct-state-db"]
+macos-test-engine = ["test-support"]
 # Task 2475: `bb-fake-server` (below), the test helpers' fake account on loopback for native checks of a TEST build.
 # Dev-only: it implies `test-support`, so a release build of it does not compile (`lib.rs`); no app names it
 # (`tests/fake_server.rs`); the default feature set does not build it.

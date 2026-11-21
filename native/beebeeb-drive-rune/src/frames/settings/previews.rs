@@ -342,7 +342,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             &Item::new(Some(&ic::IMAGE), "Photo previews")
                 .sub("Photos open instantly, without downloading the original"),
             vec![
-                lists::switch("item-0-0", "Photo previews", on, t)
+                crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-0"), "", on, true, crate::ui::button::Size::Md, t).label("Photo previews")
                     .on_press(move |s: &mut State| s.settings.drive.set_photo_previews(!on)),
             ],
             t,

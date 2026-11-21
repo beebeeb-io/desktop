@@ -100,6 +100,7 @@ pub mod signup_api;
 pub mod state_owner;
 pub mod transfer_limits_api;
 pub mod trash_api;
+mod thumb_cache_api;
 // What uploads, Try again on one, and the cancel of a new file's upload, for the native Files window.
 pub mod downloads_api;
 pub mod uploads_api;

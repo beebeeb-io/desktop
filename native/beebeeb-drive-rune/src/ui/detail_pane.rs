@@ -192,45 +192,6 @@ pub fn meta_row(key: &'static str, label: &'static str, value: &str, mono: bool,
         )
 }
 
-/// `shadow-1` of a knob that is on: the ink at 4 % and 6 %, the same in both themes (DW-0412's board).
-fn knob_ink(alpha: f32) -> Color {
-    Color {
-        a: alpha,
-        ..rune::color::hex("#14110D").unwrap_or(Color::BLACK)
-    }
-}
-
-/// A switch (the kit's Switch): 36 x 20, off is a recessed track, on is ink.
-/// Keys: `<key>-switch`, `<key>-knob`.
-pub fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
-    row()
-        .key(format!("{key}-switch"))
-        .role("switch")
-        .label(name)
-        .checked(on)
-        .size(36.0, 20.0)
-        .radius(10.0)
-        .fill(if on { t.text } else { t.paper3 })
-        .border(1.0, if on { t.text } else { t.separator_strong })
-        .border_layout()
-        .center_y()
-        .focusable(true)
-        .child(
-            el().key(format!("{key}-knob"))
-                .size(14.0, 14.0)
-                .radius(7.0)
-                // The knob of a switch that is on is the paper's colour (DW-0412's board).
-                .fill(if on { t.paper } else { t.white })
-                .box_shadow(kit::drop(1.0, 3.0, if on { knob_ink(0.04) } else { t.shadow }))
-                .box_shadow(kit::drop(
-                    1.0,
-                    2.0,
-                    if on { knob_ink(0.06) } else { Color::TRANSPARENT },
-                ))
-                .ml(if on { 18.0 } else { 2.0 }),
-        )
-}
-
 /// A card with one switch row (`.kit-list-body` > `.kit-item`): a title, a second line and
 /// the switch. Keys: `<key>-card`, `<key>-label`, `<key>-detail`, `<key>-switch`.
 pub fn switch_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
@@ -253,7 +214,7 @@ pub fn switch_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El
                 .child(kit::label(format!("{key}-label"), title, type_::ITEM_TITLE, t.text).truncate())
                 .child(kit::label(format!("{key}-detail"), sub, type_::BODY.lh(15.0), t.text_tertiary).truncate()),
         )
-        .child(switch(key, title, on, t))
+        .child(crate::ui::switch::switch_sized(&format!("{key}-switch"), "", on, true, crate::ui::button::Size::Md, t).label(title))
 }
 
 /// A small outlined button (`.kit-btn.kit-btn-sm`). Keys: `<key>-box`, `<key>-icon`, `<key>-btn`.
