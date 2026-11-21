@@ -85,6 +85,7 @@ fn filter(ui: &Ui, t: &Theme) -> El {
         .key("seg-0")
         .role("tablist")
         .label("Show")
+        .focus_group()
         .padding(2.0)
         .radius(10.0)
         .fill(t.field)

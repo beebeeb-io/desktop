@@ -828,8 +828,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(&t))
-        .child(shell::pane(children, &t));
+        .child(crate::ui::focus::pane(sidebar(&t), "backups-sidebar"))
+        .child(crate::ui::focus::pane(shell::pane(children, &t), "backups-main"));
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }
