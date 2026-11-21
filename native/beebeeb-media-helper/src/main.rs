@@ -6,5 +6,8 @@
 #![deny(unsafe_code)]
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(beebeeb_media_protocol::image::IMAGE_MODE_ARG) {
+        return beebeeb_media_helper::image_decode::run(std::io::stdin(), std::io::stdout());
+    }
     beebeeb_media_helper::session::run(std::io::stdin(), std::io::stdout());
 }
