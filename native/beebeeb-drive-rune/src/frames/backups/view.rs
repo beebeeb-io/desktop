@@ -157,7 +157,7 @@ fn folder_row(index: usize, folder: &Folder, button: usize, t: &Theme) -> El {
         bk::ghost_button(button, "Remove", &format!("Remove {}", folder.name), t)
             .on_press(move |s: &mut State| s.backups.ask_stop_folder(&id))
     } else {
-        lists::switch(&format!("item-0-{index}"), &folder.name, folder.on, t)
+        crate::ui::switch::switch_sized(&format!("{}-switch", &format!("item-0-{index}")), "", folder.on, true, crate::ui::button::Size::Md, t).label(&folder.name)
             .on_press(move |s: &mut State| s.backups.toggle_folder(&id))
     };
     lists::item_with(0, index, &item, vec![control], t)

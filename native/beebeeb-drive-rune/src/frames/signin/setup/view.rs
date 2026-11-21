@@ -156,7 +156,7 @@ pub(super) fn ghost(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to
 }
 
 fn switch(row_key: &str, name: &str, on: bool, t: &Theme, to: impl Fn(&mut Ui) + 'static) -> El {
-    settings_list::switch(row_key, name, on, t)
+    crate::ui::switch::switch_sized(&format!("{}-switch", row_key), "", on, true, crate::ui::button::Size::Md, t).label(name)
         .focus_ring(2.0, 2.0, t.accent_deep)
         .cursor(rune::Cursor::Pointer)
         .on_press_tx(act(to))

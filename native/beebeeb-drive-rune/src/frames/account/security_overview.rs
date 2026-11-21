@@ -314,7 +314,7 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
         controls.push(super::app_lock_password::link(t));
     }
     controls.push(
-        lists::switch("item-1-0", "Lock Beebeeb", on, t).on_press(move |s: &mut State| {
+        crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-0"), "", on, true, crate::ui::button::Size::Md, t).label("Lock Beebeeb").on_press(move |s: &mut State| {
             if let Some(source) = s.account.source.as_mut() {
                 source.set_app_lock(!on);
             }
@@ -350,7 +350,7 @@ fn capture_row(on: bool, t: &Theme) -> El {
         3,
         &it,
         vec![
-            lists::switch("item-1-3", "Hide Beebeeb from screen capture and remote desktop", on, t).on_press(
+            crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-3"), "", on, true, crate::ui::button::Size::Md, t).label("Hide Beebeeb from screen capture and remote desktop").on_press(
                 move |s: &mut State| s.shell.set_hide_from_capture(!on),
             ),
         ],

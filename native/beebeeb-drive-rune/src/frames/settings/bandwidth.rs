@@ -670,7 +670,7 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_control: bool
             2,
             &metered,
             vec![
-                lists::switch(&format!("item-{list}-2"), "Sync on metered connections", on, t)
+                crate::ui::switch::switch_sized(&format!("{}-switch", &format!("item-{list}-2")), "", on, true, crate::ui::button::Size::Md, t).label("Sync on metered connections")
                     .on_press(move |s: &mut State| s.settings.drive.set_sync_on_metered(!on)),
             ],
             t,

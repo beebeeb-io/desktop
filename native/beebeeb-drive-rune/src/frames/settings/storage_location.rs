@@ -96,7 +96,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     if !chosen.default {
         let title = format!("Only store in {}", chosen.name);
         let on = l.only_here;
-        let switch = lists::switch("item-1-0", &title, on, t)
+        let switch = crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-0"), "", on, true, crate::ui::button::Size::Md, t).label(&title)
             .on_press(move |s: &mut State| s.settings.source.set_only_here(!on));
         children.push(lists::list(
             1,
