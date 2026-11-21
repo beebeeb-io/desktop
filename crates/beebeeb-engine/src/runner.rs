@@ -709,7 +709,7 @@ async fn run(
                     if awaiting_first_list {
                         retry_marks_step(&sync_root).await;
                     }
-                                    emit_payload(&app, paused_payload(&tracker, hold));
+                    emit_payload(&app, paused_payload(&tracker, hold));
                     set_telemetry_state(&telemetry, "paused");
                     // Windows breadcrumb flyout: reflect the paused state.
                     #[cfg(target_os = "windows")]
