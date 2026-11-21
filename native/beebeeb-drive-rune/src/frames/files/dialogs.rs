@@ -18,6 +18,7 @@ use crate::theme::{icons, icons_settings};
 use crate::ui::settings_dialog::{self, Weight};
 use crate::ui::settings_list::VALUE_MONO;
 use crate::ui::settings_shell::SUB;
+use crate::ui::view_state::{self, ViewState};
 use crate::ui::{button, dialog, field, kit};
 use rune::{Color, El, KeyEvent, TextEdit, TextStyle, Tx, col, el, row};
 
@@ -61,6 +62,8 @@ pub struct MoveTo {
     pub picked: Option<usize>,
     /// Why the last Move did not happen (a name already used there).
     pub error: Option<String>,
+    /// The folder could not be read: why. Try again reads it again (`State::move_retry`).
+    pub failed: Option<crate::source::SourceError>,
     /// Who asked: Files' own Move, or Photos (a Move of photos; the folder to add in Photo sources).
     pub purpose: Purpose,
 }
@@ -77,6 +80,22 @@ pub enum Purpose {
 }
 
 impl MoveTo {
+    /// What a read of the folder shown gave: its folders (`picked` chosen, the first when `None`), or why not.
+    fn set_choices(&mut self, read: Result<Vec<DriveItem>, crate::source::SourceError>, picked: Option<usize>) {
+        match read {
+            Ok(choices) => {
+                self.picked = picked.or(if choices.is_empty() { None } else { Some(0) });
+                self.choices = choices;
+                self.failed = None;
+            }
+            Err(why) => {
+                self.choices = Vec::new();
+                self.picked = None;
+                self.failed = Some(why);
+            }
+        }
+    }
+
     /// The folder shown.
     pub fn here(&self) -> &Crumb {
         // `path` always holds the root.
@@ -136,15 +155,30 @@ pub(super) fn plain_enter(ev: &KeyEvent) -> bool {
 impl State {
     /// The folders the Move dialog offers inside `folder`: the rows of the source that are
     /// folders, without Backups and service folders (DW-0409) and without what is being moved.
-    fn move_choices(&self, folder: Option<&str>, moving: &[DriveItem]) -> Vec<DriveItem> {
-        let Ok(listing) = self.source.list(folder) else {
-            return Vec::new();
-        };
-        listing
+    fn move_choices(
+        &self,
+        folder: Option<&str>,
+        moving: &[DriveItem],
+    ) -> Result<Vec<DriveItem>, crate::source::SourceError> {
+        let listing = self.source.list(folder)?;
+        Ok(listing
             .items
             .into_iter()
             .filter(|i| i.is_folder && !i.is_protected && !moving.iter().any(|m| m.id == i.id))
-            .collect()
+            .collect())
+    }
+
+    /// Try again on the Move dialog's folders: the folder shown is read again.
+    pub fn move_retry(&mut self) {
+        if self.refused_in_a_dialog() {
+            return;
+        }
+        let Some(m) = self.move_dialog() else { return };
+        let (here, moving) = (m.here().id.clone(), m.items.clone());
+        let read = self.move_choices(here.as_deref(), &moving);
+        if let Some(m) = self.move_dialog() {
+            m.set_choices(read, None);
+        }
     }
 
     /// Move… (DW-0409): the dialog on the root's folders, the first one chosen. Nothing that is
@@ -181,17 +215,20 @@ impl State {
             id: None,
             name: "Files".into(),
         });
-        let choices = self.move_choices(root.id.as_deref(), &items);
+        let read = self.move_choices(root.id.as_deref(), &items);
         self.actions.menu = None;
         self.actions.rename = None;
-        self.actions.dialog = Some(Dialog::Move(MoveTo {
-            picked: if choices.is_empty() { None } else { Some(0) },
+        let mut m = MoveTo {
+            picked: None,
             items,
             path: vec![root],
-            choices,
+            choices: Vec::new(),
+            failed: None,
             error: None,
             purpose,
-        }));
+        };
+        m.set_choices(read, None);
+        self.actions.dialog = Some(Dialog::Move(m));
     }
 
     fn move_dialog(&mut self) -> Option<&mut MoveTo> {
@@ -246,14 +283,15 @@ impl State {
             return;
         };
         let moving = m.items.clone();
-        let choices = self.move_choices(Some(&folder.id), &moving);
+        let read = self.move_choices(Some(&folder.id), &moving);
         if let Some(m) = self.move_dialog() {
             m.path.push(Crumb {
                 id: Some(folder.id),
                 name: folder.name,
             });
+            m.set_choices(read, None);
+            // Going into a folder chooses nothing in it.
             m.picked = None;
-            m.choices = choices;
             m.error = None;
         }
     }
@@ -270,12 +308,12 @@ impl State {
         let left = m.path[depth + 1].id.clone();
         let here = m.path[depth].id.clone();
         let moving = m.items.clone();
-        let choices = self.move_choices(here.as_deref(), &moving);
+        let read = self.move_choices(here.as_deref(), &moving);
         if let Some(m) = self.move_dialog() {
             m.path.truncate(depth + 1);
+            m.set_choices(read, None);
             // The folder just left is the chosen one, as in a file picker.
-            m.picked = choices.iter().position(|c| Some(&c.id) == left.as_ref());
-            m.choices = choices;
+            m.picked = m.choices.iter().position(|c| Some(&c.id) == left.as_ref());
             m.error = None;
         }
     }
@@ -462,7 +500,8 @@ impl State {
         }
         match (new.back_to, made) {
             (Some(mut back), made) => {
-                back.choices = self.move_choices(back.here().id.as_deref(), &back.items);
+                let read = self.move_choices(back.here().id.as_deref(), &back.items);
+                back.set_choices(read, None);
                 if let Some(made) = made {
                     back.picked = back.choices.iter().position(|c| c.id == made.id);
                 }
@@ -710,8 +749,28 @@ fn move_to(m: &MoveTo, t: &Theme) -> El {
         }
     }
     let mut body = vec![path];
-    if m.choices.is_empty() {
-        body.push(kit::label("dlg-text-0", "No folders in here.", SUB, t.text_tertiary));
+    if let Some(why) = m.failed {
+        let retry = view_state::try_again("move-failed", t).on_press(|s: &mut State| s.move_retry());
+        body.push(view_state::view_state(
+            ViewState::Failed {
+                key: "move-failed",
+                title: "Couldn\u{2019}t read this folder",
+                why: why.message(),
+                retry: Some(retry),
+            },
+            t,
+        ));
+    } else if m.choices.is_empty() {
+        body.push(view_state::view_state(
+            ViewState::Empty {
+                key: "move-empty",
+                icon: &icons_settings::FOLDER,
+                title: "No folders in here",
+                body: "Move into this folder, or make a new one with New folder.",
+                action: None,
+            },
+            t,
+        ));
     } else {
         let mut rows = col().key("list-0-rows").w_full().clip_rounded(radius::LG);
         for (i, folder) in m.choices.iter().enumerate() {

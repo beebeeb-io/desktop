@@ -565,8 +565,8 @@ fn tab_goes_round_the_move_dialog_and_never_under_it() {
         tab_cycle(&mut rt, NONE),
         [MOVE_LIST, "btn-0", "btn-1", "btn-2", "dlg-path-0"]
     );
-    // A folder without folders has no list: the keyboard is still inside the dialog, Tab goes
-    // round what is left, and Left goes back up to the list.
+    // A folder that cannot be read has no list and says so, with Try again (a stop of its own): the keyboard is
+    // still inside the dialog, Tab goes round what is left, and Left goes back up to the list.
     press(&mut rt, Key::Down, NONE);
     press(&mut rt, Key::Right, NONE);
     let Some(Dialog::Move(m)) = &rt.state.actions.dialog else {
@@ -579,7 +579,7 @@ fn tab_goes_round_the_move_dialog_and_never_under_it() {
     sorted.sort();
     assert_eq!(
         sorted,
-        ["btn-0", "btn-1", "btn-2", "dlg-path-0", "dlg-path-1"],
+        ["btn-0", "btn-1", "btn-2", "dlg-path-0", "dlg-path-1", "move-failed-retry"],
         "{stops:?}"
     );
     press(&mut rt, Key::Left, NONE);
