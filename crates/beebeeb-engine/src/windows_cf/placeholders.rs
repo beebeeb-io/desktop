@@ -1110,10 +1110,19 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
     else {
         return Ok(false);
     };
+    // Task 2199 N4: hash through a SHARED read handle first, so a user's open during the hash is not refused; only
+    // a file whose bytes are the agreed content is then opened exclusively, and its size and mtime are re-checked
+    // there so no write landed after the hash.
+    before_data_open(path);
+    let Some(before) = hash_shared(path) else {
+        return Ok(false);
+    };
+    if before.0 != agreed {
+        return Ok(false);
+    }
     // Task 2270 (spec S1): without write-data access, so a read-only file is marked too. Exclusive: while this
     // handle is open no other handle can be opened to write.
-    before_data_open(path);
-    let Ok(mut file) = open_exclusive_without_write_data(path) else {
+    let Ok(file) = open_exclusive_without_write_data(path) else {
         return Ok(false);
     };
     // Review F9: re-read through the handle: reading a file not wholly on disk would fetch the rest.
@@ -1125,10 +1134,10 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
     if read_identity(HANDLE(file.as_raw_handle()))?.as_deref() != Some(file_id.as_bytes()) {
         return Ok(false);
     }
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    if format!("{:x}", hasher.finalize()) != agreed {
+    let Ok(meta) = file.metadata() else {
+        return Ok(false);
+    };
+    if (meta.len(), meta.modified().ok()) != before.1 {
         return Ok(false);
     }
     // SAFETY: the handle belongs to `file`, open for the whole call.
@@ -1141,6 +1150,25 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
         )
     }?;
     Ok(true)
+}
+
+/// Task 2199 N4: the SHA-256 of `path`'s bytes read through a shared handle, with the size and mtime the file had
+/// after the read. `None` when it cannot be opened or read.
+#[allow(clippy::type_complexity)]
+fn hash_shared(path: &std::path::Path) -> Option<(String, (u64, Option<std::time::SystemTime>))> {
+    use sha2::{Digest, Sha256};
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .ok()?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).ok()?;
+    let meta = file.metadata().ok()?;
+    Some((format!("{:x}", hasher.finalize()), (meta.len(), meta.modified().ok())))
 }
 
 pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {

@@ -331,9 +331,7 @@ thread_local! {
     allow(dead_code)
 )]
 pub(super) fn rel_under(sync_root: &Path, path: &Path) -> String {
-    path.strip_prefix(sync_root)
-        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default()
+    relative_db_path(sync_root, path).unwrap_or_default()
 }
 
 /// Resolve a parent's FULL relative path from the local mirror by its `file_id`
@@ -414,5 +412,21 @@ mod canonical_root_tests {
         assert_eq!(relative_db_path(&real, &via.join("a").join("f.txt")).as_deref(), Some("a/f.txt"));
         assert_eq!(relative_db_path(&real, &dir.join("other")), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod rel_under_tests {
+    use super::*;
+
+    /// Task 2199 F12: `rel_under` is `relative_db_path` with an empty string for "not under the root".
+    #[test]
+    fn rel_under_agrees_with_relative_db_path() {
+        let root = std::path::PathBuf::from("/sync");
+        for path in [root.join("a.txt"), root.join("d").join("b.md"), std::path::PathBuf::from("/other/c")] {
+            assert_eq!(rel_under(&root, &path), relative_db_path(&root, &path).unwrap_or_default());
+        }
+        assert_eq!(rel_under(&root, &root.join("d").join("b.md")), "d/b.md");
+        assert_eq!(rel_under(&root, &std::path::PathBuf::from("/other/c")), "");
     }
 }
