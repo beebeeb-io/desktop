@@ -603,6 +603,43 @@ fn only_the_last_pages_are_kept_and_an_earlier_one_is_rendered_again_when_it_is_
 }
 
 #[test]
+fn a_pdf_whose_helper_stops_at_a_page_shows_failed_once_and_try_again_opens_it_anew() {
+    let fake = Fake::new();
+    let mut hostile = sample_pdf(2, 612, 792);
+    hostile.extend_from_slice(viewer_pdf::tests::STOPS_AT_A_PAGE);
+    fake.put("f-pdf", "Invented hostile.pdf", &hostile);
+    let (mut source, _, body) = opened(&fake, "f-pdf");
+    assert!(matches!(body, Body::Pdf(ref doc) if doc.pages == 2), "{body:?}");
+    // The page is asked of the helper, and the helper ends on it: only the helper. The view is told Failed (the
+    // state with Try again), once, and no page of this opening is waited for or shown after it.
+    assert!(source.picture("f-pdf", Picture::Page(1)).is_none());
+    let began = Instant::now();
+    let said = loop {
+        if let Some(body) = source.poll("f-pdf") {
+            break body;
+        }
+        assert!(began.elapsed() < Duration::from_secs(20), "the stop was never said");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(said, Body::Failed);
+    assert_eq!(source.poll("f-pdf"), None, "said once");
+    assert!(source.picture("f-pdf", Picture::Page(1)).is_none());
+    assert!(!source.finds(), "nothing of the stopped opening is searched");
+    // Try again: the file is read and opened anew, in a new helper.
+    assert!(source.retry("f-pdf").is_ok());
+    assert_eq!(fake.s().fetches.len(), 1, "the first open's download; the retry's comes on its worker");
+    let began = Instant::now();
+    let again = loop {
+        if let Some(body @ Body::Pdf(_)) = source.poll("f-pdf") {
+            break body;
+        }
+        assert!(began.elapsed() < Duration::from_secs(20), "the retry never opened");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(matches!(again, Body::Pdf(ref doc) if doc.pages == 2), "{again:?}");
+}
+
+#[test]
 fn a_pdfs_pages_leave_with_its_session_and_a_page_on_its_way_is_never_shown() {
     let fake = Fake::new();
     fake.put("f-pdf", "Invented plan.pdf", &sample_pdf(2, 612, 792));

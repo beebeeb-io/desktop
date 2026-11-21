@@ -15,7 +15,7 @@
 //!     ([`Engine::open_file_in_memory`]: the path every hydrate uses, no crypto here), with the engine's
 //!     progress.
 //!   Text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP pictures and PDFs are shown. A PDF's pages are
-//!   rendered on the same worker, page by page as the view shows them (`viewer_pdf`), from memory.
+//!   drawn by the confined helper, asked from the same worker page by page as the view shows them (`viewer_pdf`).
 //! - which app opens a file: a list's Open of a file that is kept on this PC while sync runs goes to the file's
 //!   own app ([`ViewerSource::kept_on_this_pc`]) when that app shows it (a document, a picture); the viewer is
 //!   for a file that is not on this PC (no download to disk), for a route that names a file directly, and for
@@ -765,23 +765,25 @@ fn content_of(shows: Shows, bytes: &[u8], cancel: &AtomicBool) -> Content {
     }
 }
 
-/// Open the PDF in `bytes` (taken: the document reads the engine's buffer and wipes it when it is dropped). The
-/// view's body, and the document for its pages when it opened.
-fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str) -> (Body, Option<viewer_pdf::Document>) {
-    match viewer_pdf::Document::open(bytes) {
-        Ok(document) => (
+/// Open the PDF in `bytes` in the confined helper (a copy stays with the session, for find; both are wiped when
+/// they are let go). The view's body, and the session for its pages when it opened.
+fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str, cancel: &AtomicBool) -> (Body, Option<viewer_pdf::Session>) {
+    match viewer_pdf::Session::open(viewer_pdf::start(bytes.clone()), bytes, cancel) {
+        Ok(session) => (
             Body::Pdf(PdfDoc {
-                pages: document.pages(),
+                pages: session.pages(),
                 page: 1,
                 size: size.to_string(),
             }),
-            Some(document),
+            Some(session),
         ),
+        Err(viewer_pdf::NotOpened::Stopped) => (Body::Failed, None),
         Err(why) => (
             Body::NotPreviewable(match why {
                 viewer_pdf::NotOpened::Locked => NoPreview::PdfLocked,
                 viewer_pdf::NotOpened::TooLong { pages } => NoPreview::PdfTooLong { pages },
-                viewer_pdf::NotOpened::Unreadable => NoPreview::PdfUnreadable,
+                viewer_pdf::NotOpened::NoRenderer => NoPreview::NoViewer,
+                _ => NoPreview::PdfUnreadable,
             }),
             None,
         ),
@@ -1008,7 +1010,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     }
                 };
                 // A panic in this worker must not leave the view on "Decrypting" for good: it answers Failed.
-                let (answer, document): (Answer, Option<viewer_pdf::Document>) =
+                let (answer, document): (Answer, Option<viewer_pdf::Session>) =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let (session, bytes, origin) =
                             match read(&*engine, &file_id, recorded, IN_MEMORY_MAX, &report, &cancel) {
@@ -1017,7 +1019,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                             };
                         let (mut content, document) = match (&pdf, shows) {
                             (Some(ends), Shows::Pdf) => {
-                                let (body, document) = open_pdf(bytes, &ends.size);
+                                let (body, document) = open_pdf(bytes, &ends.size, &cancel);
                                 let content = Content {
                                     body: Some(body),
                                     picture: None,
@@ -1043,9 +1045,9 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 let cancelled = answer.is_err();
                 let _ = answers.send(answer);
                 engine.wake();
-                // An open PDF: this thread keeps the document and renders the pages the view asks for, until
-                // the file is left (the asker goes) or its session moves on (`cancel`). Then the document is
-                // dropped, and the bytes it read from are overwritten.
+                // An open PDF: this thread keeps its helper and asks it for the pages the view asks for, until the
+                // file is left (the asker goes), its session moves on (`cancel`) or the helper stops. Then the
+                // helper is ended, and the bytes kept for find are overwritten.
                 if let (Some(document), Some(ends), false) = (document, pdf, cancelled) {
                     let page = |page, rendered: Option<viewer_pdf::Rendered>| {
                         let lacks_text = rendered.as_ref().is_some_and(|rendered| rendered.lacks_text);
@@ -1057,7 +1059,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                         let _ = ends.found.send((serial, matches));
                         engine.wake();
                     };
-                    document.serve_asks(&ends.asks, &cancel, &page, &found);
+                    let stopped = || {
+                        ends.stopped.store(true, Ordering::SeqCst);
+                        engine.wake();
+                    };
+                    document.serve(&ends.asks, &cancel, &page, &found, &stopped);
                 }
             })
             .is_ok()
@@ -1168,6 +1174,12 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                         total: now.1,
                     }
                 })
+            }
+            // The helper that draws the PDF's pages stopped: nothing more comes of this opening. Try again opens anew.
+            Err(_) if opening.pages.as_ref().is_some_and(Pages::take_stopped) => {
+                log("viewer: the PDF renderer stopped");
+                opening.pages = None;
+                Some(Body::Failed)
             }
             // A page of the open PDF came back: the same document again, so the view is drawn with the page.
             Err(_) if opening.pages.as_ref().is_some_and(Pages::take_in) => opening
