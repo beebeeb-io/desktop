@@ -52,6 +52,8 @@ pub(crate) async fn revoke(client: &reqwest::Client, base: &str, token: &str) {
 /// store) leaves the bounded try alone, as before.
 pub(crate) async fn revoke_owing(client: &reqwest::Client, base: &str, token: &str, owed: &OwedRevocations) {
     let recorded = owed.owe(token).is_ok();
+    // Another task (the start paying the list) is already asking for this token: it settles it.
+    let Some(_claim) = owed.claim(token) else { return };
     if send_logout(client, base, token).await && recorded {
         let _ = owed.settle(token);
     }
@@ -60,6 +62,7 @@ pub(crate) async fn revoke_owing(client: &reqwest::Client, base: &str, token: &s
 /// Pay what is owed: one request per token; each the server answered is settled, the rest stays for the next time.
 pub(crate) async fn pay_owed(client: &reqwest::Client, base: &str, owed: &OwedRevocations) {
     for token in owed.owed() {
+        let Some(_claim) = owed.claim(&token) else { continue };
         if send_logout(client, base, &token).await {
             let _ = owed.settle(&token);
         }

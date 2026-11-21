@@ -26,6 +26,21 @@ pub(crate) trait OwedBackend: Send + Sync {
 pub(crate) struct OwedRevocations {
     backend: Box<dyn OwedBackend>,
     lock: Mutex<()>,
+    /// Tokens whose logout is being asked right now: one request per token at a time (a sign-out's own try and the
+    /// start's payment of the list never both ask for the same one).
+    in_flight: Mutex<std::collections::HashSet<String>>,
+}
+
+/// The claim on one token's logout; released on drop.
+pub(crate) struct InFlight<'a> {
+    owed: &'a OwedRevocations,
+    token: String,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.owed.in_flight.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.token);
+    }
 }
 
 impl OwedRevocations {
@@ -33,7 +48,14 @@ impl OwedRevocations {
         Self {
             backend,
             lock: Mutex::new(()),
+            in_flight: Mutex::new(Default::default()),
         }
+    }
+
+    /// Claim the right to ask the server about `token`. `None`: another task is asking right now and settles it.
+    pub(crate) fn claim(&self, token: &str) -> Option<InFlight<'_>> {
+        let fresh = self.in_flight.lock().unwrap_or_else(|e| e.into_inner()).insert(token.to_string());
+        fresh.then(|| InFlight { owed: self, token: token.to_string() })
     }
 
     /// The OS credential store of `identity`.

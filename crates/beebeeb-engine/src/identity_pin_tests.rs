@@ -273,6 +273,7 @@ const CONSUMERS: &[(&str, &str, usize)] = &[
     ("ipc_socket/macos_staging.rs", "macos_app_group", 1),
     ("ipc_socket/thumbnails.rs", "scratch_dir_in", 1),
     ("keychain.rs", "credential_service", 6),
+    ("keychain/owed_revocations.rs", "credential_service", 1),
     ("linux_fuse/mod.rs", "config_dir_name", 1),
     ("linux_fuse/mod.rs", "scratch_dir_in", 1),
     ("local_state.rs", "logs_dir_name", 1),
