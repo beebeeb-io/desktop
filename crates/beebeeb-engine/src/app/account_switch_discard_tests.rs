@@ -261,3 +261,23 @@ fn a_name_already_in_the_kept_folder_is_never_overwritten() {
     want.sort();
     assert_eq!(kept_files(&kept_root(&pc)), want);
 }
+
+/// 079b: A's cached thumbnails are gone once the switch to B went through.
+#[test]
+fn a_switch_removes_the_previous_accounts_thumb_cache() {
+    let pc = Pc::new();
+    a_left_unsent(&pc, &a_with("thumb"), 1);
+    let port = DiscardPort::new(&pc);
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([7; 32]);
+    let cache = crate::thumb_cache::ThumbCache::new(
+        &pc.engine.config.state_dir,
+        &pc.engine.config.account_id,
+        &master,
+        crate::thumb_cache::DEFAULT_CAP_MB,
+    );
+    cache.put("0190d8a6-1b2c-7d3e-8f40-0123456789ab", 1, 2, 2, &[1u8; 16]).unwrap();
+    assert!(cache.get("0190d8a6-1b2c-7d3e-8f40-0123456789ab").is_some());
+    let ask = pc.engine.discard_and_switch_ask_with(&pc.root(), &port).unwrap();
+    pc.engine.discard_and_switch_with(&ask, pc.root(), &port).unwrap();
+    assert!(cache.get("0190d8a6-1b2c-7d3e-8f40-0123456789ab").is_none(), "A's thumbnail is gone");
+}

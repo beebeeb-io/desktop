@@ -64,6 +64,7 @@ impl<C: CredentialStores> Engine<C> {
         match self.remove_the_previous_account(data, previous, sync_root, port) {
             Ok(()) => {
                 tracing::info!("account switch: the previous account's local data was removed");
+                self.wipe_thumb_cache_at_session_end(); // A's thumbnails (079); the cache is keyed by this install's slot.
                 false
             }
             Err(why) => {

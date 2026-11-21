@@ -1115,6 +1115,7 @@ impl<C: CredentialStores> Engine<C> {
             self.office_before_session_end(office_session_end::SessionEnding::SignOut);
             self.wipe_office_recovery_at_session_end();
             self.end_office_scratch_at_session_end();
+            self.wipe_thumb_cache_at_session_end(); // The previous account's thumbnails do not outlive its session.
             let mut vault = self.vault();
             let token = vault
                 .session_token()

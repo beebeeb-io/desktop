@@ -104,3 +104,7 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "thumb_wipe_session_end_tests.rs"]
+mod thumb_wipe_session_end_tests;
