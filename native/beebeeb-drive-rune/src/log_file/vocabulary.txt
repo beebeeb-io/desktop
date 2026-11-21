@@ -109,6 +109,7 @@ beside
 best-effort
 bind
 binding
+bit
 bitmap
 blobs
 bootstrapping
@@ -997,7 +998,7 @@ task
 telemetry
 tell
 temp
-ten bit
+ten
 terminal
 termination
 terms
@@ -1055,7 +1056,6 @@ undone
 unfinished
 unjournalled
 unknown
-unknown codec
 unknown-content
 unknown_item
 unlocked
