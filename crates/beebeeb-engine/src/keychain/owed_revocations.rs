@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 /// The entry's name: after the account-scoped leaves, never one a person's account can be called.
+#[cfg_attr(test, allow(dead_code))] // a test build keeps its list in memory (`Engine::open`)
 const ENTRY: &str = "owed-revocations";
 
 /// Where the sealed list lives. One entry, replaced whole.
@@ -36,6 +37,7 @@ impl OwedRevocations {
     }
 
     /// The OS credential store of `identity`.
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn platform(identity: &'static EngineIdentity) -> Self {
         Self::with_backend(Box::new(PlatformBackend {
             service: identity.credential_service(),
@@ -97,6 +99,7 @@ impl OwedRevocations {
 }
 
 /// The OS store: the platform's raw save/load/delete under the identity's service.
+#[cfg_attr(test, allow(dead_code))]
 struct PlatformBackend {
     #[allow(dead_code)] // Linux has no store
     service: &'static str,

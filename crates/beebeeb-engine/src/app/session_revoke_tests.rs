@@ -212,6 +212,11 @@ struct SignedIn {
 
 impl SignedIn {
     fn on(behaviour: Server, token: &str) -> Self {
+        Self::on_owing(behaviour, token, None)
+    }
+
+    /// As [`Self::on`], the handle holding `owed` as its owed list when given.
+    fn on_owing(behaviour: Server, token: &str, owed: Option<Arc<OwedRevocations>>) -> Self {
         let credentials = MemoryCredentials::default();
         credentials
             .store_for(SLOT)
@@ -226,7 +231,11 @@ impl SignedIn {
             state_dir: crate::state_paths::init_for_test(),
             api_base: server.base.clone(),
         };
-        let engine = Arc::new(Engine::open(&TEST, config, host, credentials.clone()).expect("the handle opens"));
+        let engine = Arc::new(match owed {
+            Some(owed) => Engine::open_owing(&TEST, config, host, credentials.clone(), owed),
+            None => Engine::open(&TEST, config, host, credentials.clone()),
+        }
+        .expect("the handle opens"));
         {
             let _writes = engine.writes.write().unwrap();
             engine
@@ -529,4 +538,49 @@ fn the_list_keeps_each_token_once_and_refuses_what_it_cannot_hold() {
     assert_eq!(owed_tokens(&owed), vec!["a-token".to_string(), "b-token".to_string()]);
     assert!(owed.owe("bad\ntoken").is_err());
     assert!(owed.owe("  ").is_err());
+}
+
+/// Waits up to `wait` for `done` to hold (the detached tasks have no other signal).
+fn eventually(wait: Duration, done: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    done()
+}
+
+/// dc-102b: a sign-out while the server is down leaves the token owed (and the sign-out itself unchanged); the next
+/// start with the server up pays it, in one request, and the list is empty after.
+#[test]
+fn a_sign_out_with_the_server_down_is_paid_at_the_next_start() {
+    let (_memory, owed) = owed_list();
+    let token = invented_token();
+    let down = SignedIn::on_owing(Server::Absent, &token, Some(owed.clone()));
+    assert_eq!(down.engine.sign_out_keeping_local_data(), Ok(()));
+    assert!(!down.store_holds_a_token());
+    // The server never heard it: still owed, however long the detached try took.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(owed_tokens(&owed), vec![token.clone()]);
+
+    let up = SignedIn::on_owing(Server::Answers(200), &invented_token(), Some(owed.clone()));
+    let heard = up.server.heard_within(Duration::from_secs(5));
+    assert_eq!(heard.len(), 1, "the start paid the owed token once");
+    assert!(heard[0].request_line.starts_with("POST /api/v1/auth/logout "));
+    assert_eq!(heard[0].bearer.as_deref(), Some(token.as_str()));
+    assert!(eventually(Duration::from_secs(5), || owed.owed().is_empty()), "the answer settled it");
+    assert_eq!(up.server.heard.lock().unwrap().len(), 1, "and nothing else was asked");
+}
+
+/// dc-102b: at the next start an answer below 500, a 401 included, settles the owed token.
+#[test]
+fn a_4xx_answer_at_the_start_settles_the_owed_token() {
+    let (_memory, owed) = owed_list();
+    let token = invented_token();
+    owed.owe(&token).unwrap();
+    let up = SignedIn::on_owing(Server::Answers(401), &invented_token(), Some(owed.clone()));
+    assert_eq!(up.server.heard_within(Duration::from_secs(5)).len(), 1);
+    assert!(eventually(Duration::from_secs(5), || owed.owed().is_empty()));
 }

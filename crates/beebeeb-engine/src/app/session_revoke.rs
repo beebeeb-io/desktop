@@ -14,7 +14,7 @@ pub(crate) const REVOKE_BOUND: Duration = Duration::from_secs(3);
 static OWED: std::sync::OnceLock<Arc<OwedRevocations>> = std::sync::OnceLock::new();
 
 /// Install the process's owed list (the first call wins).
-#[allow(dead_code)] // called at engine start (see the report of dc-102)
+#[cfg_attr(test, allow(dead_code))] // a test build keeps one list per handle (`Engine::open`)
 pub(crate) fn install_owed(owed: Arc<OwedRevocations>) {
     let _ = OWED.set(owed);
 }
@@ -74,7 +74,6 @@ pub(crate) fn revoke_detached(client: reqwest::Client, base: String, token: Stri
 }
 
 /// [`pay_owed`] as a task of its own, for the engine start and for the network coming back.
-#[allow(dead_code)] // called at engine start (see the report of dc-102)
 pub(crate) fn pay_owed_detached(client: reqwest::Client, base: String, owed: Arc<OwedRevocations>) {
     tokio::spawn(async move { pay_owed(&client, &base, &owed).await });
 }
