@@ -46,7 +46,7 @@ pub(crate) struct Seen {
 }
 
 impl Seen {
-    fn of(s: &State) -> Seen {
+    pub(crate) fn of(s: &State) -> Seen {
         let source = &s.actions.source;
         // Read as the views read them: the conflicts only under their dialog (a read of this PC's state).
         let conflict_shown = matches!(s.shell.app.dialog(), Some(super::app::Dialog::Conflict { .. }));
