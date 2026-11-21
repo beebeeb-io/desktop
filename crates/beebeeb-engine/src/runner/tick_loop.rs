@@ -21,6 +21,31 @@ impl RunMode {
     }
 }
 
+/// The tick's power/network hold (task dc-031). `None` while the person paused sync (that pause says it
+/// all). Also records the hold for the status pulse.
+pub(super) fn power_hold(identity: &'static crate::identity::EngineIdentity, user_paused: bool) -> Option<crate::power::PausedFor> {
+    let hold = if user_paused {
+        None
+    } else {
+        let metered = crate::config::DesktopConfig::load_for(identity).ok().and_then(|c| c.metered);
+        crate::power::decide(metered, &crate::power::SystemPower)
+    };
+    crate::power::set_current(hold);
+    hold
+}
+
+/// The `paused` status, with the reason in words when a power hold caused it.
+pub(super) fn paused_payload(tracker: &StatusTracker, hold: Option<crate::power::PausedFor>) -> crate::engine_status::StatusPayload {
+    let mut p = tracker.paused();
+    if let Some(h) = hold {
+        p.reason = Some(crate::engine_status::Reason {
+            code: h.code(),
+            detail: Some(h.words().to_string()),
+        });
+    }
+    p
+}
+
 /// How often the runner pulls the file list from the server and
 /// refreshes the state DB. The previous 5s cadence re-walked the WHOLE
 /// remote tree (`GET /api/v1/files`) every tick, which by itself could
@@ -156,7 +181,8 @@ pub(super) async fn run_status_pulse(
     loop {
         ticker.tick().await;
         let transfer_in_flight = !transfers.active().is_empty();
-        let payload = tracker.pulse(sync_paused.load(Ordering::Relaxed), transfer_in_flight, || {
+        let paused = sync_paused.load(Ordering::Relaxed) || crate::power::current().is_some();
+        let payload = tracker.pulse(paused, transfer_in_flight, || {
             current_activity(&db, &transfers)
         });
         if let Some(payload) = payload {
@@ -247,11 +273,6 @@ pub(super) fn enforce_cache_budget(
         // User opted into keeping everything local — skip eviction.
         return;
     }
-
-    // TODO honor `metered`: when the connection is metered and the user set
-    // `metered = Some(true)`, downloads/hydration should pause. The runner
-    // has no metered-network detection on Windows yet, so this toggle is
-    // persisted only for now (see DesktopConfig::metered).
 
     match bridge.enforce_local_cache_limit(local_cache_limit) {
         Ok(outcome) if !outcome.evicted_file_ids.is_empty() => {
