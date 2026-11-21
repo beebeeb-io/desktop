@@ -997,6 +997,7 @@ task
 telemetry
 tell
 temp
+ten bit
 terminal
 termination
 terms
@@ -1054,6 +1055,7 @@ undone
 unfinished
 unjournalled
 unknown
+unknown codec
 unknown-content
 unknown_item
 unlocked
@@ -1141,5 +1143,3 @@ wrong
 yet
 yours
 —
-ten bit
-unknown codec
