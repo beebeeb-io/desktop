@@ -333,7 +333,7 @@ fn the_list_is_a_read() {
     assert_eq!((before, after), (1, 1));
 }
 
-// ── Try again (Guus, 13:39: "Add in the try again directly if it failed") ─────────────────────────────────────────
+// ── Try again (owner, 13:39: "Add in the try again directly if it failed") ─────────────────────────────────────────
 
 /// Every column Try again may write, for one row: a refusal must leave them all as they were.
 fn row_state(db: &StateDb, op_id: &str) -> Option<(i64, i64, Option<String>, Option<String>, Option<String>, i64)> {

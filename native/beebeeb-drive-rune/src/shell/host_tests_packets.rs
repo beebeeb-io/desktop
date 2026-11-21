@@ -31,7 +31,7 @@ fn a_packets_backspace_is_the_key_and_a_control_character_types_nothing() {
     assert_eq!(rt.state.search.text, "ac");
 }
 
-/// Where Guus met it: a text file in edit mode. The packets' text lands in the editor and marks it unsaved.
+/// Where the owner met it: a text file in edit mode. The packets' text lands in the editor and marks it unsaved.
 #[test]
 fn text_typed_as_unicode_packets_reaches_the_text_editor() {
     use crate::frames::viewers::source::{FixtureViewerSource, board};

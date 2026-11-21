@@ -1,6 +1,6 @@
 # 2026-10-06 — macOS: Beebeeb in Finder just works (spec A of 3)
 
-**Status:** design approved section by section by Guus on 2026-10-06; written spec awaiting his review.
+**Status:** design approved section by section by the owner on 2026-10-06; written spec awaiting his review.
 **Amended:** 2026-10-06 after the plan review, for rulings R8–R11 and the plan's findings (`docs/superpowers/plans/2026-10-06-macos-finder-setup-reconciler.md`, "Spec issues found"). Each amendment is inline: the original is struck through and kept readable, and the replacement sits beneath it. — lead, 2026-10-06 (plan review)
 **Amended:** 2026-10-10 for task 1882 (P0, on `main` first): every removal this spec names (sign-out, Repair, the reconciler's remove) keeps files that never reached the server, with `NSFileProviderDomainRemovalModePreserveDirtyUserData`, and shows the person the folder macOS reports. Rule, copy and surfaces: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`. The source pin in `src-tauri/src/finder_removal.rs` fails this branch's rebase until its removal calls carry the mode. — lane 1882, 2026-10-10
 **Date:** 6 Oct 2026
@@ -11,13 +11,13 @@
 
 ## 1. Why
 
-Guus, 2026-10-06, on desktop 0.8.11:
+the owner, 2026-10-06, on desktop 0.8.11:
 
 > "The app sucks and doesnt work, install location fails (after update), then drive status still shows this, but it should just show to me to login and thats it."
 
 "Install location" is onboarding's **Install the Finder location** step. This spec makes that step disappear: once you are signed in and this Mac has your keys, Beebeeb puts itself in Finder, keeps itself there across launches and updates, and says one honest sentence when macOS really stops it.
 
-## 2. What we found (verified on Guus's Mac, 2026-10-06)
+## 2. What we found (verified on the owner's Mac, 2026-10-06)
 
 1. **The failure.** `fileproviderd` refused every add attempt from 0.8.11 (pid 31804) with the fault *"attempting create a domain root at `<FPFS>/B…b`, but that path already exists and is owned by a different provider `io.beebeeb.desktop.FileProvider/…domain`"*. The app made 11 attempts between 15:04:31 and 15:05:09 and then showed a generic error.
 2. **The owner of the path.** `~/Library/CloudStorage/Beebeeb-Beebeeb` (created 18 May 20:48) carries `com.apple.file-provider-domain-id: io.beebeeb.desktop.FileProvider/io.beebeeb.desktop.domain`. Its extension is no longer installed (`pluginkit` lists only `io.beebeeb.app.FileProvider`), and `ls` on the folder times out. It is an orphan from our own app before the bundle rename: the app was `io.beebeeb.desktop` until `b9da3be` (18 May 2026).
@@ -37,19 +37,19 @@ Guus, 2026-10-06, on desktop 0.8.11:
 
 The 1696 forensics line "we registered 'Drive' while the system showed 'Beebeeb'" was reading the **zombie's** name, so 1698 renamed our domain to match the zombie and created the collision. The implementation corrects that comment by adding the correction beneath it, leaving the original claim visible, per the honesty conventions.
 
-**Who is affected.** Only Macs that ran a build from before 18 May. `io.beebeeb.desktop` never shipped publicly (the first public macOS release was 0.8.5, task 1608, 29 Sept), so in practice that means Guus's Mac and possibly Bram's. The bug class is still real for everyone: an add failure gets no specific reason, no retry limit, and no log.
+**Who is affected.** Only Macs that ran a build from before 18 May. `io.beebeeb.desktop` never shipped publicly (the first public macOS release was 0.8.5, task 1608, 29 Sept), so in practice that means the owner's Mac and possibly Bram's. The bug class is still real for everyone: an add failure gets no specific reason, no retry limit, and no log.
 
-## 3. Rulings recorded (Guus, 2026-10-06, in the brainstorming session)
+## 3. Rulings recorded (owner, 2026-10-06, in the brainstorming session)
 
 - **R1: three separate specs.** "the seperate specs, prefer slow and quality over speed and quantity". Order: A (this spec), then C, then B.
 - **R2: a revoked session keeps Beebeeb in Finder.** "Keep it, ask to sign in". Files stay listed, files not on this Mac cannot open until sign-in, the app asks for sign-in again, and edits made meanwhile are kept and upload after sign-in. A sign-out you choose still removes the domain.
-- **R3: device checks run on Guus's own Mac account.** "My own Mac account" / "you're running on a mac right now". His real session gets signed out during the checks, and he signs back in at the end.
+- **R3: device checks run on the owner's own Mac account.** "My own Mac account" / "you're running on a mac right now". His real session gets signed out during the checks, and he signs back in at the end.
 - **R4: one Finder reconciler in Rust** (approach 1). "looks good, lets go with it". This was chosen over calling `install_finder_location` automatically from the frontend (approach 2) and over managing the domain from the extension or a launch agent (approach 3, impossible: only the containing app can add or remove its domain).
 - **R5: no "Add to Finder" anywhere.** "yep" to Section 1, which drops the 1683 "Finder not added" state and its "Add to Finder" button. "Try again" survives only inside a failure. This supersedes the approved 1683 artifact for that state, and the artefact is updated first (section 12).
-- **R6: the orphan is removed with a one-off helper.** "Yes, I'll make the profiles". Guus creates two development provisioning profiles for the old IDs when the cleanup step comes up.
+- **R6: the orphan is removed with a one-off helper.** "Yes, I'll make the profiles". the owner creates two development provisioning profiles for the old IDs when the cleanup step comes up.
 - **R7: device check D8 may sign a test account into production** to exercise the real alpha update path. This was approved with Section 6 ("perfect"). It is the only production action this spec authorizes.
 - **R8: re-sign-in in place** (2026-10-06, after the plan review). Question: "Sign in again" after a revoked session currently signs you out fully (Finder entry removed, edits not yet uploaded thrown away); how should it work? Answer: **"Re-sign-in in place, in spec A (Recommended)"**. The option he chose: "Sign in again as the same account and only the session token is replaced. Finder, keys, cache and pending edits all stay, and the edits upload afterwards. Signing in as a different account is an account switch: full sign-out, with a warning if edits haven't uploaded yet. Adds auth code to A, with a security review." — lead, 2026-10-06 (plan review)
-- **R9: the vault key stays after a remote revocation** (2026-10-06). Question: keep the vault key on this Mac after its session is revoked, so the same account signs in again without its recovery phrase? Answer: **"Keep the key, review decides (Recommended)"**. The Mac keeps its key. The change merges only if the security review agrees; if the review disagrees, the decision returns to Guus. — lead, 2026-10-06 (plan review)
+- **R9: the vault key stays after a remote revocation** (2026-10-06). Question: keep the vault key on this Mac after its session is revoked, so the same account signs in again without its recovery phrase? Answer: **"Keep the key, review decides (Recommended)"**. The Mac keeps its key. The change merges only if the security review agrees; if the review disagrees, the decision returns to the owner. — lead, 2026-10-06 (plan review)
 - **R10: local data is bound to the account that created it** (2026-10-06). Answer: **"Fold into 1834"**: this spec also owns that binding. A different account never reuses this computer's local data. Behaviour in §5.6; background in the private workspace task. — lead, 2026-10-06 (plan review)
 - **R11: Windows stays fail-closed** (2026-10-06), on the Windows gap of R10. Answer: **"Refuse now, escape hatch as its own task (Recommended)"**. This spec keeps Windows refusing (§5.6). An explicit "Discard and switch" escape hatch is private workspace task 1837, verified on Windows CI and a Windows PC. — lead, 2026-10-06 (plan review)
 
@@ -105,7 +105,7 @@ It reuses the existing `surfaces::phase::FinderSetup` the popover reducer alread
 | A reconciler that never received its launch trigger, because the startup restore never finished | Either |
 | A removal the check owed (the previous domain) that failed while signed in and unlocked | Yes. Since the final review this case lands `Failed` with "Try again" instead (§13.1), so `Missing` no longer rests here |
 
-So a surface shows a loaded `Missing` as a quiet row: no pill, no activity, and no claim that Beebeeb is or is not in Finder. Where a slot must show text (the Status line), it shows one sentence: "Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked." (the wording is for Guus to confirm). `Missing` is still never a resting state while the wanted state is present (§13.1). — lead, 2026-10-08 (final review)
+So a surface shows a loaded `Missing` as a quiet row: no pill, no activity, and no claim that Beebeeb is or is not in Finder. Where a slot must show text (the Status line), it shows one sentence: "Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked." (the wording is for the owner to confirm). `Missing` is still never a resting state while the wanted state is present (§13.1). — lead, 2026-10-08 (final review)
 
 ### 5.3 What starts a check
 
@@ -203,7 +203,7 @@ Codes are from the macOS 27 SDK header `FileProvider.framework/Headers/NSFilePro
 | `extension_loading` | `NSFileProviderErrorDomain` -2001 ProviderNotFound, -2003 OlderExtensionVersionRunning, -2004 NewerExtensionVersionFound, -2012 ProviderDomainTemporarilyUnavailable, -2014 ApplicationExtensionNotFound | yes | while retrying: "Adding Beebeeb to Finder…"; after the budget: "macOS hasn't finished loading Beebeeb's Finder extension." | Try again |
 | `user_disabled` | -2011 DomainDisabled, or `userEnabled == false` (this becomes the `UserDisabled` state, not `Failed`) | no | "Beebeeb is turned off in System Settings." | Open System Settings (`open_login_items_and_extensions_settings`; recovers by itself) |
 | `not_in_applications` | -2002 ProviderTranslocated, or the launch-location check | no | "Beebeeb is running from the disk image. Move it to Applications, then open it again." | Show in Finder |
-| `folder_taken` | the domain root path is owned by a different provider. ~~**The NSError domain and code are captured by device check D0** and written into this cell before the classifier for this row merges.~~ Very likely `NSCocoaErrorDomain` 516 (`NSFileWriteFileExistsError`), possibly with an underlying `NSPOSIXErrorDomain` 17: Guus's 0.8.11 saved exactly "…(NSCocoaErrorDomain 516)" for this collision at 2026-10-06 13:05:09Z. The classifier ships with this pair, and device check D0 still confirms it (and records the underlying error) before it merges. — lead, 2026-10-06 (plan review) | no | "An older Beebeeb installation still holds Beebeeb's place in Finder. Contact support and we'll help you clear it." | Copy details |
+| `folder_taken` | the domain root path is owned by a different provider. ~~**The NSError domain and code are captured by device check D0** and written into this cell before the classifier for this row merges.~~ Very likely `NSCocoaErrorDomain` 516 (`NSFileWriteFileExistsError`), possibly with an underlying `NSPOSIXErrorDomain` 17: the owner's 0.8.11 saved exactly "…(NSCocoaErrorDomain 516)" for this collision at 2026-10-06 13:05:09Z. The classifier ships with this pair, and device check D0 still confirms it (and records the underlying error) before it merges. — lead, 2026-10-06 (plan review) | no | "An older Beebeeb installation still holds Beebeeb's place in Finder. Contact support and we'll help you clear it." | Copy details |
 | `signing` | ~~entitlement, app-group or provisioning errors (exact codes listed in the plan from the bridge's existing provisioning paths)~~ No code yet: the bridge has no provisioning-specific path, so the code set ships **empty** and a test pins it as empty. Until a code is captured, such an error classifies as `unknown`. — lead, 2026-10-06 (plan review) | no | "This copy of Beebeeb can't add itself to Finder. Download it again from beebeeb.io." | Copy details |
 | `timeout` | added, but never stable within the wait | yes | "macOS didn't finish adding Beebeeb to Finder." | Try again |
 | `unknown` | anything else | once | "Beebeeb couldn't be added to Finder." | Try again |
@@ -309,7 +309,7 @@ Kept to what makes A shippable on its own. Spec C later deletes the onboarding s
 
 Not product code. It lives in a scratch directory and is deleted afterwards.
 
-1. **Guus creates two Apple Development provisioning profiles**, for `io.beebeeb.desktop` and `io.beebeeb.desktop.FileProvider` (app group `R8352WDJJR.io.beebeeb.desktop.fileprovider`). He recreates the App IDs if May's are gone.
+1. **the owner creates two Apple Development provisioning profiles**, for `io.beebeeb.desktop` and `io.beebeeb.desktop.FileProvider` (app group `R8352WDJJR.io.beebeeb.desktop.fileprovider`). He recreates the App IDs if May's are gone.
 2. **Build a minimal helper app** `io.beebeeb.desktop` embedding an empty `io.beebeeb.desktop.FileProvider` extension, signed with those profiles. Its only action is `NSFileProviderManager.removeAllDomains`, printing the result.
 3. **Run it once**, then delete the helper and the two profiles.
 4. **Proven by four checks:**
@@ -372,7 +372,7 @@ Every new test is seen failing before it passes, and the failure output is paste
   - `bunx tsc --noEmit`
   - eslint
 
-### 13.2 Device checks on Guus's Mac (R3)
+### 13.2 Device checks on the owner's Mac (R3)
 
 Evidence for every check goes under `.claude/tasks/_qa-evidence/<task>/`:
 - a screenshot
@@ -398,7 +398,7 @@ Evidence for every check goes under `.claude/tasks/_qa-evidence/<task>/`:
 **Environment:**
 - D0–D7 run a build signed with the existing `io.beebeeb.app` development profiles (valid to May 2027), against the local API (`BB_API_BASE=http://localhost:3001`), with a test account.
 - **D8 runs against production** (R7): the published 0.8.11 dmg, then the real alpha update, with a test account.
-- Guus's own session is signed out during the run. Restoring it (his password) is the last step.
+- the owner's own session is signed out during the run. Restoring it (his password) is the last step.
 
 **What counts as done:**
 - **Done** = every automated gate green with counts, plus D0–D9 passed with evidence (D9 added for R10, — lead, 2026-10-06 (plan review)).
@@ -414,14 +414,14 @@ Evidence for every check goes under `.claude/tasks/_qa-evidence/<task>/`:
 
 - ~~The `folder_taken` NSError domain and code: captured by D0, owner lead.~~
   The `folder_taken` NSError domain and code: very likely `NSCocoaErrorDomain` 516 (see 6.2); D0 confirms it, owner lead. — lead, 2026-10-06 (plan review)
-- Whether the May App IDs `io.beebeeb.desktop` and `io.beebeeb.desktop.FileProvider` still exist in the developer portal: Guus, at step 1 of section 11.
+- Whether the May App IDs `io.beebeeb.desktop` and `io.beebeeb.desktop.FileProvider` still exist in the developer portal: the owner, at step 1 of section 11.
 - ~~The exact provisioning error codes mapped to `signing`: listed in the plan from the bridge's existing provisioning paths, owner lead.~~
   The `signing` codes: none can be derived from code. The set ships empty, and an optional device rung (D-S, a profile-less ad-hoc build) may capture one. Owner lead. — lead, 2026-10-06 (plan review)
-- R8 keeps the keys on this Mac after a revoked session, including across a relaunch. Today a startup 401 deletes them, so revoking a lost device from the web effectively wipes it at its next launch; after R8 it does not. The security review and Guus confirm this trade-off. — lead, 2026-10-06 (plan review)
+- R8 keeps the keys on this Mac after a revoked session, including across a relaunch. Today a startup 401 deletes them, so revoking a lost device from the web effectively wipes it at its next launch; after R8 it does not. The security review and the owner confirm this trade-off. — lead, 2026-10-06 (plan review)
   Ruled R9 (§3): the key stays, and the security review decides. — lead, 2026-10-06 (plan review)
 - ~~Identity for installs that predate `signed_in_user_id`: the plan falls back to the account email recorded on this Mac (case-insensitive), and an unknown identity counts as a different account (fail closed). The security review confirms this.~~ — lead, 2026-10-06 (plan review)
   Identity for installs from before R10: their local data is adopted at startup ~~by the account email this Mac's Keychain still holds~~ only by a complete stored session (token and vault key), by its email (§5.6; lead, 2026-10-08 (final review)). Elsewhere R8 falls back to the recorded email ~~(case-insensitive)~~ in its canonical form (ruling A″, 2026-10-08). An identity that cannot be compared is never treated as the same account. The security review confirms this. — lead, 2026-10-06 (plan review)
-- ~~Windows and R10: the binding refuses instead of resetting, and Windows sign-out refuses while unsent changes exist. A Windows PC that holds another account's unsent changes therefore has no in-app way forward. Owner Guus (decision).~~ — lead, 2026-10-06 (plan review)
+- ~~Windows and R10: the binding refuses instead of resetting, and Windows sign-out refuses while unsent changes exist. A Windows PC that holds another account's unsent changes therefore has no in-app way forward. Owner the owner (decision).~~ — lead, 2026-10-06 (plan review)
   Ruled R11 (§3): Windows stays fail-closed in this spec. The "Discard and switch" escape hatch is private workspace task 1837. — lead, 2026-10-06 (plan review)
-- ~~An app on an external disk's Applications folder (`/Volumes/<disk>/Applications`) is refused by the 6.2 rule. Is that intended? Owner Guus.~~ — lead, 2026-10-06 (plan review)
+- ~~An app on an external disk's Applications folder (`/Volumes/<disk>/Applications`) is refused by the 6.2 rule. Is that intended? Owner the owner.~~ — lead, 2026-10-06 (plan review)
   Answered 2026-10-06 by the execution ruling in §6.2: only a bundle at a volume's root is a disk image; an Applications folder or a home on an external disk is a real install. — lead, 2026-10-06 (execution ruling)

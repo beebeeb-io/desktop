@@ -199,7 +199,7 @@ impl EngineBridge {
         })
     }
 
-    /// Task 2190 (the lead's condition on E3; glegion's constraints from #167's scan memo): the ONE
+    /// Task 2190 (the lead's condition on E3; the Windows test machine's constraints from #167's scan memo): the ONE
     /// call each held branch of [`Self::classify_tracked_edit`] makes. Records that `file_id`'s edit
     /// is held, not sent, with the file's content fingerprint, so the review feed shows it. Nothing
     /// is written while neither the reason nor the fingerprint changed, and the `files` row is never

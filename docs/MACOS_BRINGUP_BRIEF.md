@@ -4,7 +4,7 @@
 > macOS phase rebuilds from the carried notes in `native/beebeeb-drive-rune/docs/macos/`. The code paths below point
 > at where the code lives now; `release.yml` (its build matrix, its plumbing) is the 0.8.x line's workflow.
 
-Written 2026-07-30 by the desktop lead session, at Guus's explicit request, for whichever
+Written 2026-07-30 by the desktop lead session, at the owner's explicit request, for whichever
 Claude session next has a real Mac available to pick this up. macOS is currently deliberately
 parked — not because the architecture doesn't work, but because every remaining blocker needs
 either a physical Mac, an Apple Developer credential, or an interactive Apple ID login, none of
@@ -33,7 +33,7 @@ notary-credentials exist anywhere this workspace's CI or any prior session could
 Development` (a *development*-tier identity, fine for local testing, useless for a distributable
 release) and an unrelated `iPhone Distribution` identity for a different bundle.
 
-**What's needed:** Guus needs to either generate a `Developer ID Application` certificate + export
+**What's needed:** the owner needs to either generate a `Developer ID Application` certificate + export
 it (as a `.p12` + password) from his own Apple Developer account, or provision an App Store
 Connect API key with notary permissions — either path requires his Apple ID and 2FA device, so
 this cannot be automated by any agent without his direct involvement at least once. Once obtained,
@@ -158,7 +158,7 @@ to begin with.
 
 - Don't attempt to script around Apple 2FA or provisioning-profile downloads non-interactively
   without an App Store Connect API key — every prior attempt (task `0351`) confirmed this fails and
-  wastes time; get the API key from Guus first.
+  wastes time; get the API key from the owner first.
 - Don't remove or weaken the `#[cfg(not(target_os = "linux"))]` fail-closed peer-cred rejection in
   `ipc_socket.rs` "to get things working" — implement the real macOS equivalent instead (item 4
   above). A daemon that accepts unauthenticated local IPC connections on macOS is exactly the P0
@@ -174,7 +174,7 @@ to begin with.
 
 ## Suggested order of operations for the next macOS session
 
-1. Confirm with Guus: does he have (or can he generate) a Developer ID Application certificate and
+1. Confirm with the owner: does he have (or can he generate) a Developer ID Application certificate and
    an App Store Connect API key with notary access? This single conversation unblocks items 1 and 2
    simultaneously and needs his direct involvement — don't try to work around it.
 2. Once credentials exist: re-verify the existing development-signed path still works end to end on

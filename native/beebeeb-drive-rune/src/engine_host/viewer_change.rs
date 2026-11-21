@@ -604,7 +604,7 @@ fn settle_save(
     shows: Shows,
 ) -> (Settled, Option<i64>) {
     // How the save ended, in the log (w36-txt-save-enter: a save that was stored here but not sent left no line at
-    // all, on Guus's PC). The outcome's word only: never the name, the text or the file's id.
+    // all, on the Windows test machine). The outcome's word only: never the name, the text or the file's id.
     match &saved {
         Ok(SaveEnd::Saved { version }) => tracing::info!(version, "viewer save: sent"),
         Ok(SaveEnd::Queued { base }) => tracing::warn!(base, "viewer save: stored on this PC, not sent yet"),

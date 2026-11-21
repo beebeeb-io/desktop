@@ -380,7 +380,7 @@ mod tests {
         }
     }
 
-    /// w31 (Guus's PC, 2026-11-20): a local state that never got the account's file list (no cursor) owes it, also
+    /// w31 (the Windows test machine, 2026-11-20): a local state that never got the account's file list (no cursor) owes it, also
     /// when this PC's own sync folder already gave it folder rows; the backup passes wait for it and the board says
     /// it is awaited. A cursor of 0 is a list that arrived (an account with an empty op log), not an owed one.
     #[test]

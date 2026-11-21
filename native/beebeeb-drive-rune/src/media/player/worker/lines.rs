@@ -1,5 +1,5 @@
 //! The TEST build's lines about a run (the build's identity, never the real app): `media.played`, `media.start`,
-//! `media.seen` and `media.pace`, read by the VM 401 rungs. What they count ([`Played`], [`Trace`]) and how the worker
+//! `media.seen` and `media.pace`, read by the Windows test machine rungs. What they count ([`Played`], [`Trace`]) and how the worker
 //! writes them. Milliseconds and counts only: no name, id, tag or byte.
 
 use std::time::Instant;
@@ -235,7 +235,7 @@ impl Worker {
     }
 }
 
-/// Whether this build writes the `media.played` line: the TEST build only (the VM 401 rung reads it), never the
+/// Whether this build writes the `media.played` line: the TEST build only (the Windows test machine rung reads it), never the
 /// real app, in any profile. Asked of the identity fixed when the binary was built.
 pub(in crate::media::player) fn writes_played_line(identity: &EngineIdentity) -> bool {
     !identity.is_real()

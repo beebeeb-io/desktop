@@ -6,7 +6,7 @@
 //!    the survivor (core's `plan_merge`, applied in order) and then claims it with `PUT`; `Create` mints an id, seals
 //!    `Backups` and `PUT`s it. The server's answer is the root (another device's when it won a race).
 //! 2. **This device's folder** ([`resolve_device_folder`]): every folder under the root, with its `.device.json`
-//!    read and parsed, goes through core's `find_device_folder`. `AdoptLegacy` (the old mirror's `Backups/GLegion`,
+//!    read and parsed, goes through core's `find_device_folder`. `AdoptLegacy` (the old mirror's `Backups/TestPC`,
 //!    no manifest) and `Create` write the manifest at once; `Existing` is used as it is.
 //!
 //! A listing that is not complete, or a manifest that could not be fetched, stops the resolution (it is tried again

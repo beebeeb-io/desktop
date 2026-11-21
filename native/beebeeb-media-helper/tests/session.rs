@@ -413,7 +413,7 @@ fn helper_sends_an_audio_files_title_and_artist_after_opened() {
     app.send(&ToHelper::Close);
 }
 
-/// w12-video-start: the sound of an H.264 + MP3 file is proven by its decode and its clock, not by ear (VM 401 has no
+/// w12-video-start: the sound of an H.264 + MP3 file is proven by its decode and its clock, not by ear (the Windows test machine has no
 /// sound device). The picture and the PCM are asked for in turn, as the player does: each PCM answer starts where the
 /// one before ended, the tone is there (not silence), and after a second of sound the picture is a second on too.
 #[test]

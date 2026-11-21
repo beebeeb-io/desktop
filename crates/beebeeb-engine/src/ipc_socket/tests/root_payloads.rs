@@ -307,7 +307,7 @@ fn test_1694_local_folder_payload_grants_add_subitems() {
 #[test]
 fn test_1694_cloud_only_folder_payload_grants_add_subitems() {
     // The majority real-world case: CloudOnly entries dominate the tree
-    // (Guus's vault: 8195 cloud_only files), so the fix is worthless
+    // (the owner's vault: 8195 cloud_only files), so the fix is worthless
     // unless a CloudOnly folder also accepts drops.
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path().join("state.db")).unwrap();

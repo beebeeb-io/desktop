@@ -1029,7 +1029,7 @@ fn the_original_reports_its_progress_then_swaps_the_picture_in_and_stop_keeps_no
     assert!(source.original(harbour).is_none());
 }
 
-/// w31 (Guus's PC, 2026-11-20): the Original tab of a HEIC or a RAW downloaded the whole file and then refused it
+/// w31 (the Windows test machine, 2026-11-20): the Original tab of a HEIC or a RAW downloaded the whole file and then refused it
 /// (the decoder here opens PNG, JPEG, GIF and WebP only). Such a format is refused by its name, before any download,
 /// with words to say; the formats that open are asked for as before.
 #[test]

@@ -385,7 +385,7 @@ fn owner(mine: bool, manifest: Option<&DeviceManifest>) -> Owner {
 }
 
 /// Whether `name` is this PC's device-folder name as core makes it (`device_folder_name`): the bare name or one with
-/// a collision suffix (`GLegion (a3f2)`, widened 4 digits at a time), compared as core folds names. Pure.
+/// a collision suffix (`TestPC (a3f2)`, widened 4 digits at a time), compared as core folds names. Pure.
 fn is_this_pcs_name(name: &str, me: &DeviceSelf) -> bool {
     let folded = fold_name(name);
     let mut taken: Vec<TakenName> = Vec::new();

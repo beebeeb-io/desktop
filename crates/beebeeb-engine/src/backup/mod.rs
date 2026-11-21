@@ -22,7 +22,7 @@ use crate::backup_protect::{OwnBackupFolder, OwnBackups};
 use crate::state_db::StateDb;
 
 /// What this device backs up now, for the drive protection: the device folder's name as the resolved layout has it
-/// (core's `find_device_folder`, e.g. `GLegion (a3f2)` after a name collision), never re-derived from the
+/// (core's `find_device_folder`, e.g. `TestPC (a3f2)` after a name collision), never re-derived from the
 /// hostname, and the folders that are on with where each is read from. No network. `None` when the settings
 /// cannot be read: the caller keeps its last answer (a read error never lifts a protection). Before the layout is
 /// resolved the device folder is `None`.
@@ -60,7 +60,7 @@ pub fn own_backups_for(db: &StateDb, sources: &[scheduler::BackupSource]) -> Own
 mod tests {
     use super::*;
 
-    /// The device folder protection guards is the one the layout resolved (`GLegion (a3f2)` after a collision),
+    /// The device folder protection guards is the one the layout resolved (`TestPC (a3f2)` after a collision),
     /// never `sanitize_device_segment` of the hostname; before the layout exists there is none.
     #[test]
     fn own_backups_names_the_resolved_device_folder() {
@@ -81,11 +81,11 @@ mod tests {
         let layout = crate::state_db::BackupLayout {
             root_id: "0193b1a6-0000-7000-8000-000000000001".into(),
             device_folder_id: "0193b1a6-0000-7000-8000-000000000002".into(),
-            device_folder_name: "GLegion (a3f2)".into(),
+            device_folder_name: "TestPC (a3f2)".into(),
         };
         assert!(db.set_backup_layout(&layout).unwrap());
         let own = own_backups_for(&db, &sources);
-        assert_eq!(own.device_folder.as_deref(), Some("GLegion (a3f2)"));
+        assert_eq!(own.device_folder.as_deref(), Some("TestPC (a3f2)"));
         assert_eq!(
             own.folders,
             vec![OwnBackupFolder {

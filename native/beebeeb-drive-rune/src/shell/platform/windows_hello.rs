@@ -483,7 +483,7 @@ mod imp {
                 // Windows' to decide; the answer does not wait for it: none for an owner's cancel, `Cancelled`
                 // for a prompt a newer one took the place of.
                 // `Cancel` on the operation does not remove the "Windows Security" dialog (CredentialUIBroker keeps
-                // it on screen, measured on VM 401): close its window itself. This goes FIRST: on the installed app
+                // it on screen, measured on the Windows test machine): close its window itself. This goes FIRST: on the installed app
                 // the quit waits a short while for this thread, and `Cancel` is a call into the broker that can
                 // take that whole while (w9: the dialog stayed after `--quit-for-update` with the w8 order).
                 dialogs::close_ours(window.0, &before);

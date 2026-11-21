@@ -209,7 +209,7 @@ impl EngineBridge {
             return Ok(found.id.clone());
         }
         // Review (2026-11-07): a folder missing from a partial listing may be there (the old mirror's
-        // `GLegion/Pictures`); creating one would start a second folder of that name and upload it all again.
+        // `TestPC/Pictures`); creating one would start a second folder of that name and upload it all again.
         if !complete {
             return Err(
                 anyhow::anyhow!("backup_listing_incomplete: the folder is not created from a partial listing").into(),

@@ -24,7 +24,7 @@ Under Replicated, the ONLY working signal channel is `.workingSet` — signaling
 "is ignored" (`Mgr.h:85–90`). Our dead `DomainRegistration.swift:25` signals `.rootContainer`, which
 Replicated ignores by design.
 
-## 2. Root causes of the observed behavior (Guus hand test, 0.8.7 alpha)
+## 2. Root causes of the observed behavior (the owner hand test, 0.8.7 alpha)
 
 | Observation | Root cause (audit refs) |
 |---|---|

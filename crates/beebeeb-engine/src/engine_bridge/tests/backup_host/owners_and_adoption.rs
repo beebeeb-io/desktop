@@ -395,7 +395,7 @@ async fn a_recorded_folder_outside_this_devices_folder_is_never_continued() {
         .scope(config_dir.path().to_path_buf(), async {
             let fx = Fixture::new();
             let folders = tempfile::tempdir().unwrap();
-            let earlier_device = fx.add(Some(&fx.root.clone()), "GLegion (earlier)", true, 0);
+            let earlier_device = fx.add(Some(&fx.root.clone()), "TestPC (earlier)", true, 0);
             let elsewhere = fx.add(Some(&earlier_device), "Projects", true, 0);
             choose("Projects", &folders.path().join("Projects"), Some(&elsewhere));
             let host = fx.host(vec![projects()]);

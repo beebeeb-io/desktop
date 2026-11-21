@@ -214,7 +214,7 @@ fn is_number(word: &str) -> bool {
         && (unit.is_empty() || UNITS.contains(&unit))
 }
 
-/// `0.9.0`: exactly three parts of 1 to 3 digits. Four parts (`10.0.5.161`) are an address, which says where a person
+/// `0.9.0`: exactly three parts of 1 to 3 digits. Four parts (`192.0.2.161`) are an address, which says where a person
 /// is, and longer parts can carry a long digit run: both masked.
 fn is_version(word: &str) -> bool {
     let parts: Vec<&str> = word.split('.').collect();

@@ -111,7 +111,7 @@ pub fn file_entry_payload_for_db(
 /// downloading stay. Their metadata version says so, so Finder reads the capabilities again when
 /// protection starts or ends.
 ///
-/// Amendment 7 (Guus, 19:30): a protected item is read-only too: it loses `CAP_WRITE` and carries the
+/// Amendment 7 (owner, 19:30): a protected item is read-only too: it loses `CAP_WRITE` and carries the
 /// words for a content change. Amendment 8a (20:04): the root carries the "Read-only" badge.
 pub(super) fn apply_protection(
     db: &crate::state_db::StateDb,

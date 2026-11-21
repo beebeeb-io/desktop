@@ -321,7 +321,7 @@ mod about_tests {
 
     #[test]
     fn about_licence_notice_stays_open_when_settings_was_in_front() {
-        // Guus's PC, 2026-11-20: About lives inside Settings. The route machine refuses OpenItem while Settings is
+        // the Windows test machine, 2026-11-20: About lives inside Settings. The route machine refuses OpenItem while Settings is
         // open, so the viewer's file was never the route's item and `sync` dropped it: the row did nothing.
         let (mut s, _calls) = spied();
         crate::shell::host::dispatch(&mut s, crate::shell::app::Event::OpenSettings(crate::shell::app::SettingsPane::General));

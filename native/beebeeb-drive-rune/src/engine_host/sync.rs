@@ -206,7 +206,7 @@ pub fn global_status(view: &SyncView, now: chrono::DateTime<chrono::Local>) -> G
     global_status_with(view, FirstList::Here, None, now)
 }
 
-/// [`global_status`], and what the engine says of the account's first file list on this PC (w31; Guus's PC,
+/// [`global_status`], and what the engine says of the account's first file list on this PC (w31; the Windows test machine,
 /// 2026-11-20: the first sign-in showed the sync folder's own folders and no file for minutes, as a finished list).
 /// While an engine runs and the list never arrived:
 /// - awaited: `loading` (the Files list's card and strip, Photos' "Getting your photos ready"), with the count once

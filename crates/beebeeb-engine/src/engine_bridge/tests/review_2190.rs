@@ -1040,7 +1040,7 @@ async fn task_2190_held_a_finder_edit_on_an_unknown_base_is_visible_and_keeps_bo
     assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
 }
 
-/// The lead's check on glegion's constraint 1: a held edit keeps #167's scan memo working.
+/// The lead's check on the Windows test machine's constraint 1: a held edit keeps #167's scan memo working.
 /// Holding it writes only `held_edits`, and no trigger writes `files`, so the row stamp the memo
 /// keys on does not move, and the second pass skips the held file as settled instead of
 /// classifying it again.

@@ -393,9 +393,9 @@ fn office_fixture_scenes_keep_their_fixture_pictures() {
 }
 
 /// The scroll gate (PLAN §2.4): the docs scene scrolling through the 60-page latency fixture with the real helper
-/// keeps the UI frame time at p95 <= 16 ms, at 100 % and at 150 %. Run on VM 401 with `BB_OFFICE_HELPER` set.
+/// keeps the UI frame time at p95 <= 16 ms, at 100 % and at 150 %. Run on the Windows test machine with `BB_OFFICE_HELPER` set.
 #[test]
-#[ignore = "O-CP3: VM 401, the real helper"]
+#[ignore = "O-CP3: the Windows test machine, the real helper"]
 fn office_docs_scroll_frame_time_p95() {
     use std::time::{Duration, Instant};
 
@@ -423,7 +423,7 @@ fn office_docs_scroll_frame_time_p95() {
     }
 
     let helper =
-        std::env::var("BB_OFFICE_HELPER").expect("BB_OFFICE_HELPER names the real helper: this is the VM 401 rung");
+        std::env::var("BB_OFFICE_HELPER").expect("BB_OFFICE_HELPER names the real helper: this is the Windows test machine rung");
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../beebeeb-office-render/tests/fixtures/latency/big-60.docx");
     let bytes = zeroize::Zeroizing::new(std::fs::read(&fixture).expect("the 60-page latency fixture"));

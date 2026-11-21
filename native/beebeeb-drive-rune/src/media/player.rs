@@ -49,7 +49,7 @@
 //! **The window is woken** ([`PlayerHandle::set_waker`]) whenever what a view draws of the player changed, so a
 //! frame, a place or a refusal reaches the screen without waiting for a press.
 //!
-//! **TEST builds only** (the build's identity, never the real app), read by the VM 401 rungs: after 1 s of playback,
+//! **TEST builds only** (the build's identity, never the real app), read by the Windows test machine rungs: after 1 s of playback,
 //! one `media.played` line (the codec's protocol number, the frames shown and the RMS of the sound in that second,
 //! whether the helper was confined); at the first frame, one `media.start` line (each step's time since the press:
 //! the bytes, the helper, `Opened`, the sound device, the first want, frame and show) and, when a view first takes

@@ -1,4 +1,4 @@
-//! The rules the auth gate and the sign-in screens share (task 2445, Guus 2026-11-11: "every rule
+//! The rules the auth gate and the sign-in screens share (task 2445, the owner 2026-11-11: "every rule
 //! in Rust, not in TSX"). A non-Tauri caller (a future native UI) calls these directly; the TSX
 //! calls them through the `auth_gate_state` and `auth_sign_in_problem` commands.
 //!

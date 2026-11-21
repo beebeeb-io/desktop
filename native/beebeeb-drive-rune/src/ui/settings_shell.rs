@@ -216,7 +216,7 @@ pub const SETTINGS_ITEMS: &[(&str, &Icon, &str)] = &[
     ("Devices and sessions", &ic::LAPTOP, "DW-A55"),
     ("Notifications", &ic::BELL, "DW-0750"),
 ];
-/// The DRIVE group. The board draws a chevron here; Guus wants a glyph like the SETTINGS group,
+/// The DRIVE group. The board draws a chevron here; the owner wants a glyph like the SETTINGS group,
 /// so a pane's row never reads as an expandable folder.
 pub const DRIVE_ITEMS: &[(&str, &Icon, &str)] = &[
     ("Storage", &ic::DATABASE, "DW-0712"),

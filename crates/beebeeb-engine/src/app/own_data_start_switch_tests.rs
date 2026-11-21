@@ -174,7 +174,7 @@ fn a_file_of_unknown_content_keeps_the_refusal_and_deletes_nothing() {
 /// holds no bytes of it).
 const A_MADE_IN_THE_APP: &str = "Budget of A.docx";
 
-/// w27 (VM 401: a document A made in the app kept B out, "guarded file"): a file of unknown content with no bytes on
+/// w27 (the Windows test machine: a document A made in the app kept B out, "guarded file"): a file of unknown content with no bytes on
 /// this PC holds nothing a person could lose, so it does not keep B out. It goes with A's other rows.
 #[test]
 fn a_file_of_unknown_content_with_no_bytes_on_this_pc_does_not_keep_the_second_account_out() {
@@ -223,7 +223,7 @@ fn a_file_made_between_the_check_and_the_removal_survives_and_the_second_account
     assert_eq!(now, files, "nothing else was removed either");
 }
 
-/// w29 (VM 401: A's old CLI-replaced files, never opened here, kept B out 5/5): a file of unknown content whose item
+/// w29 (the Windows test machine: A's old CLI-replaced files, never opened here, kept B out 5/5): a file of unknown content whose item
 /// is there but holds no bytes (a cloud placeholder nothing was fetched into) is a synced item like any other. The
 /// removal is asked to delete it, and B starts.
 #[test]
@@ -388,9 +388,9 @@ fn a_refused_switch_keeps_the_first_accounts_entries_in_the_settings_file() {
     assert!(names.iter().any(|name| name == "w27-kept-photos"), "{names:?}");
 }
 
-/// w28's VM 401 probe, at the engine with the REAL Windows port (the purge, the exclusive handles, NTFS): the same
+/// w28's the Windows test machine probe, at the engine with the REAL Windows port (the purge, the exclusive handles, NTFS): the same
 /// switch as above, but the file a person makes lands inside the real window between the check and the purge, in a
-/// folder the purge walks. Windows only (the unit run on VM 401 reaches it).
+/// folder the purge walks. Windows only (the unit run on the Windows test machine reaches it).
 #[cfg(target_os = "windows")]
 mod real_purge {
     use super::*;

@@ -36,7 +36,7 @@ fn source() -> std::path::PathBuf {
     std::path::PathBuf::from("/Users/qa/Pictures")
 }
 
-/// Guus, 2026-11-06 17:49, "Protect the whole tree": every item at or under the root is protected in
+/// the owner, 2026-11-06 17:49, "Protect the whole tree": every item at or under the root is protected in
 /// Finder, with core's words for what it is; an item outside the tree is unchanged.
 #[test]
 fn payload_marks_whole_backups_tree_protected() {
@@ -50,13 +50,13 @@ fn payload_marks_whole_backups_tree_protected() {
     let device_folder = row(
         &db,
         "0b5ec0de-0000-4000-8000-0000000000d5",
-        "Backups/GLegion",
+        "Backups/TestPC",
         ItemKind::Folder,
     );
     let category = row(
         &db,
         "0b5ec0de-0000-4000-8000-0000000000d6",
-        "Backups/GLegion/Documents",
+        "Backups/TestPC/Documents",
         ItemKind::Folder,
     );
     let other_device = row(
@@ -68,12 +68,12 @@ fn payload_marks_whole_backups_tree_protected() {
     let own_file = row(
         &db,
         "0b5ec0de-0000-4000-8000-0000000000d2",
-        "Backups/GLegion/Pictures/a.jpg",
+        "Backups/TestPC/Pictures/a.jpg",
         ItemKind::File,
     );
     let outside = row(&db, "0b5ec0de-0000-4000-8000-0000000000d4", "Docs", ItemKind::Folder);
     let own = OwnBackups {
-        device_folder: Some("GLegion".into()),
+        device_folder: Some("TestPC".into()),
         folders: vec![OwnBackupFolder {
             display_name: "Pictures".into(),
             source_path: source(),

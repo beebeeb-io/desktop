@@ -725,7 +725,7 @@ fn w28_switch_purge_keeps_a_file_made_in_a_synced_folder() {
 
 // ---- w29: a file of unknown content that is only a placeholder (nothing fetched) is a synced item, not unsent work ----
 
-/// VM 401 (a CLI-replaced file never opened here kept every switch out, "guarded file" 5/5): a REAL cloud placeholder
+/// the Windows test machine (a CLI-replaced file never opened here kept every switch out, "guarded file" 5/5): a REAL cloud placeholder
 /// with nothing on disk holds no bytes; the real port says so and the switch's purge removes it with its row.
 #[test]
 fn w29_an_unfetched_placeholder_of_unknown_content_holds_nothing_and_the_switch_removes_it() {

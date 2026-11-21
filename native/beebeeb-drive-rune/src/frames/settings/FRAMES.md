@@ -81,7 +81,7 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
   goldens are from before the board dropped the row (both still export `item-3-1`, "About audits"): every red line
   of theirs counted in the table above as that row is the stale golden, not the app. Follow-up: recapture DW-0789
   and DW-0789b from the current board (`scripts/capture-golden.mjs`; the goldens are outside the U3 lane's files).
-- **DW-0781, DW-0789b, DW-1210: ONE press, "Restart to update"** (owner ruling, Guus 2026-11-15 08:16: one press:
+- **DW-0781, DW-0789b, DW-1210: ONE press, "Restart to update"** (owner ruling, the owner 2026-11-15 08:16: one press:
   download, then restart by itself the moment the file is verified, not two presses; it replaces the two steps of
   #441). The press downloads the newer version, checks its signature, and, only on the file that its own download
   verified, for the version pressed, hands it off: verified again, sync stops, the installer starts, the app closes

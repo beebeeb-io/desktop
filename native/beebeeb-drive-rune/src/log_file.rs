@@ -1,7 +1,7 @@
 //! The native app's local log file: what the engine and the shell say through `tracing`, kept on this computer.
 //!
 //! Until this file the app installed no `tracing` subscriber, so every warning of the sync runner went nowhere (the
-//! VM 401 rung report, 2026-11-15). Now one subscriber is installed once, at the start of the one instance that is
+//! the Windows test machine rung report, 2026-11-15). Now one subscriber is installed once, at the start of the one instance that is
 //! the app (`shell::open_engine`), and writes one line per event of level INFO and above:
 //!
 //! ```text

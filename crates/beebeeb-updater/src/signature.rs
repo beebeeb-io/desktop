@@ -5,7 +5,7 @@
 //! so the time and the file name are signed too. Tauri's updater checks only the bytes; this module also hands out
 //! the signed time and name, which the policy uses to tie a signature to one file and one moment.
 //!
-//! Two keys, one format (Guus, 2026-11-11). The native line (0.9.0 and later: installers and v2 manifests) is
+//! Two keys, one format (owner, 2026-11-11). The native line (0.9.0 and later: installers and v2 manifests) is
 //! signed by the v2 key, [`UPDATER_V2_PUBKEY`], and a native build trusts only that key. The 0.8.x line keeps the
 //! key every 0.8.x build bakes in ([`LEGACY_0_8_PUBKEY`], `keys/updater-0.8.pub`); a client on 0.8.24 or
 //! older therefore cannot verify a native installer. Only the bridge release 0.8.25 trusts both.

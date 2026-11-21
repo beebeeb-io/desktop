@@ -316,7 +316,7 @@ fn a_finished_check_asks_shared_this_pc_and_trash_to_read_again_and_a_menu_holds
     );
 }
 
-/// w31 (Guus's PC, 2026-11-20): the first file list lands in the middle of a long tick (the engine is still syncing,
+/// w31 (the Windows test machine, 2026-11-20): the first file list lands in the middle of a long tick (the engine is still syncing,
 /// no check has finished). The moment the window stops saying it is loading, the folder shown is read again: the
 /// files show then, not minutes later at the end of that tick.
 #[test]
@@ -353,7 +353,7 @@ fn w31_when_the_first_list_lands_the_folder_is_read_again_without_waiting_for_th
     );
 }
 
-/// w36 (Guus's PC, bff1af87): New file made its file, and the window showed no row for it until the engine's next
+/// w36 (the Windows test machine, bff1af87): New file made its file, and the window showed no row for it until the engine's next
 /// finished check, minutes later on a busy engine. The source lists the file as it makes it, and the window reads
 /// the folder shown again in the same poll: the row stands there with no check. Mutant: drop `reread_files()` from
 /// `State::create_file` -> red (the row is missing).

@@ -420,7 +420,7 @@ fn a_lock_read_between_two_polls_takes_the_files_away_in_the_frame_that_shows_it
     the_first_locked_frame_holds_no_file_name(true);
 }
 
-/// The engine's look that fails EVERY time (an engine that panics on each look): the wake cover fails CLOSED (Guus's
+/// The engine's look that fails EVERY time (an engine that panics on each look): the wake cover fails CLOSED (the owner's
 /// ruling). The first failure says the wake again; the retry's failure holds the cover too, and nothing lifts it
 /// without a passing check.
 /// Mutant: back to "a second failure sets `Cover::Off`" -> red at "an always-failing look never lifts the cover".

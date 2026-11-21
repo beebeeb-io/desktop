@@ -1106,7 +1106,7 @@ fn new_document_opens_on_its_own_bytes_when_the_local_copy_is_not_readable_yet()
 
 /// w23 (the w20 fix held only on the fake platform): the window opens the made file with `Ui::open`, that is a SECOND
 /// `open` of the same source after `Settled::Saved`. That open used to read the copy on this PC again (Windows: queued,
-/// not on disk, or a placeholder: "Couldn't read the copy on this PC", 3 of 3 on VM 401). It opens on the made bytes.
+/// not on disk, or a placeholder: "Couldn't read the copy on this PC", 3 of 3 on the Windows test machine). It opens on the made bytes.
 #[test]
 fn new_document_opened_by_the_window_after_saved_uses_its_own_bytes() {
     let fake = Fake::default();

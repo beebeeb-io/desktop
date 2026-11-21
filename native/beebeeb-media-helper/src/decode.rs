@@ -69,7 +69,7 @@ fn across(row: &[u8], xs: &[Tap], out: &mut [u32]) {
 /// Bilinear, in two passes of integer arithmetic: each source row is mixed across once (and kept while the output
 /// rows that need it follow each other), then two such rows are mixed down. This runs once per frame shown, at the
 /// size of the window: the per-channel floating-point loop it replaces took about 54 ns a pixel, which at a
-/// 1578 × 866 stage was 60 ms of every frame of a 640 × 360 video (w12-video-start, VM 401: 13 frames a second).
+/// 1578 × 866 stage was 60 ms of every frame of a 640 × 360 video (w12-video-start, the Windows test machine: 13 frames a second).
 pub fn scale_letterbox(src: &[u8], sw: u32, sh: u32, display: (u32, u32), dw: u32, dh: u32) -> Option<Vec<u8>> {
     let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() != sw.checked_mul(sh)?.checked_mul(4)? {

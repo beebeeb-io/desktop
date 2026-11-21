@@ -1,4 +1,4 @@
-//! The tint of each file-type icon: the ONE shared palette (Guus's ruling 1.9, 2026-11-02),
+//! The tint of each file-type icon: the ONE shared palette (the owner's ruling 1.9, 2026-11-02),
 //! light values from `repos/web/src/components/file-icon.tsx`.
 //!
 //! Dark values, for task 2320 (web and mobile) to adopt. A hex tint keeps its light value when it

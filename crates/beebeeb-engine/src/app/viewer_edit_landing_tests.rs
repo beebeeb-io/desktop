@@ -162,7 +162,7 @@ fn a_stale_refusal_is_a_conflict_at_once_when_the_server_names_the_head() {
     assert_eq!(engine.save_text_for(session, DOC, "an invented edit", 5, queued.epoch), Ok(SaveEnd::Queued { base: 5 }));
 }
 
-/// w29 (VM 401, run 11, bug 2): offline, a save waited the whole land wait (20 s) for an upload that could not start.
+/// w29 (the Windows test machine, run 11, bug 2): offline, a save waited the whole land wait (20 s) for an upload that could not start.
 /// A link failure noted at or after the save began ends the wait at once. One from before the save (the queued op may
 /// be backing off, so no new request is made) ends it once the upload has had a moment (`LINK_GRACE`) to land and
 /// clear it; a healthy link never does.

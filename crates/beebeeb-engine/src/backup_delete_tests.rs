@@ -85,23 +85,23 @@ fn row(db: &StateDb, file_id: &str, path: &str, parent_id: Option<&str>, kind: I
     .unwrap();
 }
 
-/// Backups/{GLegion (this device, backs up Pictures now; Music is a past backup), Mac/Desktop/a.txt}, and a file
+/// Backups/{TestPC (this device, backs up Pictures now; Music is a past backup), Mac/Desktop/a.txt}, and a file
 /// outside.
 fn fixture() -> (tempfile::TempDir, StateDb, OwnBackups) {
     let dir = tempfile::tempdir().unwrap();
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
     row(&db, ROOT, "Backups", None, ItemKind::Folder);
-    row(&db, DEV_OWN, "Backups/GLegion", Some(ROOT), ItemKind::Folder);
-    let manifest = format!("Backups/GLegion/{MANIFEST_NAME}");
+    row(&db, DEV_OWN, "Backups/TestPC", Some(ROOT), ItemKind::Folder);
+    let manifest = format!("Backups/TestPC/{MANIFEST_NAME}");
     row(&db, MANIFEST, &manifest, Some(DEV_OWN), ItemKind::File);
     row(
         &db,
         OWN_PICTURES,
-        "Backups/GLegion/Pictures",
+        "Backups/TestPC/Pictures",
         Some(DEV_OWN),
         ItemKind::Folder,
     );
-    row(&db, OWN_MUSIC, "Backups/GLegion/Music", Some(DEV_OWN), ItemKind::Folder);
+    row(&db, OWN_MUSIC, "Backups/TestPC/Music", Some(DEV_OWN), ItemKind::Folder);
     row(&db, DEV_MAC, "Backups/Mac", Some(ROOT), ItemKind::Folder);
     row(&db, MAC_DESKTOP, "Backups/Mac/Desktop", Some(DEV_MAC), ItemKind::Folder);
     row(
@@ -114,7 +114,7 @@ fn fixture() -> (tempfile::TempDir, StateDb, OwnBackups) {
     row(&db, OUTSIDE, "notes.txt", None, ItemKind::File);
     assert!(db.set_system_role(ROOT, Some(SystemRole::BackupsRoot)).unwrap());
     let own = OwnBackups {
-        device_folder: Some("GLegion".into()),
+        device_folder: Some("TestPC".into()),
         folders: vec![OwnBackupFolder {
             display_name: "Pictures".into(),
             source_path: PathBuf::from("/data/a/Pictures"),

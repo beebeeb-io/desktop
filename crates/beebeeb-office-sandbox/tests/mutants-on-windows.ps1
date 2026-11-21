@@ -69,7 +69,7 @@ $mutants = [ordered]@{
     # The hardening (process mitigations, the token read-back, the memory watch, the handle count).
     # No mitigation attribute and the mitigation read-back off (two defects): window and dynamic code must be seen to
     # work in the confined probe. Handle checks stay on in it: Windows turns them on for the AppContainer itself
-    # (measured on VM 401, 22631.6199: the confined probe reads raise=1 permanent=1 without the creation bit).
+    # (measured on the Windows test machine, 22631.6199: the confined probe reads raise=1 permanent=1 without the creation bit).
     'no-mitigations'                = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &mitigation_policy\)\?;', 'let _ = &mitigation_policy;', '@watch mitigations: read_mitigations\(process\)\?,', 'mitigations: crate::Profile::NoCapabilities.mitigations(),')
     # A helper outside the container (as 'share-plain-token') without the strict-handle bit and its read-back: the
     # probe survives using a handle it does not hold, and reads the policy as off. 'share-plain-token' alone is the
