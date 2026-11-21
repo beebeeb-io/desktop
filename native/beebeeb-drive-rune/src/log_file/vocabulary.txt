@@ -467,6 +467,7 @@ is_dir
 is_symlink
 it
 item
+item_id
 items
 its
 itself
@@ -808,6 +809,7 @@ remote-deletion
 removal
 remove
 removed
+removes
 removing
 ren
 rename
@@ -845,6 +847,7 @@ retained
 retried
 retries
 retry
+retry_in_secs
 retrying
 returned
 review
@@ -1043,6 +1046,7 @@ trash
 trashed
 trashing
 tree
+tried
 tries
 true_size_bytes
 trying
