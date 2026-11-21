@@ -13,7 +13,7 @@ use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Icon, TextStyle, col, el, row};
 
-use super::button::{self as btn, ButtonKeys, ButtonState, Size, Variant};
+use super::button::{self as btn, ButtonState, Size, Variant};
 use super::kit;
 
 /// 13px/600 on a 17px line: a notice's first line (`.kit-banner-text b`).

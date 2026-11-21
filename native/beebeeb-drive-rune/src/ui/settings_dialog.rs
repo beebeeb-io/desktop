@@ -10,10 +10,10 @@
 //! outside it. It is modal: Tab stays inside, Esc is the caller's `on_dismiss`.
 //! Buttons are numbered with every other `.kit-btn` of the frame, in the board's order.
 
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, type_};
 use rune::{Color, El, Span, TextStyle, col, rich, row};
 
-use super::button::{self as btn, ButtonKeys, ButtonState, Size, Variant};
+use super::button::{self as btn, ButtonState, Size, Variant};
 use super::dialog::{Dialog, Foot, Head, Sub, scrim};
 use super::dialog;
 use super::kit;
