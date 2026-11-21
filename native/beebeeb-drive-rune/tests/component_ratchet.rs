@@ -138,6 +138,120 @@ fn files_holding(files: &[(String, String)], skip: &[&str], needle: &str) -> usi
         .count()
 }
 
+/// Listed copies (path under src, function name) whose `fn name(` still exists.
+fn fns_present(files: &[(String, String)], list: &[(&str, &str)]) -> usize {
+    list.iter()
+        .filter(|(path, name)| {
+            let n = format!("fn {name}(");
+            files.iter().any(|(p, b)| p == path && b.contains(&n))
+        })
+        .count()
+}
+
+/// `needle` followed by a number literal, outside `skip`.
+fn call_with_number(files: &[(String, String)], skip: &[&str], needle: &str) -> usize {
+    let mut n = 0;
+    for (_, body) in files.iter().filter(|(p, _)| !skip.iter().any(|s| p.starts_with(s))) {
+        for (i, _) in body.match_indices(needle) {
+            if body[i + needle.len()..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+const ROWS: &[(&str, &str)] = &[
+    ("frames/files/list.rs", "file_row"),
+    ("frames/files/list.rs", "file_row_with"),
+    ("frames/files/list.rs", "file_row_full"),
+    ("frames/files/protected.rs", "row_of"),
+    ("frames/files/uploads.rs", "upload_row"),
+    ("frames/shared/parts/table.rs", "table_row"),
+    ("frames/search/view.rs", "result_row"),
+    ("frames/this_pc/offline.rs", "kept_row"),
+    ("frames/this_pc/history.rs", "change_row"),
+    ("frames/tray/view.rs", "change_row"),
+    ("frames/viewers/archive.rs", "entry_row"),
+];
+const TILES: &[(&str, &str)] = &[
+    ("frames/shared/parts/table.rs", "tile"),
+    ("frames/search/view.rs", "result_tile"),
+    ("frames/files/share.rs", "big_tile"),
+    ("frames/files/uploads.rs", "picture_tile"),
+    ("frames/this_pc/history.rs", "tile"),
+    ("frames/tray/view.rs", "file_tile"),
+    ("frames/backups/view.rs", "file_tile"),
+];
+const TOOL_BUTTONS: &[(&str, &str)] = &[
+    ("frames/photos/chrome.rs", "tbtn"),
+    ("frames/files/preview.rs", "tool"),
+    ("frames/viewers/office.rs", "tool"),
+    ("frames/viewers/office.rs", "tool_with"),
+    ("frames/viewers/audio.rs", "skip"),
+    ("frames/this_pc/chrome.rs", "search_field"),
+    ("frames/search/view.rs", "search_field"),
+];
+const TOASTS: &[(&str, &str)] = &[
+    ("ui/settings_notice.rs", "toast_on"),
+    ("frames/viewers/dialogs.rs", "toast"),
+    ("frames/photos/overlay.rs", "toast_layer"),
+];
+const STATES: &[(&str, &str)] = &[
+    ("frames/shared/parts/empty.rs", "empty"),
+    ("frames/this_pc/offline.rs", "empty_state"),
+    ("ui/account_form.rs", "empty"),
+    ("ui/settings_notice.rs", "empty"),
+    ("ui/settings_notice.rs", "empty_sized"),
+    ("ui/settings_notice.rs", "problem"),
+    ("frames/photos/grid.rs", "empty_of"),
+    ("frames/tray/view.rs", "empty"),
+    ("frames/files/protected.rs", "no_backups"),
+    ("frames/files/browse_states.rs", "card"),
+    ("frames/search/view.rs", "searching"),
+    ("frames/search/view.rs", "loading_note"),
+    ("frames/search/view.rs", "unavailable"),
+    ("frames/settings/previews.rs", "loading"),
+    ("frames/settings/previews.rs", "failed"),
+    ("frames/settings/insights.rs", "loading"),
+    ("frames/settings/insights.rs", "failed"),
+    ("frames/office/states.rs", "skeleton"),
+    ("frames/office/states.rs", "failure_panel"),
+    ("frames/viewers/states.rs", "decrypting"),
+    ("frames/viewers/states.rs", "failed"),
+    ("frames/viewers/states.rs", "stopped"),
+    ("frames/signin/setup/folder.rs", "loading"),
+    ("frames/signin/setup/folder.rs", "failed"),
+    ("frames/signin/setup/view.rs", "loading"),
+    ("frames/signin/setup/view.rs", "failed"),
+    ("frames/signin/view_recovery.rs", "cannot_recover"),
+];
+const PILLS: &[(&str, &str)] = &[
+    ("ui/au.rs", "pill"),
+    ("ui/account_set.rs", "pill"),
+    ("ui/settings_notice.rs", "pill"),
+    ("frames/shared/parts/controls.rs", "pill"),
+    ("frames/backups/mail_view.rs", "pill_on"),
+    ("frames/settings/bandwidth.rs", "state_pill"),
+    ("frames/viewers/photo.rs", "pill"),
+];
+const SWITCHES: &[(&str, &str)] = &[
+    ("ui/settings_list.rs", "switch"),
+    ("ui/detail_pane.rs", "switch"),
+    ("ui/detail_pane.rs", "switch_card"),
+    ("frames/viewers/details.rs", "switch_card"),
+    ("frames/photos/overlay.rs", "switch"),
+];
+const MENUS: &[(&str, &str)] = &[
+    ("ui/settings_controls.rs", "menu"),
+    ("ui/account_form.rs", "pop"),
+    ("frames/shared/parts/menu.rs", "menu"),
+    ("frames/this_pc/offline.rs", "menu"),
+    ("frames/photos/overlay.rs", "menu"),
+    ("frames/photos/overlay.rs", "expiry_menu"),
+    ("frames/office/sheets_tabs.rs", "menu"),
+];
+
 fn measure() -> BTreeMap<&'static str, usize> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut paths = Vec::new();
@@ -154,8 +268,24 @@ fn measure() -> BTreeMap<&'static str, usize> {
     m.insert("button_builders_role_button_outside_ui", count(&files, "", &["ui/"], &["role(\"button\")"]));
     m.insert("status_bars_key_outside_ui", count(&files, "", &["ui/"], &["key(\"status-bar\")"]));
     m.insert("dialog_cards_role_dialog_outside_ui", count(&files, "", &["ui/"], &["role(\"dialog\")"]));
-    m.insert("empty_states", count(&files, "", &[], &["fn empty_state(", "fn empty("]));
-    m.insert("toasts", count(&files, "", &[], &["fn toast("]));
+    // `fn empty() -> Self` is a plain constructor (shared/source.rs, trash/source.rs), not a state view.
+    let ctors = count(&files, "", &[], &["fn empty() -> Self"]);
+    m.insert("empty_states", count(&files, "", &[], &["fn empty_state(", "fn empty("]) - ctors);
+    m.insert("toasts", count(&files, "", &[], &["fn toast(", "fn toast_on(", "fn toast_layer("]));
+    m.insert("family_file_rows", fns_present(&files, ROWS));
+    m.insert("family_file_tiles", fns_present(&files, TILES));
+    m.insert("family_toolbars_key_outside_ui", count(&files, "", &["ui/"], &["key(\"toolbar\")"]));
+    m.insert("family_tool_buttons", fns_present(&files, TOOL_BUTTONS));
+    m.insert("family_toast_copies", fns_present(&files, TOASTS));
+    m.insert("family_state_views", fns_present(&files, STATES));
+    m.insert("family_pills", fns_present(&files, PILLS));
+    m.insert("family_switches", fns_present(&files, SWITCHES));
+    m.insert("family_menus_outside_ui_menu", fns_present(&files, MENUS));
+    m.insert("radius_number_literals", call_with_number(&files, &["theme/"], ".radius("));
+    m.insert(
+        "colour_literals_outside_theme",
+        count(&files, "", &["theme/"], &["oklch(", "hex(", "Color::rgb"]),
+    );
     m.insert("local_textstyle_new_outside_theme", count(&files, "", &["theme/"], &["TextStyle::new("]));
     m.insert("spacing_literals_in_frames", spacing_literals(&files));
     m.insert("family_button_builders", family_button_builders(&files));

@@ -18,6 +18,8 @@
 
 pub mod actions;
 pub mod app;
+#[cfg(test)]
+mod a11y_walk_tests;
 // The pure half of Windows-only code: used by `platform/windows.rs`, tested on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod autostart;
