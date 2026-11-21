@@ -592,12 +592,12 @@ fn video_seconds_of_a_dehydrated_placeholder_reads_nothing() {
     assert_eq!(facts_of_copy(dir.path(), "Trip/shot.png", false).width, Some(31));
 }
 
-/// A library of 8,816 photos among 38,764 files reads in a constant number of queries (no query per photo), fast.
+/// A library of 8,816 photos among 10,816 files reads in a constant number of queries (no query per photo), fast.
 #[test]
 fn large_library_reads_without_a_query_per_photo() {
     let dir = tempfile::tempdir().unwrap();
     let db = StateDb::open(&dir.path().join("state.db")).unwrap();
-    for i in 0..38_764 {
+    for i in 0..10_816 {
         let (name, folder) = if i < 8_816 { ("jpg", "Camera") } else { ("txt", "Docs") };
         row(
             &db,

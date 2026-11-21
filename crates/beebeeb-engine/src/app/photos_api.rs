@@ -36,7 +36,7 @@ use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
-use crate::drive_v2::model::{is_photo_or_video, leaf_name, live_rows, mime_for_name};
+use crate::drive_v2::model::{is_photo_or_video, leaf_name, live_rows_pinned, mime_for_name};
 use crate::drive_v2::photo_meta::{self, PhotoMeta};
 use crate::engine_bridge::{
     EngineBridge, ThumbnailNotYet, UnknownItem, error_http_status, local_file_path_under_sync_root,
@@ -448,7 +448,11 @@ pub(crate) fn at_or_under(path: &str, folder: &str) -> bool {
 /// longer exists is ignored). `None`: it could not be read.
 fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
     let roots: Vec<String> = db.backups_roots().ok()?.into_iter().map(|(_, path)| path).collect();
-    let live = live_rows(db).ok()?;
+    let (live, pinned): (Vec<_>, HashSet<String>) = {
+        let rows = live_rows_pinned(db).ok()?;
+        let pinned = rows.iter().filter(|(_, p)| *p).map(|(row, _)| row.file_id.clone()).collect();
+        (rows.into_iter().map(|(row, _)| row).collect(), pinned)
+    };
     // Each hidden folder's path, from its own row.
     let hidden_paths: Vec<String> = if hidden.is_empty() {
         Vec::new()
@@ -479,12 +483,6 @@ fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
         .ok()?
         .into_iter()
         .map(|row| (row.file_id, row.current_version))
-        .collect();
-    let pinned: HashSet<String> = db
-        .file_overview_rows()
-        .ok()?
-        .into_iter()
-        .filter_map(|(row, pinned)| pinned.then_some(row.file_id))
         .collect();
     let mut photos = Vec::with_capacity(rows.len());
     for (row, name) in rows {

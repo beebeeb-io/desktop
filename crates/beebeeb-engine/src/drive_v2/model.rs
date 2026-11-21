@@ -280,30 +280,35 @@ pub fn backups_root_first(items: &mut [DriveItem]) {
 /// each by its own id, even when two share a path; a row the server never confirmed folds into the server's row at its
 /// path, and several such rows at a path with no server row are one (see `prefer`). Kinds never mix.
 pub fn live_rows(db: &StateDb) -> Result<Vec<FileEntry>, DriveError> {
+    Ok(live_rows_pinned(db)?.into_iter().map(|(entry, _)| entry).collect())
+}
+
+/// [`live_rows`] with each row's effective pinned flag, from the same read.
+pub fn live_rows_pinned(db: &StateDb) -> Result<Vec<(FileEntry, bool)>, DriveError> {
     let rows = db.file_overview_rows().map_err(DriveError::db)?;
     let mut kept = Vec::new();
     // Per (kind, path): the best row the server has not confirmed, kept only when no server row shares the path.
-    let mut unsent: HashMap<(bool, String), FileEntry> = HashMap::new();
+    let mut unsent: HashMap<(bool, String), (FileEntry, bool)> = HashMap::new();
     let mut served: HashSet<(bool, String)> = HashSet::new();
-    for (entry, _) in rows {
+    for (entry, pinned) in rows {
         if entry.status == FileStatus::Trashing {
             continue;
         }
         let path = entry.path.trim_matches('/').to_lowercase();
         if path.is_empty() {
-            kept.push(entry);
+            kept.push((entry, pinned));
             continue;
         }
         let key = (entry.is_dir(), path);
         if entry.remote_updated_at > 0 {
             served.insert(key);
-            kept.push(entry);
+            kept.push((entry, pinned));
             continue;
         }
         match unsent.get(&key) {
-            Some(best) if !prefer(&entry, best) => {}
+            Some((best, _)) if !prefer(&entry, best) => {}
             _ => {
-                unsent.insert(key, entry);
+                unsent.insert(key, (entry, pinned));
             }
         }
     }
