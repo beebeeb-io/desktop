@@ -27,7 +27,8 @@ use crate::frames::office::docs::DocBody;
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::toolbar::{self as tb, Bar, Details, New, Sort, View, press};
-use crate::ui::{caption, kit, sidebar};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
+use crate::ui::{caption, kit, sidebar, status_bar};
 
 /// 12px/600 on 15px: the ribbon's tab that is open.
 const TAB_ON: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
@@ -358,7 +359,8 @@ pub(crate) fn pop_with(
     .child(kit::glyph(format!("{key}-caret"), &oi::CARET, 11.0, t.text_tertiary))
 }
 
-/// A small button of the ribbon's first row (`.kit-btn-sm`). Keys: `<key>`, `-icon`, `-label`, `-hint`.
+/// A small button of the ribbon's first row: the Secondary Sm button, with the shortcut's hint after its words.
+/// Keys: `<key>`, `-icon`, `-label`, `-hint`.
 pub(crate) fn small_button(
     key: &str,
     label: &'static str,
@@ -366,20 +368,7 @@ pub(crate) fn small_button(
     hint: Option<&'static str>,
     t: &Theme,
 ) -> El {
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(6.0)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .child(kit::glyph(format!("{key}-icon"), icon, 14.0, t.text))
-        .child(style::fitted(format!("{key}-label"), label, style::BUTTON_SM, t.text));
+    let mut b = button(keys(key), label, Some(icon), Variant::Secondary, Size::Sm, ButtonState::Enabled, t);
     if let Some(hint) = hint {
         b = b.shortcut_hint(hint).child(
             el().key(format!("{key}-hint-box"))
@@ -813,54 +802,34 @@ fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at:
         n += 1;
         format!("st-{}", n - 1)
     };
-    let mut bar = row()
-        .key("status-bar")
-        .role("status")
-        .w_full()
-        .h(28.0)
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
-    let counts = |bar: El, next: &mut dyn FnMut() -> String, pages: String, words: String, language: &str| {
+    let mut bar: Vec<El> = Vec::new();
+    let counts = |bar: &mut Vec<El>, next: &mut dyn FnMut() -> String, pages: String, words: String, language: &str| {
         let what = format!("{pages}, {words}, {language}");
-        let bar = bar
-            .child(plain(next(), &pages))
-            .child(plain(next(), "\u{00B7}"))
-            .child(plain(next(), &words))
-            .child(plain(next(), "\u{00B7}"))
-            .child(plain(next(), language));
-        (bar, what)
+        bar.push(plain(next(), &pages));
+        bar.push(plain(next(), "\u{00B7}"));
+        bar.push(plain(next(), &words));
+        bar.push(plain(next(), "\u{00B7}"));
+        bar.push(plain(next(), language));
+        what
     };
     let what = match (doc, live) {
-        (Some(doc), _) => {
-            let (b, what) = counts(
-                bar,
-                &mut next,
-                format!("Page 1 of {}", doc.pages.max(1)),
-                format!("{} words", thousands(doc.words)),
-                &doc.language,
-            );
-            bar = b;
-            what
-        }
-        (None, Some(d)) => {
-            let (b, what) = counts(
-                bar,
-                &mut next,
-                format!("Page {} of {}", d.page, d.view.pages.max(1)),
-                format!("{} words", thousands(d.view.words)),
-                &d.language,
-            );
-            bar = b;
-            what
-        }
+        (Some(doc), _) => counts(
+            &mut bar,
+            &mut next,
+            format!("Page 1 of {}", doc.pages.max(1)),
+            format!("{} words", thousands(doc.words)),
+            &doc.language,
+        ),
+        (None, Some(d)) => counts(
+            &mut bar,
+            &mut next,
+            format!("Page {} of {}", d.page, d.view.pages.max(1)),
+            format!("{} words", thousands(d.view.words)),
+            &d.language,
+        ),
         (None, None) => {
-            bar = bar
-                .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(style::warn(t)))
-                .child(kit::label("status-text", PREPARING, STATUS_STATE, t.text_secondary));
+            bar.push(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(style::warn(t)));
+            bar.push(kit::label("status-text", PREPARING, STATUS_STATE, t.text_secondary));
             PREPARING.to_string()
         }
     };
@@ -925,55 +894,55 @@ fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at:
     } else {
         (None, None)
     };
-    bar.label(format!("{what}. Encrypted, {kept}"))
-        .child(el().key("st-gap").grow(1.0))
-        .child(
-            row()
-                .key(format!("{enc}-box"))
-                .gap(4.0)
-                .center_y()
-                .child(kit::glyph(format!("{enc}-icon"), &oi::PADLOCK, 11.0, t.accent_deep))
-                .child(style::fitted(enc, "Encrypted", STATUS_ENC, t.accent_deep)),
-        )
-        .child(plain(dot, "\u{00B7}"))
-        .child(kept_el)
-        .child(sep("st-sep-0"))
-        .child(
-            row()
-                .key(zoom.clone())
-                .role("group")
-                .label(format!("Zoom, {per_cent} per cent"))
-                .gap(4.0)
-                .center_y()
-                .child(step(format!("{zoom}-less"), &oi::LESS, "Zoom out", less))
-                .child(style::fitted(
-                    format!("{zoom}-zoom"),
-                    &format!("{per_cent}%"),
-                    STATUS_MONO,
-                    t.text_tertiary,
-                ))
-                .child(step(format!("{zoom}-more"), &oi::MORE, "Zoom in", more)),
-        )
-        .child(sep("st-sep-1"))
-        .child(
-            el().key(format!("{about}-box"))
-                .role("link")
-                .label("About this editor")
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    if let Some(ui) = super::ui(s) {
-                        ui.office_about();
-                    }
-                })
-                .child({
-                    kit::note_text(&about, &about, "About", type_::STATUS, t.text_tertiary);
-                    rich("About", vec![Span::new(0, 5).underline(t.text_tertiary)])
-                        .key(about)
-                        .font(type_::STATUS)
-                        .color(t.text_tertiary)
-                        .w(rune::text::advance("About", type_::STATUS))
-                }),
-        )
+    bar.push(el().key("st-gap").grow(1.0));
+    bar.push(
+        row()
+            .key(format!("{enc}-box"))
+            .gap(4.0)
+            .center_y()
+            .child(kit::glyph(format!("{enc}-icon"), &oi::PADLOCK, 11.0, t.accent_deep))
+            .child(style::fitted(enc, "Encrypted", STATUS_ENC, t.accent_deep)),
+    );
+    bar.push(plain(dot, "\u{00B7}"));
+    bar.push(kept_el);
+    bar.push(sep("st-sep-0"));
+    bar.push(
+        row()
+            .key(zoom.clone())
+            .role("group")
+            .label(format!("Zoom, {per_cent} per cent"))
+            .gap(4.0)
+            .center_y()
+            .child(step(format!("{zoom}-less"), &oi::LESS, "Zoom out", less))
+            .child(style::fitted(
+                format!("{zoom}-zoom"),
+                &format!("{per_cent}%"),
+                STATUS_MONO,
+                t.text_tertiary,
+            ))
+            .child(step(format!("{zoom}-more"), &oi::MORE, "Zoom in", more)),
+    );
+    bar.push(sep("st-sep-1"));
+    bar.push(
+        el().key(format!("{about}-box"))
+            .role("link")
+            .label("About this editor")
+            .focusable(true)
+            .on_press(|s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.office_about();
+                }
+            })
+            .child({
+                kit::note_text(&about, &about, "About", type_::STATUS, t.text_tertiary);
+                rich("About", vec![Span::new(0, 5).underline(t.text_tertiary)])
+                    .key(about)
+                    .font(type_::STATUS)
+                    .color(t.text_tertiary)
+                    .w(rune::text::advance("About", type_::STATUS))
+            }),
+    );
+    status_bar::frame(bar, t).label(format!("{what}. Encrypted, {kept}"))
 }
 
 /// `1284` as "1,284".

@@ -7,7 +7,8 @@
 
 use rune::{Align, El, Icon, col, el, row};
 
-use super::chrome::{ButtonKind, Dot, Status, button};
+use super::chrome::{Dot, Status};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::source::{Body, NoPreview, OpenFile, Origin, Stopped, percent, progress_words, size_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
@@ -178,7 +179,7 @@ fn decrypting(file: &OpenFile, done: u64, total: u64, t: &Theme) -> El {
                 ),
         )
         // Closing cancels: nothing is kept half-decrypted.
-        .child(button("state-btn-0", "Cancel", ButtonKind::Ghost, true, t).on_press(super::close));
+        .child(button(keys("state-btn-0"), "Cancel", None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t).on_press(super::close));
     stage(content, t)
 }
 
@@ -204,12 +205,12 @@ fn too_large(file: &OpenFile, size: u64, free: u64, t: &Theme) -> El {
             t,
         ))
         .child(actions(vec![
-            button("state-btn-0", "Free up space\u{2026}", ButtonKind::Outline, false, t).on_press(|s: &mut State| {
+            button(keys("state-btn-0"), "Free up space\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::FreeUpSpace);
                 }
             }),
-            button("state-btn-1", "Download to\u{2026}", ButtonKind::Outline, false, t).on_press(|s: &mut State| {
+            button(keys("state-btn-1"), "Download to\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::DownloadTo);
                 }
@@ -243,8 +244,8 @@ fn failed(t: &Theme) -> El {
             t,
         ))
         .child(actions(vec![
-            button("state-btn-0", "Try again", ButtonKind::Outline, false, t).on_press(retry),
-            button("state-btn-1", "Report a problem", ButtonKind::Ghost, false, t).on_press(|s: &mut State| {
+            button(keys("state-btn-0"), "Try again", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(retry),
+            button(keys("state-btn-1"), "Report a problem", None, Variant::Ghost, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::ReportProblem);
                 }
@@ -306,9 +307,9 @@ fn stopped(why: Stopped, t: &Theme) -> El {
         } else {
             "Try again"
         };
-        button("state-btn-0", label, ButtonKind::Outline, false, t).on_press(retry)
+        button(keys("state-btn-0"), label, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(retry)
     } else {
-        button("state-btn-0", "Close", ButtonKind::Outline, false, t).on_press(super::close)
+        button(keys("state-btn-0"), "Close", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(super::close)
     };
     let content = col()
         .key("state")
@@ -401,13 +402,7 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
         .child(sentence(words, t))
         .child(actions({
             let mut buttons = vec![
-                button(
-                    "state-btn-0",
-                    "Open in another app\u{2026}",
-                    ButtonKind::Outline,
-                    false,
-                    t,
-                )
+                button(keys("state-btn-0"), "Open in another app\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t)
                 .on_press(|s: &mut State| {
                     if let Some(ui) = ui(s) {
                         ui.intent(Intent::OpenInAnotherApp);
@@ -416,7 +411,7 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
             ];
             if copies {
                 buttons.push(
-                    button("state-btn-1", "Save a copy\u{2026}", ButtonKind::Outline, false, t).on_press(
+                    button(keys("state-btn-1"), "Save a copy\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
                         |s: &mut State| {
                             if let Some(ui) = ui(s) {
                                 ui.intent(Intent::SaveCopy);
