@@ -102,6 +102,9 @@ windows = { version = "0.58", features = [
     #   - Security_Cryptography: CryptographicBuffer::CreateFromByteArray to build
     #     the opaque Context IBuffer from the Id bytes without hand-rolling a
     #     DataWriter.
+    # power.rs: metered network (connection profile cost) and battery saver (GetSystemPowerStatus).
+    "Networking_Connectivity",
+    "Win32_System_Power",
     "Storage_Provider",
     "Storage",
     "Storage_Streams",

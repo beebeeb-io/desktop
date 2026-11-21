@@ -702,12 +702,14 @@ async fn run(
                 // Skip all sync work while the user has paused sync.
                 // The loop keeps running so it can receive the cancel
                 // signal and so it wakes up promptly when resumed.
-                let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));
+                let user_paused = sync_paused.load(Ordering::Relaxed);
+                let hold = power_hold(identity, user_paused);
+                let mode = RunMode::of_flag(user_paused || hold.is_some());
                 if mode.is_paused() {
                     if awaiting_first_list {
                         retry_marks_step(&sync_root).await;
                     }
-                    emit_payload(&app, tracker.paused());
+                                    emit_payload(&app, paused_payload(&tracker, hold));
                     set_telemetry_state(&telemetry, "paused");
                     // Windows breadcrumb flyout: reflect the paused state.
                     #[cfg(target_os = "windows")]
