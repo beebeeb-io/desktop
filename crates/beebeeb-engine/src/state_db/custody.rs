@@ -86,6 +86,28 @@ impl StateDb {
         conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)", [format!("shared_folder_index_dirty:{folder_id}")])?;
         Ok(())
     }
+    /// The shared roots that `file_id` and everything under it belong to, read from the contract rows.
+    /// A trash, delete or move changes what each of those roots' index must list.
+    pub fn shared_roots_in_subtree(&self, file_id: &str) -> Result<Vec<String>> {
+        let rows = self.list_files()?;
+        let mut roots = std::collections::BTreeSet::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![file_id.to_string()];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(root) = self.get_file_contract_state(&id)?.and_then(|c| c.shared_root_id) {
+                roots.insert(root);
+            }
+            stack.extend(rows.iter().filter(|r| r.parent_id.as_deref() == Some(&id)).map(|r| r.file_id.clone()));
+        }
+        Ok(roots.into_iter().collect())
+    }
+    /// The shared root of one row alone (a move's new parent), not its subtree.
+    pub fn shared_roots_in_subtree_root_only(&self, file_id: &str) -> Result<Vec<String>> {
+        Ok(self.get_file_contract_state(file_id)?.and_then(|c| c.shared_root_id).into_iter().collect())
+    }
     pub fn dirty_shared_index_roots(&self) -> Result<Vec<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt =
