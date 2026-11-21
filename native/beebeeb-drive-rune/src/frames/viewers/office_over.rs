@@ -324,6 +324,14 @@ impl Ui {
         }
     }
 
+    /// The slide on the stage and the deck's count, for the palette's slide commands (`None`: not a deck).
+    fn stage(&self) -> Option<palette::Stage> {
+        match &self.file.body {
+            Body::Deck(deck) => Some(palette::Stage { current: deck.view.current, count: deck.view.count }),
+            _ => None,
+        }
+    }
+
     /// What the source finds for the typed words. Asked at every draw: a source answers from
     /// what it holds in memory.
     fn office_found(&self) -> Vec<CommandGroup> {
@@ -331,7 +339,7 @@ impl Ui {
             Some(Over::Palette(palette)) => {
                 let kind = self.office.edit.as_ref().filter(|e| !e.stopped).map(|e| e.kind);
                 let typed = palette.query.text.as_str();
-                palette::found(kind, typed, self.source.commands(&self.file.id, typed))
+                palette::found_at(kind, self.stage(), typed, self.source.commands(&self.file.id, typed))
             }
             _ => Vec::new(),
         }
@@ -370,12 +378,14 @@ impl Ui {
         };
         let edit = self.office.edit.as_ref().filter(|e| !e.stopped);
         let live = edit.is_some();
-        let run = palette::resolve(edit.map(|e| e.kind), &group.title, &command.name, edit.and_then(|e| e.marks.as_ref()));
+        let stage = self.stage();
+        let run = palette::resolve_at(edit.map(|e| e.kind), stage, &group.title, &command.name, edit.and_then(|e| e.marks.as_ref()));
         self.office.over = None;
         match run {
             Run::File(name) => self.intent(Intent::OpenInDrive(name)),
             Run::Op(op) if live => self.office_edit(op),
             Run::Insert(tool) if live => self.office_insert(tool),
+            Run::Slide(cmd) if live => self.intent(Intent::Slide(cmd)),
             _ => self.intent(Intent::Office("this command")),
         }
     }

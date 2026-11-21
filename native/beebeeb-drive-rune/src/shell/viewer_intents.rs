@@ -21,6 +21,10 @@ pub fn take(s: &mut State, tx: &mut Tx, intent: Intent) -> bool {
     match intent {
         Intent::SaveCopy | Intent::DownloadTo => return super::viewer_save::take(s, tx, intent),
         Intent::Office(_) => return office_command(s),
+        Intent::Slide(cmd) => {
+            crate::frames::office::edit::slide::run_command(s, cmd);
+            return true;
+        }
         Intent::NewDocument(kind) => {
             let folder = s.listing.folder.id.clone();
             crate::frames::office::edit::new_document::open(s, tx, Some(kind), folder);
