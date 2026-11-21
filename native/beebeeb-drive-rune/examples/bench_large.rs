@@ -16,26 +16,36 @@
 //! names the app's files read as `crate::…` are re-exported below (what `src/main.rs` does).
 #![allow(warnings)]
 
-#[path = "../src"]
-mod app_root {
-    pub mod engine_host;
-    #[cfg(feature = "feedback")]
-    pub mod feedback;
-    pub mod frames;
-    pub mod log_file;
-    pub mod media;
-    pub mod shell;
-    pub mod source;
-    pub mod source_engine;
-    pub mod text_kit;
-    pub mod theme;
-    pub mod ui;
-    pub mod windows_floor;
-}
-use app_root::*;
-pub use app_root::shell::registry::view;
-pub use app_root::shell::state::{State, init, load};
-pub use app_root::shell::{FAMILIES, FONTS, TITLEBAR_H};
+// Every module of `src/main.rs`, at this crate's root (the app's `pub(in crate::engine_host::…)` paths need them
+// there). `engine_host` and `log_file` are `<name>/mod.rs`: a `#[path]` file reads its children from its own folder.
+#[path = "../src/engine_host/mod.rs"]
+mod engine_host;
+#[cfg(feature = "feedback")]
+#[path = "../src/feedback/mod.rs"]
+mod feedback;
+#[path = "../src/frames/mod.rs"]
+mod frames;
+#[path = "../src/log_file/mod.rs"]
+mod log_file;
+#[path = "../src/media/mod.rs"]
+mod media;
+#[path = "../src/shell/mod.rs"]
+mod shell;
+#[path = "../src/source.rs"]
+mod source;
+#[path = "../src/source_engine.rs"]
+mod source_engine;
+#[path = "../src/text_kit/mod.rs"]
+mod text_kit;
+#[path = "../src/theme/mod.rs"]
+mod theme;
+#[path = "../src/ui/mod.rs"]
+mod ui;
+#[path = "../src/windows_floor.rs"]
+mod windows_floor;
+pub use shell::registry::view;
+pub use shell::state::{State, init, load};
+pub use shell::{FAMILIES, FONTS, TITLEBAR_H};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
