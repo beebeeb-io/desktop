@@ -11,7 +11,6 @@ use rune::{El, TextStyle, col, el, row};
 use crate::State;
 use crate::frames::viewers;
 use crate::theme::tokens::{Theme, type_};
-use crate::ui::dialog::{Dialog, Head, Surface};
 use crate::ui::kit;
 use crate::ui::settings_dialog::DIALOG_TITLE;
 
@@ -93,10 +92,17 @@ fn link(index: usize, words: &str, t: &Theme) -> El {
 
 /// The panel: a title, the notice, the two links. No image and no mark: names appear only inside the notice text.
 pub fn licence_panel(t: &Theme) -> El {
-    let head = col()
-        .w_full()
+    col()
+        .key("lic-panel")
+        .role("dialog")
+        .label(TITLE)
+        .w(360.0)
         .padding(16.0)
         .gap(8.0)
+        .fill(t.card)
+        .radius(12.0)
+        .box_shadow(kit::drop(24.0, 60.0, rune::Color::BLACK.alpha(0.28)))
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
         .child(
             kit::label("lic-title", TITLE, DIALOG_TITLE, t.text)
                 .role("heading")
@@ -111,15 +117,7 @@ pub fn licence_panel(t: &Theme) -> El {
                 .gap(4.0)
                 .child(link(0, LINKS[0], t))
                 .child(link(1, LINKS[1], t)),
-        );
-    crate::ui::dialog::dialog(
-        Dialog {
-            surface: Surface::Panel,
-            head: Head::Raw(head),
-            ..Dialog::new("lic-panel", TITLE, 360.0)
-        },
-        t,
-    )
+        )
 }
 
 /// DW-1558: the Files window as the board draws it under New (Contract draft.pdf selected), New document over it on
