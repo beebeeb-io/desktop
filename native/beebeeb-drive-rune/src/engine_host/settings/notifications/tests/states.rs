@@ -171,7 +171,7 @@ fn recent_says_loading_then_could_not_load_and_never_no_notifications_unread() {
     // "Try again" asks again, and an answer is drawn.
     fake.read_mode.store(ANSWER, Ordering::SeqCst);
     let asked_before = asked(&fake.fake, LIST);
-    let again = centre(&rt, "btn-0");
+    let again = centre(&rt, "recent-failed-retry");
     click_at(&mut rt, again);
     poll(&mut rt);
     assert_eq!(asked(&fake.fake, LIST), asked_before + 1, "one read for the one press");
