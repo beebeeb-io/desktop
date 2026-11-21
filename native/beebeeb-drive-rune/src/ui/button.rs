@@ -13,7 +13,7 @@ use super::kit;
 /// `.kit-btn-md span`: 13/500 on the button's 10/7 line, tracked -0.005em.
 pub const LABEL_MD: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
 /// `.kit-btn-lg span`: 13/500 on 19.5, tracked -0.005em.
-pub const LABEL_LG: TextStyle = TextStyle::new(13.0, 500.0).lh(19.5).tracking(-0.065);
+pub const LABEL_LG: TextStyle = super::au::type_au::BUTTON_LG;
 
 /// Side padding, and the gap between the icon and the words.
 const PX: f32 = 12.0;
