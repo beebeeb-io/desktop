@@ -123,8 +123,8 @@ fn cancel_shares_nothing_wipes_the_password_and_the_choices_start_again() {
     let (mut rt, calls, _) = spied();
     pick(&mut rt, "Share\u{2026}");
     click(&mut rt, "item-0-0");
-    assert_eq!(info(&rt, "menu-0").label.as_deref(), Some("Anyone with the link"));
-    click(&mut rt, "menu-0-item-0");
+    assert_eq!(info(&rt, "share-menu").label.as_deref(), Some("Anyone with the link"));
+    click(&mut rt, "share-menu-item-0");
     assert_eq!(share_of(&rt).map(|s| s.access), Some(LinkAccess::Download));
     assert_eq!(label_of(&rt, "item-0-0"), "Anyone with the link, Can download");
     click(&mut rt, "item-0-2-switch");
@@ -154,10 +154,10 @@ fn copy_link_asks_once_with_the_choices_and_then_says_link_copied() {
     let (mut rt, calls, _) = spied();
     pick(&mut rt, "Share\u{2026}");
     click(&mut rt, "item-0-0");
-    click(&mut rt, "menu-0-item-0");
+    click(&mut rt, "share-menu-item-0");
     click(&mut rt, "item-0-1");
-    assert_eq!(info(&rt, "menu-0").label.as_deref(), Some("Link expires"));
-    click(&mut rt, "menu-0-item-1");
+    assert_eq!(info(&rt, "share-menu").label.as_deref(), Some("Link expires"));
+    click(&mut rt, "share-menu-item-1");
     assert_eq!(label_of(&rt, "item-0-1"), "Link expires, In 7 days");
     click(&mut rt, "btn-0");
     assert_eq!(
@@ -287,9 +287,9 @@ fn try_again_after_a_link_failed_opens_the_dialog_again_and_never_makes_a_plain_
     fails.lock().unwrap().push((Action::ShareLink, ActionError::Offline));
     pick(&mut rt, "Share\u{2026}");
     click(&mut rt, "item-0-0");
-    click(&mut rt, "menu-0-item-0");
+    click(&mut rt, "share-menu-item-0");
     click(&mut rt, "item-0-1");
-    click(&mut rt, "menu-0-item-0");
+    click(&mut rt, "share-menu-item-0");
     click(&mut rt, "item-0-2-switch");
     type_text(&mut rt, "s3cret-words");
     let (access, expires) = share_of(&rt).map(|s| (s.access, s.expires)).unwrap();

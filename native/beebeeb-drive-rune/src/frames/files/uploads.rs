@@ -14,9 +14,13 @@ use super::Intent;
 use super::source::Action;
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
-use crate::theme::{icons, icons_files};
+use crate::theme::icons_files;
 use crate::ui::dialog::{Dialog, Foot, Head, Surface, dialog};
+use crate::ui::file_row::{self, RowLook};
+use crate::ui::file_tile::{self, TilePicture, TileSize};
+use crate::ui::grid_tiles::Thumb;
 use crate::ui::kit;
+use crate::ui::menu::{self, Entry};
 use crate::ui::status_bar::{Dot, bar as status_bar};
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use rune::{Color, El, Tx, col, el, row};
@@ -365,14 +369,24 @@ pub fn bar(key: &str, done: f32, name: &str, t: &Theme) -> El {
         )
 }
 
-fn picture_tile(key: &str, upload: &Upload, size: f32, t: &Theme) -> El {
-    let corner = (size * 0.24).round();
-    let tile = el()
-        .key(format!("{key}-tile"))
-        .size(size, size)
-        .radius(corner)
-        .clip_rounded(corner)
-        .center();
+/// An upload's tile: the kind's icon from its name, or the stand-in picture until the engine hands over pixels.
+fn picture_tile(key: &str, upload: &Upload, t: &Theme) -> El {
+    let icon = crate::theme::file_icons::icon_for(&upload.name, false, None);
+    let picture = match upload.picture {
+        Some(_) => TilePicture::Thumb(&Thumb::Plain),
+        None => TilePicture::Icon(icon),
+    };
+    let tile = file_tile::tile(
+        &format!("{key}-tile"),
+        &upload.name,
+        picture,
+        &upload.name,
+        None,
+        RowLook::default(),
+        TileSize::Small,
+        t,
+    )
+    .a11y_hidden();
     match upload.picture {
         Some(p) => {
             let stop = |hex: &str| rune::color::hex(hex).unwrap_or(Color::BLACK);
@@ -385,12 +399,7 @@ fn picture_tile(key: &str, upload: &Upload, size: f32, t: &Theme) -> El {
                 ],
             )
         }
-        None => tile.fill(t.tile).child(kit::glyph(
-            format!("{key}-icon"),
-            &icons::DOC_GENERIC,
-            (size * 0.62).round(),
-            t.text_secondary,
-        )),
+        None => tile,
     }
 }
 
@@ -403,6 +412,22 @@ fn heading(key: &str, words: &str, top: f32, t: &Theme) -> El {
     ))
 }
 
+/// The one entry of an upload's menu.
+const UPLOAD_MENU: [Entry; 1] = [Entry::item("cancel-upload", "Cancel upload")];
+
+fn pick_upload_menu(s: &mut State, index: usize, tx: &mut Tx) {
+    if UPLOAD_MENU.get(index).and_then(|e| e.id()) != Some("cancel-upload") {
+        return;
+    }
+    if let Some(id) = s.actions.upload_menu.clone() {
+        s.cancel_one_upload(&id, tx);
+    }
+}
+
+fn close_upload_menu(s: &mut State, _: &mut Tx) {
+    s.actions.upload_menu = None;
+}
+
 fn upload_row(i: usize, upload: &Upload, menu_open: bool, t: &Theme) -> El {
     let key = format!("upload-{i}");
     let (sub, ink, done) = match &upload.state {
@@ -410,54 +435,46 @@ fn upload_row(i: usize, upload: &Upload, menu_open: bool, t: &Theme) -> El {
         UploadState::Uploading { words, done, .. } => (words.clone(), t.text_tertiary, Some(*done)),
         UploadState::Waiting(words) => (words.clone(), t.text_tertiary, None),
     };
-    let mut words = col()
-        .key(format!("{key}-words"))
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(4.0)
-        .child(kit::label(format!("{key}-name"), upload.name.clone(), type_::LIST_ITEM, t.text).truncate())
-        .child(kit::label(format!("{key}-sub"), sub.clone(), type_::CAPTION, ink).truncate());
+    let mut cells = vec![kit::label(format!("{key}-sub"), sub.clone(), type_::CAPTION, ink).truncate().w(150.0)];
     if let Some(done) = done {
-        words = words.child(bar(&format!("{key}-bar"), done, &format!("{}, {sub}", upload.name), t));
+        cells.push(bar(&format!("{key}-bar"), done, &format!("{}, {sub}", upload.name), t).w(80.0));
     }
-    let id = upload.id.clone();
-    let mut r = row()
-        .key(key.clone())
-        .role("listitem")
-        .label(format!("{}. {sub}", upload.name))
-        .w_full()
-        .px(12.0)
-        .py(6.0)
-        .gap(10.0)
-        .center_y()
-        .on_secondary_press(move |s: &mut State, _: rune::PointerPress, _: &mut Tx| {
-            s.actions.upload_menu = Some(id.clone());
-        })
-        .child(picture_tile(&key, upload, 28.0, t))
-        .child(words);
     if matches!(upload.state, UploadState::Failed(_)) {
         let id = upload.id.clone();
-        r = r.child(
+        cells.push(
             controls::button(i, "Try again", None, Emphasis::Plain, t)
                 .key(format!("{key}-retry"))
                 .on_press_tx(move |s: &mut State, tx: &mut Tx| s.retry_one_upload(&id, tx)),
         );
     }
+    let id = upload.id.clone();
+    let mut r = file_row::row_with(
+        &key,
+        &format!("{}. {sub}", upload.name),
+        picture_tile(&key, upload, t),
+        &upload.name,
+        Vec::new(),
+        cells,
+        RowLook::default(),
+        t,
+    )
+    .on_secondary_press(move |s: &mut State, _: rune::PointerPress, _: &mut Tx| {
+        s.actions.upload_menu = Some(id.clone());
+    });
     if menu_open {
-        let id = upload.id.clone();
         r = r.child(
-            controls::menu(
-                9,
+            menu::menu(
+                "upload-menu",
                 "Upload",
                 130.0,
-                vec![
-                    controls::menu_item(9, 0, "Cancel upload", false, false, t)
-                        .on_press_tx(move |s: &mut State, tx: &mut Tx| s.cancel_one_upload(&id, tx)),
-                ],
+                &UPLOAD_MENU,
+                None,
                 t,
+                pick_upload_menu,
+                |_, _| {},
+                close_upload_menu,
             )
-            .absolute(52.0, 30.0)
-            .modal(true, |s: &mut State| s.actions.upload_menu = None),
+            .absolute(52.0, 30.0),
         );
     }
     r

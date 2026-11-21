@@ -19,9 +19,13 @@ use crate::State;
 use crate::source::{DriveItem, format_size};
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, icons_settings};
+use crate::ui::file_row::RowLook;
+use crate::ui::file_tile::{self, TilePicture, TileSize};
+use crate::ui::grid_tiles::Thumb;
+use crate::ui::menu::{self, Entry};
 use crate::ui::settings_dialog::{self, Weight};
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
-use crate::ui::{banner, button, field, kit, settings_controls as controls};
+use crate::ui::{banner, button, field, kit};
 use rune::{Align, El, Side, Tx, col, el, row};
 
 /// The key of the password's text input.
@@ -245,14 +249,15 @@ pub fn wipe(s: &mut State) {
 
 /// The file at the top of a dialog: its tile, its name, and a line under it.
 /// Keys: `dlg-file`, `dlg-file-tile`, `dlg-file-icon`, `dlg-file-name`, `dlg-file-sub`.
-pub fn file_head(item: &DriveItem, name: &str, sub: &str, mono: bool, tile: f32, t: &Theme) -> El {
+/// The tile is always `TileSize::Large` now; `_tile` stays until the callers outside this area drop it.
+pub fn file_head(item: &DriveItem, name: &str, sub: &str, mono: bool, _tile: f32, t: &Theme) -> El {
     let sub_style = if mono { type_::KBD } else { type_::CAPTION };
     row()
         .key("dlg-file")
         .w_full()
         .center_y()
         .gap(12.0)
-        .child(big_tile("dlg-file", item, tile, t))
+        .child(big_tile("dlg-file", item, 40.0, t))
         .child(
             col()
                 .key("dlg-file-words")
@@ -263,59 +268,54 @@ pub fn file_head(item: &DriveItem, name: &str, sub: &str, mono: bool, tile: f32,
         )
 }
 
-/// A file's tile at another size than the row's 22 pt (`FTile size`): the corner is 24 % of
-/// the side, the glyph 62 %. Keys: `<key>-tile`, `<key>-icon`.
+/// A file's tile from `ui::file_tile`: Small up to 30 pt, else Large. Keys: `<key>-tile`.
+/// (`facts.rs` still passes its 28 pt; the point is the shared tile, not the size.)
 pub fn big_tile(key: &str, item: &DriveItem, size: f32, t: &Theme) -> El {
-    let corner = (size * 0.24).round();
-    let tile = el()
-        .key(format!("{key}-tile"))
-        .size(size, size)
-        .radius(corner)
-        .clip_rounded(corner)
-        .center();
-    if item.has_thumbnail {
-        return crate::ui::file_list::thumbnail(tile);
+    let name = item.name.as_str();
+    let tile_size = if size <= 30.0 { TileSize::Small } else { TileSize::Large };
+    let thumb = Thumb::Plain;
+    let picture = if item.has_thumbnail {
+        TilePicture::Thumb(&thumb)
+    } else {
+        TilePicture::Icon(crate::theme::file_icons::icon_for_item(item))
+    };
+    file_tile::tile(&format!("{key}-tile"), name, picture, name, None, RowLook::default(), tile_size, t)
+}
+
+fn menu_entries(share: &Share) -> Vec<Entry> {
+    match share.menu {
+        Some(Menu::Access) => LinkAccess::ALL
+            .iter()
+            .map(|a| Entry::check("choice", a.words(), *a == share.access))
+            .collect(),
+        Some(Menu::Expiry) => LinkExpiry::ALL
+            .iter()
+            .map(|e| Entry::check("choice", e.choice(), *e == share.expires))
+            .collect(),
+        None => Vec::new(),
     }
-    tile.fill(t.tile).child(crate::ui::file_icon::file_icon(
-        format!("{key}-icon"),
-        crate::theme::file_icons::icon_for_item(item),
-        (size * 0.62).round(),
-        t,
-    ))
+}
+
+fn pick_choice(s: &mut State, index: usize, _: &mut Tx) {
+    if let Some(menu) = s.share_mut().and_then(|share| share.menu) {
+        s.share_choose(menu, index);
+    }
+}
+
+fn close_choices(s: &mut State, _: &mut Tx) {
+    if let Some(share) = s.share_mut() {
+        share.menu = None;
+    }
 }
 
 fn menu_layer(share: &Share, t: &Theme) -> Option<El> {
-    let menu = share.menu?;
-    let (name, anchor, labels, chosen): (&str, &str, Vec<&str>, usize) = match menu {
-        Menu::Access => (
-            "Anyone with the link",
-            "item-0-0-menu-at",
-            LinkAccess::ALL.iter().map(|a| a.words()).collect(),
-            LinkAccess::ALL.iter().position(|a| *a == share.access).unwrap_or(0),
-        ),
-        Menu::Expiry => (
-            "Link expires",
-            "item-0-1-menu-at",
-            LinkExpiry::ALL.iter().map(|e| e.choice()).collect(),
-            LinkExpiry::ALL.iter().position(|e| *e == share.expires).unwrap_or(0),
-        ),
+    let (name, anchor) = match share.menu? {
+        Menu::Access => ("Anyone with the link", "item-0-0-menu-at"),
+        Menu::Expiry => ("Link expires", "item-0-1-menu-at"),
     };
-    let items = labels
-        .into_iter()
-        .enumerate()
-        .map(|(i, label)| {
-            controls::menu_item(0, i, label, i == chosen, false, t)
-                .on_press(move |s: &mut State| s.share_choose(menu, i))
-        })
-        .collect();
     Some(
-        controls::menu(0, name, 130.0, items, t)
-            .anchored(anchor, Side::Bottom, Align::Start, 0.0)
-            .modal(true, |s: &mut State| {
-                if let Some(share) = s.share_mut() {
-                    share.menu = None;
-                }
-            }),
+        menu::menu("share-menu", name, 130.0, &menu_entries(share), None, t, pick_choice, |_, _| {}, close_choices)
+            .anchored(anchor, Side::Bottom, Align::Start, 0.0),
     )
 }
 
