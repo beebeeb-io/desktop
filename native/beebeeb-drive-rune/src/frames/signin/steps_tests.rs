@@ -1075,6 +1075,27 @@ pub(super) fn a11y_nodes(rt: &Runtime<State>, key: &str) -> Vec<serde_json::Valu
     out
 }
 
+/// The set size Rune reports for the item keyed `key`: AccessKit carries it on the item's
+/// nearest container (the node whose children hold it).
+pub(super) fn a11y_set_size_of(rt: &Runtime<State>, key: &str) -> Option<u64> {
+    fn walk(v: &serde_json::Value, key: &str) -> Option<Option<u64>> {
+        match v {
+            serde_json::Value::Object(map) => {
+                let holds = map.values().any(|c| {
+                    c.as_array().is_some_and(|kids| kids.iter().any(|k| k.get("key").and_then(|k| k.as_str()) == Some(key)))
+                });
+                if holds {
+                    return Some(map.get("setSize").and_then(|s| s.as_u64()));
+                }
+                map.values().find_map(|c| walk(c, key))
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(|c| walk(c, key)),
+            _ => None,
+        }
+    }
+    walk(&rt.accessibility_json(), key).flatten()
+}
+
 #[test]
 fn each_word_box_says_its_place_of_twelve() {
     let (rt, _) = signed_in(phrase_script());
@@ -1083,7 +1104,7 @@ fn each_word_box_says_its_place_of_twelve() {
         assert_eq!(nodes.len(), 1, "{key}");
         assert_eq!(nodes[0]["name"], format!("Recovery word {}", i + 1));
         assert_eq!(nodes[0]["position"], i + 1, "{} of 12", i + 1);
-        assert_eq!(nodes[0]["setSize"], 12);
+        assert_eq!(a11y_set_size_of(&rt, key), Some(12), "{key}");
     }
 }
 
