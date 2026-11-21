@@ -475,10 +475,11 @@ fn expired_request_shows_expired() {
     let (engine, mut source, _) = with_prompts(&server);
     *server.expires_at.lock().unwrap() = GONE;
     let request = found(&mut source);
-    let before = server.fake.routes().len();
+    let before = server.fake.routes();
     assert_eq!(source.sign_in_request_gone(request.id()), Some(Denial::Expired));
     assert_eq!(source.waiting_sign_in_request(request.id()), None);
-    assert_eq!(server.fake.routes().len(), before, "read from the request: no network");
+    let after = server.fake.routes();
+    assert_eq!(after.len(), before.len(), "read from the request: no network; new: {:?}", &after[before.len().min(after.len())..]);
 
     *server.expires_at.lock().unwrap() = LIVE;
     let mut fresh = Source::new(engine.clone());
