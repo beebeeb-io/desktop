@@ -652,7 +652,7 @@ fn wrong_inputs_map_to_the_gates_words_and_change_nothing() {
 }
 
 /// Task 2447 through the handle's entry points: a vault key that is another account's is never loaded next to
-/// this account's session, and a sign-in removes it before it stores its token.
+/// this account's session; a sign-in leaves it, tagged with the other account's id, for the account switch (dc-014).
 #[test]
 fn another_accounts_stored_key_is_refused_and_removed() {
     let _serial = serial();
@@ -684,7 +684,7 @@ fn another_accounts_stored_key_is_refused_and_removed() {
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
     drop(host);
 
-    // Sign-in: a key left behind with another owner's tag (no token) goes before the token is stored. It is put there
+    // Sign-in: a key left behind with another owner's tag (no token) stays, and is never loaded. It is put there
     // after the start: a start finishes such a leftover itself (`app::unfinished_sign_out`), and this pins the sign-in.
     let host = open(&credentials);
     assert_eq!(host.engine.restore(), GateState::SignedOut);
@@ -703,9 +703,16 @@ fn another_accounts_stored_key_is_refused_and_removed() {
         host.engine.sign_in_password(EMAIL, secret(PASSWORD)),
         Ok(NextAfterSignIn::RecoveryPhrase)
     );
+    // dc-014: a key tagged with another account's id stays until that account's local data is cleared (the account
+    // switch removes it then), and it is never this account's: nothing loads it.
     assert!(
-        store.load_wrapped_master_key().unwrap().is_none(),
-        "the foreign key is gone"
+        store.load_wrapped_master_key().unwrap().is_some(),
+        "the other account's key stays until its data is cleared"
+    );
+    assert_eq!(
+        AuthVault::new(store.clone()).vault_key_owner().unwrap().as_deref(),
+        Some("99999999-9999-4999-8999-999999999999"),
+        "with its own tag, never this account's"
     );
     assert_eq!(flag(&credentials, LockFlag::AppLock), None, "and its lock setting");
     assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));

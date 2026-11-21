@@ -712,8 +712,8 @@ impl StateDb {
     /// L7d: the custody memory survives, because it belongs to the device and an account switch must not
     /// shrink it. B05e's share rows survive too (lead ruling 2026-11-09): the person's compared marks and the keys
     /// their shares were sealed to, public keys and fingerprints only, keyed by the own account id, so signing in
-    /// again keeps the safety-number pin, and another account on this PC never reads them. A reset of local data
-    /// removes them first ([`Self::forget_share_trust_rows`]). Every other `sync_state` row is cleared.
+    /// again keeps the safety-number pin, and another account on this PC never reads them. An account switch
+    /// removes the leaving account's after this clear ([`Self::forget_share_trust_rows`]). Every other `sync_state` row is cleared.
     ///
     /// `owe_finder_removal` is written in the SAME transaction: a Mac whose previous account's Finder domain is
     /// still registered owes a removal, and no engine may start until it is confirmed (`finder_removal_owed`).
@@ -737,22 +737,32 @@ impl StateDb {
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
-    /// B05e: a reset of local data (R10's `reset`) removes the share marks, sealed, offered and accepted keys that a
-    /// sign-out keeps (`share_marks::SHARE_TRUST_ROWS`), of every account on this PC, in one statement. The
-    /// first-time guide marks (`guide_mark`) are the other rows a sign-out keeps, and go with them: after a reset
-    /// nothing of an earlier account is left here.
-    pub fn forget_share_trust_rows(&self) -> Result<()> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let kept: Vec<&str> = share_marks::SHARE_TRUST_ROWS
+    /// B05e: an account switch that removed `account`'s local data (`app::account_switch`) removes the share marks,
+    /// sealed, offered and accepted keys that a sign-out keeps (`share_marks::SHARE_TRUST_ROWS`), and its first-time
+    /// guide mark (`guide_mark`), of THAT account only (dc-014): every row is keyed `<kind>:<user id>:…` (the guide's
+    /// `guide_done:<user id>`), and another account's pins on this PC stay. One statement. Compared as an exact
+    /// prefix, never as a `LIKE` pattern, so an id is never read as a wildcard; a blank id removes nothing.
+    pub fn forget_share_trust_rows(&self, account: &str) -> Result<()> {
+        let account = account.trim();
+        if account.is_empty() {
+            return Ok(());
+        }
+        let prefixes: Vec<String> = share_marks::SHARE_TRUST_ROWS
             .iter()
-            .copied()
-            .chain([guide_mark::GUIDE_DONE_ROWS])
+            .map(|pattern| format!("{}{account}:", pattern.trim_end_matches('%')))
             .collect();
-        let any = vec!["key LIKE ?"; kept.len()].join(" OR ");
-        conn.execute(
-            &format!("DELETE FROM sync_state WHERE {any}"),
-            rusqlite::params_from_iter(kept),
-        )?;
+        let guide = format!("{}{account}", guide_mark::GUIDE_DONE_ROWS.trim_end_matches('%'));
+        let mut sql = String::from("DELETE FROM sync_state WHERE key = ?");
+        for _ in &prefixes {
+            sql.push_str(" OR substr(key, 1, length(?)) = ?");
+        }
+        let mut values: Vec<&str> = vec![guide.as_str()];
+        for prefix in &prefixes {
+            values.push(prefix);
+            values.push(prefix);
+        }
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(&sql, rusqlite::params_from_iter(values))?;
         Ok(())
     }
     pub fn finder_domain_gone(&self) -> Result<bool> {
