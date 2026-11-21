@@ -563,6 +563,7 @@ mp2
 mp3
 mpeg2
 mpeg4
+ms
 name
 name_check_errors
 name_conflicts
@@ -680,6 +681,7 @@ pending-mark
 per-scan
 periodic
 persisted
+phase
 photo
 phrase
 pin
@@ -1024,6 +1026,7 @@ tiles
 time
 timed
 timeout
+timing
 to
 toast
 toggle
