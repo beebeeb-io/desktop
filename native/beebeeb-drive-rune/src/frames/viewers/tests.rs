@@ -1173,3 +1173,17 @@ fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
     assert!(calls.borrow().iter().any(|c| c.starts_with("save")));
     assert!(!holds(&rt.state));
 }
+
+/// ux-53: with the editor focused behind it, Enter on the shown question presses Save.
+#[test]
+fn enter_on_the_shown_unsaved_question_presses_save() {
+    use super::unsaved_guard::{Then, ask, holds};
+    let (mut rt, calls) = note(false, false);
+    edit_and_type(&mut rt);
+    assert!(ask(&mut rt.state, Then::Quit));
+    rt.invalidate();
+    rt.frame(0.0);
+    press(&mut rt, Key::Enter);
+    assert!(calls.borrow().iter().any(|c| c.starts_with("save")), "Enter saved: {:?}", calls.borrow());
+    assert!(!holds(&rt.state));
+}
