@@ -27,8 +27,7 @@ use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::backups_kit::{self, Md, TileTone};
 use crate::ui::banner::{self, Banner, Run, Tone};
 use crate::ui::file_list::{PcState, ROW_H, format_date, pc_glyph};
-use crate::ui::settings_dialog::{self, DIALOG_TITLE, Weight};
-use crate::ui::settings_shell::SUB;
+use crate::ui::settings_dialog::{self, Weight};
 use crate::ui::{dialog, empty, kit};
 use rune::{Align, Color, Cx, El, Icon, Key, KeyEvent, TextStyle, Tx, col, el, row};
 
@@ -649,70 +648,23 @@ pub fn notice(s: &State, t: &Theme) -> Option<El> {
 /// source's title and sentence, OK and Open Settings side by side.
 pub fn layer(s: &State, t: &Theme) -> Option<El> {
     let words = s.actions.protected.alert.as_ref()?;
-    let said = col()
-        .key("dlg-alert-words")
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(6.0)
-        .child(
-            kit::label("dlg-title", words.title.clone(), DIALOG_TITLE, t.text)
-                .role("heading")
-                .level(2)
-                .w_full(),
-        )
-        .child(kit::label("dlg-sub", words.body.clone(), SUB, t.text_tertiary).wrap());
-    let head = row()
-        .key("dlg-head")
-        .pt(20.0)
-        .px(24.0)
-        .pb(16.0)
-        .gap(14.0)
-        .items_start()
-        .child(backups_kit::tile(0, TileTone::Neutral, &icons::LOCK, 36.0, t))
-        .child(said);
-    // `.wn-dlg-foot.is-even`: the two share the foot evenly; the outlined one is its border wider.
-    let foot = row()
-        .key("dlg-foot")
-        .center_y()
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .child(
-            settings_dialog::button(0, "OK", Weight::Primary, t)
-                .w(161.0)
-                .default_button()
-                .on_press_tx(|s: &mut State, tx: &mut Tx| {
-                    s.close_protected(tx);
-                }),
-        )
-        .child(
-            backups_kit::button_md(1, "Open Settings", None, Md::Plain, t)
-                .w(163.0)
-                .on_press(|s: &mut State| s.open_protected_settings()),
-        );
-    let card = col()
-        .key("dlg")
-        .role("alertdialog")
-        .label(words.title.clone())
-        .description(words.body.clone())
-        // The foot's hairline ends the height in a half point (`ui::dialog::card`).
-        .pixel_snap(false)
-        .w(380.0)
-        .radius(dialog::RADIUS)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(
-            col()
-                .key("dlg-clip")
-                .w_full()
-                .clip_rounded(dialog::RADIUS)
-                .child(head)
-                .child(foot),
-        );
+    let tile = backups_kit::tile(0, TileTone::Neutral, &icons::LOCK, 36.0, t);
+    let ok = settings_dialog::button(0, "OK", Weight::Primary, t).on_press_tx(|s: &mut State, tx: &mut Tx| {
+        s.close_protected(tx);
+    });
+    let open_settings = backups_kit::button_md(1, "Open Settings", None, Md::Plain, t)
+        .on_press(|s: &mut State| s.open_protected_settings());
+    let card = dialog::dialog(
+        dialog::Dialog {
+            alert: true,
+            head: dialog::Head::Alert { tile, title: &words.title, sub: &words.body },
+            foot: dialog::Foot::Row(vec![ok.w(161.0), open_settings.w(163.0)]),
+            enter: Some(0),
+            ..dialog::Dialog::new("dlg", &words.title, 380.0)
+        },
+        t,
+    )
+    .description(words.body.clone());
     Some(
         el().key("dialog-protected")
             .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))

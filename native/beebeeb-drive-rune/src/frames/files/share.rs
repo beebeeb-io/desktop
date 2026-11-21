@@ -17,9 +17,9 @@ use super::source::{Action, ActionError};
 use super::{Intent, Toast};
 use crate::State;
 use crate::source::{DriveItem, format_size};
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, icons_settings};
-use crate::ui::settings_dialog::{self, BUTTON_MD, Weight};
+use crate::ui::settings_dialog::{self, Weight};
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::{banner, button, field, kit, settings_controls as controls};
 use rune::{Align, El, Side, Tx, col, el, row};
@@ -243,27 +243,6 @@ pub fn wipe(s: &mut State) {
     s.actions.share_password.focused = false;
 }
 
-/// A dialog-size amber button with a glyph (`.kit-btn-md` with `icon`).
-fn primary(index: usize, label: &str, icon: &'static rune::Icon, t: &Theme) -> El {
-    let key = format!("btn-{index}");
-    let fill = t.accent;
-    row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .h(28.0)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD)
-        .fill(fill)
-        .hover(fill.mix(rune::Color::BLACK, 0.05))
-        .press(fill.mix(rune::Color::BLACK, 0.10))
-        .focusable(true)
-        .child(kit::glyph(format!("{key}-icon"), icon, 16.0, t.accent_text_on))
-        .child(kit::label(format!("{key}-label"), label, BUTTON_MD, t.accent_text_on))
-}
-
 /// The file at the top of a dialog: its tile, its name, and a line under it.
 /// Keys: `dlg-file`, `dlg-file-tile`, `dlg-file-icon`, `dlg-file-name`, `dlg-file-sub`.
 pub fn file_head(item: &DriveItem, name: &str, sub: &str, mono: bool, tile: f32, t: &Theme) -> El {
@@ -450,7 +429,7 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
 
     let foot = col()
         .child(
-            primary(0, "Copy link", &icons::LINK, t)
+            button::button(button::keys("btn-0"), "Copy link", Some(&icons::LINK), button::Variant::Primary, button::Size::Md, button::ButtonState::Enabled, t)
                 .w_full()
                 .default_button()
                 .on_press_tx(|s: &mut State, tx: &mut Tx| s.share_copy_link(tx)),

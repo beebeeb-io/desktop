@@ -15,10 +15,11 @@ use crate::State;
 use crate::frames::global::source::Loading;
 use crate::source::DriveItem;
 use crate::theme::icons_settings;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::Theme;
 use crate::ui::kit;
+use crate::ui::status_bar::{Dot, bar};
 use rune::tok::Family;
-use rune::{Color, El, TextStyle, col, el, row};
+use rune::{El, TextStyle, col, el, row};
 
 /// DW-1108 against DW-0101 and DW-0121 (the same state, two pictures on the board): offline, does
 /// the list itself say so (rows that need a connection dimmed and worded, the status line
@@ -91,37 +92,13 @@ pub fn status_words(s: &State) -> Option<String> {
     ))
 }
 
-fn line(dot: Color, state: &str, details: &str, t: &Theme) -> El {
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(
-            row()
-                .key("status-left")
-                .center_y()
-                .gap(7.0)
-                .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(dot))
-                .child(kit::label("status-text", state, type_::STATUS_STRONG, t.text_secondary)),
-        )
-        .child(el().key("status-spacer").grow(1.0))
-        .child(kit::label("status-details", details, type_::STATUS, t.text_tertiary))
-}
-
 /// The status line of these states: "Getting your files ready" while the first list loads,
 /// "Offline" without a connection (whatever the sync state's own word is). `None`: neither.
 pub fn status_line(s: &State, details: &str, t: &Theme) -> Option<El> {
     if loading(s).is_some() {
-        return Some(line(t.text_tertiary, "Getting your files ready", details, t));
+        return Some(bar(Some(Dot::Busy), Some("Getting your files ready"), details, t));
     }
-    offline(s).then(|| line(t.text_quaternary, "Offline", details, t))
+    offline(s).then(|| bar(Some(Dot::Idle), Some("Offline"), details, t))
 }
 
 const CARD_TITLE: TextStyle = TextStyle::new(13.0, 600.0).lh(17.0);

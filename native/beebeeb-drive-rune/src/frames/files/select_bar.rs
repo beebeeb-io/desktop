@@ -6,7 +6,7 @@ use crate::source::DriveItem;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, pane, preview};
-use crate::ui::kit;
+use crate::ui::{button, kit};
 use rune::{Color, El, Icon, Span, TextStyle, Tx, col, el, row};
 
 /// `.mk-selbar` under the toolbar: 34 pt and its hairline.
@@ -107,24 +107,16 @@ pub fn bar(s: &State, t: &Theme) -> Option<El> {
                     .on_press_tx(|s: &mut State, tx: &mut Tx| s.trash_from_bar(tx)),
             )
             .child(
-                row()
-                    .key("selbar-done")
-                    .role("button")
-                    .label("Done")
-                    .h(22.0)
-                    .px(12.0)
-                    .center()
-                    .radius(radius::MD)
-                    .hover(t.hover)
-                    .press(t.press)
-                    .focusable(true)
-                    .on_press(|s: &mut State| s.done_selecting())
-                    .child(kit::label(
-                        "selbar-done-label",
-                        "Done",
-                        type_::BUTTON_SM,
-                        t.text_secondary,
-                    )),
+                button::button(
+                    button::keys("selbar-done"),
+                    "Done",
+                    None,
+                    button::Variant::Ghost,
+                    button::Size::Sm,
+                    button::ButtonState::Enabled,
+                    t,
+                )
+                .on_press(|s: &mut State| s.done_selecting()),
             ),
     )
 }
