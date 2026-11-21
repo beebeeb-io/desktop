@@ -58,19 +58,16 @@ pub mod files;
 #[cfg(any(target_os = "windows", test))]
 pub mod found_while_paused;
 #[cfg(test)]
-#[path = "engine_host/files_case_twins_tests.rs"]
 mod files_case_twins_tests;
 mod files_conflicts;
 mod files_downloads;
 mod files_facts;
 mod files_item_of;
 #[cfg(test)]
-#[path = "engine_host/files_item_of_tests.rs"]
 mod files_item_of_tests;
 mod files_launch;
 mod files_link;
 #[cfg(test)]
-#[path = "engine_host/files_open_with_tests.rs"]
 mod files_open_with_tests;
 mod files_places;
 mod files_preview;
@@ -78,7 +75,6 @@ mod files_trash;
 mod files_uploads;
 mod files_versions;
 #[cfg(test)]
-#[path = "engine_host/files_window_support.rs"]
 mod files_window_support;
 pub mod guide;
 mod launcher;
@@ -92,13 +88,11 @@ pub mod media;
 // An Office document's confined renderer: one helper per document, every answer checked (`office_host`).
 pub mod office_host;
 #[cfg(test)]
-#[path = "engine_host/office_host_tests.rs"]
 mod office_host_tests;
 pub mod open;
 // DW-1562's Open With: one lock around every process the app starts (#460 F11), and the apps Windows reports.
 pub(crate) mod launch;
 #[cfg(test)]
-#[path = "engine_host/launch_tests.rs"]
 mod launch_tests;
 mod open_with_apps;
 pub mod passkeys;
