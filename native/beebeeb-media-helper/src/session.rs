@@ -250,7 +250,7 @@ fn open(
         }
         _ => None,
     };
-    let (audio, reduced_quality) = match (info.audio(), plan.audio) {
+    let (mut audio, mut reduced_quality) = match (info.audio(), plan.audio) {
         (Some(a), Some(codec)) => {
             let channels = a.channels.clamp(1, u32::from(MAX_CHANNELS)) as u16;
             let rate = a.sample_rate.clamp(1, MAX_RATE);
@@ -263,17 +263,34 @@ fn open(
         return Err(ErrorCode::NoDecoder);
     }
     // The wire takes a silent track only beside a video that plays and without audio; the decision gives no other.
-    let no_sound = plan.no_sound.filter(|_| video.is_some() && audio.is_none());
+    let mut no_sound = plan.no_sound.filter(|_| video.is_some() && audio.is_none());
     let duration_ms = (info.duration.seconds() * 1000.0).round().max(0.0) as u64;
     let system = if on_system {
-        Some(SystemStreams::open(SystemOpen {
-            pipe: &pipe,
-            gate,
-            flags,
-            container: &info.container,
-            video: plan.video.filter(|_| video.is_some()),
-            audio: plan.audio.filter(|_| audio.is_some()),
-        })?)
+        let open = |audio: Option<Codec>| {
+            SystemStreams::open(SystemOpen {
+                pipe: &pipe,
+                gate,
+                flags,
+                container: &info.container,
+                video: plan.video.filter(|_| video.is_some()),
+                audio,
+            })
+        };
+        let want_audio = plan.audio.filter(|_| audio.is_some());
+        Some(match open(want_audio) {
+            // ux-57: Windows has no decoder for the audio, but the video plays: open the video alone and say so.
+            // A video that cannot open either answers its own refusal from the second try.
+            Err(ErrorCode::NoSystemDecoder(codec) | ErrorCode::NoSystemMedia(codec))
+                if video.is_some() && want_audio == Some(codec) =>
+            {
+                let streams = open(None)?;
+                audio = None;
+                reduced_quality = false;
+                no_sound = Some(codec);
+                streams
+            }
+            other => other?,
+        })
     } else {
         None
     };
