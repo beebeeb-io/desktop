@@ -163,6 +163,40 @@ pub fn sync_root() -> Option<std::path::PathBuf> {
     SYNC_ROOT.read().ok().and_then(|root| root.clone())
 }
 
+/// Every Cloud Files change by a path (pin, stamp, convert, resize, mark) asks the 8.3 alias rule first (task 2415):
+/// a name the folder did not report may reach a different entry. From the sync root when `path` is below it, else
+/// from its own folder (its name alone). An `AlreadyExists` error is a conflict: change nothing.
+pub(crate) fn refuse_alias(path: &std::path::Path) -> std::io::Result<()> {
+    let root = sync_root();
+    let roots: Vec<&std::path::Path> = root.as_deref().into_iter().collect();
+    crate::name_alias::refuse_conflict_under_roots(path, &roots)
+}
+
+#[cfg(all(test, windows))]
+mod alias_guard_tests {
+    use super::*;
+
+    #[test]
+    fn changes_by_path_refuse_an_aliased_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("REPORT~1.PDF");
+        std::fs::write(&path, b"x").unwrap();
+        let _stub = crate::name_alias::stub::alias(&path);
+        let refused = |e: &anyhow::Error| {
+            e.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists)
+        };
+        assert_eq!(refuse_alias(&path).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(refused(&placeholders::set_pin_state(&path, true, false).unwrap_err()));
+        assert!(refused(&placeholders::convert_to_unsynced_placeholder(&path, "id").unwrap_err()));
+        assert!(refused(&placeholders::restamp_cloud_only(&path, "a", "b").unwrap_err()));
+        assert!(refused(&placeholders::resize_placeholder(&path, 1).unwrap_err()));
+        assert!(refused(&placeholders::mark_not_in_sync_path(&path).unwrap_err()));
+        assert!(!poison::set_pin_by_path(&path, windows::Win32::Storage::CloudFilters::CF_PIN_STATE_PINNED));
+        assert!(path.exists());
+    }
+}
+
 // The provider GUID is fixed per app identity (`EngineIdentity::cloud_files_provider_guid`; `identity.rs` pins the
 // real app's): minted once (UUIDv4) and never changed, so the sync-root identity is stable across releases and
 // machines. A changed GUID would orphan existing placeholders.
