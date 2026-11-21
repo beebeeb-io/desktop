@@ -93,6 +93,9 @@ pub struct Dialog<'a> {
     pub foot: Foot,
     /// The foot button (Row, Even, Stack) Enter presses. Never a destructive answer.
     pub enter: Option<usize>,
+    /// A fixed height for the surface. A Panel without one sizes to its content; with one its
+    /// clip grows to fill it.
+    pub height: Option<f32>,
 }
 
 impl<'a> Dialog<'a> {
@@ -110,6 +113,7 @@ impl<'a> Dialog<'a> {
             body_top: None,
             foot: Foot::None,
             enter: None,
+            height: None,
         }
     }
 }
@@ -261,7 +265,10 @@ fn build(d: Dialog, keep_body: bool, t: &Theme) -> El {
     let mut clip = col().key(k("clip")).w_full().shrink().min_h(0.0);
     clip = match d.surface {
         Surface::Card => clip.clip_rounded(RADIUS),
-        Surface::Panel => clip.grow(1.0).clip_rounded(PANEL_RADIUS),
+        Surface::Panel => {
+            let c = clip.clip_rounded(PANEL_RADIUS);
+            if d.height.is_some() { c.grow(1.0) } else { c }
+        }
         Surface::Sheet => clip.grow(1.0).clip_corners(SHEET_CORNERS),
     };
     for part in [head, body, foot].into_iter().flatten() {
@@ -274,6 +281,10 @@ fn build(d: Dialog, keep_body: bool, t: &Theme) -> El {
         .label(d.name)
         .w(d.width)
         .fill(t.card);
+    let surface = match d.height {
+        Some(h) => surface.h(h),
+        None => surface,
+    };
     let surface = match d.surface {
         // The foot's hairline makes a dialog's height end in a half point, so centring puts
         // its top on a quarter point. The board draws it there, edges half covered; so does this.

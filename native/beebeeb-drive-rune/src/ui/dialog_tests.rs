@@ -270,6 +270,22 @@ fn stack_gives_full_width_buttons() {
 }
 
 #[test]
+fn a_panel_in_an_auto_height_parent_has_its_content_height() {
+    let rt = window(|t| {
+        dialog(
+            Dialog {
+                surface: Surface::Panel,
+                body: vec![el().key("blk").w(100.0).h(90.0)],
+                ..Dialog::new("dlg", "P", 360.0)
+            },
+            t,
+        )
+    });
+    assert_eq!(info(&rt, "dlg").rect[3], 90.0);
+    assert_eq!(info(&rt, "dlg-clip").rect[3], 90.0);
+}
+
+#[test]
 fn sheet_and_panel_have_their_corners_and_add_no_padding() {
     fn part(surface: Surface, t: &Theme) -> El {
         dialog(

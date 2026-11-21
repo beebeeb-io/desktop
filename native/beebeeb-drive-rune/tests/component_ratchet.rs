@@ -160,7 +160,7 @@ fn measure() -> BTreeMap<&'static str, usize> {
     m.insert("spacing_literals_in_frames", spacing_literals(&files));
     m.insert("family_button_builders", family_button_builders(&files));
     m.insert("family_status_bars", files_holding(&files, &[], "key(\"status-bar\")"));
-    m.insert("family_dialog_cards", files_holding(&files, &[], "kit::drop(24.0, 60.0"));
+    m.insert("family_dialog_cards", files_holding(&files, &[], "kit::drop(24.0, 60.0") + files_holding(&files, &[], "kit::drop(18.0, 50.0"));
     m.insert("family_drive_sidebars", files_holding(&files, &["theme/"], "\"THIS PC\""));
     m
 }
