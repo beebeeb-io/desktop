@@ -561,7 +561,6 @@ fn footer<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
         .key("foot")
         .role("toolbar")
         .label("Flyout actions")
-        .focus_group()
         .w_full()
         .h(64.5)
         .padding(6.0)
