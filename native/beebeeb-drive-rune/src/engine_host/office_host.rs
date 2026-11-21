@@ -54,8 +54,8 @@ use beebeeb_office_sandbox as sandbox;
 use zeroize::{Zeroize, Zeroizing};
 
 pub use beebeeb_office_protocol::office::{
-    Anchor, CellData, CellRange, DocKind, EditKind, EditOp, Edited, HitMode, OutlineEntry, PageSize, Purpose, Rect,
-    SheetInfo, Template,
+    Anchor, CellData, CellRange, DocKind, DroppedPart, EditKind, EditOp, Edited, HitMode, OutlineEntry, PageSize,
+    Purpose, Rect, SheetInfo, Template,
 };
 pub use worker::edit::EditEvent;
 // Re-exported for the window; the window proof (`beebeeb-office-page`) compiles this file alone and names neither.
@@ -690,6 +690,9 @@ struct Inner {
     worker_ended: bool,
     /// A second crash within a minute opened the document read-only: `edit` calls are refused.
     read_only: bool,
+    /// The editor's guard refused this file (`EditGuarded`): what an edit here would drop. The document opens in the
+    /// viewer instead and `edit` calls are refused. Empty: not guarded.
+    guarded: Vec<DroppedPart>,
     /// The charts and pictures of checked cells from the running helper, by (sheet, id): what
     /// [`OfficeHost::request_anchor`] may ask. Emptied when that helper goes, and at a close.
     anchors: HashMap<(u32, u32), Anchor>,
@@ -1284,6 +1287,7 @@ pub(crate) fn open_mode_held<S: Starter>(
             edit_events: VecDeque::new(),
             worker_ended: false,
             read_only: false,
+            guarded: Vec::new(),
             anchors: HashMap::new(),
             parked: None,
         }),
