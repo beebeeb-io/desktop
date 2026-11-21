@@ -13,7 +13,9 @@ use crate::theme::icons as drive_icons;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
 use crate::theme::file_icons::icon_for;
-use crate::ui::file_icon::file_icon;
+use crate::ui::file_row::RowLook;
+use crate::ui::file_tile::{self, TilePicture, TileSize};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::backups_kit::{self as bk, Leading, Md, RowItem, TileTone};
 use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, Emphasis};
@@ -221,11 +223,32 @@ fn device_row(index: usize, device: &Device, t: &Theme) -> El {
 fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
     // Nothing is drawn as read before the engine answered: the loading state, then the answer or why there is none.
     if source.loading() {
-        return (vec![shell::heading("Backups", Some("Reading this PC's backup."), t)], 0);
+        return (
+            vec![
+                shell::heading("Backups", None, t),
+                view_state(ViewState::Loading { words: "Reading this PC's backup\u{2026}" }, t),
+            ],
+            0,
+        );
     }
     let refusal = source.refusal();
     if let (Some(words), true) = (refusal, source.folders().is_empty()) {
-        return (vec![shell::heading("Backups", Some(words), t)], 0);
+        let retry = try_again("backups-failed", t).on_press(|s: &mut State| s.backups.read_again());
+        return (
+            vec![
+                shell::heading("Backups", None, t),
+                view_state(
+                    ViewState::Failed {
+                        key: "backups-failed",
+                        title: "Couldn't read this PC's backup",
+                        why: words,
+                        retry: Some(retry),
+                    },
+                    t,
+                ),
+            ],
+            1,
+        );
     }
     let (mut children, mut buttons) = if source.wired(Part::Status) {
         let (card, buttons) = status_card(&source.status(), t);
@@ -279,6 +302,22 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
             )
             .on_press(|s: &mut State| s.backups.add_folder()),
         );
+    }
+    if folders.is_empty() {
+        children.push(view_state(
+            ViewState::Empty {
+                key: "backups-empty",
+                icon: &drive_icons::BACKUPS,
+                title: "No folders are backed up",
+                body: if source.wired(Part::AddFolder) {
+                    "Choose a folder with Add a folder\u{2026} and Beebeeb copies it here."
+                } else {
+                    "This PC has none of the folders Beebeeb backs up."
+                },
+                action: None,
+            },
+            t,
+        ));
     }
     let root = source.root();
     children.push(lists::list(
@@ -462,20 +501,18 @@ fn device_page(device: &Device, links: bool, t: &Theme) -> Vec<El> {
     page
 }
 
-/// A file row's 28 pt tile (`bk::tile`'s keys and wash) with the registry's icon for the name.
+/// A file row's tile: the shared small tile with the registry's icon for the name.
 fn file_tile(index: usize, name: &str, t: &Theme) -> El {
-    rune::el()
-        .key(format!("tile-{index}"))
-        .size(28.0, 28.0)
-        .radius(8.0)
-        .fill(t.text.alpha(0.07))
-        .center()
-        .child(file_icon(
-            format!("tile-{index}-icon"),
-            icon_for(name, false, None),
-            14.0,
-            t,
-        ))
+    file_tile::tile(
+        &format!("tile-{index}"),
+        name,
+        TilePicture::Icon(icon_for(name, false, None)),
+        name,
+        None,
+        RowLook::default(),
+        TileSize::Small,
+        t,
+    )
 }
 
 /// DW-0741: what could not back up, and what never does. Returns the children and how many

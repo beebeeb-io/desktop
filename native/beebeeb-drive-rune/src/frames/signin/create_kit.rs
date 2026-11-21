@@ -162,7 +162,7 @@ pub fn page_item(k: &mut Keys, icon: &'static Icon, title: &str, sub: &str, chev
 /// A suggestion (`.kit-chip`): the word as a secure text node, because which words are
 /// offered follows what was typed. Its name says its place, not the word.
 pub fn chip(i: usize, word: &str, t: &Theme) -> El {
-    let (_, _, wash) = au::tone(Tone::Neutral, t);
+    let (wash, _) = crate::ui::pill::colors(crate::ui::pill::Tone::Neutral, t);
     row()
         .key(format!("chip-{i}"))
         .role("button")

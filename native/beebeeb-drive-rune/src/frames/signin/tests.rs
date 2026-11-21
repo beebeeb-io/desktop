@@ -764,13 +764,13 @@ fn a_waiting_request_reconnects_counts_on_and_ends_on_the_heading() {
         SignInEvent::DeviceRequested(Ok(FixtureSignInSource::request()))
     ));
     assert_eq!(
-        info(&rt, "status-pill-text").text.as_deref(),
+        info(&rt, "status-pill-label").text.as_deref(),
         Some("Waiting for approval")
     );
 
     deliver(&mut rt, &queue, SignInEvent::DeviceConnection { connected: false });
     assert_eq!(
-        info(&rt, "status-pill-text").text.as_deref(),
+        info(&rt, "status-pill-label").text.as_deref(),
         Some("Reconnecting\u{2026}")
     );
     assert_eq!(info(&rt, "status-pill").role, "status");
@@ -787,7 +787,7 @@ fn a_waiting_request_reconnects_counts_on_and_ends_on_the_heading() {
     );
     deliver(&mut rt, &queue, SignInEvent::DeviceConnection { connected: true });
     assert_eq!(
-        info(&rt, "status-pill-text").text.as_deref(),
+        info(&rt, "status-pill-label").text.as_deref(),
         Some("Waiting for approval")
     );
 

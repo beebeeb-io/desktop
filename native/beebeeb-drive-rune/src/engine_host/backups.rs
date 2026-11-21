@@ -578,6 +578,12 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         self.devices.opened();
     }
 
+    fn read_again(&mut self) {
+        self.refused = None;
+        self.ask_read();
+        self.devices.opened();
+    }
+
     fn devices_note(&self) -> Option<&'static str> {
         self.devices.note()
     }
