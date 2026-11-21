@@ -17,6 +17,7 @@ use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::settings_dialog::{BUTTON_MD, DIALOG_TITLE};
+use crate::ui::button::{self, ButtonState, Size, Variant};
 use crate::ui::{caption, kit, sidebar};
 
 // ---------------------------------------------------------------------------
@@ -168,6 +169,18 @@ fn scene_of(s: &mut State, body: StateBody) {
     }
 }
 
+fn ui_button(key: &str, words: &str, outlined: bool, t: &Theme) -> El {
+    button::button(
+        button::keys(key),
+        words,
+        None,
+        if outlined { Variant::Secondary } else { Variant::Ghost },
+        Size::Md,
+        ButtonState::Enabled,
+        t,
+    )
+}
+
 /// DW-1556: the viewer stopped, on a file kept on this PC (the board's panel: Try again and Open in another app).
 pub fn scene_failed(s: &mut State) {
     scene_of(s, StateBody::new(OfficeState::Stopped { retried: false }, true));
@@ -279,31 +292,12 @@ fn viewer_bar(t: &Theme) -> El {
         .child(kit::label("vbar-page", "Page 1 of 4", BAR_LABEL, t.text_secondary))
         .child(el().key("vbar-gap").grow(1.0))
         .child(
-            text_button("elsewhere", OPEN_ELSEWHERE, t.text_secondary, true, t).on_press(|s: &mut State| {
+            ui_button("elsewhere", OPEN_ELSEWHERE, true, t).on_press(|s: &mut State| {
                 if let Some(ui) = viewers::ui(s) {
                     ui.intent(Intent::OpenInAnotherApp);
                 }
             }),
         )
-}
-
-fn text_button(key: &str, words: &str, primary_ink: Color, outlined: bool, t: &Theme) -> El {
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(words)
-        .h(28.0)
-        .px(if outlined { 13.0 } else { 12.0 })
-        .center()
-        .radius(7.0)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .cursor(rune::Cursor::Pointer);
-    if outlined {
-        b = b.box_shadow(kit::ring(kit::HAIR, t.separator_strong)).fill(t.card);
-    }
-    b.child(kit::label(format!("{key}-label"), words, BUTTON_MD, primary_ink))
 }
 
 /// DW-1556's panel. Exactly one reason line; the actions that still work.
@@ -314,7 +308,7 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
     let mut actions = row().key("empty-actions").gap(8.0).mt(8.0).center_y();
     if body.state.try_again_shown() {
         actions = actions.child(
-            text_button("empty-add", TRY_AGAIN, t.text, true, t).on_press(|s: &mut State| {
+            ui_button("empty-add", TRY_AGAIN, true, t).on_press(|s: &mut State| {
                 // A file in a renderer is opened again by its source (`viewers::office_try_again`).
                 viewers::office_try_again(s);
             }),
@@ -322,7 +316,7 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
     }
     if body.state.open_elsewhere_offered(body.kept) {
         actions = actions.child(
-            text_button("empty-btn-1", OPEN_ELSEWHERE, t.text_secondary, false, t).on_press(|s: &mut State| {
+            ui_button("empty-btn-1", OPEN_ELSEWHERE, false, t).on_press(|s: &mut State| {
                 if let Some(ui) = viewers::ui(s) {
                     ui.intent(Intent::OpenInAnotherApp);
                 }
@@ -332,7 +326,7 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
         actions = actions
             .child(kit::label("empty-keep-first", KEEP_FIRST, SUB, t.text_secondary))
             .child(
-                text_button("empty-keep", KEEP_ACTION, t.text_secondary, false, t).on_press(|s: &mut State| {
+                ui_button("empty-keep", KEEP_ACTION, false, t).on_press(|s: &mut State| {
                     if let Some(ui) = viewers::ui(s) {
                         ui.intent(Intent::KeepOffline);
                     }
@@ -452,37 +446,25 @@ pub fn skeleton(t: &Theme) -> El {
 /// colour); `opening` shows the state word in place of the position.
 pub fn status_bar(state: OfficeState, left: &[&str], t: &Theme) -> El {
     let plain = |key: String, words: &str| kit::label(key, words, type_::STATUS, t.text_tertiary);
-    let mut bar = row()
-        .key("status-bar")
-        .role("status")
-        .w_full()
-        .h(28.0)
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
+    let mut bar: Vec<El> = Vec::new();
     let mut said = String::new();
     if state.is_opening() {
-        bar = bar
-            .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(warn_dot(t)))
-            .child(kit::label("status-text", OPENING, STATUS_STATE, t.text_secondary));
+        bar.push(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(warn_dot(t)));
+        bar.push(kit::label("status-text", OPENING, STATUS_STATE, t.text_secondary));
         said.push_str(OPENING);
     } else {
         for (i, w) in left.iter().enumerate() {
             if i > 0 {
-                bar = bar.child(plain(format!("st-dot-{i}"), "\u{00B7}"));
+                bar.push(plain(format!("st-dot-{i}"), "\u{00B7}"));
             }
-            bar = bar.child(plain(format!("st-{i}"), w));
+            bar.push(plain(format!("st-{i}"), w));
             said.push_str(w);
             said.push_str(", ");
         }
     }
     if let Some(quiet) = state.quiet_line() {
-        bar = bar
-            .child(plain("st-quiet-dot".into(), "\u{00B7}"))
-            .child(plain("st-quiet".into(), quiet));
+        bar.push(plain("st-quiet-dot".into(), "\u{00B7}"));
+        bar.push(plain("st-quiet".into(), quiet));
         said.push_str(quiet);
     }
     // The failure frame's bar has nothing on the left: the board's keys count the right side from 0.
@@ -492,29 +474,29 @@ pub fn status_bar(state: OfficeState, left: &[&str], t: &Theme) -> El {
     } else {
         ("st-enc-icon", "st-enc", "st-about-dot", "st-about")
     };
-    bar.label(format!("{said}. {ENCRYPTED}"))
-        .child(el().key("st-gap").grow(1.0))
-        .child(
-            row()
-                .key("st-enc-box")
-                .gap(4.0)
-                .center_y()
-                .child(kit::glyph(k_icon, &icons::LOCK, 11.0, t.accent_deep))
-                .child(kit::label(k_enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
-        )
-        .child(plain(k_dot.into(), "\u{00B7}"))
-        .child(
-            el().key("st-about-box")
-                .role("link")
-                .label("About this viewer")
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    if let Some(ui) = viewers::ui(s) {
-                        ui.office_about();
-                    }
-                })
-                .child(plain(k_about.into(), ABOUT)),
-        )
+    bar.push(el().key("st-gap").grow(1.0));
+    bar.push(
+        row()
+            .key("st-enc-box")
+            .gap(4.0)
+            .center_y()
+            .child(kit::glyph(k_icon, &icons::LOCK, 11.0, t.accent_deep))
+            .child(kit::label(k_enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
+    );
+    bar.push(plain(k_dot.into(), "\u{00B7}"));
+    bar.push(
+        el().key("st-about-box")
+            .role("link")
+            .label("About this viewer")
+            .focusable(true)
+            .on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.office_about();
+                }
+            })
+            .child(plain(k_about.into(), ABOUT)),
+    );
+    crate::ui::status_bar::frame(bar, t).label(format!("{said}. {ENCRYPTED}"))
 }
 
 /// The page of DW-1564 until OF5's docs window hosts it: the pages that can be drawn come from the source; this holds

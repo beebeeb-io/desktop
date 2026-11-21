@@ -721,37 +721,26 @@ fn status_word(key: String, word: &str, t: &Theme) -> El {
 /// workbook is kept: "saved as version 4", "unsaved changes") follows Encrypted and its dot, then a dot more before About.
 fn status(view: &SheetView, kept: Option<&str>, t: &Theme) -> El {
     let words = status_words(view);
-    let mut bar = row()
-        .key("status-bar")
-        .role("status")
-        .w_full()
-        .h(28.0)
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
+    let mut bar: Vec<El> = Vec::new();
     let mut n = 0;
     for (i, word) in words.iter().enumerate() {
         if i > 0 {
-            bar = bar.child(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary));
+            bar.push(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary));
             n += 1;
         }
-        bar = bar.child(status_word(format!("st-{n}"), word, t));
+        bar.push(status_word(format!("st-{n}"), word, t));
         n += 1;
     }
     let mut said = String::new();
     if view.missing_content {
         // The board's OvStatus: after the left words, `·` and the one quiet line.
-        bar = bar
-            .child(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary))
-            .child(fitted(
-                format!("st-{}", n + 1),
-                QUIET_LINE,
-                type_::STATUS,
-                t.text_tertiary,
-            ));
+        bar.push(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary));
+        bar.push(fitted(
+            format!("st-{}", n + 1),
+            QUIET_LINE,
+            type_::STATUS,
+            t.text_tertiary,
+        ));
         n += 2;
         said = format!(". {QUIET_LINE}");
     }
@@ -765,42 +754,41 @@ fn status(view: &SheetView, kept: Option<&str>, t: &Theme) -> El {
         None => (None, format!("st-{}", n + 2)),
     };
     let kept_words = kept.map(|k| format!(", {k}")).unwrap_or_default();
-    let mut bar = bar
-        .label(format!("{}{said}. {ENCRYPTED}{kept_words}", words.join(", ")))
-        .child(el().key("st-gap").grow(1.0))
-        .child(
-            row()
-                .key(format!("{enc}-box"))
-                .gap(4.0)
-                .center_y()
-                .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
-                .child(fitted(enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
-        )
-        .child(fitted(dot, "\u{00B7}", type_::STATUS, t.text_tertiary));
+    let label = format!("{}{said}. {ENCRYPTED}{kept_words}", words.join(", "));
+    bar.push(el().key("st-gap").grow(1.0));
+    bar.push(
+        row()
+            .key(format!("{enc}-box"))
+            .gap(4.0)
+            .center_y()
+            .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
+            .child(fitted(enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
+    );
+    bar.push(fitted(dot, "\u{00B7}", type_::STATUS, t.text_tertiary));
     if let (Some(words), Some((kept_key, dot_key))) = (kept, kept_at) {
-        bar = bar
-            .child(fitted(kept_key, words, type_::STATUS, t.text_tertiary))
-            .child(fitted(dot_key, "\u{00B7}", type_::STATUS, t.text_tertiary));
+        bar.push(fitted(kept_key, words, type_::STATUS, t.text_tertiary));
+        bar.push(fitted(dot_key, "\u{00B7}", type_::STATUS, t.text_tertiary));
     }
-    bar.child(
-            el().key(format!("{about}-box"))
-                .role("link")
-                .label("About this viewer")
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    if let Some(ui) = viewers::ui(s) {
-                        ui.office_about();
-                    }
-                })
-                .child({
-                    kit::note_text(&about, &about, ABOUT, type_::STATUS, t.text_tertiary);
-                    rich(ABOUT, vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)])
-                        .key(about)
-                        .font(type_::STATUS)
-                        .color(t.text_tertiary)
-                        .w(rune::text::advance(ABOUT, type_::STATUS))
-                }),
-        )
+    bar.push(
+        el().key(format!("{about}-box"))
+            .role("link")
+            .label("About this viewer")
+            .focusable(true)
+            .on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.office_about();
+                }
+            })
+            .child({
+                kit::note_text(&about, &about, ABOUT, type_::STATUS, t.text_tertiary);
+                rich(ABOUT, vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)])
+                    .key(about)
+                    .font(type_::STATUS)
+                    .color(t.text_tertiary)
+                    .w(rune::text::advance(ABOUT, type_::STATUS))
+            }),
+    );
+    crate::ui::status_bar::frame(bar, t).label(label)
 }
 
 /// The window with the spreadsheet viewer: caption, sidebar, the window's toolbar, then the formula bar, the grid,
