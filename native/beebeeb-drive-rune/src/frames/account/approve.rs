@@ -23,6 +23,7 @@ use crate::theme::tokens::Theme;
 use crate::ui::account_form::{self as fm, Field};
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size, Tail};
 use crate::ui::au::{self, Keys, Tone};
+use crate::ui::dialog::{self, Dialog as Card, Foot, Head};
 use crate::ui::au_entry::{self, FocusedSpec};
 use crate::ui::kit;
 use crate::ui::settings_dialog::{DIALOG_TITLE, scrim_color};
@@ -639,48 +640,33 @@ fn behind(source: &dyn AccountSource, t: &Theme) -> El {
 /// A dialog of this flow on its scrim (`.au-scrim` + `.wn-dlg`, 440 wide): the body's children
 /// 12 apart, and the foot's buttons sharing its width (`set::dialog_with`'s arithmetic).
 fn shell(role: &'static str, name: &str, children: Vec<El>, foot: Vec<(El, bool)>, t: &Theme) -> El {
-    let mut body = col().key("dlg-body").w_full().pt(22.0).px(24.0).pb(18.0).gap(12.0);
-    for child in children {
-        body = body.child(child);
-    }
-    let mut f = row()
-        .key("dlg-foot")
-        .w_full()
-        .center_y()
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
     let count = foot.len().max(1) as f32;
     let fixed = |bordered: bool| 24.0 + if bordered { 2.0 } else { 0.0 };
     let free = DIALOG_W - 48.0 - 8.0 * (count - 1.0) - foot.iter().map(|(_, bordered)| fixed(*bordered)).sum::<f32>();
-    for (child, bordered) in foot {
-        f = f.child(child.w(free / count + fixed(bordered)));
-    }
-    let dlg = col()
-        .key("dlg")
-        .role(role)
-        .label(name)
-        .pixel_snap(false)
-        .w(DIALOG_W)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(col().key("dlg-clip").w_full().clip_rounded(8.0).child(body).child(f));
-    col()
-        .key("scrim")
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .center()
-        .fill(scrim_color(t))
-        .child(dlg)
-        // Modal: Tab stays inside, the pane behind takes no press, and Esc is this flow's Esc
-        // (Deny on the review, the one button on a result).
-        .modal(false, |s: &mut State| {
+    let buttons: Vec<El> = foot
+        .into_iter()
+        .map(|(child, bordered)| child.w(free / count + fixed(bordered)))
+        .collect();
+    // Modal: Tab stays inside, the pane behind takes no press, and Esc is this flow's Esc
+    // (Deny on the review, the one button on a result).
+    dialog::modal(
+        0.0,
+        dialog::dialog(
+            Card {
+                alert: role == "alertdialog",
+                head: Head::None,
+                body: children,
+                body_top: Some(22.0),
+                foot: Foot::Row(buttons),
+                ..Card::new("dlg", name, DIALOG_W)
+            },
+            t,
+        ),
+        |s: &mut State| {
             on_escape(s);
-        })
+        },
+        t,
+    )
 }
 
 fn foot_button(index: usize, label: &str, look: Look, dimmed: bool, t: &Theme) -> (El, bool) {
