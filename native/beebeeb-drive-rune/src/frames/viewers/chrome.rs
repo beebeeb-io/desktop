@@ -5,14 +5,14 @@
 //! search field) is `ui::toolbar`'s, drawn again here because that file builds it in one private
 //! function (a request to the design-system lane in the PR body: make the halves public).
 
-use rune::{Color, Cx, El, col, el, row, text_input};
+use rune::{Cx, El, col, el, row, text_input};
 
 use super::source::OpenFile;
 use super::{Ui, icons, style};
 use crate::State;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::toolbar::{ToolState, kbd, segment, segmented, tool_button};
-use crate::ui::{caption, kit, sidebar};
+use crate::ui::{caption, kit, sidebar, status_bar};
 
 /// The status line's dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,58 +183,11 @@ pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El
 /// The status line (`.mk-foot`) with this frame's words.
 pub fn status_bar(status: &Status, t: &Theme) -> El {
     let dot = match status.dot {
-        Dot::Green => t.green,
-        Dot::Warn => style::warn(t),
-        Dot::Red => style::red(t),
+        Dot::Green => status_bar::Dot::Green,
+        Dot::Warn => status_bar::Dot::Warn,
+        Dot::Red => status_bar::Dot::Red,
     };
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(
-            row()
-                .key("status-left")
-                .center_y()
-                .gap(7.0)
-                // A tenth of a device pixel of the bar's own colour inside the dot's edge: Chromium's
-                // antialiased 14-pixel disc covers less of its outermost pixel rows than Rune's
-                // (measured 91 % against 98 %), which shows on a dot this dark. A size or a scale
-                // cannot say it: Rune snaps the box to whole pixels ("Rune limitations", PR body).
-                .child(
-                    el().key("status-dot")
-                        .size(7.0, 7.0)
-                        .radius(3.5)
-                        .fill(dot)
-                        .box_shadow(rune::Shadow {
-                            x: 0.0,
-                            y: 0.0,
-                            blur: 0.0,
-                            spread: 0.05,
-                            color: t.status_bar_bg,
-                            inset: true,
-                        }),
-                )
-                .child(kit::label(
-                    "status-text",
-                    status.text.clone(),
-                    type_::STATUS_STRONG,
-                    t.text_secondary,
-                )),
-        )
-        .child(el().key("status-spacer").grow(1.0))
-        .child(kit::label(
-            "status-details",
-            status.details.clone(),
-            type_::STATUS,
-            t.text_tertiary,
-        ))
+    status_bar::bar(Some(dot), Some(&status.text), &status.details, t)
 }
 
 /// What the status line says at the left while content read from the copy on this PC is on screen.
@@ -368,51 +321,6 @@ pub fn window(
             }
             under
         })
-}
-
-/// How a button of the kit shows (`.kit-btn`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ButtonKind {
-    /// Paper with a line: the choice the screen expects.
-    Outline,
-    /// Words only.
-    Ghost,
-}
-
-/// A button as wide as its words. `small` is `.kit-btn-sm` (22 high), else `.kit-btn-md` (28).
-/// Keys: `<key>`, `<key>-label`. The caller adds `.on_press(..)`.
-pub fn button(key: &str, label: &str, kind: ButtonKind, small: bool, t: &Theme) -> El {
-    let (ink, text_style, h) = (
-        if kind == ButtonKind::Outline {
-            t.text
-        } else {
-            t.text_secondary
-        },
-        if small { style::BUTTON_SM } else { style::BUTTON_MD },
-        if small { 22.0 } else { 28.0 },
-    );
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(h)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(6.0)
-        .focusable(true)
-        .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(rune::Cursor::Pointer);
-    b = match kind {
-        ButtonKind::Outline => b
-            .fill(t.paper)
-            .border(1.0, t.card_border)
-            .border_layout()
-            .hover(t.paper2)
-            .press(t.paper3),
-        ButtonKind::Ghost => b.fill(Color::TRANSPARENT).hover(t.hover).press(t.press),
-    };
-    b.child(kit::label(format!("{key}-label"), label, text_style, ink))
 }
 
 #[cfg(test)]

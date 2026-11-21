@@ -4,6 +4,7 @@
 use rune::{Align, Color, El, Icon, Span, col, el, row, text_input};
 
 use super::chrome::{Dot, Status};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::source::{Cut, Ink, Keep, OpenFile, Run, TextDoc, count_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
@@ -342,7 +343,7 @@ pub fn newer_banner(file: &OpenFile, t: &Theme) -> Option<El> {
     };
     // The time is a figure: mono.
     let time = words.len() - newer.at.len() - 1;
-    let show = super::chrome::button("banner-btn", "Show it", super::chrome::ButtonKind::Outline, true, t).on_press(
+    let show = button(keys("banner-btn"), "Show it", None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t).on_press(
         |s: &mut State| {
             if let Some(ui) = ui(s) {
                 ui.show_newer();
@@ -380,7 +381,7 @@ pub fn banner_el(icon: &'static Icon, words: &str, action: Option<El>, t: &Theme
 /// (task 2530, item 1). No board draws it: DW-1519's banner, its words wrapped (they are longer than a line).
 pub fn refused_banner(words: Option<&str>, t: &Theme) -> Option<El> {
     let words = words?;
-    let copy = super::chrome::button("banner-btn", "Save a copy", super::chrome::ButtonKind::Outline, true, t)
+    let copy = button(keys("banner-btn"), "Save a copy", None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t)
         .on_press(|s: &mut State| {
             if let Some(ui) = ui(s) {
                 ui.resolve(Keep::Both);

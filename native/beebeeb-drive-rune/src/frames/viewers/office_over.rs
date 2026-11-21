@@ -21,7 +21,7 @@ use crate::frames::office::edit::palette::{self, Run};
 use crate::frames::office::edit::save::{self, Seen, Sent};
 use crate::frames::office::edit::word_insert::{self, Insert, LinkForm, Picking, TableForm};
 
-use super::chrome::{ButtonKind, button};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::dialogs::{self, Look};
 use super::office::{self, WordDoc};
 use super::office_icons as oi;
@@ -597,9 +597,12 @@ fn conflict(opened: u32, other: &Conflict, t: &Theme) -> El {
             }
         }
     };
-    let wide = |key: &str, label: String, look: Look| dialogs::button_keyed(key.to_string(), &label, look, t).w_full();
-    let foot = dialogs::foot(t).child(
-        col()
+    let wide = |key: &str, label: String, look: Look| {
+        button(keys(key), &label, None, look.variant(), Size::Md, ButtonState::Enabled, t)
+            .pixel_snap(false)
+            .w_full()
+    };
+    let foot = col()
             .key("dlg-stack")
             .w_full()
             .gap(8.0)
@@ -620,9 +623,8 @@ fn conflict(opened: u32, other: &Conflict, t: &Theme) -> El {
                 )
                 .on_press(keep(Keep::Theirs)),
             )
-            .child(wide("btn-3", "Cancel".into(), Look::Quiet).on_press(close)),
-    );
-    dialogs::shell_closing(SAVED_FIRST, "alertdialog", 420.0, head, None, foot, close, t)
+            .child(wide("btn-3", "Cancel".into(), Look::Quiet).on_press(close));
+    dialogs::shell_closing(SAVED_FIRST, "alertdialog", 420.0, head, Vec::new(), foot, close, t)
 }
 
 /// DW-1525 in the office editor: Back with changes no version holds. Save keeps the document open while it saves.
@@ -908,20 +910,14 @@ pub fn no_editor(t: &Theme) -> El {
                 .gap(8.0)
                 .mt(8.0)
                 .child(
-                    button("empty-add", "Try again", ButtonKind::Outline, false, t).on_press(|s: &mut State| {
+                    button(keys("empty-add"), "Try again", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
                         if let Some(ui) = super::ui(s) {
                             ui.retry();
                         }
                     }),
                 )
                 .child(
-                    button(
-                        "empty-btn-1",
-                        "Open in another app\u{2026}",
-                        ButtonKind::Ghost,
-                        false,
-                        t,
-                    )
+                    button(keys("empty-btn-1"), "Open in another app\u{2026}", None, Variant::Ghost, Size::Md, ButtonState::Enabled, t)
                     .on_press(|s: &mut State| {
                         if let Some(ui) = super::ui(s) {
                             ui.intent(Intent::OpenInAnotherApp);
