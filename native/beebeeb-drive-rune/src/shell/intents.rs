@@ -449,6 +449,8 @@ pub fn drain_settings_intents(s: &mut State, tx: &mut Tx) -> bool {
                 s.settings.toast = Some("Copied");
             }
             Intent::OpenWindowsNotificationSettings => open(s, web_pages::WINDOWS_NOTIFICATIONS),
+            // The flyout follows the sync state that changed with the press; nothing else is opened for it.
+            Intent::Show(frame) if crate::frames::settings::TRAY_FRAMES.contains(frame) => {}
             Intent::Show(_) => log("NotWired(Show)"),
             Intent::Open(target) => super::settings_open::open(s, tx, target),
             // Taken by the settings source's updater (`SettingsSource::check_for_updates`, `restart_to_update`): the

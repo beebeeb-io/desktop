@@ -496,7 +496,7 @@ fn office_states_try_again_asks_the_live_source_once() {
     use crate::frames::office::states::{OfficeState, StateBody};
     let stopped = Body::OfficeState(StateBody::new(OfficeState::Stopped { retried: false }, true));
     let (mut rt, log) = live_runtime(stopped, 1.0, None);
-    let button = find(&rt, "empty-add").expect("Try again is offered after a first stop");
+    let button = find(&rt, "empty-retry").expect("Try again is offered after a first stop");
     rt.pointer_down(button.rect[0] + 4.0, button.rect[1] + 4.0);
     rt.pointer_up(button.rect[0] + 4.0, button.rect[1] + 4.0);
     rt.frame(0.0);
