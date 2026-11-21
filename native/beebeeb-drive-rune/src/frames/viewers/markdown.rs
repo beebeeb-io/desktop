@@ -286,6 +286,11 @@ fn flow(key: String, pieces: &[Piece], t: &Theme) -> El {
 
 /// The note, rendered: a column at most 620 wide on the content ground.
 pub fn body(blocks: &[Block], t: &Theme) -> El {
+    body_in(blocks, t, "viewer-body")
+}
+
+/// [`body`] rooted at `root_key` (the live preview roots elsewhere than the editor).
+pub fn body_in(blocks: &[Block], t: &Theme, root_key: &str) -> El {
     let mut md = col().key("md").w_full().max_w(620.0).gap(12.0);
     let (mut h1, mut h2, mut p, mut li, mut pre) = (0usize, 0usize, 0usize, 0usize, 0usize);
     for block in blocks {
@@ -358,7 +363,7 @@ pub fn body(blocks: &[Block], t: &Theme) -> El {
         }
     }
     col()
-        .key("viewer-body")
+        .key(root_key.to_string())
         .role("document")
         .grow(1.0)
         .shrink()

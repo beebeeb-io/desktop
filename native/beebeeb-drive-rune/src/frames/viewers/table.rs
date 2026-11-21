@@ -63,6 +63,11 @@ pub fn shares(doc: &TableDoc) -> Vec<f32> {
 }
 
 pub fn body(ui: &Ui, doc: &TableDoc, t: &Theme) -> El {
+    body_in(ui, doc, t, "viewer-body")
+}
+
+/// [`body`] rooted at `root_key` (the live preview roots elsewhere than the editor).
+pub fn body_in(ui: &Ui, doc: &TableDoc, t: &Theme, root_key: &str) -> El {
     let shares = shares(doc);
     let mut head = row().key("csv-head").role("row").w_full().h(HEAD_H);
     for (c, column) in doc.columns.iter().enumerate() {
@@ -157,7 +162,7 @@ pub fn body(ui: &Ui, doc: &TableDoc, t: &Theme) -> El {
                 .child(rows),
         );
     col()
-        .key("viewer-body")
+        .key(root_key.to_string())
         .grow(1.0)
         .min_w(0.0)
         .h_full()

@@ -23,7 +23,7 @@ const BUILT: [(&str, &str, &str); 11] = [
         "banner-text",
         "A newer version arrived from Anna's iPhone, 09:14.",
     ),
-    ("DW-1523", "run-12-1", "Ask Priya about the invoices"),
+    ("DW-1523", "ln-12", "13"),
     ("DW-1524", "toast-text", "Saved \u{00B7} encrypted \u{00B7} version 4"),
     ("DW-1525", "dlg-title", "You have unsaved changes"),
     ("DW-1526", "dlg-title", "Two versions"),

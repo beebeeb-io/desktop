@@ -174,7 +174,7 @@ pub fn viewer_of(name: &str) -> Option<Viewer> {
         "zip" | "tar" | "gz" | "tgz" | "7z" | "rar" => Viewer::Archive,
         "md" | "markdown" => Viewer::Markdown,
         "txt" | "log" | "py" | "rs" | "js" | "ts" | "json" | "toml" | "yaml" | "yml" | "sh" | "css" | "html"
-        | "xml" => Viewer::Text,
+        | "xml" | "svg" => Viewer::Text,
         _ => return None,
     })
 }
