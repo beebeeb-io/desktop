@@ -51,7 +51,7 @@ pub use store::ConfigFs;
 /// Tests build hosts; outside tests only the macOS sign-out and keep paths build the real file-system steps.
 #[cfg(any(test, feature = "test-support"))]
 pub use store::ConfigHost;
-#[cfg(any(any(test, feature = "test-support"), target_os = "macos", target_os = "windows"))]
+// Public on every OS: the account switch (`app/account_switch.rs`) records the kept folder through it.
 pub use store::RealConfigFs;
 pub use types::ConfigMode;
 pub use types::{DesktopConfig, DesktopTheme, KnownFolderSource, LOCAL_CACHE_LIMIT_100_GB_BYTES, ReleaseChannel};
