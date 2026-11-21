@@ -9,7 +9,8 @@ use rune::{El, TextStyle, col};
 
 use super::source::{FolderAsk, FolderSaid};
 use super::view::{actions, ghost, primary};
-use super::{Step, Ui, icons};
+use super::{Step, Ui, act, icons};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonState, Keys, Tone};
 use crate::ui::{kit, setup};
@@ -166,16 +167,12 @@ pub fn not_yet(step: Step, k: &mut Keys, t: &Theme) -> El {
         .child(actions().child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on)))
 }
 
-/// Step 3 while the folders on this PC are being read: the step's own heading, a line that says what is happening,
-/// no folder and no switch until the read answered. "Not now" stays; turning backup on waits for the folders.
+/// Step 3 while the folders on this PC are being read: the step's own heading and a loading state, no folder and
+/// no switch until the read answered. "Not now" stays; turning backup on waits for the folders.
 pub fn backup_loading(k: &mut Keys, t: &Theme) -> El {
     setup::column()
-        .child(au::heading(
-            "Back up your folders",
-            Some("Looking at the folders on this PC\u{2026}"),
-            false,
-            t,
-        ))
+        .child(au::heading("Back up your folders", None, false, t))
+        .child(view_state(ViewState::Loading { words: "Looking at the folders on this PC\u{2026}" }, t))
         .child(
             actions()
                 .child(primary(k, "Turn on backup", ButtonState::Disabled, t, Ui::go_on))
@@ -186,18 +183,19 @@ pub fn backup_loading(k: &mut Keys, t: &Theme) -> El {
 /// Step 3 when reading the folders failed: said as a failure, never as "not in this version". Try again reads them
 /// again; Not now goes on with nothing turned on.
 pub fn backup_failed(k: &mut Keys, t: &Theme) -> El {
+    let retry = try_again("backup-failed", t).on_press_tx(act(Ui::retry_backup));
     setup::column()
-        .child(au::heading(
-            "Back up your folders",
-            Some("Beebeeb couldn\u{2019}t read the folders on this PC. Nothing is turned on."),
-            false,
+        .child(au::heading("Back up your folders", None, false, t))
+        .child(view_state(
+            ViewState::Failed {
+                key: "backup-failed",
+                title: "Couldn\u{2019}t read your folders",
+                why: "Beebeeb couldn\u{2019}t read the folders on this PC. Nothing is turned on.",
+                retry: Some(retry),
+            },
             t,
         ))
-        .child(
-            actions()
-                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::retry_backup))
-                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
-        )
+        .child(actions().child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)))
 }
 
 /// What step 3 says when the read worked and found nothing: only what is true (this app cannot add folders).

@@ -394,17 +394,17 @@ fn switches_and_choices_work_from_the_keyboard() {
 #[test]
 fn file_explorer_failing_offers_try_again_and_a_way_on() {
     let mut rt = runtime("DW-0280");
-    assert_eq!(info(&rt, "banner-0").role, "alert");
+    assert_eq!(info(&rt, "explorer-failed").role, "group");
     assert_eq!(
         info(&rt, "side-status").text.as_deref(),
         Some("Couldn't add Beebeeb to File Explorer")
     );
     // Try again: the fixture's second registration works, and setup goes on at this step (DW-0206).
-    click(&mut rt, "btn-0");
+    click(&mut rt, "explorer-failed-retry");
     assert_eq!(ui_step(&mut rt), Step::Explorer);
     assert_eq!(info(&rt, "title").text.as_deref(), Some("Beebeeb is in File Explorer"));
     let mut rt = runtime("DW-0280");
-    click(&mut rt, "btn-1");
+    click(&mut rt, "btn-0");
     assert_eq!(ui_step(&mut rt), Step::Notifications);
 }
 
