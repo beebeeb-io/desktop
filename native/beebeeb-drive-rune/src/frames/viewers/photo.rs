@@ -93,6 +93,7 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
         .key("gallery")
         .role("list")
         .label("Photos of this folder")
+        .focus_group()
         .w_full()
         .gap(4.0)
         .py(8.0)
