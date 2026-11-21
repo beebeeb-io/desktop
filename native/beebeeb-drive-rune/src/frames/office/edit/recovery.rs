@@ -19,6 +19,7 @@ use crate::frames::office::edit::EditUi;
 use crate::frames::viewers::source::{Keep, RecoveryOffer};
 use crate::frames::viewers::{self};
 use crate::theme::tokens::{self, Theme};
+use crate::ui::button::{self, ButtonState, Size, Variant};
 use crate::ui::kit;
 
 pub const KEEP_BOTH: &str = "Save the restored copy";
@@ -99,20 +100,7 @@ pub fn words(banner: &Banner, name: &str) -> String {
 /// `recovery-discard`.
 pub fn view(banner: &Banner, name: &str, t: &Theme) -> El {
     let button = |key: &str, label: &str, press: fn(&mut State)| {
-        row()
-            .key(key.to_string())
-            .role("button")
-            .label(label)
-            .h(22.0)
-            .px(12.0)
-            .center()
-            .radius(6.0)
-            .fill(t.paper)
-            .border(1.0, t.card_border)
-            .focusable(true)
-            .cursor(rune::Cursor::Pointer)
-            .child(kit::label(format!("{key}-label"), label, tokens::type_::CAPTION, t.text))
-            .on_press(press)
+        button::button(button::keys(key), label, None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t).on_press(press)
     };
     let mut b = row()
         .key("recovery")
@@ -124,7 +112,7 @@ pub fn view(banner: &Banner, name: &str, t: &Theme) -> El {
         .gap(10.0)
         .center_y()
         .radius(10.0)
-        .fill(t.surface)
+        .fill(crate::ui::banner::tone(crate::ui::banner::Tone::Neutral, t).0)
         .child(
             kit::label("recovery-text", words(banner, name), tokens::type_::CAPTION, t.text_secondary)
                 .wrap()
