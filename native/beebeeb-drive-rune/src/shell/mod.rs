@@ -44,6 +44,7 @@ mod viewer_intents;
 pub(crate) mod viewer_save;
 pub mod placeholder;
 pub mod platform;
+pub(crate) mod redraw;
 pub mod registry;
 pub mod session_gate;
 #[cfg(test)]
@@ -614,11 +615,17 @@ fn open_engine(
         &local_data_of(&dirs, std::env::consts::OS),
         api_base,
         beebeeb_engine::app::PlatformCredentials,
-        move || {
-            // On an engine thread: wake the window's loop and do nothing else.
-            if let Some(main) = wake.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
-                main.update(|_: &mut State, _| {});
-            }
+        {
+            // dc-165: the engine rings once per report (once per row of a first file list). The rings are one ask of
+            // the window at most every `AT_MOST_EVERY`, and the ask draws only when the window's poll found something
+            // (`redraw.rs`). An empty `update` here drew the whole window once per ring.
+            let wakes = redraw::EngineWakes::start(redraw::AT_MOST_EVERY, move || {
+                if let Some(main) = wake.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+                    main.update_if(redraw::engine_woke);
+                }
+            });
+            // On an engine thread: ring and do nothing else.
+            move || wakes.ring()
         },
     )?;
     // The real app only (never in `engine_host::open::open`, which tests use): a session the server ended closes
