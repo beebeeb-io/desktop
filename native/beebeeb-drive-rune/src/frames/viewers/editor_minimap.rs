@@ -139,7 +139,6 @@ pub fn minimap(edit: &rune::TextEdit, file_name: &str, scroll: f32, t: &Theme) -
         .key("editor-minimap")
         .w(WIDTH as f32)
         .h_full()
-        .shrink0()
         .cursor(rune::Cursor::Pointer)
         .a11y_hidden()
         .on_drag_any(move |d, tx| {
