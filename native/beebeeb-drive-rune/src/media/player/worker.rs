@@ -335,9 +335,11 @@ impl Worker {
             && self.profile == Profile::NoCapabilities
             && let Some(profile) = profile_for_file_with(self.system_on, Some(codec))
         {
+            refusal_log::started_again(matches!(profile, Profile::SystemDecoder { hevc: true }));
             return self.restart_in(profile);
         }
         refusal_log::helper_error(code);
+        refusal_log::helper_error_at(self.profile != Profile::NoCapabilities, self.opened.is_some());
         Err(Exit::Refused(refusal_of(code)))
     }
 
