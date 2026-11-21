@@ -143,3 +143,82 @@ impl State {
         (now != before).then(|| (scrolled + (now as f32 - before as f32) * ROW_H).max(0.0))
     }
 }
+
+/// Reads a folder (`None`: the root) as the window holds it (`shell::state::load`). It may take long on a large
+/// account: the running app calls it on a worker, never on the window's thread.
+pub type FolderReader = Arc<dyn Fn(Option<&str>) -> (Listing, Option<SourceError>) + Send + Sync>;
+
+/// Why a folder read was asked for, which says how its answer is taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadFor {
+    /// The folder shown, read again after a check: merged by id ([`State::take_reread`]).
+    Reread,
+    /// Another folder opened (Open, Forward, Back, a path's folder): it replaces the rows.
+    Open,
+    /// The root, read after the session gate opened.
+    Gate,
+}
+
+/// A folder read on a worker, stamped with the folder and the account that asked for it.
+pub struct PendingRead {
+    pub(crate) folder: Option<String>,
+    pub(crate) account: Option<String>,
+    pub(crate) kind: ReadFor,
+    answer: std::sync::mpsc::Receiver<(Listing, Option<SourceError>)>,
+}
+
+/// The Files window's folder reads on a worker (task 050): while one is out the rows shown stay (no flash); ONE read
+/// is out at a time, and a newer open replaces the one before (its answer is dropped). `reader: None` (a scene, a
+/// test, a `--db` window): every read is made at once on the caller's thread, as before.
+#[derive(Default)]
+pub struct FolderReads {
+    pub(crate) reader: Option<FolderReader>,
+    pub(crate) pending: Option<PendingRead>,
+}
+
+impl FolderReads {
+    /// Asks the worker for `folder`. `false`: no reader is wired, nothing was asked.
+    pub(crate) fn ask(&mut self, folder: Option<String>, account: Option<String>, kind: ReadFor) -> bool {
+        let Some(reader) = self.reader.clone() else {
+            return false;
+        };
+        let (send, answer) = std::sync::mpsc::channel();
+        let (asked, worker, on_worker) = (folder.clone(), send.clone(), reader.clone());
+        let spawned = std::thread::Builder::new().name("files-read".into()).spawn(move || {
+            let _ = worker.send(on_worker(asked.as_deref()));
+        });
+        if spawned.is_err() {
+            // No thread: the read is made here, as without a reader (never a folder that is never read).
+            let _ = send.send(reader(folder.as_deref()));
+        }
+        self.pending = Some(PendingRead {
+            folder,
+            account,
+            kind,
+            answer,
+        });
+        true
+    }
+
+    /// The answer of the read out, once it came (the read is no longer out then). A worker that died answers nothing.
+    pub(crate) fn take(&mut self) -> Option<(PendingRead, Listing, Option<SourceError>)> {
+        let pending = self.pending.as_ref()?;
+        match pending.answer.try_recv() {
+            Ok((listing, error)) => self.pending.take().map(|p| (p, listing, error)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.pending = None;
+                None
+            }
+        }
+    }
+
+    /// Forgets the read out: its answer, when it comes, is dropped.
+    pub(crate) fn drop_pending(&mut self) {
+        self.pending = None;
+    }
+
+    pub(crate) fn opening(&self) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.kind != ReadFor::Reread)
+    }
+}

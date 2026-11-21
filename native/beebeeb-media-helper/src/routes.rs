@@ -215,7 +215,8 @@ pub fn state_for(
 
 /// The state the decision is made by, once the app said whether another helper can follow this one (ux-57).
 /// `NotHere` asks the app for a restart in the system decoder's profile; in the last helper (`ToHelper::LastHelper`:
-/// the one already started there) no restart follows, so Media Foundation that does not start is this PC's answer,
+/// the one already started there, which holds `lpacCom` so COM and Media Foundation start in it) no restart follows,
+/// so Media Foundation that still does not start is this PC's answer,
 /// decided as `Off`: a video FilmCraft plays goes on without the audio that needed the system's decoder, and a track
 /// that cannot play at all keeps its `NoSystemDecoder`.
 pub fn settled(state: SystemState, last_helper: bool) -> SystemState {
