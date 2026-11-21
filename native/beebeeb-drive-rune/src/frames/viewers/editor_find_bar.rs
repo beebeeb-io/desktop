@@ -186,6 +186,12 @@ fn chip(key: &str, label: &str, on: bool, t: &Theme) -> El {
     let tone = if on { pill::Tone::Accent } else { pill::Tone::Neutral };
     pill::pill(key, label, tone, false, t)
         .role("button")
+        .label(match key {
+            "find-case" => "Match case",
+            "find-word" => "Whole word",
+            "find-close" => "Close find",
+            _ => label,
+        })
         .h(22.0)
         .focusable(true)
         .checked(on)
