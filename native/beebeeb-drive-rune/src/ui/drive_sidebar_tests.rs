@@ -179,7 +179,7 @@ fn locked_and_no_plan_are_dimmed_and_inert() {
         rt.frame(0.016);
         let items = sidebar(&rt);
         assert!(lit(&items).is_empty(), "{gate:?}: nothing lit");
-        for e in items.iter().filter(|e| e.role == "button") {
+        for e in items.iter().filter(|e| e.role == "button" || e.role == "treeitem") {
             assert!(!e.focusable, "{gate:?}: {:?} takes no focus", e.key);
         }
         assert!(
