@@ -163,7 +163,8 @@ fn settings_is_dw_0701_and_available_offline_is_dw_0715_and_the_shell_goes_there
     use crate::shell::registry::FrameGroup;
     let mut rt = runtime();
     click(&mut rt, "Sync history-row");
-    assert_eq!(rt.state.actions.intents, [Intent::Frame("DW-1301")]);
+    // The sidebar goes through the route machine (`host::dispatch`), not a Files intent.
+    assert!(rt.state.actions.intents.is_empty());
     assert_eq!(group(&rt), FrameGroup::Section(Section::SyncHistory));
 
     let mut rt = runtime();
@@ -172,7 +173,8 @@ fn settings_is_dw_0701_and_available_offline_is_dw_0715_and_the_shell_goes_there
 
     let mut rt = runtime();
     click(&mut rt, "Available offline-row");
-    assert_eq!(rt.state.actions.intents, [Intent::Frame("DW-0715")]);
+    // The sidebar goes through the route machine (`host::dispatch`), not a Files intent.
+    assert!(rt.state.actions.intents.is_empty());
     assert_eq!(group(&rt), FrameGroup::Section(Section::AvailableOffline));
 
     let mut rt = runtime();
@@ -182,7 +184,8 @@ fn settings_is_dw_0701_and_available_offline_is_dw_0715_and_the_shell_goes_there
 
     let mut rt = runtime();
     click(&mut rt, "settings-btn");
-    assert_eq!(rt.state.actions.intents, [Intent::Frame("DW-0701")]);
+    // The sidebar goes through the route machine (`host::dispatch`), not a Files intent.
+    assert!(rt.state.actions.intents.is_empty());
     assert_eq!(group(&rt), FrameGroup::Settings(SettingsPane::General));
 
     let mut rt = runtime();

@@ -76,7 +76,9 @@ pub fn init() -> State {
 }
 
 pub fn init_with(shell: Shell) -> State {
-    let board = init_from(shell, Box::new(BoardFixtureSource::new()), Some(6));
+    let mut board = init_from(shell, Box::new(BoardFixtureSource::new()), Some(6));
+    // The board's This PC sample belongs to the board path only; `init_from` alone (`--db`) has none.
+    board.this_pc = crate::frames::this_pc::Ui::fixture();
     crate::frames::viewers::board_fixture(crate::frames::files::board_fixture(board))
 }
 
@@ -143,7 +145,8 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         setup_source: None,
         guide: Default::default(),
         guide_marks: crate::frames::signin::setup::guide_marks::first(crate::shell::instance::DEV_BUILD),
-        this_pc: crate::frames::this_pc::Ui::fixture(),
+        // Nothing answers for This PC without the board or an engine: no sample counts (`--db`).
+        this_pc: crate::frames::this_pc::Ui::new(Box::new(crate::frames::this_pc::source::Unwired)),
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
     }
 }

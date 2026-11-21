@@ -1052,7 +1052,11 @@ mod tests {
                 for e in rt.elements() {
                     let key = e.key.clone().unwrap_or_default();
                     let allowed = matches!(key.as_str(), "new-btn" | "plus-icon" | "new-caret" | "new-label")
-                        || key.starts_with("st-5");
+                        || key.starts_with("st-5")
+                        // The Drive sidebar's places: the folder art in its own tint.
+                        || crate::ui::sidebar::SidebarSection::all()
+                            .iter()
+                            .any(|p| key == format!("{}-icon", p.label()));
                     if allowed {
                         continue;
                     }
