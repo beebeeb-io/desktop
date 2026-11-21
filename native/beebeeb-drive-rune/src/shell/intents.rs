@@ -449,6 +449,10 @@ pub fn drain_settings_intents(s: &mut State, tx: &mut Tx) -> bool {
                 s.settings.toast = Some("Copied");
             }
             Intent::OpenWindowsNotificationSettings => open(s, web_pages::WINDOWS_NOTIFICATIONS),
+            // The settings window's own answers to Pause, Sync anyway and Repair (a toast over the pane).
+            Intent::Show("DW-1204") => s.settings.toast = Some("Syncing paused"),
+            Intent::Show("DW-1203") => s.settings.toast = Some("Syncing on this connection"),
+            Intent::Show("DW-1212") => s.settings.toast = Some("Repairing Beebeeb in File Explorer…"),
             Intent::Show(_) => log("NotWired(Show)"),
             Intent::Open(target) => super::settings_open::open(s, tx, target),
             // Taken by the settings source's updater (`SettingsSource::check_for_updates`, `restart_to_update`): the
