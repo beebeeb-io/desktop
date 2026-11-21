@@ -38,7 +38,7 @@ impl<C: CredentialStores> Engine<C> {
         Some((with(&cache), key))
     }
 
-    fn hand_over(
+    fn hand_over_cached_thumb(
         &self,
         session: SessionGeneration,
         found: Option<(Option<CachedThumb>, Zeroizing<[u8; 32]>)>,
@@ -61,13 +61,13 @@ impl<C: CredentialStores> Engine<C> {
     /// or `session` is not the session in memory.
     pub fn local_thumbnail_for(&self, session: SessionGeneration, file_id: &str) -> Option<ThumbPixels> {
         let found = self.with_thumb_cache(session, |cache| cache.get(file_id));
-        self.hand_over(session, found)
+        self.hand_over_cached_thumb(session, found)
     }
 
     /// [`Self::local_thumbnail_for`], only if it was made from `version` (another version's is stale).
     pub fn local_thumbnail_at(&self, session: SessionGeneration, file_id: &str, version: i64) -> Option<ThumbPixels> {
         let found = self.with_thumb_cache(session, |cache| cache.get_at(file_id, version));
-        self.hand_over(session, found)
+        self.hand_over_cached_thumb(session, found)
     }
 
     /// WRITES (the disk): keep `pixels` as the thumbnail of `file_id` at `version`, sealed, FOR `session`. Pixels
