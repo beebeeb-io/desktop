@@ -10,6 +10,7 @@ use super::{Intent, icons, style, ui};
 use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::toolbar::{ToolState, tool_button};
+use crate::ui::view_state::{self, ViewState};
 use crate::ui::{au, kit};
 
 /// The gutter: the line number's box, 16 pt of padding on both sides.
@@ -387,11 +388,15 @@ pub fn refused_banner(words: Option<&str>, t: &Theme) -> Option<El> {
                 ui.resolve(Keep::Both);
             }
         });
-    let sentence = kit::label("banner-text", words, style::BANNER, t.text_secondary)
-        .wrap()
-        .grow(1.0)
-        .min_w(0.0);
-    Some(banner_of(&icons::INFO, sentence, Some(copy), t))
+    Some(view_state::view_state(
+        ViewState::Failed {
+            key: "refused",
+            title: "Not saved",
+            why: words,
+            retry: Some(copy),
+        },
+        t,
+    ))
 }
 
 /// [`banner_el`] with spans in its sentence (a figure in mono).

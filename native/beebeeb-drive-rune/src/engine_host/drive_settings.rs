@@ -88,8 +88,6 @@ mod reads;
 #[path = "drive_settings_tools.rs"]
 pub(crate) mod tools;
 // plan40 batch 1: "Show sync status on files" (slice B3).
-#[path = "status_on_files.rs"]
-mod status_on_files;
 #[path = "app_activity.rs"]
 pub(crate) mod app_activity;
 pub(crate) use reads::*;
@@ -349,8 +347,6 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     local_reading: bool,
     /// Thumbnails and previews (`drive_previews`): off until the app's start hands it the engine.
     previews: super::drive_previews::PreviewsHost,
-    /// Slice B3 (`status_on_files.rs`): what it keeps between a press and its answer. Empty until it binds.
-    status_on_files: status_on_files::StatusOnFilesCalls,
 }
 
 impl<E: DriveEngine> EngineDriveSettings<E> {
@@ -389,7 +385,6 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             local_at: None,
             local_reading: false,
             previews: super::drive_previews::PreviewsHost::off(),
-            status_on_files: Default::default(),
         };
         // Nothing is read at launch: a pane reads when it opens (`opened`), never before (module doc).
         source
@@ -990,11 +985,6 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
                 .unwrap_or_default(),
             not_uploaded: None,
         }
-    }
-
-    /// Not bound (slice B3, `status_on_files.rs`).
-    fn set_status_on_files(&mut self, on: bool) {
-        not_wired(self.status_on_files_set_status_on_files(on))
     }
 
     fn set_open_at_login(&mut self, on: bool) {

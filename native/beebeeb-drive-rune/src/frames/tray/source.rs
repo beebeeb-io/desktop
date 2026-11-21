@@ -394,6 +394,10 @@ pub enum Changes {
     Hidden(Hidden),
     /// Nothing yet, and the sentence that says when there will be (DW-1213, DW-1215).
     Empty { text: String },
+    /// The first answer is out: not an empty list yet.
+    Loading,
+    /// The history on this PC could not be read: Try again.
+    Failed,
     /// Newest first. `complete`: these are the last 50, so the list ends with "That's the last
     /// 50 changes." (DW-1220).
     Rows { rows: Vec<Change>, complete: bool },

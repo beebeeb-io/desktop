@@ -65,7 +65,7 @@ pub fn standing(source: &dyn super::source::SettingsSource) -> Option<&'static s
 }
 
 /// Ask Beebeeb again. What the last toast said is over: the answer says what is so now.
-fn ask_again(s: &mut State) {
+pub(super) fn ask_again(s: &mut State) {
     s.settings.toast = None;
     s.settings.source.reload_notifications();
 }

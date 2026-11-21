@@ -5,7 +5,8 @@ use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::settings_list::{self as lists, Item, Role};
-use crate::ui::settings_notice::{self as notices, Tone};
+use crate::ui::settings_notice as notices;
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::{kit, settings_shell as shell};
 use rune::tok::Family;
 use rune::{El, row};
@@ -23,39 +24,34 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     match ui.source.recent_state() {
         ReadState::Ready => {}
         ReadState::Loading => {
-            children.push(notices::note(
-                0,
-                Tone::Neutral,
-                &ic::INBOX,
-                "Loading your notifications\u{2026}",
-                "Asking Beebeeb for the list.",
-                t,
-            ));
+            let state = ViewState::Loading {
+                words: "Loading your notifications\u{2026}",
+            };
+            children.push(view_state(state, t));
             return (shell::pane(children, t), super::notifications::said_over(ui, None, t));
         }
         ReadState::Failed => {
-            let again = super::notifications::try_again(0, t);
-            children.push(notices::problem(
-                0,
-                0,
-                "Couldn't load your notifications",
+            let retry = try_again("recent-failed", t).on_press(super::notifications::ask_again);
+            let state = ViewState::Failed {
+                key: "recent-failed",
+                title: "Couldn't load your notifications",
                 // Only what holds in every way this is reached (a mark may have been taken for some of them).
-                "There may be alerts that aren't shown here.",
-                Some(again),
-                t,
-            ));
+                why: "There may be alerts that aren't shown here.",
+                retry: Some(retry),
+            };
+            children.push(view_state(state, t));
             return (shell::pane(children, t), super::notifications::said_over(ui, None, t));
         }
     }
     if days.is_empty() {
-        children.push(notices::empty(
-            0,
-            0,
-            &ic::INBOX,
-            "No notifications",
-            "When something needs your attention, a new device sign-in, a share or a storage warning, it shows up here.",
-            t,
-        ));
+        let state = ViewState::Empty {
+            key: "recent-empty",
+            icon: &ic::INBOX,
+            title: "No notifications",
+            body: "When something needs your attention, a new device sign-in, a share or a storage warning, it shows up here.",
+            action: None,
+        };
+        children.push(view_state(state, t));
         return done(ui, children, t);
     }
     let mut pills = 0;

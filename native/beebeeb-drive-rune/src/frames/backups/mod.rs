@@ -228,6 +228,13 @@ impl BackupsUi {
         }
     }
 
+    /// "Try again" on the failed section: read again, whatever is fresh.
+    pub fn read_again(&mut self) {
+        if let Some(source) = self.source.as_mut() {
+            source.read_again();
+        }
+    }
+
     pub fn add_folder(&mut self) {
         self.ask(Intent::PickFolder);
     }

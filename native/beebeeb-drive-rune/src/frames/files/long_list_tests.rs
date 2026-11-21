@@ -302,3 +302,34 @@ fn letters_jump_in_a_grid_too() {
     assert_eq!(rt.state.selected, Some(BOARD_FIRST_ROW), "the first Mir\u{2026}");
     assert!(seen(&rt), "and its tile is scrolled into view");
 }
+
+/// Task 050: with the folder read on a worker, Back shows the folder left and selects it once the read lands (the
+/// row stays selected through the answer, not before it).
+#[test]
+fn back_selects_the_folder_it_came_from_when_the_read_lands_late() {
+    let mut rt = long_trip();
+    let (let_one_read, wait) = std::sync::mpsc::channel::<()>();
+    let wait = std::sync::Mutex::new(wait);
+    rt.state.folder_reads.reader = Some(std::sync::Arc::new(move |folder: Option<&str>| {
+        let _ = wait.lock().unwrap().recv();
+        load(&LongTrip::new(), folder)
+    }));
+    let came_from = rt.state.listing.items.len(); // the 212 of Lisbon trip, still shown while the read is out
+    rt.update(|s, _| assert!(s.back()));
+    assert!(rt.state.folder_reads.pending.is_some(), "the read is out");
+    assert_eq!(rt.state.listing.items.len(), came_from, "the rows stay until it answers");
+    let_one_read.send(()).unwrap();
+    // What `host::take_folder_read` does with the answer, once the worker has it.
+    let taken = loop {
+        if let Some(taken) = rt.state.folder_reads.take() {
+            break taken;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    rt.update(|s, _| {
+        s.take_opened(taken.1, taken.2);
+    });
+    settle(&mut rt);
+    let row = rt.state.selected.expect("a row is selected");
+    assert_eq!(rt.state.listing.items[row].name, "Lisbon trip");
+}

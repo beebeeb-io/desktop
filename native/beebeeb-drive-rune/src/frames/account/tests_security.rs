@@ -160,6 +160,10 @@ fn a_source_that_knows_nothing_gets_no_score_no_mark_and_no_sample_value() {
         .filter(|k| k.ends_with("-check"))
         .collect();
     assert_eq!(checks, Vec::<String>::new(), "a mark for a state nobody read");
+    // Pages nothing answers for have no row at all.
+    assert!(find(&rt, "item-0-0").is_none());
+    // With the pages answering, each part says it is not known.
+    let rt = page_knowing(nothing_known, false);
     assert_eq!(says(&rt, "item-0-0-sub"), "Last change not known");
     assert_eq!(says(&rt, "item-0-1-sub"), "Not known");
     assert_eq!(says(&rt, "item-0-2-sub"), "Not known");
@@ -183,105 +187,63 @@ fn factors_that_came_back_empty_are_no_score_either() {
 }
 
 #[test]
-fn nothing_that_is_not_bound_can_be_pressed() {
+fn nothing_that_is_not_bound_is_drawn() {
     let mut rt = page_knowing(nothing_known, true);
-    // Pages nothing answers for: their rows are text that says so.
-    for row in ["item-0-0", "item-0-1", "item-0-2", "item-2-0"] {
-        assert_eq!(info(&rt, row).role, "listitem", "{row}");
-        assert!(
-            name(&rt, row).ends_with("Not available yet"),
-            "{row}: {}",
-            name(&rt, row)
-        );
-        click(&mut rt, row);
-        assert_eq!(rt.state.account.pane, Pane::Security, "{row}: a press leads nowhere");
+    // Every function this source has not bound is a row that is not there: no text that says so, no web detour.
+    for row in [
+        "item-0-0", "item-0-1", "item-0-2", "item-1-0", "item-1-2", "item-2-0", "item-3-0", "item-3-1",
+        "item-4-0",
+    ] {
+        assert!(find(&rt, row).is_none(), "{row} is not drawn");
     }
-    // Deleting and approving have no flow here: each says so, with the web as the way (never a row that leads
-    // nowhere, never drawn as a danger).
-    assert!(
-        name(&rt, "item-4-0").starts_with("Delete your account on the web"),
-        "{}",
-        name(&rt, "item-4-0")
-    );
-    assert_eq!(info(&rt, "item-4-0").role, "link");
-    assert!(
-        name(&rt, "item-1-2").ends_with("Not available in this version yet. Approve on the web."),
-        "{}",
-        name(&rt, "item-1-2")
-    );
-    assert_eq!(info(&rt, "item-1-2").role, "listitem");
-    click(&mut rt, "item-1-2");
-    assert_eq!(rt.state.account.pane, Pane::Security, "a press leads nowhere");
-    assert_eq!(asked(&rt), Vec::new());
-    // Below the window's edge: the keys reach it.
-    tab_to(&mut rt, "item-4-0");
-    key(&mut rt, Key::Enter);
-    assert_eq!(
-        asked(&rt),
-        vec![crate::frames::settings::Intent::Web("delete-account")],
-        "the web's page, by name"
-    );
-    // App lock that cannot be set: no switch, no delay.
-    assert!(find(&rt, "item-1-0-switch").is_none() && find(&rt, "item-1-0-pop").is_none());
-    assert_eq!(says(&rt, "item-1-0-value"), "Not available yet");
-    // Signing out that this source cannot do: no confirm opens.
-    for row in ["item-3-0", "item-3-1"] {
-        assert_eq!(info(&rt, row).role, "listitem", "{row}");
-        click(&mut rt, row);
-        assert_eq!(rt.state.account.dialog, None, "{row}");
-        assert!(find(&rt, "dlg").is_none(), "{row}");
+    let text = every_text(&rt);
+    for never in ["Not available", "on the web", "Approve on the web"] {
+        assert!(!text.contains(never), "says {never:?}");
     }
-    // Asked for by its frame id, the confirm does not open: nothing undrawn holds the keyboard.
+    // Asked for by its frame id, the confirm or menu does not open: nothing undrawn holds the keyboard.
     for frame in ["DW-A57", "DW-A57a", "DW-0716"] {
         rt.update(move |s, _| super::go(s, frame));
         settle(&mut rt);
         assert_eq!(rt.state.account.dialog, None, "{frame}");
         assert!(find(&rt, "dlg").is_none() && find(&rt, "menu-0").is_none(), "{frame}");
     }
-    // Devices and sessions answers, so its row is a link.
-    assert_eq!(info(&rt, "item-1-1").role, "link");
-    click(&mut rt, "item-1-1");
-    assert_eq!(section(&rt), Some(SettingsPane::DevicesAndSessions));
+    assert_eq!(asked(&rt), Vec::new());
 }
 
-/// The page of a source that knows two-factor and how many are signed in, and answers for no page under it (the
-/// running app today): a row keeps the state it has, and "Not available yet" is only on a row with none.
+/// "Sign out of all Beebeeb apps" stays hidden while the source cannot do it (the engine: Drive is the one app),
+/// and its confirm does not open when asked for by its frame id.
 #[test]
-fn a_row_with_a_state_keeps_it_and_does_not_also_say_not_available() {
-    let mut rt = runtime("DW-S01u");
-    assert_eq!(name(&rt, "item-0-1"), "Two-factor authentication, On, done");
-    assert_eq!(info(&rt, "item-0-1").role, "listitem");
-    assert_eq!(
-        name(&rt, "item-0-0"),
-        "Password, Last change not known, Not available yet"
+fn sign_out_of_all_apps_is_hidden_while_the_source_cannot_do_it() {
+    let mut rt = page_knowing(
+        |all| SecurityFacts {
+            can_sign_out: true,
+            can_sign_out_all: false,
+            ..all
+        },
+        false,
     );
-    assert_eq!(says(&rt, "item-1-1-value"), "4 signed in");
-    assert_eq!(info(&rt, "item-1-1").role, "link");
+    assert!(find(&rt, "item-3-0").is_some(), "this app can be signed out");
+    assert!(find(&rt, "item-3-1").is_none(), "all apps is not drawn");
+    assert!(!every_text(&rt).contains("all Beebeeb apps"));
+    rt.update(|s, _| super::go(s, "DW-A57a"));
+    settle(&mut rt);
+    assert_eq!(rt.state.account.dialog, None);
+    assert!(find(&rt, "dlg").is_none());
+}
+
+/// The page of a source that knows two-factor and how many are signed in, and answers for no page under it: a row
+/// that leads to a page nothing answers for is not drawn (no "Not available yet" text in its place).
+#[test]
+fn a_row_for_a_page_nothing_answers_for_is_not_drawn() {
+    let mut rt = runtime("DW-S01u");
+    for row in ["item-0-0", "item-0-1", "item-0-2", "item-1-2", "item-2-3"] {
+        assert!(find(&rt, row).is_none(), "{row} is not drawn");
+    }
+    assert!(!every_text(&rt).contains("Not available"), "no row says it is not available");
     // The board's source has App lock on; this page has no row for it, so its menu does not open either.
     rt.update(|s, _| super::go(s, "DW-0716"));
     settle(&mut rt);
     assert_eq!(rt.state.account.dialog, None);
-}
-
-/// A state that was read and is NOT good is a state too: said alone, never with "Not available yet" beside it.
-#[test]
-fn a_read_state_that_is_not_good_is_not_called_unavailable_either() {
-    let rt = page_knowing(
-        |all| SecurityFacts {
-            two_factor: Some(false),
-            backup_codes: None,
-            passkeys: Some(0),
-            ..all
-        },
-        true,
-    );
-    assert_eq!(
-        name(&rt, "item-0-1"),
-        "Two-factor authentication, Off: your password alone signs you in"
-    );
-    assert_eq!(name(&rt, "item-0-2"), "Passkeys, None added");
-    assert_eq!(info(&rt, "item-0-1").role, "listitem");
-    assert!(find(&rt, "item-0-1-check").is_none() && find(&rt, "item-0-2-check").is_none());
 }
 
 /// A sign-in activity nobody read keeps its way to the page when the page answers.
@@ -458,7 +420,7 @@ fn a_to_do_whose_page_is_not_there_has_no_button() {
     let rt = window(state);
     assert_eq!(says(&rt, "todo-0-title"), "Add a passkey");
     assert!(find(&rt, "todo-0-btn").is_none());
-    assert_eq!(says(&rt, "todo-0-value"), "Not available yet");
+    assert!(find(&rt, "todo-0-value").is_none(), "no \"not available\" text either");
 }
 
 #[test]
@@ -525,4 +487,40 @@ fn a_sign_out_save_that_cannot_be_asked_says_so_and_signs_nothing_out() {
     click(&mut rt, "btn-1");
     assert_eq!(says(&rt, "dlg-text-0"), super::security_overview::NOT_SAVED);
     assert_eq!(asked(&rt), Vec::new());
+}
+
+/// A pane with nothing to show says why: Loading while the first answer is out, what to do when nobody is signed
+/// in, and the reason with a Try again when the read failed (never a blank or a finished-looking empty page).
+#[test]
+fn a_pane_without_an_answer_is_loading_empty_or_failed_with_a_retry() {
+    use super::source::PaneState;
+    let drawn = |state: PaneState| {
+        let rt = rune::Runtime::new(
+            state,
+            |state: &PaneState, _: &mut rune::Cx<PaneState>| {
+                let t = crate::theme::tokens::theme(false);
+                super::state_pane(Pane::Security, *state, &t)
+            },
+            (600.0, 400.0),
+            rune::Env {
+                system_dark: false,
+                scale: 1.0,
+            },
+        );
+        let mut rt = rt;
+        rt.frame(0.0);
+        rt.elements()
+            .into_iter()
+            .map(|e| format!("{} {}", e.key.unwrap_or_default(), e.text.unwrap_or_default()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let loading = drawn(PaneState::Loading);
+    assert!(loading.contains("loading-words"), "Loading says it is loading");
+    let signed_out = drawn(PaneState::SignedOut);
+    assert!(signed_out.contains("account-state-title") && signed_out.contains("Sign in and unlock"));
+    assert!(!signed_out.contains("account-state-retry"), "nothing to retry: the person signs in");
+    let failed = drawn(PaneState::Failed);
+    assert!(failed.contains("account-state-retry"), "Try again is drawn");
+    assert!(failed.contains("Beebeeb didn't answer."), "the reason is said");
 }

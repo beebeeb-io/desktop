@@ -65,6 +65,8 @@ struct Waiting {
 thread_local! {
     /// The verb that waits for the cover's end, on the window's thread. One: a later verb replaces it.
     static WAITING: RefCell<Option<Waiting>> = const { RefCell::new(None) };
+    /// A verb whose folder is being read on the worker (task 050): its row is selected when the read lands.
+    static OPENING: RefCell<Option<Waiting>> = const { RefCell::new(None) };
 }
 
 fn unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -374,11 +376,12 @@ pub(crate) fn handle_with(s: &mut State, verb: ExplorerVerb, item: &str, engine:
 /// unlock. `true`: it ran.
 pub(crate) fn after_the_cover(s: &mut State, tx: &mut Tx) -> bool {
     // Every poll comes here: nothing waits, nothing to read.
+    let landed = finish_open(s, tx);
     if WAITING.with_borrow(Option::is_none) {
-        return false;
+        return landed;
     }
     let engine = unpoisoned(&ENGINE).clone();
-    after_the_cover_with(s, engine.as_deref().map(|e| e as &dyn ItemLookup), tx)
+    after_the_cover_with(s, engine.as_deref().map(|e| e as &dyn ItemLookup), tx) || landed
 }
 
 /// [`after_the_cover`], with the engine lookup handed in (a test's).
@@ -430,7 +433,39 @@ fn open(s: &mut State, verb: ExplorerVerb, folder: Option<String>, item: &str, t
     crate::frames::files::reset::close_dialogs(s);
     if !shown {
         s.open_folder(folder);
+        // The running app reads the folder on the worker: the row is selected once the read lands (`finish_open`).
+        if s.folder_reads.opening() {
+            let account = s.shell.app.account().map(str::to_owned);
+            OPENING.set(Some(Waiting {
+                verb,
+                item: item.to_owned(),
+                account,
+            }));
+            return;
+        }
     }
+    select_and_run(s, verb, item, tx);
+}
+
+/// The poll after a folder opened for a verb was read: the row is selected and the verb's surface follows. A read
+/// still out waits; a window that locked, or another account, drops it; a row the read does not hold says so.
+/// `true`: the window changed.
+fn finish_open(s: &mut State, tx: &mut Tx) -> bool {
+    if OPENING.with_borrow(Option::is_none) || s.folder_reads.opening() {
+        return false;
+    }
+    let Some(waiting) = OPENING.take() else {
+        return false;
+    };
+    if !session_gate::open(s) || waiting.account.as_deref() != s.shell.app.account() {
+        host::log("a File Explorer verb that waited for its folder was not followed: the window locked, or another account");
+        return false;
+    }
+    select_and_run(s, waiting.verb, &waiting.item, tx);
+    true
+}
+
+fn select_and_run(s: &mut State, verb: ExplorerVerb, item: &str, tx: &mut Tx) {
     let Some(row) = row_of(s, item) else {
         host::log("a File Explorer verb found no row");
         return;

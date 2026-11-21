@@ -680,7 +680,7 @@ fn a_passkey_is_removed_only_after_its_confirm() {
     let mut rt = runtime("DW-A73");
     assert_eq!(name(&rt, "item-0-0"), "iCloud Keychain, added 28 Oct, Can unlock data");
     click(&mut rt, "item-0-0-more");
-    assert_eq!(name(&rt, "pop-0-item-1"), "Remove, destructive");
+    assert_eq!(name(&rt, "pop-0-item-1"), "Remove");
     click(&mut rt, "pop-0-item-1");
     assert_eq!(says(&rt, "dlg-title"), "Remove iCloud Keychain?");
     assert!(find(&rt, "dlg-bold-box").is_some(), "the warning in bold");

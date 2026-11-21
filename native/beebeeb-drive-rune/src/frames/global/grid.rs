@@ -103,7 +103,7 @@ pub struct GridUi {
     /// The folders shown as a grid, by id (`None`: the root).
     folders: HashSet<Option<String>>,
     /// How many tiles stand side by side at the window's width (set when the grid is laid out).
-    columns: usize,
+    pub(crate) columns: usize,
     /// The lines in view (set by the virtual list after each layout).
     visible: Mutex<std::ops::Range<usize>>,
     /// The pictures this grid asked its source for, not yet released.
