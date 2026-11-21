@@ -33,15 +33,21 @@ fn bandwidth_is_read_when_its_pane_opens_never_at_launch() {
         0,
         "no read for a pane nobody opened"
     );
-    assert_eq!(source.bandwidth(), Bandwidth::default(), "and no value before the read");
+    let before = source.bandwidth();
+    assert_eq!(
+        Bandwidth { now: String::new(), upload: Default::default(), download: Default::default(), ..before.clone() },
+        Bandwidth::default(),
+        "and no limit, history or switch value before the read"
+    );
+    assert_eq!(before.now, "Nothing is moving", "Right now reads the engine's rate: none recorded, nothing moves");
 
     source.opened(Pane::Bandwidth);
     settle(&mut source);
     assert_eq!(fake.limit_reads.load(Ordering::SeqCst), 1);
     let pane = source.bandwidth();
     assert_eq!((pane.upload_limit, pane.download_limit), (Some(8), None));
-    // What the engine has no answer for stays as the empty pane draws it.
-    assert!(pane.devices.is_empty() && pane.now.is_empty() && pane.upload.speed.is_none());
+    // No devices card, and no transfer recorded: nothing moves.
+    assert!(pane.devices.is_empty() && pane.now == "Nothing is moving" && pane.upload.speed.is_none());
     assert_eq!(pane.test, Default::default());
     assert!(!pane.waiting_metered);
 }
@@ -178,11 +184,10 @@ fn the_traffic_is_the_signed_in_accounts_own_last_20_hours() {
     *fake.account.lock().unwrap() = Some("other@beebeeb.io".into());
     let mut source = source;
     settle(&mut source);
-    assert_eq!(
-        source.bandwidth(),
-        Bandwidth::default(),
-        "nothing held across the account change"
-    );
+    let other = source.bandwidth();
+    assert_eq!(other.history, History::default(), "no traffic held across the account change");
+    assert_eq!((other.upload_limit, other.download_limit), (None, None), "no limit held across it");
+    assert_eq!(other.now, "Nothing is moving");
     source.opened(Pane::Bandwidth);
     settle(&mut source);
     assert!(

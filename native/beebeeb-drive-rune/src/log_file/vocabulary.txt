@@ -924,7 +924,6 @@ sign-up
 signal
 signaled
 signaling
-signature
 signed
 signed_out
 since

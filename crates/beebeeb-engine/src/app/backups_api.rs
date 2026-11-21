@@ -349,7 +349,8 @@ impl<C: CredentialStores> Engine<C> {
         }
         let identity = self.identity;
         let asker = self.switch_asker(handle.as_ref());
-        switched_or_undone(
+        switch_in_order(
+            on,
             || {
                 DesktopConfig::update_for(identity, |config| {
                     // Never backed up twice (P3-3), read from the file this update holds: the rule is the add's.
@@ -383,6 +384,24 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
+/// Task drive-complete-118 (backlog 2398): the order of the two parts. Off: the settings file first, then the purge
+/// (`switched_or_undone`). On: the database part first (it clears the stop), then the settings flip. With the flip
+/// first, `reconcile_stopped_switches` could run between the two, see a stop row with its switch on, and switch it
+/// off again. A failed flip after the clear leaves the backup off with no stop: the person's click can be repeated.
+fn switch_in_order<W: Copy>(
+    on: bool,
+    write: impl FnOnce() -> Result<W, BackupsError>,
+    database: impl FnOnce() -> Result<(), BackupsError>,
+    undo: impl FnOnce(W),
+) -> Result<(), BackupsError> {
+    if on {
+        database()?;
+        write().map(|_| ())
+    } else {
+        switched_or_undone(write, database, undo)
+    }
+}
+
 /// The switch as one step: `write` changes the settings file first (and says what it was), then `database` does the
 /// state database's part (off purges the folder's pending uploads, on clears a stop). When the database part does not
 /// happen (a failed purge, or the session changed in between) `undo` puts the settings file back, so a folder is
@@ -405,3 +424,58 @@ fn switched_or_undone<W: Copy>(
 #[cfg(test)]
 #[path = "backups_api_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn switching_on_clears_the_stop_before_the_switch_flips() {
+        let log = RefCell::new(Vec::new());
+        let done = switch_in_order(
+            true,
+            || {
+                log.borrow_mut().push("flip");
+                Ok(false)
+            },
+            || {
+                log.borrow_mut().push("clear");
+                Ok(())
+            },
+            |_| log.borrow_mut().push("undo"),
+        );
+        assert_eq!(done, Ok(()));
+        assert_eq!(*log.borrow(), ["clear", "flip"], "a flip first races reconcile_stopped_switches");
+    }
+
+    #[test]
+    fn switching_off_still_flips_first_and_undoes_a_failed_purge() {
+        let log = RefCell::new(Vec::new());
+        let done = switch_in_order(
+            false,
+            || {
+                log.borrow_mut().push("flip");
+                Ok(true)
+            },
+            || {
+                log.borrow_mut().push("purge");
+                Err(BackupsError::State)
+            },
+            |_| log.borrow_mut().push("undo"),
+        );
+        assert_eq!(done, Err(BackupsError::State));
+        assert_eq!(*log.borrow(), ["flip", "purge", "undo"]);
+    }
+
+    #[test]
+    fn a_failed_clear_flips_nothing() {
+        let done = switch_in_order(
+            true,
+            || -> Result<bool, BackupsError> { panic!("no flip after a failed clear") },
+            || Err(BackupsError::State),
+            |_| panic!("nothing to undo"),
+        );
+        assert_eq!(done, Err(BackupsError::State));
+    }
+}

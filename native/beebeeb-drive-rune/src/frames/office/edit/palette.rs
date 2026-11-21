@@ -15,10 +15,26 @@ pub enum Run {
     Op(EditOp),
     /// One of Insert's tools (Table and Link open their dialog, Image the file picker).
     Insert(Insert),
+    /// A slide command on the slide on the stage (the slide editor applies it and keeps its own count).
+    Slide(SlideCmd),
     /// Open this file (a name from "Files").
     File(String),
     /// Nothing of ours answers to it.
     Unknown,
+}
+
+/// A slide command of the palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlideCmd {
+    Duplicate,
+    Delete,
+}
+
+/// The slide on the stage (1-based) and how many slides the deck has: what the palette reads of the slide editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stage {
+    pub current: u32,
+    pub count: u32,
 }
 
 /// The group of the file names.
@@ -118,6 +134,16 @@ fn catalogue(kind: EditKind) -> Vec<Entry> {
     all
 }
 
+/// Duplicate and Delete slide: only with a slide on the stage; a deck keeps one slide, so Delete needs two.
+fn slide_entries(stage: Option<Stage>) -> Vec<Entry> {
+    let Some(stage) = stage else { return Vec::new() };
+    let mut all = vec![e("Slides", "Duplicate slide", Some("Ctrl+D"), Run::Slide(SlideCmd::Duplicate))];
+    if stage.count > 1 {
+        all.push(e("Slides", "Delete slide", Some("Delete"), Run::Slide(SlideCmd::Delete)));
+    }
+    all
+}
+
 /// Whether `name` matches what was typed: every typed word is somewhere in it, any case.
 fn matches(name: &str, typed: &str) -> bool {
     let name = name.to_lowercase();
@@ -137,9 +163,18 @@ fn push(groups: &mut Vec<CommandGroup>, title: &str, command: Command) {
 /// What the search shows for `typed`: our operations for `kind` (when an editor is live), then what the source
 /// found (the document's styles, file names), without a name that is already listed in the same group.
 pub fn found(kind: Option<EditKind>, typed: &str, from_source: Vec<CommandGroup>) -> Vec<CommandGroup> {
+    found_at(kind, None, typed, from_source)
+}
+
+/// [`found`] with the slide on the stage (a deck in the live editor): Duplicate and Delete slide act on it.
+pub fn found_at(kind: Option<EditKind>, stage: Option<Stage>, typed: &str, from_source: Vec<CommandGroup>) -> Vec<CommandGroup> {
     let mut groups: Vec<CommandGroup> = Vec::new();
     if let Some(kind) = kind {
-        for entry in catalogue(kind).into_iter().filter(|x| matches(x.name, typed)) {
+        let mut entries = catalogue(kind);
+        if kind == EditKind::Pptx {
+            entries.extend(slide_entries(stage));
+        }
+        for entry in entries.into_iter().filter(|x| matches(x.name, typed)) {
             let shortcut = entry.shortcut.filter(|s| !s.is_empty()).map(String::from);
             push(
                 &mut groups,
@@ -167,6 +202,16 @@ pub fn found(kind: Option<EditKind>, typed: &str, from_source: Vec<CommandGroup>
 /// What the result `name` of group `group` does. `marks` are the selection's: a mark runs as the opposite of
 /// what the selection has.
 pub fn resolve(kind: Option<EditKind>, group: &str, name: &str, marks: Option<&Marks>) -> Run {
+    resolve_at(kind, None, group, name, marks)
+}
+
+/// [`resolve`] with the slide on the stage.
+pub fn resolve_at(kind: Option<EditKind>, stage: Option<Stage>, group: &str, name: &str, marks: Option<&Marks>) -> Run {
+    if kind == Some(EditKind::Pptx) {
+        if let Some(entry) = slide_entries(stage).into_iter().find(|x| x.group == group && x.name == name) {
+            return entry.run;
+        }
+    }
     if group == FILES {
         return Run::File(name.to_string());
     }

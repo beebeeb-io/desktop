@@ -179,6 +179,23 @@ pub fn delete_slide(s: &mut State, n: u32) {
     }
 }
 
+/// The slide on the stage and the deck's size, for the palette. `None` unless a deck is open in the live editor.
+pub fn stage(s: &State) -> Option<super::palette::Stage> {
+    live(s).map(|l| super::palette::Stage {
+        current: l.current,
+        count: l.count,
+    })
+}
+
+/// A palette slide command on the slide on the stage.
+pub fn run_command(s: &mut State, cmd: super::palette::SlideCmd) {
+    let Some(l) = live(s) else { return };
+    match cmd {
+        super::palette::SlideCmd::Duplicate => duplicate_slide(s, l.current),
+        super::palette::SlideCmd::Delete => delete_slide(s, l.current),
+    }
+}
+
 /// Slide `n` moves one place: up (`-1`) or down (`1`). At an end nothing moves.
 pub fn move_slide(s: &mut State, n: u32, by: i32) {
     let Some(l) = live(s) else { return };
@@ -285,6 +302,11 @@ pub fn on_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
             );
             true
         }
+        // No text in hand and nothing selected: Delete removes the slide on the stage.
+        Key::Delete if !l.caret && !l.selected && !m.alt && !m.shift => {
+            run_command(s, super::palette::SlideCmd::Delete);
+            true
+        }
         Key::Escape if l.selected => {
             send(s, EditOp::ClearShape);
             true
@@ -318,6 +340,10 @@ fn command_key(s: &mut State, ev: &KeyEvent, l: Live) -> bool {
     let shift = ev.mods.shift;
     if ev.is_command('m') {
         new_slide(s);
+        return true;
+    }
+    if ev.is_command('d') && !l.caret {
+        run_command(s, super::palette::SlideCmd::Duplicate);
         return true;
     }
     if ev.is_command('z') {

@@ -579,18 +579,20 @@ fn a_read_that_fails_keeps_what_was_drawn_says_so_and_is_asked_again() {
         );
         assert!(source.plan().is_some(), "mode {mode}");
         assert_eq!(ids(&source).len(), 3, "mode {mode}");
-        // Try again reads the pane that shows, once.
+        // Try again reads the pane that shows, once. (A dropped connection is asked twice more by the engine's
+        // bounded transport retries: three asks make one read.)
+        let asks = if mode == DROP_CONNECTION { 3 } else { 1 };
         let before = server.asked("GET /api/v1/account/sessions");
         engine.note_call_for_test(false);
         source.run_notice_action();
         assert_eq!(source.notice(), None, "mode {mode}: nothing is said while it is read");
         settle(&mut source);
-        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + 1, "mode {mode}");
+        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + asks, "mode {mode}");
         assert_eq!(source.notice(), Some(NOT_REFRESHED), "mode {mode}: it failed again");
         // A failed read is not fresh: the next opening asks again.
         engine.note_call_for_test(false);
         opened(&mut source, Pane::Sessions);
-        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + 2, "mode {mode}");
+        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + 2 * asks, "mode {mode}");
     }
     source.engine.note_call_for_test(false);
     server.read_mode.store(ANSWER, Ordering::SeqCst);
