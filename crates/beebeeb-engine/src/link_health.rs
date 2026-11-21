@@ -290,9 +290,15 @@ mod tests {
     fn a_refused_connection_is_offline() {
         block(async {
             // Bind, note the port, drop the listener: nothing listens there any more.
-            let port = {
-                let l = TcpListener::bind("127.0.0.1:0").unwrap();
-                l.local_addr().unwrap().port()
+            let port = loop {
+                let port = {
+                    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+                    l.local_addr().unwrap().port()
+                };
+                match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => break port,
+                    _ => {}
+                }
             };
             let err = get(&client(Duration::from_secs(5)), &format!("http://127.0.0.1:{port}/"))
                 .await
