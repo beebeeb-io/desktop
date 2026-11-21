@@ -1,5 +1,4 @@
 //! A file or folder icon from the registry: its art in its tint.
-#![allow(dead_code)]
 
 use crate::theme::file_icon_art::art;
 use crate::theme::file_icon_colors::tint_color;

@@ -1,6 +1,5 @@
 //! One registry from a file name, extension or folder name to an icon id and a tint.
 //! Tables and matching rules: board/epics/drive-ux.md "Interfaces / Icons".
-#![allow(dead_code)]
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IconId {

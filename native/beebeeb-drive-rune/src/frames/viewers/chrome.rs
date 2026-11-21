@@ -85,7 +85,7 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
                 }),
         );
     }
-    col()
+    let info = col()
         .key("file-info")
         .role("group")
         .label(format!("{}, {}", file.name, facts))
@@ -93,7 +93,16 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
         .min_w(0.0)
         .shrink()
         .child(crumbs)
-        .child(kit::label("item-count", facts, type_::TITLE_SUB, t.text_tertiary).w_full())
+        .child(kit::label("item-count", facts, type_::TITLE_SUB, t.text_tertiary).w_full());
+    let icon = crate::theme::file_icons::icon_for(&file.name, false, None);
+    row()
+        .key("viewer-title")
+        .min_w(0.0)
+        .shrink()
+        .center_y()
+        .gap(6.0)
+        .child(crate::ui::file_icon::file_icon("viewer-title-icon", icon, 16.0, t))
+        .child(info)
 }
 
 /// The toolbar of an open file. `tools` are the file's own controls, drawn before the "more" button.
@@ -405,3 +414,7 @@ pub fn button(key: &str, label: &str, kind: ButtonKind, small: bool, t: &Theme) 
     };
     b.child(kit::label(format!("{key}-label"), label, text_style, ink))
 }
+
+#[cfg(test)]
+#[path = "chrome_icon_tests.rs"]
+mod icon_tests;

@@ -181,3 +181,19 @@ fn closing_the_panel_stepping_and_a_reset_tell_the_source_to_stop() {
     rt.update(|s, _| crate::frames::files::reset::close_dialogs(s));
     assert_eq!(*spy.cancels.lock().unwrap(), before + 1);
 }
+
+#[test]
+fn the_panel_head_draws_the_icon_of_the_file_in_its_tint() {
+    let (mut rt, _) = window();
+    rt.state.listing.items[0].name = "a.mp3".into();
+    rt.state.listing.items[0].mime = None;
+    crate::ui::kit::record();
+    open(&mut rt, 0);
+    rt.frame(0.0);
+    let notes = crate::ui::kit::take();
+    let note = notes.get("preview-head-icon").expect("no preview-head-icon");
+    assert_eq!(
+        note.color,
+        Some(crate::theme::file_icon_colors::tint_color(crate::theme::file_icons::Tint::Audio, false))
+    );
+}
