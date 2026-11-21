@@ -64,6 +64,15 @@ pub fn mime_for_name(name: &str) -> Option<&'static str> {
         "bmp" => "image/bmp",
         "tif" | "tiff" => "image/tiff",
         "dng" => "image/x-adobe-dng",
+        // A camera's RAW: a picture (Photos lists it; a copy on this PC gets its thumbnail made by the desktop's
+        // confined helper, 095b). The storage meter already counted these as photos (`account_dto::storage`).
+        "cr2" => "image/x-canon-cr2",
+        "cr3" => "image/x-canon-cr3",
+        "nef" => "image/x-nikon-nef",
+        "arw" => "image/x-sony-arw",
+        "raf" => "image/x-fuji-raf",
+        "orf" => "image/x-olympus-orf",
+        "rw2" => "image/x-panasonic-rw2",
         "svg" => "image/svg+xml",
         "mp4" | "m4v" => "video/mp4",
         "mov" => "video/quicktime",

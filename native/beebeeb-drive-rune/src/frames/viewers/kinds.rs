@@ -162,8 +162,9 @@ const PLAYER_ONLY_AUDIO: [&str; 8] = ["oga", "aif", "aiff", "caf", "mka", "ac3",
 pub fn viewer_of(name: &str) -> Option<Viewer> {
     let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
     Some(match ext.as_str() {
-        "arw" | "cr2" | "cr3" | "nef" | "raf" | "orf" | "rw2" | "dng" | "jpg" | "jpeg" | "png" | "heic" | "webp"
-        | "gif" => Viewer::Photo,
+        // A HEIC/HEIF and a RAW are decoded by the confined helper (095), else the honest refusal.
+        "arw" | "cr2" | "cr3" | "nef" | "raf" | "orf" | "rw2" | "dng" | "jpg" | "jpeg" | "png" | "heic" | "heif"
+        | "webp" | "gif" => Viewer::Photo,
         "m4a" | "mp3" | "wav" | "flac" | "aac" | "ogg" | "opus" => Viewer::Audio,
         ext if PLAYER_ONLY_AUDIO.contains(&ext) => Viewer::Audio,
         // Not `.ts`: that stays a text file (TypeScript, below). A transport stream plays as `.m2ts` or `.mts`.

@@ -353,3 +353,7 @@ pub(super) fn decode_over(
         }
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "media_helper_tests.rs"]
+mod helper_tests;
