@@ -199,7 +199,7 @@ pub fn menu(
     light: fn(&mut State, usize),
     keys: fn(&mut State, &KeyEvent, &mut Tx) -> bool,
 ) -> El {
-    let m = col().key("menu").role("menu").label(name);
+    let m = col().key("menu").role("menu").label(name).focus_group();
     let m = match &open.place {
         Place::At(x, y) => {
             let (x, y) = match window {

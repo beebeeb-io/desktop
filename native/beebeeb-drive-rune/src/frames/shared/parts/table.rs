@@ -276,3 +276,58 @@ mod icon_tests {
         assert_eq!(drawn("deck.pptx", Kind::Document), Some(tint_color(Tint::PowerPoint, false)));
     }
 }
+
+/// Rows a PageUp / PageDown moves.
+pub const PAGE: usize = 10;
+
+/// The row PageUp / PageDown (`down`) lands on, from `at` (none: the first row), within `count` rows.
+pub fn page_to(at: Option<usize>, count: usize, down: bool) -> usize {
+    let at = at.unwrap_or(0);
+    if down { (at + PAGE).min(count.saturating_sub(1)) } else { at.saturating_sub(PAGE) }
+}
+
+/// Type-ahead: for a typed letter or digit, the next row after `at` (wrapping, `at` last) whose name starts with it.
+pub fn jump_to<'a>(names: impl Iterator<Item = &'a str>, at: Option<usize>, ev: &rune::KeyEvent) -> Option<usize> {
+    let m = ev.mods;
+    if m.cmd || m.ctrl || m.alt || m.logo {
+        return None;
+    }
+    let rune::Key::Text(t) = &ev.key else { return None };
+    let mut chars = t.chars();
+    let c = chars.next().filter(|c| c.is_alphanumeric() && chars.next().is_none())?;
+    let c = c.to_lowercase().next()?;
+    let names: Vec<&str> = names.collect();
+    let n = names.len();
+    (1..=n)
+        .map(|d| (at.map_or(0, |a| a + 1) + d - 1) % n.max(1))
+        .find(|&i| names[i].chars().next().is_some_and(|f| f.to_lowercase().next() == Some(c)))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use rune::{Key, KeyEvent, Mods};
+
+    fn typed(c: &str) -> KeyEvent {
+        KeyEvent { key: Key::Text(c.into()), mods: Mods::default() }
+    }
+
+    #[test]
+    fn pages_stop_at_the_ends() {
+        assert_eq!(page_to(Some(3), 100, true), 13);
+        assert_eq!(page_to(Some(95), 100, true), 99);
+        assert_eq!(page_to(Some(3), 100, false), 0);
+        assert_eq!(page_to(None, 100, true), 10);
+    }
+
+    #[test]
+    fn a_letter_jumps_to_the_next_name_and_wraps() {
+        let names = ["Alpha", "Beta", "Bravo", "Cat"];
+        assert_eq!(jump_to(names.into_iter(), Some(0), &typed("b")), Some(1));
+        assert_eq!(jump_to(names.into_iter(), Some(1), &typed("B")), Some(2));
+        assert_eq!(jump_to(names.into_iter(), Some(2), &typed("b")), Some(1));
+        assert_eq!(jump_to(names.into_iter(), None, &typed("a")), Some(0));
+        assert_eq!(jump_to(names.into_iter(), Some(0), &typed("z")), None);
+        assert_eq!(jump_to(names.into_iter(), Some(0), &typed(" ")), None);
+    }
+}
