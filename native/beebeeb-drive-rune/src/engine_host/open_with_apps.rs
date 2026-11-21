@@ -82,6 +82,57 @@ impl Apps {
     }
 }
 
+/// The friendly name of the app the system opens `ext` (".pptx") with by default, held per type for the run of the
+/// app (`None` inside: asked, no name). The first ask goes to the system on a thread of its own and `wake` runs once
+/// it answered; until then, and when there is no default (or it is this app), `None`: the caller says "another app".
+/// Never waits.
+pub(crate) fn default_app_name(ext: &str, wake: impl FnOnce() + Send + 'static) -> Option<String> {
+    static KNOWN: std::sync::OnceLock<Mutex<HashMap<String, Option<Option<String>>>>> = std::sync::OnceLock::new();
+    let known = KNOWN.get_or_init(Mutex::default);
+    let ext = ext.to_lowercase();
+    {
+        let mut held = known.lock().unwrap_or_else(PoisonError::into_inner);
+        match held.get(&ext) {
+            Some(Some(name)) => return name.clone(),
+            Some(None) => return None,
+            None => {
+                held.insert(ext.clone(), None);
+            }
+        }
+    }
+    let asked = ext.clone();
+    let started = std::thread::Builder::new().name("default-app-name".into()).spawn(move || {
+        let name = default_name(ask_default(&asked), &own_exe());
+        known.lock().unwrap_or_else(PoisonError::into_inner).insert(asked, Some(name));
+        wake();
+    });
+    if started.is_err() {
+        known.lock().unwrap_or_else(PoisonError::into_inner).insert(ext, Some(None));
+    }
+    None
+}
+
+/// The system's answer as a name to show: none when empty or when it is this app's own program.
+fn default_name(answer: Option<(String, String)>, own_exe: &str) -> Option<String> {
+    let (exe, name) = answer?;
+    let name = name.trim();
+    (!name.is_empty() && !is_own(&exe, own_exe)).then(|| name.to_owned())
+}
+
+/// Windows: `AssocQueryStringW` for the default `open` verb of `ext`: `(executable, friendly app name)`.
+#[cfg(windows)]
+fn ask_default(ext: &str) -> Option<(String, String)> {
+    let exe = win::assoc(ext, windows::Win32::UI::Shell::ASSOCSTR_EXECUTABLE).unwrap_or_default();
+    let name = win::assoc(ext, windows::Win32::UI::Shell::ASSOCSTR_FRIENDLYAPPNAME)?;
+    Some((exe, name))
+}
+
+/// Every other system: not asked here (the Office editor, and so its guard, runs on Windows only).
+#[cfg(not(windows))]
+fn ask_default(_ext: &str) -> Option<(String, String)> {
+    None
+}
+
 /// The path of this app's own program, as Windows names a handler's.
 fn own_exe() -> String {
     std::env::current_exe()
@@ -220,6 +271,34 @@ mod win {
         }
     }
 
+    /// One string of the default association of `ext` (its `open` verb), as `AssocQueryStringW` answers it. `None`:
+    /// no association, or an empty answer.
+    pub(super) fn assoc(ext: &str, what: windows::Win32::UI::Shell::ASSOCSTR) -> Option<String> {
+        use windows::Win32::UI::Shell::{ASSOCF_INIT_IGNOREUNKNOWN, ASSOCF_NOTRUNCATE, AssocQueryStringW};
+        use windows::core::w;
+        let ext = HSTRING::from(ext);
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        // SAFETY: `buf` is `len` u16s long and outlives the call; the strings are nul-terminated HSTRINGs / literals.
+        // The call writes at most `len` u16s and sets `len` to the count written, the nul included.
+        let ok = unsafe {
+            AssocQueryStringW(
+                ASSOCF_INIT_IGNOREUNKNOWN | ASSOCF_NOTRUNCATE,
+                what,
+                &ext,
+                w!("open"),
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &raw mut len,
+            )
+        };
+        if ok.is_err() {
+            return None;
+        }
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let text = String::from_utf16_lossy(&buf[..end]);
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     /// A handler's `(GetName, GetUIName)`. `None`: it gives one of them not.
     pub(super) fn names(handler: &IAssocHandler) -> Option<(String, String)> {
         // SAFETY: COM is set up on this thread by the caller. Each string Windows allocates is copied, then freed
@@ -303,6 +382,16 @@ mod tests {
         assert_eq!(apps[0].id, r"C:\Apps\app1.exe");
         // A handler with no words is not a line of the menu.
         assert_eq!(choices([handler("a.exe", " ")], own), []);
+    }
+
+    #[test]
+    fn default_app_name_leaves_out_this_app_and_empty_names() {
+        let own = r"C:\Program Files\Beebeeb\beebeeb-drive.exe";
+        let ppt = r"C:\Program Files\Microsoft Office\root\Office16\POWERPNT.EXE";
+        assert_eq!(default_name(Some((ppt.into(), "PowerPoint".into())), own), Some("PowerPoint".into()));
+        assert_eq!(default_name(Some((own.into(), "Beebeeb".into())), own), None);
+        assert_eq!(default_name(Some((ppt.into(), "  ".into())), own), None);
+        assert_eq!(default_name(None, own), None);
     }
 
     #[test]

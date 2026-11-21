@@ -1343,6 +1343,14 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
         self.office_can_edit(file_id)
     }
 
+    fn edit_guarded(&self, file_id: &str) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
+        self.office_guarded(file_id)
+    }
+
+    fn default_app(&self, file_id: &str) -> Option<String> {
+        self.office_default_app(file_id)
+    }
+
     fn edit(&mut self, file_id: &str, op: EditOp) -> bool {
         self.office_edit(file_id, op)
     }

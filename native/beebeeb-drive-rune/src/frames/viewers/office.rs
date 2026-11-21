@@ -1059,7 +1059,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .grow(1.0),
         t,
     );
-    tb::file_bar(
+    let bar = tb::file_bar(
         Bar {
             name: file.name.clone(),
             back: (true, press(|s, _| super::close(s))),
@@ -1104,7 +1104,48 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
             trailing_inset: 12.0,
         },
         t,
-    )
+    );
+    match guard_notice(ui, t) {
+        Some(notice) => col().key("toolbar-notice").w_full().child(bar).child(notice),
+        None => bar,
+    }
+}
+
+/// The button of the guard's notice: the app the system opens the type with, by name, when the system says one.
+pub(crate) fn open_in_words(app: Option<&str>) -> String {
+    match app {
+        Some(app) => format!("Open in {app}"),
+        None => super::refusal_text::OPEN_ELSEWHERE.to_string(),
+    }
+}
+
+/// The editor's guard refused the open file (`EditGuarded`): it is open read-only here. The banner under the toolbar
+/// says, per part, what editing here would drop (`DroppedPart::notice`), with "Open in <app>" through the viewer's
+/// "Open in another app…" (`Intent::OpenInAnotherApp`). `None`: not guarded.
+pub(crate) fn guard_notice(ui: &Ui, t: &Theme) -> Option<El> {
+    use crate::ui::banner::{self, Banner, Run, Tone};
+    let guarded = ui.source.edit_guarded(&ui.file.id);
+    if guarded.is_empty() {
+        return None;
+    }
+    let words = guarded.iter().map(|part| part.notice()).collect::<Vec<_>>().join(" ");
+    let action = open_in_words(ui.source.default_app(&ui.file.id).as_deref());
+    let runs = [Run::Words(words)];
+    let open: banner::Handler = |s, _| {
+        if let Some(ui) = super::ui(s) {
+            ui.intent(Intent::OpenInAnotherApp);
+        }
+    };
+    Some(banner::banner(
+        &Banner {
+            tone: Tone::Neutral,
+            icon: &super::icons::INFO,
+            runs: &runs,
+            action: Some((&action, open)),
+            dismiss: None,
+        },
+        t,
+    ))
 }
 
 /// The window with the editor's frame: a text document (`doc`), or what is shown when the editor

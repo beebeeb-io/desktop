@@ -249,3 +249,68 @@ fn a_new_document_opens_with_no_bytes() {
     assert!(matches!(host.state(), OfficeState::Pages { pages: 1, .. }));
     assert_eq!(log.section_sizes.lock().unwrap().len(), 0, "no document section");
 }
+
+/// A helper whose editor guard refuses the file (`EditGuarded` with `dropped`) and whose viewer opens it.
+fn guarding(dropped: Vec<office::DroppedPart>) -> Fake {
+    Fake::new(move |link| {
+        while let Some((id, message)) = link.next() {
+            let reply = match message {
+                Message::OpenEdit(_) => Message::EditGuarded(office::EditGuarded { dropped: dropped.clone() }),
+                Message::Open(_) => opened(&[LETTER]),
+                _ => Message::Error(office::Error {
+                    code: office::ErrorCode::Internal,
+                }),
+            };
+            link.answer(id, reply);
+        }
+    })
+}
+
+fn open_guarded(
+    registry: &Registry,
+    dropped: Vec<office::DroppedPart>,
+    kind: EditKind,
+    doc_kind: DocKind,
+) -> (OfficeHost, std::sync::Arc<Log>) {
+    let fake = guarding(dropped);
+    let log = fake.log.clone();
+    let mut host = open_mode(fake, registry, TEST_TIMEOUTS, Mode::Edit(kind), doc_kind, Some(Zeroizing::new(doc())), noop_wake());
+    let mut events = Vec::new();
+    assert!(until_open(&mut host, &mut events), "{:?}", host.state());
+    (host, log)
+}
+
+#[test]
+fn edit_guarded_pptx_with_speaker_notes_opens_read_only_in_the_viewer() {
+    let registry = Registry::new();
+    let (mut host, log) = open_guarded(&registry, vec![office::DroppedPart::SpeakerNotes], EditKind::Pptx, DocKind::Pptx);
+    // Not "Renderer stopped" (Stop::Protocol): the viewer's pages, from a second helper told `Open`.
+    assert!(matches!(host.state(), OfficeState::Pages { pages: 1, .. }), "{:?}", host.state());
+    assert_eq!(log.starts(), 2, "the guarded editor ends; a viewer helper opens the same document");
+    assert_eq!(host.guarded(), vec![office::DroppedPart::SpeakerNotes]);
+    assert_eq!(host.edit(office::EditOp::Undo), Err(EditRefused::NotEditing), "no edit on a guarded file");
+}
+
+#[test]
+fn edit_guarded_other_is_named_too() {
+    let registry = Registry::new();
+    let (host, _log) = open_guarded(&registry, vec![office::DroppedPart::Other], EditKind::Docx, DocKind::Docx);
+    assert!(matches!(host.state(), OfficeState::Pages { .. }), "{:?}", host.state());
+    assert_eq!(host.guarded(), vec![office::DroppedPart::Other]);
+}
+
+#[test]
+fn edit_guarded_to_a_viewer_open_is_a_protocol_stop() {
+    // Only `OpenEdit` may be guarded: a viewer told `EditGuarded` broke the protocol.
+    let fake = Fake::new(|link| {
+        while let Some((id, _)) = link.next() {
+            link.answer(id, Message::EditGuarded(office::EditGuarded { dropped: vec![office::DroppedPart::Ink] }));
+        }
+    });
+    let registry = Registry::new();
+    let mut host = open_mode(fake, &registry, TEST_TIMEOUTS, Mode::View, DocKind::Pptx, Some(Zeroizing::new(doc())), noop_wake());
+    let mut events = Vec::new();
+    assert!(until_open(&mut host, &mut events));
+    assert!(matches!(host.state(), OfficeState::Stopped { why: Stop::Protocol, .. }), "{:?}", host.state());
+    assert!(host.guarded().is_empty());
+}
