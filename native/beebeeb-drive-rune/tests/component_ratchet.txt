@@ -1,9 +1,13 @@
 # Recorded counts for tests/component_ratchet.rs. Counts may only go down; lower a line when a count drops.
-button_builders_role_button_outside_ui 83
+button_builders_role_button_outside_ui 80
 dialog_cards_role_dialog_outside_ui 9
 empty_states 11
+family_button_builders 24
+family_dialog_cards 13
+family_drive_sidebars 1
+family_status_bars 14
 local_textstyle_new_outside_theme 318
-sidebar_assemblies 9
-spacing_literals_in_frames 774
+sidebar_assemblies 5
+spacing_literals_in_frames 739
 status_bars_key_outside_ui 13
 toasts 3
