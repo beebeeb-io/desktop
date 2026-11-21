@@ -52,6 +52,8 @@ pub mod callbacks;
 pub mod placeholders;
 // LD-0105 S6 / I5: emptying placeholders a failed fetch wrote into.
 pub mod poison;
+// Dc-009: Zone.Identifier (ZoneId=3) on files landed from another account's share.
+pub mod mark_of_web;
 // Task 2523: a copy behind the current version, emptied in the measured order and given the new size.
 pub mod stale_copy;
 // LD-0105 W2: the streaming fetch (range sessions, cancel, open completion, W3's decline).
