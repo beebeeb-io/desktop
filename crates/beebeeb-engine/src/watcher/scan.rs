@@ -12,10 +12,9 @@ pub struct DiskStamp {
     #[cfg(target_os = "windows")]
     pub(super) attributes: u32,
     /// Task 2241 (Windows): `ChangeTime` and the 128-bit file id, read through a handle opened for no
-    /// data ([`DiskStamp::at`]). The listing alone may show an old size and time for a file still open
+    /// data ([`DiskStamp::with_identity`]). The listing alone may show an old size and time for a file still open
     /// for writing; the handle shows the live values. `None` when the file could not be opened.
-    #[cfg(target_os = "windows")]
-    pub(super) identity: Option<(i64, u64, [u8; 16])>,
+    pub(super) identity: Option<StampIdentity>,
     #[cfg(unix)]
     pub(super) inode_and_change: (u64, i64, i64),
 }
@@ -27,7 +26,6 @@ impl DiskStamp {
             modified: meta.modified().ok(),
             #[cfg(target_os = "windows")]
             attributes: std::os::windows::fs::MetadataExt::file_attributes(meta),
-            #[cfg(target_os = "windows")]
             identity: None,
             #[cfg(unix)]
             inode_and_change: {
@@ -38,26 +36,44 @@ impl DiskStamp {
     }
 }
 
+/// `(ChangeTime, volume serial, file id)`; read on Windows only.
+pub type StampIdentity = (i64, u64, [u8; 16]);
+
 impl DiskStamp {
-    /// The stamp the scan compares: [`DiskStamp::of`] and, on Windows, the live `ChangeTime` and file id
-    /// of `path` (one attribute-only open per file; nothing is read or hydrated).
-    pub fn at(path: &std::path::Path, meta: &std::fs::Metadata) -> Self {
-        #[allow(unused_mut)]
-        let mut stamp = Self::of(meta);
-        #[cfg(target_os = "windows")]
-        {
-            stamp.identity = windows_identity(path);
-        }
-        #[cfg(not(target_os = "windows"))]
-        let _ = path;
-        stamp
+    /// `self` with the live identity of `path` (Windows: one attribute-only open; elsewhere `None`).
+    pub fn with_identity(mut self, path: &std::path::Path) -> Self {
+        self.identity = identity_at(path);
+        self
     }
+
+    /// The live identity of `path`, for [`DiskStamp::unchanged_since`].
+    pub fn default_identity(path: &std::path::Path) -> Option<StampIdentity> {
+        identity_at(path)
+    }
+
+    /// Whether the file is unchanged since `seen`. Task 2241: the identity is read, by `read`, only when
+    /// the listing (size, time, attributes) already matches `seen`, i.e. for a skip candidate; a changed
+    /// file costs no open.
+    pub fn unchanged_since(&self, seen: &DiskStamp, read: impl FnOnce() -> Option<StampIdentity>) -> bool {
+        let listing = |s: &DiskStamp| DiskStamp { identity: None, ..*s };
+        listing(self) == listing(seen) && read() == seen.identity
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn identity_at(_path: &std::path::Path) -> Option<StampIdentity> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn identity_at(path: &std::path::Path) -> Option<StampIdentity> {
+    windows_identity(path)
 }
 
 /// `(ChangeTime, volume serial, file id)` of `path` through a no-data handle that never follows a
 /// reparse point; `None` when it cannot be opened or read.
 #[cfg(target_os = "windows")]
-fn windows_identity(path: &std::path::Path) -> Option<(i64, u64, [u8; 16])> {
+fn windows_identity(path: &std::path::Path) -> Option<StampIdentity> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
@@ -312,18 +328,31 @@ mod tests {
         }
     }
 
-    /// The stamp the scan compares changes when the file's bytes do, and is stable otherwise.
+    /// Task 2241: the identity is read only for a skip candidate (listing equal), never for a changed file.
     #[test]
-    fn scan_stamp_follows_the_file() {
+    fn identity_is_read_only_for_skip_candidates() {
         let dir = std::env::temp_dir().join(format!("bb-stamp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("a.bin");
         std::fs::write(&f, b"one").unwrap();
-        let a = DiskStamp::at(&f, &std::fs::metadata(&f).unwrap());
-        assert_eq!(a, DiskStamp::at(&f, &std::fs::metadata(&f).unwrap()));
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(&f, b"two").unwrap();
-        assert_ne!(a, DiskStamp::at(&f, &std::fs::metadata(&f).unwrap()));
+        let mut seen = DiskStamp::of(&std::fs::metadata(&f).unwrap());
+        let id = Some((7, 8, [9u8; 16]));
+        seen.identity = id;
+        let reads = std::cell::Cell::new(0);
+        let read = |v| {
+            reads.set(reads.get() + 1);
+            v
+        };
+        // Unchanged listing: one read; same identity confirms, another identity does not.
+        let now = DiskStamp::of(&std::fs::metadata(&f).unwrap());
+        assert!(now.unchanged_since(&seen, || read(id)));
+        assert!(!now.unchanged_since(&seen, || read(Some((8, 8, [9u8; 16])))));
+        assert_eq!(reads.get(), 2);
+        // Changed file: no read at all.
+        std::fs::write(&f, b"longer bytes").unwrap();
+        let changed = DiskStamp::of(&std::fs::metadata(&f).unwrap());
+        assert!(!changed.unchanged_since(&seen, || read(id)));
+        assert_eq!(reads.get(), 2, "a changed file must not be opened");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
