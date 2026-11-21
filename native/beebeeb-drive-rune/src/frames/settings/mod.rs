@@ -674,6 +674,21 @@ pub fn go(s: &mut State, frame: &'static str) {
         host::dispatch(s, Event::OpenSettings(pane));
         return;
     }
+    // A recent alert's places: Shared holds the shares and the requests, Security the sign-in activity.
+    match frame {
+        "DW-0501" | "DW-0503" => {
+            s.settings.reset();
+            let shared = crate::shell::app::Route::section(crate::shell::app::Section::Shared);
+            host::dispatch(s, Event::Navigate(shared));
+            return;
+        }
+        "DW-A77" => {
+            s.settings.reset();
+            crate::frames::account::go(s, frame);
+            return;
+        }
+        _ => {}
+    }
     // "Show the guide again": settings closes and the guide runs on Files (DW-0701's action).
     if frame == "DW-0380" {
         s.settings.reset();
@@ -865,3 +880,17 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         _ => false,
     }
 }
+
+/// Every `Intent::Open` target the panes can raise, and the file that takes it (`shell::settings_open`).
+pub const OPEN_TARGETS: [&str; 6] = [
+    "open-source-licences",
+    "privacy",
+    "export-my-data",
+    "file-explorer",
+    "support-bundle",
+    "choose-photo",
+];
+
+/// Frames a pane may hand the shell with `Intent::Show` where the shell has nothing to open: the tray flyout's
+/// states, which follow the sync state that changed in the same press.
+pub const TRAY_FRAMES: [&str; 3] = ["DW-1203", "DW-1204", "DW-1212"];
