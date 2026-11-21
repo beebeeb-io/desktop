@@ -36,6 +36,12 @@ fn areas() -> Vec<(&'static str, Vec<&'static [Scene<State>]>)> {
     ]
 }
 
+/// Nodes with a click action, in one accessibility tree.
+fn clickables(node: &Value) -> usize {
+    let own = usize::from(node["actions"].as_array().is_some_and(|a| a.iter().any(|x| x == "click")));
+    own + node["children"].as_array().map_or(0, |c| c.iter().map(clickables).sum())
+}
+
 /// Nodes with a click action and an empty name or no role, in one accessibility tree.
 fn unlabelled_clickables(node: &Value) -> usize {
     let clicks = node["actions"].as_array().is_some_and(|a| a.iter().any(|x| x == "click"));
@@ -79,6 +85,14 @@ fn recorded() -> BTreeMap<String, usize> {
         .filter_map(|l| l.split_once(' '))
         .filter_map(|(k, v)| Some((k.to_string(), v.trim().parse().ok()?)))
         .collect()
+}
+
+/// The walk reads real trees: the Files window has clickable nodes (a zero count means a broken walk).
+#[test]
+fn a11y_walk_sees_clickable_nodes() {
+    let mut rt = Runtime::new(init(), view, (1278.0, 798.0), Env { system_dark: false, scale: 2.0 });
+    rt.frame(0.0);
+    assert!(clickables(&rt.accessibility_json()) > 5);
 }
 
 #[test]
