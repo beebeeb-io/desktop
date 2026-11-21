@@ -242,7 +242,7 @@ fn a_speed_limit_keeps_its_megabits_through_the_engines_unit() {
 }
 
 #[test]
-fn the_pane_shows_the_live_rate_read_from_the_transfer_board() {
+fn bandwidth_pane_shows_the_live_rate_read_from_the_transfer_board() {
     let fake = Fake::new();
     *fake.board.lock().unwrap() = Some((0, 0));
     let mut source = open_bandwidth(&fake);
