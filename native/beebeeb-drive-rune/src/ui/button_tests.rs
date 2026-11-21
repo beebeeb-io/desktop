@@ -178,8 +178,9 @@ fn natural_width_is_the_laid_out_width() {
                     let rt = render(page);
                     let got = info(&rt, "b").rect[2];
                     let want = natural_width(label, icon, variant, size);
+                    // The layout snaps the words to device pixels (half points at scale 2).
                     assert!(
-                        (got - want).abs() < 0.01,
+                        (got - want).abs() <= 0.5,
                         "{variant:?} {size:?} icon {icon} {label:?}: laid out {got}, natural {want}"
                     );
                 }
