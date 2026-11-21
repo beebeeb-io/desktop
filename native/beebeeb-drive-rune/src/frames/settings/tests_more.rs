@@ -474,11 +474,11 @@ fn a_list_that_could_not_load_says_so_and_try_again_loads_it() {
         "Nothing was changed. The folders you keep stay on this PC."
     );
     assert!(find(&rt, "tree-rows").is_none());
-    assert_eq!(says(&rt, "btn-5-label"), "Try again");
+    assert_eq!(says(&rt, "tree-state-retry-label"), "Try again");
     // Apply (the second button here) is dimmed: it does nothing.
-    click(&mut rt, "btn-6");
+    click(&mut rt, "btn-5");
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep));
-    tab_to(&mut rt, "btn-5");
+    tab_to(&mut rt, "tree-state-retry");
     key(&mut rt, Key::Enter);
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep), "DW-0784");
     assert_eq!(named(&rt, "tree-documents-check"), "Documents, kept on this PC");

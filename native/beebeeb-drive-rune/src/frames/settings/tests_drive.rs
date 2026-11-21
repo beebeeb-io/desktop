@@ -238,15 +238,11 @@ fn sync_switches_turn_by_keyboard_and_are_never_amber() {
         Screen::Settings(SettingsPane::SyncAndFileExplorer)
     );
     let amber = crate::theme::tokens::theme(false).accent;
-    // The sample source draws every control; an engine source that has nothing behind "Show sync status on files"
-    // does not draw it (`engine_host::drive_settings_tools_tests`).
-    for (switch, read) in [
-        (
-            "item-0-1-switch",
-            (|d: &dyn DriveSettings| d.sync().status_on_files) as fn(&dyn DriveSettings) -> bool,
-        ),
-        ("item-1-1-switch", |d: &dyn DriveSettings| d.sync().open_at_login),
-    ] {
+    // No "Show sync status on files" row: the engine cannot switch Explorer's status.
+    for (switch, read) in [(
+        "item-1-1-switch",
+        (|d: &dyn DriveSettings| d.sync().open_at_login) as fn(&dyn DriveSettings) -> bool,
+    )] {
         let sw = info(&rt, switch);
         assert_eq!(sw.role, "switch");
         assert_ne!(sw.fill, amber, "a switch is ink, never Amber");
@@ -289,7 +285,7 @@ fn a_repair_asks_first_says_repairing_and_a_failed_one_offers_it_again() {
     assert_eq!(info(&rt, "dlg").role, "alertdialog");
     key(&mut rt, Key::Enter);
     assert_eq!(ui(&rt).drive.sync().repair, Repair::Running);
-    assert_eq!(info(&rt, "item-0-2-sub").text.as_deref(), Some("Repairing…"));
+    assert_eq!(info(&rt, "item-0-1-sub").text.as_deref(), Some("Repairing…"));
     assert!(ui(&rt).intents.contains(&Intent::Show("DW-1212")));
 
     let mut rt = runtime("DW-0746d");
