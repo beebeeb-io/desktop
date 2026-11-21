@@ -236,26 +236,24 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
             // Task 2229: a file found settled whose listing and row are both unchanged needs
             // nothing, and skipping it opens no handle. The row stamp is read before
             // classifying, so a write to the row during the pass makes the next pass ask again.
-            let disk = DiskStamp::of(meta);
+            let mut disk = DiskStamp::of(meta);
             let row = crate::engine_bridge::relative_db_path(sync_root, file_path)
                 .and_then(|rel| bridge.db().file_row_stamp_by_path(&rel).ok().flatten());
-            if row.is_none() && memo
-                .untracked
-                .get(file_path)
-                .is_some_and(|seen| disk.unchanged_since(seen, || DiskStamp::default_identity(file_path))) {
-                memo.skipped += 1;
-                return;
+            let seen = match row {
+                None => memo.untracked.get(file_path).copied(),
+                Some(row) => memo.settled.get(file_path).filter(|(_, r)| *r == row).map(|(d, _)| *d),
+            };
+            // Task 2241: only a skip candidate (listing matches) is opened for its identity, once; a
+            // changed file keeps its listing-only stamp.
+            if let Some(seen) = seen {
+                match disk.check(&seen, || DiskStamp::default_identity(file_path)) {
+                    Ok(()) => {
+                        memo.skipped += 1;
+                        return;
+                    }
+                    Err(stamp) => disk = stamp,
+                }
             }
-            if let (Some(row), Some(&(seen_disk, seen_row))) = (row, memo.settled.get(file_path))
-                && seen_row == row
-                && disk.unchanged_since(&seen_disk, || DiskStamp::default_identity(file_path))
-            {
-                memo.skipped += 1;
-                return;
-            }
-
-            // Not skipped: the stamp kept in the memo carries the live identity (read once, before classifying).
-            let disk = disk.with_identity(file_path);
 
             // Throttle (task 0811): cap NEW enqueues per pass so a first enable of
             // a huge folder ramps up gradually instead of flooding the queue. Keep

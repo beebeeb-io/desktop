@@ -40,23 +40,37 @@ impl DiskStamp {
 pub type StampIdentity = (i64, u64, [u8; 16]);
 
 impl DiskStamp {
-    /// `self` with the live identity of `path` (Windows: one attribute-only open; elsewhere `None`).
-    pub fn with_identity(mut self, path: &std::path::Path) -> Self {
-        self.identity = identity_at(path);
-        self
-    }
-
-    /// The live identity of `path`, for [`DiskStamp::unchanged_since`].
+    /// The live identity of `path` (Windows: one attribute-only open; elsewhere `None`).
     pub fn default_identity(path: &std::path::Path) -> Option<StampIdentity> {
         identity_at(path)
     }
 
-    /// Whether the file is unchanged since `seen`. Task 2241: the identity is read, by `read`, only when
-    /// the listing (size, time, attributes) already matches `seen`, i.e. for a skip candidate; a changed
-    /// file costs no open.
-    pub fn unchanged_since(&self, seen: &DiskStamp, read: impl FnOnce() -> Option<StampIdentity>) -> bool {
+    /// `Ok(())` when the file is unchanged since `seen`; otherwise the stamp to remember for it.
+    /// Task 2241: `read` (the attribute-only open) runs only when the listing (size, time, attributes)
+    /// already matches `seen`, a skip candidate; a changed file costs no open and its stamp is the
+    /// listing alone. The identity `read` returned is kept in the returned stamp (no second open).
+    pub fn check(&self, seen: &DiskStamp, read: impl FnOnce() -> Option<StampIdentity>) -> Result<(), DiskStamp> {
+        self.check_on(seen, cfg!(target_os = "windows"), read)
+    }
+
+    /// [`DiskStamp::check`] for a platform that does (`has_identity`) or does not supply an identity.
+    /// Where it does, a stored stamp without one never counts as unchanged: it is read once and refilled.
+    pub(super) fn check_on(
+        &self,
+        seen: &DiskStamp,
+        has_identity: bool,
+        read: impl FnOnce() -> Option<StampIdentity>,
+    ) -> Result<(), DiskStamp> {
         let listing = |s: &DiskStamp| DiskStamp { identity: None, ..*s };
-        listing(self) == listing(seen) && read() == seen.identity
+        if listing(self) != listing(seen) {
+            return Err(*self);
+        }
+        let identity = read();
+        if identity == seen.identity && (seen.identity.is_some() || !has_identity) {
+            Ok(())
+        } else {
+            Err(DiskStamp { identity, ..*self })
+        }
     }
 }
 
@@ -328,31 +342,58 @@ mod tests {
         }
     }
 
-    /// Task 2241: the identity is read only for a skip candidate (listing equal), never for a changed file.
+    fn stamp_of(path: &std::path::Path) -> DiskStamp {
+        DiskStamp::of(&std::fs::metadata(path).unwrap())
+    }
+
+    /// Task 2241: a changed file costs 0 opens (listing-only stamp); an unchanged candidate exactly 1,
+    /// whose value is kept; a Windows-style platform never skips a stamp stored without identity.
     #[test]
     fn identity_is_read_only_for_skip_candidates() {
         let dir = std::env::temp_dir().join(format!("bb-stamp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("a.bin");
         std::fs::write(&f, b"one").unwrap();
-        let mut seen = DiskStamp::of(&std::fs::metadata(&f).unwrap());
         let id = Some((7, 8, [9u8; 16]));
+        let mut seen = stamp_of(&f);
         seen.identity = id;
         let reads = std::cell::Cell::new(0);
         let read = |v| {
             reads.set(reads.get() + 1);
             v
         };
-        // Unchanged listing: one read; same identity confirms, another identity does not.
-        let now = DiskStamp::of(&std::fs::metadata(&f).unwrap());
-        assert!(now.unchanged_since(&seen, || read(id)));
-        assert!(!now.unchanged_since(&seen, || read(Some((8, 8, [9u8; 16])))));
+        // Unchanged candidate: exactly one open, skipped.
+        assert_eq!(stamp_of(&f).check_on(&seen, true, || read(id)), Ok(()));
+        assert_eq!(reads.get(), 1);
+        // Candidate with another identity: one open, its value kept.
+        let other = Some((8, 8, [9u8; 16]));
+        let got = stamp_of(&f).check_on(&seen, true, || read(other));
+        assert_eq!(got.unwrap_err().identity, other);
         assert_eq!(reads.get(), 2);
-        // Changed file: no read at all.
+        // Stored without identity: on an identity platform never unchanged, refilled once; elsewhere skipped.
+        let mut bare = seen;
+        bare.identity = None;
+        assert_eq!(stamp_of(&f).check_on(&bare, true, || read(id)).unwrap_err().identity, id);
+        assert_eq!(stamp_of(&f).check_on(&bare, false, || read(None)), Ok(()));
+        assert_eq!(reads.get(), 4);
+        // Changed file: no open, listing-only stamp.
         std::fs::write(&f, b"longer bytes").unwrap();
-        let changed = DiskStamp::of(&std::fs::metadata(&f).unwrap());
-        assert!(!changed.unchanged_since(&seen, || read(id)));
-        assert_eq!(reads.get(), 2, "a changed file must not be opened");
+        let got = stamp_of(&f).check_on(&seen, true, || read(id));
+        assert_eq!(got.unwrap_err().identity, None);
+        assert_eq!(reads.get(), 4, "a changed file must not be opened");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// macOS/Linux supply no identity: an unchanged file is still skipped there.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unchanged_file_is_skipped_without_identity() {
+        let dir = std::env::temp_dir().join(format!("bb-stamp2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.bin");
+        std::fs::write(&f, b"one").unwrap();
+        let seen = stamp_of(&f);
+        assert_eq!(stamp_of(&f).check(&seen, || DiskStamp::default_identity(&f)), Ok(()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
