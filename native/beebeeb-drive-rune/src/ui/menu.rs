@@ -13,6 +13,7 @@ use crate::theme::icons_files as glyphs;
 use crate::theme::tokens::{Theme, radius};
 use rune::{Color, El, TextStyle, Tx, col, el, row};
 
+use super::button::Size;
 use super::kit;
 
 /// `.wn-mi .lb`
@@ -129,11 +130,29 @@ pub const SUBMENU: &str = "\u{203A}";
 
 /// How tall a menu of these entries is, so its owner can keep it inside the window.
 pub fn height(entries: &[Entry]) -> f32 {
+    height_with(entries, ITEM_H)
+}
+
+/// The row height of a menu size: 22 (Sm), 28 (Md), 32 (Lg). The default menu rows are [`ITEM_H`].
+pub fn item_h(size: Size) -> f32 {
+    match size {
+        Size::Sm => 22.0,
+        Size::Md => 28.0,
+        Size::Lg => 32.0,
+    }
+}
+
+/// [`height`] of a menu drawn by [`menu_sized`].
+pub fn height_sized(entries: &[Entry], size: Size) -> f32 {
+    height_with(entries, item_h(size))
+}
+
+fn height_with(entries: &[Entry], item: f32) -> f32 {
     2.0 * PAD
         + entries
             .iter()
             .map(|e| match e {
-                Entry::Item { .. } => ITEM_H,
+                Entry::Item { .. } => item,
                 Entry::Head(_) => HEAD_H,
                 Entry::Sep => 2.0 * PAD + kit::HAIR,
             })
@@ -224,7 +243,24 @@ pub fn menu(
     hover: fn(&mut State, usize),
     close: fn(&mut State, &mut Tx),
 ) -> El {
-    surface(true, key, name, width, entries, hot, t, pick, hover, close)
+    surface(true, key, name, width, entries, hot, ITEM_H, t, pick, hover, close)
+}
+
+/// [`menu`] with item rows of a theme size ([`item_h`]); `key` is the prefix of every key.
+#[allow(clippy::too_many_arguments)]
+pub fn menu_sized(
+    key: &'static str,
+    name: &'static str,
+    width: f32,
+    entries: &[Entry],
+    hot: Option<usize>,
+    size: Size,
+    t: &Theme,
+    pick: fn(&mut State, usize, &mut Tx),
+    hover: fn(&mut State, usize),
+    close: fn(&mut State, &mut Tx),
+) -> El {
+    surface(true, key, name, width, entries, hot, item_h(size), t, pick, hover, close)
 }
 
 /// A menu that opens beside another one (Sort by's choices): the same surface, not modal itself. It is
@@ -240,7 +276,7 @@ pub fn flyout(
     hover: fn(&mut State, usize),
     close: fn(&mut State, &mut Tx),
 ) -> El {
-    surface(false, key, name, width, entries, None, t, pick, hover, close)
+    surface(false, key, name, width, entries, None, ITEM_H, t, pick, hover, close)
 }
 
 /// [`flyout`] with the entry `hot` highlighted (the keyboard or the pointer is on it): Open With's apps (DW-1562).
@@ -256,7 +292,7 @@ pub fn flyout_hot(
     hover: fn(&mut State, usize),
     close: fn(&mut State, &mut Tx),
 ) -> El {
-    surface(false, key, name, width, entries, hot, t, pick, hover, close)
+    surface(false, key, name, width, entries, hot, ITEM_H, t, pick, hover, close)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -267,6 +303,7 @@ fn surface(
     width: f32,
     entries: &[Entry],
     hot: Option<usize>,
+    item_h: f32,
     t: &Theme,
     pick: fn(&mut State, usize, &mut Tx),
     hover: fn(&mut State, usize),
@@ -332,7 +369,7 @@ fn surface(
                     .key(k.clone())
                     .role(if checked { "menuitemcheckbox" } else { "menuitem" })
                     .label(label)
-                    .h(ITEM_H)
+                    .h(item_h)
                     .w_full()
                     .pl(8.0)
                     .pr(12.0)
