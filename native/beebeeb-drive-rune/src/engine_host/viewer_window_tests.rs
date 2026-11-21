@@ -374,6 +374,8 @@ impl Window {
     /// The Files window's own Open on the row of `name`: a click on the row, then Enter.
     #[track_caller]
     fn open_row(&mut self, name: &str) {
+        // The Files list is read on a worker: the rows are there once it lands.
+        self.until_drawn(name);
         let row = self
             .rt
             .state
@@ -428,8 +430,8 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     w.assert_nothing_of_the_file("signed out");
 
     sign_in(&w.engine, &w.first, TEST_PHRASE);
-    w.settle();
-    assert!(w.drawn().contains(NOTE_NAME), "the first account sees its list");
+    // The list is read on a worker: wait for it to land.
+    w.until_drawn(NOTE_NAME);
 
     // Open: the viewer is there at once, saying what it is doing, while Beebeeb still holds the first chunk.
     w.hold.hold();
@@ -437,7 +439,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     assert_eq!(w.route_item().as_deref(), Some(NOTE), "the route is on the file");
     assert!(w.rt.state.viewer.ui.is_some(), "the file is open in the window");
     let drawn = w.drawn();
-    assert!(drawn.contains("Decrypting on this PC"), "{drawn}");
+    assert!(drawn.contains(&format!("Decrypting {NOTE_NAME} on this PC")), "{drawn}");
     assert!(
         !drawn.contains(NOTE_WORDS),
         "nothing of the content before it is decrypted"
@@ -448,7 +450,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     w.until_drawn(NOTE_WORDS);
     let drawn = w.drawn();
     assert!(drawn.contains("the last line"), "the whole text is there");
-    assert!(!drawn.contains("Decrypting on this PC"));
+    assert!(!drawn.contains(&format!("Decrypting {NOTE_NAME} on this PC")));
     assert!(w.chunk_requests() >= 2, "the content came chunk by chunk from Beebeeb");
 
     // The details panel (Alt+Shift+P): where the file is, and the Available offline switch, whose state the local
@@ -531,7 +533,7 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
     // On its way, then locked: the answer never reaches a window.
     w.hold.hold();
     w.open_row(NOTE_NAME);
-    assert!(w.drawn().contains("Decrypting on this PC"));
+    assert!(w.drawn().contains(&format!("Decrypting {NOTE_NAME} on this PC")));
     w.engine.lock();
     w.settle();
     w.assert_nothing_of_the_file("locked, the download was on its way");
@@ -566,7 +568,7 @@ fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_
     assert!(drawn.contains("No preview for this kind of file yet"), "{drawn}");
     // "Save a copy…" has nowhere to go on this source: it is not drawn (never a button that only says "not built").
     assert!(drawn.contains("Open in another app\u{2026}") && !drawn.contains("Save a copy"));
-    assert!(!drawn.contains("Decrypting on this PC"));
+    assert!(!drawn.contains(&format!("Decrypting {NOTE_NAME} on this PC")));
     w.settle();
     assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
 

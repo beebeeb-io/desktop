@@ -539,7 +539,7 @@ fn an_account_with_no_backups_folder_draws_no_backups_yet_and_never_the_dev_card
     until_drawn(&mut rt, "No backups yet");
     let now = drawn(&rt);
     assert!(
-        now.contains("Turn on backups in Settings \u{203A} Backups."),
+        now.contains("Turn on backups in Settings to see your devices here."),
         "the line:\n{now}"
     );
     assert!(!now.contains("NOT BUILT YET"), "the dev card in a real build:\n{now}");
