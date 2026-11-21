@@ -70,7 +70,7 @@ pub fn view(_s: &TipState, cx: &mut Cx<TipState>) -> El {
         .fill(t.surface)
         .child(kit::label("coach-title", TRAY_TITLE, type_::HEAD, t.text))
         .child(
-            kit::label("coach-text", TRAY_TEXT, type_::SMALL, t.text_tertiary)
+            kit::label("coach-text", TRAY_TEXT, type_::BODY, t.text_tertiary)
                 .wrap()
                 .w_full(),
         )
@@ -105,6 +105,10 @@ mod tray_tip_tests {
     use super::*;
     use flyout::{Anchor, Rect};
 
+    fn key(key: Key) -> KeyEvent {
+        KeyEvent { key, mods: rune::Mods::default() }
+    }
+
     fn anchor(work: (i32, i32, i32, i32)) -> Anchor {
         let monitor = Rect { x: 0, y: 0, w: 1920, h: 1080 };
         Anchor {
@@ -131,9 +135,9 @@ mod tray_tip_tests {
         let mut s = init();
         assert!(!s.dismissed);
         let mut tx = Tx::default();
-        assert!(!on_key(&mut s, &KeyEvent::new(Key::Enter), &mut tx));
+        assert!(!on_key(&mut s, &key(Key::Enter), &mut tx));
         assert!(!s.dismissed);
-        assert!(on_key(&mut s, &KeyEvent::new(Key::Escape), &mut tx));
+        assert!(on_key(&mut s, &key(Key::Escape), &mut tx));
         assert!(s.dismissed);
     }
 }
