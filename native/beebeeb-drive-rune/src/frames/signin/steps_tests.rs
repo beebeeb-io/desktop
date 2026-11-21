@@ -1021,3 +1021,31 @@ fn the_phrase_hint_names_another_device_only_where_the_source_has_the_door() {
         "with the door it is drawn"
     );
 }
+
+/// Backlog 1680: a two-factor sign-in whose vault key is not on this PC goes on to the twelve words. The words
+/// unlock the vault of the same account: the window never says the account changed, and never hands out
+/// `AccountMismatch`.
+#[test]
+fn two_factor_then_the_recovery_phrase_never_says_the_account_changed() {
+    let (mut rt, calls) = signed_in(Script::default());
+    assert_eq!(ui(&mut rt).screen, Screen::TwoFactor { backup: false });
+    ui(&mut rt).code.replace_text(board::TOTP);
+    ui(&mut rt).verify_code();
+    // The engine's answer for this account: the code is right, the vault key is not on this PC.
+    rt.update(|s, _| {
+        let ui_ = s.signin.as_mut().expect("the sign-in window is open");
+        ui_.apply(super::source::SignInEvent::TwoFactor(Ok(NextAfterSignIn::RecoveryPhrase)));
+    });
+    rt.frame(0.0);
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase);
+    for (i, word) in board::WORDS.iter().enumerate() {
+        ui(&mut rt).words[i].replace_text(*word);
+    }
+    rt.frame(0.0);
+    assert!(ui(&mut rt).can_restore());
+    assert!(!a11y(&rt).to_lowercase().contains("account changed"));
+    press(&mut rt, Key::Enter);
+    assert!(calls.borrow().contains(&"restore"));
+    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::Next(NextAfterSignIn::Drive)]);
+    assert!(!a11y(&rt).to_lowercase().contains("account changed"));
+}
