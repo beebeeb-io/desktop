@@ -64,49 +64,20 @@ pub fn button_keyed(
     ic: Option<&'static Icon>,
     t: &Theme,
 ) -> El {
-    let ink = match kind {
-        ButtonKind::Outline => t.text,
-        ButtonKind::GhostDanger => red_text(t),
-        ButtonKind::GhostOff | ButtonKind::Ghost => t.text_secondary,
-        ButtonKind::Amber => t.accent_text_on,
-        ButtonKind::Danger | ButtonKind::DangerOff => t.white,
+    use crate::ui::button::{ButtonState, Size, Variant, button as ui_button, keys};
+    let (variant, state) = match kind {
+        ButtonKind::Outline => (Variant::Secondary, ButtonState::Enabled),
+        ButtonKind::Ghost => (Variant::Ghost, ButtonState::Enabled),
+        ButtonKind::GhostDanger | ButtonKind::Danger => (Variant::Danger, ButtonState::Enabled),
+        ButtonKind::GhostOff => (Variant::Ghost, ButtonState::Disabled),
+        ButtonKind::Amber => (Variant::Primary, ButtonState::Enabled),
+        ButtonKind::DangerOff => (Variant::Danger, ButtonState::Disabled),
     };
-    let (h, glyph, type_style) = match size {
-        ButtonSize::Small => (22.0, 14.0, type_::BUTTON_SM),
-        ButtonSize::Medium => (28.0, 16.0, style::BUTTON_MD),
+    let size = match size {
+        ButtonSize::Small => Size::Sm,
+        ButtonSize::Medium => Size::Md,
     };
-    let mut b = row()
-        .key(k.clone())
-        .role("button")
-        .label(words)
-        .h(h)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD);
-    // A filled button darkens under the pointer, as the board's `hover:brightness` does.
-    let solid = |fill: Color| (fill, fill.mix(Color::BLACK, 0.05), fill.mix(Color::BLACK, 0.10));
-    b = match kind {
-        ButtonKind::GhostOff => b.disabled(true).opacity(0.4),
-        ButtonKind::DangerOff => b.fill(crate::theme::tokens::red_fill()).disabled(true).opacity(0.5),
-        ButtonKind::Amber | ButtonKind::Danger => {
-            let base = if kind == ButtonKind::Amber {
-                t.accent
-            } else {
-                crate::theme::tokens::red_fill()
-            };
-            let (fill, hover, press) = solid(base);
-            b.fill(fill).hover(hover).press(press).focusable(true)
-        }
-        _ => b.hover(t.hover).press(t.press).focusable(true),
-    };
-    if kind == ButtonKind::Outline {
-        b = b.fill(t.paper).border(1.0, t.card_border).border_layout();
-    }
-    if let Some(ic) = ic {
-        b = b.child(kit::glyph(format!("{k}-icon"), ic, glyph, ink));
-    }
-    b.child(kit::label(format!("{k}-label"), words, type_style, ink))
+    ui_button(keys(&k), words, ic, variant, size, state, t)
 }
 
 /// The key of the tab worded `words` in the switch `n`.
