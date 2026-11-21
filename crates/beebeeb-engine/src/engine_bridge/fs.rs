@@ -331,9 +331,7 @@ thread_local! {
     allow(dead_code)
 )]
 pub(super) fn rel_under(sync_root: &Path, path: &Path) -> String {
-    path.strip_prefix(sync_root)
-        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default()
+    relative_db_path(sync_root, path).unwrap_or_default()
 }
 
 /// Resolve a parent's FULL relative path from the local mirror by its `file_id`
