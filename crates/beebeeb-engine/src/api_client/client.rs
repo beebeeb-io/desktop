@@ -340,7 +340,7 @@ impl ApiClient {
                     if let Some(old) = held.take() {
                         return Self::check_status(old).await;
                     }
-                    if let Some(wait) = transport_retry_decision(transport_attempt, e.is_connect(), e.is_timeout(), idempotent) {
+                    if let Some(wait) = transport_retry_decision(transport_attempt, e.is_connect(), e.is_timeout() || e.is_request(), idempotent) {
                         tokio::time::sleep(wait).await;
                         transport_attempt += 1;
                         continue;
