@@ -276,6 +276,12 @@ pub(super) const FILE_BY_PATH_SQL: &str =
             parent_id, item_kind
      FROM files WHERE path = ?1";
 
+/// [`FILE_BY_PATH_SQL`] for either slash shape in one lookup (`?1` as given, `?2` toggled); `?1`'s row first.
+pub(super) const FILE_BY_EITHER_PATH_SQL: &str =
+    "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+            parent_id, item_kind
+     FROM files WHERE path IN (?1, ?2) ORDER BY path = ?1 DESC LIMIT 1";
+
 /// A [`FILE_BY_PATH_SQL`] row as a [`FileEntry`], for every lookup that runs it.
 pub(super) fn file_entry_from_path_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileEntry> {
     Ok(FileEntry {
