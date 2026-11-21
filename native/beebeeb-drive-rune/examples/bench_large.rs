@@ -1,3 +1,6 @@
+//! Run: cargo run --locked --release --config profile.release.debug-assertions=true --example bench_large
+//! (the engine refuses test-support in a release build without debug assertions; that guard stays.)
+//!
 //! Bench: the Files window on a 40,000-file account. Signs in to the engine's fake server seeded with
 //! `LargeAccount::GUUS`, opens each view and prints one line per view: p50 and p95 of the time one frame takes to
 //! build, and the process's memory (RSS).
