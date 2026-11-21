@@ -367,6 +367,7 @@ fn bar(deck: &DeckBody, t: &Theme) -> El {
         .key("vbar")
         .role("toolbar")
         .label("Presentation")
+        .focus_group()
         .w_full()
         .h(38.0)
         .px(12.0)
@@ -513,8 +514,9 @@ fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, editing: 
     let first = *rows.start();
     let mut list = col()
         .key("fs-rows")
-        .role("list")
+        .role("listbox")
         .label("Slides")
+        .focus_group()
         .w_full()
         .gap(STRIP_GAP as f32);
     for (i, thumb) in deck.view.slides.iter().enumerate().skip(first).take(rows.count()) {
@@ -522,9 +524,10 @@ fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, editing: 
         let current = n == deck.view.current;
         let mut line = row()
             .key(format!("fs-{i}"))
-            .role("button")
+            .role("option")
             .label(format!("Slide {n}"))
             .checked(current)
+            .position_in_set(i + 1, deck.view.slides.len())
             .gap(8.0)
             .items_start()
             .focusable(true)

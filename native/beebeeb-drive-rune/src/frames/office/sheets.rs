@@ -387,6 +387,7 @@ fn viewer_bar(t: &Theme) -> El {
         .key("vbar")
         .role("toolbar")
         .label("Spreadsheet")
+        .focus_group()
         .w_full()
         .h(VBAR_H)
         .px(12.0)
@@ -635,6 +636,11 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, layer: Option<El>, t: &The
             let here = Cell { row: r, col: c };
             let mut cell = row()
                 .key(format!("sh-cell-{r}-{c}"))
+                .role("gridcell")
+                .label(match by_place.get(&(r, c)) {
+                    Some(text) => format!("{}, {}", a1(here), text.text),
+                    None => format!("{}, empty", a1(here)),
+                })
                 .w(w)
                 .h(*h)
                 .px(8.0)

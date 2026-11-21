@@ -395,7 +395,7 @@ pub fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
         // A workbook's tabs: never on a text document's row.
         Tab::Data | Tab::Formulas => Vec::new(),
     };
-    let mut rib = vo::ribbon_of(ui, unsaved, tools, t);
+    let mut rib = vo::ribbon_of(ui, unsaved, tools, t).focus_group();
     let pops = &ui.office.ribbon;
     if let Some(pop) = pops.open {
         // Opened from the selection's tools while another tab shows: the Home row's places still say where.

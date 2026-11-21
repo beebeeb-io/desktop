@@ -322,7 +322,7 @@ pub fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
         // Layout and Review are a text document's: never on a workbook's row.
         Tab::Layout | Tab::Review => Vec::new(),
     };
-    let mut rib = vo::ribbon_of(ui, unsaved, tools, t);
+    let mut rib = vo::ribbon_of(ui, unsaved, tools, t).focus_group();
     if let Some(pop) = open_pop() {
         if at.is_empty() {
             at = home_tools(ui, t).1;
