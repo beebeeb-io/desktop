@@ -427,8 +427,8 @@ impl Sandbox {
     /// Starts `helper_exe` confined and returns it with its pipes.
     ///
     /// `helper_exe` must be an absolute path to a file; nothing is searched and no shell is involved. The helper
-    /// gets no arguments. Its environment is exactly [`helper_environment_names`]. Its standard error is not
-    /// connected.
+    /// gets no arguments ([`Mode::Plain`]). Its environment is exactly [`helper_environment_names`]. Its standard
+    /// error is not connected.
     ///
     /// Never starts an unconfined process: see the crate documentation. On Windows the helper's token is read back
     /// before it runs, and a token whose capabilities are not exactly the profile's ends it.
@@ -438,12 +438,39 @@ impl Sandbox {
     pub fn spawn(&self, helper_exe: &Path) -> Result<Child, SandboxError> {
         // Taken here, before the platform call, so the one lock is the same on every system; the platform releases
         // it as soon as the helper's pipe ends are no longer inheritable.
+        self.spawn_in_mode(helper_exe, Mode::Plain)
+    }
+
+    /// [`Sandbox::spawn`], with the one fixed word of `mode` as the helper's only argument. The confinement is the
+    /// same in every mode: a mode chooses what the helper does, never how it is confined.
+    pub fn spawn_in_mode(&self, helper_exe: &Path, mode: Mode) -> Result<Child, SandboxError> {
         let launch = launch_lock();
-        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile, launch)?;
+        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile, mode, launch)?;
         Ok(Child {
             inner,
             pipes: Some(pipes),
         })
+    }
+}
+
+/// What a helper is started to do: a closed list chosen in code by the caller, like a [`Profile`]. It is the only
+/// thing that can put a word on a helper's command line, and each word is a constant of this crate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// No argument at all. Every helper unless its caller names another mode.
+    #[default]
+    Plain,
+    /// The media helper decodes one picture and exits (`--image`, the media protocol's image mode).
+    Image,
+}
+
+impl Mode {
+    /// The helper's one argument in this mode, if it has one.
+    pub fn argument(self) -> Option<&'static str> {
+        match self {
+            Mode::Plain => None,
+            Mode::Image => Some("--image"),
+        }
     }
 }
 

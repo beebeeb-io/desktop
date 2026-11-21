@@ -938,6 +938,7 @@ pub(crate) fn spawn(
     helper_exe: &Path,
     limits: Limits,
     profile: Profile,
+    mode: crate::Mode,
     launch: LaunchGuard,
 ) -> Result<(ChildInner, Pipes), SandboxError> {
     let units: Vec<u16> = helper_exe.as_os_str().encode_wide().collect();
@@ -945,7 +946,7 @@ pub(crate) fn spawn(
     if !std::fs::metadata(helper_exe).map(|m| m.is_file()).unwrap_or(false) {
         return Err(SandboxError::HelperPath("not a file"));
     }
-    let mut command = command_line(&application);
+    let mut command = command_line(&application, mode);
     let environment = environment_block(&directory("windows directory", GetSystemWindowsDirectoryW)?)?;
     let mut current = directory("system directory", GetSystemDirectoryW)?;
     current.push(0);

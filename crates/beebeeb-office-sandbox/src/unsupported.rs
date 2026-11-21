@@ -90,6 +90,7 @@ pub(crate) fn spawn(
     _helper_exe: &Path,
     _limits: Limits,
     _profile: Profile,
+    _mode: crate::Mode,
     _launch: LaunchGuard,
 ) -> Result<(ChildInner, Pipes), SandboxError> {
     Err(SandboxError::Unsupported)

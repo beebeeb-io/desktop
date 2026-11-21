@@ -7,8 +7,13 @@
 //! - A video's length: [`Engine::video_seconds_for`]: read from the copy on this PC, when there is one. A video
 //!   that is online only has no length here (it is never downloaded for it).
 //!
-//! Where the pixels live: in this process's memory, in this store, and nowhere else. Nothing is written to disk,
-//! nothing is logged. At most [`MAX_PICTURES`] pictures and [`MAX_BYTES`] of pixels are held; the ones not looked at
+//! - A photo the server has no thumbnail for (a HEIC, a camera's RAW) whose copy is on this PC: decoded once by
+//!   the confined helper ([`super::media::decode_picture`]), kept sealed by the engine
+//!   ([`Engine::keep_local_thumbnail`]) and read from there after that, also after a restart. Never downloaded
+//!   for it.
+//!
+//! Where the pixels live: in this process's memory, in this store, and (a thumbnail made here only) sealed in the
+//! engine's thumbnail cache. Nothing else is written to disk, nothing is logged. At most [`MAX_PICTURES`] pictures and [`MAX_BYTES`] of pixels are held; the ones not looked at
 //! for longest go first.
 //!
 //! Whose: everything held belongs to ONE session and account (the stamp). A look under another stamp drops all of
@@ -36,7 +41,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
-use beebeeb_engine::app::photos_api::{ThumbCut, ThumbRefused};
+use beebeeb_engine::app::photos_api::{ThumbCut, ThumbPixels, ThumbRefused};
+use beebeeb_media_protocol::image::MAX_IMAGE_FILE;
 use beebeeb_engine::app::{CredentialStores, Engine};
 use rune::Pixels;
 
@@ -122,6 +128,9 @@ struct Inner {
     arrived: bool,
     /// A picture arrived and could not stay: nothing new is asked until a picture leaves.
     full: bool,
+    /// Pictures whose copy on this PC did not decode, by file id, with the version of that copy: not tried again
+    /// under this stamp.
+    not_made: HashMap<String, i64>,
     /// Tests only: the next fetch for this file waits on the first before it asks the engine, and says on the
     /// second that its answer was taken in (or dropped).
     #[cfg(test)]
@@ -134,6 +143,7 @@ impl Inner {
         self.bytes = 0;
         self.wishes.clear();
         self.in_flight.clear();
+        self.not_made.clear();
         self.arrived = false;
         self.full = false;
     }
@@ -478,18 +488,29 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         let (id, ask) = (&key.0, key.1);
         let session = wished_under.0;
         let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match ask {
-            Ask::Picture(cut) => self.engine.thumbnail_pixels_for(session, id, cut).map(|picture| {
-                let pixels = Pixels::new();
-                let bytes = picture.rgba.len();
-                pixels.set(picture.width, picture.height, picture.rgba.to_vec());
-                let now = Instant::now();
-                Held::Picture {
-                    pixels,
-                    bytes,
-                    used: now,
-                    fetched: now,
-                }
-            }),
+            Ask::Picture(cut) => self
+                .engine
+                .thumbnail_pixels_for(session, id, cut)
+                // No server thumbnail: the one this PC made and kept (079), or made now from the copy here (095).
+                .or_else(|refused| match refused {
+                    ThumbRefused::NoThumbnail | ThumbRefused::Unreadable => self
+                        .made_here(&wished_under, id)
+                        .map(|whole| cut_made_here(whole, cut))
+                        .ok_or(refused),
+                    other => Err(other),
+                })
+                .map(|picture| {
+                    let pixels = Pixels::new();
+                    let bytes = picture.rgba.len();
+                    pixels.set(picture.width, picture.height, picture.rgba.to_vec());
+                    let now = Instant::now();
+                    Held::Picture {
+                        pixels,
+                        bytes,
+                        used: now,
+                        fetched: now,
+                    }
+                }),
             Ask::Length => match self.engine.video_seconds_for(session, id) {
                 Ok(Some(seconds)) => Ok(Held::Length(u32::try_from(seconds).unwrap_or(u32::MAX))),
                 // This PC cannot say (online only): asked again later, once a copy may be here.
@@ -539,6 +560,97 @@ fn work<C: CredentialStores>(store: Weak<EngineThumbStore<C>>) {
             inner.workers = inner.workers.saturating_sub(1);
             return;
         }
+    }
+}
+
+/// The longest side of a thumbnail made here.
+pub(super) const LOCAL_THUMB_PX: u32 = 512;
+
+impl<C: CredentialStores> EngineThumbStore<C> {
+    /// On a worker: the thumbnail this PC made of the file `id`, whole. With a copy of the picture on this PC: the
+    /// one kept for the copy's version, else decoded now through the helper and kept. Without a copy here: the one
+    /// kept before, whatever its version. Nothing is ever downloaded for this. A copy that did not decode is not
+    /// tried again under this stamp (a helper is not started for it at every look).
+    fn made_here(&self, wished_under: &Stamp, id: &str) -> Option<ThumbPixels> {
+        let session = wished_under.0;
+        let copy = match self.engine.local_picture_copy_for(session, id, MAX_IMAGE_FILE) {
+            Ok(Some(copy)) => copy,
+            _ => return self.engine.local_thumbnail_for(session, id),
+        };
+        if let Some(kept) = self.engine.local_thumbnail_at(session, id, copy.version) {
+            return Some(kept);
+        }
+        if self.inner().not_made.get(id) == Some(&copy.version) {
+            return None;
+        }
+        let bytes = copy.read()?;
+        match make_local_thumbnail(&self.engine, session, id, copy.version, &bytes) {
+            Ok(made) => Some(made),
+            Err(_) => {
+                let mut inner = self.inner();
+                if inner.stamp.as_ref() == Some(wished_under) {
+                    inner.not_made.insert(id.to_string(), copy.version);
+                }
+                None
+            }
+        }
+    }
+}
+
+/// A photo with no server thumbnail whose bytes are on this PC: decoded through the helper (never in this process)
+/// and kept sealed in the engine's cache (079). The caller read `bytes` from the copy here; nothing is downloaded
+/// for this. Never logs a name or a byte.
+pub fn make_local_thumbnail<C: CredentialStores>(
+    engine: &Engine<C>,
+    session: beebeeb_engine::account::SessionGeneration,
+    file_id: &str,
+    version: i64,
+    bytes: &[u8],
+) -> Result<ThumbPixels, super::media::ImageRefusal> {
+    let decoded = super::media::decode_picture(bytes, LOCAL_THUMB_PX)?;
+    let pixels = ThumbPixels {
+        session,
+        width: decoded.width,
+        height: decoded.height,
+        rgba: decoded.rgba,
+    };
+    engine
+        .keep_local_thumbnail(session, file_id, version, &pixels)
+        .map_err(|_| super::media::ImageRefusal::Damaged)?;
+    Ok(pixels)
+}
+
+/// A thumbnail made here is kept whole; a tile gets the middle of it at the proportions of its cut (the engine cuts
+/// a stored picture the same way). A picture whose length does not match its size is handed on as it is.
+pub(super) fn cut_made_here(whole: ThumbPixels, cut: ThumbCut) -> ThumbPixels {
+    let (w, h) = (whole.width, whole.height);
+    let (keep_w, keep_h) = match cut {
+        ThumbCut::Whole => (w, h),
+        ThumbCut::Square => (w.min(h), w.min(h)),
+        ThumbCut::Strip => {
+            let wide = (u64::from(h) * 36 / 52).max(1) as u32;
+            if wide <= w {
+                (wide, h)
+            } else {
+                (w, ((u64::from(w) * 52 / 36).max(1) as u32).min(h))
+            }
+        }
+    };
+    if (keep_w, keep_h) == (w, h) || whole.rgba.len() as u64 != u64::from(w) * u64::from(h) * 4 {
+        return whole;
+    }
+    let (left, top) = (((w - keep_w) / 2) as usize, ((h - keep_h) / 2) as usize);
+    let (row, keep_row) = (w as usize * 4, keep_w as usize * 4);
+    let mut rgba = zeroize::Zeroizing::new(Vec::with_capacity(keep_row * keep_h as usize));
+    for y in top..top + keep_h as usize {
+        let start = y * row + left * 4;
+        rgba.extend_from_slice(&whole.rgba[start..start + keep_row]);
+    }
+    ThumbPixels {
+        session: whole.session,
+        width: keep_w,
+        height: keep_h,
+        rgba,
     }
 }
 

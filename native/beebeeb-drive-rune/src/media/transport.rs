@@ -527,6 +527,44 @@ impl LinkFactory for SandboxedHelpers {
     }
 }
 
+/// The real image helpers (095): [`helper_exe`] in its `--image` mode, confined like every helper (the crash-report
+/// exclusion first, the same limits), always in the system-decoder profile (WIC needs COM; `hevc` for a HEIC).
+/// Nothing is started while the system decoders are switched off.
+pub struct SandboxedPictures;
+
+/// The process of one image helper. Dropping it ends the helper.
+struct PictureChildProcess(std::sync::Mutex<Child>);
+
+impl crate::engine_host::media::PictureChild for PictureChildProcess {
+    fn kill(&self) {
+        let _ = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).kill();
+    }
+}
+
+impl crate::engine_host::media::PictureHelper for SandboxedPictures {
+    fn start(&self, hevc: bool) -> Option<crate::engine_host::media::PictureProcess> {
+        if !MEDIA_SYSTEM_DECODER_ON {
+            return None;
+        }
+        let exe = helper_exe()?;
+        let mut child = excluded_then(&EXCLUDED, &WindowsErrorReports, || {
+            Sandbox::with_profile(HELPER_LIMITS, Profile::SystemDecoder { hevc })
+                .and_then(|sandbox| sandbox.spawn_in_mode(&exe, beebeeb_office_sandbox::Mode::Image))
+                .map_err(sandbox_refusal)
+        })
+        .ok()?;
+        let Some(pipes) = child.take_pipes() else {
+            let _ = child.kill();
+            return None;
+        };
+        Some(crate::engine_host::media::PictureProcess {
+            from: Box::new(pipes.from_helper),
+            to: Box::new(pipes.to_helper),
+            child: Arc::new(PictureChildProcess(std::sync::Mutex::new(child))),
+        })
+    }
+}
+
 #[cfg(test)]
 #[path = "transport_tests.rs"]
 mod tests;

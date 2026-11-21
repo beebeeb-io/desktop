@@ -59,13 +59,18 @@ pub(crate) fn checked_path(units: &[u16]) -> Result<Vec<u16>, SandboxError> {
     Ok(out)
 }
 
-/// The command line: the quoted program path and nothing else. `path` is a result of [`checked_path`].
-pub(crate) fn command_line(path: &[u16]) -> Vec<u16> {
+/// The command line: the quoted program path, then the mode's one fixed word if it has one ([`Mode::argument`]),
+/// and nothing else. `path` is a result of [`checked_path`].
+pub(crate) fn command_line(path: &[u16], mode: crate::Mode) -> Vec<u16> {
     let body = path.strip_suffix(&[0]).unwrap_or(path);
-    let mut out = Vec::with_capacity(body.len() + 3);
+    let mut out = Vec::with_capacity(body.len() + 12);
     out.push(b'"' as u16);
     out.extend_from_slice(body);
     out.push(b'"' as u16);
+    if let Some(word) = mode.argument() {
+        out.push(b' ' as u16);
+        out.extend(word.encode_utf16());
+    }
     out.push(0);
     out
 }
@@ -199,8 +204,12 @@ mod tests {
     fn the_command_line_is_the_quoted_path_and_nothing_else() {
         let path = checked_path(&w(r"C:\Program Files\App\helper.exe")).unwrap();
         assert_eq!(
-            String::from_utf16(&command_line(&path)).unwrap(),
+            String::from_utf16(&command_line(&path, crate::Mode::Plain)).unwrap(),
             "\"C:\\Program Files\\App\\helper.exe\"\0"
+        );
+        assert_eq!(
+            String::from_utf16(&command_line(&path, crate::Mode::Image)).unwrap(),
+            "\"C:\\Program Files\\App\\helper.exe\" --image\0"
         );
     }
 

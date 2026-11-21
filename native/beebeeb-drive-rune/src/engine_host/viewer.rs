@@ -634,6 +634,13 @@ pub(super) fn shows(name: &str) -> Shows {
         Some(Viewer::Markdown) => Shows::Markdown,
         // The formats the toolkit decodes. A RAW or a HEIC has no decoder here.
         Some(Viewer::Photo) if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") => Shows::Picture,
+        // 095: a HEIC or a RAW is a picture too (decoded by the confined helper) unless this PC is known to have
+        // no decoder for it: then nothing is downloaded and the notice says so.
+        Some(Viewer::Photo)
+            if super::media::HelperPicture::of_name(name).is_some_and(|kind| !kind.decoder_missing()) =>
+        {
+            Shows::Picture
+        }
         Some(Viewer::Pdf) => Shows::Pdf,
         _ => Shows::Nothing,
     }
@@ -688,6 +695,29 @@ fn picture_body(bytes: &[u8], cancel: &AtomicBool) -> Content {
         picture: None,
         origin: Origin::Beebeeb,
     };
+    // 095: a HEIC or a RAW never reaches a decoder of this process: the confined helper decodes it. No decoder for
+    // it on this PC: the notice a HEIC always had, and Open in another app.
+    if let Some(kind) = super::media::HelperPicture::of_bytes(bytes) {
+        if cancel.load(Ordering::SeqCst) {
+            return nothing(NoPreview::Unreadable);
+        }
+        return match super::media::helper_pixels(bytes) {
+            Ok(pixels) => Content {
+                body: Some(Body::Photo(PhotoDoc {
+                    pill: None,
+                    note: String::new(),
+                    strip: Vec::new(),
+                })),
+                picture: Some(pixels),
+                origin: Origin::Beebeeb,
+            },
+            Err(super::media::ImageRefusal::NoDecoder) => nothing(match kind {
+                super::media::HelperPicture::Heif => NoPreview::Heic,
+                super::media::HelperPicture::Raw => NoPreview::NoViewer,
+            }),
+            Err(_) => nothing(NoPreview::Unreadable),
+        };
+    }
     match viewer_picture::check(bytes) {
         Err(viewer_picture::Refused::NotAPicture) => return nothing(NoPreview::Unreadable),
         Err(viewer_picture::Refused::TooBig(declared)) => {

@@ -382,6 +382,53 @@ impl<C: CredentialStores> Engine<C> {
         Ok(facts.duration_seconds)
     }
 
+    /// The copy ON THIS PC of the picture `file_id`, for `session`: its version, and a way to read its bytes.
+    /// `None`: it is no picture, it is online only or not wholly here (it is never downloaded for this), it is
+    /// being changed, or it is larger than `max_bytes`. Reads nothing of the file itself. No network.
+    pub fn local_picture_copy_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        max_bytes: u64,
+    ) -> Result<Option<LocalPicture>, LocalStateRefused> {
+        let state = self.local_state()?;
+        if state.session() != session {
+            return Err(LocalStateRefused::SessionChanged);
+        }
+        let entry = state
+            .with(|db| db.get_file(file_id))?
+            .map_err(|_| LocalStateRefused::Unreadable)?;
+        let Some(entry) = entry.filter(|entry| !entry.is_dir() && entry.status == FileStatus::Local) else {
+            return Ok(None);
+        };
+        if !mime_for_name(&leaf_name(&entry)).is_some_and(|mime| mime.starts_with("image/")) {
+            return Ok(None);
+        }
+        let Some(sync_root) = crate::config::DesktopConfig::load_for(self.identity)
+            .ok()
+            .and_then(|config| config.sync_root)
+        else {
+            return Ok(None);
+        };
+        let Ok(path) = local_file_path_under_sync_root(&sync_root, &entry.path) else {
+            return Ok(None);
+        };
+        // Only a copy that is wholly here: opening a placeholder on Windows would start a download.
+        if !copy_is_wholly_here(&path) {
+            return Ok(None);
+        }
+        let fits = std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 0 && metadata.len() <= max_bytes);
+        if !fits {
+            return Ok(None);
+        }
+        state.still_this_session()?;
+        Ok(Some(LocalPicture {
+            version: entry.remote_updated_at.max(0),
+            path,
+            max_bytes,
+        }))
+    }
+
     /// [`Engine::set_kept`] for the session of a press: nothing is changed unless the session in memory is still
     /// `session`. `Err` in the same fixed words.
     pub fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String> {
@@ -389,6 +436,29 @@ impl<C: CredentialStores> Engine<C> {
             return Err(super::kept_api::NOT_SIGNED_IN.to_string());
         }
         self.set_kept_in(Some(session), file_id, kept)
+    }
+}
+
+/// A picture's copy on this PC, found by [`Engine::local_picture_copy_for`]. Holds the path; says only the version.
+pub struct LocalPicture {
+    /// The version the copy was last in step with the account at (a thumbnail made of it is kept under this).
+    pub version: i64,
+    path: std::path::PathBuf,
+    max_bytes: u64,
+}
+
+impl LocalPicture {
+    /// BLOCKS (the disk): the copy's bytes. `None`: it went away, was freed meanwhile, grew past the limit or
+    /// cannot be read. Never downloads.
+    pub fn read(&self) -> Option<Zeroizing<Vec<u8>>> {
+        if !copy_is_wholly_here(&self.path) {
+            return None;
+        }
+        let mut bytes = Zeroizing::new(Vec::new());
+        std::fs::File::open(&self.path)
+            .and_then(|file| file.take(self.max_bytes + 1).read_to_end(&mut bytes))
+            .ok()?;
+        (!bytes.is_empty() && bytes.len() as u64 <= self.max_bytes).then_some(bytes)
     }
 }
 
