@@ -318,6 +318,11 @@ impl Worker {
         if !self.slots.put_link(link) {
             return Err(Exit::Done);
         }
+        // The helper in the system decoder's profile is the item's last one: where Windows' decoders do not start
+        // in it either, it plays the video without that sound instead of asking again (ux-57).
+        if self.profile != Profile::NoCapabilities {
+            self.send(&ToHelper::LastHelper)?;
+        }
         self.send(&ToHelper::Open {
             len: self.len,
             hint: self.item.kind,

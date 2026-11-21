@@ -30,7 +30,7 @@ use crate::decode::{display_size, mix_channels, scale_letterbox};
 use crate::mf::Unavailable;
 use crate::mf::gate::Gate;
 use crate::read::{PipeReader, ReadFlags, SharedWire, Wire, lock};
-use crate::routes::{Decision, Track, decide, is_reduced_quality, state_for};
+use crate::routes::{Decision, Track, decide, is_reduced_quality, settled, state_for};
 use crate::sniff::{Bare, program_stream_mpeg_audio, sniff};
 use crate::system::{SystemOpen, SystemStreams};
 use crate::{ROUTES, Route, SYSTEM_FALLBACK, system, tags};
@@ -114,6 +114,8 @@ fn serve(
     table: &[(Codec, Route)],
     system_on: bool,
 ) {
+    // `ToHelper::LastHelper` came: no other helper follows this one.
+    let mut last_helper = false;
     loop {
         let msg = lock(wire).recv();
         // Reads reach the app only while this message is answered (also the system decoder's, from its threads).
@@ -124,7 +126,7 @@ fn serve(
                 if playing.is_some() {
                     vec![FromHelper::Error(ErrorCode::Internal)]
                 } else {
-                    match open(wire, flags, gate, len, table, system_on) {
+                    match open(wire, flags, gate, len, table, system_on, last_helper) {
                         Ok((p, opened, tags)) => {
                             *playing = Some(p);
                             // The title and artist follow `Opened` (the app shows them once it has the file).
@@ -144,6 +146,10 @@ fn serve(
                 if let Some(p) = playing.as_mut() {
                     seek(p, at_ms);
                 }
+                Vec::new()
+            }
+            Ok(ToHelper::LastHelper) => {
+                last_helper = true;
                 Vec::new()
             }
             // An answer nobody asked for: ignored.
@@ -174,6 +180,7 @@ fn open(
     len: u64,
     table: &[(Codec, Route)],
     system_on: bool,
+    last_helper: bool,
 ) -> Result<(Playing, Opened, Option<Tags>), ErrorCode> {
     if len == 0 {
         return Err(ErrorCode::Corrupt);
@@ -218,9 +225,10 @@ fn open(
         .flatten()
         .find(|t| t.needs_system())
         .map_or(Codec::Other, |t| t.codec);
-    let state = state_for(video_track, audio_track, system_on, || {
-        system::availability(needs_codec)
-    });
+    let state = settled(
+        state_for(video_track, audio_track, system_on, || system::availability(needs_codec)),
+        last_helper,
+    );
     let (plan, on_system) = match decide(video_track, audio_track, state) {
         Decision::Ours(plan) => (plan, false),
         Decision::System(plan) => (plan, true),

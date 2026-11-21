@@ -63,6 +63,7 @@ fn to_helper_messages() -> Vec<ToHelper> {
         },
         ToHelper::Seek { at_ms: 72_000 },
         ToHelper::Close,
+        ToHelper::LastHelper,
     ]
 }
 

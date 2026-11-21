@@ -313,6 +313,11 @@ pub enum ToHelper {
     Seek { at_ms: u64 },
     /// Stop; the helper exits.
     Close,
+    /// Sent before `Open` to the helper the app started in the system decoder's profile: no other helper follows
+    /// this one. Where the system's decoders do not start in it either, that is this PC's answer: a video this
+    /// crate's own decoder plays is played without the audio track that needed them (`Opened::no_sound`), and
+    /// nothing else changes (ux-57).
+    LastHelper,
 }
 
 /// Counts and kinds, never a byte of the file.
@@ -328,6 +333,7 @@ impl fmt::Debug for ToHelper {
             }
             ToHelper::Seek { at_ms } => write!(f, "Seek({at_ms} ms)"),
             ToHelper::Close => f.write_str("Close"),
+            ToHelper::LastHelper => f.write_str("LastHelper"),
         }
     }
 }
@@ -562,6 +568,7 @@ const T_WANT_VIDEO: u8 = 0x04;
 const T_WANT_AUDIO: u8 = 0x05;
 const T_SEEK: u8 = 0x06;
 const T_CLOSE: u8 = 0x07;
+const T_LAST_HELPER: u8 = 0x08;
 
 const T_READ_AT: u8 = 0x81;
 const T_OPENED: u8 = 0x82;
@@ -649,6 +656,7 @@ impl Message for ToHelper {
                 put_u64(head, *at_ms);
             }
             ToHelper::Close => head.push(T_CLOSE),
+            ToHelper::LastHelper => head.push(T_LAST_HELPER),
         }
         Ok(NO_BULK)
     }
@@ -774,7 +782,7 @@ fn to_helper_max(tag: u8) -> Option<usize> {
         T_WANT_VIDEO => 4 + 4,
         T_WANT_AUDIO => 4 + 2 + 4,
         T_SEEK => 8,
-        T_CLOSE => 0,
+        T_CLOSE | T_LAST_HELPER => 0,
         _ => return None,
     })
 }
@@ -1046,6 +1054,7 @@ pub fn read_to_helper<R: Read + ?Sized>(r: &mut R) -> Result<ToHelper, WireError
         }
         T_SEEK => ToHelper::Seek { at_ms: body.u64()? },
         T_CLOSE => ToHelper::Close,
+        T_LAST_HELPER => ToHelper::LastHelper,
         _ => return Err(WireError::UnknownTag(tag)),
     };
     body.finish()?;

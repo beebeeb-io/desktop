@@ -213,6 +213,18 @@ pub fn state_for(
     system_state(switch_on, available)
 }
 
+/// The state the decision is made by, once the app said whether another helper can follow this one (ux-57).
+/// `NotHere` asks the app for a restart in the system decoder's profile; in the last helper (`ToHelper::LastHelper`:
+/// the one already started there) no restart follows, so Media Foundation that does not start is this PC's answer,
+/// decided as `Off`: a video FilmCraft plays goes on without the audio that needed the system's decoder, and a track
+/// that cannot play at all keeps its `NoSystemDecoder`.
+pub fn settled(state: SystemState, last_helper: bool) -> SystemState {
+    match state {
+        SystemState::NotHere if last_helper => SystemState::Off,
+        other => other,
+    }
+}
+
 /// The tracks that play, by codec, and the audio track that does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Plan {
@@ -327,6 +339,42 @@ mod tests {
         SystemState::NoSystemMedia,
         SystemState::Available,
     ];
+
+    /// ux-57: the helper in the system decoder's profile where Media Foundation still does not start plays an
+    /// H.264 + AAC video without sound; only a video that needs the system's decoder, and audio alone, are refused.
+    #[test]
+    fn the_last_helper_plays_the_video_without_the_system_audio() {
+        use Codec::*;
+        let t = |codec| Some(Track::of(crate::ROUTES, codec));
+        for state in ALL_STATES {
+            assert_eq!(settled(state, false), state, "{state:?}: another helper may follow");
+        }
+        assert_eq!(settled(SystemState::NotHere, true), SystemState::Off);
+        assert_eq!(settled(SystemState::NoSystemMedia, true), SystemState::NoSystemMedia);
+        assert_eq!(settled(SystemState::Available, true), SystemState::Available);
+        // The first helper asks for the restart; the last one plays the video and names the silent track.
+        assert_eq!(
+            decide(t(H264), t(Aac), settled(SystemState::NotHere, false)),
+            Decision::Error(ErrorCode::NoSystemDecoder(Aac))
+        );
+        assert_eq!(
+            decide(t(H264), t(Aac), settled(SystemState::NotHere, true)),
+            Decision::Ours(Plan {
+                video: Some(H264),
+                audio: None,
+                no_sound: Some(Aac),
+            })
+        );
+        // A video only the system's decoder plays, and audio alone, stay refused with their own codec.
+        assert_eq!(
+            decide(t(Hevc), t(Aac), settled(SystemState::NotHere, true)),
+            Decision::Error(ErrorCode::NoSystemDecoder(Hevc))
+        );
+        assert_eq!(
+            decide(None, t(Aac), settled(SystemState::NotHere, true)),
+            Decision::Error(ErrorCode::NoSystemDecoder(Aac))
+        );
+    }
 
     #[test]
     fn labels_classify_to_their_codec() {
