@@ -13,7 +13,12 @@ fn relative_luminance(c: Color) -> f32 {
 /// `top` laid over an opaque `under`, in linear light.
 fn over(top: Color, under: Color) -> Color {
     let k = |t: f32, u: f32| t * top.a + u * (1.0 - top.a);
-    Color { r: k(top.r, under.r), g: k(top.g, under.g), b: k(top.b, under.b), a: 1.0 }
+    Color {
+        r: k(top.r, under.r),
+        g: k(top.g, under.g),
+        b: k(top.b, under.b),
+        a: 1.0,
+    }
 }
 
 /// WCAG contrast ratio of two colours, 1.0 to 21.0, order-free. A translucent `b` is laid over white,
@@ -88,7 +93,12 @@ pub fn theme_from_system(s: SystemColors) -> Theme {
     let hot = colorref(s.hot_light);
     let face = colorref(s.btn_face);
     let btn_text = colorref(s.btn_text);
-    let none = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    let none = Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
     let mut t = super::tokens::theme(relative_luminance(window) < 0.18);
     t.bg = window;
     t.card = window;

@@ -37,7 +37,9 @@ pub struct Ask {
 impl std::fmt::Debug for Ask {
     /// The count only: a name is the person's and never goes into a log line.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Ask").field("files", &self.files).finish_non_exhaustive()
+        f.debug_struct("Ask")
+            .field("files", &self.files)
+            .finish_non_exhaustive()
     }
 }
 
@@ -179,8 +181,16 @@ pub fn card(pending: &Pending, cx: &mut Cx<State>) -> El {
         crate::shell::host::dispatch(s, Event::Escape);
     });
     let foot = row().center_y().justify_end().child(cancel).child(confirm);
-    dialog::card(&words.title, super::super::global::sync_off::WIDTH, &words.title, None, body, foot, &t)
-        .key("discard-switch")
+    dialog::card(
+        &words.title,
+        super::super::global::sync_off::WIDTH,
+        &words.title,
+        None,
+        body,
+        foot,
+        &t,
+    )
+    .key("discard-switch")
 }
 
 #[cfg(test)]
@@ -191,7 +201,9 @@ mod tests {
     fn ask(files: usize) -> Ask {
         Ask {
             files,
-            names: (1..=files.min(NAMES_SHOWN)).map(|n| format!("Invented {n}.txt")).collect(),
+            names: (1..=files.min(NAMES_SHOWN))
+                .map(|n| format!("Invented {n}.txt"))
+                .collect(),
             token: Arc::new(files),
         }
     }
@@ -209,7 +221,10 @@ mod tests {
             Ok(ask(self.files))
         }
         fn discard_and_switch(&self, ask: Ask) -> Result<(), ActionError> {
-            let shown = *ask.token.downcast_ref::<usize>().expect("the engine's own ask comes back");
+            let shown = *ask
+                .token
+                .downcast_ref::<usize>()
+                .expect("the engine's own ask comes back");
             self.discards.lock().unwrap().push(shown);
             Ok(())
         }
@@ -220,7 +235,12 @@ mod tests {
         let w = words(&ask(7));
         assert!(w.lost.starts_with("7 files"), "{}", w.lost);
         assert_eq!(w.names.len(), 6);
-        assert_eq!(w.names[..5], (1..=5).map(|n| format!("\u{2022} Invented {n}.txt")).collect::<Vec<_>>()[..]);
+        assert_eq!(
+            w.names[..5],
+            (1..=5)
+                .map(|n| format!("\u{2022} Invented {n}.txt"))
+                .collect::<Vec<_>>()[..]
+        );
         assert_eq!(w.names[5], "and 2 more");
         assert!(w.kept.contains("Changes not sent"));
         let one = words(&ask(1));
@@ -233,17 +253,32 @@ mod tests {
 
     #[test]
     fn cancel_asks_the_engine_nothing() {
-        let (confirmation, fake) = (Confirmation::new(), Fake { files: 2, ..Fake::default() });
+        let (confirmation, fake) = (
+            Confirmation::new(),
+            Fake {
+                files: 2,
+                ..Fake::default()
+            },
+        );
         assert!(confirmation.open(4, &fake));
         confirmation.cancel();
         assert!(confirmation.for_attempt(4).is_none());
-        assert_eq!(confirmation.confirm(&fake), Err(ActionError::NotAvailable("nothing was asked")));
+        assert_eq!(
+            confirmation.confirm(&fake),
+            Err(ActionError::NotAvailable("nothing was asked"))
+        );
         assert_eq!(fake.discards.lock().unwrap().len(), 0, "no discard after a cancel");
     }
 
     #[test]
     fn confirm_hands_back_exactly_the_ask_that_was_shown_once() {
-        let (confirmation, fake) = (Confirmation::new(), Fake { files: 3, ..Fake::default() });
+        let (confirmation, fake) = (
+            Confirmation::new(),
+            Fake {
+                files: 3,
+                ..Fake::default()
+            },
+        );
         assert!(confirmation.open(9, &fake));
         assert_eq!(confirmation.for_attempt(9).map(|p| p.ask.files), Some(3));
         confirmation.confirm(&fake).unwrap();
@@ -253,11 +288,20 @@ mod tests {
 
     #[test]
     fn a_new_refusal_drops_the_old_confirmation_and_nothing_unsent_opens_none() {
-        let (confirmation, fake) = (Confirmation::new(), Fake { files: 1, ..Fake::default() });
+        let (confirmation, fake) = (
+            Confirmation::new(),
+            Fake {
+                files: 1,
+                ..Fake::default()
+            },
+        );
         assert!(confirmation.open(1, &fake));
         assert!(confirmation.for_attempt(2).is_none());
         assert!(confirmation.for_attempt(1).is_none(), "dropped, not hidden");
-        assert!(!confirmation.open(3, &Fake::default()), "nothing to discard: no confirmation");
+        assert!(
+            !confirmation.open(3, &Fake::default()),
+            "nothing to discard: no confirmation"
+        );
         assert!(confirmation.for_attempt(3).is_none());
     }
 }

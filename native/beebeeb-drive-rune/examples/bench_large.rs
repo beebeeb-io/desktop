@@ -71,7 +71,9 @@ use shell::state::init_on_engine;
 
 const EMAIL: &str = "large@example.invalid";
 const PASSWORD: &str = "an invented password for the bench";
-const VIEWS: [&str; 8] = ["files", "list", "grid", "photos", "search", "shared", "trash", "this-pc"];
+const VIEWS: [&str; 8] = [
+    "files", "list", "grid", "photos", "search", "shared", "trash", "this-pc",
+];
 
 fn rss_mb() -> f64 {
     let pid = sysinfo::get_current_pid().ok();
@@ -104,11 +106,17 @@ fn settle(rt: &mut Runtime<State>, cap: Duration) {
 fn open(rt: &mut Runtime<State>, view: &str) {
     match view {
         "files" => {
-            dispatch(&mut rt.state, shell::app::Event::Navigate(Route::section(Section::Files)));
+            dispatch(
+                &mut rt.state,
+                shell::app::Event::Navigate(Route::section(Section::Files)),
+            );
         }
         "list" | "grid" => {
             let roll = camera_roll_id();
-            dispatch(&mut rt.state, shell::app::Event::Navigate(Route::folder(Section::Files, roll)));
+            dispatch(
+                &mut rt.state,
+                shell::app::Event::Navigate(Route::folder(Section::Files, roll)),
+            );
             rt.state.listing = {
                 let (listing, _) = shell::state::load(rt.state.source.as_ref(), Some(&camera_roll_id()));
                 listing
@@ -117,7 +125,10 @@ fn open(rt: &mut Runtime<State>, view: &str) {
         }
         "photos" => frames::go(&mut rt.state, Section::Photos),
         "search" => {
-            dispatch(&mut rt.state, shell::app::Event::Navigate(Route::section(Section::Files)));
+            dispatch(
+                &mut rt.state,
+                shell::app::Event::Navigate(Route::section(Section::Files)),
+            );
             rt.update(|s, tx| {
                 frames::search::open(s, tx);
                 frames::search::run(s, "a", tx);
@@ -140,7 +151,12 @@ fn main() {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--view" => only = args.next(),
-            "--frames" => frames_each = args.next().and_then(|n| n.parse().ok()).expect("--frames takes a number"),
+            "--frames" => {
+                frames_each = args
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .expect("--frames takes a number")
+            }
             _ => {
                 eprintln!("usage: bench_large [--view {}] [--frames N]", VIEWS.join("|"));
                 std::process::exit(2);
@@ -192,7 +208,11 @@ fn main() {
                 )
                 .expect("the insert");
             for row in &rows {
-                let kind = if row.is_folder { ItemKind::Folder } else { ItemKind::File };
+                let kind = if row.is_folder {
+                    ItemKind::Folder
+                } else {
+                    ItemKind::File
+                };
                 insert
                     .execute(rusqlite::params![
                         row.id,

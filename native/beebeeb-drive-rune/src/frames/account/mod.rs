@@ -562,10 +562,7 @@ fn state_pane(pane: Pane, state: source::PaneState, t: &Theme) -> El {
     let title = title_of(pane);
     let (head, words) = match state {
         source::PaneState::Loading => ("Loading", "Asking Beebeeb for your account."),
-        source::PaneState::SignedOut => (
-            "Not signed in",
-            "Sign in and unlock Beebeeb to see your account.",
-        ),
+        source::PaneState::SignedOut => ("Not signed in", "Sign in and unlock Beebeeb to see your account."),
         source::PaneState::SessionEnded => (
             "Your session ended",
             "Sign in again to see your account. Nothing was changed.",
@@ -937,7 +934,14 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
         Pane::Security => {
-            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, &ui.unsaved_name, s.shell.hide_from_capture(), &t);
+            let (page, over) = security_overview::pane(
+                source,
+                dialog,
+                &ui.signing_out,
+                &ui.unsaved_name,
+                s.shell.hide_from_capture(),
+                &t,
+            );
             (page, over.or_else(|| app_lock_password::over(source, form, dialog, &t)))
         }
         Pane::Sessions => sessions::pane(source, dialog, &t),

@@ -5,11 +5,11 @@
 use rune::{TextEdit, Tx};
 
 use super::{NOT_HERE, words};
-use crate::frames::photos::{Dialog, Toast};
 use crate::State;
 use crate::frames::files::names::{self, NameError};
 use crate::frames::files::source::{Action, ActionError};
 use crate::frames::photos::source::PhotoId;
+use crate::frames::photos::{Dialog, Toast};
 
 /// The key of the dialog's text input.
 pub const INPUT: &str = "ph-rename-input";
@@ -81,7 +81,12 @@ fn siblings(s: &State, id: PhotoId, parent: &Option<String>, own: &str) -> Vec<(
 }
 
 pub fn open(s: &mut State, tx: &mut Tx, id: PhotoId) {
-    let Some(item) = s.photos.source.file_items(&[id]).and_then(|items| items.into_iter().next()) else {
+    let Some(item) = s
+        .photos
+        .source
+        .file_items(&[id])
+        .and_then(|items| items.into_iter().next())
+    else {
         s.photos.toast = Some(Toast::Words(NOT_HERE));
         return;
     };
@@ -118,7 +123,12 @@ pub fn commit(s: &mut State, _tx: &mut Tx) {
         Ok(name) => name,
         Err(why) => return refuse(s, typed, why),
     };
-    let Some(item) = s.photos.source.file_items(&[draft.id]).and_then(|items| items.into_iter().next()) else {
+    let Some(item) = s
+        .photos
+        .source
+        .file_items(&[draft.id])
+        .and_then(|items| items.into_iter().next())
+    else {
         s.photos.dialog = None;
         s.photos.toast = Some(Toast::Words(NOT_HERE));
         return;

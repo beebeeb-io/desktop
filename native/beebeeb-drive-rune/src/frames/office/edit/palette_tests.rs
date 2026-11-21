@@ -15,13 +15,22 @@ use crate::frames::viewers::{self, Intent};
 use crate::{State, init, view};
 
 fn names(groups: &[CommandGroup]) -> Vec<String> {
-    groups.iter().flat_map(|g| g.commands.iter().map(|c| c.name.clone())).collect()
+    groups
+        .iter()
+        .flat_map(|g| g.commands.iter().map(|c| c.name.clone()))
+        .collect()
 }
 
 fn files(names: &[&str]) -> Vec<CommandGroup> {
     vec![CommandGroup {
         title: FILES.into(),
-        commands: names.iter().map(|n| Command { name: n.to_string(), shortcut: None }).collect(),
+        commands: names
+            .iter()
+            .map(|n| Command {
+                name: n.to_string(),
+                shortcut: None,
+            })
+            .collect(),
     }]
 }
 
@@ -38,11 +47,17 @@ fn each_kind_lists_its_own_operations_and_typing_filters() {
     assert_eq!(bold[0].commands[0].shortcut.as_deref(), Some("Ctrl+B"));
     // Without an editor only the source's answer,: the source filters its own names.
     assert!(found(None, "bold", Vec::new()).is_empty());
-    assert_eq!(names(&found(Some(EditKind::Docx), "plan", files(&["Plan.pdf", "Other.pdf"]))), ["Plan.pdf", "Other.pdf"]);
+    assert_eq!(
+        names(&found(Some(EditKind::Docx), "plan", files(&["Plan.pdf", "Other.pdf"]))),
+        ["Plan.pdf", "Other.pdf"]
+    );
     // A name the document's styles share with ours is listed once.
     let styles = vec![CommandGroup {
         title: STYLES.into(),
-        commands: vec![Command { name: "Heading 1".into(), shortcut: None }],
+        commands: vec![Command {
+            name: "Heading 1".into(),
+            shortcut: None,
+        }],
     }];
     assert_eq!(names(&found(Some(EditKind::Docx), "heading 1", styles)), ["Heading 1"]);
 }
@@ -51,8 +66,17 @@ fn each_kind_lists_its_own_operations_and_typing_filters() {
 fn a_result_resolves_to_its_operation_and_a_mark_toggles() {
     let k = Some(EditKind::Docx);
     assert_eq!(resolve(k, "Data", "Sort A to Z", None), Run::Unknown);
-    assert_eq!(resolve(k, STYLES, "Heading 2", None), Run::Op(EditOp::ParaStyle(ParaStyle::Heading2)));
-    assert_eq!(resolve(k, "Format", "Bold", None), Run::Op(EditOp::Mark { mark: Mark::Bold, on: true }));
+    assert_eq!(
+        resolve(k, STYLES, "Heading 2", None),
+        Run::Op(EditOp::ParaStyle(ParaStyle::Heading2))
+    );
+    assert_eq!(
+        resolve(k, "Format", "Bold", None),
+        Run::Op(EditOp::Mark {
+            mark: Mark::Bold,
+            on: true
+        })
+    );
     let bold = Marks {
         bold: true,
         italic: false,
@@ -62,9 +86,18 @@ fn a_result_resolves_to_its_operation_and_a_mark_toggles() {
         align: TextAlign::Left,
         list: ListKind::None,
     };
-    assert_eq!(resolve(k, "Format", "Bold", Some(&bold)), Run::Op(EditOp::Mark { mark: Mark::Bold, on: false }));
+    assert_eq!(
+        resolve(k, "Format", "Bold", Some(&bold)),
+        Run::Op(EditOp::Mark {
+            mark: Mark::Bold,
+            on: false
+        })
+    );
     assert_eq!(resolve(k, FILES, "A.pdf", None), Run::File("A.pdf".into()));
-    assert_eq!(resolve(Some(EditKind::Pptx), "Slides", "New slide", None), Run::Op(EditOp::NewSlide { layout: None }));
+    assert_eq!(
+        resolve(Some(EditKind::Pptx), "Slides", "New slide", None),
+        Run::Op(EditOp::NewSlide { layout: None })
+    );
 }
 
 struct Recording {
@@ -98,12 +131,18 @@ impl ViewerSource for Recording {
 fn open(live: bool) -> (Runtime<State>, Rc<RefCell<Vec<EditOp>>>) {
     let ops = Rc::new(RefCell::new(Vec::new()));
     let mut state = init();
-    let source = Recording { inner: FixtureViewerSource::new(), ops: ops.clone() };
+    let source = Recording {
+        inner: FixtureViewerSource::new(),
+        ops: ops.clone(),
+    };
     assert!(viewers::open_from(&mut state, Box::new(source), board::DOCX));
     if live {
         viewers::ui(&mut state).expect("open").office.edit = Some(EditUi::new(EditKind::Docx));
     }
-    let env = rune::Env { system_dark: false, scale: 2.0 };
+    let env = rune::Env {
+        system_dark: false,
+        scale: 2.0,
+    };
     let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
     rt.on_key = Some(crate::shell::host::on_key);
     rt.frame(0.0);
@@ -111,7 +150,10 @@ fn open(live: bool) -> (Runtime<State>, Rc<RefCell<Vec<EditOp>>>) {
 }
 
 fn key(rt: &mut Runtime<State>, key: Key, ctrl: bool) {
-    let mods = Mods { cmd: ctrl, ..Mods::default() };
+    let mods = Mods {
+        cmd: ctrl,
+        ..Mods::default()
+    };
     rt.key(KeyEvent { key, mods });
     rt.frame(0.0);
 }
@@ -164,13 +206,31 @@ fn slide_commands_are_listed_only_with_a_current_slide() {
     let pptx = Some(EditKind::Pptx);
     let none = names(&found_at(pptx, None, "slide", Vec::new()));
     assert_eq!(none, ["New slide"]);
-    let two = names(&found_at(pptx, Some(Stage { current: 2, count: 3 }), "slide", Vec::new()));
+    let two = names(&found_at(
+        pptx,
+        Some(Stage { current: 2, count: 3 }),
+        "slide",
+        Vec::new(),
+    ));
     assert_eq!(two, ["New slide", "Duplicate slide", "Delete slide"]);
     // A deck keeps one slide: Delete is not offered for it.
-    let one = names(&found_at(pptx, Some(Stage { current: 1, count: 1 }), "slide", Vec::new()));
+    let one = names(&found_at(
+        pptx,
+        Some(Stage { current: 1, count: 1 }),
+        "slide",
+        Vec::new(),
+    ));
     assert_eq!(one, ["New slide", "Duplicate slide"]);
     // Never in a document or a sheet.
-    assert!(names(&found_at(Some(EditKind::Docx), Some(Stage { current: 1, count: 3 }), "slide", Vec::new())).is_empty());
+    assert!(
+        names(&found_at(
+            Some(EditKind::Docx),
+            Some(Stage { current: 1, count: 3 }),
+            "slide",
+            Vec::new()
+        ))
+        .is_empty()
+    );
     let dup = found_at(pptx, Some(Stage { current: 2, count: 3 }), "duplicate", Vec::new());
     assert_eq!(dup[0].commands[0].shortcut.as_deref(), Some("Ctrl+D"));
 }
@@ -179,7 +239,13 @@ fn slide_commands_are_listed_only_with_a_current_slide() {
 fn slide_commands_resolve_to_the_slide_editor() {
     let st = Some(Stage { current: 2, count: 3 });
     let p = Some(EditKind::Pptx);
-    assert_eq!(resolve_at(p, st, "Slides", "Duplicate slide", None), Run::Slide(SlideCmd::Duplicate));
-    assert_eq!(resolve_at(p, st, "Slides", "Delete slide", None), Run::Slide(SlideCmd::Delete));
+    assert_eq!(
+        resolve_at(p, st, "Slides", "Duplicate slide", None),
+        Run::Slide(SlideCmd::Duplicate)
+    );
+    assert_eq!(
+        resolve_at(p, st, "Slides", "Delete slide", None),
+        Run::Slide(SlideCmd::Delete)
+    );
     assert_eq!(resolve_at(p, None, "Slides", "Delete slide", None), Run::Unknown);
 }

@@ -69,8 +69,20 @@ fn runtime() -> Runtime<State> {
 /// Presses Save a copy on the open fixture file with `platform` and `saver`, then polls until the save ended.
 fn press(rt: &mut Runtime<State>, platform: Arc<FakePlatform>, saver: Arc<FakeSaver>) -> Option<String> {
     rt.update(|s, tx| {
-        assert!(viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::AUDIO));
-        assert!(save_with(s, tx, platform, saver, "id".into(), "take-3.m4a".into(), PathBuf::new()));
+        assert!(viewers::open_from(
+            s,
+            Box::new(FixtureViewerSource::new()),
+            board::AUDIO
+        ));
+        assert!(save_with(
+            s,
+            tx,
+            platform,
+            saver,
+            "id".into(),
+            "take-3.m4a".into(),
+            PathBuf::new()
+        ));
     });
     for _ in 0..400 {
         let mut ended = false;
@@ -94,7 +106,11 @@ fn viewer_save_asks_the_panel_with_the_files_name_and_writes_the_copy_there() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("take-3.m4a");
     let platform = Arc::new(FakePlatform::default());
-    platform.saves.lock().unwrap().push_back(SaveAnswer::Chosen(dest.clone()));
+    platform
+        .saves
+        .lock()
+        .unwrap()
+        .push_back(SaveAnswer::Chosen(dest.clone()));
     let saver = FakeSaver::new();
     let toast = press(&mut runtime(), platform.clone(), saver.clone());
     assert_eq!(platform.save_asks.lock().unwrap()[0].0, "take-3.m4a");
@@ -111,7 +127,11 @@ fn viewer_save_a_place_chosen_after_sign_out_writes_nothing() {
     // The session moved on while the panel was open.
     saver.turn.store(2, Ordering::SeqCst);
     let platform = FakePlatform::default();
-    platform.saves.lock().unwrap().push_back(SaveAnswer::Chosen(dest.clone()));
+    platform
+        .saves
+        .lock()
+        .unwrap()
+        .push_back(SaveAnswer::Chosen(dest.clone()));
     let end = ask_and_save(
         &platform,
         &*saver,
@@ -153,7 +173,11 @@ fn viewer_save_a_refused_copy_says_so_without_a_name_and_leaves_no_file() {
 fn viewer_save_takes_only_its_two_intents_and_without_an_engine_says_not_available() {
     let mut rt = runtime();
     rt.update(|s, tx| {
-        assert!(viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::AUDIO));
+        assert!(viewers::open_from(
+            s,
+            Box::new(FixtureViewerSource::new()),
+            board::AUDIO
+        ));
         assert!(!take(s, tx, Intent::Share));
         assert!(take(s, tx, Intent::SaveCopy));
         assert_eq!(viewers::ui(s).unwrap().toast.as_deref(), Some(NOT_AVAILABLE));
@@ -164,13 +188,29 @@ fn viewer_save_takes_only_its_two_intents_and_without_an_engine_says_not_availab
 fn viewer_save_the_shells_poll_hands_the_result_to_the_toast() {
     let dir = tempfile::tempdir().unwrap();
     let platform = Arc::new(FakePlatform::default());
-    platform.saves.lock().unwrap().push_back(SaveAnswer::Chosen(dir.path().join("p.m4a")));
+    platform
+        .saves
+        .lock()
+        .unwrap()
+        .push_back(SaveAnswer::Chosen(dir.path().join("p.m4a")));
     let saver = FakeSaver::new();
     let mut rt = runtime();
     super::super::intents::poll_drains_for_this_test();
     rt.update(|s, tx| {
-        assert!(viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::AUDIO));
-        assert!(save_with(s, tx, platform, saver, "id".into(), "p.m4a".into(), PathBuf::new()));
+        assert!(viewers::open_from(
+            s,
+            Box::new(FixtureViewerSource::new()),
+            board::AUDIO
+        ));
+        assert!(save_with(
+            s,
+            tx,
+            platform,
+            saver,
+            "id".into(),
+            "p.m4a".into(),
+            PathBuf::new()
+        ));
     });
     let mut toast = None;
     for _ in 0..400 {
@@ -222,8 +262,20 @@ fn viewer_save_says_how_far_the_copy_is_while_it_is_written_then_that_it_is_save
     let saver = Arc::new(Slow { go: Mutex::new(go) });
     let mut rt = runtime();
     rt.update(|s, tx| {
-        assert!(viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::AUDIO));
-        assert!(save_with(s, tx, platform, saver, "id".into(), "take-3.m4a".into(), PathBuf::new()));
+        assert!(viewers::open_from(
+            s,
+            Box::new(FixtureViewerSource::new()),
+            board::AUDIO
+        ));
+        assert!(save_with(
+            s,
+            tx,
+            platform,
+            saver,
+            "id".into(),
+            "take-3.m4a".into(),
+            PathBuf::new()
+        ));
     });
     let mut said = None;
     for _ in 0..400 {
@@ -236,7 +288,11 @@ fn viewer_save_says_how_far_the_copy_is_while_it_is_written_then_that_it_is_save
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert_eq!(said.as_deref(), Some("Saving a copy\u{2026} 30%"), "the viewer says how far it is");
+    assert_eq!(
+        said.as_deref(),
+        Some("Saving a copy\u{2026} 30%"),
+        "the viewer says how far it is"
+    );
     assert!(running());
     let_go.send(()).unwrap();
     for _ in 0..400 {

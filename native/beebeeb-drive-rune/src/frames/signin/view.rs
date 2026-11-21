@@ -537,7 +537,13 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
     }
     let status = if expired {
         let words = if ui.lost() { "Lost" } else { "Expired" };
-        row().child(crate::ui::pill::pill("status-pill", words, crate::ui::pill::Tone::Neutral, false, t))
+        row().child(crate::ui::pill::pill(
+            "status-pill",
+            words,
+            crate::ui::pill::Tone::Neutral,
+            false,
+            t,
+        ))
     } else {
         row()
             .gap(10.0)

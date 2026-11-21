@@ -265,13 +265,26 @@ fn a_point_of_the_column_is_a_point_of_a_page() {
     // A rectangle of a page is where `page_top` and the scale put it, and a page the file does not have is the last.
     let r = d.page_rect(&PageRect {
         page: 1,
-        rect: RectPt { x: 72.0, y: 96.0, w: 1.0, h: 14.0 },
+        rect: RectPt {
+            x: 72.0,
+            y: 96.0,
+            w: 1.0,
+            h: 14.0,
+        },
     });
-    assert!((r[0] - 72.0 * k).abs() < 0.01 && (r[1] - (d.page_top(2) + 96.0 * k)).abs() < 0.01, "{r:?}");
+    assert!(
+        (r[0] - 72.0 * k).abs() < 0.01 && (r[1] - (d.page_top(2) + 96.0 * k)).abs() < 0.01,
+        "{r:?}"
+    );
     assert!((r[2] - k).abs() < 0.01 && (r[3] - 14.0 * k).abs() < 0.01);
     let last = d.page_rect(&PageRect {
         page: 99,
-        rect: RectPt { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
+        rect: RectPt {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        },
     });
     assert!((last[1] - d.page_top(3)).abs() < 0.01);
 }

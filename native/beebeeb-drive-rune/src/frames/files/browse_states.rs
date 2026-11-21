@@ -14,10 +14,10 @@
 use crate::State;
 use crate::frames::global::source::Loading;
 use crate::source::DriveItem;
-use crate::ui::view_state::{ViewState, view_state};
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 use crate::ui::status_bar::{Dot, bar};
+use crate::ui::view_state::{ViewState, view_state};
 use rune::El;
 
 /// DW-1108 against DW-0101 and DW-0121 (the same state, two pictures on the board): offline, does
@@ -112,7 +112,11 @@ pub fn card(s: &State, t: &Theme) -> Option<El> {
     let words = match figure(&loading) {
         Some(figure) => format!(
             "Getting your files ready: {figure}{}",
-            loading.left.as_ref().map(|left| format!(" \u{00B7} {left} left")).unwrap_or_default()
+            loading
+                .left
+                .as_ref()
+                .map(|left| format!(" \u{00B7} {left} left"))
+                .unwrap_or_default()
         ),
         None => "Getting your files ready".to_string(),
     };

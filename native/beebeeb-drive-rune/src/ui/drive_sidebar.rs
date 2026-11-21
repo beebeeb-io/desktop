@@ -53,7 +53,13 @@ pub fn counts(s: &State) -> DriveCounts {
         // Another window: the engine's Trash figure once the server has said one (the Files source knows
         // none of its own, ux-55); never a sample.
         _ => {
-            trash = s.frames.trash.source.server_count().and_then(|n| some(n as u32)).or(trash);
+            trash = s
+                .frames
+                .trash
+                .source
+                .server_count()
+                .and_then(|n| some(n as u32))
+                .or(trash);
         }
     }
     DriveCounts {

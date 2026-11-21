@@ -107,8 +107,18 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         .focusable(true)
         .center()
         .on_press(|s: &mut State| s.account.late_change = None)
-        .child(kit::glyph("late-change-close-icon", &global_icons::CLOSE, 12.0, t.text_secondary));
-    let action = row().key("late-change-buttons").center_y().gap(3.0).child(show).child(dismiss);
+        .child(kit::glyph(
+            "late-change-close-icon",
+            &global_icons::CLOSE,
+            12.0,
+            t.text_secondary,
+        ));
+    let action = row()
+        .key("late-change-buttons")
+        .center_y()
+        .gap(3.0)
+        .child(show)
+        .child(dismiss);
     window.child(
         // One toast line above a toast's own place (`ui::toast::layer`: 42 pt): it stands until Show, so it never
         // covers a screen's own toast (Files' Undo, an account page's notice).

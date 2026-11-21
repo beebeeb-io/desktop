@@ -735,20 +735,25 @@ fn work(engine: &Arc<dyn PreviewsEngine>, run: &PreviewRun, job: Job) -> Option<
                 None
             }
         })),
-        Ask::Choose(picker) => Some(Answer::Chosen(match picker("Choose a photo to compare", std::path::Path::new("")) {
-            Ok(Some(picked)) => match engine.measure(session, Some(picked)) {
-                Ok(facts) => Measured::of(facts),
-                Err(why) => {
-                    log(format!("photo previews: the chosen photo was not measured ({})", why.kind()));
+        Ask::Choose(picker) => Some(Answer::Chosen(
+            match picker("Choose a photo to compare", std::path::Path::new("")) {
+                Ok(Some(picked)) => match engine.measure(session, Some(picked)) {
+                    Ok(facts) => Measured::of(facts),
+                    Err(why) => {
+                        log(format!(
+                            "photo previews: the chosen photo was not measured ({})",
+                            why.kind()
+                        ));
+                        None
+                    }
+                },
+                Ok(None) => None,
+                Err(_) => {
+                    log("photo previews: the photo picker did not open");
                     None
                 }
             },
-            Ok(None) => None,
-            Err(_) => {
-                log("photo previews: the photo picker did not open");
-                None
-            }
-        })),
+        )),
         Ask::Set(setting, then_run) => {
             let done = engine.set_setting(session, setting);
             match (&done, then_run) {

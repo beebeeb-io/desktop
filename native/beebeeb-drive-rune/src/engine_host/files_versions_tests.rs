@@ -654,7 +654,11 @@ fn a_version_with_fractions_of_a_second_still_shows_its_date_and_time() {
         size: 40_000,
         current: false,
     };
-    for at in ["2026-11-03T10:00:00.123456Z", "2026-11-03T10:00:00Z", "2026-11-03T10:00:00+00:00"] {
+    for at in [
+        "2026-11-03T10:00:00.123456Z",
+        "2026-11-03T10:00:00Z",
+        "2026-11-03T10:00:00+00:00",
+    ] {
         let when = shown(&entry(at)).when;
         assert!(
             when.contains("Nov 2026, ") && when.contains(':'),

@@ -22,8 +22,8 @@ use zeroize::{Zeroize, Zeroizing};
 use std::path::Path;
 
 use super::super::{
-    Confined, DocKind, DroppedPart, EditKind, EditOp, Edited, HitMode, OfficeHost, OfficeState, Purpose, Registry, RequestId,
-    Template, Timeouts, Wake, lock, open_mode, open_mode_held,
+    Confined, DocKind, DroppedPart, EditKind, EditOp, Edited, HitMode, OfficeHost, OfficeState, Purpose, Registry,
+    RequestId, Template, Timeouts, Wake, lock, open_mode, open_mode_held,
 };
 use super::restart::Cadence;
 use super::{Asked, Command, Doc, Out, Phase, Starter, Stop, Worker};
@@ -109,7 +109,10 @@ pub enum EditEvent {
     /// The helper died and a new one opened the last snapshot (`from_snapshot`; else the bytes the document was opened
     /// with), which is from `at`. Edits since then and the undo history are gone ([`super::restart::RESTORED_WORDS`]).
     /// Requests that were out got [`EditEvent::Failed`].
-    Restored { at: std::time::SystemTime, from_snapshot: bool },
+    Restored {
+        at: std::time::SystemTime,
+        from_snapshot: bool,
+    },
     /// The helper died twice within a minute: the document is open read-only now (`edit` calls are refused) and `copy`
     /// is the last snapshot to keep as a copy, when there is one ([`super::restart::READ_ONLY_WORDS`]).
     ReadOnly {
@@ -122,14 +125,22 @@ pub enum EditEvent {
 impl fmt::Debug for EditEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EditEvent::Edited { id, edited } => f.debug_struct("Edited").field("id", id).field("edited", edited).finish(),
+            EditEvent::Edited { id, edited } => f
+                .debug_struct("Edited")
+                .field("id", id)
+                .field("edited", edited)
+                .finish(),
             EditEvent::Clip { id, text, html } => f
                 .debug_struct("Clip")
                 .field("id", id)
                 .field("text_len", &text.len())
                 .field("html_len", &html.as_ref().map(String::len))
                 .finish(),
-            EditEvent::Layouts { id, names } => f.debug_struct("Layouts").field("id", id).field("names", &names.len()).finish(),
+            EditEvent::Layouts { id, names } => f
+                .debug_struct("Layouts")
+                .field("id", id)
+                .field("names", &names.len())
+                .finish(),
             EditEvent::Saved {
                 id,
                 purpose,
@@ -194,23 +205,41 @@ pub(crate) fn wipe_edit_event(event: &mut EditEvent) -> usize {
 /// What the window asked of an editing session.
 pub(crate) enum EditCommand {
     /// `Edit`, `Hit`, `Copy` or `Layouts`.
-    Send { id: RequestId, message: Message },
+    Send {
+        id: RequestId,
+        message: Message,
+    },
     Image {
         id: RequestId,
         bytes: Zeroizing<Vec<u8>>,
         png: bool,
     },
-    Save { id: RequestId, purpose: Purpose },
+    Save {
+        id: RequestId,
+        purpose: Purpose,
+    },
 }
 
 /// An editing request out: what its answer must be.
 pub(crate) enum EditAsked<T> {
-    Op { id: RequestId },
-    Copy { id: RequestId },
-    Layouts { id: RequestId },
+    Op {
+        id: RequestId,
+    },
+    Copy {
+        id: RequestId,
+    },
+    Layouts {
+        id: RequestId,
+    },
     /// The image's section stays until the helper answered.
-    Image { id: RequestId, section: T },
-    SaveSize { id: RequestId, purpose: Purpose },
+    Image {
+        id: RequestId,
+        section: T,
+    },
+    SaveSize {
+        id: RequestId,
+        purpose: Purpose,
+    },
     SaveInto {
         id: RequestId,
         purpose: Purpose,
@@ -471,7 +500,9 @@ impl<S: Starter> Worker<S> {
     }
 
     pub(super) fn editable(&self) -> bool {
-        !matches!(self.mode, Mode::View) && matches!(self.phase, Phase::Pages { .. } | Phase::Sheets) && self.run.is_some()
+        !matches!(self.mode, Mode::View)
+            && matches!(self.phase, Phase::Pages { .. } | Phase::Sheets)
+            && self.run.is_some()
     }
 
     /// A request of the window. While a save is out it waits (in order); out of an open editing session it is dropped.
@@ -480,7 +511,13 @@ impl<S: Starter> Worker<S> {
             return;
         }
         if matches!(&command, EditCommand::Image { .. })
-            || matches!(&command, EditCommand::Send { message: Message::Edit(_), .. })
+            || matches!(
+                &command,
+                EditCommand::Send {
+                    message: Message::Edit(_),
+                    ..
+                }
+            )
         {
             self.note_edit();
         }

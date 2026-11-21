@@ -69,7 +69,13 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 let mut trailing = row().key(format!("item-{l}-{i}-when")).center_y().gap(8.0);
                 let mut name = a.title.clone();
                 if a.new {
-                    trailing = trailing.child(crate::ui::pill::pill(&format!("pill-{}", pills), "New", crate::ui::pill::Tone::Neutral, true, t));
+                    trailing = trailing.child(crate::ui::pill::pill(
+                        &format!("pill-{}", pills),
+                        "New",
+                        crate::ui::pill::Tone::Neutral,
+                        true,
+                        t,
+                    ));
                     pills += 1;
                     name = format!("New. {name}");
                 }

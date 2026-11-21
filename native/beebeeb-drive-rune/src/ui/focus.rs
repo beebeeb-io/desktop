@@ -58,14 +58,15 @@ pub fn pane(el: El, key: &'static str) -> El {
         }
     }
     LAST.with(|l| *l.borrow_mut() = panes.clone());
-    el.key(key).on_key(move |_: &mut crate::State, ev: &KeyEvent, tx: &mut Tx| {
-        let Some(back) = f6(ev) else { return false };
-        let list = panes.borrow();
-        if let Some(to) = step(&list, Some(key), back) {
-            tx.focus(to, true);
-        }
-        true
-    })
+    el.key(key)
+        .on_key(move |_: &mut crate::State, ev: &KeyEvent, tx: &mut Tx| {
+            let Some(back) = f6(ev) else { return false };
+            let list = panes.borrow();
+            if let Some(to) = step(&list, Some(key), back) {
+                tx.focus(to, true);
+            }
+            true
+        })
 }
 
 /// The pane after (`back`: before) `from`, wrapping; from none, the first (`back`: the last).
@@ -146,7 +147,13 @@ mod tests {
     }
 
     fn key(rt: &mut Runtime<crate::State>, key: Key, shift: bool) {
-        rt.key(KeyEvent { key, mods: Mods { shift, ..Mods::default() } });
+        rt.key(KeyEvent {
+            key,
+            mods: Mods {
+                shift,
+                ..Mods::default()
+            },
+        });
         rt.frame(0.0);
         rt.settle_all();
         rt.frame(0.0);
@@ -154,7 +161,10 @@ mod tests {
 
     #[test]
     fn f6_walks_the_files_window_panes_in_order_and_shift_f6_walks_back() {
-        let env = Env { system_dark: false, scale: 2.0 };
+        let env = Env {
+            system_dark: false,
+            scale: 2.0,
+        };
         let mut rt = Runtime::new(crate::init(), files, (800.0, 600.0), env);
         // Nothing focused: the app's key handler hears F6 (the shell's arm in `shell/host.rs`).
         rt.on_key = Some(|_, ev, tx| cycle(ev, tx));
@@ -178,7 +188,10 @@ mod tests {
         rt.frame(0.0);
         key(&mut rt, Key::Function(6), false);
         assert_eq!(focused(&rt).as_deref(), Some("side-1"));
-        assert!(rt.elements().into_iter().any(|e| e.focused && e.focus_visible), "with the ring");
+        assert!(
+            rt.elements().into_iter().any(|e| e.focused && e.focus_visible),
+            "with the ring"
+        );
     }
 
     fn view(_: &(), cx: &mut Cx<()>) -> El {
@@ -186,19 +199,29 @@ mod tests {
         // A control that names no ring, and one that names the shared one.
         col()
             .child(el().key("bare").size(40.0, 20.0).focusable(true))
-            .child(apply(el().key("named").size(40.0, 20.0).focusable(true), tokens::theme(false).accent_deep))
+            .child(apply(
+                el().key("named").size(40.0, 20.0).focusable(true),
+                tokens::theme(false).accent_deep,
+            ))
     }
 
     #[test]
     fn a_control_with_no_ring_of_its_own_shows_focus_from_the_keyboard_as_a_named_one_does() {
-        let env = Env { system_dark: false, scale: 2.0 };
+        let env = Env {
+            system_dark: false,
+            scale: 2.0,
+        };
         let mut rt = Runtime::new((), view, (200.0, 100.0), env);
         for key in ["bare", "named"] {
             rt.update(move |_, tx| tx.focus(key, true));
             rt.frame(0.0);
             rt.settle_all();
             rt.frame(0.0);
-            let e = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).expect(key);
+            let e = rt
+                .elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(key))
+                .expect(key);
             assert!(e.focused && e.focus_visible, "{key}: the ring shows");
         }
     }

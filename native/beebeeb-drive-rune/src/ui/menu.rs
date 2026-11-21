@@ -260,7 +260,19 @@ pub fn menu_sized(
     hover: fn(&mut State, usize),
     close: fn(&mut State, &mut Tx),
 ) -> El {
-    surface(true, key, name, width, entries, hot, item_h(size), t, pick, hover, close)
+    surface(
+        true,
+        key,
+        name,
+        width,
+        entries,
+        hot,
+        item_h(size),
+        t,
+        pick,
+        hover,
+        close,
+    )
 }
 
 /// A menu that opens beside another one (Sort by's choices): the same surface, not modal itself. It is

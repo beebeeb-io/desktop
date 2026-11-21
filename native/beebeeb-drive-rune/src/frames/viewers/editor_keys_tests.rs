@@ -3,8 +3,8 @@ use rune::{Key, KeyEvent, Mods};
 
 use rune::{Env, Runtime};
 
-use super::source::{Body, Details, MdDoc, OpenError, OpenFile, TextDoc, ViewerSource, plain_lines};
 use super::open_from;
+use super::source::{Body, Details, MdDoc, OpenError, OpenFile, TextDoc, ViewerSource, plain_lines};
 use crate::{State, init, view};
 
 /// A source that opens one invented file and can save it.
@@ -76,10 +76,12 @@ fn editing(name: &str, text: &str) -> Runtime<State> {
     rt.frame(0.0);
     rt.settle_all();
     rt.frame(0.0);
-    assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some(), "Ctrl+E opens the editor");
+    assert!(
+        rt.state.viewer.ui.as_ref().unwrap().editor.is_some(),
+        "Ctrl+E opens the editor"
+    );
     rt
 }
-
 
 fn press(rt: &mut rune::Runtime<crate::State>, key: Key, mods: Mods) {
     rt.key(KeyEvent { key, mods });
@@ -87,11 +89,24 @@ fn press(rt: &mut rune::Runtime<crate::State>, key: Key, mods: Mods) {
 }
 
 fn ctrl() -> Mods {
-    Mods { cmd: true, ..Mods::default() }
+    Mods {
+        cmd: true,
+        ..Mods::default()
+    }
 }
 
 fn text(rt: &rune::Runtime<crate::State>) -> String {
-    rt.state.viewer.ui.as_ref().unwrap().editor.as_ref().unwrap().edit.text.clone()
+    rt.state
+        .viewer
+        .ui
+        .as_ref()
+        .unwrap()
+        .editor
+        .as_ref()
+        .unwrap()
+        .edit
+        .text
+        .clone()
 }
 
 fn edit_mut(rt: &mut rune::Runtime<crate::State>) -> &mut rune::TextEdit {
@@ -124,7 +139,14 @@ fn editor_keys_tab_indents_selected_lines_and_shift_tab_undoes() {
     edit_mut(&mut rt).set_selection(0, end);
     press(&mut rt, Key::Tab, Mods::default());
     assert_eq!(text(&rt), "\t\ta\n\t\tb\n\t\tc\n");
-    press(&mut rt, Key::Tab, Mods { shift: true, ..Mods::default() });
+    press(
+        &mut rt,
+        Key::Tab,
+        Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    );
     assert_eq!(text(&rt), src);
 }
 

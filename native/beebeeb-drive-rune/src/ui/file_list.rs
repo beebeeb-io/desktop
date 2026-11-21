@@ -18,8 +18,8 @@ use rune::{Align, Color, Cx, El, Icon, col, el, row};
 use std::borrow::Cow;
 
 use super::file_row::{self, Column, RowLook, Width};
-use super::view_state::{ViewState, try_again, view_state};
 use super::kit;
+use super::view_state::{ViewState, try_again, view_state};
 
 /// `.mk-row { height: 30px }`
 pub const ROW_H: f32 = file_row::ROW_H;
@@ -34,7 +34,9 @@ pub const COLUMNS: [Column; 5] = [
     Column::new("date", "Date changed", Width::Fixed(COL_DATE_W)),
     Column::new("size", "Size", Width::Fixed(COL_SIZE_W)).align(Align::End),
     Column::new("shared", "Shared", Width::Fixed(COL_SHARED_W)),
-    Column::new("pc", "PC", Width::Fixed(COL_PC_W)).align(Align::Center).spoken("On this PC"),
+    Column::new("pc", "PC", Width::Fixed(COL_PC_W))
+        .align(Align::Center)
+        .spoken("On this PC"),
 ];
 
 /// Where an item is, in the PC column.
@@ -240,17 +242,34 @@ pub fn file_row(i: usize, item: &DriveItem, selected: bool, t: &Theme) -> El {
     }
 
     let cells = vec![
-        kit::label(format!("{k}-date"), format_date(&item.modified_at), type_::META_MONO, meta)
-            .w(COL_DATE_W)
-            .truncate(),
+        kit::label(
+            format!("{k}-date"),
+            format_date(&item.modified_at),
+            type_::META_MONO,
+            meta,
+        )
+        .w(COL_DATE_W)
+        .truncate(),
         kit::label(format!("{k}-size"), size_text, type_::META_MONO, meta)
             .w(COL_SIZE_W)
             .align(Align::End),
         shared_cell(&k, item, meta, surface, t),
         pc,
     ];
-    let look = RowLook { selected, ..RowLook::default() };
-    file_row::row_with(&k, &item.name, file_tile(&k, item, t), &item.name, marks, cells, look, t)
+    let look = RowLook {
+        selected,
+        ..RowLook::default()
+    };
+    file_row::row_with(
+        &k,
+        &item.name,
+        file_tile(&k, item, t),
+        &item.name,
+        marks,
+        cells,
+        look,
+        t,
+    )
 }
 
 /// The Shared column: who it is shared with, "Link", or a dash.

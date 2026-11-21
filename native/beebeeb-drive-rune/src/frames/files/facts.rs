@@ -197,7 +197,13 @@ fn version_row(index: usize, button: usize, item: &DriveItem, v: &Version, t: &T
             .child(kit::label(format!("{key}-sub"), sub, SUB, t.text_tertiary).truncate()),
     );
     if v.current {
-        r.child(crate::ui::pill::pill(&format!("{key}-pill"), "Current", crate::ui::pill::Tone::Neutral, false, t))
+        r.child(crate::ui::pill::pill(
+            &format!("{key}-pill"),
+            "Current",
+            crate::ui::pill::Tone::Neutral,
+            false,
+            t,
+        ))
     } else {
         let id = v.id.clone();
         r.child(

@@ -1011,7 +1011,11 @@ fn what_session_does_not_handle_goes_to_one_route_per_feature() {
     rt.frame(0.0);
     rt.frame(0.0);
     assert_eq!(super::super::route::reached(), ["route_items"]);
-    assert_ne!(rt.state.photos.toast, Some(Toast::NotYet), "Duplicate is built: no \"not yet\"");
+    assert_ne!(
+        rt.state.photos.toast,
+        Some(Toast::NotYet),
+        "Duplicate is built: no \"not yet\""
+    );
 
     // The tab is no longer reset inside session.rs: the route for the original owns it.
     super::super::route::reached_clear();
@@ -1036,5 +1040,8 @@ fn a_failed_library_shows_why_and_try_again_asks_again() {
     assert!(has(&rt, "ph-not-here-text") && has(&rt, "ph-not-here-retry"));
     let before = script.lock().unwrap().refreshed;
     click(&mut rt, "ph-not-here-retry");
-    assert!(script.lock().unwrap().refreshed > before, "Try again reads the library again");
+    assert!(
+        script.lock().unwrap().refreshed > before,
+        "Try again reads the library again"
+    );
 }

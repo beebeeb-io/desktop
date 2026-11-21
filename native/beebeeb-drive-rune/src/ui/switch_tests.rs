@@ -11,11 +11,17 @@ struct Page {
 }
 
 fn view(p: &Page, _: &mut Cx<Page>) -> El {
-    rune::row().px(20.0).pt(20.0).child(switch("s", "Sync", p.on, p.enabled, &theme(false)))
+    rune::row()
+        .px(20.0)
+        .pt(20.0)
+        .child(switch("s", "Sync", p.on, p.enabled, &theme(false)))
 }
 
 fn render(on: bool, enabled: bool) -> Runtime<Page> {
-    let env = Env { system_dark: false, scale: 2.0 };
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
     let mut rt = Runtime::new(Page { on, enabled }, view, (300.0, 100.0), env);
     rt.frame(0.0);
     rt.settle_all();
@@ -24,7 +30,9 @@ fn render(on: bool, enabled: bool) -> Runtime<Page> {
 }
 
 fn find(rt: &Runtime<Page>, key: &str) -> Option<ElementInfo> {
-    rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
 fn close(a: Color, b: Color) -> bool {
@@ -41,7 +49,10 @@ fn role_label_checked_and_theme_colours() {
         assert_eq!(s.label.as_deref(), Some("Sync"));
         assert!(s.focusable);
         let track = find(&rt, "s-track").expect("track");
-        assert!(close(track.fill, if on { t.selection } else { t.paper3 }), "on={on}: track");
+        assert!(
+            close(track.fill, if on { t.selection } else { t.paper3 }),
+            "on={on}: track"
+        );
         let knob = find(&rt, "s-knob").expect("knob");
         assert!(close(knob.fill, t.white), "knob is white");
         let l = find(&rt, "s-label").expect("label");
@@ -61,12 +72,30 @@ fn disabled_takes_no_focus_and_is_half_visible() {
 
 fn render_sized(size: Size) -> Runtime<Page> {
     fn v(p: &Page, _: &mut Cx<Page>) -> El {
-        rune::row().px(20.0).pt(20.0).child(switch_sized("set-x", "Sync", p.on, p.enabled, SIZE.with(|s| s.get()), &theme(false)))
+        rune::row().px(20.0).pt(20.0).child(switch_sized(
+            "set-x",
+            "Sync",
+            p.on,
+            p.enabled,
+            SIZE.with(|s| s.get()),
+            &theme(false),
+        ))
     }
     thread_local!(static SIZE: std::cell::Cell<Size> = const { std::cell::Cell::new(Size::Md) });
     SIZE.with(|s| s.set(size));
-    let env = Env { system_dark: false, scale: 2.0 };
-    let mut rt = Runtime::new(Page { on: true, enabled: true }, v, (300.0, 100.0), env);
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(
+        Page {
+            on: true,
+            enabled: true,
+        },
+        v,
+        (300.0, 100.0),
+        env,
+    );
     rt.frame(0.0);
     rt.settle_all();
     rt.frame(0.0);

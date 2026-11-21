@@ -133,13 +133,7 @@ pub fn modal<S: 'static>(top: f32, card: El, dismiss: impl Fn(&mut S) + 'static,
 /// [`modal`] that hands focus to the control keyed `opener` as it closes (Esc, a button), for
 /// an opener that is gone by then: a menu's row, a toolbar overflow item. An opener that stays
 /// gets focus back from [`modal`] alone.
-pub fn modal_from<S: 'static>(
-    top: f32,
-    card: El,
-    opener: &str,
-    dismiss: impl Fn(&mut S) + 'static,
-    t: &Theme,
-) -> El {
+pub fn modal_from<S: 'static>(top: f32, card: El, opener: &str, dismiss: impl Fn(&mut S) + 'static, t: &Theme) -> El {
     modal(top, card, dismiss, t).focus_return(opener)
 }
 

@@ -4,9 +4,9 @@
 //! notes.
 
 use std::cell::Cell;
+use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 

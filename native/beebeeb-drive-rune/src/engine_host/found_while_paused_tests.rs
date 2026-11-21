@@ -10,7 +10,8 @@ use beebeeb_engine::found_while_paused::{KeepResult, Review};
 use super::{Decisions, FoundWhilePausedSource};
 use crate::frames::this_pc::found_while_paused::{Action, Card, Held, Kept};
 
-const NOT_YOURS: &str = "Beebeeb couldn’t confirm these files belong to the account you’re signed in to, so nothing was changed.";
+const NOT_YOURS: &str =
+    "Beebeeb couldn’t confirm these files belong to the account you’re signed in to, so nothing was changed.";
 
 fn turn_of(n: u64) -> SessionGeneration {
     SessionGeneration::for_test(n)
@@ -59,7 +60,11 @@ impl Decisions for Double {
         turn_of(*self.turn.lock().unwrap())
     }
     fn review(&self, turn: SessionGeneration) -> Result<Review, String> {
-        self.asked.lock().unwrap().reviews.push(if turn == turn_of(7) { 7 } else { 0 });
+        self.asked
+            .lock()
+            .unwrap()
+            .reviews
+            .push(if turn == turn_of(7) { 7 } else { 0 });
         self.review.lock().unwrap().clone()
     }
     fn upload(&self, turn: SessionGeneration, op_ids: &[String]) -> Result<usize, String> {
@@ -107,9 +112,15 @@ fn read(engine: &Arc<Double>) -> FoundWhilePausedSource<Double> {
 #[test]
 fn a_card_with_nothing_held_is_not_drawn() {
     assert!(!Card::default().visible(), "a shipped build draws no sample card");
-    let empty = Card { held: Some(Held::default()), ..Card::default() };
+    let empty = Card {
+        held: Some(Held::default()),
+        ..Card::default()
+    };
     assert!(!empty.visible());
-    assert!(crate::frames::this_pc::found_while_paused::view(&empty, |_, _| {}, &crate::theme::tokens::theme(false)).is_none());
+    assert!(
+        crate::frames::this_pc::found_while_paused::view(&empty, |_, _| {}, &crate::theme::tokens::theme(false))
+            .is_none()
+    );
 }
 
 #[test]
@@ -135,13 +146,22 @@ fn the_card_says_what_was_found_in_counts_and_never_a_name() {
         "That folder is inside Dropbox, which may copy them to its own cloud."
     );
     assert!(card.can_decide());
-    assert!(crate::frames::this_pc::found_while_paused::view(&card, |_, _| {}, &crate::theme::tokens::theme(true)).is_some());
+    assert!(
+        crate::frames::this_pc::found_while_paused::view(&card, |_, _| {}, &crate::theme::tokens::theme(true))
+            .is_some()
+    );
 }
 
 #[test]
 fn what_a_keep_did_is_said_in_counts() {
     let card = Card {
-        kept: Some(Kept { moved_items: 1, moved_files: 4, not_moved: 2, stays_held: 1, synced_by: None }),
+        kept: Some(Kept {
+            moved_items: 1,
+            moved_files: 4,
+            not_moved: 2,
+            stays_held: 1,
+            synced_by: None,
+        }),
         ..Card::default()
     };
     assert_eq!(
@@ -161,7 +181,10 @@ fn upload_asks_the_engine_for_exactly_the_reviewed_ids_under_the_turn_it_was_rea
     assert!(!source.upload(), "one action at a time");
     settle(&mut source, |c| c.busy.is_none());
     let asked = engine.asked.lock().unwrap();
-    assert_eq!(asked.uploads, vec![(turn_of(7), vec!["op-1".to_string(), "op-2".to_string()])]);
+    assert_eq!(
+        asked.uploads,
+        vec![(turn_of(7), vec!["op-1".to_string(), "op-2".to_string()])]
+    );
     assert!(asked.keeps.is_empty());
 }
 
@@ -185,7 +208,10 @@ fn keep_asks_for_the_same_ids_and_shows_what_moved() {
     let mut source = read(&engine);
     assert!(source.keep());
     settle(&mut source, |c| c.busy.is_none() && c.kept.is_some());
-    assert_eq!(engine.asked.lock().unwrap().keeps, vec![(turn_of(7), vec!["op-9".to_string()])]);
+    assert_eq!(
+        engine.asked.lock().unwrap().keeps,
+        vec![(turn_of(7), vec!["op-9".to_string()])]
+    );
     assert!(engine.asked.lock().unwrap().uploads.is_empty(), "a keep never uploads");
     assert_eq!(source.card.kept.as_ref().unwrap().moved_items, 2);
     assert!(source.card.can_show());

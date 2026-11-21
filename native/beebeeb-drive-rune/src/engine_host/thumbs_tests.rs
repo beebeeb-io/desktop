@@ -312,3 +312,69 @@ fn what_cannot_get_better_by_waiting_owes_no_redraw() {
     assert!(matches!(inner.held.get(&key(6)), Some(Held::Picture { .. })));
     assert!(!inner.retry_pending());
 }
+
+mod local_decode {
+    use std::io::{Cursor, Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    use beebeeb_media_protocol::image::{ImageAnswer, ImageRefusal};
+    use beebeeb_media_protocol::write_msg;
+
+    use crate::engine_host::media::decode_over;
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn answer(a: &ImageAnswer) -> Box<dyn Read + Send> {
+        let mut out = Vec::new();
+        write_msg(&mut out, a).unwrap();
+        Box::new(Cursor::new(out))
+    }
+
+    #[test]
+    fn pixels_of_the_asked_size_come_back() {
+        let rgba = vec![7u8; 2 * 2 * 4];
+        let from = answer(&ImageAnswer::Pixels {
+            width: 2,
+            height: 2,
+            rgba: rgba.clone(),
+        });
+        let got = decode_over(from, Box::new(Sink::default()), b"pic", 512).unwrap();
+        assert_eq!((got.width, got.height, got.rgba.to_vec()), (2, 2, rgba));
+    }
+
+    #[test]
+    fn a_picture_over_what_was_asked_is_refused() {
+        let from = answer(&ImageAnswer::Pixels {
+            width: 8,
+            height: 2,
+            rgba: vec![0; 64],
+        });
+        assert!(matches!(
+            decode_over(from, Box::new(Sink::default()), b"pic", 4),
+            Err(ImageRefusal::Damaged)
+        ));
+    }
+
+    #[test]
+    fn a_refusal_is_passed_on_and_no_helper_means_no_decoder() {
+        let from = answer(&ImageAnswer::Refused(ImageRefusal::NoDecoder));
+        assert!(matches!(
+            decode_over(from, Box::new(Sink::default()), b"pic", 64),
+            Err(ImageRefusal::NoDecoder)
+        ));
+        assert!(matches!(
+            crate::engine_host::media::decode_picture(b"x", 64),
+            Err(ImageRefusal::NoDecoder)
+        ));
+    }
+}

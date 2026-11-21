@@ -67,9 +67,9 @@ fn mortal_slow(delay_ms: u64) -> Fake {
                 Message::SaveSize(_) => {
                     std::thread::sleep(Duration::from_millis(delay_ms));
                     Message::SaveReady(office::SaveReady {
-                    token: 7,
-                    len: SNAPSHOT_LEN,
-                    revision,
+                        token: 7,
+                        len: SNAPSHOT_LEN,
+                        revision,
                     })
                 }
                 Message::SaveInto(into) => {
@@ -126,12 +126,22 @@ fn wait_events(host: &mut OfficeHost, got: &mut Vec<EditEvent>, want: impl Fn(&[
 
 fn snapshots(got: &[EditEvent]) -> usize {
     got.iter()
-        .filter(|event| matches!(event, EditEvent::Saved { purpose: Purpose::Snapshot, .. }))
+        .filter(|event| {
+            matches!(
+                event,
+                EditEvent::Saved {
+                    purpose: Purpose::Snapshot,
+                    ..
+                }
+            )
+        })
         .count()
 }
 
 fn restored(got: &[EditEvent]) -> usize {
-    got.iter().filter(|event| matches!(event, EditEvent::Restored { .. })).count()
+    got.iter()
+        .filter(|event| matches!(event, EditEvent::Restored { .. }))
+        .count()
 }
 
 fn save_sizes_asked(log: &Log) -> usize {
@@ -155,14 +165,18 @@ fn a_killed_helper_restarts_from_the_snapshot_and_says_restored_once() {
     let mut got = Vec::new();
 
     host.edit(EditOp::InsertText("a".to_owned())).expect("sent");
-    assert!(wait_events(&mut host, &mut got, |got| snapshots(got) == 1), "a snapshot after idle: {got:?}");
+    assert!(
+        wait_events(&mut host, &mut got, |got| snapshots(got) == 1),
+        "a snapshot after idle: {got:?}"
+    );
     let doc_len = doc().len();
     assert_eq!(sections(&log), vec![doc_len, SNAPSHOT_LEN as usize]);
 
     let dying = host.edit(die()).expect("sent");
     assert!(wait_events(&mut host, &mut got, |got| restored(got) == 1), "{got:?}");
     assert!(
-        got.iter().any(|event| matches!(event, EditEvent::Failed { id, .. } if *id == dying)),
+        got.iter()
+            .any(|event| matches!(event, EditEvent::Failed { id, .. } if *id == dying)),
         "the request that was out is answered: {got:?}"
     );
     assert_eq!(log.starts(), 2);
@@ -174,11 +188,18 @@ fn a_killed_helper_restarts_from_the_snapshot_and_says_restored_once() {
     );
     assert!(matches!(
         got.iter().find(|event| matches!(event, EditEvent::Restored { .. })),
-        Some(EditEvent::Restored { from_snapshot: true, .. })
+        Some(EditEvent::Restored {
+            from_snapshot: true,
+            ..
+        })
     ));
     assert!(!host.read_only());
     // The session goes on, and nothing says Restored a second time.
-    assert!(matches!(host.state(), OfficeState::Pages { pages: 1, .. }), "{:?}", host.state());
+    assert!(
+        matches!(host.state(), OfficeState::Pages { pages: 1, .. }),
+        "{:?}",
+        host.state()
+    );
     host.edit(EditOp::SelectAll).expect("editing works again");
     std::thread::sleep(Duration::from_millis(100));
     let _ = host.poll();
@@ -200,7 +221,10 @@ fn without_a_snapshot_the_restart_opens_the_opened_bytes() {
     assert_eq!(sections(&log), vec![doc().len(), doc().len()]);
     assert!(matches!(
         got.iter().find(|event| matches!(event, EditEvent::Restored { .. })),
-        Some(EditEvent::Restored { from_snapshot: false, .. })
+        Some(EditEvent::Restored {
+            from_snapshot: false,
+            ..
+        })
     ));
 }
 
@@ -218,9 +242,12 @@ fn two_kills_within_the_window_open_it_read_only_and_offer_the_snapshot() {
     assert!(wait_events(&mut host, &mut got, |got| restored(got) == 1), "{got:?}");
     // `Restored` comes after the new helper opened: editing works again.
     host.edit(die()).expect("sent");
-    assert!(wait_events(&mut host, &mut got, |got| {
-        got.iter().any(|event| matches!(event, EditEvent::ReadOnly { .. }))
-    }), "{got:?}");
+    assert!(
+        wait_events(&mut host, &mut got, |got| {
+            got.iter().any(|event| matches!(event, EditEvent::ReadOnly { .. }))
+        }),
+        "{got:?}"
+    );
 
     assert_eq!(restored(&got), 1, "Restored once, then read-only: {got:?}");
     match got.iter().find(|event| matches!(event, EditEvent::ReadOnly { .. })) {
@@ -291,7 +318,12 @@ fn steady_typing_still_snapshots_every_so_often() {
         let _ = host.poll();
         got.extend(host.poll_edit());
     }
-    assert!(snapshots(&got) >= 2, "{} edits, snapshots: {}", typing.load(SeqCst), snapshots(&got));
+    assert!(
+        snapshots(&got) >= 2,
+        "{} edits, snapshots: {}",
+        typing.load(SeqCst),
+        snapshots(&got)
+    );
 }
 
 // ---- the lock's flush (`flush_all_in`): unsaved work is sealed on the worker's thread before the session ends ----
@@ -313,8 +345,15 @@ fn a_lock_seals_what_was_typed_before_any_timer_fired() {
 
     let began = std::time::Instant::now();
     flush_all_in(&registry, Duration::from_secs(2));
-    assert!(began.elapsed() < Duration::from_secs(2), "the flush answered, it did not run to its bound");
-    assert_eq!(&*kept.lock().unwrap(), &vec![vec![0x5a; SNAPSHOT_LEN as usize]], "one sealed snapshot of the latest text");
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "the flush answered, it did not run to its bound"
+    );
+    assert_eq!(
+        &*kept.lock().unwrap(),
+        &vec![vec![0x5a; SNAPSHOT_LEN as usize]],
+        "one sealed snapshot of the latest text"
+    );
 }
 
 #[test]
@@ -330,9 +369,9 @@ fn a_lock_seals_nothing_when_nothing_is_unsaved() {
     let id = host.save_bytes(Purpose::Save).expect("sent");
     let mut got = Vec::new();
     assert!(
-        wait_events(&mut host, &mut got, |got| got
-            .iter()
-            .any(|e| matches!(e, EditEvent::Saved { id: got_id, purpose: Purpose::Save, .. } if *got_id == id))),
+        wait_events(&mut host, &mut got, |got| got.iter().any(
+            |e| matches!(e, EditEvent::Saved { id: got_id, purpose: Purpose::Save, .. } if *got_id == id)
+        )),
         "{got:?}"
     );
     flush_all_in(&registry, Duration::from_secs(1));
@@ -362,7 +401,10 @@ fn a_helper_that_does_not_answer_never_holds_the_lock_past_its_bound() {
     let began = std::time::Instant::now();
     flush_all_in(&registry, Duration::from_millis(300));
     let took = began.elapsed();
-    assert!(took >= Duration::from_millis(300) && took < Duration::from_millis(1_500), "bounded: {took:?}");
+    assert!(
+        took >= Duration::from_millis(300) && took < Duration::from_millis(1_500),
+        "bounded: {took:?}"
+    );
     assert!(kept.lock().unwrap().is_empty());
 }
 
@@ -383,13 +425,28 @@ fn a_screen_lock_returns_at_once_then_seals_the_last_text_and_closes_the_helper(
 
     let began = std::time::Instant::now();
     let run = screen_lock_begin_in(registry, Duration::from_secs(3));
-    assert!(began.elapsed() < Duration::from_millis(100), "the lock does not wait for the seal: {:?}", began.elapsed());
-    assert!(kept.lock().unwrap().is_empty(), "not sealed yet when the lock call returned");
-    assert_ne!(host.state(), OfficeState::Closed(CloseWhy::Locked), "the helper is still there for the seal");
+    assert!(
+        began.elapsed() < Duration::from_millis(100),
+        "the lock does not wait for the seal: {:?}",
+        began.elapsed()
+    );
+    assert!(
+        kept.lock().unwrap().is_empty(),
+        "not sealed yet when the lock call returned"
+    );
+    assert_ne!(
+        host.state(),
+        OfficeState::Closed(CloseWhy::Locked),
+        "the helper is still there for the seal"
+    );
 
     run.finish();
     assert_eq!(kept.lock().unwrap().len(), 1, "one sealed snapshot of the latest text");
-    assert_eq!(host.state(), OfficeState::Closed(CloseWhy::Locked), "then the helper is closed");
+    assert_eq!(
+        host.state(),
+        OfficeState::Closed(CloseWhy::Locked),
+        "then the helper is closed"
+    );
 }
 
 #[test]
@@ -402,10 +459,18 @@ fn the_shells_close_during_a_screen_lock_flush_waits_for_the_seal() {
     let run = screen_lock_begin_in(registry, Duration::from_secs(2));
     // The shell's poll sees the gate leave Ready and ends the session: it must not kill the helper mid-seal.
     end_session_in(registry, CloseWhy::SignedOut);
-    assert_ne!(host.state(), OfficeState::Closed(CloseWhy::SignedOut), "deferred, not killed");
+    assert_ne!(
+        host.state(),
+        OfficeState::Closed(CloseWhy::SignedOut),
+        "deferred, not killed"
+    );
     run.finish();
     assert_eq!(kept.lock().unwrap().len(), 1, "the seal landed first");
-    assert_eq!(host.state(), OfficeState::Closed(CloseWhy::SignedOut), "the shell's reason stands");
+    assert_eq!(
+        host.state(),
+        OfficeState::Closed(CloseWhy::SignedOut),
+        "the shell's reason stands"
+    );
     // With no flush running, the shell's close is immediate again.
     let mut again = start(mortal(), cadence(30_000, 30_000, 60_000), registry);
     end_session_in(registry, CloseWhy::Locked);
@@ -429,12 +494,17 @@ fn a_save_after_a_restart_answers_with_the_documents_bytes() {
     assert!(wait_events(&mut host, &mut got, |got| snapshots(got) == 1));
     host.edit(die()).expect("sent");
     assert!(wait_events(&mut host, &mut got, |got| restored(got) == 1), "{got:?}");
-    let id = host.save_bytes(Purpose::Save).expect("the restarted session takes a save");
+    let id = host
+        .save_bytes(Purpose::Save)
+        .expect("the restarted session takes a save");
     assert!(
         wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1),
         "the save is answered: {got:?}"
     );
-    assert!(got.iter().any(|event| matches!(event, EditEvent::Saved { id: i, purpose: Purpose::Save, .. } if *i == id)));
+    assert!(
+        got.iter()
+            .any(|event| matches!(event, EditEvent::Saved { id: i, purpose: Purpose::Save, .. } if *i == id))
+    );
 }
 
 /// A helper that serves an editing session; the first helper started exits at its `exit_at`'th message (0: never),
@@ -493,12 +563,20 @@ fn a_helper_killed_while_the_document_opens_is_started_again_from_the_opened_byt
     );
     let mut events = Vec::new();
     assert!(until_open(&mut host, &mut events), "{:?}", host.state());
-    assert!(matches!(host.state(), OfficeState::Pages { .. }), "opened on the second helper: {:?}", host.state());
+    assert!(
+        matches!(host.state(), OfficeState::Pages { .. }),
+        "opened on the second helper: {:?}",
+        host.state()
+    );
     assert_eq!(log.starts(), 2);
-    host.edit(EditOp::InsertText("a".to_owned())).expect("the session edits");
+    host.edit(EditOp::InsertText("a".to_owned()))
+        .expect("the session edits");
     host.save_bytes(Purpose::Save).expect("and saves");
     let mut got = Vec::new();
-    assert!(wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1), "{got:?}");
+    assert!(
+        wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1),
+        "{got:?}"
+    );
     assert_eq!(restored(&got), 0, "nothing was open to restore: {got:?}");
 }
 
@@ -514,12 +592,21 @@ fn a_helper_killed_during_a_save_restarts_and_the_next_save_answers() {
     let first = host.save_bytes(Purpose::Save).expect("sent");
     assert!(wait_events(&mut host, &mut got, |got| restored(got) == 1), "{got:?}");
     assert!(
-        got.iter().any(|event| matches!(event, EditEvent::Failed { id, .. } if *id == first)),
+        got.iter()
+            .any(|event| matches!(event, EditEvent::Failed { id, .. } if *id == first)),
         "the save that was out is answered: {got:?}"
     );
-    let second = host.save_bytes(Purpose::Save).expect("the restarted session takes a save");
-    assert!(wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1), "{got:?}");
-    assert!(got.iter().any(|event| matches!(event, EditEvent::Saved { id, .. } if *id == second)));
+    let second = host
+        .save_bytes(Purpose::Save)
+        .expect("the restarted session takes a save");
+    assert!(
+        wait_events(&mut host, &mut got, |got| saved_for(got, Purpose::Save) == 1),
+        "{got:?}"
+    );
+    assert!(
+        got.iter()
+            .any(|event| matches!(event, EditEvent::Saved { id, .. } if *id == second))
+    );
 }
 
 /// What a sign-out asks (`unsaved_count_in`): an editor counts from its first edit until a save lands.
@@ -537,9 +624,9 @@ fn the_sign_out_question_counts_an_editor_from_its_first_edit_until_its_save_lan
     let id = host.save_bytes(Purpose::Save).expect("sent");
     let mut got = Vec::new();
     assert!(
-        wait_events(&mut host, &mut got, |got| got
-            .iter()
-            .any(|e| matches!(e, EditEvent::Saved { id: got_id, purpose: Purpose::Save, .. } if *got_id == id))),
+        wait_events(&mut host, &mut got, |got| got.iter().any(
+            |e| matches!(e, EditEvent::Saved { id: got_id, purpose: Purpose::Save, .. } if *got_id == id)
+        )),
         "{got:?}"
     );
     assert_eq!(unsaved_count_in(&registry), 0, "saved");

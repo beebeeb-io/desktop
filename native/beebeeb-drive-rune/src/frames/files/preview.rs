@@ -212,7 +212,8 @@ fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
         return head;
     }
     let mut head = head.child(
-        crate::ui::toolbar::tool("pv-share", "Share\u{2026}", &icons::SHARE, t).on_press(|s: &mut State| s.share_from_preview()),
+        crate::ui::toolbar::tool("pv-share", "Share\u{2026}", &icons::SHARE, t)
+            .on_press(|s: &mut State| s.share_from_preview()),
     );
     if matches!(state, Previewed::Shown(_)) {
         head = head.child(

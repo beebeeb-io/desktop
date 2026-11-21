@@ -2,7 +2,15 @@ use super::*;
 
 fn flat(r: &[Row]) -> Vec<(usize, String)> {
     r.iter()
-        .map(|r| (r.depth, match &r.key { Some(k) => format!("{k}: {}", r.text), None => r.text.clone() }))
+        .map(|r| {
+            (
+                r.depth,
+                match &r.key {
+                    Some(k) => format!("{k}: {}", r.text),
+                    None => r.text.clone(),
+                },
+            )
+        })
         .collect()
 }
 

@@ -27,7 +27,12 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let answer = ui.source.locations();
     // Asked for, nothing known yet: said, never a blank pane.
     if answer.is_none() && ui.source.locations_loading() {
-        children.push(view_state(ViewState::Loading { words: "Loading storage locations…" }, t));
+        children.push(view_state(
+            ViewState::Loading {
+                words: "Loading storage locations…",
+            },
+            t,
+        ));
         return (shell::pane(children, t), None);
     }
     let chosen = answer.as_ref().and_then(|l| l.chosen().cloned());
@@ -96,8 +101,16 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     if !chosen.default {
         let title = format!("Only store in {}", chosen.name);
         let on = l.only_here;
-        let switch = crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-0"), "", on, true, crate::ui::button::Size::Md, t).label(&title)
-            .on_press(move |s: &mut State| s.settings.source.set_only_here(!on));
+        let switch = crate::ui::switch::switch_sized(
+            &format!("{}-switch", "item-1-0"),
+            "",
+            on,
+            true,
+            crate::ui::button::Size::Md,
+            t,
+        )
+        .label(&title)
+        .on_press(move |s: &mut State| s.settings.source.set_only_here(!on));
         children.push(lists::list(
             1,
             Some(&format!("If {} can't take a new file", chosen.name)),

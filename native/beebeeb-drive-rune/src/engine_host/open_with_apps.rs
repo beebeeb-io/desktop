@@ -101,13 +101,21 @@ pub(crate) fn default_app_name(ext: &str, wake: impl FnOnce() + Send + 'static) 
         }
     }
     let asked = ext.clone();
-    let started = std::thread::Builder::new().name("default-app-name".into()).spawn(move || {
-        let name = default_name(ask_default(&asked), &own_exe());
-        known.lock().unwrap_or_else(PoisonError::into_inner).insert(asked, Some(name));
-        wake();
-    });
+    let started = std::thread::Builder::new()
+        .name("default-app-name".into())
+        .spawn(move || {
+            let name = default_name(ask_default(&asked), &own_exe());
+            known
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(asked, Some(name));
+            wake();
+        });
     if started.is_err() {
-        known.lock().unwrap_or_else(PoisonError::into_inner).insert(ext, Some(None));
+        known
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(ext, Some(None));
     }
     None
 }
@@ -388,7 +396,10 @@ mod tests {
     fn default_app_name_leaves_out_this_app_and_empty_names() {
         let own = r"C:\Program Files\Beebeeb\beebeeb-drive.exe";
         let ppt = r"C:\Program Files\Microsoft Office\root\Office16\POWERPNT.EXE";
-        assert_eq!(default_name(Some((ppt.into(), "PowerPoint".into())), own), Some("PowerPoint".into()));
+        assert_eq!(
+            default_name(Some((ppt.into(), "PowerPoint".into())), own),
+            Some("PowerPoint".into())
+        );
         assert_eq!(default_name(Some((own.into(), "Beebeeb".into())), own), None);
         assert_eq!(default_name(Some((ppt.into(), "  ".into())), own), None);
         assert_eq!(default_name(None, own), None);

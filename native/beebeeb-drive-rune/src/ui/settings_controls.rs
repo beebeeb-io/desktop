@@ -38,7 +38,15 @@ pub fn button(index: usize, label: &str, icon: Option<&'static Icon>, emphasis: 
         Emphasis::Primary => Variant::Primary,
         Emphasis::Plain => Variant::Secondary,
     };
-    btn::button(btn::keys(&format!("btn-{index}")), label, icon, variant, Size::Sm, ButtonState::Enabled, t)
+    btn::button(
+        btn::keys(&format!("btn-{index}")),
+        label,
+        icon,
+        variant,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    )
 }
 
 /// An inline notice (`.kit-banner.tone-neutral`): a glyph, a strong first line, the words,

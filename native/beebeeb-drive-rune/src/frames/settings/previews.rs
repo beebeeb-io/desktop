@@ -22,8 +22,8 @@ use crate::ui::settings_list::{self as lists, Item, Trailing};
 use crate::ui::settings_meter as meters;
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
-use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::setup::{self, SegInk, SegSize};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use rune::{Color, El, Family, Pixels, Span, TextStyle, col, el, rich, row};
 
 pub use crate::frames::signin::setup::source::{PreviewFormat, PreviewSize};
@@ -342,8 +342,16 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             &Item::new(Some(&ic::IMAGE), "Photo previews")
                 .sub("Photos open instantly, without downloading the original"),
             vec![
-                crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-0"), "", on, true, crate::ui::button::Size::Md, t).label("Photo previews")
-                    .on_press(move |s: &mut State| s.settings.drive.set_photo_previews(!on)),
+                crate::ui::switch::switch_sized(
+                    &format!("{}-switch", "item-0-0"),
+                    "",
+                    on,
+                    true,
+                    crate::ui::button::Size::Md,
+                    t,
+                )
+                .label("Photo previews")
+                .on_press(move |s: &mut State| s.settings.drive.set_photo_previews(!on)),
             ],
             t,
         )],
@@ -510,7 +518,12 @@ const FORMAT_CAPTION: &str = "HEIC is about half the size at the same quality. J
 
 /// While the source reads: the shared loading state, never a value.
 fn loading(t: &Theme) -> El {
-    view_state(ViewState::Loading { words: "Loading your preview settings" }, t)
+    view_state(
+        ViewState::Loading {
+            words: "Loading your preview settings",
+        },
+        t,
+    )
 }
 
 /// The read failed: said plainly, with a Try again that reads again.

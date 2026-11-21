@@ -16,9 +16,9 @@ use beebeeb_office_protocol::office::{EditOp, Mark, Marks, TextAlign};
 use rune::{El, Key, KeyEvent, Tx, row};
 
 use super::slide;
+use super::word_insert::Insert;
 use crate::State;
 use crate::frames::viewers::office::{self as vo, Face, Tab, Tool, ico};
-use super::word_insert::Insert;
 use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
@@ -148,10 +148,11 @@ fn home_tools(ui: &Ui, t: &Theme) -> Vec<El> {
     let mut tools = Vec::new();
     let mut n = 0;
     let mut seps = 0;
-    let mut tool = |tools: &mut Vec<El>, name: &'static str, face: Face, state: Tool, act: Box<dyn Fn(&mut State, &mut Tx)>| {
-        tools.push(vo::tool_with(&format!("rt-{n}"), name, face, state, act, t));
-        n += 1;
-    };
+    let mut tool =
+        |tools: &mut Vec<El>, name: &'static str, face: Face, state: Tool, act: Box<dyn Fn(&mut State, &mut Tx)>| {
+            tools.push(vo::tool_with(&format!("rt-{n}"), name, face, state, act, t));
+            n += 1;
+        };
     let mut sep = |tools: &mut Vec<El>| {
         tools.push(vo::hairline(format!("rsep-{seps}"), t));
         seps += 1;
@@ -197,26 +198,53 @@ fn home_tools(ui: &Ui, t: &Theme) -> Vec<El> {
     sep(&mut tools);
     let is_live = live(ui);
     let off = |ok: bool| if ok { Tool::Idle } else { Tool::Off };
-    tools.push(worded("rw-0", "New slide", &ico::MORE, off(is_live), |s, tx| {
-        tx.instant();
-        slide::new_slide(s);
-    }, t));
-    tools.push(worded("rw-1", "Duplicate slide", &ico::TABLE, off(is_live), move |s, tx| {
-        tx.instant();
-        if let Some(l) = slide::live(s) {
-            slide::duplicate_slide(s, l.current);
-        }
-    }, t));
+    tools.push(worded(
+        "rw-0",
+        "New slide",
+        &ico::MORE,
+        off(is_live),
+        |s, tx| {
+            tx.instant();
+            slide::new_slide(s);
+        },
+        t,
+    ));
+    tools.push(worded(
+        "rw-1",
+        "Duplicate slide",
+        &ico::TABLE,
+        off(is_live),
+        move |s, tx| {
+            tx.instant();
+            if let Some(l) = slide::live(s) {
+                slide::duplicate_slide(s, l.current);
+            }
+        },
+        t,
+    ));
     // A deck keeps one slide: Delete is off on the last.
-    tools.push(worded("rw-2", "Delete slide", &ico::LESS, off(is_live && count > 1), move |s, tx| {
-        tx.instant();
-        if let Some(l) = slide::live(s) {
-            slide::delete_slide(s, l.current);
-        }
-    }, t));
+    tools.push(worded(
+        "rw-2",
+        "Delete slide",
+        &ico::LESS,
+        off(is_live && count > 1),
+        move |s, tx| {
+            tx.instant();
+            if let Some(l) = slide::live(s) {
+                slide::delete_slide(s, l.current);
+            }
+        },
+        t,
+    ));
     let _ = current;
     sep(&mut tools);
-    tool(&mut tools, "Insert image", glyph(&ico::IMAGE), off(is_live), Box::new(pick_image));
+    tool(
+        &mut tools,
+        "Insert image",
+        glyph(&ico::IMAGE),
+        off(is_live),
+        Box::new(pick_image),
+    );
     tools.push(worded("rw-3", "Present", &ico::CARET, Tool::Idle, present, t));
     tools
 }
@@ -274,7 +302,14 @@ fn ask_layouts(s: &mut State, tx: &mut Tx) {
 fn design_tools(ui: &Ui, t: &Theme) -> Vec<El> {
     let layouts: &[String] = ui.office.edit.as_ref().map_or(&[], |e| e.layouts.as_slice());
     if layouts.is_empty() {
-        return vec![worded("rw-ask", "Show layouts", &ico::TABLE, Tool::Idle, ask_layouts, t)];
+        return vec![worded(
+            "rw-ask",
+            "Show layouts",
+            &ico::TABLE,
+            Tool::Idle,
+            ask_layouts,
+            t,
+        )];
     }
     let now = current_layout(ui);
     layouts

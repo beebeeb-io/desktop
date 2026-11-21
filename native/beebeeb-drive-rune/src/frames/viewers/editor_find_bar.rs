@@ -6,8 +6,8 @@ use std::cell::Cell;
 
 use rune::{El, Key, KeyEvent, Span, row, text_input};
 
-use super::EditorView;
 use super::super::{Ui, style};
+use super::EditorView;
 use crate::State;
 use crate::text_kit::find::{self, FindQuery};
 use crate::theme::tokens::Theme;
@@ -127,7 +127,11 @@ pub fn match_spans(view: &EditorView, text: &str, t: &Theme) -> Vec<Span> {
     ms.iter()
         .enumerate()
         .map(|(i, m)| {
-            let c = if view.find.current == Some(i) { t.selection } else { t.highlight };
+            let c = if view.find.current == Some(i) {
+                t.selection
+            } else {
+                t.highlight
+            };
             Span::new(m.start, m.end).bg(c, 0.0)
         })
         .collect()
@@ -249,7 +253,16 @@ pub fn bar(view: &EditorView, t: &Theme) -> Option<El> {
                 None
             })
         }));
-    let mut b = rune::col().key("find-bar").mx(14.0).mt(10.0).px(12.0).py(8.0).gap(6.0).radius(10.0).fill(style::banner(t)).child(line1);
+    let mut b = rune::col()
+        .key("find-bar")
+        .mx(14.0)
+        .mt(10.0)
+        .px(12.0)
+        .py(8.0)
+        .gap(6.0)
+        .radius(10.0)
+        .fill(style::banner(t))
+        .child(line1);
     if view.find.replace_open {
         b = b.child(
             row()
@@ -263,9 +276,10 @@ pub fn bar(view: &EditorView, t: &Theme) -> Option<El> {
                         None
                     })
                 }))
-                .child(chip("find-replace-all", "Replace all", false, t).on_press(|s: &mut State| {
-                    with(s, |ui, e| Some(replace_all(&mut ui.editor_view, e)))
-                })),
+                .child(
+                    chip("find-replace-all", "Replace all", false, t)
+                        .on_press(|s: &mut State| with(s, |ui, e| Some(replace_all(&mut ui.editor_view, e)))),
+                ),
         );
     }
     Some(b)

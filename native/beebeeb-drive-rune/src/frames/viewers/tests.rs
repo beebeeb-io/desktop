@@ -27,7 +27,11 @@ const BUILT: [(&str, &str, &str); 11] = [
     ("DW-1524", "toast-text", "Saved \u{00B7} encrypted \u{00B7} version 4"),
     ("DW-1525", "dlg-title", "You have unsaved changes"),
     ("DW-1526", "dlg-title", "Two versions"),
-    ("DW-1516", "loading-words", "Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)"),
+    (
+        "DW-1516",
+        "loading-words",
+        "Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)",
+    ),
     ("DW-1517", "state-title", "Too large to preview here"),
     ("DW-1518", "state-title", "Couldn't decrypt this file"),
     ("DW-1512", "run-0-0", "# Export this month's invoices as one CSV"),
@@ -286,7 +290,10 @@ fn too_large_says_the_numbers_and_both_ways_out_are_intents() {
 fn a_failure_is_an_alert_and_try_again_decrypts_again() {
     let (mut rt, calls) = recording(board::FAILED);
     assert_eq!(info(&rt, "state").role, "group");
-    assert_eq!(info(&rt, "state-title").text.as_deref(), Some("Couldn't decrypt this file"));
+    assert_eq!(
+        info(&rt, "state-title").text.as_deref(),
+        Some("Couldn't decrypt this file")
+    );
     operate(&mut rt, "state-btn-1");
     assert_eq!(intents(&mut rt), [Intent::ReportProblem]);
     operate(&mut rt, "state-btn-0");
@@ -1138,7 +1145,11 @@ fn assert_file_bar(rt: &Runtime<State>, what: &str, wanted: &[&str]) {
 #[test]
 fn the_preview_bar_has_no_files_view_buttons() {
     let rt = runtime("DW-1512");
-    assert_file_bar(&rt, "preview", &["back", "panel-toggle-btn", "show-in-folder", "more-btn"]);
+    assert_file_bar(
+        &rt,
+        "preview",
+        &["back", "panel-toggle-btn", "show-in-folder", "more-btn"],
+    );
 }
 
 #[test]
@@ -1146,7 +1157,11 @@ fn the_text_edit_bar_has_no_files_view_buttons() {
     let mut rt = runtime("DW-1512");
     operate(&mut rt, "tb-btn-0");
     assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some());
-    assert_file_bar(&rt, "text edit", &["back", "tb-btn-0", "show-in-folder", "panel-toggle-btn"]);
+    assert_file_bar(
+        &rt,
+        "text edit",
+        &["back", "tb-btn-0", "show-in-folder", "panel-toggle-btn"],
+    );
 }
 
 #[test]
@@ -1167,8 +1182,14 @@ fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
     assert!(ask(&mut rt.state, Then::Quit), "unsaved: the question is up");
     rt.invalidate();
     rt.frame(0.0);
-    assert_eq!(info(&rt, "dlg-text-0").text.as_deref(), Some("You have unsaved changes in Meeting notes 4 Nov.md."));
-    assert_eq!(info(&rt, "btn-2").label.as_deref(), Some("Discard and quit, destructive"));
+    assert_eq!(
+        info(&rt, "dlg-text-0").text.as_deref(),
+        Some("You have unsaved changes in Meeting notes 4 Nov.md.")
+    );
+    assert_eq!(
+        info(&rt, "btn-2").label.as_deref(),
+        Some("Discard and quit, destructive")
+    );
     // Cancel keeps the edit and nothing was saved.
     operate(&mut rt, "btn-3");
     assert!(rt.state.viewer.leave.is_none() && viewer(&rt).dirty());
@@ -1192,7 +1213,11 @@ fn enter_on_the_shown_unsaved_question_presses_save() {
     rt.invalidate();
     rt.frame(0.0);
     press(&mut rt, Key::Enter);
-    assert!(calls.borrow().iter().any(|c| c.starts_with("save")), "Enter saved: {:?}", calls.borrow());
+    assert!(
+        calls.borrow().iter().any(|c| c.starts_with("save")),
+        "Enter saved: {:?}",
+        calls.borrow()
+    );
     assert!(!holds(&rt.state));
 }
 

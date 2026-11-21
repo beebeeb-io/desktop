@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::{SaveAnswer, ControlHandler, ControlServer, Platform, PlatformError, ServeError, TrayHandler, TrayIcon};
+use super::{ControlHandler, ControlServer, Platform, PlatformError, SaveAnswer, ServeError, TrayHandler, TrayIcon};
 use crate::shell::control::Request;
 use crate::shell::identity::AppIdentity;
 use crate::shell::instance::Delivery;
@@ -203,7 +203,12 @@ impl Platform for FakePlatform {
     }
 
     fn take_packet_text(&self) -> Vec<String> {
-        std::mem::take(&mut *self.packet_text.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        std::mem::take(
+            &mut *self
+                .packet_text
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     fn set_capture_exclusion(&self, _window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {

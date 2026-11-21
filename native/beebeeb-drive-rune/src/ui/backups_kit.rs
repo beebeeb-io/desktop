@@ -224,8 +224,16 @@ pub fn row_item(list: usize, index: usize, it: RowItem, t: &Theme) -> El {
 /// A small button without fill or border (`.kit-btn-sm.bg-transparent.text-ink-2`): a quiet
 /// action in a row ("Remove"). Keys: `btn-<N>`, `btn-<N>-label`.
 pub fn ghost_button(index: usize, label: &str, name: &str, t: &Theme) -> El {
-    btn::button(btn::keys(&format!("btn-{index}")), label, None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t)
-        .label(name)
+    btn::button(
+        btn::keys(&format!("btn-{index}")),
+        label,
+        None,
+        Variant::Ghost,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    )
+    .label(name)
 }
 
 /// How a dialog-size button looks.
@@ -250,7 +258,15 @@ pub fn button_md(index: usize, label: &str, icon: Option<&'static Icon>, kind: M
         Md::QuietRed | Md::Danger(true) => (Variant::Danger, ButtonState::Enabled),
         Md::Danger(false) => (Variant::Danger, ButtonState::Disabled),
     };
-    btn::button(btn::keys(&format!("btn-{index}")), label, icon, variant, Size::Md, state, t)
+    btn::button(
+        btn::keys(&format!("btn-{index}")),
+        label,
+        icon,
+        variant,
+        Size::Md,
+        state,
+        t,
+    )
 }
 
 /// A paragraph of a dialog's body at body size (`.wn-dlg-body > p.t-body`), with a machine's

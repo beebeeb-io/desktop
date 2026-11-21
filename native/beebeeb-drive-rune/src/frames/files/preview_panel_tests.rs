@@ -194,6 +194,9 @@ fn the_panel_head_draws_the_icon_of_the_file_in_its_tint() {
     let note = notes.get("preview-head-icon").expect("no preview-head-icon");
     assert_eq!(
         note.color,
-        Some(crate::theme::file_icon_colors::tint_color(crate::theme::file_icons::Tint::Audio, false))
+        Some(crate::theme::file_icon_colors::tint_color(
+            crate::theme::file_icons::Tint::Audio,
+            false
+        ))
     );
 }

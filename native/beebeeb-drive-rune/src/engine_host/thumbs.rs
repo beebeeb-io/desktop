@@ -478,18 +478,28 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         let (id, ask) = (&key.0, key.1);
         let session = wished_under.0;
         let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match ask {
-            Ask::Picture(cut) => self.engine.thumbnail_pixels_for(session, id, cut).map(|picture| {
-                let pixels = Pixels::new();
-                let bytes = picture.rgba.len();
-                pixels.set(picture.width, picture.height, picture.rgba.to_vec());
-                let now = Instant::now();
-                Held::Picture {
-                    pixels,
-                    bytes,
-                    used: now,
-                    fetched: now,
-                }
-            }),
+            Ask::Picture(cut) => self
+                .engine
+                .thumbnail_pixels_for(session, id, cut)
+                // No server thumbnail: the one this PC made and kept (079), without decoding again.
+                .or_else(|refused| match refused {
+                    ThumbRefused::NoThumbnail | ThumbRefused::Unreadable => {
+                        self.engine.local_thumbnail_for(session, id).ok_or(refused)
+                    }
+                    other => Err(other),
+                })
+                .map(|picture| {
+                    let pixels = Pixels::new();
+                    let bytes = picture.rgba.len();
+                    pixels.set(picture.width, picture.height, picture.rgba.to_vec());
+                    let now = Instant::now();
+                    Held::Picture {
+                        pixels,
+                        bytes,
+                        used: now,
+                        fetched: now,
+                    }
+                }),
             Ask::Length => match self.engine.video_seconds_for(session, id) {
                 Ok(Some(seconds)) => Ok(Held::Length(u32::try_from(seconds).unwrap_or(u32::MAX))),
                 // This PC cannot say (online only): asked again later, once a copy may be here.
@@ -540,6 +550,34 @@ fn work<C: CredentialStores>(store: Weak<EngineThumbStore<C>>) {
             return;
         }
     }
+}
+
+/// The longest side of a thumbnail made here.
+pub(super) const LOCAL_THUMB_PX: u32 = 512;
+
+/// A photo with no server thumbnail whose bytes are on this PC: decoded through the helper, kept sealed in the
+/// engine's cache (079), and the pictures held for it are dropped so the next look shows it. The caller read `bytes`
+/// from the copy here; nothing is downloaded for this. Never logs a name or a byte.
+pub fn make_local_thumbnail<C: CredentialStores>(
+    store: &EngineThumbStore<C>,
+    session: beebeeb_engine::account::SessionGeneration,
+    file_id: &str,
+    version: i64,
+    bytes: &[u8],
+) -> Result<(), super::media::ImageRefusal> {
+    let decoded = super::media::decode_picture(bytes, LOCAL_THUMB_PX)?;
+    let pixels = beebeeb_engine::app::photos_api::ThumbPixels {
+        session,
+        width: decoded.width,
+        height: decoded.height,
+        rgba: decoded.rgba,
+    };
+    store
+        .engine
+        .keep_local_thumbnail(session, file_id, version, &pixels)
+        .map_err(|_| super::media::ImageRefusal::Damaged)?;
+    store.drop_file(file_id);
+    Ok(())
 }
 
 /// A video's length as a tile writes it ("0:41").

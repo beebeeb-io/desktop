@@ -587,12 +587,20 @@ fn a_read_that_fails_keeps_what_was_drawn_says_so_and_is_asked_again() {
         source.run_notice_action();
         assert_eq!(source.notice(), None, "mode {mode}: nothing is said while it is read");
         settle(&mut source);
-        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + asks, "mode {mode}");
+        assert_eq!(
+            server.asked("GET /api/v1/account/sessions"),
+            before + asks,
+            "mode {mode}"
+        );
         assert_eq!(source.notice(), Some(NOT_REFRESHED), "mode {mode}: it failed again");
         // A failed read is not fresh: the next opening asks again.
         engine.note_call_for_test(false);
         opened(&mut source, Pane::Sessions);
-        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + 2 * asks, "mode {mode}");
+        assert_eq!(
+            server.asked("GET /api/v1/account/sessions"),
+            before + 2 * asks,
+            "mode {mode}"
+        );
     }
     source.engine.note_call_for_test(false);
     server.read_mode.store(ANSWER, Ordering::SeqCst);

@@ -272,7 +272,10 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
     let mut with_key = app(false);
     click(&mut with_key.rt, "row-9-date");
     press(&mut with_key.rt, Key::Enter, NONE);
-    assert!(asked(&with_key.calls).is_empty(), "the .key file was not handed to another app");
+    assert!(
+        asked(&with_key.calls).is_empty(),
+        "the .key file was not handed to another app"
+    );
     assert!(with_key.rt.state.viewer.ui.is_some(), "the viewer's own frame for .key");
     assert_eq!(with_key.rt.state.actions.session.asked, 0);
 }

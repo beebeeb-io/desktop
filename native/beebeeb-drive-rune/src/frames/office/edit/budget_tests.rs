@@ -19,8 +19,8 @@ use crate::frames::office::docs::docs_fixture;
 use crate::frames::office::docs::live_tests::{doc_of, find};
 use crate::frames::office::edit::{self, EditUi};
 use crate::frames::office::sheets::{self, Cell, CellText, SheetView};
-use crate::frames::viewers::source::{Body, EditAnswer, OpenError, OpenFile, ViewerSource};
 use crate::frames::viewers;
+use crate::frames::viewers::source::{Body, EditAnswer, OpenError, OpenFile, ViewerSource};
 use crate::{State, init, view};
 
 const GATE: Duration = Duration::from_millis(16);
@@ -90,10 +90,16 @@ fn rig(body: Body, kind: EditKind) -> (Runtime<State>, Rc<Shared>) {
     let shared = Rc::new(Shared::default());
     let mut state = init();
     let id = file.id.clone();
-    let source = Source { file, shared: shared.clone() };
+    let source = Source {
+        file,
+        shared: shared.clone(),
+    };
     assert!(viewers::open_from(&mut state, Box::new(source), &id));
     viewers::ui(&mut state).expect("open").office.edit = Some(EditUi::new(kind));
-    let env = Env { system_dark: false, scale: 1.0 };
+    let env = Env {
+        system_dark: false,
+        scale: 1.0,
+    };
     let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
     rt.on_key = Some(crate::shell::host::on_key);
     rt.poll = Some(crate::shell::host::poll);
@@ -103,10 +109,26 @@ fn rig(body: Body, kind: EditKind) -> (Runtime<State>, Rc<Shared>) {
 }
 
 fn caret_answer(revision: u64, y: f32) -> EditAnswer {
-    let strip = PageRect { page: 30, rect: RectPt { x: 0.0, y, w: 595.0, h: 16.0 } };
+    let strip = PageRect {
+        page: 30,
+        rect: RectPt {
+            x: 0.0,
+            y,
+            w: 595.0,
+            h: 16.0,
+        },
+    };
     EditAnswer::Edited(Edited {
         revision,
-        caret: Some(PageRect { page: 30, rect: RectPt { x: 200.0, y, w: 1.0, h: 14.0 } }),
+        caret: Some(PageRect {
+            page: 30,
+            rect: RectPt {
+                x: 200.0,
+                y,
+                w: 1.0,
+                h: 14.0,
+            },
+        }),
         selection: Vec::new(),
         can_undo: true,
         can_redo: false,
@@ -130,11 +152,17 @@ fn caret_answer(revision: u64, y: f32) -> EditAnswer {
 #[test]
 fn office_word_budget_a_caret_move_and_a_dirty_strip_fit_a_frame() {
     let (mut rt, shared) = rig(doc_of(60, 100, 30), EditKind::Docx);
-    assert!(find(&rt, "pg-30").is_some() || find(&rt, "pg-29").is_some() || rt.elements().len() > 10, "the stage is drawn");
+    assert!(
+        find(&rt, "pg-30").is_some() || find(&rt, "pg-29").is_some() || rt.elements().len() > 10,
+        "the stage is drawn"
+    );
     let mut revision = 1u64;
     let frame = best(7, || {
         revision += 1;
-        shared.answers.borrow_mut().push_back(caret_answer(revision, 100.0 + (revision % 40) as f32 * 14.0));
+        shared
+            .answers
+            .borrow_mut()
+            .push_back(caret_answer(revision, 100.0 + (revision % 40) as f32 * 14.0));
         rt.update(|s, tx| {
             edit::poll(s, tx);
         });
@@ -182,10 +210,16 @@ fn office_sheets_budget_a_commit_at_the_cell_cap_fits_a_frame() {
     rt.frame(1.0 / 60.0);
     let mut runs = Vec::new();
     for _ in 0..5 {
-        rt.key(KeyEvent { key: Key::Text("4".into()), mods: Mods::default() });
+        rt.key(KeyEvent {
+            key: Key::Text("4".into()),
+            mods: Mods::default(),
+        });
         rt.frame(1.0 / 60.0);
         let t = Instant::now();
-        rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+        rt.key(KeyEvent {
+            key: Key::Enter,
+            mods: Mods::default(),
+        });
         rt.frame(1.0 / 60.0);
         runs.push(t.elapsed());
     }

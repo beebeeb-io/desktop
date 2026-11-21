@@ -22,18 +22,18 @@ use crate::frames::{self, Intent};
 use crate::shell::app::Section;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, tokens};
+use crate::ui::file_row::ROW_H;
 use crate::ui::kit;
+use crate::ui::view_state::{ViewState, try_again};
 use parts::controls::{ButtonKind, ButtonSize, Tone, button, button_keyed, pill, segments};
 use parts::menu::{Entry, Open, Took, Trail};
 use parts::table::{Columns, Row, header, rows, table_row, tile};
 use parts::toolbar::{Bar, slot_sep, toolbar};
 use parts::{chrome, empty, list, style};
-use crate::ui::file_row::ROW_H;
-use crate::ui::view_state::{ViewState, try_again};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el, row};
+use source::{BoardShared, Invitation, LinkShare, Loaded, Notice, PeopleShare, Request, RequestState, SharedSource};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
-use source::{BoardShared, Invitation, LinkShare, Loaded, Notice, PeopleShare, Request, RequestState, SharedSource};
 
 const COLUMNS: Columns = Columns {
     names: ["Name", "Shared on", "Size", "From", "PC"],

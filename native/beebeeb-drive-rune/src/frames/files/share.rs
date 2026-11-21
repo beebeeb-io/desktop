@@ -279,7 +279,16 @@ pub fn big_tile(key: &str, item: &DriveItem, size: f32, t: &Theme) -> El {
     } else {
         TilePicture::Icon(crate::theme::file_icons::icon_for_item(item))
     };
-    file_tile::tile(&format!("{key}-tile"), name, picture, name, None, RowLook::default(), tile_size, t)
+    file_tile::tile(
+        &format!("{key}-tile"),
+        name,
+        picture,
+        name,
+        None,
+        RowLook::default(),
+        tile_size,
+        t,
+    )
 }
 
 fn menu_entries(share: &Share) -> Vec<Entry> {
@@ -314,8 +323,18 @@ fn menu_layer(share: &Share, t: &Theme) -> Option<El> {
         Menu::Expiry => ("Link expires", "item-0-1-menu-at"),
     };
     Some(
-        menu::menu("share-menu", name, 130.0, &menu_entries(share), None, t, pick_choice, |_, _| {}, close_choices)
-            .anchored(anchor, Side::Bottom, Align::Start, 0.0),
+        menu::menu(
+            "share-menu",
+            name,
+            130.0,
+            &menu_entries(share),
+            None,
+            t,
+            pick_choice,
+            |_, _| {},
+            close_choices,
+        )
+        .anchored(anchor, Side::Bottom, Align::Start, 0.0),
     )
 }
 
@@ -378,8 +397,16 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
             2,
             &Item::new(Some(&icons::LOCK), "Password").ruled(),
             vec![banner::pressable(
-                crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-2"), "", share.password_on, true, crate::ui::button::Size::Md, t).label("Password")
-                    .description("The link then asks for a password you choose."),
+                crate::ui::switch::switch_sized(
+                    &format!("{}-switch", "item-0-2"),
+                    "",
+                    share.password_on,
+                    true,
+                    crate::ui::button::Size::Md,
+                    t,
+                )
+                .label("Password")
+                .description("The link then asks for a password you choose."),
                 State::share_toggle_password,
             )],
             t,
@@ -429,10 +456,18 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
 
     let foot = col()
         .child(
-            button::button(button::keys("btn-0"), "Copy link", Some(&icons::LINK), button::Variant::Primary, button::Size::Md, button::ButtonState::Enabled, t)
-                .w_full()
-                .default_button()
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.share_copy_link(tx)),
+            button::button(
+                button::keys("btn-0"),
+                "Copy link",
+                Some(&icons::LINK),
+                button::Variant::Primary,
+                button::Size::Md,
+                button::ButtonState::Enabled,
+                t,
+            )
+            .w_full()
+            .default_button()
+            .on_press_tx(|s: &mut State, tx: &mut Tx| s.share_copy_link(tx)),
         )
         .child(
             // Enter on a focused button presses THAT button, never the default one (the Files

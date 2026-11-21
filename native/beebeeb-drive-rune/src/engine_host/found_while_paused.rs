@@ -104,7 +104,9 @@ impl<E: Decisions> FoundWhilePausedSource<E> {
 
     /// "Upload to my Beebeeb": the ids of the last review, under the turn it was read at. Returns whether it asked.
     pub fn upload(&mut self) -> bool {
-        let Some((turn, ids)) = self.decision() else { return false };
+        let Some((turn, ids)) = self.decision() else {
+            return false;
+        };
         self.begin(Action::Upload);
         let (engine, tx) = (self.engine.clone(), self.tx.clone());
         on_worker("found-while-paused-upload", move || {
@@ -115,7 +117,9 @@ impl<E: Decisions> FoundWhilePausedSource<E> {
 
     /// "Keep on this PC only": the same ids, the same turn.
     pub fn keep(&mut self) -> bool {
-        let Some((turn, ids)) = self.decision() else { return false };
+        let Some((turn, ids)) = self.decision() else {
+            return false;
+        };
         self.begin(Action::Keep);
         let (engine, tx) = (self.engine.clone(), self.tx.clone());
         on_worker("found-while-paused-keep", move || {
@@ -126,11 +130,15 @@ impl<E: Decisions> FoundWhilePausedSource<E> {
 
     /// "Show in File Explorer": the folder the engine names (never a path of the card's), under the card's turn.
     pub fn show(&mut self) -> bool {
-        let Some(turn) = self.turn.filter(|_| self.card.can_show()) else { return false };
+        let Some(turn) = self.turn.filter(|_| self.card.can_show()) else {
+            return false;
+        };
         self.begin(Action::Show);
         let (engine, tx) = (self.engine.clone(), self.tx.clone());
         on_worker("found-while-paused-show", move || {
-            let _ = tx.send(Answer::Shown(engine.kept_folder(turn).map(|folder| engine.open_folder(&folder))));
+            let _ = tx.send(Answer::Shown(
+                engine.kept_folder(turn).map(|folder| engine.open_folder(&folder)),
+            ));
         });
         true
     }

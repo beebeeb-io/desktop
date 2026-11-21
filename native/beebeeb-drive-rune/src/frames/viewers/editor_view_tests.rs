@@ -78,7 +78,10 @@ fn editing(name: &str, text: &str) -> Runtime<State> {
     rt.frame(0.0);
     rt.settle_all();
     rt.frame(0.0);
-    assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some(), "Ctrl+E opens the editor");
+    assert!(
+        rt.state.viewer.ui.as_ref().unwrap().editor.is_some(),
+        "Ctrl+E opens the editor"
+    );
     rt
 }
 
@@ -90,23 +93,43 @@ fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
 }
 
 fn has(rt: &Runtime<State>, key: &str) -> bool {
-    rt.elements().iter().any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+    rt.elements()
+        .iter()
+        .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
 #[test]
 fn editor_numbers_three_lines_and_the_field_carries_coloured_spans() {
     let rt = editing("main.rs", "fn main() {\n    let x = 1;\n}");
     for i in 0..3 {
-        assert_eq!(info(&rt, &format!("ln-{i}")).text.as_deref(), Some((i + 1).to_string().as_str()));
+        assert_eq!(
+            info(&rt, &format!("ln-{i}")).text.as_deref(),
+            Some((i + 1).to_string().as_str())
+        );
     }
     // The reader's text ends each line with a break: the caret's empty last line is numbered, nothing more.
-    let lines = rt.state.viewer.ui.as_ref().unwrap().editor.as_ref().unwrap().edit.text.split('\n').count();
+    let lines = rt
+        .state
+        .viewer
+        .ui
+        .as_ref()
+        .unwrap()
+        .editor
+        .as_ref()
+        .unwrap()
+        .edit
+        .text
+        .split('\n')
+        .count();
     assert!(lines <= 4 && !has(&rt, &format!("ln-{lines}")));
     assert!(has(&rt, EDITOR_KEY));
     let ui = rt.state.viewer.ui.as_ref().unwrap();
     let t = tokens::theme(false);
     let spans = super::field_spans(ui, ui.editor.as_ref().unwrap(), &t);
-    assert!(spans.iter().any(|s| s.color.is_some()), "the field paints coloured spans: {spans:?}");
+    assert!(
+        spans.iter().any(|s| s.color.is_some()),
+        "the field paints coloured spans: {spans:?}"
+    );
 }
 
 #[test]
@@ -118,7 +141,10 @@ fn editor_numbers_stay_level_with_wrapped_lines() {
     assert!(first_row[3] >= 42.0, "line 1 wraps onto more rows: {first_row:?}");
     let second_row = info(&rt, "line-1").rect;
     assert_eq!(two[1], second_row[1], "number 2 sits at the top of logical line 2");
-    assert!(two[1] - one[1] >= first_row[3] - 0.5, "number 2 is below all of line 1's rows");
+    assert!(
+        two[1] - one[1] >= first_row[3] - 0.5,
+        "number 2 is below all of line 1's rows"
+    );
 }
 
 #[test]

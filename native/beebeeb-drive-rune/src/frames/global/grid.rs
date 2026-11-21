@@ -14,8 +14,8 @@ use rune::{El, Key, KeyEvent, PointerPress, Tx, col, row};
 
 use crate::State;
 use crate::source::DriveItem;
-use crate::theme::tokens::Theme;
 use crate::theme::file_icons::icon_for_item;
+use crate::theme::tokens::Theme;
 use crate::ui::grid_tiles::{self, Thumb, Tile};
 
 /// What the grid knows about a picture or a video beyond the list's row.
@@ -88,7 +88,10 @@ impl GridUi {
         let near = self.near_lines();
         let columns = self.columns.max(1);
         let band = grid_tiles::KEEP_ROWS * columns;
-        let (from, to) = ((near.start * columns).saturating_sub(band), (near.end * columns + band).min(items.len()));
+        let (from, to) = (
+            (near.start * columns).saturating_sub(band),
+            (near.end * columns + band).min(items.len()),
+        );
         for item in items[..from.min(items.len())].iter().chain(&items[to..]) {
             if asked.remove(&item.id) {
                 self.thumbs.release(&item.id);
@@ -223,7 +226,11 @@ fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             let r = s.global.grid.near_lines();
             let page = r.end.saturating_sub(r.start).max(1) * columns;
             let i = sel.unwrap_or(0);
-            if ev.key == Key::PageUp { i.saturating_sub(page) } else { (i + page).min(count - 1) }
+            if ev.key == Key::PageUp {
+                i.saturating_sub(page)
+            } else {
+                (i + page).min(count - 1)
+            }
         }
         _ => return false,
     };
@@ -376,11 +383,10 @@ pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
             .on_visible_rows(|s: &mut State, r: std::ops::Range<usize>| s.global.grid.set_visible(r)),
     );
     Some(
-        grid_tiles::grid(rows)
-            .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
-                let folder = s.listing.folder.id.clone();
-                s.upload(folder, files, tx);
-            }),
+        grid_tiles::grid(rows).on_drop_files(|s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
+            let folder = s.listing.folder.id.clone();
+            s.upload(folder, files, tx);
+        }),
     )
 }
 
@@ -482,7 +488,12 @@ mod tests {
             assert!(!log.asked.contains("p399"), "a tile far below asks for nothing");
         }
         // Scroll to the end: the tiles there now ask, and the first ones, far out of view, are let go.
-        rt.update(|s, tx| tx.scroll_into_view(format!("grid-line-{}", s.listing.items[N - 1 - (N - 1) % s.global.grid.columns].id)));
+        rt.update(|s, tx| {
+            tx.scroll_into_view(format!(
+                "grid-line-{}",
+                s.listing.items[N - 1 - (N - 1) % s.global.grid.columns].id
+            ))
+        });
         settle(&mut rt);
         settle(&mut rt);
         let log = log.lock().unwrap();

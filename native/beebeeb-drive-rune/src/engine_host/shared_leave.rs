@@ -50,6 +50,8 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                 is_folder: matches!(share.kind, RowKind::Folder),
             });
         }
-        held.request_folders.get(id).map(|folder| RowTarget::Folder(folder.clone()))
+        held.request_folders
+            .get(id)
+            .map(|folder| RowTarget::Folder(folder.clone()))
     }
 }

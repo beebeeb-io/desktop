@@ -2,7 +2,9 @@
 //! viewer ask): the dialog opens, Copy link asks `share_link` for that item only, and versions are asked for it.
 
 use super::super::dialogs::Dialog;
-use super::super::source::{Account, Action, ActionError, Change, Counts, Details, FilesSource, NoEngine, StorageSplit};
+use super::super::source::{
+    Account, Action, ActionError, Change, Counts, Details, FilesSource, NoEngine, StorageSplit,
+};
 use super::super::tests::runtime_of;
 use crate::State;
 use crate::frames::files::actions_data::ShareOptions;

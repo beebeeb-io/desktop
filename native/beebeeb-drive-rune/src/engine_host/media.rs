@@ -128,3 +128,97 @@ impl MediaBytes for EngineBytes {
         self.0.read_at(offset, len, cancel).map_err(|_| ())
     }
 }
+
+// ---- A picture decoded by the confined helper (095) -------------------------------------------------------------
+
+use std::io::{Read, Write};
+
+pub use beebeeb_media_protocol::image::ImageRefusal;
+use beebeeb_media_protocol::image::{DecodeImage, ImageAnswer, ImageFromHelper, MAX_IMAGE_FILE, MAX_IMAGE_PX};
+use beebeeb_media_protocol::{ToHelper, write_msg};
+
+/// A picture decoded on this PC: upright, RGBA (straight alpha), at most the `max_px` asked for on its longest side.
+pub struct DecodedPicture {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Zeroizing<Vec<u8>>,
+}
+
+/// Starts an image helper (the helper's `--image` mode, confined, system-decoder profile) and hands over its two
+/// pipes: what the app reads from it, what the app writes to it. `None`: it cannot be started (no helper, no
+/// sandbox): the picture has no decoder here.
+pub trait PictureHelper: Send + Sync {
+    fn start(&self) -> Option<(Box<dyn Read + Send>, Box<dyn Write + Send>)>;
+}
+
+static PICTURE_HELPER: std::sync::OnceLock<Arc<dyn PictureHelper>> = std::sync::OnceLock::new();
+
+/// Registers the process's one [`PictureHelper`] (the first wins). Without one every picture answers `NoDecoder`.
+pub fn set_picture_helper(helper: Arc<dyn PictureHelper>) {
+    let _ = PICTURE_HELPER.set(helper);
+}
+
+/// Decodes `bytes` (a HEIC, a camera's RAW) to at most `max_px` on its longest side through the helper. Never
+/// decodes in this process. No decoder, a damaged file, a file too large: the refusal, never a half picture.
+pub fn decode_picture(bytes: &[u8], max_px: u32) -> Result<DecodedPicture, ImageRefusal> {
+    let helper = PICTURE_HELPER.get().ok_or(ImageRefusal::NoDecoder)?;
+    let (from, to) = helper.start().ok_or(ImageRefusal::NoDecoder)?;
+    decode_over(from, to, bytes, max_px)
+}
+
+/// One decode over the helper's two pipes: the helper reads the ranges it asks for, and answers once.
+pub(super) fn decode_over(
+    mut from: Box<dyn Read + Send>,
+    mut to: Box<dyn Write + Send>,
+    bytes: &[u8],
+    max_px: u32,
+) -> Result<DecodedPicture, ImageRefusal> {
+    if max_px == 0 || max_px > MAX_IMAGE_PX {
+        return Err(ImageRefusal::Unsupported);
+    }
+    if bytes.len() as u64 > MAX_IMAGE_FILE {
+        return Err(ImageRefusal::TooLarge);
+    }
+    write_msg(
+        &mut to,
+        &DecodeImage {
+            max_px,
+            len: bytes.len() as u64,
+        },
+    )
+    .map_err(|_| ImageRefusal::Damaged)?;
+    loop {
+        match beebeeb_media_protocol::image::read_image_to_app(&mut from).map_err(|_| ImageRefusal::Damaged)? {
+            ImageFromHelper::ReadAt { id, offset, len } => {
+                let start = usize::try_from(offset).unwrap_or(usize::MAX);
+                let answer = match bytes.get(start..) {
+                    Some(rest) => ToHelper::Data {
+                        id,
+                        bytes: rest[..rest.len().min(len as usize)].to_vec(),
+                    },
+                    None => ToHelper::DataFailed { id },
+                };
+                if write_msg(&mut to, &answer).is_err() {
+                    return Err(ImageRefusal::Damaged);
+                }
+            }
+            ImageFromHelper::Answer(ImageAnswer::Refused(why)) => return Err(why),
+            ImageFromHelper::Answer(ImageAnswer::Pixels { width, height, rgba }) => {
+                // The helper is untrusted: what it says is checked against what was asked.
+                if width == 0
+                    || height == 0
+                    || width.max(height) > max_px
+                    || rgba.len() as u64 != u64::from(width) * u64::from(height) * 4
+                {
+                    return Err(ImageRefusal::Damaged);
+                }
+                let _ = write_msg(&mut to, &ToHelper::Close);
+                return Ok(DecodedPicture {
+                    width,
+                    height,
+                    rgba: Zeroizing::new(rgba),
+                });
+            }
+        }
+    }
+}

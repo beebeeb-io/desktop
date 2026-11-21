@@ -1035,7 +1035,9 @@ fn two_factor_then_the_recovery_phrase_never_says_the_account_changed() {
     // The engine's answer for this account: the code is right, the vault key is not on this PC.
     rt.update(|s, _| {
         let ui_ = s.signin.as_mut().expect("the sign-in window is open");
-        ui_.apply(super::source::SignInEvent::TwoFactor(Ok(NextAfterSignIn::RecoveryPhrase)));
+        ui_.apply(super::source::SignInEvent::TwoFactor(Ok(
+            NextAfterSignIn::RecoveryPhrase,
+        )));
     });
     rt.frame(0.0);
     assert_eq!(ui(&mut rt).screen, Screen::Phrase);

@@ -151,7 +151,11 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
         let mut words = HashMap::new();
         for share in &overview.by_me {
             let people = share.members.len();
-            let line = if people == 1 { "1 person".to_string() } else { format!("{people} people") };
+            let line = if people == 1 {
+                "1 person".to_string()
+            } else {
+                format!("{people} people")
+            };
             words.insert(share.item_id.clone(), line);
         }
         for link in &overview.links {
@@ -401,7 +405,10 @@ impl<H: SearchHost> EngineSearchSource<H> {
                 let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let before = session_of(&*host);
                     let words = host.shared_words();
-                    (before.filter(|before| session_of(&*host).as_ref() == Some(before)), words)
+                    (
+                        before.filter(|before| session_of(&*host).as_ref() == Some(before)),
+                        words,
+                    )
                 }));
                 let (of, words) = read.unwrap_or((None, HashMap::new()));
                 let _ = answers.send(Landed::Shared(of, words));
@@ -677,7 +684,11 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         }
         Pumped {
             changed,
-            busy: self.building.is_some() || self.shared_out || self.asked.is_some() || self.recent_out.is_some() || waiting,
+            busy: self.building.is_some()
+                || self.shared_out
+                || self.asked.is_some()
+                || self.recent_out.is_some()
+                || waiting,
         }
     }
 

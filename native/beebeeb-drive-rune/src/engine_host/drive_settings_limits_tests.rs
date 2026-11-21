@@ -35,11 +35,19 @@ fn bandwidth_is_read_when_its_pane_opens_never_at_launch() {
     );
     let before = source.bandwidth();
     assert_eq!(
-        Bandwidth { now: String::new(), upload: Default::default(), download: Default::default(), ..before.clone() },
+        Bandwidth {
+            now: String::new(),
+            upload: Default::default(),
+            download: Default::default(),
+            ..before.clone()
+        },
         Bandwidth::default(),
         "and no limit, history or switch value before the read"
     );
-    assert_eq!(before.now, "Nothing is moving", "Right now reads the engine's rate: none recorded, nothing moves");
+    assert_eq!(
+        before.now, "Nothing is moving",
+        "Right now reads the engine's rate: none recorded, nothing moves"
+    );
 
     source.opened(Pane::Bandwidth);
     settle(&mut source);
@@ -185,8 +193,16 @@ fn the_traffic_is_the_signed_in_accounts_own_last_20_hours() {
     let mut source = source;
     settle(&mut source);
     let other = source.bandwidth();
-    assert_eq!(other.history, History::default(), "no traffic held across the account change");
-    assert_eq!((other.upload_limit, other.download_limit), (None, None), "no limit held across it");
+    assert_eq!(
+        other.history,
+        History::default(),
+        "no traffic held across the account change"
+    );
+    assert_eq!(
+        (other.upload_limit, other.download_limit),
+        (None, None),
+        "no limit held across it"
+    );
     assert_eq!(other.now, "Nothing is moving");
     source.opened(Pane::Bandwidth);
     settle(&mut source);

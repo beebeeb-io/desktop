@@ -72,16 +72,23 @@ fn an_id_of_this_accounts_state_is_found_and_another_accounts_is_not() {
     };
     db.upsert_file_with_contract(&entry, |contract| contract.item_kind = entry.item_kind.clone())
         .unwrap();
-    db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email))).unwrap();
+    db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
+        .unwrap();
     engine.use_local_state_for_test(path);
 
     sign_in(&engine, &first, &first_phrase);
     let source = EngineFilesSource::new(engine.clone());
     let found = source.item_of("f-invented").expect("this account's item is found");
-    assert_eq!((found.id.as_str(), found.name.as_str(), found.is_folder), ("f-invented", "Invented note.txt", false));
+    assert_eq!(
+        (found.id.as_str(), found.name.as_str(), found.is_folder),
+        ("f-invented", "Invented note.txt", false)
+    );
     assert!(source.item_of("f-not-there").is_none());
 
     engine.sign_out_keeping_local_data().expect("signs out");
     sign_in(&engine, &second, &second_phrase);
-    assert!(source.item_of("f-invented").is_none(), "another account's id is not answered");
+    assert!(
+        source.item_of("f-invented").is_none(),
+        "another account's id is not answered"
+    );
 }

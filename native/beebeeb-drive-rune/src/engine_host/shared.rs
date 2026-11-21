@@ -52,12 +52,12 @@ use chrono::{DateTime, Local};
 use super::log;
 use super::stamp::{Stamp, stamp};
 use super::trash::{kind_of, seconds_of, when};
+use crate::frames::files::link::LinkText;
 use crate::frames::shared::parts::table::{Extra, Row};
 use crate::frames::shared::source::{
-    Access, Invitation, InviteResult, LinkEdit, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped,
-    Request, RequestForm, RequestState, RowTarget, SafetyAsk, SafetyState, SharedSource,
+    Access, Invitation, InviteResult, LinkEdit, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun,
+    Pumped, Request, RequestForm, RequestState, RowTarget, SafetyAsk, SafetyState, SharedSource,
 };
-use crate::frames::files::link::LinkText;
 use crate::ui::file_list::PcState;
 
 #[cfg(test)]
@@ -67,14 +67,14 @@ use crate::frames::shared::parts::table::Kind;
 #[path = "shared_tests.rs"]
 mod tests;
 // plan40 batch 1: Make available offline on someone else's file (slice B4).
-#[path = "shared_offline.rs"]
-mod shared_offline;
-#[path = "shared_links.rs"]
-mod shared_links;
-#[path = "shared_requests.rs"]
-mod shared_requests;
 #[path = "shared_leave.rs"]
 mod shared_leave;
+#[path = "shared_links.rs"]
+mod shared_links;
+#[path = "shared_offline.rs"]
+mod shared_offline;
+#[path = "shared_requests.rs"]
+mod shared_requests;
 #[path = "shared_safety.rs"]
 mod shared_safety;
 
@@ -641,7 +641,8 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
     }
 
     fn take_link(&mut self) -> Option<LinkText> {
-        self.shared_links_take_link().or_else(|| self.shared_requests_take_link())
+        self.shared_links_take_link()
+            .or_else(|| self.shared_requests_take_link())
     }
 
     fn loaded(&self) -> Loaded {

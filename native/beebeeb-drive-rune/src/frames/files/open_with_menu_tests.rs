@@ -9,11 +9,11 @@ use super::source::{AppChoice, Call, FilesFixture};
 use super::tests::{Calls, NONE, asked, click, find, focused, info, press, right_click, runtime_of, settle};
 use super::{MenuKind, Toast};
 use crate::State;
-use crate::shell::app::Screen;
 use crate::frames::office::open_with::{
     AGREEMENT_ID, AGREEMENT_ROW, BOARD_STATUS, WORD_ON, agreement, scene_open_with,
 };
 use crate::frames::viewers::kinds::OfficeShips;
+use crate::shell::app::Screen;
 use crate::ui::menu::Entry;
 use rune::{Key, Runtime};
 
@@ -271,9 +271,7 @@ fn beebeeb_in_the_submenu_makes_the_same_open_call_as_open_beebeeb() {
     click(&mut rt, "menu-item-0");
     let opened = asked(&by_open);
     assert!(opened.is_empty(), "the viewer opens it, not another app: {opened:?}");
-    let on_viewer = |rt: &Runtime<State>| {
-        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(AGREEMENT_ID))
-    };
+    let on_viewer = |rt: &Runtime<State>| matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(AGREEMENT_ID));
     assert!(on_viewer(&rt));
     // …is what Beebeeb in the submenu does, and no other app is asked.
     let (mut rt, by_line) = spied_with(true, Some(vec![app(1)]));

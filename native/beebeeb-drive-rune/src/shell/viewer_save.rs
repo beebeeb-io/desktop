@@ -123,7 +123,9 @@ pub fn save_with(
                 seen.1.store(total, Ordering::Relaxed);
                 seen.0.store(written, Ordering::Relaxed);
             };
-            let _ = send.send(ask_and_save(&*platform, &*saver, session, &cancel, &report, &id, &name, start));
+            let _ = send.send(ask_and_save(
+                &*platform, &*saver, session, &cancel, &report, &id, &name, start,
+            ));
         })
     };
     if worker.is_err() {
@@ -131,7 +133,13 @@ pub fn save_with(
         say(s, NO_PANEL);
         return false;
     }
-    RUNNING.set(Some(Running { session, saver, cancel, progress, done }));
+    RUNNING.set(Some(Running {
+        session,
+        saver,
+        cancel,
+        progress,
+        done,
+    }));
     tx.wake_after(POLL);
     true
 }
@@ -186,9 +194,16 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         match run.done.try_recv() {
             Err(mpsc::TryRecvError::Empty) => {
                 tx.wake_after(POLL);
-                let (written, total) = (run.progress.0.load(Ordering::Relaxed), run.progress.1.load(Ordering::Relaxed));
+                let (written, total) = (
+                    run.progress.0.load(Ordering::Relaxed),
+                    run.progress.1.load(Ordering::Relaxed),
+                );
                 // Nothing is said while the panel is open or before the copy knows its size.
-                Some(if total == 0 { Step::Waiting } else { Step::Going(progress_words(written, total)) })
+                Some(if total == 0 {
+                    Step::Waiting
+                } else {
+                    Step::Going(progress_words(written, total))
+                })
             }
             got => {
                 running.take();
@@ -233,7 +248,8 @@ fn progress_words(written: u64, total: u64) -> String {
 fn say(s: &mut State, words: &str) {
     if let Some(ui) = viewers::ui(s) {
         ui.toast = Some(words.to_string());
-    } else if matches!(s.shell.app.screen(), crate::shell::app::Screen::Drive(r) if r.section == crate::shell::app::Section::Photos) {
+    } else if matches!(s.shell.app.screen(), crate::shell::app::Screen::Drive(r) if r.section == crate::shell::app::Section::Photos)
+    {
         // Photos' own save: its toast says how it ended.
         s.photos.toast = Some(crate::frames::photos::Toast::Said(words.to_string()));
     }

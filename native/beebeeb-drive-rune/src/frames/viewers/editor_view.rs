@@ -175,10 +175,10 @@ pub fn parts(ui: &Ui, editor: &Editor, t: &Theme) -> (Vec<El>, Option<El>, El) {
     let name = &ui.file.name;
     let kind = live_preview::kind_of(name);
     let tools = text::editor_tools(kind.is_some(), ui.editor_view.preview_open, t);
-    let banner = text::refused_banner(editor.refused.as_deref(), t)
-        .or_else(|| editor_find_bar::bar(&ui.editor_view, t));
-    let field = text::editor(editor, name, field_spans(ui, editor, t), t)
-        .on_scroll_offset(super::editor_minimap::note_scroll);
+    let banner =
+        text::refused_banner(editor.refused.as_deref(), t).or_else(|| editor_find_bar::bar(&ui.editor_view, t));
+    let field =
+        text::editor(editor, name, field_spans(ui, editor, t), t).on_scroll_offset(super::editor_minimap::note_scroll);
     let body = match kind {
         Some(kind) if ui.editor_view.preview_open => row()
             .key("editor-split")
@@ -187,16 +187,23 @@ pub fn parts(ui: &Ui, editor: &Editor, t: &Theme) -> (Vec<El>, Option<El>, El) {
             .min_w(0.0)
             .h_full()
             .child(el().key("editor-half").w_frac(0.5).h_full().child(field))
-            .child(
-                el().key("preview-half")
-                    .w_frac(0.5)
-                    .h_full()
-                    .child(live_preview::pane(kind, &editor.edit.text, ui, t)),
-            ),
+            .child(el().key("preview-half").w_frac(0.5).h_full().child(live_preview::pane(
+                kind,
+                &editor.edit.text,
+                ui,
+                t,
+            ))),
         _ => field,
     };
     // The minimap's slot, at the editor's right edge.
     let map = super::editor_minimap::minimap(&editor.edit, name, super::editor_minimap::current_scroll(), t);
-    let body = row().key("editor-with-map").grow(1.0).shrink().min_w(0.0).h_full().child(body).child(map);
+    let body = row()
+        .key("editor-with-map")
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .h_full()
+        .child(body)
+        .child(map);
     (tools, banner, body)
 }

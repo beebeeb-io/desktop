@@ -59,7 +59,11 @@ fn show_in_files(s: &mut State, folder: String) {
 fn open(s: &mut State, id: &str) {
     let name = name_of(s, id);
     match s.frames.shared.source.target_of(id) {
-        Some(RowTarget::Folder(folder)) | Some(RowTarget::Item { id: folder, is_folder: true }) => {
+        Some(RowTarget::Folder(folder))
+        | Some(RowTarget::Item {
+            id: folder,
+            is_folder: true,
+        }) => {
             show_in_files(s, folder);
         }
         Some(RowTarget::Item { id: item, .. }) => {

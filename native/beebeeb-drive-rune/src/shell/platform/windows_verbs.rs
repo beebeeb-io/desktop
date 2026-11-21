@@ -458,7 +458,9 @@ fn finish_open(s: &mut State, tx: &mut Tx) -> bool {
         return false;
     };
     if !session_gate::open(s) || waiting.account.as_deref() != s.shell.app.account() {
-        host::log("a File Explorer verb that waited for its folder was not followed: the window locked, or another account");
+        host::log(
+            "a File Explorer verb that waited for its folder was not followed: the window locked, or another account",
+        );
         return false;
     }
     select_and_run(s, waiting.verb, &waiting.item, tx);

@@ -74,7 +74,7 @@ use beebeeb_engine::sync_view::{Explorer, SyncView};
 use super::log;
 use super::scaffold::not_wired;
 use crate::frames::settings::Pane;
-use crate::frames::settings::bandwidth_data::{live_flows, Bandwidth, Direction, History, SpeedTest, Step};
+use crate::frames::settings::bandwidth_data::{Bandwidth, Direction, History, SpeedTest, Step, live_flows};
 use crate::frames::settings::diagnostics::{Bundle, Diagnostics};
 use crate::frames::settings::drive::{
     Control, DriveSettings, Insights, InsightsData, Kept, KeptOnPc, KindShare, LargeFile, Limit, Repair, Storage,
@@ -703,7 +703,11 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
         }
         Ask::Bandwidth => {
             send(Answer::Bandwidth(read_bandwidth(engine, &account)));
-            send(Answer::Metered(still_for(engine, &account).then(|| engine.metered_pause().ok()).flatten()));
+            send(Answer::Metered(
+                still_for(engine, &account)
+                    .then(|| engine.metered_pause().ok())
+                    .flatten(),
+            ));
         }
         Ask::Metered(pause) => {
             if engine.set_metered_pause(session, pause).is_err() {
@@ -711,7 +715,11 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
                 refuse(METERED_FAILED);
             }
             // What the file holds now, changed or not.
-            send(Answer::Metered(still_for(engine, &account).then(|| engine.metered_pause().ok()).flatten()));
+            send(Answer::Metered(
+                still_for(engine, &account)
+                    .then(|| engine.metered_pause().ok())
+                    .flatten(),
+            ));
         }
         Ask::Limits(change) => {
             // Under the session of the press and no other: the engine asks it again before it writes.
@@ -796,8 +804,10 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// Every pane but Thumbnails and previews while its host is unbound answers (the module's doc says which rows
     /// of Storage stay empty).
     fn wired(&self, pane: Pane) -> bool {
-        matches!(pane, Pane::Storage | Pane::Insights | Pane::Sync | Pane::Bandwidth | Pane::Diagnostics)
-            || (pane == Pane::Previews && self.previews.bound())
+        matches!(
+            pane,
+            Pane::Storage | Pane::Insights | Pane::Sync | Pane::Bandwidth | Pane::Diagnostics
+        ) || (pane == Pane::Previews && self.previews.bound())
     }
 
     /// Controls the engine cannot honour in this version are not drawn (the triage's honest states).
@@ -1185,8 +1195,9 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// "Choose photo": the OS's photo picker (a worker's call: it blocks), then the pick measured here.
     fn choose_photo(&mut self) {
         let platform = self.platform.clone();
-        self.previews
-            .choose_photo(std::sync::Arc::new(move |title, start| platform.pick_photo(title, start)));
+        self.previews.choose_photo(std::sync::Arc::new(move |title, start| {
+            platform.pick_photo(title, start)
+        }));
     }
 
     /// Stored in this PC's settings file through the engine, under the session of the press; the engine's upload
