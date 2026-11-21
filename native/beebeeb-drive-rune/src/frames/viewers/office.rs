@@ -1069,6 +1069,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
                 }
             }),
             inert: false,
+            gate_closed: false,
             // The file's folder, this file selected (file_bar draws it as Show in File Explorer).
             on_explorer: Box::new(|s, _| {
                 let Some((id, name)) = super::ui(s).map(|ui| (ui.file.id.clone(), ui.file.name.clone())) else {

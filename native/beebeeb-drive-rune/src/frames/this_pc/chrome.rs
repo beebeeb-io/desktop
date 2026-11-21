@@ -169,6 +169,7 @@ pub fn toolbar(
             },
             on_details: None,
             inert: true,
+            gate_closed: false,
             // These sections show no folder: the Beebeeb location.
             on_explorer: Box::new(tb::open_beebeeb_location),
             new: tb::New::Idle,

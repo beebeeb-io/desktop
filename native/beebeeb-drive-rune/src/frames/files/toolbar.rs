@@ -126,6 +126,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
             },
             on_details: press(|s, _| s.show_detail_pane = !s.show_detail_pane),
             inert: false,
+            gate_closed: false,
             // The folder shown, in File Explorer.
             on_explorer: Box::new(|s, tx| {
                 s.open_in_file_explorer(tx);
