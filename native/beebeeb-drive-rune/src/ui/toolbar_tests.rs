@@ -256,9 +256,9 @@ fn viewer_bar_has_one_show_in_file_explorer_and_no_open_explorer() {
 
 #[test]
 fn files_toolbar_is_the_one_bar_with_a_title_block_and_the_standard_controls() {
-    // Files' own toolbar delegates to `bar`: title block, details toggle, Open in File Explorer, New, search.
-    let (_asked, rt) = window(|s| crate::frames::viewers::set_scene(s, "DW-1512"));
+    // Files' own toolbar delegates to `bar`: title block, details toggle, New, search.
+    let (_asked, rt) = window(|_| {});
     let keys: Vec<String> = rt.elements().into_iter().filter_map(|e| e.key).collect();
-    assert!(keys.iter().any(|k| k == "folder-info"), "the viewer's title block");
-    assert_eq!(info(&rt, "show-in-folder").role, "button");
+    assert!(keys.iter().any(|k| k == "folder-info"), "the title block");
+    assert_eq!(info(&rt, "panel-toggle-btn").role, "button");
 }
