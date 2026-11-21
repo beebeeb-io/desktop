@@ -297,7 +297,7 @@ pub trait ThisPcSource {
     /// the list), only one the problem's row lists. The answer comes back through [`Self::pump`].
     fn settle(&mut self, problem: &str, exit: Exit);
     /// What is kept on this PC.
-    fn kept(&self) -> Vec<Kept>;
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]>;
     /// How many items [`Self::kept`] lists (the sidebar's count, every frame): a source may answer it without a
     /// copy of the list.
     fn kept_count(&self) -> usize {
@@ -634,8 +634,8 @@ impl ThisPcSource for FixtureSource {
         }
     }
 
-    fn kept(&self) -> Vec<Kept> {
-        self.kept.clone()
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&self.kept)
     }
 
     fn remove_from_pc(&mut self, id: &str) {
@@ -667,8 +667,8 @@ impl ThisPcSource for Unwired {
     fn retry(&mut self, _problem: &str) {}
     fn retry_all(&mut self) {}
     fn settle(&mut self, _problem: &str, _exit: Exit) {}
-    fn kept(&self) -> Vec<Kept> {
-        Vec::new()
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&[])
     }
     fn remove_from_pc(&mut self, _id: &str) {}
     fn remove_all_from_pc(&mut self) {}

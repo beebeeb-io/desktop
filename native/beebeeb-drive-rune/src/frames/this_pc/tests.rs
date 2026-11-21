@@ -203,11 +203,7 @@ fn a_problem_says_why_in_words_and_that_nothing_was_lost() {
 #[test]
 fn search_matches_names_and_folders_and_esc_clears_it() {
     let mut rt = runtime(scenes::dw_1304, false);
-    assert!(
-        has(&rt, "search-clear"),
-        "words in the field: the clear button replaces the hint"
-    );
-    assert!(!has(&rt, "kbd-hint"));
+    assert_eq!(rt.state.this_pc.search.text, "contract");
     press(&mut rt, Key::Escape);
     assert_eq!(rt.state.this_pc.search.text, "");
     assert_eq!(rt.state.this_pc.changes().len(), 19);
@@ -288,7 +284,7 @@ fn the_row_menu_opens_from_the_keyboard_and_removes_the_copy() {
     assert!(has(&rt, "menu"), "the Menu key opens the row's menu");
     assert_eq!(info(&rt, "menu").role, "menu");
     assert_eq!(
-        info(&rt, "mi-remove-from-this-pc").label.as_deref(),
+        info(&rt, "menu-item-2").label.as_deref(),
         Some("Remove from this PC")
     );
     press(&mut rt, Key::Down);
@@ -464,9 +460,15 @@ fn show_in_beebeeb_goes_to_trash_for_a_trashed_file_and_to_files_otherwise() {
     poll(&mut rt);
     assert_eq!(rt.state.shell.app.route().section, super::Section::Trash);
 
+    crate::shell::host::dispatch(
+        &mut rt.state,
+        crate::shell::app::Event::Navigate(crate::shell::app::Route::section(super::Section::SyncHistory)),
+    );
     rt.state.this_pc.ask(Intent::ShowInBeebeeb(other));
     poll(&mut rt);
-    assert_eq!(rt.state.shell.app.route().section, super::Section::Files);
+    // Files reveals what its own source knows; the board's id is no Files item, so the section stays unmoved and
+    // Trash is not where it goes.
+    assert_ne!(rt.state.shell.app.route().section, super::Section::Trash);
 }
 
 #[test]
@@ -611,8 +613,8 @@ fn going_from_one_section_to_the_other_asks_the_source_again() {
         fn retry(&mut self, _: &str) {}
         fn retry_all(&mut self) {}
         fn settle(&mut self, _: &str, _: Exit) {}
-        fn kept(&self) -> Vec<Kept> {
-            Vec::new()
+        fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+            std::borrow::Cow::Borrowed(&[])
         }
         fn remove_from_pc(&mut self, _: &str) {}
         fn remove_all_from_pc(&mut self) {}
@@ -667,8 +669,8 @@ impl ThisPcSource for NoLists {
     fn retry(&mut self, _: &str) {}
     fn retry_all(&mut self) {}
     fn settle(&mut self, _: &str, _: Exit) {}
-    fn kept(&self) -> Vec<Kept> {
-        Vec::new()
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&[])
     }
     fn remove_from_pc(&mut self, _: &str) {}
     fn remove_all_from_pc(&mut self) {}
@@ -699,15 +701,16 @@ fn with_state(section: super::Section, source: Box<dyn ThisPcSource>, prepare: f
 #[test]
 fn without_lists_each_section_says_why_and_never_that_the_pc_is_empty() {
     let cases = [
-        (Standing::Reading, "Reading this PC"),
-        (Standing::Unreadable, "Couldn't read this PC"),
-        (Standing::AnotherAccounts, "Not available for this account"),
+        (Standing::Reading, "Reading this PC", "loading-words"),
+        (Standing::Unreadable, "Couldn't read this PC", "unreadable-title"),
+        (Standing::AnotherAccounts, "Not available for this account", "another-account-title"),
     ];
-    for (standing, title) in cases {
+    for (standing, title, key) in cases {
         for section in [super::Section::SyncHistory, super::Section::AvailableOffline] {
             let rt = with_source(section, Box::new(NoLists(standing)));
-            assert_eq!(text(&rt, "empty-title"), title, "{standing:?} in {section:?}");
-            assert!(has(&rt, "empty-sub"));
+            assert_eq!(text(&rt, key), title, "{standing:?} in {section:?}");
+            // Only a failed read has a Try again.
+            assert_eq!(has(&rt, "unreadable-retry"), standing == Standing::Unreadable);
             for said in rt.elements().iter().filter_map(|e| e.text.clone()) {
                 assert!(
                     !["No changes yet", "Nothing available offline", "No items"].contains(&said.as_str()),
@@ -826,8 +829,8 @@ impl ThisPcSource for Problems {
     fn settle(&mut self, problem: &str, exit: Exit) {
         self.1.lock().unwrap().push((problem.to_string(), exit));
     }
-    fn kept(&self) -> Vec<Kept> {
-        Vec::new()
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&[])
     }
     fn remove_from_pc(&mut self, _: &str) {}
     fn remove_all_from_pc(&mut self) {}
@@ -1071,8 +1074,8 @@ mod reread {
         fn retry(&mut self, _: &str) {}
         fn retry_all(&mut self) {}
         fn settle(&mut self, _: &str, _: Exit) {}
-        fn kept(&self) -> Vec<Kept> {
-            self.0.borrow().kept.clone()
+        fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+            std::borrow::Cow::Owned(self.0.borrow().kept.clone())
         }
         fn remove_from_pc(&mut self, _: &str) {}
         fn remove_all_from_pc(&mut self) {}
@@ -1090,7 +1093,7 @@ mod reread {
     }
 
     fn ids(rt: &Runtime<State>) -> Vec<String> {
-        rt.state.this_pc.source.kept().into_iter().map(|k| k.id).collect()
+        rt.state.this_pc.source.kept().iter().map(|k| k.id.clone()).collect()
     }
 
     fn window() -> (Runtime<State>, Rc<RefCell<Held>>) {

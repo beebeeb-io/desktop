@@ -10,7 +10,7 @@
 
 use rune::{El, col, el, row};
 
-use super::{chrome, icons};
+use super::icons;
 use crate::State;
 use crate::ui::button;
 use crate::theme::icons as base;

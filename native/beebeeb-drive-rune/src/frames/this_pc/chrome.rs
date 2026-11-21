@@ -4,31 +4,19 @@
 //! `ui::toolbar::toolbar` and `ui::status_bar` hold Files' own words. These are the same pieces
 //! with the section's content (see the PR body, "Requests to the design-system lane").
 
-use rune::{El, Icon, col, el, row, text_input};
+use rune::{El, row, text_input};
 
 use super::Ui;
 use crate::State;
 use crate::shell::app::Event;
 use crate::shell::host;
-use crate::theme::icons;
-use crate::theme::tokens::{Theme, radius, type_};
-use crate::ui::kit;
+use crate::theme::tokens::{Theme, type_};
 
 /// Whether the search field has the keyboard (Rune reports a focused field's caret).
 pub fn search_focused(cx: &rune::Cx<State>) -> bool {
     cx.caret(crate::ui::keys::SEARCH_KEY).is_some()
 }
-use crate::ui::toolbar::{self as tb, kbd};
-
-/// The section's name and the line under it (`.mk-title`).
-pub fn title(name: &str, sub: String, t: &Theme) -> El {
-    col()
-        .key("folder-info")
-        .px(4.0)
-        .min_w(0.0)
-        .child(kit::label("folder-title", name, type_::TITLE, t.text).truncate())
-        .child(kit::label("item-count", sub, type_::TITLE_SUB, t.text_tertiary))
-}
+use crate::ui::toolbar as tb;
 
 /// How the toolbar's Files controls show in a section that has no use for them.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,84 +27,19 @@ pub enum FilesControls {
     Dimmed,
 }
 
-/// The search field (`.mk-search`) over the section's own text. With words in it the field is
-/// lit (`.is-focus`) and the hint gives way to a clear button.
-pub fn search_field(ui: &Ui, focused: bool, placeholder: &'static str, t: &Theme) -> El {
-    let has_words = !ui.search.text.is_empty();
-    let lit = focused || has_words;
-    if !has_words {
-        kit::note_text(
-            "search-placeholder",
-            "search-input",
-            placeholder,
-            type_::SEARCH,
-            t.text_tertiary,
-        );
-    } else {
-        kit::note_text(
-            "search-placeholder",
-            "search-input",
-            &ui.search.text,
-            type_::SEARCH,
-            t.text,
-        );
-    }
-    let mut field = row()
-        .key("search-box")
-        .role("search")
-        .w(210.0)
-        .h(28.0)
-        .gap(6.0)
-        .pl(9.0)
-        .pr(6.0)
-        .radius(8.0)
-        .center_y()
-        .child(kit::glyph(
-            "search-icon",
-            &icons::SEARCH,
-            13.0,
-            if lit { t.text } else { t.text_tertiary },
-        ))
-        .child(
-            text_input(&ui.search, type_::SEARCH)
-                .key(crate::ui::keys::SEARCH_KEY)
-                .label(placeholder)
-                .shortcut_hint("Ctrl+F")
-                .single_line()
-                .color(t.text)
-                // The board's caret (`.kit-caret`); the selection stays neutral.
-                .caret(t.accent_deep, t.text.alpha(0.15))
-                .placeholder(placeholder, t.text_tertiary)
-                .on_edit(|s: &mut State| &mut s.this_pc.search)
-                .grow(1.0),
-        );
-    if lit {
-        field = field
-            .fill(t.card)
-            .box_shadow(kit::ring(3.0, t.accent.alpha(0.3)))
-            .box_shadow(rune::Shadow {
-                spread: 1.0,
-                ..kit::ring_inset(t.accent_deep)
-            });
-    } else {
-        field = field.fill(t.field).box_shadow(kit::ring_inset(t.separator));
-    }
-    if has_words {
-        field = field.child(
-            el().key("search-clear-btn")
-                .role("button")
-                .label("Clear search")
-                .size(12.0, 12.0)
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    s.this_pc.clear_search();
-                })
-                .child(kit::glyph("search-clear", &super::icons::CLOSE, 12.0, t.text_tertiary)),
-        );
-    } else {
-        field = field.child(kbd("kbd-hint", "Ctrl+F", t));
-    }
-    field
+/// The search field: the one search box (`ui::toolbar::search_box`) around the section's own input. Esc clears it.
+pub fn search_field(ui: &Ui, placeholder: &'static str, t: &Theme) -> El {
+    let input = text_input(&ui.search, type_::SEARCH)
+        .key(crate::ui::keys::SEARCH_KEY)
+        .label(placeholder)
+        .shortcut_hint("Ctrl+F")
+        .single_line()
+        .color(t.text)
+        .caret(t.accent_deep, t.text.alpha(0.15))
+        .placeholder(placeholder, t.text_tertiary)
+        .on_edit(|s: &mut State| &mut s.this_pc.search)
+        .grow(1.0);
+    tb::search_box("search-input", placeholder, input, t)
 }
 
 /// The toolbar (`.mk-tb`): the one window toolbar (`ui::toolbar::bar`) with the section's title,
@@ -153,7 +76,7 @@ pub fn toolbar(
                     host::dispatch(s, Event::Forward);
                 }),
             ),
-            title: title(name, sub, t),
+            title: tb::title_block(name, (!sub.is_empty()).then_some(sub.as_str()), t),
             slot: Some(row().key("toolbar-slot").center_y().gap(8.0).children(slot)),
             slot_sep: false,
             // The board draws these and the section has nothing for them: there to be seen,
