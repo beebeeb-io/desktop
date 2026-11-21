@@ -533,7 +533,13 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
     );
     // 232 pt from the window's left edge, 34 pt over its bottom: above the status line.
     let card = dialog(
-        Dialog { surface: Surface::Panel, head: Head::Raw(panel), ..Dialog::new("uploads", "Uploads", 380.0) },
+        Dialog {
+            surface: Surface::Panel,
+            // The dialog's own parts are `up-*`: `uploads-clip` is the panel's.
+            prefix: "up",
+            head: Head::Raw(panel),
+            ..Dialog::new("uploads", "Uploads", 380.0)
+        },
         t,
     )
     .pin(Some(232.0), None, None, Some(34.0));
