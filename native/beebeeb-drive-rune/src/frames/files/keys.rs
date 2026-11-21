@@ -5,6 +5,9 @@
 //! | --- | --- |
 //! | Up, Down (+Shift) | select the next row (extend the range), and scroll it into view |
 //! | Home, End | the first, the last row |
+//! | PageUp, PageDown (+Shift) | a page of rows up, down |
+//! | Alt+Up | the parent folder |
+//! | F6, Shift+F6 | the next, previous pane (`ui::focus::pane`: toolbar, list, details) |
 //! | Ctrl+A | select every row |
 //! | Enter | open: a folder in place, a file in its app |
 //! | Space | Preview (DW-0408) of a file; nothing on a folder |
@@ -76,6 +79,11 @@ fn menu_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 fn menu_point(s: &State) -> (f32, f32) {
     let row = s.selected.unwrap_or(0) as f32;
     (430.0, 110.0 + 4.0 + row * ROW_H + 22.0)
+}
+
+/// Rows in one page: what the window's height holds under the toolbar and headers.
+fn page_rows(s: &State) -> usize {
+    (((s.actions.window.1 - 200.0) / ROW_H) as usize).max(1)
 }
 
 fn reveal(row: Option<usize>, tx: &mut Tx) -> bool {
@@ -155,6 +163,14 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return moved;
     }
+    if m.alt && !in_field && ev.key == Key::Up {
+        let up = s.listing.path.len().checked_sub(2);
+        if let Some(index) = up {
+            s.open_crumb(index);
+            focus_list(s, tx);
+        }
+        return up.is_some();
+    }
     if m.alt && m.shift && matches!(&ev.key, Key::Text(p) if p.eq_ignore_ascii_case("p")) {
         s.show_detail_pane = !s.show_detail_pane;
         return true;
@@ -175,6 +191,10 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Down => reveal(s.arrow(1, m.shift), tx),
         Key::Up => reveal(s.arrow(-1, m.shift), tx),
+        Key::PageDown | Key::PageUp if count > 0 && !m.alt => {
+            let page = page_rows(s) as isize;
+            reveal(s.arrow(if ev.key == Key::PageDown { page } else { -page }, m.shift), tx)
+        }
         Key::Home if count > 0 => {
             if m.shift {
                 s.extend_to(0);
@@ -233,5 +253,19 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         // Letters jump to the first name that starts with them (DW-0420b).
         Key::Text(ref typed) if !m.cmd && !m.ctrl && !m.alt => s.type_to(typed, tx),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    #[test]
+    fn a_page_is_at_least_one_row() {
+        let mut s = crate::init();
+        s.actions.window = (800.0, 0.0);
+        assert_eq!(page_rows(&s), 1);
+        s.actions.window = (800.0, 200.0 + ROW_H * 10.0 + 1.0);
+        assert_eq!(page_rows(&s), 10);
     }
 }
