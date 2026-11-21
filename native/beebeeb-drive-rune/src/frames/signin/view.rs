@@ -537,7 +537,7 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
     }
     let status = if expired {
         let words = if ui.lost() { "Lost" } else { "Expired" };
-        row().child(au::pill("status-pill", words, Tone::Neutral, false, t))
+        row().child(crate::ui::pill::pill("status-pill", words, crate::ui::pill::Tone::Neutral, false, t))
     } else {
         row()
             .gap(10.0)
@@ -593,7 +593,7 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
                     "Waiting for approval"
                 };
                 // 8 + the dot's 6 + 5 + the words + 8 (`.kit-pill`), to the fraction of a point.
-                au::pill("status-pill", words, Tone::Neutral, true, t)
+                crate::ui::pill::pill("status-pill", words, crate::ui::pill::Tone::Neutral, true, t)
                     .w(27.0 + rune::text::advance(words, type_au::PILL))
             })
     };
