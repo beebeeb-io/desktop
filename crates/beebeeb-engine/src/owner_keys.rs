@@ -27,6 +27,66 @@ struct Custody {
     /// record or a purpose-bound registration sets it (L7c/L7d).
     remember: bool,
 }
+/// dc-163: records a prepare pass writes per commit. One commit is a short insert loop (no other
+/// work runs under the lock), so it can be larger than the ingest's row batch.
+const RECORDS_PER_COMMIT: usize = 5_000;
+
+/// dc-163: the records a prepare pass has decided but not yet written. They are written
+/// [`RECORDS_PER_COMMIT`] at a time in one transaction (the first pull wrote one commit per row),
+/// and always before anything that reads another row's record or posts a wrap. A pass that fails
+/// or dies before a write loses only records the next pass derives again.
+struct PendingRecords {
+    rows: Vec<OwnedKeyRecord>,
+    index: HashMap<String, usize>,
+    revision: u64,
+}
+
+impl PendingRecords {
+    fn new(db: &StateDb) -> Self {
+        Self {
+            rows: Vec::new(),
+            index: HashMap::new(),
+            revision: db.account_revision(),
+        }
+    }
+
+    /// The record of `id`: the one decided in this pass, else the stored one.
+    fn get(&self, db: &StateDb, id: &str) -> anyhow::Result<Option<OwnedKeyRecord>> {
+        match self.index.get(id) {
+            Some(&at) => Ok(Some(self.rows[at].clone())),
+            None => Ok(db.get_owned_key_record(id)?),
+        }
+    }
+
+    fn put(&mut self, scope: &AccountScope<'_>, record: &OwnedKeyRecord) -> anyhow::Result<()> {
+        scope.check()?;
+        match self.index.get(&record.file_id) {
+            Some(&at) => self.rows[at] = record.clone(),
+            None => {
+                self.index.insert(record.file_id.clone(), self.rows.len());
+                self.rows.push(record.clone());
+            }
+        }
+        if self.rows.len() >= RECORDS_PER_COMMIT {
+            self.flush(scope)?;
+        }
+        Ok(())
+    }
+
+    /// Writes every pending record in one transaction, only while the account is still the
+    /// pass's (the revision is checked under the database lock, as `AccountScope::put` does).
+    fn flush(&mut self, scope: &AccountScope<'_>) -> anyhow::Result<()> {
+        if self.rows.is_empty() {
+            return Ok(());
+        }
+        scope.check()?;
+        scope.db.put_owned_key_records_at_revision(&self.rows, self.revision)?;
+        self.rows.clear();
+        self.index.clear();
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct Batch {
     rows: HashMap<String, Value>,
@@ -701,12 +761,13 @@ impl crate::engine_bridge::EngineBridge {
             }
         }
         let mut prepared = Vec::with_capacity(rows.len());
+        let mut pending = PendingRecords::new(self.db());
         for input in rows {
             scope.check()?;
             let Some(id) = input["id"].as_str().filter(|s| !s.is_empty()) else {
                 continue;
             };
-            let old = self.db().get_owned_key_record(id)?;
+            let old = pending.get(self.db(), id)?;
             let mut row = input.clone();
             let mut record = old.clone().unwrap_or_else(|| OwnedKeyRecord {
                 file_id: id.to_string(),
@@ -770,6 +831,7 @@ impl crate::engine_bridge::EngineBridge {
                 .resolve_envelope(&master, &row, &mut requests, &mut record, id)
                 .await;
             let Ok(outcome) = outcome else {
+                pending.flush(&scope)?;
                 block_malformed_row(&scope, old.as_ref(), &mut record)?;
                 prepared.push(PreparedOwnedRow {
                     row,
@@ -793,6 +855,8 @@ impl crate::engine_bridge::EngineBridge {
                 && class.is_some()
                 && (derived_readable || (text.is_none() && !sparse));
             if candidate.is_none() && !ordinary_legacy && !malformed && is_foreign {
+                // The shared root and its wraps are read from the stored records.
+                pending.flush(&scope)?;
                 match batch.shared_root(&scope, &row, record.shared_root_id.as_deref()).await {
                     Ok(Some(root)) => {
                         record.shared_root_id = Some(root.clone());
@@ -866,10 +930,12 @@ impl crate::engine_bridge::EngineBridge {
             if !readable {
                 record.blocked_fingerprint = Some(record.fingerprint());
             }
-            scope.put(&record)?;
+            pending.put(&scope, &record)?;
             if let Some((key, _)) = candidate.as_ref()
                 && record.pending_owner_wrap.is_some()
             {
+                // A24: the minted wrap is stored before it is posted.
+                pending.flush(&scope)?;
                 // A24: read the winner first; a second wrap is blocked, never re-posted.
                 if let Err(_error) = adopt(&scope, &mut record, key, true).await {
                     scope.check()?;
@@ -880,6 +946,7 @@ impl crate::engine_bridge::EngineBridge {
             }
             prepared.push(PreparedOwnedRow { row, record, readable });
         }
+        pending.flush(&scope)?;
         scope.check()?;
         Ok(prepared)
     }

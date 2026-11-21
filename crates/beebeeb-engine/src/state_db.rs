@@ -27,7 +27,6 @@ use rusqlite::{Connection, OptionalExtension, Result, params};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
 
 #[cfg(test)]
 #[path = "reconcile_measure_tests.rs"]
@@ -102,7 +101,7 @@ pub fn fail_next_landings_as_locked_for_test(n: u32) {
 /// `Connection` is `Send` but `!Sync` on its own). Lock contention is
 /// fine for our access pattern: the daemon does one tick every 5
 /// seconds and OS-extension callbacks are infrequent.
-pub struct StateDb(Mutex<Connection>, std::sync::atomic::AtomicU64);
+pub struct StateDb(conn_lock::ConnLock, std::sync::atomic::AtomicU64);
 
 #[cfg(test)]
 mod tests {
@@ -682,6 +681,9 @@ pub use sql::{ALIAS_MAX_AGE_SECS, GuardedRow, LOCAL_ACTIVITY_MAX_ROWS, TRANSFER_
 pub use sql::{is_file_provider_trash, page_cache_limit_kib, tree_holds_a_file};
 
 mod conn;
+// dc-163: the re-entrant connection lock and the first pull's write batch.
+mod conn_lock;
+pub use conn_lock::{PULL_BATCH_ROWS, WriteBatch};
 use conn::*;
 
 mod read_only;

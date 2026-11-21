@@ -480,8 +480,9 @@ impl std::fmt::Debug for Wake {
     }
 }
 
-/// How many ingested rows pass between two redraws of the first-listing count.
-const LISTING_RING_EVERY: u64 = 256;
+/// dc-163: the least time between two reports of the first-listing count. The ingest reports at most this often
+/// (not per row), and every report rings the wake hook, so a window redraws the count about five times a second.
+pub const LISTING_REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(Debug, Default)]
 pub struct TransferBoard {
@@ -529,20 +530,14 @@ impl TransferBoard {
         self.first_listing.lock().ok().and_then(|slot| *slot)
     }
 
-    /// A snapshot of `total` rows is being ingested and `listed` are in. Rings the wake hook when this is the first
-    /// report, and then every [`LISTING_RING_EVERY`] rows, so a window can redraw the count without a call per row.
+    /// A snapshot of `total` rows is being ingested and `listed` are in. Rings the wake hook. dc-163: the ingest
+    /// calls this at most every [`LISTING_REPORT_EVERY`], never per row, so each call may ring.
     pub fn set_first_listing(&self, listed: u64, total: u64) {
-        let first = match self.first_listing.lock() {
-            Ok(mut slot) => {
-                let first = slot.is_none();
-                *slot = Some((listed, total));
-                first
-            }
+        match self.first_listing.lock() {
+            Ok(mut slot) => *slot = Some((listed, total)),
             Err(_) => return,
-        };
-        if first || listed % LISTING_RING_EVERY == 0 {
-            self.ring();
         }
+        self.ring();
     }
 
     /// The snapshot is whole (or its ingest failed): no listing is in progress. Rings the wake hook.

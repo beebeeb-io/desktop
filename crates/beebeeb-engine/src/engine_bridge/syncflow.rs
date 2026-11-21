@@ -766,9 +766,25 @@ pub fn apply_snapshot(
     let board = bridge.transfers().clone();
     board.set_first_listing(0, total);
     let ended = ListingEnd(board.clone());
+    let mut reported = std::time::Instant::now();
 
+    // dc-163: the rows commit PULL_BATCH_ROWS at a time (they committed one by one: 2.1 M write calls
+    // at 41,510 rows). Each batch holds whole rows only; a failure or a crash mid-pull leaves the
+    // batches before it, no cursor, and the next tick pulls again over them (every write here is
+    // an upsert). The count is reported between batches, at most every LISTING_REPORT_EVERY, so
+    // the board's wake never runs under the database lock.
+    let mut batch = bridge.db().write_batch(crate::state_db::PULL_BATCH_ROWS)?;
     for (listed, f) in order.into_iter().enumerate() {
-        board.set_first_listing(listed as u64, total);
+        if listed > 0 {
+            batch.row_done(|listed| {
+                if reported.elapsed() >= crate::transfer_progress::LISTING_REPORT_EVERY {
+                    board.set_first_listing(listed as u64, total);
+                    reported = std::time::Instant::now();
+                }
+            })?;
+        }
+        #[cfg(test)]
+        first_pull_batch_tests::crash_point(listed);
         let file_id = f["id"].as_str().unwrap_or_default();
         if file_id.is_empty() {
             continue;
@@ -829,6 +845,7 @@ pub fn apply_snapshot(
             unplaced.insert(file_id.to_string());
         }
     }
+    batch.finish()?;
 
     // Deletion reconciliation: anything in the local own-tree the snapshot did
     // NOT mention was deleted/trashed server-side. `prune_absent` excludes shared
@@ -1440,5 +1457,153 @@ mod shared_folder_index_dirty_tests {
         let mut dirty = bridge.db().dirty_shared_index_roots().unwrap();
         dirty.sort();
         assert_eq!(dirty, vec![ROOT_A.to_string(), ROOT_B.to_string()]);
+    }
+}
+
+/// dc-163: the first pull commits in batches, not row by row, and a crash mid-pull leaves a
+/// database the next pull finishes.
+#[cfg(test)]
+mod first_pull_batch_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const KEY: [u8; 32] = [63u8; 32];
+    /// LargeAccount::GUUS's size (dc-086): 41,510 items, 2,739 of them folders.
+    const ITEMS: usize = 41_510;
+    const FOLDERS: usize = 2_739;
+    const CHILD: &str = "BB_DC163_FIRST_PULL_CHILD";
+
+    static CRASH_AT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// The pull dies here (no unwinding, no rollback, as a killed process) at the row the test chose.
+    pub(super) fn crash_point(listed: usize) {
+        if listed == CRASH_AT.load(Ordering::Relaxed) {
+            std::process::abort();
+        }
+    }
+
+    fn id(i: usize) -> String {
+        format!("{:08x}-0000-4000-8000-{:012x}", 0x0dc1_6300 + (i >> 24), i)
+    }
+
+    /// Folders under each other ten wide, files spread over the folders and the root.
+    fn nodes() -> Vec<serde_json::Value> {
+        let master = beebeeb_core::kdf::MasterKey::from_bytes(KEY);
+        (0..ITEMS)
+            .map(|i| {
+                let folder = i < FOLDERS;
+                let parent = if folder {
+                    (i >= 10).then(|| id(i / 10))
+                } else {
+                    (i % 7 != 0).then(|| id(i % FOLDERS))
+                };
+                let item = id(i);
+                #[allow(deprecated)]
+                let name = beebeeb_core::encrypt::encrypt_name(&master, &item, &format!("n{i}"), None).unwrap();
+                serde_json::json!({
+                    "id": item, "parent_id": parent, "name_encrypted": name, "size_bytes": 10,
+                    "is_folder": folder, "content_hash": null, "version_number": 1,
+                    "is_trashed": false, "is_starred": false, "updated_at": 1_000,
+                })
+            })
+            .collect()
+    }
+
+    fn bridge_at(db: &Path) -> EngineBridge {
+        let db = Arc::new(StateDb::open(db).unwrap());
+        let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "token".into(), KEY));
+        EngineBridge::new(&crate::identity::TEST, db, api)
+    }
+
+    /// `bootstrap_from_snapshot` after its fetch: the prepare pass, then the ingest.
+    async fn first_pull(bridge: &EngineBridge, sync_root: &Path, nodes: &[serde_json::Value]) {
+        let nodes = bridge
+            .prepare_owned_rows(nodes)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.row)
+            .collect();
+        let snapshot = crate::api_client::SyncSnapshot { seq_id: 41, nodes };
+        apply_snapshot(bridge, sync_root, &snapshot, 2_000, 2_000, &mut Vec::new()).unwrap();
+    }
+
+    fn rows(db: &Path, sql: &str) -> i64 {
+        rusqlite::Connection::open(db).unwrap().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn first_pull_of_41k_items_commits_in_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let db = dir.path().join("state.db");
+        let bridge = bridge_at(&db);
+        bridge.db().keep_wal_for_test();
+        let before = bridge.db().wal_commits_for_test();
+        let nodes = nodes();
+        let started = std::time::Instant::now();
+        first_pull(&bridge, &sync_root, &nodes).await;
+        let commits = bridge.db().wal_commits_for_test() - before;
+        println!("first pull of {ITEMS} items: {commits} commits, {:?}", started.elapsed());
+        assert!(commits <= ITEMS / 500, "{commits} commits for {ITEMS} items");
+        assert_eq!(rows(&db, "SELECT COUNT(*) FROM files"), ITEMS as i64);
+        assert_eq!(rows(&db, "SELECT COUNT(*) FROM owned_key_records"), ITEMS as i64);
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(41));
+    }
+
+    /// The child run of `first_pull_killed_halfway_leaves_a_db_the_next_pull_finishes`: dies at half.
+    async fn child_pull(db: &Path) {
+        let sync_root = db.parent().unwrap().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        CRASH_AT.store(ITEMS / 2, Ordering::Relaxed);
+        first_pull(&bridge_at(db), &sync_root, &nodes()).await;
+        unreachable!("the pull did not reach its crash point");
+    }
+
+    #[tokio::test]
+    async fn first_pull_killed_halfway_leaves_a_db_the_next_pull_finishes() {
+        if let Some(db) = std::env::var_os(CHILD) {
+            child_pull(Path::new(&db)).await;
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "engine_bridge::syncflow::first_pull_batch_tests::first_pull_killed_halfway_leaves_a_db_the_next_pull_finishes",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD, &db)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "the child pull was not killed");
+        assert!(db.exists(), "the child never opened the database");
+
+        // What the crash left: a sound database, whole batches of rows only, no cursor.
+        let check: String = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(check, "ok");
+        let landed = rows(&db, "SELECT COUNT(*) FROM files");
+        assert!(landed > 0 && landed < (ITEMS / 2) as i64, "{landed} rows after a crash at half");
+        assert_eq!(landed % crate::state_db::PULL_BATCH_ROWS as i64, 0, "a part of a batch landed");
+        assert_eq!(
+            rows(&db, "SELECT COUNT(*) FROM files f WHERE f.parent_id IS NOT NULL
+                        AND NOT EXISTS(SELECT 1 FROM files p WHERE p.file_id = f.parent_id)"),
+            0,
+            "a row landed without its folder"
+        );
+        let bridge = bridge_at(&db);
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), None, "a cursor after half a pull");
+
+        // The next pull goes over it and finishes.
+        let sync_root = dir.path().join("Beebeeb");
+        first_pull(&bridge, &sync_root, &nodes()).await;
+        assert_eq!(rows(&db, "SELECT COUNT(*) FROM files"), ITEMS as i64);
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(41));
     }
 }

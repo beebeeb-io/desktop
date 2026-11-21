@@ -245,7 +245,7 @@ impl StateDb {
         // Task 1697: capture each removed row's parent BEFORE its delete —
         // the change log must tell the replica's materialized filter where
         // each deleted item lived. (parent_id read per row inside the tx.)
-        let old_parent_of = |tx: &rusqlite::Transaction, file_id: &str| -> Option<String> {
+        let old_parent_of = |tx: &Connection, file_id: &str| -> Option<String> {
             tx.query_row(
                 "SELECT parent_id FROM files WHERE file_id = ?1",
                 params![file_id],
@@ -259,7 +259,7 @@ impl StateDb {
         // Slice 58: a removed row must not be named by a queued operation any more. The
         // reconcile path enforces the same invariant (nothing names a dropped row); a
         // terminal-failed op would otherwise keep the row in `waiting_rows` forever.
-        let drop_ops = |tx: &rusqlite::Transaction, file_id: &str| -> rusqlite::Result<()> {
+        let drop_ops = |tx: &Connection, file_id: &str| -> rusqlite::Result<()> {
             tx.execute(
                 "DELETE FROM upload_resume WHERE op_id IN (SELECT op_id FROM operation_queue WHERE file_id = ?1)",
                 params![file_id],
