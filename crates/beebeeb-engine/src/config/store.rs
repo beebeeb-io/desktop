@@ -316,8 +316,8 @@ pub trait ConfigFs {
     fn sync_dir(&self, dir: &Path) -> std::io::Result<()>;
 }
 
-// Outside tests, only the macOS sign-out builds one (spec 2026-10-10 W5).
-#[cfg_attr(not(any(target_os = "macos", any(test, feature = "test-support"))), allow(dead_code))]
+// Outside tests, the macOS sign-out and the discard-and-switch keep path (macOS, Windows) build one (spec 2026-10-10 W5).
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows", any(test, feature = "test-support"))), allow(dead_code))]
 pub struct RealConfigFs;
 
 impl ConfigFs for RealConfigFs {
