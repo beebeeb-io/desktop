@@ -79,17 +79,6 @@ pub fn columns(width: f32) -> usize {
 /// A picture asked for stays held until its tile is this many rows out of view.
 pub const KEEP_ROWS: usize = 3;
 
-/// The items whose tiles are in view, and one row above and below: `offset` is how far the tiles' box is scrolled,
-/// `viewport` the scrolling area's height. Before the first layout (`viewport` 0) the first screenful stands in.
-pub fn items_in_view(offset: f32, viewport: f32, columns: usize, count: usize) -> std::ops::Range<usize> {
-    let pitch = CELL_H + ROW_GAP;
-    let columns = columns.max(1);
-    let viewport = if viewport > 0.0 { viewport } else { 5.0 * pitch };
-    let first = ((offset.max(0.0) / pitch).floor() as usize).saturating_sub(1);
-    let last = (((offset.max(0.0) + viewport) / pitch).ceil() as usize) + 1;
-    (first * columns).min(count)..(last * columns).min(count)
-}
-
 /// One tile (`.mk-gcell`): the one file tile at its Medium size, with the grid's figures under the
 /// name and a video's length on the picture. The caller adds what a press does, its label and its
 /// position in the set.
@@ -141,11 +130,9 @@ pub fn tile(i: usize, item: &Tile, t: &Theme) -> El {
     )
 }
 
-/// The grid: `tiles` in rows of as many as fit, scrolling when they do not fit the height.
+/// The grid: `rows` (the listbox holding the realised lines), scrolling when they do not fit the height.
 /// `rows` is the box the caller makes focusable (the grid's one Tab stop).
-pub fn grid(rows: El, tiles: Vec<El>) -> El {
-    // A column, so the tiles' box is as high as its rows and no higher (`align-content: start`):
-    // stretched over the grid's height, wrapped rows would spread apart.
+pub fn grid(rows: El) -> El {
     col()
         .key("grid")
         .grow(1.0)
@@ -155,12 +142,5 @@ pub fn grid(rows: El, tiles: Vec<El>) -> El {
         .py(PAD_Y)
         .px(PAD_X)
         .scroll(rune::ScrollSpec { stick_bottom: false })
-        .child(
-            rows.key("rows")
-                .w_full()
-                .flex_wrap()
-                .items_start()
-                .gaps(ROW_GAP, COL_GAP)
-                .children(tiles),
-        )
+        .child(rows.key("rows").w_full())
 }
