@@ -843,15 +843,17 @@ fn a_lock_during_a_wait_ends_the_run_at_once() {
     let session = world.engine.session_turn();
     let (engine, previews) = (world.engine.clone(), world.previews.clone());
     // Once the first preview is sent (the wait of about 5 s at 1 KiB/s has begun), the screen locks.
+    let locked_at = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+    let locked_at_writer = std::sync::Arc::clone(&locked_at);
     let locker = std::thread::spawn(move || {
         let began = std::time::Instant::now();
         while previews.puts() == 0 && began.elapsed() < std::time::Duration::from_secs(10) {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+        *locked_at_writer.lock().unwrap() = Some(std::time::Instant::now());
         lock_and_unlock(&engine);
     });
-    let began = std::time::Instant::now();
     let end = world.run(|| {
         DesktopConfig::update_for(&TEST, |config| {
             config.upload_kbps_limit = 1;
@@ -864,9 +866,9 @@ fn a_lock_during_a_wait_ends_the_run_at_once() {
     assert!(end.session_moved);
     assert_eq!(world.previews.puts(), 1);
     assert!(
-        began.elapsed() < std::time::Duration::from_secs(3),
+        locked_at.lock().unwrap().expect("the lock happened").elapsed() < std::time::Duration::from_secs(3),
         "the wait ended with the session: {:?}",
-        began.elapsed()
+        locked_at.lock().unwrap().map(|t| t.elapsed())
     );
 }
 
