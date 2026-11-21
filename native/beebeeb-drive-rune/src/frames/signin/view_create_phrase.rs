@@ -33,6 +33,7 @@ fn shown_word(i: usize, word: &str, t: &Theme) -> El {
     el().key(key.clone())
         .role("listitem")
         .label(format!("Word {}", i + 1))
+        .position_in_set(i + 1, 12)
         .w(WORD_WIDTH)
         .h(34.0)
         .radius(11.0)
