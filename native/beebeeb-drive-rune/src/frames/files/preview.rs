@@ -13,6 +13,7 @@ use super::dialogs::Dialog;
 use super::source::{Action, ActionError};
 use crate::State;
 use crate::source::{DriveItem, format_size};
+use crate::theme::file_icons::icon_for;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, icons_files};
 use crate::ui::settings_dialog::DIALOG_TITLE;
@@ -214,6 +215,12 @@ fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
         .child(close)
+        .child(crate::ui::file_icon::file_icon(
+            "preview-head-icon",
+            icon_for(&item.name, false, item.mime.as_deref()),
+            16.0,
+            t,
+        ))
         .child(title);
     // Nothing of a read-only panel shares or opens the file.
     if matches!(mode, Mode::ReadOnly { .. }) {
@@ -341,11 +348,11 @@ fn blank(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
                 .radius(16.0)
                 .center()
                 .fill(t.text.alpha(0.07))
-                .child(kit::glyph(
+                .child(crate::ui::file_icon::file_icon(
                     "pv-blank-icon",
-                    &icons_files::DOC_BLANK,
+                    icon_for(&item.name, false, item.mime.as_deref()),
                     28.0,
-                    t.text_secondary,
+                    t,
                 )),
         )
         .child(kit::label("pv-blank-title", title, DIALOG_TITLE, t.text).mt(8.0))
