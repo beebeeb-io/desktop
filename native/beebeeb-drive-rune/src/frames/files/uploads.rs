@@ -15,7 +15,6 @@ use super::source::Action;
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, icons_files};
-use crate::ui::dialog::{Dialog, Head, Surface, dialog};
 use crate::ui::kit;
 use crate::ui::status_bar::{Dot, bar as status_bar};
 use crate::ui::settings_controls::{self as controls, Emphasis};
@@ -531,18 +530,18 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
                     .on_press_tx(|s: &mut State, tx: &mut Tx| s.pause_uploads(tx)),
             ),
     );
-    // 232 pt from the window's left edge, 34 pt over its bottom: above the status line.
-    let card = dialog(
-        Dialog {
-            surface: Surface::Panel,
-            // The dialog's own parts are `up-*`: `uploads-clip` is the panel's.
-            prefix: "up",
-            head: Head::Raw(panel),
-            ..Dialog::new("uploads", "Uploads", 380.0)
-        },
-        t,
-    )
-    .pin(Some(232.0), None, None, Some(34.0));
+    let card = col()
+        .key("uploads")
+        .role("dialog")
+        .label("Uploads")
+        // 232 pt from the window's left edge, 34 pt over its bottom: above the status line.
+        .pin(Some(232.0), None, None, Some(34.0))
+        .w(380.0)
+        .radius(12.0)
+        .fill(t.card)
+        .box_shadow(kit::drop(18.0, 50.0, Color::BLACK.alpha(0.26)))
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .child(panel);
     Some(
         el().key("uploads-layer")
             .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
