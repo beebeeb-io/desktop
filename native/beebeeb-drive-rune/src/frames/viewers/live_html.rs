@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use rune::El;
 
 use super::super::Ui;
-use super::markdown::{self, Block, Piece};
+use super::super::markdown::{self, Block, Piece};
 use crate::theme::tokens::Theme;
 
 thread_local! {
