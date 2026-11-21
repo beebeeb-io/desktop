@@ -54,6 +54,9 @@ pub mod video;
 use open_route::is_this_groups;
 
 #[cfg(test)]
+#[path = "editor_keys_tests.rs"]
+mod editor_keys_tests;
+#[cfg(test)]
 mod media_tests;
 #[cfg(test)]
 mod new_file_tests;
@@ -804,6 +807,14 @@ pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
 /// nothing. It is handed to the field as the line break, so undo and a held key work as for any typing.
 pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
+    if ev.key == Key::Tab && !m.alt && !m.cmd && !m.ctrl {
+        let Some(editor) = s.viewer.ui.as_mut().and_then(|ui| ui.editor.as_mut()) else {
+            return false;
+        };
+        editor_tab(&mut editor.edit, m.shift);
+        tx.scroll_into_view(format!("caret-{}", editor.caret_line()));
+        return true;
+    }
     if ev.key != Key::Enter || m.shift || m.alt || m.cmd || m.ctrl {
         return false;
     }
@@ -820,6 +831,67 @@ pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     editor.edit.key(&line_break, None);
     tx.scroll_into_view(format!("caret-{}", editor.caret_line()));
     true
+}
+
+/// The find keys while the editor is open. `true`: the key was used.
+fn editor_find_key(ui: &mut Ui, ev: &KeyEvent) -> bool {
+    use editor_view::editor_find_bar as bar;
+    let m = ev.mods;
+    let Some(editor) = ui.editor.as_mut() else { return false };
+    let view = &mut ui.editor_view;
+    match &ev.key {
+        Key::Command(c) if (*c == 'f' || *c == 'h') && !m.alt && !m.shift => {
+            bar::open(view, &mut editor.edit, *c == 'h');
+            true
+        }
+        Key::Function(3) if !m.alt && !m.cmd => {
+            bar::step(view, &mut editor.edit, m.shift);
+            true
+        }
+        Key::Enter if view.find.open && view.find.needle.focused && !m.alt && !m.cmd => {
+            bar::step(view, &mut editor.edit, m.shift);
+            true
+        }
+        Key::Escape if view.find.open => {
+            bar::close(view, &mut editor.edit);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Replace `edit`'s text with `new` through the field's own edit (so undo and the unsaved mark work), then select `sel`.
+fn apply_edit(edit: &mut rune::TextEdit, new: &str, sel: std::ops::Range<usize>) {
+    let old = edit.text.clone();
+    let mut pre = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(pre) || !new.is_char_boundary(pre) {
+        pre -= 1;
+    }
+    let max_suf = old.len().min(new.len()) - pre;
+    let mut suf = old.bytes().rev().zip(new.bytes().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(old.len() - suf) || !new.is_char_boundary(new.len() - suf) {
+        suf -= 1;
+    }
+    edit.set_selection(pre, old.len() - suf);
+    edit.insert(&new[pre..new.len() - suf]);
+    edit.set_selection(sel.start, sel.end);
+}
+
+/// Tab and Shift+Tab in the editor: indent or outdent the selected lines, or put one indent unit at the caret.
+fn editor_tab(edit: &mut rune::TextEdit, outdent: bool) {
+    use crate::text_kit::indent::{detect, indent_lines, outdent_lines, unit_str};
+    let unit = detect(&edit.text);
+    let (a, b) = edit.range();
+    let multi = edit.text[a..b].contains('\n');
+    if outdent {
+        let (new, sel) = outdent_lines(&edit.text, a..b, unit);
+        apply_edit(edit, &new, sel);
+    } else if multi {
+        let (new, sel) = indent_lines(&edit.text, a..b, unit);
+        apply_edit(edit, &new, sel);
+    } else {
+        edit.insert(&unit_str(unit));
+    }
 }
 
 fn close_stale(s: &mut State) {
@@ -1104,6 +1176,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             ui.edit();
             true
         }
+        // The editor's find keys (ux-15): Ctrl+F, Ctrl+H, F3, Shift+F3, Enter in the find field, Esc.
+        _ if ui.editor.is_some() && ui.dialog.is_none() && editor_find_key(ui, ev) => true,
         // Ctrl+S: save the edit as a new, encrypted version.
         Key::Command('s') if !ev.mods.alt && !ev.mods.shift && ui.editor.is_some() && ui.dialog.is_none() => {
             ui.save();
