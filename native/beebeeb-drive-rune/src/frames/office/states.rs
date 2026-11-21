@@ -620,12 +620,12 @@ mod tests {
         // The window draws exactly one reason line for each failure, and none for the other states.
         for s in ALL_REASONS {
             let rt = showing(StateBody::new(s, true));
-            assert!(keyed(&rt, "empty-reason"), "{s:?} draws its reason line");
+            assert!(keyed(&rt, "empty-text"), "{s:?} draws its reason line");
             assert!(keyed(&rt, "empty-title"));
         }
         assert!(!keyed(
             &showing(StateBody::new(OfficeState::Opening, true)),
-            "empty-reason"
+            "empty-text"
         ));
     }
 
