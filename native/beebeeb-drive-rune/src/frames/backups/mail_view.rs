@@ -24,7 +24,7 @@ use crate::ui::settings_dialog::{self as dialogs, DIALOG_TITLE, Weight};
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_notice::{self as notice, PILL, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
-use crate::ui::{au, kit, settings_meter};
+use crate::ui::{au, kit, pill, settings_meter};
 
 /// A folder that is not ticked: a point where the tick would be (`M12 11.9v.2`).
 static NOT_TICKED: Icon = Icon {
@@ -49,20 +49,6 @@ fn words_rich(key: &str, words: &str, mono: &[std::ops::Range<usize>], style: Te
     kit::note_text(key, key, words, style, ink);
     let spans = mono.iter().map(|r| Span::new(r.start, r.end).mono()).collect();
     rich(words, spans).key(key.to_string()).font(style).color(ink)
-}
-
-/// "On" on green (`.kit-pill.tone-green`). Keys: `pill-0`, `-dot`, `-label`.
-fn pill_on(t: &Theme) -> El {
-    row()
-        .key("pill-0")
-        .h(20.0)
-        .px(8.0)
-        .gap(5.0)
-        .center_y()
-        .radius(10.0)
-        .fill(t.green.alpha(0.14))
-        .child(settings_meter::disc("pill-0-dot", 6.0, t.green))
-        .child(kit::label("pill-0-label", "On", PILL, au::green_text(t)))
 }
 
 /// The page's head: the mail tile, what Mail Backup is doing, and the state's one control.
@@ -210,7 +196,7 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
             children.push(head(
                 "Mail Backup is on",
                 &format!("Runs on this PC ({})", mail.pc),
-                Some(pill_on(t)),
+                Some(pill::pill("pill-0", "On", pill::Tone::Good, true, t)),
                 t,
             ));
             let mut facts = Vec::new();
