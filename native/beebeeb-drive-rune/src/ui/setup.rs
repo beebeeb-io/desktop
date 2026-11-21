@@ -18,6 +18,7 @@ use rune::tok::Family;
 use rune::{Color, Cx, El, Icon, TextStyle, col, el, row};
 
 use super::au::{self, Keys, type_au};
+use super::dialog::{Dialog, Head, Surface, dialog};
 use super::{button, caption, kit, settings_dialog};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
@@ -447,4 +448,18 @@ pub fn note(keys: &mut Keys, words: &str, style: TextStyle, inset: f32, t: &Them
         .wrap()
         .w_full()
         .px(inset)
+}
+
+/// A sheet over the setup window (`.mk-sheet`): hangs from the caption, `w` by `h`, its lower
+/// corners rounded. A dialog: it holds the keyboard while it is up.
+pub fn sheet(name: &str, w: f32, h: f32, content: El, t: &Theme) -> El {
+    dialog(
+        Dialog {
+            surface: Surface::Sheet,
+            head: Head::Raw(content),
+            ..Dialog::new("sheet", name, w)
+        },
+        t,
+    )
+    .h(h)
 }
