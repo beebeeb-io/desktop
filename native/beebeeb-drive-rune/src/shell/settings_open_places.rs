@@ -2,6 +2,7 @@
 //!
 //! - `file-explorer` (Sync, DW-0746): File Explorer at the Beebeeb folder, as the toolbar's button does.
 //! - `support-bundle` (Diagnostics, DW-0790b): the saved bundle shown in File Explorer.
+//! - `log-folder` (Diagnostics): the log file shown in File Explorer.
 //! - `choose-photo` (Previews, DW-0745): the photo picker and the measure, on the drive settings' source.
 
 use rune::Tx;
@@ -18,6 +19,12 @@ pub fn open(s: &mut State, tx: &mut Tx, target: &str) -> bool {
         "support-bundle" => {
             if !s.settings.drive.reveal_bundle() {
                 super::host::log("settings: the saved support bundle was not shown in File Explorer");
+            }
+            true
+        }
+        "log-folder" => {
+            if !s.settings.drive.reveal_log_file() {
+                super::host::log("settings: the log file was not shown in File Explorer");
             }
             true
         }

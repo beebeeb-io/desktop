@@ -97,7 +97,7 @@ fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     assert!(
         texts
             .iter()
-            .any(|t| t == "Turn on backups in Settings \u{203A} Backups."),
+            .any(|t| t == "Turn on backups in Settings to see your devices here."),
         "{texts:?}"
     );
     // The window's real chrome stays: caption and sidebar.

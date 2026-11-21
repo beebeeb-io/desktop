@@ -300,6 +300,11 @@ pub trait DriveSettings {
     fn reveal_bundle(&mut self) -> bool {
         false
     }
+    /// "Open folder" on the Log file row: the log file shown in File Explorer. `false`: there is no file log, or it
+    /// could not be shown.
+    fn reveal_log_file(&mut self) -> bool {
+        false
+    }
     /// "Choose photo" in Thumbnails and previews: the OS's photo picker, then the pick measured on this PC (the
     /// pane's sample follows). A source with no previews does nothing.
     fn choose_photo(&mut self) {}

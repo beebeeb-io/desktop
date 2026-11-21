@@ -17,7 +17,7 @@ pub fn open(s: &mut State, tx: &mut Tx, target: &str) {
             true
         }
         "privacy" | "export-my-data" => super::settings_open_pages::open(s, tx, target),
-        "file-explorer" | "support-bundle" | "choose-photo" => super::settings_open_places::open(s, tx, target),
+        "file-explorer" | "support-bundle" | "log-folder" | "choose-photo" => super::settings_open_places::open(s, tx, target),
         _ => false,
     };
     if !taken {

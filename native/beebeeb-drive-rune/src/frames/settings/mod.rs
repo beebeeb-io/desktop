@@ -882,12 +882,13 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 }
 
 /// Every `Intent::Open` target the panes can raise, and the file that takes it (`shell::settings_open`).
-pub const OPEN_TARGETS: [&str; 6] = [
+pub const OPEN_TARGETS: [&str; 7] = [
     "open-source-licences",
     "privacy",
     "export-my-data",
     "file-explorer",
     "support-bundle",
+    "log-folder",
     "choose-photo",
 ];
 
