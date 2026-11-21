@@ -156,6 +156,8 @@ mod tests {
     fn f6_walks_the_files_window_panes_in_order_and_shift_f6_walks_back() {
         let env = Env { system_dark: false, scale: 2.0 };
         let mut rt = Runtime::new(crate::init(), files, (800.0, 600.0), env);
+        // Nothing focused: the app's key handler hears F6 (the shell's arm in `shell/host.rs`).
+        rt.on_key = Some(|_, ev, tx| cycle(ev, tx));
         rt.frame(0.0);
         for want in ["side-1", "tool-1", "row-1", "info-1", "side-1"] {
             key(&mut rt, Key::Function(6), false);
