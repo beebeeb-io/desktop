@@ -1151,9 +1151,10 @@ impl<C: CredentialStores> Engine<C> {
             .unwrap_or_else(|| crate::config::default_sync_root_suggestion(self.identity)))
     }
 
-    /// The session token (cloned for a person's single API call). `Err` when locked (either level) or signed out.
-    fn session_token(&self) -> Result<String, String> {
-        self.person_session(|session, _| session.token.clone())
+    /// The session token (copied for a person's single API call, wiped on drop; `Zeroizing` prints redacted in
+    /// `Debug`). `Err` when locked (either level) or signed out.
+    fn session_token(&self) -> Result<Zeroizing<String>, String> {
+        self.person_session(|session, _| Zeroizing::new(session.token.clone()))
             .map_err(|refused| refused.said_as("locked".to_string(), "not signed in".to_string()))
     }
 }

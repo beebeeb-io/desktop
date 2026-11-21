@@ -15,7 +15,7 @@ impl<C: CredentialStores> Engine<C> {
             let resp = self
                 .client
                 .get(format!("{}/api/v1/billing/usage", self.config.api_base))
-                .bearer_auth(&token)
+                .bearer_auth(token.as_str())
                 .send()
                 .await
                 .map_err(|_| "offline".to_string())?
