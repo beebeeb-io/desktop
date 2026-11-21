@@ -629,7 +629,7 @@ mod tests {
             let unknown = Some(Track::of_label(&table, "something else"));
             assert_eq!(
                 decide(unknown, None, state),
-                Decision::Error(ErrorCode::Unsupported(Codec::Other))
+                Decision::Error(ErrorCode::UnknownCodec)
             );
             let raw = Some(Track::of_label(&table, "Uncompressed YUV"));
             assert_eq!(decide(raw, None, state), ours(Some(Codec::Other), None, None));
