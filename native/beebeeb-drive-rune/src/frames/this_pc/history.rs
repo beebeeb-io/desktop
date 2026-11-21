@@ -103,6 +103,7 @@ fn filter(ui: &Ui, t: &Theme) -> El {
             .center()
             .radius(8.0)
             .focusable(true)
+            .focus_selected(on)
             .on_press(move |s: &mut State| s.this_pc.set_filter(f))
             .child(kit::label(
                 format!("seg-0-{}-label", crate::ui::settings_shell::slug(&words)),

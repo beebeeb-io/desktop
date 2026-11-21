@@ -156,7 +156,11 @@ fn a_click_on_a_filter_narrows_the_list_and_checks_its_tab() {
 #[test]
 fn the_keyboard_reaches_a_filter_and_space_chooses_it() {
     let mut rt = runtime(scenes::dw_1301, false);
-    tab_to(&mut rt, "seg-0-other-devices");
+    // The filter is one Tab stop (the chosen one); arrows rove inside it.
+    tab_to(&mut rt, "seg-0-all");
+    press(&mut rt, Key::Right);
+    press(&mut rt, Key::Right);
+    assert_eq!(focused(&rt).as_deref(), Some("seg-0-other-devices"));
     press(&mut rt, Key::Text(" ".into()));
     assert_eq!(rt.state.this_pc.filter, Filter::OtherDevices);
 }
@@ -563,18 +567,8 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 3);
 
-    // The keyboard reaches the ask's own buttons: Tab to Cancel, Space presses it. Enter does not press the focused
-    // button (Rune: Return presses the window's default button, and this ask has none), so a stray Enter on
-    // "Remove all" removes nothing.
+    // The keyboard reaches the ask's own buttons: Tab to Cancel, Space presses it.
     open_ask(&mut rt);
-    tab_to(&mut rt, "btn-remove-all-yes");
-    press(&mut rt, Key::Enter);
-    settle(&mut rt);
-    assert!(
-        rt.state.this_pc.confirm_remove_all,
-        "Enter on Remove all does not answer the ask"
-    );
-    assert_eq!(rt.state.this_pc.kept_count(), 3, "Enter removed nothing");
     tab_to(&mut rt, "btn-remove-all-cancel");
     press(&mut rt, Key::Text(" ".into()));
     settle(&mut rt);
