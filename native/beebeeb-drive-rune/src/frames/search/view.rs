@@ -86,7 +86,17 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
         .child(toolbar(s, &shows.count_words(), &t))
         // The one banner of the whole window (`frames::global`: "on every view of the window").
         .children(crate::frames::global::banner_under_toolbar(s, &t))
-        .child(content.grow(1.0).min_h(0.0).w_full())
+        .child(crate::ui::focus::pane(
+            col().w_full().grow(1.0).min_h(0.0).child(content.grow(1.0).min_h(0.0).w_full()),
+            "search-content",
+        ))
+        .child(
+            // The result count, spoken politely each time it changes; the search box keeps focus.
+            el().key("result-count")
+                .role("status")
+                .label(shows.count_words())
+                .live_region(rune::LiveRegion::Polite),
+        )
         .child(status(s, &t));
     let body = row()
         .key("body")
@@ -487,9 +497,9 @@ fn grid_rows(tiles: Vec<El>) -> Vec<El> {
 
 /// One result as a tile of the grid (`ui::file_tile`): its icon, its name, and in its description where it is. Keys
 /// `row-<i>`, `-thumb`, `-icon`, `-name`, so the keyboard and the pointer treat it like the list's row.
-fn result_tile(i: usize, hit: &Hit, selected: bool, t: &Theme) -> El {
+fn result_tile(i: usize, total: usize, hit: &Hit, selected: bool, t: &Theme) -> El {
     let k = format!("row-{i}");
-    let look = RowLook { selected, ..RowLook::default() };
+    let look = RowLook { selected, position: Some((i + 1, total)), ..RowLook::default() };
     file_tile::tile(
         &k,
         &hit.name,
@@ -507,7 +517,7 @@ fn result_tile(i: usize, hit: &Hit, selected: bool, t: &Theme) -> El {
 
 /// One result (`ui::file_row`): the name, when it changed, its size, where it is, and the PC column. The match in
 /// the name is not set in bold: the shared row writes a name whole.
-fn result_row(i: usize, hit: &Hit, selected: bool, t: &Theme) -> El {
+fn result_row(i: usize, total: usize, hit: &Hit, selected: bool, t: &Theme) -> El {
     let k = format!("row-{i}");
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
     let place = row().key("where-cell").w(WHERE_W).min_w(0.0).center_y().child(
@@ -529,7 +539,7 @@ fn result_row(i: usize, hit: &Hit, selected: bool, t: &Theme) -> El {
         place,
         pc,
     ];
-    let look = RowLook { selected, ..RowLook::default() };
+    let look = RowLook { selected, position: Some((i + 1, total)), ..RowLook::default() };
     file_row::row_with(&k, &hit.name, table::tile(&k, format!("{k}-icon"), &hit.name, hit.kind, 22.0, 6.0, 14.0, t), &hit.name, Vec::new(), cells, look, t)
         .description(format!("In {}", hit.place))
         // The list is one Tab stop: the selected result; the arrows move inside it.
@@ -548,9 +558,9 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
         .map(|(i, hit)| {
             let (pressed, opened, menu) = (hit.id.clone(), hit.id.clone(), hit.id.clone());
             (if ui.grid {
-                result_tile(i, hit, at == Some(i), t)
+                result_tile(i, hits.len(), hit, at == Some(i), t)
             } else {
-                result_row(i, hit, at == Some(i), t)
+                result_row(i, hits.len(), hit, at == Some(i), t)
             })
             .on_press_tx(move |s: &mut State, tx: &mut Tx| {
                 s.frames.find.selected = Some(pressed.clone());
