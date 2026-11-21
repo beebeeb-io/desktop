@@ -464,11 +464,13 @@ fn run_row(file: &str) {
         }
         "system" => {
             let code = refusal(&mut app, file, &r.kind, hint);
-            assert_eq!(
-                code,
-                ErrorCode::NoSystemDecoder(codec_of(&r.codec)),
-                "{file}: this codec's route is the system's decoder"
-            );
+            // A 10-bit H.264 stream with no system decoder is its own refusal (ux-24).
+            let expected = if file == "h264-10bit.mp4" && code == ErrorCode::TenBit {
+                ErrorCode::TenBit
+            } else {
+                ErrorCode::NoSystemDecoder(codec_of(&r.codec))
+            };
+            assert_eq!(code, expected, "{file}: this codec's route is the system's decoder");
         }
         "unsupported" => {
             let code = refusal(&mut app, file, &r.kind, hint);

@@ -109,6 +109,7 @@ beside
 best-effort
 bind
 binding
+bit
 bitmap
 blobs
 bootstrapping
@@ -997,6 +998,7 @@ task
 telemetry
 tell
 temp
+ten
 terminal
 termination
 terms
