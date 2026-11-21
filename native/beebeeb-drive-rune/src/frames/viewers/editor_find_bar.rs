@@ -126,7 +126,7 @@ pub fn match_spans(view: &EditorView, text: &str, t: &Theme) -> Vec<Span> {
         .enumerate()
         .map(|(i, m)| {
             let c = if view.find.current == Some(i) { t.selection } else { t.highlight };
-            Span::new(m.start, m.end).bg(c)
+            Span::new(m.start, m.end).bg(c, 0.0)
         })
         .collect()
 }
