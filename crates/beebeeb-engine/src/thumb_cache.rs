@@ -14,7 +14,7 @@
 //!
 //! BLOCKS: the disk. Must not: log a name, a path or a byte.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
