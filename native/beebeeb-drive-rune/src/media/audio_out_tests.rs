@@ -227,3 +227,37 @@ fn device_fill_empty_ring_is_silence() {
     fill_device(&shared, &mut scratch, &mut i);
     assert!(i.iter().all(|s| *s == 0));
 }
+
+#[test]
+fn device_fill_applies_the_gain() {
+    let shared = Shared::new(1000, 1);
+    shared.ring().push(0, &[0.5, -1.0, 0.25, 1.0]);
+    shared.set_gain(0.5);
+    let mut scratch = Zeroizing::new(Vec::new());
+    let mut data = [9.0f32; 2];
+    fill_device(&shared, &mut scratch, &mut data);
+    assert_eq!(data, [0.25, -0.5], "half the volume, from this buffer on");
+    // A change is heard from the next buffer, not after what is queued.
+    shared.set_gain(0.0);
+    fill_device(&shared, &mut scratch, &mut data);
+    assert_eq!(data, [0.0, 0.0], "muted: silence");
+    let mut i = [7i16; 2];
+    shared.ring().push(0, &[1.0, -1.0]);
+    shared.set_gain(1.0);
+    fill_device(&shared, &mut scratch, &mut i);
+    assert!(i[0] > 0 && i[1] < 0, "full volume again: {i:?}");
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+#[test]
+fn audio_out_gain_is_clamped() {
+    let mut out = AudioOut::start(48_000).expect("the null sink");
+    out.set_gain(2.0);
+    assert_eq!(out.shared.gain(), 1.0);
+    out.set_gain(-1.0);
+    assert_eq!(out.shared.gain(), 0.0);
+    out.set_gain(f32::NAN);
+    assert_eq!(out.shared.gain(), 0.0);
+    out.set_gain(0.3);
+    assert_eq!(out.shared.gain(), 0.3);
+}

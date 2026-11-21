@@ -59,7 +59,7 @@
 
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -123,6 +123,11 @@ pub trait AudioSink: Send {
     /// The device is gone for good (lost and not rebuilt). Asked after each push. Default: never.
     fn failed(&self) -> bool {
         false
+    }
+    /// The gain applied where samples leave for the device (0.0 silent, 1.0 as decoded): heard within one device
+    /// buffer, not after what is queued. Default: ignored.
+    fn set_gain(&mut self, gain: f32) {
+        let _ = gain;
     }
 }
 
@@ -386,6 +391,9 @@ struct Player {
     /// ([`PlayerHandle::frame`]): the TEST build's `media.seen` line.
     pressed: Option<Instant>,
     seen: bool,
+    /// The volume, 0.0 to 1.0, and the mute: the session's, kept across items and stop, never saved.
+    volume: f32,
+    muted: bool,
     /// The items Next and Previous move through, and where the player is in it.
     queue: Vec<MediaItem>,
     at: usize,
@@ -424,12 +432,25 @@ struct Run {
 }
 
 /// What a run holds that a stop must end at once, from any thread, without the worker.
-#[derive(Default)]
 struct Slots {
     /// Set by [`Slots::end`]; the worker's reads take it too.
     cancel: AtomicBool,
     link: Mutex<Option<Box<dyn Link>>>,
     sound: Mutex<Option<Box<dyn AudioSink>>>,
+    /// The gain the sound plays at (`f32` bits): set before the sound is locked, read with it locked, so a sound
+    /// handed over while the volume changes still gets the new gain.
+    gain: AtomicU32,
+}
+
+impl Default for Slots {
+    fn default() -> Slots {
+        Slots {
+            cancel: AtomicBool::new(false),
+            link: Mutex::new(None),
+            sound: Mutex::new(None),
+            gain: AtomicU32::new(1.0f32.to_bits()),
+        }
+    }
 }
 
 impl Slots {
@@ -460,13 +481,22 @@ impl Slots {
     }
 
     /// Hands the opened sound to the run. A run cancelled meanwhile drops it instead: `false`.
-    fn put_sound(&self, sound: Box<dyn AudioSink>) -> bool {
+    fn put_sound(&self, mut sound: Box<dyn AudioSink>) -> bool {
         let mut slot = lock(&self.sound);
         if self.cancelled() {
             return false;
         }
+        sound.set_gain(f32::from_bits(self.gain.load(Ordering::SeqCst)));
         *slot = Some(sound);
         true
+    }
+
+    /// The sound plays at `gain` from now on, and so does a sound handed over later.
+    fn set_gain(&self, gain: f32) {
+        self.gain.store(gain.to_bits(), Ordering::SeqCst);
+        if let Some(sound) = lock(&self.sound).as_mut() {
+            sound.set_gain(gain);
+        }
     }
 }
 
@@ -532,6 +562,7 @@ impl Player {
             no_sound: None,
         });
         let slots = Arc::new(Slots::default());
+        slots.gain.store(self.gain().to_bits(), Ordering::SeqCst);
         let (commands, taken) = mpsc::channel();
         // The worker opens the item for the press that came with it, through this run's own opener.
         let opener: Arc<dyn MediaOpener> = Arc::new(PressedOpener {
@@ -603,6 +634,18 @@ impl Player {
         self.clear_controls();
     }
 
+    /// What the sound plays at: the volume, or silence when muted (the volume kept).
+    fn gain(&self) -> f32 {
+        if self.muted { 0.0 } else { self.volume }
+    }
+
+    /// Hands the gain to the current run's sound.
+    fn apply_gain(&self) {
+        if let Some(run) = &self.run {
+            run.slots.set_gain(self.gain());
+        }
+    }
+
     fn command(&self, cmd: Cmd) {
         if let Some(run) = &self.run {
             let _ = run.commands.send(cmd);
@@ -659,6 +702,8 @@ impl PlayerHandle {
                     has_frame: false,
                     pressed: None,
                     seen: false,
+                    volume: 1.0,
+                    muted: false,
                     queue: Vec::new(),
                     at: 0,
                     run: None,
@@ -713,6 +758,35 @@ impl PlayerHandle {
             player.at = at;
             player.start_current()
         })
+    }
+
+    /// The volume, clamped to 0.0 to 1.0 (NaN: unchanged). Heard within one device buffer; kept across items,
+    /// Next, Previous and stop for this session, not saved. Muting keeps it.
+    pub fn set_volume(&self, volume: f32) {
+        if volume.is_nan() {
+            return;
+        }
+        self.with(|player| {
+            player.volume = volume.clamp(0.0, 1.0);
+            player.apply_gain();
+        });
+    }
+
+    /// The volume, 0.0 to 1.0 (1.0 until set); muting does not change it.
+    pub fn volume(&self) -> f32 {
+        self.with(|player| player.volume)
+    }
+
+    /// Mutes (gain 0, the volume kept) or unmutes.
+    pub fn set_muted(&self, muted: bool) {
+        self.with(|player| {
+            player.muted = muted;
+            player.apply_gain();
+        });
+    }
+
+    pub fn muted(&self) -> bool {
+        self.with(|player| player.muted)
     }
 
     pub fn play(&self) {

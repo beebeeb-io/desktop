@@ -223,6 +223,14 @@ struct SoundProbe {
     fail_first_after: AtomicUsize,
     /// Every open fails: this PC has no output device.
     no_device: AtomicBool,
+    /// Every gain a device was handed, in order.
+    gains: Mutex<Vec<f32>>,
+}
+
+impl SoundProbe {
+    fn last_gain(&self) -> Option<f32> {
+        self.gains.lock().unwrap().last().copied()
+    }
 }
 
 struct FakeSound {
@@ -254,6 +262,10 @@ impl AudioSink for FakeSound {
 
     fn failed(&self) -> bool {
         self.fail_after != 0 && self.pushes >= self.fail_after
+    }
+
+    fn set_gain(&mut self, gain: f32) {
+        self.probe.gains.lock().unwrap().push(gain);
     }
 }
 
@@ -1197,3 +1209,48 @@ fn a_too_old_windows_is_its_own_refusal() {
 /// The window is woken, and without sound the clock follows the picture (w12-video-start).
 #[path = "player/start_tests.rs"]
 mod start;
+
+#[test]
+fn volume_and_mute_reach_the_sound_and_stay_across_next() {
+    let r = rig(1_000, plays_audio);
+    assert_eq!(r.handle.volume(), 1.0, "full volume until set");
+    assert!(!r.handle.muted());
+    let queue = vec![item("a", KindHint::Audio), item("b", KindHint::Audio)];
+    r.handle
+        .open(item("a", KindHint::Audio), queue)
+        .expect("the worker starts");
+    wait_until("a plays", || {
+        r.handle.phase() == Phase::Playing && r.sound.started.load(SeqCst) == 1
+    });
+    assert_eq!(r.sound.last_gain(), Some(1.0), "the device opened at full volume");
+
+    r.handle.set_volume(0.4);
+    assert_eq!(r.sound.last_gain(), Some(0.4), "heard at once");
+    r.handle.set_muted(true);
+    assert_eq!(r.sound.last_gain(), Some(0.0), "muted: gain 0");
+    assert_eq!(r.handle.volume(), 0.4, "muting keeps the volume");
+    assert!(r.handle.muted());
+
+    assert!(r.handle.next());
+    wait_until("b plays", || {
+        r.sound.started.load(SeqCst) == 2 && r.handle.phase() == Phase::Playing
+    });
+    assert_eq!(r.sound.last_gain(), Some(0.0), "b's device opens muted");
+    r.handle.set_muted(false);
+    assert_eq!(r.sound.last_gain(), Some(0.4), "unmuted: the volume as it was");
+
+    r.handle.set_volume(7.0);
+    assert_eq!(r.handle.volume(), 1.0, "clamped high");
+    r.handle.set_volume(-3.0);
+    assert_eq!(r.handle.volume(), 0.0, "clamped low");
+    assert_eq!(r.sound.last_gain(), Some(0.0));
+    r.handle.set_volume(f32::NAN);
+    assert_eq!(r.handle.volume(), 0.0, "NaN changes nothing");
+
+    r.handle.set_volume(0.6);
+    r.handle.stop(StopReason::Locked);
+    assert_eq!(r.handle.volume(), 0.6, "stop keeps the volume");
+    r.open("c", KindHint::Audio);
+    wait_until("c plays", || r.sound.started.load(SeqCst) == 3);
+    assert_eq!(r.sound.last_gain(), Some(0.6), "the next item plays at it");
+}

@@ -6,7 +6,7 @@
 //! Slice M4 (`media-audio-out`). The ring and the clock ([`Ring`]) are plain code and are tested without a device.
 
 use super::player::{AudioFactory, AudioSink};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -223,6 +223,8 @@ struct Shared {
     latency_frames: AtomicU64,
     /// The error callback saw the device go.
     lost: AtomicBool,
+    /// The volume (`f32` bits, 0.0 to 1.0), applied as each device buffer is filled.
+    gain: AtomicU32,
 }
 
 impl Shared {
@@ -231,11 +233,20 @@ impl Shared {
             ring: Mutex::new(Ring::new(rate, channels)),
             latency_frames: AtomicU64::new(0),
             lost: AtomicBool::new(false),
+            gain: AtomicU32::new(1.0f32.to_bits()),
         })
     }
 
     fn ring(&self) -> std::sync::MutexGuard<'_, Ring> {
         self.ring.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_gain(&self, gain: f32) {
+        self.gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    fn gain(&self) -> f32 {
+        f32::from_bits(self.gain.load(Ordering::Relaxed))
     }
 }
 
@@ -266,6 +277,11 @@ fn fill_device<T: DeviceSample>(shared: &Shared, scratch: &mut Zeroizing<Vec<f32
             ring.fill(scratch);
         }
         Err(_) => scratch.iter_mut().for_each(|s| *s = 0.0),
+    }
+    // The volume, here where the samples leave: a change is heard from the next buffer, not after the queue.
+    let gain = shared.gain();
+    if gain != 1.0 {
+        scratch.iter_mut().for_each(|s| *s *= gain);
     }
     for (out, s) in data.iter_mut().zip(scratch.iter()) {
         *out = T::from_f32(*s);
@@ -392,6 +408,12 @@ impl AudioOut {
         self.shared.ring().flush();
     }
 
+    /// The gain the device buffers are filled at, clamped to 0.0 to 1.0 (NaN: silence).
+    pub fn set_gain(&mut self, gain: f32) {
+        let gain = if gain.is_nan() { 0.0 } else { gain.clamp(0.0, 1.0) };
+        self.shared.set_gain(gain);
+    }
+
     /// Rebuilds the stream once when the device was lost; a failed rebuild (or a new device with another format,
     /// which the helper would have to resample for) is final.
     fn keep_alive(&mut self) {
@@ -403,6 +425,7 @@ impl AudioOut {
                     if self.paused {
                         let _ = stream.pause();
                     }
+                    shared.set_gain(self.shared.gain());
                     self.stream = Some(stream);
                     self.shared = shared;
                 }
@@ -458,6 +481,10 @@ impl AudioSink for AudioOut {
 
     fn failed(&self) -> bool {
         AudioOut::failed(self)
+    }
+
+    fn set_gain(&mut self, gain: f32) {
+        AudioOut::set_gain(self, gain)
     }
 }
 
