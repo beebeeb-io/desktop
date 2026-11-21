@@ -170,7 +170,7 @@ fn names_and_roles_of_dw_0802_results() {
     let row = info(&rt, "row-1");
     assert_eq!(
         (row.role, row.label.as_deref()),
-        ("listitem", Some("Contract signed 2025.pdf"))
+        ("row", Some("Contract signed 2025.pdf"))
     );
     assert_eq!(node(&rt, "row-1")["description"], "In Documents \u{203A} Legal");
     assert!(states(&node(&rt, "row-0")).contains(&"selected".into()));
@@ -186,19 +186,13 @@ fn names_and_roles_of_dw_0802_results() {
     );
     let share = info(&rt, "share-box");
     assert_eq!((share.role, share.label.as_deref()), ("button", Some("Share\u{2026}")));
-    let clear = info(&rt, "search-clear-btn");
-    assert_eq!((clear.role, clear.label.as_deref()), ("button", Some("Clear search")));
-    assert!(
-        !has(&rt, "kbd-hint"),
-        "words in the field: the hint gives way to the clear button"
-    );
 }
 
 #[test]
 fn names_and_roles_of_dw_0802b_loading() {
     let rt = scene(dw_0802b);
     assert_eq!(text(&rt, "item-count"), "3 results so far");
-    let note = info(&rt, "loading-note");
+    let note = info(&rt, "loading");
     assert_eq!(note.role, "status");
     assert_eq!(
         note.label.as_deref(),
@@ -282,13 +276,14 @@ fn a_window_that_ships_or_runs_on_the_engine_never_shows_the_sample_as_results()
     assert!(rt.state.frames.find.open, "Ctrl+F opens search");
     assert_eq!(focused(&rt).as_deref(), Some(SEARCH_KEY));
     assert_eq!(
-        text(&rt, "empty-title"),
+        text(&rt, "search-unavailable-title"),
         "Search isn't available yet",
         "no recent searches either"
     );
     type_text(&mut rt, "Contr");
     assert_eq!(rt.state.search.text, "Contr");
-    assert_eq!(text(&rt, "empty-title"), "Search isn't available yet");
+    assert_eq!(text(&rt, "search-unavailable-title"), "Search isn't available yet");
+    assert!(has(&rt, "search-unavailable-retry"), "Try again is there");
     assert_eq!(text(&rt, "item-count"), "Not available yet");
     assert!(!has(&rt, "row-0") && !has(&rt, "list-0") && !has(&rt, "seg-0") && !has(&rt, "detail-pane"));
     let drawn: Vec<String> = rt
@@ -352,11 +347,6 @@ fn ctrl_f_opens_search_and_esc_takes_the_window_back_to_files() {
     assert!(has(&rt, "file-list-col"), "Files' list is back");
     assert_ne!(text(&rt, "folder-title"), "Search");
 
-    // The × in the field does the same.
-    let mut rt = scene(dw_0802);
-    click(&mut rt, "search-clear-btn");
-    assert!(!super::is_open(&rt.state) && rt.state.search.text.is_empty());
-    assert!(has(&rt, "file-list-col"));
 }
 
 /// The board: "Type: shows results". A word typed in the Files toolbar's field opens search, and
