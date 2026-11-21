@@ -7,7 +7,9 @@
 //! place, so the binding refuses B as it always did. The order: the folder's items (through the port), the files the
 //! rows point at, then the one transaction that clears every row and the owner record.
 //!
-//! The account's entries in desktop.toml go with it ([`forget_in_settings`]), just before the owner record.
+//! Only after that transaction (dc-014): the account's entries in desktop.toml ([`forget_in_settings`]), its share
+//! pins and guide mark (that account's alone, never another's) and its vault key, if B's sign-in left it. A clear
+//! that fails leaves every one of them as it was, and B is refused with words.
 //!
 //! The folder is not locked between the check and the removal, so the removal is told which paths were found empty
 //! (`remove_synced_items`' `unasked`) and deletes only what it can prove synced and unchanged when it reaches each
@@ -106,15 +108,49 @@ impl<C: CredentialStores> Engine<C> {
                 Err(_) => return Err("a cached file stays"),
             }
         }
-        db.forget_share_trust_rows().map_err(|_| "the share marks stay")?;
-        self.forget_its_settings(previous)?;
-        // The owner record goes in this transaction, last: until it commits, B is still refused.
-        db.clear_account_data(false).map_err(|_| "the rows stay")
+        // The owner record goes in this transaction: until it commits, B is still refused, and A's settings, share
+        // pins and key are all still here (dc-014), so A signs back in to exactly what it left.
+        if db.clear_account_data(false).is_err() {
+            // The purge forgot the owner record (a sign-out's R10 step); A's rows are still here, so it is put back:
+            // A signs in again to its own data, and B stays refused as before.
+            if db.set_owner(previous).is_err() {
+                tracing::warn!("account switch: the previous account's owner record could not be put back");
+            }
+            return Err("the rows stay");
+        }
+        // Forgotten last, only once A's data is gone. A failure here no longer keeps B out (the owner record is B's
+        // to take now): what is left is A's alone, keyed by A's id, and B never reads it.
+        if let Err(why) = self.forget_its_settings(previous) {
+            tracing::warn!(why, "account switch: the previous account's settings stay");
+        }
+        if let Some(user_id) = previous.user_id.as_deref() {
+            if db.forget_share_trust_rows(user_id).is_err() {
+                tracing::warn!("account switch: the previous account's share marks stay");
+            }
+            self.forget_its_key(user_id);
+        }
+        Ok(())
+    }
+
+    /// The previous account's vault key, if the credential store still holds it: a token-only sign-in of B leaves a
+    /// key tagged with A's id in place (`key_owner::remove_foreign_key`; the loader refuses it for B), so that a clear
+    /// that fails leaves A able to sign back in without the twelve words. Removed only here, after A's data is gone,
+    /// and only while its tag is still A's: B's own key (or one of unknown owner) is never touched.
+    fn forget_its_key(&self, user_id: &str) {
+        let mut vault = self.vault();
+        let its = vault
+            .vault_key_owner()
+            .ok()
+            .flatten()
+            .is_some_and(|tag| crate::signin::key_owner::tag_is_account(&tag, user_id));
+        if its && vault.delete_vault_key_and_owner().is_err() {
+            tracing::warn!("account switch: the previous account's key stays (another sign-in removes it)");
+        }
     }
 
     /// The account's entries in desktop.toml go with its data: its chosen backup folders and their switches, its
-    /// selective-sync ids and the address the sign-in form prefills (see [`forget_in_settings`]). Before the owner
-    /// record goes, so a settings file that cannot be written keeps the refusal like any other leftover.
+    /// selective-sync ids and the address the sign-in form prefills (see [`forget_in_settings`]). After the owner
+    /// record went (dc-014), so a clear that fails leaves A's settings untouched.
     fn forget_its_settings(&self, previous: &Identity) -> Result<(), &'static str> {
         let path = DesktopConfig::path_for(self.identity).map_err(|_| "the settings stay")?;
         DesktopConfig::update_at(&path, |config| {

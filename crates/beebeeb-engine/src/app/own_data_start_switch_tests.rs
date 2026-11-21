@@ -464,3 +464,91 @@ mod real_purge {
         assert_eq!(pc.contents(), contents);
     }
 }
+
+/// dc-014: the share pins and the guide mark a sign-out keeps, of A, of a third account C on this PC, and A's vault key
+/// with A's tag (a token-only sign-in of B leaves it: `key_owner::remove_foreign_key`).
+mod clear_first_forget_last {
+    use super::*;
+    use crate::keychain::SecretBytes;
+
+    const C_ID: &str = "user-dc014-third";
+
+    fn pins_of(pc: &Pc, who: &str) -> Vec<String> {
+        let conn = rusqlite::Connection::open(pc.state_db()).unwrap();
+        let mut rows = conn
+            .prepare("SELECT key FROM sync_state WHERE key LIKE 'share_%' OR key LIKE 'guide_done:%' ORDER BY key")
+            .unwrap();
+        let keys: Vec<String> = rows.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+        keys.into_iter().filter(|key| key.contains(who)).collect()
+    }
+
+    /// A signed out with its settings, pins and key on this PC, and C's pins beside them; B signed in.
+    fn a_left_everything(pc: &Pc, a: &Identity) {
+        a_signed_out(pc, a);
+        settings_of(a, &photos(a));
+        let db = pc.db();
+        for id in [a.user_id.clone().unwrap(), C_ID.to_string()] {
+            db.set_share_sealed_key(&id, "invite-1", "aa").unwrap();
+            db.set_share_offered_key(&id, "invite-2", "bb").unwrap();
+            db.set_guide_done(&id).unwrap();
+        }
+        drop(db);
+        let vault = pc.engine.vault();
+        vault.store_wrapped_master_key(SecretBytes::new_master_key(&[0xA1; 32])).unwrap();
+        vault.bind_vault_key_owner(a.user_id.as_deref().unwrap()).unwrap();
+        assert_eq!(pins_of(pc, a.user_id.as_deref().unwrap()).len(), 3);
+        pc.sign_in(&other());
+    }
+
+    /// desktop.toml is one file for every test: each test has its own A, and so its own folder name.
+    fn photos(a: &Identity) -> String {
+        format!("{}-photos", a.user_id.as_deref().unwrap())
+    }
+
+    fn a_photos_in_settings(a: &Identity) -> bool {
+        settings_now().backup_chosen_folders.iter().any(|f| f.name == photos(a))
+    }
+
+    /// The red test of the clear: it fails (the database refuses its last write, as a locked file would), so B is
+    /// refused and A's settings, A's pins, every other account's pins and A's key are exactly as they were.
+    #[test]
+    fn a_clear_that_fails_leaves_the_first_accounts_settings_pins_and_key() {
+        let a = Identity::new(Some("user-dc014-failed-a"), Some("dc014-failed-a@example.eu"));
+        let pc = Pc::new();
+        a_left_everything(&pc, &a);
+        rusqlite::Connection::open(pc.state_db())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER dc014_locked BEFORE INSERT ON sync_state WHEN NEW.key = 'finder_domain_gone'
+                 BEGIN SELECT RAISE(ABORT, 'locked'); END;",
+            )
+            .unwrap();
+        let port = SwitchPort::new(Removal::Works);
+
+        assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData), "B is refused, with words");
+
+        assert_eq!(pc.db().owner().unwrap(), Some(a.clone()), "A still owns the local data");
+        assert!(a_photos_in_settings(&a), "A's settings stay");
+        assert_eq!(pins_of(&pc, a.user_id.as_deref().unwrap()).len(), 3, "A's pins stay");
+        assert_eq!(pins_of(&pc, C_ID).len(), 3, "C's pins stay");
+        assert_eq!(pc.engine.vault().vault_key_owner().unwrap(), a.user_id.clone(), "A's key stays");
+    }
+
+    /// A clean switch forgets A's settings, A's pins and A's key, and only A's: C's pins stay.
+    #[test]
+    fn a_clean_switch_forgets_only_the_first_accounts_rows_and_its_key() {
+        let a = Identity::new(Some("user-dc014-clean-a"), Some("dc014-clean-a@example.eu"));
+        let pc = Pc::new();
+        a_left_everything(&pc, &a);
+        let port = SwitchPort::new(Removal::Works);
+
+        assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+
+        assert_eq!(pc.db().owner().unwrap(), Some(other()));
+        assert!(!a_photos_in_settings(&a), "A's settings go");
+        assert_eq!(pins_of(&pc, a.user_id.as_deref().unwrap()), Vec::<String>::new(), "A's pins go");
+        assert_eq!(pins_of(&pc, C_ID).len(), 3, "another account's pins stay");
+        assert_eq!(pc.engine.vault().vault_key_owner().unwrap(), None, "A's key goes, last");
+        assert!(!pc.engine.vault().has_vault_key().unwrap_or(false));
+    }
+}

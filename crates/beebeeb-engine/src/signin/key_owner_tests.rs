@@ -223,7 +223,8 @@ fn which_stored_key_a_token_only_sign_in_removes() {
 
 // ── the task's scenarios, through the vault and the loader ──────────────────────────
 
-/// Task 2447's repro: A's clear fails and leaves A's key; B signs in by password.
+/// Task 2447's repro: A's clear fails and leaves A's key; B signs in by password. The failed clear took the key's tag
+/// with it, so the key is of unknown owner (it would load) and goes; only a key still tagged with A's id stays (dc-014).
 #[test]
 fn a_stale_key_and_a_different_account_the_key_is_removed_and_the_gate_asks_for_the_phrase() {
     let store = signed_in_as_a();
@@ -240,9 +241,40 @@ fn a_stale_key_and_a_different_account_the_key_is_removed_and_the_gate_asks_for_
         crate::signin::gate::decide_gate(true, false, stored_key_state(&store.vault()), false),
         crate::signin::gate::GateState::NeedsRecoveryPhrase
     );
-    // The loader has no key to give, so no session reaches memory and no engine can start (`keys_for_engine_start`
-    // reads only the session in memory).
     assert!(load(&store).is_err());
+}
+
+/// dc-014: a key still tagged with A's id stays at B's sign-in, and is never B's: the loader refuses it and the gate
+/// asks B for the twelve words.
+#[test]
+fn a_key_tagged_with_another_account_stays_but_is_never_loaded() {
+    let store = signed_in_as_a();
+    store.vault().clear_session_token().unwrap();
+    assert_eq!(token_only_sign_in(&store, "tok-b", "user-b", "b@beebeeb.io"), Ok(false));
+    assert_eq!(store.vault().vault_key_owner(), Ok(Some("user-a".to_string())), "A's key keeps A's tag");
+    assert_eq!(stored_key_ownership(&store.vault()), Ok(KeyOwnership::Foreign));
+    assert_eq!(stored_key_state(&store.vault()), StoredKey::NotThisAccounts);
+    assert_eq!(
+        crate::signin::gate::decide_gate(true, false, stored_key_state(&store.vault()), false),
+        crate::signin::gate::GateState::NeedsRecoveryPhrase
+    );
+    assert_eq!(load(&store).unwrap_err(), KEY_NOT_THIS_ACCOUNTS);
+}
+
+/// dc-014's red test at the sign-in: A -> B (B never got further than its token), then A signs in again. A's key was
+/// kept for A, so A needs no twelve words.
+#[test]
+fn the_first_account_signs_back_in_after_another_ones_sign_in_without_the_twelve_words() {
+    let store = signed_in_as_a();
+    store.vault().clear_session_token().unwrap();
+    assert_eq!(token_only_sign_in(&store, "tok-b", "user-b", "b@beebeeb.io"), Ok(false));
+    assert!(load(&store).is_err(), "B never gets A's key");
+    store.vault().clear_session_token().unwrap();
+
+    assert_eq!(token_only_sign_in(&store, "tok-a2", "user-a", "a@beebeeb.io"), Ok(false));
+    assert_eq!(stored_key_state(&store.vault()), StoredKey::Usable);
+    let session = load(&store).unwrap().expect("A's session, with A's key");
+    assert_eq!((session.token.as_str(), session.master_key), ("tok-a2", KEY_A));
 }
 
 #[test]
@@ -333,7 +365,8 @@ fn the_loader_refuses_a_key_bound_to_another_user_id() {
 
 #[test]
 fn a_failed_removal_refuses_the_sign_in_and_stores_nothing() {
-    let store = signed_in_as_a();
+    // An untagged key with another account's email: it would load as unknown, so it must go before B's token.
+    let store = legacy_a();
     store.vault().clear_session_token().unwrap();
     store.fail_deletes(KEY, true);
     assert!(token_only_sign_in(&store, "tok-b", "user-b", "b@beebeeb.io").is_err());

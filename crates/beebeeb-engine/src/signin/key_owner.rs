@@ -12,7 +12,9 @@
 //! 3. Every loader of token + key goes through `load_session_from_vault`, which asks [`stored_key_ownership`] before
 //!    it reads the key and refuses anything but [`KeyOwnership::Matches`] or [`KeyOwnership::Unknown`].
 //! 4. A token-only sign-in removes a key that is not provably the signing-in account's ([`remove_foreign_key`]), and
-//!    is refused while that key cannot be removed.
+//!    is refused while that key cannot be removed. One exception (dc-014): a key tagged with another account's id
+//!    stays (the loader refuses it, rule 3) until that account's local data is cleared (`app::account_switch`), so a
+//!    clear that fails leaves that account able to sign back in without the twelve words.
 //!
 //! Nothing here reads, copies or logs a key or a token; ids are never logged either.
 
@@ -142,7 +144,7 @@ pub fn stored_key_state<S: AuthSecretStore>(vault: &AuthVault<S>) -> StoredKey {
 }
 
 /// A token-only sign-in, BEFORE its token is stored: remove a stored key that is not provably the signing-in
-/// account's ([`should_remove_stored_key`]), with its tag. `Ok(true)`: one was removed. `Err`: it is still there, and
+/// account's ([`should_remove_stored_key`]), with its tag, except one tagged with another account's id (rule 4). `Ok(true)`: one was removed. `Err`: it is still there, and
 /// the caller refuses the sign-in ([`FOREIGN_KEY_NOT_REMOVED`]). A tag left without a key is removed too.
 pub fn remove_foreign_key<S: AuthSecretStore>(
     vault: &mut AuthVault<S>,
@@ -159,6 +161,11 @@ pub fn remove_foreign_key<S: AuthSecretStore>(
             });
         }
         let key_owner = vault.vault_key_owner()?;
+        // dc-014: a key tagged with ANOTHER account's id stays until that account's local data is cleared
+        // (`app::account_switch` removes it then). It is never this account's: the loader refuses it (`Foreign`).
+        if key_owner.as_deref().is_some_and(|owner| !owner.trim().is_empty() && !tag_is_account(owner, signing_in_user_id)) {
+            return Ok(Some(true));
+        }
         let stored_email = vault.account_email()?;
         Ok(Some(!should_remove_stored_key(
             key_owner.as_deref(),
