@@ -6,8 +6,10 @@
 //! into a target dir beside this test's. The app's global helper is never registered: the other tests of this binary
 //! keep their "no helper" world.
 //!
-//! A PC without the codec answers `NoDecoder` (the honest refusal, never a blank picture). With
-//! `BB_IMAGE_EXTENSIONS=1` (VM 401: HEIF, HEVC and Raw Image extensions installed) both must decode to pixels.
+//! A PC without the codec answers `NoDecoder` (the honest refusal, never a blank picture). Whether the PC has the
+//! codec is asked of the same helper run unconfined (the control): where it decodes there, the confined helper must
+//! decode too, so a confinement that hides the PC's codecs is red here. With `BB_IMAGE_EXTENSIONS=1` (VM 401: HEIF,
+//! HEVC and Raw Image extensions installed) both must decode whatever the control says.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -70,50 +72,70 @@ fn decode(bytes: &[u8], max_px: u32) -> Result<DecodedPicture, ImageRefusal> {
     answer
 }
 
+/// The control: the same helper and bytes, NOT confined (test only, the test's own pictures).
+fn unconfined(bytes: &[u8], max_px: u32) -> Result<DecodedPicture, ImageRefusal> {
+    let mut child = std::process::Command::new(helper())
+        .arg(beebeeb_media_protocol::image::IMAGE_MODE_ARG)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the helper starts unconfined");
+    let (to, from) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
+    let answer = decode_over(Box::new(from), Box::new(to), bytes, max_px);
+    let _ = child.kill();
+    let _ = child.wait();
+    answer
+}
+
+/// The confined answer, or a panic where it refuses what this PC decodes (the control) or must decode (strict).
+fn confined_decodes(what: &str, bytes: &[u8], max_px: u32) -> Option<DecodedPicture> {
+    let answer = decode(bytes, max_px);
+    let control = unconfined(bytes, max_px);
+    let size = |a: &Result<DecodedPicture, ImageRefusal>| a.as_ref().map(|p| (p.width, p.height)).map_err(|e| *e);
+    eprintln!("{what}: confined {:?}, unconfined {:?}", size(&answer), size(&control));
+    match answer {
+        Ok(picture) => Some(picture),
+        Err(why) => {
+            assert!(
+                control.is_err(),
+                "{what}: the confined helper says {why:?} where this PC decodes it unconfined"
+            );
+            assert!(!strict(), "{what}: the extensions are installed: {why:?}");
+            assert_eq!(why, ImageRefusal::NoDecoder, "{what}");
+            None
+        }
+    }
+}
+
 fn pixel(picture: &DecodedPicture, x: u32, y: u32) -> [u8; 4] {
     let at = ((y * picture.width + x) * 4) as usize;
     picture.rgba[at..at + 4].try_into().unwrap()
 }
 
 #[test]
-fn heif_fixture_decodes_through_the_confined_helper_or_says_no_decoder() {
+fn heif_fixture_decodes_through_the_confined_helper_or_says_no_decoder_only_without_a_codec() {
     assert_eq!(HelperPicture::of_bytes(HEIC), Some(HelperPicture::Heif));
     assert_eq!(HelperPicture::of_name("red-blue.heif"), Some(HelperPicture::Heif));
-    let answer = decode(HEIC, 32);
-    eprintln!("heic: {:?}", answer.as_ref().map(|p| (p.width, p.height)));
-    match answer {
-        Ok(picture) => {
-            assert_eq!((picture.width, picture.height), (32, 16));
-            let (left, right) = (pixel(&picture, 3, 8), pixel(&picture, 28, 8));
-            assert!(left[0] > 150 && left[2] < 100 && left[3] == 255, "{left:?}");
-            assert!(right[2] > 150 && right[0] < 100, "{right:?}");
-        }
-        Err(why) => {
-            assert!(!strict(), "the HEIF and HEVC extensions are installed: {why:?}");
-            assert_eq!(why, ImageRefusal::NoDecoder);
-        }
+    if let Some(picture) = confined_decodes("heic", HEIC, 32) {
+        assert_eq!((picture.width, picture.height), (32, 16));
+        let (left, right) = (pixel(&picture, 3, 8), pixel(&picture, 28, 8));
+        assert!(left[0] > 150 && left[2] < 100 && left[3] == 255, "{left:?}");
+        assert!(right[2] > 150 && right[0] < 100, "{right:?}");
     }
 }
 
 #[test]
-fn raw_dng_fixture_decodes_upright_through_the_confined_helper_or_says_no_decoder() {
+fn raw_dng_fixture_decodes_upright_through_the_confined_helper_or_says_no_decoder_only_without_a_codec() {
     // Stored 48 × 32 landscape, orientation 6: shown portrait.
     let dng = dng(48, 32, 6);
     assert_eq!(HelperPicture::of_bytes(&dng), Some(HelperPicture::Raw));
     for name in ["a.dng", "a.CR2", "a.nef", "a.arw"] {
         assert_eq!(HelperPicture::of_name(name), Some(HelperPicture::Raw), "{name}");
     }
-    let answer = decode(&dng, 64);
-    eprintln!("dng: {:?}", answer.as_ref().map(|p| (p.width, p.height)));
-    match answer {
-        Ok(picture) => {
-            assert!(picture.width < picture.height, "{}x{}", picture.width, picture.height);
-            assert!(picture.height <= 64);
-        }
-        Err(why) => {
-            assert!(!strict(), "the Raw Image Extension is installed: {why:?}");
-            assert_eq!(why, ImageRefusal::NoDecoder);
-        }
+    if let Some(picture) = confined_decodes("dng", &dng, 64) {
+        assert!(picture.width < picture.height, "{}x{}", picture.width, picture.height);
+        assert!(picture.height <= 64);
     }
 }
 
