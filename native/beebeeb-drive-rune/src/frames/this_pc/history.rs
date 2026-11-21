@@ -85,6 +85,7 @@ fn filter(ui: &Ui, t: &Theme) -> El {
         .key("seg-0")
         .role("tablist")
         .label("Show")
+        .focus_group()
         .padding(2.0)
         .radius(10.0)
         .fill(t.field)
@@ -102,6 +103,7 @@ fn filter(ui: &Ui, t: &Theme) -> El {
             .center()
             .radius(8.0)
             .focusable(true)
+            .focus_selected(on)
             .on_press(move |s: &mut State| s.this_pc.set_filter(f))
             .child(kit::label(
                 format!("seg-0-{}-label", crate::ui::settings_shell::slug(&words)),
