@@ -98,7 +98,7 @@ cpal = "=0.18.2"
 # `engine_host` tests open the engine on credential stores in memory, with the settings file in the engine's test
 # sandbox and a closed loopback port as the default API: no test of this crate reaches the OS credential store,
 # the person's settings or the production API. Dev-only (`scripts/check-engine-boundary.sh` refuses it elsewhere).
-beebeeb-engine = { path = "../../crates/beebeeb-engine", default-features = false, features = ["test-support"] }
+beebeeb-engine = { path = "../../crates/beebeeb-engine", default-features = false, features = ["test-support", "macos-test-engine"] }
 # `source_engine` tests build a state.db with the engine's own writers.
 tempfile = "3"
 # The updater's test doubles (`testkit`): a signing key made inside each test, a scripted release server on no
