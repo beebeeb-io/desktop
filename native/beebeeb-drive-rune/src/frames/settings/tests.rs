@@ -122,6 +122,13 @@ fn tab_to(rt: &mut Runtime<State>, target: &str) {
         }
         key(rt, Key::Tab);
     }
+    // A roving group is one Tab stop: its other members take arrows.
+    for _ in 0..12 {
+        if find(rt, target).is_some_and(|e| e.focused) {
+            return;
+        }
+        key(rt, Key::Down);
+    }
     panic!("Tab never reaches {target}");
 }
 

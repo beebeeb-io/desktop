@@ -360,6 +360,20 @@ impl SettingsUi {
     }
 }
 
+/// [`lists::list`] whose rows know their place in the whole list (`position_in_set`), so a screen reader says
+/// "3 of 7" however many rows are in view.
+pub(crate) fn list(
+    index: usize,
+    title: Option<&str>,
+    rows: Vec<El>,
+    foot: Option<&str>,
+    t: &Theme,
+) -> El {
+    let size = rows.len();
+    let rows = rows.into_iter().enumerate().map(|(i, r)| r.position_in_set(i + 1, size)).collect();
+    crate::ui::settings_list::list(index, title, rows, foot, t)
+}
+
 /// The menu `kind`, when it is the open one: its top-left corner on the point its row marks
 /// (`MenuKind::anchor`), so it stays with its pop-up button wherever the row is drawn.
 pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, t: &Theme) -> Option<El> {
@@ -376,6 +390,7 @@ pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, t: &Theme) -> Option<El> {
         .collect();
     Some(
         controls::menu(0, kind.name(), 130.0, items, t)
+            .focus_group()
             .anchored(kind.anchor(), Side::Bottom, Align::Start, 0.0)
             .modal(true, |s: &mut State| s.settings.menu = None),
     )

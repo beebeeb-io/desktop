@@ -71,6 +71,16 @@ fn tab_to(rt: &mut Runtime<State>, target: &str) {
             return;
         }
     }
+    // A roving group is one Tab stop: its other members take arrows.
+    for _ in 0..80 {
+        key(rt, Key::Tab);
+        for _ in 0..8 {
+            key(rt, Key::Right);
+            if focused(rt).as_deref() == Some(target) {
+                return;
+            }
+        }
+    }
     panic!("Tab never reaches {target}");
 }
 
