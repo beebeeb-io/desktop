@@ -1364,6 +1364,31 @@ fn a_dehydration_before_the_data_open_fetches_nothing_and_stays_pending() {
     assert_eq!(fetches("t20-"), 0, "still nothing served");
 }
 
+/// Task 2199 N4: the hash is read through a shared handle, so another reader's open does not fail the pass; the
+/// exclusive open that marks the file is refused while that reader holds it (`Ok(false)`, tried again next pass), and
+/// the file is marked once it lets go.
+#[test]
+fn stamp_if_agreed_hashes_beside_another_reader_and_marks_after_it_lets_go() {
+    use crate::unknown_check::OnDisk;
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = Root::new();
+    let db = root.db();
+    let bytes = b"n4 agreed content".as_slice();
+    let path = root.path.join("n4.txt");
+    std::fs::write(&path, bytes).unwrap();
+    placeholders::convert_to_unsynced_placeholder(&path, "n4-id").unwrap();
+    track(&db, "n4-id", Some(sha256(bytes)));
+    let reader = std::fs::OpenOptions::new().read(true).share_mode(7).open(&path).unwrap();
+    assert!(
+        !placeholders::stamp_if_agreed(&db, "n4-id", &path).unwrap(),
+        "not marked while another reader holds the file"
+    );
+    drop(reader);
+    assert!(placeholders::stamp_if_agreed(&db, "n4-id", &path).unwrap());
+    assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "n4-id"));
+    settle();
+}
+
 /// Task 2284 A1.2 / S1: a mark in sync by another pass and a dehydration between the state check and the data open are
 /// refused, so the pass does not mark the file from a fetch it would have made.
 /// Refused where the platform routes that open to the provider at all ([`assert_every_own_fetch_was_refused`]).
