@@ -20,6 +20,7 @@ pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
 pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
 pub(crate) mod details;
 mod editor_view;
+mod editor_minimap;
 pub(crate) mod dialogs;
 mod fixture_media;
 mod fixture_text;
