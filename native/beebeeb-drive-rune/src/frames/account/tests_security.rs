@@ -497,7 +497,7 @@ fn a_pane_without_an_answer_is_loading_empty_or_failed_with_a_retry() {
     let drawn = |state: PaneState| {
         let rt = rune::Runtime::new(
             state,
-            |state: &PaneState| {
+            |state: &PaneState, _: &mut rune::Cx<PaneState>| {
                 let t = crate::theme::tokens::theme(false);
                 super::state_pane(Pane::Security, *state, &t)
             },
