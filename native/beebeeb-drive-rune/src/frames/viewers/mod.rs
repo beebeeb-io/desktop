@@ -860,6 +860,19 @@ fn editor_find_key(ui: &mut Ui, ev: &KeyEvent) -> bool {
     }
 }
 
+/// Esc with the editor's find bar open closes the bar, not the file (the shell asks first). `true`: taken.
+pub fn close_find(s: &mut State) -> bool {
+    let Some(ui) = ui(s) else { return false };
+    match ui.editor.as_mut() {
+        Some(editor) if ui.editor_view.find.open => {
+            editor_view::editor_find_bar::close(&mut ui.editor_view, &mut editor.edit);
+            ui.focus = Some(EDITOR_KEY);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Replace `edit`'s text with `new` through the field's own edit (so undo and the unsaved mark work), then select `sel`.
 fn apply_edit(edit: &mut rune::TextEdit, new: &str, sel: std::ops::Range<usize>) {
     let old = edit.text.clone();

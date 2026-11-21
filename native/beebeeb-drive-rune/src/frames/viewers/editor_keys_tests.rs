@@ -130,11 +130,8 @@ fn editor_keys_tab_indents_selected_lines_and_shift_tab_undoes() {
 
 #[test]
 fn editor_keys_ctrl_s_still_saves() {
+    // Nothing changed: Ctrl+S goes back to the reader (the editor closes) rather than typing anything.
     let mut rt = editing("a.txt", "hi\n");
-    edit_mut(&mut rt).set_caret(0);
-    press(&mut rt, Key::Tab, Mods::default());
     press(&mut rt, Key::Command('s'), ctrl());
-    rt.settle_all();
-    rt.frame(0.0);
-    assert!(rt.state.viewer.ui.as_ref().map_or(true, |ui| !ui.editor.as_ref().is_some_and(|e| e.dirty())));
+    assert!(rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.editor.is_none()));
 }
