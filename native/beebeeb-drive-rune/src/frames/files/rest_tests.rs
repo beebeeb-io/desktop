@@ -391,7 +391,7 @@ fn move_offers_the_folders_without_backups_and_names_its_target() {
     let offered: Vec<&str> = m.choices.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(offered, ["Documents", "Invoices 2026", "Lisbon trip", "Shoot selects"]);
     assert_eq!(label_of(&rt, "item-0-0"), "Documents, 48 items");
-    assert_eq!(info(&rt, "item-0-0").role, "option");
+    assert_eq!(info(&rt, "item-0-0").role, "treeitem");
     assert_eq!(label_of(&rt, "btn-0"), "Move to Documents");
     // A click chooses; the button follows.
     click(&mut rt, "item-0-2");
