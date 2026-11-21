@@ -900,13 +900,30 @@ pub fn present_zoom(screen: (f32, f32)) -> u16 {
     fit.floor().clamp(1.0, f32::from(u16::MAX)) as u16
 }
 
-/// Present for a deck the Office engine renders: the slide's own pixels asked at the screen's size, never the
-/// fixture's words. While the picture comes the screen is black.
+/// The most pixels the engine renders on one side of a frame; more is refused as too large.
+pub const ENGINE_SIDE_MAX_PX: f32 = 4096.0;
+
+/// The zoom Present ASKS the engine for: the engine draws `SLIDE_W` points at `zoom` and `dpi` as
+/// `SLIDE_W x zoom x dpi / 72` pixels, so the ask is the largest zoom whose frame stays within the screen's physical
+/// pixels (points x dpi / 96) and the engine's cap. The window scales the frame to the screen ([`present_zoom`]).
+pub fn present_ask_zoom(screen: (f32, f32), dpi: u16) -> u16 {
+    let dpi = f32::from(dpi.max(1));
+    let (lw, lh) = (
+        (screen.0 * dpi / 96.0).min(ENGINE_SIDE_MAX_PX),
+        (screen.1 * dpi / 96.0).min(ENGINE_SIDE_MAX_PX),
+    );
+    let fit = (lw / SLIDE_W).min(lh / SLIDE_H) * 7200.0 / dpi;
+    fit.floor().clamp(1.0, f32::from(u16::MAX)) as u16
+}
+
+/// Present for a deck the Office engine renders: the slide's own pixels asked within the screen's physical size
+/// and the engine's cap, drawn at the screen's fit, never the fixture's words. While the picture comes the screen is
+/// black.
 pub fn present_live(cx: &mut Cx<State>, deck: &DeckBody, live: &Live) -> El {
     let zoom = present_zoom(live.screen);
     let pixels = live.asks.get(OfficePicture::Page {
         page: deck.view.current - 1,
-        zoom_pct: zoom,
+        zoom_pct: present_ask_zoom(live.screen, live.dpi),
         dpi: live.dpi,
     });
     let slide = match pixels {
