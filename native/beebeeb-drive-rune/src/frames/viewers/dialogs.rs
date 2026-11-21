@@ -12,6 +12,7 @@ use crate::State;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::button::{ButtonState, Size, Variant, button as ui_button, keys};
 use crate::ui::dialog::{self, Dialog, Foot, Head};
+use crate::ui::toast::{Lead, toast_with};
 use crate::ui::settings_dialog::{BUTTON_MD, DIALOG_TITLE};
 use crate::ui::kit;
 
@@ -337,43 +338,7 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
     )
 }
 
-/// The message after a save (`.mk-toast > .kit-toast`): a pill, centred over the content
-/// area, 42 above the window's foot. `ui::settings_notice::toast` is the same pill with a
-/// green check; a save shows the lock.
+/// The message after a save, over the content area with the lock: the shared toast.
 pub fn toast(words: &str, t: &Theme) -> El {
-    let glass = if t.dark {
-        t.paper2.alpha(0.68)
-    } else {
-        t.paper.alpha(0.72)
-    };
-    row()
-        .key("toast-line")
-        .pin(Some(220.0), None, Some(0.0), Some(42.0))
-        .justify_center()
-        .child(
-            row()
-                .key("toast")
-                .role("status")
-                .label(words)
-                .h(34.0)
-                .pl(14.0)
-                .pr(8.0)
-                .gap(10.0)
-                .center_y()
-                .radius(17.0)
-                .fill(glass)
-                .border(kit::HAIR, t.separator)
-                .border_layout()
-                .box_shadow(kit::drop(6.0, 22.0, Color::BLACK.alpha(0.10)))
-                .box_shadow(rune::Shadow {
-                    x: 0.0,
-                    y: kit::HAIR,
-                    blur: 0.0,
-                    spread: 0.0,
-                    color: Color::WHITE.alpha(if t.dark { 0.08 } else { 0.70 }),
-                    inset: true,
-                })
-                .child(kit::glyph("toast-icon", &icons::LOCK, 15.0, t.text_secondary))
-                .child(kit::label("toast-text", words, style::TOAST, t.text)),
-        )
+    crate::ui::toast::layer(toast_with("toast", words, Lead::Lock, None, t))
 }

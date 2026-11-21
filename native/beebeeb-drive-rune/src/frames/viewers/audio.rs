@@ -13,7 +13,7 @@ use crate::State;
 use crate::media::player::{PlayState, PlayerHandle};
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
-use crate::ui::toolbar::{ToolState, tool_button};
+use crate::ui::toolbar::{self, ToolState, tool_button};
 
 /// `.t-cap`: 11px/500 on 14px.
 const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
@@ -73,28 +73,13 @@ pub fn status(doc: &AudioDoc, can_play: bool) -> Status {
     }
 }
 
-/// Previous or next: two chevrons (`.mk-tbtn`). Keys: `<key>`, `<key>-icon`, `<key>-icon-2`.
+/// Previous or next: the shared tool button with the chevron, pressed to step the queue.
 fn skip(key: &'static str, name: &'static str, icon: &'static Icon, delta: isize, can: bool, t: &Theme) -> El {
-    // The board draws both in the same ink at either end of the queue; the one that cannot
-    // step is not operable.
-    let ink = t.text_secondary;
-    row()
-        .key(key)
-        .role("button")
-        .label(name)
-        .disabled(!can)
-        .size(56.0, 28.0)
-        .gap(4.0)
-        .center()
-        .radius(7.0)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(can)
-        .on_press(move |s: &mut State| {
-            media::step(s, delta);
-        })
-        .child(kit::glyph(format!("{key}-icon"), icon, 20.0, ink))
-        .child(kit::glyph(format!("{key}-icon-2"), icon, 20.0, ink))
+    // The one that cannot step (an end of the queue) is not operable.
+    let button = toolbar::tool(key, name, icon, t).on_press(move |s: &mut State| {
+        media::step(s, delta);
+    });
+    if can { button } else { button.disabled(true).focusable(false) }
 }
 
 /// What the player says of THIS recording, when the source hands a player whose current item it is. Another

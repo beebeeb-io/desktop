@@ -27,7 +27,7 @@ const BUILT: [(&str, &str, &str); 11] = [
     ("DW-1524", "toast-text", "Saved \u{00B7} encrypted \u{00B7} version 4"),
     ("DW-1525", "dlg-title", "You have unsaved changes"),
     ("DW-1526", "dlg-title", "Two versions"),
-    ("DW-1516", "state-title", "Decrypting on this PC"),
+    ("DW-1516", "loading-words", "Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)"),
     ("DW-1517", "state-title", "Too large to preview here"),
     ("DW-1518", "state-title", "Couldn't decrypt this file"),
     ("DW-1512", "run-0-0", "# Export this month's invoices as one CSV"),
@@ -185,7 +185,7 @@ fn every_built_frame_draws_its_words_in_both_themes() {
             let rt = runtime_of(state, dark);
             assert_eq!(info(&rt, key).text.as_deref(), Some(words), "{frame} (dark: {dark})");
             // The window around it is the Files window's: caption, sidebar, toolbar, status line.
-            for chrome in ["caption-bar", "toolbar", "crumb-name", "status-text", "more-btn"] {
+            for chrome in ["caption-bar", "toolbar", "folder-title", "status-text", "more-btn"] {
                 assert!(has(&rt, chrome), "{frame} has {chrome}");
             }
         }
@@ -195,9 +195,11 @@ fn every_built_frame_draws_its_words_in_both_themes() {
 #[test]
 fn the_toolbar_names_the_file_by_its_path_and_facts() {
     let rt = runtime("DW-1516");
-    assert_eq!(info(&rt, "crumb-0").text.as_deref(), Some("Files"));
-    assert_eq!(info(&rt, "crumb-1").text.as_deref(), Some("Lisbon trip"));
-    assert_eq!(info(&rt, "crumb-name").text.as_deref(), Some("Tram 28.mov"));
+    assert_eq!(
+        info(&rt, "viewer-title").label.as_deref(),
+        Some("Files / Lisbon trip, Tram 28.mov, Video \u{00B7} 120 MB")
+    );
+    assert_eq!(info(&rt, "folder-title").text.as_deref(), Some("Tram 28.mov"));
     assert_eq!(info(&rt, "item-count").text.as_deref(), Some("Video \u{00B7} 120 MB"));
     assert_eq!(info(&rt, "toolbar").role, "toolbar");
     assert_eq!(info(&rt, "toolbar").label.as_deref(), Some("Tram 28.mov"));
@@ -216,9 +218,11 @@ fn an_unknown_file_does_not_move_the_route() {
 #[test]
 fn decrypting_shows_the_amount_and_cancel_stops_it_from_the_keyboard() {
     let (mut rt, calls) = recording(board::DECRYPTING);
-    assert_eq!(info(&rt, "state-sub-mono").text.as_deref(), Some("46 of 120 MB"));
-    assert_eq!(info(&rt, "state-bar").role, "progressbar");
-    assert_eq!(info(&rt, "state-bar").label.as_deref(), Some("Decrypting, 38 percent"));
+    assert_eq!(
+        info(&rt, "loading-words").text.as_deref(),
+        Some("Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)")
+    );
+    assert_eq!(info(&rt, "loading-bar").role, "progressbar");
     assert_eq!(
         info(&rt, "status-text").text.as_deref(),
         Some("Decrypting \u{00B7} 46 of 120 MB")
@@ -238,7 +242,7 @@ fn escape_leaves_the_file_and_the_next_key_drops_what_was_decrypted() {
     // The shell's Esc runs first and leaves the route; this group then cancels and forgets.
     press(&mut rt, Key::Escape);
     assert!(!on_a_file(&rt));
-    assert!(!has(&rt, "state-title"), "a file the route left is not drawn");
+    assert!(!has(&rt, "loading-words"), "a file the route left is not drawn");
     super::sync(&mut rt.state);
     assert!(rt.state.viewer.ui.is_none());
     assert_eq!(calls.borrow().last().map(String::as_str), Some("cancel tram-28.mov"));
@@ -262,7 +266,7 @@ fn a_file_the_route_does_not_name_is_never_drawn() {
 fn too_large_says_the_numbers_and_both_ways_out_are_intents() {
     let mut rt = runtime("DW-1517");
     assert_eq!(
-        info(&rt, "state-sub").text.as_deref(),
+        info(&rt, "state-text").text.as_deref(),
         Some(
             "Studio walkthrough 4K.mov is 18.2 GB. Opening it decrypts it on this PC, which needs that much free space; there's 12.4 GB."
         )
@@ -281,8 +285,8 @@ fn too_large_says_the_numbers_and_both_ways_out_are_intents() {
 #[test]
 fn a_failure_is_an_alert_and_try_again_decrypts_again() {
     let (mut rt, calls) = recording(board::FAILED);
-    assert_eq!(info(&rt, "state").role, "alert");
-    assert_eq!(info(&rt, "state-title").role, "heading");
+    assert_eq!(info(&rt, "state").role, "group");
+    assert_eq!(info(&rt, "state-title").text.as_deref(), Some("Couldn't decrypt this file"));
     operate(&mut rt, "state-btn-1");
     assert_eq!(intents(&mut rt), [Intent::ReportProblem]);
     operate(&mut rt, "state-btn-0");
@@ -290,9 +294,11 @@ fn a_failure_is_an_alert_and_try_again_decrypts_again() {
         calls.borrow().last().map(String::as_str),
         Some("retry invoice-0139.pdf")
     );
-    assert_eq!(
-        info(&rt, "state-title").text.as_deref(),
-        Some("Decrypting on this PC"),
+    assert!(
+        info(&rt, "loading-words")
+            .text
+            .as_deref()
+            .is_some_and(|w| w.starts_with("Decrypting ")),
         "DW-1516"
     );
 }
@@ -1038,8 +1044,10 @@ fn progress_from_the_engine_moves_the_bar_and_a_finished_file_replaces_the_state
     assert!(open_from(&mut state, Box::new(Stepping(steps)), board::DECRYPTING));
     // The shell asks the open file for progress before every frame (`host::poll`).
     let mut rt = runtime_of(state, false);
-    assert_eq!(info(&rt, "state-sub-mono").text.as_deref(), Some("90 of 120 MB"));
-    assert_eq!(info(&rt, "state-bar").label.as_deref(), Some("Decrypting, 75 percent"));
+    assert_eq!(
+        info(&rt, "loading-words").text.as_deref(),
+        Some("Decrypting Tram 28.mov on this PC \u{00B7} 90 of 120 MB (75 percent)")
+    );
     rt.invalidate();
     rt.frame(0.0);
     assert_eq!(

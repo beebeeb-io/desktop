@@ -106,15 +106,5 @@ pub const MD_BOLD: TextStyle = TextStyle::new(13.0, 700.0).lh(17.0);
 /// Inline code in a note: mono 12px.
 pub const MD_CODE: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.5);
 
-/// `shadow-1`'s ink (`oklch(0.18 0.01 70)`) at `alpha`.
-pub fn knob_shadow(alpha: f32) -> Color {
-    Color {
-        a: alpha,
-        ..rune::color::hex("#14110D").unwrap_or(Color::BLACK)
-    }
-}
-
 /// `.t-cap.font-mono`: mono 11px/500 on 14px.
 pub const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
-/// `.kit-toast` words: 12.5px/550 on 17px.
-pub const TOAST: TextStyle = TextStyle::new(12.5, 550.0).lh(17.0);
