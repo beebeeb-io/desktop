@@ -606,7 +606,7 @@ fn a_window_with_no_engine_shows_no_sample_and_claims_no_change() {
         "Trash-badge",
         "Shared-badge",
         "Available offline-badge",
-        "account-name",
+        "Sync history-pill",
         "account-email",
         "avatar",
         "status-text",
@@ -615,6 +615,8 @@ fn a_window_with_no_engine_shows_no_sample_and_claims_no_change() {
     ] {
         assert!(find(&rt, key).is_none(), "{key} would be a sample");
     }
+    // The account row keeps its height with an empty name (the one Drive sidebar): no one is named.
+    assert!(find(&rt, "account-name").is_none_or(|e| e.text.as_deref().unwrap_or("").is_empty()));
     assert!(find(&rt, "settings-btn").is_some());
     assert!(!info(&rt, "new-btn").focusable);
     click(&mut rt, "row-6-date");
