@@ -411,6 +411,10 @@ fn page(ui: &Ui) -> El {
 }
 
 pub fn body(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
+    if doc.pages == 0 {
+        // No page to draw: said, never a blank page area.
+        return super::states::empty_file(&ui.file.name, t);
+    }
     row()
         .key("viewer-body")
         .grow(1.0)

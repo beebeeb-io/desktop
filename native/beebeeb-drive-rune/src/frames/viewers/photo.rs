@@ -7,15 +7,13 @@ use rune::{Align, Color, El, Icon, SurfaceFit, TextStyle, col, el, row};
 
 use super::chrome::{Dot, Status};
 use super::source::{OpenFile, PhotoDoc, Picture};
-use super::{Intent, Ui, details, media, media_icons, style};
+use super::{Intent, Ui, details, media, media_icons};
 use crate::State;
 use crate::theme::tokens::Theme;
-use crate::ui::kit;
+use crate::ui::{kit, pill};
 
 /// `.t-cap`: 11px/500 on 14px.
 const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
-/// `.kit-pill`: 11px/600 on 17px, tracked 0.01em.
-const PILL: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0).tracking(0.11);
 
 /// The stage's black: `color-mix(in oklch, black 88%, paper)`.
 fn stage_black(t: &Theme) -> Color {
@@ -27,25 +25,11 @@ fn plain() -> Color {
     Color::WHITE.alpha(0.07)
 }
 
-/// The pill of the toolbar (`.kit-pill`). Keys: `tb-pill`, `tb-pill-label`.
-fn pill(words: &str, t: &Theme) -> El {
-    let width = rune::text::advance(words, PILL) + 16.0;
-    el().key("tb-pill")
-        .role("note")
-        .label(words)
-        .size(width, 20.0)
-        .radius(10.0)
-        .fill(style::tile_neutral(t))
-        .child(
-            kit::label("tb-pill-label", words, PILL, t.text_secondary)
-                .size(width, 20.0)
-                .px(8.0)
-                .pt(1.5),
-        )
-}
-
 pub fn tools(doc: &PhotoDoc, t: &Theme) -> Vec<El> {
-    doc.pill.iter().map(|words| pill(words, t)).collect()
+    doc.pill
+        .iter()
+        .map(|words| pill::pill("tb-pill", words, pill::Tone::Neutral, false, t))
+        .collect()
 }
 
 pub fn status(ui: &Ui, doc: &PhotoDoc) -> Status {

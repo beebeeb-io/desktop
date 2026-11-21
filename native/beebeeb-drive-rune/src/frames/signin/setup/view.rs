@@ -13,6 +13,8 @@ use crate::frames::signin::icons as signin_icons;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone, type_au};
 use crate::ui::setup::{self, SegInk, SegSize, Status, StepState};
+use crate::ui::switch as ui_switch;
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::{kit, settings_list};
 
 const PRODUCT: &str = "Drive";
@@ -156,9 +158,8 @@ pub(super) fn ghost(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to
 }
 
 fn switch(row_key: &str, name: &str, on: bool, t: &Theme, to: impl Fn(&mut Ui) + 'static) -> El {
-    crate::ui::switch::switch_sized(&format!("{}-switch", row_key), "", on, true, crate::ui::button::Size::Md, t).label(name)
-        .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(rune::Cursor::Pointer)
+    ui_switch::switch(&format!("{row_key}-switch"), "", on, true, t)
+        .label(name)
         .on_press_tx(act(to))
 }
 
@@ -404,16 +405,12 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         )
 }
 
-/// Step 4 while the account's preview setting is being read: its heading, a line that says so, nothing chosen and
+/// Step 4 while the account's preview setting is being read: its heading, a loading state, nothing chosen and
 /// nothing stored until the read answered. "Not now" stays.
 fn previews_loading(k: &mut Keys, t: &Theme) -> El {
     setup::column()
-        .child(au::heading(
-            "Thumbnails and previews",
-            Some("Reading your preview settings\u{2026}"),
-            false,
-            t,
-        ))
+        .child(au::heading("Thumbnails and previews", None, false, t))
+        .child(view_state(ViewState::Loading { words: "Reading your preview settings\u{2026}" }, t))
         .child(
             actions()
                 .child(primary(k, "Continue", ButtonState::Disabled, t, Ui::go_on))
@@ -424,18 +421,19 @@ fn previews_loading(k: &mut Keys, t: &Theme) -> El {
 /// Step 4 when reading the preview setting failed: said as a failure, never as "off" or "not in this version". Try
 /// again reads it again; Not now goes on with nothing changed.
 fn previews_failed(k: &mut Keys, t: &Theme) -> El {
+    let retry = try_again("previews-failed", t).on_press_tx(act(Ui::retry_previews));
     setup::column()
-        .child(au::heading(
-            "Thumbnails and previews",
-            Some("Beebeeb couldn\u{2019}t read your preview settings. Nothing is changed."),
-            false,
+        .child(au::heading("Thumbnails and previews", None, false, t))
+        .child(view_state(
+            ViewState::Failed {
+                key: "previews-failed",
+                title: "Couldn\u{2019}t read your preview settings",
+                why: "Beebeeb couldn\u{2019}t read your preview settings. Nothing is changed.",
+                retry: Some(retry),
+            },
             t,
         ))
-        .child(
-            actions()
-                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::retry_previews))
-                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
-        )
+        .child(actions().child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)))
 }
 
 /// Step 4 as the board draws it behind the compare view: nothing in it takes a press.
@@ -609,75 +607,9 @@ const NOTHING_SYNCS: &str = "Your files are safe in Beebeeb. Nothing syncs with 
 /// `code`: Windows' code for support; empty when there is none (the sentence then stands alone). `another`: no
 /// folder was kept yet, so another one can be chosen (the folder may be what was refused).
 fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Keys, t: &Theme) -> El {
-    let (mark, _, wash) = au::tone(Tone::Red, t);
-    let key = k.next("banner");
     let lead = "Try again in a moment.";
-    let words = if code.is_empty() {
-        lead.to_string()
-    } else {
-        format!("{lead} {code}")
-    };
-    let spans = if code.is_empty() {
-        Vec::new()
-    } else {
-        vec![Span {
-            mono: true,
-            size: Some(11.0),
-            ..Span::new(lead.len() + 1, words.len())
-        }]
-    };
-    let code_style = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(17.0);
-    kit::note_text(
-        &format!("{key}-code"),
-        &format!("{key}-code-box"),
-        code,
-        code_style,
-        t.text_secondary,
-    );
-    let banner = row()
-        .key(key.clone())
-        .role("alert")
-        .live_region(rune::LiveRegion::Assertive)
-        .w_full()
-        .px(13.0)
-        .py(11.0)
-        .gap(10.0)
-        .items_start()
-        .radius(13.0)
-        .fill(wash)
-        .child(kit::glyph(format!("{key}-icon"), &icons::EXPLORER, 16.0, mark).mt(1.0))
-        .child(
-            col()
-                .gap(2.0)
-                .grow(1.0)
-                .min_w(0.0)
-                .child(
-                    kit::label(format!("{key}-title"), title, type_au::BANNER_TITLE, t.text)
-                        .wrap()
-                        .w_full(),
-                )
-                .child(
-                    el().w_full()
-                        .child(
-                            kit::label(
-                                format!("{key}-text"),
-                                words.clone(),
-                                type_au::BANNER_TEXT,
-                                t.text_secondary,
-                            )
-                            .spans(spans)
-                            .w_full(),
-                        )
-                        // The error's own box, for the gate: where the mono run stands in the line.
-                        .children((!code.is_empty()).then(|| {
-                            el().key(format!("{key}-code-box"))
-                                .a11y_hidden()
-                                .absolute(rune::text::advance(&format!("{lead} "), type_au::BANNER_TEXT), 1.25)
-                                .w(rune::text::advance(code, code_style))
-                                .h(14.5)
-                        })),
-                ),
-        );
+    let why = if code.is_empty() { lead.to_string() } else { format!("{lead} {code}") };
+    let retry = try_again("explorer-failed", t).on_press_tx(act(Ui::go_on));
     setup::column()
         .child(au::heading(
             "Couldn't add Beebeeb to File Explorer",
@@ -685,10 +617,12 @@ fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Ke
             false,
             t,
         ))
-        .child(banner)
+        .child(view_state(
+            ViewState::Failed { key: "explorer-failed", title, why: &why, retry: Some(retry) },
+            t,
+        ))
         .child(
             actions()
-                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::go_on))
                 .children(another.then(|| {
                     ghost(
                         k,

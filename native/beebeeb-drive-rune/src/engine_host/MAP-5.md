@@ -6,7 +6,6 @@ Modules 139–171, sorted by path.
 
 | Module | Purpose | Public API |
 |---|---|---|
-| `status_on_files.rs` | Slice B3 (plan40 batch 1): "Show sync status on files" (DW-0746), honoured by File Explorer on Windows. | — |
 | `sync.rs` | Sync on the native side of the engine handle (contract `docs/superpowers/specs/2026-11-12-native-sync-start-and-sign-out.md`, §4.3, S1): the | — |
 | `sync_tests.rs` | S1's native tests of the sync start (contract `docs/superpowers/specs/2026-11-12-native-sync-start-and-sign-out.md`, §8 S1): the words for t | — |
 | `tests.rs` | The real engine behind the native shell, in one test process: `cargo test` builds the TEST identity (`build.rs`), the engine's `test-support | — |

@@ -9,8 +9,8 @@
 
 use crate::State;
 use crate::theme::tokens::Theme;
-use crate::ui::settings_controls as controls;
-use rune::{Align, El, Key, KeyEvent, Side};
+use crate::ui::menu::{self, Entry};
+use rune::{Align, El, Key, KeyEvent, Side, Tx};
 
 use super::{AccountUi, Dialog};
 
@@ -51,20 +51,26 @@ pub fn choose(s: &mut State, index: Option<usize>) {
     s.account.dialog = None;
 }
 
-/// The open menu: the delays, the current one checked, `hot` under the pointer or the keys.
+/// The open menu (`ui::menu`): the delays, the current one checked, `hot` under the pointer or the keys.
 pub fn menu(lock_after: &str, hot: Option<usize>, t: &Theme) -> El {
     let now = chosen(lock_after);
-    let items = DELAYS
+    let entries: Vec<Entry> = DELAYS
         .iter()
         .enumerate()
-        .map(|(i, label)| {
-            controls::menu_item(0, i, label, Some(i) == now, Some(i) == hot, t)
-                .on_press(move |s: &mut State| choose(s, Some(i)))
-        })
+        .map(|(i, label)| Entry::check(label, label, Some(i) == now))
         .collect();
-    controls::menu(0, "Locks again after", 130.0, items, t)
-        .anchored(ANCHOR, Side::Bottom, Align::Start, 0.0)
-        .modal(true, |s: &mut State| s.account.dialog = None)
+    menu::menu(
+        "menu-0",
+        "Locks again after",
+        130.0,
+        &entries,
+        hot,
+        t,
+        |s: &mut State, i: usize, _: &mut Tx| choose(s, Some(i)),
+        |s: &mut State, i: usize| s.account.dialog = Some(Dialog::LockDelay(Some(i))),
+        |s: &mut State, _: &mut Tx| s.account.dialog = None,
+    )
+    .anchored(ANCHOR, Side::Bottom, Align::Start, 0.0)
 }
 
 /// The menu's keys: the arrows, Home and End move, Enter takes, Esc closes, Tab closes and

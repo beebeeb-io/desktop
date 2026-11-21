@@ -14,7 +14,7 @@ use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell as shell;
 use rune::{El, Link, Span, col, el, rich};
 
-use super::drive::{Control, Kept, Repair, SyncStatus};
+use super::drive::{Kept, Repair, SyncStatus};
 use super::{Dialog, Intent, SettingsUi};
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
@@ -54,26 +54,12 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         place = place.trailing(Trailing::Value("Turned off".into()));
     }
     explorer.push(lists::item_with(0, 0, &place, show.into_iter().collect(), t));
-    let on = sy.status_on_files;
-    let status_row = ui.drive.shows(Control::StatusOnFiles);
-    if status_row {
-        explorer.push(lists::item_with(
-            0,
-            1,
-            &Item::new(Some(&ic::SYNC_BADGE), "Show sync status on files").ruled(),
-            vec![
-                crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-1"), "", on, true, crate::ui::button::Size::Md, t).label("Show sync status on files")
-                    .on_press(move |s: &mut State| s.settings.drive.set_status_on_files(!on)),
-            ],
-            t,
-        ));
-    }
     let repairing = sy.repair == Repair::Running;
     let repair =
         (!repairing).then(|| button("Repair…").on_press(|s: &mut State| s.settings.dialog = Some(Dialog::Repair)));
     explorer.push(lists::item_with(
         0,
-        if status_row { 2 } else { 1 },
+        1,
         &Item::new(Some(&ic::REBUILD), "Repair Beebeeb in File Explorer")
             .sub(if repairing {
                 "Repairing…"
@@ -118,7 +104,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             1,
             &Item::new(Some(&ic::POWER), "Open Beebeeb when you log in").ruled(),
             vec![
-                crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-1"), "", login, true, crate::ui::button::Size::Md, t).label("Open Beebeeb when you log in")
+                lists::switch("item-1-1", "Open Beebeeb when you log in", login, t)
                     .on_press(move |s: &mut State| s.settings.drive.set_open_at_login(!login)),
             ],
             t,

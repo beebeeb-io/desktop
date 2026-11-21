@@ -16,7 +16,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use beebeeb_engine::app::{CredentialStores, Engine};
+use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::backup_protect::BackupsTree;
 use beebeeb_engine::drive_v2::model as drive_model;
 use beebeeb_engine::engine_status::{EngineStatusView, REASON_AUTH, REASON_ENGINE_ERROR};
@@ -84,7 +84,7 @@ impl<C: CredentialStores> EngineTraySource<C> {
         let ready = gate == Gate::Ready;
         // A file's "uploading" or "downloading" is a file on its way only while sync runs and reaches Beebeeb.
         let moving = running && !paused && matches!(report, Report::Syncing | Report::Idle);
-        let local = if ready { self.local(moving) } else { None };
+        let (local, unreadable) = if ready { self.local(moving) } else { (None, false) };
         Facts {
             gate,
             session_ended: sync.session_ended,
@@ -95,6 +95,7 @@ impl<C: CredentialStores> EngineTraySource<C> {
             explorer_ready: self.explorer_ready,
             local,
             storage: if ready { self.storage() } else { None },
+            unreadable,
         }
     }
 
@@ -102,9 +103,15 @@ impl<C: CredentialStores> EngineTraySource<C> {
     /// schema check under a write lock, which the flyout, read up to once a second while it shows during a sync,
     /// would make the engine's writers wait for). `None` before the first sync, for a state that is not this
     /// account's, and when the session changed while it was read.
-    fn local(&self, moving: bool) -> Option<Local> {
-        let state = self.live.engine.local_state().ok()?;
-        state.with(|db| local_of(db, now(), moving)).ok()
+    fn local(&self, moving: bool) -> (Option<Local>, bool) {
+        let state = match self.live.engine.local_state() {
+            Ok(state) => state,
+            Err(refused) => return (None, refused == LocalStateRefused::Unreadable),
+        };
+        match state.with(|db| local_of(db, now(), moving)) {
+            Ok(local) => (Some(local), false),
+            Err(refused) => (None, refused == LocalStateRefused::Unreadable),
+        }
     }
 
     /// The account's storage as last read, while it is the account signed in now. Starts a read on a thread
@@ -143,9 +150,26 @@ impl<C: CredentialStores> TraySource for EngineTraySource<C> {
         live::snapshot(&self.facts(), AppIdentity::CURRENT.product_name(), chrono::Local::now())
     }
 
-    /// Pause and Resume reach the engine through the shell, Review…, Show and Sign in move the window
-    /// (`frames::tray::Intent`): nothing is left for the source to do.
-    fn act(&mut self, _: Action) {}
+    /// Pause and Resume reach the engine through the shell, Review…, Show, Sign in, Unlock and Restart to update
+    /// move the window (`frames::tray::Intent`). What is left for the source: Add storage and Choose a plan open
+    /// the plans page in the browser, and Try again makes the next read start from nothing (the storage is read
+    /// again at once; the history is read afresh on every snapshot).
+    fn act(&mut self, action: Action) {
+        match action {
+            Action::AddStorage | Action::ChoosePlan => {
+                if let Some(address) = crate::shell::web_pages::url("plan")
+                    && super::signin::open_web_page(address).is_err()
+                {
+                    log("the flyout could not open the plans page");
+                }
+            }
+            Action::TryAgain => {
+                let mut read = self.storage.lock().unwrap_or_else(PoisonError::into_inner);
+                read.began = None;
+            }
+            _ => {}
+        }
+    }
 
     /// Shows the file in File Explorer, selected in its folder: #322's `show_in_file_explorer`, with its
     /// guard (refused while sync does not run on this PC). A row without an id does nothing.

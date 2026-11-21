@@ -1,6 +1,7 @@
 //! `landing` items split out of `engine_bridge.rs`.
 
 use super::*;
+use crate::unknown_check::Ownership;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FinderWriteItemKind {
@@ -871,6 +872,21 @@ pub(super) fn removed_folder_paths(db: &StateDb, sync_root: &Path) -> HashSet<Pa
         .collect()
 }
 
+/// Task 2283: the entry at `path` by its placeholder's identity. Only Windows has placeholders here; elsewhere every
+/// entry reads as an ordinary one, decided by the row's content rules.
+#[cfg_attr(not(any(target_os = "windows", test, feature = "test-support")), allow(dead_code))]
+fn entry_identity(path: &Path) -> crate::unknown_check::EntryIdentity {
+    #[cfg(target_os = "windows")]
+    {
+        crate::windows_cf::placeholders::entry_identity(path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        crate::unknown_check::EntryIdentity::NotPlaceholder
+    }
+}
+
 /// Remove the on-disk entries of `rows` (a remote deletion), each through [`remove_pruned_entry`],
 /// with `local` the platform's view of each file.
 #[cfg_attr(not(any(target_os = "windows", test, feature = "test-support")), allow(dead_code))]
@@ -896,6 +912,40 @@ pub(super) fn remove_pruned_entries(
         // web trash, a folder trash after a file trash) copies nothing again. Unreadable: kept.
         if !row.is_dir && db.pending_kept_original(&rel).map_or(true, |pending| pending.is_some()) {
             continue;
+        }
+        // Task 2283: the entry is removed (or copied) only when it is this row's: a placeholder whose identity names
+        // another file (a local rename the row has not followed, two server items at one path) is left as it is, and
+        // the row is forgotten. One that cannot be read is kept for the retry (a folder: left).
+        match crate::unknown_check::ownership(db, &entry_identity(&path), &row.file_id, &row.path) {
+            Ownership::Own => {}
+            Ownership::Other => {
+                tracing::warn!(
+                    file_id = %row.file_id,
+                    "remote-deletion reconcile: the entry at this path is another file's (its placeholder identity); it is left"
+                );
+                continue;
+            }
+            Ownership::Unknown => {
+                tracing::warn!(
+                    file_id = %row.file_id,
+                    "remote-deletion reconcile: the entry's placeholder identity could not be read; nothing is removed"
+                );
+                if !row.is_dir {
+                    let agreed = row.local_hash.as_deref().or(row.fetched_hash.as_deref());
+                    record_kept_copy(
+                        db,
+                        sync_root,
+                        &row.file_id,
+                        &path,
+                        None,
+                        agreed.unwrap_or_default(),
+                        OriginalRemoval::InPlace,
+                        KeptReason::InUse,
+                        None,
+                    );
+                }
+                continue;
+            }
         }
         // The remove itself registers with the watcher right before it happens (`engine_remove`),
         // so the NOTIFY_DELETE_COMPLETION it fires queues no trash.
@@ -1029,6 +1079,21 @@ pub fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn Fn(&Path
             Ok(_) => {}
             Err(_) => continue,
         }
+        // Task 2283: the place holds another file's placeholder now (the deleted file was renamed away, another moved
+        // there): nothing of the deleted file is there, so the entry resolves and that file is left.
+        match crate::unknown_check::ownership(
+            db,
+            &entry_identity(&original),
+            &copy.original_file_id,
+            &copy.original_path,
+        ) {
+            Ownership::Own => {}
+            Ownership::Other => {
+                resolve(&copy);
+                continue;
+            }
+            Ownership::Unknown => continue,
+        }
         let copy_dir = kept_copy_dir(db, sync_root, &original, &removed_dirs);
         let agreed = Some(copy.copied_hash.as_str()).filter(|hash| !hash.is_empty());
         // Review F2: the engine's own remove queues no trash (`engine_remove` registers it).
@@ -1148,3 +1213,121 @@ pub(super) fn remove_pruned_placeholders(db: &StateDb, sync_root: &Path, rows: &
 /// No-op stand-in on non-Windows builds so the call sites stay platform-agnostic.
 #[cfg(not(target_os = "windows"))]
 pub(super) fn remove_pruned_placeholders(_db: &StateDb, _sync_root: &Path, _rows: &[crate::state_db::PrunedRow]) {}
+
+/// Task 2283, on real Windows placeholders (a registered scratch sync root, revoked on drop). Named `windows_cf` so the
+/// Windows suite's `windows_cf::` filter runs it with the other placeholder tests.
+#[cfg(all(test, target_os = "windows"))]
+mod windows_cf {
+    use super::*;
+    use crate::state_db::{FileEntry, ItemKind};
+
+    struct Root {
+        db: StateDb,
+        root: PathBuf,
+        _temp: tempfile::TempDir,
+    }
+
+    impl Root {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("root");
+            std::fs::create_dir(&root).unwrap();
+            let db = StateDb::open(temp.path().join("state.db")).unwrap();
+            crate::windows_cf::register_test_sync_root(&root).unwrap();
+            Self { db, root, _temp: temp }
+        }
+
+        /// A synced file: an in-sync placeholder at `rel` named `file_id`, holding `bytes`, and its row (agreed
+        /// content recorded when `agreed`).
+        fn synced(&self, file_id: &str, rel: &str, bytes: &[u8], agreed: bool) {
+            let path = self.root.join(rel);
+            std::fs::write(&path, bytes).unwrap();
+            crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, "temporary-local-id").unwrap();
+            crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&path, file_id).unwrap();
+            self.row(file_id, rel, agreed.then(|| sha256_file_hex(&path).unwrap()));
+        }
+
+        fn row(&self, file_id: &str, rel: &str, hash: Option<String>) {
+            self.db
+                .upsert_file_with_contract(
+                    &FileEntry {
+                        file_id: file_id.into(),
+                        path: rel.into(),
+                        status: FileStatus::Local,
+                        size_bytes: 8,
+                        modified_at: 1_700_000_000,
+                        content_hash: None,
+                        remote_updated_at: 1_700_000_000,
+                        parent_id: None,
+                        item_kind: ItemKind::File,
+                    },
+                    |contract| {
+                        contract.item_kind = ItemKind::File;
+                        contract.local_hash = hash.clone();
+                    },
+                )
+                .unwrap();
+        }
+
+        /// A remote trash of `file_id`, as `apply_sync_op` lands it.
+        fn trash(&self, file_id: &str) {
+            let rows = self.db.mark_subtree_trashing(file_id).unwrap();
+            assert_eq!(rows.len(), 1);
+            remove_pruned_placeholders(&self.db, &self.root, &rows);
+        }
+
+        fn names(&self) -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(&self.root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            crate::windows_cf::unregister_any_sync_root(&self.root).unwrap();
+        }
+    }
+
+    /// Rename a synced file locally (its row not following yet), another file takes the old name, then the first is
+    /// trashed on the web: the file now at the old name is the other one's and stays, as does the renamed one, and
+    /// nothing is copied.
+    #[test]
+    fn task_2283_a_remote_trash_of_the_old_name_leaves_the_file_now_there() {
+        let r = Root::new();
+        r.synced("aaaa0000-0000-4000-8000-000000002283", "old.txt", b"renamed file", true);
+        r.synced(
+            "bbbb0000-0000-4000-8000-000000002283",
+            "other.txt",
+            b"the other file",
+            true,
+        );
+        std::fs::rename(r.root.join("old.txt"), r.root.join("new.txt")).unwrap();
+        std::fs::rename(r.root.join("other.txt"), r.root.join("old.txt")).unwrap();
+        r.trash("aaaa0000-0000-4000-8000-000000002283");
+        assert_eq!(std::fs::read(r.root.join("old.txt")).unwrap(), b"the other file");
+        assert_eq!(std::fs::read(r.root.join("new.txt")).unwrap(), b"renamed file");
+        assert_eq!(r.names(), ["new.txt", "old.txt"], "no copy is made");
+        assert!(
+            r.db.list_kept_copies().unwrap().is_empty(),
+            "nothing is kept on record for it"
+        );
+    }
+
+    /// Two server rows at one path (2274's pairs): trashing the older (`b`, no agreed content) leaves `a`'s file, held
+    /// wholly on disk, and makes no "(this PC)" copy. Trashing `a` itself removes it.
+    #[test]
+    fn task_2283_trashing_one_of_two_rows_at_one_path_leaves_the_other_s_file() {
+        let r = Root::new();
+        r.synced("aaaa0000-0000-4000-8000-00000000a283", "same.txt", b"a's bytes", true);
+        r.row("bbbb0000-0000-4000-8000-00000000b283", "same.txt", None);
+        r.trash("bbbb0000-0000-4000-8000-00000000b283");
+        assert_eq!(std::fs::read(r.root.join("same.txt")).unwrap(), b"a's bytes");
+        assert_eq!(r.names(), ["same.txt"], "no copy is made");
+        r.trash("aaaa0000-0000-4000-8000-00000000a283");
+        assert!(r.names().is_empty(), "the row's own entry is removed");
+    }
+}

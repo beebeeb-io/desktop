@@ -6,7 +6,7 @@
 use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::account_form as fm;
-use crate::ui::account_set::{self as set, Lead, Row, Tail};
+use crate::ui::account_set::{self as set, Lead, Row};
 use crate::ui::settings_list as lists;
 use rune::El;
 
@@ -57,13 +57,17 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
             0,
             None,
             vec![if fixed_on {
+                // This source cannot stop it from here: the row opens the web page that can.
                 set::item(
                     0,
                     0,
-                    &Row::new(Lead::Icon(&icons::ACTIVITY), "Record sign-in activity").tail(Tail::Value("On".into())),
+                    &Row::new(Lead::Icon(&icons::ACTIVITY), "Record sign-in activity")
+                        .sub("On. Turn it off on the web")
+                        .link(true),
                     Vec::new(),
                     t,
                 )
+                .on_press(|s: &mut State| s.settings.ask(crate::frames::settings::Intent::Web("privacy")))
             } else {
                 set::item(
                     0,
@@ -74,7 +78,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
                 )
             }],
             Some(if fixed_on {
-                "Turning this off is not available in this version yet. Turn it off on the web."
+                "Opens the privacy page on the web, where recording can be turned off."
             } else if on {
                 "Keeps the address and country of each sign-in and security change, so you can see if someone else got in."
             } else {

@@ -117,7 +117,7 @@ mod tests {
         assert!(
             files
                 .iter()
-                .any(|(name, _)| name == "native/beebeeb-drive-rune/src/engine_host.rs"),
+                .any(|(name, _)| name == "native/beebeeb-drive-rune/src/engine_host/mod.rs"),
             "a native file is read, under its own prefix"
         );
         assert!(

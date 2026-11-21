@@ -20,7 +20,7 @@ use crate::shell::app::{Screen, Section};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::dialog::{self, Sub};
 use crate::ui::settings_dialog::{Weight, button};
-use crate::ui::{field, kit};
+use crate::ui::{field, kit, pill};
 
 /// Whether this build offers the Office editor's way to make a file: "New document…" (DW-1520) and the
 /// Word, Excel and PowerPoint tiles (DW-1521). On since the editor landed (lock 4 of D-OV-3 is off).
@@ -643,29 +643,15 @@ fn ext_field(nf: &NewFile, t: &Theme) -> El {
 
 /// A suggested extension (`.kit-chip.tone-neutral`); the chosen one is ink with paper words. `x`, `w`:
 /// where the board lays it out (its words' width and 10 on each side).
-fn chip(i: usize, ext: &'static str, on: bool, x: f32, w: f32, t: &Theme) -> El {
-    let key = chip_key(i);
-    row()
-        .key(key)
+fn chip(i: usize, ext: &'static str, on: bool, _x: f32, _w: f32, t: &Theme) -> El {
+    let tone = if on { pill::Tone::Accent } else { pill::Tone::Neutral };
+    pill::pill(chip_key(i), ext, tone, false, t)
         .role("radio")
-        .label(ext)
-        .checked(on)
         .h(26.0)
-        .center()
-        .radius(13.0)
-        .fill(if on { t.text } else { t.tile })
+        .checked(on)
         .focusable(true)
         .focus_ring(2.0, 2.0, t.accent_deep)
         .cursor(rune::Cursor::Pointer)
-        .child(
-            style::fitted(
-                format!("{key}-label"),
-                ext,
-                CHIP,
-                if on { t.paper } else { t.text_secondary },
-            )
-            .offset(drift(x, w), 0.0),
-        )
         .on_press(move |s: &mut State| choose_ext(s, ext))
 }
 

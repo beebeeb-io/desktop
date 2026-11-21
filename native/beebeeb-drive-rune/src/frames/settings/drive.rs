@@ -227,8 +227,9 @@ pub trait DriveSettings {
     /// Sync and File Explorer. Engine: the cloud-files registration, the shell status
     /// setting, the sync state, the login item, the cache size and limit, the pinned set.
     fn sync(&self) -> SyncPane;
-    /// Put the PC column's states on files in File Explorer, or not.
-    fn set_status_on_files(&mut self, on: bool);
+    /// Put the PC column's states on files in File Explorer, or not. The engine cannot switch Explorer's status, so
+    /// the pane draws no row for it (`Control::StatusOnFiles`) and the engine's source keeps this default.
+    fn set_status_on_files(&mut self, _on: bool) {}
     /// Open Beebeeb when the person logs in (a login item), or not.
     fn set_open_at_login(&mut self, on: bool);
     /// Pause or resume syncing.

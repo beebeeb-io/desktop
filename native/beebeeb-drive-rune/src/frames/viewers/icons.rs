@@ -3,9 +3,7 @@
 
 use rune::Icon;
 
-pub use crate::theme::icons::{
-    CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, LOCK, PANEL_TOGGLE, PLUS, SEARCH, SORT, VIEW_GRID, VIEW_LIST,
-};
+pub use crate::theme::icons::{CHEVRON_RIGHT, LOCK};
 
 macro_rules! icon24 {
     ($name:expr, $body:expr) => {

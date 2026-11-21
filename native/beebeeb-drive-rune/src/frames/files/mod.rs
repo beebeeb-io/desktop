@@ -708,15 +708,21 @@ impl State {
             let Some(parent) = self.files.back.pop() else {
                 return false;
             };
-            self.actions.forward.push(here);
+            self.actions.forward.push(here.clone());
             self.show_folder(parent);
+            // The folder left is the row selected in the one Back returns to: once the read on the worker lands
+            // (`take_opened`), or at once when it is already there.
+            self.actions.reveal = here;
+            self.apply_reveal();
             return true;
         }
         if !self.go_back() {
             return false;
         }
-        self.actions.forward.push(here);
+        self.actions.forward.push(here.clone());
         self.entered();
+        self.actions.reveal = here;
+        self.apply_reveal();
         true
     }
 
