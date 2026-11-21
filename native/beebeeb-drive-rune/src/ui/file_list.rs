@@ -396,24 +396,35 @@ pub fn format_date(iso: &str) -> String {
     format_date_at(local, Local::now().naive_local())
 }
 
-/// A fixture stamp for the board's mock "now" (5 Nov 2026): 4 and 5 Nov move to yesterday and
-/// today of this PC's local clock (same time of day, no zone), so "Today, 09:12" and "Yesterday,
-/// 16:42" hold on any day. Every other stamp is returned as it is.
+/// A fixture stamp for the board's mock "now" (5 Nov 2026), moved onto this PC's local clock so
+/// the board's wording holds on any day: 4 and 5 Nov become yesterday and today (same time of
+/// day, no zone); older stamps in the board's last week (30 Oct to 3 Nov) keep their weekday
+/// ("Sunday") on the latest such day at least 2 days back. Every other stamp is unchanged.
 pub fn board_stamp(iso: &str) -> String {
-    use chrono::{Duration, Local, NaiveDate, NaiveDateTime};
+    board_stamp_at(iso, chrono::Local::now().date_naive())
+}
+
+/// [`board_stamp`] against a given local date (testable).
+pub fn board_stamp_at(iso: &str, today: chrono::NaiveDate) -> String {
+    use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
 
     let Ok(at) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ") else {
         return iso.to_string();
     };
-    let (yesterday, board_today) = (
-        NaiveDate::from_ymd_opt(2026, 11, 4).unwrap(),
-        NaiveDate::from_ymd_opt(2026, 11, 5).unwrap(),
-    );
-    if at.date() < yesterday || at.date() > board_today {
-        return iso.to_string();
-    }
-    let shift = Local::now().date_naive() - board_today;
-    (at + shift).format("%Y-%m-%dT%H:%M:%S").to_string()
+    let board_today = NaiveDate::from_ymd_opt(2026, 11, 5).unwrap();
+    let days_back = (board_today - at.date()).num_days();
+    let shifted = match days_back {
+        0 | 1 => at + (today - board_today),
+        2..=6 => {
+            let mut d = today - Duration::days(2);
+            while d.weekday() != at.date().weekday() {
+                d -= Duration::days(1);
+            }
+            d.and_time(at.time())
+        }
+        _ => return iso.to_string(),
+    };
+    shifted.format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 /// [`format_date`] for a local time against a local "now" (the rule, testable).
