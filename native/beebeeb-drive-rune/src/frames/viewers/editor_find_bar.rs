@@ -95,6 +95,7 @@ pub fn replace_current(view: &mut EditorView, edit: &mut rune::TextEdit) {
     if ms.iter().any(|m| m.start == a && m.end == b) {
         let with = view.find.replacement.text.clone();
         edit.insert(&with);
+        edit.mark_edited();
     }
     step(view, edit, false);
 }
@@ -108,6 +109,7 @@ pub fn replace_all(view: &mut EditorView, edit: &mut rune::TextEdit) -> String {
         edit.set_selection(0, edit.text.len());
         edit.insert(&new);
         edit.set_caret(caret);
+        edit.mark_edited();
     }
     view.find.current = None;
     let text = edit.text.clone();
