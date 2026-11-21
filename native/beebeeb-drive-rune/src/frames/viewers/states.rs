@@ -117,7 +117,7 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
             dot: Dot::Warn,
             text: "No preview here".into(),
             details: match why {
-                NoPreview::NoViewer | NoPreview::TooBig { .. } => "Nothing was downloaded",
+                NoPreview::NoViewer | NoPreview::Heic | NoPreview::TooBig { .. } => "Nothing was downloaded",
                 NoPreview::OverLimit { .. } => "Stopped; nothing was kept",
                 NoPreview::Unreadable
                 | NoPreview::PictureTooBig { .. }
@@ -340,6 +340,14 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
                 file.name
             ),
         ),
+        NoPreview::Heic => (
+            "HEIC photos can\u{2019}t be shown here yet",
+            format!(
+                "{} is safe in Beebeeb. HEIC photos can\u{2019}t be shown at full size on this PC yet, so nothing was \
+                 downloaded. Open it in your default app.",
+                file.name
+            ),
+        ),
         NoPreview::TooBig { size, limit } => (
             "Too large to preview here",
             format!(
@@ -402,7 +410,7 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
         .child(sentence(words, t))
         .child(actions({
             let mut buttons = vec![
-                button(keys("state-btn-0"), "Open in another app\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t)
+                button(keys("state-btn-0"), &heic_button(why), None, Variant::Secondary, Size::Md, ButtonState::Enabled, t)
                 .on_press(|s: &mut State| {
                     if let Some(ui) = ui(s) {
                         ui.intent(Intent::OpenInAnotherApp);
@@ -423,6 +431,14 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
             buttons
         }));
     stage(content, t)
+}
+
+/// The first button of the no-preview state: a HEIC names the system's app, as Photos does.
+fn heic_button(why: NoPreview) -> String {
+    match why {
+        NoPreview::Heic => format!("Open in {}", crate::frames::show_in_folder::os_app_label()),
+        _ => "Open in another app\u{2026}".to_string(),
+    }
 }
 
 /// The body of a state. `copies`: see [`not_previewable`]. `origin`: where the bytes a state speaks of were

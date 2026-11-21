@@ -615,6 +615,14 @@ pub(super) enum Shows {
     Nothing,
 }
 
+/// Why a file with no viewer is not shown: a HEIC is said as that, any other kind has no viewer.
+fn heic_or_no_viewer(name: &str) -> NoPreview {
+    let heic = name
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif"));
+    if heic { NoPreview::Heic } else { NoPreview::NoViewer }
+}
+
 pub(super) fn shows(name: &str) -> Shows {
     let ext = name
         .rsplit_once('.')
@@ -921,7 +929,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         } else if let Some(media) = media {
             media
         } else if shows == Shows::Nothing {
-            Body::NotPreviewable(NoPreview::NoViewer)
+            Body::NotPreviewable(heic_or_no_viewer(&facts.name))
         } else if facts.size > IN_MEMORY_MAX {
             Body::NotPreviewable(NoPreview::TooBig {
                 size: facts.size,
@@ -1222,7 +1230,9 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn previews(&self, name: &str) -> bool {
-        shows(name) != Shows::Nothing || self.media_previews(name) || self.office_route(name).is_some()
+        shows(name) != Shows::Nothing
+            || heic_or_no_viewer(name) == NoPreview::Heic
+            || self.media_previews(name) || self.office_route(name).is_some()
     }
 
     /// An audio or a video file kept on this PC still opens in the player when playback is available (D-MED-13); an
@@ -1407,5 +1417,17 @@ impl<E: ViewerEngine> Drop for EngineViewerSource<E> {
         }
         self.media_closed();
         self.office_left();
+    }
+}
+
+#[cfg(test)]
+mod heic_open_tests {
+    use super::*;
+
+    #[test]
+    fn a_heic_has_its_own_words_and_opens_in_the_viewer() {
+        assert_eq!(heic_or_no_viewer("n.HEIC"), NoPreview::Heic);
+        assert_eq!(heic_or_no_viewer("n.heif"), NoPreview::Heic);
+        assert_eq!(heic_or_no_viewer("n.xyz"), NoPreview::NoViewer);
     }
 }
