@@ -355,6 +355,7 @@ impl EngineBridge {
             link_failed: false,
             session_refused: false,
             account_refused: false,
+            storage_country_refusals: Vec::new(),
         };
         #[cfg(target_os = "windows")]
         if !self.is_stopping() {
@@ -598,6 +599,17 @@ impl EngineBridge {
                             outcome.retried_op_ids.push(op.op_id);
                         }
                         FailedAttemptRule::Retry(count) => {
+                            // Task 2054: a strict storage-country refusal is the server's state, not this file's
+                            // fault: the file stays queued and never uses up its attempts. Say the country.
+                            let count = if let Some(refused) = engine_cause::<StorageCountryRefused>(&error) {
+                                outcome.storage_country_refusals.push(StorageCountryRefusal {
+                                    op_id: op.op_id.clone(),
+                                    country: refused.country.clone().unwrap_or_default(),
+                                });
+                                AttemptCount::UpToTheBackoffCap
+                            } else {
+                                count
+                            };
                             // §8.6 rule 6 and §8.4: a recorded completion, and a File Provider
                             // write whose failure waiting cures, keep retrying on the normal
                             // backoff and never use up their attempts.
