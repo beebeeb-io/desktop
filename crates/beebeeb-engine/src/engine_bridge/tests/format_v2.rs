@@ -1035,3 +1035,110 @@ async fn a_row_read_that_was_rate_limited_fails_the_attempt_before_its_init() {
     assert_eq!(state.inits.len(), 2);
     assert_eq!(state.latest_plaintext(&id, master_key), b"version two");
 }
+
+/// What the server and this device hold after an upload whose `complete` committed, whose answer was
+/// lost, and whose session the server no longer knows when `complete` is sent again (404).
+/// `restart`: the process died after the commit, so a new bridge on the same state takes the retry.
+async fn upload_ack_lost_and_session_gone(master_key: [u8; 32], restart: bool) {
+    let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+    {
+        let mut state = server.state.lock().unwrap();
+        state.serve_downloads = true;
+        state.complete_reply_lost_once.insert("session-1".into());
+    }
+    let bytes = b"committed on the server, answer lost, session gone";
+    let contents = dir.path().join("create.txt");
+    std::fs::write(&contents, bytes).unwrap();
+    bridge
+        .queue_file_provider_create(finder_file_target(None, "notes.txt", &contents, None))
+        .unwrap();
+    bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+    let id = {
+        let mut state = server.state.lock().unwrap();
+        let ids = state.files_with_content();
+        assert_eq!(ids.len(), 1, "precondition: the upload committed on the server");
+        assert!(
+            bridge.db.highest_file_version(&ids[0]).unwrap().is_none_or(|v| v < 1),
+            "precondition: nothing landed on this device"
+        );
+        // The server forgot the session: a repeated `complete` answers 404, not `already_completed`.
+        state.completed_reply_lost.clear();
+        ids[0].clone()
+    };
+    let bridge = if restart {
+        drop(bridge);
+        test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key)
+    } else {
+        bridge
+    };
+    drain_upload_queue(&bridge, &sync_root).await;
+
+    let state = server.finish();
+    let count = |method: &str, path: &str| state.requests.iter().filter(|(m, p)| m == method && p == path).count();
+    assert_eq!(count("POST", "/api/v1/uploads/init"), 1, "one session: {:?}", state.requests);
+    assert_eq!(count("PUT", "/api/v1/uploads/session-1/chunks/0"), 1, "the chunk is sent once");
+    assert_eq!(count("POST", "/api/v1/uploads/session-1/complete"), 2, "complete, and one repeat");
+    assert_eq!(count("GET", &format!("/api/v1/files/{id}/versions")), 1, "the server is asked once");
+    assert_eq!(
+        state.requests.iter().filter(|(_, p)| p.ends_with("/upload/abandon")).count(),
+        0,
+        "a committed upload is never abandoned"
+    );
+    assert!(state.trashes.is_empty(), "and never trashed");
+    assert_eq!(state.files[&id].versions.len(), 1, "one version, not two");
+    assert_eq!(state.latest_plaintext(&id, master_key), bytes);
+    assert_eq!(bridge.db.highest_file_version(&id).unwrap(), Some(1), "landed as version 1");
+    assert!(bridge.db.list_operations_for_file(&id).unwrap().is_empty(), "the op is done");
+    assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
+}
+
+/// Backlog 1648. `complete` committed, its answer was lost and the server dropped the session: the
+/// next tick's `complete` answers 404. The versions listing holds the session's version, so it is
+/// landed once: no second init, no chunk sent twice, no abandon.
+/// Mutant: the 404 abandons the session and starts a fresh upload (a second init and a second version;
+/// for a create, an abandon aimed at the row that now holds the file).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_whose_answer_was_lost_and_whose_session_is_gone_lands_once() {
+    upload_ack_lost_and_session_gone([181u8; 32], false).await;
+}
+
+/// The same after a kill: the process died after the commit, and a new one on the same state finds the
+/// persisted session, is told it is gone, and lands the version the server holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_killed_after_its_commit_lands_once_on_the_next_start() {
+    upload_ack_lost_and_session_gone([182u8; 32], true).await;
+}
+
+/// The other side of the lookup: a resumed session that is gone and whose version the server does NOT
+/// hold is abandoned and uploaded again, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_whose_session_is_gone_before_any_commit_is_sent_again() {
+    let master_key = [183u8; 32];
+    let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+    {
+        let mut state = server.state.lock().unwrap();
+        state.serve_downloads = true;
+        state.fail_complete_once.insert("session-1".into());
+    }
+    let bytes = b"never committed: the session was reaped first";
+    let contents = dir.path().join("create.txt");
+    std::fs::write(&contents, bytes).unwrap();
+    bridge
+        .queue_file_provider_create(finder_file_target(None, "notes.txt", &contents, None))
+        .unwrap();
+    bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+    {
+        let mut state = server.state.lock().unwrap();
+        assert!(state.files_with_content().is_empty(), "precondition: nothing committed");
+        state.sessions.clear(); // reaped
+    }
+    drain_upload_queue(&bridge, &sync_root).await;
+    let state = server.finish();
+    let inits = state.requests.iter().filter(|(_, p)| p == "/api/v1/uploads/init").count();
+    assert_eq!(inits, 2, "a fresh upload after the reaped session: {:?}", state.requests);
+    let ids = state.files_with_content();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(state.files[&ids[0]].versions.len(), 1, "one version");
+    assert_eq!(state.latest_plaintext(&ids[0], master_key), bytes);
+    assert_eq!(bridge.db.highest_file_version(&ids[0]).unwrap(), Some(1));
+}

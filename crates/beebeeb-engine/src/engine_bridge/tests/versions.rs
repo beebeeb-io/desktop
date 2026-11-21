@@ -128,6 +128,8 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
             .map(|n| {
                 serde_json::json!({
                     "id": format!("{prefix}-v{n}"),
+                    // The id the version's init answered (on the server, an upload's `id` too).
+                    "object_version_id": mock_object_version_id(id, n),
                     "version_number": n,
                     "version_metadata_encrypted": s.version_metadata.get(&(id.to_string(), n)),
                 })

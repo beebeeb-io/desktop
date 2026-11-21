@@ -363,6 +363,36 @@ impl EngineBridge {
                 served_record,
             )
             .await;
+        // Backlog 1648: a resumed session the server no longer knows (404, 410) may be one whose
+        // `complete` committed and whose answer never arrived (lost on the way, or the process died
+        // before it was recorded). The server is asked whether it holds this session's version before
+        // anything is abandoned: when it does, that answer is landed, once, and nothing is sent again.
+        // A lookup that fails leaves the session as it is, for the next attempt to ask again.
+        let body = match body {
+            Ok(completed) => Ok(completed),
+            Err(error) => {
+                let error = land_error_to_anyhow(error);
+                if resumed && matches!(error_http_status(&error), Some(404 | 410)) && !upload_file_changed(&error) {
+                    match self
+                        .api
+                        .committed_upload(&session.server_file_id, &session.object_version_id)
+                        .await?
+                    {
+                        Some(answer) => {
+                            tracing::info!(
+                                op_id = %op.op_id,
+                                file_id = %session.server_file_id,
+                                "upload: the session is gone and the server holds its version — landing it, nothing is uploaded again"
+                            );
+                            Ok(answer)
+                        }
+                        None => Err(error),
+                    }
+                } else {
+                    Err(error)
+                }
+            }
+        };
         match body {
             Ok(completed) => {
                 // §8.6.1: the version this upload produced, from the server's reply. An
@@ -422,8 +452,7 @@ impl EngineBridge {
             Err(error) => {
                 // The session checks and `SessionAbandoned` speak `anyhow`, as the API client
                 // does; `land_error_to_anyhow` hands them the error itself, so a marker it
-                // carries stays findable.
-                let error = land_error_to_anyhow(error);
+                // carries stays findable (done above, where a committed upload is looked for).
                 if upload_file_changed(&error) {
                     // `complete` refused the completion name: the file was renamed since this
                     // session's init. The session just answered, so it is this device's and live:

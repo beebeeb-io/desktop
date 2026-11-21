@@ -166,12 +166,17 @@ fn error_is_not_found(error: &anyhow::Error) -> bool {
         .any(|e| e.status() == Some(reqwest::StatusCode::NOT_FOUND))
 }
 
-/// The `complete`-shaped answer for `object_version_id` out of a versions listing (a bare array, or
-/// `{ "versions": [...] }`), or `None` when the listing does not hold it.
+/// The `complete`-shaped answer for `object_version_id` out of the server's versions listing
+/// (`GET /files/{id}/versions`, server `routes/versions/list.rs`: `{ "versions": [{ "id",
+/// "object_version_id", "version_number", "size_bytes", .. }] }`), or `None` when the listing does not
+/// hold it. The server lists only finished versions (`available`, `completed`), so one that is listed
+/// was committed. A version of the older model has a null `object_version_id` and never matches.
 pub(crate) fn committed_answer(listing: &serde_json::Value, object_version_id: &str) -> Option<serde_json::Value> {
-    let list = listing.get("versions").unwrap_or(listing).as_array()?;
-    let found = list.iter().find(|v| v["id"].as_str() == Some(object_version_id))?;
-    let number = found["number"].as_i64().or_else(|| found["version_number"].as_i64());
+    let list = listing["versions"].as_array()?;
+    let found = list
+        .iter()
+        .find(|v| v["object_version_id"].as_str() == Some(object_version_id))?;
+    let number = found["version_number"].as_i64();
     let mut answer = serde_json::json!({
         "current_object_version_id": object_version_id,
         "already_completed": true,
@@ -193,17 +198,21 @@ mod tests {
     /// A lost `complete` answer plus a reaped session: the committed version is found, once, by its id.
     #[test]
     fn upload_ack_lost_after_commit_is_found_by_its_version_id() {
-        let listing = json!({ "versions": [
-            { "id": "v1", "number": 1, "size_bytes": 5 },
-            { "id": "v2", "number": 2, "size_bytes": 9 },
+        // The server's shape (`routes/versions/list.rs`): an upload's version carries its id twice, a
+        // version of the older model has no object version id.
+        let listing = json!({ "file_id": "f", "current_version": 2, "versions": [
+            { "id": "v2", "object_version_id": "v2", "file_version_id": null, "version_number": 2, "size_bytes": 9 },
+            { "id": "v1", "object_version_id": "v1", "file_version_id": null, "version_number": 1, "size_bytes": 5 },
+            { "id": "old", "object_version_id": null, "file_version_id": "old", "version_number": 1, "size_bytes": 3 },
         ]});
         let answer = committed_answer(&listing, "v2").expect("committed");
         assert_eq!(answer["version_number"], 2);
         assert_eq!(answer["size_bytes"], 9);
         assert_eq!(answer["current_object_version_id"], "v2");
-        // Bare array shape, and an upload that never committed.
-        assert!(committed_answer(&json!([{ "id": "v1", "version_number": 1 }]), "v1").is_some());
+        assert_eq!(answer["already_completed"], true);
+        // An upload that never committed, a version of the older model, and a listing with no versions.
         assert!(committed_answer(&listing, "v3").is_none());
+        assert!(committed_answer(&listing, "old").is_none());
         assert!(committed_answer(&json!({}), "v1").is_none());
     }
 }
