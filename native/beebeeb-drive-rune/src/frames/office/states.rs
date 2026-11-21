@@ -270,6 +270,7 @@ fn viewer_bar(t: &Theme) -> El {
         .key("vbar")
         .role("toolbar")
         .label("Document")
+        .focus_group()
         .w_full()
         .h(38.0)
         .px(12.0)
