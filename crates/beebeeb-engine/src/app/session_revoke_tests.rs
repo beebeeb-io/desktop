@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{REVOKE_BOUND, revoke};
+use super::{REVOKE_BOUND, pay_owed, revoke, revoke_detached, revoke_owing};
+use crate::keychain::owed_revocations::{MemoryOwed, OwedRevocations};
 use crate::account::SessionTransition;
 use crate::app::{Engine, EngineConfig};
 use crate::host::ChannelHost;
@@ -422,4 +423,110 @@ fn no_token_in_any_log_line() {
     let secret = token.trim_start_matches("tok-revoke-");
     assert_eq!(secret.len(), 16, "the random part of the token");
     assert!(!logs.contains(secret), "a log line carries the token");
+}
+
+// ── Owed revocations (LD-0028, LD-0026): an unanswered revoke is owed, and paid later ──
+
+fn owed_list() -> (MemoryOwed, Arc<OwedRevocations>) {
+    let memory = MemoryOwed::default();
+    (memory.clone(), Arc::new(OwedRevocations::with_backend(Box::new(memory))))
+}
+
+fn run<T>(work: impl std::future::Future<Output = T>) -> T {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    runtime.block_on(work)
+}
+
+fn client_for(base: &str) -> reqwest::Client {
+    crate::auth_transport::client_for(base).expect("the auth client")
+}
+
+fn owed_tokens(owed: &OwedRevocations) -> Vec<String> {
+    owed.owed().iter().map(|t| t.to_string()).collect()
+}
+
+/// A revoke the server never heard stays owed; one it answered (any 2xx/4xx) is settled; a 5xx is not an answer.
+#[test]
+fn an_unanswered_revoke_stays_owed_and_an_answered_one_does_not() {
+    for (behaviour, still_owed) in [
+        (Server::Absent, true),
+        (Server::Closes, true),
+        (Server::Answers(500), true),
+        (Server::Answers(200), false),
+        (Server::Answers(401), false),
+    ] {
+        let server = TestServer::start(behaviour, None);
+        let (_memory, owed) = owed_list();
+        let token = invented_token();
+        run(revoke_owing(&client_for(&server.base), &server.base, &token, &owed));
+        let expected = if still_owed { vec![token] } else { vec![] };
+        assert_eq!(owed_tokens(&owed), expected, "{behaviour:?}");
+    }
+}
+
+/// The token is recorded BEFORE the request leaves (a kill mid-request still owes it), and a server that never
+/// answers leaves it owed after the bound.
+#[test]
+fn the_token_is_owed_while_the_request_is_in_flight() {
+    let (memory, owed) = owed_list();
+    let watched = memory.clone();
+    let probe: StoreProbe = Box::new(move || watched.0.lock().unwrap().is_some());
+    let server = TestServer::start(Server::NeverAnswers, Some(probe));
+    let token = invented_token();
+    run(revoke_owing(&client_for(&server.base), &server.base, &token, &owed));
+    let heard = server.heard_within(Duration::from_secs(1));
+    assert_eq!(heard[0].store_held_a_token, Some(true), "owed before the server heard it");
+    assert_eq!(owed_tokens(&owed), vec![token]);
+}
+
+/// The next start (or the network coming back) pays what is owed: the server hears each token, and what it answered
+/// is gone from the list; what it did not answer stays.
+#[test]
+fn what_is_owed_is_paid_later_and_settled() {
+    let (_memory, owed) = owed_list();
+    let token = invented_token();
+    owed.owe(&token).unwrap();
+    // Still offline: owed.
+    let offline = TestServer::start(Server::Absent, None);
+    run(pay_owed(&client_for(&offline.base), &offline.base, &owed));
+    assert_eq!(owed_tokens(&owed), vec![token.clone()]);
+    // Back online: heard, with the token, and settled.
+    let online = TestServer::start(Server::Answers(200), None);
+    run(pay_owed(&client_for(&online.base), &online.base, &owed));
+    let heard = online.heard_within(Duration::from_secs(2));
+    assert_eq!(heard.len(), 1);
+    assert!(heard[0].request_line.starts_with("POST /api/v1/auth/logout "));
+    assert_eq!(heard[0].bearer.as_deref(), Some(token.as_str()));
+    assert!(owed_tokens(&owed).is_empty());
+}
+
+/// The detached revoke returns at once, whatever the server does (task 1886: the sign-out's result never depends on
+/// it), and still owes the token.
+#[test]
+fn the_detached_revoke_does_not_hold_its_caller() {
+    let server = TestServer::start(Server::NeverAnswers, None);
+    let (_memory, owed) = owed_list();
+    let token = invented_token();
+    let started = Instant::now();
+    run(async {
+        revoke_detached(client_for(&server.base), server.base.clone(), token.clone(), owed.clone());
+    });
+    assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
+    assert_eq!(owed_tokens(&owed), vec![token], "owed before the caller got control back");
+}
+
+/// Two owed tokens, one list entry: owing the same token twice keeps one; a token with a newline is refused.
+#[test]
+fn the_list_keeps_each_token_once_and_refuses_what_it_cannot_hold() {
+    let (_memory, owed) = owed_list();
+    owed.owe("a-token").unwrap();
+    owed.owe("a-token").unwrap();
+    owed.owe("b-token").unwrap();
+    assert_eq!(owed_tokens(&owed), vec!["a-token".to_string(), "b-token".to_string()]);
+    assert!(owed.owe("bad\ntoken").is_err());
+    assert!(owed.owe("  ").is_err());
 }
