@@ -84,19 +84,35 @@ fn lit(items: &[rune::ElementInfo]) -> Vec<String> {
 fn every_window_draws_the_same_sidebar_with_its_own_row_lit() {
     let (_, files, _) = WINDOWS[0];
     let want = shape(&sidebar(&window(files)));
-    for key in ["Files-icon", "Shared-pill", "Shared-badge", "Trash-badge", "Sync history-row", "Available offline-badge", "settings-btn"] {
+    for key in [
+        "Files-icon",
+        "Shared-pill",
+        "Shared-badge",
+        "Trash-badge",
+        "Sync history-pill",
+        "Available offline-badge",
+        "settings-btn",
+    ] {
         assert!(want.iter().any(|(k, _)| k == key), "Files draws {key}");
     }
     for (name, scene, row) in WINDOWS {
-        let rt = window(scene);
+        let mut rt = window(scene);
         let items = sidebar(&rt);
-        assert_eq!(shape(&items), want, "{name}: the same sidebar as Files");
         let row = if row.is_empty() {
             format!("{}-row", rt.state.sidebar_section.label())
         } else {
             row.to_string()
         };
         assert_eq!(lit(&items), vec![row], "{name}: its own row is lit");
+        // Files over the same data (a scene may hold its own This PC): the same rows and figures.
+        rt.update(|s, _| {
+            crate::shell::host::dispatch(
+                s,
+                crate::shell::app::Event::Navigate(crate::shell::app::Route::section(Section::Files)),
+            );
+        });
+        settle(&mut rt);
+        assert_eq!(shape(&items), shape(&sidebar(&rt)), "{name}: the same sidebar as Files");
     }
 }
 
