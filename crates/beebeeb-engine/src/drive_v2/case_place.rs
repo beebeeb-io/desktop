@@ -261,11 +261,15 @@ pub fn place_is_another_rows(db: &StateDb, sync_root: &Path, entry: &FileEntry) 
 /// the local state does not have, keeps the state it had.
 pub fn mark_shared_places(db: &StateDb, sync_root: &Path, items: &mut [DriveItem]) {
     let mut places = PlaceCheck::new(db, sync_root, CaseRule::host());
+    let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+    let Ok(entries) = db.get_files_by_ids(&ids) else {
+        return;
+    };
     for item in items {
-        let Ok(Some(entry)) = db.get_file(&item.id) else {
+        let Some(entry) = entries.get(&item.id) else {
             continue;
         };
-        match places.clash(&entry) {
+        match places.clash(entry) {
             Ok(Some(Clash::SameName)) => item.local = Some(LocalState::NameShared),
             Ok(Some(Clash::Case)) => item.local = Some(LocalState::NameSharedButCase),
             Ok(None) | Err(_) => {}

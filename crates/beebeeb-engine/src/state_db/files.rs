@@ -261,18 +261,35 @@ impl StateDb {
     /// given first, then the leading-slash-toggled variant. This is a read-only
     /// defense-in-depth lookup — it never mutates state.
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileEntry>> {
-        if let Some(entry) = self.get_file_by_exact_path(path)? {
-            return Ok(Some(entry));
+        // One lock and one prepared statement for both slash shapes; the path as given wins.
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare_cached(FILE_BY_PATH_SQL)?;
+        for candidate in [path.to_string(), toggled_slash(path)] {
+            let mut rows = stmt.query(params![candidate])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(file_entry_from_path_row(row)?));
+            }
         }
-        // Toggle the leading slash and try once more: `/leaf` ⇄ `leaf`.
-        let alt = match path.strip_prefix('/') {
-            Some(stripped) => stripped.to_string(),
-            None => format!("/{path}"),
-        };
-        if alt == path {
-            return Ok(None);
+        Ok(None)
+    }
+    /// The rows of `ids`, by id, in as few queries as the variable limit allows (rows that are not there are absent).
+    pub fn get_files_by_ids(&self, ids: &[&str]) -> Result<std::collections::HashMap<String, FileEntry>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut out = std::collections::HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                        parent_id, item_kind
+                 FROM files WHERE file_id IN ({marks})"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), file_entry_from_path_row)?;
+            for row in rows {
+                let entry = row?;
+                out.insert(entry.file_id.clone(), entry);
+            }
         }
-        self.get_file_by_exact_path(&alt)
+        Ok(out)
     }
     /// Task 2229: a stamp of the rows [`Self::file_rows_at_path`] finds at `path`, over every column,
     /// so any write to any of them changes it; `None` without a row. Valid within this process only.
@@ -319,15 +336,6 @@ impl StateDb {
             }
         }
         Ok(Vec::new())
-    }
-    fn get_file_by_exact_path(&self, path: &str) -> Result<Option<FileEntry>> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare_cached(FILE_BY_PATH_SQL)?;
-        let mut rows = stmt.query(params![path])?;
-        match rows.next()? {
-            Some(row) => Ok(Some(file_entry_from_path_row(row)?)),
-            None => Ok(None),
-        }
     }
     /// Update just the `status` column for a known file. No-op if
     /// `file_id` doesn't exist; callers should pair with `upsert_file`
@@ -705,11 +713,6 @@ impl StateDb {
         limit: i64,
     ) -> Result<(Vec<(FileEntry, FileContractState, i64)>, i64)> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM files WHERE parent_id IS ?1 AND status != 'trashing'",
-            params![parent_id],
-            |r| r.get(0),
-        )?;
         let mut stmt = conn.prepare_cached(
             "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
                     parent_id, item_kind, pin_state, inherited_pin_state,
@@ -717,12 +720,20 @@ impl StateDb {
                     content_type, current_version, current_object_version_id,
                     local_base_version, local_hash, cache_path, cache_bytes,
                     last_sync_at, owner_email,
-                    (SELECT COUNT(*) FROM files AS c WHERE c.parent_id = files.file_id AND c.status != 'trashing')
+                    COALESCE(k.n, 0),
+                    COUNT(*) OVER ()
              FROM files
-             WHERE parent_id IS ?1 AND status != 'trashing'
-             ORDER BY item_kind ASC, path ASC
+             LEFT JOIN (
+                 SELECT parent_id AS pid, COUNT(*) AS n FROM files
+                 WHERE status != 'trashing'
+                   AND parent_id IN (SELECT file_id FROM files WHERE parent_id IS ?1 AND item_kind = 'folder')
+                 GROUP BY parent_id
+             ) AS k ON k.pid = files.file_id
+             WHERE files.parent_id IS ?1 AND files.status != 'trashing'
+             ORDER BY files.item_kind ASC, files.path ASC
              LIMIT ?2 OFFSET ?3",
         )?;
+        let mut window_total: Option<i64> = None;
         let rows = stmt.query_map(params![parent_id, limit, offset], |row| {
             let entry = FileEntry {
                 file_id: row.get(0)?,
@@ -758,9 +769,25 @@ impl StateDb {
                 last_sync_at: row.get(22)?,
             };
             let child_count: i64 = row.get(24)?;
-            Ok((entry, contract, child_count))
+            let all: i64 = row.get(25)?;
+            Ok((entry, contract, child_count, all))
         })?;
-        Ok((rows.collect::<Result<Vec<_>>>()?, total))
+        let mut out = Vec::new();
+        for row in rows {
+            let (entry, contract, child_count, all) = row?;
+            window_total = Some(all);
+            out.push((entry, contract, child_count));
+        }
+        // A page past the end (or a zero limit) has no row to carry the total: count then.
+        let total = match window_total {
+            Some(total) => total,
+            None => conn.query_row(
+                "SELECT COUNT(*) FROM files WHERE parent_id IS ?1 AND status != 'trashing'",
+                params![parent_id],
+                |r| r.get(0),
+            )?,
+        };
+        Ok((out, total))
     }
     pub fn list_contract_states_by_namespace(&self, namespace: Namespace) -> Result<Vec<FileContractState>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -859,5 +886,79 @@ impl StateDb {
             })
         })?;
         rows.collect()
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::super::*;
+
+    fn row(id: &str, path: &str, parent: Option<&str>, kind: ItemKind) -> FileEntry {
+        FileEntry {
+            file_id: id.into(),
+            path: path.into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: parent.map(Into::into),
+            item_kind: kind,
+        }
+    }
+
+    fn seeded(files: usize) -> (tempfile::TempDir, StateDb) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let put = |id: &str, path: &str, parent: Option<&str>, kind: ItemKind| {
+            let e = row(id, path, parent, kind.clone());
+            let parent = parent.map(str::to_string);
+            db.upsert_file_with_contract(&e, |c| {
+                c.parent_id = parent;
+                c.item_kind = kind;
+            })
+            .unwrap();
+        };
+        put("d", "d", None, ItemKind::Folder);
+        put("d1", "d/sub", Some("d"), ItemKind::Folder);
+        put("g1", "d/sub/x", Some("d1"), ItemKind::File);
+        put("g2", "d/sub/y", Some("d1"), ItemKind::File);
+        for i in 0..files {
+            put(&format!("f{i:05}"), &format!("d/f{i:05}"), Some("d"), ItemKind::File);
+        }
+        (dir, db)
+    }
+
+    #[test]
+    fn paged_listing_has_real_limit_total_and_child_counts() {
+        let (_dir, db) = seeded(10);
+        let (all, total) = db.children_paged(Some("d"), 0, i64::MAX).unwrap();
+        assert_eq!((all.len(), total), (11, 11));
+        let folder = all.iter().find(|r| r.0.file_id == "d1").unwrap();
+        assert_eq!(folder.2, 2, "a folder's live children, joined in the one query");
+        assert!(all.iter().filter(|r| r.0.file_id != "d1").all(|r| r.2 == 0));
+        let (page, total) = db.children_paged(Some("d"), 3, 4).unwrap();
+        assert_eq!((page.len(), total), (4, 11));
+        let (none, total) = db.children_paged(Some("d"), 50, 4).unwrap();
+        assert_eq!((none.len(), total), (0, 11), "past the end still reports the total");
+    }
+
+    #[test]
+    fn path_lookup_prefers_the_given_shape_and_bulk_get_finds_rows() {
+        let (_dir, db) = seeded(2);
+        assert_eq!(db.get_file_by_path("/d/sub").unwrap().unwrap().file_id, "d1");
+        assert_eq!(db.get_file_by_path("d/sub").unwrap().unwrap().file_id, "d1");
+        assert!(db.get_file_by_path("nope").unwrap().is_none());
+        let got = db.get_files_by_ids(&["d1", "g2", "missing"]).unwrap();
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn five_thousand_rows_list_fast() {
+        let (_dir, db) = seeded(5000);
+        let t = std::time::Instant::now();
+        let (rows, total) = db.children_paged(Some("d"), 0, i64::MAX).unwrap();
+        assert_eq!((rows.len(), total), (5001, 5001));
+        assert!(t.elapsed().as_millis() < 50, "listed in {:?}", t.elapsed());
     }
 }
