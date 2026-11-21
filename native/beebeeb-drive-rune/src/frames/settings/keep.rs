@@ -652,55 +652,20 @@ pub fn question(ui: &SettingsUi, first: usize, t: &Theme) -> El {
     .modal(false, |s: &mut State| s.settings.dialog = Some(Dialog::Keep))
 }
 
-/// `settings_dialog::alert` for a question that does not fit one line: the title goes on to
-/// a second line (`.wn-dlg-alert .t-title` wraps), everything else is the same 380 pt alert.
+/// An alert for a question that does not fit one line (the Alert head's title wraps).
 fn alert(name: &str, tile: El, title: &str, sub: &str, foot: Vec<El>, t: &Theme) -> El {
-    const WIDTH: f32 = 380.0;
-    let words = col()
-        .key("dlg-alert-words")
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(6.0)
-        .child(
-            kit::label("dlg-title", title, dialogs::DIALOG_TITLE, t.text)
-                .role("heading")
-                .level(2)
-                .wrap()
-                .w_full(),
-        )
-        .child(kit::label("dlg-sub", sub, SUB, t.text_tertiary).wrap());
-    let head = row()
-        .key("dlg-head")
-        .pt(20.0)
-        .px(24.0)
-        .pb(16.0)
-        .gap(14.0)
-        .items_start()
-        .child(tile)
-        .child(words);
-    let each = (WIDTH - 48.0 - 8.0 * (foot.len().max(1) - 1) as f32) / foot.len().max(1) as f32;
-    let dlg = col()
-        .key("dlg")
-        .role("alertdialog")
-        .label(name)
-        .pixel_snap(false)
-        .w(WIDTH)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, rune::Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(
-            col()
-                .key("dlg-clip")
-                .w_full()
-                .clip_rounded(8.0)
-                .child(head)
-                .child(dialogs::foot_row(foot, Some(each), t)),
-        );
-    col()
-        .key("scrim")
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .center()
-        .fill(dialogs::scrim_color(t))
-        .child(dlg)
+    use crate::ui::dialog::{Dialog as Card, Foot, Head, dialog, scrim};
+    scrim(
+        0.0,
+        dialog(
+            Card {
+                alert: true,
+                head: Head::Alert { tile, title, sub },
+                foot: Foot::Even(foot),
+                ..Card::new("dlg", name, 380.0)
+            },
+            t,
+        ),
+        t,
+    )
 }
