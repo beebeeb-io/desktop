@@ -655,7 +655,7 @@ fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .child(chrome::sidebar(s, &s.this_pc, here, &t))
+                .child(crate::ui::drive_sidebar::drive_sidebar(s, if here == Section::SyncHistory { crate::ui::drive_sidebar::Lit::SyncHistory } else { crate::ui::drive_sidebar::Lit::AvailableOffline }, crate::ui::sidebar::Standing::Open, &t))
                 .child(match (s.this_pc.refusal, s.this_pc.said) {
                     // A refused change: said over the section, never only in a log line.
                     (Some((words, _)), _) => main.child(crate::ui::toast::layer(crate::ui::toast::toast(

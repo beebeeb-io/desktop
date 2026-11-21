@@ -1,8 +1,7 @@
-//! Sidebar (`.mk-side`): the brand block, the sections, "This PC", the storage meter and
-//! the account row.
+//! The Drive sidebar's pieces: the sections, an item, the brand, the standings. The sidebar
+//! itself is `ui::drive_sidebar`; [`sidebar`] and [`sidebar_in`] draw it.
 
 use crate::State;
-use crate::frames::files::source::Account;
 use crate::theme::file_icon_colors::tint_color;
 use crate::theme::file_icons::{FileIcon, IconId, Tint};
 use crate::theme::icons;
@@ -10,12 +9,11 @@ use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Span, col, el, row};
 
 use super::file_icon::file_icon;
+use super::drive_sidebar::Lit;
 use super::kit;
 
-const SIDEBAR_W: f32 = 220.0;
-
 /// Which sidebar section is active.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SidebarSection {
     Files,
     Shared,
@@ -237,15 +235,6 @@ pub(crate) fn badge_for(s: &State, section: SidebarSection) -> Option<Count> {
     }
 }
 
-/// An item while the gate is closed: drawn, and neither focusable nor pressable.
-fn closed(item: El, open: bool) -> El {
-    if open {
-        item
-    } else {
-        item.disabled(true).focusable(false)
-    }
-}
-
 /// How the sidebar stands while the session's gate is closed (the board's DW-0009 and DW-0014).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Standing {
@@ -275,277 +264,14 @@ impl Standing {
     }
 }
 
+/// The Drive sidebar with the window's section lit (`ui::drive_sidebar`).
 pub fn sidebar(s: &State, t: &Theme) -> El {
     sidebar_in(s, t, Standing::Open)
 }
 
 /// The sidebar in `standing`. [`sidebar`] is `Standing::Open`.
 pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
-    let open = standing == Standing::Open;
-    let no_plan = standing == Standing::NoPlan;
-    let details = standing.shows_account_details();
-    let storage = s.storage;
-    let active = s.sidebar_section;
-
-    let mut sections = col().key("sidebar-sections").gap(1.0);
-    for &section in SidebarSection::all() {
-        let count = if no_plan || !details {
-            None
-        } else {
-            badge_for(s, section)
-        };
-        let item = side_item(
-            section.label(),
-            section.icon(),
-            count,
-            open && active == section,
-            section.shortcut(),
-            t,
-        );
-        sections = sections.child(if open {
-            item.on_press(move |s: &mut State| s.sidebar_section = section)
-        } else {
-            closed(item, open)
-        });
-    }
-
-    let kept = s.this_pc.kept_count() as u32;
-    let offline_count = (kept > 0 && !no_plan && details).then_some(Count::Plain(kept));
-    let this_pc = col()
-        .key("this-pc")
-        .gap(1.0)
-        .child(el().key("this-pc-title").px(10.0).pb(3.0).child(kit::label(
-            "this-pc-label",
-            "THIS PC",
-            type_::SECTION_LABEL,
-            t.text_tertiary,
-        )))
-        .child(closed(
-            side_item("Sync history", &icons::SYNC_HISTORY, None, false, "Ctrl+6", t),
-            open,
-        ))
-        .child(closed(
-            side_item(
-                "Available offline",
-                &icons::AVAILABLE_OFFLINE,
-                offline_count,
-                false,
-                "Ctrl+7",
-                t,
-            ),
-            open,
-        ));
-
-    let nav = col()
-        .key("sidebar-nav")
-        .role("navigation")
-        .label("Sections")
-        .gap(12.0)
-        .grow(1.0)
-        .min_h(0.0)
-        .child(sections)
-        .child(this_pc);
-
-    // Storage meter (`.mk-store`). The split (Files / Photos) is from `storage_split` when
-    // the engine provides it; the board's snapshot path passes `Some((files, photos))` from
-    // the fixture; a live window without a wired split shows one plain segment.
-    // When details are blanked (Locked, LOCKED_BLANKS_ACCOUNT) the meter keeps its shape but
-    // shows no figure and no fill.
-    let blanked = !details && standing != Standing::NoPlan;
-    let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
-    let storage_value = if blanked {
-        String::new()
-    } else if no_plan {
-        "No plan".to_string()
-    } else if s.storage_known {
-        format!(
-            "{} of {}",
-            format_storage(storage.used_bytes),
-            format_storage(storage.quota_bytes)
-        )
-    } else {
-        // No figure without the server (a `--db` source never asks it).
-        "Unavailable".to_string()
-    };
-    let quota = storage.quota_bytes.max(1) as f64;
-    // The split: the board's snapshot path holds a fixture split in `storage_split`; a live
-    // window shows one segment (total used) until the engine wires the category breakdown.
-    let (seg_0, seg_1) = match s.storage_split {
-        _ if no_plan || blanked => (0.0, 0.0),
-        Some((files, _photos)) => {
-            let files_frac = (files.min(storage.used_bytes) as f64 / quota) as f32;
-            let photos_frac = ((storage.used_bytes - files).max(0) as f64 / quota) as f32;
-            (files_frac, photos_frac)
-        }
-        None => {
-            let used_frac = (storage.used_bytes as f64 / quota) as f32;
-            (used_frac, 0.0)
-        }
-    };
-    let mut meter = col()
-        .key("storage-meter")
-        .role("group")
-        .label(format!("Storage: {storage_value}"))
-        .gap(5.0)
-        .px(4.0)
-        .child(
-            row()
-                .key("storage-header")
-                .justify_between()
-                .child(kit::label("storage-label", "Storage", type_::CAPTION, t.text_secondary))
-                .child(kit::label(
-                    "storage-value",
-                    storage_value.clone(),
-                    // A figure is set in mono; "No plan" and blank are words.
-                    if no_plan || blanked { type_::CAPTION } else { type_::KBD },
-                    t.text_tertiary,
-                )),
-        )
-        .child(
-            row()
-                .key("meter-track")
-                .w_full()
-                .h(5.0)
-                .radius(2.5)
-                .clip_rounded(2.5)
-                .fill(t.separator)
-                // Neutral fills: Amber is only encryption state and the primary action.
-                .child(
-                    el().key("meter-fill-0")
-                        .h_full()
-                        .w(track_w * seg_0)
-                        // `.tone-neutral` on the empty meter of an account with no plan.
-                        .fill(if no_plan { t.text_quaternary } else { t.text }),
-                )
-                .child(
-                    el().key("meter-fill-1")
-                        .h_full()
-                        .w(track_w * seg_1)
-                        .fill(t.text_quaternary),
-                ),
-        );
-    // The category breakdown: only when the source provides one (never a board sample
-    // beside a real account's total).
-    if no_plan {
-        meter = meter.child(kit::label(
-            "storage-hint",
-            "Choose a plan on beebeeb.io",
-            type_::CAPTION,
-            t.text_tertiary,
-        ));
-    } else if let Some((files, _)) = s.storage_split {
-        if s.storage_known {
-            meter = meter.child(
-                row()
-                    .key("storage-breakdown")
-                    .justify_between()
-                    .child(kit::label(
-                        "storage-files",
-                        format!("Files {}", format_storage(files)),
-                        type_::KBD,
-                        t.text_tertiary,
-                    ))
-                    .child(kit::label(
-                        "storage-photos",
-                        format!("Photos {}", format_storage((storage.used_bytes - files).max(0))),
-                        type_::KBD,
-                        t.text_tertiary,
-                    )),
-            );
-        }
-    }
-
-    // Whose account: the source's own answer (the engine path reads the real email from the
-    // session; the fixture path gives the board's sample, which is correct in dev-build scenes).
-    // With none known the row holds the settings gear only, keeping its place in the layout.
-    let who: Option<Account> = if details {
-        s.actions.source.account()
-    } else {
-        // Locked (LOCKED_BLANKS_ACCOUNT): no account data shown, the row keeps its shape.
-        None
-    };
-    let mut account = row().key("account-row").center_y().gap(8.0).pt(2.0).px(2.0);
-    account = match &who {
-        Some(who) => account
-            .child(kit::avatar(
-                "avatar",
-                &who.initials,
-                26.0,
-                rune::oklch(0.88, 0.05, 250.0),
-                t.card,
-                t,
-            ))
-            .child(
-                col()
-                    .key("account-info")
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .child(kit::label("account-name", &who.name, type_::BODY_SEMI, t.text).truncate())
-                    .child(kit::label("account-email", &who.email, type_::BODY_SM, t.text_tertiary).truncate()),
-            ),
-        None => account.child(
-            // No account known (engine not connected) or blanked (locked): a placeholder that
-            // keeps the row's height. The avatar spot is left empty to match the settled layout.
-            col()
-                .key("account-info")
-                .grow(1.0)
-                .min_w(0.0)
-                .child(kit::label("account-name", "", type_::BODY_SEMI, t.text).truncate())
-                .child(el().key("account-email-off")),
-        ),
-    };
-    let account = account.child(
-        el().key("settings-btn")
-            .role("button")
-            .label("Settings")
-            .shortcut_hint("Ctrl+,")
-            .help("Settings  Ctrl+,")
-            .size(26.0, 26.0)
-            .radius(radius::CONTROL)
-            .center()
-            .hover(t.selection)
-            .press(t.press)
-            .focusable(open)
-            .disabled(!open)
-            // W20 bug 7: this gear had no press at all, so on Photos it did nothing.
-            .on_press(|s: &mut State| {
-                crate::shell::host::dispatch(
-                    s,
-                    crate::shell::app::Event::OpenSettings(crate::shell::app::SettingsPane::General),
-                );
-            })
-            .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
-    );
-
-    let foot = col()
-        .key("sidebar-foot")
-        .gap(10.0)
-        .pt(10.0)
-        .px(6.0)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
-    // The meter keeps its place in the layout for every standing (blank when locked/blanked,
-    // "No plan" when NoPlan, the figure when Open). Only truly hidden when the foot has no
-    // purpose at all, which today it always does (the account row is always there).
-    let foot = if details || blanked { foot.child(meter) } else { foot };
-    let foot = foot.child(account);
-
-    let side = col()
-        .key("sidebar")
-        .w(SIDEBAR_W)
-        .h_full()
-        .fill(t.sidebar_bg)
-        .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
-        .border_layout()
-        .gap(12.0)
-        .pt(12.0)
-        .px(10.0)
-        .pb(10.0)
-        .child(brand("Drive", t))
-        .child(nav)
-        .child(foot);
-    // `.mk-side` at 55 % while the gate is closed (the board).
-    if open { side } else { side.opacity(0.55) }
+    super::drive_sidebar::drive_sidebar(s, Lit::Section(s.sidebar_section), standing, t)
 }
 
 /// Format bytes as "240 GB", "1 TB" (base 10, as the board shows storage).
@@ -567,8 +293,13 @@ pub(crate) fn format_storage(bytes: i64) -> String {
         } else {
             format!("{gb:.1} GB")
         }
-    } else {
+    } else if bytes >= 1_000_000 {
         format!("{} MB", bytes / 1_000_000)
+    } else if bytes >= 1_000 {
+        format!("{} KB", bytes / 1_000)
+    } else {
+        // A new account: "0 B of 1 TB" (DW-0114).
+        format!("{} B", bytes.max(0))
     }
 }
 

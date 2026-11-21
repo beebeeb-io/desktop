@@ -98,7 +98,7 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
     let body = row()
         .key("body")
         .w_full()
-        .child(crate::frames::files::sidebar::sidebar(s, &t))
+        .child(crate::ui::sidebar::sidebar(s, &t))
         .child(main);
     col()
         .key("window")

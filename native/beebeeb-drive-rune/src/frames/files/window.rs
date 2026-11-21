@@ -2,7 +2,7 @@
 //! the selected item's own details.
 
 use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
-use super::{select_bar, sidebar, toolbar};
+use super::{select_bar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
 use crate::theme::{icons, icons_files};
@@ -389,7 +389,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let mut body = row()
         .key("body")
         .w_full()
-        .child(sidebar::sidebar(s, &t))
+        .child(crate::ui::sidebar::sidebar(s, &t))
         .child(main)
         // What is in front of the whole body: a preview that needs a connection (`frames::global`).
         .children(crate::frames::global::over_body(s, s.actions.window, &t));

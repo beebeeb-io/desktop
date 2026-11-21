@@ -39,7 +39,6 @@ pub mod scenes_waveb;
 pub mod select_bar;
 pub mod session;
 pub mod share;
-pub mod sidebar;
 pub mod sorting;
 pub mod source;
 pub mod to_trash;

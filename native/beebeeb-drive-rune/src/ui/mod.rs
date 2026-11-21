@@ -30,6 +30,7 @@ pub mod settings_meter;
 pub mod settings_notice;
 pub mod settings_shell;
 pub mod setup;
+pub mod drive_sidebar;
 pub mod sidebar;
 pub mod status_bar;
 pub mod status_line;
