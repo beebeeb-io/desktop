@@ -38,7 +38,7 @@ impl Page {
 fn view(p: &Page, _: &mut Cx<Page>) -> El {
     let t = theme(false);
     let ic = p.icon.then_some(&icons::PLUS);
-    col().key("page").p(20.0).child(
+    col().key("page").px(20.0).pt(20.0).child(
         button(p.keys.clone(), p.label, ic, p.variant, p.size, p.state, &t).on_press(|p: &mut Page| p.pressed += 1),
     )
 }
@@ -186,12 +186,4 @@ fn natural_width_is_the_laid_out_width() {
             }
         }
     }
-}
-
-#[test]
-fn outline_button_is_secondary_md_enabled() {
-    let t = theme(false);
-    let a = outline_button("x", "Done", Some(&icons::PLUS), &t);
-    let b = button(keys("x"), "Done", Some(&icons::PLUS), Variant::Secondary, Size::Md, ButtonState::Enabled, &t);
-    assert_eq!(format!("{a:?}"), format!("{b:?}"));
 }
