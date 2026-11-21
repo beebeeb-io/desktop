@@ -167,7 +167,52 @@ pub struct TransferLoopOutcome {
     pub link_failed: bool,
     pub session_refused: bool,
     pub account_refused: bool,
+    /// Task 2054 (drive-complete-100): uploads the server refused with `409 region_unavailable_strict` this pass. Each
+    /// file stays queued and is tried again on the normal backoff; the person is told the country.
+    pub storage_country_refusals: Vec<StorageCountryRefusal>,
 }
+
+/// One queued upload refused because the person's storage country cannot take new files now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StorageCountryRefusal {
+    pub op_id: String,
+    /// The country's name, e.g. `Finland`. Never a city.
+    pub country: String,
+}
+
+/// The server's `409 region_unavailable_strict` ("only store in <country>", the chosen country cannot take the write).
+/// Carries the COUNTRY only: the body's `city` is a deprecated alias of the country and `datacenter` is an internal id,
+/// so neither is read. An empty `country` is `None` inside, and the words then name no country.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageCountryRefused {
+    pub country: Option<String>,
+}
+
+impl StorageCountryRefused {
+    pub const ERROR_CODE: &'static str = "region_unavailable_strict";
+
+    /// `Some` when `body`'s `error` is [`Self::ERROR_CODE`].
+    pub fn from_body(body: &serde_json::Value) -> Option<Self> {
+        if body.get("error").and_then(|v| v.as_str()) != Some(Self::ERROR_CODE) {
+            return None;
+        }
+        let country = body
+            .get("country")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
+        Some(Self { country })
+    }
+}
+
+impl std::fmt::Display for StorageCountryRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("upload refused: the chosen storage country cannot take new files now")
+    }
+}
+
+impl std::error::Error for StorageCountryRefused {}
 
 /// The two states a pin toggle can ask for. The Tauri command still takes a
 /// flag; naming it here keeps `true` from having to stand for "pin".
@@ -905,4 +950,32 @@ pub(super) enum RowSource {
     /// op rows are always applied. Re-applying an op after a crash before the
     /// cursor persisted is idempotent: ops replay in order to the same state.
     Op,
+}
+
+#[cfg(test)]
+mod region_strict_tests {
+    use super::*;
+
+    #[test]
+    fn region_strict_body_yields_the_country_and_never_the_city() {
+        let body = serde_json::json!({"error":"region_unavailable_strict","datacenter":"fi","country":"Finland",
+            "country_code":"FI","city":"Helsinki","reason":"unavailable","message":"x"});
+        let refused = StorageCountryRefused::from_body(&body).unwrap();
+        assert_eq!(refused.country.as_deref(), Some("Finland"));
+        let words = crate::drive_v2::status::storage_country_words(refused.country.as_deref().unwrap_or_default());
+        assert!(words.contains("Finland") && !words.contains("Helsinki"), "{words}");
+    }
+
+    #[test]
+    fn region_strict_ignores_other_errors_and_an_empty_country() {
+        assert!(StorageCountryRefused::from_body(&serde_json::json!({"error":"stale_base"})).is_none());
+        let none = StorageCountryRefused::from_body(&serde_json::json!({"error":"region_unavailable_strict","country":" "}));
+        assert_eq!(none, Some(StorageCountryRefused { country: None }));
+    }
+
+    #[test]
+    fn region_strict_refusal_is_found_through_the_error_chain() {
+        let error = anyhow::Error::new(StorageCountryRefused { country: Some("Finland".into()) }).context("upload");
+        assert!(crate::engine_bridge::engine_cause::<StorageCountryRefused>(&error).is_some());
+    }
 }
