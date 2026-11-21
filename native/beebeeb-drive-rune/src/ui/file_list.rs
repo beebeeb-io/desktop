@@ -18,6 +18,7 @@ use rune::{Align, Color, Cx, El, Icon, col, el, row};
 use std::borrow::Cow;
 
 use super::file_row::{self, Column, RowLook, Width};
+use super::view_state::{ViewState, try_again, view_state};
 use super::kit;
 
 /// `.mk-row { height: 30px }`
@@ -133,22 +134,36 @@ pub fn column_headers(t: &Theme) -> El {
     file_row::header(&COLUMNS, Some((0, true)), t)
 }
 
-/// In place of the rows when the folder could not be read: the reason, in words.
+/// In place of the rows when the folder could not be read: `ui::view_state` Failed with the reason and a
+/// Try again that reads the folder again ([`State::retry_list`]). Keys: `file-list-error`, `-title`, `-text`,
+/// `-retry`.
 pub fn list_error(error: crate::source::SourceError, t: &Theme) -> El {
-    col()
-        .key("file-list-error")
-        .role("alert")
-        .grow(1.0)
-        .min_h(0.0)
-        .w_full()
-        .py(12.0)
-        .px(20.0)
-        .child(kit::label(
-            "file-list-error-text",
-            error.message(),
-            type_::LIST_ITEM,
-            t.text_secondary,
-        ))
+    let title = match error {
+        crate::source::SourceError::NotFound => "This folder can\u{2019}t be opened",
+        _ => "Your files can\u{2019}t be read",
+    };
+    view_state(
+        ViewState::Failed {
+            key: "file-list-error",
+            title,
+            why: error.message(),
+            retry: Some(try_again("file-list-error", t).on_press(|s: &mut State| s.retry_list())),
+        },
+        t,
+    )
+    .grow(1.0)
+    .min_h(0.0)
+    .w_full()
+}
+
+impl State {
+    /// Try again on a list that could not be read: the engine is asked for the file list now, and the folder
+    /// shown is read again. A read that works clears the failure; one that fails again says so again.
+    pub fn retry_list(&mut self) {
+        self.global.source.retry_list();
+        let id = self.listing.folder.id.clone();
+        (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
+    }
 }
 
 /// The rows, virtualised (`.mk-rows`).
@@ -239,7 +254,7 @@ pub fn file_row(i: usize, item: &DriveItem, selected: bool, t: &Theme) -> El {
 }
 
 /// The Shared column: who it is shared with, "Link", or a dash.
-fn shared_cell(k: &str, item: &DriveItem, meta: Color, surface: Color, t: &Theme) -> El {
+pub fn shared_cell(k: &str, item: &DriveItem, meta: Color, surface: Color, t: &Theme) -> El {
     let mut cell = row().key("shared-cell").w(COL_SHARED_W).min_w(0.0).center_y();
     if !item.shared_badges.is_empty() {
         let mut stack = row().key("avatars").role("group").label("Shared with");

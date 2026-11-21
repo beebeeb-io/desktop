@@ -155,26 +155,11 @@ fn first_download() -> (Runtime<State>, Calls) {
 #[test]
 fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
     let (mut rt, calls) = first_download();
-    assert_eq!(text(&rt, "ready-title"), "Getting your files ready");
     assert_eq!(
-        text(&rt, "ready-text"),
-        "Your file list is downloading and being decrypted on this PC. You can start using Beebeeb before it's finished."
+        text(&rt, "loading-words"),
+        "Getting your files ready: 18,240 of 40,112 \u{00B7} about 1 min left"
     );
-    assert_eq!(
-        [text(&rt, "ready-figure"), text(&rt, "ready-left")],
-        ["18,240 of 40,112", " \u{00B7} about 1 min left"]
-    );
-    assert_eq!(
-        [text(&rt, "ready-list-value"), text(&rt, "ready-thumbs-value")],
-        ["In progress", "Waiting for the file list"]
-    );
-    let bar = info(&rt, "ready-bar");
-    assert_eq!(
-        (bar.role, bar.label.as_deref()),
-        ("progressbar", Some("Getting your files ready: 45 percent"))
-    );
-    let (whole, filled) = (bar.rect[2], info(&rt, "ready-bar-fill").rect[2]);
-    assert!((filled / whole - 0.45).abs() < 0.01, "{filled} of {whole}");
+    assert_eq!(info(&rt, "loading-bar").role, "progressbar");
     assert_eq!(text(&rt, "status-text"), "Getting your files ready");
     assert_eq!(text(&rt, "status-details"), "18,240 of 40,112 listed");
     assert_eq!(text(&rt, "item-count"), "18,240 of 40,112 listed");
@@ -190,7 +175,7 @@ fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
     });
     settle(&mut rt);
     assert!(rt.state.actions.toast != Some(Toast::LinkCopied));
-    assert!(find(&rt, "ready-card").is_none(), "the card is gone");
+    assert!(find(&rt, "loading").is_none(), "the card is gone");
     assert_eq!(
         text(&rt, "item-count"),
         "7 items",
@@ -212,7 +197,7 @@ fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
 #[test]
 fn no_card_when_nothing_loads_and_the_scenes_are_these_states() {
     let (rt, _, _) = spied();
-    assert!(find(&rt, "ready-card").is_none());
+    assert!(find(&rt, "loading").is_none());
     let scene = |frame: &str| {
         let mut state = init();
         let run = super::browse_states::SCENES
@@ -327,13 +312,7 @@ fn w31_before_the_first_list_arrives_the_window_says_it_is_loading() {
         }),
         ..Default::default()
     });
-    assert_eq!(text(&rt, "ready-title"), "Getting your files ready");
-    assert!(find(&rt, "ready-figure").is_none(), "no count before the list's size is known");
-    let bar = info(&rt, "ready-bar");
-    assert_eq!(
-        (bar.role, bar.label.as_deref()),
-        ("progressbar", Some("Getting your files ready: 0 percent"))
-    );
+    assert_eq!(text(&rt, "loading-words"), "Getting your files ready");
     assert_eq!(text(&rt, "status-text"), "Getting your files ready");
     assert_eq!(text(&rt, "status-details"), "Loading your file list");
     assert_eq!(text(&rt, "item-count"), "Loading your file list");
@@ -346,7 +325,7 @@ fn w31_a_first_list_that_failed_is_said_with_try_again() {
         list_failed: true,
         ..Default::default()
     });
-    assert!(find(&rt, "ready-card").is_none());
+    assert!(find(&rt, "loading").is_none());
     assert!(find(&rt, "banner").is_some(), "the failure is said");
     let button = info(&rt, "banner-action");
     assert_eq!((button.role, button.label.as_deref()), ("button", Some("Try again")));

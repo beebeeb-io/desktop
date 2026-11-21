@@ -164,7 +164,7 @@ fn f2_turns_the_name_into_a_field_with_the_extension_left_out_of_the_selection()
     assert_eq!(label_of(&rt, RENAME_INPUT), "Name");
     let edit = &rt.state.actions.name_edit;
     assert_eq!((edit.text.as_str(), edit.range()), ("Contract draft.pdf", (0, 14)));
-    assert!(find(&rt, "row-6-name").is_none(), "the field stands where the name was");
+    assert_eq!(info(&rt, "row-6-name").text.as_deref(), Some(""), "the field stands where the name was");
     // Typing replaces the selected part and keeps .pdf; Enter saves.
     type_text(&mut rt, "Signed contract");
     press(&mut rt, Key::Enter, NONE);

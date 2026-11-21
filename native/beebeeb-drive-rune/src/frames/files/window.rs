@@ -142,78 +142,60 @@ fn pick_sort(s: &mut State, index: usize, tx: &mut Tx) {
     s.pick_background_sort(index, tx);
 }
 
+/// The toast's button (`ui::button`, Sm): `<key>-action`, with the words and its name for assistive technology.
+fn toast_button(words: &'static str, name: &'static str, shortcut: Option<&'static str>, run: fn(&mut State, &mut Tx), t: &Theme) -> El {
+    let mut keys = button::keys("toast-action");
+    keys.label = "toast-action-text".to_string();
+    let b = button::button(
+        keys,
+        words,
+        None,
+        button::Variant::Ghost,
+        button::Size::Sm,
+        button::ButtonState::Enabled,
+        t,
+    )
+    .label(name)
+    .on_press_tx(move |s: &mut State, tx: &mut Tx| run(s, tx));
+    match shortcut {
+        Some(keys) => b.shortcut_hint(keys),
+        None => b,
+    }
+}
+
 /// `again`: does a failure's message offer Try again (`State::offers_try_again`)?
 fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
+    use toast::Lead;
+    let plain = |words: &str, lead| toast::toast_with("toast", words, lead, None, t);
     match kind {
-        Toast::Trashed => toast::toast(
-            &icons::TRASH,
-            toast::Tone::Neutral,
+        Toast::Trashed => toast::toast_with(
+            "toast",
             "Moved to Trash",
-            Some(toast::ToastAction {
-                text: "Undo Ctrl+Z",
-                name: "Undo",
-                shortcut: Some("Ctrl+Z"),
-                run: undo,
-            }),
+            Lead::None,
+            Some(toast_button("Undo Ctrl+Z", "Undo", Some("Ctrl+Z"), undo, t)),
             t,
         ),
-        Toast::Duplicated => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Duplicated", None, t),
-        Toast::Keeping => toast::toast(
-            &icons::AVAILABLE_OFFLINE,
-            toast::Tone::Neutral,
-            "Keeping on this PC",
-            None,
-            t,
-        ),
-        Toast::UploadCancelled => toast::toast(
-            &icons::TRASH,
-            toast::Tone::Neutral,
-            "Upload cancelled. The copy is in the Recycle Bin.",
-            None,
-            t,
-        ),
-        Toast::LinkCopied => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Link copied", None, t),
-        Toast::ReadOneAtATime => toast::toast(
-            &icons_files::ALERT,
-            toast::Tone::Neutral,
-            Toast::READ_ONE_AT_A_TIME,
-            None,
-            t,
-        ),
-        Toast::KeepFirst => toast::toast(
-            &icons_files::ALERT,
-            toast::Tone::Neutral,
-            crate::frames::office::docs::KEEP_FIRST,
-            None,
-            t,
-        ),
-        Toast::KeptEdits(count) => toast::toast(
-            &icons_files::ALERT,
-            toast::Tone::Neutral,
+        Toast::Duplicated => plain("Duplicated", Lead::Check),
+        Toast::Keeping => plain("Keeping on this PC", Lead::None),
+        Toast::UploadCancelled => plain("Upload cancelled. The copy is in the Recycle Bin.", Lead::None),
+        Toast::LinkCopied => plain("Link copied", Lead::Check),
+        Toast::ReadOneAtATime => plain(Toast::READ_ONE_AT_A_TIME, Lead::Warn),
+        Toast::KeepFirst => plain(crate::frames::office::docs::KEEP_FIRST, Lead::Warn),
+        Toast::KeptEdits(count) => plain(
             &crate::frames::office::edit::recovery::unlocked_words(usize::from(count), None).unwrap_or_default(),
-            None,
-            t,
+            Lead::Warn,
         ),
-        Toast::FreedUp => toast::toast(
-            &icons_files::CHECK,
-            toast::Tone::Done,
-            "Freed up space on this PC",
-            None,
-            t,
-        ),
-        Toast::Failed(action, why) => toast::toast(
-            &icons_files::ALERT,
-            toast::Tone::Failed,
+        Toast::FreedUp => plain("Freed up space on this PC", Lead::Check),
+        Toast::Failed(action, why) => toast::toast_with(
+            "toast",
             &Toast::failure(action, why),
+            Lead::Warn,
             // Only where Try again repeats something (`State::offers_try_again`).
-            again.then_some(toast::ToastAction {
-                text: "Try again",
-                name: "Try again",
-                shortcut: None,
-                run: retry,
-            }),
+            again.then(|| toast_button("Try again", "Try again", None, retry, t)),
             t,
-        ),
+        )
+        // A failure is read at once.
+        .role("alert"),
     }
 }
 
