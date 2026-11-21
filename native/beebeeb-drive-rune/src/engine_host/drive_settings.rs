@@ -166,6 +166,10 @@ pub trait DriveEngine: Send + Sync + 'static {
     fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String>;
     /// Make every downloaded copy that is not kept online only again: the bytes freed.
     fn free_up_space(&self) -> Result<u64, String>;
+    /// Bytes done so far on every running (upload, download), from the transfer board. Never waits.
+    fn transfer_totals(&self) -> Option<(u64, u64)> {
+        None
+    }
     /// The settings file's limit on downloaded copies (0: no limit) and its "Show sync status on files".
     fn local_settings(&self) -> Result<(i64, bool), String>;
     /// The engine's session, which moves on at every sign-in, lock and sign-out (`Engine::session_turn`). Never
@@ -208,6 +212,9 @@ impl<C: CredentialStores> DriveEngine for Engine<C> {
     }
     fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
         Engine::local_state(self).and_then(|state| state.with(read))
+    }
+    fn transfer_totals(&self) -> Option<(u64, u64)> {
+        Engine::transfer_totals(self)
     }
     fn trash_count(&self, session: SessionGeneration) -> Result<u64, String> {
         self.trash_count_for(session).map_err(|e| format!("{e:?}"))
@@ -369,6 +376,8 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     /// recorded or the sample is old. Sampled only while Bandwidth is shown.
     rate: Option<(u64, u64)>,
     rate_at: Option<Instant>,
+    /// The board's last totals and when they were read: the next read's difference is the live rate.
+    totals: Option<(Instant, u64, u64)>,
     insights: Insights,
     keep: Keep,
     /// When insights were last answered: `opened(Insights)` re-asks when this is older than [`INSIGHTS_FRESH_FOR`].
@@ -403,6 +412,25 @@ pub struct EngineDriveSettings<E: DriveEngine> {
 }
 
 impl<E: DriveEngine> EngineDriveSettings<E> {
+    /// The live rate: the transfer board's bytes done now against the last read (up, down per second); while the board
+    /// holds nothing, the recorder's newest sample.
+    fn live_rate(&mut self) -> Option<(u64, u64)> {
+        let now = Instant::now();
+        let totals = self.engine.transfer_totals();
+        let last = self.totals.take();
+        let Some((up, down)) = totals else { return read_rate(&*self.engine) };
+        self.totals = Some((now, up, down));
+        match last {
+            Some((at, last_up, last_down)) if now > at => {
+                let secs = (now - at).as_secs_f64();
+                let per_s = |new: u64, old: u64| (new.saturating_sub(old) as f64 / secs) as u64;
+                Some((per_s(up, last_up), per_s(down, last_down)))
+            }
+            // The first read has nothing to compare with.
+            _ => self.rate,
+        }
+    }
+
     /// `base` with "Right now" filled from the engine's transfer rate and its metered hold.
     fn live(&self, mut base: Bandwidth) -> Bandwidth {
         let waiting = beebeeb_engine::power::current() == Some(beebeeb_engine::power::PausedFor::Metered);
@@ -431,6 +459,7 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             metered_pause: None,
             rate: None,
             rate_at: None,
+            totals: None,
             insights: Insights::Loading,
             keep: Keep::Failed,
             insights_at: None,
@@ -829,6 +858,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             self.bandwidth = None;
             self.metered_pause = None;
             self.rate = None;
+            self.totals = None;
             self.keep = Keep::Failed;
             self.insights_at = None;
             self.insights_reading = false;
@@ -910,7 +940,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         let rate_wanted = self.open == Some(Pane::Bandwidth) && self.mine();
         if rate_wanted && self.rate_at.is_none_or(|at| at.elapsed() >= RATE_EVERY) {
             self.rate_at = Some(Instant::now());
-            let rate = read_rate(&*self.engine);
+            let rate = self.live_rate();
             changed |= rate != self.rate;
             self.rate = rate;
         }

@@ -44,6 +44,21 @@ pub(super) fn wake_the_host_for_downloads(host: &std::sync::Arc<dyn crate::host:
 }
 
 impl<C: CredentialStores> Engine<C> {
+    /// Bytes done so far on every running upload and download (up, down), read from the transfer board; no name, no id.
+    /// Two reads a few seconds apart give the pane's live rate. `None`: no board yet.
+    pub fn transfer_totals(&self) -> Option<(u64, u64)> {
+        let board = self.host.transfer_board()?;
+        let (mut up, mut down) = (0u64, 0u64);
+        for t in board.snapshot_dtos().into_iter().filter(|t| !t.failed) {
+            match t.direction {
+                Direction::Up => up += t.done,
+                Direction::Down => down += t.done,
+                Direction::Stream => {}
+            }
+        }
+        Some((up, down))
+    }
+
     /// See the module's doc. One read of the board, one query to keep this account's files.
     pub fn downloads_for(&self, session: SessionGeneration) -> Result<Vec<DownloadRow>, LocalStateRefused> {
         let state = self.local_state()?;
