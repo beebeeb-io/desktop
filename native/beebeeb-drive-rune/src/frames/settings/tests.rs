@@ -532,12 +532,12 @@ fn a_storage_location_is_a_country_chosen_by_keyboard_and_said_in_a_toast() {
 #[test]
 fn locations_that_could_not_load_say_so_and_try_again_loads_them() {
     let mut rt = runtime("DW-0788d");
-    assert_eq!(info(&rt, "card-0").role, "alert");
+    assert!(find(&rt, "locations-failed").is_some());
     assert!(find(&rt, "list-0-body").is_none());
-    tab_to(&mut rt, "btn-0");
+    tab_to(&mut rt, "locations-failed-retry");
     key(&mut rt, Key::Enter);
     assert!(find(&rt, "list-0-body").is_some(), "the list is back");
-    assert!(find(&rt, "card-0").is_none());
+    assert!(find(&rt, "locations-failed").is_none());
 }
 
 #[test]
@@ -892,7 +892,7 @@ fn a_list_of_locations_without_choices_never_panics_and_says_it_could_not_load()
     state.settings.source = Box::new(Empty(BoardSettings::new()));
     super::open_on(&mut state, "DW-0788");
     let mut rt = window(state, (958.0, 638.0));
-    assert_eq!(info(&rt, "card-0").role, "alert");
+    assert!(find(&rt, "locations-failed").is_some());
     assert!(find(&rt, "list-0-body").is_none(), "no empty list");
     click(&mut rt, "crumb-row");
     assert_eq!(
