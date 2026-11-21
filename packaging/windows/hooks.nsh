@@ -31,8 +31,37 @@
 !macroend
 
 ; Beebeeb: an uninstall (not an update) also removes downloaded update installers. They are a cache.
+; The identity's own names (engine identity.rs): the folder name under the config, data, cache and temp dirs, and the
+; credential service. Only THIS identity's: the test build never touches the real app's, nor the other way round.
+!if "${BUNDLEID}" == "io.beebeeb.app"
+  !define BB_FOLDER "beebeeb"
+!else
+  !define BB_FOLDER "beebeeb-test"
+!endif
+
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} $UpdateMode <> 1
     RMDir /r "$LOCALAPPDATA\${BUNDLEID}\updates"
+    ${If} $DeleteAppDataCheckboxState = 1
+      SetShellVarContext current
+      ; settings (desktop.toml) and plaintext staging copies, under the data, cache and temp folders
+      RMDir /r "$APPDATA\${BB_FOLDER}"
+      RMDir /r "$LOCALAPPDATA\${BB_FOLDER}"
+      ; the real app's temp copies sit directly in %TEMP% and cannot be told apart from other programs' files: only the
+      ; test build has a folder of its own there
+      !if "${BB_FOLDER}" != "beebeeb"
+        RMDir /r "$TEMP\${BB_FOLDER}"
+      !endif
+      ; staging inside the install folder
+      RMDir /r "$INSTDIR\finder-writes"
+      RMDir "$INSTDIR"
+      ; the saved sign-in (session token, wrapped key, account email): Credential Manager entries named
+      ; "<bundle identifier>/..." (the trailing slash keeps io.beebeeb.app from matching io.beebeeb.app.test)
+      nsExec::Exec 'powershell -NoProfile -NonInteractive -Command "cmdkey /list | ForEach-Object { if ($$_ -match $\'Target:\s+(?:LegacyGeneric:target=)?(${BUNDLEID}/\S+)$\') { cmdkey /delete:$$Matches[1] } }"'
+      Pop $0
+    ${Else}
+      ; not ticked: say exactly what stays (silent uninstall shows nothing and never deletes data)
+      MessageBox MB_OK|MB_ICONINFORMATION|MB_SETFOREGROUND "$(uninstallKeepsData)" /SD IDOK
+    ${EndIf}
   ${EndIf}
 !macroend
