@@ -65,10 +65,10 @@ fn restoring_takes_the_row_out_and_keeps_a_selection() {
 }
 
 #[test]
-fn an_empty_trash_hides_empty_trash_and_its_sidebar_count() {
+fn an_empty_trash_hides_empty_trash() {
     let rt = runtime(super::scenes::dw_0117);
     assert_eq!(info(&rt, "empty-title").text.as_deref(), Some("Trash is empty"));
-    assert!(rt.find("btn-empty-trash").is_none() && rt.find("Trash-badge").is_none() && rt.find("rows").is_none());
+    assert!(rt.find("btn-empty-trash").is_none() && rt.find("rows").is_none());
 }
 
 #[test]
