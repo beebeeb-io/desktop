@@ -36,3 +36,15 @@ fn open_quote_no_panic() {
     let _ = parse("\"");
     let _ = parse("");
 }
+
+#[test]
+fn crlf_and_1000_rows() {
+    let d = parse("a,b\r\n1,\"x,y\"\r\n2,z\r\n");
+    assert_eq!(d.rows.len(), 2);
+    assert_eq!(d.rows[0], vec!["1", "x,y"]);
+    let mut s = String::from("n\r\n");
+    for i in 0..1000 {
+        s.push_str(&format!("{i}\r\n"));
+    }
+    assert_eq!(parse(&s).rows.len(), 1000);
+}
