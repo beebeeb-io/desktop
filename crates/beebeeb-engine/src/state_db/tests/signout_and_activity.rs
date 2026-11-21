@@ -914,3 +914,20 @@ fn leaving_an_account_clears_its_recent_transfers() {
     db.purge_all_local_state().unwrap();
     assert!(db.list_recent_transfer_activity(10).unwrap().is_empty());
 }
+
+/// dc-005: the sign-out preflight counts waiting uploads and sealed staged copies apart.
+#[test]
+fn windows_signout_counts_waiting_and_sealed_copies_apart() {
+    let db = super::StateDb::open(":memory:").unwrap();
+    let none = db.windows_signout_counts().unwrap();
+    assert_eq!((none.waiting, none.sealed_copies), (0, 0));
+    db.0.lock().unwrap().execute_batch(
+        "INSERT INTO staged_payloads(path, completed) VALUES ('p1', 0), ('p2', 0), ('p3', 1);
+         INSERT INTO operation_queue (op_id,kind,payload_path,created_at,updated_at) VALUES ('a','upload_file','p1',1,1);",
+    )
+    .unwrap();
+    let c = db.windows_signout_counts().unwrap();
+    assert_eq!(c.waiting, 1);
+    // p1 is named by the queued upload (counted as waiting); p2 is a sealed copy no queue row names; p3 is released.
+    assert_eq!(c.sealed_copies, 1);
+}

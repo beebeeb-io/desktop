@@ -194,6 +194,30 @@ impl StateDb {
     }
     // Windows account cleanup must not silently discard paused/exhausted writes.
     // Portable so both Windows CI and Linux exercise the exact DB policy.
+    /// dc-005: what a sign-out holds, counted apart: uploads waiting (queue rows and unsynced files) and sealed
+    /// staged copies no queue row names (kept encrypted, opened again after sign-in). Office recovery copies live
+    /// on disk, not here; the host adds them.
+    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    pub fn windows_signout_counts(&self) -> Result<SignoutCounts> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let waiting: i64 = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM operation_queue)
+                  + (SELECT COUNT(*) FROM files WHERE status IN ('uploading', 'conflict', 'error', 'trashing'))",
+            [],
+            |r| r.get(0),
+        )?;
+        let sealed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM staged_payloads
+             WHERE completed = 0
+               AND path NOT IN (SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(SignoutCounts {
+            waiting: u64::try_from(waiting).unwrap_or(0),
+            sealed_copies: u64::try_from(sealed).unwrap_or(0),
+        })
+    }
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     pub fn windows_signout_preflight(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -994,4 +1018,11 @@ impl StateDb {
             local_placeholder_paths,
         })
     }
+}
+
+/// dc-005: the counts a sign-out says in words (see `StateDb::windows_signout_counts`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignoutCounts {
+    pub waiting: u64,
+    pub sealed_copies: u64,
 }
