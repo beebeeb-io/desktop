@@ -22,6 +22,13 @@ pub enum ToolState {
     Off,
 }
 
+/// A toolbar row as one Tab stop (role `toolbar`, Rune's focus group): Tab lands on its current
+/// item and leaves at the next, Left/Right move between its buttons, Home and End jump to the
+/// ends. `label` is what a screen reader calls the toolbar ("Viewer controls").
+pub fn roving(bar: El, label: &str) -> El {
+    bar.role("toolbar").label(label).focus_group()
+}
+
 /// A toolbar button: 28 pt tall, at least 28 wide, one or more 15/16 pt glyphs.
 /// Keys: `<key>` and `<key>-icon` (further glyphs are added by the caller).
 pub fn tool_button(

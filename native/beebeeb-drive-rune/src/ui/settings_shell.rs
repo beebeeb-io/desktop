@@ -10,6 +10,7 @@
 //! | Sidebar item | `nav_item(label, icon, icon_size, on, t)` | `<label>-row`, `<label>-icon`, `<label>` |
 //! | Sidebar heading | `nav_title(text, t)` | `side-title-<slug>` |
 //! | Sidebar | `sidebar(back, sections, foot, t)` | `sidebar`, `side-foot-box`, `side-foot` |
+//! | The whole settings sidebar, one Tab stop, arrows and type-select | `app_sidebar(selected, previews, go, t)` | as `sidebar` |
 //! | Pane | `pane(children, t)` | `set-main`, `set-col` |
 //! | Way back to the parent pane | `crumb(label, t, back)` | `crumb-row`, `crumb-icon`, `crumb` |
 //! | Pane heading | `heading(title, sub, t)` | `set-title`, `set-sub` |
@@ -236,19 +237,31 @@ pub fn app_sidebar(selected: Option<&str>, previews: bool, go: Go, t: &Theme) ->
             // Not listed where nothing answers for it: a pane that only says "not built yet" is a dead door.
             .filter(|(label, _, _)| previews || *label != "Thumbnails and previews")
             .map(|&(label, icon, frame)| {
-                nav_item(label, icon, 16.0, selected == Some(label), t).on_press(move |s: &mut State| go(s, frame))
+                let on = selected == Some(label);
+                roving_item(nav_item(label, icon, 16.0, on, t), on, t).on_press(move |s: &mut State| go(s, frame))
             })
             .collect()
     };
-    let back = nav_item("Back to Drive", &ic::BACK, 15.0, false, t)
+    let back = roving_item(nav_item("Back to Drive", &ic::BACK, 15.0, false, t), false, t)
         .shortcut_hint("Esc")
         .on_press(move |s: &mut State| go(s, "DW-0401"));
+    // One Tab stop (Tab lands on the selected item, else Back to Drive): Up/Down/Home/End
+    // move, typing a name's first letters goes to it (Rune's list focus group).
     sidebar(
         back,
         vec![("Settings", items(SETTINGS_ITEMS)), ("Drive", items(DRIVE_ITEMS))],
         "Settings open inside the app. Esc goes back.",
         t,
     )
+    .role("list")
+    .label("Settings sidebar")
+    .focus_group()
+}
+
+/// An item of the roving sidebar: the group's Tab stop when `on`, and the shared ring (a list's
+/// items draw none of their own) so the keyboard's place shows on an unselected item.
+fn roving_item(item: El, on: bool, t: &Theme) -> El {
+    super::focus::apply(item.focus_selected(on), t.accent_deep)
 }
 
 #[cfg(test)]

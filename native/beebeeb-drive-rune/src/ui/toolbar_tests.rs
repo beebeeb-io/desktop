@@ -262,3 +262,66 @@ fn files_toolbar_is_the_one_bar_with_a_title_block_and_the_standard_controls() {
     assert!(keys.iter().any(|k| k == "folder-info"), "the title block");
     assert_eq!(info(&rt, "panel-toggle-btn").role, "button");
 }
+
+/// `roving`: a toolbar of three buttons between two plain ones.
+mod roving_bar {
+    use rune::{Cx, El, Env, Key, KeyEvent, Mods, Runtime, col, el, row};
+
+    fn stop(key: &str) -> El {
+        el().key(key.to_string())
+            .role("button")
+            .label(key.to_string())
+            .focusable(true)
+            .size(40.0, 24.0)
+            .on_press(|_: &mut ()| {})
+    }
+
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let bar = row().key("bar").child(stop("zoom-out")).child(stop("zoom-in")).child(stop("rotate"));
+        col()
+            .w_full()
+            .h_full()
+            .child(stop("before"))
+            .child(crate::ui::toolbar::roving(bar, "Viewer controls"))
+            .child(stop("after"))
+    }
+
+    fn key(rt: &mut Runtime<()>, key: Key, shift: bool) {
+        rt.key(KeyEvent { key, mods: Mods { shift, ..Mods::default() } });
+        rt.frame(0.0);
+        rt.settle_all();
+        rt.frame(0.0);
+    }
+
+    fn focused(rt: &Runtime<()>) -> Option<String> {
+        rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key)
+    }
+
+    #[test]
+    fn tab_enters_the_toolbar_once_arrows_move_inside_and_tab_leaves() {
+        let env = Env { system_dark: false, scale: 2.0 };
+        let mut rt = Runtime::new((), view, (400.0, 300.0), env);
+        rt.frame(0.0);
+        let bar = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("bar")).expect("bar");
+        assert_eq!(bar.role, "toolbar");
+        assert_eq!(bar.label.as_deref(), Some("Viewer controls"));
+        key(&mut rt, Key::Tab, false);
+        assert_eq!(focused(&rt).as_deref(), Some("before"));
+        key(&mut rt, Key::Tab, false);
+        assert_eq!(focused(&rt).as_deref(), Some("zoom-out"), "Tab enters at the first item");
+        key(&mut rt, Key::Right, false);
+        assert_eq!(focused(&rt).as_deref(), Some("zoom-in"));
+        key(&mut rt, Key::End, false);
+        assert_eq!(focused(&rt).as_deref(), Some("rotate"));
+        key(&mut rt, Key::Left, false);
+        assert_eq!(focused(&rt).as_deref(), Some("zoom-in"));
+        key(&mut rt, Key::Home, false);
+        assert_eq!(focused(&rt).as_deref(), Some("zoom-out"));
+        key(&mut rt, Key::Tab, false);
+        assert_eq!(focused(&rt).as_deref(), Some("after"), "one Tab leaves the toolbar");
+        key(&mut rt, Key::Tab, true);
+        assert_eq!(focused(&rt).as_deref(), Some("zoom-out"), "Shift+Tab comes back to one item");
+        key(&mut rt, Key::Tab, true);
+        assert_eq!(focused(&rt).as_deref(), Some("before"));
+    }
+}
