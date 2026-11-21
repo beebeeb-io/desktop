@@ -255,9 +255,10 @@ pub struct DesktopConfig {
     // Three on/off switches surfaced on the Windows Settings page. Stored
     // as `Option<bool>` so a missing key round-trips as `None` (toggle
     // never set) rather than forcing a default the frontend didn't choose.
-    /// Treat the current connection as metered — when `Some(true)`, the
-    /// runner pauses sync on a metered network if metered-state detection
-    /// is available. Persisted regardless; honoring is best-effort.
+    /// Pause sync on a metered network — when `Some(true)`, the tick holds
+    /// uploads/downloads while the OS reports the connection as metered
+    /// (`power::decide`) and resumes when it is not. Unreadable OS state
+    /// never pauses.
     #[serde(default)]
     pub metered: Option<bool>,
     /// Files On-Demand: when `Some(true)` (or unset), new remote files are

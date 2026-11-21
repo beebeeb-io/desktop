@@ -81,6 +81,7 @@ pub mod owner_keys;
 pub mod passkey_windows;
 pub mod path_safety;
 pub mod photo_previews;
+pub mod power;
 pub mod reauth;
 pub mod runner;
 pub mod session;

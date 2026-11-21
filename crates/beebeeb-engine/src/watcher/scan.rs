@@ -39,6 +39,9 @@ impl DiskStamp {
 #[derive(Default)]
 pub struct ScanMemo {
     pub(super) settled: HashMap<PathBuf, (DiskStamp, u64)>,
+    /// R3: untracked placeholders recorded once for the mark retry, with the listing seen then; a later
+    /// pass with the same listing does not classify them again.
+    pub(super) untracked: HashMap<PathBuf, DiskStamp>,
     pub(super) since: Option<Instant>,
     /// Files classified by the last pass.
     pub classified: usize,

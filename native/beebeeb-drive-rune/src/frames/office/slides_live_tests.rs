@@ -51,7 +51,7 @@ fn office_slides_present_draws_the_slide_pixels() {
             k,
             OfficePicture::Page {
                 page: 0,
-                zoom_pct: 199,
+                zoom_pct: 149,
                 ..
             }
         )),
@@ -65,6 +65,25 @@ fn office_slides_present_zoom_fits_the_screen() {
     assert_eq!(present_zoom((1920.0, 1080.0)), 300);
     assert_eq!(present_zoom((1278.0, 798.0)), 199);
     assert_eq!(present_zoom((640.0, 1000.0)), 100, "the narrower side decides");
+}
+
+/// The pixels the engine draws for an ask: SLIDE_W points x zoom x dpi / 72 across.
+fn ask_px(zoom: u16, dpi: u16) -> f32 {
+    640.0 * f32::from(zoom) / 100.0 * f32::from(dpi) / 72.0
+}
+
+#[test]
+fn office_slides_present_asks_within_the_cap_and_the_screen() {
+    // Guus's PC: 3840x2160 at 150 % is 2560x1440 points at dpi 144 (it asked 5120 wide and was refused).
+    for (screen, dpi, phys_w) in [((2560.0, 1440.0), 144u16, 3840.0), ((2560.0, 1440.0), 96, 2560.0)] {
+        let zoom = present_ask_zoom(screen, dpi);
+        let px = ask_px(zoom, dpi);
+        assert!(px <= ENGINE_SIDE_MAX_PX, "{px} within the cap");
+        assert!(px <= phys_w, "{px} within the screen's {phys_w}");
+        assert!(px > phys_w * 0.97, "{px} fills the screen's {phys_w}");
+        assert_eq!(present_zoom(screen), 400, "drawn to fill the screen's points");
+    }
+    assert!(ask_px(present_ask_zoom((7680.0, 4320.0), 96), 96) <= ENGINE_SIDE_MAX_PX);
 }
 
 #[test]
