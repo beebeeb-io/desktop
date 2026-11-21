@@ -280,13 +280,11 @@ fn open(
         Some(match open(want_audio) {
             // ux-57: Windows has no decoder for the audio, but the video plays: open the video alone and say so.
             // A video that cannot open either answers its own refusal from the second try.
-            Err(ErrorCode::NoSystemDecoder(codec) | ErrorCode::NoSystemMedia(codec))
-                if video.is_some() && want_audio == Some(codec) =>
-            {
+            Err(code) if video.is_some() && want_audio.is_some_and(|codec| silent_audio(code, codec)) => {
                 let streams = open(None)?;
                 audio = None;
                 reduced_quality = false;
-                no_sound = Some(codec);
+                no_sound = want_audio;
                 streams
             }
             other => other?,
@@ -596,8 +594,32 @@ fn map_error(e: &MediaError, flags: &ReadFlags) -> ErrorCode {
     }
 }
 
+/// Whether a failed open of the system's audio track `codec` still leaves a video that plays without sound: the PC
+/// has no decoder for the track (`NoSystemDecoder`, `NoSystemMedia`), or Windows' answer is no decoder that is there
+/// (`NoDecoder` from a failed call, `Internal` from a media type it will not take). The app's own failed reads, a
+/// corrupt or too large file are never silenced here.
+fn silent_audio(code: ErrorCode, codec: Codec) -> bool {
+    match code {
+        ErrorCode::NoSystemDecoder(named) | ErrorCode::NoSystemMedia(named) => named == codec,
+        ErrorCode::NoDecoder | ErrorCode::Internal => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_audio_decoder_is_silence_never_a_refusal_of_the_video() {
+        use ErrorCode::*;
+        for code in [NoSystemDecoder(Codec::Aac), NoSystemMedia(Codec::Aac), NoDecoder, Internal] {
+            assert!(silent_audio(code, Codec::Aac), "{code:?}");
+        }
+        // Another track's refusal, and failures that are not about the decoder, stay answers.
+        for code in [NoSystemDecoder(Codec::H264), ReadFailed, Corrupt, TooLarge, TenBit] {
+            assert!(!silent_audio(code, Codec::Aac), "{code:?}");
+        }
+    }
+
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
