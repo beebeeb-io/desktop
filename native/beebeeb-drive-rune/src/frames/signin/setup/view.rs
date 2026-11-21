@@ -1092,6 +1092,9 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
             .child(foot),
         t,
     )
+    // Modal: Tab stays inside, what is behind is inert, Esc closes it, focus goes back to
+    // Compare. `setup::page` draws the scrim, so `dialog::modal` (a second scrim) is not used.
+    .modal_tx(false, act(Ui::close_compare))
 }
 
 /// First letter up, for a name that starts a sentence.

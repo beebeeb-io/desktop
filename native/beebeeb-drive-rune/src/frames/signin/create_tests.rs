@@ -774,3 +774,20 @@ fn back_from_create_account_returns_to_welcome_and_keeps_nothing_typed() {
     assert!(ui(&mut rt).password.text.is_empty());
     assert_eq!(said(&rt, "title").as_deref(), Some("Welcome to Beebeeb Drive"));
 }
+
+#[test]
+fn each_shown_word_says_its_place_of_twelve_and_never_the_word() {
+    let (mut rt, _) = walked_to(Step::Phrase, SignUpScript::default());
+    assert_eq!(at(&mut rt), Step::Phrase);
+    for i in 0..12 {
+        let nodes = super::steps_tests::a11y_nodes(&rt, &format!("word-{i}"));
+        assert_eq!(nodes.len(), 1, "word-{i}");
+        assert_eq!(nodes[0]["name"], format!("Word {}", i + 1));
+        assert_eq!(nodes[0]["position"], i + 1, "{} of 12", i + 1);
+        assert_eq!(nodes[0]["setSize"], 12);
+    }
+    let tree = rt.accessibility_json().to_string();
+    for word in board::WORDS {
+        assert!(!tree.contains(&format!("\"{word}\"")), "a recovery word in the tree");
+    }
+}
