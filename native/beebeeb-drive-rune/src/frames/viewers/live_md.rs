@@ -37,6 +37,10 @@ fn blocks_of(source: &str) -> Rc<Vec<Block>> {
 }
 
 pub fn view(source: &str, _ui: &Ui, t: &Theme) -> El {
+    body(source, t)
+}
+
+fn body(source: &str, t: &Theme) -> El {
     markdown::body_in(&blocks_of(source), t, "live-preview-md-body")
 }
 
