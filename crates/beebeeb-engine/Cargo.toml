@@ -178,6 +178,8 @@ windows = { version = "0.58", features = [
 windows-core = "0.58"
 
 [dev-dependencies]
+# The photo library test counts the SQL statements a read runs (`trace_v2`): a dev edge only.
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache", "trace"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aes-gcm = "0.10"
 json-patch = { version = "3", default-features = false }
