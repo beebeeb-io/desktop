@@ -7,6 +7,8 @@
 //!
 //! Keys, for a row keyed `k`: `k`, `k-tile`, `k-icon`, `k-name`, and `name-cell`.
 //! Header keys, for a column keyed `c`: `column-headers`, `col-c-cell`, `col-c`, `sort-arrow`.
+// The areas move onto `row` and `header_with` in wave 3.
+#![allow(dead_code)]
 
 use crate::theme::file_icons::FileIcon;
 use crate::theme::icons;
