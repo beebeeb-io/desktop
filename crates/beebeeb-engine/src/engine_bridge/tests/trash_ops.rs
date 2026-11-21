@@ -547,6 +547,6 @@ fn local_classify_trashing_row_does_not_hide_a_recreated_file() {
     let verdict = bridge.classify_local_path_verdict(&sync_root, &local);
     assert!(
         !matches!(verdict, LocalPathVerdict::Settled),
-        "a re-created file must not be settled by the Trashing row: {verdict:?}"
+        "a re-created file must not be settled by the Trashing row"
     );
 }
