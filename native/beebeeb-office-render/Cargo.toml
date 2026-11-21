@@ -27,7 +27,7 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
-beebeeb-office = { git = "https://github.com/beebeeb-io/desktop-office", rev = "dcece0501a709ced9c555fa9d8178ae0d88c91f6", features = ["edit-slides"] }
+beebeeb-office = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f", features = ["edit-slides"] }
 beebeeb-office-protocol = { path = "../../crates/beebeeb-office-protocol" }
 beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
 # The edit-open guard reads the package's entries and content types (same zip as the engines, already in the lock).
