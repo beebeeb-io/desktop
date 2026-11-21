@@ -271,60 +271,28 @@ pub fn md_tools(source: bool, t: &Theme) -> Vec<El> {
     ]
 }
 
-/// The editor (DW-1523): the text in JetBrains Mono with line numbers, the line the caret is on
-/// marked. The coloured lines are drawn as the reader draws them; over them lies the text
-/// field that takes the typing (its own glyphs clear, its caret and selection showing), set in
-/// the same type on the same lines, so every key, the pointer, the clipboard, undo and the
-/// input method are the field's.
-pub fn editor(editor: &super::Editor, lines: &[Vec<Run>], t: &Theme) -> El {
-    // The line the caret is on, while the editor has the keyboard (not under a dialog).
-    let current = editor.edit.focused.then(|| editor.caret_line());
-    let mut under = col().key("editor-lines").w_full();
-    for (i, runs) in lines.iter().enumerate() {
-        if current == Some(i) {
-            // On the caret's line the marks are not dimmed: they are what is being typed.
-            let shown: Vec<Run> = runs
-                .iter()
-                .map(|run| Run {
-                    ink: if run.ink == Ink::Faint { Ink::Plain } else { run.ink },
-                    ..run.clone()
-                })
-                .collect();
-            under = under.child(line(i, &shown, true, t));
-        } else {
-            under = under.child(line(i, runs, false, t));
-        }
-    }
-    // The caret as the board draws it: 1.5 wide, 15 high, one point after the text.
-    let at = editor.edit.focus.min(editor.edit.text.len());
-    let column = editor.edit.text[..at]
-        .rsplit('\n')
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .count();
-    let caret_x = GUTTER_W + column as f32 * rune::text::advance("0", style::CODE) + 1.0;
-    let mut field = el().key("editor-field").w_full().child(under).child(
-        text_input(&editor.edit, style::CODE)
-            .key(super::EDITOR_KEY)
-            .label("Text")
-            .shortcut_hint("Ctrl+S")
-            .color(Color::TRANSPARENT)
-            .caret(Color::TRANSPARENT, t.selection)
-            .on_edit(super::editor_edit)
-            .on_input_key(super::editor_key)
-            .pin(Some(GUTTER_W), Some(0.0), Some(0.0), Some(0.0)),
-    );
-    if let Some(current) = current {
-        field = field.child(
-            el().key(format!("caret-{current}"))
-                .ime_cursor()
-                .absolute(caret_x, current as f32 * LINE_H + 3.0)
-                .size(1.5, 15.0)
-                .radius(1.0)
-                .fill(t.accent_deep),
+/// The editor (DW-1523): the text in JetBrains Mono, painted by the field itself with `spans` (the
+/// highlighter's, or a note's runs), over the gutter numbers and the current-line fill of
+/// [`super::editor_view::underlay`]. Every key, the pointer, the clipboard, undo and the input
+/// method are the field's. Long text scrolls, as the reader's does.
+pub fn editor(editor: &super::Editor, file_name: &str, spans: Vec<Span>, t: &Theme) -> El {
+    let field = el()
+        .key("editor-field")
+        .w_full()
+        .child(super::editor_view::underlay(&editor.edit, file_name, t))
+        .child(
+            text_input(&editor.edit, style::CODE)
+                .key(super::EDITOR_KEY)
+                .label("Text")
+                .shortcut_hint("Ctrl+S")
+                .color(t.text)
+                .spans(spans)
+                .wrap()
+                .caret(t.accent_deep, t.selection)
+                .on_edit(super::editor_edit)
+                .on_input_key(super::editor_key)
+                .pin(Some(GUTTER_W), Some(0.0), Some(0.0), Some(0.0)),
         );
-    }
     col()
         .key("viewer-body")
         .role("document")
@@ -335,19 +303,31 @@ pub fn editor(editor: &super::Editor, lines: &[Vec<Run>], t: &Theme) -> El {
         .py(12.0)
         .fill(t.bg)
         .clip_rounded(0.0)
+        .min_h(0.0)
+        .scroll(rune::ScrollSpec { stick_bottom: false })
         .child(field)
 }
 
-/// The toolbar's control of the editor: Save, a plain button with the lock (New stays the
-/// window's one Amber control).
-pub fn editor_tools(t: &Theme) -> Vec<El> {
-    vec![
+/// The toolbar's controls of the editor: Save, a plain button with the lock (New stays the
+/// window's one Amber control), and Preview for a file that has a live preview.
+pub fn editor_tools(has_preview: bool, preview_open: bool, t: &Theme) -> Vec<El> {
+    let mut tools = vec![
         tool_action("tb-btn-0", "Save", Some(&icons::LOCK), Some("Ctrl+S"), t).on_press(|s: &mut State| {
             if let Some(ui) = ui(s) {
                 ui.save();
             }
         }),
-    ]
+    ];
+    if has_preview {
+        tools.push(
+            tool_action("tb-preview", "Preview", None, None, t).checked(preview_open).on_press(|s: &mut State| {
+                if let Some(ui) = ui(s) {
+                    ui.editor_view.preview_open = !ui.editor_view.preview_open;
+                }
+            }),
+        );
+    }
+    tools
 }
 
 /// DW-1519: another device saved a newer version while this one is open. The version on

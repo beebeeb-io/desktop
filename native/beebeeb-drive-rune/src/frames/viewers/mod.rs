@@ -19,6 +19,7 @@ mod chrome;
 pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
 pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
 pub(crate) mod details;
+mod editor_view;
 pub(crate) mod dialogs;
 mod fixture_media;
 mod fixture_text;
@@ -219,6 +220,7 @@ pub struct Ui {
     pub md_source: bool,
     /// The editor, while the file is being edited.
     pub editor: Option<Editor>,
+    pub editor_view: editor_view::EditorView,
     pub dialog: Option<Dialog>,
     /// The message after a save ("Saved · encrypted · version 4"), until the next action.
     pub toast: Option<String>,
@@ -265,6 +267,7 @@ impl Ui {
             wrap: false,
             md_source: false,
             editor: None,
+            editor_view: editor_view::EditorView::default(),
             dialog: None,
             toast: None,
             saved_at: None,
@@ -435,14 +438,6 @@ impl Ui {
     /// The edit has changes that are not saved.
     pub fn dirty(&self) -> bool {
         self.editor.as_ref().is_some_and(Editor::dirty)
-    }
-
-    /// The lines of the text being edited, as the source colours them.
-    pub fn editor_lines(&self) -> Vec<Vec<source::Run>> {
-        match &self.editor {
-            Some(editor) => self.source.colours(&self.file, &editor.edit.text),
-            None => Vec::new(),
-        }
     }
 
     /// Leave the editor for the reader on `file`.
@@ -961,9 +956,8 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             facts: dirty.then_some(unsaved),
             unsaved: dirty,
         };
-        let body = text::editor(editor, &ui.editor_lines(), &t);
-        let refused = text::refused_banner(editor.refused.as_deref(), &t);
-        return chrome::window(s, cx, ui, head, text::editor_tools(&t), refused, body, &status, &t);
+        let (tools, banner, body) = editor_view::parts(ui, editor, &t);
+        return chrome::window(s, cx, ui, head, tools, banner, body, &status, &t);
     }
     let head = chrome::Head::default();
     let reading = |doc_truncated: Option<source::Truncated>| match &ui.saved_at {
