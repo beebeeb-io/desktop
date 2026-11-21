@@ -227,7 +227,7 @@ fn the_token_holds_exactly_the_profiles_capabilities() {
         counts.push(wanted.len());
     }
     // The instrument tells the three profiles apart.
-    assert_eq!(counts, [0, 1, 5]);
+    assert_eq!(counts, [0, 2, 5]);
 }
 
 /// Windows' decoders start in the system-decoder profile, with and without HEVC: COM (`lpacCom`, Guus 2026-11-21),
@@ -237,17 +237,20 @@ fn the_token_holds_exactly_the_profiles_capabilities() {
 fn windows_decoders_start_in_the_system_decoder_profile_only() {
     let _serial = serial();
     let mut plain = Probe::plain();
-    assert_eq!(plain.attempt("decoders"), "ok", "the instrument can say ok: the plain probe starts them");
+    assert_eq!(
+        plain.attempt("decoders"),
+        "ok",
+        "the instrument can say ok: the plain probe starts them"
+    );
     drop(plain);
-    let mut counted = 0;
-    for profile in EVERY_PROFILE {
-        let answer = Probe::confined_as(profile).attempt("decoders");
-        if profile == Profile::NoCapabilities {
-            assert!(answer.starts_with("err "), "{profile:?}: {answer}");
-        } else {
-            assert_eq!(answer, "ok", "{profile:?}");
-        }
-        counted += 1;
-    }
-    assert_eq!(counted, EVERY_PROFILE.len());
+    let answers: Vec<String> = EVERY_PROFILE
+        .iter()
+        .map(|profile| Probe::confined_as(*profile).attempt("decoders"))
+        .collect();
+    assert!(answers[0].starts_with("err "), "NoCapabilities: {}", answers[0]);
+    assert_eq!(
+        answers[1..],
+        ["ok", "ok"],
+        "SystemDecoder without and with HEVC: {answers:?}"
+    );
 }

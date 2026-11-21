@@ -500,7 +500,7 @@ pub(crate) fn memory() -> String {
 #[cfg(windows)]
 pub(crate) fn decoders() -> String {
     use std::ffi::c_void;
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
     use windows_sys::core::GUID;
     type CoInitializeEx = unsafe extern "system" fn(*const c_void, u32) -> i32;
     type CoCreateInstance =
@@ -521,10 +521,18 @@ pub(crate) fn decoders() -> String {
     const CLSID_WIC_FACTORY: GUID = GUID::from_u128(0xcacaf262_9370_4615_a13b_9f5539da4c0a);
 
     let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
-    // SAFETY: terminated UTF-16 names; each result is checked before use.
-    let (ole32, mfplat) = unsafe { (LoadLibraryW(wide("ole32.dll").as_ptr()), LoadLibraryW(wide("mfplat.dll").as_ptr())) };
-    if ole32.is_null() || mfplat.is_null() {
-        return format!("err load {}", last_error());
+    // From the system folder only, as the media helper loads them (the probe's own folder is not the container's).
+    let load = |name: &str| {
+        // SAFETY: a terminated UTF-16 name, no file handle, the system folder only; the result is checked by the caller.
+        unsafe { LoadLibraryExW(wide(name).as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) }
+    };
+    let ole32 = load("ole32.dll");
+    if ole32.is_null() {
+        return format!("err load-ole32 {}", last_error());
+    }
+    let mfplat = load("mfplat.dll");
+    if mfplat.is_null() {
+        return format!("err load-mfplat {}", last_error());
     }
     // SAFETY: each name is a terminated ASCII string and each module is loaded; each function is turned into the
     // signature the system documents for it, and only when it was found.
@@ -557,7 +565,15 @@ pub(crate) fn decoders() -> String {
     for (step, class) in [("aac", CLSID_AAC_DECODER), ("wic", CLSID_WIC_FACTORY)] {
         let mut object: *mut c_void = std::ptr::null_mut();
         // SAFETY: valid GUIDs, no outer object, an in-process server; `object` receives one reference on success.
-        let hr = unsafe { co_create(&class, std::ptr::null_mut(), CLSCTX_INPROC_SERVER, &IID_IUNKNOWN, &mut object) };
+        let hr = unsafe {
+            co_create(
+                &class,
+                std::ptr::null_mut(),
+                CLSCTX_INPROC_SERVER,
+                &IID_IUNKNOWN,
+                &mut object,
+            )
+        };
         if hr < 0 || object.is_null() {
             // SAFETY: Media Foundation was started above.
             unsafe { mf_shutdown() };
