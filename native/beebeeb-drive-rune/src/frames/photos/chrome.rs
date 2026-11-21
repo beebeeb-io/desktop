@@ -4,46 +4,34 @@
 //! The toolbar is the one window toolbar (`ui::toolbar::bar`) with this section's title, its
 //! controls in the slot and its states for the standard ones.
 
-use rune::{Color, El, Icon, TextStyle, col, el, row, text_input};
+use crate::ui::toolbar::title_block;
+use rune::{Color, El, Icon, TextStyle, col, row, text_input};
 
 use super::Intent;
 use crate::State;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, type_};
 use crate::ui::toolbar as tb;
-use crate::ui::{caption, kit, sidebar};
+use crate::ui::{button, caption, sidebar, status_bar};
 
 /// The group's own type styles, by the board's class.
 pub mod style {
     use rune::TextStyle;
     use rune::tok::Family;
 
-    /// `.kit-chip`, `.kit-seg-sm span` is 550.
-    pub const CHIP: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
     pub const SEG: TextStyle = TextStyle::new(12.0, 550.0).lh(15.0);
     /// `.t-sub` and its `b`.
     pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
     pub const SUB_STRONG: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
     /// `.mk-gbadge`.
     pub const BADGE: TextStyle = TextStyle::new(10.0, 600.0).family(Family::Mono).lh(13.0);
-    /// `.t-title`.
-    pub const TITLE: TextStyle = TextStyle::new(17.0, 600.0).lh(22.0).tracking(-0.2);
     /// `.mk-bulk` and its `b`.
     pub const BULK: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
     pub const BULK_STRONG: TextStyle = TextStyle::new(12.5, 600.0).lh(17.0);
     /// `.kit-btn-md`.
     pub const BUTTON: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
-    /// `.wn-mi`, its head and its shortcut.
-    pub const MENU: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
-    pub const MENU_HEAD: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0);
-    pub const MENU_KEYS: TextStyle = TextStyle::new(12.0, 400.0).lh(14.5);
     /// `.t-cap`, and in the machine face.
     pub const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
     pub const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
-    /// `.kit-toast` and the action in it.
-    pub const TOAST: TextStyle = TextStyle::new(13.0, 550.0).lh(17.0);
-    /// The board computes 900 for this `b` (bolder than 550) and draws 700, the heaviest Inter
-    /// it loads (`wght@400..700`): 700 is what a person sees there.
-    pub const TOAST_ACTION: TextStyle = TextStyle::new(13.0, 700.0).lh(17.0);
     /// `.kit-list-title`, `.kit-item-title`, `.kit-item-sub`, `.kit-item-value` (and mono).
     pub const LIST_TITLE: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.1);
     pub const ITEM_TITLE: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0).tracking(-0.065);
@@ -84,40 +72,8 @@ pub struct Bar {
     pub middle: El,
 }
 
-/// A toolbar button of this group (`.mk-tbtn`), keyed by a `String`.
-pub fn tbtn(key: &str, name: &str, ic: &'static Icon, size: f32, on: bool, t: &Theme) -> El {
-    row()
-        .key(key.to_string())
-        .role("button")
-        .label(name)
-        .h(28.0)
-        .min_w(28.0)
-        .px(6.0)
-        .gap(4.0)
-        .center()
-        .radius(radius::CONTROL)
-        .fill(if on { t.selection } else { Color::TRANSPARENT })
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph(
-            format!("{key}-icon"),
-            ic,
-            size,
-            if on { t.text } else { t.text_secondary },
-        ))
-}
-
 pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
-    let title = col()
-        .key("folder-info")
-        .px(4.0)
-        .min_w(0.0)
-        .shrink()
-        // Cut at the box's edge, as the board's `overflow: hidden` does (no ellipsis).
-        .clip_rounded(0.0)
-        .child(kit::label("folder-title", bar.title, type_::TITLE, t.text).w_full())
-        .child(kit::label("item-count", bar.sub, type_::TITLE_SUB, t.text_tertiary).w_full());
+    let title = title_block(&bar.title, Some(&bar.sub), t);
 
     const SEARCH_PLACEHOLDER: &str = "Search names";
     let search = tb::search_box(
@@ -161,6 +117,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
             },
             on_details: tb::press(|s, _| s.photos.open_details()),
             inert: false,
+            gate_closed: false,
             // Photos shows no folder: the Beebeeb location.
             on_explorer: Box::new(tb::open_beebeeb_location),
             // "New here adds to Files" (DW-0601): the menu is the Files lane's; this asks for it.
@@ -173,28 +130,11 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
     )
 }
 
-/// The status line (`.mk-foot`): the PC's sync state at the left, this view's words at the right.
-pub fn status_line(details: &str, t: &Theme) -> El {
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(t.green))
-        .child(kit::label(
-            "status-text",
-            "Up to date",
-            type_::STATUS_STRONG,
-            t.text_secondary,
-        ))
-        .child(el().key("status-spacer").grow(1.0))
-        .child(kit::label("status-details", details, type_::STATUS, t.text_tertiary))
+/// The status line (`.mk-foot`): the PC's sync state at the left (the same words and dot as Files), this
+/// view's words at the right. No words, no dot.
+pub fn status_line(sync: &str, details: &str, t: &Theme) -> El {
+    let state = (!sync.is_empty()).then_some(sync);
+    status_bar::bar(state.map(status_bar::dot_for), state, details, t)
 }
 
 /// The window. `front` is drawn over the whole client area, in order (a menu; a scrim and its dialog).
@@ -221,7 +161,7 @@ pub fn window(
     }
     let main = main
         .child(body.grow(1.0).min_h(0.0).w_full())
-        .child(status_line(status, t));
+        .child(status_line(&crate::frames::sync_words(s), status, t));
     col()
         .key("window")
         .role("window")
@@ -250,40 +190,29 @@ pub enum Tone {
     Primary,
 }
 
-/// A button's width on the board: the words as the font gives them, the icon and its gap, 12 pt
-/// each side (and a plain button's two borders).
-pub fn button_width(label: &str, icon: bool, tone: Tone, h: f32, font: TextStyle) -> f32 {
-    let icon_size = if h > 24.0 { 16.0 } else { 14.0 };
-    let content = advance(label, font) + if icon { icon_size + 7.0 } else { 0.0 };
-    content + if tone == Tone::Plain { 26.0 } else { 24.0 }
+fn mapped(tone: Tone, h: f32) -> (button::Variant, button::Size) {
+    let variant = match tone {
+        Tone::Plain => button::Variant::Secondary,
+        Tone::Quiet => button::Variant::Ghost,
+        Tone::Primary => button::Variant::Primary,
+    };
+    let size = if h <= 24.0 {
+        button::Size::Sm
+    } else if h <= 30.0 {
+        button::Size::Md
+    } else {
+        button::Size::Lg
+    };
+    (variant, size)
 }
 
-pub fn button(key: &str, label: &str, ic: Option<&'static Icon>, tone: Tone, h: f32, font: TextStyle, t: &Theme) -> El {
-    let ink = match tone {
-        Tone::Plain => t.text,
-        Tone::Quiet => t.text_secondary,
-        Tone::Primary => t.accent_text_on,
-    };
-    let icon_size = if h > 24.0 { 16.0 } else { 14.0 };
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(h)
-        .w(button_width(label, ic.is_some(), tone, h, font))
-        .gap(7.0)
-        .center()
-        .radius(6.0)
-        .focusable(true)
-        .hover(t.hover)
-        .press(t.press);
-    b = match tone {
-        Tone::Plain => b.fill(t.paper).border(1.0, t.card_border).border_layout(),
-        Tone::Quiet => b,
-        Tone::Primary => b.fill(t.accent),
-    };
-    if let Some(ic) = ic {
-        b = b.child(kit::glyph(format!("{key}-icon"), ic, icon_size, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, font, ink))
+/// A button's width on the board (`ui::button::natural_width`).
+pub fn button_width(label: &str, icon: bool, tone: Tone, h: f32, _font: TextStyle) -> f32 {
+    let (variant, size) = mapped(tone, h);
+    button::natural_width(label, icon, variant, size)
+}
+
+pub fn button(key: &str, label: &str, ic: Option<&'static Icon>, tone: Tone, h: f32, _font: TextStyle, t: &Theme) -> El {
+    let (variant, size) = mapped(tone, h);
+    button::button(button::keys(key), label, ic, variant, size, button::ButtonState::Enabled, t)
 }

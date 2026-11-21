@@ -147,6 +147,7 @@ fn shared_metadata_uses_placeholder_for_authenticated_traversal_name() {
         file_name_encrypted: None,
         permission_bits: PERMISSION_READ,
         approved_at: None,
+        claimed: false,
     };
     let file_key = beebeeb_core::kdf::FileKey::from_bytes([0x66u8; 32]);
     let malicious_name = serde_json::json!({

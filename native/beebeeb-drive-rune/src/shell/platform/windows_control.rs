@@ -643,6 +643,7 @@ pub(super) fn send(name: &str, request: &Request, timeout: Duration) -> Delivery
     let reply = read_until(&pipe, MAX_REPLY, deadline, |bytes| bytes.contains(&b'\n'));
     match reply.as_deref().and_then(Reply::decode) {
         Some(Reply::Ok) => Delivery::Acknowledged,
+        Some(Reply::OtherServer) => Delivery::OtherServer,
         // Busy, no answer in time, hung up without one, or not our protocol.
         _ => Delivery::NoAnswer,
     }

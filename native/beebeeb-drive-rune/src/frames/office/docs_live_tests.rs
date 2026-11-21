@@ -191,34 +191,95 @@ fn office_docs_asks_tiles_at_150_and_whole_pages_below() {
     );
 }
 
+/// Page 1's box and tile (`col`, `row`) of it, as `[x, y, w, h]` from the page's corner.
+fn tile_in_page(rt: &Runtime<State>, col: u32, row: u32) -> Option<[f32; 4]> {
+    let page = find(rt, "page").expect("page 1");
+    let tile = find(rt, &format!("page-1-tile-{col}-{row}"))?;
+    Some([
+        tile.rect[0] - page.rect[0],
+        tile.rect[1] - page.rect[1],
+        tile.rect[2],
+        tile.rect[3],
+    ])
+}
+
 #[test]
 fn office_docs_tiles_sit_at_their_place() {
-    // Every tile answers 512 x 512 px; page 1 at 150 %: its tile (1, 2) sits at (512, 1024) points from the page's corner.
+    // A4 at 150 % and 96 dpi is a raster of 1190 x 1684 px (2 px a point) on a box of 780 points: a pixel is
+    // 780 / 1190 of a point, so tile (1, 2) starts at (512, 1024) px = (335.6, 671.2) points, on whole pixels.
     let (rt, _log) = live_runtime(doc_of(4, 150, 1), 1.0, Some((TILE_PX, TILE_PX)));
+    let tile = tile_in_page(&rt, 1, 2).expect("tile (1, 2) of page 1 is drawn");
+    assert!((tile[0] - 336.0).abs() < 0.6, "x: {tile:?}");
+    assert!((tile[1] - 671.0).abs() < 0.6, "y: {tile:?}");
+}
+
+#[test]
+fn office_docs_tiles_cover_the_page_box_at_150_per_cent_display_scaling() {
+    // Windows at 150 % (144 dpi), the stage at 100 %: tiles (100 x 144 = 14 400). The renderer's raster of A4 is
+    // 1190 x 1684 px (2 px a point): 3 columns and 4 rows of tiles, which together are the page's box and no more.
+    let (rt, log) = live_runtime(doc_of(1, 100, 1), 1.5, Some((TILE_PX, TILE_PX)));
     let page = find(&rt, "page").expect("page 1");
-    let tile = find(&rt, "page-1-tile-1-2").expect("tile (1, 2) of page 1 is drawn");
+    let (w, h) = (page.rect[2], page.rect[3]);
+    assert!((w - 520.0).abs() < 0.6, "the box is the board's width: {w}");
+    let last = tile_in_page(&rt, 2, 3).expect("the last tile (2, 3) is drawn");
     assert!(
-        (tile.rect[0] - page.rect[0] - 512.0).abs() < 0.6,
-        "x: {:?} in {:?}",
-        tile.rect,
-        page.rect
+        (last[0] + last[2] - w).abs() < 0.7,
+        "the last column ends at the page's right edge: {last:?} in {w}"
     );
     assert!(
-        (tile.rect[1] - page.rect[1] - 1024.0).abs() < 0.6,
-        "y: {:?} in {:?}",
-        tile.rect,
-        page.rect
+        (last[1] + last[3] - h).abs() < 0.7,
+        "the last row ends at the page's foot: {last:?} in {h}"
     );
+    assert!(
+        log.pictures
+            .borrow()
+            .iter()
+            .all(|k| !matches!(k, OfficePicture::Tile { col: 3.., .. } | OfficePicture::Tile { row: 4.., .. })),
+        "no tile past the raster is asked"
+    );
+    // Two tiles share their edge: no gap and no overlap.
+    let (a, b) = (
+        tile_in_page(&rt, 0, 0).expect("tile (0, 0)"),
+        tile_in_page(&rt, 1, 1).expect("tile (1, 1)"),
+    );
+    assert!((a[0] + a[2] - b[0]).abs() < 0.01 && (a[1] + a[3] - b[1]).abs() < 0.01, "{a:?} {b:?}");
+}
+
+#[test]
+fn office_docs_a_tile_is_drawn_at_the_scale_the_pointer_and_the_caret_use() {
+    // What the person sees and what a press means are one scale. Tile (1, 1) starts at pixel (512, 512) of a raster
+    // of 2 px a point, the page's point (256, 256): drawn where the caret of that point is drawn, and a press there
+    // is that point.
+    let (mut rt, _log) = live_runtime(doc_of(1, 100, 1), 1.5, Some((TILE_PX, TILE_PX)));
+    let tile = tile_in_page(&rt, 1, 1).expect("tile (1, 1)");
+    let doc = viewers::doc_mut(&mut rt.state).expect("a document");
+    let caret = doc.page_rect(&beebeeb_office_protocol::office::PageRect {
+        page: 0,
+        rect: beebeeb_office_protocol::office::RectPt {
+            x: 256.0,
+            y: 256.0,
+            w: 1.0,
+            h: 12.0,
+        },
+    });
+    let top = doc.page_top(1);
+    assert!((tile[0] - caret[0]).abs() < 0.7, "x: tile {tile:?}, caret {caret:?}");
+    assert!((tile[1] - (caret[1] - top)).abs() < 0.7, "y: tile {tile:?}, caret {caret:?}");
+    let (page, x, y) = doc.page_point(tile[0], top + tile[1]);
+    assert_eq!(page, 0);
+    assert!((x - 256.0).abs() < 1.0 && (y - 256.0).abs() < 1.0, "a press on it is ({x}, {y})");
 }
 
 #[test]
 fn office_docs_tiles_divide_by_the_device_factor() {
-    // At 192 dpi (scale 2) a 512 px tile is 256 points; tile (1, 1) sits at (256, 256).
+    // At 192 dpi (scale 2) A4 at 100 % is a raster of 1587 px on a box of 520 points: tile (1, 1) starts at pixel
+    // 512, which is 512 x 520 / 1587 = 167.8 points, on a whole device pixel (half a point).
     let (rt, _log) = live_runtime(doc_of(4, 100, 1), 2.0, Some((TILE_PX, TILE_PX)));
-    let page = find(&rt, "page").expect("page 1");
-    let tile = find(&rt, "page-1-tile-1-1").expect("tile (1, 1) is drawn at 200 % scale");
-    assert!((tile.rect[0] - page.rect[0] - 256.0).abs() < 0.6);
-    assert!((tile.rect[1] - page.rect[1] - 256.0).abs() < 0.6);
+    let tile = tile_in_page(&rt, 1, 1).expect("tile (1, 1) is drawn at 200 % scale");
+    assert!((tile[0] - 167.8).abs() < 0.6, "{tile:?}");
+    assert!((tile[1] - 167.8).abs() < 0.6, "{tile:?}");
+    // On whole device pixels: half points.
+    assert!((tile[0] * 2.0).fract().abs() < 0.01 && (tile[1] * 2.0).fract().abs() < 0.01, "{tile:?}");
 }
 
 #[test]
@@ -257,7 +318,7 @@ fn office_docs_an_absurd_page_size_is_bounded() {
 
 #[test]
 fn office_docs_a_tall_page_asks_only_the_tile_rows_near_the_screen() {
-    // A page the size rule allows (20:1) but far taller than the screen: at 150 % it is 35 tile rows. Only the rows that
+    // A page the size rule allows (20:1) but far taller than the screen: at 150 % it is 47 tile rows. Only the rows that
     // touch the band (one screen above, the screen, one below) may be asked, however tall the page is.
     const WINDOW_H: f32 = 798.0; // live_runtime's window
     let (w, h) = (595.0, 11_900.0);
@@ -266,9 +327,10 @@ fn office_docs_a_tall_page_asks_only_the_tile_rows_near_the_screen() {
         d.view.page_sizes_pt = vec![(w, h); 3];
     }
     let (_rt, log) = live_runtime(body, 1.0, None);
-    // At scale 1 a tile is TILE_PX points; the band ends at most two screens below page 1's top.
-    let side = TILE_PX as f32;
-    let page_rows = (h * 1.5 / side).ceil() as u32;
+    // The raster is 2 px a point (150 % at 96 dpi) on a box 780 points wide, so a tile is TILE_PX x 780 / 1190 points;
+    // the band ends at most two screens below page 1's top.
+    let side = TILE_PX as f32 * 780.0 / 1190.0;
+    let page_rows = (h * 2.0 / TILE_PX as f32).ceil() as u32;
     let band_rows = (2.0 * WINDOW_H / side).ceil() as u32;
     assert!(
         page_rows > 4 * band_rows,
@@ -331,9 +393,9 @@ fn office_fixture_scenes_keep_their_fixture_pictures() {
 }
 
 /// The scroll gate (PLAN §2.4): the docs scene scrolling through the 60-page latency fixture with the real helper
-/// keeps the UI frame time at p95 <= 16 ms, at 100 % and at 150 %. Run on VM 401 with `BB_OFFICE_HELPER` set.
+/// keeps the UI frame time at p95 <= 16 ms, at 100 % and at 150 %. Run on the Windows test machine with `BB_OFFICE_HELPER` set.
 #[test]
-#[ignore = "O-CP3: VM 401, the real helper"]
+#[ignore = "O-CP3: the Windows test machine, the real helper"]
 fn office_docs_scroll_frame_time_p95() {
     use std::time::{Duration, Instant};
 
@@ -361,7 +423,7 @@ fn office_docs_scroll_frame_time_p95() {
     }
 
     let helper =
-        std::env::var("BB_OFFICE_HELPER").expect("BB_OFFICE_HELPER names the real helper: this is the VM 401 rung");
+        std::env::var("BB_OFFICE_HELPER").expect("BB_OFFICE_HELPER names the real helper: this is the Windows test machine rung");
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../beebeeb-office-render/tests/fixtures/latency/big-60.docx");
     let bytes = zeroize::Zeroizing::new(std::fs::read(&fixture).expect("the 60-page latency fixture"));
@@ -434,9 +496,84 @@ fn office_states_try_again_asks_the_live_source_once() {
     use crate::frames::office::states::{OfficeState, StateBody};
     let stopped = Body::OfficeState(StateBody::new(OfficeState::Stopped { retried: false }, true));
     let (mut rt, log) = live_runtime(stopped, 1.0, None);
-    let button = find(&rt, "empty-add").expect("Try again is offered after a first stop");
+    let button = find(&rt, "empty-retry").expect("Try again is offered after a first stop");
     rt.pointer_down(button.rect[0] + 4.0, button.rect[1] + 4.0);
     rt.pointer_up(button.rect[0] + 4.0, button.rect[1] + 4.0);
     rt.frame(0.0);
     assert_eq!(log.retries.get(), 1, "the source opened the file again");
+}
+
+#[test]
+fn office_docs_a_refused_page_size_draws_the_default_box() {
+    // Every size the file may state that a page cannot be draws the default page's box (A4's proportions), the page's
+    // own box when it can be; the ratio rule is 20:1 either way, the edge itself allowed.
+    let a4 = (595.0, 842.0);
+    let refused = [
+        (f32::NAN, 842.0),
+        (595.0, f32::NAN),
+        (f32::INFINITY, 842.0),
+        (595.0, f32::INFINITY),
+        (0.0, 842.0),
+        (595.0, 0.0),
+        (-595.0, 842.0),
+        (595.0, -842.0),
+        (1.0, 20.5),
+        (20.5, 1.0),
+        (1.0, 1.0e9),
+    ];
+    for size in refused {
+        let mut view = docs_fixture::view();
+        view.pages = 2;
+        view.page_sizes_pt = vec![(600.0, 300.0), size];
+        let doc = DocBody::new(view, "English (UK)");
+        assert_eq!(size_pt(&doc, 2), a4, "{size:?} is refused");
+        let (w, h) = box_pt(&doc, 2);
+        assert!(
+            (h / w - 842.0 / 595.0).abs() < 1e-4,
+            "{size:?} draws A4's proportions: {w} x {h}"
+        );
+        assert_eq!(size_pt(&doc, 1), (600.0, 300.0), "a page's own size is kept");
+    }
+    for ok in [(1.0, 20.0), (20.0, 1.0), (300.0, 600.0)] {
+        let mut view = docs_fixture::view();
+        view.pages = 1;
+        view.page_sizes_pt = vec![ok];
+        assert_eq!(size_pt(&DocBody::new(view, "English (UK)"), 1), ok, "{ok:?} is allowed");
+    }
+}
+
+#[test]
+fn office_docs_asks_a_repeated_key_once() {
+    // A build that names a key twice (the same page asked by two parts of the frame) reaches the source once, and a
+    // key with no answer yet is not asked again either.
+    let count = Cell::new(0u32);
+    let answer = |_: OfficePicture| {
+        count.set(count.get() + 1);
+        Some(pixels(2, 3))
+    };
+    let asks = Asks::new(&answer);
+    let key = OfficePicture::Page {
+        page: 0,
+        zoom_pct: 100,
+        dpi: 96,
+    };
+    let (a, b) = (asks.get(key), asks.get(key));
+    assert_eq!(count.get(), 1, "one ask for a repeated key");
+    assert!(a.is_some() && b.is_some(), "the same answer after");
+    let other = OfficePicture::Page {
+        page: 1,
+        zoom_pct: 100,
+        dpi: 96,
+    };
+    asks.get(other);
+    assert_eq!(count.get(), 2, "another key is asked");
+
+    let none_count = Cell::new(0u32);
+    let none = |_: OfficePicture| {
+        none_count.set(none_count.get() + 1);
+        None
+    };
+    let asks = Asks::new(&none);
+    assert!(asks.get(key).is_none() && asks.get(key).is_none());
+    assert_eq!(none_count.get(), 1, "a missing answer is kept for the frame too");
 }

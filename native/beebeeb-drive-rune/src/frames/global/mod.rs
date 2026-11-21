@@ -32,6 +32,9 @@ pub use view::{banner_under_toolbar, dims, fit, over_body, status_line, status_w
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BannerKind {
     SignedOut,
+    /// w31: the account's file list never arrived on this PC and the last try failed. Not on the board: it stands
+    /// where an empty, finished-looking list stood.
+    ListFailed,
     StorageFull,
     SyncProblem,
     BackupProblem,
@@ -40,8 +43,9 @@ pub enum BannerKind {
 }
 
 impl BannerKind {
-    pub const ORDER: [BannerKind; 6] = [
+    pub const ORDER: [BannerKind; 7] = [
         BannerKind::SignedOut,
+        BannerKind::ListFailed,
         BannerKind::StorageFull,
         BannerKind::SyncProblem,
         BannerKind::BackupProblem,
@@ -56,7 +60,7 @@ impl BannerKind {
             BannerKind::StorageFull | BannerKind::StorageAlmostFull => Some("DW-0712"),
             BannerKind::SyncProblem => Some("DW-0428"),
             BannerKind::BackupProblem => Some("DW-0741"),
-            BannerKind::Offline => None,
+            BannerKind::Offline | BannerKind::ListFailed => None,
         }
     }
 
@@ -66,6 +70,7 @@ impl BannerKind {
             BannerKind::SignedOut => Some("Sign in"),
             BannerKind::StorageFull | BannerKind::StorageAlmostFull => Some("Storage"),
             BannerKind::SyncProblem | BannerKind::BackupProblem => Some("View"),
+            BannerKind::ListFailed => Some("Try again"),
             BannerKind::Offline => None,
         }
     }
@@ -95,6 +100,11 @@ pub fn sentence_of(kind: BannerKind, status: &GlobalStatus) -> Vec<Run> {
         BannerKind::SignedOut => {
             vec![words(
                 "Backup and sync have stopped. Enter your password to continue. Nothing has been lost.",
+            )]
+        }
+        BannerKind::ListFailed => {
+            vec![words(
+                "Your files couldn't be loaded, so they are not all shown here. Beebeeb keeps trying.",
             )]
         }
         BannerKind::StorageFull => {
@@ -196,6 +206,7 @@ impl Ui {
         let level = status.storage.map_or(StorageLevel::Roomy, source::Storage::level);
         match kind {
             BannerKind::SignedOut => status.signed_out,
+            BannerKind::ListFailed => status.list_failed,
             BannerKind::StorageFull => level == StorageLevel::Full,
             BannerKind::SyncProblem => status.sync_problems > 0,
             BannerKind::BackupProblem => status.backup_problems > 0,
@@ -288,6 +299,11 @@ impl State {
     /// places it has (Settings' Storage and Backups, Sync history); every one is kept as an intent.
     pub fn banner_action(&mut self) -> bool {
         use crate::shell::app::{Event, Route, Section, SettingsPane};
+        // w31: Try again on a file list that could not be loaded: the engine gets it now.
+        if matches!(self.global.banner(), Some((BannerKind::ListFailed, _))) {
+            self.global.source.retry_list();
+            return true;
+        }
         let Some(frame) = self.global.banner().and_then(|(kind, _)| kind.solved_at()) else {
             return false;
         };

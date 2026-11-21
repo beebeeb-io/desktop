@@ -13,7 +13,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
@@ -194,7 +194,7 @@ fn engine_at(base: &str) -> Arc<TestEngine> {
         state_dir,
         api_base: base.to_string(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 /// A session in memory, as a sign-in and an unlock of `account` leave it.
@@ -590,4 +590,28 @@ fn video_seconds_of_a_dehydrated_placeholder_reads_nothing() {
     // A picture's size is not gated by this (the same read as before).
     std::fs::write(dir.path().join("Trip").join("shot.png"), picture(31, 17)).unwrap();
     assert_eq!(facts_of_copy(dir.path(), "Trip/shot.png", false).width, Some(31));
+}
+
+/// A library of 8,816 photos among 10,816 files reads in a constant number of queries (no query per photo), fast.
+#[test]
+fn large_library_reads_without_a_query_per_photo() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    for i in 0..10_816 {
+        let (name, folder) = if i < 8_816 { ("jpg", "Camera") } else { ("txt", "Docs") };
+        row(
+            &db,
+            &format!("c0000000-0000-4000-8000-{i:012}"),
+            &format!("{folder}/f{i}.{name}"),
+            i64::from(i),
+            FileStatus::CloudOnly,
+            false,
+        );
+    }
+    let started = std::time::Instant::now();
+    let photos = library(&db, &[]).expect("library");
+    let took = started.elapsed();
+    assert_eq!(photos.len(), 8_816);
+    assert!(photos.iter().all(|p| p.versions >= 1));
+    assert!(took < Duration::from_millis(300), "library took {took:?}");
 }

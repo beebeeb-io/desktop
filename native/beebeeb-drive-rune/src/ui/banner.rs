@@ -8,10 +8,11 @@
 //! It is a status (`role="status"` on the board): read when there is a pause, never an alert.
 
 use crate::State;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::Theme;
 use rune::tok::Family;
 use rune::{Color, El, Icon, Key, KeyEvent, LiveRegion, TextStyle, Tx, el, oklch, row};
 
+use super::button::{self as btn, ButtonKeys, ButtonState, Size, Variant};
 use super::{global_icons, kit};
 
 /// `.mk-banner`: 12.5/400 on a 17 line.
@@ -141,23 +142,19 @@ pub fn banner(b: &Banner, t: &Theme) -> El {
     if let Some((word, run)) = b.action {
         // `.kit-btn.kit-btn-sm`, outlined.
         out = out.child(pressable(
-            row()
-                .key("banner-action")
-                .role("button")
-                .label(word)
-                .h(22.0)
-                .px(12.0)
-                .center()
-                .radius(6.0)
-                .fill(t.paper)
-                .border(1.0, t.card_border)
-                .border_layout()
-                .hover(t.hover)
-                .press(t.press)
-                .focusable(true)
-                .focus_ring(2.0, 2.0, t.accent_deep)
-                .cursor(rune::Cursor::Pointer)
-                .child(kit::label("banner-action-label", word, type_::BUTTON_SM, t.text)),
+            btn::button(
+                ButtonKeys {
+                    root: "banner-action".into(),
+                    icon: "banner-action-icon".into(),
+                    label: "banner-action-label".into(),
+                },
+                word,
+                None,
+                Variant::Secondary,
+                Size::Sm,
+                ButtonState::Enabled,
+                t,
+            ),
             run,
         ));
     }

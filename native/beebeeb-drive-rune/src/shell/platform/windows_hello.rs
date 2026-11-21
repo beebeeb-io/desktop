@@ -24,6 +24,7 @@
 //! is. Off Windows everything answers "not here": `Unsupported` and `Unavailable`.
 
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// Whether a Windows Hello prompt can be shown on this PC, for this person.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +168,9 @@ struct Progress {
     superseded: bool,
     /// The prompt's operation ended, with this `AsyncStatus`.
     ended: Option<i32>,
+    /// The prompt's thread is done with Windows: no prompt was shown, its answer is in, or Windows was asked to close
+    /// it (the `Cancel` of a taken-away prompt has returned). [`take_away_for_quit`] waits for this.
+    finished: bool,
 }
 
 #[derive(Default)]
@@ -204,6 +208,30 @@ impl Control {
     fn taken_away(&self) -> bool {
         let progress = lock(&self.progress);
         progress.cancel_asked || progress.superseded
+    }
+
+    /// The prompt's thread is done with Windows (its `verify` returned).
+    fn finished(&self) {
+        lock(&self.progress).finished = true;
+        self.changed.notify_all();
+    }
+
+    /// Waits until the prompt's thread is done with Windows, at most `limit`. `true`: it is.
+    fn wait_finished(&self, limit: Duration) -> bool {
+        let until = Instant::now() + limit;
+        let mut progress = lock(&self.progress);
+        while !progress.finished {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            progress = self
+                .changed
+                .wait_timeout(progress, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        true
     }
 
     /// Waits for the prompt to end or to be taken away, whichever is first; taken away wins when both are in. The
@@ -263,6 +291,18 @@ impl OneUp {
         }
     }
 
+    /// The app is quitting: the prompt that is up (whoever asked for it) is taken away and its owner is answered
+    /// `Cancelled` (never a yes), and this waits, at most `limit`, until its thread asked Windows to close it.
+    /// `true`: no prompt is up, or its thread is done with Windows.
+    fn take_away_and_wait(&self, limit: Duration) -> bool {
+        let up = lock(&self.up).clone();
+        let Some(control) = up else { return true };
+        // Not the owner's silent cancel: the owner is answered `Cancelled` (never a yes), so an owner that waits
+        // (app lock off, approve) is not left waiting when Windows cancels the shutdown.
+        control.supersede();
+        control.wait_finished(limit)
+    }
+
     /// `control`'s prompt is over. A newer one that took its place stays.
     fn leave(&self, control: &Arc<Control>) {
         let mut up = lock(&self.up);
@@ -273,6 +313,12 @@ impl OneUp {
 }
 
 static UP: OneUp = OneUp::new();
+
+#[cfg(test)]
+thread_local! {
+    /// Whether the quit on this test thread reaches [`UP`].
+    static QUIT_ON_GLOBAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// A prompt that is up, or about to be. Dropping this leaves the prompt alone (a newer [`start`] still takes it
 /// away).
@@ -290,6 +336,20 @@ impl HelloRequest {
     pub fn cancel(&self) {
         self.control.cancel();
     }
+}
+
+/// The app is quitting (`shell::host::on_quit`): the prompt that is up, whoever asked for it, is taken away, and this
+/// waits at most `limit` for its thread to ask Windows to close it. A prompt whose owner is gone stays on screen with
+/// nobody to answer, so the quit asks Windows first. Whether and when the prompt leaves the screen is Windows' (the
+/// native rung checks it). `true`: no prompt was up, or its thread is done with Windows within `limit`.
+pub fn take_away_for_quit(limit: Duration) -> bool {
+    // A test thread that runs the quit hook (`host::on_quit`) leaves the process-wide slot, shared with other
+    // tests, alone unless it asks for it.
+    #[cfg(test)]
+    if !QUIT_ON_GLOBAL.with(std::cell::Cell::get) {
+        return true;
+    }
+    UP.take_away_and_wait(limit)
 }
 
 /// Is Windows Hello set up here? Waits for Windows (briefly): call it from a worker thread.
@@ -319,6 +379,7 @@ pub fn start(
         let (control, reason) = (control.clone(), reason.to_owned());
         move || {
             let seen = imp::verify(window, &reason, &control);
+            control.finished();
             UP.leave(&control);
             control.answer(seen, on_done);
         }
@@ -387,6 +448,8 @@ mod imp {
         let Ok(interop) = windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>() else {
             return Seen::Refused;
         };
+        // The Credential Dialogs that are already on screen (other prompts, older runs): never ours to close.
+        let before = dialogs::all();
         // SAFETY: a COM call on a live interface. The handle is only a number to Windows: one that names no
         // window (it closed in the meantime) is refused with an error, and nothing is read through it here.
         let prompt: windows::core::Result<IAsyncOperation<UserConsentVerificationResult>> =
@@ -401,6 +464,7 @@ mod imp {
         if prompt.SetCompleted(&on_end).is_err() {
             // Nothing would say when it ends: ask Windows to take it away rather than wait for ever.
             let _ = prompt.Cancel();
+            dialogs::close_ours(window.0, &before);
             return Seen::Refused;
         }
         match control.wait() {
@@ -418,8 +482,127 @@ mod imp {
                 // Asks Windows to close the prompt, from this thread. Whether and when it leaves the screen is
                 // Windows' to decide; the answer does not wait for it: none for an owner's cancel, `Cancelled`
                 // for a prompt a newer one took the place of.
+                // `Cancel` on the operation does not remove the "Windows Security" dialog (CredentialUIBroker keeps
+                // it on screen, measured on the Windows test machine): close its window itself. This goes FIRST: on the installed app
+                // the quit waits a short while for this thread, and `Cancel` is a call into the broker that can
+                // take that whole while (w9: the dialog stayed after `--quit-for-update` with the w8 order).
+                dialogs::close_ours(window.0, &before);
                 let _ = prompt.Cancel();
                 Seen::Refused
+            }
+        }
+    }
+
+    /// The "Windows Security" dialog Windows Hello shows lives in CredentialUIBroker.exe, not in this process:
+    /// closing the request does not close it, so it is found by window class and sent `WM_CLOSE`.
+    mod dialogs {
+        use std::time::{Duration, Instant};
+
+        use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, TRUE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GW_OWNER, GetClassNameW, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
+            WM_CLOSE,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+            TerminateProcess,
+        };
+
+        const CLASS: &str = "Credential Dialog Xaml Host";
+        /// The dialog may only appear after the cancel (the request was just made); look this long, no longer.
+        const LOOK: Duration = Duration::from_millis(1500);
+
+        fn is_dialog(hwnd: HWND) -> bool {
+            let mut name = [0u16; 64];
+            // SAFETY: `name` is a live buffer of the length given.
+            let n = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
+            n > 0 && String::from_utf16_lossy(&name[..n as usize]) == CLASS
+        }
+
+        unsafe extern "system" fn collect(hwnd: HWND, out: LPARAM) -> i32 {
+            if is_dialog(hwnd) {
+                // SAFETY: `out` is the `Vec` `all` passed, alive for the whole `EnumWindows` call.
+                unsafe { (*(out as *mut Vec<isize>)).push(hwnd as isize) };
+            }
+            TRUE
+        }
+
+        /// Every Credential Dialog window on the desktop now.
+        pub(super) fn all() -> Vec<isize> {
+            let mut found: Vec<isize> = Vec::new();
+            // SAFETY: the callback only reads window classes and pushes into `found`, which outlives the call.
+            unsafe { EnumWindows(Some(collect), &mut found as *mut Vec<isize> as LPARAM) };
+            found
+        }
+
+        /// How long a dialog gets to leave after `WM_CLOSE` before its broker process is ended.
+        const GRACE: Duration = Duration::from_millis(400);
+
+        fn visible(h: isize) -> bool {
+            // SAFETY: plain window queries on a handle that may have gone: Windows answers with an error.
+            unsafe { IsWindowVisible(h as HWND) != 0 }
+        }
+
+        /// Ends the process that owns `hwnd`, but only when it is `CredentialUIBroker.exe`: Windows starts a broker
+        /// per prompt, and `WM_CLOSE` is a request its XAML host may ignore (measured on the installed app).
+        fn end_broker_of(hwnd: isize) {
+            let mut pid = 0u32;
+            // SAFETY: `pid` is a live out-parameter.
+            unsafe { GetWindowThreadProcessId(hwnd as HWND, &mut pid) };
+            if pid == 0 {
+                return;
+            }
+            // SAFETY: a process handle by id; a process that went in the meantime is refused.
+            let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, 0, pid) };
+            if process.is_null() {
+                return;
+            }
+            let mut name = [0u16; 520];
+            let mut len = name.len() as u32;
+            // SAFETY: `name` and `len` are live and agree on the buffer's length.
+            let ok = unsafe { QueryFullProcessImageNameW(process, 0, name.as_mut_ptr(), &mut len) } != 0;
+            let is_broker = ok
+                && String::from_utf16_lossy(&name[..len as usize])
+                    .to_ascii_lowercase()
+                    .ends_with("\\credentialuibroker.exe");
+            if is_broker {
+                // SAFETY: the handle was opened with `PROCESS_TERMINATE` above.
+                unsafe { TerminateProcess(process, 1) };
+            }
+            // SAFETY: the handle is ours and closed once.
+            unsafe { CloseHandle(process) };
+        }
+
+        /// Closes the dialog(s) of this request: owned by `owner` (our window), or new since `before`. Keeps
+        /// looking for a short while, as the dialog may still be coming up when the cancel is made. A dialog that
+        /// ignores `WM_CLOSE` is ended with its broker process.
+        pub(super) fn close_ours(owner: isize, before: &[isize]) {
+            let until = Instant::now() + LOOK;
+            let mut posted: Vec<isize> = Vec::new();
+            loop {
+                for h in all() {
+                    // SAFETY: plain window query on a handle that may have gone.
+                    let ours = unsafe { GetWindow(h as HWND, GW_OWNER) } as isize == owner || !before.contains(&h);
+                    if ours && visible(h) && !posted.contains(&h) {
+                        // SAFETY: posting a message to a window of another process is allowed and non-blocking.
+                        unsafe { PostMessageW(h as HWND, WM_CLOSE, 0, 0) };
+                        posted.push(h);
+                    }
+                }
+                if !posted.is_empty() {
+                    let grace = Instant::now() + GRACE;
+                    while posted.iter().any(|h| visible(*h)) && Instant::now() < grace {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    for h in posted.iter().filter(|h| visible(**h)) {
+                        end_broker_of(*h);
+                    }
+                    return;
+                }
+                if Instant::now() >= until {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
@@ -693,6 +876,95 @@ mod tests {
         assert!(!second.taken_away());
     }
 
+    /// The app quits while a prompt is up (whoever asked for it): the prompt is taken away, its owner hears nothing of
+    /// it, also of a yes, and the quit returns only once the prompt's thread asked Windows to close it. A prompt whose
+    /// owner is gone stays on screen otherwise, with nobody to answer.
+    #[test]
+    fn a_quit_takes_the_prompt_away_and_waits_until_its_thread_asked_windows_to_close_it() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let one_up = OneUp::new();
+        assert!(
+            one_up.take_away_and_wait(Duration::from_millis(1)),
+            "no prompt up: nothing to wait for"
+        );
+        let control = Arc::new(Control::default());
+        one_up.take_place(&control);
+        // The prompt's thread as `start` runs it: it waits on the prompt; taken away, it asks Windows to close it
+        // (here: a while), then it is done with Windows.
+        let asked_to_close = Arc::new(AtomicBool::new(false));
+        let thread = std::thread::spawn({
+            let (control, asked) = (control.clone(), asked_to_close.clone());
+            move || {
+                assert_eq!(control.wait(), Woken::TakenAway);
+                std::thread::sleep(Duration::from_millis(50));
+                asked.store(true, SeqCst);
+                control.finished();
+            }
+        });
+        assert!(
+            one_up.take_away_and_wait(Duration::from_secs(10)),
+            "the prompt's thread was woken and finished"
+        );
+        assert!(
+            asked_to_close.load(SeqCst),
+            "the quit returned only after the thread asked Windows to close the prompt"
+        );
+        let mut got = None;
+        control.answer(completed(raw::VERIFIED), |result| got = Some(result));
+        assert_eq!(
+            got,
+            Some(HelloResult::Cancelled),
+            "its owner is answered Cancelled, also of a yes: it is never left waiting"
+        );
+        thread.join().unwrap();
+    }
+
+    /// Tests that put a control in the process-wide slot ([`UP`]) one at a time.
+    #[cfg(not(windows))]
+    static GLOBAL_UP: Mutex<()> = Mutex::new(());
+
+    /// The process-wide take-away with a prompt up (off Windows `start` ends at once, so the control is placed by
+    /// hand): the quit answers its owner `Cancelled` (a shutdown that is cancelled leaves nobody waiting), never a
+    /// yes, and the slot is free after.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_quit_on_the_global_slot_answers_the_owner_cancelled_and_never_a_yes() {
+        let _one = lock(&GLOBAL_UP);
+        QUIT_ON_GLOBAL.with(|on| on.set(true));
+        let control = Arc::new(Control::default());
+        UP.take_place(&control);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn({
+            let control = control.clone();
+            move || {
+                assert_eq!(control.wait(), Woken::TakenAway);
+                control.finished();
+                UP.leave(&control);
+                // Windows said yes in the same instant.
+                control.answer(completed(raw::VERIFIED), |result| {
+                    let _ = tx.send(result);
+                });
+            }
+        });
+        assert!(take_away_for_quit(Duration::from_secs(10)));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(HelloResult::Cancelled));
+        thread.join().unwrap();
+        assert!(lock(&UP.up).is_none());
+        QUIT_ON_GLOBAL.with(|on| on.set(false));
+    }
+
+    /// A prompt's thread that never gets done (Windows does not answer) holds the quit no longer than its limit.
+    #[test]
+    fn a_quit_waits_no_longer_than_its_limit() {
+        let one_up = OneUp::new();
+        let control = Arc::new(Control::default());
+        one_up.take_place(&control);
+        let began = Instant::now();
+        assert!(!one_up.take_away_and_wait(Duration::from_millis(100)));
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert!(control.taken_away(), "taken away all the same");
+    }
+
     // Off Windows there is nothing to show: the answers below are the stub's. On Windows these would raise a
     // real prompt, which is the native rung's job (`examples/hello_probe.rs`).
     #[cfg(not(windows))]
@@ -711,6 +983,7 @@ mod tests {
 
         #[test]
         fn start_answers_once_on_its_own_thread() {
+            let _one = lock(&super::GLOBAL_UP);
             let (tx, rx) = mpsc::channel();
             let caller = std::thread::current().id();
             let window = HelloWindow::from_hwnd(1).unwrap();

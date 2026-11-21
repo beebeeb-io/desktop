@@ -5,6 +5,8 @@ use super::style;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::file_list::{PcState, pc_glyph};
+use crate::theme::file_icons::icon_for;
+use crate::ui::file_icon::file_icon;
 use crate::ui::kit;
 use rune::{Align, Color, El, Icon, col, el, row};
 
@@ -59,6 +61,10 @@ pub struct Row {
     pub size: String,
     pub extra: Extra,
     pub pc: Option<PcState>,
+    /// The size in bytes, as the source knows it (a folder: `None`): what Sort by size orders by, never the drawn words.
+    pub bytes: Option<u64>,
+    /// The time the date column shows, Unix seconds, as the source knows it: what Sort by date orders by.
+    pub at: Option<i64>,
 }
 
 /// The column set of one section.
@@ -84,7 +90,7 @@ fn photo(tile: El) -> El {
 }
 
 /// A tile `d` points across (`.mk-ftile`). Keys: `<key>-tile` and `<icon_key>`.
-pub fn tile(key: &str, icon_key: String, kind: Kind, d: f32, r: f32, glyph: f32, t: &Theme) -> El {
+pub fn tile(key: &str, icon_key: String, name: &str, kind: Kind, d: f32, r: f32, glyph: f32, t: &Theme) -> El {
     let tile = el()
         .key(format!("{key}-tile"))
         .size(d, d)
@@ -96,8 +102,8 @@ pub fn tile(key: &str, icon_key: String, kind: Kind, d: f32, r: f32, glyph: f32,
         Kind::Photo(Some(Thumb::BoardDusk)) => return crate::ui::file_list::thumbnail(tile),
         _ => {}
     }
-    tile.fill(t.tile)
-        .child(kit::glyph(icon_key, kind.icon(), glyph, t.text_secondary))
+    let fi = icon_for(name, kind == Kind::Folder, None);
+    tile.fill(t.tile).child(file_icon(icon_key, fi, glyph, t))
 }
 
 /// The column headers (`.mk-thead`); the date column carries the sort arrow (newest first).
@@ -168,7 +174,7 @@ pub fn table_row(i: usize, r: &Row, selected: bool, c: &Columns, t: &Theme) -> E
         .min_w(0.0)
         .center_y()
         .gap(8.0)
-        .child(tile(&k, format!("{k}-icon"), r.kind, 22.0, 6.0, 14.0, t))
+        .child(tile(&k, format!("{k}-icon"), &r.name, r.kind, 22.0, 6.0, 14.0, t))
         .child(
             kit::label(format!("{k}-name"), r.name.clone(), type_::LIST_ITEM, t.text)
                 .truncate()
@@ -247,4 +253,81 @@ pub fn rows(name: &str, rows: Vec<El>) -> El {
         .px(6.0)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .children(rows)
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+    use crate::theme::file_icon_colors::tint_color;
+    use crate::theme::file_icons::Tint;
+    use crate::theme::tokens;
+
+    fn drawn(name: &str, kind: Kind) -> Option<Color> {
+        kit::record();
+        let _ = tile("row-0", "row-0-icon".into(), name, kind, 22.0, 6.0, 14.0, &tokens::theme(false));
+        kit::take().get("row-0-icon").and_then(|n| n.color)
+    }
+
+    #[test]
+    fn a_row_draws_the_registry_icon_in_its_tint() {
+        assert_eq!(drawn("Documents", Kind::Folder), Some(tint_color(Tint::Word, false)));
+        assert_eq!(drawn("notes.md", Kind::Document), Some(tint_color(Tint::Markdown, false)));
+        assert_eq!(drawn("song.flac", Kind::Document), Some(tint_color(Tint::Audio, false)));
+        assert_eq!(drawn("deck.pptx", Kind::Document), Some(tint_color(Tint::PowerPoint, false)));
+    }
+}
+
+/// Rows a PageUp / PageDown moves.
+pub const PAGE: usize = 10;
+
+/// The row PageUp / PageDown (`down`) lands on, from `at` (none: the first row), within `count` rows.
+pub fn page_to(at: Option<usize>, count: usize, down: bool) -> usize {
+    let at = at.unwrap_or(0);
+    if down { (at + PAGE).min(count.saturating_sub(1)) } else { at.saturating_sub(PAGE) }
+}
+
+/// Type-ahead: for a typed letter or digit, the next row after `at` (wrapping, `at` last) whose name starts with it.
+pub fn jump_to<'a>(names: impl Iterator<Item = &'a str>, at: Option<usize>, ev: &rune::KeyEvent) -> Option<usize> {
+    let m = ev.mods;
+    if m.cmd || m.ctrl || m.alt || m.logo {
+        return None;
+    }
+    let rune::Key::Text(t) = &ev.key else { return None };
+    let mut chars = t.chars();
+    let c = chars.next().filter(|c| c.is_alphanumeric() && chars.next().is_none())?;
+    let c = c.to_lowercase().next()?;
+    let names: Vec<&str> = names.collect();
+    let n = names.len();
+    (1..=n)
+        .map(|d| (at.map_or(0, |a| a + 1) + d - 1) % n.max(1))
+        .find(|&i| names[i].chars().next().is_some_and(|f| f.to_lowercase().next() == Some(c)))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use rune::{Key, KeyEvent, Mods};
+
+    fn typed(c: &str) -> KeyEvent {
+        KeyEvent { key: Key::Text(c.into()), mods: Mods::default() }
+    }
+
+    #[test]
+    fn pages_stop_at_the_ends() {
+        assert_eq!(page_to(Some(3), 100, true), 13);
+        assert_eq!(page_to(Some(95), 100, true), 99);
+        assert_eq!(page_to(Some(3), 100, false), 0);
+        assert_eq!(page_to(None, 100, true), 10);
+    }
+
+    #[test]
+    fn a_letter_jumps_to_the_next_name_and_wraps() {
+        let names = ["Alpha", "Beta", "Bravo", "Cat"];
+        assert_eq!(jump_to(names.into_iter(), Some(0), &typed("b")), Some(1));
+        assert_eq!(jump_to(names.into_iter(), Some(1), &typed("B")), Some(2));
+        assert_eq!(jump_to(names.into_iter(), Some(2), &typed("b")), Some(1));
+        assert_eq!(jump_to(names.into_iter(), None, &typed("a")), Some(0));
+        assert_eq!(jump_to(names.into_iter(), Some(0), &typed("z")), None);
+        assert_eq!(jump_to(names.into_iter(), Some(0), &typed(" ")), None);
+    }
 }

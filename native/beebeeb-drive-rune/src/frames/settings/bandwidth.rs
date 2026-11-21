@@ -163,8 +163,11 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     // Lists are numbered in the order the pane draws them.
     let mut list = 0;
     if matches!(crop, Crop::Whole | Crop::FromDevices) {
-        children.push(devices(list, &bw.devices, t));
-        list += 1;
+        // No source of other devices' reports: no card, never one with zero rows.
+        if !bw.devices.is_empty() {
+            children.push(devices(list, &bw.devices, t));
+            list += 1;
+        }
     }
     if crop != Crop::Head {
         children.push(limits(
@@ -538,7 +541,7 @@ fn bar(key: &str, share: f32, direction: Direction, t: &Theme) -> El {
 /// otherwise. The word says the state; the colour only repeats it.
 fn state_pill(i: usize, state: DeviceState, t: &Theme) -> El {
     if state != DeviceState::UpToDate {
-        return notices::pill(i, state.label(), t);
+        return crate::ui::pill::pill(&format!("pill-{}", i), state.label(), crate::ui::pill::Tone::Neutral, true, t);
     }
     let key = format!("pill-{i}");
     row()
@@ -670,7 +673,7 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_control: bool
             2,
             &metered,
             vec![
-                lists::switch(&format!("item-{list}-2"), "Sync on metered connections", on, t)
+                crate::ui::switch::switch_sized(&format!("{}-switch", &format!("item-{list}-2")), "", on, true, crate::ui::button::Size::Md, t).label("Sync on metered connections")
                     .on_press(move |s: &mut State| s.settings.drive.set_sync_on_metered(!on)),
             ],
             t,

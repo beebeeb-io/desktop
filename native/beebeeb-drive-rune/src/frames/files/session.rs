@@ -18,9 +18,9 @@
 
 use super::Intent;
 use crate::State;
-use crate::theme::tokens::{Theme, type_};
-use crate::ui::kit;
-use rune::{El, Tx, el, row};
+use crate::theme::tokens::Theme;
+use crate::ui::status_bar::{Dot, bar};
+use rune::{El, Tx};
 
 /// The board's answer (DW-1109: "The list as it was", "Nothing on this PC is removed"). `false`:
 /// the rows are not drawn while the session is not valid.
@@ -114,39 +114,7 @@ pub fn status_line(s: &State, t: &Theme) -> Option<El> {
     if !s.session_ended() {
         return None;
     }
-    Some(
-        row()
-            .key("status-bar")
-            .role("status")
-            .h(28.0)
-            .w_full()
-            .fill(t.status_bar_bg)
-            .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-            .border_layout()
-            .px(16.0)
-            .gap(7.0)
-            .center_y()
-            .child(
-                row()
-                    .key("status-left")
-                    .center_y()
-                    .gap(7.0)
-                    .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(t.red))
-                    .child(kit::label(
-                        "status-text",
-                        "Signed out",
-                        type_::STATUS_STRONG,
-                        t.text_secondary,
-                    )),
-            )
-            .child(el().key("status-spacer").grow(1.0))
-            .child(kit::label(
-                "status-details",
-                "Nothing syncs until you sign in",
-                type_::STATUS,
-                t.text_tertiary,
-            )),
-    )
+    Some(bar(Some(Dot::Red), Some("Signed out"), "Nothing syncs until you sign in", t))
 }
 
 /// The board frame: the window as it was, the session ended.

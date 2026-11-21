@@ -30,7 +30,7 @@ use crate::decode::{display_size, mix_channels, scale_letterbox};
 use crate::mf::Unavailable;
 use crate::mf::gate::Gate;
 use crate::read::{PipeReader, ReadFlags, SharedWire, Wire, lock};
-use crate::routes::{Decision, Track, decide, is_reduced_quality, state_for};
+use crate::routes::{Decision, Track, decide, is_reduced_quality, settled, state_for};
 use crate::sniff::{Bare, program_stream_mpeg_audio, sniff};
 use crate::system::{SystemOpen, SystemStreams};
 use crate::{ROUTES, Route, SYSTEM_FALLBACK, system, tags};
@@ -114,6 +114,8 @@ fn serve(
     table: &[(Codec, Route)],
     system_on: bool,
 ) {
+    // `ToHelper::LastHelper` came: no other helper follows this one.
+    let mut last_helper = false;
     loop {
         let msg = lock(wire).recv();
         // Reads reach the app only while this message is answered (also the system decoder's, from its threads).
@@ -124,7 +126,7 @@ fn serve(
                 if playing.is_some() {
                     vec![FromHelper::Error(ErrorCode::Internal)]
                 } else {
-                    match open(wire, flags, gate, len, table, system_on) {
+                    match open(wire, flags, gate, len, table, system_on, last_helper) {
                         Ok((p, opened, tags)) => {
                             *playing = Some(p);
                             // The title and artist follow `Opened` (the app shows them once it has the file).
@@ -144,6 +146,10 @@ fn serve(
                 if let Some(p) = playing.as_mut() {
                     seek(p, at_ms);
                 }
+                Vec::new()
+            }
+            Ok(ToHelper::LastHelper) => {
+                last_helper = true;
                 Vec::new()
             }
             // An answer nobody asked for: ignored.
@@ -174,6 +180,7 @@ fn open(
     len: u64,
     table: &[(Codec, Route)],
     system_on: bool,
+    last_helper: bool,
 ) -> Result<(Playing, Opened, Option<Tags>), ErrorCode> {
     if len == 0 {
         return Err(ErrorCode::Corrupt);
@@ -200,7 +207,7 @@ fn open(
     let source = match filmcraft_source(reader, bare) {
         Ok(source) => source,
         Err(e) if h264_refused(&e) && map_error(&e, flags) != ErrorCode::ReadFailed => {
-            return Err(refused_at_open(table, system_on));
+            return Err(refused_at_open(table, system_on, h264_ten_bit(&e)));
         }
         Err(e) => return Err(map_error(&e, flags)),
     };
@@ -218,9 +225,10 @@ fn open(
         .flatten()
         .find(|t| t.needs_system())
         .map_or(Codec::Other, |t| t.codec);
-    let state = state_for(video_track, audio_track, system_on, || {
-        system::availability(needs_codec)
-    });
+    let state = settled(
+        state_for(video_track, audio_track, system_on, || system::availability(needs_codec)),
+        last_helper,
+    );
     let (plan, on_system) = match decide(video_track, audio_track, state) {
         Decision::Ours(plan) => (plan, false),
         Decision::System(plan) => (plan, true),
@@ -250,7 +258,7 @@ fn open(
         }
         _ => None,
     };
-    let (audio, reduced_quality) = match (info.audio(), plan.audio) {
+    let (mut audio, mut reduced_quality) = match (info.audio(), plan.audio) {
         (Some(a), Some(codec)) => {
             let channels = a.channels.clamp(1, u32::from(MAX_CHANNELS)) as u16;
             let rate = a.sample_rate.clamp(1, MAX_RATE);
@@ -263,17 +271,32 @@ fn open(
         return Err(ErrorCode::NoDecoder);
     }
     // The wire takes a silent track only beside a video that plays and without audio; the decision gives no other.
-    let no_sound = plan.no_sound.filter(|_| video.is_some() && audio.is_none());
+    let mut no_sound = plan.no_sound.filter(|_| video.is_some() && audio.is_none());
     let duration_ms = (info.duration.seconds() * 1000.0).round().max(0.0) as u64;
     let system = if on_system {
-        Some(SystemStreams::open(SystemOpen {
-            pipe: &pipe,
-            gate,
-            flags,
-            container: &info.container,
-            video: plan.video.filter(|_| video.is_some()),
-            audio: plan.audio.filter(|_| audio.is_some()),
-        })?)
+        let open = |audio: Option<Codec>| {
+            SystemStreams::open(SystemOpen {
+                pipe: &pipe,
+                gate,
+                flags,
+                container: &info.container,
+                video: plan.video.filter(|_| video.is_some()),
+                audio,
+            })
+        };
+        let want_audio = plan.audio.filter(|_| audio.is_some());
+        Some(match open(want_audio) {
+            // ux-57: Windows has no decoder for the audio, but the video plays: open the video alone and say so.
+            // A video that cannot open either answers its own refusal from the second try.
+            Err(code) if video.is_some() && want_audio.is_some_and(|codec| silent_audio(code, codec)) => {
+                let streams = open(None)?;
+                audio = None;
+                reduced_quality = false;
+                no_sound = want_audio;
+                streams
+            }
+            other => other?,
+        })
     } else {
         None
     };
@@ -408,13 +431,19 @@ fn h264_refused(e: &MediaError) -> bool {
     matches!(e, MediaError::Unsupported(s) if s.starts_with(H264_REFUSED))
 }
 
+/// Whether FilmCraft's H.264 refusal is the stream's bit depth ("H.264: bit depth luma 10 ...").
+fn h264_ten_bit(e: &MediaError) -> bool {
+    matches!(e, MediaError::Unsupported(s) if s.starts_with("H.264: bit depth"))
+}
+
 /// The answer for a container whose H.264 video FilmCraft refused while it opened (MPEG-TS/PS: interlaced, 10-bit).
 /// The video decides first, so the audio (unknown here) does not change it: a refused H.264 track needs the system's
 /// decoder (row 19), and without it here the answer names H.264. Where the system's decoder runs, Windows' reader
 /// over a file FilmCraft could not describe is not wired: the same honest `NoSystemDecoder(H264)`.
-fn refused_at_open(table: &[(Codec, Route)], system_on: bool) -> ErrorCode {
+fn refused_at_open(table: &[(Codec, Route)], system_on: bool, ten_bit: bool) -> ErrorCode {
     let video = Some(Track {
         refused: true,
+        ten_bit,
         ..Track::of(table, Codec::H264)
     });
     let state = state_for(video, None, system_on, || system::availability(Codec::H264));
@@ -463,7 +492,10 @@ fn track_of_video(
         Err(e) => match map_error(&e, flags) {
             ErrorCode::ReadFailed => return Err(ErrorCode::ReadFailed),
             // A damaged first frame is answered where it always was: at the first `WantVideo`.
-            _ => track.refused = matches!(e, MediaError::Unsupported(_)),
+            _ => {
+                track.refused = matches!(e, MediaError::Unsupported(_));
+                track.ten_bit = track.refused && h264_ten_bit(&e);
+            }
         },
     }
     Ok(track)
@@ -570,8 +602,32 @@ fn map_error(e: &MediaError, flags: &ReadFlags) -> ErrorCode {
     }
 }
 
+/// Whether a failed open of the system's audio track `codec` still leaves a video that plays without sound: the PC
+/// has no decoder for the track (`NoSystemDecoder`, `NoSystemMedia`), or Windows' answer is no decoder that is there
+/// (`NoDecoder` from a failed call, `Internal` from a media type it will not take). The app's own failed reads, a
+/// corrupt or too large file are never silenced here.
+fn silent_audio(code: ErrorCode, codec: Codec) -> bool {
+    match code {
+        ErrorCode::NoSystemDecoder(named) | ErrorCode::NoSystemMedia(named) => named == codec,
+        ErrorCode::NoDecoder | ErrorCode::Internal => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_audio_decoder_is_silence_never_a_refusal_of_the_video() {
+        use ErrorCode::*;
+        for code in [NoSystemDecoder(Codec::Aac), NoSystemMedia(Codec::Aac), NoDecoder, Internal] {
+            assert!(silent_audio(code, Codec::Aac), "{code:?}");
+        }
+        // Another track's refusal, and failures that are not about the decoder, stay answers.
+        for code in [NoSystemDecoder(Codec::H264), ReadFailed, Corrupt, TooLarge, TenBit] {
+            assert!(!silent_audio(code, Codec::Aac), "{code:?}");
+        }
+    }
+
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
@@ -789,16 +845,19 @@ mod tests {
             assert!(!h264_refused(&MediaError::Unsupported(other.into())), "{other}");
         }
         assert!(!h264_refused(&MediaError::Decode("H.264: bad slice".into())));
+        assert!(h264_ten_bit(&MediaError::Unsupported("H.264: bit depth luma 10 chroma 10".into())));
+        assert!(!h264_ten_bit(&MediaError::Unsupported("H.264: interlaced (field / MBAFF) coding".into())));
+        assert_eq!(refused_at_open(ROUTES, false, true), ErrorCode::TenBit);
 
         // H.264 is FilmCraft's and falls back: with the switch off the refusal names it (M9's interlaced row).
-        assert_eq!(refused_at_open(ROUTES, false), ErrorCode::NoSystemDecoder(Codec::H264));
+        assert_eq!(refused_at_open(ROUTES, false, false), ErrorCode::NoSystemDecoder(Codec::H264));
         assert_eq!(
-            refused_at_open(&[(Codec::H264, Route::Rust)], false),
+            refused_at_open(&[(Codec::H264, Route::Rust)], false, false),
             ErrorCode::NoSystemDecoder(Codec::H264)
         );
         // An H.264 row that is off answers as any video that is not played here.
         assert_eq!(
-            refused_at_open(&[(Codec::H264, Route::Unavailable)], false),
+            refused_at_open(&[(Codec::H264, Route::Unavailable)], false, false),
             ErrorCode::Unsupported(Codec::H264)
         );
     }

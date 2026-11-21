@@ -368,92 +368,60 @@ fn item(name: &str) -> crate::source::DriveItem {
     }
 }
 
+/// w29: a list's Open of a file goes to the viewer whatever it is and wherever its bytes are: kept on this PC or
+/// not, a kind the viewer shows or one it has no preview for (that gets the "No preview" frame). The system's app is
+/// only ever the press on "Open in another app". A folder is not this group's.
 #[test]
-fn a_lists_open_of_a_file_kept_on_this_pc_is_left_to_its_own_app_and_another_file_opens_here() {
-    // Kept on this PC: not this group's, the source is not asked to open it, the route does not move.
-    let (mut rt, script) = window(Script {
-        kept_here: true,
-        ..Script::default()
-    });
-    let mut opened = true;
-    rt.update(|s, _| opened = open_item(s, &item("Invented routed.txt")));
-    frames(&mut rt, 4);
-    assert!(!opened);
-    assert_eq!(opens(&script, "open"), 0);
-    assert_eq!(opens(&script, "kept?"), 1);
-    assert_eq!(route_item(&rt), None);
-    assert!(rt.state.viewer.ui.is_none());
-
-    // Kept on this PC, and its own app would run it or load it, not show it: read here, never handed over.
-    for name in [
-        "Invented tool.py",
-        "Invented page.html",
-        "Invented run.sh",
-        "Invented data.json",
-    ] {
-        let (mut rt, script) = window(Script {
-            kept_here: true,
-            ..Script::default()
-        });
-        let mut opened = false;
-        rt.update(|s, _| opened = open_item(s, &item(name)));
-        frames(&mut rt, 4);
-        assert!(opened, "{name}");
-        assert_eq!(opens(&script, "open"), 1, "{name}");
-        assert_eq!(route_item(&rt).as_deref(), Some(FILE), "{name}");
-    }
-
-    // Not on this PC: the viewer.
-    let (mut rt, script) = window(Script::default());
-    let mut opened = false;
-    rt.update(|s, _| opened = open_item(s, &item("Invented routed.txt")));
-    frames(&mut rt, 4);
-    assert!(opened);
-    assert_eq!(opens(&script, "open"), 1);
-    assert_eq!(route_item(&rt).as_deref(), Some(FILE));
-    assert!(drawn(&rt).contains(WORDS));
-}
-
-/// Step 5 turned the Office switches on: a list's Open of an Office file goes to the viewer (a `.ppt` to its no-preview
-/// state), kept on this PC or not, as the engine's source opens a kept Office file here. Before, `viewer_of` alone
-/// decided, it has no Office kind, and every Office file went to the system's app ("Open (Beebeeb)" too).
-#[test]
-fn a_lists_open_of_an_office_file_goes_to_the_viewer_while_its_route_is_on() {
-    assert!(super::kinds::OFFICE_VIEWER_ON, "the shipped switches are on");
+fn a_lists_open_of_any_file_goes_to_the_viewer_kept_on_this_pc_or_not() {
     for kept in [false, true] {
-        for name in [
-            "Invented letter.docx",
-            "Invented letter.doc",
-            "Invented sheet.xlsx",
-            "Invented sheet.xls",
-            "Invented deck.pptx",
-            "Invented deck.ppt",
-        ] {
-            let (mut rt, script) = window(Script {
-                kept_here: kept,
-                opens_here: true,
-                ..Script::default()
-            });
-            let mut opened = false;
-            rt.update(|s, _| opened = open_item(s, &item(name)));
-            frames(&mut rt, 4);
-            assert!(opened, "{name}, kept {kept}");
-            assert_eq!(opens(&script, "open"), 1, "{name}, kept {kept}");
-            assert_eq!(route_item(&rt).as_deref(), Some(FILE), "{name}, kept {kept}");
+        for opens_here in [false, true] {
+            for name in [
+                "Invented routed.txt",
+                "Invented tool.py",
+                "Invented page.html",
+                "Invented doc.pdf",
+                "Invented pic.png",
+                "Invented clip.mp4",
+                "Invented song.mp3",
+                "Invented letter.docx",
+                "Invented letter.doc",
+                "Invented sheet.xlsx",
+                "Invented sheet.xls",
+                "Invented deck.pptx",
+                "Invented deck.ppt",
+                "Invented deck.pps",
+                "Invented file.docm",
+                "Invented file.ppsx",
+                "Invented scene.blend",
+                "no-extension",
+            ] {
+                let (mut rt, script) = window(Script {
+                    kept_here: kept,
+                    opens_here,
+                    ..Script::default()
+                });
+                let mut opened = false;
+                rt.update(|s, _| opened = open_item(s, &item(name)));
+                frames(&mut rt, 4);
+                let why = format!("{name}, kept {kept}, office {opens_here}");
+                assert!(opened, "{why}");
+                assert_eq!(opens(&script, "open"), 1, "{why}");
+                assert_eq!(route_item(&rt).as_deref(), Some(FILE), "{why}");
+            }
         }
     }
-    // The same files from a source with no Office renderer (the board's fixture): their own app's.
+    // A folder is not a file for the viewer.
     let (mut rt, script) = window(Script::default());
     let mut opened = true;
-    rt.update(|s, _| opened = open_item(s, &item("Invented letter.docx")));
-    frames(&mut rt, 4);
-    assert!(!opened);
-    assert_eq!(opens(&script, "open"), 0);
-    // A kind no viewer and no Office route shows: the system's app, the source not asked.
-    let (mut rt, script) = window(Script::default());
-    let mut opened = true;
-    rt.update(|s, _| opened = open_item(s, &item("Invented scene.blend")));
-    frames(&mut rt, 4);
+    rt.update(|s, _| {
+        opened = open_item(
+            s,
+            &crate::source::DriveItem {
+                is_folder: true,
+                ..item("Invented folder")
+            },
+        )
+    });
     assert!(!opened);
     assert_eq!(opens(&script, "open"), 0);
 }
@@ -672,31 +640,26 @@ fn a_file_that_is_left_takes_its_name_its_folders_and_its_details_and_none_is_pr
     assert!(file.newer.as_ref().is_some_and(|newer| newer.from.is_empty()));
 }
 
+/// The toolbar of every open file has the reveal button; pressing it shows THAT file in its folder through the Files
+/// source's reveal step, and nothing else (no open, no hydrate). A file with no place here gets a line, never a crash.
 #[test]
-fn a_document_goes_to_its_own_app_and_code_a_script_or_a_web_page_does_not() {
-    use super::kinds::its_app_shows_it;
-    for name in [
-        "a.txt",
-        "a.LOG",
-        "a.md",
-        "a.markdown",
-        "a.csv",
-        "a.tsv",
-        "a.pdf",
-        "a.png",
-        "a.jpg",
-        "a.gif",
-        "a.webp",
-        // Not this group's to route at all: left as it was.
-        "a.docx",
-        "no-extension",
-    ] {
-        assert!(its_app_shows_it(name), "{name}");
-    }
-    for name in [
-        "a.py", "a.sh", "a.js", "a.ts", "a.html", "a.HTML", "a.xml", "a.css", "a.json", "a.toml", "a.yaml", "a.yml",
-        "a.rs",
-    ] {
-        assert!(!its_app_shows_it(name), "{name}");
-    }
+fn the_toolbar_shows_the_open_file_in_its_folder_through_the_reveal_step() {
+    use crate::frames::files::source::{Call, FilesFixture, NoEngine};
+    let (mut rt, _script) = window(Script::default());
+    let fixture = FilesFixture::default();
+    let calls = fixture.calls.clone();
+    rt.update(|s, _| s.actions.source = Box::new(fixture));
+    route_to_file(&mut rt);
+    let label = crate::frames::show_in_folder::label();
+    assert!(drawn(&rt).contains(label), "the toolbar says {label}:\n{}", drawn(&rt));
+    click(&mut rt, "show-in-folder");
+    assert_eq!(*calls.lock().unwrap(), [Call::ShowInFileExplorer(vec![FILE.into()])]);
+    assert_eq!(rt.state.viewer.ui.as_ref().unwrap().toast, None);
+    // No place on this PC: the line, in the window's own toast.
+    rt.update(|s, _| s.actions.source = Box::new(NoEngine));
+    click(&mut rt, "show-in-folder");
+    assert_eq!(
+        rt.state.viewer.ui.as_ref().unwrap().toast.as_deref(),
+        Some(crate::frames::show_in_folder::NOT_CONNECTED)
+    );
 }

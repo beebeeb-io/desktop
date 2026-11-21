@@ -106,6 +106,7 @@ impl BoardMore {
             folder: "%LOCALAPPDATA%\\io.beebeeb.app\\diagnostics\\".into(),
             file: "beebeeb-diagnostics-1793956320.json".into(),
             draft_opened: true,
+            path: std::path::PathBuf::from("beebeeb-diagnostics-1793956320.json"),
         }
     }
 

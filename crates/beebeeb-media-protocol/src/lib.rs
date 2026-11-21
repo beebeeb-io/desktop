@@ -26,6 +26,8 @@ use std::io::{self, Read, Write};
 #[cfg(test)]
 mod tests;
 
+pub mod image;
+
 // ---- Limits ----
 
 /// The largest control message (everything that is not bulk), in bytes.
@@ -194,6 +196,11 @@ pub enum ErrorCode {
     Timeout,
     /// Anything else inside the helper.
     Internal,
+    /// A 10-bit H.264 stream that no decoder on this PC takes (ux-24): said as itself, not as "no decoder".
+    TenBit,
+    /// The file's video is a codec this build does not recognise at all, in any container (an unknown codec in a
+    /// Matroska file, ux-24): said as itself, not as "no decoder".
+    UnknownCodec,
 }
 
 impl ErrorCode {
@@ -209,6 +216,8 @@ impl ErrorCode {
             ErrorCode::Timeout => [6, 0],
             ErrorCode::Internal => [7, 0],
             ErrorCode::NoSystemMedia(codec) => [8, codec.byte()],
+            ErrorCode::TenBit => [9, 0],
+            ErrorCode::UnknownCodec => [10, 0],
         }
     }
 
@@ -230,6 +239,8 @@ impl ErrorCode {
             6 => plain(ErrorCode::Timeout),
             7 => plain(ErrorCode::Internal),
             8 => Ok(ErrorCode::NoSystemMedia(Codec::of(codec)?)),
+            9 => plain(ErrorCode::TenBit),
+            10 => plain(ErrorCode::UnknownCodec),
             _ => Err(WireError::Malformed),
         }
     }
@@ -253,10 +264,13 @@ pub enum Route {
 }
 
 /// Whether a stream whose route is [`Route::System`] is played at all. It needs the helper to start in the
-/// sandbox's system-decoder profile, which may read the registry (decision 2541). OFF until the media checkpoint's
-/// build, the attack probe against both profiles and the security review are green; while it is off,
-/// [`profile_for`] answers `None`, the app keeps the default profile, and such a file shows "Open in another app…".
-pub const MEDIA_SYSTEM_DECODER_ON: bool = false;
+/// sandbox's system-decoder profile, which may read the registry (decision 2541). ON (the owner's ruling of
+/// 2026-11-20, ux-02: with it off no HEVC clip played at all, nor an interlaced or 10-bit H.264 one, and an H.264
+/// clip with AAC sound played silent, on a PC that has Windows' decoders for all of them). The PC's own decoder
+/// plays such a stream when the PC has one; a PC without one answers [`ErrorCode::NoSystemDecoder`] from the
+/// system-decoder profile, and the app says so with "Open in default app" one press away. With the switch off,
+/// [`profile_for`] answers `None`, the app keeps the default profile and no such stream plays.
+pub const MEDIA_SYSTEM_DECODER_ON: bool = true;
 
 /// What the sandbox's system-decoder profile must allow for one file. The app makes it
 /// `beebeeb_office_sandbox::Profile::SystemDecoder { hevc }` (this crate has no dependency, so it cannot name it).
@@ -301,6 +315,11 @@ pub enum ToHelper {
     Seek { at_ms: u64 },
     /// Stop; the helper exits.
     Close,
+    /// Sent before `Open` to the helper the app started in the system decoder's profile: no other helper follows
+    /// this one. Where the system's decoders do not start in it either, that is this PC's answer: a video this
+    /// crate's own decoder plays is played without the audio track that needed them (`Opened::no_sound`), and
+    /// nothing else changes (ux-57).
+    LastHelper,
 }
 
 /// Counts and kinds, never a byte of the file.
@@ -316,6 +335,7 @@ impl fmt::Debug for ToHelper {
             }
             ToHelper::Seek { at_ms } => write!(f, "Seek({at_ms} ms)"),
             ToHelper::Close => f.write_str("Close"),
+            ToHelper::LastHelper => f.write_str("LastHelper"),
         }
     }
 }
@@ -550,6 +570,7 @@ const T_WANT_VIDEO: u8 = 0x04;
 const T_WANT_AUDIO: u8 = 0x05;
 const T_SEEK: u8 = 0x06;
 const T_CLOSE: u8 = 0x07;
+const T_LAST_HELPER: u8 = 0x08;
 
 const T_READ_AT: u8 = 0x81;
 const T_OPENED: u8 = 0x82;
@@ -637,6 +658,7 @@ impl Message for ToHelper {
                 put_u64(head, *at_ms);
             }
             ToHelper::Close => head.push(T_CLOSE),
+            ToHelper::LastHelper => head.push(T_LAST_HELPER),
         }
         Ok(NO_BULK)
     }
@@ -762,7 +784,7 @@ fn to_helper_max(tag: u8) -> Option<usize> {
         T_WANT_VIDEO => 4 + 4,
         T_WANT_AUDIO => 4 + 2 + 4,
         T_SEEK => 8,
-        T_CLOSE => 0,
+        T_CLOSE | T_LAST_HELPER => 0,
         _ => return None,
     })
 }
@@ -1034,6 +1056,7 @@ pub fn read_to_helper<R: Read + ?Sized>(r: &mut R) -> Result<ToHelper, WireError
         }
         T_SEEK => ToHelper::Seek { at_ms: body.u64()? },
         T_CLOSE => ToHelper::Close,
+        T_LAST_HELPER => ToHelper::LastHelper,
         _ => return Err(WireError::UnknownTag(tag)),
     };
     body.finish()?;

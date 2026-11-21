@@ -18,22 +18,27 @@
   A release binary is installed as beebeeb-desktop.exe, the name 0.8.x installed: the autostart entry, the
   shortcuts, the Explorer integration and 0.8.x's own updater all point at that file name (spec section 3).
 
-  The script needs NSIS 3.11 (makensis.exe) and nsis_tauri_utils.dll 0.5.3 (the NSIS helper plugin the 0.8.x
-  installer already carries: process lookup, semver compare, start-as-user). Both are in the Tauri toolchain cache of
-  a PC that has built 0.8.x (%LOCALAPPDATA%\tauri\NSIS). The plugin, the compiler (Bin\makensis.exe) and the stub it
-  packs into the installer (Stubs\lzma_solid-x86-unicode) are checked by SHA-256: release mode refuses anything but
-  NSIS 3.11 as released; test mode says so and goes on.
+  The script needs an installed NSIS 3.11 (makensis.exe) and nsis_tauri_utils.dll 0.5.3 (the NSIS helper plugin the
+  0.8.x installer already carries: process lookup, semver compare, start-as-user). NSIS is looked for in this order:
+  -NsisDir, the BEEBEEB_NSIS_DIR environment variable, then C:\Program Files (x86)\NSIS (and Program Files). The
+  Tauri toolchain cache is no longer looked at. The plugin comes from -PluginDir, the BEEBEEB_NSIS_PLUGIN_DIR
+  environment variable, or <NSIS folder>\Plugins\x86-unicode\additional. The plugin, the compiler
+  (Bin\makensis.exe) and the stub it packs into the installer (Stubs\lzma_solid-x86-unicode) are checked by SHA-256:
+  release mode refuses anything but NSIS 3.11 as released; test mode says so and goes on.
 
 .EXAMPLE
-  .\build-installer.ps1 -Exe C:\bb-win\native\target\release\beebeeb-drive.exe -Version 0.9.0 -Mode test
+  .\build-installer.ps1 -Exe C:\bb-win\native\target\release\beebeeb-drive.exe `
+    -OfficeRenderExe ...\beebeeb-office-render.exe -MediaHelperExe ...\beebeeb-media-helper.exe -Version 0.9.0 -Mode test
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$Exe,
   [Parameter(Mandatory = $true)][string]$Version,
+  [string]$OfficeRenderExe = '',
+  [string]$MediaHelperExe = '',
   [ValidateSet('test', 'release')][string]$Mode = 'test',
   [string]$OutDir = (Join-Path $PSScriptRoot 'out'),
-  [string]$NsisDir = (Join-Path $env:LOCALAPPDATA 'tauri\NSIS'),
+  [string]$NsisDir = '',
   [string]$PluginDir = ''
 )
 
@@ -56,11 +61,22 @@ function Fail([string]$Message) { Write-Host "FAILED $Message"; exit 1 }
 
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { Fail "version '$Version' must be plain semver like 0.9.0" }
 if (!(Test-Path -LiteralPath $Exe -PathType Leaf)) { Fail "no binary at $Exe" }
+# NSIS: -NsisDir, then BEEBEEB_NSIS_DIR, then an installed NSIS under Program Files.
+$nsisHint = 'install NSIS 3.11 from its official release (nsis.sourceforge.io) and pass -NsisDir <folder>, or set BEEBEEB_NSIS_DIR'
+if (!$NsisDir) { $NsisDir = $env:BEEBEEB_NSIS_DIR }
+if (!$NsisDir) {
+  $candidates = @()
+  if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} 'NSIS') }
+  if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles 'NSIS') }
+  foreach ($c in $candidates) { if (Test-Path -LiteralPath (Join-Path $c 'makensis.exe')) { $NsisDir = $c; break } }
+}
+if (!$NsisDir) { Fail "no NSIS found (looked at -NsisDir, BEEBEEB_NSIS_DIR, Program Files (x86)\NSIS, Program Files\NSIS): $nsisHint" }
 $makensis = Join-Path $NsisDir 'makensis.exe'
-if (!(Test-Path -LiteralPath $makensis)) { Fail "no makensis.exe in $NsisDir (pass -NsisDir)" }
+if (!(Test-Path -LiteralPath $makensis)) { Fail "no makensis.exe in ${NsisDir}: $nsisHint" }
+if (!$PluginDir) { $PluginDir = $env:BEEBEEB_NSIS_PLUGIN_DIR }
 if (!$PluginDir) { $PluginDir = Join-Path $NsisDir 'Plugins\x86-unicode\additional' }
 $plugin = Join-Path $PluginDir 'nsis_tauri_utils.dll'
-if (!(Test-Path -LiteralPath $plugin)) { Fail "no nsis_tauri_utils.dll in $PluginDir (pass -PluginDir)" }
+if (!(Test-Path -LiteralPath $plugin)) { Fail "no nsis_tauri_utils.dll in $PluginDir (0.5.3 from github.com/tauri-apps/nsis-tauri-utils, release nsis_tauri_utils-v0.5.3; pass -PluginDir or set BEEBEEB_NSIS_PLUGIN_DIR)" }
 $pluginHash = (Get-FileHash -LiteralPath $plugin -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($pluginHash -ne $PluginSha256) { Fail "nsis_tauri_utils.dll is not 0.5.3 (sha256 $pluginHash)" }
 foreach ($entry in $NsisSha256.GetEnumerator()) {
@@ -85,6 +101,12 @@ function Test-BinaryHolds([string]$Path, [string]$Text) {
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
+# Default: the helpers built beside the app binary (one target folder).
+if (!$OfficeRenderExe) { $OfficeRenderExe = Join-Path (Split-Path -Parent $Exe) 'beebeeb-office-render.exe' }
+if (!$MediaHelperExe) { $MediaHelperExe = Join-Path (Split-Path -Parent $Exe) 'beebeeb-media-helper.exe' }
+foreach ($h in @($OfficeRenderExe, $MediaHelperExe)) { if (!(Test-Path -LiteralPath $h -PathType Leaf)) { Fail "no helper binary at $h" } }
+$OfficeRenderExe = (Resolve-Path -LiteralPath $OfficeRenderExe).Path
+$MediaHelperExe = (Resolve-Path -LiteralPath $MediaHelperExe).Path
 $PluginDir = (Resolve-Path -LiteralPath $PluginDir).Path
 
 # The installer must not fetch or carry WebView2. The built installer is LZMA-compressed, so this is checked on
@@ -127,6 +149,27 @@ if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -F
 New-Item -ItemType Directory -Force $stage | Out-Null
 $staged = Join-Path $stage "$MainBinaryName.exe"
 Copy-Item -LiteralPath $Exe -Destination $staged
+$stagedOffice = Join-Path $stage 'beebeeb-office-render.exe'
+$stagedMedia = Join-Path $stage 'beebeeb-media-helper.exe'
+Copy-Item -LiteralPath $OfficeRenderExe -Destination $stagedOffice
+Copy-Item -LiteralPath $MediaHelperExe -Destination $stagedMedia
+# The third-party licence notice goes in every installer (legal review 2026-11-18). It is generated and committed
+# (packaging\licences\generate.sh); refuse a missing, stale or other-release one rather than ship an installer without.
+$licenceSrc = Join-Path $repo 'packaging\licences\THIRD-PARTY-LICENSES.md'
+if (!(Test-Path -LiteralPath $licenceSrc) -or (Get-Item -LiteralPath $licenceSrc).Length -lt 10000) {
+  Fail "the licence notice is missing or empty: $licenceSrc (run packaging/licences/generate.sh)"
+}
+$noticeText = [IO.File]::ReadAllText($licenceSrc)
+if ($noticeText -notmatch "(?m)^release-version: $([regex]::Escape($Version))\r?$") { Fail "the licence notice is for another release than $Version (run: VERSION=$Version packaging/licences/generate.sh)" }
+# Stale vs Cargo.lock: the notice records the hash of each lock (CR bytes removed, so a CRLF checkout agrees).
+foreach ($lk in @(@('app', 'native\beebeeb-drive-rune'), @('office-render', 'native\beebeeb-office-render'), @('media-helper', 'native\beebeeb-media-helper'))) {
+  $bytes = [IO.File]::ReadAllBytes((Join-Path $repo "$($lk[1])\Cargo.lock")) | Where-Object { $_ -ne 13 }
+  $sha = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([byte[]]$bytes)).Replace('-', '').ToLowerInvariant()
+  if ($noticeText -notmatch "(?m)^cargo-lock-sha256 $($lk[0]): $sha\r?$") { Fail "the licence notice is stale: $($lk[1])\Cargo.lock changed since it was generated (run packaging/licences/generate.sh)" }
+}
+$stagedLicence = Join-Path $stage 'THIRD-PARTY-LICENSES.md'
+Copy-Item -LiteralPath $licenceSrc -Destination $stagedLicence
+if (!(Test-Path -LiteralPath $stagedLicence)) { Fail 'the licence notice did not reach the staged files' }
 $outFile = Join-Path $OutDir ("{0}_{1}_x64-setup.exe" -f $product, $Version)
 if (Test-Path -LiteralPath $outFile) { Remove-Item -LiteralPath $outFile -Force }
 
@@ -138,12 +181,14 @@ if ($Mode -eq 'release') {
   if ($info.ProductName -ne 'Beebeeb' -or "$($info.ProductVersion)" -notin @($Version, "$Version.0")) {
     Fail "the binary's version resource says '$($info.ProductName)' '$($info.ProductVersion)', expected 'Beebeeb' '$Version' (the native crate must embed icon and version)"
   }
-  & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $signScript $staged
-  if ($LASTEXITCODE -ne 0) { Fail "signing the app binary (exit $LASTEXITCODE)" }
+  foreach ($f in @($staged, $stagedOffice, $stagedMedia)) {
+    & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $signScript $f
+    if ($LASTEXITCODE -ne 0) { Fail "signing $f (exit $LASTEXITCODE)" }
+  }
   $uninstallerSign = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$signScript`" %1"
 }
 
-$sizeKiB = [int][Math]::Ceiling((Get-Item -LiteralPath $staged).Length / 1024)
+$sizeKiB = [int][Math]::Ceiling((@($staged, $stagedOffice, $stagedMedia) | ForEach-Object { (Get-Item -LiteralPath $_).Length } | Measure-Object -Sum).Sum / 1024)
 $defines = @(
   "/DPRODUCTNAME=$product",
   "/DBUNDLEID=$bundleId",
@@ -151,6 +196,9 @@ $defines = @(
   "/DVERSIONWITHBUILD=$Version.0",
   "/DMAINBINARYNAME=$MainBinaryName",
   "/DMAINBINARYSRCPATH=$staged",
+  "/DOFFICERENDERSRCPATH=$stagedOffice",
+  "/DMEDIAHELPERSRCPATH=$stagedMedia",
+  "/DLICENSESRCPATH=$stagedLicence",
   "/DINSTALLERICON=$icon",
   "/DOUTFILE=$outFile",
   "/DADDITIONALPLUGINSPATH=$PluginDir",

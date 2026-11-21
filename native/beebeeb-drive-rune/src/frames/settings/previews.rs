@@ -13,6 +13,7 @@ use crate::State;
 use crate::frames::signin::setup::source::{BUNDLED_SAMPLE_PNG, Sample};
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
+use crate::ui::button as ui_button;
 use crate::ui::kit;
 use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, Emphasis};
@@ -21,6 +22,7 @@ use crate::ui::settings_list::{self as lists, Item, Trailing};
 use crate::ui::settings_meter as meters;
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::setup::{self, SegInk, SegSize};
 use rune::{Color, El, Family, Pixels, Span, TextStyle, col, el, rich, row};
 
@@ -110,6 +112,9 @@ pub enum PhotoPreviews {
     Loading,
     /// The read failed: the pane says why (a fixed sentence) and offers Try again.
     Failed(&'static str),
+    /// The vault is not this account's (locked, or signed out): the pane says why and what to do, never a
+    /// loading state that does not end. The sentence says both.
+    NotBound(&'static str),
     Ready(Previews),
 }
 
@@ -209,7 +214,7 @@ impl SettingsUi {
     fn stored_previews(&self) -> Option<(PreviewSize, PreviewFormat)> {
         match self.drive.photo_previews() {
             PhotoPreviews::Ready(p) => Some((p.size, p.format)),
-            PhotoPreviews::Unavailable | PhotoPreviews::Loading | PhotoPreviews::Failed(_) => None,
+            _ => None,
         }
     }
 
@@ -320,6 +325,10 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             children.push(failed(why, t));
             return (shell::pane(children, t), None);
         }
+        PhotoPreviews::NotBound(words) => {
+            children.push(not_bound(words, t));
+            return (shell::pane(children, t), None);
+        }
     };
     ui.previews.show(p.sample.as_ref());
 
@@ -333,7 +342,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             &Item::new(Some(&ic::IMAGE), "Photo previews")
                 .sub("Photos open instantly, without downloading the original"),
             vec![
-                lists::switch("item-0-0", "Photo previews", on, t)
+                crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-0"), "", on, true, crate::ui::button::Size::Md, t).label("Photo previews")
                     .on_press(move |s: &mut State| s.settings.drive.set_photo_previews(!on)),
             ],
             t,
@@ -499,38 +508,37 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 /// The Format caption on the board.
 const FORMAT_CAPTION: &str = "HEIC is about half the size at the same quality. JPEG opens anywhere.";
 
-/// While the source reads: one card of placeholders, never a value.
+/// While the source reads: the shared loading state, never a value.
 fn loading(t: &Theme) -> El {
-    let mut card = cards::column(0, 16.0, 12.0, t).role("status").label("Loading");
-    for (i, (w, h)) in [(Some(120.0), 10.0), (Some(220.0), 24.0), (None, 26.0)]
-        .iter()
-        .enumerate()
-    {
-        card = card.child(meters::skeleton(i, *w, *h, t));
-    }
-    card
+    view_state(ViewState::Loading { words: "Loading your preview settings" }, t)
 }
 
-/// The read failed: said plainly, with one way to try again.
+/// The read failed: said plainly, with a Try again that reads again.
 fn failed(why: &'static str, t: &Theme) -> El {
-    const HEAD: &str = "Couldn't load your preview settings";
-    let again = controls::button(0, "Try again", None, Emphasis::Plain, t)
-        .on_press(|s: &mut State| s.settings.drive.reload_previews());
-    cards::card(0, t)
-        .items_start()
-        .role("alert")
-        .label(format!("{HEAD}. {why}"))
-        .child(notices::tile(0, Tone::Red, &ic::WARN_CIRCLE, t))
-        .child(
-            col()
-                .key("card-0-words")
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(4.0)
-                .child(cards::head(0, HEAD, t))
-                .child(kit::label("card-0-sub", why, SUB, t.text_tertiary))
-                .child(row().key("card-0-actions").pt(8.0).child(again)),
-        )
+    let again = try_again("previews-failed", t).on_press(|s: &mut State| s.settings.drive.reload_previews());
+    view_state(
+        ViewState::Failed {
+            key: "previews-failed",
+            title: "Couldn't load your preview settings",
+            why,
+            retry: Some(again),
+        },
+        t,
+    )
+}
+
+/// The vault is not this account's: why, and what to do.
+fn not_bound(words: &'static str, t: &Theme) -> El {
+    view_state(
+        ViewState::Empty {
+            key: "previews-locked",
+            icon: &ic::PADLOCK,
+            title: "Preview settings are locked",
+            body: words,
+            action: None,
+        },
+        t,
+    )
 }
 
 /// The sample: the photo, what its preview weighs against the original, and Compare
@@ -765,31 +773,6 @@ fn option(j: usize, label: &str, weight: Option<String>, on: bool, t: &Theme) ->
     o
 }
 
-/// A small button of the compare view (`.kit-btn.kit-btn-sm`, as `settings_controls::button`),
-/// its words exactly as wide as they measure: a hugging text is snapped up to a device pixel,
-/// which moves the words of a centred row by a fraction. Keys: `btn-<N>`, `btn-<N>-label`.
-fn word_button(index: usize, label: &str, t: &Theme) -> El {
-    let key = format!("btn-{index}");
-    row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .center()
-        .radius(radius::MD)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(
-            kit::label(format!("{key}-label"), label, type_::BUTTON_SM, t.text)
-                .w(rune::text::advance(label, type_::BUTTON_SM)),
-        )
-}
-
 /// DW-0745: a preview against the original, before choosing a size.
 fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
     let dim = Color::WHITE.alpha(0.7);
@@ -805,9 +788,17 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         .gap(12.0)
         .center_y()
         .child(
-            word_button(1, "Done", t)
-                .default_button()
-                .on_press(|s: &mut State| s.settings.close_compare()),
+            ui_button::button(
+                ui_button::keys("btn-1"),
+                "Done",
+                None,
+                ui_button::Variant::Secondary,
+                ui_button::Size::Sm,
+                ui_button::ButtonState::Enabled,
+                t,
+            )
+            .default_button()
+            .on_press(|s: &mut State| s.settings.close_compare()),
         )
         .child(setup::segmented(
             "cmp-seg",
@@ -869,7 +860,16 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         );
     }
     foot = foot.child(
-        word_button(2, "Choose photo", t).on_press(|s: &mut State| s.settings.ask(Intent::Open("choose-photo"))),
+        ui_button::button(
+            ui_button::keys("btn-2"),
+            "Choose photo",
+            None,
+            ui_button::Variant::Secondary,
+            ui_button::Size::Sm,
+            ui_button::ButtonState::Enabled,
+            t,
+        )
+        .on_press(|s: &mut State| s.settings.ask(Intent::Open("choose-photo"))),
     );
     // The buttons are the light theme's paper on the dark ground in both themes, as the
     // board draws them; the sheet hangs from the caption, centred across the window.

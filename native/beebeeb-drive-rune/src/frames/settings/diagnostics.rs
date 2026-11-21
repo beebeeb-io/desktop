@@ -13,6 +13,7 @@ use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item};
 use crate::ui::settings_notice::NOTE;
 use crate::ui::settings_shell as shell;
+use crate::ui::view_state::{ViewState, view_state};
 use rune::tok::Family;
 use rune::{El, Shape, Span, canvas, el, rich, row};
 
@@ -68,6 +69,8 @@ pub enum Bundle {
         folder: String,
         file: String,
         draft_opened: bool,
+        /// The saved file in full, for "Show in File Explorer" (never drawn: a person's own path).
+        path: std::path::PathBuf,
     },
     /// Not saved: the reason, in the engine's words.
     Failed(String),
@@ -121,6 +124,7 @@ fn banner(bundle: &Bundle, t: &Theme) -> Option<El> {
             folder,
             file,
             draft_opened,
+            ..
         } => (
             &ic::CHECK,
             "Support bundle saved.",
@@ -229,26 +233,56 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             0,
             Some("App activity"),
             rows,
-            Some("Beebeeb's own use of this PC, sampled every 2 seconds while this page is open."),
+            Some("Beebeeb's own use of this PC, sampled every 2 seconds while this page is open. Upload and download are the latest bandwidth sample, not a live rate."),
             t,
         ));
     }
 
     if d.activity.is_empty() {
-        // Nothing samples the app's own use of this PC in this version: said, not left out.
+        // The sampler fills this about 2 seconds after the page opens: said, with what will show.
         children.push(lists::list(
             0,
             Some("App activity"),
-            vec![lists::item(
-                0,
-                0,
-                &Item::new(Some(&ic::GAUGE), "Not available in this version yet."),
+            vec![view_state(
+                ViewState::Empty {
+                    key: "activity-empty",
+                    icon: &ic::GAUGE,
+                    title: "No measurements yet",
+                    body: "CPU, memory, upload and download appear here about 2 seconds after this page opens, and stop when you leave it.",
+                    action: None,
+                },
                 t,
             )],
             None,
             t,
         ));
     }
+
+    // The log file (LD-0087): where the rotating, redacted log lives, with Open folder.
+    let log_row = match crate::log_file::dir() {
+        Some(dir) => lists::item_with(
+            3,
+            0,
+            &Item::new(Some(&ic::BOX), "Log file").sub(format!(
+                "{} in {}. Kept to two files of 5 MB; sign-in tokens and file names are removed.",
+                crate::log_file::FILE_NAME,
+                dir.display()
+            )),
+            vec![
+                controls::button(9, "Open folder", None, Emphasis::Plain, t)
+                    .on_press(|s: &mut State| s.settings.ask(Intent::Open("log-folder"))),
+            ],
+            t,
+        ),
+        None => lists::item(
+            3,
+            0,
+            &Item::new(Some(&ic::WARN_CIRCLE), "No log file on this PC")
+                .sub("Beebeeb could not make its log folder when it started, so nothing is being written."),
+            t,
+        ),
+    };
+    children.push(lists::list(3, Some("Log file"), vec![log_row], None, t));
 
     children.push(lists::list(
         1,
@@ -290,7 +324,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             2,
             1,
             &Item::new(Some(&ic::CHAT), "Get help")
-                .sub("Opens our support page in your browser.")
+                .sub("Opens a draft to support in your email app.")
                 .trailing(lists::Trailing::External)
                 .role(lists::Role::Link),
             t,

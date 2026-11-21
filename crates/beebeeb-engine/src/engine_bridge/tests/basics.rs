@@ -172,49 +172,17 @@ fn test_prepare_thumbnail_uploads_encrypts_medium_and_large_with_blurhash() {
     }
 }
 
+/// A video's thumbnail comes only from the confined media helper (no ffmpeg, no program found by name). With no
+/// helper in a test run the upload prepares no thumbnail, and says so, rather than starting anything.
 #[test]
-fn test_prepare_thumbnail_uploads_extracts_video_frame_when_ffmpeg_available() {
-    if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
-        return;
-    }
-
+fn test_prepare_thumbnail_uploads_for_video_without_a_helper_is_no_video_frame() {
     let dir = tempfile::tempdir().unwrap();
     let payload = dir.path().join("clip.mp4");
-    let status = std::process::Command::new("ffmpeg")
-        .arg("-nostdin")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-y")
-        .arg("-f")
-        .arg("lavfi")
-        .arg("-i")
-        .arg("testsrc=size=16x16:rate=1")
-        .arg("-t")
-        .arg("1")
-        .arg("-pix_fmt")
-        .arg("yuv420p")
-        .arg(&payload)
-        .status()
-        .unwrap();
-    if !status.success() {
-        return;
-    }
-
+    std::fs::write(&payload, b"not really a video").unwrap();
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes([32u8; 32]);
     let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-video-1");
-    let uploads = prepare_thumbnail_uploads_for_plaintext_media(&payload, Some("video/mp4"), &file_key).unwrap();
-
-    assert_eq!(uploads.len(), 2);
-    assert_eq!(uploads[0].variant, ThumbnailUploadVariant::Medium);
-    assert_eq!(uploads[1].variant, ThumbnailUploadVariant::Large);
-    assert!(uploads[0].blurhash.is_none(), "video thumbnails do not carry blurhash");
-    assert!(uploads[1].blurhash.is_none());
-
-    for upload in &uploads {
-        let plaintext = beebeeb_core::encrypt::decrypt_thumbnail(&file_key, &upload.encrypted).unwrap();
-        assert!(plaintext.starts_with(b"RIFF"), "video thumbnail plaintext must be WebP");
-    }
+    let got = prepare_thumbnail_uploads_for_plaintext_media(&payload, Some("video/mp4"), &file_key);
+    assert!(matches!(got, Err(MediaError::NoVideoFrame)));
 }
 
 #[test]

@@ -12,7 +12,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, ItemKind};
@@ -143,7 +143,7 @@ fn engine_at(base: &str) -> Arc<TestEngine> {
         state_dir,
         api_base: base.to_string(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 /// A session in memory, as a sign-in and an unlock of `account` leave it.
@@ -636,4 +636,118 @@ fn a_link_made_for_a_session_that_ended_meanwhile_is_not_handed_over() {
     // Beebeeb made it (the request was the first session's, under its token); nobody was handed it.
     assert_eq!(fake.first.links().len(), 1);
     assert_eq!(fake.second.links().len(), 0);
+}
+
+#[test]
+fn a_local_state_that_moved_to_another_session_says_not_signed_in_not_not_found() {
+    // A press whose session moved under the local state is not "no such file": it is not signed in.
+    assert_eq!(
+        local_refusal(LocalStateRefused::SessionChanged),
+        ShareLinkError::NotSignedIn
+    );
+}
+
+fn a_link(fake: &Fake, engine: &TestEngine, turn: SessionGeneration) -> String {
+    engine.share_link_for(turn, NOTE, None).expect("a link is made");
+    fake.first.links()[0]["id"].as_str().unwrap().to_string()
+}
+
+fn patches(fake: &Fake) -> usize {
+    fake.api.routes().iter().filter(|r| r.starts_with("PATCH ")).count()
+}
+
+#[test]
+fn a_link_changes_its_expiry_and_password_and_clears_them() {
+    let (fake, engine, _state, turn) = ready("change");
+    let id = a_link(&fake, &engine, turn);
+    let change = LinkChange {
+        expires_in_hours: Some(Some(48)),
+        passphrase: Some(Some(Zeroizing::new("long enough".into()))),
+    };
+    engine.share_link_change_for(turn, &id, &change).expect("changed");
+    let row = &fake.first.links()[0];
+    assert!(row["expires_at"].is_string());
+    assert_eq!(row["has_passphrase"], true);
+    // Never and no password; an unchanged field is left alone.
+    let clear = LinkChange {
+        expires_in_hours: Some(None),
+        passphrase: None,
+    };
+    engine.share_link_change_for(turn, &id, &clear).expect("cleared");
+    let row = &fake.first.links()[0];
+    assert!(row["expires_at"].is_null());
+    assert_eq!(row["has_passphrase"], true);
+    let off = LinkChange {
+        expires_in_hours: None,
+        passphrase: Some(None),
+    };
+    engine.share_link_change_for(turn, &id, &off).expect("off");
+    assert_eq!(fake.first.links()[0]["has_passphrase"], false);
+    let shown = format!("{change:?}");
+    assert!(!shown.contains("long enough"));
+}
+
+#[test]
+fn a_change_for_a_session_that_moved_on_sends_nothing() {
+    let (fake, engine, _state, turn) = ready("change-moved");
+    let id = a_link(&fake, &engine, turn);
+    let change = LinkChange {
+        expires_in_hours: Some(Some(2)),
+        passphrase: None,
+    };
+    engine.forget_session(SessionTransition::SignOut);
+    signed_in(&engine, &fake.first);
+    assert_eq!(
+        engine.share_link_change_for(turn, &id, &change),
+        Err(ShareLinkError::NotSignedIn)
+    );
+    assert_eq!(patches(&fake), 0);
+}
+
+#[test]
+fn a_refused_choice_is_invalid_and_never_sent() {
+    let (fake, engine, _state, turn) = ready("change-invalid");
+    let id = a_link(&fake, &engine, turn);
+    let password = |p: &str| LinkChange {
+        expires_in_hours: None,
+        passphrase: Some(Some(Zeroizing::new(p.into()))),
+    };
+    let hours = |h| LinkChange {
+        expires_in_hours: Some(Some(h)),
+        passphrase: None,
+    };
+    for change in [
+        password("      "),
+        password(""),
+        password(" abc "),
+        hours(0),
+        hours(MAX_EXPIRES_IN_HOURS + 1),
+    ] {
+        assert_eq!(
+            engine.share_link_change_for(turn, &id, &change),
+            Err(ShareLinkError::Invalid)
+        );
+    }
+    assert_eq!(
+        engine.share_link_change_for(turn, "not-an-id", &hours(1)),
+        Err(ShareLinkError::NotFound)
+    );
+    assert_eq!(patches(&fake), 0);
+    assert!(engine.share_link_change_for(turn, &id, &hours(MAX_EXPIRES_IN_HOURS)).is_ok());
+}
+
+#[test]
+fn a_revoked_or_unknown_link_is_not_found() {
+    let (fake, engine, _state, turn) = ready("change-gone");
+    let id = a_link(&fake, &engine, turn);
+    let change = LinkChange {
+        expires_in_hours: Some(Some(2)),
+        passphrase: None,
+    };
+    fake.first.revoke_links();
+    assert_eq!(engine.share_link_change_for(turn, &id, &change), Err(ShareLinkError::NotFound));
+    assert_eq!(
+        engine.share_link_change_for(turn, "a0000000-0000-4000-8000-0000000009ff", &change),
+        Err(ShareLinkError::NotFound)
+    );
 }

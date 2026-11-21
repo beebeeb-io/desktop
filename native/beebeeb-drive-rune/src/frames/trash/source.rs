@@ -90,6 +90,15 @@ pub trait TrashSource {
     fn wired(&self) -> bool {
         true
     }
+    /// A number that changes whenever the answer's rows change; `None`: the source cannot say, so the view never
+    /// holds a copy of its rows (a sample or a stub that changes under it).
+    fn rev(&self) -> Option<u64> {
+        None
+    }
+    /// "Try again" on a view that failed: read the list now, even if the last answer is not old.
+    fn retry(&mut self) {
+        self.opened();
+    }
     /// The deleted items of the last 30 days, newest deleted first.
     fn items(&self) -> Vec<Row>;
     /// Everything in Trash, also what the list has not loaded.
@@ -103,6 +112,9 @@ pub trait TrashSource {
     }
     /// The Trash section opened: read the list if it is missing or old. Trash is on screen from here on.
     fn opened(&mut self) {}
+    /// A sync check finished: the list may have changed. A source that reads late reads it again when it holds one;
+    /// otherwise the next opening reads.
+    fn refresh(&mut self) {}
     /// Whether the Trash section is on screen: the window's poll says so each time, before [`TrashSource::pump`].
     /// Words kept for later (a restore that a lock or a sign-out cut) are handed out only while it is, so they are
     /// never given to a window that shows something else (and wiped there when Trash opens).
@@ -116,6 +128,11 @@ pub trait TrashSource {
     /// The sidebar's count. `None`: no badge (the source has no number of Beebeeb's for this session and account).
     fn count(&self) -> Option<usize> {
         Some(self.totals().items)
+    }
+    /// The server's own count, for the sidebar of every other window (ux-55). `None`: not known, or a source
+    /// that is not an engine's (a sample is never shown there).
+    fn server_count(&self) -> Option<usize> {
+        None
     }
     /// Whether Empty Trash, Details, Preview and Delete permanently can do anything here. `false`: pressing them
     /// says "not available yet" instead.
@@ -163,6 +180,8 @@ fn row(id: &str, name: &str, kind: Kind, date: &str, size: &str, from: &str) -> 
         size: size.into(),
         extra: Extra::Words(format!("From {from}")),
         pc: None,
+        bytes: None,
+        at: None,
     }
 }
 

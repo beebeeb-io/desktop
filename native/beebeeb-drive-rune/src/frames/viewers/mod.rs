@@ -19,12 +19,15 @@ mod chrome;
 pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
 pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
 pub(crate) mod details;
+mod editor_view;
+mod editor_minimap;
 pub(crate) mod dialogs;
 mod fixture_media;
 mod fixture_text;
 pub mod icons;
 pub mod kinds;
 mod markdown;
+mod local_file;
 mod md_source;
 pub mod media;
 mod media_icons;
@@ -46,9 +49,14 @@ mod states;
 mod style;
 mod table;
 mod text;
+pub(crate) mod unsaved_guard;
+pub mod refusal_text;
 pub mod video;
 use open_route::is_this_groups;
 
+#[cfg(test)]
+#[path = "editor_keys_tests.rs"]
+mod editor_keys_tests;
 #[cfg(test)]
 mod media_tests;
 #[cfg(test)]
@@ -97,6 +105,9 @@ pub enum Intent {
     OpenInDrive(String),
     /// A link in a note to the web: the browser opens it, never this window.
     OpenInBrowser(String),
+    /// A slide command from the editor's command search (Duplicate slide, Delete slide): the host applies it to the
+    /// deck with its `State` (`office::edit::slide::run_command`).
+    Slide(crate::frames::office::edit::palette::SlideCmd),
     /// DW-1522's Create file: make `name` in `folder` (`None`: the top of Files), encrypted on this PC before it
     /// uploads. Files makes it (`frames::files::create_file`); opening it in the editor (DW-1523) is not bound yet.
     CreateFile { folder: Option<String>, name: String },
@@ -143,7 +154,7 @@ pub const NOT_OPENED_ELSEWHERE: &str = "Couldn't open this file in another app."
 
 impl Intent {
     /// The name of where this intent goes, while nothing there answers it yet.
-    fn not_built(&self) -> Option<&'static str> {
+    pub(crate) fn not_built(&self) -> Option<&'static str> {
         Some(match self {
             Intent::Share => "Share",
             Intent::Trash => "Move to Trash",
@@ -216,6 +227,7 @@ pub struct Ui {
     pub md_source: bool,
     /// The editor, while the file is being edited.
     pub editor: Option<Editor>,
+    pub editor_view: editor_view::EditorView,
     pub dialog: Option<Dialog>,
     /// The message after a save ("Saved · encrypted · version 4"), until the next action.
     pub toast: Option<String>,
@@ -262,6 +274,7 @@ impl Ui {
             wrap: false,
             md_source: false,
             editor: None,
+            editor_view: editor_view::EditorView::default(),
             dialog: None,
             toast: None,
             saved_at: None,
@@ -341,16 +354,12 @@ impl Ui {
                 Elsewhere::NotBound => {}
             }
         }
-        // Nothing takes these yet (the shell's drain of this group's intents comes with the
-        // engine's wiring): the press says so, in the shell's own words, never nothing.
-        if let Some(what) = intent.not_built() {
-            self.toast = Some(format!("{NOT_BUILT}: {what}"));
-        }
+        // The shell's router takes it (`shell::intents::drain_viewer_intents`); while nothing there answers it,
+        // the router's fallback says "Not built yet: <what>".
         self.intents.push(intent);
     }
 
     /// What the person asked for that is outside this group, oldest first.
-    #[cfg_attr(not(test), allow(dead_code))] // waits for its caller in `shell/host.rs` (PR body)
     pub fn take_intents(&mut self) -> Vec<Intent> {
         std::mem::take(&mut self.intents)
     }
@@ -438,14 +447,6 @@ impl Ui {
         self.editor.as_ref().is_some_and(Editor::dirty)
     }
 
-    /// The lines of the text being edited, as the source colours them.
-    pub fn editor_lines(&self) -> Vec<Vec<source::Run>> {
-        match &self.editor {
-            Some(editor) => self.source.colours(&self.file, &editor.edit.text),
-            None => Vec::new(),
-        }
-    }
-
     /// Leave the editor for the reader on `file`.
     fn show(&mut self, file: OpenFile) {
         self.replace(file);
@@ -514,6 +515,9 @@ impl Ui {
     /// Leaving the file was asked for. `true`: there are unsaved changes, so the question is
     /// up (DW-1525) and the file stays.
     pub fn hold_for_changes(&mut self) -> bool {
+        if self.office_hold_for_changes() {
+            return true;
+        }
         if !self.dirty() {
             return false;
         }
@@ -582,7 +586,7 @@ pub fn ui(s: &mut State) -> Option<&mut Ui> {
     s.viewer.ui.as_mut()
 }
 
-fn route_item(s: &State) -> Option<String> {
+pub(crate) fn route_item(s: &State) -> Option<String> {
     match s.shell.app.screen() {
         Screen::Drive(route) => route.item,
         _ => None,
@@ -629,6 +633,8 @@ pub struct Slot {
     /// Where a key goes that reaches a text field of this group after the field's owner closed
     /// (two keys in one frame): a field nobody shows, never the Files window's search.
     pub(crate) stray: rune::TextEdit,
+    /// The unsaved-changes question a quit or the gate's sign-out raised ([`unsaved_guard`]).
+    pub(crate) leave: Option<unsaved_guard::Leave>,
 }
 
 #[cfg(test)]
@@ -676,8 +682,8 @@ pub fn open(s: &mut State, file_id: &str) -> bool {
 
 /// The router by file type, and the ONE way a file of a list opens here: a file whose type has
 /// a viewer (`kinds::viewer_of`) and that the window's source has goes to the route
-/// (`Event::OpenItem`). `false`: not a file for this group; the caller opens it as it did before
-/// (its own app).
+/// (`Event::OpenItem`), and so does every other file (the "No preview" frame). `false`: a folder, or the window has
+/// no source: the caller never hands a file to the system's app (w29).
 ///
 /// `true` is "this group's", NOT "it opened": a file this group reads that cannot be opened right now is shown
 /// as that (it is gone, the session ended, or it could not be read, with Try again), and with no session
@@ -698,14 +704,15 @@ pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
     true
 }
 
-/// Whether `item` is a file a list's Open only ever READS here: source code, a script, a web page, a data file
-/// that the window's source shows. With several files selected such a file is left out of what the system is
-/// asked to open (`frames::files`), as one alone opens in the viewer.
-pub fn only_read_here(s: &State, item: &crate::source::DriveItem) -> bool {
-    !item.is_folder
-        && kinds::viewer_of(&item.name).is_some()
-        && !kinds::its_app_shows_it(&item.name)
-        && route_source(s).is_some_and(|source| source.previews(&item.name))
+/// Whether the window's viewer source shows a file of this name (`ViewerSource::previews`); `false` with no source.
+pub fn previews(s: &State, name: &str) -> bool {
+    route_source(s).is_some_and(|source| source.previews(name))
+}
+
+/// Open a text or Markdown file that is not in the drive in the viewer (`frames::open_file`): the licence notice.
+/// `false`: it could not be read, or the session gate is closed.
+pub fn open_local(s: &mut State, path: &std::path::Path) -> bool {
+    open_from(s, Box::new(local_file::LocalFile), &path.to_string_lossy())
 }
 
 /// [`open`] with the source to read from (the engine's, once it is wired).
@@ -718,6 +725,10 @@ pub fn open_from(s: &mut State, source: Box<dyn ViewerSource>, file_id: &str) ->
         return false;
     };
     sync(s);
+    // The route machine refuses OpenItem while Settings is in front (About's licence row opens from there): leave
+    // Settings first, to the Drive route it came from, or the viewer's file is never the route's item and `sync` drops it.
+    let here = s.shell.app.route().clone();
+    host::dispatch(s, Event::Navigate(here));
     host::dispatch(s, Event::OpenItem(file_id.to_string()));
     s.viewer.ui = Some(ui);
     true
@@ -795,6 +806,115 @@ pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
     }
 }
 
+/// Enter in the editor starts a new line (w36-txt-save-enter). Rune's field reads a plain Return as "send" (a
+/// chat's composer) and breaks the line only with Shift; the editor has nothing to send, so the plain key did
+/// nothing. It is handed to the field as the line break, so undo and a held key work as for any typing.
+pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let m = ev.mods;
+    // The field reads Esc as "blur", so it is taken here while the find bar is open.
+    if ev.key == Key::Escape && !m.alt && !m.cmd && !m.ctrl && !m.shift && close_find(s) {
+        return true;
+    }
+    if ev.key == Key::Tab && !m.alt && !m.cmd && !m.ctrl {
+        let Some(editor) = s.viewer.ui.as_mut().and_then(|ui| ui.editor.as_mut()) else {
+            return false;
+        };
+        editor_tab(&mut editor.edit, m.shift);
+        tx.scroll_into_view(format!("caret-{}", editor.caret_line()));
+        return true;
+    }
+    if ev.key != Key::Enter || m.shift || m.alt || m.cmd || m.ctrl {
+        return false;
+    }
+    let Some(editor) = s.viewer.ui.as_mut().and_then(|ui| ui.editor.as_mut()) else {
+        return false;
+    };
+    let line_break = KeyEvent {
+        key: Key::Enter,
+        mods: rune::Mods {
+            shift: true,
+            ..rune::Mods::default()
+        },
+    };
+    editor.edit.key(&line_break, None);
+    tx.scroll_into_view(format!("caret-{}", editor.caret_line()));
+    true
+}
+
+/// The find keys while the editor is open. `true`: the key was used.
+fn editor_find_key(ui: &mut Ui, ev: &KeyEvent) -> bool {
+    use editor_view::editor_find_bar as bar;
+    let m = ev.mods;
+    let Some(editor) = ui.editor.as_mut() else { return false };
+    let view = &mut ui.editor_view;
+    match &ev.key {
+        Key::Command(c) if (*c == 'f' || *c == 'h') && !m.alt && !m.shift => {
+            bar::open(view, &mut editor.edit, *c == 'h');
+            true
+        }
+        Key::Function(3) if !m.alt && !m.cmd => {
+            bar::step(view, &mut editor.edit, m.shift);
+            true
+        }
+        Key::Enter if view.find.open && view.find.needle.focused && !m.alt && !m.cmd => {
+            bar::step(view, &mut editor.edit, m.shift);
+            true
+        }
+        Key::Escape if view.find.open => {
+            bar::close(view, &mut editor.edit);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Esc with the editor's find bar open closes the bar, not the file (the shell asks first). `true`: taken.
+pub fn close_find(s: &mut State) -> bool {
+    let Some(ui) = ui(s) else { return false };
+    match ui.editor.as_mut() {
+        Some(editor) if ui.editor_view.find.open => {
+            editor_view::editor_find_bar::close(&mut ui.editor_view, &mut editor.edit);
+            ui.focus = Some(EDITOR_KEY);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Replace `edit`'s text with `new` through the field's own edit (so undo and the unsaved mark work), then select `sel`.
+fn apply_edit(edit: &mut rune::TextEdit, new: &str, sel: std::ops::Range<usize>) {
+    let old = edit.text.clone();
+    let mut pre = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(pre) || !new.is_char_boundary(pre) {
+        pre -= 1;
+    }
+    let max_suf = old.len().min(new.len()) - pre;
+    let mut suf = old.bytes().rev().zip(new.bytes().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(old.len() - suf) || !new.is_char_boundary(new.len() - suf) {
+        suf -= 1;
+    }
+    edit.set_selection(pre, old.len() - suf);
+    edit.insert(&new[pre..new.len() - suf]);
+    edit.set_selection(sel.start, sel.end);
+}
+
+/// Tab and Shift+Tab in the editor: indent or outdent the selected lines, or put one indent unit at the caret.
+fn editor_tab(edit: &mut rune::TextEdit, outdent: bool) {
+    use crate::text_kit::indent::{detect, indent_lines, outdent_lines, unit_str};
+    let unit = detect(&edit.text);
+    let (a, b) = edit.range();
+    let multi = edit.text[a..b].contains('\n');
+    if outdent {
+        let (new, sel) = outdent_lines(&edit.text, a..b, unit);
+        apply_edit(edit, &new, sel);
+    } else if multi {
+        let (new, sel) = indent_lines(&edit.text, a..b, unit);
+        apply_edit(edit, &new, sel);
+    } else {
+        edit.insert(&unit_str(unit));
+    }
+}
+
 fn close_stale(s: &mut State) {
     if let Some(mut ui) = s.viewer.ui.take() {
         ui.cancel();
@@ -846,7 +966,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         // Not after a key of this group (those take it in `on_key`): no ring is drawn.
         tx.focus(key, false);
     }
-    new_file |= changed;
+    crate::frames::office::edit::sheet::take_focus(s, tx);
+    // The office editor between presses: its answers, a save's end, the picked picture (`office_over::poll`).
+    new_file |= changed | office_over::poll(s, tx);
     new_file
 }
 
@@ -881,7 +1003,15 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
     let here = route_item(s);
     match &s.viewer.ui {
         // Only the file the route names is drawn: a stale one never shows under another's path.
-        Some(ui) if here.as_deref() == Some(ui.file.id.as_str()) => view(s, ui, cx),
+        Some(ui) if here.as_deref() == Some(ui.file.id.as_str()) => {
+            let page = view(s, ui, cx);
+            // Share and Version history of the open file are Files' dialogs: they stand over the viewer.
+            let theme = tokens::theme(cx.system_dark());
+            match crate::frames::files::window::dialog_over_viewer(s, &theme) {
+                Some(dialog) => rune::el().key("viewer-root").w_full().h_full().child(page).child(dialog),
+                None => page,
+            }
+        }
         _ => crate::shell::placeholder::window(s, cx, FrameGroup::Viewer),
     }
 }
@@ -919,9 +1049,8 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             facts: dirty.then_some(unsaved),
             unsaved: dirty,
         };
-        let body = text::editor(editor, &ui.editor_lines(), &t);
-        let refused = text::refused_banner(editor.refused.as_deref(), &t);
-        return chrome::window(s, cx, ui, head, text::editor_tools(&t), refused, body, &status, &t);
+        let (tools, banner, body) = editor_view::parts(ui, editor, &t);
+        return chrome::window(s, cx, ui, head, tools, banner, body, &status, &t);
     }
     let head = chrome::Head::default();
     let reading = |doc_truncated: Option<source::Truncated>| match &ui.saved_at {
@@ -1038,6 +1167,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);
         }
+        crate::frames::office::edit::sheet::take_focus(s, tx);
         return true;
     }
     let page_before = ui(s).map(|ui| ui.media.page);
@@ -1052,6 +1182,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);
         }
+        crate::frames::office::edit::sheet::take_focus(s, tx);
         return true;
     }
     let Some(ui) = ui(s) else { return false };
@@ -1066,6 +1197,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             ui.edit();
             true
         }
+        // The editor's find keys (ux-15): Ctrl+F, Ctrl+H, F3, Shift+F3, Enter in the find field, Esc.
+        _ if ui.editor.is_some() && ui.dialog.is_none() && editor_find_key(ui, ev) => true,
         // Ctrl+S: save the edit as a new, encrypted version.
         Key::Command('s') if !ev.mods.alt && !ev.mods.shift && ui.editor.is_some() && ui.dialog.is_none() => {
             ui.save();
@@ -1076,6 +1209,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if let Some(key) = ui.focus.take() {
         tx.focus(key, true);
     }
+    crate::frames::office::edit::sheet::take_focus(s, tx);
     handled
 }
 

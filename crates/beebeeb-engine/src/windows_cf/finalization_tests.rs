@@ -112,7 +112,7 @@ fn callbacks(prefix: &str) -> usize {
 }
 
 /// Task 2284 (CI fix): the refusal half of a dehydration test. Whether the data open of a dehydrated placeholder
-/// reaches the provider at all depends on the platform: on the Legion (probe K0) the open alone asks for the file,
+/// reaches the provider at all depends on the platform: on the Windows test machine (probe K0) the open alone asks for the file,
 /// and the no-fetch scope refuses it (os 389); on the GitHub Windows runner the open did not call FETCH_DATA (run
 /// 41032979318), so there was nothing to refuse. Either way nothing may be served (the caller asserts
 /// `fetches(prefix) == 0` first), and every callback that did fire must be a refusal.
@@ -1086,10 +1086,10 @@ fn walk(path: &Path, into: &mut Vec<PathBuf>) {
 ///
 /// LD-0066: `SetFileSecurityW` keeps `SE_DACL_AUTO_INHERITED` only when the descriptor written also carries
 /// `SE_DACL_AUTO_INHERIT_REQ`, and a read does not return that bit. Under a temp folder whose DACL is auto-inherited
-/// (a Windows 11 user profile, the Legion: the file read control 0x8404) the DACL came back with the same ACEs under
+/// (a Windows 11 user profile, the Windows test machine: the file read control 0x8404) the DACL came back with the same ACEs under
 /// control 0x8004, so I1 failed on the harness's own write. A descriptor with no auto-inherited bit comes back byte
 /// for byte (the probe's lineage B; that the GitHub runner's file is one is inferred from it, not observed there). So
-/// an auto-inherited descriptor is written from a copy with the request bit raised. On the Legion that wrote every
+/// an auto-inherited descriptor is written from a copy with the request bit raised. On the Windows test machine that wrote every
 /// saved descriptor back byte for byte, its inherited ACEs included: also when the folder no longer propagates one of
 /// them, and when the inherited deny was still on the file (the LD-0066 probe, runs 2 and 3).
 fn set_dacl(path: &Path, descriptor: &[u8]) -> Result<(), String> {

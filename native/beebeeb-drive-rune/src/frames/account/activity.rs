@@ -6,7 +6,7 @@
 use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::account_form as fm;
-use crate::ui::account_set::{self as set, Lead, Row, Tail};
+use crate::ui::account_set::{self as set, Lead, Row};
 use crate::ui::settings_list as lists;
 use rune::El;
 
@@ -43,7 +43,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     // A source that cannot stop the recording from here shows it as a value, not as a switch that would not turn.
     let fixed_on = on && !source.can_stop_activity();
     // Turning it off asks first; turning it on starts a new log at once.
-    let switch = lists::switch("item-0-0", "Record sign-in activity", on, t).on_press(move |s: &mut State| {
+    let switch = crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-0"), "", on, true, crate::ui::button::Size::Md, t).label("Record sign-in activity").on_press(move |s: &mut State| {
         if on {
             super::ask(s, Dialog::Code(CodeFor::StopActivity));
             form::focus(&mut s.account.form, Some(form::CURRENT_KEY));
@@ -57,13 +57,17 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
             0,
             None,
             vec![if fixed_on {
+                // This source cannot stop it from here: the row opens the web page that can.
                 set::item(
                     0,
                     0,
-                    &Row::new(Lead::Icon(&icons::ACTIVITY), "Record sign-in activity").tail(Tail::Value("On".into())),
+                    &Row::new(Lead::Icon(&icons::ACTIVITY), "Record sign-in activity")
+                        .sub("On. Turn it off on the web")
+                        .link(true),
                     Vec::new(),
                     t,
                 )
+                .on_press(|s: &mut State| s.settings.ask(crate::frames::settings::Intent::Web("privacy")))
             } else {
                 set::item(
                     0,
@@ -74,7 +78,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
                 )
             }],
             Some(if fixed_on {
-                "Turning this off is not available in this version yet. Turn it off on the web."
+                "Opens the privacy page on the web, where recording can be turned off."
             } else if on {
                 "Keeps the address and country of each sign-in and security change, so you can see if someone else got in."
             } else {

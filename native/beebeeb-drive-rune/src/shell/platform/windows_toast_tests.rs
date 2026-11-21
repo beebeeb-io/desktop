@@ -1,3 +1,6 @@
+//! Tests of the Windows toast (`shell::platform::windows_toast`): it honours the Settings switches it reads, and each
+//! notice says what its kind says.
+
 use super::*;
 
 fn all(on: bool) -> Switches {

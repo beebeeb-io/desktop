@@ -31,6 +31,10 @@ fn every_message() -> Vec<Message> {
             kind: DocKind::Pptx,
             doc: GrantRef { wire: u64::MAX, len: 0 },
         }),
+        Message::Open(Open {
+            kind: DocKind::Pdf,
+            doc: GRANT,
+        }),
         Message::Opened(Opened {
             pages: 2,
             sizes: vec![
@@ -400,7 +404,7 @@ fn office_decode_refuses_trailing_bytes() {
 
 #[test]
 fn office_decode_refuses_an_unknown_kind() {
-    for kind in [0u16, 0x0100, 0x0108, 0x0200, 0x0207, 0x02FE, 0x0301, u16::MAX] {
+    for kind in [0u16, 0x0100, 0x0111, 0x0200, 0x020D, 0x02FE, 0x0301, u16::MAX] {
         assert_eq!(Message::decode(kind, &[]), Err(DecodeError::UnknownKind), "{kind:#06x}");
     }
 }
@@ -589,7 +593,7 @@ fn office_decode_refuses_numbers_that_are_not_finite() {
 #[test]
 fn office_decode_refuses_tags_off_their_list() {
     // DocKind.
-    for tag in [0u8, 6, 0xFF] {
+    for tag in [0u8, 7, 0xFF] {
         let mut p = vec![tag];
         p.extend_from_slice(&[0; 16]);
         assert_eq!(Open::decode(&p), Err(DecodeError::BadTag), "doc kind {tag}");
@@ -974,4 +978,590 @@ fn cell_and_anchor_tags_off_their_list_are_refused() {
         Err(DecodeError::BadTag),
         "missing_content 2"
     );
+}
+
+// ---- The editor's messages -------------------------------------------------------------------------------------
+
+mod edit_tests {
+    use super::*;
+    use crate::check::MAX_OP_TEXT_BYTES;
+    use crate::frame::MAX_PAYLOAD;
+
+    const RW: GrantRef = GrantRef { wire: 77, len: 4096 };
+
+    fn pr(page: u32, x: f32) -> PageRect {
+        PageRect {
+            page,
+            rect: RectPt {
+                x,
+                y: 10.5,
+                w: 20.25,
+                h: 12.0,
+            },
+        }
+    }
+
+    fn marks() -> Marks {
+        Marks {
+            bold: true,
+            italic: false,
+            underline: true,
+            strike: false,
+            style: ParaStyle::Heading2,
+            align: TextAlign::Justify,
+            list: ListKind::Number,
+        }
+    }
+
+    fn range() -> CellRange {
+        CellRange {
+            row: 3,
+            col: 2,
+            rows: 4,
+            cols: 5,
+        }
+    }
+
+    /// Every op once (some twice, for their optional or boolean parts).
+    fn every_op() -> Vec<EditOp> {
+        let c = Rgb { r: 1, g: 2, b: 255 };
+        vec![
+            EditOp::InsertText("héllo\nwörld".to_owned()),
+            EditOp::InsertParagraph,
+            EditOp::InsertLineBreak,
+            EditOp::Delete { back: true, word: false },
+            EditOp::Delete { back: false, word: true },
+            EditOp::Move {
+                to: Motion::PageDown,
+                extend: true,
+            },
+            EditOp::SelectAll,
+            EditOp::Mark {
+                mark: Mark::Strike,
+                on: false,
+            },
+            EditOp::FontSize(11.5),
+            EditOp::FontFamily("Inter".to_owned()),
+            EditOp::TextColour(c),
+            EditOp::Highlight(Some(c)),
+            EditOp::Highlight(None),
+            EditOp::ParaStyle(ParaStyle::Title),
+            EditOp::List(ListKind::Bullet),
+            EditOp::Align(TextAlign::Center),
+            EditOp::Indent(-3),
+            EditOp::Indent(127),
+            EditOp::Table { rows: 3, cols: 4 },
+            EditOp::Link {
+                text: "Beebeeb".to_owned(),
+                url: "https://beebeeb.io".to_owned(),
+            },
+            EditOp::PageBreak,
+            EditOp::SetCell {
+                sheet: 1,
+                row: 2,
+                col: 3,
+                text: "=SUM(A1:A3)".to_owned(),
+            },
+            EditOp::SelectCells {
+                sheet: 2,
+                range: range(),
+            },
+            EditOp::NumberFormat(NumberFormat::Percent),
+            EditOp::FillColour(Some(c)),
+            EditOp::FillColour(None),
+            EditOp::AutoSum,
+            EditOp::Sort { ascending: true },
+            EditOp::Filter,
+            EditOp::MakeTable,
+            EditOp::RenameSheet {
+                sheet: 4,
+                name: "Q1".to_owned(),
+            },
+            EditOp::SelectShape {
+                slide: 2,
+                x_pt: 100.5,
+                y_pt: 200.25,
+            },
+            EditOp::ClearShape,
+            EditOp::NewSlide { layout: Some(3) },
+            EditOp::NewSlide { layout: None },
+            EditOp::DuplicateSlide(1),
+            EditOp::DeleteSlide(2),
+            EditOp::MoveSlide { from: 1, to: 5 },
+            EditOp::SetLayout { slide: 1, layout: 2 },
+            EditOp::Paste {
+                text: "plain".to_owned(),
+            },
+            EditOp::Undo,
+            EditOp::Redo,
+        ]
+    }
+
+    fn edited() -> Edited {
+        Edited {
+            revision: u64::MAX - 1,
+            caret: Some(pr(0, 72.0)),
+            selection: vec![pr(0, 1.0), pr(1, 2.0)],
+            can_undo: true,
+            can_redo: false,
+            dirty: Dirty::Rects(vec![pr(1, 3.0)]),
+            pages: Some(Opened {
+                pages: 1,
+                sizes: vec![PageSize {
+                    w_pt: 595.0,
+                    h_pt: 842.0,
+                }],
+            }),
+            cells: vec![(0, range()), (3, range())],
+            slides: Some(7),
+            marks: marks(),
+        }
+    }
+
+    fn every_edit_message() -> Vec<Message> {
+        let mut v = vec![
+            Message::OpenEdit(OpenEdit {
+                doc: GRANT,
+                kind: EditKind::Docx,
+            }),
+            Message::OpenEdit(OpenEdit {
+                doc: GRANT,
+                kind: EditKind::Xlsx,
+            }),
+            Message::OpenEdit(OpenEdit {
+                doc: GRANT,
+                kind: EditKind::Pptx,
+            }),
+            Message::Hit(Hit {
+                page: 3,
+                x_pt: 10.5,
+                y_pt: -2.0,
+                mode: HitMode::Paragraph,
+            }),
+            Message::SaveSize(SaveSize { purpose: Purpose::Save }),
+            Message::SaveSize(SaveSize {
+                purpose: Purpose::Snapshot,
+            }),
+            Message::SaveInto(SaveInto { token: 9, out: RW }),
+            Message::Copy(Copy),
+            Message::Layouts(Layouts),
+            Message::InsertImage(InsertImage { bytes: GRANT, png: true }),
+            Message::InsertImage(InsertImage { bytes: GRANT, png: false }),
+            Message::Edited(edited()),
+            Message::Edited(Edited {
+                revision: 0,
+                caret: None,
+                selection: Vec::new(),
+                can_undo: false,
+                can_redo: true,
+                dirty: Dirty::All,
+                pages: None,
+                cells: Vec::new(),
+                slides: None,
+                marks: marks(),
+            }),
+            Message::SaveReady(SaveReady {
+                token: 9,
+                len: u64::MAX,
+                revision: 12,
+            }),
+            Message::SavedInto(SavedInto { len: 4096 }),
+            Message::Clip(Clip {
+                text: "naïve".to_owned(),
+                html: Some("<p>na&iuml;ve</p>".to_owned()),
+            }),
+            Message::Clip(Clip {
+                text: String::new(),
+                html: None,
+            }),
+            Message::LayoutList(LayoutList {
+                names: vec!["Title".to_owned(), String::new(), "Two content".to_owned()],
+            }),
+        ];
+        for t in [
+            Template::Blank,
+            Template::Letter,
+            Template::Invoice,
+            Template::MeetingNotes,
+            Template::Report,
+        ] {
+            v.push(Message::NewDoc(NewDoc {
+                kind: EditKind::Docx,
+                template: t,
+            }));
+        }
+        v.extend(every_op().into_iter().map(|op| Message::Edit(Edit { op })));
+        v
+    }
+
+    #[test]
+    fn edit_messages_round_trip_under_their_kinds() {
+        for m in every_edit_message() {
+            let payload = m.encode().expect("fits");
+            assert_eq!(Message::decode(m.kind(), &payload), Ok(m.clone()), "{m:?}");
+        }
+    }
+
+    #[test]
+    fn edit_kinds_are_the_epics() {
+        let k = |m: Message| m.kind();
+        let doc = OpenEdit {
+            doc: GRANT,
+            kind: EditKind::Docx,
+        };
+        assert_eq!(k(Message::OpenEdit(doc)), 0x0108);
+        assert_eq!(
+            k(Message::NewDoc(NewDoc {
+                kind: EditKind::Docx,
+                template: Template::Blank
+            })),
+            0x0109
+        );
+        assert_eq!(k(Message::Edit(Edit { op: EditOp::Undo })), 0x010A);
+        assert_eq!(KIND_HIT, 0x010B);
+        assert_eq!(KIND_SAVE_SIZE, 0x010C);
+        assert_eq!(KIND_SAVE_INTO, 0x010D);
+        assert_eq!(k(Message::Copy(Copy)), 0x010E);
+        assert_eq!(k(Message::Layouts(Layouts)), 0x010F);
+        assert_eq!(KIND_INSERT_IMAGE, 0x0110);
+        assert_eq!(KIND_EDITED, 0x0207);
+        assert_eq!(KIND_SAVE_READY, 0x0208);
+        assert_eq!(KIND_SAVED_INTO, 0x0209);
+        assert_eq!(KIND_CLIP, 0x020A);
+        assert_eq!(KIND_LAYOUT_LIST, 0x020B);
+    }
+
+    #[test]
+    fn viewer_bytes_are_unchanged() {
+        // Opened: pages, count, (w, h): the layout the viewer shipped with.
+        let o = Opened {
+            pages: 1,
+            sizes: vec![PageSize { w_pt: 1.0, h_pt: 2.0 }],
+        };
+        let mut want = le32(1).to_vec();
+        want.extend_from_slice(&le32(1));
+        want.extend_from_slice(&1.0f32.to_le_bytes());
+        want.extend_from_slice(&2.0f32.to_le_bytes());
+        assert_eq!(o.encode().unwrap(), want);
+        assert_eq!(Opened::decode(&want), Ok(o));
+    }
+
+    #[test]
+    fn edit_decode_refuses_truncation_and_trailing_bytes() {
+        for m in every_edit_message() {
+            let payload = m.encode().unwrap();
+            for cut in 0..payload.len() {
+                assert!(Message::decode(m.kind(), &payload[..cut]).is_err(), "{m:?} cut at {cut}");
+            }
+            let mut long = payload.clone();
+            long.push(0);
+            assert_eq!(
+                Message::decode(m.kind(), &long),
+                Err(DecodeError::TrailingBytes),
+                "{m:?}"
+            );
+        }
+    }
+
+    fn bad_tag(kind: u16, mut payload: Vec<u8>, at: usize) {
+        payload[at] = 0xEE;
+        assert_eq!(Message::decode(kind, &payload), Err(DecodeError::BadTag), "{kind:#06x} byte {at}");
+    }
+
+    #[test]
+    fn edit_decode_refuses_every_tag_off_its_list() {
+        // OpenEdit: the kind byte after the 16-byte grant.
+        bad_tag(KIND_OPEN_EDIT, vec![0; 17].tap_set(16, 1), 16);
+        // NewDoc: kind, template.
+        bad_tag(KIND_NEW_DOC, vec![1, 1], 0);
+        bad_tag(KIND_NEW_DOC, vec![1, 1], 1);
+        // Hit: the mode byte after page, x, y.
+        bad_tag(KIND_HIT, vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 12);
+        // SaveSize.
+        bad_tag(KIND_SAVE_SIZE, vec![1], 0);
+        // InsertImage: the bool.
+        bad_tag(KIND_INSERT_IMAGE, vec![0; 17], 16);
+        // Edit: the op tag, and each tag inside an op.
+        bad_tag(KIND_EDIT, vec![2], 0);
+        for tag in [0u8, 38, 255] {
+            assert_eq!(Message::decode(KIND_EDIT, &[tag]), Err(DecodeError::BadTag), "op {tag}");
+        }
+        bad_tag(KIND_EDIT, vec![4, 0, 0], 1); // Delete.back
+        bad_tag(KIND_EDIT, vec![4, 0, 0], 2); // Delete.word
+        bad_tag(KIND_EDIT, vec![5, 1, 0], 1); // Move.to
+        bad_tag(KIND_EDIT, vec![5, 1, 0], 2); // Move.extend
+        bad_tag(KIND_EDIT, vec![7, 1, 0], 1); // Mark.mark
+        bad_tag(KIND_EDIT, vec![7, 1, 0], 2); // Mark.on
+        bad_tag(KIND_EDIT, vec![11, 0], 1); // Highlight option
+        bad_tag(KIND_EDIT, vec![12, 1], 1); // ParaStyle
+        bad_tag(KIND_EDIT, vec![13, 1], 1); // List
+        bad_tag(KIND_EDIT, vec![14, 1], 1); // Align
+        bad_tag(KIND_EDIT, vec![21, 1], 1); // NumberFormat
+        bad_tag(KIND_EDIT, vec![22, 0], 1); // FillColour option
+        bad_tag(KIND_EDIT, vec![24, 1], 1); // Sort
+        bad_tag(KIND_EDIT, vec![30, 0], 1); // NewSlide option
+        for t in [0u8, 6] {
+            assert_eq!(Message::decode(KIND_EDIT, &[21, t]), Err(DecodeError::BadTag));
+        }
+        for t in [0u8, 13] {
+            assert_eq!(Message::decode(KIND_EDIT, &[5, t, 0]), Err(DecodeError::BadTag));
+        }
+        for t in [0u8, 5] {
+            assert_eq!(Message::decode(KIND_EDIT, &[7, t, 0]), Err(DecodeError::BadTag));
+        }
+        for t in [0u8, 6] {
+            assert_eq!(Message::decode(KIND_EDIT, &[12, t]), Err(DecodeError::BadTag));
+        }
+        for t in [0u8, 4] {
+            assert_eq!(Message::decode(KIND_EDIT, &[13, t]), Err(DecodeError::BadTag));
+        }
+        for t in [0u8, 5] {
+            assert_eq!(Message::decode(KIND_EDIT, &[14, t]), Err(DecodeError::BadTag));
+        }
+        // Edited: caret option, dirty tag, pages option, slides option, marks.
+        let good = edited().encode().unwrap();
+        let none = Edited {
+            caret: None,
+            selection: Vec::new(),
+            dirty: Dirty::All,
+            pages: None,
+            cells: Vec::new(),
+            slides: None,
+            ..edited()
+        }
+        .encode()
+        .unwrap();
+        // Layout of `none`: revision 8, caret 1, selection count 4, undo, redo, dirty 1, pages 1, cells 4, slides 1,
+        // bold italic underline strike, style, align, list.
+        assert_eq!(none.len(), 8 + 1 + 4 + 1 + 1 + 1 + 1 + 4 + 1 + 4 + 3);
+        // caret tag, undo, redo, dirty tag, pages tag, slides tag, four marks bools, style, align, list.
+        for at in [8usize, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28] {
+            bad_tag(KIND_EDITED, none.clone(), at);
+        }
+        let _ = good;
+        // Clip: the html option.
+        bad_tag(KIND_CLIP, vec![0, 0, 0, 0, 0], 4);
+    }
+
+    trait TapSet {
+        fn tap_set(self, at: usize, v: u8) -> Self;
+    }
+    impl TapSet for Vec<u8> {
+        fn tap_set(mut self, at: usize, v: u8) -> Self {
+            self[at] = v;
+            self
+        }
+    }
+
+    #[test]
+    fn edit_decode_refuses_text_and_numbers() {
+        // Bad UTF-8 in InsertText, Clip text and a layout name.
+        let mut p = vec![1u8];
+        p.extend_from_slice(&le32(2));
+        p.extend_from_slice(&[0xFF, 0xFE]);
+        assert_eq!(Message::decode(KIND_EDIT, &p), Err(DecodeError::BadUtf8));
+        let mut p = le32(1).to_vec();
+        p.push(0xC3);
+        assert_eq!(Message::decode(KIND_CLIP, &p), Err(DecodeError::BadUtf8));
+        let mut p = le32(1).to_vec();
+        p.extend_from_slice(&le32(1));
+        p.push(0xC3);
+        assert_eq!(Message::decode(KIND_LAYOUT_LIST, &p), Err(DecodeError::BadUtf8));
+        // A text length past the end.
+        let mut p = vec![35u8];
+        p.extend_from_slice(&le32(5));
+        p.extend_from_slice(b"abc");
+        assert_eq!(Message::decode(KIND_EDIT, &p), Err(DecodeError::LengthPastEnd));
+        // Non-finite floats: FontSize, SelectShape, Hit, PageRect.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut p = vec![8u8];
+            p.extend_from_slice(&bad.to_le_bytes());
+            assert_eq!(Message::decode(KIND_EDIT, &p), Err(DecodeError::NotFinite));
+            let mut p = vec![28u8];
+            p.extend_from_slice(&le32(0));
+            p.extend_from_slice(&bad.to_le_bytes());
+            p.extend_from_slice(&1.0f32.to_le_bytes());
+            assert_eq!(Message::decode(KIND_EDIT, &p), Err(DecodeError::NotFinite));
+            let mut p = le32(0).to_vec();
+            p.extend_from_slice(&1.0f32.to_le_bytes());
+            p.extend_from_slice(&bad.to_le_bytes());
+            p.push(1);
+            assert_eq!(Message::decode(KIND_HIT, &p), Err(DecodeError::NotFinite));
+            let mut e = edited().encode().unwrap();
+            // The caret's x: revision 8, tag 1, page 4.
+            e[13..17].copy_from_slice(&bad.to_le_bytes());
+            assert_eq!(Message::decode(KIND_EDITED, &e), Err(DecodeError::NotFinite));
+        }
+        // Op text over the cap.
+        let mut p = vec![1u8];
+        p.extend_from_slice(&le32((MAX_OP_TEXT_BYTES + 1) as u32));
+        p.extend(std::iter::repeat(b'a').take(MAX_OP_TEXT_BYTES + 1));
+        assert_eq!(Message::decode(KIND_EDIT, &p), Err(DecodeError::TextTooLong));
+    }
+
+    #[test]
+    fn edit_vectors_are_bounded_before_allocating() {
+        // Edited selection of u32::MAX rects, none present.
+        let mut p = 0u64.to_le_bytes().to_vec();
+        p.push(0);
+        p.extend_from_slice(&le32(u32::MAX));
+        assert_eq!(Message::decode(KIND_EDITED, &p), Err(DecodeError::LengthPastEnd));
+        // One more rect than the bytes hold.
+        let mut p = 0u64.to_le_bytes().to_vec();
+        p.push(0);
+        p.extend_from_slice(&le32(2));
+        p.extend(std::iter::repeat(0u8).take(PageRect::BYTES));
+        assert_eq!(Message::decode(KIND_EDITED, &p), Err(DecodeError::LengthPastEnd));
+        // Layout names.
+        assert_eq!(
+            Message::decode(KIND_LAYOUT_LIST, &le32(u32::MAX)),
+            Err(DecodeError::LengthPastEnd)
+        );
+        // Dirty rects and cells, through a full message with the count raised.
+        let none = Edited {
+            caret: None,
+            selection: Vec::new(),
+            dirty: Dirty::Rects(Vec::new()),
+            pages: None,
+            cells: Vec::new(),
+            slides: None,
+            ..edited()
+        }
+        .encode()
+        .unwrap();
+        // revision 8, caret 1, selection 4, undo, redo, dirty tag, then the dirty count at 16.
+        let mut p = none.clone();
+        p[16..20].copy_from_slice(&le32(u32::MAX));
+        assert_eq!(Message::decode(KIND_EDITED, &p), Err(DecodeError::LengthPastEnd));
+    }
+
+    #[test]
+    fn a_paste_over_the_cap_does_not_encode() {
+        let at = |n: usize| Edit {
+            op: EditOp::Paste {
+                text: "x".repeat(n),
+            },
+        };
+        assert!(at(MAX_OP_TEXT_BYTES).encode().is_ok());
+        assert_eq!(at(MAX_OP_TEXT_BYTES + 1).encode(), Err(EncodeError::TextTooLong));
+        // The same cap holds for every op that carries text.
+        let big = "x".repeat(MAX_OP_TEXT_BYTES + 1);
+        for op in [
+            EditOp::InsertText(big.clone()),
+            EditOp::FontFamily(big.clone()),
+            EditOp::Link {
+                text: big.clone(),
+                url: String::new(),
+            },
+            EditOp::Link {
+                text: String::new(),
+                url: big.clone(),
+            },
+            EditOp::SetCell {
+                sheet: 0,
+                row: 0,
+                col: 0,
+                text: big.clone(),
+            },
+            EditOp::RenameSheet {
+                sheet: 0,
+                name: big.clone(),
+            },
+        ] {
+            assert_eq!(Edit { op: op.clone() }.encode(), Err(EncodeError::TextTooLong), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn a_clip_that_does_not_fit_one_frame_drops_its_html() {
+        let clip = |text: usize, html: usize| Clip {
+            text: "t".repeat(text),
+            html: Some("h".repeat(html)),
+        };
+        let both = clip(100, 100).encode().unwrap();
+        assert_eq!(Clip::decode(&both).unwrap().html.map(|h| h.len()), Some(100));
+        // The pair is over one frame; the text alone fits: the html is dropped.
+        let dropped = clip(MAX_PAYLOAD / 2, MAX_PAYLOAD).encode().unwrap();
+        let got = Clip::decode(&dropped).unwrap();
+        assert_eq!(got.text.len(), MAX_PAYLOAD / 2);
+        assert_eq!(got.html, None);
+        // Exactly at the frame with html (4 + text + 1 + 4 + html).
+        let exact = clip(100, MAX_PAYLOAD - 4 - 100 - 1 - 4).encode().unwrap();
+        assert!(Clip::decode(&exact).unwrap().html.is_some());
+        let over = clip(100, MAX_PAYLOAD - 4 - 100 - 1 - 4 + 1).encode().unwrap();
+        assert_eq!(Clip::decode(&over).unwrap().html, None);
+        // The text alone over a frame does not encode.
+        assert_eq!(clip(MAX_PAYLOAD, 0).encode(), Err(EncodeError::OverFrame));
+        assert_eq!(
+            Clip {
+                text: "t".repeat(MAX_PAYLOAD),
+                html: None
+            }
+            .encode(),
+            Err(EncodeError::OverFrame)
+        );
+    }
+
+    #[test]
+    fn edited_over_one_frame_does_not_encode() {
+        let mut e = edited();
+        e.selection = vec![pr(0, 1.0); MAX_PAYLOAD / PageRect::BYTES + 1];
+        assert_eq!(e.encode(), Err(EncodeError::OverFrame));
+    }
+
+    #[test]
+    fn edit_debug_shows_no_document_text() {
+        let secret = "geheim-document-tekst";
+        let s = || secret.to_owned();
+        let shown: Vec<String> = [
+            Message::Edit(Edit {
+                op: EditOp::InsertText(s()),
+            }),
+            Message::Edit(Edit {
+                op: EditOp::Paste { text: s() },
+            }),
+            Message::Edit(Edit {
+                op: EditOp::FontFamily(s()),
+            }),
+            Message::Edit(Edit {
+                op: EditOp::Link { text: s(), url: s() },
+            }),
+            Message::Edit(Edit {
+                op: EditOp::SetCell {
+                    sheet: 0,
+                    row: 0,
+                    col: 0,
+                    text: s(),
+                },
+            }),
+            Message::Edit(Edit {
+                op: EditOp::RenameSheet { sheet: 0, name: s() },
+            }),
+            Message::Clip(Clip {
+                text: s(),
+                html: Some(s()),
+            }),
+            Message::LayoutList(LayoutList { names: vec![s()] }),
+        ]
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .collect();
+        for line in &shown {
+            assert!(!line.contains("geheim"), "{line}");
+        }
+        assert!(shown[0].contains("text_len: 21"), "{}", shown[0]);
+        assert!(shown[6].contains("html_len: Some(21)"), "{}", shown[6]);
+    }
+}
+
+/// 2501: a PDF is opened by the helper, as kind 6 on the wire.
+#[test]
+fn pdf_kind_is_tag_six_and_round_trips() {
+    let open = Open {
+        kind: DocKind::Pdf,
+        doc: GRANT,
+    };
+    let payload = open.encode().expect("one frame");
+    assert_eq!(payload[0], 6);
+    assert_eq!(Open::decode(&payload), Ok(open));
 }

@@ -1104,6 +1104,9 @@ mod macos_keychain {
 mod errors;
 pub use errors::{AuthResult, AuthStoreError, VaultLockState};
 
+#[path = "../src/keychain/owed_revocations.rs"]
+pub(crate) mod owed_revocations;
+
 #[path = "../src/keychain/session.rs"]
 mod session;
 pub use session::SessionToken;

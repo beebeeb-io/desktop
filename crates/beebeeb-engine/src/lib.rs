@@ -81,6 +81,7 @@ pub mod owner_keys;
 pub mod passkey_windows;
 pub mod path_safety;
 pub mod photo_previews;
+pub mod power;
 pub mod reauth;
 pub mod runner;
 pub mod session;
@@ -100,6 +101,7 @@ pub mod sync_folder_rule;
 pub mod sync_root_owner;
 pub mod sync_root_port;
 pub mod sync_view;
+pub mod thumb_cache;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_api;
 #[cfg(any(test, feature = "test-support"))]
@@ -108,6 +110,7 @@ pub mod transfer_progress;
 pub mod unknown_check;
 pub mod upload_finalization_plan;
 pub mod vault_tree;
+pub mod video_frame_source;
 pub mod watcher;
 #[cfg(target_os = "windows")]
 pub mod windows_cf;

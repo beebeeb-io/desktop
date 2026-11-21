@@ -209,7 +209,7 @@ impl World {
 }
 fn bridge(db: &std::path::Path, fixture: &Fixture) -> EngineBridge {
     EngineBridge::new(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         Arc::new(StateDb::open(db).unwrap()),
         Arc::new(fixture.api()),
     )

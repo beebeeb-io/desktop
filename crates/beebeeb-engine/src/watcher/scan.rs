@@ -11,6 +11,10 @@ pub struct DiskStamp {
     pub(super) modified: Option<std::time::SystemTime>,
     #[cfg(target_os = "windows")]
     pub(super) attributes: u32,
+    /// Task 2241 (Windows): `ChangeTime` and the 128-bit file id, read through a handle opened for no
+    /// data ([`DiskStamp::with_identity`]). The listing alone may show an old size and time for a file still open
+    /// for writing; the handle shows the live values. `None` when the file could not be opened.
+    pub(super) identity: Option<StampIdentity>,
     #[cfg(unix)]
     pub(super) inode_and_change: (u64, i64, i64),
 }
@@ -22,6 +26,7 @@ impl DiskStamp {
             modified: meta.modified().ok(),
             #[cfg(target_os = "windows")]
             attributes: std::os::windows::fs::MetadataExt::file_attributes(meta),
+            identity: None,
             #[cfg(unix)]
             inode_and_change: {
                 use std::os::unix::fs::MetadataExt;
@@ -29,6 +34,94 @@ impl DiskStamp {
             },
         }
     }
+}
+
+/// `(ChangeTime, volume serial, file id)`; read on Windows only.
+pub type StampIdentity = (i64, u64, [u8; 16]);
+
+impl DiskStamp {
+    /// The live identity of `path` (Windows: one attribute-only open; elsewhere `None`).
+    pub fn default_identity(path: &std::path::Path) -> Option<StampIdentity> {
+        identity_at(path)
+    }
+
+    /// `Ok(())` when the file is unchanged since `seen`; otherwise the stamp to remember for it.
+    /// Task 2241: `read` (the attribute-only open) runs only when the listing (size, time, attributes)
+    /// already matches `seen`, a skip candidate; a changed file costs no open and its stamp is the
+    /// listing alone. The identity `read` returned is kept in the returned stamp (no second open).
+    pub fn check(&self, seen: &DiskStamp, read: impl FnOnce() -> Option<StampIdentity>) -> Result<(), DiskStamp> {
+        self.check_on(seen, cfg!(target_os = "windows"), read)
+    }
+
+    /// [`DiskStamp::check`] for a platform that does (`has_identity`) or does not supply an identity.
+    /// Where it does, a stored stamp without one never counts as unchanged: it is read once and refilled.
+    pub(super) fn check_on(
+        &self,
+        seen: &DiskStamp,
+        has_identity: bool,
+        read: impl FnOnce() -> Option<StampIdentity>,
+    ) -> Result<(), DiskStamp> {
+        let listing = |s: &DiskStamp| DiskStamp { identity: None, ..*s };
+        if listing(self) != listing(seen) {
+            return Err(*self);
+        }
+        let identity = read();
+        if identity == seen.identity && (seen.identity.is_some() || !has_identity) {
+            Ok(())
+        } else {
+            Err(DiskStamp { identity, ..*self })
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn identity_at(_path: &std::path::Path) -> Option<StampIdentity> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn identity_at(path: &std::path::Path) -> Option<StampIdentity> {
+    windows_identity(path)
+}
+
+/// `(ChangeTime, volume serial, file id)` of `path` through a no-data handle that never follows a
+/// reparse point; `None` when it cannot be opened or read.
+#[cfg(target_os = "windows")]
+fn windows_identity(path: &std::path::Path) -> Option<StampIdentity> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .ok()?;
+    let handle = HANDLE(file.as_raw_handle());
+    let mut basic = FILE_BASIC_INFO::default();
+    let mut id = FILE_ID_INFO::default();
+    // SAFETY: each struct is the one its info class names and its size is passed; `handle` is open for the calls.
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            (&mut basic as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+        .ok()?;
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&mut id as *mut FILE_ID_INFO).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+        .ok()?;
+    }
+    Some((basic.ChangeTime, id.VolumeSerialNumber, id.FileId.Identifier))
 }
 
 /// Task 2229: the files a pass found settled or held ([`ScanDispatch::Settled`]), with the disk stamp
@@ -39,6 +132,9 @@ impl DiskStamp {
 #[derive(Default)]
 pub struct ScanMemo {
     pub(super) settled: HashMap<PathBuf, (DiskStamp, u64)>,
+    /// R3: untracked placeholders recorded once for the mark retry, with the listing seen then; a later
+    /// pass with the same listing does not classify them again.
+    pub(super) untracked: HashMap<PathBuf, DiskStamp>,
     pub(super) since: Option<Instant>,
     /// Files classified by the last pass.
     pub classified: usize,
@@ -145,7 +241,6 @@ pub(super) fn walk_dir(
     // never even read its children — cheaper and impossible to misclassify.
     if crate::engine_bridge::path_is_engine_internal(sync_root, dir) {
         tracing::debug!(
-            path = %dir.display(),
             "enumeration scan: skipped engine-internal directory"
         );
         return;
@@ -155,7 +250,6 @@ pub(super) fn walk_dir(
         Ok(e) => e,
         Err(e) => {
             tracing::debug!(
-                path = %dir.display(),
                 error = %e,
                 "enumeration scan: read_dir failed; skipping directory"
             );
@@ -168,7 +262,6 @@ pub(super) fn walk_dir(
             Ok(e) => e,
             Err(e) => {
                 tracing::debug!(
-                    path = %dir.display(),
                     error = %e,
                     "enumeration scan: dir entry error; skipping"
                 );
@@ -181,7 +274,6 @@ pub(super) fn walk_dir(
         // nested `.beebeeb`). Cheap and defensive.
         if crate::engine_bridge::path_is_engine_internal(sync_root, &path) {
             tracing::debug!(
-                path = %path.display(),
                 "enumeration scan: skipped engine-internal entry"
             );
             continue;
@@ -196,7 +288,6 @@ pub(super) fn walk_dir(
             Ok(m) => m,
             Err(e) => {
                 tracing::debug!(
-                    path = %path.display(),
                     error = %e,
                     "enumeration scan: stat failed; skipping entry"
                 );
@@ -206,7 +297,6 @@ pub(super) fn walk_dir(
         let ft = meta.file_type();
         if ft.is_symlink() {
             tracing::debug!(
-                path = %path.display(),
                 "enumeration scan: skipped symlink"
             );
             continue;
@@ -220,10 +310,90 @@ pub(super) fn walk_dir(
             on_file(&path, &meta);
         } else {
             tracing::debug!(
-                path = %path.display(),
                 "enumeration scan: skipped non-file entry"
             );
         }
         // Other entry kinds (sockets, devices) are ignored.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Zero-knowledge: the non-test text of the scan, the watcher and the classifier logs no path or name.
+    #[test]
+    fn scan_and_classify_logs_carry_no_paths() {
+        for (name, src) in [
+            ("watcher.rs", include_str!("../watcher.rs")),
+            ("watcher/scan.rs", include_str!("scan.rs")),
+            ("engine_bridge/local_classify.rs", include_str!("../engine_bridge/local_classify.rs")),
+        ] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            for (n, line) in production.lines().enumerate() {
+                let t = line.trim();
+                if t.starts_with("//") {
+                    continue;
+                }
+                for bad in ["path = %", "path = ?", "path=%", "filename = %", "dir.display()", "path.display()"] {
+                    assert!(!t.contains(bad), "{name}:{}: log carries a path: {t}", n + 1);
+                }
+            }
+        }
+    }
+
+    fn stamp_of(path: &std::path::Path) -> DiskStamp {
+        DiskStamp::of(&std::fs::metadata(path).unwrap())
+    }
+
+    /// Task 2241: a changed file costs 0 opens (listing-only stamp); an unchanged candidate exactly 1,
+    /// whose value is kept; a Windows-style platform never skips a stamp stored without identity.
+    #[test]
+    fn identity_is_read_only_for_skip_candidates() {
+        let dir = std::env::temp_dir().join(format!("bb-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.bin");
+        std::fs::write(&f, b"one").unwrap();
+        let id = Some((7, 8, [9u8; 16]));
+        let mut seen = stamp_of(&f);
+        seen.identity = id;
+        let reads = std::cell::Cell::new(0);
+        let read = |v| {
+            reads.set(reads.get() + 1);
+            v
+        };
+        // Unchanged candidate: exactly one open, skipped.
+        assert_eq!(stamp_of(&f).check_on(&seen, true, || read(id)), Ok(()));
+        assert_eq!(reads.get(), 1);
+        // Candidate with another identity: one open, its value kept.
+        let other = Some((8, 8, [9u8; 16]));
+        let got = stamp_of(&f).check_on(&seen, true, || read(other));
+        assert_eq!(got.unwrap_err().identity, other);
+        assert_eq!(reads.get(), 2);
+        // Stored without identity: on an identity platform never unchanged, refilled once; elsewhere skipped.
+        let mut bare = seen;
+        bare.identity = None;
+        assert_eq!(stamp_of(&f).check_on(&bare, true, || read(id)).unwrap_err().identity, id);
+        assert_eq!(stamp_of(&f).check_on(&bare, false, || read(None)), Ok(()));
+        assert_eq!(reads.get(), 4);
+        // Changed file: no open, listing-only stamp.
+        std::fs::write(&f, b"longer bytes").unwrap();
+        let got = stamp_of(&f).check_on(&seen, true, || read(id));
+        assert_eq!(got.unwrap_err().identity, None);
+        assert_eq!(reads.get(), 4, "a changed file must not be opened");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// macOS/Linux supply no identity: an unchanged file is still skipped there.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unchanged_file_is_skipped_without_identity() {
+        let dir = std::env::temp_dir().join(format!("bb-stamp2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.bin");
+        std::fs::write(&f, b"one").unwrap();
+        let seen = stamp_of(&f);
+        assert_eq!(stamp_of(&f).check(&seen, || DiskStamp::default_identity(&f)), Ok(()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -534,7 +534,7 @@ pub struct StartupCheck {
     pub total: u64,
 }
 
-/// The `engine-status` key that carries the start-up guard's pass (0.8.15), which on Guus's PC walked 37,169 files with
+/// The `engine-status` key that carries the start-up guard's pass (0.8.15), which on the Windows test machine walked 37,169 files with
 /// no sign in any window: `{ "running": bool, "done": n, "total": n }`, as the engine lane writes it (branch
 /// `fix/0815-guard-nonblocking` at 62f794d: `runner::with_startup_guard` on every engine payload, and the same object as
 /// `sync_status.startup_guard`). The pause toggle's bare `{state}` payload does not carry it.

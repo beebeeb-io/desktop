@@ -192,6 +192,10 @@ pub trait BackupsSource {
     }
     /// The section opened: a source that reads late reads again when what it holds is old.
     fn opened(&mut self) {}
+    /// "Try again": read now, even when what is held is fresh.
+    fn read_again(&mut self) {
+        self.opened();
+    }
     /// Nothing is held yet and a read is out: the section's loading state.
     fn loading(&self) -> bool {
         false

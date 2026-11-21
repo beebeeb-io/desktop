@@ -212,7 +212,7 @@ final class XPCBridge {
     /// contract this two-process architecture needs. Verifying the
     /// alternative empirically would require a signed build against a real,
     /// registered domain, which this round's restrictions rule out (no
-    /// touching Guus's real domain, no second daemon instance). Kept the
+    /// touching the owner's real domain, no second daemon instance). Kept the
     /// group-container location; see the task file for the full writeup with
     /// sources.
     ///

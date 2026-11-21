@@ -3,12 +3,19 @@
 //! the lane's dialogs (`dialogs`: DW-0504, DW-0511 to DW-0515, Trash's DW-0749). The checklist
 //! is `FRAMES.md`.
 
+pub mod actions;
+mod actions_items;
+mod actions_links;
+mod actions_new;
+pub mod actions_sort;
 pub mod dialogs;
 pub mod parts;
 pub mod scenes;
 pub mod source;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod tests_chrome;
 
 use crate::State;
 use crate::frames::{self, Intent};
@@ -18,11 +25,15 @@ use crate::theme::{icons, tokens};
 use crate::ui::kit;
 use parts::controls::{ButtonKind, ButtonSize, Tone, button, button_keyed, pill, segments};
 use parts::menu::{Entry, Open, Took, Trail};
-use parts::table::{Columns, header, rows, table_row, tile};
+use parts::table::{Columns, Row, header, rows, table_row, tile};
 use parts::toolbar::{Bar, slot_sep, toolbar};
 use parts::{chrome, empty, list, style};
+use crate::ui::file_row::ROW_H;
+use crate::ui::view_state::{ViewState, try_again};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el, row};
-use source::{BoardShared, Loaded, Notice, RequestState, SharedSource};
+use std::borrow::Cow;
+use std::sync::{Arc, Mutex};
+use source::{BoardShared, Invitation, LinkShare, Loaded, Notice, PeopleShare, Request, RequestState, SharedSource};
 
 const COLUMNS: Columns = Columns {
     names: ["Name", "Shared on", "Size", "From", "PC"],
@@ -62,6 +73,41 @@ pub struct SharedUi {
     seen: Option<(crate::shell::app::GateState, Option<String>)>,
     /// Whether the Shared section was open at the last poll.
     was_open: bool,
+    /// A sync check finished and the lists are to be read again: waits while a menu or a dialog is open.
+    pub(crate) reread_due: bool,
+    /// The With me list's order and what the toolbar's search filters it by (`actions_sort`).
+    pub sort: actions_sort::SectionSort,
+    /// The one copy of the source's answer (`snapshot`).
+    snap: Mutex<Option<(u64, actions_sort::SectionSort, Arc<Snap>)>>,
+}
+
+/// What the source answered, held once per answer and sort: the lists are asked for many times a frame (the view, the
+/// keys, an item's key), and the source hands out a copy of each every time.
+pub struct Snap {
+    pub invitations: Vec<Invitation>,
+    /// In the Sort and the filter of the toolbar's search.
+    pub with_me: Arc<Vec<Row>>,
+    pub people: Vec<PeopleShare>,
+    pub links: Vec<LinkShare>,
+    pub requests: Vec<Request>,
+}
+
+/// A sync check finished (`shell::host::poll`): the lists are read again, on the first poll with nothing open over
+/// them. The source decides whether a list nobody looked at is read now or at its next opening.
+pub fn after_a_check(s: &mut State) {
+    s.frames.shared.reread_due = true;
+    reread_if_free(s);
+}
+
+/// The read a finished check asked for, when nothing is open over the lists (`after_a_check`, and every poll: a read
+/// that waited runs on the first poll after what was open closed).
+fn reread_if_free(s: &mut State) {
+    let ready = s.shell.app.gate() == crate::shell::app::GateState::Ready;
+    let ui = &mut s.frames.shared;
+    if ui.reread_due && ready && !ui.reread_waits() {
+        ui.reread_due = false;
+        ui.source.refresh();
+    }
 }
 
 /// How often the poll runs again while a read or a change is on its way.
@@ -74,6 +120,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let gate = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
     let open = s.sidebar_section == crate::ui::sidebar::SidebarSection::Shared
         && gate.0 == crate::shell::app::GateState::Ready;
+    reread_if_free(s);
     let ui = &mut s.frames.shared;
     let mut changed = false;
     if ui.seen.as_ref() != Some(&gate) {
@@ -87,6 +134,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             }
             // The section must re-open on the next poll, so a new read starts for the new account.
             ui.was_open = false;
+            ui.reread_due = false;
             changed = true;
         }
         ui.seen = Some(gate);
@@ -97,6 +145,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         changed = true;
     }
     ui.was_open = open;
+    // The selected ITEM, before the lists change under it: a read lands between polls, and an index would then name
+    // another item (its menu would act on it).
+    let chosen = ui.selected_id();
     let pumped = ui.source.pump();
     if let Some(notice) = pumped.notice {
         ui.notice = Some(notice);
@@ -106,13 +157,23 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         ui.invite_answered(&share, result);
         changed = true;
     }
+    // A link the source made (a new request's): only this `Tx` can put it on the clipboard.
+    let mut copied = false;
+    while let Some(link) = ui.source.take_link() {
+        tx.copy(link.expose());
+        copied = true;
+    }
+    if copied {
+        s.show_toast(crate::frames::files::Toast::LinkCopied, tx);
+        changed = true;
+    }
+    let ui = &mut s.frames.shared;
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
     if pumped.changed {
-        // An item that went takes the selection with it.
-        let left = ui.count();
-        ui.selected = ui.selected.filter(|i| *i < left);
+        // The selection follows its item; an item that went takes the selection (and its menu) with it.
+        ui.selected = chosen.and_then(|id| ui.item_ids().iter().position(|have| *have == id));
         if ui.selected.is_none() {
             ui.menu = None;
         }
@@ -127,6 +188,8 @@ fn notice_words(notice: Notice) -> &'static str {
         Notice::ChangeRefused => "Couldn\u{2019}t make that change. Nothing was changed.",
         Notice::AlreadyAccepted => "Already accepted.",
         Notice::RequestStillOpen => "Close the request first.",
+        Notice::NotOnThisPc => "This isn\u{2019}t on this PC. Make it available offline to show it in File Explorer.",
+        Notice::NoFolder => "This request has no folder of its own. Its files arrive in your Beebeeb.",
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Shared. What\u{2019}s shown may be out of date.",
     }
 }
@@ -138,6 +201,7 @@ fn notice_note(notice: Notice, t: &Theme) -> El {
         col()
             .key("notice")
             .role("status")
+            .live_region(rune::LiveRegion::Polite)
             .label(notice_words(notice))
             .w_full()
             .pt(9.0)
@@ -156,22 +220,63 @@ fn notice_note(notice: Notice, t: &Theme) -> El {
     )
 }
 
-/// The words of lists that are not here (`None`: they are, draw them).
-fn not_here(loaded: Loaded) -> Option<(&'static str, &'static str)> {
+/// What stands for lists that are not here (`None`: they are, draw them): Loading while the first answer is out, Failed
+/// with the reason (and Try again, where trying again can help) for the rest. Never a blank or an empty-looking list.
+fn away(loaded: Loaded, t: &Theme) -> Option<El> {
+    let failed = |title: &str, why: &str, retry: bool| {
+        let retry = retry.then(|| {
+            try_again("shared-failed", t).on_press(|s: &mut State| {
+                s.frames.shared.notice = None;
+                s.frames.shared.source.retry();
+            })
+        });
+        state_body(
+            ViewState::Failed {
+                key: "shared-failed",
+                title,
+                why,
+                retry,
+            },
+            t,
+        )
+    };
     match loaded {
         Loaded::Ready => None,
-        Loaded::Loading => Some(("Loading Shared\u{2026}", "Getting your shares from Beebeeb.")),
-        Loaded::Offline => Some((
+        Loaded::Loading => Some(state_body(
+            ViewState::Loading {
+                words: "Loading Shared\u{2026} Getting your shares from Beebeeb.",
+            },
+            t,
+        )),
+        Loaded::Offline => Some(failed(
             "Can\u{2019}t reach Beebeeb",
             "Shared shows again once you\u{2019}re online.",
+            true,
         )),
-        Loaded::Failed => Some((
+        Loaded::Failed => Some(failed(
             "Couldn\u{2019}t load Shared",
-            "Open Shared again in a moment to try again.",
+            "Beebeeb answered with an error.",
+            true,
         )),
-        Loaded::SessionEnded => Some(("Your session ended", "Sign in again to see Shared.")),
-        Loaded::SignedOut => Some(("Signed out", "Sign in to see Shared.")),
+        Loaded::SessionEnded => Some(failed("Your session ended", "Sign in again to see Shared.", false)),
+        Loaded::SignedOut => Some(failed("Signed out", "Sign in to see Shared.", false)),
     }
+}
+
+/// A refresh that failed while the lists are shown: Failed with Try again, over lists that may be out of date.
+fn refresh_failed(t: &Theme) -> El {
+    state_body(
+        ViewState::Failed {
+            key: "shared-failed",
+            title: "Couldn\u{2019}t refresh Shared",
+            why: "What\u{2019}s shown may be out of date.",
+            retry: Some(try_again("shared-failed", t).on_press(|s: &mut State| {
+                s.frames.shared.notice = None;
+                s.frames.shared.source.retry();
+            })),
+        },
+        t,
+    )
 }
 
 impl Default for SharedUi {
@@ -186,11 +291,47 @@ impl Default for SharedUi {
             notice: None,
             seen: None,
             was_open: false,
+            reread_due: false,
+            sort: actions_sort::SectionSort::default(),
+            snap: Mutex::new(None),
         }
     }
 }
 
 impl SharedUi {
+    /// What Shared with the person lists, in the Sort and the filter of the toolbar's search.
+    pub fn with_me_rows(&self) -> Arc<Vec<Row>> {
+        self.snapshot().with_me.clone()
+    }
+
+    /// The lists of the answer, worked out once per answer of the source (`SharedSource::rev`) and per sort. A
+    /// source with no revision is read each time.
+    pub fn snapshot(&self) -> Arc<Snap> {
+        let rev = self.source.rev();
+        let read = || {
+            Arc::new(Snap {
+                invitations: self.source.invitations(),
+                with_me: Arc::new(self.sort.arrange(self.source.with_me())),
+                people: self.source.people_shares(),
+                links: self.source.links(),
+                requests: self.source.requests(),
+            })
+        };
+        let Some(rev) = rev else {
+            return read();
+        };
+        let mut held = self.snap.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((have, by, snap)) = held.as_ref()
+            && *have == rev
+            && *by == self.sort
+        {
+            return snap.clone();
+        }
+        let snap = read();
+        *held = Some((rev, self.sort.clone(), snap.clone()));
+        snap
+    }
+
     pub fn show(&mut self, tab: Tab) {
         if self.tab != tab {
             self.tab = tab;
@@ -203,7 +344,7 @@ impl SharedUi {
     /// access here (DW-0511); anything else asks for what it points at.
     pub fn open_selected(&mut self) -> Option<Intent> {
         let i = self.selected?;
-        if self.tab == Tab::ByMe && i < self.source.people_shares().len() {
+        if self.tab == Tab::ByMe && i < self.snapshot().people.len() {
             let id = self.selected_id()?;
             self.show_people(&id);
             return None;
@@ -213,10 +354,11 @@ impl SharedUi {
 
     /// How many items the tab that shows lists.
     pub fn count(&self) -> usize {
+        let snap = self.snapshot();
         match self.tab {
-            Tab::WithMe => self.source.with_me().len(),
-            Tab::ByMe => self.source.people_shares().len() + self.source.links().len(),
-            Tab::Requests => self.source.requests().len(),
+            Tab::WithMe => snap.with_me.len(),
+            Tab::ByMe => snap.people.len() + snap.links.len(),
+            Tab::Requests => snap.requests.len(),
         }
     }
 
@@ -224,34 +366,49 @@ impl SharedUi {
     /// nothing: People with access is drawn here (`open_selected`).
     pub fn open_intent(&self) -> Option<Intent> {
         let i = self.selected?;
+        let snap = self.snapshot();
         match self.tab {
-            Tab::WithMe => self.source.with_me().get(i).map(|r| Intent::OpenItem(r.id.clone())),
+            Tab::WithMe => snap.with_me.get(i).map(|r| Intent::OpenItem(r.id.clone())),
             // A link or a request opens what it points at.
-            Tab::ByMe if i < self.source.people_shares().len() => None,
-            Tab::ByMe => self
-                .source
-                .links()
-                .get(i - self.source.people_shares().len())
+            Tab::ByMe if i < snap.people.len() => None,
+            Tab::ByMe => snap
+                .links
+                .get(i - snap.people.len())
                 .map(|l| Intent::OpenItem(l.id.clone())),
-            Tab::Requests => self.source.requests().get(i).map(|r| Intent::OpenItem(r.id.clone())),
+            Tab::Requests => snap.requests.get(i).map(|r| Intent::OpenItem(r.id.clone())),
         }
     }
 
     /// The id of the selected item.
     fn selected_id(&self) -> Option<String> {
         let i = self.selected?;
-        let people = self.source.people_shares();
+        self.item_ids().into_iter().nth(i)
+    }
+
+    /// The ids of the items of the tab that shows, in the order they are drawn.
+    fn item_ids(&self) -> Vec<String> {
+        let snap = self.snapshot();
         match self.tab {
-            Tab::WithMe => self.source.with_me().get(i).map(|r| r.id.clone()),
-            Tab::ByMe if i < people.len() => Some(people[i].id.clone()),
-            Tab::ByMe => self.source.links().get(i - people.len()).map(|l| l.id.clone()),
-            Tab::Requests => self.source.requests().get(i).map(|r| r.id.clone()),
+            Tab::WithMe => snap.with_me.iter().map(|r| r.id.clone()).collect(),
+            Tab::ByMe => snap
+                .people
+                .iter()
+                .map(|p| p.id.clone())
+                .chain(snap.links.iter().map(|l| l.id.clone()))
+                .collect(),
+            Tab::Requests => snap.requests.iter().map(|r| r.id.clone()).collect(),
         }
+    }
+
+    /// Something is open over the lists that a read would move under it: a menu, or a dialog (an invitation, a
+    /// link's expiry, People with access). The read of a finished check waits until it closed.
+    fn reread_waits(&self) -> bool {
+        self.menu.is_some() || self.dialog.is_some()
     }
 
     /// The key of item `i` of the tab that shows: focus goes where the selection goes.
     pub fn item_key(&self, i: usize) -> String {
-        let people = self.source.people_shares().len();
+        let people = self.snapshot().people.len();
         match self.tab {
             Tab::WithMe => format!("row-{i}"),
             Tab::ByMe if i < people => format!("item-0-{i}"),
@@ -274,23 +431,43 @@ impl SharedUi {
             .position(|e| matches!(e.trail, Trail::Keys(k) if k == keys))
     }
 
+    /// The names of the current tab's items in list order: what typed letters jump over.
+    fn names(&self) -> Vec<String> {
+        let snap = self.snapshot();
+        match self.tab {
+            Tab::WithMe => snap.with_me.iter().map(|r| r.name.clone()).collect(),
+            Tab::ByMe => snap
+                .people
+                .iter()
+                .map(|p| p.name.clone())
+                .chain(snap.links.iter().map(|l| l.name.clone()))
+                .collect(),
+            Tab::Requests => snap.requests.iter().map(|r| r.title.clone()).collect(),
+        }
+    }
+
     /// Move the selection to item `i`.
     fn select(&mut self, i: usize, tx: &mut Tx) {
         self.selected = Some(i);
+        // The lists draw only the rows in view: the one the arrow went to is brought in first.
+        tx.scroll_into_view(self.item_key(i));
         tx.focus(self.item_key(i), true);
     }
 
     /// The selected item's menu (DW-0505, DW-0506, DW-0507) and its name.
     pub fn menu_entries(&self) -> (&'static str, &'static [Entry], f32) {
+        if self.menu.as_ref().is_some_and(actions_sort::is_sort_menu) {
+            return ("Sort by", actions_sort::SORT_MENU, 180.0);
+        }
         let Some(i) = self.selected else {
             return ("", &[], 0.0);
         };
         match self.tab {
             Tab::WithMe => ("Shared with you", MENU_WITH_ME, 220.0),
             // A share with people offers People and Stop sharing instead of the link items.
-            Tab::ByMe if i < self.source.people_shares().len() => ("Shared with people", MENU_PEOPLE, 210.0),
+            Tab::ByMe if i < self.snapshot().people.len() => ("Shared with people", MENU_PEOPLE, 210.0),
             Tab::ByMe => ("Link", MENU_LINK, 210.0),
-            Tab::Requests => match self.source.requests().get(i).map(|r| r.state) {
+            Tab::Requests => match self.snapshot().requests.get(i).map(|r| r.state) {
                 Some(RequestState::Open) => ("File request", MENU_REQUEST, 200.0),
                 // A closed or expired request only offers View files and Remove.
                 _ => ("File request", MENU_REQUEST_OVER, 200.0),
@@ -300,6 +477,12 @@ impl SharedUi {
 
     /// Do what the menu's item `n` says, and close the menu.
     pub fn pick(&mut self, n: usize) -> Option<Intent> {
+        if self.menu.as_ref().is_some_and(actions_sort::is_sort_menu) {
+            self.menu = None;
+            self.sort.pick(n);
+            self.selected = None;
+            return None;
+        }
         let (_, entries, _) = self.menu_entries();
         self.menu = None;
         let words = entries.get(n)?.words;
@@ -314,8 +497,11 @@ impl SharedUi {
             }
             "Show in File Explorer" => Some(Intent::About("DW-1180", id)),
             "Details" => Some(Intent::About("DW-0411", id)),
-            // The confirmation is the shell's (the board draws none); the engine call follows it.
-            "Leave\u{2026}" => Some(Intent::Do("leave", id)),
+            // Each asks first; the engine call follows the answer (`actions_items`).
+            "Leave\u{2026}" => {
+                self.open_dialog(dialogs::Dialog::ConfirmLeave { id });
+                None
+            }
             "Copy link" => Some(Intent::Do("copy-link", id)),
             "Change expiry" => Some(Intent::Do("change-expiry", id)),
             "Password\u{2026}" => Some(Intent::Do("link-password", id)),
@@ -324,11 +510,11 @@ impl SharedUi {
             "People" if self.show_people(&id) => None,
             "People" => Some(Intent::About("DW-0511", id)),
             "Stop sharing" => {
-                gone = self.source.stop_sharing(&id);
+                self.open_dialog(dialogs::Dialog::ConfirmStop { id });
                 None
             }
             "Close request" => {
-                self.source.close_request(&id);
+                self.open_dialog(dialogs::Dialog::ConfirmClose { id });
                 None
             }
             "Remove" => {
@@ -396,6 +582,19 @@ fn return_focus(s: &State, tx: &mut Tx) {
 fn light(s: &mut State, n: usize) {
     if let Some(open) = s.frames.shared.menu.as_mut() {
         open.hot = n;
+    }
+}
+
+/// A view's state as the body under the toolbar: Loading is the strip at the top; Empty and Failed are centred in the
+/// space (`ui::view_state`).
+pub(crate) fn state_body(state: crate::ui::view_state::ViewState, t: &Theme) -> El {
+    use crate::ui::view_state::{ViewState, view_state};
+    let loading = matches!(state, ViewState::Loading { .. });
+    let shown = view_state(state, t);
+    if loading {
+        col().key("state-area").w_full().child(shown)
+    } else {
+        el().key("empty-area").center().child(shown)
     }
 }
 
@@ -483,7 +682,7 @@ fn invitation_card(n: usize, inv: &source::Invitation, t: &Theme) -> El {
             .fill(t.card)
             .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)))
             .box_shadow(kit::ring(kit::HAIR, t.separator))
-            .child(tile(&k, format!("{k}-icon"), inv.kind, 36.0, 9.0, 22.0, t))
+            .child(tile(&k, format!("{k}-icon"), &inv.name, inv.kind, 36.0, 9.0, 22.0, t))
             .child(words)
             .child(
                 button("Decline", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
@@ -499,8 +698,8 @@ fn invitation_card(n: usize, inv: &source::Invitation, t: &Theme) -> El {
 }
 
 fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
-    let invitations = ui.source.invitations();
-    let items = ui.source.with_me();
+    let snap = ui.snapshot();
+    let (invitations, items) = (&snap.invitations, &snap.with_me);
     let count = items.len() + invitations.len();
     let status = format!(
         "Shared with you: {} \u{00B7} waiting: {}",
@@ -508,11 +707,14 @@ fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
         invitations.len()
     );
     if count == 0 {
-        let body = empty::empty(
-            &icons::SHARED,
-            "Nothing shared with you",
-            "When someone shares a file or folder with you, it appears here.",
-            None,
+        let body = state_body(
+            ViewState::Empty {
+                key: "shared-empty",
+                icon: &icons::SHARED,
+                title: "Nothing shared with you",
+                body: "When someone shares a file or folder with you, it appears here.",
+                action: None,
+            },
             t,
         );
         return (body, status, 0);
@@ -521,17 +723,35 @@ fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
     for (n, inv) in invitations.iter().enumerate() {
         body = body.child(invitation_card(n, inv, t));
     }
-    let list = items
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            table_row(i, r, ui.selected == Some(i), &COLUMNS, t)
-                .tab_index(stop(ui, i))
-                .on_press(select(i))
-                .on_double_press(open(i))
-                .on_secondary_press(menu(i))
-        })
-        .collect();
+    // Only the rows in view are built (`virtual_rows`), from the one copy of the answer.
+    let t = *t;
+    let list = rows("Shared with you", Vec::new()).child(
+        col()
+            .key("with-me-rows")
+            .w_full()
+            .growth(rune::GrowthSpec::default())
+            .virtual_rows(
+                items.len(),
+                ROW_H,
+                |s: &State, i| {
+                    if i < s.frames.shared.snapshot().with_me.len() {
+                        Cow::Owned(format!("row-{i}"))
+                    } else {
+                        Cow::Borrowed("row-oob")
+                    }
+                },
+                move |s: &State, i| match s.frames.shared.snapshot().with_me.get(i) {
+                    Some(r) => table_row(i, r, s.frames.shared.selected == Some(i), &COLUMNS, &t)
+                        .tab_index(stop(&s.frames.shared, i))
+                        .position_in_set(i + 1, s.frames.shared.snapshot().with_me.len())
+                        .on_press(select(i))
+                        .on_double_press(open(i))
+                        .on_secondary_press(menu(i)),
+                    None => el().key("empty"),
+                },
+            ),
+    );
+    let t = &t;
     body =
         body.child(el().key("label-wrap").px(20.0).pt(16.0).child(list::label(
             "shared-with-you",
@@ -539,21 +759,24 @@ fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
             t,
         )))
         .child(header(&COLUMNS, t))
-        .child(rows("Shared with you", list));
+        .child(list);
     (body, status, count)
 }
 
 fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
-    let people = ui.source.people_shares();
-    let links = ui.source.links();
+    let snap = ui.snapshot();
+    let (people, links) = (&snap.people, &snap.links);
     let count = people.len() + links.len();
     let status = format!("{} shared with people \u{00B7} {} links", people.len(), links.len());
     if count == 0 {
-        let body = empty::empty(
-            &icons::SHARE,
-            "You haven't shared anything",
-            "Right-click any file or folder in Files and choose Share\u{2026} to share it.",
-            None,
+        let body = state_body(
+            ViewState::Empty {
+                key: "shared-empty",
+                icon: &icons::SHARE,
+                title: "You haven't shared anything",
+                body: "Right-click any file or folder in Files and choose Share\u{2026} to share it.",
+                action: None,
+            },
             t,
         );
         return (body, status, 0);
@@ -599,6 +822,7 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 t,
             )
             .tab_index(stop(ui, m))
+            .position_in_set(m + 1, count)
             .on_press(select(m))
             .on_double_press(open(m))
             .on_secondary_press(menu(m))
@@ -644,6 +868,7 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 t,
             )
             .tab_index(stop(ui, i))
+            .position_in_set(i + 1, count)
             .on_press(select(i))
             .on_double_press(open(i))
             .on_secondary_press(menu(i))
@@ -670,7 +895,8 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
 }
 
 fn requests(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
-    let requests = ui.source.requests();
+    let snap = ui.snapshot();
+    let requests = &snap.requests;
     let of = |state| requests.iter().filter(|r| r.state == state).count();
     let status = format!(
         "{} open \u{00B7} {} closed \u{00B7} {} expired",
@@ -679,21 +905,24 @@ fn requests(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
         of(RequestState::Expired)
     );
     if requests.is_empty() {
-        let body = empty::empty(
-            &parts::icons::REQUEST,
-            "No file requests",
-            "Ask anyone to send you files, even without a Beebeeb account.",
-            Some(
-                button_keyed(
-                    "btn-new-request-2".into(),
-                    "New request",
-                    ButtonKind::Outline,
-                    ButtonSize::Medium,
-                    Some(&icons::PLUS),
-                    t,
-                )
-                .on_press(|s: &mut State| s.frames.intents.push(Intent::Frame("DW-0504"))),
-            ),
+        let body = state_body(
+            ViewState::Empty {
+                key: "shared-empty",
+                icon: &parts::icons::REQUEST,
+                title: "No file requests",
+                body: "Ask anyone to send you files, even without a Beebeeb account.",
+                action: Some(
+                    button_keyed(
+                        "btn-new-request-2".into(),
+                        "New request",
+                        ButtonKind::Outline,
+                        ButtonSize::Medium,
+                        Some(&icons::PLUS),
+                        t,
+                    )
+                    .on_press(|s: &mut State| s.frames.intents.push(Intent::Frame("DW-0504"))),
+                ),
+            },
             t,
         );
         return (body, status, 0);
@@ -721,6 +950,7 @@ fn requests(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 t,
             )
             .tab_index(stop(ui, m))
+            .position_in_set(m + 1, requests.len())
             .on_press(select(m))
             .on_double_press(open(m))
             .on_secondary_press(menu(m))
@@ -743,14 +973,22 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
     let ui = &s.frames.shared;
     // A source that answers late: its loading, offline, error and signed-out states instead of an empty list.
-    let away = not_here(ui.source.loaded());
+    let away = away(ui.source.loaded(), &t);
+    let missing = away.is_some();
     let (body, status, count) = match (away, ui.tab) {
-        (Some((title, words)), _) => (empty::empty(&icons::SHARED, title, words, None, &t), String::new(), 0),
+        (Some(state), _) => (state, String::new(), 0),
         (None, Tab::WithMe) => with_me(ui, &t),
         (None, Tab::ByMe) => by_me(ui, &t),
         (None, Tab::Requests) => requests(ui, &t),
     };
     let body = match ui.notice {
+        // A refresh that failed with the lists on screen: Failed with Try again over them.
+        Some(Notice::RefreshFailed) => col()
+            .key("notice-body")
+            .w_full()
+            .grow(1.0)
+            .child(refresh_failed(&t))
+            .child(body),
         Some(notice) => col()
             .key("notice-body")
             .w_full()
@@ -760,7 +998,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         None => body,
     };
     let sub = match (ui.tab, count) {
-        (_, 0) if away.is_some() => String::new(),
+        (_, 0) if missing => String::new(),
         (_, 0) => "No items".to_string(),
         (Tab::WithMe, 1) => "1 item".to_string(),
         (Tab::WithMe, n) => format!("{n} items"),
@@ -792,7 +1030,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         &t,
     );
     // With nothing to count, the status line is the PC's summary, as in Files (DW-0508, DW-0509, DW-0510).
-    let status = if count == 0 { s.frames.pc.summary() } else { status };
+    let status = if count == 0 { frames::pc_summary(s) } else { status };
     let window = cx.layout_size("window");
     let layer = ui.menu.as_ref().map(|open| {
         let (name, entries, min_w) = ui.menu_entries();
@@ -865,6 +1103,21 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Up => ui.select(ui.selected.map_or(0, |i| i.saturating_sub(1)), tx),
         Key::Home => ui.select(0, tx),
         Key::End => ui.select(count - 1, tx),
+        Key::PageDown | Key::PageUp => {
+            let to = parts::table::page_to(ui.selected, count, ev.key == Key::PageDown);
+            ui.select(to, tx)
+        }
+        Key::Text(_) => {
+            let names = ui.names();
+            match parts::table::jump_to(names.iter().map(String::as_str), ui.selected, ev) {
+                Some(i) => ui.select(i, tx),
+                None => return false,
+            }
+        }
+        Key::Delete => match ui.hinted("Delete") {
+            Some(n) => pick(s, n, tx),
+            None => return false,
+        },
         Key::Enter => match ui.open_selected() {
             Some(intent) => s.frames.intents.push(intent),
             // People with access opened here: the key is taken.

@@ -15,6 +15,12 @@ pub enum LocalState {
     AvailableOffline,
     Syncing,
     Failed,
+    /// The entry at its place on this computer is another server item's with the very same name
+    /// (`case_place::Clash::SameName`): its presses on disk are refused.
+    NameShared,
+    /// The entry at its place on this computer is another item's whose name differs only by letter case
+    /// (`case_place::Clash::Case`): its presses on disk are refused.
+    NameSharedButCase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

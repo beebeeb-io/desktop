@@ -13,7 +13,7 @@ IDs, names, bytes, SHA-256 and versions are stable; synthetic keys, tokens and
 encryption nonces are generated per setup and never serialized or logged.
 Video poster retrieval does not certify video decoding or poster generation.
 
-Review-fix contract (Guus, 2026-09-30): each stored object's active manifest
+Review-fix contract (owner, 2026-09-30): each stored object's active manifest
 version owns its version ID (`<object-id>-v<version-number>`), size and chunk
 plan. Upload init/complete, metadata and snapshot listing use that same state;
 object 10 keeps its ID through completion and retries. Object 7's remote version

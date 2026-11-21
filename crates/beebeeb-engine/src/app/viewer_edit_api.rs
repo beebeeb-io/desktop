@@ -36,7 +36,9 @@ use crate::write_token::ChainAfter;
 
 /// How long a save waits for the upload to land before it says "stored here, sent later".
 pub const LAND_WAIT: Duration = Duration::from_secs(20);
-const LAND_POLL: Duration = Duration::from_millis(150);
+const LAND_POLL: Duration = Duration::from_millis(100);
+/// How long a save whose op left the queue without a landing is waited for before it is called not saved.
+const GONE_GRACE: Duration = Duration::from_secs(2);
 
 /// A save that ended as [`SaveEnd::Queued`]: which upload carries it, from which base, for which session and which
 /// opening (`epoch`), under which write. Once that upload has landed, the version it became (the landing records it
@@ -267,6 +269,11 @@ pub enum SaveEnd {
 
 #[path = "viewer_edit_held.rs"]
 mod viewer_edit_held;
+#[path = "viewer_edit_landing.rs"]
+mod viewer_edit_landing;
+#[cfg(test)]
+#[path = "viewer_edit_landing_tests.rs"]
+mod viewer_edit_landing_tests;
 
 /// The file Keep both made.
 #[derive(Clone, PartialEq, Eq)]
@@ -333,7 +340,35 @@ impl<C: CredentialStores> Engine<C> {
         base: i64,
         opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
+        self.save_bytes_for(session, file_id, text.as_bytes(), base, opening)
+    }
+
+    /// [`Self::save_text_for`] for any bytes (the Office save shares it: `office_edit_api`). One body for both, so
+    /// the opening epoch, the Conflict answer, the chain rule and the land wait can never differ between them.
+    pub(in crate::app) fn save_bytes_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &[u8],
+        base: i64,
+        opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
+        self.save_bytes_sealed_for(session, file_id, bytes, base, opening, None)
+    }
+
+    /// [`Self::save_bytes_for`]; `seal_kind` `Some(kind)` stages the bytes sealed (an Office save: `office_edit_api`).
+    pub(in crate::app) fn save_bytes_sealed_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &[u8],
+        base: i64,
+        opening: u64,
+        seal_kind: Option<u8>,
+    ) -> Result<SaveEnd, EditRefused> {
+        let began = Instant::now();
         let (token, key) = self.edit_credentials(session)?;
+        let asking = (token.clone(), key.clone());
         let state = self.local_state_for_changes().map_err(|_| EditRefused::Unavailable)?;
         if state.session() != session {
             return Err(EditRefused::NotSignedIn);
@@ -386,7 +421,11 @@ impl<C: CredentialStores> Engine<C> {
             content_type: contract.content_type.clone(),
             base_version_identifier: Some(base.to_string()),
         };
-        let held = anonymous_file(text).ok_or(EditRefused::Failed)?;
+        // A sealed save never puts the plaintext in a file of its own: the one staged copy is the sealed blob.
+        let held = match seal_kind {
+            Some(_) => None,
+            None => Some(anonymous_file(bytes).ok_or(EditRefused::Failed)?),
+        };
         // Delta 3 of desktop#432: queued after this opening's own latest unsent save alone. Another unsent write of
         // the file (an earlier opening's save, a File Provider save) is not what the text on screen is based on:
         // after it, both would land one after the other and nobody would be asked. The accept checks it inside its
@@ -406,7 +445,7 @@ impl<C: CredentialStores> Engine<C> {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
                 let queued = EngineBridge::new(self.identity, db.clone(), api)
                     .with_chain_after(chain)
-                    .queue_file_provider_modify_from(target, Some(&held))
+                    .queue_modify_for_save(target, held.as_ref(), bytes, seal_kind)
                     .map(|write| (write.outcome, write.token));
                 // Refused behind an earlier write: ONE read, after the refused accept, picks which refusal it is (held
                 // back, or not sent yet). For the words alone: nothing was stored either way, so a change between the
@@ -436,21 +475,106 @@ impl<C: CredentialStores> Engine<C> {
         // this viewer's own by its read of the version (`EditFacts::own`), also one between the last look below and
         // the Queued answer.
         remember_queued(saves, file_id, queued.clone());
+        tracing::debug!(queued_after_ms = began.elapsed().as_millis() as u64, "viewer save queued");
+        // The runner sends it now, not at its next tick (w26, v5 bug 3: a save waited for the tick, 20 s).
+        self.nudge_runner();
         // Wait, bounded, for the upload to land: the op leaves the queue, and the version it became is the one the
         // landing recorded for this save's write (never a version read off the row, which may be another device's).
+        // A save the server refused as stale (409) is a Conflict, never "saved" (w26, v5 bug 8); one that will not be
+        // sent by itself, or left the queue without landing, is not saved.
         let deadline = Instant::now() + LAND_WAIT;
+        let began_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let (mut gone_since, mut parked_stale, mut asked) = (None::<Instant>, false, None::<Instant>);
+        let mut head = None::<(i64, i64)>;
+        // A save that is not saved leaves no claim on the file: the next save of this opening is judged by what is
+        // really queued (an unsent write of the file refuses it), never queued behind a refused one.
+        let forget = || {
+            with_saves(saves, file_id, session, opening, |saves| saves.queued = None);
+        };
         while self.is_syncing() && Instant::now() < deadline {
-            match state.with(|db| landed_version(db, file_id, &queued)) {
-                Err(_) => return Err(EditRefused::NotSignedIn),
-                Ok(Some(version)) if version > base => {
+            use viewer_edit_landing::{Fate, look_with_head};
+            match state.with(|db| look_with_head(db, file_id, &queued, base, head)) {
+                Err(_) | Ok(Err(_)) => return Err(EditRefused::NotSignedIn),
+                Ok(Ok(Fate::Landed(version))) => {
                     // Noted, never forgotten: a read between here and the answer finds it the view's own.
                     note_landed(saves, file_id, &queued, version);
+                    tracing::debug!(landed_after_ms = began.elapsed().as_millis() as u64, "viewer save landed");
                     return Ok(SaveEnd::Saved { version });
                 }
-                Ok(_) => std::thread::sleep(LAND_POLL),
+                Ok(Ok(Fate::Conflict { theirs })) => {
+                    // The refused save is out of the queue: the person's choice starts from the file as it is.
+                    forget();
+                    return Ok(SaveEnd::Conflict { theirs });
+                }
+                Ok(Ok(Fate::Failed)) => {
+                    forget();
+                    return Err(EditRefused::Failed);
+                }
+                Ok(Ok(Fate::Gone)) => {
+                    // A landing and the op's end are one transaction; a short grace for any other order of reads.
+                    if gone_since.get_or_insert_with(Instant::now).elapsed() > GONE_GRACE {
+                        forget();
+                        return Err(EditRefused::Failed);
+                    }
+                    std::thread::sleep(LAND_POLL);
+                }
+                Ok(Ok(Fate::ParkedStale)) => {
+                    parked_stale = true;
+                    // The server refused the upload as stale (409): final. This PC's pull learns the newer version at
+                    // its next tick (30 s); the server is asked now (once a second), and its head settles the refused
+                    // save in the next look, so the person is asked at once.
+                    if asked.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+                        asked = Some(Instant::now());
+                        head = self.server_head(&asking.0, &asking.1, file_id).filter(|(v, _)| *v > base);
+                        if head.is_some() {
+                            continue;
+                        }
+                    }
+                    std::thread::sleep(LAND_POLL);
+                }
+                Ok(Ok(Fate::Waiting)) => {
+                    (gone_since, parked_stale) = (None, false);
+                    // w29: offline (or the server not answering) the upload cannot start: the save is stored here and
+                    // says so now, not after the whole land wait (the Windows test machine run 11: 20 s of "saving").
+                    if viewer_edit_landing::link_down_since(self.link_failure(), began_unix, began.elapsed()) {
+                        return Ok(SaveEnd::Queued { base });
+                    }
+                    std::thread::sleep(LAND_POLL);
+                }
             }
         }
+        // Refused as stale and neither this PC nor the server named the newer version in time: not saved (the change
+        // stays in Sync history).
+        if parked_stale {
+            forget();
+            return Err(EditRefused::Failed);
+        }
         Ok(SaveEnd::Queued { base })
+    }
+
+    /// The head the server holds for `file_id` now, its version and size (one request; a worker's). `None`: it could
+    /// not be read.
+    fn server_head(&self, token: &str, key: &Zeroizing<[u8; 32]>, file_id: &str) -> Option<(i64, i64)> {
+        let api = ApiClient::new(self.config.api_base.clone(), token.to_string(), **key);
+        let meta = self.runtime.block_on(api.get_file(file_id)).ok()?;
+        head_of(&meta)
+    }
+
+    /// The link monitor's latest failure (the runner's), `None`: none since its last good answer, or no runner.
+    fn link_failure(&self) -> Option<(crate::link_health::LinkFailure, i64)> {
+        self.runtime
+            .block_on(async { self.acct.engine.lock().await.as_ref().and_then(|runner| runner.send_phase().link_failure()) })
+    }
+
+    /// Ask the runner for a queue step now (it would otherwise send the save at its next tick). No runner: nothing.
+    pub(in crate::app) fn nudge_runner(&self) {
+        self.runtime.block_on(async {
+            if let Some(runner) = self.acct.engine.lock().await.as_ref() {
+                runner.send_phase().nudge();
+            }
+        });
     }
 
     /// See the module's doc: Keep both. `device` and `hhmm` name the copy as every conflict copy is named.
@@ -459,6 +583,18 @@ impl<C: CredentialStores> Engine<C> {
         session: SessionGeneration,
         file_id: &str,
         text: &str,
+        device: &str,
+        hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        self.save_bytes_copy_for(session, file_id, text.as_bytes(), device, hhmm)
+    }
+
+    /// [`Self::save_text_copy_for`] for any bytes (shared with the Office save's Keep both).
+    pub(in crate::app) fn save_bytes_copy_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &[u8],
         device: &str,
         hhmm: &str,
     ) -> Result<NewCopy, EditRefused> {
@@ -500,7 +636,7 @@ impl<C: CredentialStores> Engine<C> {
             content_type: contract.content_type.clone(),
             base_version_identifier: None,
         };
-        let held = anonymous_file(text).ok_or(EditRefused::Failed)?;
+        let held = anonymous_file(bytes).ok_or(EditRefused::Failed)?;
         let outcome = state
             .with_shared(|db| {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
@@ -517,7 +653,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// The token and the key of the session `session` is, copied while it still is.
-    fn edit_credentials(&self, session: SessionGeneration) -> Result<(String, Zeroizing<[u8; 32]>), EditRefused> {
+    pub(in crate::app) fn edit_credentials(&self, session: SessionGeneration) -> Result<(String, Zeroizing<[u8; 32]>), EditRefused> {
         self.person_session(|current, generation| {
             (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
         })
@@ -527,10 +663,18 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
-/// `text` in a file with no name, read from the start.
-fn anonymous_file(text: &str) -> Option<std::fs::File> {
+/// `bytes` in a file with no name, read from the start.
+/// The head version and size `GET /api/v1/files/{id}` names: `download_version.version_number` and `size_bytes`
+/// (the response has no `current_version`; w27 found the old read of that key never matched, so the server was asked
+/// every second and never answered). `None`: no version in it.
+fn head_of(meta: &serde_json::Value) -> Option<(i64, i64)> {
+    let version = meta["download_version"]["version_number"].as_i64()?;
+    Some((version, meta["size_bytes"].as_i64().unwrap_or(0)))
+}
+
+pub(in crate::app) fn anonymous_file(bytes: &[u8]) -> Option<std::fs::File> {
     let mut file = tempfile::tempfile().ok()?;
-    file.write_all(text.as_bytes()).ok()?;
+    file.write_all(bytes).ok()?;
     file.flush().ok()?;
     file.seek(SeekFrom::Start(0)).ok()?;
     Some(file)
@@ -909,5 +1053,16 @@ mod queued_save_tests {
             ..record()
         };
         assert_eq!(landed_version(&db, "f", &other), None);
+    }
+
+    /// w27: the file's detail answers `download_version.version_number`; no `current_version` key exists.
+    #[test]
+    fn the_head_is_read_from_the_file_detail_s_download_version() {
+        let meta = serde_json::json!({
+            "id": "f", "size_bytes": 6543,
+            "download_version": { "object_version_id": "o", "version_number": 5 }
+        });
+        assert_eq!(super::head_of(&meta), Some((5, 6543)));
+        assert_eq!(super::head_of(&serde_json::json!({ "size_bytes": 1 })), None);
     }
 }

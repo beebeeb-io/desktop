@@ -2,6 +2,7 @@
 //! where it came from. Nothing here opens (an item can be restored); Details and a read-only Preview show over the list
 //! (`frames::item`).
 
+pub mod actions;
 pub mod scenes;
 pub mod source;
 #[cfg(test)]
@@ -13,13 +14,18 @@ use crate::State;
 use crate::frames::shared::dialogs::{Dialog, PASSWORD_INPUT};
 use crate::frames::shared::parts::controls::{ButtonKind, button};
 use crate::frames::shared::parts::menu::{Entry, Open, Took, menu};
-use crate::frames::shared::parts::table::{Columns, header, rows, table_row};
+use crate::frames::shared::parts::table::{Columns, Row, header, rows, table_row};
 use crate::frames::shared::parts::toolbar::{Bar, toolbar};
-use crate::frames::shared::parts::{chrome, empty};
+use crate::frames::shared::parts::chrome;
+use crate::frames::shared::state_body;
+use crate::ui::file_row::ROW_H;
+use crate::ui::view_state::{ViewState, try_again};
 use crate::frames::{self, Intent};
 use crate::theme::{icons, tokens};
 use crate::ui::kit;
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el};
+use std::borrow::Cow;
+use std::sync::Arc;
 use source::{BoardTrash, Loaded, Notice, PurgeEnd, TrashSource};
 
 const COLUMNS: Columns = Columns {
@@ -43,10 +49,33 @@ pub struct TrashUi {
     seen: Option<(crate::shell::app::GateState, Option<String>)>,
     /// Whether the Trash section was open at the last poll.
     was_open: bool,
+    /// A sync check finished and the list is to be read again: waits while a menu or a dialog is open.
+    pub(crate) reread_due: bool,
+    /// The list's order and what the toolbar's search filters it by (`shared::actions_sort`).
+    pub sort: crate::frames::shared::actions_sort::SectionSort,
+    /// The one sorted copy of the source's answer (`rows`).
+    arranged: crate::frames::shared::actions_sort::Arranged,
 }
 
 /// How often the poll runs again while a read or a restore is on its way.
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A sync check finished (`shell::host::poll`): the list is read again, on the first poll with nothing open over it.
+pub fn after_a_check(s: &mut State) {
+    s.frames.trash.reread_due = true;
+    reread_if_free(s);
+}
+
+/// The read a finished check asked for, when nothing is open over the list (`after_a_check`, and every poll).
+fn reread_if_free(s: &mut State) {
+    let ready = s.shell.app.gate() == crate::shell::app::GateState::Ready;
+    let free = s.frames.trash.menu.is_none() && s.frames.shared.dialog.is_none();
+    let ui = &mut s.frames.trash;
+    if ui.reread_due && ready && free {
+        ui.reread_due = false;
+        ui.source.refresh();
+    }
+}
 
 /// The window's poll (`shell::host::poll`): a gate or account change drops the source's names at once, on the
 /// window's side; opening the Trash section asks for the list (the source decides whether it is old); what arrived
@@ -55,6 +84,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let gate = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
     let open =
         s.sidebar_section == crate::ui::sidebar::SidebarSection::Trash && gate.0 == crate::shell::app::GateState::Ready;
+    reread_if_free(s);
     let ui = &mut s.frames.trash;
     let mut changed = false;
     if ui.seen.as_ref() != Some(&gate) {
@@ -67,10 +97,12 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             // The section must re-open (`opened`) on the next poll so a new read starts: without this,
             // an account change while the gate stays Ready would show "Loading" forever.
             ui.was_open = false;
+            ui.reread_due = false;
             changed = true;
         }
         ui.seen = Some(gate);
     }
+    let ui = &mut s.frames.trash;
     if open && !ui.was_open {
         ui.notice = None;
         ui.source.opened();
@@ -120,6 +152,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     changed
 }
 
+use crate::frames::shared::actions_sort as sort;
+
+/// The open menu's name, entries and width: Sort's under the toolbar, else the selected item's.
+fn menu_of(open: &Open) -> (&'static str, &'static [Entry], f32) {
+    if sort::is_sort_menu(open) {
+        ("Sort by", sort::SORT_MENU, 180.0)
+    } else {
+        ("Trash item", MENU, 220.0)
+    }
+}
+
 const MENU: &[Entry] = &[
     Entry::new("Restore"),
     Entry::new("Details").keys("Alt+Enter"),
@@ -129,6 +172,13 @@ const MENU: &[Entry] = &[
 /// Do what the menu's item `n` says, for the selected item; focus goes back to it (or to the
 /// row that took its place).
 fn pick(s: &mut State, n: usize, tx: &mut Tx) {
+    if s.frames.trash.menu.as_ref().is_some_and(sort::is_sort_menu) {
+        s.frames.trash.menu = None;
+        s.frames.trash.sort.pick(n);
+        s.frames.trash.selected = None;
+        s.frames.trash.selected_item = None;
+        return;
+    }
     s.frames.trash.menu = None;
     let id = s.frames.trash.selected_id();
     match (n, id) {
@@ -187,11 +237,20 @@ impl Default for TrashUi {
             notice: None,
             seen: None,
             was_open: false,
+            reread_due: false,
+            sort: Default::default(),
+            arranged: Default::default(),
         }
     }
 }
 
 impl TrashUi {
+    /// The rows as drawn: the source's, in the Sort and the filter of the toolbar's search.
+    /// One copy is held per answer of the source and per sort, so a frame (and every key) shares it.
+    pub fn rows(&self) -> Arc<Vec<Row>> {
+        self.arranged.get(&self.sort, self.source.rev(), || self.source.items())
+    }
+
     /// A Trash on `source`, nothing selected.
     pub fn on(source: Box<dyn TrashSource>) -> Self {
         TrashUi {
@@ -204,19 +263,21 @@ impl TrashUi {
     pub fn selected_id(&self) -> Option<String> {
         self.selected_item
             .clone()
-            .or_else(|| self.source.items().get(self.selected?).map(|item| item.id.clone()))
+            .or_else(|| self.rows().get(self.selected?).map(|item| item.id.clone()))
     }
 
     /// Move the selection to row `i` and its item; focus goes with it.
     fn select(&mut self, i: usize, tx: &mut Tx) {
         self.pick_row(i);
+        // The list draws only the rows in view: the one the arrow went to is brought in first.
+        tx.scroll_into_view(format!("row-{i}"));
         tx.focus(format!("row-{i}"), true);
     }
 
     /// Select row `i` and the item on it.
     pub fn pick_row(&mut self, i: usize) {
         self.selected = Some(i);
-        self.selected_item = self.source.items().get(i).map(|item| item.id.clone());
+        self.selected_item = self.rows().get(i).map(|item| item.id.clone());
     }
 
     /// The list changed: the selection stays on its ITEM (its row may have moved), or ends when the item is gone.
@@ -224,7 +285,7 @@ impl TrashUi {
         let Some(id) = self.selected_item.as_deref() else {
             return;
         };
-        match self.source.items().iter().position(|item| item.id == id) {
+        match self.rows().iter().position(|item| item.id == id) {
             Some(i) => self.selected = Some(i),
             None => {
                 self.selected = None;
@@ -239,9 +300,9 @@ impl TrashUi {
         let Some(id) = self.selected_id() else {
             return false;
         };
-        let at = self.source.items().iter().position(|item| item.id == id);
+        let at = self.rows().iter().position(|item| item.id == id);
         let done = self.source.restore(&id);
-        let items = self.source.items();
+        let items = self.rows();
         let left = items.len();
         self.selected = at.or(self.selected).filter(|_| left > 0).map(|i| i.min(left - 1));
         self.selected_item = self.selected.and_then(|i| items.get(i)).map(|item| item.id.clone());
@@ -316,6 +377,7 @@ fn notice_note(notice: &Notice, t: &tokens::Theme) -> El {
         col()
             .key("notice")
             .role("status")
+            .live_region(rune::LiveRegion::Polite)
             .label(notice_words(notice))
             .w_full()
             .pt(9.0)
@@ -334,22 +396,63 @@ fn notice_note(notice: &Notice, t: &tokens::Theme) -> El {
     )
 }
 
-/// The words of a list that is not here (`None`: it is, draw it).
-fn not_here(loaded: Loaded) -> Option<(&'static str, &'static str)> {
+/// What stands for a list that is not here (`None`: it is, draw it): Loading while the first answer is out, Failed with
+/// the reason (and Try again, where trying again can help) for the rest. Never a blank or an empty-looking list.
+fn away(loaded: Loaded, t: &tokens::Theme) -> Option<El> {
+    let failed = |title: &str, why: &str, retry: bool| {
+        let retry = retry.then(|| {
+            try_again("trash-failed", t).on_press(|s: &mut State| {
+                s.frames.trash.notice = None;
+                s.frames.trash.source.retry();
+            })
+        });
+        state_body(
+            ViewState::Failed {
+                key: "trash-failed",
+                title,
+                why,
+                retry,
+            },
+            t,
+        )
+    };
     match loaded {
         Loaded::Ready => None,
-        Loaded::Loading => Some(("Loading Trash\u{2026}", "Getting the list from Beebeeb.")),
-        Loaded::Offline => Some((
+        Loaded::Loading => Some(state_body(
+            ViewState::Loading {
+                words: "Loading Trash\u{2026} Getting the list from Beebeeb.",
+            },
+            t,
+        )),
+        Loaded::Offline => Some(failed(
             "Can\u{2019}t reach Beebeeb",
             "Trash shows again once you\u{2019}re online.",
+            true,
         )),
-        Loaded::Failed => Some((
+        Loaded::Failed => Some(failed(
             "Couldn\u{2019}t load Trash",
-            "Open Trash again in a moment to try again.",
+            "Beebeeb answered with an error.",
+            true,
         )),
-        Loaded::SessionEnded => Some(("Your session ended", "Sign in again to see Trash.")),
-        Loaded::SignedOut => Some(("Signed out", "Sign in to see Trash.")),
+        Loaded::SessionEnded => Some(failed("Your session ended", "Sign in again to see Trash.", false)),
+        Loaded::SignedOut => Some(failed("Signed out", "Sign in to see Trash.", false)),
     }
+}
+
+/// A refresh that failed while a list is shown: Failed with Try again, over the list that may be out of date.
+fn refresh_failed(t: &tokens::Theme) -> El {
+    state_body(
+        ViewState::Failed {
+            key: "trash-failed",
+            title: "Couldn\u{2019}t refresh Trash",
+            why: "What\u{2019}s shown may be out of date.",
+            retry: Some(try_again("trash-failed", t).on_press(|s: &mut State| {
+                s.frames.trash.notice = None;
+                s.frames.trash.source.retry();
+            })),
+        },
+        t,
+    )
 }
 
 /// The note while Trash empties (`.mk-banner`): how far it is, and that the view can be left.
@@ -420,12 +523,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     let t = tokens::theme(cx.system_dark());
     let ui = &s.frames.trash;
-    let items = ui.source.items();
+    let items = ui.rows();
     let totals = ui.source.totals();
     let is_empty = totals.items == 0;
     // A list that is not here yet (loading, offline, signed out…) says so; never "Trash is empty" for it.
     let missing = if items.is_empty() {
-        not_here(ui.source.loaded())
+        away(ui.source.loaded(), &t)
     } else {
         None
     };
@@ -475,38 +578,65 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         &t,
     );
 
-    let body = if let Some((title, words)) = missing {
-        empty::empty(&icons::TRASH, title, words, None, &t)
+    let body = if let Some(state) = missing {
+        state
     } else if is_empty {
-        empty::empty(
-            &icons::TRASH,
-            "Trash is empty",
-            "Files you delete stay here until you delete them for good.",
-            None,
+        state_body(
+            ViewState::Empty {
+                key: "trash-empty",
+                icon: &icons::TRASH,
+                title: "Trash is empty",
+                body: "Files you delete stay here until you delete them for good.",
+                action: None,
+            },
             &t,
         )
     } else {
-        let list = items
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                table_row(i, r, ui.selected == Some(i), &COLUMNS, &t)
-                    // The list is one Tab stop: the selected row, or the first.
-                    .tab_index(if ui.selected.unwrap_or(0) == i { 0 } else { -1 })
-                    .on_press(move |s: &mut State| s.frames.trash.pick_row(i))
-                    .on_secondary_press(move |s: &mut State, press, _| {
-                        s.frames.trash.pick_row(i);
-                        s.frames.trash.menu = Some(Open::at(press.x, press.y));
-                    })
-            })
-            .collect();
+        // Only the rows in view are built (`virtual_rows`), from the one sorted copy of the answer.
+        let list = rows("Trash", Vec::new()).child(
+            col()
+                .key("trash-rows")
+                .w_full()
+                .growth(rune::GrowthSpec::default())
+                .virtual_rows(
+                    items.len(),
+                    ROW_H,
+                    |s: &State, i| {
+                        if i < s.frames.trash.rows().len() {
+                            Cow::Owned(format!("row-{i}"))
+                        } else {
+                            Cow::Borrowed("row-oob")
+                        }
+                    },
+                    move |s: &State, i| match s.frames.trash.rows().get(i) {
+                        Some(r) => table_row(i, r, s.frames.trash.selected == Some(i), &COLUMNS, &t)
+                            // The list is one Tab stop: the selected row, or the first.
+                            .tab_index(if s.frames.trash.selected.unwrap_or(0) == i { 0 } else { -1 })
+                            // The place in the whole list, not in the rows built.
+                            .position_in_set(i + 1, s.frames.trash.rows().len())
+                            .on_press(move |s: &mut State| s.frames.trash.pick_row(i))
+                            .on_secondary_press(move |s: &mut State, press, _| {
+                                s.frames.trash.pick_row(i);
+                                s.frames.trash.menu = Some(Open::at(press.x, press.y));
+                            }),
+                        None => el().key("empty"),
+                    },
+                ),
+        );
         let mut body = col().key("list-body");
         if let Some(e) = emptying {
             body = body.child(emptying_note(e, &t));
         }
-        body.child(header(&COLUMNS, &t)).child(rows("Trash", list))
+        body.child(header(&COLUMNS, &t)).child(list)
     };
     let body = match &ui.notice {
+        // A refresh that failed with a list on screen: Failed with Try again over the list.
+        Some(Notice::RefreshFailed) => col()
+            .key("notice-body")
+            .w_full()
+            .grow(1.0)
+            .child(refresh_failed(&t))
+            .child(body),
         Some(notice) => col()
             .key("notice-body")
             .w_full()
@@ -524,11 +654,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         body,
         "Items in Trash are deleted for good after 30 days",
         ui.menu.as_ref().map(|open| {
+            let (name, entries, w) = menu_of(open);
             menu(
-                "Trash item",
-                MENU,
+                name,
+                entries,
                 open,
-                220.0,
+                w,
                 window,
                 &t,
                 pick,
@@ -548,7 +679,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 /// for the search.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if let Some(open) = s.frames.trash.menu.as_mut() {
-        match open.on_key(ev, MENU, tx) {
+        match open.on_key(ev, menu_of(open).1, tx) {
             Took::Pick(n) => pick(s, n, tx),
             Took::Close => close_menu(s, tx),
             Took::Key => {}
@@ -566,7 +697,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Some(key) if !key.starts_with("row-") => return false,
         _ => {}
     }
-    let count = s.frames.trash.source.items().len();
+    let count = s.frames.trash.rows().len();
     if count == 0 {
         return false;
     }
@@ -603,6 +734,17 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Up => ui.select(ui.selected.map_or(0, |i| i.saturating_sub(1)), tx),
         Key::Home => ui.select(0, tx),
         Key::End => ui.select(count - 1, tx),
+        Key::PageDown | Key::PageUp => {
+            let to = crate::frames::shared::parts::table::page_to(ui.selected, count, ev.key == Key::PageDown);
+            ui.select(to, tx)
+        }
+        Key::Text(_) => {
+            let rows = ui.rows();
+            match crate::frames::shared::parts::table::jump_to(rows.iter().map(|r| r.name.as_str()), ui.selected, ev) {
+                Some(i) => ui.select(i, tx),
+                None => return false,
+            }
+        }
         Key::Delete => match ui.selected_id() {
             Some(_) if !ui.source.purge_available() => ui.notice = Some(Notice::NotAvailable),
             Some(id) => open_purge(s, Dialog::DeleteForever(id), tx),

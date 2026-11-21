@@ -6,15 +6,16 @@
 //! - `people_shares` / `members`: the invites the account sent, by item; a person's id is the invite's id, the
 //!   owner's row is the session's own email. A person is named by their email address (Beebeeb has no other name).
 //! - `links`: the account's live links, one per item. `requests`: its file requests.
-//! - `Member::compared` is always `false`: the safety-number marks are not in the engine crate yet (see the PR).
+//! - `Member::compared` is the engine's trust read after each read of the lists (`shared_safety.rs`, which also holds
+//!   People's safety number, the two marks and "Share anyway").
 //!
 //! Bound changes ([`Engine::share_change`], by id, for the session the row was drawn under): `accept`, `set_access`,
 //! `remove_access` (the view confirms it, DW-0512b), `decline` (`/decline`: the sender sees it declined; 409 is "Already
-//! accepted."), `remove_request` ("Remove from my list" is the server's `/hide`, never DELETE, which destroys the key;
+//! accepted."), `stop_sharing` (a people share: `CancelInvites` for every invite; a link row: `RevokeLinks` for every live link
+//! of the item), `close_request` (`CloseRequest`, an open request only), `remove_request` ("Remove from my list" is the server's `/hide`, never DELETE, which destroys the key;
 //! 409 is "Close the request first."). A change is never drawn before Beebeeb confirmed it: the rows
 //! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a
-//! notice the view draws ("Not available yet"): `stop_sharing`, `close_request` (the view asks no confirmation),
-//! and the old synchronous `invite` (it cannot wait for the server). `keep_offline` is bound (`shared_offline.rs`):
+//! notice the view draws ("Not available yet"): the old synchronous `invite` (it cannot wait for the server). `keep_offline` is bound (`shared_offline.rs`):
 //! the engine's pin change for a row of Shared with me, answered like a change.
 //!
 //! Invite someone (DW-0514, [`Engine::invite_for`]): `start_invite` stamps the press's session and account, runs the
@@ -53,9 +54,10 @@ use super::stamp::{Stamp, stamp};
 use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
 use crate::frames::shared::source::{
-    Access, Invitation, InviteResult, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped, Request,
-    RequestState, SharedSource,
+    Access, Invitation, InviteResult, LinkEdit, LinkShare, Loaded, Member, Notice, PeopleShare, Person, Pronoun, Pumped,
+    Request, RequestForm, RequestState, RowTarget, SafetyAsk, SafetyState, SharedSource,
 };
+use crate::frames::files::link::LinkText;
 use crate::ui::file_list::PcState;
 
 #[cfg(test)]
@@ -67,6 +69,14 @@ mod tests;
 // plan40 batch 1: Make available offline on someone else's file (slice B4).
 #[path = "shared_offline.rs"]
 mod shared_offline;
+#[path = "shared_links.rs"]
+mod shared_links;
+#[path = "shared_requests.rs"]
+mod shared_requests;
+#[path = "shared_leave.rs"]
+mod shared_leave;
+#[path = "shared_safety.rs"]
+mod shared_safety;
 
 /// Lists this recent are not read again when the Shared section opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -90,6 +100,8 @@ pub struct EngineSharedSource<C: CredentialStores> {
     reads: u64,
     /// A read was asked for while one was on its way: start it when that one lands.
     again: bool,
+    /// The section was opened in this session: only then is a finished check followed by a read.
+    asked: bool,
     /// The ids (an invitation's, a person's) with a change on its way: one change per id at a time.
     changing: HashSet<String>,
     notice: Option<Notice>,
@@ -98,12 +110,20 @@ pub struct EngineSharedSource<C: CredentialStores> {
     unmade: bool,
     /// Something changed outside an answer: the next pump says so.
     dirty: bool,
+    /// Changes with every change to the lists held (`SharedSource::rev`).
+    rev: u64,
     /// The shares with an invitation on its way: one per share at a time.
     inviting: HashSet<String>,
     /// The invitations' answers of the current session and account, in order, for the view.
     invite_answers: VecDeque<(String, InviteResult)>,
     /// Slice B4 (`shared_offline.rs`): what it keeps between a press and its answer. Empty until it binds.
     shared_offline: shared_offline::SharedOfflineCalls,
+    /// `shared_links.rs`: the links Copy link made, waiting for the clipboard.
+    shared_links: shared_links::SharedLinkCalls,
+    /// `shared_requests.rs`: the links a new request made, until the window takes them.
+    shared_requests: shared_requests::RequestCalls,
+    /// `shared_safety.rs`: the safety numbers, marks and "Share anyway" of People.
+    safety: shared_safety::SafetyCalls,
 }
 
 /// The lists as the view draws them.
@@ -117,7 +137,13 @@ pub(crate) struct Held {
     pub(crate) links: Vec<LinkShare>,
     /// A link row's id to every live link behind it (what Stop sharing revokes).
     pub(crate) link_shares: HashMap<String, Vec<String>>,
+    /// A link row's id to the item it is a link to (OwnedLink.item_id).
+    pub(crate) link_items: HashMap<String, String>,
     pub(crate) requests: Vec<Request>,
+    /// A with-me row's item id to the invite it came with (what Leave sends).
+    pub(crate) invites: HashMap<String, String>,
+    /// A request's id to the folder its uploads land in, when it has one (what View files opens).
+    pub(crate) request_folders: HashMap<String, String>,
 }
 
 enum Answer {
@@ -143,13 +169,18 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             reading: None,
             reads: 0,
             again: false,
+            asked: false,
             changing: HashSet::new(),
             notice: None,
             unmade: false,
             dirty: false,
+            rev: 0,
             inviting: HashSet::new(),
             invite_answers: VecDeque::new(),
             shared_offline: Default::default(),
+            shared_links: Default::default(),
+            shared_requests: Default::default(),
+            safety: Default::default(),
         }
     }
 
@@ -241,6 +272,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
     }
 
     fn take_in(&mut self, answer: Answer) {
+        self.rev += 1;
         let now = self.engine.session_turn();
         match answer {
             Answer::Read(number, result, kept) => {
@@ -260,6 +292,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                         self.held = Some(held);
                         self.unmade = false;
                         self.loaded = Loaded::Ready;
+                        self.shared_safety_after_read();
                     }
                     Err(kind) => {
                         if kind != AccountCallError::NotSignedIn {
@@ -322,6 +355,9 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                     return;
                 }
                 let result = invite_result(&answer);
+                if let InviteAnswer::PeerKeyChanged { invite_id } = &answer {
+                    self.shared_safety_key_changed(&share, invite_id);
+                }
                 if let InviteAnswer::Refused(kind) = answer {
                     log(format!("shared: an invitation was not sent ({kind})"));
                 }
@@ -352,11 +388,18 @@ impl<C: CredentialStores> EngineSharedSource<C> {
 #[cfg(test)]
 impl<C: CredentialStores> EngineSharedSource<C> {
     fn busy(&self) -> bool {
-        self.reading.is_some() || !self.changing.is_empty() || !self.inviting.is_empty()
+        self.reading.is_some() || !self.changing.is_empty() || !self.inviting.is_empty() || self.shared_safety_busy()
     }
 }
 
 impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
+    fn rev(&self) -> Option<u64> {
+        self.current().map(|_| self.rev)
+    }
+    fn retry(&mut self) {
+        self.read_at = None;
+        self.opened();
+    }
     fn invitations(&self) -> Vec<Invitation> {
         self.current().map(|h| h.invitations.clone()).unwrap_or_default()
     }
@@ -373,9 +416,28 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.current().map(|h| h.requests.clone()).unwrap_or_default()
     }
     fn members(&self, share: &str) -> Vec<Member> {
-        self.current()
+        let mut members = self
+            .current()
             .and_then(|h| h.members.get(share).cloned())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.shared_safety_overlay(&mut members);
+        members
+    }
+
+    fn safety_wired(&self) -> bool {
+        true
+    }
+    fn safety_start(&mut self, share: &str, person: &str, ask: SafetyAsk) -> bool {
+        self.shared_safety_start(share, person, ask)
+    }
+    fn safety_state(&self, share: &str, person: &str) -> SafetyState {
+        self.shared_safety_state(share, person)
+    }
+    fn safety_clear(&mut self, share: &str, person: &str) {
+        self.shared_safety_clear(share, person)
+    }
+    fn key_changed_person(&self, share: &str) -> Option<String> {
+        self.shared_safety_key_changed_person(share)
     }
 
     /// Sent once per press, for an invitation of the current session's lists. Nothing is drawn as accepted before
@@ -437,6 +499,17 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.change(session, id, ShareChange::Decline { invite_id: id.into() })
     }
 
+    // w17-shared-links (`shared_links.rs`).
+    fn copy_row_link(&mut self, id: &str) -> bool {
+        self.shared_links_copy_row_link(id)
+    }
+    fn change_link(&mut self, share_id: &str, change: LinkEdit) -> bool {
+        self.shared_links_change_link(share_id, change)
+    }
+    fn change_request_expiry(&mut self, id: &str, hours: Option<u32>) -> bool {
+        self.shared_links_change_request_expiry(id, hours)
+    }
+
     // Slice B4 (`shared_offline.rs`): sent once per press for a row of "Shared with me".
     fn keep_offline(&mut self, id: &str) -> bool {
         self.shared_offline_keep_offline(id)
@@ -470,6 +543,15 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
             return false;
         };
         self.change(session, id, change)
+    }
+
+    // Slice w17 (`shared_leave.rs`): Leave a share someone made with the person; where a row points.
+    fn leave(&mut self, id: &str) -> bool {
+        self.shared_leave(id)
+    }
+
+    fn target_of(&self, id: &str) -> Option<RowTarget> {
+        self.shared_target_of(id)
     }
 
     /// Sent once per press, for an open request of the current session's lists.
@@ -534,6 +616,34 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.invite_answers.pop_front()
     }
 
+    /// The account's top-level folders from this PC's copy of the list, by name (a read on the window's thread, as
+    /// Files' own listing is); none when the list cannot be read yet.
+    fn folders(&self) -> Vec<(String, String)> {
+        use beebeeb_engine::drive_v2::model::{self, Sort};
+        let read = |db: &beebeeb_engine::state_db::StateDb| {
+            model::children_of(db, None, Sort::default(), 0, usize::MAX)
+                .map(|(rows, _)| rows)
+                .unwrap_or_default()
+        };
+        let rows = self
+            .engine
+            .local_state()
+            .and_then(|state| state.with(read))
+            .unwrap_or_default();
+        rows.into_iter()
+            .filter(|row| row.is_folder)
+            .map(|row| (row.id, row.name))
+            .collect()
+    }
+
+    fn create_request(&mut self, form: RequestForm) -> bool {
+        self.shared_requests_create(form)
+    }
+
+    fn take_link(&mut self) -> Option<LinkText> {
+        self.shared_links_take_link().or_else(|| self.shared_requests_take_link())
+    }
+
     fn loaded(&self) -> Loaded {
         if !self.engine.has_session() {
             Loaded::SignedOut
@@ -548,9 +658,22 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         if !self.engine.has_session() {
             return;
         }
+        self.asked = true;
         let fresh = self.current().is_some() && self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
         if !fresh {
             self.read();
+        }
+    }
+
+    /// A finished check: lists someone looked at in this session are read again; otherwise the next opening reads.
+    fn refresh(&mut self) {
+        if !self.engine.has_session() {
+            return;
+        }
+        if self.asked {
+            self.read();
+        } else {
+            self.read_at = None;
         }
     }
 
@@ -566,17 +689,25 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
             self.take_in(answer);
             changed = true;
         }
+        changed |= self.shared_safety_pump();
         let notice = self.notice.take();
         Pumped {
             changed: changed || notice.is_some() || !self.invite_answers.is_empty(),
-            busy: self.reading.is_some() || !self.changing.is_empty() || !self.inviting.is_empty(),
+            busy: self.reading.is_some()
+                || !self.changing.is_empty()
+                || !self.inviting.is_empty()
+                || self.shared_safety_busy(),
             notice,
         }
     }
 
     fn forget(&mut self) {
+        self.rev += 1;
+        self.shared_requests_forget();
+        self.shared_safety_forget();
         self.held = None;
         self.again = false;
+        self.asked = false;
         self.changing.clear();
         self.inviting.clear();
         self.invite_answers.clear();
@@ -603,7 +734,11 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
     let kind = |is_folder: bool, name: &str| kind_of(is_folder, mime_for_name(name));
     let date = |stamp: &str| seconds_of(stamp).map(|at| when(at, now)).unwrap_or_default();
     let (mut invitations, mut with_me) = (Vec::new(), Vec::new());
+    let mut invites = HashMap::new();
     for item in overview.incoming {
+        if !item.waiting {
+            invites.insert(item.item_id.clone(), item.invite_id.clone());
+        }
         let row = Row {
             id: item.item_id,
             kind: kind(item.is_folder, &item.name),
@@ -624,6 +759,8 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
             },
             // Whether it is on this PC is not known here: no claim.
             pc: None,
+            bytes: (!item.is_folder).then(|| item.size_bytes.max(0) as u64),
+            at: seconds_of(&item.shared_at),
             name: item.name,
         };
         if item.waiting {
@@ -668,11 +805,13 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         members.insert(share.item_id, rows);
     }
     let mut link_shares = HashMap::new();
+    let mut link_items = HashMap::new();
     let links = overview
         .links
         .into_iter()
         .map(|link| {
             link_shares.insert(link.share_id.clone(), link.share_ids.clone());
+            link_items.insert(link.share_id.clone(), link.item_id.clone());
             let expiry = link.expires_at.as_deref().and_then(seconds_of);
             let expired = expiry.is_some_and(|at| at <= now.timestamp());
             let mut line = match expiry {
@@ -692,10 +831,14 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
             }
         })
         .collect();
+    let mut request_folders = HashMap::new();
     let requests = overview
         .requests
         .into_iter()
         .map(|r| {
+            if let Some(folder) = &r.target_folder_id {
+                request_folders.insert(r.id.clone(), folder.clone());
+            }
             let expiry = r.expires_at.as_deref().and_then(seconds_of);
             let state = match expiry {
                 _ if r.closed => RequestState::Closed,
@@ -729,7 +872,10 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         members,
         links,
         link_shares,
+        link_items,
         requests,
+        invites,
+        request_folders,
     }
 }
 
@@ -787,7 +933,7 @@ fn member_of(member: ShareMember) -> Member {
         access: Some(if member.can_edit { Access::Edit } else { Access::View }),
         you: false,
         invited: !member.accepted,
-        // Not read here: the safety-number marks are not in the engine crate (the module's doc).
+        // The engine's trust read is laid over it when the lists are handed out (`shared_safety.rs`).
         compared: false,
         pronoun: Pronoun::They,
         email: member.email,

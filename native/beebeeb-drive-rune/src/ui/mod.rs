@@ -13,7 +13,11 @@ pub mod detail_pane;
 pub mod dialog;
 pub mod empty;
 pub mod field;
+pub mod focus;
+pub mod file_icon;
 pub mod file_list;
+pub mod file_row;
+pub mod file_tile;
 pub mod gate;
 pub mod global_icons;
 pub mod grid_tiles;
@@ -21,6 +25,7 @@ pub mod keys;
 pub mod kit;
 pub mod load_strip;
 pub mod menu;
+pub mod pill;
 pub mod settings_card;
 pub mod settings_controls;
 pub mod settings_dialog;
@@ -29,14 +34,17 @@ pub mod settings_meter;
 pub mod settings_notice;
 pub mod settings_shell;
 pub mod setup;
+pub mod drive_sidebar;
 pub mod sidebar;
 pub mod status_bar;
 pub mod status_line;
 pub mod status_offline;
+pub mod switch;
 pub mod toast;
 pub mod toolbar;
 #[cfg(test)]
 mod toolbar_tests;
+pub mod view_state;
 pub mod window;
 
 #[cfg(test)]

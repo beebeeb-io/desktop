@@ -12,7 +12,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::explorer_command::{CommandState, ExplorerBinding, Invoked, ReclaimOwner, invoke, served, state_of};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
@@ -56,7 +56,7 @@ fn fixture() -> Fixture {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     let dirs = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let db_path = dirs.0.path().join("state.db");
     let root = dirs.1.path().canonicalize().unwrap();
@@ -277,7 +277,7 @@ fn asking_windows_again_with_no_engine_changes_nothing() {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens");
     let before = engine.view();
     assert!(!engine.add_to_file_explorer_again(), "nothing runs: nothing was asked");
     assert_eq!(engine.view(), before);

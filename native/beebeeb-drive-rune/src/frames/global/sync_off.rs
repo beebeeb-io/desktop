@@ -25,17 +25,23 @@ pub enum Refused {
     FolderOfAnotherProvider,
     FolderUnreadable,
     FolderMissing,
-    RegistrationFailed { code: Option<i32> },
+    RegistrationFailed {
+        code: Option<i32>,
+    },
     OtherAccountsData,
+    /// w29: a file the previous account left may hold changes it never sent.
+    UnsentFileOfAnotherAccount,
     IdentityUnknown,
     StopUnconfirmed,
+    /// A stopped proof still holds its client: the refusal ends by itself, so it is a retry.
+    StopFinishing,
     StateInUse,
     Other,
 }
 
 impl Refused {
     /// Every kind, for the tests (a code where one is carried).
-    pub const ALL: [Refused; 9] = [
+    pub const ALL: [Refused; 11] = [
         Refused::FolderOfAnotherProvider,
         Refused::FolderUnreadable,
         Refused::FolderMissing,
@@ -43,8 +49,10 @@ impl Refused {
             code: Some(0x8007_017C_u32 as i32),
         },
         Refused::OtherAccountsData,
+        Refused::UnsentFileOfAnotherAccount,
         Refused::IdentityUnknown,
         Refused::StopUnconfirmed,
+        Refused::StopFinishing,
         Refused::StateInUse,
         Refused::Other,
     ];
@@ -151,6 +159,17 @@ pub fn words(off: &SyncOff, product: &str) -> Words {
             no_fix,
             NO_FIX,
         ),
+        Refused::UnsentFileOfAnotherAccount => (
+            "A file may hold changes that were never sent".to_string(),
+            format!(
+                "A file in the sync folder, left by the account that was signed in before, may hold changes that were \
+                 never sent, so {product} didn\u{2019}t sync. Nothing was uploaded or deleted."
+            ),
+            "Sign in to that account again so it can send them, or move the files you want to keep out of the \
+             sync folder, then try again."
+                .to_string(),
+            RETRY,
+        ),
         Refused::IdentityUnknown => (
             "Sync can\u{2019}t confirm your account".to_string(),
             format!(
@@ -168,6 +187,15 @@ pub fn words(off: &SyncOff, product: &str) -> Words {
             ),
             format!("Quit {product}, then open it again."),
             RESTART,
+        ),
+        Refused::StopFinishing => (
+            "Sync is still finishing".to_string(),
+            format!(
+                "The last stop of sync hasn\u{2019}t finished yet, so {product} didn\u{2019}t start it again. \
+                 Nothing was changed."
+            ),
+            "Try again in a moment.".to_string(),
+            RETRY,
         ),
         Refused::StateInUse => (
             "Another program is syncing".to_string(),
@@ -235,7 +263,9 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
             Action::TryAgain => button.on_press(crate::shell::host::try_sync_again),
             Action::Quit => button.on_press_tx(|s: &mut State, tx: &mut rune::Tx| {
                 crate::shell::host::dispatch(s, Event::Escape);
-                tx.quit();
+                if !crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::Quit) {
+                    tx.quit();
+                }
             }),
             Action::Close => button.on_press(|s: &mut State| {
                 crate::shell::host::dispatch(s, Event::Escape);

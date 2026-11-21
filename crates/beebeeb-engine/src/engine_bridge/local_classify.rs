@@ -60,7 +60,6 @@ impl EngineBridge {
             Ok(m) => {
                 let file_type = m.file_type();
                 tracing::debug!(
-                    path = %path.display(),
                     is_dir = file_type.is_dir(),
                     is_symlink = file_type.is_symlink(),
                     "classify_local_path: rejected non-regular file"
@@ -69,7 +68,6 @@ impl EngineBridge {
             }
             Err(e) => {
                 tracing::debug!(
-                    path = %path.display(),
                     error = %e,
                     "classify_local_path: stat failed; skipping"
                 );
@@ -80,22 +78,18 @@ impl EngineBridge {
         // Filter 1 — engine-internal paths + OS junk.
         if path_is_engine_internal(sync_root, path) {
             tracing::debug!(
-                path = %path.display(),
                 "classify_local_path: rejected engine-internal path"
             );
             return LocalPathVerdict::Skip;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
             tracing::debug!(
-                path = %path.display(),
                 "classify_local_path: rejected path with non-utf8 filename"
             );
             return LocalPathVerdict::Skip;
         };
         if is_ignored_finder_name(&file_name) {
             tracing::debug!(
-                path = %path.display(),
-                filename = %file_name,
                 "classify_local_path: rejected ignored/temp filename"
             );
             return LocalPathVerdict::Skip;
@@ -107,7 +101,6 @@ impl EngineBridge {
         // rejects every placeholder (a synced file is one).
         let Some(rel) = relative_db_path(sync_root, path) else {
             tracing::debug!(
-                path = %path.display(),
                 sync_root = %sync_root.display(),
                 "classify_local_path: rejected path outside sync root"
             );
@@ -116,13 +109,13 @@ impl EngineBridge {
         // Task 1640 (review N13): an original whose kept copy is made but which is not removed
         // yet (it was in use) is never sent: a later tick removes it.
         if self.db.is_kept_original_pending(&rel).unwrap_or(false) {
-            tracing::debug!(rel_path = %rel, "classify_local_path: rejected an original whose copy is kept");
+            tracing::debug!("classify_local_path: rejected an original whose copy is kept");
             return LocalPathVerdict::Skip;
         }
         // Task 2204 S0.4: a file at the path a Windows rename vacated waits until that rename is
         // sent: it may be a safe save's new bytes, which fold back onto the original.
         if self.db.is_vacated_by_pending_rename(&rel).unwrap_or(true) {
-            tracing::debug!(rel_path = %rel, "classify_local_path: the path a pending rename vacated; skipped this pass");
+            tracing::debug!("classify_local_path: the path a pending rename vacated; skipped this pass");
             return LocalPathVerdict::Skip;
         }
         match self.row_judging_bytes_at(&rel, path) {
@@ -137,14 +130,12 @@ impl EngineBridge {
                 return LocalPathVerdict::Settled;
             }
             Ok(RowAtPath::NotWhollyOnDisk) => {
-                tracing::debug!(rel_path = %rel, "classify_local_path: several rows at a path not wholly on disk; asked again later");
+                tracing::debug!("classify_local_path: several rows at a path not wholly on disk; asked again later");
                 return LocalPathVerdict::Skip;
             }
             Ok(RowAtPath::None) => { /* not tracked — filter 2, then new */ }
             Err(e) => {
                 tracing::warn!(
-                    path = %path.display(),
-                    rel_path = %rel,
                     error = %e,
                     "classify_local_path: could not tell which row the path's bytes belong to (a state DB lookup or a read of the bytes failed); skipping to be safe"
                 );
@@ -161,11 +152,10 @@ impl EngineBridge {
         if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
             // Task 2191 (D12): an untracked placeholder may be one a remote rename left behind,
             // holding unknown bytes; the tick's retry checks its identity.
-            if let Err(e) = self.db.put_unknown_orphan(&rel, "", true) {
+            if let Err(e) = self.db.note_untracked_orphan(&rel) {
                 tracing::debug!(error = %e, "classify_local_path: could not record an untracked placeholder");
             }
             tracing::debug!(
-                path = %path.display(),
                 "classify_local_path: rejected Cloud Files placeholder"
             );
             return LocalPathVerdict::Skip;
@@ -177,8 +167,6 @@ impl EngineBridge {
         // a folder.
         let parent_id = self.resolve_parent_id_for(sync_root, path);
         tracing::debug!(
-            path = %path.display(),
-            rel_path = %rel,
             nested = parent_id.is_some(),
             "classify_local_path: accepted new local file"
         );
@@ -199,7 +187,7 @@ impl EngineBridge {
         })
     }
 
-    /// Task 2190 (the lead's condition on E3; glegion's constraints from #167's scan memo): the ONE
+    /// Task 2190 (the lead's condition on E3; the Windows test machine's constraints from #167's scan memo): the ONE
     /// call each held branch of [`Self::classify_tracked_edit`] makes. Records that `file_id`'s edit
     /// is held, not sent, with the file's content fingerprint, so the review feed shows it. Nothing
     /// is written while neither the reason nor the fingerprint changed, and the `files` row is never
@@ -248,6 +236,29 @@ impl EngineBridge {
     fn row_judging_bytes_at(&self, rel: &str, path: &Path) -> Result<RowAtPath, EngineError> {
         let mut rows = self.db.file_rows_at_path(rel)?;
         if rows.len() < 2 {
+            // Task 2230: a lone `Trashing` row answers only for the file it records; bytes of
+            // another size or hash are a file re-created at the path before the trash landed.
+            if let Some(row) = rows.first() {
+                if row.status == FileStatus::Trashing && !row.is_dir() {
+                    let recreated = match std::fs::metadata(path) {
+                        Ok(m) if m.len() as i64 != row.size_bytes => true,
+                        Ok(_) => match &row.content_hash {
+                            Some(recorded) => {
+                                #[cfg(target_os = "windows")]
+                                if !crate::windows_cf::placeholders::fully_on_disk(path) {
+                                    return Ok(RowAtPath::NotWhollyOnDisk);
+                                }
+                                cached_sha256_file_hex(&row.file_id, path)? != *recorded
+                            }
+                            None => false,
+                        },
+                        Err(_) => false,
+                    };
+                    if recreated {
+                        return Ok(RowAtPath::None);
+                    }
+                }
+            }
             return Ok(rows.pop().map_or(RowAtPath::None, RowAtPath::One));
         }
         let mut recorded = Vec::new();
@@ -316,8 +327,7 @@ impl EngineBridge {
     ) -> LocalPathVerdict {
         if existing.is_dir() || existing.status != FileStatus::Local {
             tracing::debug!(
-                path = %path.display(),
-                rel_path = %rel,
+                file_id = %existing.file_id,
                 "classify_local_path: rejected already-tracked server file"
             );
             return LocalPathVerdict::Settled;

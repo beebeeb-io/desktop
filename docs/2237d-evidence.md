@@ -58,15 +58,15 @@ Tasks 3 and 4 are complete within their interfaces. Task 5 is stopped and Task 6
 | Frontend Bun | 1,833 | 0 | 0 | `final-macos-bun.log`, 106 files |
 | TypeScript / ESLint | exit 0 / exit 0 | 0 diagnostic lines | — | `final-macos-tsc.log`, `final-macos-eslint.log` |
 
-The final Rust command was `cargo test --locked --no-fail-fast -- --test-threads=1`, under workspace `with-lock.sh cargo-build`, with an owned target/cache configuration, fresh scratch HOME, `BB_API_BASE=http://127.0.0.1:9` and `BB_REFUSE_NON_LOOPBACK_API=1`. Six announced binary/doc-test totals agree with 2,271 completed test rows, including ignored rows with reasons. All 14 new tests passed on both Linux testrig and macOS; none is Windows-only. The nine existing ignored tests require a real local API/MinIO (5), a logged-in GUI session (2), a real DB copy (1), or a separate existing two-surface implementation (1); their exact names/reasons are retained in the log and JSON receipt. They were not forced on.
+The final Rust command was `cargo test --locked --no-fail-fast -- --test-threads=1`, under workspace `the lock script cargo-build`, with an owned target/cache configuration, fresh scratch HOME, `BB_API_BASE=http://127.0.0.1:9` and `BB_REFUSE_NON_LOOPBACK_API=1`. Six announced binary/doc-test totals agree with 2,271 completed test rows, including ignored rows with reasons. All 14 new tests passed on both Linux testrig and macOS; none is Windows-only. The nine existing ignored tests require a real local API/MinIO (5), a logged-in GUI session (2), a real DB copy (1), or a separate existing two-surface implementation (1); their exact names/reasons are retained in the log and JSON receipt. They were not forced on.
 
-Native Windows tests inside `windows_cf`, including `windows_cf::reconcile_tests`, are gated by `cfg(target_os = "windows")` at `src-tauri/src/lib.rs:135` and were not run here. `tests/windows_session_wiring.rs` and `tests/windows_signout_cleanup.rs` are portable checks and passed on macOS; they do not prove Cloud Files behavior. `StateDb::finish_windows_signout` is available under `cfg(any(target_os = "windows", test))` for portable purge coverage. Lead glegion owns the native Windows gate.
+Native Windows tests inside `windows_cf`, including `windows_cf::reconcile_tests`, are gated by `cfg(target_os = "windows")` at `src-tauri/src/lib.rs:135` and were not run here. `tests/windows_session_wiring.rs` and `tests/windows_signout_cleanup.rs` are portable checks and passed on macOS; they do not prove Cloud Files behavior. `StateDb::finish_windows_signout` is available under `cfg(any(target_os = "windows", test))` for portable purge coverage. The lead owns the native Windows gate.
 
 Source compatibility was checked against server main `7dd40237b5abb50fae1b686a37246e773584e2fc` (#349 / #351), not production. Latest desktop main `64d39db` still has no `ChunkDecryptor` / `ExpectedChunkFormat` consumer; a read-only `git merge-tree --write-tree origin/main HEAD` completed with exit 0 (`merge-preview.log`). The implementation retains the original allocated base. Core remains pinned coherently to `a245a549`; no chunk-format rollout. `git diff --check` passes. No Finder/Explorer device proof, deployed-client interoperability, live server check, or release clearance is claimed.
 
 Next required handoff: document/merge the authenticated API/direct/range chunk reader interface (including v2 format pins, finish validation and range AAD/frame-zero handling), amend Task 5's premise, then resume Tasks 5–6 and the Task 13 native rung.
 
-## Resume under Guus's corrected ruling (2026-10-28)
+## Resume under the owner's corrected ruling (2026-10-28)
 
 Workspace origin/main's Task 5 correction (workspace #225) supersedes the struck #224 amendment and clears the previous wrong-premise stop. Task 1943 scope/verification and plan C L7b were read before editing. Resume remains in the same isolated branch/PR, sequential with no child agents. All previously used trees were checked: the lane tree was clean at 105ba298; shared-tree changes are unrelated and untouched.
 
@@ -94,7 +94,7 @@ Final remote related selections: direct_download 32 passed / 0 failed / 1 existi
 
 ## Corrected final verification (2026-10-28, Codex)
 
-Tasks 3, 4, 5 and 6 completed sequentially. Source tested from fresh detached worktree at **638a42c3301e0cf2aa284e2af1cdb8351c66cd6a**; subsequent edits only record evidence. The earlier stopped conclusion is superseded by Guus's workspace #225 ruling, not silently erased.
+Tasks 3, 4, 5 and 6 completed sequentially. Source tested from fresh detached worktree at **638a42c3301e0cf2aa284e2af1cdb8351c66cd6a**; subsequent edits only record evidence. The earlier stopped conclusion is superseded by the owner's workspace #225 ruling, not silently erased.
 
 | Final gate | Passed | Failed | Ignored |
 | --- | ---: | ---: | ---: |
@@ -106,11 +106,11 @@ Tasks 3, 4, 5 and 6 completed sequentially. Source tested from fresh detached wo
 | Testrig Bun, 106 files | **1,833** | **0** | 0 |
 | TypeScript / ESLint | exit 0 / exit 0 | 0 diagnostic lines | — |
 
-`cargo test --locked --no-fail-fast -- --test-threads=1` completed with exit 0 under workspace `with-lock.sh cargo-build`, a fresh scratch HOME, owned CARGO_TARGET_DIR/cache, BB_API_BASE=http://127.0.0.1:9 and BB_REFUSE_NON_LOOPBACK_API=1. All six announced suite totals match **2,288 completed rows**, including nine ignored reasons (`final-macos-counts.json`), and all **31 lane tests pass on macOS and Linux**. The nine existing ignores require local API/MinIO (5), a logged-in GUI (2), a real DB copy (1) or another surface slice (1); none was forced on. Previous final logs are archived in `pre-correction-macos/`; corrected logs are `final-macos-rust.log`, `final-macos-wrapper.log`, `final-macos-rust-status.txt`, `final-macos-counts.json` and `final-testrig-frontend.log`.
+`cargo test --locked --no-fail-fast -- --test-threads=1` completed with exit 0 under workspace `the lock script cargo-build`, a fresh scratch HOME, owned CARGO_TARGET_DIR/cache, BB_API_BASE=http://127.0.0.1:9 and BB_REFUSE_NON_LOOPBACK_API=1. All six announced suite totals match **2,288 completed rows**, including nine ignored reasons (`final-macos-counts.json`), and all **31 lane tests pass on macOS and Linux**. The nine existing ignores require local API/MinIO (5), a logged-in GUI (2), a real DB copy (1) or another surface slice (1); none was forced on. Previous final logs are archived in `pre-correction-macos/`; corrected logs are `final-macos-rust.log`, `final-macos-wrapper.log`, `final-macos-rust-status.txt`, `final-macos-counts.json` and `final-testrig-frontend.log`.
 
 Graphify was refreshed again after source changes: 390 files, 8,537 nodes, 25,817 edges, 191 communities (`graphify-resume-update.log`). Its generated artifacts are preserved externally in `graphify-resume-refresh/`; tracked baseline graph artifacts remain scoped out. Read-only merge preview against desktop origin/main 64d39db completed with exit 0 (`final-merge-preview.log`). `git diff --check` passes.
 
-No new test is Windows-only: all 31 lane tests are portable. `windows_cf` and its reconcile/provider tests are cfg(target_os = "windows"); its native t10–t16/t18 and task_2240 reconcile/log guards require glegion's Windows gate. The public whole-memory Windows callback is native-only; indexed ranges and DB cleanup have cfg(any(target_os = "windows", test)) portable coverage. Portable Windows integration tests are not Cloud Files proof.
+No new test is Windows-only: all 31 lane tests are portable. `windows_cf` and its reconcile/provider tests are cfg(target_os = "windows"); its native t10–t16/t18 and task_2240 reconcile/log guards require the Windows test machine's Windows gate. The public whole-memory Windows callback is native-only; indexed ranges and DB cleanup have cfg(any(target_os = "windows", test)) portable coverage. Portable Windows integration tests are not Cloud Files proof.
 
 Task 1943 desktop: core pin a245a549 in src-tauri/Cargo.toml and Cargo.lock; content only through core chunk_stream; whole finish and explicit indexed ranges; published V1/V2 KATs; no V2 downgrade; truncation mutation red; new files Unrecorded, replacement pin preserved; name/thumbnail APIs stay purpose-specific. No desktop notes implementation. Partial V2 replacement sessions re-init safely rather than reuse a stream identity.
 
@@ -128,7 +128,7 @@ Memory writes check the captured account revision under the DB lock. Both local-
 
 A canonical item GET 404 omits that obsolete enrichment row only. The delta loop acknowledges its sequence, reaches the later delete and an independent rename, and persists its cursor; reopening the DB retains both cursor and deletion. 401/403/500 remain failures with the cursor unchanged and retry normally. No custody/inventory/network/auth error is treated as a deleted item. Removed the Windows review's two dead helpers, `read_full_chunk` and `metadata_rekeyed_to`.
 
-All ten review tests are portable; none is cfg(windows). The new full macOS and remote frontend receipts follow below after completion. Native Windows remains glegion's gate; Task 13 and the previously listed device/release residuals remain.
+All ten review tests are portable; none is cfg(windows). The new full macOS and remote frontend receipts follow below after completion. Native Windows remains the Windows test machine's gate; Task 13 and the previously listed device/release residuals remain.
 
 Review frontend gate: **1,833 passed / 0 failed**, 106 files, 7,655 assertions; frozen install, TypeScript and ESLint all exit 0 (`review-testrig-frontend.log`). Graphify refresh: 391 files, 8,551 nodes, 25,867 edges, 197 communities; outputs retained in `graphify-review-refresh/` and the tracked baseline restored. Fresh read-only merge preview against desktop main **64d39db9502a0c5cdf41e65e4fdf9b4fc34b02bc** exits 0 (`review-merge-preview.log`); `git diff --check` passes.
 
@@ -137,7 +137,7 @@ Final source review found an additional L7c concurrency window: an in-flight pre
 
 ## Final post-review gate (2026-10-28)
 
-Tested source **68f3c780e8ce89451105b8c7fcdfaa2bae6a474a**, fresh detached lane-owned worktree, workspace `with-lock.sh cargo-build`, owned target/cache and fresh scratch HOME, `BB_API_BASE=http://127.0.0.1:9` plus `BB_REFUSE_NON_LOOPBACK_API=1`.
+Tested source **68f3c780e8ce89451105b8c7fcdfaa2bae6a474a**, fresh detached lane-owned worktree, workspace `the lock script cargo-build`, owned target/cache and fresh scratch HOME, `BB_API_BASE=http://127.0.0.1:9` plus `BB_REFUSE_NON_LOOPBACK_API=1`.
 
 | Gate | Passed | Failed | Ignored |
 | --- | ---: | ---: | ---: |
@@ -153,7 +153,7 @@ Tested source **68f3c780e8ce89451105b8c7fcdfaa2bae6a474a**, fresh detached lane-
 
 Final Graphify refresh after the stale-inventory fix: **391 files / 8,555 nodes / 25,880 edges / 194 communities** (`graphify-review-final-update.log`); generated outputs retained in `graphify-review-final-refresh/`, tracked baseline restored. Final read-only main merge preview and diff checks pass (`review-merge-preview-final.log`). Server-main custody owner/member response verified at **fe0f130ac48599d3f12944b1c18e982b6752f914** without contacting production. Core pin remains **a245a549c12415af6311bf4488deca5def65e983** in `src-tauri/Cargo.toml` and `Cargo.lock`.
 
-All 42 lane tests, including all 11 review tests, are portable; **zero are cfg(windows)**. Native `windows_cf` provider/reconcile tests remain glegion's responsibility, including t10–t16/t18 and the task_2240 reconcile/log guards. Portable Windows integration results are not native Cloud Files proof. Signed Finder/Explorer Task 13, live deployed-client/server interoperability, remaining 2240–2242 device/scanner integration and the separate owner-upload publication dependency remain as previously recorded. No installed app, real user config, real Keychain, production, release or merge was used.
+All 42 lane tests, including all 11 review tests, are portable; **zero are cfg(windows)**. Native `windows_cf` provider/reconcile tests remain the Windows test machine's responsibility, including t10–t16/t18 and the task_2240 reconcile/log guards. Portable Windows integration results are not native Cloud Files proof. Signed Finder/Explorer Task 13, live deployed-client/server interoperability, remaining 2240–2242 device/scanner integration and the separate owner-upload publication dependency remain as previously recorded. No installed app, real user config, real Keychain, production, release or merge was used.
 
 
 ## L8 owner-file envelope migration (2026-10-28)
@@ -166,7 +166,7 @@ The old-format rejection exercises both canonical and pending owner wraps, with 
 
 Ran `cargo update -p beebeeb-core -p beebeeb-sync -p beebeeb-types` on the testrig desktop image (`l8-cargo-update.log`). Cargo additionally reselected already-locked Windows dependency edges in nine unrelated packages. Those unrelated selections were excluded: the final lock changes only the three core source entries, with all other packages/edges unchanged, and the 44-test `--locked` gate accepts it. A premature locked invocation before installing the corrected lock failed dependency validation (`l8-instrument-lock-gate.log`); no tests ran and it is not a behavioral RED.
 
-Full post-L8 macOS and remote frontend gates follow below. Native Windows remains glegion's gate.
+Full post-L8 macOS and remote frontend gates follow below. Native Windows remains the Windows test machine's gate.
 
 
 Post-L8 remote frontend: **1,833 passed / 0 failed**, 106 files, 7,655 assertions; frozen install, TypeScript and ESLint all exit 0 (`l8-testrig-frontend.log`). Counted all 1,833 completed test rows. Graphify refreshed after source changes: **391 files / 8,558 nodes / 25,891 edges / 195 communities** (`graphify-l8-update.log`); outputs retained in `graphify-l8-refresh/`, tracked graph baseline restored. Full Mac gate source is the clean detached **90b7f773416bdce663892b41a31b7da86b9346a6**; subsequent commits record evidence only.
@@ -174,7 +174,7 @@ Post-L8 remote frontend: **1,833 passed / 0 failed**, 106 files, 7,655 assertion
 
 ## Final post-L8 gate (2026-10-28)
 
-Tested source **90b7f773416bdce663892b41a31b7da86b9346a6**, fresh detached lane-owned tree, workspace `with-lock.sh cargo-build`, owned target/cache and fresh scratch HOME, `BB_API_BASE=http://127.0.0.1:9` and `BB_REFUSE_NON_LOOPBACK_API=1`. Subsequent commits record evidence only.
+Tested source **90b7f773416bdce663892b41a31b7da86b9346a6**, fresh detached lane-owned tree, workspace `the lock script cargo-build`, owned target/cache and fresh scratch HOME, `BB_API_BASE=http://127.0.0.1:9` and `BB_REFUSE_NON_LOOPBACK_API=1`. Subsequent commits record evidence only.
 
 | Gate | Passed | Failed | Ignored |
 | --- | ---: | ---: | ---: |
@@ -192,4 +192,4 @@ Core is coherently pinned to **c08defc70c35428926be6784d18ff091be6d004c** in `sr
 
 Read-only merge preview against desktop origin/main **64d39db9502a0c5cdf41e65e4fdf9b4fc34b02bc** passes (`l8-merge-preview.log`). `git diff --check` passes. Task 1943 desktop checklist remains complete with the new c08defc7 pin and the same core stream reader/finish contract.
 
-All **44 lane tests are portable; zero are cfg(windows)**. Native `windows_cf` provider/reconcile tests, t10–t16/t18 and the task_2240 guards require glegion's Windows re-gate at the new PR head. The 8+3 portable integration tests do not prove native Cloud Files behavior. Signed Finder/Explorer Task 13, live deployed-client/server interoperability, remaining 2240–2242 scanner/device integration and the separate owner-upload publication dependency remain unchanged. No installed app, real user config, real Keychain, production, release or merge was used.
+All **44 lane tests are portable; zero are cfg(windows)**. Native `windows_cf` provider/reconcile tests, t10–t16/t18 and the task_2240 guards require the Windows test machine's Windows re-gate at the new PR head. The 8+3 portable integration tests do not prove native Cloud Files behavior. Signed Finder/Explorer Task 13, live deployed-client/server interoperability, remaining 2240–2242 scanner/device integration and the separate owner-upload publication dependency remain unchanged. No installed app, real user config, real Keychain, production, release or merge was used.

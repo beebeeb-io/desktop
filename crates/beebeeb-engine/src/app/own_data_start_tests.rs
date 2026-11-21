@@ -17,7 +17,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, OperationKind, PendingOperation};
@@ -27,6 +27,14 @@ use crate::sync_root_port::SyncRootPort;
 /// Row S4 race: a stop that comes right after the proof was spawned, or before it read the keys.
 #[path = "own_data_start_race_tests.rs"]
 mod race;
+
+/// Row fx-stop-timeout: a stopped proof that does not let go of its client within the stop's wait.
+#[path = "own_data_start_stop_tests.rs"]
+mod stop;
+
+/// w26-account-switch: A signed out, B starts (v5 bug 6).
+#[path = "own_data_start_switch_tests.rs"]
+mod switch;
 
 type TestEngine = Engine<MemoryCredentials>;
 type Answer = std::pin::Pin<Box<dyn std::future::Future<Output = Listing> + Send>>;
@@ -100,7 +108,7 @@ impl Pc {
         };
         let opened = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(
             state_paths::STATE_DIR_OVERRIDE.scope(state_dir, async move {
-                Engine::open(&REAL, config, host, MemoryCredentials::default())
+                Engine::open(&TEST, config, host, MemoryCredentials::default())
             }),
         );
         let engine = Arc::new(opened.expect("the handle opens on a state folder of its own"));
@@ -378,11 +386,18 @@ fn a_windows_refusal_over_unowned_data_asks_for_the_proof_and_only_an_adoption_s
     let rows = db.list_files().unwrap().len();
     drop(db);
     pc.sign_in(&owner());
-    pc.seams(|seams| seams.listing = Some(answering(Listing::Nodes(tree(MINE)))));
+    // The listing is held until the refused start has been checked: an answer at once lets the proof adopt and start
+    // sync again by itself before the check below runs (it did on a fast Windows PC: "asked Windows nothing: 1 vs 0").
+    let (asked, listing_asked) = mpsc::channel();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    pc.seams(|seams| seams.listing = Some(gated(asked, gate.clone(), tree(MINE))));
     pc.engine.serve_own_data_proofs();
 
     assert_eq!(pc.start(), Err(SyncStartRefused::OtherAccountsData));
     assert_eq!(pc.port.registers(), 0, "the refused start asked Windows nothing");
+    listing_asked.recv_timeout(WAIT).expect("the refusal asked for the proof");
+    assert_eq!(pc.port.registers(), 0, "and nothing starts while the proof waits for its answer");
+    gate.notify_one();
     pc.wait_for_outcomes(1);
 
     assert_eq!(pc.outcomes(), vec!["adopted"]);
@@ -1011,7 +1026,7 @@ fn the_upgrade_candidate_rule() {
     }
 }
 
-/// For the lead's VM 401 rung R-UP-owner: the statements that read, remove and shut a 0.8.25 `state.db`'s owner record
+/// For the lead's the Windows test machine rung R-UP-owner: the statements that read, remove and shut a 0.8.25 `state.db`'s owner record
 /// and adoption window, run on a copy of the release's own image (`tests/fixtures/state-db-0.8.25/closed`).
 #[test]
 fn the_r_up_owner_statements_work_on_a_0_8_25_state_db() {

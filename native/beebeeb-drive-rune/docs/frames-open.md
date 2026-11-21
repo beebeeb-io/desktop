@@ -10,6 +10,25 @@ holds `v2-native` f34a8eee and #302). **Sections 3 to 8 are as written after wav
 update**: some of what they ask for has been built since (the conflict dialog, Bandwidth aside). Where a line is a
 lane's claim that I did not check myself, it says "(lane)". Rune is pinned at `c92e462e`.
 
+## 0. Read this first: what changed since (w19-docs-map, 2026-11-18)
+
+Sections 1 to 8 below still describe 2026-11-12 and were not re-measured: **the counts, the "Not built (113)" list and
+the gate numbers are stale, and nothing in this section is a new count.** The group checklists (`FRAMES.md` beside each
+group, section 1's table) are the truth; `beebeeb-drive --list-scenes` prints the scenes. What the checklists now say:
+
+- **Sign-in:** DW-A11 to A17 and DW-A31 to A44 are built (the account view and `create.rs`); the first-time guide's six
+  frames are built (lane b04). The Lock step waits for Windows Hello.
+- **Shared, Search, Trash:** the dialogs DW-0504, 0511 to 0515 and DW-0749 are all wired on the engine (requests, the real
+  safety number, the purge); Search DW-0801 to 0803 are built and linked to the engine's local index.
+- **Photos:** all 13 built; Search, New, Rename, Duplicate, Save to PC, Send a copy, Share, Copy link and Version history act.
+- **Viewers and the office editor:** DW-1507, 1520 to 1522, 1504 built; the editor's frames DW-1507e, 1508e, 1509e,
+  1550 to 1554, 1558 to 1560 and the viewer's DW-1508, 1509, 1557, 1561, 1562 are built; DW-1555 is retired. The editor is
+  in 0.9.0 (owner, 2026-11-18, reversing decision 2539).
+- **Settings:** Storage, Report a problem (DW-0782), Privacy, Export my data and the places are wired; the 22 "not
+  built" there were not recounted.
+- **Not re-read for this update:** the Files, Global, This PC and Tray lists below; their checklists are the truth.
+  Not taken by the shell in the viewer: Edit in Sheets and Open in another app.
+
 ## 1. Frames: built and not built
 
 Ten checklists list 310 different frames: 197 are built (each is a scene of the app, `beebeeb-drive
@@ -199,13 +218,13 @@ then listed add up to 15 (9 small-disc rim, 4 Windows Hello, 2 overlaid text).
 - **One test hangs on the Linux build VM.** `source_engine::tests::timings_and_query_plan_for_5000_children_in_a_70000_row_db`
   (`src/source_engine_tests.rs`, added by #280): it builds a 5,204-row and a 70,000-row database, prints the time
   of a 500-row page and of the whole 5,000-child folder, and asserts SQLite's plan for the listing query (no time
-  is asserted). On the loaded 16-core build VM it did not finish in over 25 minutes (during #306); on the Legion
-  it passes within the suite's 30 to 40 seconds. Since then the VM run skips it by exact name and the Legion run
+  is asserted). On the loaded 16-core build VM it did not finish in over 25 minutes (during #306); on the Windows test machine
+  it passes within the suite's 30 to 40 seconds. Since then the VM run skips it by exact name and the Windows test machine run
   includes it. Not fixed, not investigated.
-- On the tree of #304: the Linux VM, that test skipped: 534 passed, 0 failed, 1 filtered out; the Legion, nothing
+- On the tree of #304: the Linux VM, that test skipped: 534 passed, 0 failed, 1 filtered out; the Windows test machine, nothing
   skipped: 535 passed, 0 failed. The identity pin (`crates/beebeeb-engine`, filter `identity_pin`): 6 passed, 0
   failed.
-- Legion only: the engine's `ipc_socket::framing_tests::changes_and_thumbnail::fetch_thumbnail_reports_daemon_side_failures_without_writing_the_dest`
+- the Windows test machine only: the engine's `ipc_socket::framing_tests::changes_and_thumbnail::fetch_thumbnail_reports_daemon_side_failures_without_writing_the_dest`
   fails there ("no delimited reply within 5s", 3 of 3) and passes in CI's Linux job on the same engine code. Known
   under load (lead); CI decides.
 - Not run in this batch: `cargo test --features feedback`; the Windows build VM (CI's "Native Rune app (Windows
@@ -227,7 +246,7 @@ then listed add up to 15 (9 small-disc rim, 4 Windows Hello, 2 overlaid text).
 
 ## 2f. The app names itself from the build's identity: open
 
-Ruling (Guus, 2026-11-12 08:00, relayed by the lead): "use the build name dynamicly". Every place the app names
+Ruling (owner, 2026-11-12 08:00, relayed by the lead): "use the build name dynamicly". Every place the app names
 ITSELF takes the name from the build's identity (`src/shell/identity.rs`), not from a literal. Done so far: the
 window titles (`shell/mod.rs`), the tray's tooltip, the flyout's accessible name (2e). Still literals, seen by a
 search for `Beebeeb` in production text on the tree of #304 (not a complete audit: 181 string literals hold the

@@ -67,7 +67,7 @@ impl FrameGroup {
             FrameGroup::Locked => "Before Files: locked (DW-0009)",
             FrameGroup::RecoveryPhrase => "Email and password: the recovery phrase (DW-A23)",
             FrameGroup::NoPlan => "Before Files: no plan yet (DW-0014)",
-            FrameGroup::KeyStoreUnavailable => "no board frame yet (the auth gate's KeyStoreUnavailable)",
+            FrameGroup::KeyStoreUnavailable => "no board frame (the auth gate's KeyStoreUnavailable)",
             FrameGroup::FirstRun => "First run on Windows: a window of its own, 960 x 640 (DW-0201 to DW-0208)",
             FrameGroup::Section(Section::Files) => "Files: the full Drive in the window (DW-0401)",
             FrameGroup::Section(Section::Shared) => "Shared (DW-0501)",
@@ -187,6 +187,7 @@ pub const FRAMES: &[Frame] = &[
     crate::frames::shared::dialogs::TRASH,
     crate::frames::signin::before_files::LOCKED,
     crate::frames::signin::before_files::NO_PLAN,
+    crate::frames::signin::before_files::KEYSTORE,
     Frame {
         group: FrameGroup::Settings(SettingsPane::General),
         view: crate::frames::settings::view,
@@ -352,16 +353,19 @@ pub fn dialog_frame(group: FrameGroup) -> Option<&'static DialogFrame> {
 /// gates of an open engine: a closed one's own screen (the lock, sign-in, the recovery phrase, an unreadable key store)
 /// holds nothing of the account's and is never hidden by a lock screen that cannot unlock.
 pub fn covered(s: &State) -> bool {
-    s.shell.away.covers()
-        && matches!(
-            s.shell.app.gate(),
-            GateState::Ready | GateState::FirstRun | GateState::NoPlan
-        )
+    covered_over(&s.shell.away, &s.shell.app)
+}
+
+/// The one predicate of [`covered`], over the parts of the shell it reads: `Shell::covered` (`host.rs`, where only the
+/// shell is at hand) must call this, not repeat it.
+pub(crate) fn covered_over(away: &super::away::AwayLock, app: &super::app::AppMachine) -> bool {
+    away.covers() && matches!(app.gate(), GateState::Ready | GateState::FirstRun | GateState::NoPlan)
 }
 
 /// The main window's view: the registered frame for the state (or the placeholder), and over
 /// it the open dialog on its scrim.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    crate::ui::focus::install(cx); // one keyboard focus ring for every frame, tip and dialog
     // The frame gate's scenes of the flyout (`--scene DW-1203 --size 340x520`): never set in the running app.
     if let Some(flyout) = crate::frames::tray::scene(s, cx) {
         return flyout;
@@ -376,6 +380,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         None => placeholder::window(s, cx, group),
     };
     let behind = crate::frames::viewers::new_file::over(s, cx, behind);
+    let behind = crate::frames::viewers::unsaved_guard::over(s, cx, behind); // the unsaved-changes question of a quit
     let behind = crate::frames::signin::setup::guide::over(s, cx, behind); // the first-time guide's tip, over the frame
     let behind = crate::frames::account::late::over(s, cx, behind); // a late password answer, said wherever the person is
     let (Some(dialog), Some(dialog_group)) = (s.shell.app.dialog(), dialog_group_for(&s.shell.app)) else {
@@ -511,7 +516,7 @@ mod tests {
     fn the_frame_count_is_pinned() {
         assert_eq!(
             FRAMES.len(),
-            23,
+            24,
             "a frame was added to FRAMES without updating this test"
         );
         assert_eq!(

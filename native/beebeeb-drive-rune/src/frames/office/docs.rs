@@ -19,9 +19,11 @@
 
 use rune::tok::Family;
 use rune::{Color, Cx, El, Icon, Key, Mods, Pixels, SurfaceFit, TextStyle, col, el, row};
+use beebeeb_office_protocol::office::EditKind;
 use zeroize::Zeroize;
 
 use crate::State;
+use super::edit::{EditUi, ime, word};
 use crate::frames::viewers::{self, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
@@ -78,6 +80,9 @@ pub struct DocBody {
     pub outline_open: bool,
     /// Where the stage was last seen scrolled to, in points from the top of its content (`docs_scroll`).
     pub scroll_y: f32,
+    /// The editor asked to show the caret once it has moved: where it stood (page, x, y in points) when it was asked
+    /// (`edit::word`). `None`: nothing is asked.
+    pub reveal: Option<(u32, f32, f32)>,
 }
 
 /// Counts only, never a heading or a word.
@@ -101,6 +106,7 @@ impl DocBody {
             quiet: None,
             outline_open: true,
             scroll_y: 0.0,
+            reveal: None,
         }
     }
 
@@ -145,7 +151,7 @@ impl DocBody {
     }
 
     /// The viewer's keys: Ctrl+Plus and Ctrl+Minus zoom, Ctrl+0 is the actual size, Page Down and Page Up move the stage by a page. Every other
-    /// key is not taken here: there is no editor behind a key (Ctrl+S, Ctrl+K and the rest reach nothing).
+    /// key is not taken here: the editor's keys (Ctrl+S, Ctrl+K and the rest) are `edit`'s, taken while an editor is live on the document.
     /// `true`: taken.
     pub fn on_key(&mut self, key: &Key, m: &Mods) -> bool {
         let command = (m.ctrl || m.cmd) && !m.alt;
@@ -557,7 +563,7 @@ pub enum Pictures<'a> {
 /// The pages on grey in the stage's viewport (`docs_scroll`). Every page keeps its box, so the scroll height is right;
 /// live, only the pages near the screen ask the renderer for a picture, and the rest are blank paper of their size; the
 /// fixture draws its pages as it always did.
-fn stage(doc: &DocBody, pics: &Pictures, stage_y: Option<f32>, t: &Theme) -> El {
+fn stage(doc: &DocBody, pics: &Pictures, stage_rect: Option<[f32; 4]>, ed: Option<(&EditUi, Option<El>)>, t: &Theme) -> El {
     let count = doc.view.pages.max(1);
     let mut pages = col()
         .key("pages")
@@ -592,7 +598,12 @@ fn stage(doc: &DocBody, pics: &Pictures, stage_y: Option<f32>, t: &Theme) -> El 
             }
         }
     }
-    scroll::viewport(pages, stage_y, heights.into(), t)
+    // A document open for editing: the pages' column is the editor's surface (focus, keys, pointer, caret).
+    let content = match ed {
+        Some((edit, ime)) => word::surface(pages, doc, edit, stage_rect, ime),
+        None => pages,
+    };
+    scroll::viewport(content, stage_rect.map(|r| r[1]), heights.into(), t)
 }
 
 /// `1284` as "1,284".
@@ -615,22 +626,12 @@ fn status(doc: &DocBody, t: &Theme) -> El {
         format!("{} words", thousands(doc.view.words)),
         doc.language.clone(),
     ];
-    let mut bar = row()
-        .key("status-bar")
-        .role("status")
-        .w_full()
-        .h(28.0)
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
+    let mut bar: Vec<El> = Vec::new();
     let mut n = 0;
     let mut said_quiet = String::new();
     for (i, part) in parts.iter().enumerate() {
         if i > 0 {
-            bar = bar.child(kit::label(
+            bar.push(kit::label(
                 format!("st-{n}"),
                 "\u{00B7}",
                 type_::STATUS,
@@ -638,7 +639,7 @@ fn status(doc: &DocBody, t: &Theme) -> El {
             ));
             n += 1;
         }
-        bar = bar.child(
+        bar.push(
             kit::label(format!("st-{n}"), part.clone(), type_::STATUS, t.text_tertiary)
                 .w(rune::text::advance(part, type_::STATUS)),
         );
@@ -646,69 +647,69 @@ fn status(doc: &DocBody, t: &Theme) -> El {
     }
     // The board's OvStatus: after the left words, `·` and the one quiet line.
     if let Some(quiet) = doc.quiet {
-        bar = bar
-            .child(kit::label(
-                format!("st-{n}"),
-                "\u{00B7}",
-                type_::STATUS,
-                t.text_tertiary,
-            ))
-            .child(
-                kit::label(format!("st-{}", n + 1), quiet, type_::STATUS, t.text_tertiary)
-                    .w(rune::text::advance(quiet, type_::STATUS)),
-            );
+        bar.push(kit::label(
+            format!("st-{n}"),
+            "\u{00B7}",
+            type_::STATUS,
+            t.text_tertiary,
+        ));
+        bar.push(
+            kit::label(format!("st-{}", n + 1), quiet, type_::STATUS, t.text_tertiary)
+                .w(rune::text::advance(quiet, type_::STATUS)),
+        );
         n += 2;
         said_quiet = format!(". {quiet}");
     }
     let about_key = format!("st-{}", n + 2);
-    bar.label(format!("{}{said_quiet}. {ENCRYPTED}", parts.join(", ")))
-        .child(el().key("st-gap").grow(1.0))
-        .child(
-            row()
-                .key(format!("st-{n}-box"))
-                .gap(4.0)
-                .center_y()
-                .child(kit::glyph(format!("st-{n}-icon"), &icons::LOCK, 11.0, t.accent_deep))
-                .child(
-                    kit::label(format!("st-{n}"), ENCRYPTED, STATUS_ENC, t.accent_deep)
-                        .w(rune::text::advance(ENCRYPTED, STATUS_ENC)),
-                ),
-        )
-        .child(kit::label(
-            format!("st-{}", n + 1),
-            "\u{00B7}",
-            type_::STATUS,
-            t.text_tertiary,
-        ))
-        .child(
-            el().key(format!("{about_key}-box"))
-                .role("link")
-                .label("About this viewer")
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    if let Some(ui) = viewers::ui(s) {
-                        ui.office_about();
-                    }
-                })
-                .child(
-                    // The board underlines "About" (offset 2 px): the line is a bar under the words; the top pad
-                    // keeps the words where the board has them.
-                    col()
-                        .key(format!("{about_key}-under"))
-                        .pt(2.0)
-                        .child(
-                            kit::label(about_key, ABOUT, type_::STATUS, t.text_tertiary)
-                                .w(rune::text::advance(ABOUT, type_::STATUS)),
-                        )
-                        .child(
-                            el().key("st-about-line")
-                                .mt(1.0)
-                                .w(rune::text::advance(ABOUT, type_::STATUS))
-                                .h(1.0)
-                                .fill(t.text_tertiary),
-                        ),
-                ),
-        )
+    let said = format!("{}{said_quiet}. {ENCRYPTED}", parts.join(", "));
+    bar.push(el().key("st-gap").grow(1.0));
+    bar.push(
+        row()
+            .key(format!("st-{n}-box"))
+            .gap(4.0)
+            .center_y()
+            .child(kit::glyph(format!("st-{n}-icon"), &icons::LOCK, 11.0, t.accent_deep))
+            .child(
+                kit::label(format!("st-{n}"), ENCRYPTED, STATUS_ENC, t.accent_deep)
+                    .w(rune::text::advance(ENCRYPTED, STATUS_ENC)),
+            ),
+    );
+    bar.push(kit::label(
+        format!("st-{}", n + 1),
+        "\u{00B7}",
+        type_::STATUS,
+        t.text_tertiary,
+    ));
+    bar.push(
+        el().key(format!("{about_key}-box"))
+            .role("link")
+            .label("About this viewer")
+            .focusable(true)
+            .on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.office_about();
+                }
+            })
+            .child(
+                // The board underlines "About" (offset 2 px): the line is a bar under the words; the top pad
+                // keeps the words where the board has them.
+                col()
+                    .key(format!("{about_key}-under"))
+                    .pt(2.0)
+                    .child(
+                        kit::label(about_key, ABOUT, type_::STATUS, t.text_tertiary)
+                            .w(rune::text::advance(ABOUT, type_::STATUS)),
+                    )
+                    .child(
+                        el().key("st-about-line")
+                            .mt(1.0)
+                            .w(rune::text::advance(ABOUT, type_::STATUS))
+                            .h(1.0)
+                            .fill(t.text_tertiary),
+                    ),
+            ),
+    );
+    crate::ui::status_bar::frame(bar, t).label(said)
 }
 
 /// The window of DW-1507 / DW-1511: the caption, the sidebar, and the document beside it. `page(n)`: the source's
@@ -724,13 +725,25 @@ pub fn window_live(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, live: 
 
 fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pictures) -> El {
     let t = tokens::theme(cx.system_dark());
+    // The editor of a Word document that runs: its surface needs the stage's whole rectangle (to keep the caret in view).
+    let editing = ui
+        .office
+        .edit
+        .as_ref()
+        .filter(|e| e.kind == EditKind::Docx && !e.stopped)
+        .map(|e| (e, e.has_keyboard.then(|| ime::caret_el(s)).flatten()));
+    let stage_rect = if editing.is_some() {
+        cx.layout_with(scroll::STAGE, |r| r)
+    } else {
+        cx.layout_with(scroll::STAGE, |r| [0.0, r[1], 0.0, 0.0])
+    };
     let mut body = row()
         .key("viewer-row")
         .grow(1.0)
         .min_h(0.0)
         .w_full()
         .child(outline(doc, &t))
-        .child(stage(doc, pics, cx.layout_with(scroll::STAGE, |r| r[1]), &t));
+        .child(stage(doc, pics, stage_rect, editing, &t));
     if ui.show_details {
         body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
     }
@@ -745,7 +758,10 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pic
     if doc.view.older_format {
         main = main.child(note(&t));
     }
-    main = main.child(bar(doc, &t)).child(body).child(status(doc, &t));
+    main = match ui.office.edit.as_ref().map(|e| e.kind) {
+        Some(kind) => main.child(super::edit::chrome(s, cx, ui, kind, body)),
+        None => main.child(bar(doc, &t)).child(body).child(status(doc, &t)),
+    };
     let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
         row()
             .key("body")
@@ -1026,7 +1042,11 @@ mod tests {
                 for e in rt.elements() {
                     let key = e.key.clone().unwrap_or_default();
                     let allowed = matches!(key.as_str(), "new-btn" | "plus-icon" | "new-caret" | "new-label")
-                        || key.starts_with("st-5");
+                        || key.starts_with("st-5")
+                        // The Drive sidebar's places: the folder art in its own tint.
+                        || crate::ui::sidebar::SidebarSection::all()
+                            .iter()
+                            .any(|p| key == format!("{}-icon", p.label()));
                     if allowed {
                         continue;
                     }

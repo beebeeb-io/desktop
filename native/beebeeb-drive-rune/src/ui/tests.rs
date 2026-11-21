@@ -188,11 +188,16 @@ fn every_pc_state_has_its_own_glyph() {
 
 #[test]
 fn dates_read_as_the_board_writes_them() {
-    use super::file_list::format_date;
-    assert_eq!(format_date("2026-11-05T07:02:00Z"), "Today, 07:02");
-    assert_eq!(format_date("2026-11-04T16:42:00Z"), "Yesterday, 16:42");
-    assert_eq!(format_date("2026-11-01T14:00:00Z"), "Sunday");
-    assert_eq!(format_date("2026-10-28T10:00:00Z"), "28 Oct 2026");
+    use super::file_list::{format_date, format_date_at};
+    let at = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").unwrap();
+    let now = at("2026-11-05T12:00:00");
+    assert_eq!(format_date_at(at("2026-11-05T07:02:00"), now), "Today, 07:02");
+    assert_eq!(format_date_at(at("2026-11-04T16:42:00"), now), "Yesterday, 16:42");
+    assert_eq!(format_date_at(at("2026-11-01T14:00:00"), now), "Sunday");
+    assert_eq!(format_date_at(at("2026-10-28T10:00:00"), now), "28 Oct 2026");
+    // A file changed a moment ago reads "Today" whatever this PC's zone is.
+    let moment = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    assert!(format_date(&moment).starts_with("Today, "));
     assert_eq!(format_date("not a date"), "");
 }
 

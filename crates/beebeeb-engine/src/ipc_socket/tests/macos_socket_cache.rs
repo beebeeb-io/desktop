@@ -13,14 +13,14 @@ fn test_macos_ipc_socket_path_is_inside_group_container_not_tmp() {
     // entirely, causing the original "Timed out waiting for the local
     // Beebeeb sync daemon" report).
     let home = std::path::Path::new("/Users/alice");
-    let path = macos_ipc_socket_path_in(&crate::identity::REAL, home);
+    let path = macos_ipc_socket_path_in(&crate::identity::TEST, home);
 
     assert!(
         path.starts_with(home.join("Library").join("Group Containers")),
         "must live inside the shared App Group container, got {path:?}"
     );
     assert!(
-        path.to_str().unwrap().contains(crate::identity::REAL.macos_app_group()),
+        path.to_str().unwrap().contains(crate::identity::TEST.macos_app_group()),
         "must be namespaced under the app's own App Group id, got {path:?}"
     );
     assert!(
@@ -65,14 +65,14 @@ fn test_macos_hydrate_cache_dir_is_inside_group_container_not_tmp() {
     // The shared App Group container is the one directory both sides can
     // actually agree on.
     let home = std::path::Path::new("/Users/alice");
-    let path = macos_hydrate_cache_dir_in(&crate::identity::REAL, home);
+    let path = macos_hydrate_cache_dir_in(&crate::identity::TEST, home);
 
     assert!(
         path.starts_with(home.join("Library").join("Group Containers")),
         "must live inside the shared App Group container, got {path:?}"
     );
     assert!(
-        path.to_str().unwrap().contains(crate::identity::REAL.macos_app_group()),
+        path.to_str().unwrap().contains(crate::identity::TEST.macos_app_group()),
         "must be namespaced under the app's own App Group id, got {path:?}"
     );
     assert!(
@@ -94,8 +94,8 @@ fn unit_tests_resolve_the_hydrate_dir_in_a_sandbox_never_the_real_group_containe
     // compared as the specific `hydrate-cache` dir, so a `CARGO_TARGET_DIR` elsewhere in the
     // container cannot turn this red.
     let real_home = getpwuid_home_dir().expect("the password database knows this user");
-    let real = macos_hydrate_cache_dir_in(&crate::identity::REAL, &real_home);
-    let resolved = macos_hydrate_cache_dir(&crate::identity::REAL);
+    let real = macos_hydrate_cache_dir_in(&crate::identity::TEST, &real_home);
+    let resolved = macos_hydrate_cache_dir(&crate::identity::TEST);
 
     assert_ne!(
         resolved, real,
@@ -117,7 +117,7 @@ fn unit_tests_resolve_the_hydrate_dir_in_a_sandbox_never_the_real_group_containe
     assert!(
         resolved.ends_with(
             std::path::Path::new("Group Containers")
-                .join(crate::identity::REAL.macos_app_group())
+                .join(crate::identity::TEST.macos_app_group())
                 .join(MACOS_HYDRATE_CACHE_DIRNAME)
         ),
         "the sandbox keeps the production path shape, got {resolved:?}"
@@ -131,8 +131,8 @@ fn test_macos_hydrate_cache_dir_does_not_collide_with_ipc_socket_path() {
     // 1670's doc comment); they must still be distinct paths, or a
     // hydrated file could shadow (or be shadowed by) the IPC socket.
     let home = std::path::Path::new("/Users/alice");
-    let socket = macos_ipc_socket_path_in(&crate::identity::REAL, home);
-    let hydrate_dir = macos_hydrate_cache_dir_in(&crate::identity::REAL, home);
+    let socket = macos_ipc_socket_path_in(&crate::identity::TEST, home);
+    let hydrate_dir = macos_hydrate_cache_dir_in(&crate::identity::TEST, home);
 
     assert_ne!(socket, hydrate_dir, "must not reuse the socket's own path");
     assert!(
@@ -376,7 +376,7 @@ fn test_macos_ipc_socket_path_ignores_sandboxed_home_env_var() {
     let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let real_home = getpwuid_home_dir().expect("getpwuid_r must resolve a real home directory on this machine");
-    let expected = macos_ipc_socket_path_in(&crate::identity::REAL, &real_home);
+    let expected = macos_ipc_socket_path_in(&crate::identity::TEST, &real_home);
 
     let original_home = std::env::var_os("HOME");
     // A realistic sandboxed $HOME, per the task 1524 root-cause report:
@@ -387,7 +387,7 @@ fn test_macos_ipc_socket_path_ignores_sandboxed_home_env_var() {
     // restores the original value before returning.
     unsafe { std::env::set_var("HOME", sandbox_home) };
 
-    let result = std::panic::catch_unwind(|| ipc_socket_path(&crate::identity::REAL));
+    let result = std::panic::catch_unwind(|| ipc_socket_path(&crate::identity::TEST));
 
     // SAFETY: same guard as the set_var above.
     match &original_home {
@@ -462,7 +462,7 @@ async fn ipc_publication_failure_does_not_signal_readiness() {
         [7u8; 32],
     ));
     let bridge = Arc::new(crate::engine_bridge::EngineBridge::new(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         db.clone(),
         api,
     ));

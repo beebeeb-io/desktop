@@ -5,22 +5,24 @@ Plain `makensis`, no Tauri CLI. Spec: `docs/superpowers/specs/2026-11-11-native-
 | File | What it is |
 |---|---|
 | `installer.nsi`, `utils.nsh`, `English.nsh` | The installer script Tauri generated for 0.8.x, kept line for line; the changes are listed at the top of `installer.nsi`. |
-| `hooks.nsh` | Our hooks: remove the WebView2 profile after install, the staged updates on uninstall. |
+| `hooks.nsh` | Our hooks: remove the WebView2 profile after install, grant the helpers to the sandbox group, the staged updates on uninstall. |
 | `build-installer.ps1` | Builds the installer; refuses a script that still handles WebView2. `-Mode test` ("Beebeeb Test", `io.beebeeb.app.test`, unsigned) or `-Mode release` (signed, fails closed). |
-| `verify-install.ps1` | Read-only checks of an installed or uninstalled state; ends with a count line. |
+| `verify-install.ps1` | Read-only checks of an installed or uninstalled state; ends with a count line. The install-folder check reads the file list from the `Delete` lines of `installer.nsi`'s uninstall section (binary, both helpers, licence notice, `uninstall.exe`). |
+| `verify-install.tests.ps1` | Self test of that file check on fake folders in `$env:TEMP` (plain PowerShell, no Pester): `powershell -NoProfile -File verify-install.tests.ps1`. |
 | `rehearsal/serve.ts`, `rehearsal/db-fingerprint.ts` | Helpers for the upgrade rehearsal below. |
 
 **Status.** Section A and native check 1 ran on Windows for the first time on 2026-11-12, on the build VM
-`bb-build-win11` (Windows 11 23H2, beside an installed Beebeeb 0.8.25), and the scripts needed no change: steps 1 to
+`the Windows build box` (Windows 11 23H2, beside an installed Beebeeb 0.8.25), and the scripts needed no change: steps 1 to
 7 printed what they say below. Two parts are still open: that VM has no interactive desktop, so the app started
 there but drew no window and step 5's "look at it" was not done; and 0.8.25 was not running, so step 8 had nothing to
 compare. Native check 4 runs in CI; native checks 2 and 3 and section B have never run.
 
-Needs: NSIS 3.11 and `nsis_tauri_utils.dll` 0.5.3. On a PC that has built 0.8.x both are in
-`%LOCALAPPDATA%\tauri\NSIS`, where the script looks by default. Elsewhere: NSIS 3.11 from its official release, the
-plugin from `github.com/tauri-apps/nsis-tauri-utils` (release `nsis_tauri_utils-v0.5.3`) in
-`<NSIS folder>\Plugins\x86-unicode\additional\`, and `-NsisDir <NSIS folder>` on the command line (the build VM:
-`-NsisDir 'C:\Program Files (x86)\NSIS'`). Every file is checked by SHA-256. A plugin that is not 0.5.3 is refused
+Needs: an installed NSIS 3.11 and `nsis_tauri_utils.dll` 0.5.3. The Tauri toolchain cache is no longer a source. The
+script finds NSIS in this order: `-NsisDir <folder>`, the `BEEBEEB_NSIS_DIR` environment variable, then
+`C:\Program Files (x86)\NSIS` (and `Program Files\NSIS`); with none it stops and says what to install. NSIS 3.11 comes
+from its official release; the plugin from `github.com/tauri-apps/nsis-tauri-utils` (release `nsis_tauri_utils-v0.5.3`),
+looked for in `-PluginDir`, then `BEEBEEB_NSIS_PLUGIN_DIR`, then `<NSIS folder>\Plugins\x86-unicode\additional\`.
+Every file is checked by SHA-256. A plugin that is not 0.5.3 is refused
 in both modes. `makensis.exe`, `Bin\makensis.exe` and the stub `Stubs\lzma_solid-x86-unicode` must be NSIS 3.11 as
 released: a release build refuses any other file, a test build prints a `NOTE` line and goes on. The output folder
 `out\` is ignored by git.
@@ -57,6 +59,11 @@ Set-Location C:\bb-win\native\desktop\native\beebeeb-drive-rune
 $env:BEEBEEB_APP_IDENTIFIER = 'io.beebeeb.app.test'     # the test identity is compiled in (also the default); the packager checks the binary's mark
 cargo build --release --locked
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+# The two helpers the installer ships beside it (own crates, same target folder): build-installer.ps1 refuses without them.
+foreach ($h in 'beebeeb-office-render','beebeeb-media-helper') {
+  Set-Location "C:\bb-win\native\desktop\native\$h"; cargo build --release --locked
+  if ($LASTEXITCODE -ne 0) { throw "cargo build $h failed" }
+}
 Remove-Item Env:BEEBEEB_APP_IDENTIFIER
 $real = @(Get-Process beebeeb-desktop -ErrorAction SilentlyContinue | ForEach-Object Id)   # for step 8
 

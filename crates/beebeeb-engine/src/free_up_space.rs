@@ -441,11 +441,15 @@ fn dehydrate_these(
     let allowed_roots = free_up_space_allowed_roots(identity, sync_root);
     let mut bytes_freed: u64 = 0;
     let mut dehydrated_ids: Vec<String> = Vec::new();
+    // One pass over the places: each folder on the way is read once.
+    let mut places =
+        crate::drive_v2::case_place::PlaceCheck::new(db, sync_root, crate::drive_v2::case_place::CaseRule::host());
 
     let finished = each_while(candidates, go_on, |(file_id, rel_path, _size_bytes)| {
         // Task 2407 (core 2404): never another file this name reaches (an 8.3 short name; `canonicalize` below would
-        // follow it to that file's long name). A check that cannot finish keeps the file local.
-        let Some(local_path) = crate::name_alias::reclaim_place(sync_root, &rel_path) else {
+        // follow it to that file's long name), nor the entry of another row at this place (two server items with one
+        // name, or one name but for case). A check that cannot finish keeps the file local.
+        let Some(local_path) = crate::name_alias::reclaim_place_of(&mut places, &file_id, &rel_path) else {
             return;
         };
         // Path-safety: only dehydrate placeholders that actually resolve under

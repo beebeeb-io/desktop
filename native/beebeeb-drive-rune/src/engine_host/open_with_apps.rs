@@ -7,13 +7,14 @@
 //!   per type for the run of the app, on a COM thread of its own (never the window's), and held.
 //! - The start: on a COM thread of its own the handlers are listed again, the one whose `GetName` is the id picked is
 //!   found (a handler gone since the menu: refused), and `IAssocHandler::Invoke` gets the kept file as a data object
-//!   (`SHCreateItemFromParsingName` → `BindToHandler(BHID_DataObject)`), under the launch lock (`launch.rs`).
+//!   (`SHCreateItemFromParsingName` → `BindToHandler(BHID_DataObject)`), under the launch lock (`launch.rs`), and only
+//!   while the session of the press is still the one once the lock is taken (`files_launch.rs`).
 //! - Never: a registry write, `MakeDefault` / `SetAsDefaultFor`, a temporary copy, a path made from a name.
 //!
 //! Must not: log a path or a file's name.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::frames::files::source::{ActionError, AppChoice};
@@ -111,33 +112,44 @@ fn ask_windows(_ext: String, answer: impl FnOnce(Vec<AppChoice>) + Send + 'stati
     answer(Vec::new());
 }
 
-/// Open `path`, the copy kept on this PC, in the handler whose `GetName` is `app_id`, on a COM thread of its own.
-/// `Ok`: the thread started, and `done` gets what happened (a handler gone since the menu, or a start that failed:
-/// `Failed`). Every other system: not there.
+/// What starts the app picked on the kept copy, on the thread [`open_in`] makes: the path, the app's id, and `still`,
+/// which it asks inside the launch lock right before the start (`false`: the press's session moved on; nothing
+/// starts). The system's own is [`SYSTEM`]; a test hands a stand-in.
+pub(crate) type Invoke = fn(&Path, &str, &dyn Fn() -> bool) -> Result<(), ActionError>;
+
+/// Windows' handlers, with COM set up on the thread that starts one.
+#[cfg(windows)]
+pub(crate) const SYSTEM: Option<Invoke> = Some(invoke_with_com);
+/// Every other system has no handlers to start.
+#[cfg(not(windows))]
+pub(crate) const SYSTEM: Option<Invoke> = None;
+
+#[cfg(windows)]
+fn invoke_with_com(path: &Path, app_id: &str, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    match win::Com::enter() {
+        Some(_com) => win::invoke(path, app_id, still),
+        None => Err(ActionError::Failed),
+    }
+}
+
+/// Open `path`, the copy kept on this PC, in the handler whose `GetName` is `app_id`, with `invoke` on a thread of its
+/// own. `Ok`: the thread started, and `done` gets what happened (a handler gone since the menu, a start that failed,
+/// or a session that moved on before the lock was taken: an `Err`). `None` (every other system): not there.
 pub(crate) fn open_in(
+    invoke: Option<Invoke>,
     path: PathBuf,
     app_id: String,
+    still: impl Fn() -> bool + Send + 'static,
     done: impl FnOnce(Result<(), ActionError>) + Send + 'static,
 ) -> Result<(), ActionError> {
-    #[cfg(windows)]
-    {
-        std::thread::Builder::new()
-            .name("files-open-in-app".into())
-            .spawn(move || {
-                let answer = match win::Com::enter() {
-                    Some(_com) => win::invoke(&path, &app_id),
-                    None => Err(ActionError::Failed),
-                };
-                done(answer);
-            })
-            .map(|_| ())
-            .map_err(|_| ActionError::Failed)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (path, app_id, done);
-        Err(ActionError::NotOnThisSystem)
-    }
+    let Some(invoke) = invoke else {
+        return Err(ActionError::NotOnThisSystem);
+    };
+    std::thread::Builder::new()
+        .name("files-open-in-app".into())
+        .spawn(move || done(invoke(&path, &app_id, &still)))
+        .map(|_| ())
+        .map_err(|_| ActionError::Failed)
 }
 
 #[cfg(windows)]
@@ -233,8 +245,8 @@ mod win {
     }
 
     /// Start the handler named `app_id` on the file at `path` (the copy kept on this PC). The handlers are listed again
-    /// here: one gone since the menu was drawn is refused.
-    pub(super) fn invoke(path: &Path, app_id: &str) -> Result<(), ActionError> {
+    /// here: one gone since the menu was drawn is refused. It starts only while `still()` holds inside the launch lock.
+    pub(super) fn invoke(path: &Path, app_id: &str, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -252,7 +264,9 @@ mod win {
             let data: IDataObject = item
                 .BindToHandler(None, &BHID_DataObject)
                 .map_err(|_| ActionError::Failed)?;
-            launch::locked(|| handler.Invoke(&data)).map_err(|_| ActionError::Failed)
+            launch::locked(|| still().then(|| handler.Invoke(&data)))
+                .ok_or(ActionError::Unavailable)?
+                .map_err(|_| ActionError::Failed)
         }
     }
 }
@@ -319,7 +333,7 @@ mod tests {
     /// The instrument first, on a type every Windows has: `.txt` has handlers, Notepad among them.
     #[cfg(windows)]
     #[test]
-    #[ignore = "O-CP3: VM 401"]
+    #[ignore = "O-CP3: the Windows test machine"]
     fn windows_reports_handlers_for_txt() {
         let _com = win::Com::enter().expect("COM");
         let reported: Vec<(String, String)> = win::handlers(".txt").iter().filter_map(win::names).collect();
@@ -334,7 +348,7 @@ mod tests {
     /// by its PID. Mutant: invoke with an empty data object → no process.
     #[cfg(windows)]
     #[test]
-    #[ignore = "O-CP3: VM 401"]
+    #[ignore = "O-CP3: the Windows test machine"]
     fn invoke_opens_the_kept_path() {
         let notepads = || -> Vec<u32> {
             let out = std::process::Command::new("tasklist")
@@ -357,7 +371,7 @@ mod tests {
             .find(|(name, _)| name.to_lowercase().contains("notepad"))
             .expect("Notepad is a handler of .txt")
             .0;
-        win::invoke(&path, &notepad).expect("invoked");
+        win::invoke(&path, &notepad, &|| true).expect("invoked");
         let started = (0..50)
             .find_map(|_| {
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -368,7 +382,7 @@ mod tests {
             .args(["/PID", &started.to_string(), "/F"])
             .output();
         assert!(
-            win::invoke(&path, "no such handler").is_err(),
+            win::invoke(&path, "no such handler", &|| true).is_err(),
             "a handler that is not there is refused"
         );
     }

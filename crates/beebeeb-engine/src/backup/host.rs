@@ -128,7 +128,7 @@ impl DesktopBackupHost {
     }
 
     /// The category folder's id: the remembered one, else (a first backup, or "Back up again") the live folder of that
-    /// name in the device folder (the old mirror's `GLegion/Pictures` is adopted), else a new one. A folder the person
+    /// name in the device folder (the old mirror's `TestPC/Pictures` is adopted), else a new one. A folder the person
     /// chose: [`Self::chosen_category_folder`].
     async fn category_folder(&self, c: &Category) -> Result<(String, Option<bool>), HostError> {
         if matches!(c, Category::Custom(_)) {

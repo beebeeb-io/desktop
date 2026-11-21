@@ -530,3 +530,46 @@ pub fn render_into(out: GrantRef) -> Message {
         out,
     })
 }
+
+// ---- the real engine, editing
+
+/// The helper with the real Office engine and an editing session open (id 0) on `bytes`: the helper and what it
+/// answered (`Opened`, or `OpenedSheets` for a workbook). Ids after 0 are the caller's, even.
+pub fn open_real_edit(
+    memory: &Arc<FakeMemory>,
+    kind: beebeeb_office_protocol::office::EditKind,
+    bytes: &[u8],
+) -> (Running, Message) {
+    let mut helper = Running::start(Arc::clone(memory), Arc::new(beebeeb_office_render::Office));
+    let doc = memory.section(bytes.to_vec());
+    helper.send(
+        0,
+        &Message::OpenEdit(beebeeb_office_protocol::office::OpenEdit { doc, kind }),
+    );
+    let (id, answer) = helper.answer();
+    assert_eq!(id, 0, "the answer carries the OpenEdit's id");
+    (helper, answer)
+}
+
+/// The save handshake as the app runs it, ids `id` and `id + 2`: the saved bytes.
+pub fn save_real(helper: &mut Running, memory: &FakeMemory, id: u32) -> Vec<u8> {
+    use beebeeb_office_protocol::office::{Purpose, SaveInto, SaveSize};
+    helper.send(id, &Message::SaveSize(SaveSize { purpose: Purpose::Save }));
+    let ready = match helper.answer() {
+        (got, Message::SaveReady(ready)) if got == id => ready,
+        other => panic!("SaveReady for {id} was due: {other:?}"),
+    };
+    let out = memory.zeroed(ready.len as usize);
+    helper.send(
+        id + 2,
+        &Message::SaveInto(SaveInto {
+            token: ready.token,
+            out,
+        }),
+    );
+    match helper.answer() {
+        (got, Message::SavedInto(done)) if got == id + 2 => assert_eq!(done.len, ready.len),
+        other => panic!("SavedInto for {} was due: {other:?}", id + 2),
+    }
+    memory.bytes(out)
+}

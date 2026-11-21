@@ -214,6 +214,23 @@ fn unlock_asks_windows_hello_once_and_each_answer_is_a_sentence_or_nothing() {
     assert_eq!(script.count("sign_in") + script.count("unlock"), 0);
 }
 
+/// The app quits (the shell's quit hook) while the lock screen waits for its prompt: the prompt is taken away, and a
+/// quit Windows then cancels (a shutdown another app refused) leaves Unlock asking again.
+#[test]
+fn a_quit_takes_the_lock_screens_prompt_away_and_unlock_asks_again_after_it() {
+    let (_, script, mut rt) = window(false);
+    // Not waiting for a prompt: the quit asks nothing of the source.
+    rt.update(host::on_quit);
+    assert_eq!(script.calls(), Vec::<&str>::new());
+    click(&mut rt, lock::UNLOCK_KEY);
+    assert!(ui(&rt).lock_hello_waiting());
+    rt.update(host::on_quit);
+    assert_eq!(script.calls(), ["hello", "cancel_hello"]);
+    assert!(!ui(&rt).lock_hello_waiting());
+    click(&mut rt, lock::UNLOCK_KEY);
+    assert_eq!(script.count("hello"), 2, "Unlock asks again");
+}
+
 #[test]
 fn an_answer_of_windows_hello_nobody_waits_for_changes_nothing() {
     let (engine, script, mut rt) = window(false);
@@ -682,4 +699,34 @@ fn screen_password_a_closed_vault_keeps_the_strong_unlock() {
     rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
     assert_eq!(script.count("unlock"), 1);
     assert_eq!(script.count("screen_password"), 0);
+}
+
+/// The window closing under a lock: what was typed on the lock's password is wiped, and a code step after a proven
+/// password goes back to the lock's password with the engine told to forget the proof (Back's own path).
+#[test]
+fn closing_the_window_under_a_lock_wipes_the_typed_password_and_leaves_the_code_step() {
+    // The screen lock's password, typed and not sent.
+    let (_, script, mut rt) = window(false);
+    to_the_screen_password(&script, &mut rt);
+    type_password(&mut rt, "typed under the lock");
+    super::wipe::on_window_closed(&mut rt.state);
+    assert!(ui(&rt).password.text.is_empty(), "the typed password is wiped");
+    assert_eq!(script.count("screen_password"), 0, "nothing was sent");
+
+    // The closed vault's code step: back to the lock's password, the proof discarded once, no form.
+    let (_, script, mut rt) = window(true);
+    type_password(&mut rt, "the password");
+    rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
+    answer(
+        &mut rt,
+        &script,
+        SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::TwoFactor)),
+    );
+    assert_eq!(ui(&rt).screen, super::Screen::TwoFactor { backup: false });
+    super::wipe::on_window_closed(&mut rt.state);
+    assert_eq!(ui(&rt).screen, super::Screen::UnlockVault);
+    assert_eq!(script.count("discard"), 1);
+    assert_eq!(script.count("sign_in"), 0);
+    assert!(ui(&rt).password.text.is_empty());
+    assert!(ui(&rt).code.text.is_empty());
 }

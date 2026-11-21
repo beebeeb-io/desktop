@@ -18,6 +18,8 @@ fn a_refused_start_makes_no_request() {
     std::fs::write(folder.join("Plans").join("budget.ods"), b"twelve bytes").unwrap();
     s.sign_in();
     s.unlock();
+    // The plan check runs in the background after the unlock: let it be served before the count starts.
+    std::thread::sleep(std::time::Duration::from_secs(1));
     let before = common::listing(&folder);
     let from = s.fake.requests().len();
 

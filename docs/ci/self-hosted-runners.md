@@ -1,7 +1,7 @@
 # Self-hosted runners for the Rust jobs (prepared, not registered)
 
 Status 2026-11-11: **nothing is registered.** Registering a runner needs organisation or repository admin
-(the lead's token gets 403) and is Guus's action. This page is the procedure and the safe configuration.
+(the lead's token gets 403) and is the owner's action. This page is the procedure and the safe configuration.
 Measurements behind the expected timings: `docs/ci/2026-11-11-rust-ci-speed.md`.
 
 ## Read this first: `beebeeb-io/desktop` is a PUBLIC repository
@@ -11,7 +11,7 @@ On a public repository anyone can open a pull request, and a pull request's work
 own copy of the workflow file**. So a stranger can open a pull request that changes `runs-on:` to our runner's
 label and runs `curl … | sh` on our machine. This is the documented reason GitHub recommends against
 self-hosted runners on public repositories. It is a real risk, not a theoretical one; the machines in question
-(the testrig, the Legion, the Mac) hold source checkouts, signing material and a WireGuard path to production.
+(the testrig, the Windows test machine, the Mac) hold source checkouts, signing material and a WireGuard path to production.
 
 The `runs-on` expression in `ci.yml` keeps a fork's pull request on a GitHub-hosted runner. **That expression is
 a convenience, not a control**: the fork can edit it. The controls are the five below. Do not register a runner
@@ -36,8 +36,8 @@ never approving a fork run whose `runs-on` was edited) — which is what the `ru
 What is NOT protected by any of this: the kernel and the machine itself. A job is arbitrary code as a local
 user; a local privilege escalation breaks every control above. The strongest configuration is a runner inside a
 throwaway VM or container (Linux: a rootless Podman container or a small KVM guest on the testrig; Windows: a
-Hyper-V guest or Windows Sandbox on the Legion; macOS: a Tart/`Virtualization.framework` guest). Start with the
-testrig (it holds the least), and treat a runner on the Legion's own Windows install or on the Mac's login
+Hyper-V guest or Windows Sandbox on the Windows test machine; macOS: a Tart/`Virtualization.framework` guest). Start with the
+testrig (it holds the least), and treat a runner on the Windows test machine's own Windows install or on the Mac's login
 session as the weaker option that it is.
 
 ## How a job moves to a runner
@@ -78,16 +78,16 @@ construction). Do not point two runners at one target directory.
 
 `sccache`: not needed while one crate builds on one runner with a kept target directory (cargo's own
 fingerprints already skip everything unchanged; an incremental rebuild after a one-line change is 11.7 s on the
-Legion). It earns its place when several crates or several runners share dependencies (the native UI crates):
+the Windows test machine). It earns its place when several crates or several runners share dependencies (the native UI crates):
 then `RUSTC_WRAPPER=sccache`, `SCCACHE_DIR=~ghrunner/cache/sccache`, `SCCACHE_CACHE_SIZE=20G`, and
 `CARGO_INCREMENTAL=0` (sccache cannot cache incremental units). Measure before keeping it.
 
 **Cleanup policy, with a cap.** The supervisor runs this after every job; a kept target directory otherwise
-grows without bound (the Legion caps its shared target directory at 70 GB for the same reason).
+grows without bound (the Windows test machine caps its shared target directory at 70 GB for the same reason).
 
 - `_work/` is deleted after every job (ephemeral).
 - `CARGO_TARGET_DIR`: cap **30 GB**. Over the cap: delete the whole directory (the next job is one clean build,
-  about a minute on the testrig or the Legion). No partial pruning: a half-pruned target directory fails in ways
+  about a minute on the testrig or the Windows test machine). No partial pruning: a half-pruned target directory fails in ways
   that look like compiler bugs.
 - Weekly: delete it regardless (a toolchain update leaves a full dead copy behind).
 - `sccache` (if used) caps itself (`SCCACHE_CACHE_SIZE`).
@@ -104,7 +104,7 @@ grows without bound (the Legion caps its shared target directory at 70 GB for th
 4. As `ghrunner`: download the runner (`actions-runner-linux-x64`), verify the published SHA-256.
 5. Controls 2 and 3: the permission check and the WireGuard reject rule above. `/dev/shm` must be writable
    (the tests' temporary files go there).
-6. Guus: Repository → Settings → Actions → Runners → New self-hosted runner gives a registration token (valid
+6. the owner: Repository → Settings → Actions → Runners → New self-hosted runner gives a registration token (valid
    1 h). `./config.sh --url https://github.com/beebeeb-io/desktop --token <token> --name testrig-1 --labels bb-rust-linux --ephemeral --unattended --disableupdate=false`.
    Never paste the token into a chat, a task file or a commit; it goes from the browser to the terminal.
 7. A systemd unit (`User=ghrunner`, `NoNewPrivileges=yes`, `ProtectHome=tmpfs` with `BindPaths=/home/ghrunner`,
@@ -112,10 +112,10 @@ grows without bound (the Legion caps its shared target directory at 70 GB for th
    cleanup → fetch a just-in-time runner config (`POST /repos/beebeeb-io/desktop/actions/runners/generate-jitconfig`,
    with a fine-grained token that has ONLY "Administration: write" on this one repository, stored root-owned
    mode 0600 and read by the unit, not by the job) → `./run.sh --jitconfig …` → repeat.
-8. Guus: set `RUST_LINUX_RUNNER=bb-rust-linux`. Verify: the next pull request's "Rust test (Linux)" job shows
+8. the owner: set `RUST_LINUX_RUNNER=bb-rust-linux`. Verify: the next pull request's "Rust test (Linux)" job shows
    `Runner name: testrig-1`; its truth line and count equal the hosted run's.
 
-## Windows runner on the Legion (native Windows, not WSL)
+## Windows runner on the Windows test machine (native Windows, not WSL)
 
 The Windows job tests Cloud Files and the Credential Manager, so it must run on Windows itself.
 
@@ -133,9 +133,9 @@ The Windows job tests Cloud Files and the Credential Manager, so it must run on 
    build), and for nothing else.
 7. Registration as on Linux, label `bb-rust-windows`, ephemeral, started by a Scheduled Task that runs as
    `ghrunner` "whether the user is logged on or not" (not as a service under SYSTEM).
-8. Guus: set `RUST_WINDOWS_RUNNER=bb-rust-windows`.
+8. the owner: set `RUST_WINDOWS_RUNNER=bb-rust-windows`.
 
-The Legion is Guus's daily machine and a development machine (LD-0081). A CI job there competes with dev
+The the Windows test machine is the owner's daily machine and a development machine (LD-0081). A CI job there competes with dev
 builds for the same 16 logical CPUs; the Windows job is the one that cannot go anywhere else. Prefer a Hyper-V
 guest (4–8 vCPUs) so the runner cannot see the host at all.
 
@@ -149,16 +149,16 @@ guest (4–8 vCPUs) so the runner cannot see the host at all.
    WireGuard interface; "Full Disk Access" is NOT granted to the runner.
 5. A LaunchDaemon with `UserName=ghrunner` runs the supervisor loop (a LaunchAgent would need a logged-in
    session). Label `bb-rust-macos`, ephemeral.
-6. Guus: set `RUST_MACOS_RUNNER=bb-rust-macos`.
+6. the owner: set `RUST_MACOS_RUNNER=bb-rust-macos`.
 
 The Rust job only. "File Provider Swift (macOS)" stays on GitHub-hosted runners: it needs nothing kept.
 
 ## Expected timings on warm runners
 
-Measured on the Legion (WSL2, 16 logical CPUs) with this pull request's configuration; a self-hosted Linux
+Measured on the Windows test machine (WSL2, 16 logical CPUs) with this pull request's configuration; a self-hosted Linux
 runner on comparable hardware does the same work. "Warm" = `CARGO_TARGET_DIR` kept from the previous job.
 
-| Step | Warm self-hosted Linux (measured on the Legion) |
+| Step | Warm self-hosted Linux (measured on the Windows test machine) |
 |---|---|
 | Queue + set up job + checkout | ~5 s (no VM to boot; not measured, GitHub's part) |
 | `apt-get`, cache restore | 0 s (both skipped on a self-hosted runner) |
@@ -173,7 +173,7 @@ dependency cache; the warm number is in that table.
 Windows and macOS runners: not measured (no runner exists). The same reasoning gives "incremental compile +
 the 65 s floor"; the first real job on each replaces this sentence with a number.
 
-## What Guus must do
+## What the owner must do
 
 1. Decide that a self-hosted runner on a public repository is acceptable with the five controls (or: VM-only).
 2. Set control 1 in the repository settings (it is useful today, without any runner).

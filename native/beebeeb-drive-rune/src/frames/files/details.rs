@@ -8,7 +8,7 @@ use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
-use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview, switch};
+use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview};
 use crate::ui::{file_list, kit};
 use rune::{El, Span, Tx, col, el, row};
 
@@ -35,7 +35,7 @@ fn offline_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
                 .child(kit::label(format!("{key}-detail"), sub, type_::BODY.lh(15.0), t.text_tertiary).truncate()),
         )
         .child(
-            switch(key, title, on, t)
+            crate::ui::switch::switch_sized(&format!("{key}-switch"), "", on, true, crate::ui::button::Size::Md, t).label(title)
                 .description(sub)
                 .on_press_tx(|s: &mut State, tx: &mut Tx| {
                     s.toggle_keep_offline(tx);
@@ -43,9 +43,14 @@ fn offline_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
         )
 }
 
+/// The width of `ui::detail_pane`'s pane, kept free while nothing is selected.
+const PANE_W_EMPTY: f32 = 284.0;
+
 pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
     let Some((item, d)) = item else {
-        return el().key("detail-pane-empty");
+        // Its place stays, bare: the list must not shrink under the pointer when a click selects a row, or
+        // the second click of a double-click lands on the pane that just opened and the row never opens.
+        return el().key("detail-pane-empty").w(PANE_W_EMPTY).h_full();
     };
     // Free up space, under the Available offline card: where the item has a copy on this PC.
     let on_this_pc = matches!(item.pc_status.as_deref(), Some("on_this_pc" | "available_offline"));

@@ -25,7 +25,7 @@ fn off(attempt: u64, kind: Refused) -> SyncOff {
 }
 
 /// Every kind has its own title and its own sentence, names the folder by its name and never a path, and offers the
-/// fix this build has: "Try again" where a retry can work, "Quit" where only a restart helps, and for the two kinds
+/// fix this build has: "Try again" where a retry can work, and for the two kinds
 /// with no fix only "Close" and a plain sentence that there is none.
 #[test]
 fn each_refusal_says_what_happened_and_offers_a_fix_only_where_one_exists() {
@@ -38,7 +38,7 @@ fn each_refusal_says_what_happened_and_offers_a_fix_only_where_one_exists() {
     sentences.dedup();
     assert_eq!(
         (titles.len(), sentences.len()),
-        (9, 9),
+        (11, 11),
         "one title and one sentence per kind"
     );
     for (kind, words) in Refused::ALL.iter().zip(&all) {
@@ -87,6 +87,26 @@ fn each_refusal_says_what_happened_and_offers_a_fix_only_where_one_exists() {
         ..off(1, Refused::FolderMissing)
     };
     assert!(words(&unnamed, PRODUCT).happened.contains("the sync folder"));
+}
+
+/// Row fx-stop-words (mutant SW-R: the sentence says "restarts" again): a start refused while a stopped proof still
+/// holds its client is not a restart case, it clears by itself, so the words say it is still finishing and to try
+/// again in a moment, and the button is Try again. An engine stop that was never confirmed keeps "quit and reopen".
+#[test]
+fn a_finishing_stop_says_try_again_and_an_unconfirmed_engine_stop_keeps_quit_and_reopen() {
+    let kept = words(&off(1, Refused::StopUnconfirmed), PRODUCT);
+    assert_eq!(kept.title, "Quit and reopen Beebeeb Test");
+    assert!(kept.happened.contains("restarts"), "{}", kept.happened);
+    assert_eq!(kept.actions, [Action::Quit, Action::Close]);
+    let w = words(&off(1, Refused::StopFinishing), PRODUCT);
+    assert_eq!(w.title, "Sync is still finishing");
+    assert!(w.happened.contains("hasn\u{2019}t finished yet"), "{}", w.happened);
+    assert_eq!(w.fix, "Try again in a moment.");
+    for text in [&w.title, &w.happened, &w.fix] {
+        assert!(!text.to_lowercase().contains("restart"), "{text}");
+        assert!(!text.to_lowercase().contains("reopen"), "{text}");
+    }
+    assert_eq!(w.actions, [Action::TryAgain, Action::Close]);
 }
 
 const ENV: Env = Env {

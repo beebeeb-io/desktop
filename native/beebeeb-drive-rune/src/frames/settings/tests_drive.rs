@@ -3,7 +3,7 @@
 //!
 //! Input is scripted: keys and presses go through Rune's `Runtime`, as a person's would.
 
-use super::drive::{BoardDrive, DriveSettings, Insights, Kept, Repair, SyncStatus};
+use super::drive::{BoardDrive, DriveSettings, Insights, Kept, Repair, Storage, SyncPane, SyncStatus};
 use super::{Dialog, Intent, Pane};
 use crate::shell::app::{Screen, SettingsPane};
 use crate::shell::host;
@@ -192,18 +192,18 @@ fn clearing_downloads_asks_first_and_clearing_previews_says_so() {
 #[test]
 fn insights_say_loading_failed_and_empty_and_try_again_loads() {
     let rt = runtime("DW-0783b");
-    assert_eq!(info(&rt, "card-0").label.as_deref(), Some("Loading"));
-    assert!(find(&rt, "skel-8").is_some(), "three cards of three shapes");
+    assert!(find(&rt, "loading").is_some());
+    assert!(find(&rt, "insbar-0").is_none());
 
     let rt = runtime("DW-0783d");
-    assert_eq!(info(&rt, "card-0-head").text.as_deref(), Some("Nothing is stored yet"));
+    assert_eq!(info(&rt, "insights-empty-title").text.as_deref(), Some("Nothing is stored yet"));
 
     let mut rt = runtime("DW-0783c");
-    assert_eq!(info(&rt, "card-0").role, "alert");
+    assert!(find(&rt, "insights-failed").is_some());
     assert!(find(&rt, "insbar-0").is_none(), "no stale numbers beside the failure");
-    press(&mut rt, "btn-0");
+    press(&mut rt, "insights-failed-retry");
     assert_eq!(ui(&rt).drive.insights(), &Insights::Loading, "Try again loads again");
-    assert!(find(&rt, "skel-0").is_some());
+    assert!(find(&rt, "loading").is_some());
 }
 
 #[test]
@@ -238,15 +238,11 @@ fn sync_switches_turn_by_keyboard_and_are_never_amber() {
         Screen::Settings(SettingsPane::SyncAndFileExplorer)
     );
     let amber = crate::theme::tokens::theme(false).accent;
-    // The sample source draws every control; an engine source that has nothing behind "Show sync status on files"
-    // does not draw it (`engine_host::drive_settings_tools_tests`).
-    for (switch, read) in [
-        (
-            "item-0-1-switch",
-            (|d: &dyn DriveSettings| d.sync().status_on_files) as fn(&dyn DriveSettings) -> bool,
-        ),
-        ("item-1-1-switch", |d: &dyn DriveSettings| d.sync().open_at_login),
-    ] {
+    // No "Show sync status on files" row: the engine cannot switch Explorer's status.
+    for (switch, read) in [(
+        "item-1-1-switch",
+        (|d: &dyn DriveSettings| d.sync().open_at_login) as fn(&dyn DriveSettings) -> bool,
+    )] {
         let sw = info(&rt, switch);
         assert_eq!(sw.role, "switch");
         assert_ne!(sw.fill, amber, "a switch is ink, never Amber");
@@ -289,7 +285,7 @@ fn a_repair_asks_first_says_repairing_and_a_failed_one_offers_it_again() {
     assert_eq!(info(&rt, "dlg").role, "alertdialog");
     key(&mut rt, Key::Enter);
     assert_eq!(ui(&rt).drive.sync().repair, Repair::Running);
-    assert_eq!(info(&rt, "item-0-2-sub").text.as_deref(), Some("Repairing…"));
+    assert_eq!(info(&rt, "item-0-1-sub").text.as_deref(), Some("Repairing…"));
     assert!(ui(&rt).intents.contains(&Intent::Show("DW-1212")));
 
     let mut rt = runtime("DW-0746d");
@@ -464,4 +460,69 @@ fn a_section_not_built_yet_is_left_to_the_shell() {
         Screen::Settings(SettingsPane::ThumbnailsAndPreviews)
     );
     assert!(find(&rt, "set-main").is_none(), "no settings pane is drawn for it");
+}
+
+/// Storage > On this PC: the "Thumbnails and previews" row is drawn only for a source that can say what previews
+/// hold (`Control::PreviewsRow`); one that cannot leaves it out, never " of 0 GB".
+#[test]
+fn the_previews_row_is_hidden_while_the_source_has_none() {
+    use super::drive::Control;
+    use super::tests_previews::Bare;
+    struct NoRow(Bare);
+    impl DriveSettings for NoRow {
+        fn shows(&self, control: Control) -> bool {
+            control != Control::PreviewsRow
+        }
+        fn storage(&self) -> Storage {
+            self.0.storage()
+        }
+        fn set_limit(&mut self, which: Kept, gb: u32) {
+            self.0.set_limit(which, gb);
+        }
+        fn clear(&mut self, which: Kept) {
+            self.0.clear(which);
+        }
+        fn sync(&self) -> SyncPane {
+            self.0.sync()
+        }
+        fn set_status_on_files(&mut self, on: bool) {
+            self.0.set_status_on_files(on);
+        }
+        fn set_open_at_login(&mut self, on: bool) {
+            self.0.set_open_at_login(on);
+        }
+        fn set_paused(&mut self, paused: bool) {
+            self.0.set_paused(paused);
+        }
+        fn sync_anyway(&mut self) {
+            self.0.sync_anyway();
+        }
+        fn repair(&mut self) {
+            self.0.repair();
+        }
+        fn turn_off_explorer(&mut self) {
+            self.0.turn_off_explorer();
+        }
+        fn insights(&self) -> &Insights {
+            self.0.insights()
+        }
+        fn reload_insights(&mut self) {
+            self.0.reload_insights();
+        }
+    }
+    let rows = |drive: Box<dyn DriveSettings>| {
+        let mut state = init();
+        assert!(super::scene("DW-0712", &mut state));
+        state.settings.drive = drive;
+        let mut rt = Runtime::new(state, view, (958.0, 718.0), Env { system_dark: false, scale: 2.0 });
+        rt.on_key = Some(host::on_key);
+        rt.poll = Some(host::poll);
+        rt.frame(0.0);
+        settle(&mut rt);
+        rt.elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("item-1-1") && !e.exiting)
+    };
+    assert!(rows(Box::new(Bare(BoardDrive::new()))), "a source that shows it: the row is there");
+    assert!(!rows(Box::new(NoRow(Bare(BoardDrive::new())))), "a source with none: no row");
 }

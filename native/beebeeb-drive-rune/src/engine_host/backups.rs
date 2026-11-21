@@ -105,6 +105,12 @@ pub trait BackupsEngine: DevicesEngine + Send + Sync + 'static {
     fn sync_running(&self) -> bool {
         true
     }
+    /// The engine's words for a switch refused because it would back a folder up twice (`BackupsError::Nested`), naming
+    /// the other folder (`Engine::switch_on_refused`, P3-3). `None`: nothing nests with it now. BLOCKS: a worker's. The
+    /// default has none.
+    fn nested_words(&self, _key: &str) -> Option<String> {
+        None
+    }
     /// Add a chosen folder for `session` (`Engine::add_backup_folder_for`, slice A7). BLOCKS: a worker's. The default
     /// adds nothing.
     fn add_folder_for(
@@ -157,6 +163,9 @@ impl<C: CredentialStores> BackupsEngine for Engine<C> {
     fn sync_running(&self) -> bool {
         self.view().start == beebeeb_engine::sync_view::Start::Running
     }
+    fn nested_words(&self, key: &str) -> Option<String> {
+        self.switch_on_refused(key).map(|refused| refused.words())
+    }
     fn add_folder_for(
         &self,
         session: beebeeb_engine::account::SessionGeneration,
@@ -198,8 +207,9 @@ enum Answer {
         /// The folder whose switch this read follows (every switch job ends with exactly one read).
         switched: Option<String>,
     },
-    /// A switch that did not happen.
-    Refused { generation: u64 },
+    /// A switch that did not happen, and what the window says: [`NOT_SWITCHED`], or the engine's words naming the
+    /// folder it would back up twice (P3-3).
+    Refused { generation: u64, words: &'static str },
 }
 
 /// Backups on the real engine. See the module's doc.
@@ -357,6 +367,20 @@ fn still_for<E: BackupsEngine>(engine: &E, account: &str) -> bool {
 
 /// One job, on the worker. A switch runs only for the account it was asked for; every job ends with a read, so
 /// the list shows what the engine has after it.
+/// `words` as the window's `&'static str` (its refusals are fixed sentences): each distinct sentence is kept once for the
+/// life of the process, so what is kept is bounded by the folder names the engine's refusals name (P3-3; never a path).
+fn kept(words: String) -> &'static str {
+    static KEPT: std::sync::Mutex<std::collections::BTreeSet<&'static str>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut held = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = held.get(words.as_str()) {
+        return *found;
+    }
+    let words: &'static str = Box::leak(words.into_boxed_str());
+    held.insert(words);
+    words
+}
+
 fn run<E: BackupsEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
     let Job {
         ask,
@@ -380,7 +404,14 @@ fn run<E: BackupsEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
         };
         if let Err(error) = switched {
             log(format!("backups: a folder was not switched ({})", error.kind()));
-            let _ = answers.send(Answer::Refused { generation });
+            // P3-3: a switch that would back a folder up twice names that folder, in the engine's words, while the
+            // account is still the one asked for.
+            let named = match error {
+                BackupsError::Nested => engine.nested_words(&key).filter(|_| still_for(engine, &account)),
+                _ => None,
+            };
+            let words = named.map_or(NOT_SWITCHED, kept);
+            let _ = answers.send(Answer::Refused { generation, words });
         }
     }
     let read = if still_for(engine, &account) {
@@ -521,9 +552,9 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
                         }
                     }
                 }
-                Answer::Refused { generation } => {
+                Answer::Refused { generation, words } => {
                     if generation == self.generation {
-                        pumped.refusal = Some(NOT_SWITCHED);
+                        pumped.refusal = Some(words);
                         pumped.changed = true;
                     }
                 }
@@ -544,6 +575,12 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         if !fresh {
             self.ask_read();
         }
+        self.devices.opened();
+    }
+
+    fn read_again(&mut self) {
+        self.refused = None;
+        self.ask_read();
         self.devices.opened();
     }
 

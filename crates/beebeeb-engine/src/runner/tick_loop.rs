@@ -21,6 +21,31 @@ impl RunMode {
     }
 }
 
+/// The tick's power/network hold (task dc-031). `None` while the person paused sync (that pause says it
+/// all). Also records the hold for the status pulse.
+pub(super) fn power_hold(identity: &'static crate::identity::EngineIdentity, user_paused: bool) -> Option<crate::power::PausedFor> {
+    let hold = if user_paused {
+        None
+    } else {
+        let metered = crate::config::DesktopConfig::load_for(identity).ok().and_then(|c| c.metered);
+        crate::power::decide(metered, &crate::power::SystemPower)
+    };
+    crate::power::set_current(hold);
+    hold
+}
+
+/// The `paused` status, with the reason in words when a power hold caused it.
+pub(super) fn paused_payload(tracker: &StatusTracker, hold: Option<crate::power::PausedFor>) -> crate::engine_status::StatusPayload {
+    let mut p = tracker.paused();
+    if let Some(h) = hold {
+        p.reason = Some(crate::engine_status::Reason {
+            code: h.code(),
+            detail: Some(h.words().to_string()),
+        });
+    }
+    p
+}
+
 /// How often the runner pulls the file list from the server and
 /// refreshes the state DB. The previous 5s cadence re-walked the WHOLE
 /// remote tree (`GET /api/v1/files`) every tick, which by itself could
@@ -121,6 +146,24 @@ pub(super) fn finish_tick_payload(
     payload
 }
 
+/// w31: has the account's file list never arrived in this local state? True only when the cursor reads as unset: a
+/// read that fails changes nothing (the tick's own read of it reports that).
+pub(super) fn first_list_owed(db: &StateDb) -> bool {
+    matches!(db.get_sync_cursor(), Ok(None))
+}
+
+/// w31: what the board says of the first list after a tick's pull. `still_owed`: the cursor is still unset.
+/// `reached_server`: the pull came back. A pull that did not, with no list yet, is a failure a window must say: its
+/// rows are not the account's files.
+pub(super) fn first_list_after_pull(still_owed: bool, reached_server: bool) -> crate::transfer_progress::FirstList {
+    use crate::transfer_progress::FirstList;
+    match (still_owed, reached_server) {
+        (false, _) => FirstList::Here,
+        (true, true) => FirstList::Awaited,
+        (true, false) => FirstList::Failed,
+    }
+}
+
 /// How often the pulse looks. The look itself is free while nothing is moving.
 pub(super) const STATUS_PULSE_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -138,7 +181,8 @@ pub(super) async fn run_status_pulse(
     loop {
         ticker.tick().await;
         let transfer_in_flight = !transfers.active().is_empty();
-        let payload = tracker.pulse(sync_paused.load(Ordering::Relaxed), transfer_in_flight, || {
+        let paused = sync_paused.load(Ordering::Relaxed) || crate::power::current().is_some();
+        let payload = tracker.pulse(paused, transfer_in_flight, || {
             current_activity(&db, &transfers)
         });
         if let Some(payload) = payload {
@@ -229,11 +273,6 @@ pub(super) fn enforce_cache_budget(
         // User opted into keeping everything local — skip eviction.
         return;
     }
-
-    // TODO honor `metered`: when the connection is metered and the user set
-    // `metered = Some(true)`, downloads/hydration should pause. The runner
-    // has no metered-network detection on Windows yet, so this toggle is
-    // persisted only for now (see DesktopConfig::metered).
 
     match bridge.enforce_local_cache_limit(local_cache_limit) {
         Ok(outcome) if !outcome.evicted_file_ids.is_empty() => {
@@ -360,5 +399,30 @@ mod tests {
             assert_eq!(RunMode::of_flag(paused), mode, "paused = {paused}");
             assert_eq!(mode.is_paused(), paused, "paused = {paused}");
         }
+    }
+
+    /// w31 (the Windows test machine, 2026-11-20): a local state that never got the account's file list (no cursor) owes it, also
+    /// when this PC's own sync folder already gave it folder rows; the backup passes wait for it and the board says
+    /// it is awaited. A cursor of 0 is a list that arrived (an account with an empty op log), not an owed one.
+    #[test]
+    fn w31_a_state_with_no_cursor_owes_the_first_list_and_one_with_a_cursor_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        assert!(first_list_owed(&db), "never listed: owed");
+        db.set_sync_cursor(0).unwrap();
+        assert!(!first_list_owed(&db), "a cursor of 0 is a list that arrived");
+        db.set_sync_cursor(177_670).unwrap();
+        assert!(!first_list_owed(&db));
+    }
+
+    /// w31: after a pull, a list that is still owed is awaited while the server answers and failed when it did not;
+    /// once the cursor is there it is here, whatever that pull said.
+    #[test]
+    fn w31_the_board_says_awaited_failed_or_here_after_a_pull() {
+        use crate::transfer_progress::FirstList;
+        assert_eq!(first_list_after_pull(true, true), FirstList::Awaited);
+        assert_eq!(first_list_after_pull(true, false), FirstList::Failed);
+        assert_eq!(first_list_after_pull(false, true), FirstList::Here);
+        assert_eq!(first_list_after_pull(false, false), FirstList::Here);
     }
 }

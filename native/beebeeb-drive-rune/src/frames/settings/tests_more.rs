@@ -91,7 +91,7 @@ fn ui(rt: &Runtime<State>) -> &super::SettingsUi {
 fn stored(rt: &Runtime<State>) -> Vec<Folder> {
     match ui(rt).drive.keep() {
         Keep::Ready { folders, .. } => folders,
-        Keep::Failed => panic!("the folder list is loaded"),
+        Keep::Failed | Keep::Loading => panic!("the folder list is loaded"),
     }
 }
 
@@ -219,6 +219,7 @@ fn the_banner_says_so_when_no_email_app_opened_and_when_nothing_was_saved() {
         folder: "%LOCALAPPDATA%\\io.beebeeb.app\\diagnostics\\".into(),
         file: "beebeeb-diagnostics-1.json".into(),
         draft_opened: false,
+        path: std::path::PathBuf::new(),
     });
     assert!(
         named(&rt, "note-0").ends_with("Your email app didn't open; send the file to support@beebeeb.io yourself."),
@@ -467,28 +468,28 @@ fn cancel_and_esc_change_nothing_and_the_next_visit_starts_fresh() {
 fn a_list_that_could_not_load_says_so_and_try_again_loads_it() {
     let mut rt = runtime("DW-0784c");
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep));
-    assert_eq!(says(&rt, "tree-state-head"), "Couldn't load your folders.");
+    assert_eq!(says(&rt, "tree-state-title"), "Couldn't load your folders.");
     assert_eq!(
-        says(&rt, "tree-state-sub"),
+        says(&rt, "tree-state-text"),
         "Nothing was changed. The folders you keep stay on this PC."
     );
     assert!(find(&rt, "tree-rows").is_none());
-    assert_eq!(says(&rt, "btn-5-label"), "Try again");
+    assert_eq!(says(&rt, "tree-state-retry-label"), "Try again");
     // Apply (the second button here) is dimmed: it does nothing.
-    click(&mut rt, "btn-6");
+    click(&mut rt, "btn-5");
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep));
-    tab_to(&mut rt, "btn-5");
+    tab_to(&mut rt, "tree-state-retry");
     key(&mut rt, Key::Enter);
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep), "DW-0784");
     assert_eq!(named(&rt, "tree-documents-check"), "Documents, kept on this PC");
-    assert!(find(&rt, "tree-state-head").is_none());
+    assert!(find(&rt, "tree-state-title").is_none());
 }
 
 #[test]
 fn no_folders_yet_says_where_single_files_are_kept_and_cancel_closes() {
     let mut rt = runtime("DW-0784d");
-    assert_eq!(says(&rt, "tree-state-head"), "No folders yet");
-    assert!(says(&rt, "tree-state-sub").ends_with("Files you keep one by one are in Available offline."));
+    assert_eq!(says(&rt, "tree-state-title"), "No folders yet");
+    assert!(says(&rt, "tree-state-text").ends_with("Files you keep one by one are in Available offline."));
     assert!(find(&rt, "btn-7").is_none(), "Apply and Cancel only");
     click(&mut rt, "btn-5");
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep), "Apply is dimmed");
@@ -527,8 +528,8 @@ fn a_source_that_does_not_know_these_pages_shows_no_sample_values() {
     super::go(&mut state, "DW-0790b");
     let rt = window(state);
     assert_eq!(
-        says(&rt, "item-0-0-title"),
-        "Not available in this version yet.",
+        says(&rt, "activity-empty-title"),
+        "No measurements yet",
         "no App activity without a measurement: the page says so"
     );
     assert!(find(&rt, "note-0").is_none(), "no banner without a saved file");
@@ -537,7 +538,7 @@ fn a_source_that_does_not_know_these_pages_shows_no_sample_values() {
     state.settings.drive = Box::new(Bare(BoardDrive::new()));
     super::go(&mut state, "DW-0784");
     let rt = window(state);
-    assert_eq!(says(&rt, "tree-state-head"), "Couldn't load your folders.");
+    assert_eq!(says(&rt, "tree-state-title"), "Couldn't load your folders.");
     assert!(find(&rt, "tree-rows").is_none());
 }
 
@@ -721,7 +722,7 @@ fn the_question_by_its_frame_id_without_a_choice_asks_nothing_and_tells_nothing(
 fn a_list_that_arrives_after_the_dialog_opened_is_adopted_at_the_first_press() {
     let (mut rt, folders, told) = recording(Vec::new());
     click(&mut rt, "btn-3");
-    assert_eq!(says(&rt, "tree-state-head"), "No folders yet");
+    assert_eq!(says(&rt, "tree-state-title"), "No folders yet");
     *folders.borrow_mut() = board_folders();
     settle(&mut rt);
     assert_eq!(named(&rt, "tree-documents-check"), "Documents, kept on this PC");
@@ -740,10 +741,10 @@ fn choose_folders_shows_the_state_the_source_is_in() {
     let mut rt = window(state);
     tab_to(&mut rt, "btn-3");
     key(&mut rt, Key::Enter);
-    assert_eq!(says(&rt, "tree-state-head"), "Couldn't load your folders.");
+    assert_eq!(says(&rt, "tree-state-title"), "Couldn't load your folders.");
     let (mut rt, _, _) = recording(Vec::new());
     click(&mut rt, "btn-3");
-    assert_eq!(says(&rt, "tree-state-head"), "No folders yet");
+    assert_eq!(says(&rt, "tree-state-title"), "No folders yet");
 }
 
 // ---- Showing Diagnostics never exports; a press does, once ----
@@ -768,4 +769,65 @@ fn showing_the_saved_page_exports_nothing_and_a_press_exports_once() {
     click(&mut rt, "btn-0");
     assert_eq!(ui(&rt).pane, Pane::Diagnostics);
     assert_eq!(told.borrow().exports, 1);
+}
+
+/// Upload and Download are the engine's newest bandwidth sample, not a live rate: the page says so, beside the
+/// numbers, instead of letting a sample pass for the rate right now.
+#[test]
+fn app_activity_says_that_upload_and_download_are_the_latest_sample() {
+    let rt = runtime("DW-0790");
+    let said = rt
+        .elements()
+        .iter()
+        .filter_map(|e| e.text.clone())
+        .any(|t| t.contains("Upload and download are the latest bandwidth sample"));
+    assert!(said, "the footer names what the two rates are");
+}
+
+/// Every target a pane raises is one the shell takes: no `Intent::Open`, `Intent::Web` or `Intent::Show` a pane
+/// can queue ends as `NotWired`.
+#[test]
+fn no_pane_raises_a_target_nothing_takes() {
+    let panes = [
+        include_str!("general.rs"),
+        include_str!("notifications.rs"),
+        include_str!("recent.rs"),
+        include_str!("about.rs"),
+        include_str!("more.rs"),
+        include_str!("diagnostics.rs"),
+        include_str!("sync.rs"),
+        include_str!("previews.rs"),
+    ];
+    let quoted = |text: &str, head: &str| -> Vec<String> {
+        text.split(head)
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next().map(str::to_string))
+            .collect()
+    };
+    let mut seen = 0;
+    for text in panes {
+        for target in quoted(text, "Intent::Open(\"") {
+            seen += 1;
+            assert!(super::OPEN_TARGETS.contains(&target.as_str()), "Open({target}) has no taker");
+        }
+        for page in quoted(text, "Intent::Web(\"") {
+            seen += 1;
+            assert!(crate::shell::web_pages::url(&page).is_some(), "Web({page}) has no address");
+        }
+        for frame in quoted(text, "Intent::Show(\"") {
+            seen += 1;
+            assert!(super::TRAY_FRAMES.contains(&frame.as_str()), "Show({frame}) is not taken");
+        }
+    }
+    assert!(seen >= 10, "the scan found only {seen} targets");
+    // The alert places go() routes itself, so none reaches the shell as a Show.
+    for target in [
+        super::source::AlertTarget::DevicesAndSessions,
+        super::source::AlertTarget::Shared,
+        super::source::AlertTarget::SharedRequests,
+        super::source::AlertTarget::SecurityLog,
+    ] {
+        let frame = super::frame_of(target);
+        assert!(["DW-A55", "DW-0501", "DW-0503", "DW-A77"].contains(&frame));
+    }
 }

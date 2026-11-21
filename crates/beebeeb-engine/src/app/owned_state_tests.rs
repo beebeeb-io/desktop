@@ -12,7 +12,7 @@ use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::drive_v2::model::Sort;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind};
@@ -32,7 +32,7 @@ fn engine_on(credentials: MemoryCredentials) -> Arc<TestEngine> {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    Arc::new(Engine::open(&REAL, config, host, credentials).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, credentials).expect("the handle opens"))
 }
 
 const SLOT: &str = "an-invented-slot";
@@ -707,7 +707,7 @@ fn free_up_space_for_a_selection_is_the_owners_alone() {
     signed_in(&engine, Some("user-a"), Some("a@example.eu"));
     let mine = engine.local_state_for_changes().expect("the owner's handle");
     let answer =
-        mine.with_while(|db, go_on| crate::free_up_space::free_up_space_of(&REAL, db, root.path(), &ids, go_on));
+        mine.with_while(|db, go_on| crate::free_up_space::free_up_space_of(&TEST, db, root.path(), &ids, go_on));
     #[cfg(not(target_os = "windows"))]
     assert_eq!(
         answer,

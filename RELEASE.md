@@ -25,7 +25,7 @@ app (`native/beebeeb-drive-rune` on the engine `crates/beebeeb-engine`), Windows
 
 The manifests that 0.8.24 and older read (`desktop/latest.json`, `beta.json`, `alpha.json`) are never written by
 this workflow, so a native build reaches only clients that passed through the 0.8.25 bridge. Whether and when the
-0.8.25 bridge is promoted to beta and stable is Guus's call (D-T-14), made on the 0.8.x line.
+0.8.25 bridge is promoted to beta and stable is the maintainers' decision, made on the 0.8.x line.
 
 ## Versioning
 

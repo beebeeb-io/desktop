@@ -55,7 +55,7 @@ Tests: none in this file.
 
 ### `src-tauri/macos/FileProviderBridge.m` (now at `packaging/macos/FileProviderBridge.m`)
 Reference: `desktop-v0.8.25:src-tauri/macos/FileProviderBridge.m` (identical at `a57b9592`). This file is moved with
-`git mv` in this lane to `packaging/macos/FileProviderBridge.m` and stays in the repo; the native app reuses it as is.
+`git mv` to `packaging/macos/FileProviderBridge.m` and stays in the repo; the native app reuses it as is.
 
 What it does: it is the only code that talks to `NSFileProviderManager` and `NSWorkspace`. It exposes plain C functions
 that block until the system answers (or a stated time passes), and it reports every failure as a structured error.
@@ -407,7 +407,7 @@ are sitting at.
 | `test_1885_an_ungated_open_that_launch_services_refuses_is_an_error_and_releases_its_handle` | (ignored: real `NSWorkspace`) `open_scoped` on an unopenable scheme is an `Err` that is not `OPEN_TIMEOUT`, and it consumed its handle |
 
 ### `src-tauri/src/extension_log_pin.rs`
-Reference: `desktop-v0.8.25:src-tauri/src/extension_log_pin.rs` (identical at `a57b9592`). This file is PORTED in this lane
+Reference: `desktop-v0.8.25:src-tauri/src/extension_log_pin.rs` (identical at `a57b9592`). This file is ported
 to the engine test `crates/beebeeb-engine/tests/file_provider_source_pins.rs`, module `extension_log`, with the same four
 test names. It reads `BeebeebFileProvider/*.swift` and `scripts/build-fileprovider-extension.sh`, which stay in the repo.
 

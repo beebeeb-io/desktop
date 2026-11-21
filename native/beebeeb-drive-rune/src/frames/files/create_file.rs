@@ -1,7 +1,8 @@
 //! Create file (DW-1522): what the New file dialog asked for ([`viewers::take_asked`]), made by the source in the
 //! folder the dialog was opened on. The dialog checked the name against the rows it showed; the engine checks it
 //! again against the folder itself (a cloud-only name, an 8.3 short name) and refuses rather than overwrite. What
-//! it refuses is said as every other failed action is (DW-0109), with Try again opening the dialog again.
+//! it refuses is said as every other failed action is (DW-0109), with Try again opening the dialog again. New file's
+//! Continue on an office type is not made here: it opens New document (DW-1558) on that app (`edit::new_document`).
 
 use rune::Tx;
 
@@ -17,8 +18,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     for intent in asked {
         match intent {
             ViewerIntent::CreateFile { folder, name } => s.create_file(folder.as_deref(), &name, tx),
-            // New document is the Office editor's (0.9.1, decision D-OV-3): this build never asks for it.
-            ViewerIntent::NewDocument(_) => {}
+            // New file's Continue on an office type: New document (DW-1558) on that app, for the folder shown.
+            ViewerIntent::NewDocument(kind) => {
+                let folder = s.listing.folder.id.clone();
+                crate::frames::office::edit::new_document::open(s, tx, Some(kind), folder);
+            }
             // The dialog asks for nothing else.
             _ => {}
         }
@@ -34,8 +38,12 @@ impl State {
             return;
         }
         match self.actions.source.new_file(folder, name) {
-            // The engine sees the new file in the sync folder and lists and uploads it as any other.
-            Ok(()) => self.forget_undo(),
+            // The source listed the new file and queued its upload (w36): the folder shown is read again in this
+            // poll, so its row stands there now, not after the engine's next finished check.
+            Ok(()) => {
+                self.forget_undo();
+                self.shell.reread_files();
+            }
             Err(why) => self.failed(Action::NewFile, why, tx),
         }
     }

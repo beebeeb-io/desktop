@@ -4,8 +4,17 @@
 //! are missing. Read from the built executable's own import table.
 #![cfg(windows)]
 
-/// The libraries of the Media Feature Pack the helper uses.
-const MEDIA_LIBRARIES: [&str; 3] = ["mfplat.dll", "mfreadwrite.dll", "mf.dll"];
+/// The libraries of the Media Feature Pack the helper uses, and the COM libraries behind them: ole32, combase and
+/// oleaut32 are delay-loaded (`build.rs`); loaded at start they failed with 0xc0000142 on the build VM and the helper
+/// never started.
+const MEDIA_LIBRARIES: [&str; 6] = [
+    "mfplat.dll",
+    "mfreadwrite.dll",
+    "mf.dll",
+    "ole32.dll",
+    "combase.dll",
+    "oleaut32.dll",
+];
 
 fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))

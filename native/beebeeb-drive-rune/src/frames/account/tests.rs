@@ -680,7 +680,7 @@ fn a_passkey_is_removed_only_after_its_confirm() {
     let mut rt = runtime("DW-A73");
     assert_eq!(name(&rt, "item-0-0"), "iCloud Keychain, added 28 Oct, Can unlock data");
     click(&mut rt, "item-0-0-more");
-    assert_eq!(name(&rt, "pop-0-item-1"), "Remove, destructive");
+    assert_eq!(name(&rt, "pop-0-item-1"), "Remove");
     click(&mut rt, "pop-0-item-1");
     assert_eq!(says(&rt, "dlg-title"), "Remove iCloud Keychain?");
     assert!(find(&rt, "dlg-bold-box").is_some(), "the warning in bold");
@@ -1176,5 +1176,50 @@ fn the_delete_subtitle_is_the_boards_two_lines_and_names_no_length_of_time() {
     let lower = sub.to_lowercase();
     for words in ["72", "hour", "day"] {
         assert!(!lower.contains(words), "names a length of time: {words}");
+    }
+}
+
+/// The sidebar of every settings pane is the one `settings_shell::app_sidebar`: the same rows,
+/// roles, icons and foot on every pane, and only the selected row's fill tells them apart.
+#[test]
+fn every_settings_pane_draws_the_same_sidebar() {
+    const NAMES: [&str; 10] = [
+        "General", "Account", "Security", "Devices and sessions", "Notifications", "Storage", "Backups",
+        "Sync and File Explorer", "Thumbnails and previews", "Bandwidth",
+    ];
+    let sidebar = |frame: &str| -> (Vec<String>, Vec<String>) {
+        let mut state = init();
+        assert!(
+            super::scene(frame, &mut state) || crate::frames::settings::scene(frame, &mut state),
+            "{frame} is a built frame"
+        );
+        let rt = window(state);
+        let mut shape = Vec::new();
+        let mut selected = Vec::new();
+        for e in rt.elements().into_iter().filter(|e| !e.exiting) {
+            let Some(k) = e.key.as_deref() else { continue };
+            let labelled = |suffix: &str| {
+                k.strip_suffix(suffix).is_some_and(|l| l == "Back to Drive" || NAMES.contains(&l))
+            };
+            let side = k == "sidebar" || k == "settings-nav" || k.starts_with("side-") || labelled("-row") || labelled("-icon");
+            if side {
+                shape.push(format!("{k}|{:?}|{:?}", e.role, e.label));
+                if k.ends_with("-row") && e.fill.a > 0.0 {
+                    selected.push(k.to_string());
+                }
+            }
+        }
+        (shape, selected)
+    };
+    let frames = [
+        "DW-0701", "DW-A51", "DW-S01", "DW-A55", "DW-0750", "DW-0712", "DW-0746", "DW-0744", "DW-0785",
+    ];
+    let (first, _) = sidebar(frames[0]);
+    assert!(first.iter().any(|k| k.starts_with("Security-row")), "the sidebar is there");
+    assert!(first.iter().any(|k| k.starts_with("Bandwidth-icon")));
+    for frame in frames {
+        let (shape, selected) = sidebar(frame);
+        assert_eq!(shape, first, "{frame} draws another sidebar");
+        assert!(selected.len() <= 1, "{frame} selects {selected:?}");
     }
 }

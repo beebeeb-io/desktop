@@ -23,11 +23,11 @@ const BUILT: [(&str, &str, &str); 11] = [
         "banner-text",
         "A newer version arrived from Anna's iPhone, 09:14.",
     ),
-    ("DW-1523", "run-12-1", "Ask Priya about the invoices"),
+    ("DW-1523", "ln-12", "13"),
     ("DW-1524", "toast-text", "Saved \u{00B7} encrypted \u{00B7} version 4"),
     ("DW-1525", "dlg-title", "You have unsaved changes"),
     ("DW-1526", "dlg-title", "Two versions"),
-    ("DW-1516", "state-title", "Decrypting on this PC"),
+    ("DW-1516", "loading-words", "Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)"),
     ("DW-1517", "state-title", "Too large to preview here"),
     ("DW-1518", "state-title", "Couldn't decrypt this file"),
     ("DW-1512", "run-0-0", "# Export this month's invoices as one CSV"),
@@ -148,9 +148,12 @@ fn focused(rt: &Runtime<State>) -> Option<String> {
     rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key)
 }
 
-/// Tab until `key` has focus (at most 30 stops).
+/// Tab until `key` has focus (at most 30 stops). Tab in the editor indents (ux-15), so Esc blurs the field first.
 fn tab_to(rt: &mut Runtime<State>, key: &str) {
     for _ in 0..30 {
+        if focused(rt).as_deref() == Some(super::EDITOR_KEY) && key != super::EDITOR_KEY {
+            press(rt, Key::Escape);
+        }
         if focused(rt).as_deref() == Some(key) {
             return;
         }
@@ -182,7 +185,7 @@ fn every_built_frame_draws_its_words_in_both_themes() {
             let rt = runtime_of(state, dark);
             assert_eq!(info(&rt, key).text.as_deref(), Some(words), "{frame} (dark: {dark})");
             // The window around it is the Files window's: caption, sidebar, toolbar, status line.
-            for chrome in ["caption-bar", "toolbar", "crumb-name", "status-text", "more-btn"] {
+            for chrome in ["caption-bar", "toolbar", "folder-title", "status-text", "more-btn"] {
                 assert!(has(&rt, chrome), "{frame} has {chrome}");
             }
         }
@@ -192,9 +195,11 @@ fn every_built_frame_draws_its_words_in_both_themes() {
 #[test]
 fn the_toolbar_names_the_file_by_its_path_and_facts() {
     let rt = runtime("DW-1516");
-    assert_eq!(info(&rt, "crumb-0").text.as_deref(), Some("Files"));
-    assert_eq!(info(&rt, "crumb-1").text.as_deref(), Some("Lisbon trip"));
-    assert_eq!(info(&rt, "crumb-name").text.as_deref(), Some("Tram 28.mov"));
+    assert_eq!(
+        info(&rt, "viewer-title").label.as_deref(),
+        Some("Files / Lisbon trip, Tram 28.mov, Video \u{00B7} 120 MB")
+    );
+    assert_eq!(info(&rt, "folder-title").text.as_deref(), Some("Tram 28.mov"));
     assert_eq!(info(&rt, "item-count").text.as_deref(), Some("Video \u{00B7} 120 MB"));
     assert_eq!(info(&rt, "toolbar").role, "toolbar");
     assert_eq!(info(&rt, "toolbar").label.as_deref(), Some("Tram 28.mov"));
@@ -213,9 +218,11 @@ fn an_unknown_file_does_not_move_the_route() {
 #[test]
 fn decrypting_shows_the_amount_and_cancel_stops_it_from_the_keyboard() {
     let (mut rt, calls) = recording(board::DECRYPTING);
-    assert_eq!(info(&rt, "state-sub-mono").text.as_deref(), Some("46 of 120 MB"));
-    assert_eq!(info(&rt, "state-bar").role, "progressbar");
-    assert_eq!(info(&rt, "state-bar").label.as_deref(), Some("Decrypting, 38 percent"));
+    assert_eq!(
+        info(&rt, "loading-words").text.as_deref(),
+        Some("Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)")
+    );
+    assert_eq!(info(&rt, "loading-bar").role, "progressbar");
     assert_eq!(
         info(&rt, "status-text").text.as_deref(),
         Some("Decrypting \u{00B7} 46 of 120 MB")
@@ -235,7 +242,7 @@ fn escape_leaves_the_file_and_the_next_key_drops_what_was_decrypted() {
     // The shell's Esc runs first and leaves the route; this group then cancels and forgets.
     press(&mut rt, Key::Escape);
     assert!(!on_a_file(&rt));
-    assert!(!has(&rt, "state-title"), "a file the route left is not drawn");
+    assert!(!has(&rt, "loading-words"), "a file the route left is not drawn");
     super::sync(&mut rt.state);
     assert!(rt.state.viewer.ui.is_none());
     assert_eq!(calls.borrow().last().map(String::as_str), Some("cancel tram-28.mov"));
@@ -259,7 +266,7 @@ fn a_file_the_route_does_not_name_is_never_drawn() {
 fn too_large_says_the_numbers_and_both_ways_out_are_intents() {
     let mut rt = runtime("DW-1517");
     assert_eq!(
-        info(&rt, "state-sub").text.as_deref(),
+        info(&rt, "state-text").text.as_deref(),
         Some(
             "Studio walkthrough 4K.mov is 18.2 GB. Opening it decrypts it on this PC, which needs that much free space; there's 12.4 GB."
         )
@@ -278,8 +285,8 @@ fn too_large_says_the_numbers_and_both_ways_out_are_intents() {
 #[test]
 fn a_failure_is_an_alert_and_try_again_decrypts_again() {
     let (mut rt, calls) = recording(board::FAILED);
-    assert_eq!(info(&rt, "state").role, "alert");
-    assert_eq!(info(&rt, "state-title").role, "heading");
+    assert_eq!(info(&rt, "state").role, "group");
+    assert_eq!(info(&rt, "state-title").text.as_deref(), Some("Couldn't decrypt this file"));
     operate(&mut rt, "state-btn-1");
     assert_eq!(intents(&mut rt), [Intent::ReportProblem]);
     operate(&mut rt, "state-btn-0");
@@ -287,9 +294,11 @@ fn a_failure_is_an_alert_and_try_again_decrypts_again() {
         calls.borrow().last().map(String::as_str),
         Some("retry invoice-0139.pdf")
     );
-    assert_eq!(
-        info(&rt, "state-title").text.as_deref(),
-        Some("Decrypting on this PC"),
+    assert!(
+        info(&rt, "loading-words")
+            .text
+            .as_deref()
+            .is_some_and(|w| w.starts_with("Decrypting ")),
         "DW-1516"
     );
 }
@@ -744,7 +753,7 @@ fn a_refused_save_keeps_the_edit_and_says_why() {
     assert_eq!(ui.dialog, None);
     assert_eq!(ui.toast, None, "said once, in the banner");
     assert_eq!(
-        info(&rt, "banner-text").text.as_deref(),
+        info(&rt, "refused-text").text.as_deref(),
         Some("Not saved: an invented reason")
     );
     assert_eq!(ui.file.version, 3);
@@ -943,16 +952,15 @@ fn the_folder_controls_that_do_nothing_for_a_file_cannot_be_operated() {
     for dead in ["view-list", "view-grid", "sort-btn", "forward"] {
         assert!(!stops.iter().any(|k| k == dead), "{dead} takes no focus: {stops:?}");
     }
-    for live in ["back", "more-btn", "panel-toggle-btn", "new-btn", "state-btn-0"] {
+    for live in ["back", "more-btn", "panel-toggle-btn", "state-btn-0"] {
         assert!(stops.iter().any(|k| k == live), "{live} is reached by Tab: {stops:?}");
     }
 }
 
 #[test]
-fn back_and_new_leave_through_the_shell() {
+fn back_leaves_through_the_shell() {
     let mut rt = runtime("DW-1512");
-    operate(&mut rt, "new-btn");
-    assert_eq!(intents(&mut rt), [Intent::NewMenu]);
+    assert!(!has(&rt, "new-btn"), "an open file's bar has no New");
     operate(&mut rt, "back");
     assert!(!on_a_file(&rt));
     assert!(
@@ -1036,8 +1044,10 @@ fn progress_from_the_engine_moves_the_bar_and_a_finished_file_replaces_the_state
     assert!(open_from(&mut state, Box::new(Stepping(steps)), board::DECRYPTING));
     // The shell asks the open file for progress before every frame (`host::poll`).
     let mut rt = runtime_of(state, false);
-    assert_eq!(info(&rt, "state-sub-mono").text.as_deref(), Some("90 of 120 MB"));
-    assert_eq!(info(&rt, "state-bar").label.as_deref(), Some("Decrypting, 75 percent"));
+    assert_eq!(
+        info(&rt, "loading-words").text.as_deref(),
+        Some("Decrypting Tram 28.mov on this PC \u{00B7} 90 of 120 MB (75 percent)")
+    );
     rt.invalidate();
     rt.frame(0.0);
     assert_eq!(
@@ -1101,4 +1111,101 @@ fn wrap_breaks_a_long_lines_text_at_the_windows_width_and_no_wrap_keeps_it_on_on
     assert_eq!(info(&rt, "run-1-w0").text.as_deref(), Some("import"));
     operate(&mut rt, "seg-1");
     assert_eq!(info(&rt, "run-0-0").rect[3], 21.0, "No wrap again");
+}
+
+/// w35-edit-toolbar: the top bar of an open file holds what applies to that file, and none of the
+/// Files view's buttons (no New, no list/grid switch, no Sort, no search of the folder).
+const FOLDER_ONLY: [&str; 8] = [
+    "open-explorer",
+    "new-btn",
+    "view-toggle",
+    "view-list",
+    "view-grid",
+    "sort-btn",
+    "search-box",
+    "forward",
+];
+
+fn assert_file_bar(rt: &Runtime<State>, what: &str, wanted: &[&str]) {
+    for key in FOLDER_ONLY {
+        assert!(!has(rt, key), "{what}: the bar has {key}");
+    }
+    for key in wanted {
+        assert!(has(rt, key), "{what}: the bar lacks {key}");
+    }
+}
+
+#[test]
+fn the_preview_bar_has_no_files_view_buttons() {
+    let rt = runtime("DW-1512");
+    assert_file_bar(&rt, "preview", &["back", "panel-toggle-btn", "show-in-folder", "more-btn"]);
+}
+
+#[test]
+fn the_text_edit_bar_has_no_files_view_buttons() {
+    let mut rt = runtime("DW-1512");
+    operate(&mut rt, "tb-btn-0");
+    assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some());
+    assert_file_bar(&rt, "text edit", &["back", "tb-btn-0", "show-in-folder", "panel-toggle-btn"]);
+}
+
+#[test]
+fn the_office_edit_bar_has_no_files_view_buttons() {
+    let rt = runtime("DW-1507e");
+    assert_file_bar(&rt, "office edit", &["back", "panel-toggle-btn", "show-in-folder"]);
+}
+
+/// w36: a quit with unsaved changes asks first (the one shared question); Cancel keeps the edit, Save saves, and the
+/// quit follows only an answer. With nothing unsaved it asks nothing.
+#[test]
+fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
+    use super::unsaved_guard::{Then, ask, holds};
+    let (mut rt, calls) = note(false, false);
+    assert!(!ask(&mut rt.state, Then::Quit), "nothing unsaved: no question");
+    edit_and_type(&mut rt);
+    assert!(holds(&rt.state));
+    assert!(ask(&mut rt.state, Then::Quit), "unsaved: the question is up");
+    rt.invalidate();
+    rt.frame(0.0);
+    assert_eq!(info(&rt, "dlg-text-0").text.as_deref(), Some("You have unsaved changes in Meeting notes 4 Nov.md."));
+    assert_eq!(info(&rt, "btn-2").label.as_deref(), Some("Discard and quit, destructive"));
+    // Cancel keeps the edit and nothing was saved.
+    operate(&mut rt, "btn-3");
+    assert!(rt.state.viewer.leave.is_none() && viewer(&rt).dirty());
+    assert!(!calls.borrow().iter().any(|c| c.starts_with("save")));
+    // Save saves the text editor at once; the question is gone with the edit.
+    assert!(ask(&mut rt.state, Then::Quit));
+    rt.invalidate();
+    rt.frame(0.0);
+    operate(&mut rt, "btn-1");
+    assert!(calls.borrow().iter().any(|c| c.starts_with("save")));
+    assert!(!holds(&rt.state));
+}
+
+/// ux-53: with the editor focused behind it, Enter on the shown question presses Save.
+#[test]
+fn enter_on_the_shown_unsaved_question_presses_save() {
+    use super::unsaved_guard::{Then, ask, holds};
+    let (mut rt, calls) = note(false, false);
+    edit_and_type(&mut rt);
+    assert!(ask(&mut rt.state, Then::Quit));
+    rt.invalidate();
+    rt.frame(0.0);
+    press(&mut rt, Key::Enter);
+    assert!(calls.borrow().iter().any(|c| c.starts_with("save")), "Enter saved: {:?}", calls.borrow());
+    assert!(!holds(&rt.state));
+}
+
+/// ux-53: Enter on the question shown when leaving the open file (DW-1525) presses Save.
+#[test]
+fn enter_on_the_leaving_question_presses_save() {
+    let (mut rt, _calls) = note(false, false);
+    edit_and_type(&mut rt);
+    crate::shell::host::dispatch(&mut rt.state, Event::Escape);
+    rt.invalidate();
+    rt.frame(0.0);
+    assert_eq!(viewer(&rt).dialog, Some(Dialog::Unsaved));
+    press(&mut rt, Key::Enter);
+    assert_eq!(viewer(&rt).file.version, 4, "Enter saved");
+    assert!(viewer(&rt).dialog.is_none());
 }

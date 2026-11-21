@@ -57,7 +57,7 @@ pub fn item(
             .fill(t.tile)
             .center()
             .child(kit::glyph(format!("{k}-tile-icon"), ic, 17.0, t.text_secondary)),
-        None => tile(&k, format!("{k}-tile-icon"), kind, 28.0, 7.0, 17.0, t),
+        None => tile(&k, format!("{k}-tile-icon"), title, kind, 28.0, 7.0, 17.0, t),
     };
     let words = col()
         .key("item-text")

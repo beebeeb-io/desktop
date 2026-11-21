@@ -396,6 +396,7 @@ fn what_asking_again_cannot_change_is_said_in_its_own_words_without_try_again() 
     for (why, words) in [
         (ActionError::HasLink, "already has a link"),
         (ActionError::NotYet, "not available yet"),
+        (ActionError::NotAFile, "Only a file"),
     ] {
         rt.update(|s, tx| assert!(s.copy_link(tx)));
         spy.answer(Action::CopyLink, Err(why));

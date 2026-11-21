@@ -130,10 +130,12 @@ pub struct ChosenFolder {
     pub name: String,
     /// The folder on this PC, absolute. Read in place, never written.
     pub path: PathBuf,
-    /// Whose it is: the account that chose it, as a digest of its local state's owner (never an email or an id in
-    /// clear; `app::bindings::backup_folders::owner_tag`). Only that account backs it up, lists it or removes it.
-    /// Missing: written by a test build before folders were per account; nobody's (passed, listed and removable for no
-    /// account), so the person adds the folder again.
+    /// Whose it is: the account that chose it, as a digest of that account's id (never an email or an id in clear,
+    /// never made from an address; `app::bindings::backup_folders::owner_tag`, its one maker). Only that account backs
+    /// it up, lists it or removes it. Missing: written by a test build before folders were per account; nobody's
+    /// (passed, listed and removable for no account), so the person adds the folder again. A digest of an address
+    /// (written by an earlier build while the id was not known) is nobody's too, until its own account's next start
+    /// replaces it with that account's id tag (`backup_folders::retag_by_id`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     /// The server id of its backup's folder (`Backups/<device>/<name>`), recorded by the pass before it creates that

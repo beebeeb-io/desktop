@@ -451,13 +451,16 @@ fn test_shared_invite_mapping_filters_approved_and_permissions() {
             {
                 "id": "invite-pending",
                 "file_id": "root-pending",
-                "status": "claimed"
+                "status": "claimed",
+                "is_folder_share": true
             }
         ]
     });
 
     let roots = shared_roots_from_invite_response(&body);
-    assert_eq!(roots.len(), 2);
+    assert_eq!(roots.len(), 3);
+    assert_eq!(roots[2].display_name, "Opening shared folder…");
+    assert!(roots[2].claimed && !roots[0].claimed);
     assert_eq!(roots[0].display_name, "Encrypted folder");
     assert_eq!(roots[0].permission_bits, PERMISSION_READ | PERMISSION_SHARE);
     assert_eq!(roots[1].permission_bits, PERMISSION_READ | PERMISSION_WRITE);
@@ -513,5 +516,37 @@ fn test_smart_cache_cleanup_deletes_no_file() {
         std::fs::read(&copy).unwrap(),
         b"an edit nobody detected",
         "the file stays"
+    );
+}
+
+/// Task 2230: a lone `Trashing` row at a path must not hide a file re-created there with other
+/// bytes before the trash landed.
+#[test]
+fn local_classify_trashing_row_does_not_hide_a_recreated_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync-root");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:1".into(), [9u8; 32]);
+    let old = b"old bytes";
+    bridge
+        .db
+        .upsert_file(&FileEntry {
+            file_id: "d6b89687-3ec2-52ca-8ee7-4f5e8e9a2230".into(),
+            path: "again.txt".into(),
+            status: FileStatus::Trashing,
+            size_bytes: old.len() as i64,
+            modified_at: 0,
+            content_hash: Some(sha256_hex(old)),
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    let local = sync_root.join("again.txt");
+    std::fs::write(&local, b"brand new content, re-created").unwrap();
+    let verdict = bridge.classify_local_path_verdict(&sync_root, &local);
+    assert!(
+        !matches!(verdict, LocalPathVerdict::Settled),
+        "a re-created file must not be settled by the Trashing row"
     );
 }

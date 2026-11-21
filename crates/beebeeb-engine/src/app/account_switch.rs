@@ -1,0 +1,193 @@
+//! w26-account-switch (v5 bug 6): account A signed out and left its local data bound to it (a sign-out keeps it), and
+//! account B starts sync on the same PC. B must start clean and never see A's names, so before the binding of step 7
+//! A's data is removed, when it provably is another account's and nothing of it needs a person's answer.
+//!
+//! Only two USER IDS that differ prove another account: an owner recorded by an email alone, and unowned data, are
+//! task 2267's cases (the ownership proof, nothing deleted). Anything that cannot be removed leaves A's owner record in
+//! place, so the binding refuses B as it always did. The order: the folder's items (through the port), the files the
+//! rows point at, then the one transaction that clears every row and the owner record.
+//!
+//! Only after that transaction (dc-014): the account's entries in desktop.toml ([`forget_in_settings`]), its share
+//! pins and guide mark (that account's alone, never another's) and its vault key, if B's sign-in left it. A clear
+//! that fails leaves every one of them as it was, and B is refused with words.
+//!
+//! The folder is not locked between the check and the removal, so the removal is told which paths were found empty
+//! (`remove_synced_items`' `unasked`) and deletes only what it can prove synced and unchanged when it reaches each
+//! item; an item made since refuses the switch, nothing deleted (w28).
+//!
+//! Must not: remove anything while a queued change, a staged copy, a held edit or a file of unknown content that may
+//! hold bytes on this PC is left;
+//! clear the owner record before every item is gone; log a name, a path, an email or an id.
+
+use std::path::Path;
+
+use super::{CredentialStores, Engine, LocalState};
+use crate::account_binding::{Identity, canonical_email};
+use crate::config::DesktopConfig;
+use crate::sync_root_port::SyncRootPort;
+
+/// The reason a file that may hold unsent bytes keeps the switch out.
+const GUARDED_FILE: &str = "guarded file";
+
+impl<C: CredentialStores> Engine<C> {
+    /// Step 7's part: see the module. A no-op unless `data` is recorded as another account's by user id. Best effort in
+    /// the sense that a failure changes nothing the binding reads: the start then refuses as before. `true` when it
+    /// stopped at a file that may hold bytes a person never sent (w29: the refusal then says what to do).
+    pub(super) fn clear_the_previous_account(
+        &self,
+        data: &LocalState,
+        session: &Identity,
+        sync_root: &Path,
+        port: &dyn SyncRootPort,
+    ) -> bool {
+        let owner = data.db.owner().ok().flatten();
+        let other_account = match (owner.as_ref().and_then(|o| o.user_id.as_deref()), session.user_id.as_deref()) {
+            (Some(recorded), Some(now)) => recorded != now,
+            _ => false,
+        };
+        if !other_account {
+            return false;
+        }
+        let Some(previous) = owner.as_ref() else { return false };
+        match self.remove_the_previous_account(data, previous, sync_root, port) {
+            Ok(()) => {
+                tracing::info!("account switch: the previous account's local data was removed");
+                false
+            }
+            Err(why) => {
+                tracing::warn!(why, "account switch: the previous account's local data stays");
+                why == GUARDED_FILE
+            }
+        }
+    }
+
+    fn remove_the_previous_account(
+        &self,
+        data: &LocalState,
+        previous: &Identity,
+        sync_root: &Path,
+        port: &dyn SyncRootPort,
+    ) -> Result<(), &'static str> {
+        let db = &data.db;
+        if let Some(kind) = db.work_waiting_for_a_person().map_err(|_| "unreadable")? {
+            return Err(kind);
+        }
+        // A file of unknown content keeps B out only while its item in the folder may hold bytes (an edit of A's
+        // nobody sent). With none on this PC there is nothing a person could lose: the row goes with the others.
+        let guarded = db.guarded_paths().map_err(|_| "unreadable")?;
+        // w29: an item that is there and holds no bytes (a cloud placeholder nothing was fetched into) is a synced
+        // item like any other: the removal deletes it after proving that, holding it. Only a path with no item at all
+        // is `unasked`: whatever is found there later was made since and refuses the switch.
+        let mut unasked = Vec::new();
+        for path in &guarded {
+            let nothing_there = matches!(
+                sync_root.join(path.trim_start_matches('/')).symlink_metadata(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            );
+            // An OS that cannot tell (the port's default says `true`) is believed only for an item that is there: a
+            // path with no item cannot hold an unsent edit, so the refusal stays the plain `OtherAccountsData`.
+            if port.may_hold_bytes(sync_root, path) && !nothing_there {
+                return Err(GUARDED_FILE);
+            }
+            if nothing_there {
+                unasked.push(path.clone());
+            }
+        }
+        if db.has_account_data().map_err(|_| "unreadable")? {
+            port.remove_synced_items(db, sync_root, &unasked).map_err(|_| "the folder's items stay")?;
+        }
+        let purge = db.purge_all_local_state().map_err(|_| "the rows stay")?;
+        for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {
+            let path = Path::new(path);
+            if !crate::is_disposable_cache_path(self.identity, path) {
+                return Err("a cached file is not ours to delete");
+            }
+            match std::fs::remove_file(path) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(_) => return Err("a cached file stays"),
+            }
+        }
+        // The owner record goes in this transaction: until it commits, B is still refused, and A's settings, share
+        // pins and key are all still here (dc-014), so A signs back in to exactly what it left.
+        if db.clear_account_data(false).is_err() {
+            // The purge forgot the owner record (a sign-out's R10 step); A's rows are still here, so it is put back:
+            // A signs in again to its own data, and B stays refused as before.
+            if db.set_owner(previous).is_err() {
+                tracing::warn!("account switch: the previous account's owner record could not be put back");
+            }
+            return Err("the rows stay");
+        }
+        // Forgotten last, only once A's data is gone. A failure here no longer keeps B out (the owner record is B's
+        // to take now): what is left is A's alone, keyed by A's id, and B never reads it.
+        if let Err(why) = self.forget_its_settings(previous) {
+            tracing::warn!(why, "account switch: the previous account's settings stay");
+        }
+        if let Some(user_id) = previous.user_id.as_deref() {
+            if db.forget_share_trust_rows(user_id).is_err() {
+                tracing::warn!("account switch: the previous account's share marks stay");
+            }
+            self.forget_its_key(user_id);
+        }
+        Ok(())
+    }
+
+    /// The previous account's vault key, if the credential store still holds it: a token-only sign-in of B leaves a
+    /// key tagged with A's id in place (`key_owner::remove_foreign_key`; the loader refuses it for B), so that a clear
+    /// that fails leaves A able to sign back in without the twelve words. Removed only here, after A's data is gone,
+    /// and only while its tag is still A's: B's own key (or one of unknown owner) is never touched.
+    fn forget_its_key(&self, user_id: &str) {
+        let mut vault = self.vault();
+        let its = vault
+            .vault_key_owner()
+            .ok()
+            .flatten()
+            .is_some_and(|tag| crate::signin::key_owner::tag_is_account(&tag, user_id));
+        if its && vault.delete_vault_key_and_owner().is_err() {
+            tracing::warn!("account switch: the previous account's key stays (another sign-in removes it)");
+        }
+    }
+
+    /// The account's entries in desktop.toml go with its data: its chosen backup folders and their switches, its
+    /// selective-sync ids and the address the sign-in form prefills (see [`forget_in_settings`]). After the owner
+    /// record went (dc-014), so a clear that fails leaves A's settings untouched.
+    fn forget_its_settings(&self, previous: &Identity) -> Result<(), &'static str> {
+        let path = DesktopConfig::path_for(self.identity).map_err(|_| "the settings stay")?;
+        DesktopConfig::update_at(&path, |config| {
+            let changed = forget_in_settings(config, previous);
+            (changed, ())
+        })
+        .map_err(|_| "the settings stay")
+    }
+}
+
+/// `previous`'s entries out of `config`: the chosen backup folders tagged with its id (and the `custom:<name>` switch
+/// of each), the selective-sync ids (folder ids of its vault, meaningless for another account), and the prefilled
+/// address when it is its own. Another account's entries and untagged ones stay. Whether anything changed.
+fn forget_in_settings(config: &mut DesktopConfig, previous: &Identity) -> bool {
+    let mut changed = false;
+    let mut gone = Vec::new();
+    config.backup_chosen_folders.retain(|folder| {
+        let its = crate::app::bindings::backup_folders::is_owners(folder, Some(previous));
+        if its {
+            gone.push(format!("custom:{}", folder.name));
+        }
+        changed |= its;
+        !its
+    });
+    let switches = config.known_folder_backup.len();
+    config.known_folder_backup.retain(|key| !gone.contains(key));
+    changed |= config.known_folder_backup.len() != switches;
+    if config.excluded_folder_ids.take().is_some() {
+        changed = true;
+    }
+    let prefilled_is_its = match (config.last_signed_in_email.as_deref(), previous.email.as_deref()) {
+        (Some(prefilled), Some(email)) => canonical_email(prefilled) == canonical_email(email),
+        _ => false,
+    };
+    if prefilled_is_its {
+        config.last_signed_in_email = None;
+        changed = true;
+    }
+    changed
+}

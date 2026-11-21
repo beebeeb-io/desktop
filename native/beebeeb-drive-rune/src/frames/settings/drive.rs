@@ -99,6 +99,8 @@ pub struct KindShare {
 /// One of the largest files (DW-0783).
 #[derive(Clone, PartialEq, Debug)]
 pub struct LargeFile {
+    /// The file's id in the account: what Files selects when the row is pressed.
+    pub id: String,
     /// The whole path (the row's name for assistive technology and its tooltip).
     pub path: String,
     /// The path as the row shows it, cut in the middle so the file name stays readable.
@@ -185,6 +187,9 @@ pub enum Control {
     SyncOnMetered,
     /// Bandwidth: the speed test, and the link to it in Diagnostics.
     SpeedTest,
+    /// Storage: the "Thumbnails and previews" row of "On this PC". Hidden until a source can say what previews hold
+    /// and what limit they have.
+    PreviewsRow,
 }
 
 /// What Drive's settings panes read and change.
@@ -203,6 +208,8 @@ pub trait DriveSettings {
     /// A pane of these was opened (the route moved to it): a source that reads late reads again when what it holds
     /// is old.
     fn opened(&mut self, _pane: super::Pane) {}
+    /// The window left Settings (the route is elsewhere): whatever a pane started on its own (a sampler) stops.
+    fn closed(&mut self) {}
     /// A change the person asked for was refused since the last frame: the settings window's toast says it (a fixed
     /// sentence). Taken once.
     fn take_toast(&mut self) -> Option<&'static str> {
@@ -220,8 +227,9 @@ pub trait DriveSettings {
     /// Sync and File Explorer. Engine: the cloud-files registration, the shell status
     /// setting, the sync state, the login item, the cache size and limit, the pinned set.
     fn sync(&self) -> SyncPane;
-    /// Put the PC column's states on files in File Explorer, or not.
-    fn set_status_on_files(&mut self, on: bool);
+    /// Put the PC column's states on files in File Explorer, or not. The engine cannot switch Explorer's status, so
+    /// the pane draws no row for it (`Control::StatusOnFiles`) and the engine's source keeps this default.
+    fn set_status_on_files(&mut self, _on: bool) {}
     /// Open Beebeeb when the person logs in (a login item), or not.
     fn set_open_at_login(&mut self, on: bool);
     /// Pause or resume syncing.
@@ -287,6 +295,14 @@ pub trait DriveSettings {
     /// - `Bundle::Failed`'s reason is shown on the page as given: it must be a fixed sentence
     ///   or a redacted one, never an OS error with a path in it.
     fn export_bundle(&mut self) {}
+    /// "Show in File Explorer" on the banner (w17-settings-places): show the file of the last `Bundle::Saved`.
+    /// `false`: there is none, or it could not be shown.
+    fn reveal_bundle(&mut self) -> bool {
+        false
+    }
+    /// "Choose photo" in Thumbnails and previews: the OS's photo picker, then the pick measured on this PC (the
+    /// pane's sample follows). A source with no previews does nothing.
+    fn choose_photo(&mut self) {}
     /// Keep on this PC (DW-0784). Engine: the folder tree with sizes and the kept set
     /// (the same thing as Available offline for folders). Until a source answers: not loaded.
     fn keep(&self) -> super::keep::Keep {
@@ -353,6 +369,7 @@ impl Default for BoardDrive {
 impl BoardDrive {
     pub fn new() -> Self {
         let large = |path: &str, shown: &str, kind: &str, size: &str| LargeFile {
+            id: path.into(),
             path: path.into(),
             shown: shown.into(),
             kind: kind.into(),

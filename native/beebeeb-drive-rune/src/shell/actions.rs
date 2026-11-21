@@ -89,6 +89,9 @@ pub trait EngineActions: Send + Sync {
     /// Sign in (DW-1109): the engine asks for the password, by closing its gate to the sign-in
     /// screen. The default does nothing: an engine that does not know the state keeps its gate.
     fn sign_in_again(&self) {}
+    /// The wake cover's sign-in path (the engine's look failed, nothing passed): the engine closes its lock at the
+    /// vault, so the window shows the engine's own password screen. The default does nothing.
+    fn lock_vault_now(&self) {}
     /// The last start's refusal while it stands, with the attempt it was (the refusal modal, Q3). Cheap: asked on
     /// every frame.
     fn sync_refusal(&self) -> Option<SyncOff> {
@@ -127,6 +130,9 @@ pub trait ShellActions: Send + Sync {
     fn set_gate_for_scene(&self, gate: GateState);
     /// See [`EngineActions::sign_in_again`].
     fn sign_in_again(&self) {}
+    /// The wake cover's sign-in path (the engine's look failed, nothing passed): the engine closes its lock at the
+    /// vault, so the window shows the engine's own password screen. The default does nothing.
+    fn lock_vault_now(&self) {}
     /// See [`EngineActions::sync_refusal`].
     fn sync_refusal(&self) -> Option<SyncOff>;
     /// See [`EngineActions::away_job`].
@@ -193,6 +199,9 @@ impl ShellActions for HostActions {
     }
     fn sign_in_again(&self) {
         self.engine.sign_in_again();
+    }
+    fn lock_vault_now(&self) {
+        self.engine.lock_vault_now();
     }
     fn sync_refusal(&self) -> Option<SyncOff> {
         self.engine.sync_refusal()

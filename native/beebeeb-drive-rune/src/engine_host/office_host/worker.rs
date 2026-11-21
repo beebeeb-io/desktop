@@ -22,23 +22,49 @@ use super::{
     wipe_entries, wipe_message,
 };
 
+// The editing session's side of the worker: its requests, the checks of its answers, the save handshake.
+#[path = "edit.rs"]
+pub(crate) mod edit;
+
+// The document the host keeps for a restart, and the restart itself with the snapshot timing.
+#[path = "held.rs"]
+mod held;
+#[path = "restart.rs"]
+pub(crate) mod restart;
+
+use edit::Mode;
+use held::Held;
+use restart::Cadence;
+
 /// Starts the worker of one document on a thread of its own. `false` when no thread could be made: the worker, and
 /// the bytes in it, are dropped (wiped).
 pub(super) fn spawn<S: Starter>(
     starter: S,
+    mode: Mode,
     kind: DocKind,
     shared: Arc<Shared>,
     inputs: Receiver<Input>,
     timeouts: Timeouts,
-    bytes: Zeroizing<Vec<u8>>,
+    cadence: Cadence,
+    bytes: Option<Zeroizing<Vec<u8>>>,
+    scratch: Option<beebeeb_engine::app::office_scratch::ScratchStore>,
 ) -> bool {
+    // An editing session keeps what it was opened with, for a restart; large copies spill sealed to scratch.
+    let held = match mode {
+        Mode::View => None,
+        Mode::Edit(_) => Some(Held::with_scratch(bytes.clone(), scratch)),
+        Mode::New(..) => Some(Held::with_scratch(None, scratch)),
+    };
     let worker = Worker {
+        held,
+        rs: restart::State::new(cadence),
         starter,
+        mode,
         kind,
         shared,
         inputs,
         timeouts,
-        doc: Doc::Bytes(bytes),
+        doc: bytes.map_or(Doc::Blank, Doc::Bytes),
         run: None,
         links: 0,
         retried: false,
@@ -52,6 +78,8 @@ pub(super) fn spawn<S: Starter>(
 
 /// The document: its bytes until they are in a section, then the section (kept for Try again), then gone.
 enum Doc<T> {
+    /// A new document: there are no bytes.
+    Blank,
     Bytes(Zeroizing<Vec<u8>>),
     Section(T),
     Gone,
@@ -73,7 +101,8 @@ struct Run<S: Starter> {
     helper: Arc<S::Process>,
     writer: Sender<Outgoing>,
     ids: Ids,
-    /// When this helper's start was requested: the open timer counts from here.
+    /// When this helper had started (its start returned, after any wait for the launch lock): the open timer counts
+    /// from here.
     started_at: Instant,
     /// When the oldest request out became the oldest: the request timer counts from here.
     oldest_since: Instant,
@@ -81,6 +110,10 @@ struct Run<S: Starter> {
     sent: VecDeque<Sent<S::Section>>,
     /// Pages and anchors not sent yet (more than [`MAX_IN_FLIGHT`] asked).
     waiting: VecDeque<Ask>,
+    /// A save is out (`SaveSize` to `SavedInto`): edits wait in `deferred`, so that the token stays current.
+    save_busy: bool,
+    /// Edit requests that came during a save, in order.
+    deferred: VecDeque<Command>,
     /// The outline's entries so far, while it is being asked.
     outline: Option<Vec<OutlineEntry>>,
     /// When the outline's first page was asked: its budget counts from here.
@@ -88,8 +121,12 @@ struct Run<S: Starter> {
     /// The budget of each range the window asked, while any of its requests is out.
     splits: Vec<Split>,
     next_split: u64,
-    /// The helper's open handles at its first checked page: the bound counts from here.
+    /// The helper's open handles at its first checked answer (Opened/Sheets): the ceiling counts from here. The
+    /// loader's handles (taken between the resume and that answer) belong to it. `None`: not taken yet, or the
+    /// system could not say, nothing is bounded.
     handle_baseline: Option<u32>,
+    /// Whether the baseline was taken (once, at the first checked answer).
+    baselined: bool,
 }
 
 /// One range the window asked, and the halves asked for it after `RangeTooLarge`.
@@ -138,6 +175,8 @@ enum Asked<T> {
     },
     Outline(office::Outline),
     Stats,
+    /// A request of an editing session.
+    Edit(edit::EditAsked<T>),
     /// A range, or a half of one, and the window's ask it belongs to.
     Cells {
         asked: office::Cells,
@@ -147,6 +186,7 @@ enum Asked<T> {
 
 struct Worker<S: Starter> {
     starter: S,
+    mode: Mode,
     kind: DocKind,
     shared: Arc<Shared>,
     inputs: Receiver<Input>,
@@ -157,10 +197,14 @@ struct Worker<S: Starter> {
     links: u64,
     retried: bool,
     phase: Phase,
+    /// What a restart opens (editing sessions only).
+    held: Option<Held>,
+    /// Snapshot timing and crash bookkeeping.
+    rs: restart::State,
 }
 
-/// A panic on the worker thread: the shared helper is ended, the window says "Renderer stopped" with no Try again,
-/// and the worker counts as ended. Does nothing when the worker returns normally.
+/// A panic on the worker thread: the shared helper is ended, a document parked for a start is dropped, the window says
+/// "Renderer stopped" with no Try again, and the worker counts as ended. Does nothing when the worker returns normally.
 struct PanicGuard(Arc<Shared>);
 
 impl Drop for PanicGuard {
@@ -168,7 +212,11 @@ impl Drop for PanicGuard {
         if !thread::panicking() {
             return;
         }
-        let helper = lock(&self.0.inner).helper.take();
+        let (helper, parked) = {
+            let mut inner = lock(&self.0.inner);
+            (inner.helper.take(), inner.parked.take())
+        };
+        drop(parked);
         if let Some(helper) = helper {
             helper.end();
         }
@@ -186,17 +234,17 @@ impl<S: Starter> Worker<S> {
         let _guard = PanicGuard(self.shared.clone());
         self.start_helper();
         while !self.done() {
-            let input = match self.deadline() {
+            let input = match self.next_due() {
                 Some((at, why)) => {
                     let now = Instant::now();
                     if at <= now {
-                        self.stopped(why);
+                        self.fire(why);
                         continue;
                     }
                     match self.inputs.recv_timeout(at - now) {
                         Ok(input) => input,
                         Err(RecvTimeoutError::Timeout) => {
-                            self.stopped(why);
+                            self.fire(why);
                             continue;
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -211,6 +259,7 @@ impl<S: Starter> Worker<S> {
                 Input::Close => break,
                 Input::Frame { link, frame } => self.on_frame(link, frame),
                 Input::Command(command) => self.on_command(command),
+                Input::Flush => self.on_flush(),
             }
         }
         self.finish();
@@ -259,7 +308,6 @@ impl<S: Starter> Worker<S> {
     }
 
     fn start_helper(&mut self) {
-        let started_at = Instant::now();
         if !self.starter.installed() {
             return self.end_with(OfficeState::NoPreview(NoPreview::NotInstalled));
         }
@@ -288,10 +336,23 @@ impl<S: Starter> Worker<S> {
         if matches!(self.doc, Doc::Gone) {
             return self.stopped(Stop::Failed);
         }
-        let link = match self.starter.start() {
+        // The start may wait for the launch lock, which Windows' app chooser holds for as long as it is open. Meanwhile
+        // the worker takes no close, so the document's section waits where a close drops it at once.
+        if !self.shared.park(Box::new(std::mem::replace(&mut self.doc, Doc::Gone))) {
+            return;
+        }
+        let started = self.starter.start();
+        self.doc = self
+            .shared
+            .unpark()
+            .and_then(|doc| doc.downcast::<Doc<S::Section>>().ok())
+            .map_or(Doc::Gone, |doc| *doc);
+        let link = match started {
             Ok(link) => link,
             Err(error) => return self.start_failed(error),
         };
+        // The open timer counts from here: the wait for the lock was not the helper's time.
+        let started_at = Instant::now();
         let Link {
             helper,
             to_helper,
@@ -327,27 +388,20 @@ impl<S: Starter> Worker<S> {
             oldest_since: started_at,
             sent: VecDeque::new(),
             waiting: VecDeque::new(),
+            save_busy: false,
+            deferred: VecDeque::new(),
             outline: None,
             outline_since: None,
             splits: Vec::new(),
             next_split: 0,
+            // Taken at the first checked answer, not at the start: the loader is still mapping then.
             handle_baseline: None,
+            baselined: false,
         });
-        let granted = match (self.run.as_ref(), &self.doc) {
-            (Some(run), Doc::Section(section)) => Some(self.starter.grant(&run.helper, section, sandbox::Access::Read)),
-            _ => None,
-        };
-        let Some(Ok(granted)) = granted else {
+        let Some(first) = self.first_message() else {
             return self.stopped(Stop::Failed);
         };
-        let open = office::Open {
-            kind: self.kind,
-            doc: office::GrantRef {
-                wire: granted.wire,
-                len: granted.len,
-            },
-        };
-        self.ask(Message::Open(open), Asked::Open);
+        self.ask(first, Asked::Open);
     }
 
     fn start_failed(&mut self, error: sandbox::SandboxError) {
@@ -373,8 +427,15 @@ impl<S: Starter> Worker<S> {
 
     /// "Renderer stopped". The document's section stays for Try again; without one it goes now.
     fn stopped(&mut self, why: Stop) {
+        // A snapshot a lock waits for can no longer come from this helper.
+        self.flush_complete();
+        // An editing session whose helper exited goes on with a new one (or read-only).
+        if why == Stop::Exited && self.try_restart() {
+            return;
+        }
         self.kill_run();
-        let can_retry = !self.retried && !matches!(self.doc, Doc::Gone);
+        // An editing session has no Try again: a new helper would not hold the edits.
+        let can_retry = !self.retried && !matches!(self.doc, Doc::Gone) && matches!(self.mode, Mode::View);
         if can_retry {
             self.phase = Phase::Stopped { can_retry: true };
         } else {
@@ -424,6 +485,7 @@ impl<S: Starter> Worker<S> {
                 run.waiting.push_back(Ask::Anchor(ask));
                 self.pump_renders();
             }
+            Command::Edit(command) => self.edit_command(command),
             Command::Cancel(id) => self.cancel(id),
             Command::Outline => self.start_outline(),
             Command::Stats => {
@@ -656,26 +718,23 @@ impl<S: Starter> Worker<S> {
         }
     }
 
-    /// After a checked answer, the helper's open handles stay within its count at its first checked page, plus one
-    /// per render out, plus [`HANDLE_SLACK`]. Over it, the helper is stopped (`Protocol`) and `false` comes back: a
-    /// helper that keeps the sections it was handed pins their memory. The first checked page (`page`) reads the
-    /// count it is measured from. Where the count cannot be read, nothing is bounded.
-    fn handles_ok(&mut self, page: bool) -> bool {
+    /// After a checked answer, the helper's open handles stay within an absolute ceiling: its count at its first
+    /// checked answer (Opened/Sheets; the loader's handles are in it), plus one per render out ([`MAX_IN_FLIGHT`]), plus [`HANDLE_SLACK`]. Over
+    /// it, the helper is stopped (`Protocol`) and `false` comes back: a helper that keeps the sections it was handed
+    /// pins their memory. Where the count cannot be read (at the start or now), nothing is bounded.
+    fn handles_ok(&mut self) -> bool {
         let Some(run) = self.run.as_mut() else {
             return false;
         };
-        let Some(count) = run.helper.handle_count() else {
+        if !run.baselined {
+            run.baselined = true;
+            run.handle_baseline = run.helper.handle_count();
+            return true;
+        }
+        let (Some(base), Some(count)) = (run.handle_baseline, run.helper.handle_count()) else {
             return true;
         };
-        let over = match run.handle_baseline {
-            Some(base) => u64::from(count) > u64::from(base) + MAX_IN_FLIGHT as u64 + u64::from(HANDLE_SLACK),
-            None => {
-                if page {
-                    run.handle_baseline = Some(count);
-                }
-                false
-            }
-        };
+        let over = u64::from(count) > u64::from(base) + MAX_IN_FLIGHT as u64 + u64::from(HANDLE_SLACK);
         if over {
             self.stopped(Stop::Protocol);
         }
@@ -694,9 +753,10 @@ impl<S: Starter> Worker<S> {
             (Asked::Open, Message::Opened(opened)) if pages => self.opened(opened),
             (Asked::Open, Message::OpenedSheets(opened)) if !pages => self.opened_sheets(opened),
             (Asked::Open, Message::Error(error)) => self.open_refused(error.code),
+            (Asked::Edit(asked), message) => self.edit_answer(asked, message),
             // Cancelled: its answer is checked for id, order and kind (above), then discarded with its section.
             (Asked::Render { .. } | Asked::Anchor { .. }, Message::Rendered(_) | Message::Error(_)) if cancelled => {
-                let _ = self.handles_ok(false);
+                let _ = self.handles_ok();
             }
             (Asked::Render { ask, request, section }, Message::Rendered(got)) => {
                 self.rendered(ask, request, section, got)
@@ -706,7 +766,7 @@ impl<S: Starter> Worker<S> {
             }
             (Asked::Outline(asked), Message::OutlineData(got)) => self.outline_page(asked, got),
             (Asked::Stats, Message::StatsData(got)) => {
-                if self.handles_ok(false) {
+                if self.handles_ok() {
                     self.shared.push(Out::Event(Event::Stats { words: got.words }));
                 }
             }
@@ -728,9 +788,13 @@ impl<S: Starter> Worker<S> {
         if check::check_opened(&opened, &check::Limits::CONTRACT).is_err() {
             return self.stopped(Stop::Protocol);
         }
+        if !self.handles_ok() {
+            return;
+        }
         let office::Opened { pages, sizes } = opened;
         self.phase = Phase::Pages { sizes: sizes.clone() };
         self.shared.push(Out::State(OfficeState::Pages { pages, sizes }));
+        self.opened_after_restart();
     }
 
     fn opened_sheets(&mut self, mut opened: office::OpenedSheets) {
@@ -740,11 +804,18 @@ impl<S: Starter> Worker<S> {
             }
             return self.stopped(Stop::Protocol);
         }
+        if !self.handles_ok() {
+            for sheet in &mut opened.sheets {
+                sheet.name.zeroize();
+            }
+            return;
+        }
         self.phase = Phase::Sheets;
         self.shared.push(Out::State(OfficeState::Sheets {
             sheets: opened.sheets,
             more: opened.more,
         }));
+        self.opened_after_restart();
     }
 
     /// The helper's answer to `Open` with an error: its typed state; the helper goes.
@@ -780,7 +851,7 @@ impl<S: Starter> Worker<S> {
         if check::check_rendered(&request, &size, len as u64, &got, &check::Limits::CONTRACT).is_err() {
             return self.stopped(Stop::Protocol);
         }
-        if !self.handles_ok(true) {
+        if !self.handles_ok() {
             return;
         }
         let mut rgba = vec![0u8; len];
@@ -814,7 +885,7 @@ impl<S: Starter> Worker<S> {
         if check::check_rendered_anchor(&request, &ask.anchor, len as u64, &got, &check::Limits::CONTRACT).is_err() {
             return self.stopped(Stop::Protocol);
         }
-        if !self.handles_ok(true) {
+        if !self.handles_ok() {
             return;
         }
         let mut rgba = vec![0u8; len];
@@ -849,7 +920,7 @@ impl<S: Starter> Worker<S> {
             wipe_entries(&mut got.entries);
             return self.stopped(Stop::Protocol);
         }
-        if !self.handles_ok(false) {
+        if !self.handles_ok() {
             wipe_entries(&mut got.entries);
             return;
         }
@@ -876,7 +947,7 @@ impl<S: Starter> Worker<S> {
             wipe_cells(&mut got);
             return self.stopped(Stop::Protocol);
         }
-        if !self.handles_ok(false) {
+        if !self.handles_ok() {
             wipe_cells(&mut got);
             return;
         }

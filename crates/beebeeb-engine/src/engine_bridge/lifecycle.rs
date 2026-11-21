@@ -33,6 +33,7 @@ impl EngineBridge {
             transfers: crate::transfer_progress::TransferBoard::new(),
             stopping,
             thumbnails_pending: std::sync::Mutex::new(HashSet::new()),
+            ops_in_flight: std::sync::Mutex::new(HashSet::new()),
             request_rows: std::sync::Mutex::new(HashSet::new()),
             request_keys: std::sync::Mutex::new(None),
             failed_snapshots: std::sync::atomic::AtomicU32::new(0),
@@ -150,8 +151,7 @@ impl EngineBridge {
         self.resume.pass_wanted.load(Ordering::SeqCst) > self.resume.pass_served.load(Ordering::SeqCst)
     }
 
-    /// Tests, and a Windows range session's Activity row (LD-0105 W2).
-    #[cfg(any(any(test, feature = "test-support"), target_os = "windows"))]
+    /// The transfer board: the first listing (syncflow), tests, and a Windows range session's Activity row (LD-0105 W2).
     pub fn transfers(&self) -> &Arc<crate::transfer_progress::TransferBoard> {
         &self.transfers
     }
@@ -324,6 +324,28 @@ impl EngineBridge {
     }
 
     pub async fn process_due_operations(&self, sync_root: &Path, now: i64) -> anyhow::Result<TransferLoopOutcome> {
+        self.process_due(sync_root, now, true).await
+    }
+
+    /// w36: [`Self::process_due_operations`] without the backup's uploads: the step a save's nudge gets while a tick
+    /// runs. The queue is sent oldest first, so a step that took the backup's uploads too would put a save behind
+    /// every one of them. Safe beside the tick's own step: an op one step is sending is skipped by the other
+    /// (`ops_in_flight`), and the claim keeps each file's order (a later change of a file waits while an earlier one
+    /// is queued, sent or not).
+    pub async fn process_due_changes(&self, sync_root: &Path, now: i64) -> anyhow::Result<TransferLoopOutcome> {
+        self.process_due(sync_root, now, false).await
+    }
+
+    /// w36: `op_id` is this step's to send until the guard drops, or `None`: another step is sending it.
+    pub(super) fn begin_op(&self, op_id: &str) -> Option<OpInFlight<'_>> {
+        let mut in_flight = self.ops_in_flight.lock().unwrap_or_else(|p| p.into_inner());
+        in_flight.insert(op_id.to_string()).then(|| OpInFlight {
+            ops: &self.ops_in_flight,
+            op_id: op_id.to_string(),
+        })
+    }
+
+    async fn process_due(&self, sync_root: &Path, now: i64, backups: bool) -> anyhow::Result<TransferLoopOutcome> {
         let mut outcome = TransferLoopOutcome {
             completed_op_ids: Vec::new(),
             retried_op_ids: Vec::new(),
@@ -333,6 +355,7 @@ impl EngineBridge {
             link_failed: false,
             session_refused: false,
             account_refused: false,
+            storage_country_refusals: Vec::new(),
         };
         #[cfg(target_os = "windows")]
         if !self.is_stopping() {
@@ -357,6 +380,14 @@ impl EngineBridge {
             if self.a_pass_is_owed() {
                 break;
             }
+            // w36: a backup upload is the tick's own step's (every backup op carries its folder's key).
+            if !backups && op.backup_source_key.is_some() {
+                continue;
+            }
+            // w36: another step is sending this op; that attempt records its outcome.
+            let Some(_in_flight) = self.begin_op(&op.op_id) else {
+                continue;
+            };
             // The list is read once per pass, and an upload that lands moves
             // the later ops of its file along (`StateDb::apply_landing`),
             // so run each op as it is NOW: the claim re-reads it, enforces its
@@ -568,6 +599,17 @@ impl EngineBridge {
                             outcome.retried_op_ids.push(op.op_id);
                         }
                         FailedAttemptRule::Retry(count) => {
+                            // Task 2054: a strict storage-country refusal is the server's state, not this file's
+                            // fault: the file stays queued and never uses up its attempts. Say the country.
+                            let count = if let Some(refused) = engine_cause::<StorageCountryRefused>(&error) {
+                                outcome.storage_country_refusals.push(StorageCountryRefusal {
+                                    op_id: op.op_id.clone(),
+                                    country: refused.country.clone().unwrap_or_default(),
+                                });
+                                AttemptCount::UpToTheBackoffCap
+                            } else {
+                                count
+                            };
                             // §8.6 rule 6 and §8.4: a recorded completion, and a File Provider
                             // write whose failure waiting cures, keep retrying on the normal
                             // backoff and never use up their attempts.
@@ -865,4 +907,16 @@ impl EngineBridge {
 /// (`409 protected_folder`); `None` for any other error.
 fn protected_folder_refusal(error: &anyhow::Error) -> Option<String> {
     engine_cause::<crate::api_client::ProtectedFolderRefused>(error).map(|refused| refused.message.clone())
+}
+
+/// w36: one op a queue step is sending ([`EngineBridge::begin_op`]); dropping it lets the next step take the op again.
+pub(super) struct OpInFlight<'a> {
+    ops: &'a std::sync::Mutex<HashSet<String>>,
+    op_id: String,
+}
+
+impl Drop for OpInFlight<'_> {
+    fn drop(&mut self) {
+        self.ops.lock().unwrap_or_else(|p| p.into_inner()).remove(&self.op_id);
+    }
 }

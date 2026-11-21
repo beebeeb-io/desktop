@@ -16,6 +16,8 @@ fn a_failed_registration_starts_no_engine() {
     let s = common::setup();
     s.sign_in();
     s.unlock();
+    // The plan check runs in the background after the unlock: let it be served before the count starts.
+    std::thread::sleep(std::time::Duration::from_secs(1));
     let port = common::Port {
         register: Err(Some(CODE)),
         ..common::Port::free()

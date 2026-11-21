@@ -264,7 +264,7 @@ fn a_copy_that_is_not_kept_is_shown_as_such() {
 /// `with_downloads`, a kept copy that was accepted reads, and the account leaving forgets the held rows.
 #[test]
 fn the_files_source_wires_the_downloads_in() {
-    let host = include_str!("../engine_host.rs");
+    let host = include_str!("mod.rs");
     let body = |head: &str| {
         let from = host.find(head).unwrap_or_else(|| panic!("{head} is gone"));
         host[from..].split("\n    fn ").next().unwrap().to_string()

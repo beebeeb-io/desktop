@@ -44,6 +44,25 @@ impl<C: CredentialStores> EngineMediaOpener<C> {
 /// What the player says when the engine refuses: not signed in for a session that is gone or locked, else the file
 /// could not be played. Never the engine's own words.
 pub(super) fn refusal_of(error: OpenFileError) -> Refusal {
+    // ux-02: the kind is written (fixed words, no size and nothing of the file); the window says less.
+    tracing::warn!(
+        kind = match error {
+            OpenFileError::NotSignedIn => "not signed in",
+            OpenFileError::SessionEnded => "session ended",
+            OpenFileError::NotYours => "not yours",
+            OpenFileError::NothingSynced => "nothing synced",
+            OpenFileError::NotFound => "not found",
+            OpenFileError::TooLarge { .. } => "too large",
+            OpenFileError::OverLimit => "over limit",
+            OpenFileError::CopyNotReadable => "copy not readable",
+            OpenFileError::Cancelled => "cancelled",
+            OpenFileError::Offline => "offline",
+            OpenFileError::NoAccess => "no access",
+            OpenFileError::ChangedWhileOpening => "changed while opening",
+            OpenFileError::Failed => "failed",
+        },
+        "media file not opened"
+    );
     match error {
         OpenFileError::NotSignedIn | OpenFileError::SessionEnded | OpenFileError::NotYours => Refusal::NotSignedIn,
         _ => Refusal::CouldNotPlay,
@@ -81,6 +100,7 @@ impl<C: CredentialStores + 'static> MediaOpener for EngineMediaOpener<C> {
 /// Makes the shell's one player with the real helper, sound device and media controls, and registers it
 /// (`media::set_shell_player`). Called once when the window is built on the engine (`shell::state::init_on_engine`).
 pub fn install_shell_player<C: CredentialStores + 'static>(engine: Arc<Engine<C>>) {
+    let host = Arc::clone(&engine);
     let player = PlayerHandle::new(
         Arc::new(EngineMediaOpener::new(engine)),
         Arc::new(SandboxedHelpers),
@@ -88,7 +108,12 @@ pub fn install_shell_player<C: CredentialStores + 'static>(engine: Arc<Engine<C>
         Some(Box::new(crate::media::os_controls::shell_controls())),
         VideoSurface::new(),
     );
+    // What the player's worker changes reaches the screen: the window's loop is woken for it (the first frame of a
+    // video is in no scene yet, so no frame alone would).
+    player.set_waker(Arc::new(move || host.wake_host()));
     crate::media::set_shell_player(player);
+    // The engine's video thumbnails come from the same confined helper, never from a program found by name.
+    crate::media::thumb_frame::install();
 }
 
 /// One opened file's bytes, read by the engine for the session it was opened for.

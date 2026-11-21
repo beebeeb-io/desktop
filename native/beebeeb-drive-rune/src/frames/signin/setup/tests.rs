@@ -330,15 +330,24 @@ fn not_now_and_skip_turn_nothing_on() {
     assert_eq!(ui_step(&mut rt), Step::Lock);
     click(&mut rt, "skip");
     assert_eq!(ui_step(&mut rt), Step::Done);
-    assert!(
-        log.borrow().is_empty(),
-        "nothing was asked of the engine: {:?}",
-        log.borrow()
-    );
+    // "Not now" on the Lock step is "Continue" with the switch off (Windows Hello is asked first); "Skip setup" from
+    // it the same. Nothing else is asked.
+    assert_eq!(*log.borrow(), ["set_app_lock false 5 min"]);
     let values: Vec<String> = (0..3)
         .map(|i| info(&rt, &format!("item-{i}-value")).text.unwrap_or_default())
         .collect();
     assert_eq!(values, ["Not added", "Off", "Off"]);
+}
+
+#[test]
+fn not_now_on_the_lock_step_asks_the_switch_off_like_continue() {
+    let (ui_, log) = fixture(Script::default());
+    let mut rt = runtime_at(ui_, 2.0, false);
+    click(&mut rt, "btn-1"); // passkey: Not now
+    assert_eq!(ui_step(&mut rt), Step::Lock);
+    click(&mut rt, "btn-1"); // lock: Not now
+    assert_eq!(ui_step(&mut rt), Step::Backup);
+    assert_eq!(*log.borrow(), ["set_app_lock false 5 min"]);
 }
 
 #[test]
@@ -385,17 +394,17 @@ fn switches_and_choices_work_from_the_keyboard() {
 #[test]
 fn file_explorer_failing_offers_try_again_and_a_way_on() {
     let mut rt = runtime("DW-0280");
-    assert_eq!(info(&rt, "banner-0").role, "alert");
+    assert_eq!(info(&rt, "explorer-failed").role, "group");
     assert_eq!(
         info(&rt, "side-status").text.as_deref(),
         Some("Couldn't add Beebeeb to File Explorer")
     );
     // Try again: the fixture's second registration works, and setup goes on at this step (DW-0206).
-    click(&mut rt, "btn-0");
+    click(&mut rt, "explorer-failed-retry");
     assert_eq!(ui_step(&mut rt), Step::Explorer);
     assert_eq!(info(&rt, "title").text.as_deref(), Some("Beebeeb is in File Explorer"));
     let mut rt = runtime("DW-0280");
-    click(&mut rt, "btn-1");
+    click(&mut rt, "btn-0");
     assert_eq!(ui_step(&mut rt), Step::Notifications);
 }
 

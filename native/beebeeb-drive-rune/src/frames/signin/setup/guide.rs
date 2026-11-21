@@ -33,6 +33,7 @@ use super::guide_marks;
 use crate::State;
 use crate::shell::app::{GateState, Screen, Section};
 use crate::theme::tokens::{self, Theme, type_};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::kit;
 
 /// DW-0380's heading.
@@ -451,51 +452,6 @@ fn arrow(arrow: Arrow, t: &Theme) -> El {
         .a11y_hidden()
 }
 
-/// A 22 pt button of the card (`.kit-btn.kit-btn-sm`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Ghost,
-    Outline,
-    Amber,
-}
-
-fn button(key: &str, label: &str, kind: Kind, t: &Theme) -> El {
-    let b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .center()
-        .radius(6.0)
-        .focusable(true)
-        .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(rune::Cursor::Pointer);
-    let (b, ink) = match kind {
-        Kind::Ghost => (b.hover(t.hover).press(t.press), t.text_secondary),
-        Kind::Outline => (
-            b.fill(t.paper)
-                .border(1.0, t.card_border)
-                .border_layout()
-                .hover(t.paper2)
-                .press(t.paper3),
-            t.text,
-        ),
-        Kind::Amber => (
-            b.fill(t.accent)
-                .hover(t.accent.mix(Color::BLACK, 0.05))
-                .press(t.accent.mix(Color::BLACK, 0.10)),
-            t.accent_text_on,
-        ),
-    };
-    b.child(kit::label(
-        format!("{key}-label"),
-        label,
-        type_::BUTTON_SM.lh(17.1429),
-        ink,
-    ))
-}
-
 fn go_on(s: &mut State, tx: &mut Tx) {
     next(s);
     if s.guide.step.is_some() {
@@ -534,9 +490,18 @@ pub fn tray_card(t: &Theme) -> El {
                 .w_full(),
         )
         .child(
-            row()
-                .justify_end()
-                .child(button(NEXT_KEY, "Got it", Kind::Amber, t).on_press_tx(go_on)),
+            row().justify_end().child(
+                button(
+                    keys(NEXT_KEY),
+                    "Got it",
+                    None,
+                    Variant::Primary,
+                    Size::Sm,
+                    ButtonState::Enabled,
+                    t,
+                )
+                .on_press_tx(go_on),
+            ),
         )
 }
 
@@ -566,9 +531,31 @@ fn tip_card(n: u8, arrow_at: Arrow, t: &Theme) -> El {
         ))
         .child(el().grow(1.0));
     if !last {
-        foot = foot.child(button(SKIP_KEY, "Skip", Kind::Ghost, t).on_press(|s: &mut State| skip(s)));
+        foot = foot.child(
+            button(
+                keys(SKIP_KEY),
+                "Skip",
+                None,
+                Variant::Ghost,
+                Size::Sm,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| skip(s)),
+        );
     }
-    foot = foot.child(button(NEXT_KEY, if last { "Done" } else { "Next" }, Kind::Outline, t).on_press_tx(go_on));
+    foot = foot.child(
+        button(
+            keys(NEXT_KEY),
+            if last { "Done" } else { "Next" },
+            None,
+            Variant::Secondary,
+            Size::Sm,
+            ButtonState::Enabled,
+            t,
+        )
+        .on_press_tx(go_on),
+    );
     card(280.0, &format!("Guide, tip {n} of 5"), t)
         .child(arrow(arrow_at, t))
         .child(

@@ -41,7 +41,8 @@ use windows::core::PCWSTR;
 // The single-placeholder create (LD-0113: read-only under Backups), in its own file under the size ratchet.
 #[path = "placeholder_create.rs"]
 mod create;
-pub use create::{create_placeholder, create_placeholder_with};
+pub(super) use create::mint;
+pub use create::{create_placeholder, create_placeholder_with, entry_name_at};
 
 /// Remove the on-disk Cloud Files placeholder at `path` as part of reconciling a
 /// REMOTE deletion (a file/folder trashed or hard-deleted on another client) back
@@ -175,6 +176,7 @@ pub fn delete_placeholder(path: &std::path::Path, is_dir: bool) -> anyhow::Resul
 /// wholly on disk: on a cloud-only placeholder that open fetches it.
 #[cfg(any(test, feature = "test-support"))]
 pub fn convert_to_in_sync_placeholder(path: &std::path::Path, file_id: &str) -> anyhow::Result<()> {
+    super::refuse_alias(path)?;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     let file = open_exclusive_without_write_data(path)?;
@@ -345,6 +347,7 @@ pub enum Restamped {
 /// times are kept. The placeholder's state is read again through that handle, so bytes that arrived since the
 /// caller's view are never marked.
 pub fn restamp_cloud_only(path: &std::path::Path, local_id: &str, server_id: &str) -> anyhow::Result<Restamped> {
+    super::refuse_alias(path)?;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     let file = open_exclusive_without_data(path)?;
@@ -385,6 +388,7 @@ pub fn finalize_wholly_local(
     server_id: &str,
     judge: &mut dyn FnMut(&str) -> anyhow::Result<crate::upload_finalization_plan::Judged>,
 ) -> anyhow::Result<Local> {
+    super::refuse_alias(path)?;
     use crate::upload_finalization_plan::Judged;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
@@ -460,6 +464,26 @@ fn win32_code(error: &anyhow::Error) -> Option<u32> {
     (code & 0xFFFF_0000 == 0x8007_0000).then_some(code & 0xFFFF)
 }
 
+/// Task 028: open `path` for a CF call with the least access it needs. A placeholder that is not wholly on disk is
+/// opened with no oplock and no write access (an EXCLUSIVE+WRITE open of a cloud-only file asks the provider for
+/// the whole file first); a file on disk is opened EXCLUSIVE and only gets write access when that is refused
+/// (a read-only file).
+unsafe fn open_cf_least_access(
+    path: &std::path::Path,
+    path_wide: &[u16],
+) -> windows::core::Result<windows::Win32::Foundation::HANDLE> {
+    if is_cloud_placeholder(path) && !fully_on_disk(path) {
+        return CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE);
+    }
+    match CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_EXCLUSIVE) {
+        Err(e) if e.code() == windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult() => CfOpenFileWithOplock(
+            PCWSTR(path_wide.as_ptr()),
+            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+        ),
+        other => other,
+    }
+}
+
 /// Convert a brand-new plain local file at `path` into a Cloud Files
 /// placeholder WITHOUT marking it in-sync, called the moment we decide to upload
 /// it (task 0780) and BEFORE the upload completes.
@@ -492,6 +516,7 @@ fn win32_code(error: &anyhow::Error) -> Option<u32> {
 /// SAFETY: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
 /// (conversion rewrites reparse data) and always closes it before returning.
 pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -> anyhow::Result<()> {
+    super::refuse_alias(path)?;
     let path_wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
@@ -502,11 +527,8 @@ pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -
     // SAFETY: `path_wide` / `identity` live for the whole call; the handle is
     // closed on every exit path.
     unsafe {
-        let handle = CfOpenFileWithOplock(
-            PCWSTR(path_wide.as_ptr()),
-            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
-        )
-        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert-unsynced): {e}"))?;
+        let handle = open_cf_least_access(path, &path_wide)
+            .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert-unsynced): {e}"))?;
 
         // NONE: become a placeholder, keep bytes on disk, do NOT claim in-sync.
         let result = CfConvertToPlaceholder(
@@ -560,6 +582,11 @@ pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -
 /// SAFETY: opens a CF handle via `CfOpenFileWithOplock` and always closes it
 /// via `CfCloseHandle` before returning.
 pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
+    super::refuse_alias(path)?;
+    // Task 028: a placeholder not wholly on disk has nothing to free; open nothing (no fetch, no write access).
+    if is_cloud_placeholder(path) && !fully_on_disk(path) {
+        return Ok(0);
+    }
     // LD-0113 Amendment 7: the engine's own change of a read-only Backups file (the open needs write access).
     let _read_only = super::read_only::Lifted::new(path);
     // Logical size = bytes currently materialised on disk for a fully-hydrated
@@ -575,11 +602,8 @@ pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
     // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
     // every exit path.
     unsafe {
-        let handle = CfOpenFileWithOplock(
-            PCWSTR(path_wide.as_ptr()),
-            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
-        )
-        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (dehydrate): {e}"))?;
+        let handle = open_cf_least_access(path, &path_wide)
+            .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (dehydrate): {e}"))?;
 
         // length = -1 → dehydrate from `startingoffset` to EOF. NONE flags =
         // synchronous foreground dehydration (we want the bytes gone now so
@@ -716,6 +740,7 @@ pub fn hydrate_placeholder(path: &std::path::Path) -> anyhow::Result<()> {
 /// (setting pin state mutates the placeholder's reparse data) and always closes
 /// it via `CfCloseHandle` before returning — on every exit path, no leak.
 pub fn set_pin_state(path: &std::path::Path, pinned: bool, recurse: bool) -> anyhow::Result<()> {
+    super::refuse_alias(path)?;
     // LD-0113 Amendment 7: the engine's own change of a read-only Backups file (the open needs write access).
     let _read_only = super::read_only::Lifted::new(path);
     let path_wide: Vec<u16> = path
@@ -738,11 +763,8 @@ pub fn set_pin_state(path: &std::path::Path, pinned: bool, recurse: bool) -> any
     // SAFETY: `path_wide` is alive for the whole call; the handle is closed on
     // every exit path.
     unsafe {
-        let handle = CfOpenFileWithOplock(
-            PCWSTR(path_wide.as_ptr()),
-            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
-        )
-        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (set_pin_state): {e}"))?;
+        let handle = open_cf_least_access(path, &path_wide)
+            .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (set_pin_state): {e}"))?;
 
         let result = CfSetPinState(handle, pin_state, pin_flags, None);
 
@@ -834,7 +856,7 @@ fn handle_fully_on_disk(file: &std::fs::File) -> bool {
 /// provider for the WHOLE file: the native probe
 /// `desktop_0815_probe_the_guard_reads_a_cloud_only_file_without_fetching_it` counts one
 /// FETCH_DATA for all 8 MiB of its file, requested by the test's own process, after one such
-/// open, and none after these reads. On Guus's PC the 0.8.14 start-up guard's opens fetched
+/// open, and none after these reads. On the Windows test machine the 0.8.14 start-up guard's opens fetched
 /// 5,294 cloud-only files whole, one after another in the guard's own row order, ~42 GB in two
 /// hours, until C: was full. `CfGetPlaceholderInfo` needs no more than this handle.
 pub fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> {
@@ -1008,6 +1030,7 @@ pub fn promote_fetched_content(
     file_id: &str,
     path: &std::path::Path,
 ) -> anyhow::Result<bool> {
+    super::refuse_alias(path)?;
     use crate::engine_bridge::LocalEntry;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
@@ -1070,6 +1093,7 @@ pub fn promote_fetched_content(
 /// marked (already in sync, not wholly on disk, an upload queued, no agreed content, other bytes,
 /// an identity other than `file_id`, or the file is open elsewhere: the next pass tries again).
 pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> anyhow::Result<bool> {
+    super::refuse_alias(path)?;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     // Task 2284 A1.2: this process's own fetch of the file is refused until the pass returns (S1).
@@ -1194,6 +1218,7 @@ pub fn list_dir_attributes(dir: &std::path::Path) -> std::io::Result<std::collec
 /// SAFETY: `path_wide` lives for the whole call; the handle is closed on every
 /// exit path.
 pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyhow::Result<()> {
+    super::refuse_alias(path)?;
     // LD-0113 Amendment 7: the engine's own change of a read-only Backups file (the open needs write access; the
     // update writes FILE_ATTRIBUTE_NORMAL, so the attribute is set again after it).
     let _read_only = super::read_only::Lifted::new(path);
@@ -1375,6 +1400,7 @@ pub fn platform_view(path: &std::path::Path) -> crate::unknown_check::PlatformVi
 /// Only when this handle can't be had (no `WRITE_DAC` on a file someone else owns) is the 0.8.14
 /// handle used.
 pub fn mark_not_in_sync_path(path: &std::path::Path) -> anyhow::Result<()> {
+    super::refuse_alias(path)?;
     match mark_not_in_sync_without_data_access(path) {
         Ok(()) => return Ok(()),
         Err(e) => tracing::debug!(error = %e, "guard: no handle without data access; marking through an oplock handle"),
@@ -1492,6 +1518,62 @@ pub fn handle_identity(file: &std::fs::File) -> (bool, Option<String>) {
             .filter(|id| !id.is_empty())
             .map(str::to_string),
     )
+}
+
+/// Task 2283: what the entry at `path` is, by its placeholder's identity: a remote deletion removes an entry only when
+/// that identity names the deleted file. Read through a handle opened for its attributes only, on the entry itself
+/// (never a recall), sharing every access. An entry that is not a reparse point is an ordinary file or folder (never
+/// asked of the Cloud Files API); nothing there reads as not a placeholder too (the caller finds it gone).
+pub fn entry_identity(path: &std::path::Path) -> crate::unknown_check::EntryIdentity {
+    use crate::unknown_check::EntryIdentity;
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 => {
+            return EntryIdentity::NotPlaceholder;
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return EntryIdentity::NotPlaceholder,
+        Err(_) => return EntryIdentity::Unreadable,
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)
+    else {
+        return EntryIdentity::Unreadable;
+    };
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `file` is open for the call; the buffer is 8-byte aligned and its length passed.
+    let read = unsafe {
+        CfGetPlaceholderInfo(
+            HANDLE(file.as_raw_handle()),
+            CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
+    match read {
+        Ok(()) => {}
+        Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0) => {
+            return EntryIdentity::NotPlaceholder;
+        }
+        Err(_) => return EntryIdentity::Unreadable,
+    }
+    // SAFETY: a successful call wrote the struct, and its identity inside the buffer.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    let identity = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) };
+    match std::str::from_utf8(identity) {
+        Ok(id) if !id.is_empty() => EntryIdentity::Names(id.to_string()),
+        _ => EntryIdentity::Nameless,
+    }
 }
 
 /// Task 2191 (D11): [`handle_fully_on_disk`], for sign-out's held handle.

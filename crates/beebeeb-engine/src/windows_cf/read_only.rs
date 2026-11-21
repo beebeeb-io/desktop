@@ -1,4 +1,4 @@
-//! LD-0113 Amendment 7 (Guus, 2026-11-06 19:30, "Makes sense, do it"): files under Backups are
+//! LD-0113 Amendment 7 (owner, 2026-11-06 19:30, "Makes sense, do it"): files under Backups are
 //! read-only in Explorer. Every file placeholder at or under the Backups root carries
 //! `FILE_ATTRIBUTE_READONLY`, so an editor opens it read-only (Word shows its Read-only bar and offers
 //! Save As) and the file system itself refuses an open that writes. Folders are left alone: Explorer
@@ -10,7 +10,7 @@
 //! access only (no data access, so a cloud-only placeholder is never fetched), and a placeholder that
 //! was in sync is in sync again afterwards.
 //!
-//! Amendment 8a (Guus, 20:04): the Backups root carries core's `MSG_BADGE` as a Cloud Files custom
+//! Amendment 8a (owner, 20:04): the Backups root carries core's `MSG_BADGE` as a Cloud Files custom
 //! state, which Explorer shows in its Status column ([`set_read_only_badge`]).
 //!
 //! This file uses `std`, `tracing` and the `windows` crate only, so it type-checks on its own.

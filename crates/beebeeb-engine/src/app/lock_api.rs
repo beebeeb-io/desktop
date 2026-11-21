@@ -48,6 +48,14 @@ pub(super) const NO_SESSION: StartFacts = StartFacts {
     app_lock: None,
 };
 
+/// One Windows Hello (platform) prompt's claim on the screen lock ([`Engine::ask_screen_unlock`]): the lock as it
+/// held when the prompt was asked for. It lives as long as that lock ([`Engine::screen_unlock_ask_holds`]); a host
+/// keeps it beside its prompt and hands it back with the prompt's answer ([`Engine::unlock_screen_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenUnlockAsk {
+    turn: SessionGeneration,
+}
+
 /// Why a step of the lock did nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockRefused {
@@ -305,6 +313,8 @@ impl<C: CredentialStores> Engine<C> {
     /// work stay as they are. Every answer asked for before this moment is for another turn of the session
     /// ([`Engine::session_turn`] moves on), so a host drops it. Never waits on a session step.
     pub fn lock_screen(&self) -> Result<(), LockRefused> {
+        // Read before the lock is taken: a locked screen refuses the read (for the Office host's last snapshot).
+        let open = self.office_session_before_screen_lock();
         {
             let _writes = self.writes.write().unwrap_or_else(|p| p.into_inner());
             self.flow(|flow| flow.lock(LockLevel::Screen)).map_err(refused)?;
@@ -312,6 +322,8 @@ impl<C: CredentialStores> Engine<C> {
                 .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
         }
         self.publish();
+        // The lock shows first; then the Office host seals what was typed since its last snapshot, in the background.
+        self.office_after_screen_lock(open);
         Ok(())
     }
 
@@ -331,6 +343,31 @@ impl<C: CredentialStores> Engine<C> {
         Ok(())
     }
 
+    /// The claim of a Windows Hello (platform) prompt on the screen lock, read when the prompt is about to be asked
+    /// for: `None` when the screen is not locked (nothing a prompt could open, so none is asked). Read without
+    /// waiting (the window's thread asks): the turn, the state, then the turn again; a move between them is no claim.
+    pub fn ask_screen_unlock(&self) -> Option<ScreenUnlockAsk> {
+        let turn = self.acct.session_generation();
+        let locked = self.lock_state() == LockState::ScreenLocked;
+        (locked && self.acct.session_unchanged_since(turn)).then_some(ScreenUnlockAsk { turn })
+    }
+
+    /// Does the lock the prompt was asked for still hold? `false` from the moment the screen opened by any means
+    /// (another prompt, the password), locked again (every lock moves the session's turn, so a lock after an unlock
+    /// is another lock), the vault closed, a sign-out or another account's sign-in. A host takes its prompt away
+    /// then; whatever that prompt still answers opens nothing ([`Self::unlock_screen_for`]). Never waits.
+    pub fn screen_unlock_ask_holds(&self, ask: ScreenUnlockAsk) -> bool {
+        self.acct.session_unchanged_since(ask.turn)
+            && self.lock_state() == LockState::ScreenLocked
+            && self.acct.session_unchanged_since(ask.turn)
+    }
+
+    /// The prompt asked under `ask` said Windows verified the person: the screen opens only while that same lock
+    /// holds, decided in the hold every lock move takes ([`Self::unlock_screen_platform_verified`]).
+    pub fn unlock_screen_for(&self, ask: ScreenUnlockAsk) -> Result<(), LockRefused> {
+        self.unlock_screen_platform_verified(ask.turn)
+    }
+
     /// "Ask for my password when Beebeeb starts". `None`: the setting could not be read (the next start is closed).
     pub fn ask_password_at_start(&self) -> Option<bool> {
         self.vault().lock_flag(LockFlag::AskPasswordAtStart)
@@ -343,11 +380,16 @@ impl<C: CredentialStores> Engine<C> {
     pub fn lock_vault(&self) -> VaultLocked {
         let locked = self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
-            self.stop_proofs().await;
+            // A proof that did not end in time (`ProofStop::Unconfirmed`) does not hold the Lock back: the vault closes
+            // all the same, and the proof's seat refuses every start until its client is gone.
+            let _ = self.stop_proofs().await;
             let vault = self.vault();
             let signed_in = self.lock_state() != LockState::SignedOut;
             let mut survives_restart = signed_in && vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
             let stopped = self.stop_holding_step().await;
+            // The Office host seals its open edited documents first (bounded; it cannot refuse the lock).
+            self.office_before_session_end(super::office_session_end::SessionEnding::Lock);
+            self.end_office_scratch_at_session_end();
             self.forget_session(SessionTransition::Lock);
             if signed_in && vault.lock_flag(LockFlag::VaultClosed) != Some(true) {
                 survives_restart = vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
@@ -402,8 +444,9 @@ impl<C: CredentialStores> Engine<C> {
             if !may_close() {
                 return None;
             }
-            // A proof stops wherever a session ends, before the engine, as at a lock and a sign-out.
-            self.stop_proofs().await;
+            // A proof stops wherever a session ends, before the engine, as at a lock and a sign-out. One that did not
+            // end in time does not hold the close back: its seat refuses every start until its client is gone.
+            let _ = self.stop_proofs().await;
             // The account's recent searches leave this computer while the session is still in memory, as at a
             // sign-out, also once the refusal run marked the session ended (its own row only).
             let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
@@ -413,6 +456,9 @@ impl<C: CredentialStores> Engine<C> {
             let _ = vault.clear_lock_flag(LockFlag::Attempts);
             let mut survives_restart = vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
             let stopped = self.stop_holding_step().await;
+            // The Office scratch key leaves memory with the session (every sealed spill stops opening, the folder goes).
+            self.office_before_session_end(super::office_session_end::SessionEnding::Lock);
+            self.end_office_scratch_at_session_end();
             self.forget_session_as(SessionTransition::Lock, SessionMoved::Ended);
             if vault.lock_flag(LockFlag::VaultClosed) != Some(true) {
                 survives_restart = vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
@@ -539,8 +585,11 @@ impl<C: CredentialStores> Engine<C> {
         if !self.unlocked() {
             return Ok((turn, Some(old)));
         }
-        self.stop_proofs().await;
-        if self.stop_holding_step().await == SyncStop::Unconfirmed {
+        // A proof that did not end in time does not refuse the strong unlock, unlike an engine task that may still run
+        // (`unfinished_sign_out`): the old token is ended at the server afterwards, and the proof's seat refuses every
+        // start until it let go.
+        let _ = self.stop_proofs().await;
+        if super::unfinished_sign_out::a_task_may_hold_the_keys(&self.acct, self.stop_holding_step().await) {
             return Err(crate::account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
         }
         self.forget_session(SessionTransition::Lock);

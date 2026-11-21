@@ -189,6 +189,9 @@ pub enum SignOutAnswer {
     Refused(&'static str),
     /// Sent, not answered yet: the answer comes through [`AccountSource::sign_out_result`].
     Pending,
+    /// Not signed out: an open editor holds changes no save has landed. The confirm asks Save, Discard and sign out
+    /// or Cancel; nothing was changed.
+    Unsaved,
 }
 
 impl SecurityFacts {
@@ -720,6 +723,11 @@ pub trait AccountSource {
     /// Engine: `session.sign_out()`: ends this app's session and clears its keys from memory. The answer says
     /// whether it was done: the page draws nothing of a sign-out before it.
     fn sign_out_this_app(&mut self) -> SignOutAnswer;
+    /// [`Self::sign_out_this_app`] after the person chose "Discard and sign out": the open editors' unsaved changes
+    /// are dropped with the session. A source that cannot refuse for unsaved changes never needs it.
+    fn sign_out_discarding_unsaved(&mut self) -> SignOutAnswer {
+        self.sign_out_this_app()
+    }
     /// Engine: `session.sign_out_all_on_this_pc()`: ends every Beebeeb session this PC holds
     /// and removes the shared 'Continue as' entry.
     fn sign_out_all_apps(&mut self) -> SignOutAnswer;

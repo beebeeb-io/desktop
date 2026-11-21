@@ -145,7 +145,9 @@ impl EngineBridge {
         } else {
             ItemKind::File
         };
-        let decrypted = if root.is_folder {
+        let decrypted = if root.claimed {
+            return shared_claimed_name(&item_kind).to_string();
+        } else if root.is_folder {
             folder_key
                 .zip(folder_keys_response)
                 .and_then(|(key, keys_response)| self.decrypted_folder_root_name(root, key, keys_response))
@@ -227,7 +229,7 @@ impl EngineBridge {
 
         for root in &roots {
             let mut folder_material = None;
-            if root.is_folder {
+            if root.is_folder && !root.claimed {
                 match self.shared_folder_material(root).await {
                     Ok((folder_key, folder_keys_response)) => {
                         folder_material = Some((folder_key, folder_keys_response));

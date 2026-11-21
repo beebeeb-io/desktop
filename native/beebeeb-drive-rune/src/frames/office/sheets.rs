@@ -5,7 +5,7 @@
 //!
 //! The grid is OURS: Rune elements drawn from a [`SheetView`] (the engine gives geometry and cells; we draw), never
 //! an image. [`sheets_fixture::board`] is the board's workbook; a live host fills the same shape later.
-//! DW-1559 (the Data tab) is a 0.9.1 frame (the editor): its row stays `placeholder::scene`, nothing of it is drawn.
+//! DW-1559 (the Data tab) is the editor's: its scene is `edit::sheet_ribbon::scene`, the same as DW-1508e's.
 //!
 //! Wiring (the integration lane applies it, see this lane's BRANCH-NOTES): `Body::Sheet(SheetView)` in
 //! `viewers::source`, one arm in `viewers::view` that calls [`window`], one `scene_file` arm for DW-1508.
@@ -32,6 +32,7 @@ use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::{caption, kit, sidebar};
 
 use super::docs::{ABOUT, ENCRYPTED, KEEP_FIRST, Live, OPEN_ELSEWHERE};
+use super::edit::sheet as edit_sheet;
 use super::states::QUIET_LINE;
 
 #[path = "sheets_fixture.rs"]
@@ -40,7 +41,8 @@ pub mod sheets_fixture;
 /// The group's board frames and the scene that shows each (`frames::scenes`).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1508", |s| viewers::set_scene(s, "DW-1508")),
-    ("DW-1559", placeholder::scene),
+    ("DW-1508e", super::edit::sheet_ribbon::scene),
+    ("DW-1559", super::edit::sheet_ribbon::scene),
 ];
 
 // ---------------------------------------------------------------------------
@@ -68,7 +70,8 @@ pub struct CellText {
     pub formula: Option<String>,
 }
 
-/// A chart or picture the sheet places: its box in points from the sheet's origin, and the cells it starts and ends in.
+/// A chart or picture the sheet places: its top-left corner `x_pt`, `y_pt` into its `from` cell (the protocol's words: a
+/// cell plus an offset into it), its size, and the cells it starts and ends in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SheetAnchor {
     pub anchor: u32,
@@ -95,7 +98,8 @@ pub struct SheetView {
     pub current: Cell,
     /// The current cell's formula as text ("=SUM(B2:B9)"), or its value's text.
     pub formula: String,
-    /// Rows and columns that stay in view, as the file says.
+    /// Rows and columns that stay in view, as the file says (the largest a block reported: `hold_frozen`). Only as many
+    /// as fit the screen are drawn.
     pub frozen: (u32, u32),
     pub merges: Vec<(Cell, Cell)>,
     /// The sheet index `active` points at in the workbook (the tabs may be fewer than the sheets).
@@ -253,7 +257,7 @@ pub fn status_words(view: &SheetView) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// 12px/400 on 16px: a cell's words.
-const CELL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
+pub(crate) const CELL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
 const CELL_BOLD: TextStyle = TextStyle::new(12.0, 650.0).lh(16.0);
 /// 11.5px mono on 16px: a figure in a cell (the board's `font-mono t-num`), and its bold twin (the total row).
 const CELL_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(16.0);
@@ -269,16 +273,16 @@ const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(
 const TAB_ON: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
 const TAB: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
 /// 11.5px mono on 17px: a cell's name and the formula (machine text).
-const MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
+pub(crate) const MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
 /// 11.5px/600 on 17px: "Encrypted".
 const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
 
 /// Widths in the board: the row numbers' column, the cell box, and the heights of the bars.
-const ROW_HEAD_W: f32 = 40.0;
-const HEADER_H: f32 = 24.0;
+pub(crate) const ROW_HEAD_W: f32 = 40.0;
+pub(crate) const HEADER_H: f32 = 24.0;
 const FORMULA_BAR_H: f32 = 34.0;
 /// The cell's name is plain text 92 wide on the board (no box).
-const CELLBOX_W: f32 = 92.0;
+pub(crate) const CELLBOX_W: f32 = 92.0;
 const TABS_H: f32 = 30.0;
 /// The viewer bar's height (`OvBar`).
 const VBAR_H: f32 = 38.0;
@@ -303,16 +307,21 @@ pub fn formula_text(view: &SheetView) -> String {
     here.map(|c| c.text.clone()).unwrap_or_default()
 }
 
-/// The formula bar, read-only: the cell's name as text, then the formula as text (no "fx" mark: the board draws none). No box around either.
-fn formula_bar(view: &SheetView, t: &Theme) -> El {
+/// The formula bar: the cell's name as text, then the formula as text (no "fx" mark: the board draws none). No box around
+/// either. In the editor `formula` is the element that shows and edits it (`edit::sheet::formula`); the viewer's is read-only.
+fn formula_bar(view: &SheetView, cellbox: Option<El>, formula: Option<El>, t: &Theme) -> El {
     let name = a1(view.current);
-    let cellbox = row()
+    let shown = row()
         .key("sh-cellbox")
         .role("group")
         .label(format!("Cell {name}"))
         .w(CELLBOX_W)
-        .center_y()
-        .child(kit::label("sh-cellbox-text", name.clone(), MONO, t.text));
+        .center_y();
+    // The editor's cell box is a field (`edit::sheet::cell_box`); the viewer's is the name as text.
+    let cellbox = match cellbox {
+        Some(field) => shown.child(field),
+        None => shown.child(kit::label("sh-cellbox-text", name.clone(), MONO, t.text)),
+    };
     row()
         .key("sh-formula-bar")
         .role("group")
@@ -326,11 +335,11 @@ fn formula_bar(view: &SheetView, t: &Theme) -> El {
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
         .child(cellbox)
-        .child(
+        .child(formula.unwrap_or_else(|| {
             kit::label("sh-formula", formula_text(view), MONO, t.text)
                 .truncate()
-                .min_w(0.0),
-        )
+                .min_w(0.0)
+        }))
 }
 
 static LESS: Icon = Icon {
@@ -429,51 +438,33 @@ fn bounds(range: (Cell, Cell)) -> (u32, u32, u32, u32) {
     (a.row.min(b.row), a.row.max(b.row), a.col.min(b.col), a.col.max(b.col))
 }
 
-/// How many columns the merge starting at this cell spans to the right (1: none), and whether this cell is hidden
-/// under another cell's merge.
-fn merge_of(view: &SheetView, r: u32, c: u32) -> (u32, bool) {
-    for m in &view.merges {
-        let (r0, r1, c0, c1) = bounds(*m);
-        if r < r0 || r > r1 || c < c0 || c > c1 {
-            continue;
-        }
-        if r == r0 && c == c0 {
-            return (c1 - c0 + 1, false);
-        }
-        return (1, true);
-    }
-    (1, false)
-}
-
-/// Which rows and columns of the sheet are drawn.
+/// Which rows and columns of the sheet are drawn, and where (`sheets_bounds::Side`).
 pub struct Shown {
-    pub rows: Vec<u32>,
-    pub cols: Vec<u32>,
+    rows: Side,
+    cols: Side,
 }
 
 /// A row without a size yet, and a column without one (what the source fills gaps with).
-const ROW_PT: f32 = 15.0;
-const COL_PT: f32 = 48.0;
+pub(crate) const ROW_PT: f32 = 15.0;
+pub(crate) const COL_PT: f32 = 48.0;
 
 impl Shown {
     /// Everything the view holds (the fixture's workbook).
     fn all(view: &SheetView) -> Shown {
         Shown {
-            rows: (0..view.row_heights.len() as u32).collect(),
-            cols: (0..view.col_widths.len() as u32).collect(),
+            rows: Side::all(&view.row_heights),
+            cols: Side::all(&view.col_widths),
         }
     }
 
-    /// The frozen rows and columns, then those from `top_left` that fit `screen` (points).
+    /// The frozen rows and columns that fit `screen` (points), then those from `top_left` that fit the rest: at most a
+    /// screen, however large the frozen panes, and at most `MAX_DRAWN_CELLS` cells.
     fn from_top_left(view: &SheetView, screen: (f32, f32)) -> Shown {
-        let (rows_in, cols_in) = fit(view, screen);
         let (r0, c0) = (view.top_left.row, view.top_left.col);
-        let mut rows: Vec<u32> = (0..view.frozen.0.min(r0)).collect();
-        rows.extend(r0..r0 + rows_in);
-        let mut cols: Vec<u32> = (0..view.frozen.1.min(c0)).collect();
-        cols.extend(c0..c0 + cols_in);
-        rows.retain(|r| (*r as usize) < view.row_heights.len());
-        cols.retain(|c| (*c as usize) < view.col_widths.len());
+        let rows = Side::walk(&view.row_heights, view.frozen.0, r0, screen.1, ROW_PT);
+        let mut cols = Side::walk(&view.col_widths, view.frozen.1, c0, screen.0, COL_PT);
+        // The rows are at most `MAX_LINES`, so cutting the columns keeps the product within the budget.
+        cols.keep((MAX_DRAWN_CELLS / rows.len().max(1)).max(1));
         Shown { rows, cols }
     }
 }
@@ -482,7 +473,7 @@ impl Shown {
 pub fn fit(view: &SheetView, screen: (f32, f32)) -> (u32, u32) {
     let count = |sizes: &[f32], from: u32, room: f32, gap: f32| {
         let (mut used, mut n) = (0.0, 0u32);
-        while used < room && n < 4096 {
+        while used < room && n < MAX_LINES {
             used += sizes.get((from + n) as usize).copied().unwrap_or(gap);
             n += 1;
         }
@@ -522,19 +513,17 @@ pub fn scroll_key(view: &mut SheetView, key: &Key, m: &Mods) -> bool {
     true
 }
 
-/// The charts and pictures of the sheet, each at its place from the first row and column in view, clipped by the grid.
-/// A picture that has not come draws its box empty.
-fn anchors_of(view: &SheetView, live: Option<&Live>, t: &Theme) -> El {
+/// The charts and pictures of the sheet, each at its `from` cell plus its offset into that cell (the protocol's words),
+/// from where this frame drew (or walked back to) that cell's row and column, clipped by the grid. A picture that has
+/// not come draws its box empty.
+fn anchors_of(view: &SheetView, shown: &Shown, live: Option<&Live>, t: &Theme) -> El {
     let mut layer = el().key("sh-anchors").absolute(0.0, 0.0).size(0.0, 0.0);
     let Some(live) = live else { return layer };
-    let x0: f32 = (0..view.top_left.col)
-        .map(|c| view.col_widths.get(c as usize).copied().unwrap_or(COL_PT))
-        .sum();
-    let y0: f32 = (0..view.top_left.row)
-        .map(|r| view.row_heights.get(r as usize).copied().unwrap_or(ROW_PT))
-        .sum();
     for a in &view.anchors {
-        let (x, y) = (a.x_pt - x0, a.y_pt - y0);
+        let (Some(x), Some(y)) = (shown.cols.start_of(a.from.col), shown.rows.start_of(a.from.row)) else {
+            continue;
+        };
+        let (x, y) = (x + a.x_pt, y + a.y_pt);
         if x + a.w_pt <= 0.0 || y + a.h_pt <= 0.0 || x >= live.screen.0 || y >= live.screen.1 {
             continue;
         }
@@ -560,8 +549,18 @@ fn anchors_of(view: &SheetView, live: Option<&Live>, t: &Theme) -> El {
 }
 
 /// The grid: the corner and the column letters, then each row with its number and its cells.
-fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
-    let by_place: HashMap<(u32, u32), &CellText> = view.cells.iter().map(|c| ((c.row, c.col), c)).collect();
+fn grid(view: &SheetView, shown: &Shown, anchors: El, layer: Option<El>, t: &Theme) -> El {
+    // Only the cells on a drawn row and column are indexed: a sheet held at its cell cap costs a scan, not 65,536 inserts.
+    let (rows_in, cols_in): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) =
+        (shown.rows.iter().copied().collect(), shown.cols.iter().copied().collect());
+    let by_place: HashMap<(u32, u32), &CellText> = view
+        .cells
+        .iter()
+        .filter(|c| rows_in.contains(&c.row) && cols_in.contains(&c.col))
+        .map(|c| ((c.row, c.col), c))
+        .collect();
+    let width = |c: u32| view.col_widths.get(c as usize).copied().unwrap_or(0.0);
+    let merges = MergesShown::of(view, &shown.rows, &shown.cols, width);
     let selected = view.selection.map(bounds);
     let in_selection =
         |r: u32, c: u32| selected.is_some_and(|(r0, r1, c0, c1)| r >= r0 && r <= r1 && c >= c0 && c <= c1);
@@ -572,7 +571,7 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
             .border_sides([0.0, kit::HAIR, kit::HAIR, 0.0], t.separator)
             .border_layout(),
     );
-    for &c in &shown.cols {
+    for &c in shown.cols.iter() {
         let w = &view.col_widths[c as usize];
         head = head.child(
             row()
@@ -592,10 +591,12 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
         );
     }
     let mut body = col().key("sh-body");
-    for &r in &shown.rows {
+    for (ri, &r) in shown.rows.iter().enumerate() {
         let h = &view.row_heights[r as usize];
-        // A frozen boundary is a heavier line under the last frozen row.
-        let under = if view.frozen.0 > 0 && r + 1 == view.frozen.0 {
+        // A frozen boundary is a heavier line under the last frozen row (under the last one drawn when the screen cut
+        // the frozen rows short).
+        let cut_here = shown.rows.cut && ri + 1 == shown.rows.frozen;
+        let under = if view.frozen.0 > 0 && (r + 1 == view.frozen.0 || cut_here) {
             1.0
         } else {
             kit::HAIR
@@ -611,13 +612,26 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
                 .border_layout()
                 .child(fitted(format!("sh-row-{r}-t"), &number, ROW_NUMBER, t.text_tertiary)),
         );
-        for &c in &shown.cols {
-            let (span, hidden) = merge_of(view, r, c);
-            if hidden {
-                continue;
-            }
-            let span = span.max(1);
-            let w: f32 = (c..c + span).filter_map(|i| view.col_widths.get(i as usize)).sum();
+        for (ci, &c) in shown.cols.iter().enumerate() {
+            // A merge's first row spans its drawn columns; its other rows draw a blank as wide, so the cells after it
+            // stay in their columns; only its last row has the line under it.
+            let (w, under) = match merges.at(ri, ci) {
+                AtCell::Covered => continue,
+                AtCell::Own => (width(c), under),
+                AtCell::Spans { w, last } => (w, if last { under } else { 0.0 }),
+                AtCell::Blank { w, last } => {
+                    let fill = if in_selection(r, c) { t.selection } else { t.paper };
+                    line = line.child(
+                        el().key(format!("sh-blank-{r}-{c}"))
+                            .w(w)
+                            .h(*h)
+                            .fill(fill)
+                            .border_sides([0.0, kit::HAIR, if last { under } else { 0.0 }, 0.0], t.separator)
+                            .border_layout(),
+                    );
+                    continue;
+                }
+            };
             let here = Cell { row: r, col: c };
             let mut cell = row()
                 .key(format!("sh-cell-{r}-{c}"))
@@ -653,7 +667,7 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
         }
         body = body.child(line);
     }
-    col()
+    let grid = col()
         .key("sh-grid")
         .role("grid")
         .label("Sheet")
@@ -664,7 +678,12 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, t: &Theme) -> El {
         .clip_rounded(0.0)
         .child(head)
         .child(body)
-        .child(anchors)
+        .child(anchors);
+    // The editor's pointer, keys and cell editor lie over the cells (under the scroll viewports `window_with` adds).
+    match layer {
+        Some(layer) => grid.child(layer),
+        None => grid,
+    }
 }
 
 #[path = "sheets_scroll.rs"]
@@ -673,7 +692,12 @@ pub use sheets_scroll::scroll_key_tx;
 
 #[path = "sheets_tabs.rs"]
 mod sheets_tabs;
-use sheets_tabs::sheet_tabs;
+
+#[path = "sheets_bounds.rs"]
+mod sheets_bounds;
+pub use sheets_bounds::Geometry;
+use sheets_bounds::{AtCell, MAX_DRAWN_CELLS, MAX_LINES, MergesShown, Side};
+use sheets_tabs::sheet_tabs_edit;
 
 /// A status word with its figure in mono, as the board sets it ("Sum " sans, "13,220" mono; "Count 8" is all sans).
 fn status_word(key: String, word: &str, t: &Theme) -> El {
@@ -693,76 +717,78 @@ fn status_word(key: String, word: &str, t: &Theme) -> El {
 
 /// The status line (`OvStatus`): the sheet and the selection's figures on the left, then Encrypted, a middle dot and
 /// About on the right. Its parts are keyed `st-<N>` in order, each middle dot between them numbered too: with the
-/// board's four left words that is st-0 to st-6, Encrypted st-7, the dot st-8, About st-9.
-fn status(view: &SheetView, t: &Theme) -> El {
+/// board's four left words that is st-0 to st-6, Encrypted st-7, the dot st-8, About st-9. In the editor `kept` (how the
+/// workbook is kept: "saved as version 4", "unsaved changes") follows Encrypted and its dot, then a dot more before About.
+fn status(view: &SheetView, kept: Option<&str>, t: &Theme) -> El {
     let words = status_words(view);
-    let mut bar = row()
-        .key("status-bar")
-        .role("status")
-        .w_full()
-        .h(28.0)
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
+    let mut bar: Vec<El> = Vec::new();
     let mut n = 0;
     for (i, word) in words.iter().enumerate() {
         if i > 0 {
-            bar = bar.child(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary));
+            bar.push(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary));
             n += 1;
         }
-        bar = bar.child(status_word(format!("st-{n}"), word, t));
+        bar.push(status_word(format!("st-{n}"), word, t));
         n += 1;
     }
     let mut said = String::new();
     if view.missing_content {
         // The board's OvStatus: after the left words, `·` and the one quiet line.
-        bar = bar
-            .child(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary))
-            .child(fitted(
-                format!("st-{}", n + 1),
-                QUIET_LINE,
-                type_::STATUS,
-                t.text_tertiary,
-            ));
+        bar.push(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary));
+        bar.push(fitted(
+            format!("st-{}", n + 1),
+            QUIET_LINE,
+            type_::STATUS,
+            t.text_tertiary,
+        ));
         n += 2;
         said = format!(". {QUIET_LINE}");
     }
     let enc = format!("st-{n}");
     let dot = format!("st-{}", n + 1);
-    let about = format!("st-{}", n + 2);
-    bar.label(format!("{}{said}. {ENCRYPTED}", words.join(", ")))
-        .child(el().key("st-gap").grow(1.0))
-        .child(
-            row()
-                .key(format!("{enc}-box"))
-                .gap(4.0)
-                .center_y()
-                .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
-                .child(fitted(enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
-        )
-        .child(fitted(dot, "\u{00B7}", type_::STATUS, t.text_tertiary))
-        .child(
-            el().key(format!("{about}-box"))
-                .role("link")
-                .label("About this viewer")
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    if let Some(ui) = viewers::ui(s) {
-                        ui.office_about();
-                    }
-                })
-                .child({
-                    kit::note_text(&about, &about, ABOUT, type_::STATUS, t.text_tertiary);
-                    rich(ABOUT, vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)])
-                        .key(about)
-                        .font(type_::STATUS)
-                        .color(t.text_tertiary)
-                        .w(rune::text::advance(ABOUT, type_::STATUS))
-                }),
-        )
+    let (kept_at, about) = match kept {
+        Some(_) => (
+            Some((format!("st-{}", n + 2), format!("st-{}", n + 3))),
+            format!("st-{}", n + 4),
+        ),
+        None => (None, format!("st-{}", n + 2)),
+    };
+    let kept_words = kept.map(|k| format!(", {k}")).unwrap_or_default();
+    let label = format!("{}{said}. {ENCRYPTED}{kept_words}", words.join(", "));
+    bar.push(el().key("st-gap").grow(1.0));
+    bar.push(
+        row()
+            .key(format!("{enc}-box"))
+            .gap(4.0)
+            .center_y()
+            .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
+            .child(fitted(enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
+    );
+    bar.push(fitted(dot, "\u{00B7}", type_::STATUS, t.text_tertiary));
+    if let (Some(words), Some((kept_key, dot_key))) = (kept, kept_at) {
+        bar.push(fitted(kept_key, words, type_::STATUS, t.text_tertiary));
+        bar.push(fitted(dot_key, "\u{00B7}", type_::STATUS, t.text_tertiary));
+    }
+    bar.push(
+        el().key(format!("{about}-box"))
+            .role("link")
+            .label("About this viewer")
+            .focusable(true)
+            .on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.office_about();
+                }
+            })
+            .child({
+                kit::note_text(&about, &about, ABOUT, type_::STATUS, t.text_tertiary);
+                rich(ABOUT, vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)])
+                    .key(about)
+                    .font(type_::STATUS)
+                    .color(t.text_tertiary)
+                    .w(rune::text::advance(ABOUT, type_::STATUS))
+            }),
+    );
+    crate::ui::status_bar::frame(bar, t).label(label)
 }
 
 /// The window with the spreadsheet viewer: caption, sidebar, the window's toolbar, then the formula bar, the grid,
@@ -781,14 +807,60 @@ pub fn window_live(
     live: &Live,
     cells: &dyn Fn(u32, u32, u32, u32, u32),
 ) -> El {
-    let (rows, cols) = fit(view, live.screen);
-    cells(view.sheet, view.top_left.row, view.top_left.col, rows * 2, cols * 2);
-    window_with(s, cx, ui, view, &Shown::from_top_left(view, live.screen), Some(live))
+    let shown = Shown::from_top_left(view, live.screen);
+    for (row, col, rows, cols) in asks(view, &shown, live.screen) {
+        cells(view.sheet, row, col, rows, cols);
+    }
+    window_with(s, cx, ui, view, &shown, Some(live))
+}
+
+/// The blocks of cells one frame asks, as (first row, first column, rows, columns): the frozen block first (the corner,
+/// then the frozen rows across the scrolled columns, then the frozen columns down the scrolled rows), then the cells in
+/// view and one screen more. Together at most `MAX_DRAWN_CELLS` cells, the earlier blocks keeping theirs.
+fn asks(view: &SheetView, shown: &Shown, screen: (f32, f32)) -> Vec<(u32, u32, u32, u32)> {
+    let (rows, cols) = fit(view, screen);
+    let (r0, c0) = (view.top_left.row, view.top_left.col);
+    let (fr, fc) = (shown.rows.frozen_walked(), shown.cols.frozen_walked());
+    let (sr, sc) = (rows.saturating_mul(2), cols.saturating_mul(2));
+    let mut left = MAX_DRAWN_CELLS as u64;
+    let mut out = Vec::new();
+    for (row, col, h, w) in [(0, 0, fr, fc), (0, c0, fr, sc), (r0, 0, sr, fc), (r0, c0, sr, sc)] {
+        if h == 0 || w == 0 || left == 0 {
+            continue;
+        }
+        // A block over what is left keeps its rows and gives up columns.
+        let h = u64::from(h).min(left);
+        let w = u64::from(w).min((left / h).max(1));
+        left -= (h * w).min(left);
+        out.push((row, col, h as u32, w as u32));
+    }
+    out
 }
 
 fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: &Shown, live: Option<&Live>) -> El {
     let t = tokens::theme(cx.system_dark());
-    let mut cells = grid(view, shown, anchors_of(view, live, &t), &t);
+    // The workbook is open for editing (a live one): the grid takes the pointer and the keys, the formula bar edits.
+    let editing = live.is_some()
+        && ui
+            .office
+            .edit
+            .as_ref()
+            .is_some_and(|e| e.kind == beebeeb_office_protocol::office::EditKind::Xlsx);
+    let (layer, cellbox, formula) = if editing {
+        let geometry = Geometry::of(view, &shown.rows, &shown.cols);
+        let room = cx
+            .layout_size("sh-grid")
+            .map_or((800.0, 600.0), |[w, h]| ((w - ROW_HEAD_W).max(0.0), (h - HEADER_H).max(0.0)));
+        (
+            Some(edit_sheet::layer(&ui.office.grid, view, geometry, room, &t)),
+            Some(edit_sheet::cell_box(&ui.office.grid, view, &t)),
+            Some(edit_sheet::formula(&ui.office.grid, view, &t)),
+        )
+    } else {
+        edit_sheet::reset(s);
+        (None, None, None)
+    };
+    let mut cells = grid(view, shown, anchors_of(view, shown, live, &t), layer, &t);
     // A workbook in a renderer scrolls (`sheets_scroll`); the fixture's is the board's still sheet.
     if live.is_some() {
         let (down, across) = (cx.layout(sheets_scroll::DOWN), cx.layout(sheets_scroll::ACROSS));
@@ -802,9 +874,9 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
             .min_w(0.0)
             .h_full()
             .child(viewer_bar(&t))
-            .child(formula_bar(view, &t))
+            .child(formula_bar(view, cellbox, formula, &t))
             .child(cells)
-            .child(sheet_tabs(view, live.is_some(), room, &t)),
+            .child(sheet_tabs_edit(view, live.is_some(), room, editing, &t)),
     );
     if ui.show_details {
         body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
@@ -816,9 +888,26 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(viewers::office::toolbar(s, ui, false, &t))
-        .child(body)
-        .child(status(view, &t));
+        .child(viewers::office::toolbar(s, ui, false, &t));
+    let main = match ui.office.edit.as_ref() {
+        // The editor's frame, with the sheet's own status line: the figures of the selection, then how it is kept
+        // (`edit::chrome`'s is the document's: pages and words).
+        Some(edit) if editing => {
+            let kept = super::edit::save::kept_words(edit, ui.file.version);
+            main.child(
+                col()
+                    .key("edit-chrome")
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .w_full()
+                    .child(super::edit::sheet_ribbon::ribbon(ui, edit.unsaved(), &t))
+                    .child(body)
+                    .child(status(view, Some(&kept), &t)),
+            )
+        }
+        Some(edit) => main.child(super::edit::chrome(s, cx, ui, edit.kind, body)),
+        None => main.child(body).child(status(view, None, &t)),
+    };
     let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
         row()
             .key("body")
@@ -912,7 +1001,7 @@ mod tests {
     }
 
     /// The scene sets what the frame names: the sheet open, its first tab, B2:B9 selected, B10 current, no ribbon;
-    /// and DW-1559 (0.9.1) is still the placeholder.
+    /// and DW-1559 is the editor's `edit::sheet_ribbon` scene.
     #[test]
     fn office_sheets_scenes_set_their_state() {
         let mut state = scene_state();
@@ -923,10 +1012,10 @@ mod tests {
         let rt = runtime_of(state, false);
         assert!(find(&rt, "rib").is_none(), "a viewer has no ribbon");
         let row_1559 = FRAMES.iter().find(|(id, _)| *id == "DW-1559").expect("the DW-1559 row");
-        assert_eq!(
+        assert_ne!(
             row_1559.1 as usize,
             placeholder::scene as usize,
-            "DW-1559 is a 0.9.1 frame"
+            "DW-1559 is the sheet ribbon's scene (w04-ui-sheet-ribbon)"
         );
     }
 
@@ -1088,3 +1177,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sheets_live_tests.rs"]
 mod live_tests;
+
+#[cfg(test)]
+#[path = "sheets_budget_tests.rs"]
+mod budget_tests;

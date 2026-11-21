@@ -400,7 +400,7 @@ impl SystemAudio {
             return Err(ErrorCode::Corrupt);
         }
         let channels = channels as u16;
-        Ok(SystemAudio {
+        let mut audio = SystemAudio {
             reader,
             codec,
             flags,
@@ -412,7 +412,12 @@ impl SystemAudio {
             done: 0,
             source_ended: false,
             skip_before: None,
-        })
+        };
+        // ux-57: Windows may load a track's decoder only when the first sample is read (a PC without the AAC decoder
+        // opens, then fails there). Read one now, so a missing decoder is an answer of `open`, where a video beside
+        // it can go on without sound. The sample stays in the resampler.
+        audio.read_more()?;
+        Ok(audio)
     }
 
     fn fail(&self, e: windows::core::Error) -> ErrorCode {

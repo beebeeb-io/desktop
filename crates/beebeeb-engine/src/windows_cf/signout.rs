@@ -24,6 +24,50 @@ pub enum UnknownFiles {
     Keep { dir: std::path::PathBuf },
     /// Delete them with the rest.
     Delete,
+    /// w28, an account switch (nobody was asked, nobody can be): delete only what the engine knows is synced and
+    /// unchanged. The engine asked (`SyncRootPort::may_hold_bytes`) about the paths of `at` and was told nothing is
+    /// there, so an item of any kind found at one of them, or at a path of the database's files of unknown content,
+    /// was made since: it is never deleted, never copied, and the purge refuses before it deletes anything.
+    /// Build it with [`UnknownFiles::refuse_at`].
+    Refuse { at: std::collections::HashSet<String> },
+}
+
+impl UnknownFiles {
+    /// [`UnknownFiles::Refuse`] for the database's paths `at` (`/a/b` or `a/b`), keyed as `prepare` keys a path.
+    pub fn refuse_at<'a>(at: impl IntoIterator<Item = &'a str>) -> Self {
+        UnknownFiles::Refuse { at: at.into_iter().map(path_key).collect() }
+    }
+}
+
+/// A database path as `prepare` keys a path under the sync root: no leading slash, `\` between names.
+fn path_key(path: &str) -> String {
+    path.trim_start_matches('/').replace('/', "\\")
+}
+
+/// w28: said (never with a name) when a switch's purge meets an item it was not told about.
+const SWITCH_ITEM_APPEARED: &str =
+    "Something new appeared in the Beebeeb folder where nothing was a moment ago, so nothing was removed.";
+
+/// w29: said (never with a name) when a switch's purge meets a file that may hold a person's unsent bytes.
+const SWITCH_BYTES_HELD: &str = "A file in the Beebeeb folder may hold changes that were never sent, so nothing was removed.";
+
+/// w29: whether the item at `path` is a placeholder holding no bytes on this PC, proven through a handle that fetches
+/// nothing (the reparse point is opened, never followed, never read). `false` for anything else or anything that
+/// cannot be read: only a proof of nothing frees an account switch to remove an item of unknown content.
+pub fn placeholder_holds_nothing(path: &Path) -> bool {
+    // Attribute access only: a read open of a cloud placeholder asks the provider for the whole file (0.8.14).
+    let Ok(file) = super::placeholders::open_for_state(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else { return false };
+    if metadata.is_dir() || !super::placeholders::handle_identity(&file).0 {
+        return false;
+    }
+    if super::placeholders::held_fully_on_disk(&file) {
+        return false;
+    }
+    super::placeholders::on_disk_ranges(&file, metadata.len())
+        .is_ok_and(|ranges| ranges.iter().all(|(_, length)| *length == 0))
 }
 
 /// What the purge kept (`UnknownFiles::Keep`): how many files, and where.
@@ -47,13 +91,12 @@ const KEEP_COPY_FAILED: &str =
 /// as possibly holding another file's. Never trusted without the identity there (self-review).
 fn unknown_paths(db: &StateDb) -> anyhow::Result<HashMap<String, crate::unknown_check::ExpectedAt>> {
     use crate::unknown_check::ExpectedAt;
-    let key = |path: &str| path.trim_start_matches('/').replace('/', "\\");
     let mut paths = HashMap::new();
     for (path, _, _) in db.list_unknown_orphans()? {
-        paths.insert(key(&path), ExpectedAt::OrphanCandidate);
+        paths.insert(path_key(&path), ExpectedAt::OrphanCandidate);
     }
     for row in db.list_guarded()? {
-        paths.insert(key(&row.path), ExpectedAt::Guarded(row.file_id));
+        paths.insert(path_key(&row.path), ExpectedAt::Guarded(row.file_id));
     }
     Ok(paths)
 }
@@ -89,7 +132,7 @@ pub fn purge(
     let keep_dir = match (db.windows_signout_preflight().is_ok(), unknown) {
         (true, _) => None,
         (false, UnknownFiles::Keep { dir }) => Some(dir.clone()),
-        (false, UnknownFiles::Delete) => anyhow::bail!("{}", UNSENT_WORK_REFUSAL),
+        (false, UnknownFiles::Delete | UnknownFiles::Refuse { .. }) => anyhow::bail!("{}", UNSENT_WORK_REFUSAL),
     };
     let rows = db.list_files()?;
     let mut cache_paths = rows
@@ -252,10 +295,21 @@ fn prepare(
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         let relative = path.strip_prefix(root)?.to_string_lossy().replace('/', "\\");
+        // w28: an item where the engine was told (or the database says) a file of unknown content may be is new
+        // since the check: nothing is opened for deletion, and the purge stops before it deletes anything.
+        if let UnknownFiles::Refuse { at } = unknown {
+            anyhow::ensure!(!at.contains(&relative), "{}", SWITCH_ITEM_APPEARED);
+        }
         // Task 2191 (D11): a file of unknown content, or a placeholder left at another path that
         // holds unknown bytes, is never deleted unasked: decided from the database, never from
         // the platform's in-sync state (which 0.8.12 set over edits).
-        if let Some(expected) = unknown_set.get(&relative).filter(|_| !path.is_dir()) {
+        if let (UnknownFiles::Refuse { .. }, true) = (unknown, unknown_set.contains_key(&relative) && !path.is_dir()) {
+            // w29, an account switch: a file of unknown content is removed only when it provably holds no bytes on
+            // this PC (a placeholder nothing was fetched into; read with attribute access, which fetches nothing).
+            // Anything else may be a person's unsent work: the purge refuses before it deletes anything. What holds
+            // nothing is then judged by the ordinary rules below (its identity, in sync, no changes).
+            anyhow::ensure!(placeholder_holds_nothing(&path), "{}", SWITCH_BYTES_HELD);
+        } else if let Some(expected) = unknown_set.get(&relative).filter(|_| !path.is_dir()) {
             if prepare_unknown(db, &path, &relative, expected, unknown, kept, handles)? {
                 continue;
             }

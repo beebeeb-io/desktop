@@ -5,14 +5,17 @@
 //! the sheets that do not fit are counted in `more`. Sizes here are counted the way each message encodes; the
 //! encoding itself stays the last word ([`crate::serve`] never writes a message that does not encode).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use beebeeb_office_protocol::check::{
-    Limits, MAX_ANCHORS, MAX_CELL_TEXT_BYTES, MAX_FORMULA_BYTES, MAX_OUTLINE_ENTRIES, MAX_OUTLINE_TEXT_BYTES,
-    MAX_SHEET_NAME_CHARS, MAX_SHEETS, anchor_placeable,
+    Limits, MAX_ANCHORS, MAX_CELL_TEXT_BYTES, MAX_DIRTY_RECTS, MAX_FORMULA_BYTES, MAX_LAYOUT_NAME_BYTES, MAX_LAYOUTS,
+    MAX_OUTLINE_ENTRIES, MAX_OUTLINE_TEXT_BYTES, MAX_SELECTION_RECTS, MAX_SHEET_NAME_CHARS, MAX_SHEETS,
+    anchor_placeable,
 };
 use beebeeb_office_protocol::frame::{MAX_PAYLOAD, fits_one_frame};
-use beebeeb_office_protocol::office::{CellData, CellRange, OpenedSheets, OutlineData, OutlineEntry, SheetInfo};
+use beebeeb_office_protocol::office::{
+    CellData, CellRange, Dirty, Edited, LayoutList, OpenedSheets, OutlineData, OutlineEntry, SheetInfo,
+};
 
 /// Bytes of a `u32` on the wire: a count, a length, a number.
 const U32: usize = 4;
@@ -146,12 +149,16 @@ pub(crate) fn range_sizes_fit(range: &CellRange) -> bool {
 }
 
 /// The engine's cells for `asked`, as the app's checks accept them: every merge clipped to the asked range (a merge
-/// outside it dropped), every cell's text and formula cut to their caps, a value that is not finite dropped, and the
-/// charts and pictures held to what the app takes: those it would refuse (`check::anchor_placeable`), a second one
-/// with an id already given, and those past the most a block carries are dropped. Whatever is dropped, the block
-/// says `missing_content`, so the status line tells the user.
+/// outside it dropped), the frozen panes cut to the range's end, every cell's text and formula cut to their caps, a value
+/// that is not finite dropped, and the charts and pictures held to what the app takes: those it would refuse
+/// (`check::anchor_placeable`), a second one with an id already given, and those past the most a block carries are
+/// dropped. Whatever is dropped, the block says `missing_content`, so the status line tells the user.
 pub(crate) fn cell_data(mut data: CellData, asked: &CellRange) -> CellData {
     data.merges = data.merges.iter().filter_map(|m| clip(m, asked)).collect();
+    // The sheet's frozen panes reach no further than the cells asked (the app refuses more): a block near the top says
+    // fewer than a sheet with deep panes has, and the app keeps the largest it was told.
+    data.frozen.rows = data.frozen.rows.min(asked.row.saturating_add(asked.rows));
+    data.frozen.cols = data.frozen.cols.min(asked.col.saturating_add(asked.cols));
     for cell in &mut data.cells {
         cut_to_bytes(&mut cell.text, MAX_CELL_TEXT_BYTES);
         if let Some(formula) = &mut cell.formula {
@@ -189,6 +196,63 @@ fn clip(merge: &CellRange, asked: &CellRange) -> Option<CellRange> {
         rows: u32::try_from(bottom - top).ok()?,
         cols: u32::try_from(right - left).ok()?,
     })
+}
+
+/// An `Edited` held to the caps the app's check takes (`check::check_edited`): a selection past the most rectangles is
+/// cut to that many (the caret is separate and stays); more dirty rectangles than the app takes become "redraw all";
+/// changed cell ranges that are empty are dropped, and past the most ranges they become one bounding range per sheet
+/// (a larger area than changed, never a smaller one). At its largest an `Edited` is well under one frame.
+pub(crate) fn edited(mut got: Edited) -> Edited {
+    got.selection.truncate(MAX_SELECTION_RECTS);
+    if matches!(&got.dirty, Dirty::Rects(rects) if rects.len() > MAX_DIRTY_RECTS) {
+        got.dirty = Dirty::All;
+    }
+    got.cells.retain(|(_, r)| r.rows > 0 && r.cols > 0);
+    if got.cells.len() > MAX_DIRTY_RECTS {
+        let mut bounds: BTreeMap<u32, CellRange> = BTreeMap::new();
+        for (sheet, r) in &got.cells {
+            bounds.entry(*sheet).and_modify(|b| *b = union(b, r)).or_insert(*r);
+        }
+        got.cells = bounds.into_iter().collect();
+        // At most the engine's 256 sheets, which is the cap.
+        got.cells.truncate(MAX_DIRTY_RECTS);
+    }
+    got
+}
+
+/// The smallest range holding both.
+fn union(a: &CellRange, b: &CellRange) -> CellRange {
+    let top = a.row.min(b.row);
+    let left = a.col.min(b.col);
+    let bottom = (u64::from(a.row) + u64::from(a.rows)).max(u64::from(b.row) + u64::from(b.rows));
+    let right = (u64::from(a.col) + u64::from(a.cols)).max(u64::from(b.col) + u64::from(b.cols));
+    CellRange {
+        row: top,
+        col: left,
+        rows: u32::try_from(bottom - u64::from(top)).unwrap_or(u32::MAX),
+        cols: u32::try_from(right - u64::from(left)).unwrap_or(u32::MAX),
+    }
+}
+
+/// The slide layouts' names as the app takes them: at most the protocol's count, each cut to its byte cap, and as many
+/// as fit one frame.
+pub(crate) fn layouts(mut names: Vec<String>) -> LayoutList {
+    names.truncate(MAX_LAYOUTS);
+    for name in &mut names {
+        cut_to_bytes(name, MAX_LAYOUT_NAME_BYTES);
+    }
+    // The count, then each name's length and bytes.
+    let mut used = U32;
+    let mut fit = 0usize;
+    for name in &names {
+        used = used.saturating_add(U32 + name.len());
+        if !fits_one_frame(used) {
+            break;
+        }
+        fit += 1;
+    }
+    names.truncate(fit);
+    LayoutList { names }
 }
 
 #[cfg(test)]
@@ -246,5 +310,35 @@ mod tests {
             cols: 2,
         };
         assert_eq!(clip(&inside, &asked), Some(inside));
+    }
+
+    #[test]
+    fn frozen_panes_are_cut_to_the_asked_range() {
+        use beebeeb_office_protocol::check::{Limits, check_cells};
+        use beebeeb_office_protocol::office::{Cells, Frozen};
+        // Rows 5 to 14 and columns 5 to 8 asked: the range ends after row 15 and column 9.
+        let asked = CellRange {
+            row: 5,
+            col: 5,
+            rows: 10,
+            cols: 4,
+        };
+        let block = |rows, cols| CellData {
+            cells: Vec::new(),
+            col_widths: vec![48.0; 4],
+            row_heights: vec![15.0; 10],
+            merges: Vec::new(),
+            frozen: Frozen { rows, cols },
+            anchors: Vec::new(),
+            missing_content: false,
+        };
+        // A workbook's sheet-sized panes: cut, so the app's check takes the answer.
+        let cut = cell_data(block(1_048_576, 16_384), &asked);
+        assert_eq!(cut.frozen, Frozen { rows: 15, cols: 9 });
+        let ask = Cells { sheet: 0, range: asked };
+        assert_eq!(check_cells(&ask, &cut, &Limits::CONTRACT), Ok(()));
+        // Panes inside the range are the file's own.
+        assert_eq!(cell_data(block(1, 0), &asked).frozen, Frozen { rows: 1, cols: 0 });
+        assert_eq!(cell_data(block(15, 9), &asked).frozen, Frozen { rows: 15, cols: 9 });
     }
 }

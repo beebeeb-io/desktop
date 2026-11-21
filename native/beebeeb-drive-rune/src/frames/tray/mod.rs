@@ -185,9 +185,18 @@ impl Ui {
             Action::SignIn | Action::Unlock => vec![Intent::OpenWindow, Intent::Close],
             // The plans page opens in the browser, the installer takes over: the flyout is
             // in the way of neither, so it closes.
-            Action::AddStorage | Action::ChoosePlan | Action::RestartToUpdate => vec![Intent::Close],
+            Action::AddStorage | Action::ChoosePlan => vec![Intent::Close],
+            // The updater is in Settings: the window opens there.
+            Action::RestartToUpdate => vec![Intent::OpenSettings, Intent::Close],
+            // The source reads again (`TraySource::act`); the flyout stays and shows the answer.
             Action::SyncAnyway | Action::TryAgain | Action::RetryExplorer => Vec::new(),
         });
+        self.refresh();
+    }
+
+    /// "Try again" under a list that could not be read: the source reads again, the list shows what it finds.
+    pub fn retry_changes(&mut self) {
+        self.source.act(Action::TryAgain);
         self.refresh();
     }
 

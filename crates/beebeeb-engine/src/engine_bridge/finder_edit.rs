@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// The op metadata key that says the staged copy is a sealed Office save, and its value.
+pub(crate) const STAGED_SEAL_KEY: &str = "staged_seal";
+pub(crate) const STAGED_SEAL_OFFICE: &str = "office-v1";
+/// What core's recovery-snapshot seal adds to the plaintext (header 22, nonce 12, tag 16).
+pub(crate) const SEAL_OVERHEAD: u64 = 50;
+
+/// An Office save to stage sealed: the plaintext package and its kind (1 docx, 2 xlsx, 3 pptx).
+pub(crate) struct SealedOffice<'a> {
+    pub bytes: &'a [u8],
+    pub kind: u8,
+}
+
+/// The staged copy of an Office save is a sealed blob (see [`STAGED_SEAL_KEY`]).
+pub(crate) fn is_sealed_office(metadata: &serde_json::Value) -> bool {
+    metadata[STAGED_SEAL_KEY].as_str() == Some(STAGED_SEAL_OFFICE)
+}
+
 impl EngineBridge {
     /// [`Self::queue_file_provider_create_from`] reading the contents by path.
     #[cfg(any(test, feature = "test-support"))]
@@ -46,7 +63,7 @@ impl EngineBridge {
                 size_bytes,
                 modified_at,
                 payload,
-            } = self.prepare_finder_modify(&target, contents_path, contents, &file_id, item_contract.as_ref())?;
+            } = self.prepare_finder_modify(&target, contents_path, contents, &file_id, item_contract.as_ref(), None)?;
             // Decided from the row BEFORE this write changes it.
             let current_row = self.db.get_file(&file_id)?;
             let current_contract = self.db.get_file_contract_state(&file_id)?;
@@ -282,7 +299,40 @@ impl EngineBridge {
         contents: Option<&std::fs::File>,
         file_id: &str,
         item_contract: Option<&FileContractState>,
+        sealed: Option<&SealedOffice<'_>>,
     ) -> Result<PreparedFinderModify, EngineError> {
+        // A sealed Office save: the staging folder gets the account-bound recovery-snapshot seal of the package, never
+        // the package. The seal is bound to the file id the op acts on, so the upload can open it after a restart.
+        let sealed_file = match sealed {
+            Some(office) => {
+                use std::io::{Seek, Write};
+                let meta = beebeeb_core::local_seal::SnapshotMeta {
+                    base_version: target
+                        .base_version_identifier
+                        .as_deref()
+                        .and_then(|b| b.parse::<i64>().ok())
+                        .filter(|b| *b >= 0)
+                        .unwrap_or(0),
+                    saved_at: now_secs().max(0),
+                    kind: office.kind,
+                };
+                let blob = beebeeb_core::local_seal::seal_recovery_snapshot(
+                    &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()),
+                    file_id,
+                    &meta,
+                    office.bytes,
+                )
+                .map_err(|_| EngineError::from(anyhow::anyhow!("could not seal the staged save")))?;
+                let mut file = tempfile::tempfile().map_err(|e| EngineError::from(anyhow::Error::from(e)))?;
+                file.write_all(&blob)
+                    .and_then(|()| file.flush())
+                    .and_then(|()| file.seek(std::io::SeekFrom::Start(0)).map(|_| ()))
+                    .map_err(|e| EngineError::from(anyhow::Error::from(e)))?;
+                Some(file)
+            }
+            None => None,
+        };
+        let contents = sealed_file.as_ref().or(contents);
         let staged = stage_finder_contents(
             &self.db,
             self.finder_staging_root()?,
@@ -306,10 +356,13 @@ impl EngineBridge {
             "operation": Op::UploadVersion.as_str(),
             "name_encrypted": name_encrypted,
             "content_type": target.content_type,
-            "size_bytes": size_bytes,
+            "size_bytes": if sealed.is_some() { (size_bytes as u64).saturating_sub(SEAL_OVERHEAD) as i64 } else { size_bytes },
             "base_version_identifier": target.base_version_identifier,
             "uploaded_by": "authenticated_desktop_user",
         });
+        if sealed.is_some() {
+            payload[STAGED_SEAL_KEY] = serde_json::json!(STAGED_SEAL_OFFICE);
+        }
         apply_shared_context(&mut payload, item_contract);
         Ok(PreparedFinderModify {
             staged,
@@ -333,8 +386,42 @@ impl EngineBridge {
     #[cfg_attr(not(any(target_os = "macos", any(test, feature = "test-support"))), allow(dead_code))]
     pub fn queue_file_provider_modify_from(
         &self,
+        target: FinderWriteTarget,
+        contents: Option<&std::fs::File>,
+    ) -> anyhow::Result<FpWrite> {
+        self.queue_modify_staging(target, contents, None)
+    }
+
+    /// [`Self::queue_file_provider_modify_from`] for an Office save: the staged copy is sealed (core's account-bound
+    /// recovery-snapshot seal), and the upload of the op opens it as it reads. Needs a target with contents.
+    pub(crate) fn queue_office_modify_sealed(
+        &self,
+        target: FinderWriteTarget,
+        office: &SealedOffice<'_>,
+    ) -> anyhow::Result<FpWrite> {
+        anyhow::ensure!(target.contents_path.is_some(), "a sealed save carries contents");
+        self.queue_modify_staging(target, None, Some(office))
+    }
+
+    /// The viewer-edit save's queueing: `held` is the bytes in a file; `seal_kind` `Some` stages `bytes` sealed instead.
+    pub(crate) fn queue_modify_for_save(
+        &self,
+        target: FinderWriteTarget,
+        held: Option<&std::fs::File>,
+        bytes: &[u8],
+        seal_kind: Option<u8>,
+    ) -> anyhow::Result<FpWrite> {
+        match seal_kind {
+            Some(kind) => self.queue_office_modify_sealed(target, &SealedOffice { bytes, kind }),
+            None => self.queue_file_provider_modify_from(target, held),
+        }
+    }
+
+    fn queue_modify_staging(
+        &self,
         mut target: FinderWriteTarget,
         contents: Option<&std::fs::File>,
+        sealed: Option<&SealedOffice<'_>>,
     ) -> anyhow::Result<FpWrite> {
         let mut present_as = None;
         if let Some(requested_id) = target.file_id.clone()
@@ -360,7 +447,7 @@ impl EngineBridge {
             return Ok(FpWrite::plain(ignored_finder_item(&target.filename)));
         };
         let prepared =
-            self.prepare_finder_modify(&target, &contents_path, contents, &file_id, item_contract.as_ref())?;
+            self.prepare_finder_modify(&target, &contents_path, contents, &file_id, item_contract.as_ref(), sealed)?;
         let op_id = uuid::Uuid::new_v4().to_string();
         let metadata_json = serde_json::to_string(&prepared.payload)?;
         let backup_source_key = crate::known_folder::backup_source_key_for_this_device(&target.filename);

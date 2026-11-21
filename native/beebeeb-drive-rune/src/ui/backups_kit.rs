@@ -21,8 +21,9 @@ use crate::theme::tokens::{Theme, radius, type_};
 use rune::tok::Family;
 use rune::{Color, El, Icon, Span, TextStyle, col, el, oklch, rich, row, text};
 
+use super::button::{self as btn, ButtonState, Size, Variant};
+use super::dialog::{self, Dialog, Foot, Head, scrim};
 use super::kit;
-use super::settings_dialog::{BUTTON_MD, DIALOG_TITLE, scrim_color};
 use super::settings_shell::SUB;
 
 /// 13px/400 on a 17px line: body words (`.t-body`).
@@ -223,24 +224,8 @@ pub fn row_item(list: usize, index: usize, it: RowItem, t: &Theme) -> El {
 /// A small button without fill or border (`.kit-btn-sm.bg-transparent.text-ink-2`): a quiet
 /// action in a row ("Remove"). Keys: `btn-<N>`, `btn-<N>-label`.
 pub fn ghost_button(index: usize, label: &str, name: &str, t: &Theme) -> El {
-    let key = format!("btn-{index}");
-    row()
-        .key(key.clone())
-        .role("button")
+    btn::button(btn::keys(&format!("btn-{index}")), label, None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t)
         .label(name)
-        .h(22.0)
-        .px(12.0)
-        .center()
-        .radius(radius::MD)
-        .hover(t.paper2)
-        .press(t.paper3)
-        .focusable(true)
-        .child(kit::label(
-            format!("{key}-label"),
-            label,
-            type_::BUTTON_SM,
-            t.text_secondary,
-        ))
 }
 
 /// How a dialog-size button looks.
@@ -259,43 +244,13 @@ pub enum Md {
 
 /// A dialog-size button (`.kit-btn.kit-btn-md`, 28 pt). Keys: `btn-<N>`, `-icon`, `-label`.
 pub fn button_md(index: usize, label: &str, icon: Option<&'static Icon>, kind: Md, t: &Theme) -> El {
-    let key = format!("btn-{index}");
-    let ink = match kind {
-        Md::Plain => t.text,
-        Md::Quiet => t.text_secondary,
-        Md::QuietRed => red_text(t),
-        Md::Danger(_) => Color::WHITE,
+    let (variant, state) = match kind {
+        Md::Plain => (Variant::Secondary, ButtonState::Enabled),
+        Md::Quiet => (Variant::Ghost, ButtonState::Enabled),
+        Md::QuietRed | Md::Danger(true) => (Variant::Danger, ButtonState::Enabled),
+        Md::Danger(false) => (Variant::Danger, ButtonState::Disabled),
     };
-    let mut b = row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .h(28.0)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD);
-    b = match kind {
-        Md::Plain => b
-            .fill(t.paper)
-            .border(1.0, t.card_border)
-            .border_layout()
-            .hover(t.paper2)
-            .press(t.paper3)
-            .focusable(true),
-        Md::Quiet | Md::QuietRed => b.hover(t.paper2).press(t.paper3).focusable(true),
-        Md::Danger(true) => b
-            .fill(red_fill())
-            .hover(red_fill().mix(Color::BLACK, 0.05))
-            .press(red_fill().mix(Color::BLACK, 0.10))
-            .focusable(true),
-        // Not available: drawn at half strength, takes no press and no focus.
-        Md::Danger(false) => b.fill(red_fill()).opacity(0.5).disabled(true),
-    };
-    if let Some(icon) = icon {
-        b = b.child(kit::glyph(format!("{key}-icon"), icon, 16.0, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, BUTTON_MD, ink))
+    btn::button(btn::keys(&format!("btn-{index}")), label, icon, variant, Size::Md, state, t)
 }
 
 /// A paragraph of a dialog's body at body size (`.wn-dlg-body > p.t-body`), with a machine's
@@ -316,58 +271,13 @@ pub fn para(index: usize, words: &str, mono: &[std::ops::Range<usize>], t: &Them
 /// the question and what it means, then the choices stacked, the safest first. 420 pt wide.
 /// Keys: `scrim`, `dlg`, `dlg-title`, `dlg-sub`, `dlg-foot`.
 pub fn alert(name: &str, tile: El, title: &str, sub: &str, buttons: Vec<El>, t: &Theme) -> El {
-    let head = col().key("dlg-head").pt(20.0).px(24.0).pb(16.0).child(
-        row()
-            .key("dlg-alert")
-            .w_full()
-            .items_start()
-            .gap(14.0)
-            .child(tile)
-            .child(
-                col()
-                    .key("dlg-words")
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .gap(6.0)
-                    .child(
-                        kit::label("dlg-title", title, DIALOG_TITLE, t.text)
-                            .role("heading")
-                            .level(2)
-                            .w_full(),
-                    )
-                    .child(kit::label("dlg-sub", sub, SUB, t.text_tertiary).wrap().w_full()),
-            ),
-    );
-    let mut foot = col()
-        .key("dlg-foot")
-        .w_full()
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
-    for b in buttons {
-        foot = foot.child(b.w_full());
-    }
-    let dlg = col()
-        .key("dlg")
-        .role("alertdialog")
-        .label(name)
-        // The foot's hairline ends the height in a half point (`settings_dialog::dialog`).
-        .pixel_snap(false)
-        .w(420.0)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(col().key("dlg-clip").w_full().clip_rounded(8.0).child(head).child(foot));
-    col()
-        .key("scrim")
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .center()
-        .fill(scrim_color(t))
-        .child(dlg)
+    let d = Dialog {
+        alert: true,
+        head: Head::Alert { tile, title, sub },
+        foot: Foot::Stack(buttons),
+        ..Dialog::new("dlg", name, 420.0)
+    };
+    scrim(0.0, dialog::dialog(d, t), t)
 }
 
 /// How many digits a one-time code has.

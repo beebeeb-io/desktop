@@ -11,6 +11,8 @@
 //! search field holds a file name. Comment mode is allowed on both sections.
 
 mod chrome;
+#[cfg(any(target_os = "windows", test))]
+pub mod found_while_paused;
 mod history;
 pub mod icons;
 mod offline;
@@ -132,6 +134,8 @@ pub struct Ui {
     /// The section of this group that was on screen at the last poll: arriving at one, also from the other, is an
     /// opening.
     was_open: Option<Section>,
+    /// A sync check finished and the lists are to be read again: waits while a menu or an ask is open.
+    pub(crate) reread_due: bool,
 }
 
 /// How long a refusal's toast stays.
@@ -155,6 +159,7 @@ impl Ui {
             sample: false,
             refusal: None,
             was_open: None,
+            reread_due: false,
         }
     }
 
@@ -199,7 +204,7 @@ impl Ui {
         self.source.kept_count()
     }
 
-    pub fn kept(&self) -> Vec<Kept> {
+    pub fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
         self.source.kept()
     }
 
@@ -330,6 +335,11 @@ impl Ui {
         true
     }
 
+    /// Try again after a failed read: the source reads again.
+    pub fn read_again(&mut self) {
+        self.source.refresh();
+    }
+
     pub fn open_menu(&mut self, row: usize, at: (f32, f32)) {
         if row < self.kept_count() {
             self.selected = Some(row);
@@ -344,7 +354,7 @@ impl Ui {
     /// Pick an item of the open row menu.
     pub fn pick(&mut self, item: usize) {
         let Some(menu) = self.menu.take() else { return };
-        let Some(kept) = self.source.kept().into_iter().nth(menu.row) else {
+        let Some(kept) = self.source.kept().get(menu.row).cloned() else {
             return;
         };
         match item {
@@ -356,7 +366,7 @@ impl Ui {
     }
 
     pub fn open_selected(&mut self) -> bool {
-        let Some(kept) = self.selected.and_then(|i| self.source.kept().into_iter().nth(i)) else {
+        let Some(kept) = self.selected.and_then(|i| self.source.kept().get(i).cloned()) else {
             return false;
         };
         self.ask(Intent::Open(kept.id));
@@ -399,7 +409,7 @@ pub fn carry_out(s: &mut State, tx: &mut Tx) -> bool {
     let asked = !intents.is_empty();
     for intent in intents {
         let refused = match intent {
-            // The window on Trash for a file that went there, else on Files.
+            // Trash for a file that went there, else Files with the item selected and in view.
             Intent::ShowInBeebeeb(id) => {
                 let trashed = s
                     .this_pc
@@ -407,8 +417,11 @@ pub fn carry_out(s: &mut State, tx: &mut Tx) -> bool {
                     .history()
                     .iter()
                     .any(|change| change.id == id && matches!(change.what, What::MovedToTrash { .. }));
-                let section = if trashed { Section::Trash } else { Section::Files };
-                host::dispatch(s, Event::Navigate(Route::section(section)));
+                if trashed {
+                    host::dispatch(s, Event::Navigate(Route::section(Section::Trash)));
+                } else {
+                    crate::frames::files::reveal::reveal(s, tx, &id);
+                }
                 None
             }
             Intent::ShowInFileExplorer(id) => s
@@ -443,7 +456,7 @@ pub fn carry_out(s: &mut State, tx: &mut Tx) -> bool {
 fn open_kept(s: &mut State, id: &str) -> Option<&'static str> {
     use crate::shell::app::{Event, Route};
 
-    let kept = s.this_pc.source.kept().into_iter().find(|kept| kept.id == id)?;
+    let kept = s.this_pc.source.kept().iter().find(|kept| kept.id == id).cloned()?;
     let item = offline::drive_item(&kept.id, &kept.name, kept.kind == source::Kind::Folder);
     if item.is_folder {
         let route = Route {
@@ -454,17 +467,33 @@ fn open_kept(s: &mut State, id: &str) -> Option<&'static str> {
         crate::shell::host::dispatch(s, Event::Navigate(route));
         return None;
     }
-    if crate::frames::viewers::open_item(s, &item) {
-        return None;
-    }
-    s.actions.source.open(&[item]).err().map(|_| NOT_OPENED)
+    use crate::frames::open_file::{Opened, Target, open_file};
+    matches!(open_file(s, Target::Item(&item)), Opened::Failed(_)).then_some(NOT_OPENED)
 }
 
 /// What the sections asked of the window ([`carry_out`]) and what the source's workers answered since the last
 /// frame, for the shell's poll: `true` when the window must draw again. A refusal becomes the window's toast. The
 /// source's part never calls the engine and never waits; a file is shown or opened through the Files source, as
 /// Files' own rows do it.
+/// A sync check finished (`shell::host::poll`): the lists are read again, on the first poll with nothing open over
+/// them.
+pub fn after_a_check(s: &mut State) {
+    s.this_pc.reread_due = true;
+    reread_if_free(s);
+}
+
+/// The read a finished check asked for, when nothing is open over the lists (`after_a_check`, and every poll).
+fn reread_if_free(s: &mut State) {
+    let ready = s.shell.app.gate() == crate::shell::app::GateState::Ready;
+    let ui = &mut s.this_pc;
+    if ui.reread_due && ready && ui.menu.is_none() && !ui.confirm_remove_all && ui.asking.is_none() {
+        ui.reread_due = false;
+        ui.source.refresh();
+    }
+}
+
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    reread_if_free(s);
     let asked = carry_out(s, tx);
     let open = matches!(
         s.shell.app.route().section,
@@ -494,7 +523,29 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         ui.source.opened();
     }
     ui.was_open = here;
+    // The selected kept ITEM and the one a menu is open for, before the lists change under them: a read lands between
+    // polls, and an index would then name another item (the menu would act on it).
+    let kept_ids: Vec<String> = if ui.selected.is_some() || ui.menu.is_some() {
+        ui.source.kept().iter().map(|k| k.id.clone()).collect()
+    } else {
+        Vec::new()
+    };
+    let chosen = ui.selected.and_then(|i| kept_ids.get(i).cloned());
+    let menu_item = ui.menu.as_ref().and_then(|m| kept_ids.get(m.row).cloned());
     let pumped = ui.source.pump();
+    if pumped.changed && (chosen.is_some() || menu_item.is_some() || ui.selected.is_some() || ui.menu.is_some()) {
+        let now: Vec<String> = ui.source.kept().iter().map(|k| k.id.clone()).collect();
+        let place = |id: Option<String>| id.and_then(|id| now.iter().position(|have| *have == id));
+        ui.selected = place(chosen);
+        match place(menu_item) {
+            Some(row) => {
+                if let Some(menu) = ui.menu.as_mut() {
+                    menu.row = row;
+                }
+            }
+            None => ui.menu = None,
+        }
+    }
     let mut changed = pumped.changed || asked;
     if let Some(words) = pumped.refusal {
         ui.refusal = Some((words, std::time::Instant::now()));
@@ -590,14 +641,24 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Down => ui.move_selection(1),
         Key::Up => ui.move_selection(-1),
+        Key::PageDown => ui.move_selection(PAGE),
+        Key::PageUp => ui.move_selection(-PAGE),
+        Key::Home => ui.move_selection(isize::MIN / 2),
+        Key::End => ui.move_selection(isize::MAX / 2),
         Key::Enter => ui.open_selected(),
         _ => false,
     }
 }
 
+/// Rows a PageUp / PageDown moves the selection.
+const PAGE: isize = 10;
+
 /// The window around a section's content: caption, sidebar, and the column the section fills.
 fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
+    // Keyboard as Windows has it: Tab visits every control.
+    cx.web_focus();
     let t = crate::theme::tokens::theme(cx.system_dark());
+    let main_pane = |main: El| crate::ui::focus::pane(rune::col().grow(1.0).min_w(0.0).min_h(0.0).h_full().child(main), "this-pc-main");
     rune::col()
         .key("window")
         .role("window")
@@ -612,25 +673,25 @@ fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .child(chrome::sidebar(s, &s.this_pc, here, &t))
+                .child(crate::ui::focus::pane(rune::row().h_full().child(crate::ui::drive_sidebar::drive_sidebar(s, if here == Section::SyncHistory { crate::ui::drive_sidebar::Lit::SyncHistory } else { crate::ui::drive_sidebar::Lit::AvailableOffline }, crate::ui::sidebar::Standing::Open, &t)), "this-pc-sidebar"))
                 .child(match (s.this_pc.refusal, s.this_pc.said) {
                     // A refused change: said over the section, never only in a log line.
-                    (Some((words, _)), _) => main.child(crate::ui::toast::layer(crate::ui::toast::toast(
+                    (Some((words, _)), _) => main_pane(main.child(crate::ui::toast::layer(crate::ui::toast::toast(
                         &crate::theme::icons_files::ALERT,
                         crate::ui::toast::Tone::Failed,
                         words,
                         None,
                         &t,
-                    ))),
+                    )))),
                     // Task 2530: what a way out did.
-                    (None, Some((words, _))) => main.child(crate::ui::toast::layer(crate::ui::toast::toast(
+                    (None, Some((words, _))) => main_pane(main.child(crate::ui::toast::layer(crate::ui::toast::toast(
                         &crate::theme::icons_files::CHECK,
                         crate::ui::toast::Tone::Done,
                         words,
                         None,
                         &t,
-                    ))),
-                    (None, None) => main,
+                    )))),
+                    (None, None) => main_pane(main),
                 }),
         )
 }

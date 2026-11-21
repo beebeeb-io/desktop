@@ -5,8 +5,9 @@
 //!   ([`Engine::two_factor`]: core tells the two apart), the twelve words on a computer that holds no key
 //!   ([`Engine::unlock_with_phrase`]), and leaving a half-done sign-in ([`Engine::discard_partial_sign_in`]);
 //! - the two-level lock (core's rules, through the engine's `lock_api`): the lock screen's Windows Hello prompt
-//!   (`hello::HelloPrompter`), whose yes is handed to [`Engine::unlock_screen_platform_verified`] with the
-//!   session's turn AS READ AT THE PRESS, and the account's password for a closed vault or a locked screen
+//!   (`hello::HelloPrompter`), whose yes is handed to [`Engine::unlock_screen_for`] with core's claim on the lock
+//!   AS READ AT THE PRESS (the prompt is taken away once that lock ended, `end_hello_of_a_lock_that_ended`, and
+//!   when this source goes), and the account's password for a closed vault or a locked screen
 //!   ([`Engine::unlock_vault_with_password`]: proven to the server in a new sign-in, the code step after it
 //!   when the account has one);
 //! - the wait after "too many tries" (DW-A21): counted down here, once a second, from the seconds the server named;
@@ -32,14 +33,14 @@
 //!
 //! Must not: log an email, a password, a code, a word, a token or a key; start a thread per key press.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use beebeeb_engine::app::lock_api::{LockRefused, LockState};
+use beebeeb_engine::app::lock_api::{LockRefused, LockState, ScreenUnlockAsk};
 use beebeeb_engine::app::lock_password_api::ScreenUnlock;
 use beebeeb_engine::app::{CredentialStores, Engine};
 
@@ -90,6 +91,14 @@ enum Wait {
 
 const WAITS: usize = Wait::Unbound as usize + 1;
 
+/// The lock screen's Windows Hello prompt that is up: the lock it was asked for (core's claim), the way to take it
+/// away, and whether it answered (an answered prompt is over: nothing of it is taken away any more).
+struct HelloUp {
+    asked_for: ScreenUnlockAsk,
+    cancel: HelloCancel,
+    answered: Arc<AtomicBool>,
+}
+
 /// One answer: the wait it belongs to, which attempt of it, and the event for the screen.
 struct Answer {
     wait: Wait,
@@ -110,9 +119,9 @@ pub struct EngineSignInSource<C: CredentialStores> {
     jobs: Option<mpsc::Sender<Job<C>>>,
     /// One step of the countdown (a second; a test shortens it).
     tick: Duration,
-    /// The Windows Hello prompt, and the way to take the one that is up away.
+    /// The Windows Hello prompt, and the one that is up: the lock it was asked for, and the way to take it away.
     hello: Box<dyn HelloPrompter>,
-    hello_up: Option<HelloCancel>,
+    hello_up: Option<HelloUp>,
     /// The lock a password is opening, as it was when the password was sent; shared with the worker, which
     /// puts that lock back when the person left the step and it finished anyway. `None`: a sign-in.
     unlocking: Arc<Mutex<Option<LockState>>>,
@@ -123,6 +132,28 @@ pub struct EngineSignInSource<C: CredentialStores> {
 }
 
 impl<C: CredentialStores> EngineSignInSource<C> {
+    /// The no-plan screen's sign-out: the session as it is now, signed out by the engine's own call (which refuses
+    /// an open editor's unsaved changes unless `discard`).
+    fn sign_out_gate_as(&mut self, discard: bool) {
+        let job: Job<C> = Box::new(move |engine| {
+            if engine.has_session() {
+                let session = engine.session_turn();
+                let done = if discard {
+                    engine.sign_out_discarding_unsaved_for(session)
+                } else {
+                    engine.sign_out_for(session)
+                };
+                if done.is_err() {
+                    log("sign-in: the sign-out from the gate was not done");
+                }
+            }
+            engine.wake_host();
+        });
+        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
+            log("sign-in: the sign-out could not be passed to the engine");
+        }
+    }
+
     /// Without a Windows Hello prompt: the lock screen's Unlock answers "not available" and offers the password.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
         Self::with_tick(engine, Duration::from_secs(1))
@@ -166,6 +197,28 @@ impl<C: CredentialStores> EngineSignInSource<C> {
     /// A new attempt of `wait`: every answer of an earlier one is stale from here on.
     fn next_attempt(&self, wait: Wait) -> u64 {
         self.attempts[wait as usize].fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The lock screen's prompt is up, unanswered, for a lock that ended (core's word, `screen_unlock_ask_holds`: the
+    /// screen opened by any means, locked again, the vault closed, a sign-out, another account): it is taken away,
+    /// whatever it still answers is dropped, and the screen hears `Cancelled`, so its Unlock asks again. On every
+    /// poll, whatever the window shows: the window's own follow of the lock sees only the lock it reads next.
+    fn end_hello_of_a_lock_that_ended(&mut self) {
+        let ended = self.hello_up.as_ref().is_some_and(|up| {
+            !up.answered.load(Ordering::SeqCst) && !self.engine.screen_unlock_ask_holds(up.asked_for)
+        });
+        if !ended {
+            return;
+        }
+        if let Some(up) = self.hello_up.take() {
+            (up.cancel)();
+        }
+        let attempt = self.next_attempt(Wait::Hello);
+        let _ = self.answers.send(Answer {
+            wait: Wait::Hello,
+            attempt,
+            event: SignInEvent::Hello(HelloOutcome::Cancelled),
+        });
     }
 
     /// Run `work` on the worker as a new attempt of `wait`; its event is the answer. `failed` is the answer when
@@ -417,10 +470,41 @@ fn count_down_as<C: CredentialStores>(
     }
 }
 
+impl<C: CredentialStores> Drop for EngineSignInSource<C> {
+    /// The source goes (the window that owns it closes, the app quits): a prompt it asked for is taken away, never
+    /// left on screen with nobody to answer, and an answer it decided before that opens nothing.
+    fn drop(&mut self) {
+        self.next_attempt(Wait::Hello);
+        if let Some(up) = self.hello_up.take() {
+            (up.cancel)();
+        }
+    }
+}
+
 impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     /// The gate from the handle's view: read without waiting, on every frame.
     fn gate(&self) -> GateState {
         map_gate_signin(self.engine.view().gate)
+    }
+
+    /// w16-gates: the gate read once more and published, on the worker (the credential store may be slow to answer).
+    fn recheck_gate(&mut self) {
+        let job: Job<C> = Box::new(|engine| {
+            engine.recheck_gate();
+            engine.wake_host();
+        });
+        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
+            log("sign-in: the gate re-check could not be passed to the engine");
+        }
+    }
+
+    /// w16-gates: the no-plan screen's sign-out: the session as it is now, signed out by the engine's own call.
+    fn sign_out_from_gate(&mut self) {
+        self.sign_out_gate_as(false);
+    }
+
+    fn sign_out_from_gate_discarding_unsaved(&mut self) {
+        self.sign_out_gate_as(true);
     }
 
     /// No other Beebeeb app's session is read on this computer, and no Windows Hello prompt exists for this app
@@ -450,26 +534,29 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     fn begin_hello(&mut self) {
         let attempt = self.next_attempt(Wait::Hello);
         // A prompt this screen asked for before is taken away, never just forgotten (it would stay on screen).
-        if let Some(cancel) = self.hello_up.take() {
-            cancel();
+        if let Some(up) = self.hello_up.take() {
+            (up.cancel)();
         }
-        let asked_at = self.engine.session_turn();
         let answer = move |event| Answer {
             wait: Wait::Hello,
             attempt,
             event: SignInEvent::Hello(event),
         };
-        if self.engine.lock_state() != LockState::ScreenLocked {
+        // The lock the prompt is for, as core holds it now (the session's turn and the screen lock, in one read).
+        let Some(asked_for) = self.engine.ask_screen_unlock() else {
             // Nothing a prompt could open: no prompt is shown.
             let _ = self.answers.send(answer(HelloOutcome::Cancelled));
             return;
-        }
+        };
         let (engine, answers, attempts) = (self.engine.clone(), self.answers.clone(), self.attempts.clone());
+        let answered = Arc::new(AtomicBool::new(false));
+        let answering = answered.clone();
         let done: HelloDone = Box::new(move |result| {
+            answering.store(true, Ordering::SeqCst);
             let outcome = match result {
                 HelloResult::Verified => {
                     let still_asked = attempts[Wait::Hello as usize].load(Ordering::SeqCst) == attempt;
-                    if still_asked && engine.unlock_screen_platform_verified(asked_at).is_ok() {
+                    if still_asked && engine.unlock_screen_for(asked_for).is_ok() {
                         HelloOutcome::Succeeded(NextAfterSignIn::Drive)
                     } else {
                         // Late, or refused by core's rule: nothing opened, and the button works again.
@@ -484,7 +571,13 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             engine.wake_host();
         });
         match self.hello.start(done) {
-            Ok(cancel) => self.hello_up = Some(cancel),
+            Ok(cancel) => {
+                self.hello_up = Some(HelloUp {
+                    asked_for,
+                    cancel,
+                    answered,
+                })
+            }
             Err(()) => {
                 let _ = self.answers.send(answer(HelloOutcome::Unavailable));
             }
@@ -494,8 +587,8 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     /// The person left the lock screen's prompt: no answer of it is handed out, and the prompt is taken away.
     fn cancel_hello(&mut self) {
         self.next_attempt(Wait::Hello);
-        if let Some(cancel) = self.hello_up.take() {
-            cancel();
+        if let Some(up) = self.hello_up.take() {
+            (up.cancel)();
         }
     }
 
@@ -698,6 +791,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
 
     /// The next answer that is still waited for; an answer of a step the person left is dropped here.
     fn poll(&mut self) -> Option<SignInEvent> {
+        self.end_hello_of_a_lock_that_ended();
         while let Ok(answer) = self.inbox.try_recv() {
             let current = match answer.wait {
                 Wait::Unbound => 0,
@@ -721,7 +815,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         }
         let answers = self.answers.clone();
         let job: Job<C> = Box::new(move |engine| {
-            engine.recovery_forget();
+            // The engine forgets every half-done step's copies itself (the code challenge, the stretch, a held recovery).
             if engine.discard_partial_sign_in().is_err() {
                 still_signed_in(&answers);
             }
@@ -734,7 +828,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
 }
 
 /// Opens one of our own addresses by the same OS call a file opens with: the address is one argument, never a
-/// command line. Only three schemes open (`https://`, `mailto:`, `ms-settings:`); anything else is refused in
+/// command line. Only four schemes open (`https://`, `http://`, `mailto:`, `ms-settings:`); anything else is refused in
 /// every build. The addresses come from `shell::web_pages` only, never from the server, a file or a typed string.
 pub fn open_web_page(url: &str) -> Result<(), ()> {
     if !is_allowed_address(url) {
@@ -747,7 +841,36 @@ pub fn open_web_page(url: &str) -> Result<(), ()> {
         Ok(())
     }
     #[cfg(not(test))]
-    super::open_path(std::path::Path::new(url)).map_err(|_| ())
+    open_on_the_launch_worker(url, super::open_path)
+}
+
+/// Opens a file that ships with the app (the licence notice, beside the exe) with the system's handler, on the same
+/// launch worker as the pages. The path comes from this program's own location, never from the server or a file.
+pub fn open_installed_file(path: &std::path::Path) -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        OPENED.with(|o| o.borrow_mut().push(path.display().to_string()));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    open_on_the_launch_worker(&path.to_string_lossy(), super::open_path)
+}
+
+/// The one launch worker the pages open on: the window's thread never waits for the launch lock (ruling R-OW1). A
+/// page has no session (the sign-in page opens signed out), so its start compares none.
+#[cfg_attr(test, allow(dead_code))]
+fn open_on_the_launch_worker(url: &str, start: super::files_launch::Start) -> Result<(), ()> {
+    static PAGES: std::sync::LazyLock<super::launcher::Launcher> = std::sync::LazyLock::new(Default::default);
+    PAGES.open(
+        start,
+        std::path::PathBuf::from(url),
+        || true,
+        |answer| {
+            if answer.is_err() {
+                super::log("sign-in: a page did not open");
+            }
+        },
+    )
 }
 
 #[cfg(test)]
@@ -756,9 +879,9 @@ thread_local! {
     pub(crate) static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Whether `url` starts with one of the three schemes the opener allows.
+/// Whether `url` starts with one of the four schemes the opener allows (https and http, mail, Windows Settings).
 pub fn is_allowed_address(url: &str) -> bool {
-    ["https://", "mailto:", "ms-settings:"]
+    ["https://", "http://", "mailto:", "ms-settings:"]
         .iter()
         .any(|scheme| url.starts_with(scheme))
 }

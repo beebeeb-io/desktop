@@ -12,15 +12,14 @@
 
 use rune::{El, Tx, col};
 
-use super::chrome::style;
-use super::source::{Answered, Left, Loaded, PhotoId, Viewing};
-use super::{Intent, Original, Toast, Ui, Viewer};
+use super::source::{Answered, Left, Loaded, OriginalAnswer, PhotoId, Viewing};
+use super::{Intent, Original, Toast, Ui, Viewer, icons};
 use crate::State;
 use crate::frames::files::dialogs::Purpose;
 use crate::shell::app::GateState;
 use crate::source::DriveItem;
 use crate::theme::tokens::Theme;
-use crate::ui::kit;
+use crate::ui::view_state::{ViewState, try_again, view_state};
 
 #[cfg(test)]
 #[path = "session_tests.rs"]
@@ -64,6 +63,8 @@ pub struct Later {
     trashing: Vec<PhotoId>,
     /// How many answers of a selection's Keep are still to come: their failures are ONE message with a count.
     several: usize,
+    /// A sync check finished and the library is to be read again: waits while a menu or a dialog is open.
+    reread_due: bool,
 }
 
 /// How often the window looks again while something is on its way.
@@ -279,6 +280,32 @@ impl Ui {
     }
 
     /// A source that answers later said what a change did, per item.
+    /// What the original's download did: the bar, the swap, or the preview kept.
+    pub(super) fn original_answered(&mut self, answer: OriginalAnswer) {
+        match answer {
+            OriginalAnswer::Progress { id, done, total } => {
+                if total == 0 {
+                    return;
+                }
+                // The last byte is not "whole": the picture is swapped in at `Done`, once decoded.
+                self.original_progress(id, done.min(total - 1), total);
+            }
+            OriginalAnswer::Done(id) => {
+                let total = self.source.viewing(id).map_or(0, |viewing| viewing.original_bytes);
+                self.original_progress(id, total, total);
+            }
+            OriginalAnswer::Failed(id) => {
+                if let Some(viewer) = &mut self.viewer
+                    && viewer.id == id
+                {
+                    // The preview stays.
+                    viewer.original = Original::Preview;
+                    self.toast = Some(Toast::Words(WORDS_ORIGINAL));
+                }
+            }
+        }
+    }
+
     pub(super) fn answered(&mut self, answer: Answered) {
         let split = |items: &[(PhotoId, Option<Left>)]| {
             let done: Vec<PhotoId> = items
@@ -399,9 +426,10 @@ impl Ui {
 
     /// What the group asked of the shell, on a source that answers later: what this source can do is done, and a
     /// control whose work is not connected in this build says so instead of doing nothing.
-    fn take_in_intents(&mut self) -> bool {
+    fn take_in_intents(&mut self) -> (bool, Vec<Intent>) {
         let intents = self.take_intents();
         let any = !intents.is_empty();
+        let mut left_over = Vec::new();
         for intent in intents {
             match intent {
                 // "On this PC", pressed again: it stops being kept (asked; said once this PC answered).
@@ -425,35 +453,24 @@ impl Ui {
                     self.say_left(What::Keep(true), &left);
                 }
                 // Kept in this window for as long as it is open.
-                Intent::RememberAcross(_) | Intent::StopOriginal(_) => {}
+                Intent::RememberAcross(_) => {}
                 // The folder dialog of Files opens over the window at the next poll; its answer comes back as
                 // `folder_chosen` / `moved`. What is not there to ask (no session, a photo that left) is said.
                 Intent::AddFolder if self.later.closed => self.toast = Some(Toast::Words(WORDS_FOLDER)),
                 Intent::AddFolder => self.later.pick = Some(Pick::Folder),
                 // A move to Trash of one of them is still on its way: nothing is moved, as Files refuses it.
                 Intent::Move(ids) if ids.iter().any(|id| self.later.trashing.contains(id)) => {
-                    self.toast = Some(Toast::Left {
-                        what: What::Trash,
-                        why: Left::InFlight,
-                        count: ids.len(),
-                        again: Vec::new(),
-                    })
+                    self.toast = Some(Toast::Words(WORDS_MOVE_IN_FLIGHT))
                 }
                 Intent::Move(ids) => match self.source.file_items(&ids) {
                     Some(items) if !items.is_empty() && !self.later.closed => self.later.pick = Some(Pick::Move(items)),
                     _ => self.toast = Some(Toast::Words(WORDS_MOVE)),
                 },
-                Intent::DownloadOriginal(_) => {
-                    // No download was started: the tab does not say one is running.
-                    if let Some(viewer) = &mut self.viewer {
-                        viewer.original = Original::Preview;
-                    }
-                    self.toast = Some(Toast::NotYet);
-                }
-                _ => self.toast = Some(Toast::NotYet),
+                // Everything else goes to the route of its feature (`route.rs`), which has the State and Tx.
+                other => left_over.push(other),
             }
         }
-        any
+        (any, left_over)
     }
 
     /// The folder of Files that the dialog chose goes to Photo sources. What the Sources dialog's switches say now is
@@ -515,7 +532,10 @@ impl Ui {
 
 /// What is said when a folder could not be added, and when photos could not be moved.
 const WORDS_FOLDER: &str = "Couldn\u{2019}t add that folder \u{00B7} not available right now";
+const WORDS_ORIGINAL: &str = "Couldn\u{2019}t download the original";
 const WORDS_CHANGE: &str = "Couldn\u{2019}t change that folder";
+/// Move… while a move to Trash of the photo is on its way: what did not happen, then Files' own sentence.
+const WORDS_MOVE_IN_FLIGHT: &str = "Couldn\u{2019}t move. The last change is still on its way.";
 const WORDS_MOVE: &str = "Couldn\u{2019}t move \u{00B7} not available right now";
 
 impl Toast {
@@ -559,57 +579,68 @@ pub(super) fn status(ui: &Ui, viewing: &Viewing) -> String {
     super::viewer::status(viewing)
 }
 
-/// A sync check finished (`shell::host::poll`): what this PC knows of the account may have changed.
-pub fn after_a_check(s: &mut State) {
-    if s.shell.app.gate() == GateState::Ready {
-        s.photos.source.refresh();
-    }
+/// "Link copied" said by Files' poll for a link the engine's source made on Photos' press (`files::link::poll` puts
+/// it on the clipboard and sets Files' toast, which Photos does not draw): the same words over Photos, for as long as
+/// Files' toast lives, unless Photos has a message of its own.
+pub(super) fn link_toast(s: &State) -> Option<Toast> {
+    (s.photos.toast.is_none() && s.live_toast() == Some(crate::frames::files::Toast::LinkCopied))
+        .then_some(Toast::Words("Link copied"))
 }
 
-/// The words in the library's place while there is none (`None`: there is one, draw it).
-pub(super) fn not_here(loaded: Loaded) -> Option<(&'static str, &'static str)> {
-    match loaded {
-        Loaded::Ready => None,
-        Loaded::Loading => Some((
-            "Loading your photos\u{2026}",
-            "Reading what this PC knows of your Beebeeb.",
-        )),
-        Loaded::SignedOut => Some(("Signed out", "Sign in to see your photos.")),
-        Loaded::SessionEnded => Some(("Your session ended", "Sign in again to see your photos.")),
-        Loaded::NothingSynced => Some((
-            "Nothing has synced to this PC yet",
-            "Photos shows your photos and videos once this PC has synced with Beebeeb.",
-        )),
-        Loaded::NotThisAccounts => Some((
-            "This PC holds another account\u{2019}s files",
-            "Photos shows your photos once this PC has synced with your account.",
-        )),
-        Loaded::Failed => Some((
-            "Couldn\u{2019}t load your photos",
-            "Open Photos again in a moment to try again.",
-        )),
+/// A sync check finished (`shell::host::poll`): what this PC knows of the account may have changed.
+pub fn after_a_check(s: &mut State) {
+    s.photos.later.reread_due = true;
+    reread_if_free(s);
+}
+
+/// The read a finished check asked for, when nothing is open over the library: no menu, no dialog (`after_a_check`,
+/// and every poll: a read that waited runs on the first poll after it closed).
+fn reread_if_free(s: &mut State) {
+    let ready = s.shell.app.gate() == GateState::Ready;
+    let ui = &mut s.photos;
+    if ui.later.reread_due && ready && ui.menu.is_none() && ui.dialog.is_none() {
+        ui.later.reread_due = false;
+        ui.source.refresh();
     }
 }
 
 /// The library's place while there is none: what is going on, in words. `None`: there is a library; draw it.
 pub(super) fn not_here_body(ui: &Ui, t: &Theme) -> Option<El> {
-    let (title, words) = not_here(ui.source.loaded())?;
-    let mut body = col().key("ph-body").grow(1.0).center().child(
-        col()
-            .key("ph-not-here")
-            .role("status")
-            .items_center()
-            .gap(8.0)
-            .px(24.0)
-            .py(28.0)
-            .child(kit::label("ph-not-here-title", title, style::TITLE, t.text).role("heading"))
-            .child(
-                kit::label("ph-not-here-words", words, style::SUB, t.text_tertiary)
-                    .w(260.0)
-                    .wrap()
-                    .align(rune::Align::Center),
-            ),
-    );
+    let loaded = ui.source.loaded();
+    let said = |title: &'static str, body: &'static str| ViewState::Empty {
+        key: "ph-not-here",
+        icon: &icons::PHOTOS,
+        title,
+        body,
+        action: None,
+    };
+    let state = match loaded {
+        Loaded::Ready => return None,
+        Loaded::Loading => ViewState::Loading {
+            words: "Loading your photos\u{2026} Reading what this PC knows of your Beebeeb.",
+        },
+        Loaded::SignedOut => said("Signed out", "Sign in to see your photos."),
+        Loaded::SessionEnded => said("Your session ended", "Sign in again to see your photos."),
+        Loaded::NothingSynced => said(
+            "Nothing has synced to this PC yet",
+            "Photos shows your photos and videos once this PC has synced with Beebeeb.",
+        ),
+        Loaded::NotThisAccounts => said(
+            "This PC holds another account\u{2019}s files",
+            "Photos shows your photos once this PC has synced with your account.",
+        ),
+        Loaded::Failed => ViewState::Failed {
+            key: "ph-not-here",
+            title: "Couldn\u{2019}t load your photos",
+            why: "Beebeeb couldn\u{2019}t read the library on this PC.",
+            retry: Some(try_again("ph-not-here", t).on_press(|s: &mut State| s.photos.source.refresh())),
+        },
+    };
+    let mut body = col().key("ph-body").grow(1.0);
+    if loaded != Loaded::Loading {
+        body = body.center();
+    }
+    body = body.child(view_state(state, t));
     if let Some(toast) = &ui.toast {
         body = body.child(super::overlay::toast_layer(toast, 24.0, true, t));
     }
@@ -624,6 +655,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let open = s.sidebar_section == crate::ui::sidebar::SidebarSection::Photos && gate.0 == GateState::Ready;
     // Asked of the shell's gate with the engine as it is now; kept for the presses until the next poll.
     let closed = !crate::shell::session_gate::open(s);
+    reread_if_free(s);
     let ui = &mut s.photos;
     ui.later.closed = closed && ui.source.answers_later();
     let mut changed = false;
@@ -632,6 +664,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             ui.end_session();
             // The section must open again on the next poll so a new read starts.
             ui.later.was_open = false;
+            ui.later.reread_due = false;
             changed = true;
         }
         ui.later.seen = Some(gate);
@@ -642,9 +675,21 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     ui.later.was_open = open;
     let later = ui.source.answers_later();
+    let mut left_over = Vec::new();
     if later {
-        changed |= ui.take_in_intents();
+        let (any, rest) = ui.take_in_intents();
+        changed |= any;
+        left_over = rest;
     }
+    for intent in left_over {
+        changed |= super::route::route(s, tx, intent);
+    }
+    let ui = &mut s.photos;
+    // The tile the arrow keys are on, by its photo: a read that lands puts photos before it.
+    let cursor_on = ui
+        .cursor
+        .and_then(|(day, index)| ui.source.photo(ui.filter, day, index))
+        .map(|p| p.id);
     let pumped = ui.source.pump();
     // A folder change the engine refused (it answers after the press): said, not only logged.
     if later && ui.source.folder_refused() {
@@ -654,9 +699,21 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
-    changed |= pumped.changed || !pumped.answered.is_empty();
+    // A video this window started: the stage reads the player's state once it names the file, then the poll ends.
+    let (settled, waiting) = ui.settle_playing();
+    changed |= settled;
+    if waiting {
+        tx.wake_after(POLL_EVERY);
+    }
+    changed |= pumped.changed || !pumped.answered.is_empty() || !pumped.originals.is_empty();
+    for answer in pumped.originals {
+        ui.original_answered(answer);
+    }
     if pumped.changed {
         ui.relayout();
+        if later {
+            ui.cursor = cursor_on.and_then(|id| ui.place_of(id));
+        }
     }
     // What the changes did, first: an open photo that Beebeeb moved to Trash leaves the stage its own way.
     for answer in pumped.answered {

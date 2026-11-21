@@ -10,22 +10,32 @@
 
 use crate::State;
 use crate::source::DriveItem;
+use crate::theme::file_icons::icon_for_item;
 use crate::theme::icons;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, type_};
 use chrono::Timelike;
 use rune::{Align, Color, Cx, El, Icon, col, el, row};
 use std::borrow::Cow;
 
+use super::file_row::{self, Column, RowLook, Width};
+use super::view_state::{ViewState, try_again, view_state};
 use super::kit;
 
 /// `.mk-row { height: 30px }`
-pub const ROW_H: f32 = 30.0;
-const COLUMN_HEADER_H: f32 = 28.0;
+pub const ROW_H: f32 = file_row::ROW_H;
 const COL_DATE_W: f32 = 132.0;
 const COL_SIZE_W: f32 = 84.0;
 const COL_SHARED_W: f32 = 92.0;
 const COL_PC_W: f32 = 34.0;
-const COL_GAP: f32 = 12.0;
+
+/// The list's columns, in order.
+pub const COLUMNS: [Column; 5] = [
+    Column::new("name", "Name", Width::Flex(1.0)),
+    Column::new("date", "Date changed", Width::Fixed(COL_DATE_W)),
+    Column::new("size", "Size", Width::Fixed(COL_SIZE_W)).align(Align::End),
+    Column::new("shared", "Shared", Width::Fixed(COL_SHARED_W)),
+    Column::new("pc", "PC", Width::Fixed(COL_PC_W)).align(Align::Center).spoken("On this PC"),
+];
 
 /// Where an item is, in the PC column.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -94,21 +104,10 @@ pub fn pc_glyph(key: impl Into<String>, state: PcState, surface: Color, t: &Them
 /// A file's tile (`.mk-ftile`): 22 pt, the kind's outlined glyph on a neutral wash, or the
 /// file's thumbnail. Keys: `<key>-tile`, `<key>-icon`.
 pub fn file_tile(key: &str, item: &DriveItem, t: &Theme) -> El {
-    let tile = el()
-        .key(format!("{key}-tile"))
-        .size(22.0, 22.0)
-        .radius(6.0)
-        .clip_rounded(6.0)
-        .center();
     if item.has_thumbnail {
-        return thumbnail(tile);
+        return thumbnail(file_row::tile_frame(key));
     }
-    tile.fill(t.tile).child(kit::glyph(
-        format!("{key}-icon"),
-        file_type_icon(item),
-        14.0,
-        t.text_secondary,
-    ))
+    file_row::icon_tile(key, icon_for_item(item), t)
 }
 
 /// A thumbnail's stand-in until the engine hands over pixels: the board's sample photo
@@ -125,111 +124,46 @@ pub fn thumbnail(tile: El) -> El {
     )
 }
 
-/// The board draws one outlined glyph per kind, all in ink-2 (no per-type colour in the
-/// desktop list): a folder, the Backups drive, a sheet, a deck or media file, a document.
+/// The registry's art for an item (folder, Backups root, or its file type).
 pub fn file_type_icon(item: &DriveItem) -> &'static Icon {
-    if item.is_folder {
-        return if item.is_protected {
-            &icons::BACKUPS
-        } else {
-            &icons::FILES
-        };
-    }
-    match item.mime.as_deref() {
-        Some(m) if m.contains("spreadsheet") || m.contains("excel") || m == "text/csv" => &icons::DOC_SPREADSHEET,
-        Some(m) if m.contains("presentation") || m.contains("keynote") || m.contains("powerpoint") => {
-            &icons::DOC_MINIMAL
-        }
-        Some(m) if m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/") => &icons::DOC_MINIMAL,
-        // A file of no known kind: the plain sheet (the board's `file`, DW-0408b).
-        Some("application/octet-stream") => &crate::theme::icons_files::DOC_BLANK,
-        _ => &icons::DOC_GENERIC,
-    }
+    crate::theme::file_icon_art::art(icon_for_item(item).id)
 }
 
-/// A header cell's label.
-fn head(key: &'static str, label: &'static str, t: &Theme) -> El {
-    kit::label(key, label, type_::COLUMN_HEADER, t.text_tertiary)
-}
-
-/// Column headers (`.mk-thead`).
+/// Column headers (`.mk-thead`), sorted by name.
 pub fn column_headers(t: &Theme) -> El {
-    row()
-        .key("column-headers")
-        .role("row")
-        .h(COLUMN_HEADER_H)
-        .w_full()
-        .mt(4.0)
-        .px(20.0)
-        .gap(COL_GAP)
-        .center_y()
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .child(
-            row()
-                .key("col-name-cell")
-                .role("columnheader")
-                .label("Name")
-                .sorted(Some(true))
-                .grow(1.0)
-                .min_w(0.0)
-                .center_y()
-                .gap(3.0)
-                .child(head("col-name", "Name", t))
-                .child(kit::glyph("sort-arrow", &icons::CHEVRON_DOWN, 11.0, t.text_tertiary)),
-        )
-        .child(
-            row()
-                .key("col-date-cell")
-                .role("columnheader")
-                .w(COL_DATE_W)
-                .center_y()
-                .child(head("col-date", "Date changed", t)),
-        )
-        .child(
-            row()
-                .key("col-size-cell")
-                .role("columnheader")
-                .w(COL_SIZE_W)
-                .center_y()
-                .justify_end()
-                .child(head("col-size", "Size", t)),
-        )
-        .child(
-            row()
-                .key("col-shared-cell")
-                .role("columnheader")
-                .w(COL_SHARED_W)
-                .center_y()
-                .child(head("col-shared", "Shared", t)),
-        )
-        .child(
-            row()
-                .key("col-pc-cell")
-                .role("columnheader")
-                .label("On this PC")
-                .w(COL_PC_W)
-                .center()
-                .child(head("col-pc", "PC", t)),
-        )
+    file_row::header(&COLUMNS, Some((0, true)), t)
 }
 
-/// In place of the rows when the folder could not be read: the reason, in words.
+/// In place of the rows when the folder could not be read: `ui::view_state` Failed with the reason and a
+/// Try again that reads the folder again ([`State::retry_list`]). Keys: `file-list-error`, `-title`, `-text`,
+/// `-retry`.
 pub fn list_error(error: crate::source::SourceError, t: &Theme) -> El {
-    col()
-        .key("file-list-error")
-        .role("alert")
-        .grow(1.0)
-        .min_h(0.0)
-        .w_full()
-        .py(12.0)
-        .px(20.0)
-        .child(kit::label(
-            "file-list-error-text",
-            error.message(),
-            type_::LIST_ITEM,
-            t.text_secondary,
-        ))
+    let title = match error {
+        crate::source::SourceError::NotFound => "This folder can\u{2019}t be opened",
+        _ => "Your files can\u{2019}t be read",
+    };
+    view_state(
+        ViewState::Failed {
+            key: "file-list-error",
+            title,
+            why: error.message(),
+            retry: Some(try_again("file-list-error", t).on_press(|s: &mut State| s.retry_list())),
+        },
+        t,
+    )
+    .grow(1.0)
+    .min_h(0.0)
+    .w_full()
+}
+
+impl State {
+    /// Try again on a list that could not be read: the engine is asked for the file list now, and the folder
+    /// shown is read again. A read that works clears the failure; one that fails again says so again.
+    pub fn retry_list(&mut self) {
+        self.global.source.retry_list();
+        let id = self.listing.folder.id.clone();
+        (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
+    }
 }
 
 /// The rows, virtualised (`.mk-rows`).
@@ -282,20 +216,9 @@ pub fn file_row(i: usize, item: &DriveItem, selected: bool, t: &Theme) -> El {
     // What the row sits on, for the rings and cut-outs drawn in the surface's colour.
     let surface = t.bg;
 
-    let mut name = row()
-        .key("name-cell")
-        .grow(1.0)
-        .min_w(0.0)
-        .center_y()
-        .gap(8.0)
-        .child(file_tile(&k, item, t));
-    name = name.child(
-        kit::label(format!("{k}-name"), item.name.clone(), type_::LIST_ITEM, t.text)
-            .truncate()
-            .min_w(0.0),
-    );
+    let mut marks = Vec::new();
     if item.is_protected {
-        name = name.child(
+        marks.push(
             kit::glyph(format!("{k}-lock"), &icons::LOCK, 11.0, t.text_tertiary)
                 .ml(2.0)
                 .role("image")
@@ -316,43 +239,22 @@ pub fn file_row(i: usize, item: &DriveItem, selected: bool, t: &Theme) -> El {
         pc = pc.child(pc_glyph(format!("{k}-pc"), state, surface, t));
     }
 
-    row()
-        .key(k.clone())
-        .role("listitem")
-        .label(&item.name)
-        .h(ROW_H)
-        .w_full()
-        .px(14.0)
-        .gap(COL_GAP)
-        .center_y()
-        .radius(radius::CONTROL)
-        .fill(if selected { t.selection_row } else { Color::TRANSPARENT })
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .focus_selected(selected)
-        .child(name)
-        .child(
-            kit::label(
-                format!("{k}-date"),
-                format_date(&item.modified_at),
-                type_::META_MONO,
-                meta,
-            )
+    let cells = vec![
+        kit::label(format!("{k}-date"), format_date(&item.modified_at), type_::META_MONO, meta)
             .w(COL_DATE_W)
             .truncate(),
-        )
-        .child(
-            kit::label(format!("{k}-size"), size_text, type_::META_MONO, meta)
-                .w(COL_SIZE_W)
-                .align(Align::End),
-        )
-        .child(shared_cell(&k, item, meta, surface, t))
-        .child(pc)
+        kit::label(format!("{k}-size"), size_text, type_::META_MONO, meta)
+            .w(COL_SIZE_W)
+            .align(Align::End),
+        shared_cell(&k, item, meta, surface, t),
+        pc,
+    ];
+    let look = RowLook { selected, ..RowLook::default() };
+    file_row::row_with(&k, &item.name, file_tile(&k, item, t), &item.name, marks, cells, look, t)
 }
 
 /// The Shared column: who it is shared with, "Link", or a dash.
-fn shared_cell(k: &str, item: &DriveItem, meta: Color, surface: Color, t: &Theme) -> El {
+pub fn shared_cell(k: &str, item: &DriveItem, meta: Color, surface: Color, t: &Theme) -> El {
     let mut cell = row().key("shared-cell").w(COL_SHARED_W).min_w(0.0).center_y();
     if !item.shared_badges.is_empty() {
         let mut stack = row().key("avatars").role("group").label("Shared with");
@@ -397,19 +299,55 @@ fn shared_cell(k: &str, item: &DriveItem, meta: Color, surface: Color, t: &Theme
 }
 
 /// A date as the board shows it: "Today, 07:02", "Yesterday, 16:42", "Sunday" within the
-/// last week, else "28 Oct 2026".
+/// last week, else "28 Oct 2026". One rule for every list and row, in this PC's local time: a
+/// UTC stamp (`...Z`) is moved to local time and compared with the local date of now.
 pub fn format_date(iso: &str) -> String {
-    use chrono::{Datelike, Duration, NaiveDateTime, Weekday};
+    use chrono::{Local, NaiveDateTime, TimeZone, Utc};
 
-    let Ok(dt) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ")
-        .or_else(|_| NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S"))
-    else {
+    let local = if let Ok(utc) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ") {
+        Utc.from_utc_datetime(&utc).with_timezone(&Local).naive_local()
+    } else if let Ok(naive) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S") {
+        naive
+    } else {
         return String::new();
     };
-    // The fixture's "now" (5 Nov 2026); the engine's source brings its own clock.
-    let Ok(now) = NaiveDateTime::parse_from_str("2026-11-05T12:00:00", "%Y-%m-%dT%H:%M:%S") else {
-        return String::new();
+    format_date_at(local, Local::now().naive_local())
+}
+
+/// A fixture stamp for the board's mock "now" (5 Nov 2026), moved onto this PC's local clock so
+/// the board's wording holds on any day: 4 and 5 Nov become yesterday and today (same time of
+/// day, no zone); older stamps in the board's last week (30 Oct to 3 Nov) keep their weekday
+/// ("Sunday") on the latest such day at least 2 days back. Every other stamp is unchanged.
+pub fn board_stamp(iso: &str) -> String {
+    board_stamp_at(iso, chrono::Local::now().date_naive())
+}
+
+/// [`board_stamp`] against a given local date (testable).
+pub fn board_stamp_at(iso: &str, today: chrono::NaiveDate) -> String {
+    use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
+
+    let Ok(at) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ") else {
+        return iso.to_string();
     };
+    let board_today = NaiveDate::from_ymd_opt(2026, 11, 5).unwrap();
+    let days_back = (board_today - at.date()).num_days();
+    let shifted = match days_back {
+        0 | 1 => at + (today - board_today),
+        2..=6 => {
+            let mut d = today - Duration::days(2);
+            while d.weekday() != at.date().weekday() {
+                d -= Duration::days(1);
+            }
+            d.and_time(at.time())
+        }
+        _ => return iso.to_string(),
+    };
+    shifted.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+/// [`format_date`] for a local time against a local "now" (the rule, testable).
+pub fn format_date_at(dt: chrono::NaiveDateTime, now: chrono::NaiveDateTime) -> String {
+    use chrono::{Datelike, Duration, Weekday};
 
     let (date, today) = (dt.date(), now.date());
     let time = format!("{:02}:{:02}", dt.hour(), dt.minute());
@@ -436,3 +374,7 @@ pub fn format_date(iso: &str) -> String {
         format!("{} {} {}", date.day(), MONTHS[date.month0() as usize], date.year())
     }
 }
+
+#[cfg(test)]
+#[path = "file_list_tests.rs"]
+mod tests;

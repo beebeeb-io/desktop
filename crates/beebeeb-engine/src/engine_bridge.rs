@@ -21,7 +21,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -73,6 +72,10 @@ pub struct EngineBridge {
     /// landing takes the op off the queue before they are uploaded, and until they are, the
     /// server holds the previous version's (one per file): [`Self::finder_thumbnail`] refuses.
     thumbnails_pending: std::sync::Mutex<HashSet<String>>,
+    /// w36: the ops a queue step is sending right now ([`Self::process_due_operations`], [`Self::process_due_changes`]).
+    /// Two steps can run at once (the tick's, and a nudge's beside it): an op in here is skipped by the other, so no
+    /// change is ever sent twice.
+    ops_in_flight: std::sync::Mutex<HashSet<String>>,
     /// Ids whose listing carries a 2236 request envelope (L12). A cache only:
     /// the authoritative fact is persisted on the record (P3-3).
     request_rows: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -277,6 +280,7 @@ mod tests {
     mod stale_2523;
     // S6: a hydrate's start look; a save made after it is never replaced (Linux).
     mod start_look_s6;
+    mod cursor_2272; // Task 2272: a failed op apply holds the cursor, retries, then parks.
     mod sync;
     mod sync_2;
     mod sync_3;
@@ -295,6 +299,7 @@ mod tests {
     mod versions;
     mod versions_2;
     mod versions_3;
+    mod video_frame;
     // Chunk format v2 (core 0.3.0): write then read, the completion name, resume, capabilities.
     mod format_v2;
     // rusqlite 0.41: a state database and a file of release 0.8.25, read by this build.

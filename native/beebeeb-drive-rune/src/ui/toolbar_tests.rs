@@ -161,13 +161,13 @@ fn sort_opens_the_sort_frame_in_shared_and_trash_and_is_out_of_reach_in_photos_a
         if live {
             assert_eq!(
                 rt.state.frames.intents,
-                [Intent::Frame("DW-0406")],
+                [Intent::Frame("DW-0404")],
                 "{name}: the pointer"
             );
             press_focused(&mut rt, "sort-btn");
             assert_eq!(
                 rt.state.frames.intents,
-                [Intent::Frame("DW-0406"), Intent::Frame("DW-0406")],
+                [Intent::Frame("DW-0404"), Intent::Frame("DW-0404")],
                 "{name}: the keyboard"
             );
         } else {
@@ -242,15 +242,23 @@ fn in_files_the_switch_sort_and_the_details_button_each_change_their_own_state()
 }
 
 #[test]
-fn viewer_open_in_file_explorer_opens_the_beebeeb_location() {
-    // A file open in the viewer shows no folder of its own: the button opens the Beebeeb location, by pointer.
-    let (asked, mut rt) = window(|s| crate::frames::viewers::set_scene(s, "DW-1512"));
-    let button = info(&rt, "open-explorer");
-    assert_eq!(
-        (button.role, button.label.as_deref(), button.focusable),
-        ("button", Some("Open in File Explorer"), true)
+fn viewer_bar_has_one_show_in_file_explorer_and_no_open_explorer() {
+    // A file open in the viewer: one reveal action (this file selected), never a second "Open in File Explorer".
+    let (_asked, rt) = window(|s| crate::frames::viewers::set_scene(s, "DW-1512"));
+    let button = info(&rt, "show-in-folder");
+    assert_eq!(button.role, "button");
+    assert!(button.focusable);
+    assert!(
+        !rt.elements().into_iter().any(|e| e.key.as_deref() == Some("open-explorer") && !e.exiting),
+        "no duplicate open-explorer button in the viewer bar"
     );
-    assert!(asked.files().is_empty(), "nothing asked before a press");
-    click(&mut rt, "open-explorer");
-    assert_eq!(asked.files(), [Call::OpenInFileExplorer(None)]);
+}
+
+#[test]
+fn files_toolbar_is_the_one_bar_with_a_title_block_and_the_standard_controls() {
+    // Files' own toolbar delegates to `bar`: title block, details toggle, New, search.
+    let (_asked, rt) = window(|_| {});
+    let keys: Vec<String> = rt.elements().into_iter().filter_map(|e| e.key).collect();
+    assert!(keys.iter().any(|k| k == "folder-info"), "the title block");
+    assert_eq!(info(&rt, "panel-toggle-btn").role, "button");
 }

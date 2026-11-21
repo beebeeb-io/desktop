@@ -10,9 +10,14 @@ use super::chrome::{self, Bar, Tone, rgb, style};
 use super::source::{Kind, Photo, Shape, Totals};
 use super::{Intent, Menu, Ui, icons};
 use crate::State;
+use crate::theme::file_icons::icon_for;
 use crate::theme::icons as shared;
 use crate::theme::tokens::{Theme, type_};
+use crate::ui::file_icon::file_icon;
 use crate::ui::kit;
+use crate::ui::pill::{Tone as PillTone, pill as ui_pill};
+use crate::ui::toolbar::tool;
+use crate::ui::view_state::{ViewState, try_again, view_state};
 
 /// The gap between tiles (`gap-[3px]`).
 const GAP: f32 = 3.0;
@@ -30,16 +35,29 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
-/// A size as the board writes it: "216 GB", "42 MB", "30.9 MB"; `unit: false` leaves the unit out.
-pub fn megabytes(bytes: u64, unit: bool) -> String {
-    let (value, name) = if bytes >= 1_000_000_000 {
-        (bytes as f64 / 1e9, "GB")
+/// The unit a size of `bytes` is written in, and what one of it is.
+fn unit_of(bytes: u64) -> (f64, &'static str) {
+    if bytes >= 1_000_000_000 {
+        (1e9, "GB")
+    } else if bytes >= 1_000_000 {
+        (1e6, "MB")
     } else {
-        (bytes as f64 / 1e6, "MB")
-    };
+        (1e3, "KB")
+    }
+}
+
+/// A size as the board writes it: "216 GB", "42 MB", "30.9 MB", "41 KB"; `unit: false` leaves the unit out.
+pub fn megabytes(bytes: u64, unit: bool) -> String {
+    sized_like(bytes, bytes, unit)
+}
+
+/// `bytes` in the unit that `whole` is written in ("12.4" of "30.9 MB").
+pub fn sized_like(bytes: u64, whole: u64, unit: bool) -> String {
+    let (per, name) = unit_of(whole);
+    let value = bytes as f64 / per;
     let tenths = (value * 10.0).round() / 10.0;
-    let figure = if tenths.fract() == 0.0 {
-        format!("{tenths:.0}")
+    let figure = if name == "KB" || tenths.fract() == 0.0 {
+        format!("{:.0}", if name == "KB" { value.ceil() } else { tenths })
     } else {
         format!("{tenths:.1}")
     };
@@ -71,7 +89,7 @@ fn totals_line(totals: Totals) -> String {
 }
 
 pub fn bar(ui: &Ui, t: &Theme) -> Bar {
-    let across = chrome::tbtn("ph-across", "Photos across", &shared::VIEW_GRID, 15.0, false, t)
+    let across = tool("ph-across", "Photos across", &shared::VIEW_GRID, t)
         .expanded(ui.menu.is_some_and(|m| m.which == Menu::Across))
         .child(kit::glyph(
             "ph-across-caret",
@@ -80,9 +98,9 @@ pub fn bar(ui: &Ui, t: &Theme) -> Bar {
             t.text_secondary,
         ))
         .on_press(|s: &mut State| s.photos.toggle_menu(Menu::Across));
-    let sources = chrome::tbtn("ph-sources", "Photo sources", &icons::SOURCES, 15.0, false, t)
+    let sources = tool("ph-sources", "Photo sources", &icons::SOURCES, t)
         .on_press(|s: &mut State| s.photos.open_sources());
-    let select = chrome::tbtn("ph-select", "Select", &icons::CHECK, 15.0, false, t)
+    let select = tool("ph-select", "Select", &icons::CHECK, t)
         .checked(ui.selecting)
         .on_press(|s: &mut State| {
             if s.photos.selecting {
@@ -107,25 +125,20 @@ pub fn bar(ui: &Ui, t: &Theme) -> Bar {
 }
 
 fn pill(i: usize, name: &str, on: bool, device: Option<usize>, t: &Theme) -> El {
-    el().key(format!("ph-pill-{i}"))
-        .role("radio")
-        .label(name)
-        .checked(on)
-        .h(26.0)
-        .w(chrome::advance(name, style::CHIP) + 20.0)
-        .radius(13.0)
-        .center()
-        .fill(if on { t.text } else { t.tile })
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .on_press(move |s: &mut State| s.photos.set_filter(device))
-        .child(kit::label(
-            format!("ph-pill-{i}-label"),
-            name,
-            style::CHIP,
-            if on { t.paper } else { t.text_secondary },
-        ))
+    // A choice among sources: a radio of the shared pill, ink when it is the one shown.
+    ui_pill(
+        &format!("ph-pill-{i}"),
+        name,
+        if on { PillTone::Accent } else { PillTone::Neutral },
+        false,
+        t,
+    )
+    .role("radio")
+    .checked(on)
+    .hover(t.hover)
+    .press(t.press)
+    .focusable(true)
+    .on_press(move |s: &mut State| s.photos.set_filter(device))
 }
 
 /// The bar under the toolbar: All and one pill per device that shows, and what the devices'
@@ -134,6 +147,7 @@ fn head(ui: &Ui, t: &Theme) -> El {
     let mut pills = row()
         .key("ph-pills")
         .role("radiogroup")
+        .focus_group()
         .label("Source")
         .gap(6.0)
         .center_y()
@@ -204,6 +218,7 @@ pub fn bulk(ui: &Ui, t: &Theme) -> El {
     row()
         .key("ph-bulk")
         .role("toolbar")
+        .focus_group()
         .label("Selection")
         .w_full()
         .px(14.0)
@@ -269,6 +284,9 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
         .size(side, side)
         .radius(3.0)
         .focusable(true)
+        // One Tab stop for the whole grid: the cursor's tile (the first before there is one); arrows rove.
+        .tab_index(if ui.cursor.map_or((day, index) == (0, 0), |c| c == (day, index)) { 0 } else { -1 })
+        .position_in_set(ui.position_of(day, index), ui.total())
         // Ctrl+click checks a photo and starts selecting (DW-0601, DW-0602).
         .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| {
             if tx.mods().ctrl {
@@ -284,7 +302,13 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
     // A thumbnail that is not there yet: the neutral tile, never a broken picture.
     tile = match ui.source.thumbnail(photo.id, Shape::Square) {
         Some(pixels) => tile.pixels(&pixels),
-        None => tile.fill(t.tile),
+        None => {
+            let mime = if matches!(photo.kind, Kind::Video(_)) { "video/*" } else { "image/*" };
+            let fi = icon_for("", false, Some(mime));
+            tile.fill(t.tile)
+                .center()
+                .child(file_icon(format!("{key}-type-icon"), fi, 28.0, t))
+        }
     };
     if checked {
         tile = tile.child(
@@ -379,51 +403,81 @@ fn line(ui: &Ui, i: usize, t: &Theme) -> El {
     out.child(tiles)
 }
 
-/// "No photos yet" (`.kit-empty`, DW-0116): also when a device filter has nothing.
-fn empty(t: &Theme) -> El {
-    col()
-        .key("ph-empty-area")
-        .grow(1.0)
-        .center()
-        .child(
-            col()
-                .key("ph-empty")
-                .role("status")
-                .items_center()
-                .gap(8.0)
-                .px(24.0)
-                .py(28.0)
-                .child(
-                    el().key("ph-empty-tile")
-                        .size(52.0, 52.0)
-                        .radius(15.0)
-                        .fill(t.tile)
-                        .center()
-                        .child(kit::glyph("ph-empty-icon", &icons::PHOTOS, 26.0, t.text_secondary)),
-                )
-                .child(kit::label("ph-empty-title", "No photos yet", style::TITLE, t.text).role("heading"))
-                .child(
-                    kit::label(
-                        "ph-empty-sub",
-                        "Photos backed up from your iPhone or iPad appear here. Turn on photo backup in Beebeeb on the iPhone or iPad.",
-                        style::SUB,
-                        t.text_tertiary,
-                    )
-                    // `max-width: 30ch`.
-                    .w(227.11)
-                    .wrap()
-                    .align(rune::Align::Center),
-                ),
-        )
+/// w31: what the account's file list on this PC is, for a library with nothing in it: only a list that arrived
+/// makes "No photos yet" true.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListState {
+    Here,
+    OnItsWay,
+    Failed,
 }
 
-pub fn body(ui: &Ui, t: &Theme) -> El {
+/// As the window's global source says it now (the same read the Files list's card and banner make).
+pub fn list_state(s: &State) -> ListState {
+    let status = s.global.source.status();
+    if status.list_failed {
+        ListState::Failed
+    } else if status.loading.is_some() {
+        ListState::OnItsWay
+    } else {
+        ListState::Here
+    }
+}
+
+/// "No photos yet" (`.kit-empty`, DW-0116): also when a device filter has nothing. While the file list is on
+/// its way it says Loading, and when it could not be loaded it says why, with a Try again that asks again.
+fn empty(list: ListState, t: &Theme) -> El {
+    let state = match list {
+        ListState::Here => ViewState::Empty {
+            key: "ph-empty",
+            icon: &icons::PHOTOS,
+            title: "No photos yet",
+            body: "Photos backed up from your iPhone or iPad appear here. Turn on photo backup in Beebeeb on the iPhone or iPad.",
+            action: None,
+        },
+        ListState::OnItsWay => ViewState::Loading {
+            words: "Getting your photos ready. Your file list is downloading and being decrypted on this PC.",
+        },
+        ListState::Failed => ViewState::Failed {
+            key: "ph-empty",
+            title: "Your photos couldn\u{2019}t be loaded",
+            why: "Beebeeb couldn\u{2019}t get your file list. It keeps trying; you can also try again now.",
+            retry: Some(try_again("ph-empty", t).on_press(|s: &mut State| s.global.source.retry_list())),
+        },
+    };
+    let mut area = col().key("ph-empty-area").grow(1.0);
+    if list != ListState::OnItsWay {
+        area = area.center();
+    }
+    area.child(view_state(state, t))
+}
+
+/// w31: HEIC and RAW originals cannot be shown here; said once at the top, only when the view holds some.
+fn unshowable_notice(t: &Theme) -> El {
+    row()
+        .key("ph-heic-notice")
+        .role("status")
+        .label(UNSHOWABLE)
+        .w_full()
+        .px(20.0)
+        .py(8.0)
+        .gap(8.0)
+        .center_y()
+        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
+        .border_layout()
+        .child(kit::glyph("ph-heic-notice-icon", &icons::MORE, 14.0, t.text_tertiary))
+        .child(kit::label("ph-heic-notice-words", UNSHOWABLE, style::SUB, t.text_secondary))
+}
+
+/// The notice's words (also the viewer's).
+pub use crate::frames::viewers::refusal_text::UNSHOWABLE;
+
+pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
     let content = if ui.lines.is_empty() {
-        empty(t)
+        empty(list, t)
     } else {
         let t = *t;
-        col()
-            .key("ph-scroll")
+        crate::ui::focus::pane(col(), "ph-scroll")
             // The tiles are sized from the width the grid really has.
             .on_layout(|s: &mut State, rect: [f32; 4]| s.photos.set_width(rect[2]))
             .scroll(ScrollSpec { stick_bottom: false })
@@ -446,7 +500,11 @@ pub fn body(ui: &Ui, t: &Theme) -> El {
                     .virtual_rows_version((ui.lines.len(), ui.across, ui.filter)),
             )
     };
-    let mut body = col().key("ph-body").child(head(ui, t)).child(content);
+    let mut body = col().key("ph-body").child(crate::ui::focus::pane(head(ui, t), "ph-head"));
+    if ui.source.holds_unshowable() {
+        body = body.child(unshowable_notice(t));
+    }
+    let mut body = body.child(content);
     if let Some(toast) = &ui.toast {
         body = body.child(super::overlay::toast_layer(toast, 24.0, true, t));
     }

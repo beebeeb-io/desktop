@@ -152,16 +152,8 @@ pub fn toast_room(lines: usize) -> El {
 
 /// [`toast`] on line `line` (0: its own place; 1: above a notice that stays).
 pub fn toast_on(index: usize, words: &str, line: usize, t: &Theme) -> El {
-    let key = format!("toast-{index}");
-    // `--kit-glass`: the paper, see-through. (The board blurs what is behind it; behind a
-    // toast is the pane's flat ground.)
-    let glass = if t.dark {
-        t.paper2.alpha(0.68)
-    } else {
-        t.paper.alpha(0.72)
-    };
     row()
-        .key(format!("{key}-line"))
+        .key(format!("toast-{index}-line"))
         .pin(
             Some(super::settings_shell::SIDEBAR_W),
             None,
@@ -169,33 +161,13 @@ pub fn toast_on(index: usize, words: &str, line: usize, t: &Theme) -> El {
             Some(42.0 + TOAST_LINE * line as f32),
         )
         .justify_center()
-        .child(
-            row()
-                .key(key.clone())
-                .role("status")
-                .label(words)
-                .h(34.0)
-                .pl(14.0)
-                .pr(8.0)
-                .gap(10.0)
-                .center_y()
-                .radius(17.0)
-                .fill(glass)
-                .border(kit::HAIR, t.separator)
-                .border_layout()
-                .box_shadow(kit::drop(6.0, 22.0, Color::BLACK.alpha(0.10)))
-                // `inset 0 .5px 0 var(--kit-hi)`: the glass catches the light along its top edge.
-                .box_shadow(rune::Shadow {
-                    x: 0.0,
-                    y: kit::HAIR,
-                    blur: 0.0,
-                    spread: 0.0,
-                    color: Color::WHITE.alpha(if t.dark { 0.08 } else { 0.70 }),
-                    inset: true,
-                })
-                .child(kit::glyph(format!("{key}-icon"), &ic::CHECK, 15.0, t.green))
-                .child(kit::label(format!("{key}-text"), words, TOAST, t.text)),
-        )
+        .child(crate::ui::toast::toast_with(
+            &format!("toast-{index}"),
+            words,
+            crate::ui::toast::Lead::Check,
+            None,
+            t,
+        ))
 }
 
 /// A glyph on its tone's tint (`.kit-tile`), 36 pt, corners 10. Keys: `tile-<N>`, `tile-<N>-icon`.
@@ -216,75 +188,6 @@ pub fn tile_sized(index: usize, tone: Tone, icon: &'static Icon, size: f32, t: &
         .fill(fill)
         .center()
         .child(kit::glyph(format!("tile-{index}-icon"), icon, size / 2.0, ink))
-}
-
-/// A small pill with a dot (`.kit-pill.tone-neutral`): "New". Keys: `pill-<N>`, `-dot`, `-label`.
-pub fn pill(index: usize, words: &str, t: &Theme) -> El {
-    let key = format!("pill-{index}");
-    row()
-        .key(key.clone())
-        .h(20.0)
-        .px(8.0)
-        .gap(5.0)
-        .center_y()
-        .radius(10.0)
-        .fill(t.text.alpha(0.07))
-        .child(super::settings_meter::disc(
-            &format!("{key}-dot"),
-            6.0,
-            t.text_secondary,
-        ))
-        .child(kit::label(format!("{key}-label"), words, PILL, t.text_secondary))
-}
-
-/// The card for a pane with nothing to show (an empty state): a tile, what is empty, and
-/// what will show up here. Centred.
-pub fn empty(card: usize, tile_index: usize, icon: &'static Icon, head: &str, words: &str, t: &Theme) -> El {
-    // `max-width: 46ch`.
-    empty_sized(card, tile_index, icon, head, words, 348.23, t)
-}
-
-/// `empty` with the words wrapped in `max_w` points (the board sets it per frame, in `ch`).
-pub fn empty_sized(
-    card: usize,
-    tile_index: usize,
-    icon: &'static Icon,
-    head: &str,
-    words: &str,
-    max_w: f32,
-    t: &Theme,
-) -> El {
-    col()
-        .key(format!("card-{card}"))
-        .role("status")
-        .label(format!("{head}. {words}"))
-        .w_full()
-        .items_center()
-        .py(44.0)
-        .px(36.0)
-        .gap(8.0)
-        .radius(crate::theme::tokens::radius::LG)
-        .fill(t.card)
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
-        .child(tile_sized(tile_index, Tone::Neutral, icon, 40.0, t))
-        .child(kit::label(
-            format!("card-{card}-head"),
-            head,
-            crate::theme::tokens::type_::HEAD,
-            t.text,
-        ))
-        .child(
-            kit::label(
-                format!("card-{card}-sub"),
-                words,
-                super::settings_shell::SUB,
-                t.text_tertiary,
-            )
-            .wrap()
-            .align(rune::Align::Center)
-            .w(max_w),
-        )
 }
 
 /// The card for something that could not load: what failed, what is unchanged, and one

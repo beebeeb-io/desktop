@@ -248,6 +248,7 @@ fn ingestion_writes_a_new_row_with_its_parent_and_namespace() {
         file_name_encrypted: None,
         permission_bits: PERMISSION_READ,
         approved_at: None,
+        claimed: false,
     };
     apply_shared_metadata_file_row(
         &bridge.db,
@@ -335,6 +336,31 @@ async fn the_shared_root_refresh_writes_its_row_with_its_namespace() {
         (Namespace::SharedWithMe, None, Some("shared-file"), Some("invite-1"))
     );
     assert!(!listed_under(&bridge, FP_ROOT).contains(&"shared-file".to_string()));
+    drop(server.finish());
+}
+
+/// w24: an accepted invite still in the "claimed" state (no sealed key yet) is listed under Shared with the
+/// "Opening shared folder…" placeholder, and becomes the real row when the key arrives.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_claimed_invite_is_listed_with_the_opening_placeholder() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = VersionedServerMock::start();
+    server.state.lock().unwrap().incoming_invites = Some(serde_json::json!({
+        "invites": [{
+            "status": "claimed",
+            "id": "invite-c",
+            "file_id": "claimed-folder",
+            "is_folder_share": true
+        }]
+    }));
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [111u8; 32]);
+    let outcome = bridge.refresh_shared_roots().await.unwrap();
+    assert_eq!(outcome.active_shared_root_ids, vec!["claimed-folder".to_string()]);
+    let row = bridge.db.get_file("claimed-folder").unwrap().expect("claimed row is listed");
+    assert_eq!(row.path, "Shared with me/Opening shared folder…");
+    let contract = bridge.db.get_file_contract_state("claimed-folder").unwrap().unwrap();
+    assert_eq!(contract.namespace, Namespace::SharedWithMe);
     drop(server.finish());
 }
 

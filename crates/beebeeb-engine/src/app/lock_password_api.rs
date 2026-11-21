@@ -110,6 +110,12 @@ impl LockPassword {
     pub(super) fn drop_pending(&self) {
         *self.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
+
+    /// Whether a sign-in's stretched password waits here (the sign-in's wipe tests, `signin_api_tests.rs`).
+    #[cfg(test)]
+    pub(super) fn holds_a_stretch(&self) -> bool {
+        self.pending.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    }
 }
 
 /// What the server said about one typed password.

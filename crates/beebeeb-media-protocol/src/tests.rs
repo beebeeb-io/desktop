@@ -63,6 +63,7 @@ fn to_helper_messages() -> Vec<ToHelper> {
         },
         ToHelper::Seek { at_ms: 72_000 },
         ToHelper::Close,
+        ToHelper::LastHelper,
     ]
 }
 
@@ -166,12 +167,12 @@ fn protocol_round_trips_every_variant() {
     let to_helper = to_helper_messages();
     let from_helper = from_helper_messages();
 
-    // Each of the 7 + 7 kinds is in the lists.
+    // Each of the 8 + 7 kinds is in the lists.
     let to_kinds = to_helper
         .iter()
         .map(|m| wire(m)[4])
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(to_kinds.len(), 7, "every ToHelper kind is written once at least");
+    assert_eq!(to_kinds.len(), 8, "every ToHelper kind is written once at least");
     let from_kinds = from_helper
         .iter()
         .map(|m| wire(m)[4])
@@ -377,18 +378,32 @@ fn protocol_refuses_truncated_message() {
     );
 }
 
-/// The switch is off as this crate ships: no route asks for the system-decoder profile, so the app keeps the default
-/// one and a `System` file shows "Open in another app…".
+/// ux-02, the cause of "video does not play" on a PC that has Windows' own decoders: the switch shipped off, so a
+/// `System` stream (HEVC; interlaced or 10-bit H.264; AAC) never got the system-decoder profile and was refused
+/// before Windows was asked. As this crate ships, a `System` stream gets the profile (the owner's ruling of
+/// 2026-11-20); held off, no route gets it.
 #[test]
-fn profile_for_is_none_while_the_system_decoder_switch_is_off() {
+fn the_shipped_switch_gives_a_system_stream_the_system_decoder_profile() {
     assert!(
-        !MEDIA_SYSTEM_DECODER_ON,
-        "the switch flips only after the media checkpoint and its security review"
+        MEDIA_SYSTEM_DECODER_ON,
+        "off, no HEVC clip plays on a PC that has Microsoft's HEVC extension"
+    );
+    assert_eq!(
+        profile_for(Route::System, Codec::Hevc),
+        Some(SystemDecoderProfile { hevc: true })
+    );
+    assert_eq!(
+        profile_for(Route::System, Codec::H264),
+        Some(SystemDecoderProfile { hevc: false })
     );
     let mut asked = 0;
     for route in [Route::Rust, Route::System, Route::Unavailable] {
         for codec in Codec::ALL {
-            assert_eq!(profile_for(route, codec), None, "{route:?} {codec:?}");
+            assert_eq!(
+                profile_for(route, codec),
+                profile_for_with(true, route, codec),
+                "{route:?} {codec:?}"
+            );
             assert_eq!(profile_for_with(false, route, codec), None, "{route:?} {codec:?}");
             asked += 1;
         }

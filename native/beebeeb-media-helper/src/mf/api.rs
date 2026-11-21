@@ -81,6 +81,10 @@ fn start() -> Result<Api, Unavailable> {
     let mfplat = library("mfplat.dll")?;
     let readwrite = library("mfreadwrite.dll")?;
     let ole32 = library("ole32.dll").map_err(|_| Unavailable::NotHere)?;
+    // The COM libraries are delay-loaded imports (`build.rs`): load them from the system folder now, so the first
+    // call through an import finds them already here and never searches for them.
+    library("combase.dll").map_err(|_| Unavailable::NotHere)?;
+    library("oleaut32.dll").map_err(|_| Unavailable::NotHere)?;
     let co_initialize = export!(ole32, "CoInitializeEx", CoInitializeEx)?;
     let startup = export!(mfplat, "MFStartup", MfStartup)?;
     let api = Api {
@@ -93,6 +97,10 @@ fn start() -> Result<Api, Unavailable> {
     };
     // SAFETY: no reserved pointer; this thread joins the process's multithreaded apartment. The sandbox's default
     // profile refuses this (0x80070005, measured): Windows' decoders then do not run here.
+    // Measured on VM 401 (ux-57, 2026-11-21): the default profile already fails at `ole32.dll` above, and the system
+    // decoder's profile without the HEVC capabilities (`registryRead` alone) was refused HERE, so Media Foundation
+    // did not start in it. That profile now holds `lpacCom` too (Guus, 2026-11-21), so COM starts there; where it
+    // still does not, the session plays a video of ours without that sound (`routes::settled`).
     if unsafe { co_initialize(null(), MULTITHREADED) }.is_err() {
         return Err(Unavailable::NotHere);
     }

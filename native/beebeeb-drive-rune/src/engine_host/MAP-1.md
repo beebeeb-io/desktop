@@ -9,7 +9,11 @@ Modules 1–33, sorted by path.
 | `account.rs` | The account sections on the real engine: [`EngineAccountSource`], the `AccountSource` of the running app. | — |
 | `account_actions.rs` | What the account sections DO on the real engine, beside reading: sign this app out (Sign-in and security, DW-S02), prove the password for a | — |
 | `account_activity.rs` | Sign-in activity on the real engine (DW-A77 to DW-A79 and the last three events of the Security page): whether the account records its sign- | — |
+| `account_approve.rs` | Slice A5 (plan40 batch 1): approving a sign-in from another device (DW-A12 to DW-A17), on the real engine. | — |
+| `account_approve_tests.rs` | Approving another device's sign-in through the window's source (`EngineAccountSource`, slice A5) on the real engine: a real sign-in and unlo | — |
 | `account_bound_tests.rs` | Sign out of Drive, the step-up, the name and sign-in activity on the real engine, against a fake of Beebeeb's account routes on loopback (th | — |
+| `account_deletion.rs` | Slice A6 (plan40 batch 1): deleting the account from this PC (DW-A58, DW-A80 to DW-A83). | — |
+| `account_deletion_tests.rs` | Deleting the account on the real engine (slice A6), against the engine's fake account on loopback with Beebeeb's deletion routes added here, | — |
 | `account_email.rs` | Changing the sign-in email on the real engine: the calls are in `account_twofactor.rs` (`StartEmail`, `ConfirmEmail`, `ResendEmail`: one wor | — |
 | `account_password.rs` | Change password (DW-A67, DW-A68) on the real engine: [`PasswordCalls`], the part of `EngineAccountSource` behind `password_strength`, the st | — |
 | `account_password_tests.rs` | Change password on the real engine's side of the source: strength is core's, a typed password is kept for ONE change under the session and a | — |
@@ -25,17 +29,13 @@ Modules 1–33, sorted by path.
 | `account_twofactor_status.rs` | The two-factor status on the real engine (DW-A71, and the backup-codes line of the Security page): when it was added, when it was last used | — |
 | `account_twofactor_status_tests.rs` | The two-factor status on the real engine: Beebeeb's values shown, a read that failed showing none, an answer that lands after the session mo | — |
 | `account_twofactor_tests.rs` | Two-factor and change email on the real engine: the answer shown from Beebeeb, a refusal said honestly, an answer that lands after the sessi | — |
+| `account_twofactor_tests_window.rs` | Two-factor in the running app's window, through the window's own poll (`shell::host::poll`, which runs `frames::account::poll` and the shell | — |
 | `account_values.rs` | What the account panes draw, made from what Beebeeb answered: a session's row, the name and the plan of Account, and the words for a plan's | — |
+| `app_activity.rs` | Diagnostics > App activity (DW-0790): this process's CPU and memory and the upload and download rates, sampled every 2 seconds while the pan | — |
+| `app_lock.rs` | App lock on the real engine: the "Lock Beebeeb" switch of Sign-in and security (DW-S03, DW-S03b), bound to core's rule through the engine ([ | — |
+| `app_lock_password_tests.rs` | "Use your password" for app lock (no board frame: D-2) on the real engine and the parent modules' fake: Windows Hello did not confirm turnin | — |
+| `app_lock_tests.rs` | App lock's switch on Sign-in and security, on the real engine and the parent module's fake: what the page is told (`security_facts().app_loc | — |
+| `away.rs` | The away lock on the real engine: the shell's look ([`actions::Away`], measured by `shell/away.rs`) becomes the engine's ([`Engine::away_for | — |
+| `backup_folders.rs` | Slice A7 (plan40 batch 1): Add a folder and Stop backing up (DW-0737, DW-0738, DW-1410). | — |
+| `backup_folders_tests.rs` | Slice A7 on the adapter (`EngineBackupsSource`): an add asked of the engine for the session of its press and its answer dropped when it land | — |
 | `backups.rs` | Backups on the real engine: [`EngineBackupsSource`], the `BackupsSource` of the running app (DW-0737), and [`may_back_up`], the one rule tha | — |
-| `backups_devices.rs` | Backups' "Other devices" and "Delete this backup" on the real engine: [`DeviceCalls`], the part of `EngineBackupsSource` behind `devices`, ` | — |
-| `backups_devices_tests.rs` | Backups' other devices and "Delete this backup" on the real engine (`DeviceCalls`): the list from the engine's answer with its honest rows, | — |
-| `backups_tests.rs` | Backups on the real engine (`EngineBackupsSource`): the root and the folders from the engine's answer, the empty answer, an engine error, si | — |
-| `binding_tests.rs` | The binding of a test build's local data to one server (`engine_host::open::bind_to_server`, the lead's rulings inside decision 2462), from | — |
-| `drive_settings.rs` | Drive's own settings panes on the real engine: [`EngineDriveSettings`], the `DriveSettings` of the running app. | SPEED_TEST_ON |
-| `drive_settings_limits_tests.rs` | This PC's transfer limits and the Bandwidth read on the engine adapter: a limit goes to the engine under the session of the press and is sho | — |
-| `drive_settings_reads.rs` | What Drive's settings read from the engine and the local state: the Bandwidth pane's limits and traffic, the Sync pane's sizes, the folder t | — |
-| `drive_settings_tests.rs` | Drive's settings panes on the real engine (`EngineDriveSettings`), against the engine's own state database in a folder of each test's own an | — |
-| `drive_settings_tools.rs` | What Drive's settings do besides reading and storing: the speed test's steps, the support bundle's hand-off to the OS (show the file, open a | — |
-| `drive_settings_tools_tests.rs` | Repair and turn off of File Explorer, the speed test, the support bundle, the controls that are not drawn, and the reads that wait for their | — |
-| `files.rs` | The Files window's changes of what this PC holds, on the real engine: [`LocalCopies`], the part of `EngineFilesSource` behind `keep_offline` | — |
-| `files_conflicts.rs` | The Files window's Two versions dialog on the real engine: [`ConflictCalls`], the part of `EngineFilesSource` behind `conflicts` and `keep_v | — |

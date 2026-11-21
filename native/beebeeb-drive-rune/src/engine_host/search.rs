@@ -38,7 +38,7 @@
 //!
 //! Must not: log a query, a recent search, a name or a path; keep a name or a search of a session that ended.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -51,7 +51,7 @@ use chrono::Local;
 use super::log;
 use super::trash::{kind_of, when};
 use crate::frames::files::source::Details;
-use crate::frames::search::source::{Answer, Hit, Narrow, Pumped, SearchSource};
+use crate::frames::search::source::{Answer, Hit, Loading, Narrow, Pumped, SearchSource};
 use crate::ui::file_list::PcState;
 
 #[cfg(test)]
@@ -61,6 +61,9 @@ mod tests_accounts;
 
 /// An index this recent is not built again when Search opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
+
+/// A refused build (nothing synced yet, an unreadable list) is built again once it is this old, while Search is open.
+pub const RETRY_AFTER: Duration = Duration::from_secs(3);
 
 /// At most this many results are shown.
 pub const SHOWN: usize = 100;
@@ -79,6 +82,11 @@ pub trait SearchHost: Send + Sync + 'static {
     /// The index of this computer's local state. `Err`: why there is none, as the engine's account-bound handle says
     /// it (another account's local state, nothing synced yet, …); a list that cannot be read is `Unreadable`.
     fn index(&self) -> Result<LocalSearchIndex, LocalStateRefused>;
+    /// How far the first listing of the files has come while a first sign-in still gets them (DW-0802b): `None`
+    /// when it is not known or the list is whole. In memory, never waits.
+    fn listing(&self) -> Option<Loading> {
+        None
+    }
     /// The recent searches of the account of the session `turn`, newest first (disk work: a worker calls it). `Err`:
     /// none can be read (another account's local state, nothing synced yet, the session moved on).
     fn recent_searches(&self, turn: Self::Turn) -> Result<Vec<String>, ()>;
@@ -88,6 +96,11 @@ pub trait SearchHost: Send + Sync + 'static {
     /// WRITES (disk work, Clear): the recent searches of the account of the session `turn` are deleted. `Err`: they
     /// were not.
     fn clear_recent_searches(&self, turn: Self::Turn) -> Result<(), ()>;
+    /// How the account shares its items, by item id ("Anyone with the link"): a network read, so a worker calls it.
+    /// Empty when it cannot be read: a line is then left unsaid, never "Only you".
+    fn shared_words(&self) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
     fn wake(&self);
 }
 
@@ -114,6 +127,11 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
             .map_err(|_| LocalStateRefused::Unreadable)
     }
 
+    fn listing(&self) -> Option<Loading> {
+        let (listed, total) = self.first_listing()?;
+        Some(Loading { listed, total })
+    }
+
     fn recent_searches(&self, turn: SessionGeneration) -> Result<Vec<String>, ()> {
         self.recent_searches_for(turn).map_err(|_| ())
     }
@@ -124,6 +142,22 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
 
     fn clear_recent_searches(&self, turn: SessionGeneration) -> Result<(), ()> {
         self.clear_recent_searches_for(turn).map_err(|_| ())
+    }
+
+    fn shared_words(&self) -> HashMap<String, String> {
+        let Ok(overview) = self.shares_overview() else {
+            return HashMap::new();
+        };
+        let mut words = HashMap::new();
+        for share in &overview.by_me {
+            let people = share.members.len();
+            let line = if people == 1 { "1 person".to_string() } else { format!("{people} people") };
+            words.insert(share.item_id.clone(), line);
+        }
+        for link in &overview.links {
+            words.insert(link.item_id.clone(), "Anyone with the link".to_string());
+        }
+        words
     }
 
     fn wake(&self) {
@@ -166,6 +200,9 @@ enum Landed<T> {
     /// The index or why there is none, and the session it was built in (`None`: the session was not the same after
     /// the build as before).
     Built(u64, Option<Session<T>>, Result<LocalSearchIndex, LocalStateRefused>),
+    /// How the account shares its items, read after a build, and the session it was read in (`None`: the session
+    /// was not the same after the read as before).
+    Shared(Option<Session<T>>, HashMap<String, String>),
     /// A query's results, and the session whose index it ran on.
     Found(u64, Session<T>, Asked, Vec<Hit>),
     /// The recent searches as the engine keeps them after a read or a change, and the session the work ran in
@@ -197,6 +234,10 @@ pub struct EngineSearchSource<H: SearchHost> {
     jobs: u64,
     /// When the last build was answered (a failure too).
     built_at: Option<Instant>,
+    /// How old a refusal is before it is built again.
+    retry_after: Duration,
+    /// Search was opened in this session: only then does a refusal come back for another build.
+    watching: bool,
     /// The build on its way.
     building: Option<u64>,
     /// Why the last build of a session built nothing, and that session (`None`: it built, or none was refused). Said
@@ -207,7 +248,11 @@ pub struct EngineSearchSource<H: SearchHost> {
     /// The query on its way.
     asked: Option<(u64, Asked)>,
     /// The last result, and the query it answers.
-    found: Option<(Asked, Vec<Hit>)>,
+    found: Option<(Asked, Arc<[Hit]>)>,
+    /// How the account shares its items (item id to words), and the session it was read in. Read after a build.
+    shared: Option<(Session<H::Turn>, HashMap<String, String>)>,
+    /// A read of the shares is on its way.
+    shared_out: bool,
     /// The recent searches as the engine last answered them, newest first, and the session that work ran in.
     recent: Option<(Session<H::Turn>, Vec<String>)>,
     /// The work on the recent searches that is on its way (one at a time), by job number.
@@ -243,11 +288,15 @@ impl<H: SearchHost> EngineSearchSource<H> {
             installed: 0,
             jobs: 0,
             built_at: None,
+            retry_after: RETRY_AFTER,
+            watching: false,
             building: None,
             refused: None,
             wanted: None,
             asked: None,
             found: None,
+            shared: None,
+            shared_out: false,
             recent: None,
             recent_out: None,
             recent_next: VecDeque::new(),
@@ -271,6 +320,35 @@ impl<H: SearchHost> EngineSearchSource<H> {
         self.refused
             .as_ref()
             .is_some_and(|(of, refused)| *of == now && refused.not_this_accounts())
+    }
+
+    /// The current session's last build was refused for a reason that passes (not this account's state: that stays
+    /// said, and is never built again by itself).
+    fn refused_for_now(&self) -> bool {
+        let Some(now) = session_of(&*self.host) else {
+            return false;
+        };
+        self.refused
+            .as_ref()
+            .is_some_and(|(of, refused)| *of == now && !refused.not_this_accounts())
+    }
+
+    /// Nothing is held and the first sync has not given this PC a list yet (`NothingSynced`): the files are being got
+    /// ready, which is not "not available".
+    fn getting_ready(&self) -> bool {
+        let Some(now) = session_of(&*self.host) else {
+            return false;
+        };
+        self.current().is_none()
+            && self
+                .refused
+                .as_ref()
+                .is_some_and(|(of, refused)| *of == now && matches!(refused, LocalStateRefused::NothingSynced))
+    }
+
+    /// How far the first listing is, only while it is not whole.
+    fn listing_now(&self) -> Option<Loading> {
+        self.host.listing().filter(|l| l.listed < l.total)
     }
 
     /// Follow the session of the moment: when it is not the one this source's state belongs to, all of that state
@@ -315,8 +393,20 @@ impl<H: SearchHost> EngineSearchSource<H> {
                 )
             }));
             let (of, index) = built.unwrap_or((None, Err(LocalStateRefused::Unreadable)));
+            let built = of.is_some() && index.is_ok();
             let _ = answers.send(Landed::Built(job, of, index));
             host.wake();
+            if built {
+                // The shares are a call to the server: after the index is in, never before it.
+                let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let before = session_of(&*host);
+                    let words = host.shared_words();
+                    (before.filter(|before| session_of(&*host).as_ref() == Some(before)), words)
+                }));
+                let (of, words) = read.unwrap_or((None, HashMap::new()));
+                let _ = answers.send(Landed::Shared(of, words));
+                host.wake();
+            }
         });
         if started.is_ok() {
             self.building = Some(job);
@@ -445,6 +535,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
                 self.built_at = Some(Instant::now());
                 match (of, result) {
                     (Some(of), Ok(index)) => {
+                        self.shared_out = true;
                         self.installed += 1;
                         self.held = Some(Held {
                             of,
@@ -466,6 +557,12 @@ impl<H: SearchHost> EngineSearchSource<H> {
                     (None, _) => {}
                 }
             }
+            Landed::Shared(of, words) => {
+                self.shared_out = false;
+                if let Some(of) = of.filter(|of| Some(of) == self.of.as_ref()) {
+                    self.shared = Some((of, words));
+                }
+            }
             Landed::Found(job, of, asked, hits) => {
                 if self.asked.as_ref().map(|(waited, _)| *waited) != Some(job) {
                     return;
@@ -473,7 +570,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
                 self.asked = None;
                 let mine = Some(&of) == self.of.as_ref() && self.current().is_some_and(|held| held.number == asked.2);
                 if mine {
-                    self.found = Some((asked, hits));
+                    self.found = Some((asked, hits.into()));
                 }
             }
             Landed::Recent(job, of, list) => {
@@ -501,7 +598,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
 impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     /// An index of the current session is held, or is being built (a query then reads `Searching`). Reads only.
     fn wired(&self) -> bool {
-        self.current().is_some() || self.building_now()
+        self.current().is_some() || self.building_now() || self.getting_ready()
     }
 
     /// The recent searches the engine answered for the session of the moment, newest first; none while it has not
@@ -538,10 +635,19 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         if !recent_held && self.recent_out.is_none() && self.recent_next.is_empty() {
             self.ask_recent(RecentWork::Read);
         }
-        let fresh = self.built_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
+        self.watching = self.of.is_some();
+        // A refusal is never "fresh": opening Search builds again.
+        let fresh = self.built_at.is_some_and(|at| at.elapsed() < FRESH_FOR) && !self.refused_for_now();
         if !fresh {
             self.build();
         }
+    }
+
+    /// Try again: build the index now, for the session of the moment (a build on its way is kept).
+    fn rebuild(&mut self) {
+        self.follow();
+        self.watching = self.of.is_some();
+        self.build();
     }
 
     /// The words or the pill changed: the query runs on a worker (now, or when the index lands).
@@ -564,9 +670,14 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
             self.take_in(landed);
             changed = true;
         }
+        // A refusal that passes (the first sync, a list that could not be read) is built again after a short wait.
+        let waiting = self.watching && self.building.is_none() && self.current().is_none() && self.refused_for_now();
+        if waiting && self.built_at.is_none_or(|at| at.elapsed() >= self.retry_after) {
+            self.build();
+        }
         Pumped {
             changed,
-            busy: self.building.is_some() || self.asked.is_some() || self.recent_out.is_some(),
+            busy: self.building.is_some() || self.shared_out || self.asked.is_some() || self.recent_out.is_some() || waiting,
         }
     }
 
@@ -579,6 +690,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         self.wanted = None;
         self.building = None;
         self.built_at = None;
+        self.watching = false;
         self.refused = None;
         self.recent = None;
         self.recent_out = None;
@@ -591,7 +703,13 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     fn search(&self, query: &str, narrow: Narrow) -> Answer {
         let Some(held) = self.current() else {
             // The first index of this session is being built: the query is answered when it lands.
-            return if self.building_now() {
+            return if self.getting_ready() && self.listing_now().is_some() {
+                // The first sign-in still lists the files: no match yet, and the note says how far it is.
+                Answer::Found {
+                    hits: Arc::from([]),
+                    loading: self.listing_now(),
+                }
+            } else if self.building_now() || self.getting_ready() {
                 Answer::Searching
             } else if self.not_this_accounts() {
                 // This PC's local state is another account's: Search says why; nothing of it was read.
@@ -603,15 +721,15 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         let query = query.trim();
         if query.is_empty() {
             return Answer::Found {
-                hits: Vec::new(),
+                hits: Arc::from([]),
                 loading: None,
             };
         }
         match &self.found {
             Some(((words, pill, number), hits)) if words == query && *pill == narrow && *number == held.number => {
                 Answer::Found {
-                    hits: hits.clone(),
-                    loading: None,
+                    hits: Arc::clone(hits),
+                    loading: self.listing_now(),
                 }
             }
             _ => Answer::Searching,
@@ -621,7 +739,17 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     fn details(&self, id: &str) -> Option<Details> {
         let held = self.current()?;
         let record = held.index.records.get(id).filter(|record| !record.shared_with_me)?;
-        Some(details_of(record))
+        let now = session_of(&*self.host)?;
+        let shared = self
+            .shared
+            .as_ref()
+            .filter(|(of, _)| *of == now)
+            .and_then(|(_, words)| words.get(id))
+            .cloned()
+            .unwrap_or_default();
+        let mut details = details_of(record);
+        details.shared = shared;
+        Some(details)
     }
 }
 

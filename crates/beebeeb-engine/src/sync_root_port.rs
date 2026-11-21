@@ -12,6 +12,7 @@
 use std::path::Path;
 
 use crate::identity::EngineIdentity;
+use crate::state_db::StateDb;
 use crate::sync_root_owner::Registration;
 
 pub trait SyncRootPort: Send + Sync {
@@ -21,6 +22,22 @@ pub trait SyncRootPort: Send + Sync {
     fn register(&self, folder: &Path) -> Result<(), Option<i32>>;
     /// Whether the engine lock in `state_dir` is held by a live process (the read half of `LockFile::acquire`).
     fn engine_lock_held(&self, state_dir: &Path) -> bool;
+    /// Remove the previous account's synced items from `folder`, the items `db` lists, for an account switch.
+    /// Only an item known to be synced and unchanged goes, checked per item at the moment it is deleted. `unasked` are
+    /// the paths the engine asked [`may_hold_bytes`](Self::may_hold_bytes) about and was told nothing is there: an
+    /// item of any kind found at one of them was made since, is no one's to delete, and refuses the whole removal
+    /// before anything is deleted (so does any other item the database has no row for).
+    /// `Err`: nothing may be assumed removed beyond what the OS did; the switch then goes no further. An OS with no
+    /// way to do it safely refuses.
+    fn remove_synced_items(&self, _db: &StateDb, _folder: &Path, _unasked: &[String]) -> Result<(), String> {
+        Err("this OS cannot remove another account's synced items".to_string())
+    }
+    /// Whether the item at `path` (as the database writes it, under `folder`) may hold bytes on this PC. Asked for a
+    /// file of unknown content before an account switch: one that may is never deleted unasked (sign-out's D11 rule).
+    /// `false` only when the OS proves there are none: no item is there. An OS that cannot tell says `true`.
+    fn may_hold_bytes(&self, _folder: &Path, _path: &str) -> bool {
+        true
+    }
 }
 
 /// The OS's answers, for the identity the handle was opened with.
@@ -53,6 +70,35 @@ impl SyncRootPort for OsSyncRoots {
 
     fn engine_lock_held(&self, state_dir: &Path) -> bool {
         crate::lockfile::held_by_a_live_process(state_dir)
+    }
+
+    /// Windows' purge in its `UnknownFiles::Refuse` mode: it deletes only items proven clean while it holds each one
+    /// (an exclusive handle binds the identity and in-sync check to the deletion), and refuses, deleting nothing, at
+    /// any other item: an ordinary file, a placeholder with changes, a file at a path of `unasked` or of a file of
+    /// unknown content (made after the engine's check), or one in a folder no row names. The engine asks for the
+    /// removal only when the database holds no unsent work (`work_waiting_for_a_person`) and every file of unknown
+    /// content was answered `false` by `may_hold_bytes`.
+    #[cfg(target_os = "windows")]
+    fn remove_synced_items(&self, db: &StateDb, folder: &Path, unasked: &[String]) -> Result<(), String> {
+        crate::windows_cf::signout::purge(
+            self.identity,
+            db,
+            Some(folder),
+            &crate::windows_cf::signout::UnknownFiles::refuse_at(unasked.iter().map(String::as_str)),
+        )
+        .map(|_| ())
+        .map_err(|_| "the purge refused".to_string())
+    }
+    /// No item at the path: no bytes. A placeholder with no byte on disk (never fetched into) holds none either (w29:
+    /// proven through a handle that fetches nothing). Any other item (an ordinary file, a placeholder with anything
+    /// on disk, a folder, something that cannot be read) may hold some.
+    #[cfg(target_os = "windows")]
+    fn may_hold_bytes(&self, folder: &Path, path: &str) -> bool {
+        let at = folder.join(path.trim_start_matches('/').replace('/', "\\"));
+        match std::fs::symlink_metadata(&at) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            _ => !crate::windows_cf::signout::placeholder_holds_nothing(&at),
+        }
     }
 }
 
@@ -100,5 +146,42 @@ mod tests {
             os.engine_lock_held(dir.path()),
             "a lock that cannot be read refuses, as acquire does"
         );
+    }
+
+    /// A port that was not taught the question never lets a file of unknown content go: it says "may hold bytes".
+    #[test]
+    fn a_port_that_cannot_tell_says_the_item_may_hold_bytes() {
+        struct Untaught;
+        impl SyncRootPort for Untaught {
+            fn registration(&self, _folder: &Path) -> Registration {
+                Registration::Nobody
+            }
+            fn register(&self, _folder: &Path) -> Result<(), Option<i32>> {
+                Ok(())
+            }
+            fn engine_lock_held(&self, _state_dir: &Path) -> bool {
+                false
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Untaught.may_hold_bytes(dir.path(), "nothing here.docx"));
+    }
+
+    /// Windows: no item at the path holds no bytes (also under a folder that is not there: the VM proof's case, a
+    /// document made in the app); an ordinary file, even an empty one, and a folder may.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_says_no_bytes_only_where_no_item_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let os = OsSyncRoots::new(&crate::identity::TEST);
+        assert!(!os.may_hold_bytes(dir.path(), "Budget.docx"), "no item");
+        assert!(!os.may_hold_bytes(dir.path(), "/Plans/Budget.docx"), "no folder, no item");
+        std::fs::write(dir.path().join("Budget.docx"), b"typed, not sent").unwrap();
+        assert!(os.may_hold_bytes(dir.path(), "Budget.docx"), "an ordinary file");
+        assert!(os.may_hold_bytes(dir.path(), "/Budget.docx"), "the same, as the database writes it");
+        std::fs::write(dir.path().join("Empty.docx"), b"").unwrap();
+        assert!(os.may_hold_bytes(dir.path(), "Empty.docx"), "an ordinary file is never proven empty of work");
+        std::fs::create_dir(dir.path().join("Plans")).unwrap();
+        assert!(os.may_hold_bytes(dir.path(), "Plans"), "a folder where the file should be");
     }
 }

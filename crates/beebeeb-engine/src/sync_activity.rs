@@ -1,6 +1,6 @@
 //! What Settings › Sync and the Windows tray popover read to say what sync is doing (0.8.15).
 //!
-//! On Guus's PC (0.8.14) the popover showed nothing while File Explorer showed files pending: its only sources were the
+//! On the Windows test machine (0.8.14) the popover showed nothing while File Explorer showed files pending: its only sources were the
 //! counts of rows mid-transfer and the recent-files list, so a queue of 2,924 paused changes, 43 that gave up, and an
 //! engine stuck in its startup check all looked like "Your files are synced". This is the one read both surfaces poll:
 //! the live pause flag, the engine's last real state, what is moving, the queue in counts, and the startup check while
@@ -56,7 +56,7 @@ mod tests {
     use crate::state_db::HeldGroup;
     use serde_json::json;
 
-    /// Guus's PC on 26 Oct, from the copied state DB: 2,832 + 92 changes paused for `auth` on 4 Oct, 43 that gave up,
+    /// the Windows test machine on 26 Oct, from the copied state DB: 2,832 + 92 changes paused for `auth` on 4 Oct, 43 that gave up,
     /// no transfer, and the engine in its startup check (the engine lane's progress hook).
     fn on_hold() -> SyncActivitySummary {
         let mut engine = EngineStatusView::default();

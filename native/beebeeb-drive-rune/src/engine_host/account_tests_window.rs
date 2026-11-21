@@ -43,6 +43,16 @@ fn has(rt: &Runtime<State>, key: &str) -> bool {
         .any(|e| !e.exiting && e.key.as_deref() == Some(key))
 }
 
+/// The pane's toast is drawn as a failure: its lead is the red warning glyph (the toast's role is "status" either way).
+fn toast_is_failure(rt: &Runtime<State>) -> bool {
+    let red = crate::theme::tokens::theme(false).red;
+    rt.elements().iter().any(|e| {
+        !e.exiting
+            && e.key.as_deref() == Some("toast-icon")
+            && (e.fill == red || e.text_color == Some(red))
+    })
+}
+
 fn wait_for(rt: &mut Runtime<State>, what: &str, done: impl Fn(&Runtime<State>) -> bool) {
     let began = Instant::now();
     while !done(rt) {
@@ -304,15 +314,15 @@ fn a_sign_out_in_the_window_is_confirmed_sent_once_and_said() {
     click(&mut rt, "btn-2");
     wait_for(&mut rt, "the toast", |rt| shows(rt, SIGNED_OUT));
     assert!(
-        has(&rt, "toast-0") && !has(&rt, "toast"),
-        "something that worked: the settings toast"
+        has(&rt, "toast") && !has(&rt, "toast-0"),
+        "something that worked: the pane's toast, not the settings one"
     );
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
     wait_for(&mut rt, "the row goes", |rt| !says_anywhere(rt, PHONE));
     assert!(shows(&rt, BROWSER));
     // The toast goes by itself after its time.
     wait_long_for(&mut rt, "the toast fades", |rt| {
-        !shows(rt, SIGNED_OUT) && !has(rt, "toast-0")
+        !shows(rt, SIGNED_OUT) && !has(rt, "toast")
     });
 
     // A sign-out Beebeeb did not take is drawn with a way to send it again, and the row stands.
@@ -323,9 +333,7 @@ fn a_sign_out_in_the_window_is_confirmed_sent_once_and_said() {
     assert!(shows(&rt, BROWSER));
     assert!(shows(&rt, TRY_AGAIN) && has(&rt, "toast-action"));
     assert!(
-        rt.elements()
-            .iter()
-            .any(|e| !e.exiting && e.key.as_deref() == Some("toast") && e.role == "alert"),
+        toast_is_failure(&rt),
         "something that was not done is drawn as a failure"
     );
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-web"]);
@@ -357,7 +365,7 @@ fn a_failed_read_is_drawn_with_a_way_to_try_again() {
     wait_for(&mut rt, "the failure", |rt| shows(rt, "Couldn't load this"));
     assert!(!says_anywhere(&rt, PHONE));
     server.read_mode.store(ANSWER, Ordering::SeqCst);
-    click(&mut rt, "btn-0");
+    click(&mut rt, "account-state-retry");
     wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
     assert!(!says_anywhere(&rt, "Couldn't load this"));
 }
@@ -376,9 +384,7 @@ fn a_refusal_with_nothing_to_try_again_is_still_drawn_as_a_failure() {
     }
     assert!(shows(&rt, STILL_SIGNING_OUT));
     assert!(
-        rt.elements()
-            .iter()
-            .any(|e| !e.exiting && e.key.as_deref() == Some("toast") && e.role == "alert"),
+        toast_is_failure(&rt),
         "drawn as a failure"
     );
     assert!(!has(&rt, "toast-action") && !has(&rt, "toast-0"));

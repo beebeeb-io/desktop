@@ -23,14 +23,16 @@ use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
 use crate::source::DriveItem;
 use crate::theme::icons;
 use crate::theme::icons_settings;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, type_};
 use crate::ui::backups_kit::{self, Md, TileTone};
 use crate::ui::banner::{self, Banner, Run, Tone};
-use crate::ui::file_list::{PcState, ROW_H, format_date, pc_glyph};
-use crate::ui::settings_dialog::{self, DIALOG_TITLE, Weight};
-use crate::ui::settings_shell::SUB;
-use crate::ui::{dialog, empty, kit};
-use rune::{Align, Color, Cx, El, Icon, Key, KeyEvent, TextStyle, Tx, col, el, row};
+use crate::ui::file_list::{PcState, format_date, pc_glyph};
+use crate::ui::settings_dialog::{self, Weight};
+use crate::ui::button::{self, ButtonState, Size, Variant};
+use crate::ui::file_row::{self, Column, RowLook, Width};
+use crate::ui::view_state::{self, ViewState};
+use crate::ui::{dialog, kit};
+use rune::{Align, Cx, El, Icon, Key, KeyEvent, TextStyle, Tx, el, row};
 
 /// The words of the message, as the source hands them over.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -356,37 +358,29 @@ fn section_view(s: &State, cx: &mut Cx<State>) -> El {
     }
 }
 
-/// No Backups folder: the Files empty state's look (`kit-empty`, no new colour), and the way to a backup (design note:
-/// the board has no frame for an account without a Backups folder; ruled by the lead 2026-11-15).
+/// No Backups folder: an honest empty state (design note: the board has no frame for an account without a Backups
+/// folder; ruled by the lead 2026-11-15), with the way to a backup.
 fn no_backups(t: &Theme) -> El {
-    let title = kit::label("backups-none-title", "No backups yet", empty::TITLE, t.text);
-    let link = kit::label(
-        "backups-none-link",
-        "Turn on backups in Settings \u{203A} Backups.",
-        empty::SUB,
-        t.text_secondary,
+    let action = button::button(
+        button::keys("backups-none-link"),
+        "Open Settings \u{203A} Backups",
+        None,
+        Variant::Secondary,
+        Size::Md,
+        ButtonState::Enabled,
+        t,
     )
-    .role("link")
-    .focusable(true)
     .on_press(|s: &mut State| s.open_protected_settings());
-    col()
-        .key("backups-none")
-        .role("group")
-        .label("No backups yet")
-        .py(28.0)
-        .px(24.0)
-        .gap(8.0)
-        .items_center()
-        .child(
-            el().key("backups-none-tile")
-                .size(52.0, 52.0)
-                .radius(15.0)
-                .fill(t.tile)
-                .center()
-                .child(kit::glyph("backups-none-icon", &icons::BACKUPS, 26.0, t.text_secondary)),
-        )
-        .child(title)
-        .child(link)
+    view_state::view_state(
+        ViewState::Empty {
+            key: "backups-none",
+            icon: &icons::BACKUPS,
+            title: "No backups yet",
+            body: "Turn on backups in Settings to see your devices here.",
+            action: Some(action),
+        },
+        t,
+    )
 }
 
 fn section_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
@@ -410,7 +404,6 @@ const COL_SHARED_W: f32 = 92.0;
 /// `.mk-cols` of Backups: Status is wider than Shared.
 const COL_STATUS_W: f32 = 150.0;
 const COL_PC_W: f32 = 34.0;
-const COL_GAP: f32 = 12.0;
 /// The Status column's words (`.mk-row .t-cap`).
 const STATUS: TextStyle = TextStyle::new(12.0, 400.0).lh(14.5);
 /// The words beside a name (`.mk-row .t-cap` in the name cell).
@@ -446,50 +439,21 @@ pub fn column_headers(s: &State, t: &Theme) -> Option<El> {
     if !s.in_protected_folder() {
         return None;
     }
-    let root = is_root(s);
-    let head = |key: &'static str, text: &'static str| kit::label(key, text, type_::COLUMN_HEADER, t.text_tertiary);
-    let column = |cell: &'static str, key: &'static str, text: &'static str| {
-        row()
-            .key(cell)
-            .role("columnheader")
-            .label(text)
-            .center_y()
-            .gap(3.0)
-            .child(head(key, text))
-    };
-    let (date, shared, shared_w) = if root {
+    let (date, shared, shared_w) = if is_root(s) {
         ("Last backup", "Status", COL_STATUS_W)
     } else {
         ("Date changed", "Shared", COL_SHARED_W)
     };
-    Some(
-        row()
-            .key("column-headers")
-            .role("row")
-            .h(28.0)
-            .w_full()
-            .mt(4.0)
-            .px(20.0)
-            .gap(COL_GAP)
-            .center_y()
-            .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-            .border_layout()
-            .child(
-                column("col-name-cell", "col-name", "Name")
-                    .child(kit::glyph("sort-arrow", &icons::CHEVRON_DOWN, 11.0, t.text_tertiary))
-                    .grow(1.0)
-                    .min_w(0.0),
-            )
-            .child(column("col-date-cell", "col-date", date).w(COL_DATE_W))
-            .child(column("col-size-cell", "col-size", "Size").w(COL_SIZE_W).justify_end())
-            .child(column("col-shared-cell", "col-shared", shared).w(shared_w))
-            .child(
-                column("col-pc-cell", "col-pc", "PC")
-                    .label("On this PC")
-                    .w(COL_PC_W)
-                    .justify_center(),
-            ),
-    )
+    let columns = [
+        Column::new("name", "Name", Width::Flex(1.0)),
+        Column::new("date", date, Width::Fixed(COL_DATE_W)),
+        Column::new("size", "Size", Width::Fixed(COL_SIZE_W)).align(Align::End),
+        Column::new("shared", shared, Width::Fixed(shared_w)),
+        Column::new("pc", "PC", Width::Fixed(COL_PC_W))
+            .align(Align::Center)
+            .spoken("On this PC"),
+    ];
+    Some(file_row::header(&columns, Some((0, true)), t))
 }
 
 /// One row of a protected folder (`.mk-row`): a device, a service's folder, or what is in one.
@@ -505,33 +469,20 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
     let date = format_date(&item.modified_at);
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
 
-    let icon = match entry.as_ref().map(|e| e.kind) {
-        None | Some(BackupKind::Folder) => crate::ui::file_list::file_type_icon(item),
-        Some(kind) => kind.icon(),
-    };
-    let tile = el()
-        .key(format!("{k}-tile"))
-        .size(22.0, 22.0)
-        .radius(6.0)
-        .clip_rounded(6.0)
-        .center()
-        .fill(t.tile)
-        .child(kit::glyph(format!("{k}-icon"), icon, 14.0, t.text_secondary));
-    let mut name = row()
-        .key("name-cell")
-        .grow(1.0)
-        .min_w(0.0)
-        .center_y()
-        .gap(8.0)
-        .child(tile)
-        .child(
-            kit::label(format!("{k}-name"), item.name.clone(), type_::LIST_ITEM, t.text)
-                .truncate()
-                .min_w(0.0),
-        );
+
+    let tile = file_row::tile_frame(&k).fill(t.tile).child(match entry.as_ref().map(|e| e.kind) {
+        None | Some(BackupKind::Folder) => crate::ui::file_icon::file_icon(
+            format!("{k}-icon"),
+            crate::theme::file_icons::icon_for_item(item),
+            14.0,
+            t,
+        ),
+        Some(kind) => kit::glyph(format!("{k}-icon"), kind.icon(), 14.0, t.text_secondary),
+    });
+    let mut marks = Vec::new();
     let managed = entry.as_ref().is_some_and(|e| e.managed);
     if managed {
-        name = name.child(
+        marks.push(
             kit::glyph(format!("{k}-lock"), &icons::LOCK, 11.0, t.text_tertiary)
                 .ml(2.0)
                 .role("image")
@@ -548,7 +499,7 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
     };
     let note = entry.as_ref().and_then(|e| e.note.clone());
     if let Some(note) = &note {
-        name = name.child(kit::label(format!("{k}-note"), note.clone(), NOTE, t.text_tertiary));
+        marks.push(kit::label(format!("{k}-note"), note.clone(), NOTE, t.text_tertiary));
     }
     let status = entry.as_ref().and_then(|e| e.status.clone());
     let pc_state = PcState::of(item.pc_status.as_deref());
@@ -587,34 +538,18 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
             .center_y()
             .child(kit::label(format!("{k}-dash"), "\u{2014}", type_::META_MONO, meta))
     };
-    Some(
-        row()
-            .key(k.clone())
-            .role("row")
-            .label(said.join(", "))
-            .h(ROW_H)
-            .w_full()
-            .px(14.0)
-            .gap(COL_GAP)
-            .center_y()
-            .radius(radius::CONTROL)
-            .fill(if selected { t.selection_row } else { Color::TRANSPARENT })
-            .hover(t.hover)
-            .press(t.press)
-            .child(name)
-            .child(
-                kit::label(format!("{k}-date"), date, type_::META_MONO, meta)
-                    .w(COL_DATE_W)
-                    .truncate(),
-            )
-            .child(
-                kit::label(format!("{k}-size"), size, type_::META_MONO, meta)
-                    .w(COL_SIZE_W)
-                    .align(Align::End),
-            )
-            .child(last)
-            .child(pc),
-    )
+    let cells = vec![
+        kit::label(format!("{k}-date"), date, type_::META_MONO, meta)
+            .w(COL_DATE_W)
+            .truncate(),
+        kit::label(format!("{k}-size"), size, type_::META_MONO, meta)
+            .w(COL_SIZE_W)
+            .align(Align::End),
+        last,
+        pc,
+    ];
+    let look = RowLook { selected, ..RowLook::default() };
+    Some(file_row::row_with(&k, &said.join(", "), tile, &item.name, marks, cells, look, t))
 }
 
 fn open_settings(s: &mut State, _: &mut Tx) {
@@ -644,70 +579,23 @@ pub fn notice(s: &State, t: &Theme) -> Option<El> {
 /// source's title and sentence, OK and Open Settings side by side.
 pub fn layer(s: &State, t: &Theme) -> Option<El> {
     let words = s.actions.protected.alert.as_ref()?;
-    let said = col()
-        .key("dlg-alert-words")
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(6.0)
-        .child(
-            kit::label("dlg-title", words.title.clone(), DIALOG_TITLE, t.text)
-                .role("heading")
-                .level(2)
-                .w_full(),
-        )
-        .child(kit::label("dlg-sub", words.body.clone(), SUB, t.text_tertiary).wrap());
-    let head = row()
-        .key("dlg-head")
-        .pt(20.0)
-        .px(24.0)
-        .pb(16.0)
-        .gap(14.0)
-        .items_start()
-        .child(backups_kit::tile(0, TileTone::Neutral, &icons::LOCK, 36.0, t))
-        .child(said);
-    // `.wn-dlg-foot.is-even`: the two share the foot evenly; the outlined one is its border wider.
-    let foot = row()
-        .key("dlg-foot")
-        .center_y()
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .child(
-            settings_dialog::button(0, "OK", Weight::Primary, t)
-                .w(161.0)
-                .default_button()
-                .on_press_tx(|s: &mut State, tx: &mut Tx| {
-                    s.close_protected(tx);
-                }),
-        )
-        .child(
-            backups_kit::button_md(1, "Open Settings", None, Md::Plain, t)
-                .w(163.0)
-                .on_press(|s: &mut State| s.open_protected_settings()),
-        );
-    let card = col()
-        .key("dlg")
-        .role("alertdialog")
-        .label(words.title.clone())
-        .description(words.body.clone())
-        // The foot's hairline ends the height in a half point (`ui::dialog::card`).
-        .pixel_snap(false)
-        .w(380.0)
-        .radius(dialog::RADIUS)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(
-            col()
-                .key("dlg-clip")
-                .w_full()
-                .clip_rounded(dialog::RADIUS)
-                .child(head)
-                .child(foot),
-        );
+    let tile = backups_kit::tile(0, TileTone::Neutral, &icons::LOCK, 36.0, t);
+    let ok = settings_dialog::button(0, "OK", Weight::Primary, t).on_press_tx(|s: &mut State, tx: &mut Tx| {
+        s.close_protected(tx);
+    });
+    let open_settings = backups_kit::button_md(1, "Open Settings", None, Md::Plain, t)
+        .on_press(|s: &mut State| s.open_protected_settings());
+    let card = dialog::dialog(
+        dialog::Dialog {
+            alert: true,
+            head: dialog::Head::Alert { tile, title: &words.title, sub: &words.body },
+            foot: dialog::Foot::Row(vec![ok.w(161.0), open_settings.w(163.0)]),
+            enter: Some(0),
+            ..dialog::Dialog::new("dlg", &words.title, 380.0)
+        },
+        t,
+    )
+    .description(words.body.clone());
     Some(
         el().key("dialog-protected")
             .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))

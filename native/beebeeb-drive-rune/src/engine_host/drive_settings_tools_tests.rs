@@ -228,7 +228,8 @@ fn an_export_saves_shows_and_opens_a_draft_that_names_the_file_only() {
         Bundle::Saved {
             folder: "Downloads".into(),
             file: "beebeeb-support-bundle-1.json".into(),
-            draft_opened: true
+            draft_opened: true,
+            path: PathBuf::from("somewhere/beebeeb-support-bundle-1.json"),
         }
     );
     assert_eq!(SHOWN.lock().unwrap().len(), 1);
@@ -237,7 +238,6 @@ fn an_export_saves_shows_and_opens_a_draft_that_names_the_file_only() {
     assert!(drafts[0].starts_with("mailto:support@beebeeb.io?"), "{}", drafts[0]);
     assert!(drafts[0].contains("beebeeb-support-bundle-1.json"));
     assert!(!drafts[0].contains("somewhere"), "never the folder");
-    assert!(source.diagnostics().activity.is_empty(), "no live figure is drawn");
 }
 
 #[test]

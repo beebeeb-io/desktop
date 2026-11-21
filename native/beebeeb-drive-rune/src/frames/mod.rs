@@ -14,9 +14,11 @@ pub mod files;
 pub mod global;
 pub mod item;
 pub mod office;
+pub mod open_file;
 pub mod photos;
 pub mod placeholder;
 pub mod search;
+pub mod show_in_folder;
 pub mod settings;
 pub mod shared;
 pub mod signin;
@@ -90,7 +92,7 @@ pub struct GateNotice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Intent {
     /// Open a board frame that is about no single item (`DW-0749` Empty Trash, `DW-0504` New
-    /// request, `DW-0415` New, `DW-0406` Sort).
+    /// request, `DW-0414` New, `DW-0404` Sort).
     Frame(&'static str),
     /// Open a board frame about the item with this id (`DW-0411` Details, `DW-0511` People
     /// with access, `DW-1180` Show in File Explorer).
@@ -134,6 +136,24 @@ impl PcStatus for UnwiredPc {
     fn summary(&self) -> String {
         String::new()
     }
+}
+
+/// The sync state in words for the status line of Shared and Trash: the PC's words where it has some (the board's
+/// sample, a test's), else what Files' own status line says (`FilesSource::sync_state`), so the three agree.
+/// Empty: nothing syncs here (no dot, no word).
+pub fn sync_words(s: &State) -> String {
+    let own = s.frames.pc.sync_words();
+    if own.is_empty() {
+        s.actions.source.sync_state().unwrap_or_default()
+    } else {
+        own
+    }
+}
+
+/// How much is on this PC, for a section with nothing of its own to count: the PC's summary, else Files' own words.
+pub fn pc_summary(s: &State) -> String {
+    let own = s.frames.pc.summary();
+    if own.is_empty() { files::window::pc_summary(s) } else { own }
 }
 
 /// What the lane's groups keep on `State` (ONE field: `State::frames`).

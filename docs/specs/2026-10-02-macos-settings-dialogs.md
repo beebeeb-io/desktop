@@ -1,9 +1,9 @@
 # macOS Settings dialogs — design ruling (task 1683 slice-4 follow-up)
 
-**Status:** ruling — approved by Guus (“Approve + do red/danger follow-up”); follow-ups shipped in PR #104
+**Status:** ruling — approved by the owner (“Approve + do red/danger follow-up”); follow-ups shipped in PR #104
 **Date:** 2 Oct 2026 · amended 3 Oct 2026 (follow-ups shipped — see the amendment note at the end)
 **Design source:** `design/hifi/macos-settings-dialogs.html`
-**Amended 2026-10-24 (Guus's ruling: at most two surfaces, [two-surface spec](2026-10-24-macos-two-surface-app.md) §5.C, §8):** every dialog here keeps its copy, size, buttons and keys. Their host changes: the Settings window is retired, and they open as window-modal sheets in the Settings pane of the one Beebeeb window. Read "Settings" below as that pane, and "closing Settings" as closing the Beebeeb window. — two-surface design, 2026-10-24
+**Amended 2026-10-24 (the owner's ruling: at most two surfaces, [two-surface spec](2026-10-24-macos-two-surface-app.md) §5.C, §8):** every dialog here keeps its copy, size, buttons and keys. Their host changes: the Settings window is retired, and they open as window-modal sheets in the Settings pane of the one Beebeeb window. Read "Settings" below as that pane, and "closing Settings" as closing the Beebeeb window. — two-surface design, 2026-10-24
 **Context:** decision file `.claude/tasks/decisions/1683-s4-undrawn-and-unbacked.md`, question 1: the three Settings dialogs built in slice 4 follow the existing `Modal` styling — acceptable as-is, or do they need their own dialog treatment before slice 6 flips the window on?
 
 ## Verdict (question 1)

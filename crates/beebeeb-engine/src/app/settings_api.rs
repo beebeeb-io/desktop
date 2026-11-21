@@ -181,7 +181,7 @@ impl<C: CredentialStores> Engine<C> {
     {
         let token = self.session_token().map_err(|_| AccountCallError::NotSignedIn)?;
         // No vault key: these calls decrypt nothing, so the client is given none.
-        let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
+        let api = ApiClient::new(self.config.api_base.clone(), token.to_string(), [0; 32]);
         self.runtime.block_on(call(api)).map_err(|error| kind_of(&error))
     }
 

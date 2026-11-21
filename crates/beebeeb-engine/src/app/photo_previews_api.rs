@@ -389,6 +389,17 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
+    /// Whether the entry at `photo`'s place is its own row's ([`plan::own_place`]), read for `session`: `false` once
+    /// the session moved, or when it cannot be read.
+    fn place_is_its_own(&self, session: SessionGeneration, sync_root: &Path, photo: &plan::LocalPhoto) -> bool {
+        match self.local_state() {
+            Ok(state) if state.session() == session => {
+                state.with(|db| plan::own_place(db, sync_root, photo)).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
     /// Sleep `wait` in short steps; `false` as soon as `stop` is set or the session moved (nothing more is sent
     /// then, and the run's copy of the key goes with the run).
     fn wait_while_running(&self, session: SessionGeneration, stop: &AtomicBool, wait: std::time::Duration) -> bool {
@@ -428,6 +439,10 @@ impl<C: CredentialStores> Engine<C> {
         // later run.
         if let Some(made) = self.row_moved(session, photo) {
             return made;
+        }
+        // Another item's entry at its place (one name, or one name but for case): never read as this photo.
+        if !self.place_is_its_own(session, sync_root, photo) {
+            return Made::NotHere;
         }
         let Some(path) = plan::ready_to_read(sync_root, photo) else {
             return Made::NotHere;
@@ -554,6 +569,10 @@ impl<C: CredentialStores> Engine<C> {
             .filter(|photo| plan::may_be_source(photo, &owned))
             .take(SAMPLE_TRIES)
         {
+            // Another item's entry at its place (one name, or one name but for case) is never its sample.
+            if !state.with(|db| plan::own_place(db, &sync_root, photo)).unwrap_or(false) {
+                continue;
+            }
             let Some(path) = plan::ready_to_read(&sync_root, photo) else {
                 continue;
             };

@@ -6,3 +6,6 @@
 # Use -text (rather than binary) so textual fixtures retain readable diffs.
 fixtures/** -text
 tests/fixtures/** -text
+
+# The pinned OS vocabulary is hashed byte for byte by allow_list_tests: LF on every checkout (CRLF broke the pin on Windows).
+native/beebeeb-drive-rune/src/log_file/vocabulary_os.txt text eol=lf

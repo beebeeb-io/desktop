@@ -164,7 +164,7 @@ fn f2_turns_the_name_into_a_field_with_the_extension_left_out_of_the_selection()
     assert_eq!(label_of(&rt, RENAME_INPUT), "Name");
     let edit = &rt.state.actions.name_edit;
     assert_eq!((edit.text.as_str(), edit.range()), ("Contract draft.pdf", (0, 14)));
-    assert!(find(&rt, "row-6-name").is_none(), "the field stands where the name was");
+    assert_eq!(info(&rt, "row-6-name").text.as_deref(), Some(""), "the field stands where the name was");
     // Typing replaces the selected part and keeps .pdf; Enter saves.
     type_text(&mut rt, "Signed contract");
     press(&mut rt, Key::Enter, NONE);
@@ -391,7 +391,7 @@ fn move_offers_the_folders_without_backups_and_names_its_target() {
     let offered: Vec<&str> = m.choices.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(offered, ["Documents", "Invoices 2026", "Lisbon trip", "Shoot selects"]);
     assert_eq!(label_of(&rt, "item-0-0"), "Documents, 48 items");
-    assert_eq!(info(&rt, "item-0-0").role, "option");
+    assert_eq!(info(&rt, "item-0-0").role, "treeitem");
     assert_eq!(label_of(&rt, "btn-0"), "Move to Documents");
     // A click chooses; the button follows.
     click(&mut rt, "item-0-2");
@@ -565,8 +565,8 @@ fn tab_goes_round_the_move_dialog_and_never_under_it() {
         tab_cycle(&mut rt, NONE),
         [MOVE_LIST, "btn-0", "btn-1", "btn-2", "dlg-path-0"]
     );
-    // A folder without folders has no list: the keyboard is still inside the dialog, Tab goes
-    // round what is left, and Left goes back up to the list.
+    // A folder that cannot be read has no list and says so, with Try again (a stop of its own): the keyboard is
+    // still inside the dialog, Tab goes round what is left, and Left goes back up to the list.
     press(&mut rt, Key::Down, NONE);
     press(&mut rt, Key::Right, NONE);
     let Some(Dialog::Move(m)) = &rt.state.actions.dialog else {
@@ -579,7 +579,7 @@ fn tab_goes_round_the_move_dialog_and_never_under_it() {
     sorted.sort();
     assert_eq!(
         sorted,
-        ["btn-0", "btn-1", "btn-2", "dlg-path-0", "dlg-path-1"],
+        ["btn-0", "btn-1", "btn-2", "dlg-path-0", "dlg-path-1", "move-failed-retry"],
         "{stops:?}"
     );
     press(&mut rt, Key::Left, NONE);

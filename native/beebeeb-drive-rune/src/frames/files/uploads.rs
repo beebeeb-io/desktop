@@ -14,8 +14,14 @@ use super::Intent;
 use super::source::Action;
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
-use crate::theme::{icons, icons_files};
+use crate::theme::icons_files;
+use crate::ui::dialog::{Dialog, Foot, Head, Surface, dialog};
+use crate::ui::file_row::{self, RowLook};
+use crate::ui::file_tile::{self, TilePicture, TileSize};
+use crate::ui::grid_tiles::Thumb;
 use crate::ui::kit;
+use crate::ui::menu::{self, Entry};
+use crate::ui::status_bar::{Dot, bar as status_bar};
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use rune::{Color, El, Tx, col, el, row};
 
@@ -340,30 +346,7 @@ pub fn status(s: &State, details: &str, t: &Theme) -> Option<(El, String)> {
     } else {
         uploads.status.clone()
     };
-    let left = row()
-        .key("status-left")
-        .center_y()
-        .gap(7.0)
-        .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(t.text_tertiary))
-        .child(kit::label(
-            "status-text",
-            words.clone(),
-            type_::STATUS_STRONG,
-            t.text_secondary,
-        ));
-    let line = row()
-        .key("status-bar")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(left)
-        .child(el().key("status-spacer").grow(1.0))
-        .child(kit::label("status-details", details, type_::STATUS, t.text_tertiary));
+    let line = status_bar(Some(Dot::Busy), Some(&words), details, t);
     Some((line, words))
 }
 
@@ -386,14 +369,24 @@ pub fn bar(key: &str, done: f32, name: &str, t: &Theme) -> El {
         )
 }
 
-fn picture_tile(key: &str, upload: &Upload, size: f32, t: &Theme) -> El {
-    let corner = (size * 0.24).round();
-    let tile = el()
-        .key(format!("{key}-tile"))
-        .size(size, size)
-        .radius(corner)
-        .clip_rounded(corner)
-        .center();
+/// An upload's tile: the kind's icon from its name, or the stand-in picture until the engine hands over pixels.
+fn picture_tile(key: &str, upload: &Upload, t: &Theme) -> El {
+    let icon = crate::theme::file_icons::icon_for(&upload.name, false, None);
+    let picture = match upload.picture {
+        Some(_) => TilePicture::Thumb(&Thumb::Plain),
+        None => TilePicture::Icon(icon),
+    };
+    let tile = file_tile::tile(
+        &format!("{key}-tile"),
+        &upload.name,
+        picture,
+        &upload.name,
+        None,
+        RowLook::default(),
+        TileSize::Small,
+        t,
+    )
+    .a11y_hidden();
     match upload.picture {
         Some(p) => {
             let stop = |hex: &str| rune::color::hex(hex).unwrap_or(Color::BLACK);
@@ -406,12 +399,7 @@ fn picture_tile(key: &str, upload: &Upload, size: f32, t: &Theme) -> El {
                 ],
             )
         }
-        None => tile.fill(t.tile).child(kit::glyph(
-            format!("{key}-icon"),
-            &icons::DOC_GENERIC,
-            (size * 0.62).round(),
-            t.text_secondary,
-        )),
+        None => tile,
     }
 }
 
@@ -424,61 +412,69 @@ fn heading(key: &str, words: &str, top: f32, t: &Theme) -> El {
     ))
 }
 
-fn upload_row(i: usize, upload: &Upload, menu_open: bool, t: &Theme) -> El {
+/// The one entry of an upload's menu.
+const UPLOAD_MENU: [Entry; 1] = [Entry::item("cancel-upload", "Cancel upload")];
+
+fn pick_upload_menu(s: &mut State, index: usize, tx: &mut Tx) {
+    if UPLOAD_MENU.get(index).and_then(|e| e.id()) != Some("cancel-upload") {
+        return;
+    }
+    if let Some(id) = s.actions.upload_menu.clone() {
+        s.cancel_one_upload(&id, tx);
+    }
+}
+
+fn close_upload_menu(s: &mut State, _: &mut Tx) {
+    s.actions.upload_menu = None;
+}
+
+fn upload_row(i: usize, of: usize, upload: &Upload, menu_open: bool, t: &Theme) -> El {
     let key = format!("upload-{i}");
     let (sub, ink, done) = match &upload.state {
         UploadState::Failed(why) => (why.clone(), crate::theme::tokens::red_text(t.dark), None),
         UploadState::Uploading { words, done, .. } => (words.clone(), t.text_tertiary, Some(*done)),
         UploadState::Waiting(words) => (words.clone(), t.text_tertiary, None),
     };
-    let mut words = col()
-        .key(format!("{key}-words"))
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(4.0)
-        .child(kit::label(format!("{key}-name"), upload.name.clone(), type_::LIST_ITEM, t.text).truncate())
-        .child(kit::label(format!("{key}-sub"), sub.clone(), type_::CAPTION, ink).truncate());
+    let mut cells = vec![kit::label(format!("{key}-sub"), sub.clone(), type_::CAPTION, ink).truncate().w(150.0)];
     if let Some(done) = done {
-        words = words.child(bar(&format!("{key}-bar"), done, &format!("{}, {sub}", upload.name), t));
+        cells.push(bar(&format!("{key}-bar"), done, &format!("{}, {sub}", upload.name), t).w(80.0));
     }
-    let id = upload.id.clone();
-    let mut r = row()
-        .key(key.clone())
-        .role("listitem")
-        .label(format!("{}. {sub}", upload.name))
-        .w_full()
-        .px(12.0)
-        .py(6.0)
-        .gap(10.0)
-        .center_y()
-        .on_secondary_press(move |s: &mut State, _: rune::PointerPress, _: &mut Tx| {
-            s.actions.upload_menu = Some(id.clone());
-        })
-        .child(picture_tile(&key, upload, 28.0, t))
-        .child(words);
     if matches!(upload.state, UploadState::Failed(_)) {
         let id = upload.id.clone();
-        r = r.child(
+        cells.push(
             controls::button(i, "Try again", None, Emphasis::Plain, t)
                 .key(format!("{key}-retry"))
                 .on_press_tx(move |s: &mut State, tx: &mut Tx| s.retry_one_upload(&id, tx)),
         );
     }
+    let id = upload.id.clone();
+    let mut r = file_row::row_with(
+        &key,
+        &format!("{}. {sub}", upload.name),
+        picture_tile(&key, upload, t),
+        &upload.name,
+        Vec::new(),
+        cells,
+        RowLook { position: Some((i + 1, of)), ..RowLook::default() },
+        t,
+    )
+    .on_secondary_press(move |s: &mut State, _: rune::PointerPress, _: &mut Tx| {
+        s.actions.upload_menu = Some(id.clone());
+    });
     if menu_open {
-        let id = upload.id.clone();
         r = r.child(
-            controls::menu(
-                9,
+            menu::menu(
+                "upload-menu",
                 "Upload",
                 130.0,
-                vec![
-                    controls::menu_item(9, 0, "Cancel upload", false, false, t)
-                        .on_press_tx(move |s: &mut State, tx: &mut Tx| s.cancel_one_upload(&id, tx)),
-                ],
+                &UPLOAD_MENU,
+                None,
                 t,
+                pick_upload_menu,
+                |_, _| {},
+                close_upload_menu,
             )
-            .absolute(52.0, 30.0)
-            .modal(true, |s: &mut State| s.actions.upload_menu = None),
+            .absolute(52.0, 30.0),
         );
     }
     r
@@ -493,8 +489,7 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
     let menu = s.actions.upload_menu.as_deref();
     // The figures are a machine's: JetBrains Mono inside the Inter line.
     let line = format!("{} \u{00B7} Continues in the background", uploads.figures);
-    let mut panel = col().key("uploads-clip").w_full().clip_rounded(12.0).child(
-        col()
+    let head = col()
             .key("uploads-head")
             .px(12.0)
             .pt(12.0)
@@ -513,8 +508,8 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
                         ..rune::Span::default()
                     }])
                     .mt(2.0),
-            ),
-    );
+            );
+    let mut body: Vec<El> = Vec::new();
     let groups: [(&str, fn(&UploadState) -> bool, f32); 3] = [
         ("Needs attention", |s| matches!(s, UploadState::Failed(_)), 4.0),
         ("Uploading", |s| matches!(s, UploadState::Uploading { .. }), 8.0),
@@ -525,10 +520,11 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
         if rows.is_empty() {
             continue;
         }
-        panel = panel.child(heading(&format!("uploads-group-{g}"), title, top, t));
+        body.push(heading(&format!("uploads-group-{g}"), title, top, t));
         for (i, upload) in rows {
-            panel = panel.child(upload_row(
+            body.push(upload_row(
                 i,
+                uploads.items.len(),
                 upload,
                 menu == Some(upload.id.as_str()) && s.actions.source.cancels_upload(&upload.id),
                 t,
@@ -536,34 +532,31 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
         }
     }
     let pause = if uploads.paused { "Resume all" } else { "Pause all" };
-    panel = panel.child(
-        row()
-            .key("uploads-foot")
-            .w_full()
-            .justify_end()
-            .px(12.0)
-            .py(10.0)
-            .mt(4.0)
-            .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-            .border_layout()
-            .child(
-                controls::button(8, pause, Some(&icons_files::PAUSE), Emphasis::Plain, t)
-                    .key("uploads-pause")
-                    .on_press_tx(|s: &mut State, tx: &mut Tx| s.pause_uploads(tx)),
-            ),
-    );
-    let card = col()
-        .key("uploads")
-        .role("dialog")
-        .label("Uploads")
-        // 232 pt from the window's left edge, 34 pt over its bottom: above the status line.
-        .pin(Some(232.0), None, None, Some(34.0))
-        .w(380.0)
-        .radius(12.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(18.0, 50.0, Color::BLACK.alpha(0.26)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(panel);
+    let foot = row()
+        .w_full()
+        .justify_end()
+        .px(12.0)
+        .py(10.0)
+        .mt(4.0)
+        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
+        .border_layout()
+        .child(
+            controls::button(8, pause, Some(&icons_files::PAUSE), Emphasis::Plain, t)
+                .key("uploads-pause")
+                .on_press_tx(|s: &mut State, tx: &mut Tx| s.pause_uploads(tx)),
+        );
+    // 232 pt from the window's left edge, 34 pt over its bottom: above the status line.
+    let card = dialog(
+        Dialog {
+            surface: Surface::Panel,
+            head: Head::Raw(head),
+            body,
+            foot: Foot::Custom(foot),
+            ..Dialog::new("uploads", "Uploads", 380.0)
+        },
+        t,
+    )
+    .pin(Some(232.0), None, None, Some(34.0));
     Some(
         el().key("uploads-layer")
             .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))

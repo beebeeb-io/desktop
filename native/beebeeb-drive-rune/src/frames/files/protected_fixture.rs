@@ -25,7 +25,7 @@ fn folder(id: &str, parent: &str, name: &str, modified: &str) -> DriveItem {
         is_folder: true,
         size: None,
         child_count: None,
-        modified_at: modified.into(),
+        modified_at: crate::ui::file_list::board_stamp(modified),
         mime: None,
         has_thumbnail: false,
         shared_type: None,

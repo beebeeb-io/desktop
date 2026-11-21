@@ -179,6 +179,9 @@ thread_local! {
 
 /// `CfSetPinState(pin)` by path, with its own handle (the retry when the step's handle could not).
 pub(super) fn set_pin_by_path(path: &Path, pin: CF_PIN_STATE) -> bool {
+    if super::refuse_alias(path).is_err() {
+        return false;
+    }
     // LD-0113 Amendment 7: the write-access open below is refused on a read-only Backups file.
     let _read_only = super::read_only::Lifted::new(path);
     #[cfg(any(test, feature = "test-support"))]

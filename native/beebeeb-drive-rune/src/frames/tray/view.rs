@@ -10,7 +10,10 @@ use rune::{Align, Color, Cursor, El, Icon, ScrollFade, ScrollPos, ScrollSpec, Te
 use super::source::{Change, Changes, MAX_ROWS, Origin, Snapshot, Status, Tile, Tone, What};
 use super::{Host, Ui, icons};
 use crate::theme::tokens::{self, Theme, type_};
-use crate::ui::kit;
+use crate::theme::file_icons::icon_for;
+use crate::ui::file_row::{self, RowLook};
+use crate::ui::view_state::{ViewState, try_again, view_state};
+use crate::ui::{file_list, kit};
 use crate::ui::settings_controls::{self, Emphasis};
 
 /// The flyout's size (`.mk-pop`): fixed in every state (DW-1201).
@@ -37,8 +40,6 @@ mod type_fly {
     pub const WHAT: TextStyle = TextStyle::new(11.5, 400.0).lh(14.0);
     /// 11px/400 mono: when (`.mk-pr-t`).
     pub const WHEN: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(14.5);
-    /// 12px/400 on a 15px line: the sentence of an empty list (`.t-sub` in the flyout).
-    pub const EMPTY: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
     /// 11.5px/400: "That's the last 50 changes." (`.mk-pend small`).
     pub const END: TextStyle = TextStyle::new(11.5, 400.0).lh(17.0);
     /// 11.5px/500 on a 13px line: the three buttons (`.wn-fly .mk-pbtn`).
@@ -305,53 +306,18 @@ fn changes_label(snapshot: &Snapshot, t: &Theme) -> El {
         ))
 }
 
-fn tile_icon(tile: Tile) -> Option<&'static Icon> {
-    Some(match tile {
-        Tile::Document => &icons::FILE_DOC,
-        Tile::Sheet => &icons::FILE_SHEET,
-        Tile::Deck => &icons::FILE_DECK,
-        Tile::Video => &icons::FILE_VIDEO,
-        Tile::Audio => &icons::FILE_AUDIO,
-        Tile::Archive => &icons::FILE_ARCHIVE,
-        Tile::Folder => &icons::FOLDER,
-        Tile::Trashed => &icons::FILE_TRASHED,
-        Tile::Image => &icons::FILE_IMAGE,
-        Tile::Photo(_) => return None,
-    })
-}
-
-/// The board's sample photos (`.mk-ph1` to `.mk-ph6`): the angle in CSS degrees and the stops.
-fn photo(n: u8) -> (f32, [(f32, &'static str); 3]) {
-    match n {
-        1 => (160.0, [(0.0, "#e9c9a0"), (0.55, "#b97a50"), (1.0, "#5e4a4a")]),
-        2 => (170.0, [(0.0, "#9cc4dc"), (0.60, "#e9e2cf"), (1.0, "#8d9a78")]),
-        3 => (150.0, [(0.0, "#33435c"), (0.55, "#7a7f96"), (1.0, "#e3b58c")]),
-        4 => (200.0, [(0.0, "#c7d6b0"), (0.60, "#6c8d62"), (1.0, "#2f4634")]),
-        6 => (120.0, [(0.0, "#d9dfe4"), (0.60, "#8ea4b4"), (1.0, "#4a5866")]),
-        _ => (180.0, [(0.0, "#f3d9a8"), (0.50, "#d58c6a"), (1.0, "#3f3a58")]),
-    }
-}
-
-/// A row's tile (`.mk-ftile`, 30 in the flyout): the file's glyph, or the photo.
-fn file_tile(key: &str, tile: Tile, t: &Theme) -> El {
-    let base = el()
-        .key(format!("{key}-tile"))
-        .size(30.0, 30.0)
-        .radius(7.0)
-        .clip_rounded(7.0)
-        .center();
-    match (tile, tile_icon(tile)) {
-        (_, Some(icon)) => base
-            .fill(t.tile)
-            .child(kit::glyph(format!("{key}-icon"), icon, 19.0, t.text_secondary)),
-        (Tile::Photo(n), _) => {
-            let (degrees, stops) = photo(n);
-            base.linear_gradient(
-                degrees.to_radians(),
-                stops.map(|(at, hex)| (at, rune::color::hex(hex).unwrap_or(Color::BLACK))),
-            )
-        }
-        _ => base.fill(t.tile),
+/// A row's tile: the file's glyph (the shared tile), the trash glyph for a file moved to Trash, or a
+/// thumbnail's stand-in for a photo of the board's fixture.
+fn tile(key: &str, name: &str, tile: Tile, t: &Theme) -> El {
+    match tile {
+        Tile::Trashed => file_row::tile_frame(key).fill(t.tile).child(kit::glyph(
+            format!("{key}-icon"),
+            &icons::FILE_TRASHED,
+            14.0,
+            t.text_secondary,
+        )),
+        Tile::Photo(_) => file_list::thumbnail(file_row::tile_frame(key)),
+        _ => file_row::icon_tile(key, icon_for(name, matches!(tile, Tile::Folder), None), t),
     }
 }
 
@@ -364,129 +330,82 @@ fn origin_icon(origin: Origin) -> &'static Icon {
     }
 }
 
+/// One change, as the shared file row: tile, name, what happened (red when it failed), when.
 fn change_row<S: 'static>(i: usize, change: &Change, selected: bool, host: Host<S>, t: &Theme) -> El {
     let key = row_key(i);
-    let mut words = col().key(format!("{key}-text")).grow(1.0).min_w(0.0).gap(2.0).child(
-        kit::label(format!("{key}-name"), change.name.clone(), type_fly::NAME, t.text)
-            .w_full()
-            .truncate(),
-    );
-    let said = match &change.what {
-        What::Done { origin, text } => {
-            words = words.child(
-                row()
-                    .key(format!("{key}-what"))
-                    .w_full()
-                    .gap(4.0)
-                    .center_y()
-                    .child(kit::glyph(
-                        format!("{key}-sub-icon"),
-                        origin_icon(*origin),
-                        12.0,
-                        t.text_tertiary,
-                    ))
-                    .child(
-                        kit::label(format!("{key}-sub"), text.clone(), type_fly::WHAT, t.text_tertiary)
-                            .min_w(0.0)
-                            .truncate(),
-                    ),
-            );
-            text.clone()
-        }
-        What::Moving { text, fraction, upload } => {
-            // Amber for an upload (the encryption step), grey for a download (DW-1201).
-            let color = if *upload { t.accent } else { t.text_tertiary };
-            words = words.child(
-                kit::label(format!("{key}-sub"), text.clone(), type_fly::WHAT, t.text_tertiary)
-                    .w_full()
-                    .truncate(),
-            );
-            if let Some(fraction) = fraction {
-                words = words.child(bar(&format!("{key}-bar"), 0.0, *fraction, color, t).w_full());
-            }
-            text.clone()
-        }
-        What::Failed { text } => {
-            words = words.child(
-                kit::label(format!("{key}-sub"), text.clone(), type_fly::WHAT, red_text(t))
-                    .w_full()
-                    .wrap()
-                    .max_lines(2),
-            );
-            text.clone()
-        }
+    let (said, color, origin) = match &change.what {
+        What::Done { origin, text } => (text.clone(), t.text_tertiary, Some(*origin)),
+        What::Moving { text, .. } => (text.clone(), t.text_tertiary, None),
+        What::Failed { text } => (text.clone(), red_text(t), None),
     };
-    let mut r = row()
-        .key(key.clone())
-        .role("listitem")
-        .label(format!("{}, {said}, {}", change.name, change.when))
-        .help(if change.in_trash {
-            "Open Trash"
-        } else {
-            "Show in File Explorer"
-        })
-        .w_full()
-        .h(44.0)
-        .px(8.0)
-        .gap(10.0)
-        .center_y()
-        .radius(8.0)
-        .hover(t.selection)
-        .cursor(Cursor::Pointer)
-        .on_press_tx(host.act(move |ui| ui.open_row(i)))
-        .child(file_tile(&key, change.tile, t))
-        .child(words)
-        .child(
-            kit::label(
-                format!("{key}-time"),
-                change.when.clone(),
-                type_fly::WHEN,
-                t.text_tertiary,
-            )
-            .self_start()
-            .mt(7.0),
-        );
-    if selected {
-        r = r.fill(t.selection);
+    let mut what = row().key(format!("{key}-what")).w(WHAT_W).gap(4.0).center_y();
+    if let Some(origin) = origin {
+        what = what.child(kit::glyph(format!("{key}-sub-icon"), origin_icon(origin), 12.0, t.text_tertiary));
     }
-    r
+    what = what.child(kit::label(format!("{key}-sub"), said.clone(), type_fly::WHAT, color).min_w(0.0).truncate());
+    let when = kit::label(format!("{key}-time"), change.when.clone(), type_fly::WHEN, t.text_tertiary).w(WHEN_W);
+    let look = RowLook {
+        selected,
+        ..RowLook::default()
+    };
+    file_row::row_with(
+        &key,
+        &format!("{}, {said}, {}", change.name, change.when),
+        tile(&key, &change.name, change.tile, t),
+        &change.name,
+        Vec::new(),
+        vec![what, when],
+        look,
+        t,
+    )
+    .help(if change.in_trash {
+        "Open Trash"
+    } else {
+        "Show in File Explorer"
+    })
+    // The list is the one focus stop: the arrow keys move through its rows (`active_descendant`).
+    .role("listitem")
+    .focusable(false)
+    .cursor(Cursor::Pointer)
+    .on_press_tx(host.act(move |ui| ui.open_row(i)))
 }
 
-/// The list with nothing to show (`.kit-tile` over `.t-head` and `.t-sub`, centred).
-fn empty(icon: &'static Icon, title: &str, sentence: &str, t: &Theme) -> El {
-    col()
-        .key("empty")
-        .w_full()
-        .h_full()
-        // The list's own 6 px, and the 32 px of the empty state (`px-8`).
-        .px(38.0)
-        .gap(8.0)
-        .center()
-        .child(
-            el().key("empty-tile")
-                .size(38.0, 38.0)
-                .radius(11.0)
-                .fill(t.tile)
-                .center()
-                .child(kit::glyph("empty-icon", icon, 19.0, t.text_secondary)),
-        )
-        .child(kit::label("empty-title", title, type_::HEAD, t.text))
-        .child(
-            kit::label("empty-text", sentence, type_fly::EMPTY, t.text_tertiary)
-                .w_full()
-                .wrap()
-                .align(Align::Center),
-        )
-}
+/// What a row says happened, and when, beside the name.
+const WHAT_W: f32 = 112.0;
+const WHEN_W: f32 = 46.0;
 
 /// The scroll thumb's length and the room it keeps from the list's ends (`.mk-scroll`).
 const THUMB: (f32, f32) = (34.0, 4.0);
 
 fn changes_list<S: 'static>(ui: &Ui, name: &str, host: Host<S>, t: &Theme) -> El {
     let list = el().key("list").w_full().grow(1.0).min_h(0.0);
+    let empty = |icon: &'static Icon, title: &str, body: &str| {
+        view_state(
+            ViewState::Empty {
+                key: "empty",
+                icon,
+                title,
+                body,
+                action: None,
+            },
+            t,
+        )
+    };
     let (rows, complete) = match &ui.snapshot().changes {
-        Changes::Hidden(why) => return list.child(empty(&icons::LOCK, why.title(), &why.sentence(name), t)),
-        Changes::Empty { text } => return list.child(empty(&icons::CLOCK, "No changes yet", text, t)),
+        Changes::Hidden(why) => return list.child(empty(&icons::LOCK, why.title(), &why.sentence(name))),
+        Changes::Empty { text } => return list.child(empty(&icons::CLOCK, "No changes yet", text)),
+        Changes::Loading => return list.child(view_state(ViewState::Loading { words: "Loading recent changes" }, t)),
+        Changes::Failed => {
+            return list.child(view_state(
+                ViewState::Failed {
+                    key: "failed",
+                    title: "Couldn't read recent changes",
+                    why: "The list of changes on this PC didn't open. Nothing was lost.",
+                    retry: Some(try_again("failed", t).on_press_tx(host.act(Ui::retry_changes))),
+                },
+                t,
+            ));
+        }
         Changes::Rows { rows, complete } => (rows, *complete),
     };
     let shown = rows.len().min(MAX_ROWS);
@@ -643,3 +562,7 @@ fn footer<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
         .child(explorer)
         .child(settings)
 }
+
+#[cfg(test)]
+#[path = "icon_tests.rs"]
+mod icon_tests;

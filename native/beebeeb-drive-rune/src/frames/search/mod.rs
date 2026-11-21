@@ -14,12 +14,14 @@
 //!   (`OpenItem`), its file menu (`About("DW-0402")`), Details, Share…, Version history, Available
 //!   offline, and the toolbar's Sort, New and grid view.
 
+pub mod actions;
 pub mod source;
 #[cfg(test)]
 mod tests;
 mod view;
 pub use view::PLAIN_NOTE;
 
+use std::sync::Arc;
 use rune::{El, Key, KeyEvent, TextEdit, Tx};
 
 use crate::State;
@@ -52,6 +54,20 @@ pub struct SearchUi {
     asked: Option<(String, Narrow)>,
     /// The shell's session gate was open at the last poll (`shell::session_gate`).
     gate_open: bool,
+    /// The results' order (the toolbar's Sort); `None`: the source's own order.
+    pub sort: Option<crate::frames::files::Sort>,
+    /// The results as a grid of tiles (the toolbar's view switch) instead of the list.
+    pub grid: bool,
+    /// The open menu of this window (Sort, or a result's menu).
+    pub menu: Option<actions::Menu>,
+    /// Where the pointer asked for the result's menu (a right-click); none for the Menu key.
+    pub menu_at: Option<(f32, f32)>,
+    /// What Available offline was last set to, by result id, until the source says so itself.
+    pub kept: std::collections::HashMap<String, bool>,
+    /// A line for what could not be done, with the time it was said.
+    pub notice: Option<(String, std::time::Instant)>,
+    /// Files' dialog (Share, Version history) was opened from here: it stands over the results.
+    pub dialog_over: bool,
 }
 
 impl Default for SearchUi {
@@ -69,6 +85,13 @@ impl Default for SearchUi {
             was_open: false,
             asked: None,
             gate_open: false,
+            sort: None,
+            grid: false,
+            menu: None,
+            menu_at: None,
+            kept: Default::default(),
+            notice: None,
+            dialog_over: false,
         }
     }
 }
@@ -85,6 +108,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     // The shell's session gate, read from the engine as it is now: it is also closed for a session
     // that ended under a Ready gate and for a change this poll's refresh has not applied yet.
     let gate_open = crate::shell::session_gate::open(s);
+    if s.actions.dialog.is_none() {
+        s.frames.find.dialog_over = false;
+    }
     let open = is_open(s) && !files_busy(s) && gate_open;
     let typed = s.search.text.trim().to_string();
     let ui = &mut s.frames.find;
@@ -159,7 +185,7 @@ pub enum Shows {
     /// The field is empty: the recent searches (DW-0801).
     Recent(Vec<String>),
     /// The matches (DW-0802), and how far the list has loaded while it still loads (DW-0802b).
-    Results { hits: Vec<Hit>, loading: Option<Loading> },
+    Results { hits: Arc<[Hit]>, loading: Option<Loading> },
     /// No match (DW-0803).
     Nothing { loading: Option<Loading> },
     /// The query is being answered.
@@ -239,7 +265,9 @@ pub fn is_open(s: &State) -> bool {
 /// Something of the Files window that takes the keyboard on its own (a menu, a dialog, a name
 /// being typed in a row) keeps it: search does not open over it.
 fn files_busy(s: &State) -> bool {
-    s.actions.menu.is_some() || s.actions.dialog.is_some() || s.actions.rename.is_some()
+    s.actions.menu.is_some()
+        || (s.actions.dialog.is_some() && !s.frames.find.dialog_over)
+        || s.actions.rename.is_some()
 }
 
 /// While search shows, Alt+Left and Alt+Right are not the window's Back and Forward: the board
@@ -308,6 +336,7 @@ pub fn close(s: &mut State, tx: &mut Tx) {
     ui.selected = None;
     ui.narrow = Narrow::All;
     ui.pictured = false;
+    ui.menu = None;
     s.search.clear();
     tx.focus(SEARCH_KEY, false);
 }
@@ -324,16 +353,16 @@ pub fn run(s: &mut State, query: &str, tx: &mut Tx) {
 }
 
 /// The results for the field as it is now (empty while there is none).
-fn hits(s: &State) -> Vec<Hit> {
-    match s.frames.find.shows(&s.search.text) {
+fn hits(s: &State) -> Arc<[Hit]> {
+    match actions::shows(s) {
         Shows::Results { hits, .. } => hits,
-        _ => Vec::new(),
+        _ => Arc::from([]),
     }
 }
 
 /// The result of `id` among the results shown now (`frames::item`'s Details over Search).
 pub fn hit(s: &State, id: &str) -> Option<Hit> {
-    hits(s).into_iter().find(|hit| hit.id == id)
+    hits(s).iter().find(|hit| hit.id == id).cloned()
 }
 
 /// The result of `id` is no longer among results that are all here: the field changed, or the search answered
@@ -376,10 +405,15 @@ fn open_result(s: &mut State, hits: &[Hit], i: usize) -> bool {
     s.frames.find.source.remember(&query);
     // "Double-click a result: opens it" (DW-0408). The search stays as it is behind the open
     // item, so Back shows the same results again.
-    // THE ONE OPENING PATH: this is Search's single call site. When the viewers lane's router
-    // (`viewers::open_item(state, &DriveItem) -> bool`, by file type) is on the branch, this
-    // line becomes that call, with today's dispatch as what it falls back to.
-    crate::shell::host::dispatch(s, crate::shell::app::Event::OpenItem(hit.id.clone()));
+    // A folder goes to its place; a file goes through `open_file` like every other open in the app.
+    if hit.kind == crate::frames::shared::parts::table::Kind::Folder {
+        crate::shell::host::dispatch(s, crate::shell::app::Event::OpenItem(hit.id.clone()));
+        return true;
+    }
+    let item = crate::frames::open_file::item_named(&hit.id, &hit.name);
+    // A refusal says nothing here: the viewer's own frame says why a file could not be shown, and an outside open
+    // that failed is logged by the source.
+    let _ = crate::frames::open_file::open_file(s, crate::frames::open_file::Target::Item(&item));
     true
 }
 
@@ -394,6 +428,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // `files_key` hands its keys here once search is open, so a Files key with search closed never touches it.)
     if let Some(took) = crate::frames::shared::dialogs::section_keys(s, ev, tx, Section::Files) {
         return took;
+    }
+    // Files' own dialog over the results (Share, Version history) takes every key.
+    if s.actions.dialog.is_some() && s.frames.find.dialog_over {
+        return crate::frames::files::keys::on_key(s, ev, tx);
     }
     s.frames.find.pictured = false;
     if ev.key == Key::Escape && frames::plain(ev) {
@@ -432,6 +470,11 @@ fn field_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     }
     match ev.key {
+        // Esc clears the words first, then closes.
+        Key::Escape if !s.search.text.is_empty() => {
+            s.search = TextEdit::new("");
+            true
+        }
         Key::Escape => {
             close(s, tx);
             true
@@ -520,6 +563,9 @@ fn recent_key(s: &mut State, key: &str, ev: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
+/// Results one PageUp or PageDown moves.
+const PAGE: usize = 10;
+
 /// The results' keys, with focus on a result or nowhere.
 fn results_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let hits = hits(s);
@@ -546,6 +592,19 @@ fn results_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Up => select(s, &hits, at - 1, tx),
         Key::Home => select(s, &hits, 0, tx),
         Key::End => select(s, &hits, last, tx),
+        Key::PageDown => select(s, &hits, (at + PAGE).min(last), tx),
+        Key::PageUp => select(s, &hits, at.saturating_sub(PAGE), tx),
+        // Typed letters jump to the next result whose name starts with them.
+        Key::Text(ref t) if t.chars().count() == 1 && !t.trim().is_empty() => {
+            let t = t.to_lowercase();
+            let at_t = (1..=hits.len())
+                .map(|d| (at + d) % hits.len())
+                .find(|i| hits[*i].name.to_lowercase().starts_with(&t));
+            match at_t {
+                Some(i) => select(s, &hits, i, tx),
+                None => return false,
+            }
+        }
         Key::Enter => return open_result(s, &hits, at),
         _ => return false,
     }

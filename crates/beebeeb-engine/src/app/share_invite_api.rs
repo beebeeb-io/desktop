@@ -47,7 +47,7 @@
 //! Must not: log or return a key, a sealed or wrapped key, an email, a name, an id or a server's words. A
 //! `ShareFlowError`, an `HttpRequest` or a `FolderSend` is never formatted: they can carry server text and key blobs.
 
-use beebeeb_core::auth_flow::{HttpRequest, HttpResponse, Method};
+use beebeeb_core::auth_flow::{HttpRequest, HttpResponse};
 use beebeeb_core::item_id::{ItemClass, item_class};
 use beebeeb_core::kdf::{FileKey, MasterKey};
 use beebeeb_core::share_flow::folder::{FolderInviteInput, FolderSend, FolderShare, FolderStep};
@@ -57,6 +57,7 @@ use beebeeb_core::share_flow::{self, ShareFlowError};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use super::bindings::share_folder_link::get;
 use super::owned_state::{LocalStateRefused, OwnedState};
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
@@ -651,14 +652,6 @@ fn state_refusal(refused: LocalStateRefused) -> InviteRefused {
         | LocalStateRefused::SessionChanged => InviteRefused::SessionEnded,
         _ => InviteRefused::Failed,
     }
-}
-
-/// A GET on the session with no confirm token and no body.
-fn get(path: &str) -> HttpRequest {
-    let mut req = HttpRequest::session_post(path.to_string(), Value::Null);
-    req.method = Method::Get;
-    req.body = None;
-    req
 }
 
 #[cfg(test)]

@@ -52,6 +52,8 @@ pub mod callbacks;
 pub mod placeholders;
 // LD-0105 S6 / I5: emptying placeholders a failed fetch wrote into.
 pub mod poison;
+// Dc-009: Zone.Identifier (ZoneId=3) on files landed from another account's share.
+pub mod mark_of_web;
 // Task 2523: a copy behind the current version, emptied in the measured order and given the new size.
 pub mod stale_copy;
 // LD-0105 W2: the streaming fetch (range sessions, cancel, open completion, W3's decline).
@@ -63,6 +65,9 @@ mod registration;
 pub use registration::*;
 #[cfg(test)]
 mod reconcile_tests;
+// w36: an idle tick keeps no handle and does no per-row work.
+#[cfg(test)]
+mod idle_tick_native_tests;
 // LD-0105 part 1: the Windows-native rungs (S0, W1, S6), each on its own QA sync root.
 #[cfg(test)]
 mod ld0105_native_tests;
@@ -156,6 +161,40 @@ static SYNC_ROOT: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
 /// `NormalizedPath` is unavailable.
 pub fn sync_root() -> Option<std::path::PathBuf> {
     SYNC_ROOT.read().ok().and_then(|root| root.clone())
+}
+
+/// Every Cloud Files change by a path (pin, stamp, convert, resize, mark) asks the 8.3 alias rule first (task 2415):
+/// a name the folder did not report may reach a different entry. From the sync root when `path` is below it, else
+/// from its own folder (its name alone). An `AlreadyExists` error is a conflict: change nothing.
+pub(crate) fn refuse_alias(path: &std::path::Path) -> std::io::Result<()> {
+    let root = sync_root();
+    let roots: Vec<&std::path::Path> = root.as_deref().into_iter().collect();
+    crate::name_alias::refuse_conflict_under_roots(path, &roots)
+}
+
+#[cfg(all(test, windows))]
+mod alias_guard_tests {
+    use super::*;
+
+    #[test]
+    fn changes_by_path_refuse_an_aliased_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("REPORT~1.PDF");
+        std::fs::write(&path, b"x").unwrap();
+        let _stub = crate::name_alias::stub::alias(&path);
+        let refused = |e: &anyhow::Error| {
+            e.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists)
+        };
+        assert_eq!(refuse_alias(&path).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(refused(&placeholders::set_pin_state(&path, true, false).unwrap_err()));
+        assert!(refused(&placeholders::convert_to_unsynced_placeholder(&path, "id").unwrap_err()));
+        assert!(refused(&placeholders::restamp_cloud_only(&path, "a", "b").unwrap_err()));
+        assert!(refused(&placeholders::resize_placeholder(&path, 1).unwrap_err()));
+        assert!(refused(&placeholders::mark_not_in_sync_path(&path).unwrap_err()));
+        assert!(!poison::set_pin_by_path(&path, windows::Win32::Storage::CloudFilters::CF_PIN_STATE_PINNED));
+        assert!(path.exists());
+    }
 }
 
 // The provider GUID is fixed per app identity (`EngineIdentity::cloud_files_provider_guid`; `identity.rs` pins the
@@ -1175,7 +1214,7 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
     // be reachable before we create any placeholder below.
     set_bridge(bridge.clone());
     crate::backup_protect::reconcile_backups_tree_soon(bridge.db_arc(), sync_root); // LD-0113 review #4
-    let created = populate_placeholders(bridge.db(), sync_root).created;
+    let created = populate_placeholders(bridge.db(), sync_root, &mut placed_memo()).created;
     // Zero-knowledge (task 2240 slice 2): a count, never the sync root's path.
     tracing::info!(placeholders = created, "Cloud Files placeholders seeded");
 }
@@ -1207,9 +1246,11 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
     };
     // Task 2240 slice 2 (spec D6): what the refresh costs, measured every tick before anyone optimises it.
     // Counts and milliseconds only, never a path.
-    let s = populate_placeholders(bridge.db(), sync_root);
+    let s = populate_placeholders(bridge.db(), sync_root, &mut placed_memo());
     tracing::debug!(
         rows = s.rows,
+        visited = s.visited,
+        dirs_listed = s.dirs_listed,
         skipped = s.skipped,
         ensure_dir_errors = s.ensure_dir_errors,
         create_calls = s.create_calls,
@@ -1222,6 +1263,15 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         elapsed_ms = s.elapsed_ms,
         "placeholder refresh"
     );
+}
+
+/// w36: the tick's memo of placed rows ([`populate::PlacedMemo`]); it resets itself for another sync root.
+fn placed_memo() -> std::sync::MutexGuard<'static, populate::PlacedMemo> {
+    static PLACED: OnceLock<std::sync::Mutex<populate::PlacedMemo>> = OnceLock::new();
+    PLACED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 /// Per-tick reconcile of on-disk Cloud Files placeholder state back into the
@@ -1627,6 +1677,8 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
     }
 }
 
+// A placeholder's identity read by its place (the prune of two server items with one name).
+pub mod identity_at;
 // The placeholder pass (task 2240, LD-0113), in its own file under the size ratchet.
 mod populate;
 use populate::populate_placeholders;

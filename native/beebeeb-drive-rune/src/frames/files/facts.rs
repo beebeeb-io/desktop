@@ -15,7 +15,6 @@ use crate::source::DriveItem;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Trailing};
-use crate::ui::settings_notice::PILL;
 use crate::ui::settings_shell::SUB;
 use crate::ui::{button, kit};
 use rune::{El, Tx, col, el, row};
@@ -49,9 +48,18 @@ impl State {
             Some(Dialog::Details(item)) => Some((**item).clone()),
             _ => self.one_selected(),
         };
-        let Some(item) = item.filter(|item| !item.is_folder) else {
+        match item {
+            Some(item) => self.begin_versions_for(item),
+            None => false,
+        }
+    }
+
+    /// Version history… of this file, whatever Files' list has selected (Search, Photos and the viewer ask it): the
+    /// same dialog and source call as [`State::begin_versions`]. A folder has none.
+    pub fn begin_versions_for(&mut self, item: DriveItem) -> bool {
+        if item.is_folder {
             return false;
-        };
+        }
         self.close_menu();
         self.actions.dialog = Some(Dialog::Versions(Box::new(item.clone())));
         self.actions.source.ask_versions(&item);
@@ -145,18 +153,6 @@ pub fn details(s: &State, item: &DriveItem, t: &Theme) -> El {
     dialogs::shell("Details", 420.0, "Details", None, body, done(0, t), t)
 }
 
-/// `.kit-pill.tone-neutral` without a dot. Keys: `<key>`, `<key>-label`.
-fn pill(key: &str, words: &str, t: &Theme) -> El {
-    row()
-        .key(key.to_string())
-        .h(20.0)
-        .px(8.0)
-        .center_y()
-        .radius(10.0)
-        .fill(t.text.alpha(0.07))
-        .child(kit::label(format!("{key}-label"), words, PILL, t.text_secondary))
-}
-
 /// One version (`.kit-item` with a 28 pt tile): when, how large, and Restore, or "Current".
 fn version_row(index: usize, button: usize, item: &DriveItem, v: &Version, t: &Theme) -> El {
     let key = format!("item-0-{index}");
@@ -201,7 +197,7 @@ fn version_row(index: usize, button: usize, item: &DriveItem, v: &Version, t: &T
             .child(kit::label(format!("{key}-sub"), sub, SUB, t.text_tertiary).truncate()),
     );
     if v.current {
-        r.child(pill(&format!("{key}-pill"), "Current", t))
+        r.child(crate::ui::pill::pill(&format!("{key}-pill"), "Current", crate::ui::pill::Tone::Neutral, false, t))
     } else {
         let id = v.id.clone();
         r.child(

@@ -175,15 +175,16 @@ fn the_three_keeps() {
 /// One read of the version, from its start to its end, and what it said. `settled` starts a read (the interval is
 /// zero) and takes an answer; the answer is taken only after the worker let go of its flag, so no new read starts
 /// between the wait and the take.
+///
+/// Every take that finds nothing newer starts the next read, so one is on its way when this is called, begun before
+/// whatever the test changed since. It ends first: its answer (the version as it was, or already the new one) is
+/// taken by the first `settled`, and the read this one waits for began after the change.
 fn newer_answer(source: &mut Source, id: &str) -> Option<Settled> {
+    read_done(source);
     if let Some(settled) = source.settled(id) {
         return Some(settled);
     }
-    let began = Instant::now();
-    while source.changes.checking.load(Ordering::SeqCst) {
-        assert!(began.elapsed() < Duration::from_secs(10), "the read did not end");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    read_done(source);
     source.settled(id)
 }
 

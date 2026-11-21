@@ -43,6 +43,11 @@ pub struct FakeSignup {
     pub registered: Mutex<Option<Vec<u8>>>,
     pub email: Mutex<String>,
     pub terms_accepted: AtomicUsize,
+    /// The release default (`BB_SIGNUP_EMAIL_CODE` on): `register-finish` answers 400 `terms_version_required`
+    /// unless the body names the terms version.
+    pub terms_required: AtomicBool,
+    /// The terms version the last `register-finish` body carried.
+    pub finish_terms: Mutex<Option<String>>,
     pub logouts: AtomicUsize,
     setup: Vec<u8>,
 }
@@ -58,6 +63,8 @@ impl Default for FakeSignup {
             registered: Mutex::new(None),
             email: Mutex::new(String::new()),
             terms_accepted: AtomicUsize::new(0),
+            terms_required: AtomicBool::new(true),
+            finish_terms: Mutex::new(None),
             logouts: AtomicUsize::new(0),
             setup: opaque::create_server_setup(),
         }
@@ -141,6 +148,11 @@ pub fn signup_handler(state: Arc<FakeSignup>) -> Handler {
             "POST /api/v1/opaque/register-finish" => {
                 if state.finish_fails.load(Ordering::SeqCst) {
                     return Reply::error(500, "boom");
+                }
+                let terms = req.json()["terms_version"].as_str().map(str::to_owned);
+                *state.finish_terms.lock().unwrap() = terms.clone();
+                if state.terms_required.load(Ordering::SeqCst) && terms.is_none() {
+                    return Reply::error(400, "terms_version_required");
                 }
                 let upload = req.json()["client_message"].as_str().and_then(|m| b64().decode(m).ok());
                 match upload.and_then(|u| opaque::server_registration_finish(&u).ok()) {

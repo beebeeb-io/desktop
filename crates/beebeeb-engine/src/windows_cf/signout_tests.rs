@@ -3,7 +3,7 @@ use super::*;
 
 /// The suite signs out as the real app (today's names; every root here is a temp one).
 fn purge(db: &StateDb, root: Option<&Path>, unknown: &UnknownFiles) -> anyhow::Result<KeptAtSignOut> {
-    super::purge(&crate::identity::REAL, db, root, unknown)
+    super::purge(&crate::identity::TEST, db, root, unknown)
 }
 use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, Namespace, PinState};
 
@@ -15,7 +15,11 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        // Staged payloads must sit under the test identity's scratch folder: the purge gate accepts nothing
+        // else under the OS temp dir (identity::TEST scopes its disposable roots to a sub-folder).
+        let scratch = crate::identity::TEST.scratch_dir_in(&std::env::temp_dir());
+        std::fs::create_dir_all(&scratch).unwrap();
+        let temp = tempfile::tempdir_in(scratch).unwrap();
         let root = temp.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let db = StateDb::open(temp.path().join("state.db")).unwrap();
@@ -348,7 +352,7 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
     use windows::Win32::System::Registry::*;
     use windows::core::HSTRING;
     let f = Fixture::new();
-    let id = crate::windows_cf::shell_sync_root_id(&crate::identity::REAL, &f.root);
+    let id = crate::windows_cf::shell_sync_root_id(&crate::identity::TEST, &f.root);
     let key = HSTRING::from(format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"
     ));
@@ -369,7 +373,7 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
             ERROR_SUCCESS
         );
         assert_eq!(RegCloseKey(handle), ERROR_SUCCESS);
-        let result = crate::windows_cf::unregister_shell_sync_root(&crate::identity::REAL, &f.root);
+        let result = crate::windows_cf::unregister_shell_sync_root(&crate::identity::TEST, &f.root);
         let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
         if remaining == ERROR_SUCCESS {
             assert_eq!(RegCloseKey(handle), ERROR_SUCCESS);
@@ -656,4 +660,120 @@ fn sign_out_stops_plainly_when_it_cannot_keep_a_pending_file() {
         b"an edit that has not left"
     );
     assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+// ---- w28: an account switch's purge never deletes a file the engine does not know is synced and unchanged ----
+
+/// The purge an account switch runs: the real port, as the engine calls it.
+fn switch_purge(f: &Fixture, unasked: &[&str]) -> Result<(), String> {
+    use crate::sync_root_port::SyncRootPort;
+    let unasked: Vec<String> = unasked.iter().map(|path| path.to_string()).collect();
+    crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST).remove_synced_items(&f.db, &f.root, &unasked)
+}
+
+/// w28 (the window w27 left): the engine was told nothing is at the path of a file of unknown content, then a person
+/// made a file there. The switch's purge refuses and deletes nothing; the file keeps every byte; no row is cleared.
+#[test]
+fn w28_switch_purge_keeps_a_file_made_at_a_path_that_was_empty_when_checked() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    f.track_unknown("Budget.docx", ItemKind::File, FileStatus::Local);
+    std::fs::write(f.root.join("Budget.docx"), b"typed while the account switched").unwrap();
+
+    assert!(switch_purge(&f, &["Budget.docx"]).is_err());
+
+    assert_eq!(
+        std::fs::read(f.root.join("Budget.docx")).unwrap(),
+        b"typed while the account switched"
+    );
+    assert!(f.root.join("Plans").is_dir(), "nothing else was removed either");
+    assert_eq!(f.db.list_files().unwrap().len(), 2, "no row was cleared");
+}
+
+/// The same, with the engine's list naming the path: an item the engine did not know (here a folder that is
+/// otherwise a synced plain one) at a path it was told was empty is never removed.
+#[test]
+fn w28_switch_purge_refuses_any_item_at_a_path_the_engine_was_told_was_empty() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    assert!(switch_purge(&f, &["Plans"]).is_err());
+    assert!(f.root.join("Plans").is_dir());
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+/// With nothing at those paths the purge still does its work: the synced items go, the rows are cleared.
+#[test]
+fn w28_switch_purge_still_removes_synced_items_when_nothing_unexpected_is_there() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    f.track_unknown("Budget.docx", ItemKind::File, FileStatus::Local);
+    switch_purge(&f, &["Budget.docx"]).unwrap();
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+/// A file made in a synced folder (a path no row has) after the check: refused too, nothing deleted.
+#[test]
+fn w28_switch_purge_keeps_a_file_made_in_a_synced_folder() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    std::fs::write(f.root.join("Plans").join("late.txt"), b"made during the switch").unwrap();
+    assert!(switch_purge(&f, &[]).is_err());
+    assert_eq!(std::fs::read(f.root.join("Plans").join("late.txt")).unwrap(), b"made during the switch");
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+// ---- w29: a file of unknown content that is only a placeholder (nothing fetched) is a synced item, not unsent work ----
+
+/// the Windows test machine (a CLI-replaced file never opened here kept every switch out, "guarded file" 5/5): a REAL cloud placeholder
+/// with nothing on disk holds no bytes; the real port says so and the switch's purge removes it with its row.
+#[test]
+fn w29_an_unfetched_placeholder_of_unknown_content_holds_nothing_and_the_switch_removes_it() {
+    use crate::sync_root_port::SyncRootPort;
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    assert!(crate::windows_cf::placeholders::create_placeholder(&f.root, "Old.docx", "Old.docx", 4096, 1_700_000_000, false).unwrap());
+    f.track_unknown("Old.docx", ItemKind::File, FileStatus::CloudOnly);
+    let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
+
+    assert!(!os.may_hold_bytes(&f.root, "/Old.docx"), "a placeholder with nothing on disk holds nothing");
+    switch_purge(f, &[]).unwrap();
+
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+/// The same row with bytes on disk may be a person's: the real port says it may hold bytes, and a purge that is asked
+/// anyway refuses, deleting nothing.
+#[test]
+fn w29_a_placeholder_of_unknown_content_with_bytes_on_disk_is_never_removed() {
+    use crate::sync_root_port::SyncRootPort;
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    let path = f.root.join("Budget.docx");
+    std::fs::write(&path, b"typed by A, not sent").unwrap();
+    crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, "Budget.docx").unwrap();
+    crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&path, "Budget.docx").unwrap();
+    f.track_unknown("Budget.docx", ItemKind::File, FileStatus::Local);
+    let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
+
+    assert!(os.may_hold_bytes(&f.root, "/Budget.docx"));
+    assert!(switch_purge(f, &[]).is_err());
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"typed by A, not sent");
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+/// A plain file (no placeholder at all) at the path may hold anything: it is never removed.
+#[test]
+fn w29_a_plain_file_at_a_path_of_unknown_content_is_never_removed() {
+    use crate::sync_root_port::SyncRootPort;
+    let f = Fixture::new();
+    f.track_unknown("Plain.docx", ItemKind::File, FileStatus::Local);
+    std::fs::write(f.root.join("Plain.docx"), b"").unwrap();
+    let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
+
+    assert!(os.may_hold_bytes(&f.root, "/Plain.docx"));
+    assert!(switch_purge(&f, &[]).is_err());
+    assert!(f.root.join("Plain.docx").exists());
 }

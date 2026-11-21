@@ -108,6 +108,8 @@ pub struct Track {
     /// FilmCraft's decoder refused the stream when the file opened (H.264 interlaced or 10-bit): it needs the
     /// system's decoder when its codec is in [`SYSTEM_FALLBACK`], and nothing here decodes it otherwise.
     pub refused: bool,
+    /// With `refused`: the refusal was the stream's 10-bit depth (FilmCraft's "bit depth" words), not interlacing.
+    pub ten_bit: bool,
 }
 
 /// What a track takes, given its route and whether FilmCraft refused it.
@@ -130,6 +132,7 @@ impl Track {
             codec,
             route: route_in(table, codec),
             refused: false,
+            ten_bit: false,
         }
     }
 
@@ -145,6 +148,7 @@ impl Track {
             codec,
             route,
             refused: false,
+            ten_bit: false,
         }
     }
 
@@ -168,7 +172,8 @@ impl Track {
 /// The operating system's decoders, as one file's decision sees them (contract C6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemState {
-    /// The switch (`beebeeb_media_protocol::MEDIA_SYSTEM_DECODER_ON`) is off: never Media Foundation.
+    /// The switch (`beebeeb_media_protocol::MEDIA_SYSTEM_DECODER_ON`, on as shipped) is held off: never Media
+    /// Foundation.
     Off,
     /// The switch is on, but Media Foundation does not start in this process (the sandbox's default profile, or not
     /// Windows): the app may restart the helper once in the system-decoder profile.
@@ -206,6 +211,19 @@ pub fn state_for(
     }
     let available = if switch_on { ask() } else { Err(Unavailable::NotHere) };
     system_state(switch_on, available)
+}
+
+/// The state the decision is made by, once the app said whether another helper can follow this one (ux-57).
+/// `NotHere` asks the app for a restart in the system decoder's profile; in the last helper (`ToHelper::LastHelper`:
+/// the one already started there, which holds `lpacCom` so COM and Media Foundation start in it) no restart follows,
+/// so Media Foundation that still does not start is this PC's answer,
+/// decided as `Off`: a video FilmCraft plays goes on without the audio that needed the system's decoder, and a track
+/// that cannot play at all keeps its `NoSystemDecoder`.
+pub fn settled(state: SystemState, last_helper: bool) -> SystemState {
+    match state {
+        SystemState::NotHere if last_helper => SystemState::Off,
+        other => other,
+    }
 }
 
 /// The tracks that play, by codec, and the audio track that does not.
@@ -257,8 +275,12 @@ pub fn decide(video: Option<Track>, audio: Option<Track>, system: SystemState) -
         };
     };
     match video.need() {
+        Need::Unavailable if video.codec == Codec::Other => return Decision::Error(ErrorCode::UnknownCodec),
         Need::Unavailable => return Decision::Error(ErrorCode::Unsupported(video.codec)),
         Need::NoDecoder => return Decision::Error(ErrorCode::NoDecoder),
+        Need::System if !available && video.refused && video.ten_bit && system != SystemState::NoSystemMedia => {
+            return Decision::Error(ErrorCode::TenBit);
+        }
         Need::System if !available => return Decision::Error(refusal(system, video.codec)),
         Need::System | Need::Ours => {}
     }
@@ -318,6 +340,42 @@ mod tests {
         SystemState::NoSystemMedia,
         SystemState::Available,
     ];
+
+    /// ux-57: the helper in the system decoder's profile where Media Foundation still does not start plays an
+    /// H.264 + AAC video without sound; only a video that needs the system's decoder, and audio alone, are refused.
+    #[test]
+    fn the_last_helper_plays_the_video_without_the_system_audio() {
+        use Codec::*;
+        let t = |codec| Some(Track::of(crate::ROUTES, codec));
+        for state in ALL_STATES {
+            assert_eq!(settled(state, false), state, "{state:?}: another helper may follow");
+        }
+        assert_eq!(settled(SystemState::NotHere, true), SystemState::Off);
+        assert_eq!(settled(SystemState::NoSystemMedia, true), SystemState::NoSystemMedia);
+        assert_eq!(settled(SystemState::Available, true), SystemState::Available);
+        // The first helper asks for the restart; the last one plays the video and names the silent track.
+        assert_eq!(
+            decide(t(H264), t(Aac), settled(SystemState::NotHere, false)),
+            Decision::Error(ErrorCode::NoSystemDecoder(Aac))
+        );
+        assert_eq!(
+            decide(t(H264), t(Aac), settled(SystemState::NotHere, true)),
+            Decision::Ours(Plan {
+                video: Some(H264),
+                audio: None,
+                no_sound: Some(Aac),
+            })
+        );
+        // A video only the system's decoder plays, and audio alone, stay refused with their own codec.
+        assert_eq!(
+            decide(t(Hevc), t(Aac), settled(SystemState::NotHere, true)),
+            Decision::Error(ErrorCode::NoSystemDecoder(Hevc))
+        );
+        assert_eq!(
+            decide(None, t(Aac), settled(SystemState::NotHere, true)),
+            Decision::Error(ErrorCode::NoSystemDecoder(Aac))
+        );
+    }
 
     #[test]
     fn labels_classify_to_their_codec() {
@@ -620,7 +678,7 @@ mod tests {
             let unknown = Some(Track::of_label(&table, "something else"));
             assert_eq!(
                 decide(unknown, None, state),
-                Decision::Error(ErrorCode::Unsupported(Codec::Other))
+                Decision::Error(ErrorCode::UnknownCodec)
             );
             let raw = Some(Track::of_label(&table, "Uncompressed YUV"));
             assert_eq!(decide(raw, None, state), ours(Some(Codec::Other), None, None));

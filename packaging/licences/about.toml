@@ -1,0 +1,32 @@
+# cargo-about configuration for the third-party licence notice (packaging/licences/generate.sh).
+# Every licence a crate in the three shipped binaries' Cargo.lock graphs may be under must be named here; a crate
+# under one that is not named fails the run (--fail), so a new dependency is a decision, never an accident.
+# Dev and build dependencies are listed too: the notice is a superset of what ships, never a subset.
+accepted = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "AGPL-3.0",
+    "AGPL-3.0-or-later",
+    "Ubuntu-font-1.0",
+]
+ignore-dev-dependencies = false
+ignore-build-dependencies = false
+workarounds = ["ring"]
+# Crates marked publish = false are not listed by cargo-about: ours (section 1 of the notice covers them, AGPL-3.0-or-later)
+# and the git dependencies that do the same (desktop-office, FilmCraft, ...). render.py reads the git ones' licence from
+# `cargo metadata` and the files beside them, so none goes unlisted, and fails when it finds none.
+private = { ignore = true }

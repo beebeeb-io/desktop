@@ -24,6 +24,17 @@ mod hardening_tests;
 // Charts and pictures of a sheet: asked once seen, sized by the protocol.
 #[path = "office_host_tests/anchor_tests.rs"]
 mod anchor_tests;
+// The wait for the launch lock: not the helper's time, and a close during it drops the document (review of #467).
+#[path = "office_host_tests/launch_wait_tests.rs"]
+mod launch_wait_tests;
+// The editing session: checked answers, the save handshake.
+#[path = "office_host_tests/edit_tests.rs"]
+mod edit_tests;
+// A helper that dies mid-edit comes back from the last snapshot; the snapshot timing.
+#[path = "office_host_tests/restart_tests.rs"]
+mod restart_tests;
+#[path = "office_host_tests/spill_tests.rs"]
+mod spill_tests;
 
 /// 100 % on a 96 DPI screen: a Letter page is 816 x 1056.
 fn scale_100() -> f32 {
@@ -977,7 +988,8 @@ fn a_too_old_windows_needs_a_windows_update() {
 fn no_sandbox_no_helper() {
     // An existing, runnable file of the helper's name: were there an unconfined way, this would start it.
     let exe = runnable_helper("no-sandbox");
-    let mut host = OfficeHost::open(&exe, DocKind::Docx, Zeroizing::new(doc()), noop_wake());
+    let registry = Registry::new();
+    let mut host = OfficeHost::open_in(&registry, &exe, DocKind::Docx, Zeroizing::new(doc()), noop_wake());
     let mut events = Vec::new();
     let ended = |host: &OfficeHost, _: &[Event]| host.worker_ended() && !matches!(host.state(), OfficeState::Opening);
     assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());

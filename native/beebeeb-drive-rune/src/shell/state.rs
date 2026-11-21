@@ -21,12 +21,18 @@ pub struct State {
     pub(crate) listing: Listing,
     /// Why `listing` could not be read, when it could not: the window shows this instead of rows.
     pub(crate) list_error: Option<source::SourceError>,
+    /// The folder reads the running app makes on a worker (`frames::files::reread::FolderReads`); a scene reads at once.
+    pub(crate) folder_reads: crate::frames::files::reread::FolderReads,
     pub(crate) storage: source::StorageSummary,
     /// `false`: the source cannot know the account's storage (a `--db` source never asks the server).
     pub(crate) storage_known: bool,
     /// The storage split by category: `Some((files_bytes, photos_bytes))` from the board fixture
     /// or the engine; `None` when the split is not known (a live window before the engine wires it).
     pub(crate) storage_split: Option<(i64, i64)>,
+    /// How the live window reads the signed-in account's storage again (`shell::storage_view`); `None` in a scene.
+    pub(crate) storage_reader: Option<super::storage_view::StorageReader>,
+    /// The read in flight, stamped with the account that asked.
+    pub(crate) storage_pending: Option<super::storage_view::Pending>,
     pub(crate) selected: Option<usize>,
     pub(crate) search: TextEdit,
     pub(crate) sidebar_section: SidebarSection,
@@ -72,7 +78,9 @@ pub fn init() -> State {
 }
 
 pub fn init_with(shell: Shell) -> State {
-    let board = init_from(shell, Box::new(BoardFixtureSource::new()), Some(6));
+    let mut board = init_from(shell, Box::new(BoardFixtureSource::new()), Some(6));
+    // The board's This PC sample belongs to the board path only; `init_from` alone (`--db`) has none.
+    board.this_pc = crate::frames::this_pc::Ui::fixture();
     crate::frames::viewers::board_fixture(crate::frames::files::board_fixture(board))
 }
 
@@ -109,12 +117,15 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         source,
         listing,
         list_error,
+        folder_reads: Default::default(),
         storage_known: storage.is_some(),
         storage: storage.unwrap_or(source::StorageSummary {
             used_bytes: 0,
             quota_bytes: 0,
         }),
         storage_split,
+        storage_reader: None,
+        storage_pending: None,
         selected,
         search: TextEdit::new(""),
         sidebar_section: SidebarSection::Files,
@@ -137,7 +148,8 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         setup_source: None,
         guide: Default::default(),
         guide_marks: crate::frames::signin::setup::guide_marks::first(crate::shell::instance::DEV_BUILD),
-        this_pc: crate::frames::this_pc::Ui::fixture(),
+        // Nothing answers for This PC without the board or an engine: no sample counts (`--db`).
+        this_pc: crate::frames::this_pc::Ui::new(Box::new(crate::frames::this_pc::source::Unwired)),
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
     }
 }
@@ -186,6 +198,10 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     let drive: Box<dyn DriveSource> = Box::new(crate::engine_host::EngineDriveSource::new(engine.clone()));
     let mut s = init_from(shell, drive, None);
     s.identity = AppIdentity::CURRENT;
+    // Every later folder read of the Files window (a finished check, an opened folder, a gate that opened) is made on
+    // a worker: a large account's folder takes long to read, and the window never waits for it (task 050).
+    let reads = crate::engine_host::EngineDriveSource::new(engine.clone());
+    s.folder_reads.reader = Some(std::sync::Arc::new(move |folder: Option<&str>| load(&reads, folder)));
     s.actions =
         crate::frames::files::Actions::new(Box::new(crate::engine_host::EngineFilesSource::new(engine.clone())));
     // The banner's two fields S1 feeds from the engine's view (the session ended, offline).
@@ -205,6 +221,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         crate::engine_host::EngineSignInSource::with_hello(engine.clone(), Box::new(hello)),
     )));
     crate::engine_host::media::install_shell_player(engine.clone());
+    // "Save a copy…" and "Download to…" copy through the engine's one handle (`shell::viewer_save`).
+    crate::shell::viewer_save::install(std::sync::Arc::new(crate::engine_host::save_copy::EngineSaver(engine.clone())));
     // An open file: read from the engine, decrypted in memory (`engine_host::viewer`); one source per opened file.
     let viewer_engine = engine.clone();
     crate::frames::viewers::wire(
@@ -233,6 +251,17 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
             .with_approval_window(s.shell.main_window_slot()),
     ));
     s.storage_split = None;
+    // The figure follows the account: cleared at a sign-out or another account, read again for the one that signs in.
+    let storage_engine = engine.clone();
+    s.storage_reader = Some(std::sync::Arc::new(move || {
+        storage_engine
+            .storage_info()
+            .ok()
+            .map(|(used, quota)| source::StorageSummary {
+                used_bytes: used,
+                quota_bytes: quota,
+            })
+    }));
     // The first-time guide's "done", once per account: the engine keeps it in the account's own local state.
     s.guide_marks = Box::new(crate::engine_host::guide::EngineGuideMarks::new(engine.clone()));
     // Shared reads the engine (`engine_host::shared`): from Beebeeb only, for the session in memory.
@@ -245,6 +274,7 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     if SEARCH_ON_ENGINE {
         s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine.clone()));
     }
+    // No words of its own: Shared and Trash say what Files says (`frames::sync_words`, `frames::pc_summary`).
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
     // Photos and every grid of thumbnails read the engine (`engine_host::photos`, `engine_host::thumbs`): one store
     // of thumbnails for both, in memory only, the session's alone.

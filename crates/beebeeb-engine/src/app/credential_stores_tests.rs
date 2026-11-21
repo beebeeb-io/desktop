@@ -11,7 +11,7 @@ use base64::Engine as _;
 use super::{CredentialStores, LEGACY_FLAT_SLOT, PlatformCredentials};
 use crate::app::{Engine, EngineConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::{AuthSecretStore, SecretBytes, SessionToken};
 use crate::signin::gate::GateState;
 use crate::signin::memory_store::{MemoryCredentials, MemoryStore};
@@ -41,7 +41,7 @@ fn open(credentials: &MemoryCredentials) -> Result<TestEngine, String> {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    Engine::open(&REAL, config, host, credentials.clone())
+    Engine::open(&TEST, config, host, credentials.clone())
 }
 
 fn opened(credentials: &MemoryCredentials) -> TestEngine {
@@ -54,8 +54,10 @@ fn slot(credentials: &MemoryCredentials) -> MemoryStore {
 
 fn flat(credentials: &MemoryCredentials) -> MemoryStore {
     credentials
-        .legacy_flat(&REAL)
+        .legacy_flat(&TEST)
         .expect("the test stores have a flat layout")
+        .install_slot()
+        .clone()
 }
 
 /// A session put in `store`: its token, its vault key, its email.
@@ -300,7 +302,7 @@ fn nothing_secret_reaches_the_log() {
 #[test]
 fn the_platform_flat_layout_is_asked_on_windows_and_macos_only() {
     assert_eq!(
-        PlatformCredentials.legacy_flat(&REAL).is_some(),
+        PlatformCredentials.legacy_flat(&TEST).is_some(),
         cfg!(any(target_os = "windows", target_os = "macos"))
     );
 }
@@ -326,7 +328,7 @@ fn open_on<C: CredentialStores + Clone>(stores: &C, api_base: &str) -> Engine<C>
         state_dir,
         api_base: api_base.into(),
     };
-    Engine::open(&REAL, config, host, stores.clone()).expect("the handle opens")
+    Engine::open(&TEST, config, host, stores.clone()).expect("the handle opens")
 }
 
 /// No server listens there; nothing in these tests needs one.
@@ -675,4 +677,200 @@ fn a_flat_trio_found_after_the_mark_is_deleted_not_adopted() {
         "{} items are left (the mark goes with the flat session)",
         credentials.len()
     );
+}
+
+/// R4 (014's real check): one kept key per ACCOUNT, not per device. A switch A -> B -> A never asks A for the twelve
+/// words again; removing B leaves A's slot. Ids, tokens and keys are invented.
+mod key_slot_per_account {
+    use super::*;
+    use crate::keychain::AuthVault;
+    use crate::signin::key_owner::{self, KeyOwnership};
+
+    const USER_A: &str = "0f6a3c1e-aaaa-4aaa-8aaa-000000000001";
+    const USER_B: &str = "0f6a3c1e-bbbb-4bbb-8bbb-000000000002";
+    const KEY_A: &[u8; 32] = b"an-invented-32-byte-vault-key-A1";
+    const KEY_B: &[u8; 32] = b"an-invented-32-byte-vault-key-B2";
+
+    fn vault(credentials: &MemoryCredentials) -> AuthVault<<MemoryCredentials as CredentialStores>::Store> {
+        AuthVault::new(credentials.for_account(&TEST, SLOT))
+    }
+
+    /// A password sign-in as the app stores it (`Engine::store_first_sign_in`).
+    fn sign_in(credentials: &MemoryCredentials, user: &str, email: &str) {
+        let mut vault = vault(credentials);
+        key_owner::remove_foreign_key(&mut vault, user, email).expect("no foreign key left");
+        vault
+            .install_session(SessionToken::new(format!("token-of-{user}")).unwrap())
+            .unwrap();
+        vault.store_account_email(email).unwrap();
+        vault.bind_session_owner(user).unwrap();
+    }
+
+    /// The twelve words, proven (`Engine::unlock_with_phrase`).
+    fn unlock_with_words(credentials: &MemoryCredentials, key: &[u8; 32]) {
+        let vault = vault(credentials);
+        vault.store_wrapped_master_key(SecretBytes::new_master_key(key)).unwrap();
+        assert!(key_owner::bind_key_to_session_owner(&vault).unwrap());
+    }
+
+    fn sign_out(credentials: &MemoryCredentials) {
+        vault(credentials).clear_session().unwrap();
+    }
+
+    /// Does the signed-in account unlock without the words, and with which key?
+    fn unlocks_without_words(credentials: &MemoryCredentials) -> Option<Vec<u8>> {
+        let mut vault = vault(credentials);
+        if key_owner::stored_key_state(&vault) != key_owner::StoredKey::Usable {
+            return None;
+        }
+        assert_eq!(key_owner::stored_key_ownership(&vault).unwrap(), KeyOwnership::Matches);
+        vault.unlock().ok()?;
+        Some(vault.master_key().unwrap().to_vec())
+    }
+
+    fn kept(credentials: &MemoryCredentials, user: &str) -> Option<Vec<u8>> {
+        credentials
+            .for_account(&TEST, SLOT)
+            .load_account_key(user)
+            .unwrap()
+            .map(|key| key.expose_for_crypto().to_vec())
+    }
+
+    #[test]
+    fn a_switch_back_needs_no_twelve_words_and_signing_out_of_b_leaves_a() {
+        let credentials = MemoryCredentials::default();
+        sign_in(&credentials, USER_A, "a@example.eu");
+        unlock_with_words(&credentials, KEY_A);
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
+
+        // Switch to B: A is not signed out (Guus, 2026-11-21), so nothing of A is forgotten.
+        sign_in(&credentials, USER_B, "b@example.eu");
+        assert_eq!(unlocks_without_words(&credentials), None, "B never gets A's key");
+        unlock_with_words(&credentials, KEY_B);
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_B[..]));
+
+        // And back to A: no twelve words.
+        sign_in(&credentials, USER_A, "a@example.eu");
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
+
+        // Both slots exist, each with its own key.
+        assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]));
+        assert_eq!(kept(&credentials, USER_B).as_deref(), Some(&KEY_B[..]));
+
+        // Removing B removes only B's slot.
+        vault(&credentials).forget_account_key(USER_B).unwrap();
+        assert_eq!(kept(&credentials, USER_B), None);
+        assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]));
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
+    }
+
+    /// A sign-out leaves nothing of the account signing out (task 2447 d), and keeps the slot of an account that was
+    /// only switched away from.
+    #[test]
+    fn signing_out_removes_that_accounts_slot_only() {
+        let credentials = MemoryCredentials::default();
+        sign_in(&credentials, USER_A, "a@example.eu");
+        unlock_with_words(&credentials, KEY_A);
+        sign_in(&credentials, USER_B, "b@example.eu");
+        unlock_with_words(&credentials, KEY_B);
+
+        sign_out(&credentials);
+        assert_eq!(kept(&credentials, USER_B), None, "B signed out: its key is gone");
+        assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]), "A was switched away from");
+        let install = credentials.store_for(SLOT);
+        assert!(install.load_wrapped_master_key().unwrap().is_none());
+        assert!(install.load_session_token().unwrap().is_none());
+
+        sign_in(&credentials, USER_B, "b@example.eu");
+        assert_eq!(unlocks_without_words(&credentials), None, "B asks for its words again");
+        sign_in(&credentials, USER_A, "a@example.eu");
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
+
+        // A signs out too: nothing of either account is left.
+        sign_out(&credentials);
+        assert!(credentials.is_empty(), "a sign-out leaves nothing");
+    }
+
+    /// dc-014's case, with A's working key left behind by B's sign-out: A's key stays A's (it was not A signing out).
+    #[test]
+    fn a_sign_out_of_b_beside_a_working_key_of_a_keeps_it_in_as_slot() {
+        let credentials = MemoryCredentials::default();
+        sign_in(&credentials, USER_A, "a@example.eu");
+        unlock_with_words(&credentials, KEY_A);
+        sign_in(&credentials, USER_B, "b@example.eu");
+        sign_out(&credentials);
+        assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]));
+        sign_in(&credentials, USER_A, "a@example.eu");
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
+    }
+
+    /// dc-014's case: B signs in while A's tagged key is still the working key (A's clear failed, or a store that
+    /// keeps it). B's unlock never takes A's only copy; A comes back to its own key.
+    #[test]
+    fn b_unlocking_over_a_working_key_of_a_keeps_a() {
+        let credentials = MemoryCredentials::default();
+        // An earlier build: one slot, A's key tagged A, no account slots yet.
+        let store = credentials.store_for(SLOT);
+        store.save_wrapped_master_key(SecretBytes::new_master_key(KEY_A)).unwrap();
+        store.save_vault_key_owner(USER_A).unwrap();
+        assert_eq!(kept(&credentials, USER_A), None);
+
+        sign_in(&credentials, USER_B, "b@example.eu");
+        assert_eq!(unlocks_without_words(&credentials), None, "B never gets A's key");
+        unlock_with_words(&credentials, KEY_B);
+        assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]), "A's key moved into A's slot");
+
+        sign_in(&credentials, USER_A, "a@example.eu");
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
+        assert_eq!(kept(&credentials, USER_B).as_deref(), Some(&KEY_B[..]));
+    }
+
+    /// The migration: the single slot of an earlier build moves into the signed-in account's slot at its first run.
+    #[test]
+    fn the_single_slot_moves_into_the_signed_in_accounts_slot_on_first_run() {
+        let credentials = MemoryCredentials::default();
+        let store = credentials.store_for(SLOT);
+        store
+            .save_session_token(&SessionToken::new("token-of-a").unwrap())
+            .unwrap();
+        store.save_session_owner(USER_A).unwrap();
+        store.save_wrapped_master_key(SecretBytes::new_master_key(KEY_A)).unwrap();
+        store.save_vault_key_owner(USER_A).unwrap();
+
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
+        assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]));
+        assert_eq!(kept(&credentials, USER_B), None);
+    }
+
+    /// An untagged working key is never replaced by a kept one (it may be this account's key, written a moment ago
+    /// for this session), and a kept key never reaches another account's session.
+    #[test]
+    fn a_kept_key_never_replaces_an_untagged_key_nor_reaches_another_account() {
+        let credentials = MemoryCredentials::default();
+        sign_in(&credentials, USER_A, "a@example.eu");
+        unlock_with_words(&credentials, KEY_A);
+
+        // A device approval of B (a switch: A stays signed in on this PC): token and key, untagged until bound.
+        let vault = vault(&credentials);
+        vault
+            .install_session(SessionToken::new("token-of-b").unwrap())
+            .unwrap();
+        vault.store_wrapped_master_key(SecretBytes::new_master_key(KEY_B)).unwrap();
+        vault.bind_session_owner(USER_B).unwrap();
+        assert_eq!(
+            credentials.store_for(SLOT).load_wrapped_master_key().unwrap().unwrap().expose_for_crypto(),
+            &KEY_B[..]
+        );
+        vault.bind_vault_key_owner(USER_B).unwrap();
+        assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_B[..]));
+        assert_eq!(kept(&credentials, USER_B).as_deref(), Some(&KEY_B[..]));
+    }
+
+    #[test]
+    fn an_id_that_is_not_a_server_user_id_names_no_slot() {
+        assert!(super::super::account_key_slot_name("").is_err());
+        assert!(super::super::account_key_slot_name("a/b").is_err());
+        assert!(super::super::account_key_slot_name("a@example.eu").is_err());
+        assert_eq!(super::super::account_key_slot_name(USER_A).unwrap(), format!("account-key-{USER_A}"));
+    }
 }

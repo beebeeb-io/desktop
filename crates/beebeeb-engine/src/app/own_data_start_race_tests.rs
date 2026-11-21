@@ -5,14 +5,17 @@
 use super::*;
 
 /// A pause for the service thread ([`TestSeams::before_keys`], [`TestSeams::after_spawn`]): it says it arrived, then
-/// waits until the test lets it go (or [`WAIT`] passed, or the test ended).
+/// waits until the test lets it go or the test ended (its `Sender` dropped). Never on a clock: the service thread is
+/// woken inside `start_sync`, before the start's own publish (a plan request) returns, so the thread can arrive long
+/// before the test has the start back in hand. A timed pause let the proof go on before the stop the test makes after
+/// the start, under load (a 30 s plan request against a 20 s pause).
 fn pause() -> (TestPause, mpsc::Receiver<()>, mpsc::Sender<()>) {
     let (arrived, arrival) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();
     let (arrived, released) = (Mutex::new(arrived), Mutex::new(released));
     let pause: TestPause = Arc::new(move || {
         let _ = arrived.lock().unwrap().send(());
-        let _ = released.lock().unwrap().recv_timeout(WAIT);
+        let _ = released.lock().unwrap().recv();
     });
     (pause, arrival, release)
 }
@@ -74,7 +77,11 @@ fn a_stop_before_the_proof_read_the_keys_ends_it_without_a_client() {
     paused.recv_timeout(WAIT).expect("the service thread took up the proof");
     let turn = pc.engine.acct.session_generation();
 
-    pc.engine.runtime.block_on(pc.engine.stop_proofs());
+    assert_eq!(
+        pc.engine.runtime.block_on(pc.engine.stop_proofs()),
+        ProofStop::Ended,
+        "no proof was running yet"
+    );
     release.send(()).unwrap();
 
     pc.wait_for_outcomes(1);

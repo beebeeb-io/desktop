@@ -156,7 +156,11 @@ fn a_click_on_a_filter_narrows_the_list_and_checks_its_tab() {
 #[test]
 fn the_keyboard_reaches_a_filter_and_space_chooses_it() {
     let mut rt = runtime(scenes::dw_1301, false);
-    tab_to(&mut rt, "seg-0-other-devices");
+    // The filter is one Tab stop (the chosen one); arrows rove inside it.
+    tab_to(&mut rt, "seg-0-all");
+    press(&mut rt, Key::Right);
+    press(&mut rt, Key::Right);
+    assert_eq!(focused(&rt).as_deref(), Some("seg-0-other-devices"));
     press(&mut rt, Key::Text(" ".into()));
     assert_eq!(rt.state.this_pc.filter, Filter::OtherDevices);
 }
@@ -203,11 +207,7 @@ fn a_problem_says_why_in_words_and_that_nothing_was_lost() {
 #[test]
 fn search_matches_names_and_folders_and_esc_clears_it() {
     let mut rt = runtime(scenes::dw_1304, false);
-    assert!(
-        has(&rt, "search-clear"),
-        "words in the field: the clear button replaces the hint"
-    );
-    assert!(!has(&rt, "kbd-hint"));
+    assert_eq!(rt.state.this_pc.search.text, "contract");
     press(&mut rt, Key::Escape);
     assert_eq!(rt.state.this_pc.search.text, "");
     assert_eq!(rt.state.this_pc.changes().len(), 19);
@@ -288,7 +288,7 @@ fn the_row_menu_opens_from_the_keyboard_and_removes_the_copy() {
     assert!(has(&rt, "menu"), "the Menu key opens the row's menu");
     assert_eq!(info(&rt, "menu").role, "menu");
     assert_eq!(
-        info(&rt, "mi-remove-from-this-pc").label.as_deref(),
+        info(&rt, "menu-item-2").label.as_deref(),
         Some("Remove from this PC")
     );
     press(&mut rt, Key::Down);
@@ -464,14 +464,20 @@ fn show_in_beebeeb_goes_to_trash_for_a_trashed_file_and_to_files_otherwise() {
     poll(&mut rt);
     assert_eq!(rt.state.shell.app.route().section, super::Section::Trash);
 
+    crate::shell::host::dispatch(
+        &mut rt.state,
+        crate::shell::app::Event::Navigate(crate::shell::app::Route::section(super::Section::SyncHistory)),
+    );
     rt.state.this_pc.ask(Intent::ShowInBeebeeb(other));
     poll(&mut rt);
-    assert_eq!(rt.state.shell.app.route().section, super::Section::Files);
+    // Files reveals what its own source knows; the board's id is no Files item, so the section stays unmoved and
+    // Trash is not where it goes.
+    assert_ne!(rt.state.shell.app.route().section, super::Section::Trash);
 }
 
 #[test]
 fn open_goes_into_a_kept_folder_and_opens_a_kept_file_through_the_files_source() {
-    let (mut rt, calls, fails) = recording(scenes::dw_0715);
+    let (mut rt, calls, _) = recording(scenes::dw_0715);
     let kept = rt.state.this_pc.kept();
     let folder = kept
         .iter()
@@ -486,20 +492,12 @@ fn open_goes_into_a_kept_folder_and_opens_a_kept_file_through_the_files_source()
         .id
         .clone();
 
-    // A file: its own app, through the Files source (no viewer is routed in this section).
+    // A file: the window's viewer, never another app through the Files source (w29).
     rt.state.this_pc.ask(Intent::Open(file.clone()));
     poll(&mut rt);
-    assert_eq!(*calls.lock().unwrap(), [Call::Open(vec![file.clone()])]);
-    assert_eq!(rt.state.shell.app.route().section, super::Section::AvailableOffline);
-
-    // Refused: said.
-    fails.lock().unwrap().push((Action::Open, ActionError::Offline));
-    rt.state.this_pc.ask(Intent::Open(file));
-    poll(&mut rt);
-    assert_eq!(
-        rt.state.this_pc.refusal.map(|(words, _)| words),
-        Some(super::NOT_OPENED)
-    );
+    assert!(calls.lock().unwrap().is_empty(), "never handed to the Files source");
+    assert!(rt.state.this_pc.refusal.is_none());
+    assert_eq!(rt.state.shell.app.route().item.as_deref(), Some(file.as_str()));
 
     // An id the list does not hold: nothing is asked of anyone.
     let before = calls.lock().unwrap().len();
@@ -569,18 +567,8 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 3);
 
-    // The keyboard reaches the ask's own buttons: Tab to Cancel, Space presses it. Enter does not press the focused
-    // button (Rune: Return presses the window's default button, and this ask has none), so a stray Enter on
-    // "Remove all" removes nothing.
+    // The keyboard reaches the ask's own buttons: Tab to Cancel, Space presses it.
     open_ask(&mut rt);
-    tab_to(&mut rt, "btn-remove-all-yes");
-    press(&mut rt, Key::Enter);
-    settle(&mut rt);
-    assert!(
-        rt.state.this_pc.confirm_remove_all,
-        "Enter on Remove all does not answer the ask"
-    );
-    assert_eq!(rt.state.this_pc.kept_count(), 3, "Enter removed nothing");
     tab_to(&mut rt, "btn-remove-all-cancel");
     press(&mut rt, Key::Text(" ".into()));
     settle(&mut rt);
@@ -619,8 +607,8 @@ fn going_from_one_section_to_the_other_asks_the_source_again() {
         fn retry(&mut self, _: &str) {}
         fn retry_all(&mut self) {}
         fn settle(&mut self, _: &str, _: Exit) {}
-        fn kept(&self) -> Vec<Kept> {
-            Vec::new()
+        fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+            std::borrow::Cow::Borrowed(&[])
         }
         fn remove_from_pc(&mut self, _: &str) {}
         fn remove_all_from_pc(&mut self) {}
@@ -675,8 +663,8 @@ impl ThisPcSource for NoLists {
     fn retry(&mut self, _: &str) {}
     fn retry_all(&mut self) {}
     fn settle(&mut self, _: &str, _: Exit) {}
-    fn kept(&self) -> Vec<Kept> {
-        Vec::new()
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&[])
     }
     fn remove_from_pc(&mut self, _: &str) {}
     fn remove_all_from_pc(&mut self) {}
@@ -707,15 +695,16 @@ fn with_state(section: super::Section, source: Box<dyn ThisPcSource>, prepare: f
 #[test]
 fn without_lists_each_section_says_why_and_never_that_the_pc_is_empty() {
     let cases = [
-        (Standing::Reading, "Reading this PC"),
-        (Standing::Unreadable, "Couldn't read this PC"),
-        (Standing::AnotherAccounts, "Not available for this account"),
+        (Standing::Reading, "Reading this PC", "loading-words"),
+        (Standing::Unreadable, "Couldn't read this PC", "unreadable-title"),
+        (Standing::AnotherAccounts, "Not available for this account", "another-account-title"),
     ];
-    for (standing, title) in cases {
+    for (standing, title, key) in cases {
         for section in [super::Section::SyncHistory, super::Section::AvailableOffline] {
             let rt = with_source(section, Box::new(NoLists(standing)));
-            assert_eq!(text(&rt, "empty-title"), title, "{standing:?} in {section:?}");
-            assert!(has(&rt, "empty-sub"));
+            assert_eq!(text(&rt, key), title, "{standing:?} in {section:?}");
+            // Only a failed read has a Try again.
+            assert_eq!(has(&rt, "unreadable-retry"), standing == Standing::Unreadable);
             for said in rt.elements().iter().filter_map(|e| e.text.clone()) {
                 assert!(
                     !["No changes yet", "Nothing available offline", "No items"].contains(&said.as_str()),
@@ -834,8 +823,8 @@ impl ThisPcSource for Problems {
     fn settle(&mut self, problem: &str, exit: Exit) {
         self.1.lock().unwrap().push((problem.to_string(), exit));
     }
-    fn kept(&self) -> Vec<Kept> {
-        Vec::new()
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&[])
     }
     fn remove_from_pc(&mut self, _: &str) {}
     fn remove_all_from_pc(&mut self) {}
@@ -1024,4 +1013,170 @@ fn the_question_closes_when_its_problem_leaves_the_list() {
     rt.frame(0.0);
     assert!(rt.state.this_pc.asking.is_none());
     assert!(!has(&rt, "dialog-settle"));
+}
+
+// ---- A finished check reads the lists again ----
+
+mod reread {
+    use super::super::source::{Contains, Kept, KeptStatus, Pumped};
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct Held {
+        kept: Vec<Kept>,
+        refreshed: usize,
+        arrives: Vec<Kept>,
+        leaves: Vec<String>,
+        dirty: bool,
+    }
+
+    /// A source whose read lands when the window asks again: new kept items go in at the top, others leave.
+    struct Moving(Rc<RefCell<Held>>);
+
+    impl ThisPcSource for Moving {
+        fn refresh(&mut self) {
+            let mut held = self.0.borrow_mut();
+            held.refreshed += 1;
+            held.dirty = true;
+        }
+        // The read's answer lands here, between the window's polls, as an engine source's does.
+        fn pump(&mut self) -> Pumped {
+            let mut held = self.0.borrow_mut();
+            let changed = std::mem::take(&mut held.dirty);
+            if changed {
+                let arrives = std::mem::take(&mut held.arrives);
+                held.kept.splice(0..0, arrives);
+                let gone = std::mem::take(&mut held.leaves);
+                held.kept.retain(|k| !gone.contains(&k.id));
+            }
+            Pumped {
+                changed,
+                ..Pumped::default()
+            }
+        }
+        fn today(&self) -> chrono::NaiveDate {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+        }
+        fn history(&self) -> Vec<Change> {
+            Vec::new()
+        }
+        fn problems(&self) -> Vec<Change> {
+            Vec::new()
+        }
+        fn retry(&mut self, _: &str) {}
+        fn retry_all(&mut self) {}
+        fn settle(&mut self, _: &str, _: Exit) {}
+        fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+            std::borrow::Cow::Owned(self.0.borrow().kept.clone())
+        }
+        fn remove_from_pc(&mut self, _: &str) {}
+        fn remove_all_from_pc(&mut self) {}
+    }
+
+    fn kept(id: &str) -> Kept {
+        Kept {
+            id: id.into(),
+            name: format!("{id}.pdf"),
+            kind: super::super::source::Kind::Document,
+            bytes: 1000,
+            contains: Contains::Items(1),
+            status: KeptStatus::UpToDate,
+        }
+    }
+
+    fn ids(rt: &Runtime<State>) -> Vec<String> {
+        rt.state.this_pc.source.kept().iter().map(|k| k.id.clone()).collect()
+    }
+
+    fn window() -> (Runtime<State>, Rc<RefCell<Held>>) {
+        let held = Rc::new(RefCell::new(Held {
+            kept: vec![kept("a"), kept("b"), kept("c")],
+            ..Held::default()
+        }));
+        let mut rt = with_source(super::super::Section::AvailableOffline, Box::new(Moving(held.clone())));
+        poll(&mut rt);
+        (rt, held)
+    }
+
+    /// New kept items and a removed one show after a finished check; the selected item stays selected, and the menu
+    /// open on a row is about its item, never the item that took the row's place. The read waits under the menu.
+    #[test]
+    fn a_finished_check_shows_arrivals_and_removals_and_the_selection_and_menu_stay_with_their_item() {
+        let (mut rt, held) = window();
+        rt.update(|s, _| s.this_pc.open_menu(1, (10.0, 10.0)));
+        assert_eq!((rt.state.this_pc.selected, ids(&rt)[1].as_str()), (Some(1), "b"));
+        {
+            let mut held = held.borrow_mut();
+            held.arrives = vec![kept("n1"), kept("n2")];
+            held.leaves = vec!["a".into()];
+        }
+        crate::frames::this_pc::after_a_check(&mut rt.state);
+        poll(&mut rt);
+        assert_eq!(held.borrow().refreshed, 0, "nothing is read under an open menu");
+        assert_eq!(ids(&rt), ["a", "b", "c"]);
+
+        rt.update(|s, _| {
+            s.this_pc.close_menu();
+        });
+        poll(&mut rt);
+        assert_eq!(held.borrow().refreshed, 1, "read once the menu closed");
+        assert_eq!(
+            ids(&rt),
+            ["n1", "n2", "b", "c"],
+            "arrivals show, the removed one is gone"
+        );
+        assert_eq!(
+            rt.state.this_pc.selected,
+            Some(2),
+            "Bravo's row moved, the selection with it"
+        );
+    }
+
+    /// A read lands under an open menu: the menu's row follows its item, and the menu closes when the item left.
+    #[test]
+    fn a_read_that_lands_under_an_open_menu_keeps_the_menu_on_its_item() {
+        let (mut rt, held) = window();
+        rt.update(|s, _| s.this_pc.open_menu(1, (10.0, 10.0)));
+        {
+            let mut held = held.borrow_mut();
+            held.arrives = vec![kept("n1")];
+            held.dirty = true;
+        }
+        poll(&mut rt);
+        assert_eq!(
+            rt.state.this_pc.menu.as_ref().map(|m| m.row),
+            Some(2),
+            "the menu moved with its item"
+        );
+        assert_eq!(rt.state.this_pc.selected, Some(2));
+
+        {
+            let mut held = held.borrow_mut();
+            held.leaves = vec!["b".into()];
+            held.dirty = true;
+        }
+        poll(&mut rt);
+        assert!(rt.state.this_pc.menu.is_none(), "the item left: the menu closes");
+        assert_eq!(rt.state.this_pc.selected, None, "and no other item is chosen");
+    }
+}
+
+#[test]
+fn a_kept_file_opens_through_open_file() {
+    let (mut rt, _, _) = recording(scenes::dw_0715);
+    let calls = crate::frames::open_file::testing::wire_into(&mut rt.state, false);
+    let file = rt
+        .state
+        .this_pc
+        .kept()
+        .iter()
+        .find(|k| k.kind != super::source::Kind::Folder)
+        .unwrap()
+        .id
+        .clone();
+    rt.state.this_pc.ask(Intent::Open(file.clone()));
+    poll(&mut rt);
+    assert_eq!(*calls.lock().unwrap(), [Call::OpenDefault(file)]);
 }

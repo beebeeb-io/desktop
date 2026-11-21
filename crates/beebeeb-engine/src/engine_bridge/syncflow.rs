@@ -414,25 +414,65 @@ pub async fn sync_tick_outcome(
         });
     }
 
-    // Apply the delta ops in order, advancing the cursor to the max seq_id.
+    // Apply the delta ops in order, advancing the cursor to the last op that
+    // landed. Task 2272: an op that fails to apply holds the cursor just before
+    // it (the ops after it wait too, so order is kept) and is tried again after a
+    // back-off; one that keeps failing is parked with words and a re-snapshot
+    // brings its item level. It is never stepped over silently.
     let mut max_seq = cursor;
     for original in &ops.ops {
+        if let Some(retry_at) = op_retry_pending(sync_root, original.seq_id, now_secs) {
+            tracing::info!(
+                seq_id = original.seq_id,
+                retry_in_secs = retry_at - now_secs,
+                "sync_tick: an op that failed to apply is waiting for its retry; the cursor stays before it"
+            );
+            break;
+        }
         let prepared = prepare_owned_sync_op(bridge, original).await?;
         bridge.owner_key_scope().check()?;
-        max_seq = max_seq.max(original.seq_id);
         let Some(op) = prepared else {
+            max_seq = max_seq.max(original.seq_id);
             continue;
         };
-        match apply_sync_op(bridge, sync_root, &op, now_secs, &mut conflicts) {
-            Ok(applied) => applied_item_ids.extend(applied),
-            Err(e) => {
-                // A failed op applied nothing: it contributes no ids.
-                tracing::warn!(error = %e, op_type = %op.op_type, seq_id = op.seq_id, "sync_tick: op apply error; skipping op");
+        match apply_sync_op_once(bridge, sync_root, &op, now_secs, &mut conflicts) {
+            Ok(applied) => {
+                // A failed op applied nothing, so only a landed one contributes ids.
+                applied_item_ids.extend(applied);
+                max_seq = max_seq.max(original.seq_id);
             }
+            Err(e) => match note_op_apply_failure(sync_root, &op, &e, now_secs) {
+                OpFailure::Retry { attempts, retry_at } => {
+                    tracing::warn!(
+                        error = %e,
+                        op_type = %op.op_type,
+                        seq_id = op.seq_id,
+                        attempts,
+                        retry_in_secs = retry_at - now_secs,
+                        "sync_tick: op apply error; the cursor stays before it and it is tried again"
+                    );
+                    break;
+                }
+                OpFailure::Parked(parked) => {
+                    tracing::error!(
+                        op_type = %parked.op_type,
+                        seq_id = parked.seq_id,
+                        item_id = %parked.item_id,
+                        attempts = parked.attempts,
+                        "sync_tick: {}",
+                        parked.words
+                    );
+                    // The snapshot is authoritative: it carries the item's state, so the
+                    // change the op described still reaches this PC.
+                    bridge.db().request_resnapshot()?;
+                    max_seq = max_seq.max(original.seq_id);
+                }
+            },
         }
     }
     if max_seq > cursor {
         bridge.db().set_sync_cursor(max_seq)?;
+        forget_op_failures_through(sync_root, max_seq);
     }
     Ok(SyncTickOutcome {
         conflicts,
@@ -440,6 +480,168 @@ pub async fn sync_tick_outcome(
         reached_server: true,
         pull_failure: None,
     })
+}
+
+// ── Task 2272: an op that fails to apply ─────────────────────────────────────
+
+/// How many times one op may fail to apply before it is parked.
+pub const SYNC_OP_MAX_ATTEMPTS: u32 = 5;
+
+/// The wait after the `attempts`-th failure: 30 s, doubling, at most 10 minutes.
+pub(super) fn sync_op_backoff_secs(attempts: u32) -> i64 {
+    (30i64 << attempts.saturating_sub(1).min(5)).min(600)
+}
+
+/// An op this PC could not apply after [`SYNC_OP_MAX_ATTEMPTS`] tries, for the review list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedSyncOp {
+    pub seq_id: i64,
+    pub op_type: String,
+    pub item_id: String,
+    pub attempts: u32,
+    /// The last apply error.
+    pub error: String,
+    /// What the person reads.
+    pub words: String,
+    pub parked_at: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FailingOp {
+    attempts: u32,
+    retry_at: i64,
+}
+
+#[derive(Debug, Default)]
+struct OpRetryState {
+    failing: HashMap<i64, FailingOp>,
+    parked: Vec<ParkedSyncOp>,
+}
+
+/// The parked list keeps the newest this many.
+const PARKED_SYNC_OPS_KEPT: usize = 100;
+
+/// Per sync root (one per account), the ops that failed to apply. Held in memory: after a restart
+/// the cursor still stands before a failing op, so it is simply tried again from its first attempt.
+static OP_RETRY: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, OpRetryState>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn op_retry<R>(f: impl FnOnce(&mut HashMap<PathBuf, OpRetryState>) -> R) -> R {
+    let mut guard = OP_RETRY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+pub(super) enum OpFailure {
+    Retry { attempts: u32, retry_at: i64 },
+    Parked(ParkedSyncOp),
+}
+
+/// `Some(retry_at)` while the op at `seq_id` failed before and its back-off has not passed.
+pub(super) fn op_retry_pending(sync_root: &Path, seq_id: i64, now: i64) -> Option<i64> {
+    op_retry(|all| {
+        all.get(sync_root)
+            .and_then(|state| state.failing.get(&seq_id))
+            .map(|f| f.retry_at)
+            .filter(|at| *at > now)
+    })
+}
+
+/// Count one more failure of `op`; at [`SYNC_OP_MAX_ATTEMPTS`] it is parked.
+pub(super) fn note_op_apply_failure(
+    sync_root: &Path,
+    op: &crate::api_client::SyncOp,
+    error: &EngineError,
+    now: i64,
+) -> OpFailure {
+    op_retry(|all| {
+        let state = all.entry(sync_root.to_path_buf()).or_default();
+        let attempts = state.failing.get(&op.seq_id).map_or(0, |f| f.attempts) + 1;
+        if attempts < SYNC_OP_MAX_ATTEMPTS {
+            let retry_at = now + sync_op_backoff_secs(attempts);
+            state.failing.insert(op.seq_id, FailingOp { attempts, retry_at });
+            return OpFailure::Retry { attempts, retry_at };
+        }
+        state.failing.remove(&op.seq_id);
+        let item_id = op.payload["id"].as_str().unwrap_or_default().to_string();
+        let parked = ParkedSyncOp {
+            seq_id: op.seq_id,
+            op_type: op.op_type.clone(),
+            item_id: item_id.clone(),
+            attempts,
+            error: error.to_string(),
+            words: format!(
+                "A change from your vault (a {} of item {item_id}) could not be applied on this PC after {attempts} tries. \
+                 It is set aside for review, and this PC reads the full vault list again so the item still ends up right.",
+                op.op_type.replace('_', " ")
+            ),
+            parked_at: now,
+        };
+        state.parked.push(parked.clone());
+        let excess = state.parked.len().saturating_sub(PARKED_SYNC_OPS_KEPT);
+        state.parked.drain(..excess);
+        OpFailure::Parked(parked)
+    })
+}
+
+/// The cursor moved to `seq_id`: no op at or before it is waiting for a retry any more.
+pub(super) fn forget_op_failures_through(sync_root: &Path, seq_id: i64) {
+    op_retry(|all| {
+        if let Some(state) = all.get_mut(sync_root) {
+            state.failing.retain(|seq, _| *seq > seq_id);
+        }
+    });
+}
+
+/// The ops parked on this sync root, oldest first: the review list's entries for sync.
+pub fn parked_sync_ops(sync_root: &Path) -> Vec<ParkedSyncOp> {
+    op_retry(|all| all.get(sync_root).map(|state| state.parked.clone()).unwrap_or_default())
+}
+
+/// How many times the op at `seq_id` has failed so far (0: not failing).
+pub fn sync_op_failed_attempts(sync_root: &Path, seq_id: i64) -> u32 {
+    op_retry(|all| {
+        all.get(sync_root)
+            .and_then(|state| state.failing.get(&seq_id))
+            .map_or(0, |f| f.attempts)
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Task 2272: the seq ids whose apply fails, for the cursor tests.
+    static FAIL_APPLY_SEQS: std::cell::RefCell<HashSet<i64>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// Task 2272 tests: make the apply of these seq ids fail (empty: none fails).
+#[cfg(test)]
+pub(super) fn fail_sync_op_apply_for_test(seqs: &[i64]) {
+    FAIL_APPLY_SEQS.with(|s| *s.borrow_mut() = seqs.iter().copied().collect());
+}
+
+/// Task 2272 tests: let every waiting op on this root be retried now.
+#[cfg(test)]
+pub(super) fn expire_sync_op_backoff_for_test(sync_root: &Path) {
+    op_retry(|all| {
+        if let Some(state) = all.get_mut(sync_root) {
+            for f in state.failing.values_mut() {
+                f.retry_at = 0;
+            }
+        }
+    });
+}
+
+fn apply_sync_op_once(
+    bridge: &EngineBridge,
+    sync_root: &Path,
+    op: &crate::api_client::SyncOp,
+    now_secs: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> Result<Vec<String>, EngineError> {
+    #[cfg(test)]
+    if FAIL_APPLY_SEQS.with(|s| s.borrow().contains(&op.seq_id)) {
+        return Err(anyhow::anyhow!("test: the apply of op {} fails", op.seq_id).into());
+    }
+    apply_sync_op(bridge, sync_root, op, now_secs, conflicts)
 }
 
 /// Enrich actual sparse events before entering the synchronous reconciler.
@@ -559,7 +761,14 @@ pub fn apply_snapshot(
     // Their children are skipped instead of being placed at the root.
     let mut unplaced: HashSet<String> = HashSet::new();
 
-    for f in order {
+    // DW-0802b: Search says how far the first listing is while this runs.
+    let total = order.len() as u64;
+    let board = bridge.transfers().clone();
+    board.set_first_listing(0, total);
+    let ended = ListingEnd(board.clone());
+
+    for (listed, f) in order.into_iter().enumerate() {
+        board.set_first_listing(listed as u64, total);
         let file_id = f["id"].as_str().unwrap_or_default();
         if file_id.is_empty() {
             continue;
@@ -635,13 +844,42 @@ pub fn apply_snapshot(
         // placeholder. `prune_absent` returns rows CHILDREN-BEFORE-PARENTS (orphan
         // descendants of a pruned folder precede the folder), which is exactly the
         // order placeholder removal needs (leaf files before their directory).
-        remove_pruned_placeholders(bridge.db(), sync_root, &pruned);
+        // Never the entry of a row still here whose name differs only by case: on
+        // Windows that entry is reached by the pruned row's path too (`case_place`).
+        // Nor, for two server items with one name, an entry whose placeholder names
+        // the other row (or nothing). Only Windows removes entries here; elsewhere
+        // nothing is read for it.
+        #[cfg(target_os = "windows")]
+        let removable = crate::drive_v2::case_place::removable_by_identity(
+            bridge.db(),
+            sync_root,
+            crate::drive_v2::case_place::removable_places(
+                bridge.db(),
+                sync_root,
+                &pruned,
+                crate::drive_v2::case_place::CaseRule::host(),
+            ),
+            &crate::windows_cf::identity_at::identity_at,
+        );
+        #[cfg(not(target_os = "windows"))]
+        let removable = pruned.clone();
+        remove_pruned_placeholders(bridge.db(), sync_root, &removable);
         // A pruned row is a REMOTE deletion Finder must see (T3).
         applied.extend(pruned.iter().map(|row| row.file_id.clone()));
     }
 
     bridge.db().set_sync_cursor(snapshot.seq_id)?;
+    drop(ended);
     Ok(applied)
+}
+
+/// Ends the board's first-listing report when the ingest ends, by return or by an error.
+struct ListingEnd(Arc<crate::transfer_progress::TransferBoard>);
+
+impl Drop for ListingEnd {
+    fn drop(&mut self) {
+        self.0.end_first_listing();
+    }
 }
 
 /// Order snapshot nodes so every node appears AFTER its parent (parents-first),
@@ -725,6 +963,19 @@ pub(super) fn apply_sync_op(
     let id = payload["id"].as_str().unwrap_or_default();
     if id.is_empty() {
         return Ok(applied);
+    }
+
+    // Trash, delete and a move change what the shared-folder index of the roots involved must list: collect
+    // the roots before the op rewrites the rows, mark them dirty after it applied.
+    let mut dirty_roots: Vec<String> = Vec::new();
+    if matches!(
+        op.op_type.as_str(),
+        "file_trash" | "file_delete" | "file_move" | "folder_move"
+    ) {
+        dirty_roots = bridge.db().shared_roots_in_subtree(id)?;
+        if let Some(new_parent) = payload["new_parent_id"].as_str() {
+            dirty_roots.extend(bridge.db().shared_roots_in_subtree_root_only(new_parent)?);
+        }
     }
 
     match op.op_type.as_str() {
@@ -932,6 +1183,12 @@ pub(super) fn apply_sync_op(
             tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
         }
     }
+    if matches!(op.op_type.as_str(), "file_move" | "folder_move") {
+        dirty_roots.extend(bridge.db().shared_roots_in_subtree(id)?);
+    }
+    for root in dirty_roots {
+        bridge.db().mark_shared_index_dirty(&root)?;
+    }
     // A sparse folder rename/move has no descendant events. Reuse the same
     // metadata write for their new parent paths, then signal those identities
     // with the folder. This preserves content baselines and queued rename holds.
@@ -1099,4 +1356,89 @@ pub(super) fn synthesize_op_row(
     };
     row["updated_at"] = serde_json::json!(kept_server_time.unwrap_or_else(now_secs));
     row
+}
+
+/// Trash, delete and a move between shared roots mark the shared-folder index of each root involved dirty.
+#[cfg(test)]
+mod shared_folder_index_dirty_tests {
+    use super::*;
+
+    const KEY: [u8; 32] = [39u8; 32];
+    const ROOT_A: &str = "06600000-0000-4000-8000-0000000000a0";
+    const ROOT_B: &str = "06600000-0000-4000-8000-0000000000b0";
+    const FILE: &str = "06600000-0000-4000-8000-0000000000f1";
+
+    fn bridge_in(dir: &Path) -> EngineBridge {
+        let db = Arc::new(StateDb::open(dir.join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "token".into(), KEY));
+        EngineBridge::new(&crate::identity::TEST, db, api)
+    }
+
+    fn seed(bridge: &EngineBridge, id: &str, parent: Option<&str>, folder: bool, root: &str) {
+        #[allow(deprecated)]
+        let name = {
+            let master = beebeeb_core::kdf::MasterKey::from_bytes(KEY);
+            beebeeb_core::encrypt::encrypt_name(&master, id, "n", None).unwrap()
+        };
+        let row = serde_json::json!({
+            "id": id, "parent_id": parent, "name_encrypted": name, "size_bytes": 1,
+            "is_folder": folder, "content_hash": null, "version_number": 1,
+            "is_trashed": false, "is_starred": false, "updated_at": 1_000,
+        });
+        apply_metadata_file_row(
+            bridge.db(),
+            &row,
+            Namespace::SharedWithMe,
+            Some(root.into()),
+            None,
+            PERMISSION_READ | PERMISSION_WRITE,
+            1_000,
+            &KEY,
+            "",
+        )
+        .unwrap()
+        .expect("row written");
+    }
+
+    fn setup() -> (tempfile::TempDir, std::path::PathBuf, EngineBridge) {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let bridge = bridge_in(dir.path());
+        seed(&bridge, ROOT_A, None, true, ROOT_A);
+        seed(&bridge, ROOT_B, None, true, ROOT_B);
+        seed(&bridge, FILE, Some(ROOT_A), false, ROOT_A);
+        for root in [ROOT_A, ROOT_B] {
+            bridge.db().clear_shared_index_dirty(root).unwrap();
+        }
+        (dir, sync_root, bridge)
+    }
+
+    fn run(bridge: &EngineBridge, sync_root: &Path, op_type: &str, payload: serde_json::Value) {
+        let op = crate::api_client::SyncOp { seq_id: 1, op_type: op_type.into(), payload };
+        apply_sync_op(bridge, sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
+    }
+
+    #[test]
+    fn shared_folder_index_is_dirty_after_a_trash() {
+        let (_d, root, bridge) = setup();
+        run(&bridge, &root, "file_trash", serde_json::json!({ "id": FILE }));
+        assert_eq!(bridge.db().dirty_shared_index_roots().unwrap(), vec![ROOT_A.to_string()]);
+    }
+
+    #[test]
+    fn shared_folder_index_is_dirty_after_a_delete() {
+        let (_d, root, bridge) = setup();
+        run(&bridge, &root, "file_delete", serde_json::json!({ "id": FILE }));
+        assert_eq!(bridge.db().dirty_shared_index_roots().unwrap(), vec![ROOT_A.to_string()]);
+    }
+
+    #[test]
+    fn shared_folder_index_is_dirty_for_both_roots_after_a_move() {
+        let (_d, root, bridge) = setup();
+        run(&bridge, &root, "file_move", serde_json::json!({ "id": FILE, "new_parent_id": ROOT_B }));
+        let mut dirty = bridge.db().dirty_shared_index_roots().unwrap();
+        dirty.sort();
+        assert_eq!(dirty, vec![ROOT_A.to_string(), ROOT_B.to_string()]);
+    }
 }

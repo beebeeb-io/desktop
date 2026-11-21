@@ -12,7 +12,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::{AuthSecretStore, SessionToken};
 use crate::session::Session;
 use crate::signin::gate::GateState;
@@ -32,7 +32,7 @@ fn engine() -> Arc<TestEngine> {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 /// A session in memory, as a sign-in and an unlock leave it (as `owned_state_tests::signed_in`). Answers its turn.
@@ -337,8 +337,8 @@ fn a_session_the_server_ended_leaves_no_recent_searches() {
     );
 }
 
-/// Batch 3 row S7 (mutant S7-M2: no delete in `sign_out_keeping_local_data_step`): the sign-out that keeps the local
-/// files and the local state deletes the account's recent searches all the same.
+/// Batch 3 row S7 (mutant S7-M2: no delete in `sign_out_holding_step`, where it is made past the stop gate): the
+/// sign-out that keeps the local files and the local state deletes the account's recent searches all the same.
 #[test]
 fn the_sign_out_that_keeps_local_data_deletes_the_recent_searches() {
     let engine = engine();
@@ -358,6 +358,51 @@ fn the_sign_out_that_keeps_local_data_deletes_the_recent_searches() {
 
     assert_eq!(on_disk(&path, A.0), (false, Vec::new()), "the sign-out deleted the row");
     assert!(path.exists(), "the local state itself stays");
+}
+
+/// A sign-out refused because an engine task may still run (its stop was never confirmed: the account's record)
+/// deletes nothing: the recent searches stay. The delete is made past the stop gate (`sign_out_holding_step`).
+/// Mutant U-S1: the delete made before the gate again, in `sign_out_keeping_local_data_step`: the row is gone: red.
+#[test]
+fn a_refused_sign_out_keeps_the_recent_searches() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    engine.use_local_state_for_test(path.clone());
+    let a = signed_in(&engine, A);
+    engine.remember_search_for(a, "contract").unwrap();
+    engine
+        .acct
+        .engine_stop_unconfirmed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(
+        engine.sign_out_keeping_local_data(),
+        Err(crate::account_binding::ENGINE_STOP_UNCONFIRMED.to_string())
+    );
+    assert_eq!(on_disk(&path, A.0), (true, words(&["contract"])), "nothing was deleted");
+}
+
+/// The same through the account page's sign-out (`sign_out_for`). Mutant U-S2: the delete made before the gate again,
+/// in `account_actions_api::sign_out_for`: the row is gone: red.
+#[test]
+fn a_refused_sign_out_from_the_account_page_keeps_the_recent_searches() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    engine.use_local_state_for_test(path.clone());
+    let a = signed_in(&engine, A);
+    engine.remember_search_for(a, "contract").unwrap();
+    engine
+        .acct
+        .engine_stop_unconfirmed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(
+        engine.sign_out_for(a),
+        Err(crate::app::account_actions_api::ActionError::Failed)
+    );
+    assert_eq!(on_disk(&path, A.0), (true, words(&["contract"])), "nothing was deleted");
 }
 
 /// The control for S7: a screen lock keeps the recent searches (the same person unlocks), and so does the vault lock.
@@ -589,7 +634,7 @@ fn engine_with(credentials: MemoryCredentials) -> Arc<TestEngine> {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    Arc::new(Engine::open(&REAL, config, host, credentials).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, credentials).expect("the handle opens"))
 }
 
 /// The lead's case: a sign-out's delete fails (the state was held), the delete's due mark lives in memory and goes

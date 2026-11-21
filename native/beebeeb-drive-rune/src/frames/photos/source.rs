@@ -170,6 +170,17 @@ pub enum Answered {
     },
 }
 
+/// What the download of the open photo's original did ([`Pumped::originals`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OriginalAnswer {
+    /// This much of this many bytes has arrived.
+    Progress { id: PhotoId, done: u64, total: u64 },
+    /// The original is here, decoded ([`PhotosSource::original`] has it).
+    Done(PhotoId),
+    /// The original could not be had; the preview stays.
+    Failed(PhotoId),
+}
+
 /// What the window draws in the library's place while there is none.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Loaded {
@@ -195,6 +206,9 @@ pub struct Pumped {
     /// Something is still on its way: look again soon.
     pub busy: bool,
     pub answered: Vec<Answered>,
+    /// What the open photo's original download did since the last pump: it arrives here, with the rest of what
+    /// the pump took in, never around it.
+    pub originals: Vec<OriginalAnswer>,
 }
 
 pub trait PhotosSource {
@@ -243,6 +257,12 @@ pub trait PhotosSource {
     fn file_items(&self, _ids: &[PhotoId]) -> Option<Vec<crate::source::DriveItem>> {
         None
     }
+    /// The photo's own file in the Beebeeb folder on this PC (read on open: a placeholder hydrates then), while sync is
+    /// on and the photo has one. `None`: sync is off, the photo has no file there (a device backup), or nothing is
+    /// connected that could say. Send a copy hands this path to the Share sheet and never writes a temp copy.
+    fn kept_path(&self, _id: PhotoId) -> Option<std::path::PathBuf> {
+        None
+    }
     /// The totals of what shows, or of one device (`devices()` index).
     fn totals(&self, device: Option<usize>) -> Totals;
     fn backup_status(&self) -> Option<BackupStatus>;
@@ -263,6 +283,27 @@ pub trait PhotosSource {
     /// Moves items to Beebeeb's Trash; `restore` brings them back (Undo). `Ok` and `Err` as [`Self::keep_offline`].
     fn trash(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
     fn restore(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
+    /// Starts downloading the original of `id` into memory (one at a time; the earlier one stops). Progress and the
+    /// end arrive through [`Self::pump`]. `false`: nothing is started (a fixture, a video, too large, locked).
+    fn download_original(&mut self, _id: PhotoId) -> bool {
+        false
+    }
+    /// w31: why the original of `id` is not downloaded at all on this PC (a format no decoder here opens, such as
+    /// HEIC or a RAW): the words to say. `None`: it can be asked for. Nothing is downloaded to find out.
+    fn original_refused(&self, _id: PhotoId) -> Option<&'static str> {
+        None
+    }
+    /// w31: whether the photos in view hold a file this PC cannot show at any size (HEIC, RAW): Photos then says so
+    /// at the top. Only the stored thumbnail of such a file shows.
+    fn holds_unshowable(&self) -> bool {
+        false
+    }
+    /// Stops the original's download and wipes what is held of it. The preview is untouched.
+    fn stop_original(&mut self, _id: PhotoId) {}
+    /// The decoded original of `id`, once it is here.
+    fn original(&self, _id: PhotoId) -> Option<Pixels> {
+        None
+    }
     /// Plays the video `id` in the shell's player and hands the player to the stage (DW-0611). `None` (the
     /// default): a photo, no player, or no playback on this PC; the stage keeps its poster and "Open in another
     /// app".

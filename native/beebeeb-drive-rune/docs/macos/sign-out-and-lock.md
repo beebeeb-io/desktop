@@ -1,6 +1,6 @@
 # macOS: sign-out, lock and the engine start (carry note C4)
 
-Decision 2537 (2026-11-15): Tauri leaves every OS, and 0.9.0 ships the Rune macOS app. D-T-5 (a): a macOS rule whose only copy
+Tauri leaves every OS, and 0.9.0 ships the Rune macOS app. A macOS rule whose only copy
 lives in `src-tauri/` is carried as a design note before the delete. This note is the macOS phase's specification and acceptance
 list for the sign-out, the lock and the engine start on a Mac. It states each rule in words, names the source lines, and lists
 every test of the carried files with what it asserts.
@@ -100,7 +100,7 @@ flowchart TD
    alone gives 1882's body byte for byte; neither gives no alert. The result is `Completed` (or `NotSignedIn` when nothing was
    signed in) with the warning, the macOS folder and our folder.
 
-**Open for the macOS phase: D-T-9 (deferred by the lead, 21:58).** Owner ruling Q1 (2026-11-12: a sign-out keeps the local data) is
+**Open for the macOS phase (deferred to it).** The ruling on question Q1 (2026-11-12: a sign-out keeps the local data) is
 written for Windows, and the engine's `sign_out_keeping_local_data` (`crates/beebeeb-engine/src/app.rs:1005`) is what Windows runs.
 Whether the Rune macOS sign-out keeps local data too, or keeps the 0.8.x keep-then-purge above, is decided at the macOS phase.
 This note records the 0.8.x rules either way. Under Q1 on macOS, steps 5 and 6 (and the strings of section 4) fall away; the gate,
@@ -256,7 +256,7 @@ Source: `src-tauri/src/bound_engine.rs`.
    `hold_operations_paused_for_auth_as_key_replaced` (`state_db/ops.rs:223`); its rule off macOS is pinned by
    `crates/beebeeb-engine/src/engine_bridge/tests/review_2190_2.rs:a_name_that_does_not_open_holds_every_auth_op_as_key_replaced`.
 
-## 8. One account at a time on macOS too (F2, lead ruling (a), 2026-11-15 23:00)
+## 8. One account at a time on macOS too (F2, ruling (a), 2026-11-15)
 
 **The rule:** the Rune macOS app follows the engine's one-account model. A sign-in while an account is signed in is refused ("sign
 out first"); the same account signing in again is the strong unlock; another account's stored key is refused by the binding (I10).
@@ -272,7 +272,7 @@ after a purge warning (A0s/A1s/A2s/A4s, section 4). Its decision lives in `crate
 code for a later clean-up (the reauth port's finding F2).
 
 **What the ruling rests on:** a sign-out that keeps local data (Q1), so a switch has nothing to purge or warn about. Q1 on macOS is
-D-T-9, deferred to the macOS phase (section 1). If the macOS phase keeps the 0.8.x keep-then-purge instead, the switch flow of
+Deferred to the macOS phase (section 1). If the macOS phase keeps the 0.8.x keep-then-purge instead, the switch flow of
 sections 4 and 5.5 comes back with it, and R8 needs a ruling again.
 
 ## 9. Acceptance list: every test of the carried files
@@ -489,5 +489,5 @@ The engine's off-macOS twins, which keep running: `crates/beebeeb-engine/src/eng
    `#[cfg(not(target_os = "macos"))]` at `runner.rs:753` (the engine's pass-then-resume, if the File Provider path allows the
    reconcile pass there), or serve the ask in the macOS engine start as 0.8.x did (section 7.3). Acceptance: the five tests of 9.11,
    on a Mac.
-2. **D-T-9:** decide Q1 on macOS before building sections 2, 3 and 4.
+2. **Open question:** decide Q1 on macOS before building sections 2, 3 and 4.
 3. The rest of this note's acceptance list, on a Mac, with the engine's statements named in the header.

@@ -585,30 +585,10 @@ pub fn codes(list: &[&str], t: &Theme) -> El {
 
 /// An empty state (`.kit-empty`): a neutral tile, a title and one paragraph, centred.
 pub fn empty(icon: &'static Icon, title: &str, words: &str, t: &Theme) -> El {
-    col()
-        .key("empty")
-        .w_full()
-        .py(28.0)
-        .px(24.0)
-        .gap(8.0)
-        .items_center()
-        .child(
-            el().key("empty-tile")
-                .a11y_hidden()
-                .size(52.0, 52.0)
-                .radius(15.0)
-                .fill(au::tone(Tone::Neutral, t).2)
-                .center()
-                .child(kit::glyph("empty-icon", icon, 26.0, au::tone(Tone::Neutral, t).0)),
-        )
-        .child(kit::label("empty-title", title, TITLE, t.text).role("heading").level(2))
-        .child(
-            kit::label("empty-sub", words, SUB, t.text_tertiary)
-                .wrap()
-                .align(rune::Align::Center)
-                // `max-width: 30ch`: thirty zeros of its own font wide.
-                .w(30.0 * rune::text::advance("0", SUB)),
-        )
+    super::view_state::view_state(
+        super::view_state::ViewState::Empty { key: "empty", icon, title, body: words, action: None },
+        t,
+    )
 }
 
 /// One row of a words-only pop-up menu; `danger` in red. `pad` is the board's own padding

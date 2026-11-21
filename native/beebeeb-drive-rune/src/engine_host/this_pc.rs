@@ -737,16 +737,29 @@ fn kept(db: &StateDb, backups: &BackupsTree) -> Result<Vec<Kept>, String> {
         .collect();
     let by_id: std::collections::HashMap<&str, &FileEntry> =
         rows.iter().map(|(e, _, _)| (e.file_id.as_str(), e)).collect();
+    // One pass over the rows for every kept folder: a folder's prefix is true while every file under it is local.
+    let mut all_local: std::collections::HashMap<String, bool> = rows
+        .iter()
+        .filter(|(e, _, _)| e.is_dir())
+        .map(|(e, _, _)| (format!("{}/", e.path.trim_matches('/')), true))
+        .collect();
+    for (e, _, _) in rows.iter().filter(|(e, _, _)| !e.is_dir()) {
+        let path = e.path.trim_start_matches('/');
+        for (at, _) in path.match_indices('/') {
+            if let Some(ok) = all_local.get_mut(&path[..=at]) {
+                *ok &= e.status == FileStatus::Local;
+            }
+        }
+    }
     Ok(status::offline_entries(&rows)
         .into_iter()
         .filter_map(|entry| {
             let row = *by_id.get(entry.item.id.as_str())?;
             let here = if row.is_dir() {
-                let prefix = format!("{}/", row.path.trim_matches('/'));
-                rows.iter()
-                    .map(|(e, _, _)| e)
-                    .filter(|e| !e.is_dir() && e.path.trim_start_matches('/').starts_with(&prefix))
-                    .all(|e| e.status == FileStatus::Local)
+                all_local
+                    .get(&format!("{}/", row.path.trim_matches('/')))
+                    .copied()
+                    .unwrap_or(true)
             } else {
                 row.status == FileStatus::Local
             };
@@ -853,9 +866,21 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
         }
         match (&self.held, self.no_read) {
             (Some(_), _) => Standing::Ready,
+            // A retry of a failed read is out: Loading, not the old failure.
+            (None, _) if self.reading => Standing::Reading,
             (None, Some(NoRead::AnotherAccounts)) => Standing::AnotherAccounts,
             (None, Some(NoRead::Unreadable)) => Standing::Unreadable,
             (None, Some(NoRead::NotNow) | None) => Standing::Reading,
+        }
+    }
+
+    /// A finished check: what this PC holds may have changed (the sync history, what is kept). Read again while the
+    /// session is the one held; a read already out is not doubled.
+    fn refresh(&mut self) {
+        if self.current() {
+            self.ask_read();
+        } else {
+            self.read_at = None;
         }
     }
 
@@ -922,8 +947,8 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
         }
     }
 
-    fn kept(&self) -> Vec<Kept> {
-        self.held().map(|s| s.kept.clone()).unwrap_or_default()
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(self.held().map_or(&[][..], |s| &s.kept[..]))
     }
 
     /// The count the sidebar draws, without a copy of the list.

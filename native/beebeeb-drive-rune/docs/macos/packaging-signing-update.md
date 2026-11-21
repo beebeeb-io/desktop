@@ -1,6 +1,6 @@
 # macOS: packaging, signing, notarisation and updates (carry note C6)
 
-Decision 2537 (2026-11-15) and D-T-5 (a): every Tauri build goes, on every OS. What the Rune macOS app needs from the Tauri macOS
+Every Tauri build goes, on every OS. What the Rune macOS app needs from the Tauri macOS
 bundle, its signing and its release scripts is carried here first, so the delete may remove `src-tauri/` and the seven macOS
 scripts and `sign-macos-updater-artifact.yml`. This is the macOS phase's packaging and release specification.
 
@@ -10,7 +10,7 @@ scripts and `sign-macos-updater-artifact.yml`. This is the macOS phase's packagi
   `scripts/build-fileprovider-extension.sh`). At v2-native's `a57b9592` the web view is gone (`build` holds only `frontendDist`);
   the bundle blocks are unchanged.
 - **Line numbers** are at `a57b9592`. After the delete, read them with `git show a57b9592:<path>`.
-- **Kept, not carried:** `scripts/build-fileprovider-extension.sh` stays (D-T-7 (a): re-pointed by t-delete), and so do the File
+- **Kept, not carried:** `scripts/build-fileprovider-extension.sh` stays (re-pointed by the Tauri deletion), and so do the File
   Provider extension sources (`BeebeebFileProvider*/`) and CI's `fileprovider-swift` job. `docs/RELEASING.md` (the hand-run version
   of section 4) is a dated procedure; t-delete classes it.
 - **Specs:** `docs/specs/2026-10-25-macos-sandboxed-updater.md`, `docs/specs/2026-10-24-macos-two-surface-app.md` §0 ruling 5.

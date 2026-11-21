@@ -19,6 +19,10 @@ use crate::State;
 use crate::shell::app::Section;
 use crate::shell::registry::{self, FrameGroup};
 
+#[cfg(test)]
+#[path = "reset_tests.rs"]
+mod tests;
+
 /// Is the Files window what the route shows? (Backups shows its folder in it: `protected.rs`.)
 fn on_files_route(s: &State) -> bool {
     matches!(
@@ -90,6 +94,8 @@ pub fn end_session(s: &mut State, account_left: bool) {
         // Stays: the Office switches only a board scene sets; the submenu's line goes with the menu (closed above).
         open_with: _,
         host: _,
+        // Stays: how far the list is scrolled, in points, which the list says again each time it draws.
+        list_scroll: _,
         forward,
         made,
         conflicts_done,
@@ -104,11 +110,15 @@ pub fn end_session(s: &mut State, account_left: bool) {
         session: _,
         local,
         first_load_strip,
+        reveal,
     } = &mut s.actions;
     // Another session of this window: an answer asked for under the one that ended is dropped.
     *session_no += 1;
+    // What it asked to start (Open, Show in File Explorer) and has not begun goes, on a lock too.
+    source.forget_starts();
     // The folder has not loaded under the next session yet.
     *first_load_strip = false;
+    *reveal = None;
     // The account left (a sign-out, another account): what it was uploading is cancelled and
     // forgotten by the source, so the next account sees no status line, panel or row of it. A
     // LOCK is the same account coming back: its uploads go on (the panel says "Continues in the
@@ -163,12 +173,19 @@ pub fn end_session(s: &mut State, account_left: bool) {
 /// The shell's session gate closed under the window (`shell::session_gate`), in any way: also
 /// the session that ended while the gate stayed Ready, where the rows stay (`session.rs`). What
 /// could still act goes: every dialog through the wiping path, a name being typed in a row, an
-/// open menu, a picker that was asked for, and Search over the window. No source is asked.
+/// open menu, a picker that was asked for, the starts not begun yet, and Search over the window.
+/// Nothing is read from a source.
 pub fn session_closed(s: &mut State) {
     close_dialogs(s);
+    s.actions.source.forget_starts();
     s.actions.picker = None;
     s.actions.drop_hover = None;
     s.actions.upload_menu = None;
+    close_search(s);
+}
+
+/// A section press ends Search over the window.
+pub(crate) fn end_search(s: &mut State) {
     close_search(s);
 }
 

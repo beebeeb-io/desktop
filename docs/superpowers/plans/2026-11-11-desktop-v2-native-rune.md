@@ -5,7 +5,7 @@ Filed: 2026-11-11 by the Rune spike lane (task 2445).
 
 ## Prerequisites
 
-- [ ] Guus approves go-with-conditions verdict
+- [ ] the owner approves go-with-conditions verdict
 - [x] Rust stable (1.98.x) builds the spike (confirmed on Windows + Linux)
 - [x] Disk space is fine (58 GB free after cleanup)
 
@@ -21,7 +21,7 @@ native/beebeeb-drive-rune/scripts/snap.sh DW-0401
 # 5. Write remaining differences to diff.md.
 ```
 
-The script sources `~/code/bb-legion-native/lavapipe/env.sh` and writes PNGs + tree to
+The script sources `~/code/the Windows test machine/lavapipe/env.sh` and writes PNGs + tree to
 `~/code/beebeeb.io/.claude/tasks/verification-evidence/2445/rune/`.
 
 ## Phase 0: Foundation (slices 1-5, sequential then parallel)

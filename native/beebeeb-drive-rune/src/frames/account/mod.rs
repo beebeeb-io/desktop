@@ -302,6 +302,8 @@ pub struct AccountUi {
     told_open: Option<Pane>,
     /// A sign-out asked from the Security page's confirm: waiting for its answer, or refused.
     pub signing_out: security_overview::SigningOut,
+    /// The open document that holds the unsaved changes a sign-out met (for its question).
+    pub unsaved_name: String,
     /// A password change answered while its page was not open, to be said wherever the person is (`late`). Outside
     /// the form: leaving the account's sections keeps it; the end of the session drops it.
     pub late_change: Option<late::Late>,
@@ -317,6 +319,7 @@ impl Default for AccountUi {
             source: source::first(instance::DEV_BUILD),
             told_open: None,
             signing_out: security_overview::SigningOut::default(),
+            unsaved_name: String::new(),
             late_change: None,
         }
     }
@@ -416,6 +419,8 @@ fn showing(s: &State) -> Option<Pane> {
 /// The window's poll for the account sections: tells the source which pane shows when that changed (it reads
 /// then, never from a draw), and takes in what its workers answered. `true`: something a pane draws changed.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    // Save asked by a sign-out's question: wait for the editor, then sign out.
+    let followed = security_overview::follow_save(s, tx);
     let now = showing(s);
     let ui = &mut s.account;
     let Some(source) = ui.source.as_mut() else {
@@ -477,29 +482,41 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if show_late_codes(s) {
         return true;
     }
-    pumped.changed || step_closed
+    pumped.changed || step_closed || followed
 }
 
 /// The toast over a pane. Something that worked is the settings toast, as before. Something that was not done
 /// is the failure toast (`ui::toast`: its own mark, read at once), laid where the settings toast sits, with its
 /// button when it can be tried again.
 fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
+    use crate::ui::toast::{self, Lead};
     let words = source.notice()?;
-    let action = source.notice_action();
-    if !source.notice_failed() && action.is_none() {
-        return Some(crate::ui::settings_notice::toast(0, words, t));
-    }
-    let again = action.map(|action| crate::ui::toast::ToastAction {
-        text: action,
-        name: action,
-        shortcut: None,
-        run: |s: &mut State, _: &mut Tx| {
+    let failed = source.notice_failed();
+    let action = source.notice_action().map(|action| {
+        crate::ui::button::button(
+            crate::ui::button::keys("toast-action"),
+            action,
+            None,
+            crate::ui::button::Variant::Secondary,
+            crate::ui::button::Size::Md,
+            crate::ui::button::ButtonState::Enabled,
+            t,
+        )
+        .on_press(|s: &mut State| {
             if let Some(source) = s.account.source.as_mut() {
                 source.run_notice_action();
             }
-        },
+        })
     });
-    Some(crate::ui::settings_notice::standing("toast", words, again, 0, t))
+    let lead = if failed { Lead::Warn } else { Lead::Check };
+    // Over the pane, 42 pt above its foot, right of the sidebar, so no row moves when it comes or goes.
+    Some(
+        rune::row()
+            .key("toast-line")
+            .pin(Some(crate::ui::settings_shell::SIDEBAR_W), None, Some(0.0), Some(42.0))
+            .justify_center()
+            .child(toast::toast_with("toast", words, lead, action, t)),
+    )
 }
 
 /// How soon the window looks again while an answer is out (the worker also wakes it).
@@ -542,49 +559,50 @@ fn unbuilt_pane(pane: Pane, t: &Theme) -> El {
 /// The pane in a state that is not its content: asked and not answered, nobody signed in, the session ended,
 /// or the read failed. Nothing of an account is in it.
 fn state_pane(pane: Pane, state: source::PaneState, t: &Theme) -> El {
-    use crate::ui::settings_notice as notices;
     let title = title_of(pane);
-    let (head, words, again) = match state {
-        source::PaneState::Loading => ("Loading", "Asking Beebeeb for your account.", false),
+    let (head, words) = match state {
+        source::PaneState::Loading => ("Loading", "Asking Beebeeb for your account."),
         source::PaneState::SignedOut => (
             "Not signed in",
             "Sign in and unlock Beebeeb to see your account.",
-            false,
         ),
         source::PaneState::SessionEnded => (
             "Your session ended",
             "Sign in again to see your account. Nothing was changed.",
-            false,
         ),
         _ => (
             "Couldn't load this",
             // Not "nothing was changed": this state also follows a sign-out Beebeeb took, when the list
             // could not be read after it.
             "Beebeeb didn't answer.",
-            true,
         ),
     };
-    let body = if state == source::PaneState::Loading {
-        el().key("account-loading")
-            .role("status")
-            .label(format!("{head}. {words}"))
-            .child(crate::ui::kit::label(
-                "account-loading-text",
-                words,
-                set::SUB,
-                t.text_tertiary,
-            ))
-    } else {
-        let action = again.then(|| {
-            set::button("btn-0", "Try again", None, set::Look::Plain, set::Size::Small, false, t).on_press(
-                move |s: &mut State| {
+    use crate::ui::view_state::{self as vs, ViewState};
+    let body = match state {
+        source::PaneState::Loading => vs::view_state(ViewState::Loading { words }, t),
+        source::PaneState::SignedOut | source::PaneState::SessionEnded => vs::view_state(
+            ViewState::Empty {
+                key: "account-state",
+                icon: &icons::SHIELD,
+                title: head,
+                body: words,
+                action: None,
+            },
+            t,
+        ),
+        _ => vs::view_state(
+            ViewState::Failed {
+                key: "account-state",
+                title: head,
+                why: words,
+                retry: Some(vs::try_again("account-state", t).on_press(move |s: &mut State| {
                     if let Some(source) = s.account.source.as_mut() {
                         source.reload(pane);
                     }
-                },
-            )
-        });
-        notices::problem(0, 0, head, words, action, t)
+                })),
+            },
+            t,
+        ),
     };
     set::pane(vec![set::heading(title, None, None, t), body], t)
 }
@@ -864,71 +882,20 @@ pub fn scene(id: &str, s: &mut State) -> bool {
     }
 }
 
-/// One entry of the settings sidebar: its label, its icon, the frame it shows, and the
-/// section it is (for the selection), when it is one of this lane's.
-struct Section {
-    label: &'static str,
-    icon: &'static Icon,
-    frame: &'static str,
-    section: Option<SettingsPane>,
-}
-
-const fn entry(
-    label: &'static str,
-    icon: &'static Icon,
-    frame: &'static str,
-    section: Option<SettingsPane>,
-) -> Section {
-    Section {
-        label,
-        icon,
-        frame,
-        section,
+/// The sidebar label of the account section that is open.
+fn section_label(section: SettingsPane) -> Option<&'static str> {
+    match section {
+        SettingsPane::Account => Some("Account"),
+        SettingsPane::Security => Some("Security"),
+        SettingsPane::DevicesAndSessions => Some("Devices and sessions"),
+        _ => None,
     }
 }
 
-const SETTINGS_SECTIONS: &[Section] = &[
-    entry("General", &icons::GEAR, "DW-0701", None),
-    entry("Account", &icons::PEOPLE, "DW-A51", Some(SettingsPane::Account)),
-    entry("Security", &icons::SHIELD, "DW-A52", Some(SettingsPane::Security)),
-    entry(
-        "Devices and sessions",
-        &icons::DEVICE_PHONE,
-        "DW-A55",
-        Some(SettingsPane::DevicesAndSessions),
-    ),
-    entry("Notifications", &icons::BELL, "DW-0750", None),
-];
-
-// The board draws the Drive group's items with a chevron where the other group has a glyph.
-const DRIVE_SECTIONS: &[Section] = &[
-    entry("Storage", &icons::CHEV_RIGHT, "DW-0712", None),
-    entry("Backups", &icons::CHEV_RIGHT, "DW-0737", None),
-    entry("Sync and File Explorer", &icons::CHEV_RIGHT, "DW-0746", None),
-    entry("Thumbnails and previews", &icons::CHEV_RIGHT, "DW-0744", None),
-    entry("Bandwidth", &icons::CHEV_RIGHT, "DW-0785", None),
-];
-
-fn sidebar(section: SettingsPane, t: &Theme) -> El {
-    let items = |sections: &'static [Section]| -> Vec<El> {
-        sections
-            .iter()
-            .map(|sec| {
-                let frame = sec.frame;
-                set::nav_item(sec.label, sec.icon, sec.section == Some(section), t)
-                    .on_press(move |s: &mut State| go(s, frame))
-            })
-            .collect()
-    };
-    let back = set::nav_back("Back to Drive", &icons::BACK, t)
-        .shortcut_hint("Esc")
-        .on_press(|s: &mut State| go(s, "DW-0401"));
-    set::sidebar(
-        back,
-        vec![("Settings", items(SETTINGS_SECTIONS)), ("Drive", items(DRIVE_SECTIONS))],
-        "Settings open inside the app. Esc goes back.",
-        t,
-    )
+/// The one settings sidebar (`settings_shell::app_sidebar`), never a copy of it.
+fn sidebar(s: &State, section: SettingsPane, t: &Theme) -> El {
+    let previews = s.settings.drive.photo_previews() != settings::previews::PhotoPreviews::Unavailable;
+    crate::ui::settings_shell::app_sidebar(section_label(section), previews, go, t)
 }
 
 /// The window while one of the account sections is open.
@@ -970,7 +937,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
         Pane::Security => {
-            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, &t);
+            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, &ui.unsaved_name, s.shell.hide_from_capture(), &t);
             (page, over.or_else(|| app_lock_password::over(source, form, dialog, &t)))
         }
         Pane::Sessions => sessions::pane(source, dialog, &t),
@@ -992,7 +959,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(section, &t))
+        .child(sidebar(s, section, &t))
         // One scroller per pane (Rune keeps a scroller's offset by its path): a page opened from a page that
         // was scrolled down starts at its own top, never at the other's offset.
         .child(

@@ -26,7 +26,8 @@ pub struct DriveItem {
     pub shared_type: Option<String>,
     /// Letter-circle badges in the Shared column.
     pub shared_badges: Vec<SharedBadge>,
-    /// "on_this_pc", "online_only", "available_offline".
+    /// "on_this_pc", "online_only", "available_offline"; "name_shared" and "name_shared_but_case" when its place on
+    /// this PC is another item's (`source_engine::NAME_SHARED*`).
     pub pc_status: Option<String>,
     /// Protected folder (e.g. Backups): shows lock icon, can't be trashed.
     pub is_protected: bool,
@@ -141,7 +142,7 @@ impl DriveSource for BoardFixtureSource {
             is_folder: true,
             size: None,
             child_count: Some(count),
-            modified_at: modified.into(),
+            modified_at: crate::ui::file_list::board_stamp(modified),
             mime: None,
             has_thumbnail: false,
             shared_type: None,
@@ -164,7 +165,7 @@ impl DriveSource for BoardFixtureSource {
             is_folder: false,
             size: Some(size),
             child_count: None,
-            modified_at: modified.into(),
+            modified_at: crate::ui::file_list::board_stamp(modified),
             mime: Some(mime.into()),
             has_thumbnail: mime.starts_with("image/"),
             shared_type: link.then(|| "Link".to_string()),

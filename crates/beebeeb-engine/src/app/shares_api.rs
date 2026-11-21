@@ -37,6 +37,10 @@ const MINE: &str = "/api/v1/shares/mine";
 
 /// The name of an incoming item whose name cannot be opened (not sealed for this account yet, or a folder's).
 pub const ENCRYPTED_ITEM: &str = "Encrypted item";
+/// The name of an incoming folder whose key is not sealed for this account yet: neutral, never a misleading label.
+pub const OPENING_SHARED_FOLDER: &str = "Opening shared folder\u{2026}";
+/// The same for an incoming file.
+pub const OPENING_SHARED_ITEM: &str = "Opening shared item\u{2026}";
 /// The name of one of the account's own shared items whose name cannot be opened.
 pub const SHARED_ITEM: &str = "Shared item";
 
@@ -108,6 +112,8 @@ pub struct FileRequestRow {
     pub max_files: Option<u64>,
     pub expires_at: Option<String>,
     pub closed: bool,
+    /// The folder the request's uploads land in, when it has one.
+    pub target_folder_id: Option<String>,
 }
 
 /// A change to a share, on the server, for the session's account.
@@ -130,6 +136,11 @@ pub enum ShareChange {
     /// Take a CLOSED file request off the account's list (`POST /file-requests/{id}/hide`): the row stays on the
     /// server with its key, so what arrived can still be opened. Never the DELETE route, which destroys the key.
     HideRequest { request_id: String },
+    /// Change when an OPEN file request of the account's stops taking uploads (`PATCH /file-requests/{id}`);
+    /// `None` is never. A closed request is `Refused` (409).
+    RequestExpiry { request_id: String, expires_in_secs: Option<u64> },
+    /// Leave a share that was approved for the account (`POST /shares/invites/{id}/leave`); already left is done.
+    Leave { invite_id: String },
 }
 
 /// Why a change was not made. Fixed words only.
@@ -217,7 +228,7 @@ impl<C: CredentialStores> Engine<C> {
             incoming: list(&bodies[0], "invites")
                 .filter_map(|i| incoming_share(i, &master))
                 .collect(),
-            links: owned_links(&bodies[2], &by_me),
+            links: owned_links(&bodies[2], &by_me, &key),
             by_me,
             requests: list(&bodies[3], "file_requests").filter_map(request_row).collect(),
         };
@@ -259,9 +270,8 @@ impl<C: CredentialStores> Engine<C> {
                     });
                 }
                 401 => return Err(ShareChangeError::SessionEnded),
-                // Beebeeb refusing this account the change (a frozen account, sharing paused): never a session that
-                // ended, which only a 401 is.
-                403 => return Err(ShareChangeError::Refused),
+                // A 403 (Beebeeb refusing this account the change: a frozen account, sharing paused) is `Refused`
+                // below, never a session that ended, which only a 401 is.
                 _ => return Err(ShareChangeError::Refused),
             }
         }
@@ -281,6 +291,19 @@ fn change_requests(change: &ShareChange) -> Result<(Vec<HttpRequest>, bool), Sha
         ShareChange::HideRequest { request_id } => {
             let path = format!("/api/v1/file-requests/{}/hide", canonical(request_id)?);
             Ok((vec![request(Method::Post, path)], false))
+        }
+        ShareChange::RequestExpiry {
+            request_id,
+            expires_in_secs,
+        } => {
+            let path = format!("/api/v1/file-requests/{}", canonical(request_id)?);
+            let mut req = HttpRequest::session_post(path, json!({ "expires_in_secs": expires_in_secs }));
+            req.method = Method::Patch;
+            Ok((vec![req], false))
+        }
+        ShareChange::Leave { invite_id } => {
+            let path = format!("/api/v1/shares/invites/{}/leave", canonical(invite_id)?);
+            Ok((vec![request(Method::Post, path)], true))
         }
         ShareChange::CancelInvites { invite_ids } => {
             let reqs = invite_ids
@@ -370,18 +393,20 @@ fn list<'a>(body: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> {
 }
 
 /// An incoming invite as a row: `invited` waits for an answer, `approved` is shared with the account. A `claimed`
-/// one (accepted, the owner has not approved yet) is neither: there is nothing to answer and nothing to open.
+/// one (accepted, the owner has not approved yet) is listed too, named by its placeholder until the sealed key arrives.
 fn incoming_share(invite: &Value, master: &MasterKey) -> Option<IncomingShare> {
     let waiting = match text(invite, "status")? {
         "invited" => true,
-        "approved" => false,
+        // Accepted, not approved yet: no key is sealed for this account, so it reads as still opening.
+        "approved" | "claimed" => false,
         _ => return None,
     };
+    let is_folder = flag(invite, "is_folder") || flag(invite, "is_folder_share");
     Some(IncomingShare {
         invite_id: text(invite, "id")?.to_string(),
         item_id: text(invite, "file_id")?.to_string(),
-        name: incoming_name(invite, master).unwrap_or_else(|| ENCRYPTED_ITEM.to_string()),
-        is_folder: flag(invite, "is_folder") || flag(invite, "is_folder_share"),
+        name: incoming_name(invite, master).unwrap_or_else(|| unopened_name(invite, is_folder).to_string()),
+        is_folder,
         from_email: text(invite, "sender_email").unwrap_or_default().to_string(),
         size_bytes: invite.get("size_bytes").and_then(Value::as_i64).unwrap_or(0),
         waiting,
@@ -390,6 +415,17 @@ fn incoming_share(invite: &Value, master: &MasterKey) -> Option<IncomingShare> {
             .unwrap_or_default()
             .to_string(),
     })
+}
+
+/// The words for an incoming name that did not open: while no key is sealed for this account yet it is still being
+/// opened (a placeholder); a sealed key that does not open is [`ENCRYPTED_ITEM`].
+fn unopened_name(invite: &Value, is_folder: bool) -> &'static str {
+    let sealed = text(invite, "encrypted_file_key").is_some_and(|k| !k.is_empty());
+    match (sealed, is_folder) {
+        (true, _) => ENCRYPTED_ITEM,
+        (false, true) => OPENING_SHARED_FOLDER,
+        (false, false) => OPENING_SHARED_ITEM,
+    }
 }
 
 /// An incoming item's name, opened with core's member key flow. Only an encrypted envelope is opened: a name field
@@ -445,9 +481,17 @@ fn own_name(row: &Value, field: &str, item: &str, master_key: &[u8; 32]) -> Stri
         .unwrap_or_else(|| SHARED_ITEM.to_string())
 }
 
-/// The account's live links, one per item. The listing carries no name: an item also shared with people has the
-/// name read there, any other reads [`SHARED_ITEM`].
-fn owned_links(mine: &Value, by_me: &[SentShare]) -> Vec<OwnedLink> {
+/// The name of a link's item from the row's `file.name_encrypted`; [`SHARED_ITEM`] when it does not open.
+fn link_name(share: &Value, item: &str, master_key: &[u8; 32]) -> String {
+    match share.get("file") {
+        Some(file) => own_name(file, "name_encrypted", item, master_key),
+        None => SHARED_ITEM.to_string(),
+    }
+}
+
+/// The account's live links, one per item. An item also shared with people has the name read there, any other the
+/// name sealed on its link row, and only a name that does not open reads [`SHARED_ITEM`].
+fn owned_links(mine: &Value, by_me: &[SentShare], master_key: &[u8; 32]) -> Vec<OwnedLink> {
     let mut out: Vec<OwnedLink> = Vec::new();
     for share in list(mine, "shares") {
         let (Some(item), Some(id)) = (text(share, "file_id"), text(share, "id")) else {
@@ -465,10 +509,11 @@ fn owned_links(mine: &Value, by_me: &[SentShare]) -> Vec<OwnedLink> {
             share_id: id.to_string(),
             share_ids: vec![id.to_string()],
             item_id: item.to_string(),
-            name: by_me
-                .iter()
-                .find(|s| s.item_id == item)
-                .map_or_else(|| SHARED_ITEM.to_string(), |s| s.name.clone()),
+            // The invite names it; else the link row's own sealed name (`file`); else the fixed words.
+            name: by_me.iter().find(|s| s.item_id == item).map_or_else(
+                || link_name(share, item, master_key),
+                |s| s.name.clone(),
+            ),
             expires_at: text(share, "expires_at").map(str::to_string),
             has_password: flag(share, "has_passphrase"),
         });
@@ -488,6 +533,7 @@ fn request_row(r: &Value) -> Option<FileRequestRow> {
         max_files: r.get("max_files").and_then(Value::as_u64).filter(|max| *max > 0),
         expires_at: text(r, "expires_at").map(str::to_string),
         closed: flag(r, "closed"),
+        target_folder_id: text(r, "target_folder_id").map(str::to_string),
     })
 }
 

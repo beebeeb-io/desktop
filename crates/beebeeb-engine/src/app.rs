@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroizing;
 
+use plan_gate::PlanKnown;
 use crate::account::{AccountId, AccountRuntime, Accounts, SessionGeneration, SessionTransition};
 use crate::account_binding::{self, Identity};
 use crate::account_dto::AccountProfile;
@@ -46,6 +47,7 @@ use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 use lock_api::SessionMoved;
 
+mod plan_gate;
 pub mod account_actions_api;
 pub mod account_api;
 pub mod account_email_api;
@@ -53,9 +55,12 @@ pub mod account_email_resend_api;
 pub mod account_password_api;
 pub mod account_twofactor_api;
 pub mod backup_devices_api;
-mod credential_stores;
+pub(crate) mod credential_stores;
+mod owed_online;
 mod session_revoke;
 mod session_watch;
+mod unfinished_sign_out;
+mod account_switch;
 use session_revoke::revoke;
 pub mod account_twofactor_status_api;
 pub mod backups_api;
@@ -67,6 +72,7 @@ pub(crate) mod explorer_api;
 // The sidebar's figures for the native Files window: files kept on this PC, the storage split.
 pub mod files_facts_api;
 pub mod kept_api;
+mod kept_key_proof;
 // The two-level lock, bound to core's rules (`beebeeb_api::flows::lock`).
 pub mod lock_api;
 pub mod lock_password_api;
@@ -80,6 +86,7 @@ pub mod settings_api;
 pub mod setup_api;
 pub mod speed_test_api;
 // Storage use and quota from the server.
+mod new_file_api;
 mod storage_usage_api;
 pub mod support_bundle_api;
 // A link to one of the account's files, for the native Files window's Copy link.
@@ -94,6 +101,7 @@ pub mod signup_api;
 pub mod state_owner;
 pub mod transfer_limits_api;
 pub mod trash_api;
+mod thumb_cache_api;
 // What uploads, Try again on one, and the cancel of a new file's upload, for the native Files window.
 pub mod downloads_api;
 pub mod uploads_api;
@@ -103,6 +111,10 @@ pub mod trash_purge_api;
 pub mod versions_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;
+pub mod office_edit_api;
+pub mod office_recovery;
+pub mod office_scratch;
+pub mod office_session_end;
 pub mod viewer_edit_api;
 
 pub use credential_stores::{CredentialStores, PlatformCredentials};
@@ -144,10 +156,15 @@ pub enum SyncStartRefused {
     RegistrationFailed { code: Option<i32> },
     /// This PC's local data could not be proven the signed-in account's (`account_binding`).
     OtherAccountsData,
+    /// w29: the previous account left a file here that may hold changes it never sent: it is never removed unasked.
+    /// The only way on is that account's (it sends them) or the person's (the file moves out of the folder).
+    UnsentFileOfAnotherAccount,
     /// Whose this PC's local data is, or whose the session is, could not be confirmed.
     IdentityUnknown,
     /// An earlier engine did not confirm it stopped: only a restart of the app helps.
     StopUnconfirmed,
+    /// A stopped ownership proof still holds its client: the refusal ends by itself once its write ends.
+    StopFinishing,
     /// A live process holds this app's engine lock (another copy of the app, or `bb watch`).
     StateInUse,
     /// The local state could not be read or written, or an engine ended by itself.
@@ -163,8 +180,10 @@ impl SyncStartRefused {
             Self::FolderMissing => "folder_missing",
             Self::RegistrationFailed { .. } => "registration_failed",
             Self::OtherAccountsData => "other_accounts_data",
+            Self::UnsentFileOfAnotherAccount => "unsent_file_of_another_account",
             Self::IdentityUnknown => "identity_unknown",
             Self::StopUnconfirmed => "stop_unconfirmed",
+            Self::StopFinishing => "stop_finishing",
             Self::StateInUse => "state_in_use",
             Self::Other => "other",
         }
@@ -202,8 +221,12 @@ impl std::fmt::Display for SyncStartRefused {
                 f.write_str("Windows did not register the sync folder. Nothing was changed.")
             }
             Self::OtherAccountsData => f.write_str(account_binding::OTHER_ACCOUNT_ON_WINDOWS),
+            Self::UnsentFileOfAnotherAccount => f.write_str(
+                "A file left in the sync folder by the account that was signed in before may hold changes that were never sent. Nothing was uploaded or deleted.",
+            ),
             Self::IdentityUnknown => f.write_str(account_binding::IDENTITY_UNKNOWN),
             Self::StopUnconfirmed => f.write_str(account_binding::ENGINE_STOP_UNCONFIRMED),
+            Self::StopFinishing => f.write_str(account_binding::ENGINE_STOP_FINISHING),
             Self::StateInUse => {
                 f.write_str("Another program is syncing with this app's local state. Nothing was changed.")
             }
@@ -217,7 +240,7 @@ impl std::fmt::Display for SyncStartRefused {
 pub enum SyncStop {
     Stopped,
     WasNotRunning,
-    /// The engine did not confirm that it ended: no new one starts in this process (restart the app).
+    /// This stop or an earlier one did not confirm its engine ended: no new one starts in this process (restart).
     Unconfirmed,
 }
 
@@ -232,6 +255,9 @@ pub struct Engine<C: CredentialStores> {
     acct: Arc<AccountRuntime>,
     runtime: tokio::runtime::Runtime,
     client: reqwest::Client,
+    /// The session tokens this process still owes the server a logout for (LD-0028): sign-out records into it, the
+    /// engine start and the network coming back pay from it.
+    owed: Arc<crate::keychain::owed_revocations::OwedRevocations>,
     /// One session step at a time (a sign-in step, a lock, a sign-out, an engine start or stop).
     transition: tokio::sync::Mutex<()>,
     /// The order of the credential-store writes and the session generation.
@@ -249,6 +275,8 @@ pub struct Engine<C: CredentialStores> {
     failures: AtomicU32,
     /// [`Engine::watch_session`] ran on this handle.
     session_watch_started: AtomicBool,
+    /// What the server last said about the plan, for the No plan gate ([`Engine::gate`]).
+    plan: Arc<Mutex<PlanKnown>>,
     /// Items moved to or from Trash through this handle (`trash_api`), for a window that keeps a Trash count.
     trash_moves: AtomicU64,
     /// The two-level lock: core's state machine, moved only by `lock_api`.
@@ -271,6 +299,9 @@ pub struct Engine<C: CredentialStores> {
     forget_hook_for_test: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
+/// The refusal of a sign-out while an open editor holds edits that no save has landed.
+pub const UNSAVED_EDITS: &str = "unsaved edits in an open document";
+
 impl<C: CredentialStores> Engine<C> {
     /// Build the handle; a 0.8.x PC's flat-layout session moves into the account's slot. Then [`Engine::restore`].
     pub fn open(
@@ -278,6 +309,29 @@ impl<C: CredentialStores> Engine<C> {
         config: EngineConfig,
         host: Arc<dyn EngineHost>,
         stores: C,
+    ) -> Result<Self, String> {
+        // A test build keeps its list in memory, one per handle: the machine's own store is never touched and one
+        // test's owed token is never paid to another test's server.
+        #[cfg(test)]
+        let owed = Arc::new(crate::keychain::owed_revocations::OwedRevocations::with_backend(Box::new(
+            crate::keychain::owed_revocations::MemoryOwed::default(),
+        )));
+        #[cfg(not(test))]
+        let owed = Arc::new(crate::keychain::owed_revocations::OwedRevocations::platform(identity));
+        let handle = Self::open_owing(identity, config, host, stores, owed.clone())?;
+        #[cfg(not(test))]
+        session_revoke::install_owed(owed);
+        Ok(handle)
+    }
+
+    /// [`Engine::open`] with the owed list given: what is owed is paid at once, and again each time the engine
+    /// reports the network back.
+    pub(crate) fn open_owing(
+        identity: &'static EngineIdentity,
+        config: EngineConfig,
+        host: Arc<dyn EngineHost>,
+        stores: C,
+        owed: Arc<crate::keychain::owed_revocations::OwedRevocations>,
     ) -> Result<Self, String> {
         if let Some(refusal) = identity.refusal_on(std::env::consts::OS) {
             return Err(refusal.to_string());
@@ -299,10 +353,22 @@ impl<C: CredentialStores> Engine<C> {
         let acct = accounts.active_account()?;
         // Every engine started from here reports through the view's host, which goes on to the host given here.
         let view = Arc::new(ViewCell::default());
+        let host: Arc<dyn EngineHost> = Arc::new(owed_online::OwedPayingHost::new(
+            host,
+            runtime.handle().clone(),
+            client.clone(),
+            config.api_base.clone(),
+            owed.clone(),
+        ));
         let host: Arc<dyn EngineHost> = Arc::new(ViewHost::new(host, view.clone()));
         downloads_api::wake_the_host_for_downloads(&host);
         credential_stores::adopt_legacy_flat(identity, &config.account_id, &stores);
         session_watch::start(&runtime, &acct, &config.api_base);
+        {
+            // What an earlier sign-out could not tell the server is paid now (and again when the network is back).
+            let _enter = runtime.enter();
+            session_revoke::pay_owed_detached(client.clone(), config.api_base.clone(), owed.clone());
+        }
         Ok(Self {
             identity,
             config,
@@ -312,6 +378,7 @@ impl<C: CredentialStores> Engine<C> {
             acct,
             runtime,
             client,
+            owed,
             transition: tokio::sync::Mutex::new(()),
             writes: std::sync::RwLock::new(()),
             auth_present: Mutex::new(false),
@@ -319,6 +386,7 @@ impl<C: CredentialStores> Engine<C> {
             lock_password: lock_password_api::LockPassword::default(),
             failures: AtomicU32::new(0),
             session_watch_started: AtomicBool::new(false),
+            plan: Arc::new(Mutex::new(PlanKnown::default())),
             trash_moves: AtomicU64::new(0),
             lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
             view,
@@ -350,6 +418,7 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The end of a transition: the view's gate is the gate now, and the window is woken to read it.
     fn publish(&self) {
+        self.ask_plan(false);
         let gate = self.gate();
         self.view.write(|view| view.gate = gate);
         self.host.wake();
@@ -402,7 +471,7 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
-            let vault = self.vault();
+            let vault = self.vault_at_start(); // A clear cut short is finished first (`unfinished_sign_out`).
             let present = matches!(vault.session_token(), Ok(Some(_)));
             self.set_auth_present(present);
             if present {
@@ -423,8 +492,9 @@ impl<C: CredentialStores> Engine<C> {
         self.view.read().gate
     }
 
-    /// Which screen the window shows (`gate::decide_gate`). The plan check is not made here: a signed-in, unlocked
-    /// account answers `Ready`.
+    /// Which screen the window shows (`gate::decide_gate`). `NoPlan` only when the server last said the account has
+    /// no active plan (none, or lapsed: trial or subscription ended, payment failed past grace). No network here: a
+    /// server that could not be reached leaves the last known answer, and no answer at all never blocks.
     pub fn gate(&self) -> GateState {
         let unlocked = self.unlocked();
         if unlocked && self.lock_state() == beebeeb_api::flows::LockState::ScreenLocked {
@@ -442,7 +512,17 @@ impl<C: CredentialStores> Engine<C> {
         } else {
             StoredKey::Absent
         };
-        gate::decide_gate(present || unlocked, unlocked, stored, false)
+        let no_plan = unlocked && self.plan_known_none();
+        gate::decide_gate(present || unlocked, unlocked, stored, no_plan)
+    }
+
+    /// The window's gate buttons (Try again on the credential-store screen, Check again on the no-plan screen):
+    /// read the gate once more and publish it, so `view().gate` changes when the store answers or the plan arrived.
+    /// Never the start path: [`Engine::restore`] is not run again.
+    pub fn recheck_gate(&self) -> GateState {
+        self.ask_plan(true);
+        self.publish();
+        self.view.read().gate
     }
 
     /// The signed-in account's email, as the server spelled it.
@@ -491,6 +571,8 @@ impl<C: CredentialStores> Engine<C> {
                 // stored session is unlocked.
                 return Err(SignInProblem::Other);
             }
+            // A new password step replaces a half-done one: its challenge, stretch and held recovery go first.
+            self.forget_half_done_sign_in();
             let email = account_binding::canonical_email(email);
             let legs = password::password_legs(
                 |req| auth_transport::send_to(&self.config.api_base, &self.client, None, req),
@@ -547,20 +629,18 @@ impl<C: CredentialStores> Engine<C> {
                 .await
                 .map_err(|e| words(&e))?;
             let token = {
-                let pending = self.pending_2fa.lock().map_err(|_| words("failed"))?;
+                let mut pending = self.pending_2fa.lock().map_err(|_| words("failed"))?;
                 let Some((challenge, _)) = pending.as_ref() else {
                     return Err(gate::TWO_FACTOR_EXPIRED);
                 };
-                password::second_factor_answer(challenge, response).map_err(|e| words(&e))?
-            };
-            let next = self
-                .finish_sign_in(turn, token, (*email).clone())
-                .await
-                .map_err(|e| words(&e))?;
-            if let Ok(mut pending) = self.pending_2fa.lock() {
+                let token = password::second_factor_answer(challenge, response).map_err(|e| words(&e))?;
+                // Accepted: the challenge is spent, and goes (wiped) whatever the install below answers.
                 *pending = None;
-            }
-            Ok(next)
+                token
+            };
+            self.finish_sign_in(turn, token, (*email).clone())
+                .await
+                .map_err(|e| words(&e))
         })
     }
 
@@ -574,6 +654,8 @@ impl<C: CredentialStores> Engine<C> {
         typed_email: String,
     ) -> Result<NextAfterSignIn, String> {
         let base = &self.config.api_base;
+        // Taken first, so a sign-in that fails below leaves no stretch behind (it is wiped as it drops).
+        let screen_check = self.take_pending_screen_check(&typed_email);
         let profile = match fetch_profile(&self.client, base, &token).await {
             Ok(profile) => profile,
             Err(error) => {
@@ -581,10 +663,17 @@ impl<C: CredentialStores> Engine<C> {
                 return Err(error);
             }
         };
-        let screen_check = self.take_pending_screen_check(&typed_email);
         let email = match profile.email.trim() {
             "" => typed_email,
             named => named.to_string(),
+        };
+        // The key this computer kept is the account's only once the server says so; no answer undoes the sign-in.
+        let kept = match self.prove_kept_key(&token, &profile.user_id, &email).await {
+            Ok(kept) => kept,
+            Err(error) => {
+                revoke(&self.client, base, &token).await;
+                return Err(error);
+            }
         };
         // A stored session this sign-in replaces (the strong unlock): it must be this account's, and the key and
         // the engine of the old session leave first (`lock_api`).
@@ -602,27 +691,12 @@ impl<C: CredentialStores> Engine<C> {
         }
         self.install_screen_check(screen_check, &profile);
         self.failures.store(0, Ordering::SeqCst);
-        // The stored key of this same account (a vault that was closed, a locked screen, an older build's lock) is
-        // loaded through the guarded loader. The password was proven to the server: the lock opens in the same
-        // hold as the key's install, or stays closed for a session whose key is not here.
-        let turn = self.acct.session_generation();
-        let loaded = store::load_session_from_vault(self.vault(), Some(email)).ok().flatten();
-        if let Ok(_write) = self.claim(turn) {
-            match (loaded, self.acct.session.lock()) {
-                (Some(session), Ok(mut guard)) => {
-                    *guard = Some(session);
-                    drop(guard);
-                    self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
-                    self.lock_follows(SessionMoved::StrongProof);
-                }
-                _ => self.lock_follows(SessionMoved::Keyless),
-            }
-        }
+        let next = self.install_kept_key(&kept, email);
         if let Some(replaced) = replaced.filter(|old| old.as_str() != token.as_str()) {
             // The session the strong unlock replaced is ended at the server, best effort.
             revoke(&self.client, base, &replaced).await;
         }
-        Ok(gate::next_after_sign_in(false, self.unlocked(), false, false))
+        Ok(next)
     }
 
     fn store_first_sign_in(
@@ -659,6 +733,7 @@ impl<C: CredentialStores> Engine<C> {
             *stored = Some(email.to_string());
         }
         self.set_auth_present(true);
+        self.forget_half_done_sign_in();
         Ok(())
     }
 
@@ -778,8 +853,7 @@ impl<C: CredentialStores> Engine<C> {
                     *slot = Some(runner);
                     return Ok(SyncStart::AlreadyRunning);
                 }
-                if !runner.abort().await.is_stopped() {
-                    self.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+                if unfinished_sign_out::record_the_stop(&self.acct, &runner.abort().await) != SyncStop::Stopped {
                     return Err(SyncStartRefused::StopUnconfirmed);
                 }
             }
@@ -830,8 +904,15 @@ impl<C: CredentialStores> Engine<C> {
             }
             // (7) The local data is bound to the session's account (another account's data refuses, nothing reset).
             let data = self.local_data_for_start(&sync_root, &identity)?;
-            account_binding::bind_before_engine_start(&data, &identity, false)
-                .map_err(|error| self.proof_owed_on(SyncStartRefused::of_binding(&error), &sync_root))?;
+            let unsent_file = self.clear_the_previous_account(&data, &identity, &sync_root, port); // another account's data goes first.
+            account_binding::bind_before_engine_start(&data, &identity, false).map_err(|error| {
+                let refused = match (unsent_file, SyncStartRefused::of_binding(&error)) {
+                    (true, SyncStartRefused::OtherAccountsData) => SyncStartRefused::UnsentFileOfAnotherAccount,
+                    (_, other) => other,
+                };
+                self.proof_owed_on(refused, &sync_root)
+            })?;
+            crate::app::bindings::backup_folders::retag_at_start(self.identity, &identity); // P3-5: re-tag to the id.
             self.settle_an_interrupted_keep(data, &sync_root, &slot);
             // (8) The folder exists.
             crate::config::ensure_directory(&sync_root).map_err(|_| SyncStartRefused::Other)?;
@@ -937,9 +1018,8 @@ impl<C: CredentialStores> Engine<C> {
         stopped
     }
 
-    /// The engine's stop, then Explorer's "Free up space" binding is removed (task 2490), whether an engine ran or
-    /// not and whether its end was confirmed: the binding outlives a restart of the app. A lock and a sign-out stop
-    /// through here.
+    /// The engine's stop, then Explorer's "Free up space" binding is removed (task 2490), whether an engine ran or not
+    /// and whether its end was confirmed: the binding outlives a restart. A lock and a sign-out stop through here.
     async fn stop_holding_step(&self) -> SyncStop {
         let stopped = self.stop_runner().await;
         // No pass runs and none is asked for once sync stopped, for this account or the next.
@@ -951,19 +1031,14 @@ impl<C: CredentialStores> Engine<C> {
     async fn stop_runner(&self) -> SyncStop {
         let mut slot = self.acct.engine.lock().await;
         let Some(runner) = slot.take() else {
-            return SyncStop::WasNotRunning;
+            return unfinished_sign_out::stop_of_an_empty_slot(&self.acct);
         };
         // The view stops saying sync runs before the task is told to end: the task's own end then changes nothing.
         self.view.write(|view| {
             view.start = Start::NotAsked;
             view.explorer = Explorer::Unknown;
         });
-        if runner.abort().await.is_stopped() {
-            SyncStop::Stopped
-        } else {
-            self.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-            SyncStop::Unconfirmed
-        }
+        unfinished_sign_out::record_the_stop(&self.acct, &runner.abort().await)
     }
 
     /// The vault lock ([`Engine::lock_vault`]): the closed mark, then the engine stops and the keys leave memory
@@ -995,17 +1070,14 @@ impl<C: CredentialStores> Engine<C> {
         *guard = None;
         drop(guard);
         self.lock_follows(moved);
-        if let Ok(mut pending) = self.pending_2fa.lock() {
-            *pending = None;
-        }
-        self.lock_password.drop_pending();
+        self.forget_half_done_sign_in();
     }
 
     /// Sign out and KEEP the local files and the local state: the engine stops, the session is ended on the server
     /// (best effort), the token, the key and their owners leave the credential store, memory is cleared. Nothing
     /// on disk is deleted but the account's recent searches; the state stays bound to this account, so another
     /// account cannot sync into it.
-    /// `Err`: the engine did not confirm its stop, or the credential store could not be cleared; still signed in.
+    /// `Err`: an engine task may still run (its end unconfirmed, now or until a restart), or the store was not cleared.
     pub fn sign_out_keeping_local_data(&self) -> Result<(), String> {
         let result = self.sign_out_keeping_local_data_step();
         self.publish();
@@ -1015,8 +1087,6 @@ impl<C: CredentialStores> Engine<C> {
     fn sign_out_keeping_local_data_step(&self) -> Result<(), String> {
         self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
-            // The account's recent searches leave this computer while its session is still in memory (`sign_out_for`).
-            let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
             self.sign_out_holding_step().await
         })
     }
@@ -1024,11 +1094,27 @@ impl<C: CredentialStores> Engine<C> {
     /// The sign-out itself, for a caller that holds the step (`transition`) already: a step that decides to sign
     /// out and does it in the same hold (`signin_api::discard_partial_sign_in`).
     async fn sign_out_holding_step(&self) -> Result<(), String> {
+        self.sign_out_holding_step_as(false).await
+    }
+
+    /// [`Self::sign_out_holding_step`]. An open editor with edits no save has landed refuses the sign-out (nothing
+    /// is stopped, wiped or sent) unless `discard_unsaved`: only the person's explicit Discard drops them.
+    async fn sign_out_holding_step_as(&self, discard_unsaved: bool) -> Result<(), String> {
+        if !discard_unsaved && self.office_unsaved_count() > 0 {
+            return Err(UNSAVED_EDITS.to_string());
+        }
         {
-            self.stop_proofs().await;
-            if self.stop_holding_step().await == SyncStop::Unconfirmed {
+            let _ = self.stop_proofs().await; // Not ended in time: its seat refuses starts, the sign-out goes on.
+            if unfinished_sign_out::a_task_may_hold_the_keys(&self.acct, self.stop_holding_step().await) {
                 return Err(account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
             }
+            // Past the gate (a refused sign-out deletes nothing), the session still in memory: its recent searches.
+            let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
+            // Every Office recovery blob of this account goes with the session (not a waiting save).
+            // The Office host ends its helpers first, so no snapshot lands after the wipe below.
+            self.office_before_session_end(office_session_end::SessionEnding::SignOut);
+            self.wipe_office_recovery_at_session_end();
+            self.end_office_scratch_at_session_end();
             let mut vault = self.vault();
             let token = vault
                 .session_token()
@@ -1050,7 +1136,13 @@ impl<C: CredentialStores> Engine<C> {
             self.acct.auth_health.note_result(None);
             self.set_auth_present(false);
             if let Some(token) = token {
-                revoke(&self.client, &self.config.api_base, &token).await;
+                // Recorded as owed before this returns; the server is asked by a task of its own (task 1886).
+                session_revoke::revoke_detached(
+                    self.client.clone(),
+                    self.config.api_base.clone(),
+                    token.to_string(),
+                    self.owed.clone(),
+                );
             }
             Ok(())
         }
@@ -1106,9 +1198,10 @@ impl<C: CredentialStores> Engine<C> {
             .unwrap_or_else(|| crate::config::default_sync_root_suggestion(self.identity)))
     }
 
-    /// The session token (cloned for a person's single API call). `Err` when locked (either level) or signed out.
-    fn session_token(&self) -> Result<String, String> {
-        self.person_session(|session, _| session.token.clone())
+    /// The session token (copied for a person's single API call, wiped on drop; `Zeroizing` prints redacted in
+    /// `Debug`). `Err` when locked (either level) or signed out.
+    fn session_token(&self) -> Result<Zeroizing<String>, String> {
+        self.person_session(|session, _| Zeroizing::new(session.token.clone()))
             .map_err(|refused| refused.said_as("locked".to_string(), "not signed in".to_string()))
     }
 }

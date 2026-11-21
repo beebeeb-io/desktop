@@ -24,6 +24,10 @@ use std::sync::Mutex;
 /// joining the guarded set (a first snapshot) never stalls one tick.
 pub const MARK_RETRIES_PER_TICK: usize = 2000;
 
+/// R3: at most this many recorded orphans are verified per tick (about 2.4 ms each on a sync root), so
+/// the first tick of a folder with tens of thousands of untracked placeholders is never held for a minute.
+pub const ORPHAN_VERIFIES_PER_TICK: usize = 200;
+
 /// Desktop 0.8.15: the start-up guard reports its progress (an info line, counts only) every
 /// this many rows, and records the empty placeholders it found in one transaction per this many.
 pub const GUARD_PROGRESS_EVERY: usize = 2000;
@@ -190,6 +194,61 @@ pub enum PlatformView {
     },
 }
 
+/// Task 2283: what the entry at a path is, by its placeholder's identity (Windows:
+/// `windows_cf::placeholders::entry_identity`; elsewhere every entry reads as not a placeholder).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryIdentity {
+    /// Nothing there, or an ordinary file or folder (not a placeholder).
+    NotPlaceholder,
+    /// A placeholder whose identity names this file id.
+    Names(String),
+    /// A placeholder whose identity names no id (minted before identities were set).
+    Nameless,
+    /// Something is there, but it could not be read.
+    Unreadable,
+}
+
+/// Task 2283: whether an entry is a row's own, by its placeholder's identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ownership {
+    /// The row's own entry (or an entry that carries no identity to say otherwise).
+    Own,
+    /// Another file's entry: never removed, copied or marked on this row's behalf.
+    Other,
+    /// It could not be read: nothing is done now, the caller may retry.
+    Unknown,
+}
+
+/// Task 2283: whether `identity` names `file_id`: its own id, or a provisional id this file's server id replaced
+/// (`id_aliases`). A placeholder that names no id is the row's only while no other live row has `rel_path`: two
+/// server items at one path are one entry, and nothing on it says whose it is. An ordinary file carries no identity;
+/// the row's content rules decide for it.
+pub fn ownership(db: &StateDb, identity: &EntryIdentity, file_id: &str, rel_path: &str) -> Ownership {
+    match identity {
+        EntryIdentity::NotPlaceholder => Ownership::Own,
+        EntryIdentity::Unreadable => Ownership::Unknown,
+        EntryIdentity::Names(id) if id == file_id => Ownership::Own,
+        EntryIdentity::Names(id) => match db.resolve_alias(id) {
+            Ok(Some(server_id)) if server_id == file_id => Ownership::Own,
+            Ok(_) => Ownership::Other,
+            Err(_) => Ownership::Unknown,
+        },
+        EntryIdentity::Nameless => match db.file_rows_at_path(rel_path) {
+            Ok(rows) => {
+                if rows
+                    .iter()
+                    .any(|row| row.file_id != file_id && row.status != FileStatus::Trashing)
+                {
+                    Ownership::Other
+                } else {
+                    Ownership::Own
+                }
+            }
+            Err(_) => Ownership::Unknown,
+        },
+    }
+}
+
 /// Task 2284 A1.1: a metadata error means "missing" only when the path is not there; any other
 /// error (a denied folder, a held handle) is something that is there but could not be read.
 pub fn view_of_metadata_error(error: &std::io::Error) -> PlatformView {
@@ -315,6 +374,27 @@ fn guard_row(
         summary.mark_failed += 1;
         return Ok(());
     }
+    // Task 2283: a placeholder whose identity names another file is that file's (two server items at one path, or a
+    // local rename the row has not followed yet): nothing is marked or recorded for this row on it.
+    if let PlatformView::Placeholder {
+        identity: Some(identity),
+        ..
+    } = &seen
+    {
+        let named = EntryIdentity::Names(identity.clone());
+        match ownership(db, &named, &row.file_id, &row.path) {
+            Ownership::Own => {}
+            Ownership::Other => {
+                tracing::warn!(file_id = %row.file_id, "guard: the placeholder at this row's path is another file's; it is left alone");
+                return clear(&row.file_id);
+            }
+            Ownership::Unknown => {
+                db.set_mark_pending(&row.file_id, true)?;
+                summary.mark_failed += 1;
+                return Ok(());
+            }
+        }
+    }
     let decision = decide_guard(&seen, row.fetched_min_version, in_population(row));
     if decision.mark_empty {
         empty.push(row.file_id.clone());
@@ -351,11 +431,11 @@ pub fn retry_marks(
     if summary.stopped {
         return Ok(marked);
     }
-    for (path, _, pending) in db.list_unknown_orphans()? {
+    for path in db.list_pending_unknown_orphans(ORPHAN_VERIFIES_PER_TICK)? {
         if stop() {
             break;
         }
-        if pending && verify_orphan(db, sync_root, &path, view, mark)? {
+        if verify_orphan(db, sync_root, &path, view, mark)? {
             marked += 1;
         }
     }
@@ -675,6 +755,52 @@ mod tests {
         (dir, db)
     }
 
+    /// Task 2283: two server rows at one path; the guarded one (`b`, unknown content) is guarded while the
+    /// placeholder there is `a`'s. Nothing is marked on `a`'s file, nor `b` recorded as empty from it. The same
+    /// path holding `b`'s own placeholder is marked.
+    #[test]
+    fn task_2283_the_guard_never_marks_another_file_s_placeholder_at_the_row_s_path() {
+        let (dir, db) = db_with(&[
+            ("a", "same.txt", FileStatus::Local),
+            ("b", "same.txt", FileStatus::Local),
+        ]);
+        db.record_local_baseline("a", 1, "hash").unwrap();
+        let root = dir.path().join("root");
+        let rows: Vec<GuardedRow> = db
+            .list_guarded()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.file_id == "b")
+            .collect();
+        assert_eq!(rows.len(), 1, "b is guarded");
+        for on_disk in [OnDisk::Wholly, OnDisk::Nothing] {
+            let view = |_: &Path| PlatformView::Placeholder {
+                on_disk,
+                in_sync: true,
+                identity: Some("a".into()),
+            };
+            let mut marks = 0;
+            let summary = guard(&db, &root, &rows, &view, &mut |_: &Path| {
+                marks += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!((marks, summary.marked, summary.emptied), (0, 0, 0), "{on_disk:?}");
+        }
+        let own = |_: &Path| PlatformView::Placeholder {
+            on_disk: OnDisk::Wholly,
+            in_sync: true,
+            identity: Some("b".into()),
+        };
+        let mut marks = 0;
+        guard(&db, &root, &rows, &own, &mut |_: &Path| {
+            marks += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(marks, 1, "b's own placeholder is marked");
+    }
+
     #[test]
     fn task_2191_conflict_and_error_rows_are_marked_and_a_failed_mark_is_retried_on_the_next_tick() {
         let (dir, db) = db_with(&[
@@ -931,8 +1057,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} not found"))
         };
         // D-P2-7 named the mode: the pause check reads `RunMode::of_flag` before its `is_paused` arm.
-        const PAUSED: &str = "let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));";
-        let retry = after(tick, "crate::windows_cf::retry_pending_marks(&mark_root)).await");
+        const PAUSED: &str = "let mode = RunMode::of_flag(user_paused || hold.is_some());";
+        let retry = after(tick, "retry_marks_step(&sync_root).await;");
         let paused = after(retry, PAUSED);
         let stamp = after(paused, "crate::windows_cf::stamp_local_files_in_sync(&stamp_root);");
         assert!(
@@ -947,11 +1073,15 @@ mod tests {
         assert_eq!(
             production.matches("retry_pending_marks(").count(),
             1,
-            "one call, on every tick"
+            "one call site, in the step every tick reaches"
+        );
+        assert!(
+            production.matches("retry_marks_step(&sync_root).await").count() >= 2,
+            "the step runs on every tick: at its start, or after the pull while the first list is owed"
         );
     }
 
-    /// Desktop 0.8.15 (deliverable 1): uploads must not wait for the guard. On Guus's PC the
+    /// Desktop 0.8.15 (deliverable 1): uploads must not wait for the guard. On a maintainer's PC the
     /// 0.8.14 pass ran 2 h 12 min, and nothing uploaded while it ran, because the runner awaited
     /// it before it spawned the upload watcher. Now the pass is spawned (off the async workers)
     /// and nothing between seeding and the tick loop is awaited.
@@ -1023,7 +1153,7 @@ mod tests {
     /// also carried it, and `changes_on_hold`, went with the old shell; no native reader of the guard's progress
     /// exists yet.)
     #[test]
-    fn desktop_0815_the_ui_reads_the_guard_s_progress_and_the_changes_on_hold() {
+    fn desktop_0815_the_ui_reads_the_guard_s_progress() {
         let production = runner_production();
         let emit = &production[production.find("fn emit_payload(").unwrap()..];
         let emit = &emit[..emit.find("\n}\n").unwrap()];
@@ -1368,5 +1498,41 @@ mod tests {
             partial_hash,
             "a change is seen"
         );
+    }
+
+    #[test]
+    fn r3_a_tick_verifies_a_bounded_number_of_orphans() {
+        let (dir, db) = db_with(&[]);
+        let root = dir.path().join("root");
+        for i in 0..23_000 {
+            db.note_untracked_orphan(&format!("p{i}.txt")).unwrap();
+        }
+        let views = std::cell::Cell::new(0usize);
+        let view = |_: &Path| {
+            views.set(views.get() + 1);
+            PlatformView::Missing
+        };
+        retry(&db, &root, &view, &mut |_: &Path| Ok(())).unwrap();
+        assert!(views.get() <= ORPHAN_VERIFIES_PER_TICK, "view calls: {}", views.get());
+        assert!(views.get() > 0);
+    }
+
+    #[test]
+    fn r3_noting_an_untracked_placeholder_twice_keeps_a_verified_row_verified() {
+        let (_dir, db) = db_with(&[]);
+        db.note_untracked_orphan("a.txt").unwrap();
+        db.note_untracked_orphan("a.txt").unwrap();
+        assert_eq!(
+            db.list_unknown_orphans().unwrap(),
+            vec![("a.txt".into(), "".into(), true)]
+        );
+        db.put_unknown_orphan("a.txt", "id", false).unwrap(); // verified
+        db.note_untracked_orphan("a.txt").unwrap();
+        db.note_untracked_orphan("a.txt").unwrap();
+        assert_eq!(
+            db.list_unknown_orphans().unwrap(),
+            vec![("a.txt".into(), "id".into(), false)]
+        );
+        assert!(db.list_pending_unknown_orphans(10).unwrap().is_empty());
     }
 }

@@ -15,6 +15,10 @@
 //!    script. Everything else is handed its identity. A third identity cannot
 //!    be made anywhere else: the struct's fields are private
 //!    (`the_identity_type_cannot_be_built_outside_its_file`).
+//! 2b. **Tests run as TEST** ([`test_real_hits`]): the engine's test code (test files, test-gated items and
+//!    everything under `crates/beebeeb-engine/tests/`) names `TEST`, never `REAL`, so a test can never touch the
+//!    names the installed app uses. A test that needs `REAL` on purpose stands in [`TEST_REAL_ALLOWED`], with its
+//!    reason.
 //! 3. **The consumer census** ([`CONSUMERS`]): every read of an identity accessor in the engine, by file and
 //!    accessor, with its count. A consumer put back on a literal, or on a name glued from pieces, drops a read
 //!    and fails here even when rule 1 cannot see the pieces.
@@ -152,6 +156,101 @@ const NAMING_ALLOWED: [(&str, usize, &str); 3] = [
         28,
         "the native identity's two variants and `AppIdentity::engine`, the one bridge to the engine's values; \
          `engine_identity()` hands production code `CURRENT`'s",
+    ),
+];
+
+/// Rule 2b's allow-list: engine test code that names `REAL` on purpose, `(file, namings, why)`. Everything else in
+/// the engine's tests runs on `TEST`.
+const TEST_REAL_ALLOWED: [(&str, usize, &str); 18] = [
+    (
+        "crates/beebeeb-engine/src/backup/device.rs",
+        7,
+        "the device name and folder adoption differ by build: REAL's salt, suffix and legacy-folder adoption are asserted against TEST's",
+    ),
+    (
+        "crates/beebeeb-engine/src/config/tests.rs",
+        5,
+        "the default sync folder and config path are asserted by REAL's user-facing names",
+    ),
+    (
+        "crates/beebeeb-engine/src/engine_bridge/tests/fixture_upload_server.rs",
+        2,
+        "the bridge fixture of the backup-layout tests, which adopt a legacy folder: only the REAL build may",
+    ),
+    (
+        "crates/beebeeb-engine/src/engine_bridge/tests/versions_3.rs",
+        1,
+        "the macOS staging test reads the folders of the bridge fixture, which is the REAL build",
+    ),
+    (
+        "crates/beebeeb-engine/src/ipc_socket/tests/macos_socket_cache.rs",
+        2,
+        "the macOS socket-path budget is for the shipped REAL group id; the test build never runs on macOS",
+    ),
+    (
+        "crates/beebeeb-engine/src/engine_bridge/tests/hydration.rs",
+        4,
+        "the Finder staging sandbox is asserted for the REAL build's cache folder name",
+    ),
+    (
+        "crates/beebeeb-engine/src/engine_bridge/tests/ipc.rs",
+        6,
+        "the hydrate allowed-roots are the REAL build's (the test build's staging base is not one of them)",
+    ),
+    (
+        "crates/beebeeb-engine/src/local_state_tests.rs",
+        13,
+        "the purge's disposable roots and the real config path: the names under test are the REAL build's",
+    ),
+    (
+        "crates/beebeeb-engine/src/sign_out/kept_names.rs",
+        7,
+        "the kept root and bundle id asserted by REAL's values",
+    ),
+    (
+        "crates/beebeeb-engine/src/engine_bridge/tests/backup_host.rs",
+        2,
+        "these settings and stop-switch tests share the bridge fixture, which runs as the REAL build (it adopts legacy folders)",
+    ),
+    (
+        "crates/beebeeb-engine/src/engine_bridge/tests/backup_host/owners_and_adoption.rs",
+        4,
+        "these settings and stop-switch tests share the bridge fixture, which runs as the REAL build (it adopts legacy folders)",
+    ),
+    (
+        "crates/beebeeb-engine/src/engine_bridge.rs",
+        1,
+        "the settings the bridge suites read are the file the REAL-build bridge fixture writes",
+    ),
+    (
+        "crates/beebeeb-engine/src/identity.rs",
+        21,
+        "the identity's own unit tests: they assert REAL's values and tell the two apart",
+    ),
+    (
+        "crates/beebeeb-engine/src/keychain/tests.rs",
+        3,
+        "the test that the two identities store under different credential services",
+    ),
+    (
+        "crates/beebeeb-engine/src/sync_root_owner.rs",
+        9,
+        "the refusal of the other build's sync-root name is a REAL-versus-TEST rule: both sides are needed",
+    ),
+    (
+        "crates/beebeeb-engine/src/windows_cf/registration.rs",
+        10,
+        "the two builds must register different provider ids and class ids: both sides are needed",
+    ),
+    (
+        "crates/beebeeb-engine/src/windows_cf/sync_root_owner_native_tests.rs",
+        6,
+        "the sync-root owner check of the other build: both sides are needed",
+    ),
+    (
+        "crates/beebeeb-engine/tests/test_identity.rs",
+        17,
+        "the test of the test build's isolation from the real app's state, config, folders and caches",
     ),
 ];
 
@@ -401,6 +500,69 @@ fn production_files() -> Vec<(String, String)> {
     files
 }
 
+/// Rule 2b: how often the test code of `name` (whole file minus its production text) names `REAL`.
+fn test_real_hits(whole: &str, production: &str) -> usize {
+    let count = |text: &str| {
+        lex(text)
+            .code
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|token| *token == "REAL")
+            .count()
+    };
+    count(whole).saturating_sub(count(production))
+}
+
+/// Every `.rs` file under the engine's `tests/` directory, as `(name, text)`.
+fn integration_test_files() -> Vec<(String, String)> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let path = entry.expect("dir entry").path();
+            let name = format!("{prefix}{}", path.file_name().unwrap_or_default().to_string_lossy());
+            if path.is_dir() {
+                walk(&path, &format!("{name}/"), out);
+            } else if name.ends_with(".rs") {
+                let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+                out.push((name, text.replace("\r\n", "\n")));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests"),
+        "crates/beebeeb-engine/tests/",
+        &mut out,
+    );
+    out
+}
+
+/// The engine's test code that names `REAL`, by file: test items inside engine files and every file in `tests/`.
+fn test_real_found() -> BTreeMap<String, usize> {
+    let mut found = BTreeMap::new();
+    for (name, path) in rust_files_with_native() {
+        if !name.starts_with(crate::source_census::ENGINE_PREFIX) {
+            continue;
+        }
+        let whole = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+        let hits = if is_test_file(&name) {
+            test_real_hits(&whole, "")
+        } else {
+            test_real_hits(&whole, &production_text(&path))
+        };
+        if hits > 0 {
+            found.insert(name, hits);
+        }
+    }
+    let integration = integration_test_files();
+    assert!(integration.len() > 20, "the engine's tests/ directory is read");
+    for (name, text) in integration {
+        let hits = test_real_hits(&text, "");
+        if hits > 0 {
+            found.insert(name, hits);
+        }
+    }
+    found
+}
+
 fn allowed(list: &[(&str, usize, &str)]) -> BTreeMap<String, usize> {
     list.iter()
         .filter(|(_, hits, _)| *hits > 0)
@@ -447,6 +609,21 @@ fn only_a_host_names_an_identity() {
          outside the files that may name one, by any path or alias: code is handed its identity, and the native \
          app reads `AppIdentity::CURRENT` (left: found, right: allowed)"
     );
+}
+
+#[test]
+fn engine_tests_run_as_the_test_identity() {
+    assert_eq!(
+        test_real_found(),
+        allowed(&TEST_REAL_ALLOWED),
+        "engine test code names `REAL` (left: found, right: allowed): run the test as `TEST`, or, when the test is \
+         about telling the two builds apart, list it in `TEST_REAL_ALLOWED` with the reason"
+    );
+    let planted =
+        "use crate::identity::REAL;\nfn t() { open(&REAL); }\n#[cfg(test)]\nmod t { fn f() { open(&REAL); } }";
+    let production = without_items(planted, &TEST_ITEM_GATES);
+    assert_eq!(test_real_hits(planted, &production), 1);
+    assert_eq!(test_real_hits("fn f() { open(&TEST); } // REAL", ""), 0);
 }
 
 /// No field of the identity is public and the type has no constructor: REAL and TEST are the only values there

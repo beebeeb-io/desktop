@@ -14,7 +14,8 @@
 
 use std::fmt;
 
-use zeroize::Zeroize;
+use beebeeb_office_protocol::office::{EditKind, EditOp, Edited, HitMode, Template};
+use zeroize::{Zeroize, Zeroizing};
 
 /// One open file, as the viewer draws it.
 #[derive(Clone, PartialEq)]
@@ -108,6 +109,8 @@ impl fmt::Debug for Newer {
 pub enum NoPreview {
     /// This app has no viewer for this kind of file yet. Nothing was downloaded.
     NoViewer,
+    /// A HEIC photo: this PC has no decoder for it. Said as that, with the system's app one press away. Nothing was downloaded.
+    Heic,
     /// Larger than a preview holds in memory (`limit`). Nothing was downloaded.
     TooBig { size: u64, limit: u64 },
     /// It passed what a preview holds in memory (`limit`) while it was read, although it was said to be
@@ -398,6 +401,9 @@ pub enum Settled {
     /// Not saved, and why (the words): nothing changed, the edit stays as it is (delta 3 of desktop#432: an earlier
     /// change to the file on this PC has not been sent yet).
     Refused(String),
+    /// The revision of the editor's document that the save just reported (`Saved`, `Queued`) was made from: the
+    /// editor is saved up to it, no further (typing during the upload stays unsaved). Comes just before its `Saved`/`Queued`.
+    SavedRevision(u64),
     /// A change begun before the file was opened again (Show it, Try again): what it came to, said. Nothing on
     /// screen changes.
     Said(String),
@@ -556,6 +562,40 @@ pub enum Elsewhere {
     NotBound,
 }
 
+/// What the editor's helper answered since the last [`ViewerSource::poll_edit`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditAnswer {
+    /// An edit landed (also the answer to a hit and to an inserted image).
+    Edited(Edited),
+    /// The selection as text and, when it fit, html (answers `copy_selection`).
+    Clip { text: String, html: Option<String> },
+    /// The slide layouts' names (answers `layouts`).
+    Layouts(Vec<String>),
+    /// The editor stopped; the document on screen is no longer live.
+    Stopped,
+    /// A recovery snapshot was restored: the document is the one saved at `at`.
+    Restored { at: String },
+    /// The selection is too big to copy at all (not even as text): said as [`COPY_TOO_LARGE`].
+    CopyTooLarge,
+}
+
+/// What is said when the helper cannot copy the selection (`Error{TooLarge}` to a `Copy`).
+pub const COPY_TOO_LARGE: &str = "Too much to copy at once";
+
+/// A snapshot of an earlier, unsaved editing of the file that this PC kept (the words say when: "09:41").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryOffer {
+    pub at: String,
+}
+
+/// The editor's door to the open file's source (`frames/office/edit`): the `source` field is private to `viewers`.
+impl super::Ui {
+    /// The source and the open file's id, for the editor's calls.
+    pub(crate) fn edit_source(&mut self) -> (&mut dyn ViewerSource, &str) {
+        (self.source.as_mut(), self.file.id.as_str())
+    }
+}
+
 pub trait ViewerSource {
     /// Start opening a file. The answer is what can be shown NOW; a `Decrypting` body is
     /// followed by [`ViewerSource::poll`].
@@ -671,6 +711,53 @@ pub trait ViewerSource {
     fn saving(&self) -> bool {
         false
     }
+    /// Whether the open file takes editor calls (`edit`, `hit`, ...). Default: not available.
+    fn can_edit(&self, _file_id: &str) -> bool {
+        false
+    }
+    /// Hand one edit to the editor. `false`: not available or not taken. The answer comes by `poll_edit`.
+    fn edit(&mut self, _file_id: &str, _op: EditOp) -> bool {
+        false
+    }
+    /// What is under a point of a page (the caret goes there, or the selection grows). `false`: not taken.
+    fn hit(&mut self, _file_id: &str, _page: u32, _x_pt: f32, _y_pt: f32, _mode: HitMode) -> bool {
+        false
+    }
+    /// Ask for the selection as text (answered `EditAnswer::Clip`). `false`: not taken.
+    fn copy_selection(&mut self, _file_id: &str) -> bool {
+        false
+    }
+    /// Ask for the slide layouts' names (answered `EditAnswer::Layouts`). `false`: not taken.
+    fn layouts(&mut self, _file_id: &str) -> bool {
+        false
+    }
+    /// Insert an image (PNG or JPEG bytes, wiped when dropped). `false`: not taken.
+    fn insert_image(&mut self, _file_id: &str, _bytes: Zeroizing<Vec<u8>>, _png: bool) -> bool {
+        false
+    }
+    /// The editor's next answer, if any arrived.
+    fn poll_edit(&mut self, _file_id: &str) -> Option<EditAnswer> {
+        None
+    }
+    /// Make a new document of `kind` from `template` in `folder` (`None`: the top). The answer is `settled`.
+    fn create_document(&mut self, _folder: Option<&str>, _name: &str, _kind: EditKind, _template: Template) -> bool {
+        false
+    }
+    /// An unsaved editing of this file that this PC kept, if any.
+    fn recovery(&self, _file_id: &str) -> Option<RecoveryOffer> {
+        None
+    }
+    /// Open the kept editing (answered `EditAnswer::Restored`). `false`: not taken.
+    fn restore(&mut self, _file_id: &str) -> bool {
+        false
+    }
+    /// Drop the kept editing.
+    fn discard_recovery(&mut self, _file_id: &str) {}
+    /// The account's files with a kept editing, newest first: the file's id and the editing's time ("14:32"). For the
+    /// notice after unlock.
+    fn recovery_pending(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// How long until this source next reads whether a newer version arrived (DW-1519), while it reads one: the
     /// window asks to be woken then, so the banner comes without a press. `None`: it does not read.
     fn next_check(&self) -> Option<std::time::Duration> {
@@ -772,6 +859,13 @@ pub struct FixtureViewerSource {
     pub conflict: bool,
     /// Which board frame's office document is handed over.
     pub office: super::office::board::Case,
+    /// The editor's answers not yet polled, and the revision they reached.
+    pub edit_answers: Vec<EditAnswer>,
+    pub edit_revision: u64,
+    /// The revision of the last save that landed (a save becomes the next version).
+    pub saved_revision: u64,
+    /// A kept editing the board's recovery offer shows.
+    pub offer: Option<RecoveryOffer>,
 }
 
 impl FixtureViewerSource {
@@ -784,6 +878,34 @@ impl FixtureViewerSource {
         Newer {
             from: "Anna's iPhone".into(),
             at: "09:14".into(),
+        }
+    }
+
+    /// An `Edited` with a caret on page one at `revision`.
+    fn edited(revision: u64, can_redo: bool) -> Edited {
+        use beebeeb_office_protocol::office::{Dirty, ListKind, Marks, PageRect, ParaStyle, RectPt, TextAlign};
+        Edited {
+            revision,
+            caret: Some(PageRect {
+                page: 0,
+                rect: RectPt { x: 72.0, y: 96.0, w: 1.0, h: 14.0 },
+            }),
+            selection: Vec::new(),
+            can_undo: revision > 0,
+            can_redo,
+            dirty: Dirty::All,
+            pages: None,
+            cells: Vec::new(),
+            slides: None,
+            marks: Marks {
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                style: ParaStyle::Normal,
+                align: TextAlign::Left,
+                list: ListKind::None,
+            },
         }
     }
 
@@ -960,6 +1082,66 @@ impl ViewerSource for FixtureViewerSource {
         Ok(file)
     }
 
+    fn can_edit(&self, file_id: &str) -> bool {
+        file_id == board::DOCX
+    }
+
+    /// The fixture's edit: the next revision, the caret after the typed text on page one.
+    fn edit(&mut self, file_id: &str, op: EditOp) -> bool {
+        self.calls.push(format!("edit {file_id}"));
+        if file_id != board::DOCX {
+            return false;
+        }
+        self.edit_revision += 1;
+        let can_redo = matches!(op, EditOp::Undo);
+        let answer = Self::edited(self.edit_revision, can_redo);
+        self.edit_answers.push(EditAnswer::Edited(answer));
+        true
+    }
+
+    fn hit(&mut self, file_id: &str, _page: u32, _x_pt: f32, _y_pt: f32, _mode: HitMode) -> bool {
+        self.calls.push(format!("hit {file_id}"));
+        file_id == board::DOCX && {
+            self.edit_answers.push(EditAnswer::Edited(Self::edited(self.edit_revision, false)));
+            true
+        }
+    }
+
+    fn copy_selection(&mut self, file_id: &str) -> bool {
+        self.calls.push(format!("copy {file_id}"));
+        file_id == board::DOCX && {
+            self.edit_answers.push(EditAnswer::Clip {
+                text: "Service agreement".into(),
+                html: None,
+            });
+            true
+        }
+    }
+
+    fn poll_edit(&mut self, _file_id: &str) -> Option<EditAnswer> {
+        (!self.edit_answers.is_empty()).then(|| self.edit_answers.remove(0))
+    }
+
+    fn recovery(&self, _file_id: &str) -> Option<RecoveryOffer> {
+        self.offer.clone()
+    }
+
+    fn restore(&mut self, file_id: &str) -> bool {
+        self.calls.push(format!("restore {file_id}"));
+        match self.offer.take() {
+            Some(offer) => {
+                self.edit_answers.push(EditAnswer::Restored { at: offer.at });
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn discard_recovery(&mut self, file_id: &str) {
+        self.calls.push(format!("discard recovery {file_id}"));
+        self.offer = None;
+    }
+
     /// The fixture saves the agreement as the board's DW-1553 shows it: the next version, at 09:41.
     fn save_document(&mut self, file_id: &str, base: u32) -> SaveOutcome {
         self.calls.push(format!("save document {file_id} from version {base}"));
@@ -974,6 +1156,7 @@ impl ViewerSource for FixtureViewerSource {
                 version: base + 1,
             });
         }
+        self.saved_revision = self.edit_revision;
         let table = self.office == super::office::board::Case::Table;
         self.office = super::office::board::Case::Selected;
         let mut outcome = Self::agreement_saved(base + 1, None);

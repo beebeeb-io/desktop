@@ -20,11 +20,13 @@ serde_json = "1"
 sha2 = "0.10"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "7d5b5f97892bb10cd027c0285fdc6af00476140b" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "7d5b5f97892bb10cd027c0285fdc6af00476140b" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1" }
 # The two-level lock's rules (`flows::lock`): I/O-free, no transport and no store of its own.
-beebeeb-api = { git = "https://github.com/beebeeb-io/core", rev = "7d5b5f97892bb10cd027c0285fdc6af00476140b" }
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "7d5b5f97892bb10cd027c0285fdc6af00476140b" }
+beebeeb-api = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1" }
+# The kept-key rule (`auth::kept_key`): when a key this computer kept may be offered, and what the proof means.
+beebeeb-client = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1", default-features = false, features = ["auth"] }
 # The running engine (API client, sync bridge, credential stores).
 toml = "0.8"
 dirs = "6"
@@ -43,8 +45,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 bytes = "1"
 rand = "0.8"
 bip39 = { version = "2", default-features = false, features = ["std"] }
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "7d5b5f97892bb10cd027c0285fdc6af00476140b" }
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "7d5b5f97892bb10cd027c0285fdc6af00476140b" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1" }
 hostname = "0.4"
 # Production on unix (staged copies) and the test-support helpers.
 tempfile = "3"
@@ -102,6 +104,9 @@ windows = { version = "0.58", features = [
     #   - Security_Cryptography: CryptographicBuffer::CreateFromByteArray to build
     #     the opaque Context IBuffer from the Id bytes without hand-rolling a
     #     DataWriter.
+    # power.rs: metered network (connection profile cost) and battery saver (GetSystemPowerStatus).
+    "Networking_Connectivity",
+    "Win32_System_Power",
     "Storage_Provider",
     "Storage",
     "Storage_Streams",
@@ -177,7 +182,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aes-gcm = "0.10"
 json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "7d5b5f97892bb10cd027c0285fdc6af00476140b", features = ["test-support"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "a5176f974649bf6c69000188b982898b216046a1", features = ["test-support"] }
 # The crate's own integration tests (`tests/`) link the lib with its test helpers (the in-memory credential store,
 # the fake API, the sandboxed config dir): a dev edge only, as in the native app.
 beebeeb-engine = { path = ".", features = ["test-support"] }
@@ -196,6 +201,7 @@ dev-viewer = []
 # Test helpers (`*_for_test`, in-memory databases, injected failures) for the tests of a crate that depends on this
 # one. Never enabled by a release build: the native app turns it on under `[dev-dependencies]` only.
 test-support = ["direct-state-db"]
+macos-test-engine = ["test-support"]
 # Task 2475: `bb-fake-server` (below), the test helpers' fake account on loopback for native checks of a TEST build.
 # Dev-only: it implies `test-support`, so a release build of it does not compile (`lib.rs`); no app names it
 # (`tests/fake_server.rs`); the default feature set does not build it.

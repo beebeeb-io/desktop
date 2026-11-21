@@ -16,15 +16,19 @@ impl State {
         for change in self.actions.source.changes() {
             match change {
                 Change::Copied { after, item } => {
-                    // A copy made in a folder that is no longer shown is there when it is shown again.
-                    if let Some(at) = self.listing.items.iter().position(|i| i.id == after) {
+                    // A copy made in a folder that is no longer shown is there when it is shown again. One that the
+                    // read after a check brought in already is selected, not shown twice (`reread.rs`).
+                    if self.listing.items.iter().any(|i| i.id == item.id) {
+                        copies.push(item.id.clone());
+                    } else if let Some(at) = self.listing.items.iter().position(|i| i.id == after) {
                         copies.push(item.id.clone());
                         self.listing.items.insert(at + 1, *item);
                     }
                 }
                 Change::Made { item } => {
-                    // A folder made in the folder shown stands in its rows, in the folder's order.
-                    if item.parent_id == self.listing.folder.id {
+                    // A folder made in the folder shown stands in its rows, in the folder's order, once (the read after
+                    // a check may have brought it in already: `reread.rs`).
+                    if item.parent_id == self.listing.folder.id && !self.listing.items.iter().any(|i| i.id == item.id) {
                         self.listing.items.push((*item).clone());
                         self.apply_sort();
                     }

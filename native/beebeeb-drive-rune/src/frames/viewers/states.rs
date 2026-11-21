@@ -5,17 +5,19 @@
 //! not a failed decryption ([`Stopped`]), and a file that is in Beebeeb and is not shown here
 //! ([`NoPreview`]). They are drawn with the same parts as the board's three.
 
-use rune::{Align, El, Icon, col, el, row};
+use rune::{El, Icon, col, row};
 
-use super::chrome::{ButtonKind, Dot, Status, button};
+use super::chrome::{Dot, Status};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::source::{Body, NoPreview, OpenFile, Origin, Stopped, percent, progress_words, size_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
 use crate::theme::tokens::Theme;
-use crate::ui::kit;
+use crate::ui::view_state::{self, ViewState, view_state};
 
-/// The title's key: focus moves to it when a state replaces what was on screen.
-pub const TITLE_KEY: &str = "state-title";
+/// The key focus moves to when a state replaces what was on screen: the state's first button (`ui::view_state`
+/// titles are not focus stops).
+pub const TITLE_KEY: &str = "state-btn-0";
 
 fn stage(content: El, t: &Theme) -> El {
     col()
@@ -27,36 +29,65 @@ fn stage(content: El, t: &Theme) -> El {
         .child(content)
 }
 
-fn tile(icon: &'static Icon, red: bool, t: &Theme) -> El {
-    let (wash, ink) = if red {
-        (style::tile_red(t), style::red(t))
-    } else {
-        (style::tile_neutral(t), t.text_secondary)
-    };
-    el().key("state-tile")
-        .size(52.0, 52.0)
-        .radius(15.0)
-        .fill(wash)
-        .center()
-        .child(kit::glyph("state-icon", icon, 26.0, ink))
+/// The button row under a state's words.
+fn actions(buttons: Vec<El>) -> El {
+    row().key("state-actions").gap(8.0).children(buttons)
 }
 
-fn heading(words: &str, t: &Theme) -> El {
-    kit::label(TITLE_KEY, words, style::TITLE, t.text)
-        .role("heading")
-        .level(1)
-        .focusable(true)
-        .tab_index(-1)
-        .no_focus_ring()
+/// A state's words and actions through `ui::view_state`, centred on the stage.
+fn empty_view(icon: &'static Icon, title: &str, body: &str, buttons: Vec<El>, t: &Theme) -> El {
+    stage(
+        view_state(
+            ViewState::Empty {
+                key: "state",
+                icon,
+                title,
+                body,
+                action: (!buttons.is_empty()).then(|| actions(buttons)),
+            },
+            t,
+        ),
+        t,
+    )
 }
 
-/// A sentence at most 30 characters of the type wide (`.kit-empty .t-sub`), centred.
-fn sentence(words: String, t: &Theme) -> El {
-    let width = 30.0 * rune::text::advance("0", style::SUB);
-    kit::label("state-sub", words, style::SUB, t.text_secondary)
-        .wrap()
-        .w(width)
-        .align(Align::Center)
+fn failed_view(title: &str, why: &str, buttons: Vec<El>, t: &Theme) -> El {
+    stage(
+        view_state(
+            ViewState::Failed {
+                key: "state",
+                title,
+                why,
+                retry: (!buttons.is_empty()).then(|| actions(buttons)),
+            },
+            t,
+        ),
+        t,
+    )
+}
+
+/// A file with nothing in it (zero bytes, an archive with no entries): said, not drawn as a blank page.
+pub fn empty_file(name: &str, t: &Theme) -> El {
+    empty_view(
+        &icons::INFO,
+        "This file is empty",
+        &format!("{name} has nothing in it, so there is nothing to show. Open it in another app to add something."),
+        vec![button(
+            keys("state-btn-0"),
+            "Open in another app\u{2026}",
+            None,
+            Variant::Secondary,
+            Size::Md,
+            ButtonState::Enabled,
+            t,
+        )
+        .on_press(|s: &mut State| {
+            if let Some(ui) = ui(s) {
+                ui.intent(Intent::OpenInAnotherApp);
+            }
+        })],
+        t,
+    )
 }
 
 /// The status line's right side for bytes that were decrypted, looked at, and dropped.
@@ -116,7 +147,7 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
             dot: Dot::Warn,
             text: "No preview here".into(),
             details: match why {
-                NoPreview::NoViewer | NoPreview::TooBig { .. } => "Nothing was downloaded",
+                NoPreview::NoViewer | NoPreview::Heic | NoPreview::TooBig { .. } => "Nothing was downloaded",
                 NoPreview::OverLimit { .. } => "Stopped; nothing was kept",
                 NoPreview::Unreadable
                 | NoPreview::PictureTooBig { .. }
@@ -137,85 +168,50 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
     })
 }
 
-/// DW-1516.
+/// DW-1516: the loading strip with the amount, and Cancel.
 fn decrypting(file: &OpenFile, done: u64, total: u64, t: &Theme) -> El {
-    // The amount is a machine's number: mono, inside the sentence (`.t-sub .font-mono`).
-    let lead = format!("{} \u{00B7}", file.name);
-    let lead_w = rune::text::advance(&format!("{lead} "), style::SUB);
-    let sentence = row()
-        .key("state-sub-row")
-        .child(kit::label("state-sub", lead, style::SUB, t.text_secondary).w(lead_w))
-        .child(kit::label(
-            "state-sub-mono",
-            progress_words(done, total),
-            style::SUB_MONO,
-            t.text_secondary,
-        ));
-    let pct = percent(done, total);
+    let words = format!(
+        "Decrypting {} on this PC \u{00B7} {} ({} percent)",
+        file.name,
+        progress_words(done, total),
+        percent(done, total)
+    );
     let content = col()
         .key("state")
         .w(300.0)
         .items_center()
         .gap(8.0)
-        .child(tile(&icons::LOCK, false, t))
-        .child(heading("Decrypting on this PC", t).mt(4.0))
-        .child(sentence)
-        .child(
-            el().key("state-bar")
-                .role("progressbar")
-                .label(format!("Decrypting, {pct} percent"))
-                .w_full()
-                .h(4.0)
-                .mt(4.0)
-                .radius(2.0)
-                .fill(style::bar_track(t))
-                .child(
-                    el().key("state-bar-fill")
-                        .w(300.0 * pct as f32 / 100.0)
-                        .h(4.0)
-                        .radius(2.0)
-                        .fill(t.text_secondary),
-                ),
-        )
+        .child(view_state(ViewState::Loading { words: &words }, t))
         // Closing cancels: nothing is kept half-decrypted.
-        .child(button("state-btn-0", "Cancel", ButtonKind::Ghost, true, t).on_press(super::close));
+        .child(button(keys("state-btn-0"), "Cancel", None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t).on_press(super::close));
     stage(content, t)
-}
-
-fn actions(buttons: Vec<El>) -> El {
-    row().key("state-actions").gap(8.0).mt(8.0).children(buttons)
 }
 
 /// DW-1517.
 fn too_large(file: &OpenFile, size: u64, free: u64, t: &Theme) -> El {
     let size = size_words(size);
     let free = size_words(free);
-    let content = col()
-        .key("state")
-        .items_center()
-        .gap(8.0)
-        .child(tile(&icons::FILE_VIDEO, false, t))
-        .child(heading("Too large to preview here", t))
-        .child(sentence(
-            format!(
-                "{} is {size}. Opening it decrypts it on this PC, which needs that much free space; there's {free}.",
-                file.name
-            ),
-            t,
-        ))
-        .child(actions(vec![
-            button("state-btn-0", "Free up space\u{2026}", ButtonKind::Outline, false, t).on_press(|s: &mut State| {
+    empty_view(
+        &icons::FILE_VIDEO,
+        "Too large to preview here",
+        &format!(
+            "{} is {size}. Opening it decrypts it on this PC, which needs that much free space; there's {free}.",
+            file.name
+        ),
+        vec![
+            button(keys("state-btn-0"), "Free up space\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::FreeUpSpace);
                 }
             }),
-            button("state-btn-1", "Download to\u{2026}", ButtonKind::Outline, false, t).on_press(|s: &mut State| {
+            button(keys("state-btn-1"), "Download to\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::DownloadTo);
                 }
             }),
-        ]));
-    stage(content, t)
+        ],
+        t,
+    )
 }
 
 /// Try again / Open it again: asked of the source only while the shell's session gate is open (a window still
@@ -231,26 +227,19 @@ fn retry(s: &mut State) {
 
 /// DW-1518.
 fn failed(t: &Theme) -> El {
-    let content = col()
-        .key("state")
-        .role("alert")
-        .items_center()
-        .gap(8.0)
-        .child(tile(&icons::ALERT, true, t))
-        .child(heading("Couldn't decrypt this file", t))
-        .child(sentence(
-            "Nothing changed: the copy in Beebeeb is untouched. This can happen when a download is cut off.".into(),
-            t,
-        ))
-        .child(actions(vec![
-            button("state-btn-0", "Try again", ButtonKind::Outline, false, t).on_press(retry),
-            button("state-btn-1", "Report a problem", ButtonKind::Ghost, false, t).on_press(|s: &mut State| {
+    failed_view(
+        "Couldn't decrypt this file",
+        "Nothing changed: the copy in Beebeeb is untouched. This can happen when a download is cut off.",
+        vec![
+            button(keys("state-btn-0"), view_state::TRY_AGAIN, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(retry),
+            button(keys("state-btn-1"), "Report a problem", None, Variant::Ghost, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::ReportProblem);
                 }
             }),
-        ]));
-    stage(content, t)
+        ],
+        t,
+    )
 }
 
 /// Opening stopped, and it was not a failed decryption: what happened, and the one thing to do.
@@ -306,20 +295,11 @@ fn stopped(why: Stopped, t: &Theme) -> El {
         } else {
             "Try again"
         };
-        button("state-btn-0", label, ButtonKind::Outline, false, t).on_press(retry)
+        button(keys("state-btn-0"), label, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(retry)
     } else {
-        button("state-btn-0", "Close", ButtonKind::Outline, false, t).on_press(super::close)
+        button(keys("state-btn-0"), "Close", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(super::close)
     };
-    let content = col()
-        .key("state")
-        .role("alert")
-        .items_center()
-        .gap(8.0)
-        .child(tile(&icons::ALERT, false, t))
-        .child(heading(title, t))
-        .child(sentence(words.into(), t))
-        .child(actions(vec![act]));
-    stage(content, t)
+    failed_view(title, words, vec![act], t)
 }
 
 /// The file is in Beebeeb and is not shown here: why, and the ways out. `copies`: "Save a copy…" has somewhere to
@@ -336,6 +316,14 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
             "No preview for this kind of file yet",
             format!(
                 "{} is safe in Beebeeb. This app can't show this kind of file yet, so nothing was downloaded.",
+                file.name
+            ),
+        ),
+        NoPreview::Heic => (
+            "HEIC photos can\u{2019}t be shown here yet",
+            format!(
+                "{} is safe in Beebeeb. HEIC photos can\u{2019}t be shown at full size on this PC yet, so nothing was \
+                 downloaded. Open it in your default app.",
                 file.name
             ),
         ),
@@ -392,42 +380,34 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
             ),
         ),
     };
-    let content = col()
-        .key("state")
-        .items_center()
-        .gap(8.0)
-        .child(tile(&icons::INFO, false, t))
-        .child(heading(title, t))
-        .child(sentence(words, t))
-        .child(actions({
-            let mut buttons = vec![
-                button(
-                    "state-btn-0",
-                    "Open in another app\u{2026}",
-                    ButtonKind::Outline,
-                    false,
-                    t,
-                )
-                .on_press(|s: &mut State| {
+    let mut buttons = vec![
+        button(keys("state-btn-0"), &heic_button(why), None, Variant::Secondary, Size::Md, ButtonState::Enabled, t)
+            .on_press(|s: &mut State| {
+                if let Some(ui) = ui(s) {
+                    ui.intent(Intent::OpenInAnotherApp);
+                }
+            }),
+    ];
+    if copies {
+        buttons.push(
+            button(keys("state-btn-1"), "Save a copy\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
+                |s: &mut State| {
                     if let Some(ui) = ui(s) {
-                        ui.intent(Intent::OpenInAnotherApp);
+                        ui.intent(Intent::SaveCopy);
                     }
-                }),
-            ];
-            if copies {
-                buttons.push(
-                    button("state-btn-1", "Save a copy\u{2026}", ButtonKind::Outline, false, t).on_press(
-                        |s: &mut State| {
-                            if let Some(ui) = ui(s) {
-                                ui.intent(Intent::SaveCopy);
-                            }
-                        },
-                    ),
-                );
-            }
-            buttons
-        }));
-    stage(content, t)
+                },
+            ),
+        );
+    }
+    empty_view(&icons::INFO, title, &words, buttons, t)
+}
+
+/// The first button of the no-preview state: a HEIC names the system's app, as Photos does.
+fn heic_button(why: NoPreview) -> String {
+    match why {
+        NoPreview::Heic => format!("Open in {}", crate::frames::show_in_folder::os_app_label()),
+        _ => "Open in another app\u{2026}".to_string(),
+    }
 }
 
 /// The body of a state. `copies`: see [`not_previewable`]. `origin`: where the bytes a state speaks of were

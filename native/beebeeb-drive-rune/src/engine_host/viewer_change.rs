@@ -154,7 +154,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// The press's stamp for `file_id`: the session, the account, the opening, what the file is shown as and its
     /// name.
-    fn stamp_of(&self, file_id: &str) -> Option<Stamp> {
+    pub(super) fn stamp_of(&self, file_id: &str) -> Option<Stamp> {
         let (opening, _) = self.change_facts().filter(|(opening, _)| opening.file_id == file_id)?;
         Some(Stamp {
             session: opening.session,
@@ -168,7 +168,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// Run `work` on a worker; what it settles, and the version the view then holds, is sent back for the stamp's
     /// session, account and opening.
-    fn spawn(
+    pub(super) fn spawn(
         &mut self,
         file_id: &str,
         stamp: Stamp,
@@ -577,14 +577,14 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
 /// The press's stamp: the session, the account and the opening the change is for; what the file is shown as and
 /// its name (a Keep both names the copy after it).
-struct Stamp {
-    session: SessionGeneration,
-    account: Option<String>,
-    opening: u64,
+pub(super) struct Stamp {
+    pub(super) session: SessionGeneration,
+    pub(super) account: Option<String>,
+    pub(super) opening: u64,
     /// The engine's opening of the file the change is for (`Opening::epoch`): only its saves are its own.
-    epoch: u64,
-    shows: Shows,
-    name: String,
+    pub(super) epoch: u64,
+    pub(super) shows: Shows,
+    pub(super) name: String,
 }
 
 /// The body of `text` as the file is shown.
@@ -603,6 +603,14 @@ fn settle_save(
     text: &str,
     shows: Shows,
 ) -> (Settled, Option<i64>) {
+    // How the save ended, in the log (w36-txt-save-enter: a save that was stored here but not sent left no line at
+    // all, on the Windows test machine). The outcome's word only: never the name, the text or the file's id.
+    match &saved {
+        Ok(SaveEnd::Saved { version }) => tracing::info!(version, "viewer save: sent"),
+        Ok(SaveEnd::Queued { base }) => tracing::warn!(base, "viewer save: stored on this PC, not sent yet"),
+        Ok(SaveEnd::Conflict { theirs }) => tracing::info!(theirs, "viewer save: a newer version exists, asked"),
+        Err(refused) => tracing::warn!(?refused, "viewer save: not saved"),
+    }
     match saved {
         Ok(SaveEnd::Saved { version }) => match body_of_text(text, shows) {
             Some(body) => (
@@ -679,7 +687,7 @@ fn earlier(settled: Settled, file_id: &str) -> Option<Settled> {
         }
         Settled::Conflict(_) => "Your earlier edit was not saved: the file changed since you opened it".to_string(),
         Settled::Failed | Settled::Refused(_) => "Your earlier edit was not saved".to_string(),
-        Settled::Opened { .. } | Settled::Newer(_) | Settled::Said(_) => String::new(),
+        Settled::Opened { .. } | Settled::SavedRevision(_) | Settled::Newer(_) | Settled::Said(_) => String::new(),
     };
     wipe(settled);
     (!said.is_empty()).then_some(Settled::Said(said))

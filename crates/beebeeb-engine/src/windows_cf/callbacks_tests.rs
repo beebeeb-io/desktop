@@ -86,7 +86,7 @@ fn safe_join_rejects_unsafe_paths() {
 }
 
 /// Desktop 0.8.15 (deliverable 2), the hydration storm. 0.8.14's guard opened every placeholder
-/// for reading (as the reparse point); on Guus's PC 5,294 cloud-only files were then fetched
+/// for reading (as the reparse point); on the Windows test machine 5,294 cloud-only files were then fetched
 /// whole, one after another, in the guard's row order, ~42 GB in 2 h, until C: was full. On a
 /// temporary sync root connected with a counting FETCH_DATA callback (which fails every
 /// fetch, so nothing is served), this measures what asks for a cloud-only file's bytes: the

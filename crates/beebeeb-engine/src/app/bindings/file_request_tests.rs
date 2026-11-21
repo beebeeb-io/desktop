@@ -16,7 +16,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, StateDb};
@@ -71,7 +71,7 @@ impl Fixture {
         self.engine.file_request_create_for(self.engine.session_turn(), choices)
     }
 
-    fn copy(&self, id: &str) -> Result<MadeLink, ShareLinkError> {
+    fn copy(&self, id: &str) -> Result<MadeLink, RequestCopyError> {
         self.engine.file_request_copy_for(self.engine.session_turn(), id)
     }
 
@@ -171,7 +171,7 @@ fn fixture() -> Fixture {
         state_dir: crate::state_paths::init_for_test(),
         api_base: api.base.clone(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     engine.use_local_state_for_test(path);
     signed_in(&engine);
     Fixture {
@@ -379,4 +379,75 @@ fn a_copied_link_read_for_a_session_that_ended_meanwhile_is_not_handed_over() {
         ShareLinkError::NotSignedIn
     );
     assert_eq!(f.count(LIST), 1, "it was read before the session moved");
+}
+
+/// The session moves at the top of the press's next request, before that request's own session check.
+fn before_next_send(engine: &Arc<TestEngine>) {
+    let engine = engine.clone();
+    crate::app::bindings::link_session::tests::BEFORE_SEND
+        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || signed_in(&engine))));
+}
+
+#[test]
+fn a_press_of_another_session_is_refused_before_any_of_its_choices_is_looked_at() {
+    // The run's session check (`link_session.rs`, `Engine::link_run`): a press of a session that is gone is refused
+    // as not signed in, never told "not found" about a folder it chose.
+    let f = fixture();
+    let turn = f.engine.session_turn();
+    signed_in(&f.engine);
+    let into_nothing = RequestChoices {
+        folder_id: Some("../x".into()),
+        ..choices("Invented drop")
+    };
+    assert_eq!(
+        f.engine.file_request_create_for(turn, &into_nothing).unwrap_err(),
+        ShareLinkError::NotSignedIn
+    );
+    assert_eq!(f.sent(), 0, "nothing was sent");
+}
+
+#[test]
+fn a_session_that_moves_before_the_request_leaves_sends_nothing() {
+    // The send's session check (`link_session.rs`, `Engine::link_send`): the session moves after the press's run
+    // and before its request; the request never leaves.
+    let f = fixture();
+    before_next_send(&f.engine);
+    assert_eq!(
+        f.create(&choices("Invented drop")).unwrap_err(),
+        ShareLinkError::NotSignedIn
+    );
+    assert_eq!(f.count(CREATE), 0, "the request never left");
+    before_next_send(&f.engine);
+    assert_eq!(f.copy(FOREIGN_REQUEST).unwrap_err(), ShareLinkError::NotSignedIn);
+    assert_eq!(f.count(LIST), 0, "the list was never read");
+}
+
+#[test]
+fn a_closed_requests_link_is_refused_with_words_and_nothing_is_copied() {
+    let f = fixture();
+    f.create(&choices("Invented drop")).expect("a request");
+    let id = text(&f.server.lock().unwrap().rows[0], "id").to_string();
+    f.server.lock().unwrap().rows[0]["closed"] = json!(true);
+    let refused = f.copy(&id).unwrap_err();
+    assert_eq!(refused, RequestCopyError::Closed);
+    assert_eq!(refused.words(), "This request is closed");
+    // Closed is said first, as the Shared list draws it, even when its expiry has passed too.
+    f.server.lock().unwrap().rows[0]["expires_at"] = json!("2020-01-02T03:04:05Z");
+    assert_eq!(f.copy(&id).unwrap_err(), RequestCopyError::Closed);
+    assert_eq!(f.count(CREATE), 1, "nothing new was made");
+}
+
+#[test]
+fn an_expired_requests_link_is_refused_with_words_and_nothing_is_copied() {
+    let f = fixture();
+    let made = f.create(&choices("Invented drop")).expect("a request");
+    let id = text(&f.server.lock().unwrap().rows[0], "id").to_string();
+    f.server.lock().unwrap().rows[0]["expires_at"] = json!("2020-01-02T03:04:05Z");
+    let refused = f.copy(&id).unwrap_err();
+    assert_eq!(refused, RequestCopyError::Expired);
+    assert_eq!(refused.words(), "This request has expired");
+    // An expiry still ahead: the link is copied as before.
+    f.server.lock().unwrap().rows[0]["expires_at"] = json!("2999-01-02T03:04:05Z");
+    assert_eq!(f.copy(&id).expect("an open request's link").expose(), made.expose());
+    assert_eq!(f.count(CREATE), 1, "nothing new was made");
 }

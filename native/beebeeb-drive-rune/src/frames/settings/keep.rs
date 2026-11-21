@@ -18,6 +18,7 @@ use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::SUB;
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use rune::tok::Family;
 use rune::{Align, El, TextStyle, col, el, row};
 
@@ -45,6 +46,8 @@ pub struct Folder {
 /// The folder list, as the source has it.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Keep {
+    /// The first answer is still out.
+    Loading,
     /// It could not load: nothing is changed (DW-0784c).
     Failed,
     /// The account's folders (none: DW-0784d), and the size of everything in the account
@@ -225,7 +228,7 @@ impl KeepDraft {
 pub fn open(ui: &mut SettingsUi) {
     ui.more.keep = match ui.drive.keep() {
         Keep::Ready { folders, total_mb } => KeepDraft::of(folders, total_mb),
-        Keep::Failed => KeepDraft::default(),
+        Keep::Failed | Keep::Loading => KeepDraft::default(),
     };
     ui.dialog = Some(Dialog::Keep);
 }
@@ -454,63 +457,44 @@ fn legend(t: &Theme) -> El {
         .child(entry(2, Check::Off, "Online only"))
 }
 
-/// A state of the dialog without a tree: a tile, what is the case, and one thing to do.
-fn stated(tile: El, head: &str, words: &str, max_w: Option<f32>, action: Option<El>, t: &Theme) -> El {
-    let mut says = kit::label("tree-state-sub", words, SUB, t.text_tertiary)
-        .wrap()
-        .align(Align::Center);
-    if let Some(w) = max_w {
-        says = says.w(w);
-    }
-    let mut b = tree_box()
-        .role("status")
-        .label(format!("{head} {words}"))
-        .items_center()
-        .py(40.0)
-        .px(24.0)
-        .gap(8.0)
-        .fill(t.card)
-        .box_shadow(kit::ring_inset(t.separator))
-        .child(tile)
-        .child(kit::label("tree-state-head", head, type_::HEAD, t.text))
-        .child(says);
-    if let Some(action) = action {
-        b = b.child(action);
-    }
-    b
-}
-
 /// The dialog (DW-0784, DW-0784c, DW-0784d). `first`: the number of its first button, after
 /// the pane's own.
 pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
     let draft = &ui.more.keep;
     let mut n = first;
     let (body, sum, changed) = match ui.drive.keep() {
+        Keep::Loading => (
+            vec![tree_box().child(view_state(ViewState::Loading { words: "Loading your folders…" }, t))],
+            None,
+            false,
+        ),
         Keep::Failed => {
-            let again = controls::button(n, "Try again", None, Emphasis::Plain, t).on_press(|s: &mut State| {
+            let again = try_again("tree-state", t).on_press(|s: &mut State| {
                 s.settings.drive.reload_keep();
                 open(&mut s.settings);
             });
-            n += 1;
-            let b = stated(
-                notices::tile(0, Tone::Red, &ic::WARN_CIRCLE, t),
-                "Couldn't load your folders.",
-                "Nothing was changed. The folders you keep stay on this PC.",
-                None,
-                Some(again),
+            let b = tree_box().child(view_state(
+                ViewState::Failed {
+                    key: "tree-state",
+                    title: "Couldn't load your folders.",
+                    why: "Nothing was changed. The folders you keep stay on this PC.",
+                    retry: Some(again),
+                },
                 t,
-            );
+            ));
             (vec![b], None, false)
         }
         Keep::Ready { folders, .. } if folders.is_empty() => {
-            let b = stated(
-                notices::tile(0, Tone::Neutral, &ic::FOLDER, t),
-                "No folders yet",
-                "Once you add folders, you can choose which ones stay on this PC. Files you keep one by one are in Available offline.",
-                Some(302.81),
-                None,
+            let b = tree_box().child(view_state(
+                ViewState::Empty {
+                    key: "tree-state",
+                    icon: &ic::FOLDER,
+                    title: "No folders yet",
+                    body: "Once you add folders, you can choose which ones stay on this PC. Files you keep one by one are in Available offline.",
+                    action: None,
+                },
                 t,
-            );
+            ));
             (vec![b], None, false)
         }
         Keep::Ready { folders, total_mb } => {
@@ -652,55 +636,20 @@ pub fn question(ui: &SettingsUi, first: usize, t: &Theme) -> El {
     .modal(false, |s: &mut State| s.settings.dialog = Some(Dialog::Keep))
 }
 
-/// `settings_dialog::alert` for a question that does not fit one line: the title goes on to
-/// a second line (`.wn-dlg-alert .t-title` wraps), everything else is the same 380 pt alert.
+/// An alert for a question that does not fit one line (the Alert head's title wraps).
 fn alert(name: &str, tile: El, title: &str, sub: &str, foot: Vec<El>, t: &Theme) -> El {
-    const WIDTH: f32 = 380.0;
-    let words = col()
-        .key("dlg-alert-words")
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(6.0)
-        .child(
-            kit::label("dlg-title", title, dialogs::DIALOG_TITLE, t.text)
-                .role("heading")
-                .level(2)
-                .wrap()
-                .w_full(),
-        )
-        .child(kit::label("dlg-sub", sub, SUB, t.text_tertiary).wrap());
-    let head = row()
-        .key("dlg-head")
-        .pt(20.0)
-        .px(24.0)
-        .pb(16.0)
-        .gap(14.0)
-        .items_start()
-        .child(tile)
-        .child(words);
-    let each = (WIDTH - 48.0 - 8.0 * (foot.len().max(1) - 1) as f32) / foot.len().max(1) as f32;
-    let dlg = col()
-        .key("dlg")
-        .role("alertdialog")
-        .label(name)
-        .pixel_snap(false)
-        .w(WIDTH)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, rune::Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(
-            col()
-                .key("dlg-clip")
-                .w_full()
-                .clip_rounded(8.0)
-                .child(head)
-                .child(dialogs::foot_row(foot, Some(each), t)),
-        );
-    col()
-        .key("scrim")
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .center()
-        .fill(dialogs::scrim_color(t))
-        .child(dlg)
+    use crate::ui::dialog::{Dialog as Card, Foot, Head, dialog, scrim};
+    scrim(
+        0.0,
+        dialog(
+            Card {
+                alert: true,
+                head: Head::Alert { tile, title, sub },
+                foot: Foot::Even(foot),
+                ..Card::new("dlg", name, 380.0)
+            },
+            t,
+        ),
+        t,
+    )
 }

@@ -1,12 +1,12 @@
 # Desktop 0.9.0 on Windows: the installer and the updater without Tauri
 
-Lane P1, 2026-11-11. Ruling (Guus, 2026-11-11): 0.9.0 is the native Rust app (`native/beebeeb-drive-rune`, binary
+Lane P1, 2026-11-11. Ruling (owner, 2026-11-11): 0.9.0 is the native Rust app (`native/beebeeb-drive-rune`, binary
 `beebeeb-drive`), shipped **in place**: a 0.8.x install updates to it through the updater it has and keeps its
 account, settings, `state.db`, sync folder and credentials. Amended the same day: a Tauri **0.8.25 bridge** is
 allowed and wanted. Line numbers are at `v2-native` `b9e73441`.
 
 **Amended 2026-11-11 after the independent security review of PR #283 ("Delta 2").** Where a paragraph below was
-changed it says so; the rulings behind the changes: Guus, 2026-11-11 11:40: the updater key moves into the
+changed it says so; the rulings behind the changes: the owner, 2026-11-11 11:40: the updater key moves into the
 `desktop-release` environment AND the native line gets its own, password-protected key; keep the Windows MSI;
 GitHub "Latest" shows 0.9.0 only when it is stable; the update host stays GitHub Pages for now.
 
@@ -85,7 +85,7 @@ only, and native builds are published only to `desktop/v2/{stable,beta,alpha}.js
   1. **The key.** Native installers and v2 manifests are signed by the v2 key only (§4). A client on 0.8.24 or
      older trusts only the 0.8.x key, so a native installer served to it at a legacy address fails Tauri's
      signature check and is never started. (With one shared key this lock would not exist and lock 2 alone would
-     hold: that was the design before Guus's ruling.)
+     hold: that was the design before the owner's ruling.)
   2. **The installer.** It refuses to run over an installed version below 0.8.25, in every mode, before a file is
      touched; a version that is empty or does not parse counts as below (§5). This is what stops a person who
      downloads 0.9.0 from the site and runs it over an old install.
@@ -160,7 +160,7 @@ time, but two were *resolved by* Tauri and must now be spelled out):
 
 A library: no Tauri, no UI, no network or clock of its own (`cargo tree -e normal | grep -c tauri` prints 0).
 
-**Signatures and keys (replaced in Delta 2; Guus, 2026-11-11 11:40).** The format stays the exact minisign form
+**Signatures and keys (replaced in Delta 2; the owner, 2026-11-11 11:40).** The format stays the exact minisign form
 Tauri's signer writes (it already signs a time and a file name, which Tauri ignores and we use); the verifier is
 `minisign-verify` 0.2.5, the crate Tauri's updater uses (no dependencies); legacy (not pre-hashed) signatures are
 refused, also when our own key made them (`signature.rs`, `refuses_a_legacy_signature_by_our_own_key`).
@@ -357,9 +357,9 @@ gate, the key guard. It builds the native crate (baking in the build's time), pa
 signs the installer and then the manifest with the v2 key (`tauri signer sign`, used as a signing tool; the key
 reaches it by environment only) and verifies both against the committed public key, creates `desktop-v<V>` with
 the authored notes (`make_latest: false`; a release becomes GitHub's "Latest" only when its stable manifest is
-published: job `mark-latest`, Guus 2026-11-11), stages the files and publishes them. It never writes
+published: job `mark-latest`, the owner 2026-11-11), stages the files and publishes them. It never writes
 `desktop/latest.json`, `beta.json` or `alpha.json` (the publish script refuses any path but the two below).
-**MSI (Guus, 2026-11-11: keep the Windows MSI):** this pipeline builds the NSIS installer only; a native MSI is
+**MSI (owner, 2026-11-11: keep the Windows MSI):** this pipeline builds the NSIS installer only; a native MSI is
 not designed or built here and is open (§9 Q4).
 
 **The signing boundary (Delta 2; review P1-1; details in task 2451, not repeated here).**
@@ -381,9 +381,9 @@ not designed or built here and is open (§9 Q4).
   The public key file's SHA-256 is pinned in the workflow and in `tests/nativeChannelManifest.test.ts`, and the
   crate, the key, the packaging and the release scripts have `CODEOWNERS` entries.
 - **These in-file checks are the second line.** A branch can carry its own copy of a workflow, so what holds is the
-  environment's own rules, which only Guus can set:
+  environment's own rules, which only the owner can set:
 
-**Settings Guus must make (a lane cannot change repository settings).** In `beebeeb-io/desktop` → Settings:
+**Settings the owner must make (a lane cannot change repository settings).** In `beebeeb-io/desktop` → Settings:
 
 1. Environments → `desktop-release` → Environment secrets: add `UPDATER_V2_PRIVATE_KEY` and
    `UPDATER_V2_PRIVATE_KEY_PASSWORD` (the new key), and add `TAURI_SIGNING_PRIVATE_KEY` and
@@ -391,11 +391,11 @@ not designed or built here and is open (§9 Q4).
 2. Secrets and variables → Actions → Repository secrets: **delete** `TAURI_SIGNING_PRIVATE_KEY` and
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (an environment secret wins while both exist, but the repository copy stays
    readable outside the environment until it is deleted). The v2 key is never a repository secret.
-3. Environments → `desktop-release` → Required reviewers: Guus (and Bram once provisioned); "Prevent self-review"
+3. Environments → `desktop-release` → Required reviewers: the owner (and Bram once provisioned); "Prevent self-review"
    off while there is one operator.
 4. Environments → `desktop-release` → Deployment branches and tags → Selected: `main` and `release/*`. No tag rule.
 5. Rules → Rulesets (Delta 3): a **tag** ruleset on `desktop-v*` (restrict creation, update and deletion to the
-   release workflow's actor and Guus), and a **branch** ruleset that forbids creating any branch named
+   release workflow's actor and the owner), and a **branch** ruleset that forbids creating any branch named
    `desktop-v*` (target `desktop-v*`, "Restrict creations", no bypass). The workflow refuses such a branch when it
    sees one; the ruleset stops it from existing.
 6. Branch protection on `main`: "Require review from Code Owners" on, so the `CODEOWNERS` entries bind.
@@ -447,12 +447,12 @@ Rehearsal and the lead's commands: `packaging/windows/README.md`.
 3. **A record never written** (not security): `record_installed_release_channel` after `download_and_install` is
    unreachable on Windows (`update_window.rs:522`, `updater.rs:865`).
 
-## 9. Open questions that are Guus's
+## 9. Open questions that are the owner's
 
-- **Q1 (decision 2450). Where is `releases.beebeeb.io` served from for 0.9.0?** Guus, 2026-11-11: it stays GitHub
+- **Q1 (decision 2450). Where is `releases.beebeeb.io` served from for 0.9.0?** the owner, 2026-11-11: it stays GitHub
   Pages for now. A US system in the update path, existing and not extended; the client still allows one host
   name, so moving is a DNS change plus one repository variable (§6).
-- **Q2. The updater key.** Answered (Guus, 2026-11-11 11:40): both. The old key moves into the environment; the
+- **Q2. The updater key.** Answered (owner, 2026-11-11 11:40): both. The old key moves into the environment; the
   native line has its own password-protected key (§4, §6).
 - **Q3. GitHub "Latest" and beebeeb.io/download.** Answered: "Latest" shows 0.9.0 only when it is stable
   (`mark-latest`). The download page's wording and day are still open.

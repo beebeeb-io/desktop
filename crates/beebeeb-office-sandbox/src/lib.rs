@@ -106,11 +106,13 @@ pub enum Profile {
     NoCapabilities,
     /// The media helper, only for a file whose decoder is Windows' own (its route is `System`; decision 2541).
     ///
-    /// Windows' decoders (Media Foundation) do not start without `registryRead`. With `hevc`, also the four
-    /// capabilities the HEVC decoder from Microsoft's Store extension needs: `lpacCom`, `lpacAppExperience`,
+    /// Windows' decoders (Media Foundation) do not start without `registryRead`, and its audio decoders (AAC) and
+    /// WIC (HEIC, camera RAW) not without `lpacCom` (COM; Guus, 2026-11-21). With `hevc`, also the three further
+    /// capabilities the HEVC decoder from Microsoft's Store extension needs: `lpacAppExperience`,
     /// `lpacIdentityServices` and `lpacMedia` (each one measured necessary, the five together enough).
     ///
-    /// What it adds, measured: the helper can READ the machine's and the user's registry. What stays denied, as in
+    /// What it adds: the helper can READ the machine's and the user's registry (measured) and activate COM servers
+    /// that admit less-privileged containers (`lpacCom`). What stays denied, as in
     /// every profile: reading a file of the user, writing anywhere, the network (loopback too) and starting a
     /// process.
     SystemDecoder {
@@ -121,6 +123,11 @@ pub enum Profile {
 
 /// The capability Media Foundation needs to start in a less-privileged AppContainer.
 const REGISTRY_READ: &str = "registryRead";
+
+/// COM inside a less-privileged AppContainer. Media Foundation's audio decoders (AAC) and WIC (HEIC, camera RAW)
+/// start COM objects and fail without it; held by [`Profile::SystemDecoder`] only (Guus, 2026-11-21). It reaches
+/// COM servers that admit less-privileged containers; it grants no file, network or registry-write access.
+const LPAC_COM: &str = "lpacCom";
 
 /// The process mitigations a helper is created under, as plain names (no system type), one table per [`Profile`]:
 /// [`Profile::mitigations`]. On Windows each one that is on is set at the helper's creation and read back from the
@@ -151,10 +158,10 @@ impl Profile {
     pub const fn capabilities(self) -> &'static [&'static str] {
         match self {
             Profile::NoCapabilities => &[],
-            Profile::SystemDecoder { hevc: false } => &[REGISTRY_READ],
+            Profile::SystemDecoder { hevc: false } => &[REGISTRY_READ, LPAC_COM],
             Profile::SystemDecoder { hevc: true } => &[
                 REGISTRY_READ,
-                "lpacCom",
+                LPAC_COM,
                 "lpacAppExperience",
                 "lpacIdentityServices",
                 "lpacMedia",
@@ -813,7 +820,10 @@ mod tests {
     fn each_profile_asks_for_exactly_its_measured_capabilities() {
         assert_eq!(Profile::default(), Profile::NoCapabilities);
         assert_eq!(Profile::NoCapabilities.capabilities(), &[] as &[&str]);
-        assert_eq!(Profile::SystemDecoder { hevc: false }.capabilities(), &["registryRead"]);
+        assert_eq!(
+            Profile::SystemDecoder { hevc: false }.capabilities(),
+            &["registryRead", "lpacCom"]
+        );
         assert_eq!(
             Profile::SystemDecoder { hevc: true }.capabilities(),
             &[
@@ -837,7 +847,21 @@ mod tests {
                 counted += 1;
             }
         }
-        assert_eq!(counted, 6, "the instrument counted every name of every profile");
+        assert_eq!(counted, 7, "the instrument counted every name of every profile");
+    }
+
+    /// `lpacCom` (COM, which Media Foundation's audio decoders and WIC need to start) is held by the system-decoder
+    /// profile only, both with and without HEVC (Guus, 2026-11-21). The default profile, every helper's, never.
+    #[test]
+    fn com_is_held_by_the_system_decoder_profile_only() {
+        assert!(!Profile::NoCapabilities.capabilities().contains(&"lpacCom"));
+        assert!(!Profile::default().capabilities().contains(&"lpacCom"));
+        for hevc in [false, true] {
+            assert!(
+                Profile::SystemDecoder { hevc }.capabilities().contains(&"lpacCom"),
+                "SystemDecoder {{ hevc: {hevc} }} holds lpacCom"
+            );
+        }
     }
 
     #[test]

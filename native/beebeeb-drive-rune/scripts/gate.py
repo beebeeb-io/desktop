@@ -120,6 +120,18 @@ def norm_path(d):
     return re.sub(r"\s+", " ", d.strip())
 
 
+# Item-type icons are the app's own (the registry), not the board's art: no glyph or pixel check.
+OWN_ICON = re.compile(r"^(row|grid|change)-\d+-icon$|-tile-icon$|-type-icon$")
+OWN_ICON_KEYS = {"viewer-title-icon", "preview-head-icon", "Files-icon", "Shared-icon", "Photos-icon", "Backups-icon"}
+
+
+def own_icon(key):
+    return key in OWN_ICON_KEYS or bool(OWN_ICON.search(key))
+
+
+OWN_ICON_PAD = 2       # px around an app-owned icon's board box that its art may reach
+
+
 def icon_check(b, n):
     issues = []
     if b.get("mark"):
@@ -139,7 +151,7 @@ def icon_check(b, n):
 
 
 class Pixels:
-    def __init__(self, board_png, native_png, width, height):
+    def __init__(self, board_png, native_png, width, height, own_boxes=()):
         self.board = Image.open(board_png).convert("RGB")
         self.native = Image.open(native_png).convert("RGB")
         self.size_issue = None
@@ -147,6 +159,14 @@ class Pixels:
             self.size_issue = f"render is {self.native.size[0]}x{self.native.size[1]}, golden is {self.board.size[0]}x{self.board.size[1]}"
             return
         self.scale = self.board.size[0] / width
+        self.shown = self.native.copy()  # what the evidence pictures show: the render as it is
+        # An app-owned icon (own_icon) is not the board's art: its box takes the board's pixels in the
+        # native picture, so the row, the sidebar item and the frame tiles around it are still held to the
+        # board while the icon itself is not. Geometry still checks where the icon sits.
+        for b in own_boxes:
+            p = OWN_ICON_PAD
+            box = self.device_box({"x": b["x"] - p, "y": b["y"] - p, "w": b["w"] + 2 * p, "h": b["h"] + 2 * p})
+            self.native.paste(self.board.crop(box), box[:2])
         blur = ImageFilter.GaussianBlur(BLUR)
         self.board_blur = self.board.filter(blur)
         self.native_blur = self.native.filter(blur)
@@ -243,7 +263,7 @@ class Pixels:
         x0, y0, x1, y1 = box
         w, h = self.board.size
         big = (max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad))
-        a, b = self.board.crop(big), self.native.crop(big)
+        a, b = self.board.crop(big), self.shown.crop(big)
         z = zoom if a.size[0] * zoom <= 1400 else 1
         a = a.resize((a.size[0] * z, a.size[1] * z), Image.NEAREST)
         b = b.resize((b.size[0] * z, b.size[1] * z), Image.NEAREST)
@@ -266,7 +286,7 @@ class Pixels:
         tw, th = best.size
         data = best.tobytes()
         over = 0
-        shade = self.native.copy().convert("RGBA")
+        shade = self.shown.copy().convert("RGBA")
         draw = ImageDraw.Draw(shade, "RGBA")
         c = int(CORNER * self.scale / TILE) + 1
         sx, sy = (w - 2 * m) / tw, (h - 2 * m) / th
@@ -305,7 +325,8 @@ def main():
     board = load(board_json)
     native = load(native_json)
     b_els, n_els = board["elements"], native["elements"]
-    px = Pixels(board_png, native_png, board["width"], board["height"])
+    own_boxes = [b for k, b in b_els.items() if own_icon(k) and k in n_els]
+    px = Pixels(board_png, native_png, board["width"], board["height"], own_boxes)
     if px.size_issue:
         print(f"gate: {px.size_issue}")
         return 2
@@ -334,6 +355,8 @@ def main():
             issues = ["MISSING in the native tree"] if n is None else fill_check(b, n)
             if issues:
                 fill_fail.append((key, "; ".join(issues)))
+        if own_icon(key):
+            continue
         if b["kind"] == "icon":
             icon_n += 1
             issues = ["MISSING in the native tree"] if n is None else icon_check(b, n)
@@ -366,7 +389,7 @@ def main():
 
     side = Image.new("RGB", (px.board.size[0] * 2 + 16, px.board.size[1]), (255, 0, 255))
     side.paste(px.board, (0, 0))
-    side.paste(px.native, (px.board.size[0] + 16, 0))
+    side.paste(px.shown, (px.board.size[0] + 16, 0))
     side.save(out / f"{stem}-side-by-side.png")
     total_tiles, over_tiles = px.frame_tiles(out / f"{stem}-tiles.png")
 

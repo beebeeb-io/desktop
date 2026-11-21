@@ -14,7 +14,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::SecretBytes;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
@@ -154,7 +154,7 @@ fn engine(base: &str) -> Arc<TestEngine> {
         state_dir,
         api_base: base.to_string(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 /// Signed in and unlocked: the old token and a key in the credential store, with the account's owner tag, and the
