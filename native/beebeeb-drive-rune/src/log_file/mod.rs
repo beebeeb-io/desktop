@@ -50,7 +50,18 @@ pub fn install(local_data: &Path) -> bool {
     let Some(log) = AppLog::open(&local_data.join(DIR_NAME), MAX_FILE_BYTES) else {
         return false;
     };
-    tracing::subscriber::set_global_default(log).is_ok()
+    let ok = tracing::subscriber::set_global_default(log).is_ok();
+    if ok {
+        let _ = LOG_DIR.set(local_data.join(DIR_NAME));
+    }
+    ok
+}
+
+static LOG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The folder the log is written to; `None` when no file log is installed in this process.
+pub fn dir() -> Option<&'static Path> {
+    LOG_DIR.get().map(PathBuf::as_path)
 }
 
 /// The subscriber: level filter, redaction, the rotating file.

@@ -380,3 +380,97 @@ fn a_new_file_made_here_is_listed_at_once_with_no_finished_check() {
     assert_eq!(ids(&rt.state), ["a-new.txt", "m-1.txt"], "listed with no finished check");
     assert_eq!(shelf.reads(), reads + 1, "the folder is read once for it");
 }
+
+/// Task 050: the running app reads on a worker. `shelf` is read only once the test lets it (`let_one_read`): until
+/// then the read is out, and the window goes on.
+fn read_on_a_worker(rt: &mut Runtime<State>, shelf: &Elsewhere) -> std::sync::mpsc::Sender<()> {
+    let (let_one_read, wait) = std::sync::mpsc::channel::<()>();
+    let (wait, shelf) = (Mutex::new(wait), shelf.clone());
+    rt.state.folder_reads.reader = Some(Arc::new(move |folder: Option<&str>| {
+        let _ = wait.lock().unwrap().recv();
+        state::load(&shelf, folder)
+    }));
+    let_one_read
+}
+
+/// Polls until the read out answered and was taken (a worker answers in its own time).
+fn until_taken(rt: &mut Runtime<State>) {
+    for _ in 0..200 {
+        if rt.state.folder_reads.pending.is_none() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(rt);
+    }
+    panic!("the read never answered");
+}
+
+/// Task 050: the read after a check runs on the worker. While it is out the rows shown stay (no flash, no wait); its
+/// answer merges by id and the selection stays with its file.
+#[test]
+fn a_finished_check_is_read_on_a_worker_and_the_rows_stay_until_it_answers() {
+    let shelf = Elsewhere::with(&["m-1.txt", "m-2.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    let let_one_read = read_on_a_worker(&mut rt, &shelf);
+    rt.update(|s, _| s.select_only(1));
+    shelf.add(&SEVEN);
+    a_check_finishes(&engine, &mut rt);
+
+    assert!(rt.state.folder_reads.pending.is_some(), "the read is out");
+    assert_eq!(
+        ids(&rt.state),
+        ["m-1.txt", "m-2.txt"],
+        "the rows shown stay while it is out"
+    );
+
+    let_one_read.send(()).unwrap();
+    until_taken(&mut rt);
+    assert_eq!(rt.state.listing.items.len(), 9, "merged: {:?}", ids(&rt.state));
+    assert_eq!(selection_ids(&rt.state), ["m-2.txt"], "the selection is the same file");
+}
+
+/// Task 050: an answer for a folder the window no longer shows is dropped; it never replaces the rows shown.
+#[test]
+fn a_read_for_a_folder_no_longer_shown_is_dropped() {
+    let shelf = Elsewhere::with(&["m-1.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    let let_one_read = read_on_a_worker(&mut rt, &shelf);
+    shelf.add(&SEVEN);
+    a_check_finishes(&engine, &mut rt);
+    assert!(rt.state.folder_reads.pending.is_some(), "the read is out");
+    // The window shows another folder now (as an open made at once leaves it).
+    rt.state.listing.folder.id = Some("elsewhere".into());
+
+    let_one_read.send(()).unwrap();
+    until_taken(&mut rt);
+    assert_eq!(
+        ids(&rt.state),
+        ["m-1.txt"],
+        "the root's answer is not put in another folder"
+    );
+}
+
+/// Task 050: an answer that comes after the session moved (a lock, a sign-out) is dropped.
+#[test]
+fn a_read_that_answers_after_the_gate_closed_is_dropped() {
+    let shelf = Elsewhere::with(&["m-1.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    let let_one_read = read_on_a_worker(&mut rt, &shelf);
+    shelf.add(&SEVEN);
+    a_check_finishes(&engine, &mut rt);
+    assert!(rt.state.folder_reads.pending.is_some(), "the read is out");
+    engine.set_gate(GateState::Locked);
+    settle(&mut rt);
+    assert!(rt.state.folder_reads.pending.is_none(), "the gate change forgot it");
+
+    let _ = let_one_read.send(());
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut rt);
+    }
+    assert!(
+        ids(&rt.state).is_empty(),
+        "nothing of the read shows behind a closed gate: {:?}",
+        ids(&rt.state)
+    );
+}

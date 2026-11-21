@@ -117,6 +117,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
             },
             on_details: tb::press(|s, _| s.photos.open_details()),
             inert: false,
+            gate_closed: false,
             // Photos shows no folder: the Beebeeb location.
             on_explorer: Box::new(tb::open_beebeeb_location),
             // "New here adds to Files" (DW-0601): the menu is the Files lane's; this asks for it.

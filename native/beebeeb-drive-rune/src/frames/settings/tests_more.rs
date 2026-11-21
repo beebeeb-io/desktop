@@ -528,8 +528,8 @@ fn a_source_that_does_not_know_these_pages_shows_no_sample_values() {
     super::go(&mut state, "DW-0790b");
     let rt = window(state);
     assert_eq!(
-        says(&rt, "item-0-0-title"),
-        "Not available in this version yet.",
+        says(&rt, "activity-empty-title"),
+        "No measurements yet",
         "no App activity without a measurement: the page says so"
     );
     assert!(find(&rt, "note-0").is_none(), "no banner without a saved file");

@@ -927,9 +927,14 @@ fn the_sync_guard_is_present_in_the_local_choke_point() {
     let local_fn = &source[source.find("fn local<T>(&self").unwrap()..];
     let local_fn = &local_fn[..local_fn.find("\n    }").unwrap()];
     assert!(
-        local_fn.contains("is_syncing()"),
-        "the local() choke point checks is_syncing: dropping it would let folder-route ops \
-         through when sync is not running"
+        local_fn.contains(".view().start != Start::Running"),
+        "the local() choke point checks that sync runs (from the published view): dropping it would let \
+         folder-route ops through when sync is not running"
+    );
+    // Task 050: the choke point runs on the window's thread; `is_syncing()` waits for the slot a start holds.
+    assert!(
+        !local_fn.contains(".is_syncing()"),
+        "local() reads the view, never is_syncing()"
     );
     // Task 2488: the choke point's database is the signed-in account's, from the engine's account-bound handle.
     assert!(

@@ -965,6 +965,19 @@ pub(super) fn apply_sync_op(
         return Ok(applied);
     }
 
+    // Trash, delete and a move change what the shared-folder index of the roots involved must list: collect
+    // the roots before the op rewrites the rows, mark them dirty after it applied.
+    let mut dirty_roots: Vec<String> = Vec::new();
+    if matches!(
+        op.op_type.as_str(),
+        "file_trash" | "file_delete" | "file_move" | "folder_move"
+    ) {
+        dirty_roots = bridge.db().shared_roots_in_subtree(id)?;
+        if let Some(new_parent) = payload["new_parent_id"].as_str() {
+            dirty_roots.extend(bridge.db().shared_roots_in_subtree_root_only(new_parent)?);
+        }
+    }
+
     match op.op_type.as_str() {
         // Task 1698 (trash ruling — full sync): the two server-side deletion
         // kinds now mean different things locally.
@@ -1170,6 +1183,12 @@ pub(super) fn apply_sync_op(
             tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
         }
     }
+    if matches!(op.op_type.as_str(), "file_move" | "folder_move") {
+        dirty_roots.extend(bridge.db().shared_roots_in_subtree(id)?);
+    }
+    for root in dirty_roots {
+        bridge.db().mark_shared_index_dirty(&root)?;
+    }
     // A sparse folder rename/move has no descendant events. Reuse the same
     // metadata write for their new parent paths, then signal those identities
     // with the folder. This preserves content baselines and queued rename holds.
@@ -1337,4 +1356,89 @@ pub(super) fn synthesize_op_row(
     };
     row["updated_at"] = serde_json::json!(kept_server_time.unwrap_or_else(now_secs));
     row
+}
+
+/// Trash, delete and a move between shared roots mark the shared-folder index of each root involved dirty.
+#[cfg(test)]
+mod shared_folder_index_dirty_tests {
+    use super::*;
+
+    const KEY: [u8; 32] = [39u8; 32];
+    const ROOT_A: &str = "06600000-0000-4000-8000-0000000000a0";
+    const ROOT_B: &str = "06600000-0000-4000-8000-0000000000b0";
+    const FILE: &str = "06600000-0000-4000-8000-0000000000f1";
+
+    fn bridge_in(dir: &Path) -> EngineBridge {
+        let db = Arc::new(StateDb::open(dir.join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "token".into(), KEY));
+        EngineBridge::new(&crate::identity::TEST, db, api)
+    }
+
+    fn seed(bridge: &EngineBridge, id: &str, parent: Option<&str>, folder: bool, root: &str) {
+        #[allow(deprecated)]
+        let name = {
+            let master = beebeeb_core::kdf::MasterKey::from_bytes(KEY);
+            beebeeb_core::encrypt::encrypt_name(&master, id, "n", None).unwrap()
+        };
+        let row = serde_json::json!({
+            "id": id, "parent_id": parent, "name_encrypted": name, "size_bytes": 1,
+            "is_folder": folder, "content_hash": null, "version_number": 1,
+            "is_trashed": false, "is_starred": false, "updated_at": 1_000,
+        });
+        apply_metadata_file_row(
+            bridge.db(),
+            &row,
+            Namespace::SharedWithMe,
+            Some(root.into()),
+            None,
+            PERMISSION_READ | PERMISSION_WRITE,
+            1_000,
+            &KEY,
+            "",
+        )
+        .unwrap()
+        .expect("row written");
+    }
+
+    fn setup() -> (tempfile::TempDir, std::path::PathBuf, EngineBridge) {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let bridge = bridge_in(dir.path());
+        seed(&bridge, ROOT_A, None, true, ROOT_A);
+        seed(&bridge, ROOT_B, None, true, ROOT_B);
+        seed(&bridge, FILE, Some(ROOT_A), false, ROOT_A);
+        for root in [ROOT_A, ROOT_B] {
+            bridge.db().clear_shared_index_dirty(root).unwrap();
+        }
+        (dir, sync_root, bridge)
+    }
+
+    fn run(bridge: &EngineBridge, sync_root: &Path, op_type: &str, payload: serde_json::Value) {
+        let op = crate::api_client::SyncOp { seq_id: 1, op_type: op_type.into(), payload };
+        apply_sync_op(bridge, sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
+    }
+
+    #[test]
+    fn shared_folder_index_is_dirty_after_a_trash() {
+        let (_d, root, bridge) = setup();
+        run(&bridge, &root, "file_trash", serde_json::json!({ "id": FILE }));
+        assert_eq!(bridge.db().dirty_shared_index_roots().unwrap(), vec![ROOT_A.to_string()]);
+    }
+
+    #[test]
+    fn shared_folder_index_is_dirty_after_a_delete() {
+        let (_d, root, bridge) = setup();
+        run(&bridge, &root, "file_delete", serde_json::json!({ "id": FILE }));
+        assert_eq!(bridge.db().dirty_shared_index_roots().unwrap(), vec![ROOT_A.to_string()]);
+    }
+
+    #[test]
+    fn shared_folder_index_is_dirty_for_both_roots_after_a_move() {
+        let (_d, root, bridge) = setup();
+        run(&bridge, &root, "file_move", serde_json::json!({ "id": FILE, "new_parent_id": ROOT_B }));
+        let mut dirty = bridge.db().dirty_shared_index_roots().unwrap();
+        dirty.sort();
+        assert_eq!(dirty, vec![ROOT_A.to_string(), ROOT_B.to_string()]);
+    }
 }
