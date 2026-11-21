@@ -832,11 +832,12 @@ fn path_the_system_opens(db: &StateDb, sync_root: &Path, id: &str) -> Result<std
 
 impl<C: CredentialStores> EngineFilesSource<C> {
     /// A local file operation, on the signed-in account's local state (the account-bound handle, task 2488) and
-    /// the sync root: both are required. Refused when sync is not running for this handle (`Engine::is_syncing`):
-    /// changing a local folder that nothing syncs is not an honest operation. Refused too when the session
-    /// changed while the operation ran.
+    /// the sync root: both are required. Refused when sync is not running for this handle, as the published view
+    /// says (`start == Running`; not `Engine::is_syncing`, which waits for the engine slot a start holds while it
+    /// registers the folder, and this runs on the window's thread): changing a local folder that nothing syncs is not
+    /// an honest operation. Refused too when the session changed while the operation ran.
     fn local<T>(&self, operation: impl FnOnce(&StateDb, &Path) -> Result<T, ActionError>) -> Result<T, ActionError> {
-        if !self.engine.is_syncing() {
+        if self.engine.view().start != Start::Running {
             return Err(ActionError::Unavailable);
         }
         let sync_root = self.engine.sync_root().map_err(|_| ActionError::Unavailable)?;

@@ -663,10 +663,39 @@ impl State {
         if self.refused_without_session() {
             return;
         }
-        self.files.back.push(self.listing.folder.id.clone());
+        // An open still out never showed: the folder Back returns to is the one shown, once.
+        if !self.folder_reads.opening() {
+            self.files.back.push(self.listing.folder.id.clone());
+        }
         self.actions.forward.clear();
+        self.show_folder(id);
+    }
+
+    /// Shows the folder with this id: read on the worker when the running app wired one (the rows shown stay until
+    /// the answer, [`State::take_opened`]), at once otherwise.
+    fn show_folder(&mut self, id: Option<String>) {
+        let account = self.shell.app.account().map(str::to_owned);
+        if self.folder_reads.ask(id.clone(), account, reread::ReadFor::Open) {
+            // A reveal asked before this open is the folder left's.
+            self.actions.reveal = None;
+            return;
+        }
         (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
         self.entered();
+    }
+
+    /// The answer of a folder opened on the worker: it replaces the rows, as an open made at once does. An item to
+    /// reveal that was asked for while it was out is selected in it. Returns the scroll that puts it in view.
+    pub(crate) fn take_opened(
+        &mut self,
+        listing: crate::source::Listing,
+        error: Option<crate::source::SourceError>,
+    ) -> Option<f32> {
+        let reveal = self.actions.reveal.take();
+        (self.listing, self.list_error) = (listing, error);
+        self.entered();
+        self.actions.reveal = reveal;
+        self.apply_reveal()
     }
 
     /// Back, leaving the folder shown to Forward.
@@ -675,6 +704,14 @@ impl State {
             return false;
         }
         let here = self.listing.folder.id.clone();
+        if self.folder_reads.reader.is_some() {
+            let Some(parent) = self.files.back.pop() else {
+                return false;
+            };
+            self.actions.forward.push(here);
+            self.show_folder(parent);
+            return true;
+        }
         if !self.go_back() {
             return false;
         }
@@ -695,9 +732,10 @@ impl State {
         let Some(id) = self.actions.forward.pop() else {
             return false;
         };
-        self.files.back.push(self.listing.folder.id.clone());
-        (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
-        self.entered();
+        if !self.folder_reads.opening() {
+            self.files.back.push(self.listing.folder.id.clone());
+        }
+        self.show_folder(id);
         true
     }
 
