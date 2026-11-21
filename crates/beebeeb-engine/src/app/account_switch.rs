@@ -21,7 +21,8 @@
 //!
 //! dc-111, "Discard and switch": when such a file keeps B out ([`super::SyncStartRefused::UnsentFileOfAnotherAccount`]),
 //! the person may let it go. [`Engine::discard_and_switch_ask`] only reads: what would be lost (a count and up to
-//! [`NAMES_SHOWN`] names), so a Cancel changes nothing. [`Engine::discard_and_switch`] takes that ask back and, under
+//! five names, `account_binding::NAMES_SHOWN`), so a Cancel changes nothing. [`Engine::discard_and_switch`] takes
+//! that ask back and, under
 //! the start's locks: refuses when what is unsent is no longer what the person saw; keeps A's working key in A's own
 //! key slot (R4: a switch forgets no account's key slot); copies every unsent file into the kept folder ("Changes not
 //! sent", the 1887 keep step: never over a name) and records that folder durably; takes each original out of the sync
@@ -30,8 +31,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{CredentialStores, Engine, LocalState, SyncStart, SyncStartRefused};
-use crate::account_binding::{Identity, canonical_email};
+use super::{CredentialStores, Engine, LocalState};
+use crate::account_binding::{DiscardAsk, DiscardDone, DiscardRefused, Identity, canonical_email};
 use crate::config::DesktopConfig;
 use crate::keychain::AuthSecretStore;
 use crate::state_db::StateDb;
@@ -201,70 +202,6 @@ fn forget_in_settings(config: &mut DesktopConfig, previous: &Identity) -> bool {
         changed = true;
     }
     changed
-}
-
-/// How many names the confirmation shows; the rest are a count.
-pub const NAMES_SHOWN: usize = 5;
-
-/// What "Discard and switch" would lose, as the confirmation shows it: every unsent file of the previous account, by
-/// count, and the names (never a path) of the first [`NAMES_SHOWN`]. The full set is held here, so the discard does
-/// exactly what was confirmed or nothing. Made by [`Engine::discard_and_switch_ask`]; dropping it is the Cancel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscardAsk {
-    /// How many files would be taken out of the sync folder (each kept as a copy first).
-    pub files: usize,
-    /// The names of the first of them, at most [`NAMES_SHOWN`].
-    pub names: Vec<String>,
-    paths: Vec<String>,
-}
-
-impl DiscardAsk {
-    fn of(paths: Vec<String>) -> Self {
-        let names = paths
-            .iter()
-            .take(NAMES_SHOWN)
-            .map(|path| path.rsplit('/').find(|part| !part.is_empty()).unwrap_or(path).to_string())
-            .collect();
-        Self {
-            files: paths.len(),
-            names,
-            paths,
-        }
-    }
-
-    /// The files beyond the named ones ("and 3 more").
-    pub fn more(&self) -> usize {
-        self.files - self.names.len()
-    }
-}
-
-/// Why "Discard and switch" did nothing. No variant carries a name, a path or an id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiscardRefused {
-    /// No session, or nothing of another account's is unsent here (the plain start is the way on).
-    NothingToDiscard,
-    /// What is unsent now is not what the person confirmed: ask again.
-    Changed,
-    /// Something else of the previous account's needs a person's answer (a queued change, a held edit…).
-    OtherWork,
-    /// The previous account's key could not be kept in its own slot: nothing was copied or removed (R4).
-    KeyNotKept,
-    /// A copy could not be made or recorded: nothing was removed from the sync folder.
-    KeepFailed,
-    /// Sync runs: there is nothing to switch.
-    SyncRunning,
-    /// This OS cannot remove another account's synced items, so a switch cannot finish here: nothing is offered.
-    Unsupported,
-    /// The local state could not be read.
-    Unreadable,
-}
-
-/// A discard that went through: where the copies are, and the start that followed (014's clear, then B's start).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscardDone {
-    pub kept_in: PathBuf,
-    pub kept: usize,
-    pub start: Result<SyncStart, SyncStartRefused>,
 }
 
 impl<C: CredentialStores> Engine<C> {

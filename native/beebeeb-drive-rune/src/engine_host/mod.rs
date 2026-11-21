@@ -595,6 +595,43 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
         sync::sync_refusal(&self.engine.view(), self.starts.folder_name())
     }
 
+    /// dc-111: what "Discard and switch" would lose, in the folder the refused start asked for (the settings' folder,
+    /// else the suggestion, as `setup_folder::start_now` picks it). The engine's own ask rides along as the token.
+    fn discard_ask(&self) -> Result<crate::frames::signin::discard_switch::Ask, actions::ActionError> {
+        use setup::SetupEngine as _;
+        let folder = self.engine.settings_folder().ok().flatten().unwrap_or_else(|| self.engine.suggested_folder());
+        let ask = self
+            .engine
+            .discard_and_switch_ask(&folder)
+            .map_err(|why| actions::ActionError::Failed(format!("{why:?}")))?;
+        Ok(crate::frames::signin::discard_switch::Ask {
+            files: ask.files,
+            names: ask.names.clone(),
+            token: Arc::new(ask),
+        })
+    }
+
+    /// dc-111: discard exactly the shown ask and switch, on the start worker (the engine copies files, then starts).
+    /// A refused discard changed nothing; a plain start then follows, so the refusal modal opens again with the truth.
+    fn discard_and_switch(&self, ask: crate::frames::signin::discard_switch::Ask) -> Result<(), actions::ActionError> {
+        use setup::SetupEngine as _;
+        let Ok(ask) = ask.token.downcast::<beebeeb_engine::account_binding::DiscardAsk>() else {
+            return Err(actions::ActionError::NotAvailable("not this engine's ask"));
+        };
+        let folder = self.engine.settings_folder().ok().flatten().unwrap_or_else(|| self.engine.suggested_folder());
+        let (engine, name, first_run) = (self.engine.clone(), self.starts.folder(), self.first_run.clone());
+        self.starts
+            .ask(move || match engine.discard_and_switch(&ask, folder) {
+                Ok(done) => tracing::info!(kept = done.kept, "discard and switch: done"),
+                Err(why) => {
+                    tracing::warn!(?why, "discard and switch: nothing was removed");
+                    sync::start_sync_now(&engine, &name, &first_run);
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| actions::ActionError::Failed("could not start a thread".into()))
+    }
+
     fn stop_for_quit(&self) {
         let _ = self.engine.stop();
     }

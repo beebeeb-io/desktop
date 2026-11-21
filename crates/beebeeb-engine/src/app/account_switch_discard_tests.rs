@@ -232,7 +232,7 @@ fn a_file_added_since_the_ask_refuses_and_changes_nothing() {
 
     assert_eq!(
         pc.engine.discard_and_switch_with(&ask, pc.root(), &port),
-        Err(crate::app::account_switch::DiscardRefused::Changed)
+        Err(crate::account_binding::DiscardRefused::Changed)
     );
 
     assert_eq!(pc.contents(), contents);

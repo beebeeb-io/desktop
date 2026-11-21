@@ -21,6 +21,8 @@ mod before_files_tests;
 pub mod create;
 mod create_kit;
 pub mod create_source;
+// dc-111: "Discard and switch", the refusal modal's confirmation.
+pub mod discard_switch;
 pub mod icons;
 // The two lock levels in the window: the lock screen's Windows Hello and the password in front of it.
 pub mod lock;
