@@ -8,6 +8,7 @@ use super::chrome::{self, FilesControls};
 use super::source::{Change, Exit, Kind, Origin, What};
 use super::{Filter, Section, Ui, icons};
 use crate::State;
+use crate::ui::button;
 use crate::theme::icons as base;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::theme::file_icons::icon_for;
@@ -146,7 +147,7 @@ fn problems_bar(try_all: bool, t: &Theme) -> El {
     // Task 2524: held edits have no Try again; the bar offers it only while something can be tried again.
     if try_all {
         bar = bar.child(
-            chrome::outline_button("btn-try-all-again", "Try all again", Some(&icons::RETRY), t)
+            button::button(button::keys("btn-try-all-again"), "Try all again", Some(&icons::RETRY), button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t)
                 .on_press(|s: &mut State| s.this_pc.retry_all()),
         );
     }
@@ -277,17 +278,17 @@ fn change_row(i: usize, change: &Change, retry_no: usize, t: &Theme) -> El {
             "btn-try-again".to_string()
         };
         retry = retry.child(
-            chrome::outline_button(&key, "Try again", Some(&icons::RETRY), t)
+            button::button(button::keys(&key), "Try again", Some(&icons::RETRY), button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t)
                 .on_press(move |s: &mut State| s.this_pc.retry(&problem)),
         );
     } else if let Some(problem) = failed.clone().filter(|_| exits.iter().any(|exit| exit.is_keep())) {
         retry = retry.child(
-            chrome::outline_button(&format!("{k}-choose"), "Choose", None, t)
+            button::button(button::keys(&format!("{k}-choose")), "Choose", None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t)
                 .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, false)),
         );
     } else if let Some(problem) = failed.clone().filter(|_| exits.contains(&Exit::RemoveFromList)) {
         retry = retry.child(
-            chrome::outline_button(&format!("{k}-remove"), "Remove", None, t)
+            button::button(button::keys(&format!("{k}-remove")), "Remove", None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t)
                 .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, true)),
         );
     }

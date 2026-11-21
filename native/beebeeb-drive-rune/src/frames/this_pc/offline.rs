@@ -10,6 +10,7 @@ use super::chrome::{self, FilesControls};
 use super::source::{Kept, Kind, Standing};
 use super::{MENU_ITEMS, RowMenu, Section, Ui, icons};
 use crate::State;
+use crate::ui::button;
 use crate::source::{DriveItem, format_size};
 use crate::theme::icons as base;
 use crate::theme::tokens::{self, Theme, radius, type_};
@@ -50,7 +51,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     // "Remove all is hidden" when nothing is kept (DW-0120).
     if !kept.is_empty() {
         right.push(
-            chrome::outline_button("btn-remove-all-from-this-pc", "Remove all from this PC", None, &t)
+            button::button(button::keys("btn-remove-all-from-this-pc"), "Remove all from this PC", None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, &t)
                 .on_press(|s: &mut State| s.this_pc.ask(super::Intent::AskRemoveAll)),
         );
     }
