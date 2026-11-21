@@ -157,10 +157,14 @@ fn main() {
 
     // The engine, signed in and unlocked; its local state is what a sync of that account leaves.
     let (host, _messages) = ChannelHost::new(|| {});
-    let state_dir = tempfile::tempdir().expect("a state folder");
+    // The engine's state folder is the process's: a folder of this run's own, never the person's.
+    let base = tempfile::tempdir().expect("a state folder");
+    beebeeb_engine::state_paths::init_from_app_local_data_dir(&TEST, base.path()).expect("the state folder");
+    let state_dir = beebeeb_engine::state_paths::beebeeb_state_dir_for(&TEST).expect("the state folder");
+    std::fs::create_dir_all(&state_dir).expect("the state folder");
     let config = EngineConfig {
         account_id: "bench-large-slot".into(),
-        state_dir: state_dir.path().to_path_buf(),
+        state_dir,
         api_base: api.base.clone(),
     };
     let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens"));
