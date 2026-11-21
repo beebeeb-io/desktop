@@ -365,6 +365,7 @@ pub(crate) fn covered_over(away: &super::away::AwayLock, app: &super::app::AppMa
 /// The main window's view: the registered frame for the state (or the placeholder), and over
 /// it the open dialog on its scrim.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    crate::ui::focus::install(cx); // one keyboard focus ring for every frame, tip and dialog
     // The frame gate's scenes of the flyout (`--scene DW-1203 --size 340x520`): never set in the running app.
     if let Some(flyout) = crate::frames::tray::scene(s, cx) {
         return flyout;

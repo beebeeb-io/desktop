@@ -153,7 +153,7 @@ pub fn button(
         b.disabled(true).inert()
     } else {
         b.focusable(true)
-            .focus_ring(2.0, 2.0, t.accent_deep)
+            .focus_ring(super::focus::RING_WIDTH, super::focus::RING_OFFSET, t.accent_deep)
             .cursor(rune::Cursor::Pointer)
     };
     if let Some(ic) = icon {
