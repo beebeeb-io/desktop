@@ -24,7 +24,6 @@ accepted
 accepts
 access
 account
-account-binding
 ack
 acknowledged
 acquire
@@ -87,7 +86,6 @@ backed-up
 backend
 backing
 backup
-backup-scheduler
 backup_unknown_kept
 backups
 badge
@@ -286,7 +284,6 @@ downloaded
 downloading
 drained
 driver
-driver-scaffold
 dropped
 dropping
 due
@@ -365,7 +362,6 @@ finder
 finished
 fired
 first
-first-pull
 first_pass
 flac
 flagged
@@ -699,7 +695,6 @@ plain
 plaintext
 plaintext_len
 plan
-plan-ask
 planned
 planner
 plans
@@ -966,7 +961,6 @@ starts
 startup
 stat
 state
-state-open
 state_dir
 status
 status-flyout
