@@ -15,6 +15,10 @@ use beebeeb_office_protocol::office::{
 
 use crate::edit_map;
 
+// The PDF engine (2501), beside the Office ones: `src/pdf.rs`.
+#[path = "pdf.rs"]
+mod pdf;
+
 /// What an opened file is: pages (a document, a deck) or sheets (a workbook).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Opening {
@@ -124,6 +128,7 @@ impl Engine for Office {
             DocKind::Pptx => Box::new(Slides::new(eng::Deck::open(bytes, &limits).map_err(open_code)?)),
             DocKind::Xlsx => sheets(eng::Workbook::open(eng::SheetKind::Xlsx, bytes, &limits).map_err(open_code)?),
             DocKind::Xls => sheets(eng::Workbook::open(eng::SheetKind::Xls, bytes, &limits).map_err(open_code)?),
+            DocKind::Pdf => Box::new(pdf::open(bytes)?),
         };
         Ok(opened)
     }

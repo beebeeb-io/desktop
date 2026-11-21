@@ -121,7 +121,8 @@ impl fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
-/// The Office formats the helper may be asked to open. `.ppt` is not on the list: it has no preview (2482 Q5).
+/// The formats the helper may be asked to open. `.ppt` is not on the list: it has no preview (2482 Q5). `Pdf` is
+/// rendered by the helper too (2501), so a hostile PDF ends the helper, never the app; it opens as pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocKind {
     Docx,
@@ -129,6 +130,7 @@ pub enum DocKind {
     Xlsx,
     Xls,
     Pptx,
+    Pdf,
 }
 
 impl DocKind {
@@ -139,6 +141,7 @@ impl DocKind {
             DocKind::Xlsx => 3,
             DocKind::Xls => 4,
             DocKind::Pptx => 5,
+            DocKind::Pdf => 6,
         }
     }
 
@@ -149,6 +152,7 @@ impl DocKind {
             3 => Ok(DocKind::Xlsx),
             4 => Ok(DocKind::Xls),
             5 => Ok(DocKind::Pptx),
+            6 => Ok(DocKind::Pdf),
             _ => Err(DecodeError::BadTag),
         }
     }

@@ -31,6 +31,10 @@ fn every_message() -> Vec<Message> {
             kind: DocKind::Pptx,
             doc: GrantRef { wire: u64::MAX, len: 0 },
         }),
+        Message::Open(Open {
+            kind: DocKind::Pdf,
+            doc: GRANT,
+        }),
         Message::Opened(Opened {
             pages: 2,
             sizes: vec![
@@ -589,7 +593,7 @@ fn office_decode_refuses_numbers_that_are_not_finite() {
 #[test]
 fn office_decode_refuses_tags_off_their_list() {
     // DocKind.
-    for tag in [0u8, 6, 0xFF] {
+    for tag in [0u8, 7, 0xFF] {
         let mut p = vec![tag];
         p.extend_from_slice(&[0; 16]);
         assert_eq!(Open::decode(&p), Err(DecodeError::BadTag), "doc kind {tag}");
@@ -1548,4 +1552,16 @@ mod edit_tests {
         assert!(shown[0].contains("text_len: 21"), "{}", shown[0]);
         assert!(shown[6].contains("html_len: Some(21)"), "{}", shown[6]);
     }
+}
+
+/// 2501: a PDF is opened by the helper, as kind 6 on the wire.
+#[test]
+fn pdf_kind_is_tag_six_and_round_trips() {
+    let open = Open {
+        kind: DocKind::Pdf,
+        doc: GRANT,
+    };
+    let payload = open.encode().expect("one frame");
+    assert_eq!(payload[0], 6);
+    assert_eq!(Open::decode(&payload), Ok(open));
 }
