@@ -715,6 +715,16 @@ pub trait ViewerSource {
     fn can_edit(&self, _file_id: &str) -> bool {
         false
     }
+    /// What the editor's guard said editing the open file would drop: it opened read-only in the viewer, which says
+    /// so ([`beebeeb_office_protocol::office::DroppedPart::notice`]). Default: nothing (not guarded).
+    fn edit_guarded(&self, _file_id: &str) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
+        Vec::new()
+    }
+    /// The friendly name of the app the system opens the open file's type with ("PowerPoint"), once known. Never
+    /// waits; `None`: none registered, not known yet, or this system cannot say ("Open in another app…" then).
+    fn default_app(&self, _file_id: &str) -> Option<String> {
+        None
+    }
     /// Hand one edit to the editor. `false`: not available or not taken. The answer comes by `poll_edit`.
     fn edit(&mut self, _file_id: &str, _op: EditOp) -> bool {
         false

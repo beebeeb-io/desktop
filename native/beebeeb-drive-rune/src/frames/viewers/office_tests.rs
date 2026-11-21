@@ -851,3 +851,94 @@ mod live_ribbon {
         assert_eq!(words(&rt, "st-0"), "Page 1 of 4");
     }
 }
+
+/// 008c: a file the editor's guard refused opens read-only in the viewer, which says why and offers the other app.
+mod edit_guarded {
+    use super::*;
+    use crate::frames::viewers::source::Elsewhere;
+    use beebeeb_office_protocol::office::DroppedPart;
+
+    /// The fixture's deck, as the live source hands it after `EditGuarded`: no editor, the guard's parts, and the
+    /// system's app for the type when it is known. Presses of "Open in …" are counted.
+    struct Guarded {
+        inner: FixtureViewerSource,
+        parts: Vec<DroppedPart>,
+        app: Option<String>,
+        elsewhere: Rc<RefCell<u32>>,
+    }
+
+    impl ViewerSource for Guarded {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.open(id)
+        }
+        fn poll(&mut self, id: &str) -> Option<Body> {
+            self.inner.poll(id)
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.retry(id)
+        }
+        fn can_edit(&self, _: &str) -> bool {
+            self.parts.is_empty()
+        }
+        fn edit_guarded(&self, _: &str) -> Vec<DroppedPart> {
+            self.parts.clone()
+        }
+        fn default_app(&self, _: &str) -> Option<String> {
+            self.app.clone()
+        }
+        fn open_elsewhere(&mut self, _: &str) -> Elsewhere {
+            *self.elsewhere.borrow_mut() += 1;
+            Elsewhere::Opened
+        }
+    }
+
+    fn deck(parts: Vec<DroppedPart>, app: Option<&str>) -> (Runtime<State>, Rc<RefCell<u32>>) {
+        let elsewhere = Rc::new(RefCell::new(0));
+        let mut state = init();
+        let source = Guarded {
+            inner: FixtureViewerSource::new(),
+            parts,
+            app: app.map(str::to_owned),
+            elsewhere: elsewhere.clone(),
+        };
+        assert!(open_from(&mut state, Box::new(source), board::DECK));
+        let mut rt = runtime_of(state, false);
+        rt.frame(16.0);
+        (rt, elsewhere)
+    }
+
+    fn notice(rt: &Runtime<State>) -> String {
+        find(rt, "banner").and_then(|e| e.label).unwrap_or_default()
+    }
+
+    #[test]
+    fn edit_guarded_deck_with_speaker_notes_opens_read_only_with_the_notice() {
+        let (mut rt, elsewhere) = deck(vec![DroppedPart::SpeakerNotes], None);
+        assert!(matches!(ui(&rt).file.body, Body::Deck(_)), "the deck is in the viewer");
+        assert_eq!(notice(&rt), DroppedPart::SpeakerNotes.notice());
+        assert_eq!(find(&rt, "banner").map(|e| e.role), Some("status"));
+        // No default app known: the honest words, never an assumed PowerPoint.
+        assert_eq!(words(&rt, "banner-action-label"), "Open in another app\u{2026}");
+        // Edit is not offered: no editor, no editing chrome.
+        assert!(ui(&rt).office.edit.is_none());
+        assert!(!has(&rt, "edit-chrome"));
+        operate(&mut rt, "banner-action");
+        assert_eq!(*elsewhere.borrow(), 1, "Open in … goes through the viewer's other-app chain");
+    }
+
+    #[test]
+    fn edit_guarded_names_the_systems_app_and_every_part() {
+        let (rt, _) = deck(vec![DroppedPart::ActiveX, DroppedPart::Other], Some("LibreOffice Impress"));
+        assert_eq!(words(&rt, "banner-action-label"), "Open in LibreOffice Impress");
+        let said = notice(&rt);
+        assert!(said.contains(DroppedPart::ActiveX.notice()), "{said}");
+        assert!(said.contains(DroppedPart::Other.notice()), "{said}");
+    }
+
+    #[test]
+    fn edit_guarded_none_draws_no_notice() {
+        let (rt, _) = deck(Vec::new(), Some("PowerPoint"));
+        assert!(!has(&rt, "banner"));
+    }
+}

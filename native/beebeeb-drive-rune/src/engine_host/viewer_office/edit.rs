@@ -232,6 +232,25 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         self.office_view(file_id).is_some_and(OfficeView::can_edit)
     }
 
+    pub(in crate::engine_host::viewer) fn office_guarded(&self, file_id: &str) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
+        self.office_view(file_id).map(OfficeView::guarded).unwrap_or_default()
+    }
+
+    /// The system's app for the open Office file's type, by name: asked off the window's thread once per type and
+    /// held (`open_with_apps::default_app_name`); the window is woken when it is known.
+    pub(in crate::engine_host::viewer) fn office_default_app(&self, file_id: &str) -> Option<String> {
+        let ext = match self.office_view(file_id)?.kind {
+            OfficeKind::Docx => ".docx",
+            OfficeKind::Doc => ".doc",
+            OfficeKind::Xlsx => ".xlsx",
+            OfficeKind::Xls => ".xls",
+            OfficeKind::Pptx => ".pptx",
+            OfficeKind::Ppt => ".ppt",
+        };
+        let waker = self.engine.clone();
+        crate::engine_host::open_with_apps::default_app_name(ext, move || waker.wake())
+    }
+
     pub(in crate::engine_host::viewer) fn office_edit(&mut self, file_id: &str, op: EditOp) -> bool {
         self.office_view_mut(file_id).is_some_and(|view| view.edit(op))
     }
