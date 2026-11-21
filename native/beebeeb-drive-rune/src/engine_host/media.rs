@@ -144,26 +144,75 @@ pub struct DecodedPicture {
     pub rgba: Zeroizing<Vec<u8>>,
 }
 
-/// Starts an image helper (the helper's `--image` mode, confined, system-decoder profile) and hands over its two
-/// pipes: what the app reads from it, what the app writes to it. `None`: it cannot be started (no helper, no
-/// sandbox): the picture has no decoder here.
+/// A started image helper: its two pipes, and the process behind them. Dropping it ends the helper.
+pub struct PictureProcess {
+    /// What the app reads from the helper.
+    pub from: Box<dyn Read + Send>,
+    /// What the app writes to the helper.
+    pub to: Box<dyn Write + Send>,
+    /// Ends the helper (it is not asked): both pipes break, a read of `from` ends.
+    pub child: Arc<dyn PictureChild>,
+}
+
+/// The process of a started image helper.
+pub trait PictureChild: Send + Sync {
+    /// Ends it now. Called at most a few times; a helper that is gone already is fine.
+    fn kill(&self);
+}
+
+/// Starts an image helper (the helper's `--image` mode, confined, system-decoder profile; `hevc`: with the
+/// capabilities of the HEVC decoder too, for a HEIC). `None`: it cannot be started (no helper, no sandbox): the
+/// picture has no decoder here.
 pub trait PictureHelper: Send + Sync {
-    fn start(&self) -> Option<(Box<dyn Read + Send>, Box<dyn Write + Send>)>;
+    fn start(&self, hevc: bool) -> Option<PictureProcess>;
 }
 
 static PICTURE_HELPER: std::sync::OnceLock<Arc<dyn PictureHelper>> = std::sync::OnceLock::new();
 
-/// Registers the process's one [`PictureHelper`] (the first wins). Without one every picture answers `NoDecoder`.
+/// Registers the process's one [`PictureHelper`] (the first wins). Without one the app's own sandboxed helper is
+/// used (`media::transport::SandboxedPictures`).
 pub fn set_picture_helper(helper: Arc<dyn PictureHelper>) {
     let _ = PICTURE_HELPER.set(helper);
 }
 
+/// One decode may take this long; then the helper is ended and the picture is `Damaged`.
+const DECODE_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One helper decodes at a time (each may hold up to the helper's memory limit).
+static ONE_DECODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Whether `bytes` start like a HEIC/HEIF (an ISO media file that is not a camera's CR3): its decoder is HEVC.
+pub(super) fn looks_like_heif(bytes: &[u8]) -> bool {
+    bytes.get(4..8) == Some(b"ftyp") && bytes.get(8..12) != Some(b"crx ")
+}
+
 /// Decodes `bytes` (a HEIC, a camera's RAW) to at most `max_px` on its longest side through the helper. Never
 /// decodes in this process. No decoder, a damaged file, a file too large: the refusal, never a half picture.
+/// BLOCKS: the helper, at most [`DECODE_WITHIN`] (and while another decode runs). Never call it on the window's thread.
 pub fn decode_picture(bytes: &[u8], max_px: u32) -> Result<DecodedPicture, ImageRefusal> {
+    // The app's own helper unless another was registered first; a test starts none it did not register.
+    #[cfg(not(test))]
+    let helper = PICTURE_HELPER.get_or_init(|| Arc::new(crate::media::transport::SandboxedPictures));
+    #[cfg(test)]
     let helper = PICTURE_HELPER.get().ok_or(ImageRefusal::NoDecoder)?;
-    let (from, to) = helper.start().ok_or(ImageRefusal::NoDecoder)?;
-    decode_over(from, to, bytes, max_px)
+    let _one = ONE_DECODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let PictureProcess { from, to, child } = helper.start(looks_like_heif(bytes)).ok_or(ImageRefusal::NoDecoder)?;
+    // A helper that stops answering is ended, so the read below ends too.
+    let (done, late) = std::sync::mpsc::channel::<()>();
+    let watched = child.clone();
+    let watch = std::thread::Builder::new().name("picture-helper-watch".into()).spawn(move || {
+        if late.recv_timeout(DECODE_WITHIN) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+            watched.kill();
+        }
+    });
+    if watch.is_err() {
+        child.kill();
+        return Err(ImageRefusal::Damaged);
+    }
+    let answer = decode_over(from, to, bytes, max_px);
+    let _ = done.send(());
+    child.kill();
+    answer
 }
 
 /// One decode over the helper's two pipes: the helper reads the ranges it asks for, and answers once.

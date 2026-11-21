@@ -377,4 +377,38 @@ mod local_decode {
             Err(ImageRefusal::NoDecoder)
         ));
     }
+
+    #[test]
+    fn a_thumbnail_made_here_is_cut_to_the_middle_like_a_stored_one() {
+        use beebeeb_engine::app::photos_api::{ThumbCut, ThumbPixels};
+
+        use crate::engine_host::thumbs::cut_made_here;
+
+        // 4 wide, 2 high: each pixel says its column.
+        let whole = || ThumbPixels {
+            session: beebeeb_engine::account::SessionGeneration::for_test(1),
+            width: 4,
+            height: 2,
+            rgba: zeroize::Zeroizing::new((0..8u8).flat_map(|i| [i % 4; 4]).collect()),
+        };
+        let square = cut_made_here(whole(), ThumbCut::Square);
+        assert_eq!((square.width, square.height), (2, 2));
+        assert_eq!(square.rgba.to_vec(), [1u8, 2, 1, 2].iter().flat_map(|c| [*c; 4]).collect::<Vec<u8>>());
+        let strip = cut_made_here(whole(), ThumbCut::Strip);
+        assert_eq!((strip.width, strip.height), (1, 2));
+        let same = cut_made_here(whole(), ThumbCut::Whole);
+        assert_eq!((same.width, same.height, same.rgba.len()), (4, 2, 32));
+        // A length that does not match its size is never indexed.
+        let short = cut_made_here(ThumbPixels { rgba: zeroize::Zeroizing::new(vec![0; 5]), ..whole() }, ThumbCut::Square);
+        assert_eq!(short.rgba.len(), 5);
+    }
+
+    #[test]
+    fn a_heif_is_told_from_a_cameras_raw_by_its_first_bytes() {
+        use crate::engine_host::media::looks_like_heif;
+        assert!(looks_like_heif(b"\0\0\0\x18ftypheic\0\0\0\0"));
+        assert!(!looks_like_heif(b"\0\0\0\x18ftypcrx \0\0\0\0"));
+        assert!(!looks_like_heif(b"II*\0\x08\0\0\0"));
+        assert!(!looks_like_heif(b"ftyp"));
+    }
 }
