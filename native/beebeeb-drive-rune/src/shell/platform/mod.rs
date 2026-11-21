@@ -26,6 +26,8 @@ mod windows;
 #[cfg(windows)]
 mod windows_control;
 #[cfg(windows)]
+mod windows_contrast;
+#[cfg(windows)]
 mod windows_folder;
 #[cfg(windows)]
 mod windows_packet;
