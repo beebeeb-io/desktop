@@ -334,6 +334,39 @@ fn bold_follows_the_answered_marks() {
     assert_eq!(ops(&shared), vec![EditOp::Mark { mark: Mark::Bold, on: false }]);
 }
 
+/// A ribbon tool pressed with the pointer takes the keyboard with it; once it acted the keyboard is the page's again,
+/// so what is typed next is typed (dc-R3, on a 150 % display and any other: after Text colour the keys went to the
+/// tool, nothing was typed, and Space opened its menu again).
+#[test]
+fn a_ribbon_tool_gives_the_keyboard_back_to_the_page() {
+    use beebeeb_office_protocol::office::Mark;
+    let (mut rt, shared) = editor(true);
+    focus_surface(&mut rt);
+    let bold = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.focusable && e.label.as_deref() == Some("Bold"))
+        .expect("Bold is on the ribbon");
+    let (x, y) = (bold.rect[0] + bold.rect[2] / 2.0, bold.rect[1] + bold.rect[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(
+        ops(&shared).iter().any(|op| matches!(op, EditOp::Mark { mark: Mark::Bold, .. })),
+        "the tool acted: {:?}",
+        ops(&shared)
+    );
+    assert!(find(&rt, SURFACE).is_some_and(|e| e.focused), "the page has the keyboard again");
+    // What is typed next reaches the document.
+    plain(&mut rt, Key::Text("x".into()));
+    assert!(
+        ops(&shared).iter().any(|op| matches!(op, EditOp::InsertText(t) if t == "x")),
+        "typed after the tool: {:?}",
+        ops(&shared)
+    );
+}
+
 /// With nothing focused the window passes the keys to the editor; with something else focused it does not.
 #[test]
 fn the_window_gives_the_editor_its_keys_when_nothing_has_focus() {

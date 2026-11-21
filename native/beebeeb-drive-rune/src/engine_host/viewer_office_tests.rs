@@ -1736,16 +1736,71 @@ fn what_scrolled_past_is_cancelled() {
     };
     view.picture(seventh);
     let id = fake.last_page();
+    // The view scrolled on: every build from here wants the first page, held, and never the seventh.
+    let first = OfficePicture::Page {
+        page: 0,
+        zoom_pct: 100,
+        dpi: 96,
+    };
     view.poll(); // the frame that asked
-    view.poll(); // one poll without it
+    view.picture(first);
+    fake.deliver(fake.last_page(), 8, 8, false);
+    view.poll(); // one build without it
     assert!(fake.log().cancels.is_empty());
+    view.picture(first);
     view.poll(); // a second
     assert_eq!(fake.log().cancels, vec![id]);
+    view.picture(first);
     view.poll();
     assert_eq!(fake.log().cancels, vec![id], "cancelled once");
     // Wanted again later: asked anew.
     view.picture(seventh);
-    assert_eq!(fake.log().pages.len(), 2);
+    assert_eq!(fake.log().pages.len(), 3);
+}
+
+/// A frame that changes nothing polls and does not build (a pointer that moves, a popover that closes, 240 of them
+/// a second on a fast screen). Such a poll says nothing about what the view wants: an ask the last build wanted
+/// stays out until its answer comes, however many of them pass (dc-R3: at 144 dpi every tile an `Edited` asked for
+/// was cancelled on the third poll, and nothing asked again until the next build, so the page stayed as it was).
+#[test]
+fn a_poll_without_a_build_cancels_nothing_the_last_build_wanted() {
+    let fake = Fake::default();
+    let mut view = editing_view(&fake, EditKind::Docx, pages(1));
+    // A 150 % display at 100 % zoom: the page is drawn in tiles (3 across, 4 down for A4).
+    assert!(kinds::uses_tiles(100, 144));
+    let tiles: Vec<OfficePicture> = (0..4)
+        .flat_map(|row| {
+            (0..3).map(move |col| OfficePicture::Tile {
+                page: 0,
+                zoom_pct: 100,
+                dpi: 144,
+                col,
+                row,
+            })
+        })
+        .collect();
+    let build = |view: &OfficeView| tiles.iter().filter(|tile| view.picture(**tile).is_some()).count();
+
+    // An edit redrew page one (a text colour): the poll says so, and the build that follows asks its tiles.
+    fake.answer(HostEdit::Edited(Box::new(edited(3, Dirty::Rects(vec![page_rect(0)])))));
+    assert!(view.poll().is_some(), "an Edited builds the view again");
+    assert_eq!(build(&view), 0, "nothing of the older revision is drawn");
+    let asked: Vec<u64> = fake.log().pages.iter().map(|page| page.0).collect();
+    assert_eq!(asked.len(), tiles.len(), "every tile is asked once");
+
+    // Three frames that change nothing, before the helper answered.
+    for _ in 0..3 {
+        assert!(view.poll().is_none(), "nothing changed: no build");
+    }
+    assert!(fake.log().cancels.is_empty(), "no ask the last build wanted is cancelled");
+
+    // The answers come: each is drawn.
+    for id in &asked {
+        fake.deliver(*id, 8, 8, false);
+    }
+    assert!(view.poll().is_some(), "the answers build the view again");
+    assert_eq!(build(&view), tiles.len(), "every tile of the edited page is drawn");
+    assert_eq!(fake.log().pages.len(), tiles.len(), "and none was asked twice");
 }
 
 #[test]
