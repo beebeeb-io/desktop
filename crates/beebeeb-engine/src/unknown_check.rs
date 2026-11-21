@@ -936,7 +936,7 @@ mod tests {
         };
         // D-P2-7 named the mode: the pause check reads `RunMode::of_flag` before its `is_paused` arm.
         const PAUSED: &str = "let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));";
-        let retry = after(tick, "crate::windows_cf::retry_pending_marks(&mark_root)).await");
+        let retry = after(tick, "retry_marks_step(&sync_root).await;");
         let paused = after(retry, PAUSED);
         let stamp = after(paused, "crate::windows_cf::stamp_local_files_in_sync(&stamp_root);");
         assert!(
@@ -951,7 +951,11 @@ mod tests {
         assert_eq!(
             production.matches("retry_pending_marks(").count(),
             1,
-            "one call, on every tick"
+            "one call site, in the step every tick reaches"
+        );
+        assert!(
+            production.matches("retry_marks_step(&sync_root).await").count() >= 2,
+            "the step runs on every tick: at its start, or after the pull while the first list is owed"
         );
     }
 
