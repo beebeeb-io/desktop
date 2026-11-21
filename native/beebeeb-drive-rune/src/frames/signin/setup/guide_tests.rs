@@ -411,6 +411,8 @@ fn the_guide_is_done_once_per_account() {
                 click(&mut rt, SKIP_KEY);
             }
             _ => {
+                // Esc in the tray tip's window moves on to tip 1 (`tray_tip_window::on_key`); Esc there skips.
+                click(&mut rt, NEXT_KEY);
                 tick(&mut rt);
                 press(&mut rt, Key::Escape);
             }
@@ -434,6 +436,7 @@ fn the_guide_is_done_once_per_account() {
         tick(&mut rt);
         assert_eq!(rt.state.shell.app.account(), Some("user-b"));
         assert!(a_first_run_ends(&mut rt), "{ending}: another account gets it once");
+        click(&mut rt, NEXT_KEY);
         tick(&mut rt);
         press(&mut rt, Key::Escape);
         assert_eq!(rt.state.guide.step, None);
