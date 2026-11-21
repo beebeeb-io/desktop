@@ -148,8 +148,11 @@ fn focused(rt: &Runtime<State>) -> Option<String> {
     rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key)
 }
 
-/// Tab until `key` has focus (at most 30 stops).
+/// Tab until `key` has focus (at most 30 stops). Tab in the editor indents (ux-15), so Esc blurs the field first.
 fn tab_to(rt: &mut Runtime<State>, key: &str) {
+    if focused(rt).as_deref() == Some(super::EDITOR_KEY) && key != super::EDITOR_KEY {
+        press(rt, Key::Escape);
+    }
     for _ in 0..30 {
         if focused(rt).as_deref() == Some(key) {
             return;
