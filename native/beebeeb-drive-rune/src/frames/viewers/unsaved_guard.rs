@@ -1,6 +1,6 @@
 //! The one unsaved-changes question for every path that ends an open editor: the sign-outs (Security's, all
 //! apps, the no-plan gate's) and the quit (the b's menu, a close with no b, the sync-off dialog's Quit).
-//! Save (then goes on), Discard and continue (the only way the edits are dropped), Cancel (Enter).
+//! Save (then goes on), Discard and continue (the only way the edits are dropped), Cancel (Enter presses Save).
 //!
 //! The sign-out of this app is asked by the engine (it refuses with `UnsavedEdits`) and drawn by Security's
 //! confirm; both use [`question`] and [`save_open_editor`], so the words, the buttons and the Save are one.
@@ -119,14 +119,14 @@ pub(crate) fn question(
     let mut save_b = set::button("btn-1", "Save", None, Look::Primary, Size::Medium, saving, t);
     let mut discard_b = set::button("btn-2", discard, None, Look::Danger, Size::Medium, saving, t)
         .label(format!("{discard}, destructive"));
-    let mut cancel_b = set::button("btn-3", "Cancel", None, Look::Plain, Size::Medium, saving, t).default_button();
+    let mut cancel_b = set::button("btn-3", "Cancel", None, Look::Plain, Size::Medium, saving, t);
     if !saving {
         save_b = save_b.on_press_tx(on_save);
         discard_b = discard_b.on_press_tx(on_discard);
         cancel_b = cancel_b.on_press_tx(on_cancel);
     }
     let foot = vec![(save_b, false), (discard_b, false), (cancel_b, true)];
-    set::dialog(title, 440.0, title, words, Vec::new(), foot, t).modal_tx(false, move |s: &mut State, tx: &mut Tx| {
+    set::dialog_enter(title, 440.0, title, words, Vec::new(), foot, Some(0), t).modal_tx(false, move |s: &mut State, tx: &mut Tx| {
         if !saving {
             on_cancel(s, tx);
         }

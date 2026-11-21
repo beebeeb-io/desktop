@@ -79,7 +79,22 @@ pub fn para_rich(index: usize, words: &str, mono: &[std::ops::Range<usize>], t: 
 /// A dialog in the middle of the body, on its scrim. `foot` holds the buttons, the primary
 /// first, the way out last, as the board orders them.
 pub fn dialog(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<El>, foot: Vec<El>, t: &Theme) -> El {
+    dialog_enter(name, width, title, sub, body, foot, None, t)
+}
+
+/// [`dialog`] where Enter presses foot button `enter` (never a destructive one).
+pub fn dialog_enter(
+    name: &str,
+    width: f32,
+    title: &str,
+    sub: Option<&str>,
+    body: Vec<El>,
+    foot: Vec<El>,
+    enter: Option<usize>,
+    t: &Theme,
+) -> El {
     let d = Dialog {
+        enter,
         head: Head::Title { title, sub: sub.map(Sub::Wrap) },
         body,
         foot: Foot::Row(foot),
@@ -114,7 +129,22 @@ pub fn foot_row(buttons: Vec<El>, even: Option<f32>, t: &Theme) -> El {
 /// toned tile, the question, what it means; the two answers side by side, the same width.
 /// Keys: `dlg-title`, `dlg-sub`, the tile's own.
 pub fn alert(name: &str, width: f32, tile: El, title: &str, sub: &str, foot: Vec<El>, t: &Theme) -> El {
+    alert_enter(name, width, tile, title, sub, foot, None, t)
+}
+
+/// [`alert`] where Enter presses foot button `enter` (never a destructive one).
+pub fn alert_enter(
+    name: &str,
+    width: f32,
+    tile: El,
+    title: &str,
+    sub: &str,
+    foot: Vec<El>,
+    enter: Option<usize>,
+    t: &Theme,
+) -> El {
     let d = Dialog {
+        enter,
         alert: true,
         head: Head::Alert { tile, title, sub },
         foot: Foot::Even(foot),
