@@ -245,9 +245,13 @@ unsafe extern "system" fn fix_cancel(info: *const CF_CALLBACK_INFO, params: *con
     }
     // SAFETY: valid for the duration of the callback; the cancel arm of a CANCEL_FETCH_DATA callback.
     let (rkey, cancel) = unsafe { ((*info).RequestKey, (*params).Anonymous.Cancel.Anonymous.FetchData) };
+    // SAFETY: as above.
+    let tkey = unsafe { (*info).TransferKey };
     fix_note(format!(
-        "CANCEL [{}, +{}) rkey {rkey}",
-        cancel.FileOffset, cancel.Length
+        "CANCEL [{}, +{}) flags {:#x} tkey {tkey} rkey {rkey}",
+        cancel.FileOffset,
+        cancel.Length,
+        unsafe { (*params).Anonymous.Cancel.Flags.0 }
     ));
 }
 
@@ -261,7 +265,18 @@ unsafe extern "system" fn session_piece_fetch(info: *const CF_CALLBACK_INFO, par
     }
     // SAFETY: valid for the duration of the callback.
     let r = unsafe { request_of(info, params) };
-    fix_note(format!("FETCH [{}, +{}) rkey {}", r.offset, r.length, r.request));
+    // SAFETY: the fetch arm of a FETCH_DATA callback; ProcessInfo is filled (REQUIRE_PROCESS_INFO).
+    let (fetch, pid) = unsafe {
+        let process = (*info).ProcessInfo;
+        (
+            (*params).Anonymous.FetchData,
+            if process.is_null() { 0 } else { (*process).ProcessId },
+        )
+    };
+    fix_note(format!(
+        "FETCH [{}, +{}) opt [{}, +{}) flags {:#x} pid {pid} tkey {} rkey {}",
+        r.offset, r.length, fetch.OptionalFileOffset, fetch.OptionalLength, fetch.Flags.0, r.transfer, r.request
+    ));
     let ready = *FIX_READY_AT
         .lock()
         .unwrap()
@@ -294,6 +309,7 @@ fn serve_session_piece(r: Request, ready: Instant) {
         transfer_key: r.transfer,
         request_key: r.request,
     };
+    fix_note(format!("  TRANSFER [{start}, {end}) tkey {} begins", r.transfer));
     // SAFETY: the keys of a request Windows has not completed or cancelled (a refusal returns an error).
     match unsafe {
         crate::windows_cf::streaming::transfer_piece(
@@ -332,7 +348,9 @@ fn serve_session_piece(r: Request, ready: Instant) {
 fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces() {
     let data = F2B_DATA.get_or_init(|| content(F2B_SIZE));
     let mut runs = Vec::new();
-    for i in 0..3 {
+    let rounds: usize = std::env::var("BB_F2B_DIAG_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    println!("ld0105-f2b-native: this process is pid {}", std::process::id());
+    for i in 0..rounds {
         let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
         qa.connect_with(session_piece_fetch, Some(fix_cancel));
         FIX_SERVED.lock().unwrap().clear();
@@ -368,7 +386,7 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
         runs.push((exit, errors, whole, refused));
         if exit != Some(1) || !whole || refused != 0 {
             // The first 60 lines, then at most 160 refusals, cancels and overlaps, then always the last 20.
-            let tail = log.len().saturating_sub(20).max(60);
+            let tail = log.len().saturating_sub(120).max(60);
             let flagged = |line: &str| ["refused", "CANCEL", "overlaps"].iter().any(|word| line.contains(word));
             let middle = (60..tail).filter(|&n| flagged(&log[n])).take(160);
             println!("ld0105-f2b-native: run {i} failed; its timeline ({} lines):", log.len());
