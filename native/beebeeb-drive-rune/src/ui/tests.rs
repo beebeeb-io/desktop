@@ -150,7 +150,7 @@ fn caption_buttons_and_controls_have_their_roles_and_names() {
         ("new-btn", "button", "New"),
         ("search-input", "textbox", "Search names"),
         ("settings-btn", "button", "Settings"),
-        ("Files-row", "button", "Files"),
+        ("Files-row", "treeitem", "Files"),
         // DW-0401, Accessibility: "The list is a table: Narrator reads name, modified, size,
         // shared and the PC state per row" (review of PR 294, P2.8).
         ("rows", "table", "Files"),
