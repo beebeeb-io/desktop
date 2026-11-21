@@ -22,6 +22,7 @@ use crate::ui::settings_list::{self as lists, Item, Trailing};
 use crate::ui::settings_meter as meters;
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::setup::{self, SegInk, SegSize};
 use rune::{Color, El, Family, Pixels, Span, TextStyle, col, el, rich, row};
 
@@ -111,6 +112,9 @@ pub enum PhotoPreviews {
     Loading,
     /// The read failed: the pane says why (a fixed sentence) and offers Try again.
     Failed(&'static str),
+    /// The vault is not this account's (locked, or signed out): the pane says why and what to do, never a
+    /// loading state that does not end. The sentence says both.
+    NotBound(&'static str),
     Ready(Previews),
 }
 
@@ -321,6 +325,10 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             children.push(failed(why, t));
             return (shell::pane(children, t), None);
         }
+        PhotoPreviews::NotBound(words) => {
+            children.push(not_bound(words, t));
+            return (shell::pane(children, t), None);
+        }
     };
     ui.previews.show(p.sample.as_ref());
 
@@ -500,38 +508,37 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 /// The Format caption on the board.
 const FORMAT_CAPTION: &str = "HEIC is about half the size at the same quality. JPEG opens anywhere.";
 
-/// While the source reads: one card of placeholders, never a value.
+/// While the source reads: the shared loading state, never a value.
 fn loading(t: &Theme) -> El {
-    let mut card = cards::column(0, 16.0, 12.0, t).role("status").label("Loading");
-    for (i, (w, h)) in [(Some(120.0), 10.0), (Some(220.0), 24.0), (None, 26.0)]
-        .iter()
-        .enumerate()
-    {
-        card = card.child(meters::skeleton(i, *w, *h, t));
-    }
-    card
+    view_state(ViewState::Loading { words: "Loading your preview settings" }, t)
 }
 
-/// The read failed: said plainly, with one way to try again.
+/// The read failed: said plainly, with a Try again that reads again.
 fn failed(why: &'static str, t: &Theme) -> El {
-    const HEAD: &str = "Couldn't load your preview settings";
-    let again = controls::button(0, "Try again", None, Emphasis::Plain, t)
-        .on_press(|s: &mut State| s.settings.drive.reload_previews());
-    cards::card(0, t)
-        .items_start()
-        .role("alert")
-        .label(format!("{HEAD}. {why}"))
-        .child(notices::tile(0, Tone::Red, &ic::WARN_CIRCLE, t))
-        .child(
-            col()
-                .key("card-0-words")
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(4.0)
-                .child(cards::head(0, HEAD, t))
-                .child(kit::label("card-0-sub", why, SUB, t.text_tertiary))
-                .child(row().key("card-0-actions").pt(8.0).child(again)),
-        )
+    let again = try_again("previews-failed", t).on_press(|s: &mut State| s.settings.drive.reload_previews());
+    view_state(
+        ViewState::Failed {
+            key: "previews-failed",
+            title: "Couldn't load your preview settings",
+            why,
+            retry: Some(again),
+        },
+        t,
+    )
+}
+
+/// The vault is not this account's: why, and what to do.
+fn not_bound(words: &'static str, t: &Theme) -> El {
+    view_state(
+        ViewState::Empty {
+            key: "previews-locked",
+            icon: &ic::PADLOCK,
+            title: "Preview settings are locked",
+            body: words,
+            action: None,
+        },
+        t,
+    )
 }
 
 /// The sample: the photo, what its preview weighs against the original, and Compare
