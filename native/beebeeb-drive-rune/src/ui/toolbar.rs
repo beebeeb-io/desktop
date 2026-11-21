@@ -381,7 +381,7 @@ fn bar_for(bar: Bar, file: bool, t: &Theme) -> El {
     // Open in File Explorer (board b4ffef881): the last icon button, never dimmed.
     let on_explorer: std::rc::Rc<dyn Fn(&mut State, &mut rune::Tx)> = std::rc::Rc::from(bar.on_explorer);
     let on_reveal = on_explorer.clone();
-    let explorer_btn = tool_button(
+    let mut explorer_btn = tool_button(
         "open-explorer",
         "Open in File Explorer",
         &crate::theme::icons_settings::FOLDER,
@@ -391,6 +391,9 @@ fn bar_for(bar: Bar, file: bool, t: &Theme) -> El {
     )
     .help("Open in File Explorer")
     .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| on_explorer(s, tx));
+    if bar.inert {
+        explorer_btn = explorer_btn.disabled(true).focusable(false);
+    }
 
     let sep = el()
         .key(if bar.slot_sep { "toolbar-sep-2" } else { "toolbar-sep" })
@@ -580,7 +583,7 @@ pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Clo
             } else {
                 press(|s: &mut State, _| s.show_detail_pane = !s.show_detail_pane)
             },
-            inert: false,
+            inert: off,
             on_explorer,
             new: if off { New::Off } else { New::Idle },
             on_new: None,
