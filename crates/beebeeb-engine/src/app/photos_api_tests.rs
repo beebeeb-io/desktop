@@ -592,7 +592,8 @@ fn video_seconds_of_a_dehydrated_placeholder_reads_nothing() {
     assert_eq!(facts_of_copy(dir.path(), "Trip/shot.png", false).width, Some(31));
 }
 
-/// A library of 8,816 photos among 10,816 files reads in a constant number of queries (no query per photo), fast.
+/// A library of 8,816 photos among 10,816 files reads in a constant number of SQL statements (no query per photo).
+/// It counts statements, not time: a wall-clock bound fails on a loaded machine.
 #[test]
 fn large_library_reads_without_a_query_per_photo() {
     let dir = tempfile::tempdir().unwrap();
@@ -608,10 +609,19 @@ fn large_library_reads_without_a_query_per_photo() {
             false,
         );
     }
-    let started = std::time::Instant::now();
+    static STATEMENTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    db.hold_lock_for_test()
+        .trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(|_event: rusqlite::trace::TraceEvent<'_>| {
+                STATEMENTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        )
+        .unwrap();
     let photos = library(&db, &[]).expect("library");
-    let took = started.elapsed();
+    let statements = STATEMENTS.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(photos.len(), 8_816);
     assert!(photos.iter().all(|p| p.versions >= 1));
-    assert!(took < Duration::from_millis(300), "library took {took:?}");
+    assert!(statements > 0, "the instrument: the trace saw the read");
+    assert!(statements <= 10, "library ran {statements} statements for 8,816 photos");
 }

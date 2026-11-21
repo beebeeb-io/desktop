@@ -115,8 +115,9 @@ pub(crate) fn hresult_of(error: &anyhow::Error) -> Option<i32> {
 mod tests {
     use super::*;
 
-    /// The read half answers as `LockFile::acquire` would decide: no lock, or a lock it would overwrite (a dead
-    /// process, unreadable JSON), is free; a live process's lock, or a lock that cannot be read, is held.
+    /// The read half answers as `LockFile::acquire` would decide: no lock, a lock naming this process (acquire
+    /// reclaims it) or a dead process is free; another live process's lock, JSON that does not parse, or a lock that
+    /// cannot be read, is held.
     #[test]
     fn the_lock_is_held_exactly_when_acquire_would_refuse() {
         let dir = tempfile::tempdir().unwrap();
@@ -127,7 +128,13 @@ mod tests {
             format!(r#"{{"pid":{pid},"agent":"desktop","hostname":"pc","started_at":"2026-11-12T10:00:00Z"}}"#)
         };
         std::fs::write(&lock, held_by(std::process::id())).unwrap();
-        assert!(os.engine_lock_held(dir.path()), "a live process holds it");
+        assert!(!os.engine_lock_held(dir.path()), "this process's own lock is reclaimed by acquire");
+        #[cfg(unix)]
+        {
+            // Another live process: this test's parent.
+            std::fs::write(&lock, held_by(std::os::unix::process::parent_id())).unwrap();
+            assert!(os.engine_lock_held(dir.path()), "another live process holds it");
+        }
         // A dead process's lock is free (acquire would overwrite it). PID 4_000_000_000 is above Linux's
         // default `pid_max` (4_194_304) and Windows' ceiling, so it is not alive on any test machine.
         std::fs::write(&lock, held_by(4_000_000_000)).unwrap();
@@ -137,8 +144,8 @@ mod tests {
         );
         std::fs::write(&lock, "not json").unwrap();
         assert!(
-            !os.engine_lock_held(dir.path()),
-            "a corrupt lock is overwritten by acquire"
+            os.engine_lock_held(dir.path()),
+            "a corrupt lock is refused by acquire (it cannot tell who holds it)"
         );
         std::fs::remove_file(&lock).unwrap();
         std::fs::create_dir(&lock).unwrap();
