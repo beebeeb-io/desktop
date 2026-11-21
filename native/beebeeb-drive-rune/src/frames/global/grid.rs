@@ -6,10 +6,11 @@
 //! ([`grid_body`], in the list's place). "Each folder remembers its own view" (DW-1102): the
 //! folders seen as a grid are kept here by id, for as long as the app runs.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use rune::{El, Key, KeyEvent, PointerPress, Tx, row};
+use rune::{El, Key, KeyEvent, PointerPress, Tx, col, row};
 
 use crate::State;
 use crate::source::DriveItem;
@@ -65,17 +66,32 @@ impl ThumbSource for BoardThumbs {
 }
 
 impl GridUi {
-    /// A picture asked for earlier whose tile is now more than [`grid_tiles::KEEP_ROWS`] rows out of view is let go.
-    fn release_far(&self, items: &[DriveItem], near: &std::ops::Range<usize>, thumbs: &dyn ThumbSource) {
+    /// The lines in view, as the list last reported them (before the first layout: the first screenful).
+    fn near_lines(&self) -> std::ops::Range<usize> {
+        self.visible.lock().unwrap().clone()
+    }
+
+    /// The lines in view changed: true when the view must be built again (new lines ask for their pictures).
+    fn set_visible(&self, r: std::ops::Range<usize>) -> bool {
+        let mut v = self.visible.lock().unwrap();
+        let changed = *v != r;
+        *v = r;
+        changed
+    }
+
+    /// A picture asked for earlier whose tile is now more than [`grid_tiles::KEEP_ROWS`] lines out of view is let go.
+    fn release_far(&self, items: &[DriveItem]) {
         let mut asked = self.asked.lock().unwrap();
         if asked.is_empty() {
             return;
         }
-        let band = grid_tiles::KEEP_ROWS * self.columns.max(1);
-        let (from, to) = (near.start.saturating_sub(band), (near.end + band).min(items.len()));
-        for item in items[..from].iter().chain(&items[to..]) {
+        let near = self.near_lines();
+        let columns = self.columns.max(1);
+        let band = grid_tiles::KEEP_ROWS * columns;
+        let (from, to) = ((near.start * columns).saturating_sub(band), (near.end * columns + band).min(items.len()));
+        for item in items[..from.min(items.len())].iter().chain(&items[to..]) {
             if asked.remove(&item.id) {
-                thumbs.release(&item.id);
+                self.thumbs.release(&item.id);
             }
         }
     }
@@ -88,10 +104,8 @@ pub struct GridUi {
     folders: HashSet<Option<String>>,
     /// How many tiles stand side by side at the window's width (set when the grid is laid out).
     columns: usize,
-    /// Where the scrolling area and the tiles' box stand in the window, and how high the area is (set when the grid is
-    /// laid out): the tiles in view follow from them.
-    area: [f32; 2],
-    rows_y: f32,
+    /// The lines in view (set by the virtual list after each layout).
+    visible: Mutex<std::ops::Range<usize>>,
     /// The pictures this grid asked its source for, not yet released.
     asked: Mutex<HashSet<String>>,
 }
@@ -102,8 +116,7 @@ impl Default for GridUi {
             thumbs: Box::new(NoThumbs),
             folders: HashSet::new(),
             columns: 1,
-            area: [0.0, 0.0],
-            rows_y: 0.0,
+            visible: Mutex::new(0..5),
             asked: Mutex::new(HashSet::new()),
         }
     }
@@ -212,35 +225,37 @@ fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     } else {
         s.select_only(to);
     }
-    tx.scroll_into_view(format!("grid-{to}"));
+    tx.scroll_into_view(format!("grid-line-{}", s.listing.items[to - to % columns].id));
     true
 }
 
-/// The folder as a grid, in the list's place. `None`: this folder is a list, or could not be read.
-pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
-    if !on(s) || s.list_error.is_some() {
-        return None;
-    }
-    let thumbs = s.global.grid.thumbs.as_ref();
-    let count = s.listing.items.len();
+/// Where an item stands now, found by its id (a row's handlers never trust the index it was built at).
+fn index_of(s: &State, id: &str) -> Option<usize> {
+    s.listing.items.iter().position(|it| it.id == id)
+}
+
+/// One line of the grid: up to `columns` tiles side by side, built only while the line is in the mounted window.
+/// Pictures are asked for only by the lines in view and one line above and below.
+fn line(s: &State, i: usize, t: &Theme) -> El {
     let g = &s.global.grid;
-    // Only the tiles in view (and a row above and below) ask for their picture; the rest stay plain tiles.
-    let near = grid_tiles::items_in_view(g.area[0] + grid_tiles::PAD_Y - g.rows_y, g.area[1], g.columns, count);
-    g.release_far(&s.listing.items, &near, thumbs);
-    let tiles = s
-        .listing
-        .items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
+    let thumbs = g.thumbs.as_ref();
+    let columns = g.columns.max(1);
+    let count = s.listing.items.len();
+    let (from, to) = (i * columns, ((i + 1) * columns).min(count));
+    let near = g.near_lines();
+    let line_near = i + 1 >= near.start && i < near.end + 1;
+    let first = s.listing.items.get(from).map_or("none", |it| it.id.as_str());
+    let tiles: Vec<El> = (from..to.max(from))
+        .filter_map(|n| s.listing.items.get(n).map(|item| (n, item)))
+        .map(|(n, item)| {
             let sub = sub_of(item);
-            let asks = pictured(item) && near.contains(&i);
+            let asks = pictured(item) && line_near;
             if asks {
                 g.asked.lock().unwrap().insert(item.id.clone());
             }
             let length = asks.then(|| thumbs.video_length(&item.id)).flatten();
             let mut tile = grid_tiles::tile(
-                i,
+                n,
                 &Tile {
                     name: &item.name,
                     sub: &sub,
@@ -251,21 +266,24 @@ pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
                     },
                     pixels: asks.then(|| thumbs.pixels(&item.id)).flatten(),
                     length: length.as_deref(),
-                    selected: s.is_selected(i),
+                    selected: s.is_selected(n),
                 },
                 t,
             )
             .role("option")
             .label(tile_name(item, &sub, length.as_deref()))
-            .position_in_set(i + 1, count);
+            .position_in_set(n + 1, count);
+            let id = item.id.clone();
             if item.is_folder {
                 // "Drop on a folder: uploads into that folder", as in the list.
-                let id = item.id.clone();
+                let folder = id.clone();
                 tile = tile.on_drop_files(move |s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
-                    s.upload(Some(id.clone()), files, tx);
+                    s.upload(Some(folder.clone()), files, tx);
                 });
             }
+            let (a, b, c) = (id.clone(), id.clone(), id);
             tile.on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                let Some(i) = index_of(s, &a) else { return };
                 let mods = tx.mods();
                 tx.focus("rows", false);
                 if mods.shift {
@@ -277,9 +295,12 @@ pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
                 }
             })
             .on_double_press_tx(move |s: &mut State, tx: &mut Tx| {
-                s.open_row(i, tx);
+                if let Some(i) = index_of(s, &b) {
+                    s.open_row(i, tx);
+                }
             })
             .on_secondary_press(move |s: &mut State, at: PointerPress, tx: &mut Tx| {
+                let Some(i) = index_of(s, &c) else { return };
                 tx.focus("rows", false);
                 if !s.is_selected(i) {
                     s.select_only(i);
@@ -288,25 +309,67 @@ pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
             })
         })
         .collect();
-    let mut rows = row()
+    row()
+        .key(format!("grid-line-{first}"))
+        .w_full()
+        .items_start()
+        .gap(grid_tiles::COL_GAP)
+        .pb(grid_tiles::ROW_GAP)
+        .children(tiles)
+}
+
+/// The folder as a grid, in the list's place. `None`: this folder is a list, or could not be read.
+/// Only the lines in view (and what the window mounts around them) are realised, keyed by their first item's id.
+pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
+    if !on(s) || s.list_error.is_some() {
+        return None;
+    }
+    let g = &s.global.grid;
+    let count = s.listing.items.len();
+    let columns = g.columns.max(1);
+    let lines = count.div_ceil(columns);
+    g.release_far(&s.listing.items);
+    let t = *t;
+    // The first id and the last id stand for the keys: a reordered or replaced folder re-reads them.
+    let version = (
+        lines,
+        columns,
+        s.listing.items.first().map(|i| i.id.clone()),
+        s.listing.items.last().map(|i| i.id.clone()),
+        s.listing.folder.id.clone(),
+    );
+    let mut rows = col()
         .role("listbox")
         .label(s.listing.folder.name.clone())
         // The grid's one Tab stop: it holds keyboard focus, the selected tile is its active one.
         .focusable(true)
         .no_focus_ring()
         .on_key(on_key)
-        .on_layout(|s: &mut State, [_, y, w, _]| {
+        .on_layout(|s: &mut State, [_, _, w, _]| {
             s.global.grid.columns = grid_tiles::columns(w + 2.0 * grid_tiles::PAD_X);
-            s.global.grid.rows_y = y;
         });
-    if let Some(i) = s.selected.filter(|&i| i < s.listing.items.len()) {
+    if let Some(i) = s.selected.filter(|&i| i < count) {
         rows = rows.active_descendant(format!("grid-{i}"));
     }
+    let rows = rows.child(
+        col()
+            .key("grid-lines")
+            .w_full()
+            .growth(rune::GrowthSpec::default())
+            .virtual_rows(
+                lines,
+                grid_tiles::CELL_H + grid_tiles::ROW_GAP,
+                move |s: &State, i| {
+                    let first = s.listing.items.get(i * s.global.grid.columns.max(1));
+                    Cow::Owned(format!("grid-line-{}", first.map_or("none", |it| it.id.as_str())))
+                },
+                move |s: &State, i| line(s, i, &t),
+            )
+            .virtual_rows_version(version)
+            .on_visible_rows(|s: &mut State, r: std::ops::Range<usize>| s.global.grid.set_visible(r)),
+    );
     Some(
-        grid_tiles::grid(rows, tiles)
-            .on_layout(|s: &mut State, [_, y, _, h]| {
-                s.global.grid.area = [y, h];
-            })
+        grid_tiles::grid(rows)
             .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
                 let folder = s.listing.folder.id.clone();
                 s.upload(folder, files, tx);
@@ -412,7 +475,7 @@ mod tests {
             assert!(!log.asked.contains("p399"), "a tile far below asks for nothing");
         }
         // Scroll to the end: the tiles there now ask, and the first ones, far out of view, are let go.
-        rt.update(|_, tx| tx.scroll_into_view(format!("grid-{}", N - 1)));
+        rt.update(|s, tx| tx.scroll_into_view(format!("grid-line-{}", s.listing.items[N - 1 - (N - 1) % s.global.grid.columns].id)));
         settle(&mut rt);
         settle(&mut rt);
         let log = log.lock().unwrap();
