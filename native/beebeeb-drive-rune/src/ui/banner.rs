@@ -8,7 +8,7 @@
 //! It is a status (`role="status"` on the board): read when there is a pause, never an alert.
 
 use crate::State;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::Theme;
 use rune::tok::Family;
 use rune::{Color, El, Icon, Key, KeyEvent, LiveRegion, TextStyle, Tx, el, oklch, row};
 

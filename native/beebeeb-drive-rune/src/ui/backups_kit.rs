@@ -21,10 +21,9 @@ use crate::theme::tokens::{Theme, radius, type_};
 use rune::tok::Family;
 use rune::{Color, El, Icon, Span, TextStyle, col, el, oklch, rich, row, text};
 
-use super::button::{self as btn, ButtonKeys, ButtonState, Size, Variant};
+use super::button::{self as btn, ButtonState, Size, Variant};
 use super::dialog::{self, Dialog, Foot, Head, scrim};
 use super::kit;
-use super::settings_dialog::{BUTTON_MD, DIALOG_TITLE, scrim_color};
 use super::settings_shell::SUB;
 
 /// 13px/400 on a 17px line: body words (`.t-body`).
