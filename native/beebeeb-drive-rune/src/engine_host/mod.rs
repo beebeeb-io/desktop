@@ -1110,19 +1110,18 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.apps.for_name(&item.name, move || engine.wake_host())
     }
 
-    /// Open With ▸ an app (DW-1562): only the copy KEPT on this PC, by the engine's own facts at the press, and its
+    /// Open With ▸ an app (DW-1562): any copy, as for the default app (Cloud Files fetches a placeholder), its
     /// path resolved under the account-bound handle at the press (never a path from the menu's time, never one made
-    /// from a name). Nothing is fetched, decrypted or copied for it. The app starts on a COM thread, only while the
+    /// from a name). Nothing is copied here. The app starts on a COM thread, only while the
     /// press's session is still the one inside the launch lock; a start that fails there is said through `changes`,
     /// unless the session moved on since the press.
     fn open_in_app(&mut self, item: &DriveItem, app: &files_source::AppChoice) -> Result<(), ActionError> {
         if item.is_folder {
             return Err(ActionError::Failed);
         }
+        // One rule with `open_outside`: the person asked, so a cloud-only placeholder is handed over too and Cloud Files
+        // hydrates it. Refused only when sync is off or the vault is locked (`local`: `Unavailable`).
         let turn = self.engine.session_turn();
-        if !self.kept_here_for(turn, &item.id) {
-            return Err(ActionError::Failed);
-        }
         let path = self.local(|db, sync_root| path_the_system_opens(db, sync_root, &item.id))?;
         let (engine, failed) = (self.engine.clone(), self.start_failed.clone());
         let now = self.engine.clone();

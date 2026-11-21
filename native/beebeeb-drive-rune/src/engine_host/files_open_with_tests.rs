@@ -237,12 +237,11 @@ fn put_kept(set: &Set, id: &str, name: &str, status: FileStatus, kept: bool) {
         .expect("written");
 }
 
-/// DW-1562's Open With ▸ an app on the real engine: only a copy KEPT on this PC (kept AND its bytes here, for this
-/// session) gets past the engine's check; off Windows the start then says it is not on this system. A file that is
-/// only listed, here but not kept, or kept and still coming down is refused before any start.
+/// Open With ▸ an app follows the default app's rule (dc-096): any file is handed over, online-only included (Cloud
+/// Files hydrates it); off Windows the start then says it is not on this system. A folder is never handed over.
 #[cfg(not(windows))]
 #[test]
-fn open_with_an_app_needs_the_copy_kept_on_this_pc() {
+fn open_with_an_app_hands_over_any_file() {
     let mut set = set("a5-app", true, true);
     let _running = hold_running(&set.engine);
     let app = crate::frames::files::source::AppChoice {
@@ -250,30 +249,9 @@ fn open_with_an_app_needs_the_copy_kept_on_this_pc() {
         label: "Invented".into(),
     };
     let notes = row(NOTES, "Invented notes.txt", false);
-    assert_eq!(
-        set.source.open_in_app(&notes, &app),
-        Err(ActionError::Failed),
-        "online only"
-    );
-    put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Local, false);
-    assert_eq!(
-        set.source.open_in_app(&notes, &app),
-        Err(ActionError::Failed),
-        "here, not kept"
-    );
-    put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Downloading, true);
-    assert_eq!(
-        set.source.open_in_app(&notes, &app),
-        Err(ActionError::Failed),
-        "kept, still coming down"
-    );
+    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "online only");
     put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Local, true);
-    assert_eq!(
-        set.source.open_in_app(&notes, &app),
-        Err(ActionError::NotOnThisSystem),
-        "kept and here: past every check, and off Windows there is no handler to start"
-    );
-    // A folder is never handed to an app.
+    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "kept and here");
     assert_eq!(
         set.source.open_in_app(&row(FOLDER, "Invented folder", true), &app),
         Err(ActionError::Failed)
