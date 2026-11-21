@@ -10,7 +10,8 @@ use crate::ui::account_form::{self as fm, Field};
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size};
 use crate::ui::kit;
 use crate::ui::settings_list as lists;
-use rune::{El, el};
+use crate::ui::menu;
+use rune::{El, Tx, el};
 
 use super::form::{self, Form, Problem};
 use super::forms::button;
@@ -146,7 +147,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     match dialog {
         Some(Dialog::PasskeyMenu(id)) => {
             if let Some(at) = passkeys.iter().position(|p| &p.id == id) {
-                list = list.child(menu(&passkeys[at], at, source.can_rename_passkey(), t));
+                list = list.child(menu(at, source.can_rename_passkey(), t));
             }
         }
         Some(Dialog::RemovePasskey(id)) => {
@@ -185,27 +186,53 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     (set::pane(children, t), overlay)
 }
 
-/// The menu on one passkey (DW-A75): Rename, Remove. Under the row, 12 pt in from its end.
-fn menu(passkey: &Passkey, at: usize, can_rename: bool, t: &Theme) -> El {
-    let (rename_id, remove_id) = (passkey.id.clone(), passkey.id.clone());
-    let name = passkey.name.clone();
-    let remove = fm::pop_item(if can_rename { 1 } else { 0 }, "Remove", true, t)
-        .on_press(move |s: &mut State| super::ask(s, Dialog::RemovePasskey(remove_id.clone())));
-    let mut items = Vec::new();
-    // A source that cannot rename (no route, or not bound) gets no "Rename" (never a button that cannot work).
+/// The menu on one passkey (DW-A75, `ui::menu`): Rename, Remove. Under the row, 12 pt in from its end. A
+/// source that cannot rename (no route, or not bound) gets no "Rename" (never a button that cannot work).
+fn menu(at: usize, can_rename: bool, t: &Theme) -> El {
+    let mut entries = Vec::new();
     if can_rename {
-        items.push(fm::pop_item(0, "Rename", false, t).on_press(move |s: &mut State| {
-            s.account.dialog = None;
-            let f = &mut s.account.form;
-            form::type_in(&mut f.rename, &name);
-            f.renaming = Some(rename_id.clone());
-            form::focus(f, Some(form::RENAME_KEY));
-        }));
+        entries.push(menu::Entry::item("rename", "Rename"));
     }
-    items.push(remove);
-    fm::pop(&format!("{}, passkey", passkey.name), items, t)
-        .pin(None, Some(40.0 * (at as f32 + 1.0)), Some(12.0), None)
-        .modal(true, |s: &mut State| s.account.dialog = None)
+    entries.push(menu::Entry::Item {
+        id: "remove",
+        label: "Remove",
+        shortcut: None,
+        checked: false,
+        danger: true,
+        off: false,
+    });
+    menu::menu(
+        "pop-0",
+        "Passkey",
+        180.0,
+        &entries,
+        None,
+        t,
+        |s: &mut State, i: usize, _: &mut Tx| {
+            let Some(Dialog::PasskeyMenu(id)) = s.account.dialog.clone() else {
+                return;
+            };
+            let can_rename = s.account.source.as_deref().is_some_and(|x| x.can_rename_passkey());
+            if can_rename && i == 0 {
+                let name = s
+                    .account
+                    .source
+                    .as_deref()
+                    .and_then(|x| x.passkeys().into_iter().find(|p| p.id == id).map(|p| p.name))
+                    .unwrap_or_default();
+                s.account.dialog = None;
+                let f = &mut s.account.form;
+                form::type_in(&mut f.rename, &name);
+                f.renaming = Some(id);
+                form::focus(f, Some(form::RENAME_KEY));
+            } else {
+                super::ask(s, Dialog::RemovePasskey(id));
+            }
+        },
+        |_: &mut State, _: usize| {},
+        |s: &mut State, _: &mut Tx| s.account.dialog = None,
+    )
+    .pin(None, Some(40.0 * (at as f32 + 1.0)), Some(12.0), None)
 }
 
 /// Rename a passkey, here: Beebeeb's name for it only. Enter saves, Esc cancels.
