@@ -7,6 +7,7 @@ use rune::{Align, Cx, El, ScrollSpec, Side, Tx, col, el, row, text, text_input};
 use super::model::{self, NoteEntry, StatusState};
 use super::{Feedback, Mode, ROOT_KEY, app_path};
 use crate::theme::tokens::{self, Theme, radius, space, type_};
+use crate::ui::button::{self as ui_button, ButtonState, Size, Variant};
 use crate::{State, TITLEBAR_H};
 
 pub const NOTE_INPUT: &str = "fb-note-input";
@@ -45,35 +46,15 @@ fn mono(s: impl Into<String>, t: &Theme) -> El {
 }
 
 fn button(key: &'static str, label: &'static str, t: &Theme) -> El {
-    row()
-        .key(key)
-        .role("button")
-        .label(label)
-        .h(26.0)
-        .px(space::MD)
-        .center()
-        .radius(radius::MD)
-        .border(1.0, t.card_border)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(text(label).font(type_::BODY).color(t.text))
-}
-
-/// The feedback chrome's own main action: strong and neutral. Amber stays the app's (one
-/// Amber action per view, and the app under this chrome already has its own).
-fn primary(key: &'static str, label: &'static str, t: &Theme) -> El {
-    row()
-        .key(key)
-        .role("button")
-        .label(label)
-        .h(26.0)
-        .px(space::MD)
-        .center()
-        .radius(radius::MD)
-        .fill(t.text)
-        .focusable(true)
-        .child(text(label).font(type_::BODY_SEMI).color(t.bg))
+    ui_button::button(
+        ui_button::keys(key),
+        label,
+        None,
+        Variant::Secondary,
+        Size::Md,
+        ButtonState::Enabled,
+        t,
+    )
 }
 
 /// The small entry that is always reachable by Tab: opens the notes panel.
@@ -274,7 +255,7 @@ fn popover(fb: &Feedback, t: &Theme) -> El {
                         .gap(6.0)
                         .child(button("fb-cancel", "Cancel", t).on_press(|s: &mut State| s.feedback.back()))
                         .child(
-                            primary("fb-save", "Save note", t)
+                            button("fb-save", "Save note", t)
                                 .on_press_tx(|s: &mut State, tx: &mut Tx| s.feedback.save(tx)),
                         ),
                 ),
@@ -507,7 +488,7 @@ fn panel(fb: &Feedback, t: &Theme) -> El {
                     row()
                         .gap(6.0)
                         .child(
-                            primary("fb-add", "Add a note", t)
+                            button("fb-add", "Add a note", t)
                                 .on_press_tx(|s: &mut State, tx: &mut Tx| s.feedback.enter(tx)),
                         )
                         .child(button("fb-close", "Close", t).on_press(|s: &mut State| s.feedback.toggle_panel())),

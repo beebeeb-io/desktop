@@ -164,18 +164,11 @@ fn status(s: &State, t: &Theme) -> El {
 pub const PLAIN_NOTE: &str = "Searches file and folder names on this PC, even offline. It doesn't look inside files.";
 
 fn plain_note_line(t: &Theme) -> El {
-    row()
-        .key("status-bar")
-        .role("status")
-        .label(PLAIN_NOTE)
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .center_y()
-        .child(kit::label("search-note", PLAIN_NOTE, type_::STATUS, t.text_tertiary))
+    crate::ui::status_bar::frame(
+        vec![kit::label("search-note", PLAIN_NOTE, type_::STATUS, t.text_tertiary)],
+        t,
+    )
+    .label(PLAIN_NOTE)
 }
 
 /// The toolbar (`.mk-tb`) while searching: "Search" and what was found, the Files window's
@@ -206,7 +199,13 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
         ],
         t,
     );
-    let sorting = matches!(&s.frames.find.menu, Some(actions::Menu { of: actions::MenuOf::Sort, .. }));
+    let sorting = matches!(
+        &s.frames.find.menu,
+        Some(actions::Menu {
+            of: actions::MenuOf::Sort,
+            ..
+        })
+    );
     let sort = tool_button(
         "sort-btn",
         "Sort",
@@ -215,8 +214,8 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
         if sorting { ToolState::On } else { ToolState::Idle },
         t,
     )
-        .child(kit::glyph("sort-caret", &icons::CHEVRON_DOWN, 11.0, t.text_secondary))
-        .on_press(push(Intent::Frame("DW-0404")));
+    .child(kit::glyph("sort-caret", &icons::CHEVRON_DOWN, 11.0, t.text_secondary))
+    .on_press(push(Intent::Frame("DW-0404")));
     let panel = tool_button(
         "panel-toggle-btn",
         "Details panel",
@@ -795,23 +794,27 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
         .enumerate()
         .map(|(i, hit)| {
             let (pressed, opened, menu) = (hit.id.clone(), hit.id.clone(), hit.id.clone());
-            (if ui.grid { result_tile(i, hit, query, at == Some(i), t) } else { result_row(i, hit, query, at == Some(i), t) })
-                .on_press_tx(move |s: &mut State, tx: &mut Tx| {
-                    s.frames.find.selected = Some(pressed.clone());
-                    tx.focus(format!("row-{i}"), false);
-                })
-                .on_double_press(move |s: &mut State| {
-                    let hits = super::hits(s);
-                    if let Some(at) = hits.iter().position(|h| h.id == opened) {
-                        open_result(s, &hits, at);
-                    }
-                })
-                // The usual file menu, plus Show in enclosing folder (DW-0402).
-                .on_secondary_press(move |s: &mut State, at: rune::PointerPress, _: &mut Tx| {
-                    s.frames.find.selected = Some(menu.clone());
-                    s.frames.find.menu_at = Some((at.x, at.y));
-                    s.frames.intents.push(Intent::About("DW-0402", menu.clone()));
-                })
+            (if ui.grid {
+                result_tile(i, hit, query, at == Some(i), t)
+            } else {
+                result_row(i, hit, query, at == Some(i), t)
+            })
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                s.frames.find.selected = Some(pressed.clone());
+                tx.focus(format!("row-{i}"), false);
+            })
+            .on_double_press(move |s: &mut State| {
+                let hits = super::hits(s);
+                if let Some(at) = hits.iter().position(|h| h.id == opened) {
+                    open_result(s, &hits, at);
+                }
+            })
+            // The usual file menu, plus Show in enclosing folder (DW-0402).
+            .on_secondary_press(move |s: &mut State, at: rune::PointerPress, _: &mut Tx| {
+                s.frames.find.selected = Some(menu.clone());
+                s.frames.find.menu_at = Some((at.x, at.y));
+                s.frames.intents.push(Intent::About("DW-0402", menu.clone()));
+            })
         })
         .collect();
     let list = col()
