@@ -70,7 +70,7 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
 pub fn toolbar(_s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El {
     let more = toolbar::tool("more-btn", "More actions", &icons::MORE, t);
     // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
-    let file_tools = row().key("file-tools").role("toolbar").label("File tools").focus_group().center_y().gap(6.0).children(tools).child(more);
+    let file_tools = row().key("file-tools").role("toolbar").label("File tools").center_y().gap(6.0).children(tools).child(more);
     toolbar::file_bar(
         toolbar::Bar {
             name: ui.file.name.clone(),
