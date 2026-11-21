@@ -9,6 +9,7 @@ use super::source::{Kind, Shape, Viewing};
 use super::{Intent, Menu, Original, Ui, icons, overlay};
 use crate::State;
 use crate::theme::tokens::Theme;
+use crate::ui::toolbar::tool;
 use crate::ui::kit;
 
 fn tab(i: usize, words: String, on: bool, t: &Theme) -> El {
@@ -76,12 +77,12 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
     let open = viewing.id;
     let show_label = crate::frames::show_in_folder::label();
     middle = middle.child(
-        chrome::tbtn("ph-show-in-folder", show_label, &crate::theme::icons_settings::FOLDER, 16.0, false, t)
+        tool("ph-show-in-folder", show_label, &crate::theme::icons_settings::FOLDER, t)
             .help(show_label)
             .on_press(move |s: &mut State| s.photos.ask(Intent::ShowInFolder(open))),
     );
     middle = middle.child(
-        chrome::tbtn("ph-more", "More", &icons::MORE, 17.0, false, t)
+        tool("ph-more", "More", &icons::MORE, t)
             .expanded(ui.menu.is_some_and(|m| m.which == Menu::More))
             .on_press(|s: &mut State| s.photos.toggle_menu(Menu::More)),
     );

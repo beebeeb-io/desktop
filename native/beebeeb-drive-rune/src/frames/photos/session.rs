@@ -12,15 +12,14 @@
 
 use rune::{El, Tx, col};
 
-use super::chrome::style;
 use super::source::{Answered, Left, Loaded, OriginalAnswer, PhotoId, Viewing};
-use super::{Intent, Original, Toast, Ui, Viewer};
+use super::{Intent, Original, Toast, Ui, Viewer, icons};
 use crate::State;
 use crate::frames::files::dialogs::Purpose;
 use crate::shell::app::GateState;
 use crate::source::DriveItem;
 use crate::theme::tokens::Theme;
-use crate::ui::kit;
+use crate::ui::view_state::{ViewState, try_again, view_state};
 
 #[cfg(test)]
 #[path = "session_tests.rs"]
@@ -605,50 +604,43 @@ fn reread_if_free(s: &mut State) {
     }
 }
 
-/// The words in the library's place while there is none (`None`: there is one, draw it).
-pub(super) fn not_here(loaded: Loaded) -> Option<(&'static str, &'static str)> {
-    match loaded {
-        Loaded::Ready => None,
-        Loaded::Loading => Some((
-            "Loading your photos\u{2026}",
-            "Reading what this PC knows of your Beebeeb.",
-        )),
-        Loaded::SignedOut => Some(("Signed out", "Sign in to see your photos.")),
-        Loaded::SessionEnded => Some(("Your session ended", "Sign in again to see your photos.")),
-        Loaded::NothingSynced => Some((
-            "Nothing has synced to this PC yet",
-            "Photos shows your photos and videos once this PC has synced with Beebeeb.",
-        )),
-        Loaded::NotThisAccounts => Some((
-            "This PC holds another account\u{2019}s files",
-            "Photos shows your photos once this PC has synced with your account.",
-        )),
-        Loaded::Failed => Some((
-            "Couldn\u{2019}t load your photos",
-            "Open Photos again in a moment to try again.",
-        )),
-    }
-}
-
 /// The library's place while there is none: what is going on, in words. `None`: there is a library; draw it.
 pub(super) fn not_here_body(ui: &Ui, t: &Theme) -> Option<El> {
-    let (title, words) = not_here(ui.source.loaded())?;
-    let mut body = col().key("ph-body").grow(1.0).center().child(
-        col()
-            .key("ph-not-here")
-            .role("status")
-            .items_center()
-            .gap(8.0)
-            .px(24.0)
-            .py(28.0)
-            .child(kit::label("ph-not-here-title", title, style::TITLE, t.text).role("heading"))
-            .child(
-                kit::label("ph-not-here-words", words, style::SUB, t.text_tertiary)
-                    .w(260.0)
-                    .wrap()
-                    .align(rune::Align::Center),
-            ),
-    );
+    let loaded = ui.source.loaded();
+    let said = |title: &'static str, body: &'static str| ViewState::Empty {
+        key: "ph-not-here",
+        icon: &icons::PHOTOS,
+        title,
+        body,
+        action: None,
+    };
+    let state = match loaded {
+        Loaded::Ready => return None,
+        Loaded::Loading => ViewState::Loading {
+            words: "Loading your photos\u{2026} Reading what this PC knows of your Beebeeb.",
+        },
+        Loaded::SignedOut => said("Signed out", "Sign in to see your photos."),
+        Loaded::SessionEnded => said("Your session ended", "Sign in again to see your photos."),
+        Loaded::NothingSynced => said(
+            "Nothing has synced to this PC yet",
+            "Photos shows your photos and videos once this PC has synced with Beebeeb.",
+        ),
+        Loaded::NotThisAccounts => said(
+            "This PC holds another account\u{2019}s files",
+            "Photos shows your photos once this PC has synced with your account.",
+        ),
+        Loaded::Failed => ViewState::Failed {
+            key: "ph-not-here",
+            title: "Couldn\u{2019}t load your photos",
+            why: "Beebeeb couldn\u{2019}t read the library on this PC.",
+            retry: Some(try_again("ph-not-here", t).on_press(|s: &mut State| s.photos.source.refresh())),
+        },
+    };
+    let mut body = col().key("ph-body").grow(1.0);
+    if loaded != Loaded::Loading {
+        body = body.center();
+    }
+    body = body.child(view_state(state, t));
     if let Some(toast) = &ui.toast {
         body = body.child(super::overlay::toast_layer(toast, 24.0, true, t));
     }

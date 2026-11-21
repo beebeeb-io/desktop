@@ -11,9 +11,11 @@ use super::source::{DeviceKind, Shape, SourceRef};
 use super::{ACROSS, Dialog, Intent, Menu, OpenMenu, ShareDraft, SourcesDraft, Toast, Ui, icons};
 use crate::State;
 use crate::frames::files::actions_data::{LinkAccess, LinkExpiry};
-use crate::ui::settings_controls as controls;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::dialog as ui_dialog;
+use crate::ui::menu::{self as ui_menu, Entry};
+use crate::ui::switch::switch;
+use crate::ui::toast::{self, Lead, toast_with};
 use crate::ui::{field, kit};
 
 /// The caption bar's height: menus and dialogs sit in the window under it.
@@ -23,55 +25,50 @@ const CAPTION: f32 = 32.0;
 // Menus
 // ---------------------------------------------------------------------------
 
-struct Row {
-    label: String,
-    keys: Option<&'static str>,
-    head: bool,
-    checked: bool,
-}
-
-fn rows(ui: &Ui, which: Menu) -> Vec<Row> {
-    let row = |label: &str, keys| Row {
-        label: label.into(),
-        keys,
-        head: false,
-        checked: false,
-    };
+fn entries(ui: &Ui, which: Menu) -> Vec<Entry> {
     match which {
         Menu::Across => {
-            let mut out = vec![Row {
-                head: true,
-                ..row("Photos across", None)
-            }];
+            let mut out = vec![Entry::Head("Photos across")];
             // The two shortcuts sit on the choices they lead to from here.
             let (larger, smaller) = (ui.across_after(true), ui.across_after(false));
             for n in ACROSS {
                 let label = match n {
-                    3 => "3, larger".to_string(),
-                    7 => "7, smallest".to_string(),
-                    n => n.to_string(),
+                    3 => "3, larger",
+                    4 => "4",
+                    5 => "5",
+                    7 => "7, smallest",
+                    _ => "",
                 };
-                out.push(Row {
-                    checked: n == ui.across,
-                    ..row(
-                        &label,
-                        if n == smaller {
-                            Some("Ctrl\u{2212}")
-                        } else if n == larger {
-                            Some("Ctrl+Plus")
-                        } else {
-                            None
-                        },
-                    )
+                let checked = n == ui.across;
+                out.push(if n == smaller {
+                    Entry::Item {
+                        id: label,
+                        label,
+                        shortcut: Some("Ctrl\u{2212}"),
+                        checked,
+                        danger: false,
+                        off: false,
+                    }
+                } else if n == larger {
+                    Entry::Item {
+                        id: label,
+                        label,
+                        shortcut: Some("Ctrl+Plus"),
+                        checked,
+                        danger: false,
+                        off: false,
+                    }
+                } else {
+                    Entry::check(label, label, checked)
                 });
             }
             out
         }
         Menu::More => vec![
-            row("Save to PC\u{2026}", None),
-            row("Move\u{2026}", None),
-            row("Rename", Some("F2")),
-            row("Duplicate", None),
+            Entry::item("save", "Save to PC\u{2026}"),
+            Entry::item("move", "Move\u{2026}"),
+            Entry::keyed("rename", "Rename", "F2"),
+            Entry::item("duplicate", "Duplicate"),
         ],
     }
 }
@@ -82,72 +79,26 @@ pub fn menu(ui: &Ui, open: OpenMenu, t: &Theme) -> El {
         Menu::Across => ("Photos across", CAPTION + 80.0, 58.0),
         Menu::More => ("More", CAPTION + 44.0, 398.0),
     };
-    let which = open.which;
-    let mut menu = col()
-        .key("ph-menu")
-        .role("menu")
-        .label(name)
-        .pin(None, Some(top), Some(right), None)
-        .min_w(180.0)
-        .padding(4.0)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(8.0, 28.0, Color::BLACK.alpha(0.2)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .modal(true, |s: &mut State| s.photos.menu = None);
-    for (i, r) in rows(ui, which).into_iter().enumerate() {
-        let hot = open.hot == Some(i);
-        let key = format!("ph-menu-{i}");
-        let mut item = row()
-            .key(key.clone())
-            .h(if r.head { 26.0 } else { 30.0 })
-            .pl(8.0)
-            .pr(12.0)
-            .gap(10.0)
-            .center_y()
-            .radius(4.0);
-        if r.head {
-            item = item.child(kit::label(format!("{key}-label"), r.label, style::MENU_HEAD, t.text_tertiary).grow(1.0));
-        } else {
-            let mut check = el().key(format!("{key}-ck")).w(14.0).center();
-            if r.checked {
-                check = check.child(kit::glyph(format!("{key}-check"), &icons::CHECK, 12.0, t.text));
+    ui_menu::menu(
+        "ph-menu",
+        name,
+        180.0,
+        &entries(ui, open.which),
+        open.hot,
+        t,
+        |s: &mut State, i, _| {
+            if let Some(open) = s.photos.menu {
+                s.photos.pick(open.which, i);
             }
-            item = item
-                .role(if which == Menu::Across {
-                    "menuitemradio"
-                } else {
-                    "menuitem"
-                })
-                .label(r.label.clone())
-                .focusable(true)
-                .fill(if hot { t.press } else { Color::TRANSPARENT })
-                .on_hover(move |s: &mut State| {
-                    if let Some(open) = &mut s.photos.menu {
-                        open.hot = Some(i);
-                    }
-                })
-                .on_press(move |s: &mut State| s.photos.pick(which, i))
-                .child(check)
-                .child(kit::label(format!("{key}-label"), r.label, style::MENU, t.text).grow(1.0));
-            if which == Menu::Across {
-                item = item.checked(r.checked);
+        },
+        |s: &mut State, i| {
+            if let Some(open) = &mut s.photos.menu {
+                open.hot = Some(i);
             }
-            if let Some(keys) = r.keys {
-                item = item.shortcut_hint(keys).child(
-                    kit::label(
-                        format!("{key}-sc"),
-                        keys,
-                        style::MENU_KEYS,
-                        if hot { t.text_secondary } else { t.text_tertiary },
-                    )
-                    .pl(24.0),
-                );
-            }
-        }
-        menu = menu.child(item);
-    }
-    menu
+        },
+        |s: &mut State, _| s.photos.menu = None,
+    )
+    .pin(None, Some(top), Some(right), None)
 }
 
 // ---------------------------------------------------------------------------
@@ -155,111 +106,55 @@ pub fn menu(ui: &Ui, open: OpenMenu, t: &Theme) -> El {
 // ---------------------------------------------------------------------------
 
 /// A message over the content, `bottom` points above its lower edge.
-pub fn toast_layer(toast: &Toast, bottom: f32, over_photos: bool, t: &Theme) -> El {
+pub fn toast_layer(toast: &Toast, bottom: f32, _over_photos: bool, t: &Theme) -> El {
     let left_words;
-    let (ic, words): (&'static Icon, &str) = match toast {
-        Toast::Kept => (&icons::OFFLINE, "Keeping the original on this PC"),
-        Toast::Trashed(_) => (&icons::TRASH, "Moved to Trash"),
-        Toast::NotYet => (&icons::MORE, "Not available in this version yet"),
-        Toast::Words(words) => (&icons::MORE, words),
-        Toast::Said(words) => (&icons::MORE, words.as_str()),
+    let (lead, words): (Lead, &str) = match toast {
+        Toast::Kept => (Lead::Lock, "Keeping the original on this PC"),
+        Toast::Trashed(_) => (Lead::Check, "Moved to Trash"),
+        Toast::NotYet => (Lead::None, "Not available in this version yet"),
+        Toast::Words(words) => (Lead::None, words),
+        Toast::Said(words) => (Lead::None, words.as_str()),
         Toast::Left { what, why, count, .. } => {
             left_words = Toast::left_words(*what, *why, *count);
-            let ic = match what {
-                super::session::What::Keep(_) => &icons::OFFLINE,
-                _ => &icons::TRASH,
-            };
-            (ic, left_words.as_str())
+            (Lead::Warn, left_words.as_str())
         }
     };
-    let glass = if t.dark {
-        chrome::rgb(25, 21, 16).alpha(173.0 / 255.0)
+    let action = if matches!(toast, Toast::Trashed(_)) {
+        Some(toast_action("Undo", Some("Ctrl+Z"), |s: &mut State| {
+            s.photos.undo();
+        }, t))
+    } else if toast.can_retry() {
+        Some(toast_action("Try again", None, |s: &mut State| {
+            s.photos.try_again();
+        }, t))
     } else {
-        chrome::rgb(251, 249, 247).alpha(184.0 / 255.0)
+        None
     };
-    let mut pill = row()
-        .key("ph-toast")
-        .role("status")
-        .h(38.0)
-        .px(14.0)
-        .gap(8.0)
-        .center_y()
-        .radius(19.0)
-        .fill(glass)
-        // The board's half-point border is part of the pill's width.
-        .border(kit::HAIR, t.separator)
-        .border_layout()
-        .box_shadow(kit::drop(6.0, 22.0, Color::BLACK.alpha(0.1)))
-        // `.glass`: the half-point highlight along the top, inside.
-        .box_shadow(rune::Shadow {
-            x: 0.0,
-            y: kit::HAIR,
-            blur: 0.0,
-            spread: 0.0,
-            color: t.highlight,
-            inset: true,
-        })
-        .child(kit::glyph("ph-toast-icon", ic, 15.0, t.text_secondary))
-        // As wide as the words run: a text's own box rounds up to the device pixel, and two of
-        // them moved "Undo" half a pixel off the board's.
-        .child(kit::label("ph-toast-text", words, style::TOAST, t.text).w(chrome::advance(words, style::TOAST)));
-    // Rune's backdrop blur also takes in what lies beside the element (on the stage: the strip
-    // just under the message, which lit its lower edge), where the board's takes only what is
-    // behind it. Over the dark stage there is nothing behind to blur; over the grid there is.
-    if over_photos {
-        pill = pill.backdrop_blur(22.0);
-    }
-    if matches!(toast, Toast::Trashed(_)) {
-        pill = pill.child(
-            row()
-                .key("ph-toast-action")
-                .role("button")
-                .label("Undo")
-                .shortcut_hint("Ctrl+Z")
-                // `ml-2` and the space before it in the board's sentence.
-                .ml(3.37)
-                .h(15.5)
-                .w(chrome::advance("Undo Ctrl+Z", style::TOAST_ACTION))
-                .center_y()
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    s.photos.undo();
-                })
-                .child(kit::label(
-                    "ph-toast-action-label",
-                    "Undo Ctrl+Z",
-                    style::TOAST_ACTION,
-                    t.text,
-                )),
-        );
-    }
-    if toast.can_retry() {
-        pill = pill.child(
-            row()
-                .key("ph-toast-action")
-                .role("button")
-                .label("Try again")
-                .ml(3.37)
-                .h(15.5)
-                .w(chrome::advance("Try again", style::TOAST_ACTION))
-                .center_y()
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    s.photos.try_again();
-                })
-                .child(kit::label(
-                    "ph-toast-action-label",
-                    "Try again",
-                    style::TOAST_ACTION,
-                    t.text,
-                )),
-        );
-    }
     row()
         .key("ph-toast-layer")
         .pin(Some(0.0), None, Some(0.0), Some(bottom))
         .center()
-        .child(pill)
+        .child(toast_with("ph-toast", words, lead, action, t))
+}
+
+/// The toast's button: its words, and the shortcut where there is one.
+fn toast_action(name: &'static str, shortcut: Option<&'static str>, press: fn(&mut State), t: &Theme) -> El {
+    let words = match shortcut {
+        Some(keys) => format!("{name} {keys}"),
+        None => name.to_string(),
+    };
+    let mut button = row()
+        .key("ph-toast-action")
+        .role("button")
+        .label(name)
+        .center_y()
+        .focusable(true)
+        .on_press(press)
+        .child(kit::label("ph-toast-action-label", words, toast::ACTION, t.text));
+    if let Some(keys) = shortcut {
+        button = button.shortcut_hint(keys);
+    }
+    button
 }
 
 // ---------------------------------------------------------------------------
@@ -270,33 +165,6 @@ pub fn scrim(t: &Theme) -> El {
     el().key("ph-scrim")
         .pin(Some(0.0), Some(CAPTION), Some(0.0), Some(0.0))
         .fill(crate::shell::registry::scrim(t.dark))
-}
-
-/// A switch (36 x 20): ink when on, as the board draws it on the desktop.
-fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
-    // `oklch(0.18 0.01 70)`: the ink of the knob's shadow, the same in both themes.
-    let knob_ink = rune::color::hex("#14110d").unwrap_or(Color::BLACK);
-    el().key(format!("{key}-switch"))
-        .role("switch")
-        .label(name)
-        .checked(on)
-        .size(36.0, 20.0)
-        .radius(10.0)
-        .fill(if on { t.text } else { t.paper3 })
-        // On, the border is the fill's own ink: drawn as one shape, or the round ends are covered
-        // twice and come out darker than the board's.
-        .border(if on { 0.0 } else { 1.0 }, t.separator_strong)
-        .focusable(true)
-        .child(
-            el().key(format!("{key}-knob"))
-                .absolute(if on { 19.0 } else { 3.0 }, 3.0)
-                .size(14.0, 14.0)
-                .radius(7.0)
-                .fill(if on { t.paper } else { Color::WHITE })
-                // `.kit-switch i`: ink at 4 % over 3 pt and at 6 % over 2 pt, in both themes.
-                .box_shadow(kit::drop(1.0, 3.0, knob_ink.alpha(0.04)))
-                .box_shadow(kit::drop(1.0, 2.0, knob_ink.alpha(0.06))),
-        )
 }
 
 /// A pop-up button (`.mk-pop2`): its value and a caret.
@@ -422,7 +290,7 @@ fn sources(ui: &Ui, draft: &SourcesDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
                 &d.name,
                 Some(&sub),
                 vec![
-                    switch(&key, &d.name, on, t)
+                    switch(&format!("{key}-switch"), &d.name, on, true, t)
                         .on_press(move |s: &mut State| s.photos.toggle_source(SourceRef::Device(i))),
                 ],
                 t,
@@ -452,7 +320,7 @@ fn sources(ui: &Ui, draft: &SourcesDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
                         .label(format!("Remove {}", f.name))
                         .focusable(true)
                         .on_press(move |s: &mut State| s.photos.remove_folder(m)),
-                    switch(&key, &f.name, on, t)
+                    switch(&format!("{key}-switch"), &f.name, on, true, t)
                         .on_press(move |s: &mut State| s.photos.toggle_source(SourceRef::Folder(m))),
                 ],
                 t,
@@ -504,28 +372,32 @@ pub fn expiry_menu(ui: &Ui, t: &Theme) -> Option<El> {
     if !draft.menu {
         return None;
     }
-    let items = LinkExpiry::ALL
+    let entries: Vec<Entry> = LinkExpiry::ALL
         .iter()
-        .enumerate()
-        .map(|(i, choice)| {
-            controls::menu_item(0, i, choice.choice(), *choice == draft.expires, false, t).on_press(
-                move |s: &mut State| {
-                    if let Some(Dialog::Share(draft)) = &mut s.photos.dialog {
-                        draft.expires = LinkExpiry::ALL[i];
-                        draft.menu = false;
-                    }
-                },
-            )
-        })
+        .map(|choice| Entry::check(choice.choice(), choice.choice(), *choice == draft.expires))
         .collect();
     Some(
-        controls::menu(0, "Link expires", 130.0, items, t)
-            .anchored("ph-item-0-1-pop", rune::Side::Bottom, rune::Align::End, 4.0)
-            .modal(true, |s: &mut State| {
+        ui_menu::menu(
+            "ph-expiry-menu",
+            "Link expires",
+            130.0,
+            &entries,
+            None,
+            t,
+            |s: &mut State, i, _| {
+                if let Some(Dialog::Share(draft)) = &mut s.photos.dialog {
+                    draft.expires = LinkExpiry::ALL[i];
+                    draft.menu = false;
+                }
+            },
+            |_: &mut State, _| {},
+            |s: &mut State, _| {
                 if let Some(Dialog::Share(draft)) = &mut s.photos.dialog {
                     draft.menu = false;
                 }
-            }),
+            },
+        )
+        .anchored("ph-item-0-1-pop", rune::Side::Bottom, rune::Align::End, 4.0),
     )
 }
 
@@ -587,7 +459,7 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
             "Password",
             None,
             vec![
-                switch("ph-item-0-2", "Password", draft.password, t).on_press_tx(|s: &mut State, tx: &mut Tx| {
+                switch("ph-item-0-2-switch", "Password", draft.password, true, t).on_press_tx(|s: &mut State, tx: &mut Tx| {
                     s.photos.toggle_share_password();
                     if matches!(&s.photos.dialog, Some(Dialog::Share(d)) if d.password) {
                         tx.focus(SHARE_PASSWORD, false);

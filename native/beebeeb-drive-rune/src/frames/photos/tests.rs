@@ -102,7 +102,7 @@ fn every_board_frame_has_a_scene_that_draws_its_marks() {
         ),
         (
             "DW-0603",
-            "ph-menu-4-check",
+            "ph-menu-item-4-check",
             "Photos",
             "12,430 photos \u{00B7} 842 videos \u{00B7} 216 GB",
         ),
@@ -126,7 +126,7 @@ fn every_board_frame_has_a_scene_that_draws_its_marks() {
         ),
         (
             "DW-0606",
-            "ph-menu-3",
+            "ph-menu-item-3",
             "Today 09:12",
             "Anna's iPhone \u{00B7} Harbour.heic",
         ),
@@ -183,8 +183,8 @@ fn the_board_copy_of_each_frame_is_drawn() {
     );
     assert_eq!(text(&runtime("DW-0602"), "ph-bulk-count"), "3 photos \u{00B7} 42 MB");
     let menu = runtime("DW-0603");
-    assert_eq!(text(&menu, "ph-menu-3-sc"), "Ctrl+Plus");
-    assert_eq!(text(&menu, "ph-menu-4-sc"), "Ctrl\u{2212}");
+    assert_eq!(text(&menu, "ph-menu-item-3-shortcut"), "Ctrl+Plus");
+    assert_eq!(text(&menu, "ph-menu-item-4-shortcut"), "Ctrl\u{2212}");
     let open = runtime("DW-0605");
     assert_eq!(text(&open, "ph-seg-1-label"), "Original \u{00B7} 30.9 MB");
     assert_eq!(
@@ -239,7 +239,7 @@ fn names_and_roles() {
         assert_eq!((e.role, e.label.as_deref()), (role, Some(label)), "{key}");
     }
     assert_eq!(info(&runtime("DW-0603"), "ph-menu").role, "menu");
-    assert_eq!(info(&runtime("DW-0116"), "ph-empty-title").role, "heading");
+    assert_eq!(info(&runtime("DW-0116"), "ph-empty").role, "group");
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn photos_across_by_menu_and_by_keys() {
     }
     assert_eq!(rt.state.photos.across, 7, "7 is the smallest");
     click(&mut rt, "ph-across");
-    click(&mut rt, "ph-menu-3");
+    click(&mut rt, "ph-menu-item-3");
     assert_eq!(rt.state.photos.across, 5, "a click on 5");
     click(&mut rt, "ph-across");
     press(&mut rt, Key::Escape);
@@ -436,7 +436,7 @@ fn the_open_photo_actions() {
     );
 
     click(&mut rt, "ph-more");
-    click(&mut rt, "ph-menu-0");
+    click(&mut rt, "ph-menu-item-0");
     click(&mut rt, "ph-more");
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
