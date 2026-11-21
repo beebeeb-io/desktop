@@ -527,3 +527,31 @@ fn card_keeps_its_keys_and_boxes() {
         assert_eq!(boxes(&a), boxes(&b), "case {i}");
     }
 }
+
+#[test]
+fn old_presets_press_their_enter_button() {
+    use super::{account_set as set, settings_dialog as sd};
+    fn unsaved(t: &Theme) -> El {
+        set::dialog_enter("U", 440.0, "U", "words", vec![], vec![(btn(0, "Save", t), false), (btn(1, "Discard", t), false), (btn(2, "Cancel", t), true)], Some(0), t)
+    }
+    fn account(t: &Theme) -> El {
+        set::dialog_with_enter("A", 440.0, "A", kit::label("p", "w", SUB, t.text), vec![], vec![(btn(0, "Ok", t), false), (btn(1, "Cancel", t), false)], Some(0), t)
+    }
+    fn settings(t: &Theme) -> El {
+        sd::dialog_enter("S", 440.0, "S", None, vec![], vec![btn(0, "Ok", t), btn(1, "Cancel", t)], Some(0), t)
+    }
+    fn alert(t: &Theme) -> El {
+        sd::alert_enter("L", 440.0, el(), "L", "w", vec![btn(0, "Ok", t), btn(1, "Cancel", t)], Some(0), t)
+    }
+    fn plain(t: &Theme) -> El {
+        sd::dialog("P", 440.0, "P", None, vec![], vec![btn(0, "Ok", t)], t)
+    }
+    for build in [unsaved as fn(&Theme) -> El, account, settings, alert] {
+        let mut rt = window(build);
+        press(&mut rt, Key::Enter);
+        assert_eq!(rt.state.pressed, vec![0]);
+    }
+    let mut rt = window(plain);
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.pressed.is_empty());
+}

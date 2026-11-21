@@ -467,8 +467,22 @@ pub fn dialog(
     foot: Vec<(El, bool)>,
     t: &Theme,
 ) -> El {
+    dialog_enter(name, width, title, words, extra, foot, None, t)
+}
+
+/// [`dialog`] where Enter presses foot button `enter` (never a destructive one).
+pub fn dialog_enter(
+    name: &str,
+    width: f32,
+    title: &str,
+    words: &str,
+    extra: Vec<El>,
+    foot: Vec<(El, bool)>,
+    enter: Option<usize>,
+    t: &Theme,
+) -> El {
     let paragraph = kit::label("dlg-text-0", words, SUB, t.text_secondary).wrap().w_full();
-    dialog_with(name, width, title, paragraph, extra, foot, t)
+    dialog_with_enter(name, width, title, paragraph, extra, foot, enter, t)
 }
 
 /// [`dialog`] with the caller's own paragraph under the title (one whose lead is bold:
@@ -480,6 +494,20 @@ pub fn dialog_with(
     paragraph: El,
     extra: Vec<El>,
     foot: Vec<(El, bool)>,
+    t: &Theme,
+) -> El {
+    dialog_with_enter(name, width, title, paragraph, extra, foot, None, t)
+}
+
+/// [`dialog_with`] where Enter presses foot button `enter` (never a destructive one).
+pub fn dialog_with_enter(
+    name: &str,
+    width: f32,
+    title: &str,
+    paragraph: El,
+    extra: Vec<El>,
+    foot: Vec<(El, bool)>,
+    enter: Option<usize>,
     t: &Theme,
 ) -> El {
     let mut body = vec![
@@ -512,6 +540,7 @@ pub fn dialog_with(
                 body,
                 body_top: Some(22.0),
                 foot: Foot::Row(buttons),
+                enter,
                 ..Dialog::new("dlg", name, width)
             },
             t,
