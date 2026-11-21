@@ -40,7 +40,7 @@ function Calibrate-Types {
     Event   = { 1..64 | % { [void]$keep.Add((New-Object Threading.ManualResetEvent($false))) } }
     Key     = { 1..64 | % { [void]$keep.Add([Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software')) } }
     Process = { 1..64 | % { $p = [Diagnostics.Process]::GetProcessById($PID); $null = $p.Handle; [void]$keep.Add($p) } }
-    Section = { 1..64 | % { [void]$keep.Add([IO.MemoryMappedFiles.MemoryMappedFile]::CreateNew($null, 4096)) } }
+    Section = { 1..64 | % { [void]$keep.Add([IO.MemoryMappedFiles.MemoryMappedFile]::CreateNew(('dc086-' + [guid]::NewGuid().ToString('N')), 4096)) } }
   }
   foreach ($k in $steps.Keys) { $a = [KS]::Handles($me); & $steps[$k]; $b = [KS]::Handles($me)
     foreach ($i in @($b.Keys)) { $was = 0L; if ($a.ContainsKey($i)) { $was = $a[$i] }; if (($b[$i] - $was) -ge 60) { $global:TypeName[$i] = $k } } }
@@ -106,7 +106,7 @@ function Sign-In([string]$email, [string]$pw, [string]$phrase) {
   for ($i = 0; $i -lt 4; $i++) { $null = Click-Name 'Sign in' 'Button' 10; Pump 1500; if (@(Texts2 | ? { $_ -match '^Sign in to Drive$' }).Count) { break } }
   L "sign-in form: email $(TypeNew 'Email' $email), password $(TypeNew 'Password' $pw)"
   Pump 400; $global:tSign = Get-Date; Send '{ENTER}'; L 'SIGNIN password sent (t = 0 of the population)'
-  $asked = $false; $seen = @{}; $main = $false; $next = Get-Date
+  $asked = $false; $seen = @{}; $main = $false; $next = Get-Date; $nowin = 0
   for ($i = 0; $i -lt 400 -and -not $main; $i++) {
     Pump 500
     if ((Get-Date) -ge $next) { $next = (Get-Date).AddSeconds(10); if (Test-Path -LiteralPath $Root) { $c = Count-Entries; L "entries=$($c[0]) dirs=$($c[1]) (listing took $($c[2]) ms) [during set-up, t=$([Math]::Round(((Get-Date) - $global:tSign).TotalSeconds, 1)) s]" } }
@@ -117,9 +117,10 @@ function Sign-In([string]$email, [string]$pw, [string]$phrase) {
     }
     $b = Btns2
     if ($b -contains 'Settings' -and $b -contains 'New') { $main = $true; break }
+    if (-not @(App-Windows).Count) { $nowin++; if ($nowin -gt 40) { L 'the app has no window for 40 polls; giving up'; break } } else { $nowin = 0 }
     if (@(Prompt-Rows).Count) { L "Windows Hello prompt: $(Close-Credential)"; continue }
     $act = ''
-    foreach ($a in 'Use this folder', 'Not now', 'Continue for now', 'Open my Beebeeb', 'Continue', 'Got it', 'Close') { if ($b -contains $a) { $act = $a; break } }
+    foreach ($a in 'Use this folder', 'Not now', 'Continue for now', 'Open my Beebeeb', 'Continue', 'Got it') { if ($b -contains $a) { $act = $a; break } }
     if ($act) { $k = "$act|$(($b | Select-Object -First 6) -join ',')"; $seen[$k]++; if ($seen[$k] -gt 6) { L "stuck: '$act' pressed 6 times; buttons: $($b -join ', ')"; S 'stuck'; break }
       $title = @(Texts2 | Select-Object -First 3) -join ' / '; L "set-up: '$title' -> $act"; Pump 400; $null = Click-Name $act 'Button' 3; Pump 800
       if (@(Prompt-Rows).Count) { Pump 1500; L "Windows Hello prompt: $(Close-Credential)" } }

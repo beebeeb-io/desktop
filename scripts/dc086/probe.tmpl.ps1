@@ -40,7 +40,7 @@ function Calibrate-Types {
     Event   = { 1..64 | % { [void]$keep.Add((New-Object Threading.ManualResetEvent($false))) } }
     Key     = { 1..64 | % { [void]$keep.Add([Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software')) } }
     Process = { 1..64 | % { $p = [Diagnostics.Process]::GetProcessById($PID); $null = $p.Handle; [void]$keep.Add($p) } }
-    Section = { 1..64 | % { [void]$keep.Add([IO.MemoryMappedFiles.MemoryMappedFile]::CreateNew($null, 4096)) } }
+    Section = { 1..64 | % { [void]$keep.Add([IO.MemoryMappedFiles.MemoryMappedFile]::CreateNew(('dc086-' + [guid]::NewGuid().ToString('N')), 4096)) } }
   }
   foreach ($k in $steps.Keys) { $a = [KS]::Handles($me); & $steps[$k]; $b = [KS]::Handles($me)
     foreach ($i in @($b.Keys)) { $was = 0L; if ($a.ContainsKey($i)) { $was = $a[$i] }; if (($b[$i] - $was) -ge 60) { $global:TypeName[$i] = $k } } }
@@ -100,13 +100,14 @@ function Explorer-Time([string]$path, [int]$want, [string]$tag) {
   $a1 = App-Proc; $ecpu1 = (@(Get-Process explorer -ea 0) | % { $_.TotalProcessorTime.TotalSeconds } | Measure-Object -Sum).Sum
   L ("EXPLORER $tag | window after {0} ms | shell folder reports {1} items after {2} ms | view ready after {3} ms | status bar '{4}' after {5} ms | explorer CPU +{6:0.0} s, app CPU +{7:0.0} s, app handles {8} -> {9}" -f $tWin, $n, $tCount, $tReady, $bar, $tBar, ($ecpu1 - $ecpu0), ($a1.TotalProcessorTime.TotalSeconds - $acpu0), $ah0, $a1.HandleCount)
 }
+function Threads([string]$tag, [int]$sec = 5) { try { foreach ($l in @(& powershell -NoProfile -ExecutionPolicy Bypass -File C:\bb\dc086\threads2.ps1 -Seconds $sec 2>&1 | Select-Object -First 7)) { L "THREADS $tag | $l" } } catch { L "THREADS $tag failed" } }
 function Log-Lines([string]$rx, [int]$last = 40) { $f = @(Get-ChildItem -LiteralPath $LogDir -Filter *.log -ea 0 | Sort-Object LastWriteTime | Select-Object -Last 1)[0]; if ($f) { @(Select-String -LiteralPath $f.FullName -Pattern $rx | Select-Object -Last $last | % { $_.Line -replace '^(.{0,300}).*$', '$1' }) } else { @() } }
 # Sign-in to the main window: the email, the password, the twelve words, every set-up step answered "not now".
 function Sign-In([string]$email, [string]$pw, [string]$phrase) {
   for ($i = 0; $i -lt 4; $i++) { $null = Click-Name 'Sign in' 'Button' 10; Pump 1500; if (@(Texts2 | ? { $_ -match '^Sign in to Drive$' }).Count) { break } }
   L "sign-in form: email $(TypeNew 'Email' $email), password $(TypeNew 'Password' $pw)"
   Pump 400; $global:tSign = Get-Date; Send '{ENTER}'; L 'SIGNIN password sent (t = 0 of the population)'
-  $asked = $false; $seen = @{}; $main = $false; $next = Get-Date
+  $asked = $false; $seen = @{}; $main = $false; $next = Get-Date; $nowin = 0
   for ($i = 0; $i -lt 400 -and -not $main; $i++) {
     Pump 500
     if ((Get-Date) -ge $next) { $next = (Get-Date).AddSeconds(10); if (Test-Path -LiteralPath $Root) { $c = Count-Entries; L "entries=$($c[0]) dirs=$($c[1]) (listing took $($c[2]) ms) [during set-up, t=$([Math]::Round(((Get-Date) - $global:tSign).TotalSeconds, 1)) s]" } }
@@ -117,9 +118,10 @@ function Sign-In([string]$email, [string]$pw, [string]$phrase) {
     }
     $b = Btns2
     if ($b -contains 'Settings' -and $b -contains 'New') { $main = $true; break }
+    if (-not @(App-Windows).Count) { $nowin++; if ($nowin -gt 40) { L 'the app has no window for 40 polls; giving up'; break } } else { $nowin = 0 }
     if (@(Prompt-Rows).Count) { L "Windows Hello prompt: $(Close-Credential)"; continue }
     $act = ''
-    foreach ($a in 'Use this folder', 'Not now', 'Continue for now', 'Open my Beebeeb', 'Continue', 'Got it', 'Close') { if ($b -contains $a) { $act = $a; break } }
+    foreach ($a in 'Use this folder', 'Not now', 'Continue for now', 'Open my Beebeeb', 'Continue', 'Got it') { if ($b -contains $a) { $act = $a; break } }
     if ($act) { $k = "$act|$(($b | Select-Object -First 6) -join ',')"; $seen[$k]++; if ($seen[$k] -gt 6) { L "stuck: '$act' pressed 6 times; buttons: $($b -join ', ')"; S 'stuck'; break }
       $title = @(Texts2 | Select-Object -First 3) -join ' / '; L "set-up: '$title' -> $act"; Pump 400; $null = Click-Name $act 'Button' 3; Pump 800
       if (@(Prompt-Rows).Count) { Pump 1500; L "Windows Hello prompt: $(Close-Credential)" } }
@@ -166,9 +168,11 @@ $ok = Sign-In $email $pw $phrase
 $pw = ''; $phrase = ''
 if (-not $ok) { L "sign-in did not reach the main window; texts: $((Texts2 | Select-Object -First 25) -join ' ; ') || buttons: $((Btns2) -join ' ; ')"; S 'signin-failed' }
 Snap 'main-window'
+L "display adapter: $((Get-CimInstance Win32_VideoController | % { $_.Name }) -join ' ; '); render modules in the app: $((@((App-Proc).Modules | ? { $_.ModuleName -match 'warp|d3d1|dxgi|vulkan|opengl|dcomp' } | % { $_.ModuleName }) -join ' '))"
+$thr = @{}
 # ---- population: entries in the sync folder every 10 s until every placeholder is there
 $tFirst = $null; $tDone = $null; $tIdleWord = $null; $last = -1; $lastChange = Get-Date; $word = ''; $i = 0
-while ($ok -and ((Get-Date) - $global:tSign).TotalMinutes -lt 50) {
+while ($ok -and ((Get-Date) - $global:tSign).TotalMinutes -lt 60) {
   $c = Count-Entries; $el = [Math]::Round(((Get-Date) - $global:tSign).TotalSeconds, 1)
   if ($c[0] -gt 0 -and -not $tFirst) { $tFirst = $el }
   if ($c[0] -ne $last) { $last = $c[0]; $lastChange = Get-Date }
@@ -176,8 +180,9 @@ while ($ok -and ((Get-Date) - $global:tSign).TotalMinutes -lt 50) {
   L "POP t=$el s entries=$($c[0]) dirs=$($c[1]) files=$($c[0] - $c[1]) (listing took $($c[2]) ms) status='$word' | $(App-Line)"
   if ($c[0] -ge $Expected) { $tDone = $el; break }
   if ($c[0] -gt 0 -and ((Get-Date) - $lastChange).TotalMinutes -ge 6) { L "POP no new entry for 6 minutes at $($c[0]) of $Expected; going on"; break }
-  if ($c[0] -le 0 -and ((Get-Date) - $lastChange).TotalMinutes -ge 12) { L "POP no entry at all for 12 minutes; going on"; break }
-  if (($i % 12) -eq 11) { foreach ($l in (Log-Lines 'engine phase timing' 30 | Select-Object -Last 3)) { L "POP log: $l" } }
+  if (-not $thr['pull-5min'] -and $c[0] -eq 0 -and $el -gt 300) { $thr['pull-5min'] = 1; Threads 'first pull, 5 min in' }
+  if (-not $thr['pull-12min'] -and $c[0] -eq 0 -and $el -gt 720) { $thr['pull-12min'] = 1; Threads 'first pull, 12 min in' }
+  if (-not $thr['placing'] -and $c[0] -gt 8000) { $thr['placing'] = 1; Threads 'placeholders being made' }
   $i++; Pump 10000
 }
 L "POPULATION first entry at $tFirst s; every placeholder ($Expected) at $tDone s; last count $last; 'Up to date' first read at $tIdleWord s (all from the password)"
@@ -200,7 +205,12 @@ if ($ok) {
   Snap 'after-explorer'
   # ---- idle
   L "IDLE start ($IDLE_MIN min)"
-  for ($m = 1; $m -le $IDLE_MIN; $m++) { Pump 60000; if (($m % 5) -eq 0) { Snap "idle-$m-min" } else { L "IDLE $m min | $(App-Line)" } }
+  for ($m = 1; $m -le $IDLE_MIN; $m++) {
+    if ($m -eq 4) { Threads 'idle, window shown' 20 }
+    if ($IDLE_MIN -ge 20 -and $m -eq 13) { $hw = @(App-Windows)[0]; if ($hw) { [M]::ShowWindow($hw, 6) | Out-Null; L 'IDLE window minimised (test: is the CPU the window drawing?)' } }
+    if ($IDLE_MIN -ge 20 -and $m -eq 15) { Threads 'idle, window minimised' 30 }
+    if ($IDLE_MIN -ge 20 -and $m -eq 17) { if ($hw) { [M]::ShowWindow($hw, 9) | Out-Null; $null = Front; L 'IDLE window restored' } }
+    Pump 60000; if (($m % 5) -eq 0) { Snap "idle-$m-min" } else { L "IDLE $m min | $(App-Line)" } }
   L "IDLE end; status '$(Status-Word)'"; S 'idle-end'
 }
 # ---- a backup pass (Documents turned on in the settings file while the app is stopped, then a restart)
@@ -222,7 +232,7 @@ if ($ok -and $BACKUP) {
     $word = Status-Word; if ($word -eq 'Up to date' -and -not $tUp) { $tUp = $el; L "BACKUP 'Up to date' first read $el s after the restart" }
     $bl = @(Log-Lines 'backup' 400); $passes = @($bl | ? { $_ -match 'unchanged' }).Count
     if (($k % 6) -eq 5) { L "BACKUP t=$el s status='$word' backup log lines=$($bl.Count) pass lines=$passes | $(App-Line)" }
-    if ($passes -ge 2 -or $el -gt 1500) { break }
+    if ($passes -ge 2 -or $el -gt 1200) { break }
   }
   foreach ($l in (Log-Lines 'backup|engine phase timing' 60)) { L "backup log: $l" }
   L "BACKUP requests the fake answered for uploads and the root: $(@(Get-Content -LiteralPath $fakeErr -ea 0 | ? { $_ -match 'uploads|backups/root' }).Count)"
