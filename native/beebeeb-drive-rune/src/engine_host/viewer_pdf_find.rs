@@ -1,5 +1,6 @@
 //! Find in a PDF (DW-1506), from the PDF's own text: the words are looked for in the text the renderer's interpreter
-//! reads off each page of the open document, on the worker that holds it. Child of `viewer_pdf.rs`.
+//! reads off each page of the document, on the worker that holds it. The pages are drawn by the confined helper; this
+//! is the one read of the file left in this process, begun at the first find. Child of `viewer_pdf.rs`.
 //!
 //! - Memory only: the text is read into this call's own vectors and dropped when it returns; nothing is written, and
 //!   neither the words asked for nor a page's text is logged.
@@ -17,8 +18,8 @@ use hayro::hayro_interpret::font::{Glyph, GlyphRun};
 use hayro::hayro_interpret::hayro_cmap::BfString;
 use hayro::hayro_interpret::kurbo::{Affine, BezPath, Rect};
 use hayro::hayro_interpret::{
-    BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterCache, SoftMask,
-    TransformExt, interpret_page,
+    BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterCache,
+    InterpreterSettings, SoftMask, TransformExt, interpret_page,
 };
 
 use super::*;
