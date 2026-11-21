@@ -172,6 +172,9 @@ impl<C: CredentialStores> Engine<C> {
         // The email first, then the id: a window that reads "the email, else the id" goes from neither to the email.
         self.name_unnamed_session(token.as_str(), profile.email.trim());
         self.remember_session_user_id(Some(user_id.to_string()));
+        drop(_writes);
+        // dc-068: a key kept untagged (0.8.x) is proven once against the account Beebeeb just named (`kept_key_proof`).
+        let _ = self.prove_untagged_key_at_start(turn, token.as_str(), user_id, profile.email.trim());
         OwnerSettled::Recorded
     }
 
