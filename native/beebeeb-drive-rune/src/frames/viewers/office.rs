@@ -261,6 +261,20 @@ pub(crate) fn tool_with(
     act: impl Fn(&mut State, &mut rune::Tx) + 'static,
     t: &Theme,
 ) -> El {
+    if let Face::Glyph(icon, size) = face {
+        let shown = match state {
+            Tool::Idle => tb::ToolState::Idle,
+            Tool::On => tb::ToolState::On,
+            Tool::Off => tb::ToolState::Off,
+        };
+        let b = tb::tool_button(key, name, icon, size, shown, t);
+        // A press leaves the keyboard where it was (the page keeps typing).
+        return match state {
+            Tool::Off => b,
+            Tool::On => b.checked(true).preserve_focus_on_press(true).on_press_tx(act),
+            Tool::Idle => b.preserve_focus_on_press(true).on_press_tx(act),
+        };
+    }
     let ink = match state {
         Tool::Idle => t.text_secondary,
         Tool::On => t.text,
@@ -291,7 +305,7 @@ pub(crate) fn tool_with(
         b = b.checked(true);
     }
     b.child(match face {
-        Face::Glyph(icon, size) => kit::glyph(format!("{key}-icon"), icon, size, ink),
+        Face::Glyph(..) => unreachable!("a glyph tool is ui::toolbar::tool_button"),
         Face::Letter(letter, text_style) => {
             // Underline is drawn underlined and Italic slanted, as the board's letters are.
             let key = format!("{key}-letter");
