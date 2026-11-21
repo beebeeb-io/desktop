@@ -63,6 +63,8 @@ pub const RUN_STOPPED: &str = "Making previews stopped: Beebeeb couldn't be reac
 pub const RUN_PAUSED: &str = "Sync is paused, so no previews are being made.";
 pub const CHANGE_FAILED: &str = "Couldn't change photo previews. Try again.";
 pub const CHANGE_BUSY: &str = "A change to photo previews is still on its way.";
+/// Said where the pane would otherwise load for ever.
+pub const NOT_BOUND: &str = "Unlock Beebeeb with this account to see and change these settings.";
 pub const CHANGE_LOCKED: &str = "Unlock Beebeeb to change this.";
 
 /// The photo picker: the platform's (`Platform::pick_photo`), or a test's. BLOCKS: only a worker calls it.
@@ -312,6 +314,8 @@ pub struct PreviewsHost {
     facts: Option<PreviewsFacts>,
     /// The last read failed, and why (said until a read answers).
     failed: Option<&'static str>,
+    /// `pump` has run at least once (what it saw first is known).
+    pumped: bool,
     reading: bool,
     read_at: Option<Instant>,
     sample: Option<Measured>,
@@ -351,6 +355,7 @@ impl PreviewsHost {
             generation: 0,
             facts: None,
             failed: None,
+            pumped: false,
             reading: false,
             read_at: None,
             sample: None,
@@ -458,6 +463,7 @@ impl PreviewsHost {
             return false;
         }
         let mut changed = false;
+        self.pumped = true;
         let now = self.now();
         if now != self.seen {
             if self.seen.is_some() {
@@ -578,6 +584,11 @@ impl PreviewsHost {
             return PhotoPreviews::Unavailable;
         }
         if !self.mine() {
+            // Pumped and still no vault of this account: locked or signed out, which does not end by waiting.
+            // Before the first pump, or while another account's read turns over, it is a pane still loading.
+            if self.seen.is_none() && self.pumped && self.now().is_none() {
+                return PhotoPreviews::NotBound(NOT_BOUND);
+            }
             return PhotoPreviews::Loading;
         }
         match (&self.facts, self.failed) {
