@@ -43,14 +43,20 @@ fn some(n: u32) -> Option<u32> {
 /// problems are This PC's. Never a sample.
 pub fn counts(s: &State) -> DriveCounts {
     let files = s.actions.source.counts();
-    // One source for every window: the Shared and Trash lists' own figures (an accepted invitation or an
-    // emptied Trash changes the figure at once), the Files source's where those lists know nothing.
-    let shared_waiting = some(s.frames.shared.source.invitations().len() as u32)
-        .or_else(|| files.and_then(|c| some(c.shared_waiting)));
-    let trash = match s.frames.trash.source.count() {
-        Some(n) => some(n as u32),
-        None => files.and_then(|c| some(c.trash)),
-    };
+    let mut shared_waiting = files.and_then(|c| some(c.shared_waiting));
+    let mut trash = files.and_then(|c| some(c.trash));
+    match s.sidebar_section {
+        SidebarSection::Shared | SidebarSection::Trash => {
+            shared_waiting = some(s.frames.shared.source.invitations().len() as u32);
+            trash = s.frames.trash.source.count().and_then(|n| some(n as u32));
+        }
+        // Another window: the Trash list's own figure once it has read (the Files source knows none of
+        // its own, ux-55), never before; with no Files source behind the window there is no badge.
+        _ if files.is_some() && s.frames.trash.source.loaded() == crate::frames::trash::source::Loaded::Ready => {
+            trash = s.frames.trash.source.count().and_then(|n| some(n as u32)).or(trash);
+        }
+        _ => {}
+    }
     DriveCounts {
         shared_waiting,
         trash,
