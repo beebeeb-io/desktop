@@ -1,7 +1,6 @@
 //! The window of a sidebar section other than Files (`.mk-win`): caption, sidebar, the
 //! section's toolbar and body, the status line, and an optional layer in front.
 
-use super::sidebar;
 use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::caption;
@@ -44,14 +43,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .child(sidebar::sidebar(
-                    s,
-                    sidebar::Counts {
-                        waiting: s.frames.shared.source.invitations().len() as u32,
-                        trash: s.frames.trash.source.count().unwrap_or(0) as u32,
-                    },
-                    t,
-                ))
+                .child(crate::frames::files::sidebar::sidebar(s, t))
                 .child(main),
         );
     if let Some(layer) = layer {
