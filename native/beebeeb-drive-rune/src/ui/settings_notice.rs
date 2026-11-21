@@ -190,61 +190,6 @@ pub fn tile_sized(index: usize, tone: Tone, icon: &'static Icon, size: f32, t: &
         .child(kit::glyph(format!("tile-{index}-icon"), icon, size / 2.0, ink))
 }
 
-/// A small pill with a dot (`.kit-pill.tone-neutral`): "New". Keys: `pill-<N>`, `-dot`, `-label`.
-pub fn pill(index: usize, words: &str, t: &Theme) -> El {
-    crate::ui::pill::pill(&format!("pill-{index}"), words, crate::ui::pill::Tone::Neutral, true, t)
-}
-
-/// The card for a pane with nothing to show (an empty state): a tile, what is empty, and
-/// what will show up here. Centred.
-pub fn empty(card: usize, tile_index: usize, icon: &'static Icon, head: &str, words: &str, t: &Theme) -> El {
-    // `max-width: 46ch`.
-    empty_sized(card, tile_index, icon, head, words, 348.23, t)
-}
-
-/// `empty` with the words wrapped in `max_w` points (the board sets it per frame, in `ch`).
-pub fn empty_sized(
-    card: usize,
-    tile_index: usize,
-    icon: &'static Icon,
-    head: &str,
-    words: &str,
-    max_w: f32,
-    t: &Theme,
-) -> El {
-    col()
-        .key(format!("card-{card}"))
-        .role("status")
-        .label(format!("{head}. {words}"))
-        .w_full()
-        .items_center()
-        .py(44.0)
-        .px(36.0)
-        .gap(8.0)
-        .radius(crate::theme::tokens::radius::LG)
-        .fill(t.card)
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
-        .child(tile_sized(tile_index, Tone::Neutral, icon, 40.0, t))
-        .child(kit::label(
-            format!("card-{card}-head"),
-            head,
-            crate::theme::tokens::type_::HEAD,
-            t.text,
-        ))
-        .child(
-            kit::label(
-                format!("card-{card}-sub"),
-                words,
-                super::settings_shell::SUB,
-                t.text_tertiary,
-            )
-            .wrap()
-            .align(rune::Align::Center)
-            .w(max_w),
-        )
-}
-
 /// The card for something that could not load: what failed, what is unchanged, and one
 /// way to try again (the caller's button). Says what happened; never blames the person.
 pub fn problem(card: usize, tile_index: usize, head: &str, words: &str, action: Option<El>, t: &Theme) -> El {

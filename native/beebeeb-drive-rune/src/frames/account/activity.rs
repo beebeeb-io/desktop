@@ -43,7 +43,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     // A source that cannot stop the recording from here shows it as a value, not as a switch that would not turn.
     let fixed_on = on && !source.can_stop_activity();
     // Turning it off asks first; turning it on starts a new log at once.
-    let switch = lists::switch("item-0-0", "Record sign-in activity", on, t).on_press(move |s: &mut State| {
+    let switch = crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-0"), "", on, true, crate::ui::button::Size::Md, t).label("Record sign-in activity").on_press(move |s: &mut State| {
         if on {
             super::ask(s, Dialog::Code(CodeFor::StopActivity));
             form::focus(&mut s.account.form, Some(form::CURRENT_KEY));

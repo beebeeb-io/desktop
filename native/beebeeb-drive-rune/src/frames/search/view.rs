@@ -25,7 +25,7 @@ use crate::theme::file_icons::icon_for;
 use crate::ui::field::advance;
 use crate::theme::tokens::{self, Theme, radius, type_};
 use crate::theme::{icons, icons_settings};
-use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview, switch};
+use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview};
 use crate::ui::file_list::{self, pc_glyph};
 use crate::ui::keys::SEARCH_KEY;
 use crate::ui::file_row::{self, Column, RowLook, Width};
@@ -764,7 +764,7 @@ fn offline_card(id: &str, d: &Details, t: &Theme) -> El {
                 .child(kit::label("offline-detail", d.offline_note.clone(), sub_style, t.text_tertiary).truncate()),
         )
         .child(
-            switch("offline", title, d.kept_offline, t)
+            crate::ui::switch::switch_sized("offline-switch", "", d.kept_offline, true, crate::ui::button::Size::Md, t).label(title)
                 .description(d.offline_note.clone())
                 .on_press(push(Intent::Do("keep-offline", id))),
         );
