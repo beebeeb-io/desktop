@@ -393,6 +393,17 @@ pub fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
     match (&ui.file.body, &ev.key) {
         (Body::Photo(_), Key::Left) if plain => step(s, -1),
         (Body::Photo(_), Key::Right) if plain => step(s, 1),
+        // Left / Right seek 5 s in a recording or a video (Ctrl+Left / Right: the neighbouring recording).
+        (Body::Audio(_) | Body::Video(_), Key::Left | Key::Right) if plain => {
+            let delta = if ev.key == Key::Left { -1 } else { 1 };
+            match ui.source.player() {
+                Some(handle) => {
+                    super::video::step_seek(&handle, Some(&ui.file.id), delta);
+                    true
+                }
+                None => false,
+            }
+        }
         (Body::Audio(_), Key::Left) if ctrl => step(s, -1),
         (Body::Audio(_), Key::Right) if ctrl => step(s, 1),
         (Body::Audio(_), Key::Text(key)) if plain && key == " " => {
@@ -450,6 +461,22 @@ pub fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
         }
         (Body::Archive(_), Key::Down) if plain => {
             ui.move_entry(1);
+            true
+        }
+        (Body::Archive(_), Key::Home) if plain => {
+            ui.media.entry = Some(0);
+            true
+        }
+        (Body::Archive(_), Key::End) if plain => {
+            ui.media.entry = ui.entries().len().checked_sub(1);
+            true
+        }
+        (Body::Archive(_), Key::PageUp) if plain => {
+            ui.move_entry(-10);
+            true
+        }
+        (Body::Archive(_), Key::PageDown) if plain => {
+            ui.move_entry(10);
             true
         }
         (Body::Archive(_), Key::Enter) if plain => match ui.media.entry {
