@@ -109,6 +109,8 @@ impl fmt::Debug for Newer {
 pub enum NoPreview {
     /// This app has no viewer for this kind of file yet. Nothing was downloaded.
     NoViewer,
+    /// A HEIC photo: this PC has no decoder for it. Said as that, with the system's app one press away. Nothing was downloaded.
+    Heic,
     /// Larger than a preview holds in memory (`limit`). Nothing was downloaded.
     TooBig { size: u64, limit: u64 },
     /// It passed what a preview holds in memory (`limit`) while it was read, although it was said to be
