@@ -183,6 +183,7 @@ fn toolbar(s: &State, sub: &str, t: &Theme) -> El {
             title: title_block("Search", Some(sub), t),
             slot: None,
             slot_sep: false,
+            gate_closed: false,
             view: if s.frames.find.grid { View::Grid } else { View::List },
             on_view: Some(Box::new(|s: &mut State, _: &mut Tx, grid: bool| {
                 if grid {

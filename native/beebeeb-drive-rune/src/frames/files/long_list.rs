@@ -87,7 +87,9 @@ impl State {
         self.select_only(row);
         // A grid's tiles have their own keys.
         if crate::frames::global::grid::on(self) {
-            tx.scroll_into_view(format!("grid-{row}"));
+            // Tiles are realised by line (dc-038): scroll to the line's key, the tile itself may not exist yet.
+            let first = row - row % self.global.grid.columns.max(1);
+            tx.scroll_into_view(format!("grid-line-{}", self.listing.items[first].id));
         } else {
             tx.scroll_into_view(format!("row-{}", row.wrapping_sub(self.actions.board_first_row)));
         }
