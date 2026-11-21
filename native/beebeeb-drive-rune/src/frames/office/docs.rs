@@ -626,22 +626,12 @@ fn status(doc: &DocBody, t: &Theme) -> El {
         format!("{} words", thousands(doc.view.words)),
         doc.language.clone(),
     ];
-    let mut bar = row()
-        .key("status-bar")
-        .role("status")
-        .w_full()
-        .h(28.0)
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
+    let mut bar: Vec<El> = Vec::new();
     let mut n = 0;
     let mut said_quiet = String::new();
     for (i, part) in parts.iter().enumerate() {
         if i > 0 {
-            bar = bar.child(kit::label(
+            bar.push(kit::label(
                 format!("st-{n}"),
                 "\u{00B7}",
                 type_::STATUS,
@@ -649,7 +639,7 @@ fn status(doc: &DocBody, t: &Theme) -> El {
             ));
             n += 1;
         }
-        bar = bar.child(
+        bar.push(
             kit::label(format!("st-{n}"), part.clone(), type_::STATUS, t.text_tertiary)
                 .w(rune::text::advance(part, type_::STATUS)),
         );
@@ -657,69 +647,69 @@ fn status(doc: &DocBody, t: &Theme) -> El {
     }
     // The board's OvStatus: after the left words, `·` and the one quiet line.
     if let Some(quiet) = doc.quiet {
-        bar = bar
-            .child(kit::label(
-                format!("st-{n}"),
-                "\u{00B7}",
-                type_::STATUS,
-                t.text_tertiary,
-            ))
-            .child(
-                kit::label(format!("st-{}", n + 1), quiet, type_::STATUS, t.text_tertiary)
-                    .w(rune::text::advance(quiet, type_::STATUS)),
-            );
+        bar.push(kit::label(
+            format!("st-{n}"),
+            "\u{00B7}",
+            type_::STATUS,
+            t.text_tertiary,
+        ));
+        bar.push(
+            kit::label(format!("st-{}", n + 1), quiet, type_::STATUS, t.text_tertiary)
+                .w(rune::text::advance(quiet, type_::STATUS)),
+        );
         n += 2;
         said_quiet = format!(". {quiet}");
     }
     let about_key = format!("st-{}", n + 2);
-    bar.label(format!("{}{said_quiet}. {ENCRYPTED}", parts.join(", ")))
-        .child(el().key("st-gap").grow(1.0))
-        .child(
-            row()
-                .key(format!("st-{n}-box"))
-                .gap(4.0)
-                .center_y()
-                .child(kit::glyph(format!("st-{n}-icon"), &icons::LOCK, 11.0, t.accent_deep))
-                .child(
-                    kit::label(format!("st-{n}"), ENCRYPTED, STATUS_ENC, t.accent_deep)
-                        .w(rune::text::advance(ENCRYPTED, STATUS_ENC)),
-                ),
-        )
-        .child(kit::label(
-            format!("st-{}", n + 1),
-            "\u{00B7}",
-            type_::STATUS,
-            t.text_tertiary,
-        ))
-        .child(
-            el().key(format!("{about_key}-box"))
-                .role("link")
-                .label("About this viewer")
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    if let Some(ui) = viewers::ui(s) {
-                        ui.office_about();
-                    }
-                })
-                .child(
-                    // The board underlines "About" (offset 2 px): the line is a bar under the words; the top pad
-                    // keeps the words where the board has them.
-                    col()
-                        .key(format!("{about_key}-under"))
-                        .pt(2.0)
-                        .child(
-                            kit::label(about_key, ABOUT, type_::STATUS, t.text_tertiary)
-                                .w(rune::text::advance(ABOUT, type_::STATUS)),
-                        )
-                        .child(
-                            el().key("st-about-line")
-                                .mt(1.0)
-                                .w(rune::text::advance(ABOUT, type_::STATUS))
-                                .h(1.0)
-                                .fill(t.text_tertiary),
-                        ),
-                ),
-        )
+    let said = format!("{}{said_quiet}. {ENCRYPTED}", parts.join(", "));
+    bar.push(el().key("st-gap").grow(1.0));
+    bar.push(
+        row()
+            .key(format!("st-{n}-box"))
+            .gap(4.0)
+            .center_y()
+            .child(kit::glyph(format!("st-{n}-icon"), &icons::LOCK, 11.0, t.accent_deep))
+            .child(
+                kit::label(format!("st-{n}"), ENCRYPTED, STATUS_ENC, t.accent_deep)
+                    .w(rune::text::advance(ENCRYPTED, STATUS_ENC)),
+            ),
+    );
+    bar.push(kit::label(
+        format!("st-{}", n + 1),
+        "\u{00B7}",
+        type_::STATUS,
+        t.text_tertiary,
+    ));
+    bar.push(
+        el().key(format!("{about_key}-box"))
+            .role("link")
+            .label("About this viewer")
+            .focusable(true)
+            .on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.office_about();
+                }
+            })
+            .child(
+                // The board underlines "About" (offset 2 px): the line is a bar under the words; the top pad
+                // keeps the words where the board has them.
+                col()
+                    .key(format!("{about_key}-under"))
+                    .pt(2.0)
+                    .child(
+                        kit::label(about_key, ABOUT, type_::STATUS, t.text_tertiary)
+                            .w(rune::text::advance(ABOUT, type_::STATUS)),
+                    )
+                    .child(
+                        el().key("st-about-line")
+                            .mt(1.0)
+                            .w(rune::text::advance(ABOUT, type_::STATUS))
+                            .h(1.0)
+                            .fill(t.text_tertiary),
+                    ),
+            ),
+    );
+    crate::ui::status_bar::frame(bar, t).label(said)
 }
 
 /// The window of DW-1507 / DW-1511: the caption, the sidebar, and the document beside it. `page(n)`: the source's

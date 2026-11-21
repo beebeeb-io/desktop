@@ -663,31 +663,18 @@ fn wheel_steps(s: &mut State, ev: rune::WheelEvent, _: &mut rune::Tx) -> bool {
 /// While editing the line also says how the deck is kept ("saved as version 3", "unsaved changes"), `kept`.
 fn status(deck: &DeckBody, kept: Option<&str>, t: &Theme) -> El {
     let words = format!("Slide {} of {}", deck.view.current, deck.view.count);
-    let mut bar = row()
-        .key("status-bar")
-        .role("status")
-        .w_full()
-        .h(28.0)
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .child(
-            kit::label("st-0", words.clone(), type_::STATUS, t.text_tertiary)
-                .w(rune::text::advance(&words, type_::STATUS)),
-        );
+    let mut bar: Vec<El> = vec![
+        kit::label("st-0", words.clone(), type_::STATUS, t.text_tertiary).w(rune::text::advance(&words, type_::STATUS)),
+    ];
     // The board's OvStatus: after the left words, `·` and the one quiet line.
     let mut n = 1;
     let mut said = String::new();
     if deck.view.quiet {
-        bar = bar
-            .child(kit::label("st-1", "\u{00B7}", type_::STATUS, t.text_tertiary))
-            .child(
-                kit::label("st-2", states::QUIET_LINE, type_::STATUS, t.text_tertiary)
-                    .w(rune::text::advance(states::QUIET_LINE, type_::STATUS)),
-            );
+        bar.push(kit::label("st-1", "\u{00B7}", type_::STATUS, t.text_tertiary));
+        bar.push(
+            kit::label("st-2", states::QUIET_LINE, type_::STATUS, t.text_tertiary)
+                .w(rune::text::advance(states::QUIET_LINE, type_::STATUS)),
+        );
         n = 3;
         said = format!(". {}", states::QUIET_LINE);
     }
@@ -704,24 +691,22 @@ fn status(deck: &DeckBody, kept: Option<&str>, t: &Theme) -> El {
     });
     let about = format!("st-{next}");
     let kept_said = kept.map(|words| format!(". {words}")).unwrap_or_default();
-    let mut bar = bar
-        .label(format!("{words}{said}. {ENCRYPTED}{kept_said}"))
-        .child(el().key("st-gap").grow(1.0))
-        .child(
-            row()
-                .key(format!("{enc}-box"))
-                .gap(4.0)
-                .center_y()
-                .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
-                .child(
-                    kit::label(enc, ENCRYPTED, STATUS_ENC, t.accent_deep).w(rune::text::advance(ENCRYPTED, STATUS_ENC)),
-                ),
-        )
-        .child(kit::label(dot, "\u{00B7}", type_::STATUS, t.text_tertiary));
+    let label = format!("{words}{said}. {ENCRYPTED}{kept_said}");
+    bar.push(el().key("st-gap").grow(1.0));
+    bar.push(
+        row()
+            .key(format!("{enc}-box"))
+            .gap(4.0)
+            .center_y()
+            .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
+            .child(kit::label(enc, ENCRYPTED, STATUS_ENC, t.accent_deep).w(rune::text::advance(ENCRYPTED, STATUS_ENC))),
+    );
+    bar.push(kit::label(dot, "\u{00B7}", type_::STATUS, t.text_tertiary));
     if let Some((words, dot)) = kept_els {
-        bar = bar.child(words).child(dot);
+        bar.push(words);
+        bar.push(dot);
     }
-    bar.child(
+    bar.push(
         el().key(format!("{about}-box"))
             .role("link")
             .label("About this viewer")
@@ -736,7 +721,8 @@ fn status(deck: &DeckBody, kept: Option<&str>, t: &Theme) -> El {
                     .w(rune::text::advance(ABOUT, type_::STATUS))
                     .spans(vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)]),
             ),
-    )
+    );
+    crate::ui::status_bar::frame(bar, t).label(label)
 }
 
 /// The window of DW-1509: the caption, the sidebar, and the deck beside it. `page(n)`: the source's answer for
