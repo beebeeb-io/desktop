@@ -427,8 +427,8 @@ impl Sandbox {
     /// Starts `helper_exe` confined and returns it with its pipes.
     ///
     /// `helper_exe` must be an absolute path to a file; nothing is searched and no shell is involved. The helper
-    /// gets no arguments ([`Mode::Plain`]). Its environment is exactly [`helper_environment_names`]. Its standard error is not
-    /// connected.
+    /// gets no arguments ([`Mode::Plain`]). Its environment is exactly [`helper_environment_names`]. Its standard
+    /// error is not connected.
     ///
     /// Never starts an unconfined process: see the crate documentation. On Windows the helper's token is read back
     /// before it runs, and a token whose capabilities are not exactly the profile's ends it.

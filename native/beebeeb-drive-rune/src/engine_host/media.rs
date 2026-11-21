@@ -186,10 +186,92 @@ pub(super) fn looks_like_heif(bytes: &[u8]) -> bool {
     bytes.get(4..8) == Some(b"ftyp") && bytes.get(8..12) != Some(b"crx ")
 }
 
+/// A picture only the helper decodes (Windows' own decoders), by what must be installed for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelperPicture {
+    /// HEIC/HEIF: the HEIF and HEVC extensions.
+    Heif,
+    /// A camera's RAW: the Raw Image Extension.
+    Raw,
+}
+
+impl HelperPicture {
+    /// By the file's name. `None`: not a kind the helper is asked for.
+    pub fn of_name(name: &str) -> Option<HelperPicture> {
+        let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+        match ext.as_str() {
+            "heic" | "heif" => Some(HelperPicture::Heif),
+            "dng" | "cr2" | "cr3" | "arw" | "nef" | "raf" | "orf" | "rw2" => Some(HelperPicture::Raw),
+            _ => None,
+        }
+    }
+
+    /// By the file's first bytes: an ISO media file (HEIF, or a CR3), a TIFF (DNG, CR2, NEF, ARW, ORF, RW2) or a
+    /// RAF. `None`: the helper is not started for these bytes.
+    pub fn of_bytes(bytes: &[u8]) -> Option<HelperPicture> {
+        if looks_like_heif(bytes) {
+            return Some(HelperPicture::Heif);
+        }
+        let raw = bytes.get(4..12) == Some(b"ftypcrx ")
+            || bytes.starts_with(b"II*\0")
+            || bytes.starts_with(b"MM\0*")
+            || bytes.starts_with(b"IIRO")
+            || bytes.starts_with(b"IIRS")
+            || bytes.starts_with(b"IIU\0")
+            || bytes.starts_with(b"FUJIFILM");
+        (raw && bytes.len() > 16).then_some(HelperPicture::Raw)
+    }
+
+    fn known(self) -> &'static std::sync::atomic::AtomicU8 {
+        static HEIF: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNKNOWN);
+        static RAW: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNKNOWN);
+        match self {
+            HelperPicture::Heif => &HEIF,
+            HelperPicture::Raw => &RAW,
+        }
+    }
+
+    /// Whether this PC is known to have no decoder for this kind: a decode of this run answered `NoDecoder` (and
+    /// none since succeeded). Not known yet: `false`, the first picture finds out. Until the app is started again
+    /// a decoder installed meanwhile is not seen. In a test with no helper registered: `true`.
+    pub fn decoder_missing(self) -> bool {
+        if cfg!(test) && PICTURE_HELPER.get().is_none() {
+            return true;
+        }
+        self.known().load(std::sync::atomic::Ordering::Relaxed) == MISSING
+    }
+}
+
+const UNKNOWN: u8 = 0;
+const HERE: u8 = 1;
+const MISSING: u8 = 2;
+
+/// `bytes` (a HEIC, a RAW) as the pixels a viewer draws, at most [`MAX_IMAGE_PX`] a side, through the helper.
+/// BLOCKS like [`decode_picture`].
+pub fn helper_pixels(bytes: &[u8]) -> Result<rune::Pixels, ImageRefusal> {
+    let decoded = decode_picture(bytes, MAX_IMAGE_PX)?;
+    let pixels = rune::Pixels::new();
+    pixels.set(decoded.width, decoded.height, decoded.rgba.to_vec());
+    Ok(pixels)
+}
+
 /// Decodes `bytes` (a HEIC, a camera's RAW) to at most `max_px` on its longest side through the helper. Never
 /// decodes in this process. No decoder, a damaged file, a file too large: the refusal, never a half picture.
 /// BLOCKS: the helper, at most [`DECODE_WITHIN`] (and while another decode runs). Never call it on the window's thread.
 pub fn decode_picture(bytes: &[u8], max_px: u32) -> Result<DecodedPicture, ImageRefusal> {
+    let answer = decode_in_a_helper(bytes, max_px);
+    // What this PC can decode is learned from the answers: a kind with no decoder is said so before any download.
+    if let Some(kind) = HelperPicture::of_bytes(bytes) {
+        match &answer {
+            Ok(_) => kind.known().store(HERE, std::sync::atomic::Ordering::Relaxed),
+            Err(ImageRefusal::NoDecoder) => kind.known().store(MISSING, std::sync::atomic::Ordering::Relaxed),
+            Err(_) => {}
+        }
+    }
+    answer
+}
+
+fn decode_in_a_helper(bytes: &[u8], max_px: u32) -> Result<DecodedPicture, ImageRefusal> {
     // The app's own helper unless another was registered first; a test starts none it did not register.
     #[cfg(not(test))]
     let helper = PICTURE_HELPER.get_or_init(|| Arc::new(crate::media::transport::SandboxedPictures));

@@ -52,6 +52,7 @@ use rune::Pixels;
 
 use super::files_trash::TrashCalls;
 use super::log;
+use super::media::HelperPicture;
 use super::stamp::{Stamp, stamp};
 use super::thumbs::EngineThumbStore;
 use crate::frames::files::source::{Action, ActionError, Change};
@@ -141,12 +142,17 @@ struct OriginalJob {
     pixels: Option<Pixels>,
 }
 
-/// w31: why the original of the photo `name` is never downloaded for the Original tab: the decoder here opens PNG,
-/// JPEG, GIF and WebP only (`viewer_picture::check`), so a HEIC or a RAW came down whole (2 MB to 80 MB each on
-/// the owner's account) and was then refused. `None`: a format that opens here.
+/// w31: why the original of the photo `name` is never downloaded for the Original tab: the decoder in this process
+/// opens PNG, JPEG, GIF and WebP only (`viewer_picture::check`), so a HEIC or a RAW came down whole (2 MB to 80 MB
+/// each on the owner's account) and was then refused. `None`: a format that opens here, which a HEIC or a RAW is
+/// (095, through the confined helper) until this PC answered that it has no decoder for it.
 pub(crate) fn original_refused_for(name: &str) -> Option<&'static str> {
     use super::viewer::{Shows, shows};
     if shows(name) == Shows::Picture {
+        return None;
+    }
+    // 095: a HEIC or a RAW opens through the confined helper unless this PC is known to have no decoder for it.
+    if HelperPicture::of_name(name).is_some_and(|kind| !kind.decoder_missing()) {
         return None;
     }
     let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()).unwrap_or_default();
@@ -174,6 +180,10 @@ fn decoders() -> &'static rune::ImageCache {
 /// The decoder reads a copy of the bytes; it is overwritten once the decoder let go of it.
 fn decode(bytes: &[u8]) -> Option<Pixels> {
     use zeroize::Zeroize;
+    // A HEIC or a RAW is decoded by the confined helper, never in this process.
+    if HelperPicture::of_bytes(bytes).is_some() {
+        return super::media::helper_pixels(bytes).ok();
+    }
     viewer_picture::check(bytes).ok()?;
     let mut encoded: Arc<[u8]> = Arc::from(bytes);
     let image = decoders().load(encoded.clone());
@@ -1280,6 +1290,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             return false;
         }
         let file_id = photo.id.clone();
+        let (name, session) = (photo.name.clone(), pressed.0);
         // One original at a time: the earlier one is stopped and wiped.
         self.end_original();
         self.originals += 1;
@@ -1298,6 +1309,13 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
                 #[cfg(test)]
                 if let Some(fake) = fake {
                     return fake(&progress, &flag).ok().and_then(|bytes| decode(&bytes)).ok_or(());
+                }
+                // A HEIC or a RAW whose copy is on this PC is read from there: nothing is downloaded for it.
+                if HelperPicture::of_name(&name).is_some()
+                    && let Ok(Some(copy)) = engine.local_picture_copy_for(session, &wanted, ORIGINAL_MAX)
+                    && let Some(bytes) = copy.read()
+                {
+                    return decode(&bytes).ok_or(());
                 }
                 let opened = engine
                     .open_file_in_memory(&wanted, ORIGINAL_MAX, &progress, &flag)
