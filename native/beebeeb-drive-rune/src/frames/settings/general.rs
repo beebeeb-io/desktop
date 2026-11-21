@@ -21,7 +21,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let g = ui.source.general();
     let menu_open = ui.menu.is_some_and(|m| m.kind == MenuKind::Theme);
 
-    let appearance = lists::list(
+    let appearance = super::list(
         0,
         Some("Appearance"),
         vec![
@@ -44,7 +44,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         t,
     );
 
-    let help = lists::list(
+    let help = super::list(
         1,
         Some("Help"),
         vec![
@@ -71,7 +71,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         t,
     );
 
-    let privacy = lists::list(
+    let privacy = super::list(
         2,
         Some("Privacy and data"),
         vec![
@@ -107,7 +107,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         Update::Current => format!("Version {}", g.version),
         Update::Available { .. } => format!("{} · update available", g.version),
     };
-    let about = lists::list(
+    let about = super::list(
         3,
         Some("About"),
         vec![
@@ -179,7 +179,7 @@ fn report_problem(t: &Theme) -> El {
     };
     let body = vec![
         dialogs::para_rich(0, WORDS, &[at..at + ADDRESS.len()], t),
-        lists::list(
+        super::list(
             4,
             Some("In the bundle"),
             vec![
@@ -189,7 +189,7 @@ fn report_problem(t: &Theme) -> El {
             None,
             t,
         ),
-        lists::list(
+        super::list(
             5,
             Some("Removed first"),
             vec![
@@ -201,7 +201,7 @@ fn report_problem(t: &Theme) -> El {
             ),
             t,
         ),
-        lists::list(
+        super::list(
             6,
             Some("Your email"),
             vec![lists::item(

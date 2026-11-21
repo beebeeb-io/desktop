@@ -619,7 +619,7 @@ fn devices(list: usize, devices: &[Device], t: &Theme) -> El {
             .child(state_pill(i, d.state, t))
         })
         .collect();
-    lists::list(
+    super::list(
         list,
         Some("Your devices right now"),
         rows,
@@ -679,7 +679,7 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_control: bool
             t,
         ));
     }
-    lists::list(
+    super::list(
         list,
         Some("Limits"),
         rows,
@@ -790,7 +790,7 @@ fn speed_test(list: usize, test: &SpeedTest, t: &Theme) -> El {
             t,
         ))),
     }
-    lists::list(list, Some("Speed test"), rows, Some(foot), t)
+    super::list(list, Some("Speed test"), rows, Some(foot), t)
 }
 
 /// A limit's menu, when it is the open one (DW-0785d): No limit, a rule, then the presets.

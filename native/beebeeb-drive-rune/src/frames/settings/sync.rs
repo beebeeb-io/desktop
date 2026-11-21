@@ -70,7 +70,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         repair.into_iter().collect(),
         t,
     ));
-    children.push(lists::list(0, Some("File Explorer"), explorer, None, t));
+    children.push(super::list(0, Some("File Explorer"), explorer, None, t));
 
     // Sync: where it stands, and the one thing to do about it.
     let (icon, says, act): (&'static rune::Icon, String, El) = match &sy.status {
@@ -110,7 +110,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         ),
     ];
-    let mut sync_list = lists::list(1, Some("Sync"), sync_rows, None, t);
+    let mut sync_list = super::list(1, Some("Sync"), sync_rows, None, t);
     if matches!(sy.status, SyncStatus::WaitingMetered(_)) {
         sync_list = sync_list.child(metered_foot(t));
     }
@@ -162,7 +162,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         ),
     ];
-    children.push(lists::list(
+    children.push(super::list(
         2,
         Some("Space on this PC"),
         space,
@@ -173,7 +173,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     ));
 
     if sy.in_explorer {
-        children.push(lists::list(
+        children.push(super::list(
             3,
             None,
             vec![

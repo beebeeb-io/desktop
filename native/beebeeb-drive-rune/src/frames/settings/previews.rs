@@ -333,7 +333,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     ui.previews.show(p.sample.as_ref());
 
     let on = p.on;
-    children.push(lists::list(
+    children.push(super::list(
         0,
         None,
         vec![lists::item_with(
@@ -357,7 +357,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let size_at = PreviewSize::ALL.iter().position(|s| *s == p.size).unwrap_or(0);
     let format_at = PreviewFormat::ALL.iter().position(|f| *f == p.format).unwrap_or(0);
     let seg_row = |key: &str, seg: El| el().key(key.to_string()).w_full().px(12.0).py(10.0).child(seg);
-    children.push(lists::list(
+    children.push(super::list(
         1,
         Some("Preview size"),
         vec![seg_row(
@@ -376,7 +376,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         None,
         t,
     ));
-    children.push(lists::list(
+    children.push(super::list(
         2,
         Some("Format"),
         vec![seg_row(
@@ -427,10 +427,10 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         )),
         None => counts.push('.'),
     }
-    children.push(lists::list(3, Some("What it uses"), uses, Some(&counts), t));
+    children.push(super::list(3, Some("What it uses"), uses, Some(&counts), t));
 
     if let Some(on_pc) = &p.on_pc {
-        children.push(lists::list(
+        children.push(super::list(
             4,
             Some("On this PC"),
             vec![
@@ -468,7 +468,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         ));
     }
-    children.push(lists::list(
+    children.push(super::list(
         5,
         Some("Made automatically"),
         made,
@@ -479,7 +479,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         }),
         t,
     ));
-    children.push(lists::list(
+    children.push(super::list(
         6,
         Some("Rebuild"),
         vec![
@@ -831,11 +831,13 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         .gap(24.0)
         .center()
         .role("group")
+        .focus_group()
         .label("Preview size and format");
     for (j, size) in PreviewSize::ALL.iter().enumerate() {
         let size = *size;
         foot = foot.child(
             option(j, size.label(), p.weight(size, now_format), size == now_size, t)
+                .position_in_set(j + 1, PreviewSize::ALL.len())
                 .on_press(move |s: &mut State| s.settings.pick_in_compare(Some(size), None)),
         );
     }
@@ -856,6 +858,7 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
                 format == now_format,
                 t,
             )
+            .position_in_set(j + 1, PreviewFormat::ALL.len())
             .on_press(move |s: &mut State| s.settings.pick_in_compare(None, Some(format))),
         );
     }

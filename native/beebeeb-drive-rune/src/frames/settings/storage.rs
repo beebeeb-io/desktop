@@ -187,7 +187,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             .key("account-use")
             .w_full()
             .gap(8.0)
-            .child(lists::list(0, Some("In your Beebeeb account"), account, None, t))
+            .child(super::list(0, Some("In your Beebeeb account"), account, None, t))
             .child(
                 el().key("cap-0-box").w_full().px(4.0).child(
                     kit::label(
@@ -199,7 +199,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     .w_full(),
                 ),
             ),
-        lists::list(
+        super::list(
             1,
             Some("On this PC"),
             pc,

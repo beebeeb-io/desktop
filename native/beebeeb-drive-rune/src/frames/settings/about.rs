@@ -70,7 +70,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 .on_press(move |s: &mut State| s.settings.ask(Intent::Copy(copy_text.clone()))),
         );
 
-    let versions = lists::list(
+    let versions = super::list(
         0,
         None,
         vec![
@@ -156,7 +156,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             .on_press(|s: &mut State| super::go(s, "DW-0789b")),
         );
     }
-    let updates = lists::list(
+    let updates = super::list(
         1,
         Some("Updates"),
         update_rows,
@@ -171,7 +171,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         }
         lists::item(l, i, &it, t).on_press(move |s: &mut State| s.settings.ask(Intent::Web(page)))
     };
-    let open_source = lists::list(
+    let open_source = super::list(
         2,
         Some("Open source"),
         vec![
@@ -183,7 +183,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         Some(SOURCE_LINE),
         t,
     );
-    let more = lists::list(
+    let more = super::list(
         3,
         Some("More"),
         vec![
