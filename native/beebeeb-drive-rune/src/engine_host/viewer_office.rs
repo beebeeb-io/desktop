@@ -9,7 +9,8 @@
 //! - **The asks:** the view asks for a page, a tile, a thumbnail or an anchor while it is drawn
 //!   ([`OfficeView::picture`], as a PDF's pages are asked: `viewer_pages.rs`) and for a block of cells
 //!   ([`OfficeView::wants_cells`]). A picture is asked once; meanwhile the nearest held picture of the same page at
-//!   another scale stays up. An ask that scrolled past is cancelled; at most [`TEXTURE_CAP_BYTES`] of pixels are held.
+//!   another scale stays up. An ask that scrolled past (two builds of the view that did not want it) is cancelled; at
+//!   most [`TEXTURE_CAP_BYTES`] of pixels are held.
 //! - **Plaintext:** a close, a lock and a sign-out drop every picture and wipe the body this view holds (sheet names,
 //!   cells, formulas, outline). Pixels handed to the toolkit cannot be overwritten there, only dropped.
 //!
@@ -62,7 +63,8 @@ pub(crate) use glue::{EditShips, Office};
 /// The pixels one open file holds at most (`w × h × 4` of every held picture). Past it the least recently wanted
 /// pictures go first, never one wanted since the last poll.
 pub(crate) const TEXTURE_CAP_BYTES: u64 = 256 * 1024 * 1024;
-/// An ask that is not wanted again during this many polls is cancelled.
+/// An ask that is not wanted again by this many builds of the view is cancelled. Counted per poll that follows a build
+/// (one that wanted a picture); a poll with no build before it counts nothing ([`OfficeView::end_turn`]).
 const UNWANTED_POLLS: u8 = 2;
 /// A sheet's first block, asked as soon as its sheets are known.
 const FIRST_ROWS: u32 = 64;
@@ -1445,17 +1447,25 @@ impl OfficeView {
     }
 
     /// The end of a poll: the cap, then what scrolled past is cancelled; the wanted set starts again.
+    ///
+    /// The window polls at the start of every frame and builds the view only when something changed, so most polls
+    /// follow no build (a pointer that moves, a popover that closes: 240 a second on a fast screen). Such a poll
+    /// says nothing about what the view wants, and counts against no ask: counted, every ask of the last build was
+    /// cancelled two frames later, its answer discarded, and nothing asked again until the next build (dc-R3). A
+    /// build is known by what it wanted: one that wants no picture at all (a sheet with no chart in view) counts
+    /// nothing either, and the asks still out then are answered and held under the cap.
     fn end_turn(&mut self) {
         let pictures = self.pictures.get_mut();
         pictures.hold_to(self.cap);
         let Pictures {
             out, asking, wanted, ..
         } = pictures;
+        let built = !wanted.is_empty();
         let mut gone = Vec::new();
         for (id, ask) in out.iter_mut() {
             if wanted.contains(&ask.key) {
                 ask.misses = 0;
-            } else {
+            } else if built {
                 ask.misses = ask.misses.saturating_add(1);
                 if ask.misses >= UNWANTED_POLLS {
                     gone.push(*id);
