@@ -528,7 +528,7 @@ pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -
     // closed on every exit path.
     unsafe {
         let handle = open_cf_least_access(path, &path_wide)
-        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert-unsynced): {e}"))?;
+            .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (convert-unsynced): {e}"))?;
 
         // NONE: become a placeholder, keep bytes on disk, do NOT claim in-sync.
         let result = CfConvertToPlaceholder(
@@ -603,7 +603,7 @@ pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
     // every exit path.
     unsafe {
         let handle = open_cf_least_access(path, &path_wide)
-        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (dehydrate): {e}"))?;
+            .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (dehydrate): {e}"))?;
 
         // length = -1 → dehydrate from `startingoffset` to EOF. NONE flags =
         // synchronous foreground dehydration (we want the bytes gone now so
@@ -764,7 +764,7 @@ pub fn set_pin_state(path: &std::path::Path, pinned: bool, recurse: bool) -> any
     // every exit path.
     unsafe {
         let handle = open_cf_least_access(path, &path_wide)
-        .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (set_pin_state): {e}"))?;
+            .map_err(|e| anyhow::anyhow!("CfOpenFileWithOplock (set_pin_state): {e}"))?;
 
         let result = CfSetPinState(handle, pin_state, pin_flags, None);
 
@@ -1518,6 +1518,62 @@ pub fn handle_identity(file: &std::fs::File) -> (bool, Option<String>) {
             .filter(|id| !id.is_empty())
             .map(str::to_string),
     )
+}
+
+/// Task 2283: what the entry at `path` is, by its placeholder's identity: a remote deletion removes an entry only when
+/// that identity names the deleted file. Read through a handle opened for its attributes only, on the entry itself
+/// (never a recall), sharing every access. An entry that is not a reparse point is an ordinary file or folder (never
+/// asked of the Cloud Files API); nothing there reads as not a placeholder too (the caller finds it gone).
+pub fn entry_identity(path: &std::path::Path) -> crate::unknown_check::EntryIdentity {
+    use crate::unknown_check::EntryIdentity;
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 => {
+            return EntryIdentity::NotPlaceholder;
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return EntryIdentity::NotPlaceholder,
+        Err(_) => return EntryIdentity::Unreadable,
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)
+    else {
+        return EntryIdentity::Unreadable;
+    };
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `file` is open for the call; the buffer is 8-byte aligned and its length passed.
+    let read = unsafe {
+        CfGetPlaceholderInfo(
+            HANDLE(file.as_raw_handle()),
+            CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
+    match read {
+        Ok(()) => {}
+        Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0) => {
+            return EntryIdentity::NotPlaceholder;
+        }
+        Err(_) => return EntryIdentity::Unreadable,
+    }
+    // SAFETY: a successful call wrote the struct, and its identity inside the buffer.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    let identity = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) };
+    match std::str::from_utf8(identity) {
+        Ok(id) if !id.is_empty() => EntryIdentity::Names(id.to_string()),
+        _ => EntryIdentity::Nameless,
+    }
 }
 
 /// Task 2191 (D11): [`handle_fully_on_disk`], for sign-out's held handle.
