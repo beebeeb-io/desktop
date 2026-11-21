@@ -5,7 +5,7 @@
 //! `.wn-fly`), read from the goldens' `css` records. Keys are `scripts/keymap-tray.js`'s.
 
 use rune::tok::Family;
-use rune::{Align, Color, Cursor, El, Icon, ScrollFade, ScrollPos, ScrollSpec, TextStyle, col, el, oklch, row};
+use rune::{Align, Color, Cursor, El, Icon, LiveRegion, ScrollFade, ScrollPos, ScrollSpec, TextStyle, col, el, oklch, row};
 
 use super::source::{Change, Changes, MAX_ROWS, Origin, Snapshot, Status, Tile, Tone, What};
 use super::{Host, Ui, icons};
@@ -225,6 +225,7 @@ fn status_block<S: 'static>(snapshot: &Snapshot, name: &str, host: Host<S>, t: &
     let mut block = col()
         .key("st")
         .role("status")
+        .live_region(LiveRegion::Polite)
         .label(match status.line(name) {
             Some(line) => format!("{}. {line}", status.title(name)),
             None => status.title(name),
@@ -331,7 +332,14 @@ fn origin_icon(origin: Origin) -> &'static Icon {
 }
 
 /// One change, as the shared file row: tile, name, what happened (red when it failed), when.
-fn change_row<S: 'static>(i: usize, change: &Change, selected: bool, host: Host<S>, t: &Theme) -> El {
+fn change_row<S: 'static>(
+    i: usize,
+    of: usize,
+    change: &Change,
+    selected: bool,
+    host: Host<S>,
+    t: &Theme,
+) -> El {
     let key = row_key(i);
     let (said, color, origin) = match &change.what {
         What::Done { origin, text } => (text.clone(), t.text_tertiary, Some(*origin)),
@@ -366,6 +374,7 @@ fn change_row<S: 'static>(i: usize, change: &Change, selected: bool, host: Host<
     // The list is the one focus stop: the arrow keys move through its rows (`active_descendant`).
     .role("listitem")
     .focusable(false)
+    .position_in_set(i + 1, of)
     .cursor(Cursor::Pointer)
     .on_press_tx(host.act(move |ui| ui.open_row(i)))
 }
@@ -438,7 +447,7 @@ fn changes_list<S: 'static>(ui: &Ui, name: &str, host: Host<S>, t: &Theme) -> El
         thumb_shown.set(if at.offset[1] > 0.5 { 1.0 } else { 0.0 });
     });
     for (i, change) in rows.iter().take(MAX_ROWS).enumerate() {
-        content = content.child(change_row(i, change, ui.selected() == Some(i), host, t));
+        content = content.child(change_row(i, shown, change, ui.selected() == Some(i), host, t));
     }
     // The end of the list: where the rest is (DW-1220).
     let mut end = col().key("end").w_full().pt(12.0).pb(14.0).gap(8.0).center();
@@ -551,6 +560,7 @@ fn footer<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
     row()
         .key("foot")
         .role("toolbar")
+        .label("Flyout actions")
         .w_full()
         .h(64.5)
         .padding(6.0)
