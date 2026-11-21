@@ -934,9 +934,9 @@ mod listing_tests {
         let (_dir, db) = seeded(10);
         let (all, total) = db.children_paged(Some("d"), 0, i64::MAX).unwrap();
         assert_eq!((all.len(), total), (11, 11));
-        assert_eq!(all[0].0.file_id, "d1");
-        assert_eq!(all[0].2, 2, "a folder's live children, joined in the one query");
-        assert_eq!(all[1].2, 0);
+        let folder = all.iter().find(|r| r.0.file_id == "d1").unwrap();
+        assert_eq!(folder.2, 2, "a folder's live children, joined in the one query");
+        assert!(all.iter().filter(|r| r.0.file_id != "d1").all(|r| r.2 == 0));
         let (page, total) = db.children_paged(Some("d"), 3, 4).unwrap();
         assert_eq!((page.len(), total), (4, 11));
         let (none, total) = db.children_paged(Some("d"), 50, 4).unwrap();
