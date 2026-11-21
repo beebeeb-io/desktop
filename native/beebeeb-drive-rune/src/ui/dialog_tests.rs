@@ -695,3 +695,129 @@ fn a_dialog_opened_from_a_row_that_went_away_hands_focus_to_the_named_opener() {
     assert!(!rt.state.open);
     assert_eq!(focused_key(&rt).as_deref(), Some("opener"), "focus goes to the named opener, not nowhere");
 }
+
+/// `modal_back`: a list (the fallback) whose row `row-2` opened the dialog. Closing may take the
+/// opener away (`trash`) and the list too (`drop_list`), in the same update as the close.
+struct B {
+    open: bool,
+    opener: bool,
+    list: bool,
+    trash: bool,
+    drop_list: bool,
+}
+
+impl B {
+    fn close(&mut self) {
+        self.open = false;
+        if self.trash {
+            self.opener = false;
+        }
+        if self.drop_list {
+            self.list = false;
+        }
+    }
+}
+
+fn back_row(key: &str, selected: bool) -> El {
+    el().key(key.to_string())
+        .role("listitem")
+        .label(key.to_string())
+        .focusable(true)
+        .focus_selected(selected)
+        .size(80.0, 24.0)
+        .on_press(|s: &mut B| s.open = true)
+}
+
+fn back_view(s: &B, _: &mut Cx<B>) -> El {
+    let t = theme(false);
+    let mut root = col().key("root").w_full().h_full().child(focus_button_b("elsewhere"));
+    if s.list {
+        let mut list = col()
+            .key("file-list")
+            .role("list")
+            .focus_group()
+            .child(back_row("row-0", false))
+            .child(back_row("row-1", true));
+        if s.opener {
+            list = list.child(back_row("row-2", false));
+        }
+        root = root.child(list);
+    }
+    if s.open {
+        let card = dialog(
+            Dialog {
+                foot: Foot::Row(vec![focus_button_b("ok")]),
+                ..Dialog::new("dlg", "M", 380.0)
+            },
+            &t,
+        );
+        root = root.child(modal_back(32.0, card, "row-2", "file-list", |s: &mut B| s.close(), &t));
+    }
+    root
+}
+
+fn focus_button_b(key: &str) -> El {
+    el().key(key.to_string()).role("button").focusable(true).size(80.0, 24.0).on_press(|_: &mut B| {})
+}
+
+/// Opens the dialog from `row-2`, closes it with Esc, and gives what has focus then.
+fn back_close(trash: bool, drop_list: bool) -> (Runtime<B>, Option<String>) {
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let b = B {
+        open: false,
+        opener: true,
+        list: true,
+        trash,
+        drop_list,
+    };
+    let mut rt = Runtime::new(b, back_view, (1000.0, 800.0), env);
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.focus("row-2", true));
+    rt.frame(0.0);
+    assert_eq!(focused_b(&rt).as_deref(), Some("row-2"));
+    rt.update(|s, _| s.open = true);
+    rt.frame(0.0);
+    rt.settle_all();
+    rt.frame(0.0);
+    assert_eq!(focused_b(&rt).as_deref(), Some("ok"), "the dialog takes focus");
+    rt.key(KeyEvent {
+        key: Key::Escape,
+        mods: Mods::default(),
+    });
+    rt.frame(0.0);
+    rt.settle_all();
+    rt.frame(0.0);
+    assert!(!rt.state.open, "Esc closes it");
+    let now = focused_b(&rt);
+    (rt, now)
+}
+
+fn focused_b(rt: &Runtime<B>) -> Option<String> {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.focused && !e.exiting)
+        .and_then(|e| e.key)
+}
+
+#[test]
+fn modal_back_hands_focus_to_the_opener_while_it_is_there() {
+    let (_, now) = back_close(false, false);
+    assert_eq!(now.as_deref(), Some("row-2"));
+}
+
+#[test]
+fn modal_back_hands_focus_to_the_fallback_s_selected_item_when_the_opener_went_with_the_close() {
+    let (rt, now) = back_close(true, false);
+    assert!(!rt.state.opener, "the row went in the same update");
+    assert_eq!(now.as_deref(), Some("row-1"), "the list's selected row, not its first");
+}
+
+#[test]
+fn modal_back_focuses_nothing_when_opener_and_fallback_are_both_gone() {
+    let (rt, now) = back_close(true, true);
+    assert!(!rt.state.list && !rt.state.opener);
+    assert_eq!(now, None);
+}

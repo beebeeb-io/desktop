@@ -122,12 +122,18 @@ fn tab_to(rt: &mut Runtime<State>, target: &str) {
         }
         key(rt, Key::Tab);
     }
-    // A roving group is one Tab stop: its other members take arrows.
-    for _ in 0..12 {
-        if find(rt, target).is_some_and(|e| e.focused) {
-            return;
+    // A roving group (the settings sidebar) is one Tab stop: its other members take arrows,
+    // down from the item Tab lands on, then back up past it.
+    for _ in 0..40 {
+        key(rt, Key::Tab);
+        for arrow in [Key::Down, Key::Up] {
+            for _ in 0..12 {
+                if find(rt, target).is_some_and(|e| e.focused) {
+                    return;
+                }
+                key(rt, arrow.clone());
+            }
         }
-        key(rt, Key::Down);
     }
     panic!("Tab never reaches {target}");
 }
@@ -819,17 +825,7 @@ fn a_pop_up_row_is_one_tab_stop_and_every_tab_stop_acts() {
     assert_eq!(
         stops[3..],
         [
-            "Back to Drive-row",
             "General-row",
-            "Account-row",
-            "Security-row",
-            "Devices and sessions-row",
-            "Notifications-row",
-            "Storage-row",
-            "Backups-row",
-            "Sync and File Explorer-row",
-            "Thumbnails and previews-row",
-            "Bandwidth-row",
             "item-0-0",
             "item-1-0",
             "item-1-1",
@@ -840,7 +836,7 @@ fn a_pop_up_row_is_one_tab_stop_and_every_tab_stop_acts() {
             "item-3-0",
             "item-3-1",
         ],
-        "the Tab order of General: the sidebar, then the rows, top to bottom; nothing twice"
+        "the Tab order of General: the sidebar (one stop, its selected item), then the rows, top to bottom; nothing twice"
     );
     // About has the other pop-up row.
     click(&mut rt, "item-3-1");

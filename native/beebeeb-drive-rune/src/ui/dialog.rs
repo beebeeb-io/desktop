@@ -5,6 +5,7 @@
 //! | Any dialog: surface, head, body, foot, Enter | `dialog(Dialog { .. }, t)` | `key`; `p-clip`, `p-head`, `p-title`, `p-sub`, `p-words`, `p-body`, `p-foot` (`p` = `prefix`) |
 //! | The scrim, modal: Esc dismisses, Tab stays inside, focus back on the opener | `modal(top, card, dismiss, t)` | `scrim` |
 //! | The same, focus back on a named opener (one that went away) | `modal_from(top, card, opener, dismiss, t)` | `scrim` |
+//! | The same, focus to a fallback pane or list when the opener is gone too | `modal_back(top, card, opener, fallback, dismiss, t)` | `scrim` |
 //! | The card: title, line under it, body, foot (delegate) | `card(name, width, title, sub, body, foot, t)` | `dlg`, `dlg-clip`, `dlg-head`, `dlg-title`, `dlg-sub`, `dlg-body`, `dlg-foot` |
 //! | The scrim with the card in its middle | `scrim(top, card, t)` | `scrim` |
 //!
@@ -12,7 +13,7 @@
 //! Callers write `Dialog { head: .., foot: .., ..Dialog::new("dlg", name, 380.0) }`.
 
 use crate::theme::tokens::Theme;
-use rune::{Color, El, col, row};
+use rune::{Color, El, col, el, row};
 
 use super::kit;
 use super::settings_dialog::{DIALOG_TITLE, scrim_color};
@@ -141,6 +142,25 @@ pub fn modal_from<S: 'static>(
     t: &Theme,
 ) -> El {
     modal(top, card, dismiss, t).focus_return(opener)
+}
+
+/// [`modal_from`] for an opener that may be gone at close (the row was trashed, the device
+/// revoked): focus goes to `opener` when it is still there, else into `fallback` (a pane's or a
+/// list's key: its selected item, else its first Tab stop), else nowhere.
+///
+/// Two return layers: Rune walks the removed nodes innermost first and skips one whose key is
+/// gone. The opener's layer is a zero-size leaf inside the scrim (its scope is the scrim), the
+/// fallback's is the scrim itself.
+pub fn modal_back<S: 'static>(
+    top: f32,
+    card: El,
+    opener: &str,
+    fallback: &str,
+    dismiss: impl Fn(&mut S) + 'static,
+    t: &Theme,
+) -> El {
+    let back = el().size(0.0, 0.0).pin(Some(0.0), Some(0.0), None, None).focus_return(opener);
+    scrim(top, card, t).child(back).modal(false, dismiss).focus_return(fallback)
 }
 
 /// A dialog's card. `foot`: the buttons in the caller's layout, the primary first, the way out
