@@ -90,6 +90,15 @@ pub trait TrashSource {
     fn wired(&self) -> bool {
         true
     }
+    /// A number that changes whenever the answer's rows change; `None`: the source cannot say, so the view never
+    /// holds a copy of its rows (a sample or a stub that changes under it).
+    fn rev(&self) -> Option<u64> {
+        None
+    }
+    /// "Try again" on a view that failed: read the list now, even if the last answer is not old.
+    fn retry(&mut self) {
+        self.opened();
+    }
     /// The deleted items of the last 30 days, newest deleted first.
     fn items(&self) -> Vec<Row>;
     /// Everything in Trash, also what the list has not loaded.

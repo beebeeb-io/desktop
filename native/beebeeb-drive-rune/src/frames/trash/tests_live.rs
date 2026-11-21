@@ -136,27 +136,56 @@ fn three() -> Vec<Row> {
 
 #[test]
 fn every_state_of_a_list_that_is_not_here_is_drawn_and_none_says_trash_is_empty() {
-    for (loaded, title) in [
-        (Loaded::Loading, "Loading Trash\u{2026}"),
-        (Loaded::Offline, "Can\u{2019}t reach Beebeeb"),
-        (Loaded::Failed, "Couldn\u{2019}t load Trash"),
-        (Loaded::SessionEnded, "Your session ended"),
-        (Loaded::SignedOut, "Signed out"),
+    for (loaded, key, title) in [
+        (Loaded::Loading, "loading-words", "Loading Trash\u{2026} Getting the list from Beebeeb."),
+        (Loaded::Offline, "trash-failed-title", "Can\u{2019}t reach Beebeeb"),
+        (Loaded::Failed, "trash-failed-title", "Couldn\u{2019}t load Trash"),
+        (Loaded::SessionEnded, "trash-failed-title", "Your session ended"),
+        (Loaded::SignedOut, "trash-failed-title", "Signed out"),
     ] {
         let (rt, _) = window(Held {
             loaded,
             ..Held::default()
         });
-        assert_eq!(info(&rt, "empty-title").text.as_deref(), Some(title), "{loaded:?}");
+        assert_eq!(info(&rt, key).text.as_deref(), Some(title), "{loaded:?}");
+        // Only a failure that trying again can mend offers the button.
+        let retry = matches!(loaded, Loaded::Offline | Loaded::Failed);
+        assert_eq!(rt.find("trash-failed-retry").is_some(), retry, "{loaded:?}");
         assert!(rt.find("btn-empty-trash").is_none(), "{loaded:?}: nothing to empty");
         assert!(rt.find("Trash-badge").is_none(), "{loaded:?}: no count");
     }
     let (rt, _) = window(Held::default());
     assert_eq!(
-        info(&rt, "empty-title").text.as_deref(),
+        info(&rt, "trash-empty-title").text.as_deref(),
         Some("Trash is empty"),
         "a list read as empty"
     );
+}
+
+#[test]
+fn try_again_on_a_failed_trash_reads_again_and_a_failed_refresh_offers_it_too() {
+    let (mut rt, held) = window(Held {
+        loaded: Loaded::Failed,
+        ..Held::default()
+    });
+    let before = held.borrow().opened;
+    click(&mut rt, "trash-failed-retry");
+    assert_eq!(held.borrow().opened, before + 1, "Try again asks the source to read");
+
+    let (mut rt, held) = window(Held {
+        rows: three(),
+        notice: Some(Notice::RefreshFailed),
+        ..Held::default()
+    });
+    assert_eq!(
+        info(&rt, "trash-failed-title").text.as_deref(),
+        Some("Couldn\u{2019}t refresh Trash")
+    );
+    assert!(rt.find("row-0").is_some(), "the list stays under it");
+    let before = held.borrow().opened;
+    click(&mut rt, "trash-failed-retry");
+    assert_eq!(held.borrow().opened, before + 1);
+    assert!(rt.find("trash-failed-retry").is_none(), "the failure goes once it is tried again");
 }
 
 #[test]

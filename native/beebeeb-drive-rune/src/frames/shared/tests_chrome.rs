@@ -108,7 +108,7 @@ fn trash_sort_menu_and_filter_work_on_its_rows() {
     click(&mut rt, "mi-name");
     let mut want: Vec<String> = before.iter().map(|r| r.name.clone()).collect();
     want.sort_by_key(|n| n.to_lowercase());
-    let got: Vec<String> = rt.state.frames.trash.rows().into_iter().map(|r| r.name).collect();
+    let got: Vec<String> = rt.state.frames.trash.rows().iter().map(|r| r.name.clone()).collect();
     assert_eq!(got, want);
     assert_eq!(row_name(&rt, 0).as_deref(), Some(want[0].as_str()));
     rt.update(|s, tx| {

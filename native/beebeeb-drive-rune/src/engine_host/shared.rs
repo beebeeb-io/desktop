@@ -110,6 +110,8 @@ pub struct EngineSharedSource<C: CredentialStores> {
     unmade: bool,
     /// Something changed outside an answer: the next pump says so.
     dirty: bool,
+    /// Changes with every change to the lists held (`SharedSource::rev`).
+    rev: u64,
     /// The shares with an invitation on its way: one per share at a time.
     inviting: HashSet<String>,
     /// The invitations' answers of the current session and account, in order, for the view.
@@ -172,6 +174,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             notice: None,
             unmade: false,
             dirty: false,
+            rev: 0,
             inviting: HashSet::new(),
             invite_answers: VecDeque::new(),
             shared_offline: Default::default(),
@@ -269,6 +272,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
     }
 
     fn take_in(&mut self, answer: Answer) {
+        self.rev += 1;
         let now = self.engine.session_turn();
         match answer {
             Answer::Read(number, result, kept) => {
@@ -389,6 +393,13 @@ impl<C: CredentialStores> EngineSharedSource<C> {
 }
 
 impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
+    fn rev(&self) -> Option<u64> {
+        self.current().map(|_| self.rev)
+    }
+    fn retry(&mut self) {
+        self.read_at = None;
+        self.opened();
+    }
     fn invitations(&self) -> Vec<Invitation> {
         self.current().map(|h| h.invitations.clone()).unwrap_or_default()
     }
@@ -691,6 +702,7 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
     }
 
     fn forget(&mut self) {
+        self.rev += 1;
         self.shared_requests_forget();
         self.shared_safety_forget();
         self.held = None;

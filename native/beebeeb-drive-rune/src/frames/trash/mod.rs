@@ -16,11 +16,16 @@ use crate::frames::shared::parts::controls::{ButtonKind, button};
 use crate::frames::shared::parts::menu::{Entry, Open, Took, menu};
 use crate::frames::shared::parts::table::{Columns, Row, header, rows, table_row};
 use crate::frames::shared::parts::toolbar::{Bar, toolbar};
-use crate::frames::shared::parts::{chrome, empty};
+use crate::frames::shared::parts::chrome;
+use crate::frames::shared::state_body;
+use crate::ui::file_row::ROW_H;
+use crate::ui::view_state::{ViewState, try_again};
 use crate::frames::{self, Intent};
 use crate::theme::{icons, tokens};
 use crate::ui::kit;
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el};
+use std::borrow::Cow;
+use std::sync::Arc;
 use source::{BoardTrash, Loaded, Notice, PurgeEnd, TrashSource};
 
 const COLUMNS: Columns = Columns {
@@ -48,6 +53,8 @@ pub struct TrashUi {
     pub(crate) reread_due: bool,
     /// The list's order and what the toolbar's search filters it by (`shared::actions_sort`).
     pub sort: crate::frames::shared::actions_sort::SectionSort,
+    /// The one sorted copy of the source's answer (`rows`).
+    arranged: crate::frames::shared::actions_sort::Arranged,
 }
 
 /// How often the poll runs again while a read or a restore is on its way.
@@ -232,14 +239,16 @@ impl Default for TrashUi {
             was_open: false,
             reread_due: false,
             sort: Default::default(),
+            arranged: Default::default(),
         }
     }
 }
 
 impl TrashUi {
     /// The rows as drawn: the source's, in the Sort and the filter of the toolbar's search.
-    pub fn rows(&self) -> Vec<Row> {
-        self.sort.arrange(self.source.items())
+    /// One copy is held per answer of the source and per sort, so a frame (and every key) shares it.
+    pub fn rows(&self) -> Arc<Vec<Row>> {
+        self.arranged.get(&self.sort, self.source.rev(), || self.source.items())
     }
 
     /// A Trash on `source`, nothing selected.
@@ -260,6 +269,8 @@ impl TrashUi {
     /// Move the selection to row `i` and its item; focus goes with it.
     fn select(&mut self, i: usize, tx: &mut Tx) {
         self.pick_row(i);
+        // The list draws only the rows in view: the one the arrow went to is brought in first.
+        tx.scroll_into_view(format!("row-{i}"));
         tx.focus(format!("row-{i}"), true);
     }
 
@@ -384,22 +395,63 @@ fn notice_note(notice: &Notice, t: &tokens::Theme) -> El {
     )
 }
 
-/// The words of a list that is not here (`None`: it is, draw it).
-fn not_here(loaded: Loaded) -> Option<(&'static str, &'static str)> {
+/// What stands for a list that is not here (`None`: it is, draw it): Loading while the first answer is out, Failed with
+/// the reason (and Try again, where trying again can help) for the rest. Never a blank or an empty-looking list.
+fn away(loaded: Loaded, t: &tokens::Theme) -> Option<El> {
+    let failed = |title: &str, why: &str, retry: bool| {
+        let retry = retry.then(|| {
+            try_again("trash-failed", t).on_press(|s: &mut State| {
+                s.frames.trash.notice = None;
+                s.frames.trash.source.retry();
+            })
+        });
+        state_body(
+            ViewState::Failed {
+                key: "trash-failed",
+                title,
+                why,
+                retry,
+            },
+            t,
+        )
+    };
     match loaded {
         Loaded::Ready => None,
-        Loaded::Loading => Some(("Loading Trash\u{2026}", "Getting the list from Beebeeb.")),
-        Loaded::Offline => Some((
+        Loaded::Loading => Some(state_body(
+            ViewState::Loading {
+                words: "Loading Trash\u{2026} Getting the list from Beebeeb.",
+            },
+            t,
+        )),
+        Loaded::Offline => Some(failed(
             "Can\u{2019}t reach Beebeeb",
             "Trash shows again once you\u{2019}re online.",
+            true,
         )),
-        Loaded::Failed => Some((
+        Loaded::Failed => Some(failed(
             "Couldn\u{2019}t load Trash",
-            "Open Trash again in a moment to try again.",
+            "Beebeeb answered with an error.",
+            true,
         )),
-        Loaded::SessionEnded => Some(("Your session ended", "Sign in again to see Trash.")),
-        Loaded::SignedOut => Some(("Signed out", "Sign in to see Trash.")),
+        Loaded::SessionEnded => Some(failed("Your session ended", "Sign in again to see Trash.", false)),
+        Loaded::SignedOut => Some(failed("Signed out", "Sign in to see Trash.", false)),
     }
+}
+
+/// A refresh that failed while a list is shown: Failed with Try again, over the list that may be out of date.
+fn refresh_failed(t: &tokens::Theme) -> El {
+    state_body(
+        ViewState::Failed {
+            key: "trash-failed",
+            title: "Couldn\u{2019}t refresh Trash",
+            why: "What\u{2019}s shown may be out of date.",
+            retry: Some(try_again("trash-failed", t).on_press(|s: &mut State| {
+                s.frames.trash.notice = None;
+                s.frames.trash.source.retry();
+            })),
+        },
+        t,
+    )
 }
 
 /// The note while Trash empties (`.mk-banner`): how far it is, and that the view can be left.
@@ -475,7 +527,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let is_empty = totals.items == 0;
     // A list that is not here yet (loading, offline, signed out…) says so; never "Trash is empty" for it.
     let missing = if items.is_empty() {
-        not_here(ui.source.loaded())
+        away(ui.source.loaded(), &t)
     } else {
         None
     };
@@ -525,38 +577,63 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         &t,
     );
 
-    let body = if let Some((title, words)) = missing {
-        empty::empty(&icons::TRASH, title, words, None, &t)
+    let body = if let Some(state) = missing {
+        state
     } else if is_empty {
-        empty::empty(
-            &icons::TRASH,
-            "Trash is empty",
-            "Files you delete stay here until you delete them for good.",
-            None,
+        state_body(
+            ViewState::Empty {
+                key: "trash-empty",
+                icon: &icons::TRASH,
+                title: "Trash is empty",
+                body: "Files you delete stay here until you delete them for good.",
+                action: None,
+            },
             &t,
         )
     } else {
-        let list = items
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                table_row(i, r, ui.selected == Some(i), &COLUMNS, &t)
-                    // The list is one Tab stop: the selected row, or the first.
-                    .tab_index(if ui.selected.unwrap_or(0) == i { 0 } else { -1 })
-                    .on_press(move |s: &mut State| s.frames.trash.pick_row(i))
-                    .on_secondary_press(move |s: &mut State, press, _| {
-                        s.frames.trash.pick_row(i);
-                        s.frames.trash.menu = Some(Open::at(press.x, press.y));
-                    })
-            })
-            .collect();
+        // Only the rows in view are built (`virtual_rows`), from the one sorted copy of the answer.
+        let list = rows("Trash", Vec::new()).child(
+            col()
+                .key("trash-rows")
+                .w_full()
+                .growth(rune::GrowthSpec::default())
+                .virtual_rows(
+                    items.len(),
+                    ROW_H,
+                    |s: &State, i| {
+                        if i < s.frames.trash.rows().len() {
+                            Cow::Owned(format!("row-{i}"))
+                        } else {
+                            Cow::Borrowed("row-oob")
+                        }
+                    },
+                    move |s: &State, i| match s.frames.trash.rows().get(i) {
+                        Some(r) => table_row(i, r, s.frames.trash.selected == Some(i), &COLUMNS, &t)
+                            // The list is one Tab stop: the selected row, or the first.
+                            .tab_index(if s.frames.trash.selected.unwrap_or(0) == i { 0 } else { -1 })
+                            .on_press(move |s: &mut State| s.frames.trash.pick_row(i))
+                            .on_secondary_press(move |s: &mut State, press, _| {
+                                s.frames.trash.pick_row(i);
+                                s.frames.trash.menu = Some(Open::at(press.x, press.y));
+                            }),
+                        None => el().key("empty"),
+                    },
+                ),
+        );
         let mut body = col().key("list-body");
         if let Some(e) = emptying {
             body = body.child(emptying_note(e, &t));
         }
-        body.child(header(&COLUMNS, &t)).child(rows("Trash", list))
+        body.child(header(&COLUMNS, &t)).child(list)
     };
     let body = match &ui.notice {
+        // A refresh that failed with a list on screen: Failed with Try again over the list.
+        Some(Notice::RefreshFailed) => col()
+            .key("notice-body")
+            .w_full()
+            .grow(1.0)
+            .child(refresh_failed(&t))
+            .child(body),
         Some(notice) => col()
             .key("notice-body")
             .w_full()

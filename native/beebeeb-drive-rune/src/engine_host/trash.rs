@@ -104,6 +104,8 @@ pub struct EngineTrashSource<C: CredentialStores> {
     next_restore: Option<(mpsc::Receiver<()>, mpsc::Sender<()>)>,
     /// Something changed outside an answer (a restore started, a forget): the next pump says so.
     dirty: bool,
+    /// Changes with every change to the rows held (`TrashSource::rev`).
+    rev: u64,
     /// The delete for good on its way, and how the last one ended (told once, by the next pump).
     purging: Option<purge::Purging>,
     purge_end: Option<PurgeEnd>,
@@ -195,6 +197,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
             #[cfg(test)]
             next_restore: None,
             dirty: false,
+            rev: 0,
             purging: None,
             purge_end: None,
             counted: count::CountState::default(),
@@ -245,6 +248,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
     }
 
     fn take_in(&mut self, answer: Answer) {
+        self.rev += 1;
         let now = self.engine.session_turn();
         match answer {
             Answer::Listed(number, result) => {
@@ -445,6 +449,15 @@ impl<C: CredentialStores> EngineTrashSource<C> {
 }
 
 impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
+    fn rev(&self) -> Option<u64> {
+        self.current().map(|_| self.rev)
+    }
+
+    fn retry(&mut self) {
+        self.read_at = None;
+        self.opened();
+    }
+
     fn items(&self) -> Vec<Row> {
         self.current()
             .map(|listing| listing.rows.iter().map(|listed| listed.row.clone()).collect())
@@ -514,6 +527,7 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         }
         if let Some(listing) = self.listing.as_mut() {
             let row = listing.rows.remove(at);
+            self.rev += 1;
             self.restoring.insert(id.to_string(), (pressed.0, row));
         }
         self.dirty = true;
@@ -592,6 +606,7 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
     }
 
     fn forget(&mut self) {
+        self.rev += 1;
         self.listing = None;
         self.restoring.clear();
         self.restored.clear();

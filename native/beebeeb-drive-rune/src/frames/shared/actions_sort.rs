@@ -10,6 +10,37 @@ use super::parts::table::Row;
 use crate::State;
 use crate::frames::Intent;
 
+/// One sorted, filtered copy of a source's rows, held per answer: the view and the keys ask for it many times a
+/// frame, and it is worked out again only when the source's answer (`rev`) or the sort changed. A source that
+/// gives no revision (`None`) is never cached.
+#[derive(Default)]
+pub struct Arranged(std::sync::Mutex<Option<(u64, SectionSort, std::sync::Arc<Vec<Row>>)>>);
+
+impl Arranged {
+    /// The rows as `sort` lists them. `rev`: the source's revision; `rows` reads the source's rows (called only on a
+    /// miss).
+    pub fn get(
+        &self,
+        sort: &SectionSort,
+        rev: Option<u64>,
+        rows: impl FnOnce() -> Vec<Row>,
+    ) -> std::sync::Arc<Vec<Row>> {
+        let Some(rev) = rev else {
+            return std::sync::Arc::new(sort.arrange(rows()));
+        };
+        let mut held = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((have, by, arranged)) = held.as_ref()
+            && *have == rev
+            && by == sort
+        {
+            return arranged.clone();
+        }
+        let arranged = std::sync::Arc::new(sort.arrange(rows()));
+        *held = Some((rev, sort.clone(), arranged.clone()));
+        arranged
+    }
+}
+
 /// The key of the toolbar's Sort button (`ui::toolbar`): the sort menu opens under it, which is also how an open menu
 /// is known for the sort menu.
 pub const SORT_BUTTON: &str = "sort-btn";
