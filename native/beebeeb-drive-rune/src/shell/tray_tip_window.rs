@@ -1,14 +1,17 @@
 //! The first-run tray tip (DW-0380) as a Rune window of its own: a small borderless, always-on-top
 //! card by the notification area, placed with the flyout's code ([`flyout::position`] on the same
-//! [`flyout::Anchor`]). "Got it" and Esc dismiss it; the shell then moves the guide on (it reads
-//! [`TipState::dismissed`] through the window's handle, see `host`).
+//! [`flyout::Anchor`]). The shell opens it when the guide reaches its first step and hides it when the
+//! guide leaves it (`host::Shell::show_tray_tip`). "Got it" and Esc dismiss it: [`TipState::dismissed`]
+//! is set and the main window is told (`host::on_tray_tip_dismissed`), which hides this window and
+//! moves the guide on to its first tip.
 //!
 //! The card's words are the guide's (`guide::TRAY_TITLE`, `guide::TRAY_TEXT`).
 
-use rune::{Cx, El, Key, KeyEvent, Tx, col, el, row};
+use rune::{AppHandle, Cx, El, Key, KeyEvent, Tx, col, el, row};
 
 use super::flyout::{self, Anchor};
 use super::surfaces::TRAY_TIP_KEY;
+use crate::State;
 use crate::frames::signin::setup::guide::{NEXT_KEY, TRAY_TEXT, TRAY_TITLE};
 use crate::theme::tokens::{self, type_};
 use crate::ui::button::{ButtonState, Size, Variant, button, keys};
@@ -19,14 +22,25 @@ pub const SIZE: (f32, f32) = (332.0, 172.0);
 /// Where the tip's window key is read from (`surfaces::TRAY_TIP_KEY`).
 pub const KEY: &str = TRAY_TIP_KEY;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Default, Clone)]
 pub struct TipState {
-    /// "Got it" or Esc was used: the guide goes on to its first tip.
+    /// "Got it" or Esc was used: the guide goes on to its first tip. The shell sets it back when it
+    /// opens the tip again ("Show the guide again").
     pub dismissed: bool,
+    /// The main window, told of a dismiss. None in tests and headless renders.
+    pub main: Option<AppHandle<State>>,
 }
 
 pub fn init() -> TipState {
     TipState::default()
+}
+
+/// The tip of the running app: a dismiss reaches the main window through `main`.
+pub fn with_main(main: AppHandle<State>) -> TipState {
+    TipState {
+        dismissed: false,
+        main: Some(main),
+    }
 }
 
 /// The tip's top-left, next to the b: the flyout's rule with the tip's size.
@@ -51,9 +65,16 @@ pub fn position(a: &Anchor) -> (i32, i32) {
     (x.max(a.work.x), y.max(a.work.y))
 }
 
-fn dismiss(s: &mut TipState, tx: &mut Tx) {
+/// Once per showing: the main window hides this one and moves the guide on (`host::on_tray_tip_dismissed`). The
+/// window is never closed from here: closing it would end it, not hide it.
+fn dismiss(s: &mut TipState, _tx: &mut Tx) {
+    if s.dismissed {
+        return;
+    }
     s.dismissed = true;
-    tx.close_window();
+    if let Some(main) = &s.main {
+        main.update(crate::shell::host::on_tray_tip_dismissed);
+    }
 }
 
 pub fn view(_s: &TipState, cx: &mut Cx<TipState>) -> El {

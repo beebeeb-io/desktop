@@ -11,6 +11,7 @@
 //! | `surfaces.rs`, `window_state.rs` | the two windows, and where the main one was |
 //! | `tray.rs`, `tray_icon.rs` | the b: its model and its pixels |
 //! | `flyout.rs`, `flyout_window.rs` | the flyout: where it opens, and its window |
+//! | `tray_tip_window.rs` | the first-run tray tip (DW-0380): a window of its own by the b |
 //! | `identity.rs` | which app this build is (real or test): every per-app name |
 //! | `instance.rs`, `control.rs` | the command line, one instance, the control channel |
 //! | `deeplink.rs`, `autostart.rs` | links, start at login |
@@ -76,6 +77,7 @@ use actions::{EngineActions, FixtureEngine, HostActions, ShellActions};
 use app::{Dialog, Event, GateState, Route, Section, SettingsPane};
 use control::Reply;
 use flyout_window::FlyoutState;
+use tray_tip_window::TipState;
 use host::{Shell, Wiring};
 use identity::AppIdentity;
 use instance::{Claim, Plan, Start};
@@ -404,6 +406,19 @@ pub fn run() {
             flyout_window::view,
         )
     };
+    // The first-run tray tip (DW-0380): opened by the shell when the guide reaches it (`host::Shell::show_tray_tip`).
+    let tray_tip_spec = AppSpec::<TipState> {
+        fonts: FONTS,
+        families: FAMILIES,
+        min_size: Some(tray_tip_window::SIZE),
+        on_key: Some(tray_tip_window::on_key),
+        ..AppSpec::new(
+            identity.main_window_title(),
+            tray_tip_window::SIZE,
+            tray_tip_window::init,
+            tray_tip_window::view,
+        )
+    };
 
     let window = Arc::new(Mutex::new(None));
     let window_slot = window.clone();
@@ -424,22 +439,30 @@ pub fn run() {
         .args(launch.rune_args.clone())
         .on_focus(flyout_window::on_focus)
         .on_window(move |native| flyout_platform.adopt_flyout_window(native));
+    let mut tray_tip_app = App::new(tray_tip_spec).args(launch.rune_args.clone());
     if !tooling {
         // The app outlives its window: closing it leaves the b running (DW-1231).
         main_app = main_app.keep_running().on_close(host::on_close).on_quit(host::on_quit);
         flyout_app = flyout_app.keep_running();
+        tray_tip_app = tray_tip_app.keep_running();
         if !show_window {
             main_app = main_app.windowless();
         }
     }
-    let (main, flyout_handle) = (main_app.handle(), flyout_app.handle());
+    let (main, flyout_handle, tray_tip_handle) = (main_app.handle(), flyout_app.handle(), tray_tip_app.handle());
+    let tray_tip_main = main.clone();
+    let tray_tip_app = tray_tip_app.init(move || tray_tip_window::with_main(tray_tip_main));
 
     let flyout_hidden_at = Arc::new(Mutex::new(None));
+    let tray_anchor = Arc::new(Mutex::new(None));
+    let tray_anchor_slot = tray_anchor.clone();
     let wiring = Wiring {
         main: Some(main.clone()),
         flyout: Some(flyout_handle),
         window,
         flyout_hidden_at: flyout_hidden_at.clone(),
+        tray_tip: Some(tray_tip_handle),
+        tray_anchor,
         saved,
         state_file,
         capture_file,
@@ -488,7 +511,13 @@ pub fn run() {
 
     rune::run_windows(move |displays| {
         // The displays as the window may use them: the taskbar's room and the frame left out.
-        let monitors = work_area::usable(&surfaces::monitors(displays), &work_area::os_work_areas());
+        let work_areas = work_area::os_work_areas();
+        let monitors = work_area::usable(&surfaces::monitors(displays), &work_areas);
+        // Where the b is until a click on it says otherwise: the primary display, by its taskbar.
+        if let Some(anchor) = surfaces::primary_anchor(&surfaces::monitors(displays), &work_areas) {
+            let mut slot = tray_anchor_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            slot.get_or_insert(anchor);
+        }
         let first_place = saved_main.or_else(|| {
             legacy_frame
                 .as_deref()
@@ -518,6 +547,9 @@ pub fn run() {
                 .boxed(),
             WindowSpec::from_app(WindowKind::Flyout.key(), flyout_app)
                 .options(surfaces::flyout_options())
+                .boxed(),
+            WindowSpec::from_app(tray_tip_window::KEY, tray_tip_app)
+                .options(surfaces::tray_tip_options())
                 .boxed(),
         ]
     });

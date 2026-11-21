@@ -343,3 +343,46 @@ fn a_session_without_a_key_here_shows_the_twelve_words_in_the_sign_in_window() {
     assert_eq!(rt.state.signin.as_ref().unwrap().screen, Screen::SignIn);
     assert!(rt.find(WORD_KEYS[0]).is_none(), "the words are gone");
 }
+
+/// DW-0380 in its own window by the b: the shell opens the tray tip once when the guide reaches it, by the b's
+/// display, and hides it when its "Got it" or Esc is told to the main window; the guide goes on to its first tip.
+#[test]
+fn the_tray_tip_opens_once_at_its_step_and_hides_on_dismiss() {
+    use crate::frames::signin::setup::guide::{self, Step};
+    let tip = rune::App::new(rune::AppSpec::new(
+        "tray tip",
+        super::super::tray_tip_window::SIZE,
+        super::super::tray_tip_window::init,
+        super::super::tray_tip_window::view,
+    ))
+    .handle();
+    let wiring = Wiring {
+        tray_tip: Some(tip),
+        ..Wiring::default()
+    };
+    let platform = Arc::new(FakePlatform::default());
+    let actions = Arc::new(HostActions::new(Arc::new(FixtureEngine::ready()), platform.clone()));
+    let mut rt = runtime(state::init_with(Shell::new(actions, platform, wiring)));
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.tray_tip_counts, (0, 0), "no guide: no tip");
+
+    rt.update(|s, _| guide::start(s));
+    settle(&mut rt);
+    settle(&mut rt);
+    assert_eq!(rt.state.guide.step, Some(Step::Tray));
+    assert_eq!(rt.state.shell.tray_tip_counts, (1, 0), "opened once, however many polls run");
+
+    // "Got it" or Esc in the tip's window (`tray_tip_window::dismiss`).
+    rt.update(|s, tx| on_tray_tip_dismissed(s, tx));
+    settle(&mut rt);
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)));
+    assert_eq!(rt.state.shell.tray_tip_counts, (1, 1), "hidden, and not opened again");
+
+    // "Show the guide again": it opens again; the guide ending under it (Skip from elsewhere) hides it.
+    rt.update(|s, _| guide::start(s));
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.tray_tip_counts, (2, 1));
+    rt.update(|s, _| guide::skip(s));
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.tray_tip_counts, (2, 2));
+}

@@ -3,7 +3,7 @@
 
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
-use super::guide::{self, COACH_KEY, FRAMES, NEXT_KEY, RING_KEY, SKIP_KEY, Step, TIPS, TRAY_TEXT, TRAY_TITLE};
+use super::guide::{self, COACH_KEY, FRAMES, NEXT_KEY, RING_KEY, SKIP_KEY, Step, TIPS};
 use crate::shell::app::{Event, GateState, Screen, Section, SettingsPane};
 use crate::shell::host;
 use crate::{State, init, view};
@@ -64,6 +64,14 @@ fn text(rt: &Runtime<State>, key: &str) -> Option<String> {
 fn click(rt: &mut Runtime<State>, key: &str) {
     rt.settle_all();
     rt.frame(0.0);
+    // DW-0380's "Got it" is in the tray tip's own window: what that window tells the main one.
+    if key == NEXT_KEY && rt.state.guide.step == Some(Step::Tray) {
+        rt.update(|s, tx| host::on_tray_tip_dismissed(s, tx));
+        rt.frame(0.0);
+        rt.settle_all();
+        rt.frame(0.0);
+        return;
+    }
     let r = rect(rt, key).unwrap_or_else(|| panic!("no element keyed {key}"));
     let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
     rt.pointer_down(x, y);
@@ -104,30 +112,45 @@ fn ring_holds(rt: &Runtime<State>, target: &str, slack: f32) {
 #[test]
 fn every_board_frame_draws_its_step_with_its_words() {
     let words = [
-        ("DW-0380", TRAY_TEXT, None, "Got it"),
         ("DW-0301", TIPS[0], Some("1 of 5"), "Next"),
         ("DW-0302", TIPS[1], Some("2 of 5"), "Next"),
         ("DW-0303", TIPS[2], Some("3 of 5"), "Next"),
         ("DW-0304", TIPS[3], Some("4 of 5"), "Next"),
         ("DW-0305", TIPS[4], Some("5 of 5"), "Done"),
     ];
-    assert_eq!(FRAMES.len(), 6);
+    assert_eq!(FRAMES.len(), 6, "DW-0380 is a scene too, with no card (below)");
     for (frame, body, counter, button) in words {
         let rt = at_scene(frame);
         assert_eq!(rt.state.guide.step.map(Step::frame), Some(frame));
         assert_eq!(text(&rt, "coach-text").as_deref(), Some(body), "{frame}");
         assert_eq!(text(&rt, "coach-counter").as_deref(), counter, "{frame}");
         assert_eq!(text(&rt, "coach-next-label").as_deref(), Some(button), "{frame}");
-        // Skip is on tips 1 to 4 only; DW-0380 has its heading and no ring.
-        let tip = counter.is_some();
-        assert_eq!(rect(&rt, SKIP_KEY).is_some(), tip && frame != "DW-0305", "{frame}");
-        assert_eq!(rect(&rt, RING_KEY).is_some(), tip, "{frame}");
-        assert_eq!(
-            text(&rt, "coach-title").as_deref(),
-            (!tip).then_some(TRAY_TITLE),
-            "{frame}"
-        );
+        // Skip is on tips 1 to 4 only.
+        assert_eq!(rect(&rt, SKIP_KEY).is_some(), frame != "DW-0305", "{frame}");
+        assert!(rect(&rt, RING_KEY).is_some(), "{frame}");
+        assert_eq!(text(&rt, "coach-title"), None, "{frame}");
     }
+}
+
+/// DW-0380 is a window of its own by the b (`shell::tray_tip_window`): at that step the main window draws no card,
+/// no ring and none of its words, and its keys stay the window's.
+#[test]
+fn tray_tip_step_draws_no_card_in_the_main_window() {
+    let mut rt = at_scene("DW-0380");
+    assert_eq!(rt.state.guide.step, Some(Step::Tray));
+    for key in [COACH_KEY, RING_KEY, NEXT_KEY, "coach-place", "window-with-guide"] {
+        assert!(rect(&rt, key).is_none(), "{key} is not in the main window");
+    }
+    assert_eq!(text(&rt, "coach-title"), None);
+    assert_eq!(text(&rt, "coach-text"), None);
+    press(&mut rt, Key::Escape);
+    assert_eq!(rt.state.guide.step, Some(Step::Tray), "Esc in the main window is not the tip's");
+}
+
+/// The tray tip's "Got it" or Esc, as its window tells the main one (`host::on_tray_tip_dismissed`).
+fn tray_tip_dismissed(rt: &mut Runtime<State>) {
+    rt.update(|s, tx| host::on_tray_tip_dismissed(s, tx));
+    rt.frame(0.0);
 }
 
 #[test]
@@ -166,8 +189,10 @@ fn each_ring_is_on_the_real_control_and_follows_it() {
 fn got_it_and_next_step_through_the_five_tips_and_done_ends_on_files() {
     let mut rt = started();
     assert_eq!(rt.state.guide.step, Some(Step::Tray));
-    let mut seen = Vec::new();
-    for _ in 0..6 {
+    let mut seen = vec![(Step::Tray, section(&rt).unwrap())];
+    assert!(rect(&rt, COACH_KEY).is_none(), "DW-0380 is the tray tip's window");
+    tray_tip_dismissed(&mut rt);
+    for _ in 0..5 {
         seen.push((rt.state.guide.step.unwrap(), section(&rt).unwrap()));
         assert!(
             rect(&rt, COACH_KEY).is_some(),
@@ -314,7 +339,8 @@ fn open_my_beebeeb_at_the_end_of_the_first_run_starts_the_guide() {
     });
     rt.frame(0.0);
     assert_eq!(section(&rt), Some(Section::Files));
-    assert_eq!(text(&rt, "coach-title").as_deref(), Some(TRAY_TITLE));
+    assert_eq!(guide::showing(&rt.state), Some(Step::Tray));
+    assert_eq!(text(&rt, "coach-title"), None, "DW-0380 is the tray tip's own window");
     rt.update(|s, _| {
         host::dispatch(s, Event::Gate(GateState::FirstRun));
     });
@@ -526,11 +552,8 @@ fn focused(rt: &Runtime<State>) -> Option<String> {
 fn the_keyboard_is_the_cards_tab_stays_in_it_and_enter_steps() {
     let mut rt = started();
     tick(&mut rt);
-    assert_eq!(focused(&rt).as_deref(), Some(NEXT_KEY), "focus starts on Got it");
-    // DW-0380 has one button: Tab stays on it.
-    press(&mut rt, Key::Tab);
-    assert_eq!(focused(&rt).as_deref(), Some(NEXT_KEY));
-    press(&mut rt, Key::Enter);
+    // DW-0380 is the tray tip's window: its Got it moves the guide on, with focus on tip 1's Next.
+    tray_tip_dismissed(&mut rt);
     assert_eq!(rt.state.guide.step, Some(Step::Tip(1)));
     assert_eq!(
         focused(&rt).as_deref(),
@@ -554,6 +577,8 @@ fn the_keyboard_is_the_cards_tab_stays_in_it_and_enter_steps() {
     host::dispatch(&mut state, Event::OpenSettings(SettingsPane::General));
     let mut rt = window(state);
     click(&mut rt, "item-1-0");
+    tick(&mut rt);
+    tray_tip_dismissed(&mut rt);
     tick(&mut rt);
     assert_eq!(focused(&rt).as_deref(), Some(NEXT_KEY));
 }
@@ -873,7 +898,6 @@ fn at_the_windows_smallest_size_every_card_and_ring_is_inside_it() {
         ("DW-0303", Some("Shared-row")),
         ("DW-0304", Some("Photos-row")),
         ("DW-0305", Some("settings-btn")),
-        ("DW-0380", None),
     ] {
         let rt = at_scene_sized(frame, size);
         let card = rect(&rt, COACH_KEY).unwrap_or_else(|| panic!("{frame} draws its card"));
@@ -896,7 +920,7 @@ fn show_the_guide_again_in_settings_runs_it_on_files() {
     click(&mut rt, "item-1-0");
     assert_eq!(section(&rt), Some(Section::Files), "settings closed");
     assert_eq!(rt.state.guide.step, Some(Step::Tray));
-    assert_eq!(text(&rt, "coach-title").as_deref(), Some(TRAY_TITLE));
+    assert_eq!(text(&rt, "coach-title"), None, "DW-0380 is the tray tip's own window");
     assert!(
         rt.state.settings.take_intents().is_empty(),
         "nothing is left asked of the shell"
