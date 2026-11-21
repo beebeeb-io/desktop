@@ -640,13 +640,16 @@ fn notifications_off_in_windows_keep_the_choices_out_of_reach_and_open_windows_s
 
 #[test]
 fn recent_alerts_lead_where_they_point_and_an_empty_list_says_so() {
-    let leads = [("item-0-1", "DW-0501"), ("item-1-0", "DW-0503"), ("item-2-0", "DW-A77")];
-    for (row, frame) in leads {
+    // Shared holds the shares and the requests: the window leaves settings for it. The sign-in activity is a
+    // page of Security. Nothing is left over as a request nobody takes.
+    let leads = [("item-0-1", None), ("item-1-0", None), ("item-2-0", Some(SettingsPane::Security))];
+    for (row, pane) in leads {
         let mut rt = runtime("DW-0791");
         assert_eq!(info(&rt, row).role, "link");
         tab_to(&mut rt, row);
         key(&mut rt, Key::Enter);
-        assert_eq!(rt.state.settings.intents, vec![Intent::Show(frame)], "{row}");
+        assert_eq!(on_settings(&rt), pane, "{row}");
+        assert!(rt.state.settings.intents.is_empty(), "{row}");
     }
     // A place the shell routes itself (Settings › Devices and sessions): no request needed.
     let mut rt = runtime("DW-0791");
@@ -660,7 +663,7 @@ fn recent_alerts_lead_where_they_point_and_an_empty_list_says_so() {
         "a new alert says so in words, not only with a pill"
     );
     let mut rt = runtime("DW-0791b");
-    assert_eq!(info(&rt, "card-0-head").text.as_deref(), Some("No notifications"));
+    assert_eq!(info(&rt, "recent-empty-title").text.as_deref(), Some("No notifications"));
     click(&mut rt, "crumb-row");
     assert_eq!(rt.state.settings.pane, Pane::Notifications);
 }
