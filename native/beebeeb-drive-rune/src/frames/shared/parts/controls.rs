@@ -139,28 +139,11 @@ pub enum Tone {
     Green,
 }
 
-/// A pill (`.kit-pill`), with its dot when the state is live. Keys: `<key>-pill`, `-pill-dot`, `-pill-label`.
+/// A pill: `ui::pill`. Keys: `<key>-pill`, `-pill-dot`, `-pill-label`.
 pub fn pill(key: &str, words: &str, tone: Tone, dot: bool, t: &Theme) -> El {
-    let (wash, ink, dot_ink): (Color, Color, Color) = match tone {
-        Tone::Neutral => (t.tile, t.text_secondary, t.text_secondary),
-        Tone::Green => (t.green.alpha(0.14), green_text(t), t.green),
+    let tone = match tone {
+        Tone::Neutral => crate::ui::pill::Tone::Neutral,
+        Tone::Green => crate::ui::pill::Tone::Good,
     };
-    let mut p = row()
-        .key(format!("{key}-pill"))
-        .h(20.0)
-        .px(8.0)
-        .gap(5.0)
-        .center_y()
-        .radius(10.0)
-        .fill(wash);
-    if dot {
-        p = p.child(
-            el().key(format!("{key}-pill-dot"))
-                .size(6.0, 6.0)
-                .radius(3.0)
-                .fill(dot_ink),
-        );
-    }
-    // The words at their own width (Rune lays a text out half a point wider at most).
-    p.child(kit::label(format!("{key}-pill-label"), words, style::PILL, ink).w(rune::text::advance(words, style::PILL)))
+    crate::ui::pill::pill(&format!("{key}-pill"), words, tone, dot, t)
 }
