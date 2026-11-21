@@ -25,10 +25,6 @@ const SCORE_HEAD: TextStyle = TextStyle::new(20.0, 650.0).lh(24.0).tracking(-0.3
 
 /// What a part says when nobody read it.
 pub(super) const NOT_KNOWN: &str = "Not known";
-/// What a function says when this build has not bound it.
-pub(super) const NOT_YET: &str = "Not available yet";
-/// The Approve a sign-in row of a source that does not have it (0.9.0).
-pub(super) const APPROVE_ON_WEB: &str = "Not available in this version yet. Approve on the web.";
 /// The name the shell holds the web's delete-account page under (`Intent::Web`).
 pub const DELETE_PAGE: &str = "delete-account";
 
@@ -70,10 +66,8 @@ enum State_ {
     Marked(Tail),
 }
 
-/// A row that opens `frame`. While nothing answers for that page it is the row alone: no press, no chevron
-/// (never a row that leads to a page that is not there). A row with a READ state then says that state and
-/// nothing more; "Not available yet" is only on a row that has none (never both, which would read as the
-/// state itself not being available).
+/// A row that opens `frame`. While nothing answers for that page the row is not drawn: a row either works or
+/// is not there (never a row that leads to a page that is not there).
 fn leads(
     list: usize,
     index: usize,
@@ -82,17 +76,27 @@ fn leads(
     frame: &'static str,
     source: &dyn AccountSource,
     t: &Theme,
-) -> El {
-    let open = answered(source, frame);
+) -> Option<El> {
+    if !answered(source, frame) {
+        return None;
+    }
     let it = match state {
         State_::Marked(mark) => it.tail(mark),
-        State_::None if !open => it.tail(Tail::Value(NOT_YET.into())),
         State_::Read | State_::None => it,
     };
-    if !open {
-        return set::item(list, index, &it, Vec::new(), t);
-    }
-    set::item(list, index, &it.link(true), Vec::new(), t).on_press(move |s: &mut State| super::go(s, frame))
+    Some(set::item(list, index, &it.link(true), Vec::new(), t).on_press(move |s: &mut State| super::go(s, frame)))
+}
+
+/// A list of the rows that are drawn; none drawn, no list.
+fn list_of(
+    list: usize,
+    head: Option<&str>,
+    rows: Vec<Option<El>>,
+    foot: Option<&str>,
+    t: &Theme,
+) -> Option<El> {
+    let rows: Vec<El> = rows.into_iter().flatten().collect();
+    (!rows.is_empty()).then(|| lists::list(list, head, rows, foot, t))
 }
 
 /// The factors, when there is a score to say: known and not empty.
@@ -212,13 +216,6 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
                 .label(format!("{}, {}", f.kind.fix_label(), f.says))
                 .on_press(move |s: &mut State| super::go(s, frame)),
             );
-        } else {
-            todo = todo.child(kit::label(
-                format!("todo-{i}-value"),
-                NOT_YET,
-                set::SUB,
-                t.text_tertiary,
-            ));
         }
         card = card.child(todo);
     }
@@ -235,7 +232,7 @@ fn checked(known: bool, good: bool) -> State_ {
     }
 }
 
-fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
+fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> Option<El> {
     let password = Row::new(Lead::Icon(&icons::PADLOCK), "Password").sub(match &facts.password_changed {
         Some(when) => format!("Changed {when}"),
         None => "Last change not known".into(),
@@ -260,7 +257,7 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
         None => NOT_KNOWN.into(),
     });
     let passkeys_ok = checked(facts.passkeys.is_some(), facts.passkeys.is_some_and(|n| n > 0));
-    lists::list(
+    list_of(
         0,
         Some("Sign-in"),
         vec![
@@ -276,17 +273,10 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
 /// App lock is Drive's own row (the board's `securityExtra` slot, DW-0716): its switch and delay are here,
 /// not on a page behind it. A source that gives no delay (an empty one: nothing acts on it in this version)
 /// gets no delay control and no "locks again after".
-fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
+fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> Option<El> {
     let it = Row::new(Lead::Icon(&icons::APP_LOCK), "Lock Beebeeb");
-    let Some((on, after)) = &facts.app_lock else {
-        return set::item(
-            1,
-            0,
-            &it.sub("Windows Hello").tail(Tail::Value(NOT_YET.into())),
-            Vec::new(),
-            t,
-        );
-    };
+    // No facts: nothing acts on it in this build, so the row is not drawn.
+    let (on, after) = facts.app_lock.as_ref()?;
     let on = *on;
     let delay = on && !after.is_empty();
     let mut controls = Vec::new();
@@ -320,7 +310,7 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
             }
         }),
     );
-    set::item(
+    Some(set::item(
         1,
         0,
         &it.sub(if delay {
@@ -332,7 +322,7 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
         }),
         controls,
         t,
-    )
+    ))
 }
 
 /// "Hide Beebeeb from screen capture and remote desktop": a per-PC switch, off by default (`shell::capture_setting`).
@@ -358,25 +348,21 @@ fn capture_row(on: bool, t: &Theme) -> El {
     )
 }
 
-/// Approving a sign-in from another device. A source that has it opens it; one that has not says so, with the
-/// way that works (the web), and no code field behind the row.
-fn approve_row(source: &dyn AccountSource, t: &Theme) -> El {
+/// Approving a sign-in from another device. A source that has it opens it; one that has not draws no row.
+fn approve_row(source: &dyn AccountSource, t: &Theme) -> Option<El> {
     let it = Row::new(Lead::Icon(&icons::SCAN), "Approve a sign-in");
-    if answered(source, "DW-A12") {
-        return leads(
-            1,
-            2,
-            it.sub("Let another device sign in"),
-            State_::None,
-            "DW-A12",
-            source,
-            t,
-        );
-    }
-    set::item(1, 2, &it.sub(APPROVE_ON_WEB), Vec::new(), t)
+    leads(
+        1,
+        2,
+        it.sub("Let another device sign in"),
+        State_::None,
+        "DW-A12",
+        source,
+        t,
+    )
 }
 
-fn devices(facts: &SecurityFacts, source: &dyn AccountSource, hide_capture: bool, t: &Theme) -> El {
+fn devices(facts: &SecurityFacts, source: &dyn AccountSource, hide_capture: bool, t: &Theme) -> Option<El> {
     // "N signed in": true of devices and of sessions alike (a source lists one or the other).
     let sessions =
         Row::new(Lead::Icon(&icons::DEVICE_PHONE), "Devices and sessions").sub("Where your account is signed in");
@@ -385,14 +371,14 @@ fn devices(facts: &SecurityFacts, source: &dyn AccountSource, hide_capture: bool
         Count::Reading => "Loading".into(),
         Count::NotKnown => NOT_KNOWN.into(),
     });
-    lists::list(
+    list_of(
         1,
         Some("This PC and your devices"),
         vec![
             app_lock_row(facts, t),
             leads(1, 1, sessions, State_::Marked(signed_in), "DW-A55", source, t),
             approve_row(source, t),
-            capture_row(hide_capture, t),
+            Some(capture_row(hide_capture, t)),
         ],
         None,
         t,
@@ -401,7 +387,7 @@ fn devices(facts: &SecurityFacts, source: &dyn AccountSource, hide_capture: bool
 
 /// The last sign-ins and security changes, then the way to all of them. Read as what happened, then when and
 /// where: a country, never a city; never which files were opened.
-fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
+fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> Option<El> {
     let all = |index: usize, sub: &str| {
         leads(
             2,
@@ -419,12 +405,12 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El 
         Some(None) => vec![all(0, "Security logging is off: nothing is recorded")],
         Some(Some(events)) if events.is_empty() => vec![all(0, "Recording is on. Nothing recorded yet")],
         Some(Some(events)) => {
-            let mut rows: Vec<El> = events
+            let mut rows: Vec<Option<El>> = events
                 .iter()
                 .take(super::source::RECENT_EVENTS)
                 .enumerate()
                 .map(|(i, e)| {
-                    set::item(
+                    Some(set::item(
                         2,
                         i,
                         &Row::new(Lead::Icon(super::activity::event_icon(e.kind)), e.what.clone())
@@ -432,7 +418,7 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El 
                             .name(format!("{}, {}", e.what, e.when_where.replace(" · ", ", "))),
                         Vec::new(),
                         t,
-                    )
+                    ))
                 })
                 .collect();
             let index = rows.len();
@@ -440,38 +426,39 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El 
             rows
         }
     };
-    lists::list(2, Some("Recent sign-in activity"), rows, None, t)
+    list_of(2, Some("Recent sign-in activity"), rows, None, t)
 }
 
-/// The two destructive rows open a confirm over the page; neither touches other devices. A source that
-/// cannot sign this app out gets the rows as text: nothing to press that would do nothing.
-fn sign_out(facts: &SecurityFacts, t: &Theme) -> El {
-    let able = facts.can_sign_out;
+/// The two destructive rows open a confirm over the page; neither touches other devices. A row is drawn only
+/// for what the source can do: one that cannot sign this app out draws none, and "all apps" is drawn only when
+/// the source can sign every Beebeeb app on this PC out.
+fn sign_out(facts: &SecurityFacts, t: &Theme) -> Option<El> {
+    if !facts.can_sign_out {
+        return None;
+    }
     let one = |index: usize, it: Row, dialog: Dialog| {
-        if !able {
-            return set::item(3, index, &it.tail(Tail::Value(NOT_YET.into())), Vec::new(), t);
-        }
-        set::item(3, index, &it.danger().link(false), Vec::new(), t).on_press(move |s: &mut State| {
+        Some(set::item(3, index, &it.danger().link(false), Vec::new(), t).on_press(move |s: &mut State| {
             s.account.dialog = Some(dialog.clone());
             arrive(&mut s.account);
-        })
+        }))
     };
-    let mut rows = vec![one(
-        0,
-        Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of Drive"),
-        Dialog::SignOutApp,
-    )];
-    // A source that signs Drive out and has no other Beebeeb app to sign out does not draw "all apps". One that
-    // signs nothing out draws both as text, as before.
-    let all = facts.can_sign_out_all || !facts.can_sign_out;
-    if all {
-        rows.push(one(
-            1,
-            Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of all Beebeeb apps").sub("On this PC"),
-            Dialog::SignOutAllApps,
-        ));
-    }
-    lists::list(
+    let all = facts.can_sign_out_all;
+    let rows = vec![
+        one(
+            0,
+            Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of Drive"),
+            Dialog::SignOutApp,
+        ),
+        all.then(|| {
+            one(
+                1,
+                Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of all Beebeeb apps").sub("On this PC"),
+                Dialog::SignOutAllApps,
+            )
+        })
+        .flatten(),
+    ];
+    list_of(
         3,
         Some("Sign out"),
         rows,
@@ -484,20 +471,10 @@ fn sign_out(facts: &SecurityFacts, t: &Theme) -> El {
     )
 }
 
-fn delete(source: &dyn AccountSource, t: &Theme) -> El {
-    // A source that has no deletion flow leads to the web's, which does: a link, never a button that is not there.
+fn delete(source: &dyn AccountSource, t: &Theme) -> Option<El> {
+    // A source that has no deletion flow draws no row.
     if !answered(source, "DW-A58") {
-        let it = Row::new(Lead::Icon(&icons::TRASH), "Delete your account on the web").link(true);
-        return lists::list(
-            4,
-            Some("Delete"),
-            vec![
-                set::item(4, 0, &it, Vec::new(), t)
-                    .on_press(|s: &mut State| s.settings.ask(crate::frames::settings::Intent::Web(DELETE_PAGE))),
-            ],
-            Some("Deleting your account is done on the web in this version."),
-            t,
-        );
+        return None;
     }
     let it = Row::new(Lead::Icon(&icons::TRASH), "Delete your Beebeeb account").danger();
     // A deletion this session already knows of opens where it stands: the link sent, or the schedule and its undo.
@@ -506,7 +483,7 @@ fn delete(source: &dyn AccountSource, t: &Theme) -> El {
         super::source::Deletion::LinkSent => "DW-A81",
         super::source::Deletion::None => "DW-A58",
     };
-    lists::list(
+    list_of(
         4,
         Some("Delete"),
         vec![leads(4, 0, it, State_::None, frame, source, t)],
@@ -572,15 +549,21 @@ pub fn pane(
         },
         _ => None,
     };
-    let children = vec![
+    let mut children = vec![
         set::heading("Sign-in and security", None, None, t),
         score_card(&facts, source, t),
-        sign_in(&facts, source, t),
-        devices(&facts, source, hide_capture, t),
-        activity(&facts, source, t),
-        sign_out(&facts, t),
-        delete(source, t),
     ];
+    children.extend(
+        [
+            sign_in(&facts, source, t),
+            devices(&facts, source, hide_capture, t),
+            activity(&facts, source, t),
+            sign_out(&facts, t),
+            delete(source, t),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     (set::pane(children, t), over)
 }
 

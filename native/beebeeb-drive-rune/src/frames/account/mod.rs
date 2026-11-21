@@ -489,22 +489,34 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
 /// is the failure toast (`ui::toast`: its own mark, read at once), laid where the settings toast sits, with its
 /// button when it can be tried again.
 fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
+    use crate::ui::toast::{self, Lead};
     let words = source.notice()?;
-    let action = source.notice_action();
-    if !source.notice_failed() && action.is_none() {
-        return Some(crate::ui::settings_notice::toast(0, words, t));
-    }
-    let again = action.map(|action| crate::ui::toast::ToastAction {
-        text: action,
-        name: action,
-        shortcut: None,
-        run: |s: &mut State, _: &mut Tx| {
+    let failed = source.notice_failed();
+    let action = source.notice_action().map(|action| {
+        crate::ui::button::button(
+            crate::ui::button::keys("toast-action"),
+            action,
+            None,
+            crate::ui::button::Variant::Secondary,
+            crate::ui::button::Size::Md,
+            crate::ui::button::ButtonState::Enabled,
+            t,
+        )
+        .on_press(|s: &mut State| {
             if let Some(source) = s.account.source.as_mut() {
                 source.run_notice_action();
             }
-        },
+        })
     });
-    Some(crate::ui::settings_notice::standing("toast", words, again, 0, t))
+    let lead = if failed { Lead::Warn } else { Lead::Check };
+    // Over the pane, 42 pt above its foot, right of the sidebar, so no row moves when it comes or goes.
+    Some(
+        rune::row()
+            .key("toast-line")
+            .pin(Some(crate::ui::settings_shell::SIDEBAR_W), None, Some(0.0), Some(42.0))
+            .justify_center()
+            .child(toast::toast_with("toast", words, lead, action, t)),
+    )
 }
 
 /// How soon the window looks again while an answer is out (the worker also wakes it).
@@ -547,49 +559,50 @@ fn unbuilt_pane(pane: Pane, t: &Theme) -> El {
 /// The pane in a state that is not its content: asked and not answered, nobody signed in, the session ended,
 /// or the read failed. Nothing of an account is in it.
 fn state_pane(pane: Pane, state: source::PaneState, t: &Theme) -> El {
-    use crate::ui::settings_notice as notices;
     let title = title_of(pane);
-    let (head, words, again) = match state {
-        source::PaneState::Loading => ("Loading", "Asking Beebeeb for your account.", false),
+    let (head, words) = match state {
+        source::PaneState::Loading => ("Loading", "Asking Beebeeb for your account."),
         source::PaneState::SignedOut => (
             "Not signed in",
             "Sign in and unlock Beebeeb to see your account.",
-            false,
         ),
         source::PaneState::SessionEnded => (
             "Your session ended",
             "Sign in again to see your account. Nothing was changed.",
-            false,
         ),
         _ => (
             "Couldn't load this",
             // Not "nothing was changed": this state also follows a sign-out Beebeeb took, when the list
             // could not be read after it.
             "Beebeeb didn't answer.",
-            true,
         ),
     };
-    let body = if state == source::PaneState::Loading {
-        el().key("account-loading")
-            .role("status")
-            .label(format!("{head}. {words}"))
-            .child(crate::ui::kit::label(
-                "account-loading-text",
-                words,
-                set::SUB,
-                t.text_tertiary,
-            ))
-    } else {
-        let action = again.then(|| {
-            set::button("btn-0", "Try again", None, set::Look::Plain, set::Size::Small, false, t).on_press(
-                move |s: &mut State| {
+    use crate::ui::view_state::{self as vs, ViewState};
+    let body = match state {
+        source::PaneState::Loading => vs::view_state(ViewState::Loading { words }, t),
+        source::PaneState::SignedOut | source::PaneState::SessionEnded => vs::view_state(
+            ViewState::Empty {
+                key: "account-state",
+                icon: &icons::SHIELD,
+                title: head,
+                body: words,
+                action: None,
+            },
+            t,
+        ),
+        _ => vs::view_state(
+            ViewState::Failed {
+                key: "account-state",
+                title: head,
+                why: words,
+                retry: Some(vs::try_again("account-state", t).on_press(move |s: &mut State| {
                     if let Some(source) = s.account.source.as_mut() {
                         source.reload(pane);
                     }
-                },
-            )
-        });
-        notices::problem(0, 0, head, words, action, t)
+                })),
+            },
+            t,
+        ),
     };
     set::pane(vec![set::heading(title, None, None, t), body], t)
 }
