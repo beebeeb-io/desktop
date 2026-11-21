@@ -32,8 +32,10 @@
 //! Must not: log a token, a key, an email or a store error's text (a platform error can name the item it touched);
 //! fail an open, or change what a sign-out returns; write a session into the flat layout.
 
+use std::sync::Arc;
+
 use crate::identity::EngineIdentity;
-use crate::keychain::{self, AuthResult, AuthSecretStore, AuthStoreError};
+use crate::keychain::{self, AuthResult, AuthSecretStore, AuthStoreError, LockFlag, SecretBytes, SessionToken};
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call
 /// (`identity` is the one [`Engine::open`](super::Engine::open) was given): a store has no identity of its own to
@@ -54,15 +56,18 @@ pub trait CredentialStores: Send + Sync + 'static {
 pub struct PlatformCredentials;
 
 impl CredentialStores for PlatformCredentials {
-    type Store = crate::keychain::PlatformKeychainStore;
+    type Store = AccountSlots<crate::keychain::PlatformKeychainStore>;
     fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store {
-        crate::keychain::platform_keychain_store_for(identity, account_id)
+        AccountSlots::new(
+            crate::keychain::platform_keychain_store_for(identity, account_id),
+            move |slot| crate::keychain::platform_keychain_store_for(identity, slot),
+        )
     }
     /// Windows and macOS had the flat layout. Elsewhere the platform store is a fail-closed stub: asking it would log
     /// a warning at every open for nothing.
     fn legacy_flat(&self, identity: &'static EngineIdentity) -> Option<Self::Store> {
         if cfg!(any(target_os = "windows", target_os = "macos")) {
-            Some(crate::keychain::legacy_platform_keychain_store(identity))
+            Some(AccountSlots::without_account_keys(crate::keychain::legacy_platform_keychain_store(identity)))
         } else {
             None
         }
@@ -77,12 +82,148 @@ pub const LEGACY_FLAT_SLOT: &str = "<flat layout>";
 
 #[cfg(any(test, feature = "test-support"))]
 impl CredentialStores for crate::signin::memory_store::MemoryCredentials {
-    type Store = crate::signin::memory_store::MemoryStore;
+    type Store = AccountSlots<crate::signin::memory_store::MemoryStore>;
     fn for_account(&self, _identity: &'static EngineIdentity, account_id: &str) -> Self::Store {
-        self.store_for(account_id)
+        let all = self.clone();
+        AccountSlots::new(self.store_for(account_id), move |slot| all.store_for(slot))
     }
     fn legacy_flat(&self, _identity: &'static EngineIdentity) -> Option<Self::Store> {
-        Some(self.store_for(LEGACY_FLAT_SLOT))
+        Some(AccountSlots::without_account_keys(self.store_for(LEGACY_FLAT_SLOT)))
+    }
+}
+
+/// R4: the store of one install slot, plus one kept-key slot per ACCOUNT. Before this, the credential store held one
+/// vault key per device, so after a switch A -> B, B's unlock wrote over A's key and A had to type the twelve words
+/// again. Every entry of the install slot is read and written as before; [`AuthSecretStore::save_account_key`] and its
+/// siblings reach the account's own slot, one item per account: `account-key-<server user id>/wrapped-master-key`.
+/// The id is the server's (never the email); one that is not an id refuses. Which key goes there, and when, is
+/// [`keychain::AuthVault`]'s rule.
+pub struct AccountSlots<S> {
+    slot: S,
+    account_key_slot: Option<Arc<dyn Fn(&str) -> S + Send + Sync>>,
+}
+
+impl<S> AccountSlots<S> {
+    pub fn new(slot: S, account_key_slot: impl Fn(&str) -> S + Send + Sync + 'static) -> Self {
+        Self {
+            slot,
+            account_key_slot: Some(Arc::new(account_key_slot)),
+        }
+    }
+
+    /// The flat layout of a 0.8.x PC: never an account's key slot.
+    pub fn without_account_keys(slot: S) -> Self {
+        Self {
+            slot,
+            account_key_slot: None,
+        }
+    }
+
+    /// The install slot, as a test reads and seeds it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_slot(&self) -> &S {
+        &self.slot
+    }
+
+    /// `user_id`'s key slot. `Unsupported` without slots; `InvalidSecret` for an id that is not a server user id.
+    fn account_key_store(&self, user_id: &str) -> AuthResult<S> {
+        let Some(make) = self.account_key_slot.as_ref() else {
+            return Err(AuthStoreError::Unsupported("account key slots are not kept by this store"));
+        };
+        Ok(make(&account_key_slot_name(user_id)?))
+    }
+}
+
+/// The slot name of `user_id`'s kept key. Server user ids are UUIDs: only ASCII letters, digits and `-` pass, so no
+/// id can name an install slot (a bare UUID), the flat layout, or a path. Not a secret, but never logged.
+pub fn account_key_slot_name(user_id: &str) -> AuthResult<String> {
+    let id = user_id.trim();
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(AuthStoreError::InvalidSecret("not an account id"));
+    }
+    Ok(format!("account-key-{id}"))
+}
+
+impl<S: AuthSecretStore> AuthSecretStore for AccountSlots<S> {
+    fn save_lock_flag(&self, flag: LockFlag, bytes: &[u8]) -> AuthResult<()> {
+        self.slot.save_lock_flag(flag, bytes)
+    }
+    fn load_lock_flag(&self, flag: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        self.slot.load_lock_flag(flag)
+    }
+    fn delete_lock_flag(&self, flag: LockFlag) -> AuthResult<()> {
+        self.slot.delete_lock_flag(flag)
+    }
+    fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+        self.slot.save_session_token(token)
+    }
+    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+        self.slot.load_session_token()
+    }
+    fn delete_session_token(&self) -> AuthResult<()> {
+        self.slot.delete_session_token()
+    }
+    fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+        self.slot.save_wrapped_master_key(wrapped)
+    }
+    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+        self.slot.load_wrapped_master_key()
+    }
+    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+        self.slot.delete_wrapped_master_key()
+    }
+    fn save_account_email(&self, email: &str) -> AuthResult<()> {
+        self.slot.save_account_email(email)
+    }
+    fn load_account_email(&self) -> AuthResult<Option<String>> {
+        self.slot.load_account_email()
+    }
+    fn delete_account_email(&self) -> AuthResult<()> {
+        self.slot.delete_account_email()
+    }
+    fn holds_session_token(&self) -> AuthResult<bool> {
+        self.slot.holds_session_token()
+    }
+    fn holds_wrapped_master_key(&self) -> AuthResult<bool> {
+        self.slot.holds_wrapped_master_key()
+    }
+    fn holds_account_email(&self) -> AuthResult<bool> {
+        self.slot.holds_account_email()
+    }
+    fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
+        self.slot.save_vault_key_owner(user_id)
+    }
+    fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
+        self.slot.load_vault_key_owner()
+    }
+    fn delete_vault_key_owner(&self) -> AuthResult<()> {
+        self.slot.delete_vault_key_owner()
+    }
+    fn save_session_owner(&self, user_id: &str) -> AuthResult<()> {
+        self.slot.save_session_owner(user_id)
+    }
+    fn load_session_owner(&self) -> AuthResult<Option<String>> {
+        self.slot.load_session_owner()
+    }
+    fn delete_session_owner(&self) -> AuthResult<()> {
+        self.slot.delete_session_owner()
+    }
+    fn save_account_key(&self, user_id: &str, wrapped: SecretBytes) -> AuthResult<()> {
+        self.account_key_store(user_id)?.save_wrapped_master_key(wrapped)
+    }
+    fn load_account_key(&self, user_id: &str) -> AuthResult<Option<SecretBytes>> {
+        match self.account_key_store(user_id) {
+            Ok(store) => store.load_wrapped_master_key(),
+            Err(AuthStoreError::Unsupported(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    fn delete_account_key(&self, user_id: &str) -> AuthResult<()> {
+        match self.account_key_store(user_id) {
+            Ok(store) => store.delete_wrapped_master_key(),
+            Err(AuthStoreError::Unsupported(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
 

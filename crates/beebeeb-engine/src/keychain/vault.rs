@@ -143,6 +143,47 @@ pub trait AuthSecretStore: Send + Sync {
     fn delete_session_owner(&self) -> AuthResult<()> {
         Ok(())
     }
+
+    /// R4: keep `user_id`'s vault key in that account's own slot (one item per account, named by its server user id,
+    /// never by its email), beside the working key above. Written only by [`AuthVault`], and only with a key that was
+    /// proven that account's. A store without account slots refuses: the working key is then the only one.
+    fn save_account_key(&self, _user_id: &str, _wrapped: SecretBytes) -> AuthResult<()> {
+        Err(ACCOUNT_KEYS_UNSUPPORTED)
+    }
+    /// Read `user_id`'s kept key; `Ok(None)`: none kept (or a store without account slots).
+    fn load_account_key(&self, _user_id: &str) -> AuthResult<Option<SecretBytes>> {
+        Ok(None)
+    }
+    /// Remove `user_id`'s kept key only. No-op when absent.
+    fn delete_account_key(&self, _user_id: &str) -> AuthResult<()> {
+        Ok(())
+    }
+}
+
+const ACCOUNT_KEYS_UNSUPPORTED: AuthStoreError = AuthStoreError::Unsupported("account key slots are not kept by this store");
+
+/// The same account by server user id; blank is never an account.
+fn same_account(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    !a.is_empty() && a == b
+}
+
+/// A kept-key step that failed, by its kind only (an error's text can name the item it touched). Never fails the
+/// caller: the working key's own rules are unchanged by it.
+fn account_slot_refused(step: &'static str, error: &AuthStoreError) {
+    if matches!(error, AuthStoreError::Unsupported(_)) {
+        return;
+    }
+    tracing::warn!(
+        step,
+        kind = match error {
+            AuthStoreError::Unsupported(_) => "unsupported",
+            AuthStoreError::NotFound => "not_found",
+            AuthStoreError::InvalidSecret(_) => "invalid_secret",
+            AuthStoreError::Backend(_) => "backend",
+        },
+        "an account's kept vault key was not written or read"
+    );
 }
 
 /// One rule for every "is anything of an account left?" probe: present is present; a store that cannot hold secrets
@@ -218,9 +259,115 @@ impl<S: AuthSecretStore> AuthVault<S> {
     /// Store a vault key. Its owner tag describes the key stored BEFORE, so it is removed first, and a removal that
     /// fails stops the write (task 2447): a new key never carries an old owner. The caller binds the new owner
     /// afterwards ([`Self::bind_vault_key_owner`]); a crash in between leaves a key of unknown owner, never a wrong one.
+    ///
+    /// R4: a working key tagged with an account is first kept in that account's slot (if it has none yet), so the
+    /// write never takes another account's only copy.
     pub fn store_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+        self.keep_tagged_working_key();
         self.store.delete_vault_key_owner()?;
         self.store.save_wrapped_master_key(wrapped)
+    }
+
+    /// The working key, read only to copy it into an account's slot. `None`: none, or not a vault key.
+    fn working_key(&self) -> AuthResult<Option<SecretBytes>> {
+        Ok(self
+            .store
+            .load_wrapped_master_key()?
+            .filter(|key| key.expose_for_crypto().len() == MASTER_KEY_BYTES))
+    }
+
+    /// Copy the working key into `user_id`'s slot. The caller has the proof it is that account's (its owner tag).
+    fn keep_working_key_for(&self, user_id: &str) -> AuthResult<()> {
+        match self.working_key()? {
+            Some(key) => self.store.save_account_key(user_id, key),
+            None => Ok(()),
+        }
+    }
+
+    /// Does `user_id` have a kept key? A store without slots, or one that cannot say, answers no.
+    fn kept_key(&self, user_id: &str) -> AuthResult<Option<SecretBytes>> {
+        Ok(self
+            .store
+            .load_account_key(user_id)?
+            .filter(|key| key.expose_for_crypto().len() == MASTER_KEY_BYTES))
+    }
+
+    /// The working key's owner, if it is tagged, gets the working key in its own slot when it has none there yet (the
+    /// move of the single slot of an earlier build into the account's slot). Best effort; `true` when that account's
+    /// key is kept in its slot afterwards (or the working key has no owner to keep it for).
+    fn keep_tagged_working_key(&self) -> bool {
+        let owner = match self.vault_key_owner() {
+            Ok(Some(owner)) => owner,
+            Ok(None) => return true,
+            Err(error) => {
+                account_slot_refused("read_owner", &error);
+                return false;
+            }
+        };
+        match self.kept_key(&owner) {
+            Ok(Some(_)) => true,
+            Ok(None) => match self.keep_working_key_for(&owner).and_then(|()| self.kept_key(&owner)) {
+                Ok(kept) => kept.is_some() || !matches!(self.working_key(), Ok(Some(_))),
+                Err(error) => {
+                    account_slot_refused("keep", &error);
+                    false
+                }
+            },
+            Err(error) => {
+                account_slot_refused("read", &error);
+                false
+            }
+        }
+    }
+
+    /// R4, at a session the server named `user_id`: the working key becomes that account's kept key, if it has one
+    /// and the working key is not already its own. An untagged working key is never replaced (it may be this
+    /// account's key, written a moment ago for this very session; its tag follows its proof). Another account's
+    /// working key is first kept in its own slot; when that fails, nothing is replaced. The restore writes the key and
+    /// then its tag, the order of [`Self::store_wrapped_master_key`]: a stop between them leaves an untagged key.
+    fn settle_account_key(&self, user_id: &str) -> AuthResult<()> {
+        let present = match self.store.holds_wrapped_master_key() {
+            Ok(present) => present,
+            Err(AuthStoreError::NotFound | AuthStoreError::Unsupported(_)) => false,
+            Err(error) => return Err(error),
+        };
+        let owner = self.vault_key_owner()?;
+        match (present, owner.as_deref()) {
+            (true, Some(owner)) if same_account(owner, user_id) => {
+                // The single slot of an earlier build, now proven this account's: kept in its slot as well.
+                if self.kept_key(user_id)?.is_none() {
+                    self.keep_working_key_for(user_id)?;
+                }
+                return Ok(());
+            }
+            (true, None) => return Ok(()),
+            _ => {}
+        }
+        let Some(kept) = self.kept_key(user_id)? else {
+            // Nothing to restore; another account's working key stays where dc-014 left it, kept in its slot.
+            self.keep_tagged_working_key();
+            return Ok(());
+        };
+        if present && !self.keep_tagged_working_key() {
+            return Ok(());
+        }
+        self.store_wrapped_master_key(kept)?;
+        self.store.save_vault_key_owner(user_id)
+    }
+
+    /// Remove `user_id` from this computer's keys: its kept key, and the working key when it is tagged with that
+    /// account. Another account's slot, and an untagged working key, stay. Both removals are tried.
+    pub fn forget_account_key(&mut self, user_id: &str) -> AuthResult<()> {
+        if user_id.trim().is_empty() {
+            return Ok(());
+        }
+        let kept = self.store.delete_account_key(user_id);
+        let working = match self.vault_key_owner() {
+            Ok(Some(owner)) if same_account(&owner, user_id) => self.delete_vault_key_and_owner(),
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        kept.and(working)
     }
 
     /// Is a vault key present? Delegates to the store's `holds_wrapped_master_key`
@@ -235,7 +382,12 @@ impl<S: AuthSecretStore> AuthVault<S> {
         if user_id.trim().is_empty() {
             return Ok(());
         }
-        self.store.save_vault_key_owner(user_id)
+        self.store.save_vault_key_owner(user_id)?;
+        // R4: proven that account's, so it is also that account's kept key (a key it rotated replaces the old one).
+        if let Err(error) = self.keep_working_key_for(user_id) {
+            account_slot_refused("keep", &error);
+        }
+        Ok(())
     }
 
     /// Read the vault key owner, or `None` for a key of unknown owner (stored before task 2447, or a write that
@@ -250,11 +402,19 @@ impl<S: AuthSecretStore> AuthVault<S> {
 
     /// Bind the stored session token to the server user id the server named for it (task 2447). A blank id binds
     /// nothing.
+    ///
+    /// R4: the session is that account's now, so its kept key (if any) becomes the working key
+    /// ([`Self::settle_account_key`]): an account that signs back in after another one unlocked here needs no
+    /// twelve words. Best effort: a refusal leaves the working key as it was, and the loader's rules judge it.
     pub fn bind_session_owner(&self, user_id: &str) -> AuthResult<()> {
         if user_id.trim().is_empty() {
             return Ok(());
         }
-        self.store.save_session_owner(user_id)
+        self.store.save_session_owner(user_id)?;
+        if let Err(error) = self.settle_account_key(user_id) {
+            account_slot_refused("restore", &error);
+        }
+        Ok(())
     }
 
     /// Read the session owner, or `None` when it is unknown.
@@ -306,6 +466,17 @@ impl<S: AuthSecretStore> AuthVault<S> {
         if master_key.expose_for_crypto().len() != MASTER_KEY_BYTES {
             self.lock();
             return Err(AuthStoreError::InvalidSecret("master key must be 32 bytes"));
+        }
+        // R4, the first run after the single slot: a key tagged with its account is kept in that account's slot too.
+        // From the key just read (no second read of the store).
+        if let Ok(Some(owner)) = self.vault_key_owner() {
+            if matches!(self.kept_key(&owner), Ok(None)) {
+                // Copied straight into the wiped buffer (the field is this module's).
+                let copy = SecretBytes(master_key.0.clone());
+                if let Err(error) = self.store.save_account_key(&owner, copy) {
+                    account_slot_refused("keep", &error);
+                }
+            }
         }
         self.master_key = Some(master_key);
         self.state = VaultLockState::Unlocked;
@@ -373,8 +544,13 @@ impl<S: AuthSecretStore> AuthVault<S> {
 
     /// The full sign-out. Every removal is tried, and the first failure is the result (task 2447): a token that
     /// cannot be removed must not leave the vault key, the email or the owner tags behind as well.
+    ///
+    /// R4: the working key goes; the account's kept key stays in its own slot (kept there first when the working key
+    /// is tagged and the slot is empty), so the account signs back in without the twelve words after another one
+    /// used this computer. Only [`Self::forget_account_key`] removes an account's slot.
     pub fn clear_session(&mut self) -> AuthResult<()> {
         self.lock();
+        self.keep_tagged_working_key();
         // App lock goes FIRST (core's device sign-out): a sign-out cut short must never leave `lock.app_lock = 0`
         // for the next account. Tried again with the other lock entries below.
         let app_lock = self.store.delete_lock_flag(LockFlag::AppLock);
