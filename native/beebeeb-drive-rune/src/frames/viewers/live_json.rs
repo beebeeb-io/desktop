@@ -114,7 +114,7 @@ pub fn view(source: &str, _ui: &Ui, t: &Theme) -> El {
                     Kind::Lit => tint_color(Tint::Data, t.dark),
                     Kind::More => t.text_secondary,
                 };
-                let mut line = row().key(format!("live-json-row-{i}")).padding_left(r.depth as f32 * INDENT);
+                let mut line = row().key(format!("live-json-row-{i}")).pl(r.depth as f32 * INDENT);
                 if let Some(k) = &r.key {
                     line = line.child(kit::label(format!("live-json-key-{i}"), format!("{k}: "), style::CODE, t.text_secondary));
                 }
