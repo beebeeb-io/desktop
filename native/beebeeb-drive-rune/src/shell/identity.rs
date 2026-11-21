@@ -101,9 +101,11 @@ impl AppIdentity {
 
     /// Why this app must not start on `os` (`std::env::consts::OS`), or `None` when it may. The engine's
     /// rule: the test build has no macOS App Group and no File Provider extension of its own, so there it
-    /// would have to use the real app's. `shell::run` asks before anything else exists.
+    /// would have to use the real app's. `shell::run` asks before anything else exists. This question has no
+    /// test exception in any build (the engine's `start_refusal_at`); only `Engine::open` lets this crate's
+    /// tests open a TEST engine on a Mac (`macos-test-engine`, a dev-dependency feature).
     pub fn start_refusal(self, os: &str) -> Option<&'static str> {
-        self.engine().refusal_on(os)
+        self.engine().start_refusal_at(os)
     }
 
     pub const fn bundle_identifier(self) -> &'static str {
@@ -380,16 +382,29 @@ mod tests {
         assert!(!AppIdentity::Test.engine().is_real());
     }
 
-    /// The test build does not start on macOS; the real app starts everywhere, the test build elsewhere.
+    /// The test build does not start on macOS; the real app starts everywhere, the test build elsewhere. The
+    /// start question is the same in this test build as in a shipped one: the test exception never reaches it.
     #[test]
     fn the_test_build_is_refused_on_macos_only() {
-        assert!(AppIdentity::Test.start_refusal("macos").is_some());
+        assert!(AppIdentity::Test.start_refusal("macos").is_some_and(|words| words.contains("macOS")));
         for os in ["windows", "linux"] {
             assert_eq!(AppIdentity::Test.start_refusal(os), None, "{os}");
         }
         for os in ["macos", "windows", "linux"] {
             assert_eq!(AppIdentity::Real.start_refusal(os), None, "{os}");
         }
+    }
+
+    /// This crate's tests may open a TEST engine on a Mac (`Engine::open` asks `refusal_on`): the engine's
+    /// `macos-test-engine` feature, on under `[dev-dependencies]` only. The real app is never refused anywhere,
+    /// and the test build's own start question still refuses macOS (above).
+    #[test]
+    fn this_crates_tests_may_open_a_test_engine_on_macos() {
+        for os in ["macos", "windows", "linux"] {
+            assert_eq!(AppIdentity::Test.engine().refusal_on(os), None, "{os}");
+            assert_eq!(AppIdentity::Real.engine().refusal_on(os), None, "{os}");
+        }
+        assert!(AppIdentity::Test.start_refusal("macos").is_some());
     }
 
     /// `GOLDEN` is the real app: golden/snapshot exports compare against the board, which
