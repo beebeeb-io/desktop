@@ -15,6 +15,7 @@ use super::source::Action;
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, icons_files};
+use crate::ui::dialog::{Dialog, Foot, Head, Surface, dialog};
 use crate::ui::kit;
 use crate::ui::status_bar::{Dot, bar as status_bar};
 use crate::ui::settings_controls::{self as controls, Emphasis};
@@ -471,8 +472,7 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
     let menu = s.actions.upload_menu.as_deref();
     // The figures are a machine's: JetBrains Mono inside the Inter line.
     let line = format!("{} \u{00B7} Continues in the background", uploads.figures);
-    let mut panel = col().key("uploads-clip").w_full().clip_rounded(12.0).child(
-        col()
+    let head = col()
             .key("uploads-head")
             .px(12.0)
             .pt(12.0)
@@ -491,8 +491,8 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
                         ..rune::Span::default()
                     }])
                     .mt(2.0),
-            ),
-    );
+            );
+    let mut body: Vec<El> = Vec::new();
     let groups: [(&str, fn(&UploadState) -> bool, f32); 3] = [
         ("Needs attention", |s| matches!(s, UploadState::Failed(_)), 4.0),
         ("Uploading", |s| matches!(s, UploadState::Uploading { .. }), 8.0),
@@ -503,9 +503,9 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
         if rows.is_empty() {
             continue;
         }
-        panel = panel.child(heading(&format!("uploads-group-{g}"), title, top, t));
+        body.push(heading(&format!("uploads-group-{g}"), title, top, t));
         for (i, upload) in rows {
-            panel = panel.child(upload_row(
+            body.push(upload_row(
                 i,
                 upload,
                 menu == Some(upload.id.as_str()) && s.actions.source.cancels_upload(&upload.id),
@@ -514,34 +514,31 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
         }
     }
     let pause = if uploads.paused { "Resume all" } else { "Pause all" };
-    panel = panel.child(
-        row()
-            .key("uploads-foot")
-            .w_full()
-            .justify_end()
-            .px(12.0)
-            .py(10.0)
-            .mt(4.0)
-            .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-            .border_layout()
-            .child(
-                controls::button(8, pause, Some(&icons_files::PAUSE), Emphasis::Plain, t)
-                    .key("uploads-pause")
-                    .on_press_tx(|s: &mut State, tx: &mut Tx| s.pause_uploads(tx)),
-            ),
-    );
-    let card = col()
-        .key("uploads")
-        .role("dialog")
-        .label("Uploads")
-        // 232 pt from the window's left edge, 34 pt over its bottom: above the status line.
-        .pin(Some(232.0), None, None, Some(34.0))
-        .w(380.0)
-        .radius(12.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(18.0, 50.0, Color::BLACK.alpha(0.26)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(panel);
+    let foot = row()
+        .w_full()
+        .justify_end()
+        .px(12.0)
+        .py(10.0)
+        .mt(4.0)
+        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
+        .border_layout()
+        .child(
+            controls::button(8, pause, Some(&icons_files::PAUSE), Emphasis::Plain, t)
+                .key("uploads-pause")
+                .on_press_tx(|s: &mut State, tx: &mut Tx| s.pause_uploads(tx)),
+        );
+    // 232 pt from the window's left edge, 34 pt over its bottom: above the status line.
+    let card = dialog(
+        Dialog {
+            surface: Surface::Panel,
+            head: Head::Raw(head),
+            body,
+            foot: Foot::Custom(foot),
+            ..Dialog::new("uploads", "Uploads", 380.0)
+        },
+        t,
+    )
+    .pin(Some(232.0), None, None, Some(34.0));
     Some(
         el().key("uploads-layer")
             .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
