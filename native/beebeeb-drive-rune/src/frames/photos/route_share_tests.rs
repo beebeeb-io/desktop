@@ -161,7 +161,7 @@ fn copy_link_with_week_and_a_password_asks_once_with_those_choices_for_that_phot
     rt.state.photos.open_share();
     settle(&mut rt);
     click(&mut rt, "ph-item-0-1-pop");
-    click(&mut rt, "menu-0-item-1");
+    click(&mut rt, "ph-expiry-menu-item-1");
     click(&mut rt, "ph-item-0-2-switch");
     rt.state.photos.share_password = rune::TextEdit::new("hunter2").secure();
     settle(&mut rt);

@@ -4,46 +4,34 @@
 //! The toolbar is the one window toolbar (`ui::toolbar::bar`) with this section's title, its
 //! controls in the slot and its states for the standard ones.
 
+use crate::ui::toolbar::title_block;
 use rune::{Color, El, Icon, TextStyle, col, row, text_input};
 
 use super::Intent;
 use crate::State;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, type_};
 use crate::ui::toolbar as tb;
-use crate::ui::{button, caption, kit, sidebar, status_bar};
+use crate::ui::{button, caption, sidebar, status_bar};
 
 /// The group's own type styles, by the board's class.
 pub mod style {
     use rune::TextStyle;
     use rune::tok::Family;
 
-    /// `.kit-chip`, `.kit-seg-sm span` is 550.
-    pub const CHIP: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
     pub const SEG: TextStyle = TextStyle::new(12.0, 550.0).lh(15.0);
     /// `.t-sub` and its `b`.
     pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
     pub const SUB_STRONG: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
     /// `.mk-gbadge`.
     pub const BADGE: TextStyle = TextStyle::new(10.0, 600.0).family(Family::Mono).lh(13.0);
-    /// `.t-title`.
-    pub const TITLE: TextStyle = TextStyle::new(17.0, 600.0).lh(22.0).tracking(-0.2);
     /// `.mk-bulk` and its `b`.
     pub const BULK: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
     pub const BULK_STRONG: TextStyle = TextStyle::new(12.5, 600.0).lh(17.0);
     /// `.kit-btn-md`.
     pub const BUTTON: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
-    /// `.wn-mi`, its head and its shortcut.
-    pub const MENU: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
-    pub const MENU_HEAD: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0);
-    pub const MENU_KEYS: TextStyle = TextStyle::new(12.0, 400.0).lh(14.5);
     /// `.t-cap`, and in the machine face.
     pub const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
     pub const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
-    /// `.kit-toast` and the action in it.
-    pub const TOAST: TextStyle = TextStyle::new(13.0, 550.0).lh(17.0);
-    /// The board computes 900 for this `b` (bolder than 550) and draws 700, the heaviest Inter
-    /// it loads (`wght@400..700`): 700 is what a person sees there.
-    pub const TOAST_ACTION: TextStyle = TextStyle::new(13.0, 700.0).lh(17.0);
     /// `.kit-list-title`, `.kit-item-title`, `.kit-item-sub`, `.kit-item-value` (and mono).
     pub const LIST_TITLE: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.1);
     pub const ITEM_TITLE: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0).tracking(-0.065);
@@ -84,40 +72,8 @@ pub struct Bar {
     pub middle: El,
 }
 
-/// A toolbar button of this group (`.mk-tbtn`), keyed by a `String`.
-pub fn tbtn(key: &str, name: &str, ic: &'static Icon, size: f32, on: bool, t: &Theme) -> El {
-    row()
-        .key(key.to_string())
-        .role("button")
-        .label(name)
-        .h(28.0)
-        .min_w(28.0)
-        .px(6.0)
-        .gap(4.0)
-        .center()
-        .radius(radius::CONTROL)
-        .fill(if on { t.selection } else { Color::TRANSPARENT })
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph(
-            format!("{key}-icon"),
-            ic,
-            size,
-            if on { t.text } else { t.text_secondary },
-        ))
-}
-
 pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
-    let title = col()
-        .key("folder-info")
-        .px(4.0)
-        .min_w(0.0)
-        .shrink()
-        // Cut at the box's edge, as the board's `overflow: hidden` does (no ellipsis).
-        .clip_rounded(0.0)
-        .child(kit::label("folder-title", bar.title, type_::TITLE, t.text).w_full())
-        .child(kit::label("item-count", bar.sub, type_::TITLE_SUB, t.text_tertiary).w_full());
+    let title = title_block(&bar.title, Some(&bar.sub), t);
 
     const SEARCH_PLACEHOLDER: &str = "Search names";
     let search = tb::search_box(

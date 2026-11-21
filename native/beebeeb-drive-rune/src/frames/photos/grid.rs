@@ -15,6 +15,9 @@ use crate::theme::icons as shared;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::file_icon::file_icon;
 use crate::ui::kit;
+use crate::ui::pill::{Tone as PillTone, pill as ui_pill};
+use crate::ui::toolbar::tool;
+use crate::ui::view_state::{ViewState, try_again, view_state};
 
 /// The gap between tiles (`gap-[3px]`).
 const GAP: f32 = 3.0;
@@ -86,7 +89,7 @@ fn totals_line(totals: Totals) -> String {
 }
 
 pub fn bar(ui: &Ui, t: &Theme) -> Bar {
-    let across = chrome::tbtn("ph-across", "Photos across", &shared::VIEW_GRID, 15.0, false, t)
+    let across = tool("ph-across", "Photos across", &shared::VIEW_GRID, t)
         .expanded(ui.menu.is_some_and(|m| m.which == Menu::Across))
         .child(kit::glyph(
             "ph-across-caret",
@@ -95,9 +98,9 @@ pub fn bar(ui: &Ui, t: &Theme) -> Bar {
             t.text_secondary,
         ))
         .on_press(|s: &mut State| s.photos.toggle_menu(Menu::Across));
-    let sources = chrome::tbtn("ph-sources", "Photo sources", &icons::SOURCES, 15.0, false, t)
+    let sources = tool("ph-sources", "Photo sources", &icons::SOURCES, t)
         .on_press(|s: &mut State| s.photos.open_sources());
-    let select = chrome::tbtn("ph-select", "Select", &icons::CHECK, 15.0, false, t)
+    let select = tool("ph-select", "Select", &icons::CHECK, t)
         .checked(ui.selecting)
         .on_press(|s: &mut State| {
             if s.photos.selecting {
@@ -122,25 +125,20 @@ pub fn bar(ui: &Ui, t: &Theme) -> Bar {
 }
 
 fn pill(i: usize, name: &str, on: bool, device: Option<usize>, t: &Theme) -> El {
-    el().key(format!("ph-pill-{i}"))
-        .role("radio")
-        .label(name)
-        .checked(on)
-        .h(26.0)
-        .w(chrome::advance(name, style::CHIP) + 20.0)
-        .radius(13.0)
-        .center()
-        .fill(if on { t.text } else { t.tile })
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .on_press(move |s: &mut State| s.photos.set_filter(device))
-        .child(kit::label(
-            format!("ph-pill-{i}-label"),
-            name,
-            style::CHIP,
-            if on { t.paper } else { t.text_secondary },
-        ))
+    // A choice among sources: a radio of the shared pill, ink when it is the one shown.
+    ui_pill(
+        &format!("ph-pill-{i}"),
+        name,
+        if on { PillTone::Accent } else { PillTone::Neutral },
+        false,
+        t,
+    )
+    .role("radio")
+    .checked(on)
+    .hover(t.hover)
+    .press(t.press)
+    .focusable(true)
+    .on_press(move |s: &mut State| s.photos.set_filter(device))
 }
 
 /// The bar under the toolbar: All and one pill per device that shows, and what the devices'
@@ -421,61 +419,32 @@ pub fn list_state(s: &State) -> ListState {
     }
 }
 
-/// "No photos yet" (`.kit-empty`, DW-0116): also when a device filter has nothing. w31: while the file list is on
-/// its way it says that, and when it could not be loaded it says so, with Try again.
+/// "No photos yet" (`.kit-empty`, DW-0116): also when a device filter has nothing. While the file list is on
+/// its way it says Loading, and when it could not be loaded it says why, with a Try again that asks again.
 fn empty(list: ListState, t: &Theme) -> El {
-    let (title, sub) = match list {
-        ListState::Here => (
-            "No photos yet",
-            "Photos backed up from your iPhone or iPad appear here. Turn on photo backup in Beebeeb on the iPhone or iPad.",
-        ),
-        ListState::OnItsWay => (
-            "Getting your photos ready",
-            "Your file list is downloading and being decrypted on this PC. Your photos appear here when it's finished.",
-        ),
-        ListState::Failed => (
-            "Your photos couldn't be loaded",
-            "Beebeeb couldn't get your file list. It keeps trying; you can also try again now.",
-        ),
+    let state = match list {
+        ListState::Here => ViewState::Empty {
+            key: "ph-empty",
+            icon: &icons::PHOTOS,
+            title: "No photos yet",
+            body: "Photos backed up from your iPhone or iPad appear here. Turn on photo backup in Beebeeb on the iPhone or iPad.",
+            action: None,
+        },
+        ListState::OnItsWay => ViewState::Loading {
+            words: "Getting your photos ready. Your file list is downloading and being decrypted on this PC.",
+        },
+        ListState::Failed => ViewState::Failed {
+            key: "ph-empty",
+            title: "Your photos couldn\u{2019}t be loaded",
+            why: "Beebeeb couldn\u{2019}t get your file list. It keeps trying; you can also try again now.",
+            retry: Some(try_again("ph-empty", t).on_press(|s: &mut State| s.global.source.retry_list())),
+        },
     };
-    let again = (list == ListState::Failed).then(|| {
-        chrome::button("ph-empty-retry", "Try again", None, Tone::Plain, 28.0, type_::BUTTON_SM, t)
-            .on_press(|s: &mut State| s.global.source.retry_list())
-    });
-    empty_of(title, sub, again, t)
-}
-
-fn empty_of(title: &'static str, sub: &'static str, again: Option<El>, t: &Theme) -> El {
-    col()
-        .key("ph-empty-area")
-        .grow(1.0)
-        .center()
-        .child(
-            col()
-                .key("ph-empty")
-                .role("status")
-                .items_center()
-                .gap(8.0)
-                .px(24.0)
-                .py(28.0)
-                .child(
-                    el().key("ph-empty-tile")
-                        .size(52.0, 52.0)
-                        .radius(15.0)
-                        .fill(t.tile)
-                        .center()
-                        .child(kit::glyph("ph-empty-icon", &icons::PHOTOS, 26.0, t.text_secondary)),
-                )
-                .child(kit::label("ph-empty-title", title, style::TITLE, t.text).role("heading"))
-                .child(
-                    kit::label("ph-empty-sub", sub, style::SUB, t.text_tertiary)
-                        // `max-width: 30ch`.
-                        .w(227.11)
-                        .wrap()
-                        .align(rune::Align::Center),
-                )
-                .children(again),
-        )
+    let mut area = col().key("ph-empty-area").grow(1.0);
+    if list != ListState::OnItsWay {
+        area = area.center();
+    }
+    area.child(view_state(state, t))
 }
 
 /// w31: HEIC and RAW originals cannot be shown here; said once at the top, only when the view holds some.

@@ -310,7 +310,11 @@ fn the_section_opening_asks_for_the_library_once_and_no_library_is_said_in_words
         }
         rt.frame(0.0);
         rt.frame(0.0);
-        assert_eq!(text(&rt, "ph-not-here-title"), title);
+        if loaded == Loaded::Loading {
+            assert!(text(&rt, "loading-words").starts_with(title), "Loading says so");
+        } else {
+            assert_eq!(text(&rt, "ph-not-here-title"), title);
+        }
         assert!(!has(&rt, "ph-tile-0-0"), "no tile under {loaded:?}");
         assert!(
             !has(&rt, "ph-empty"),
@@ -1017,4 +1021,20 @@ fn what_session_does_not_handle_goes_to_one_route_per_feature() {
     rt.frame(0.0);
     rt.frame(0.0);
     assert_eq!(super::super::route::reached(), ["route_original"]);
+}
+
+#[test]
+fn a_failed_library_shows_why_and_try_again_asks_again() {
+    let (mut rt, script) = window();
+    {
+        let mut script = script.lock().unwrap();
+        script.loaded = Loaded::Failed;
+        script.dirty = true;
+    }
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(has(&rt, "ph-not-here-text") && has(&rt, "ph-not-here-retry"));
+    let before = script.lock().unwrap().refreshed;
+    click(&mut rt, "ph-not-here-retry");
+    assert!(script.lock().unwrap().refreshed > before, "Try again reads the library again");
 }
