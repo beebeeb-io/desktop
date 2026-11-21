@@ -11,7 +11,7 @@ use super::super::{Ui, style};
 use crate::State;
 use crate::text_kit::find::{self, FindQuery};
 use crate::theme::tokens::Theme;
-use crate::ui::kit;
+use crate::ui::{kit, pill};
 
 thread_local! {
     /// The match count of the last step or paint: `bar` has no text to count in.
@@ -183,23 +183,15 @@ fn needle_key(s: &mut State, ev: &KeyEvent, _tx: &mut rune::Tx) -> bool {
 }
 
 fn chip(key: &str, label: &str, on: bool, t: &Theme) -> El {
-    row()
-        .key(key.to_string())
+    let tone = if on { pill::Tone::Accent } else { pill::Tone::Neutral };
+    pill::pill(key, label, tone, false, t)
         .role("button")
-        .label(label.to_string())
         .h(22.0)
-        .px(8.0)
-        .center()
-        .radius(6.0)
-        .fill(if on { t.paper3 } else { t.paper })
-        .border(1.0, t.card_border)
-        .border_layout()
-        .hover(t.paper2)
-        .press(t.paper3)
         .focusable(true)
         .checked(on)
+        .hover(t.paper2)
+        .press(t.paper3)
         .cursor(rune::Cursor::Pointer)
-        .child(kit::label(format!("{key}-label"), label, style::BUTTON_SM, t.text))
 }
 
 fn field(key: &'static str, edit: &rune::TextEdit, t: &Theme) -> El {

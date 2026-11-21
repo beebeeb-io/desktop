@@ -747,7 +747,7 @@ fn a_refused_save_keeps_the_edit_and_says_why() {
     assert_eq!(ui.dialog, None);
     assert_eq!(ui.toast, None, "said once, in the banner");
     assert_eq!(
-        info(&rt, "banner-text").text.as_deref(),
+        info(&rt, "refused-text").text.as_deref(),
         Some("Not saved: an invented reason")
     );
     assert_eq!(ui.file.version, 3);
