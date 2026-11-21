@@ -84,6 +84,16 @@ fn error(code: &'static str) -> HostMessage {
     report(status)
 }
 
+/// The engine's `paused` while it holds sync on a metered connection (`power::PausedFor::Metered`).
+fn metered() -> HostMessage {
+    let mut status = plain_status("paused", None, None);
+    status.reason = Some(Reason {
+        code: beebeeb_engine::power::PausedFor::Metered.code(),
+        detail: None,
+    });
+    report(status)
+}
+
 fn pause(state: PauseState) -> HostMessage {
     HostMessage::Event(EngineEvent::PauseChanged(PauseChanged { state }))
 }
@@ -140,6 +150,8 @@ fn each_report_of_the_engine_moves_the_view_the_flyout_and_the_b_read() {
             Report::Quiet,
             EngineState::Checking,
         ),
+        // 090b: the engine's own hold on a metered connection (the flyout offers Sync anyway).
+        (metered(), "paused", Report::Metered, EngineState::Checking),
         (pause(PauseState::Idle), "", Report::Unknown, EngineState::Checking),
         (plain("offline"), "offline", Report::Offline, EngineState::Offline),
         (error("timeout"), "error", Report::ServerError, EngineState::Offline),

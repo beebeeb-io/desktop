@@ -69,6 +69,11 @@ pub trait EngineActions: Send + Sync {
     fn tray_inputs(&self) -> TrayInputs;
     fn pause_sync(&self) -> Result<(), ActionError>;
     fn resume_sync(&self) -> Result<(), ActionError>;
+    /// Sync anyway (DW-1222, DW-0746e): lift the metered or battery-saver hold that stands, until the connection
+    /// changes (`beebeeb_engine::power::sync_anyway`), and run a tick now.
+    fn sync_anyway(&self) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("sync anyway"))
+    }
     /// Opens File Explorer at the Beebeeb location (DW-1180).
     fn open_in_file_explorer(&self) -> Result<(), ActionError>;
     /// Another agent holding this profile's sync lock (`lockfile.rs`), if one is alive: a
@@ -132,6 +137,10 @@ pub trait ShellActions: Send + Sync {
     fn tray_inputs(&self) -> TrayInputs;
     fn pause_sync(&self) -> Result<(), ActionError>;
     fn resume_sync(&self) -> Result<(), ActionError>;
+    /// See [`EngineActions::sync_anyway`].
+    fn sync_anyway(&self) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("sync anyway"))
+    }
     fn open_in_file_explorer(&self) -> Result<(), ActionError>;
     /// "Open Beebeeb when you log in" (DW-0281, Settings).
     fn autostart_enabled(&self) -> bool;
@@ -201,6 +210,9 @@ impl ShellActions for HostActions {
     }
     fn resume_sync(&self) -> Result<(), ActionError> {
         self.engine.resume_sync()
+    }
+    fn sync_anyway(&self) -> Result<(), ActionError> {
+        self.engine.sync_anyway()
     }
     fn open_in_file_explorer(&self) -> Result<(), ActionError> {
         self.engine.open_in_file_explorer()
