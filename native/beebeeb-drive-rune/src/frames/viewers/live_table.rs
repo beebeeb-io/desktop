@@ -30,7 +30,8 @@ pub fn view(source: &str, ui: &Ui, t: &Theme) -> El {
             }
         }
     });
-    table::body_in(ui, &doc, t, "live-preview-table")
+    // The rows are the previewed text's own, not the editor file's (`ui.table_rows()` reads that one).
+    table::body_in(ui, &doc, t, "live-preview-table", doc.rows.iter().collect())
 }
 
 /// The separator from the first line: tab, else ',' or ';' (whichever there is more of; ',' on a tie).
