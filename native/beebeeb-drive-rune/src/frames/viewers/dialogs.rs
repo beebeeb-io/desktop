@@ -175,6 +175,7 @@ pub fn unsaved(file_name: &str, t: &Theme) -> El {
         .child(
             button(0, labels[0].0, labels[0].1, t)
                 .w(widths[0])
+                .default_button() // Enter saves; Discard never takes Enter (ux-53)
                 .on_press(|s: &mut State| {
                     if let Some(ui) = ui(s) {
                         ui.save();

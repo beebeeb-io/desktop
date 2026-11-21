@@ -1187,3 +1187,17 @@ fn enter_on_the_shown_unsaved_question_presses_save() {
     assert!(calls.borrow().iter().any(|c| c.starts_with("save")), "Enter saved: {:?}", calls.borrow());
     assert!(!holds(&rt.state));
 }
+
+/// ux-53: Enter on the question shown when leaving the open file (DW-1525) presses Save.
+#[test]
+fn enter_on_the_leaving_question_presses_save() {
+    let (mut rt, _calls) = note(false, false);
+    edit_and_type(&mut rt);
+    crate::shell::host::dispatch(&mut rt.state, Event::Escape);
+    rt.invalidate();
+    rt.frame(0.0);
+    assert_eq!(viewer(&rt).dialog, Some(Dialog::Unsaved));
+    press(&mut rt, Key::Enter);
+    assert_eq!(viewer(&rt).file.version, 4, "Enter saved");
+    assert!(viewer(&rt).dialog.is_none());
+}
