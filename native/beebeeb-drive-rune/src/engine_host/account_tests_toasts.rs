@@ -306,8 +306,8 @@ fn everywhere_else_one_by_one_stops_at_a_call_that_gets_no_answer() {
     settle(&mut source);
     assert_eq!(
         server.deleted.lock().unwrap().clone(),
-        ["s-phone"],
-        "nothing is sent after a call that got no answer"
+        ["s-phone", "s-phone", "s-phone"],
+        "the client tries a call that got no answer three times; nothing is sent after it"
     );
     // Not known for the one, not sent for the other: the list says both stand, and both can be sent again.
     assert_eq!(source.notice(), Some(NOT_SIGNED_OUT_ELSEWHERE));
@@ -321,7 +321,7 @@ fn everywhere_else_one_by_one_stops_at_a_call_that_gets_no_answer() {
     settle(&mut source);
     assert_eq!(
         server.deleted.lock().unwrap().clone(),
-        ["s-phone", "s-phone", "s-web"],
+        ["s-phone", "s-phone", "s-phone", "s-phone", "s-web"],
         "an answered error does not end it, and the unsent one was kept"
     );
     assert_eq!(source.notice(), Some(NOT_ALL_SIGNED_OUT));
@@ -340,7 +340,7 @@ fn everywhere_else_one_by_one_stops_at_a_call_that_gets_no_answer() {
     server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
     source.run_notice_action();
     settle(&mut source);
-    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-web"]);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-web", "s-web", "s-web"]);
     assert_eq!(source.notice(), Some(UNCONFIRMED_SIGN_OUT));
     assert_eq!(source.notice_action(), None, "not known is not \"send it again\"");
 }

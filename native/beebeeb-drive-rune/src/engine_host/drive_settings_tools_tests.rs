@@ -195,15 +195,8 @@ fn the_speed_test_button_is_off_in_the_test_build() {
     assert!(!SPEED_TEST_ON);
     let source = EngineDriveSettings::new(account(), Arc::new(FakePlatform::default()));
     assert!(!source.shows(Control::SpeedTest));
-    assert!(!source.shows(Control::SyncOnMetered), "no metered detection: no switch");
+    assert!(source.shows(Control::SyncOnMetered), "the engine's tick honours it: the switch is drawn");
     assert!(!source.shows(Control::StatusOnFiles), "nothing honours it: no switch");
-}
-
-#[test]
-fn a_press_on_the_metered_switch_changes_nothing_and_says_so() {
-    let mut source = source(&account(), Arc::default());
-    source.set_sync_on_metered(true);
-    assert_eq!(source.take_toast(), Some(METERED_NOT_AVAILABLE));
 }
 
 #[test]

@@ -549,7 +549,8 @@ fn a_read_that_fails_after_an_answered_sign_out_is_followed_by_the_read_for_that
     *server.during_failed_read.lock().unwrap() = Some(Box::new(|| std::thread::sleep(Duration::from_millis(400))));
     source.reload(Pane::Sessions);
     let began = Instant::now();
-    while server.asked("GET /api/v1/account/sessions") < 2 {
+    // The client sends a read that got no answer three times; the last is the one that is out.
+    while server.asked("GET /api/v1/account/sessions") < 4 {
         assert!(began.elapsed() < Duration::from_secs(10));
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -558,8 +559,8 @@ fn a_read_that_fails_after_an_answered_sign_out_is_followed_by_the_read_for_that
     settle(&mut source);
     assert_eq!(
         server.asked("GET /api/v1/account/sessions"),
-        3,
-        "the first, the one that failed, and the one after the answer"
+        5,
+        "the first, the three tries of the one that failed, and the one after the answer"
     );
     assert_eq!(ids(&source), ["s-this", "s-web"]);
     assert_eq!(source.notice(), Some(SIGNED_OUT));
@@ -801,6 +802,7 @@ fn a_list_read_before_a_sign_out_is_not_drawn_after_it() {
     server.read_delay_ms.store(1_500, Ordering::SeqCst);
     source.reload(Pane::Sessions);
     let began = Instant::now();
+    // The client sends a read that got no answer three times; the last is the one that is out.
     while server.asked("GET /api/v1/account/sessions") < 2 {
         assert!(began.elapsed() < Duration::from_secs(10));
         std::thread::sleep(Duration::from_millis(5));
