@@ -91,7 +91,7 @@ fn ui(rt: &Runtime<State>) -> &super::SettingsUi {
 fn stored(rt: &Runtime<State>) -> Vec<Folder> {
     match ui(rt).drive.keep() {
         Keep::Ready { folders, .. } => folders,
-        Keep::Failed => panic!("the folder list is loaded"),
+        Keep::Failed | Keep::Loading => panic!("the folder list is loaded"),
     }
 }
 
