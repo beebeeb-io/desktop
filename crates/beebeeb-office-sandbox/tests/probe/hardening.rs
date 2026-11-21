@@ -495,7 +495,7 @@ pub(crate) fn memory() -> String {
 
 /// Windows' decoders starting in this process, through libraries loaded at run time: COM (multithreaded), Media
 /// Foundation, Microsoft's AAC decoder and the WIC imaging factory (HEIC and camera RAW pictures), each made and let go.
-/// `ok`, or the first step that failed with its code (`err load|lookup <system code>`, `err <step> <hresult hex>`).
+/// `ok`, or the first step that failed with its code (`err load-<library> <system code>`, `err lookup <system code>`, `err <step> <hresult hex>`).
 /// The system-decoder profile must answer `ok` (it holds `lpacCom`); the default profile must not.
 #[cfg(windows)]
 pub(crate) fn decoders() -> String {
