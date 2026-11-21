@@ -498,7 +498,7 @@ fn run_checks_api_base_before_anything_starts_and_says_the_server_once() {
 fn the_api_base_is_an_argument_never_the_environment() {
     let production = |text: &str| text.split("#[cfg(test)]").next().unwrap().to_string();
     for (file, text) in [
-        ("engine_host.rs", production(include_str!("../engine_host.rs"))),
+        ("engine_host/mod.rs", production(include_str!("mod.rs"))),
         ("engine_host/open.rs", production(include_str!("open.rs"))),
         ("shell/mod.rs", production(include_str!("../shell/mod.rs"))),
     ] {
@@ -753,7 +753,7 @@ fn the_local_state_is_where_the_08x_app_kept_it() {
 /// macOS/Linux: the path is a single argv element to `open`/`xdg-open`, never a shell command.
 #[test]
 fn the_open_and_reveal_code_never_routes_through_a_shell() {
-    let source = include_str!("../engine_host.rs");
+    let source = include_str!("mod.rs");
     // Scan from the open_path function to the LiveEngine section.
     let open_section = &source[source.find("fn open_path").unwrap()..];
     let open_section = &open_section[..open_section.find("// LiveEngine").unwrap_or(open_section.len())];
@@ -923,7 +923,7 @@ fn the_menu_opens_the_sync_root() {
 /// scan proves the guard is present.
 #[test]
 fn the_sync_guard_is_present_in_the_local_choke_point() {
-    let source = include_str!("../engine_host.rs");
+    let source = include_str!("mod.rs");
     let local_fn = &source[source.find("fn local<T>(&self").unwrap()..];
     let local_fn = &local_fn[..local_fn.find("\n    }").unwrap()];
     assert!(
@@ -1002,7 +1002,7 @@ fn no_source_file_opens_a_state_database_around_the_account_bound_handle() {
 /// and do not touch the sync folder. Neither calls `self.local(…)`.
 #[test]
 fn trash_and_restore_are_not_gated_by_the_sync_guard() {
-    let source = include_str!("../engine_host.rs");
+    let source = include_str!("mod.rs");
     let trash_fn = &source[source.find("fn trash(&mut self").unwrap()..];
     let trash_fn = &trash_fn[..trash_fn.find("\n    fn ").unwrap()];
     assert!(

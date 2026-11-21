@@ -167,7 +167,7 @@ fn the_order_of_starts_is_the_order_asked_across_clones() {
 /// The two calls that start on a thread of their own already (the first-run step's folder, the bundle's reveal and
 /// draft), by file and how many calls each has. A new `|| true` call anywhere else is a window-thread start.
 const ON_THEIR_OWN_THREAD: [(&str, usize); 3] =
-    [("engine_host.rs", 1), ("engine_host/drive_settings_tools.rs", 2), ("engine_host/found_while_paused.rs", 1)];
+    [("engine_host/mod.rs", 1), ("engine_host/drive_settings_tools.rs", 2), ("engine_host/found_while_paused.rs", 1)];
 
 /// The lines of the calls in `src` that start the system's open or reveal with a session that always holds
 /// (`&|| true`) rather than the press's own.

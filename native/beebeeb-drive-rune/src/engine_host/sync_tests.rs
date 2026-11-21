@@ -225,7 +225,7 @@ fn the_ui_thread_reads_the_view_only() {
             .unwrap_or_else(|| panic!("{from} does not close"));
         source[start..start + end].to_string()
     };
-    let host = read("engine_host.rs");
+    let host = read("engine_host/mod.rs");
     let tray = read("engine_host/tray.rs");
     let reads = [
         body(&host, "    fn session(&self) -> Session {"),
