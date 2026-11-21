@@ -147,6 +147,37 @@ pub fn flyout_options() -> WindowOptions {
     }
 }
 
+/// The first-run tray tip (DW-0380): as the flyout, at the tip's size.
+pub fn tray_tip_options() -> WindowOptions {
+    WindowOptions {
+        borderless: true,
+        always_on_top: true,
+        visible: false,
+        resizable: false,
+        min_size: Some(super::tray_tip_window::SIZE),
+        max_size: Some(super::tray_tip_window::SIZE),
+        ..WindowOptions::default()
+    }
+}
+
+/// The primary display with the part its taskbar leaves free (`work`: `work_area::os_work_areas`), where Windows
+/// keeps the b by default. A display with no work area pair keeps its whole rectangle.
+pub fn primary_anchor(displays: &[Monitor], work: &[(flyout::Rect, flyout::Rect)]) -> Option<flyout::Anchor> {
+    let d = displays.iter().find(|d| d.primary).or_else(|| displays.first())?;
+    let monitor = flyout::Rect {
+        x: d.x,
+        y: d.y,
+        w: d.w as i32,
+        h: d.h as i32,
+    };
+    let area = work.iter().find(|(m, _)| *m == monitor).map_or(monitor, |(_, w)| *w);
+    Some(flyout::Anchor {
+        monitor,
+        work: area,
+        scale: d.scale,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +251,18 @@ mod tests {
         let o = flyout_options();
         assert!(o.borderless && o.always_on_top && !o.visible && !o.resizable);
         assert_eq!((o.min_size, o.max_size), (Some((340.0, 520.0)), Some((340.0, 520.0))));
+    }
+
+    #[test]
+    fn the_tray_tip_is_fixed_frameless_topmost_starts_hidden_and_sits_on_the_primary_display() {
+        let o = tray_tip_options();
+        assert!(o.borderless && o.always_on_top && !o.visible && !o.resizable);
+        let m = |x, primary| Monitor { x, y: 0, w: 1920, h: 1080, scale: 1.0, primary };
+        let whole = flyout::Rect { x: 1920, y: 0, w: 1920, h: 1080 };
+        let work = flyout::Rect { h: 1040, ..whole };
+        let a = primary_anchor(&[m(0, false), m(1920, true)], &[(whole, work)]).expect("a display");
+        assert_eq!((a.monitor, a.work), (whole, work));
+        assert_eq!(primary_anchor(&[], &[]), None);
     }
 
     #[test]

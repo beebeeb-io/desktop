@@ -18,6 +18,7 @@ use super::flyout_window::FlyoutState;
 use super::instance::{self, Forwarded};
 use super::platform::{self, Platform, PlatformError, TrayEvent, TrayHandler, TrayIcon};
 use super::surfaces::WindowKind;
+use super::tray_tip_window::{self, TipState};
 use super::tray::{EngineState, LeftClick, MenuAction, TrayInputs, TrayModel, tray_model};
 use super::window_state::{self, Observed, SavedWindows};
 use super::{registry, surfaces};
@@ -43,6 +44,11 @@ pub struct Wiring {
     /// The main window's native handle, filled by `App::on_window`.
     pub window: Arc<Mutex<Option<WindowHandle>>>,
     pub flyout_hidden_at: Arc<Mutex<Option<Instant>>>,
+    /// The first-run tray tip's window (DW-0380, `tray_tip_window`).
+    pub tray_tip: Option<AppHandle<TipState>>,
+    /// The display the b is on: the primary display's at start (`shell::run`), then the one a click on the b
+    /// reported. The tray tip opens by it.
+    pub tray_anchor: Arc<Mutex<Option<flyout::Anchor>>>,
     pub saved: SavedWindows,
     /// Where window places are saved; None: nowhere (tooling runs, tests).
     pub state_file: Option<PathBuf>,
@@ -89,6 +95,11 @@ pub struct Shell {
     /// How many reads the shell asked of the flyout ([`Shell::read_flyout`]), for the tests.
     #[cfg(test)]
     flyout_reads: u32,
+    /// The tray tip's window was opened and not hidden since ([`Shell::show_tray_tip`]).
+    tray_tip_open: bool,
+    /// How often the tray tip was opened and hidden, for the tests.
+    #[cfg(test)]
+    pub(crate) tray_tip_counts: (u32, u32),
     /// The refused start the refusal modal shows ([`open_sync_refusal`]).
     sync_off: Option<SyncOff>,
     /// The attempt the refusal modal was last opened for, or seen without a gate to open over: once per attempt.
@@ -161,6 +172,9 @@ impl Shell {
             flyout_behind: false,
             #[cfg(test)]
             flyout_reads: 0,
+            tray_tip_open: false,
+            #[cfg(test)]
+            tray_tip_counts: (0, 0),
             sync_off: None,
             refusal_seen: None,
             #[cfg(test)]
@@ -410,7 +424,37 @@ impl Shell {
         }
     }
 
+    /// Opens the tray tip by the b (`wanted`) or hides it; once per change. Opening sets its `dismissed` back, so the
+    /// guide started again from Settings shows it again.
+    pub(crate) fn show_tray_tip(&mut self, wanted: bool) {
+        let Some(tip) = self.wiring.tray_tip.clone() else {
+            return;
+        };
+        if wanted == self.tray_tip_open {
+            return;
+        }
+        self.tray_tip_open = wanted;
+        if wanted {
+            if let Some(anchor) = *unpoisoned(&self.wiring.tray_anchor) {
+                tip.set_position(tray_tip_window::position(&anchor));
+            }
+            tip.update(|t, _| t.dismissed = false);
+            tip.open();
+        } else {
+            tip.hide();
+        }
+        #[cfg(test)]
+        if wanted {
+            self.tray_tip_counts.0 += 1;
+        } else {
+            self.tray_tip_counts.1 += 1;
+        }
+    }
+
     pub(crate) fn toggle_flyout(&mut self, anchor: Option<flyout::Anchor>) {
+        if let Some(anchor) = anchor {
+            *unpoisoned(&self.wiring.tray_anchor) = Some(anchor);
+        }
         let Some(flyout) = self.wiring.flyout.clone() else {
             return;
         };
@@ -609,6 +653,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::item::poll(s, tx);
     // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
     changed |= crate::frames::signin::setup::guide::poll(s, tx);
+    // Its first step (DW-0380) is a window of its own by the b: open while the guide is on it.
+    sync_tray_tip(s);
     // The first run's answers (File Explorer finished, a switch was set, the first run ended).
     changed |= crate::frames::signin::setup::poll(s, tx);
     // The session and the tray: the engine may have changed since the last frame.
@@ -1104,6 +1150,21 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Some(keys) => keys(s, ev, tx),
         None => false,
     }
+}
+
+/// The tray tip's window shows while the guide is on its first step, and only then.
+fn sync_tray_tip(s: &mut State) {
+    let wanted = s.guide.step == Some(crate::frames::signin::setup::guide::Step::Tray);
+    s.shell.show_tray_tip(wanted);
+}
+
+/// "Got it" or Esc in the tray tip's window (`tray_tip_window`), on the main window's turn: the tip hides and the
+/// guide goes on to its first tip, as "Got it" did in the main window.
+pub fn on_tray_tip_dismissed(s: &mut State, tx: &mut Tx) {
+    if s.guide.step == Some(crate::frames::signin::setup::guide::Step::Tray) {
+        crate::frames::signin::setup::guide::go_on(s, tx);
+    }
+    sync_tray_tip(s);
 }
 
 /// A click or a menu pick on the b, delivered on the UI thread.

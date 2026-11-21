@@ -1,5 +1,7 @@
 //! The first-time guide (DW-0380 and DW-0301 to DW-0305): a coach card over the main window, with
-//! a ring around the real control each tip explains. It starts when the first run ends ("Open my
+//! a ring around the real control each tip explains. DW-0380, where the b is, is a window of its own
+//! by the notification area (`shell::tray_tip_window`, opened and hidden by `shell::host`); nothing
+//! of it is drawn in the main window, and it takes none of the main window's keys. It starts when the first run ends ("Open my
 //! Beebeeb") and from Settings › General › "Show the guide again".
 //!
 //! [`Guide`] is the whole state (`State::guide`): which step shows, or none. The shell draws
@@ -65,8 +67,6 @@ pub const TIP_2_ROWS: usize = 10;
 
 /// `.t-body`: a tip's words.
 const TIP: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
-/// `.t-sub`: DW-0380's words.
-const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 /// `.t-cap.font-mono`: "1 of 5".
 const COUNTER: TextStyle = type_::KBD;
 
@@ -221,7 +221,10 @@ pub fn showing(s: &State) -> Option<Step> {
 /// the card), Enter presses the focused one. `true`: the key was the guide's. The card's own
 /// key handler (focus is in the card), and `shell::host::shell_keys` before the shell's own keys.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    let Some(step) = showing(s) else { return false };
+    // DW-0380's keys are its own window's (`shell::tray_tip_window::on_key`).
+    let Some(step) = showing(s).filter(|step| *step != Step::Tray) else {
+        return false;
+    };
     let m = ev.mods;
     if m.cmd || m.ctrl || m.alt || m.logo {
         return false;
@@ -346,7 +349,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
-    let shows = showing(s).is_some();
+    // DW-0380 is not in this window: nothing here to focus.
+    let shows = showing(s).is_some_and(|step| step != Step::Tray);
     if shows && (s.guide.focus || !s.guide.shown) {
         s.guide.focus = false;
         tx.focus(NEXT_KEY, tx.focus_visible());
@@ -452,7 +456,9 @@ fn arrow(arrow: Arrow, t: &Theme) -> El {
         .a11y_hidden()
 }
 
-fn go_on(s: &mut State, tx: &mut Tx) {
+/// "Got it", "Next", "Done": the next step, with focus on its card's button. Also the tray tip's dismiss
+/// (`shell::host::on_tray_tip_dismissed`).
+pub(crate) fn go_on(s: &mut State, tx: &mut Tx) {
     next(s);
     if s.guide.step.is_some() {
         s.guide.focus = false;
@@ -476,33 +482,6 @@ fn card(width: f32, name: &str, t: &Theme) -> El {
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         // With focus on one of its buttons the card gets the key before Rune's own Tab walk.
         .on_key(on_key)
-}
-
-/// DW-0380's card: the heading, the words, "Got it". A view of its own (no place, no arrow
-/// target), so a window of its own by the notification area can hold it unchanged (task 2479).
-pub fn tray_card(t: &Theme) -> El {
-    card(300.0, TRAY_TITLE, t)
-        .child(arrow(Arrow::Down(150.0), t))
-        .child(kit::label("coach-title", TRAY_TITLE, type_::HEAD, t.text))
-        .child(
-            kit::label("coach-text", TRAY_TEXT, SUB, t.text_tertiary)
-                .wrap()
-                .w_full(),
-        )
-        .child(
-            row().justify_end().child(
-                button(
-                    keys(NEXT_KEY),
-                    "Got it",
-                    None,
-                    Variant::Primary,
-                    Size::Sm,
-                    ButtonState::Enabled,
-                    t,
-                )
-                .on_press_tx(go_on),
-            ),
-        )
 }
 
 /// A tip's card: the words, the five dots, "n of 5", Skip (not on the last) and Next or Done.
@@ -592,22 +571,13 @@ fn ring(rect: [f32; 4], radius: f32, t: &Theme) -> El {
 /// `shell::registry::view`: ONE call around the frame behind.
 pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
     let Some(step) = showing(s) else { return behind };
-    let t = tokens::theme(cx.system_dark());
-    let layer = el().key("window-with-guide").w_full().h_full().child(behind);
     let n = match step {
-        // Interim (the lead, 2026-11-12): the board draws this card on the desktop, by the b, where
-        // it covers only the window's lower right corner. Until it has a window of its own (task
-        // 2479) it stands in that corner of the main window, over the status line's end, clear of
-        // the details panel's buttons.
-        Step::Tray => {
-            return layer.child(
-                el().key("coach-place")
-                    .pin(None, None, Some(16.0), Some(44.0))
-                    .child(tray_card(&t)),
-            );
-        }
+        // DW-0380 is drawn in its own window by the b (`shell::tray_tip_window`).
+        Step::Tray => return behind,
         Step::Tip(n) => n,
     };
+    let t = tokens::theme(cx.system_dark());
+    let layer = el().key("window-with-guide").w_full().h_full().child(behind);
     let Some(spot) = spot(n, s) else { return layer };
     // Where the real control is in the window now (a row moves when its list scrolls). Unknown
     // until it is laid out once: the view runs again then.
