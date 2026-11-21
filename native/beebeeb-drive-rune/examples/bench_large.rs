@@ -55,7 +55,7 @@ use beebeeb_engine::app::{Engine, EngineConfig};
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
-use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+use beebeeb_engine::state_db::{FileStatus, ItemKind, StateDb};
 use beebeeb_engine::test_api::FakeApi;
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use beebeeb_engine::test_api::large_account::{LargeAccount, camera_roll_id, local_rows, seed};
@@ -175,29 +175,38 @@ fn main() {
     engine.restore();
     let local = tempfile::tempdir().expect("a folder for the local state");
     let db_path = local.path().join("state.db");
-    let db = StateDb::open(&db_path).expect("the local state opens");
-    for (n, row) in rows.iter().enumerate() {
-        if n % 5000 == 0 {
-            eprintln!("bench_large: local state row {n} ({:.1}s)", t0.elapsed().as_secs_f64());
+    // The schema from the engine's own opener, the rows in ONE transaction (the engine's per-row writer keeps a change
+    // log and is far too slow for 40,000 rows).
+    drop(StateDb::open(&db_path).expect("the local state opens"));
+    {
+        let mut conn = rusqlite::Connection::open(&db_path).expect("the local state opens");
+        let tx = conn.transaction().expect("a transaction");
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO files (file_id, path, status, size_bytes, modified_at, remote_updated_at, parent_id, item_kind)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+                )
+                .expect("the insert");
+            for row in &rows {
+                let kind = if row.is_folder { ItemKind::Folder } else { ItemKind::File };
+                insert
+                    .execute(rusqlite::params![
+                        row.id,
+                        row.path,
+                        FileStatus::CloudOnly.as_str(),
+                        row.size_bytes as i64,
+                        row.updated_at,
+                        row.parent_id,
+                        kind.as_str()
+                    ])
+                    .expect("a row is recorded");
+            }
         }
-        let kind = if row.is_folder { ItemKind::Folder } else { ItemKind::File };
-        let entry = FileEntry {
-            file_id: row.id.clone(),
-            path: row.path.clone(),
-            status: FileStatus::CloudOnly,
-            size_bytes: row.size_bytes as i64,
-            modified_at: row.updated_at,
-            content_hash: None,
-            remote_updated_at: row.updated_at,
-            parent_id: row.parent_id.clone(),
-            item_kind: kind.clone(),
-        };
-        db.upsert_file_with_contract(&entry, |c| {
-            c.parent_id = entry.parent_id.clone();
-            c.item_kind = kind.clone();
-        })
-        .expect("a row is recorded");
+        tx.commit().expect("the rows are kept");
     }
+    eprintln!("bench_large: local state written ({:.1}s)", t0.elapsed().as_secs_f64());
+    let db = StateDb::open(&db_path).expect("the local state opens");
     db.set_owner(&owner).expect("the local state is the account's");
     drop(db);
     engine.use_local_state_for_test(db_path);
