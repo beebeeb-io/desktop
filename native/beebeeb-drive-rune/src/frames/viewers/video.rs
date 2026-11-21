@@ -52,10 +52,7 @@ pub fn refusal_words_with(system_decoder_on: bool, why: &Refusal) -> String {
 /// The line for a file whose sound this PC cannot play (decision of 2026-11-15 19:50): the video keeps playing.
 /// The name is the FORMAT's (`Codec::name`), never the file's.
 pub fn no_sound_words(why: NoSound) -> String {
-    match why {
-        NoSound::Codec(codec) => format!("Sound isn't available on this PC ({})", codec_name(codec)),
-        NoSound::Device => "Sound isn't available on this PC".into(),
-    }
+    refusal_text::no_sound(why).0
 }
 
 /// The no-sound line with "Open in another app\u{2026}" one press away (the press of [`refused`]). `prefix` keys it.
@@ -71,7 +68,7 @@ pub fn no_sound_line(prefix: &'static str, why: NoSound, ink: Color, t: &Theme) 
             ink,
         ))
         .child(
-            super::text::tool_action("no-sound-open", "Open in another app\u{2026}", None, None, t).on_press(
+            super::text::tool_action("no-sound-open", refusal_text::no_sound(why).1, None, None, t).on_press(
                 |s: &mut State| {
                     if let Some(ui) = super::ui(s) {
                         ui.intent(Intent::OpenInAnotherApp);

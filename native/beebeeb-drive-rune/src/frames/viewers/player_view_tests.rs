@@ -160,7 +160,7 @@ fn no_sound_scene() -> Runtime<State> {
 fn no_sound_line_names_the_missing_track() {
     assert_eq!(
         no_sound_words(NoSound::Codec(Codec::Aac)),
-        "Sound isn't available on this PC (AAC)"
+        "No sound: this PC has no decoder for AAC audio"
     );
     assert_eq!(no_sound_words(NoSound::Device), "Sound isn't available on this PC");
     let rt = no_sound_scene();
@@ -169,7 +169,7 @@ fn no_sound_line_names_the_missing_track() {
         .into_iter()
         .find(|e| e.key.as_deref() == Some("video-no-sound-words") && !e.exiting)
         .expect("the line is drawn");
-    assert_eq!(words.text.as_deref(), Some("Sound isn't available on this PC (AAC)"));
+    assert_eq!(words.text.as_deref(), Some("No sound: this PC has no decoder for AAC audio"));
 }
 
 /// 7. The line offers "Open in another app\u{2026}" one press away.

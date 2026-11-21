@@ -6,7 +6,7 @@
 
 use beebeeb_media_protocol::{Codec, MEDIA_SYSTEM_DECODER_ON};
 
-use crate::media::player::Refusal;
+use crate::media::player::{NoSound, Refusal};
 
 /// "Open in another app\u{2026}": the button of every refusal that is not about the PC's decoders.
 pub const OPEN_ELSEWHERE: &str = "Open in another app\u{2026}";
@@ -151,6 +151,19 @@ pub fn text_with(system_decoder_on: bool, why: &Refusal) -> Text {
     Text { sentence, action, link, log_word }
 }
 
+/// The notice of a video that plays WITHOUT sound (ux-57): (sentence, button). Only a video whose VIDEO cannot be
+/// decoded is refused (`text_with`); a track whose audio has no decoder here is this notice, never a refusal. The name
+/// is the FORMAT's, never the file's.
+pub fn no_sound(why: NoSound) -> (String, &'static str) {
+    match why {
+        NoSound::Codec(codec) => (
+            format!("No sound: this PC has no decoder for {} audio", codec_name(codec)),
+            OPEN_DEFAULT,
+        ),
+        NoSound::Device => ("Sound isn't available on this PC".into(), OPEN_ELSEWHERE),
+    }
+}
+
 /// Every reason, for the test that none has an empty or generic text.
 #[cfg(test)]
 pub fn every_reason() -> Vec<Refusal> {
@@ -225,6 +238,18 @@ mod tests {
             })
             .sum::<usize>();
         assert_eq!(n, 14);
+    }
+
+    /// ux-57: a missing AAC decoder is a notice beside a playing video, never a refusal; every cause has its words.
+    #[test]
+    fn a_missing_audio_decoder_is_a_notice_not_a_refusal() {
+        let (words, action) = no_sound(NoSound::Codec(Codec::Aac));
+        assert_eq!(words, "No sound: this PC has no decoder for AAC audio");
+        assert_eq!(action, OPEN_DEFAULT);
+        let (device, _) = no_sound(NoSound::Device);
+        assert_ne!(device, words);
+        // A video that cannot be decoded is still refused, with its own words.
+        assert!(text(&Refusal::NoSystemDecoder(Codec::H264)).sentence.contains("no decoder"));
     }
 
     #[test]
