@@ -662,7 +662,9 @@ fn shell(role: &'static str, name: &str, children: Vec<El>, foot: Vec<(El, bool)
             },
             t,
         ),
-        |s: &mut State| on_escape(s),
+        |s: &mut State| {
+            on_escape(s);
+        },
         t,
     )
 }
