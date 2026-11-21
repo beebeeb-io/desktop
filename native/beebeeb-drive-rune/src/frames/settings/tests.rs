@@ -127,7 +127,7 @@ fn tab_to(rt: &mut Runtime<State>, target: &str) {
                 if find(rt, target).is_some_and(|e| e.focused) {
                     return;
                 }
-                key(rt, arrow);
+                key(rt, arrow.clone());
             }
         }
     }
