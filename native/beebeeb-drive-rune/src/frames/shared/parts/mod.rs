@@ -9,7 +9,6 @@ pub mod empty;
 pub mod icons;
 pub mod list;
 pub mod menu;
-pub mod sidebar;
 pub mod table;
 pub mod toolbar;
 
