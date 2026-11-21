@@ -128,6 +128,22 @@ pub fn local_state(status: &FileStatus, is_folder: bool, pinned: bool) -> Option
     })
 }
 
+/// A file whose upload is still queued (parked while sync is paused included) has not reached the server: it
+/// shows as waiting (`Syncing`), never as synced. Reads the queue, not the file status.
+pub fn with_queue(mut local: Option<LocalState>, upload_queued: bool) -> Option<LocalState> {
+    if upload_queued && matches!(local, Some(LocalState::Downloaded | LocalState::AvailableOffline)) {
+        local = Some(LocalState::Syncing);
+    }
+    local
+}
+
+fn queued_local(db: &StateDb, entry: &FileEntry, item: &mut DriveItem) {
+    if !entry.is_dir() && entry.status == FileStatus::Local {
+        let queued = db.sync_folder_upload_queued(&entry.file_id).unwrap_or(false);
+        item.local = with_queue(item.local.take(), queued);
+    }
+}
+
 fn is_pinned(contract: Option<&FileContractState>) -> bool {
     contract.is_some_and(|c| c.effective_pin_state() == PinState::Pinned)
 }
@@ -184,7 +200,9 @@ pub fn item_for_entry(db: &StateDb, entry: &FileEntry) -> Result<DriveItem, Driv
     } else {
         None
     };
-    Ok(item_from(entry, contract.as_ref(), count))
+    let mut item = item_from(entry, contract.as_ref(), count);
+    queued_local(db, entry, &mut item);
+    Ok(item)
 }
 
 /// The row behind an id: a server id, or a provisional `local:<path>` id for an item this PC just
@@ -442,7 +460,9 @@ pub fn list(db: &StateDb, folder_id: Option<&str>, sort: Sort, stale: bool) -> R
     let mut items: Vec<DriveItem> = Vec::with_capacity(all.len());
     for (entry, contract, child_count) in &all {
         let count = if entry.is_dir() { Some(*child_count) } else { None };
-        items.push(item_from(entry, Some(contract), count));
+        let mut item = item_from(entry, Some(contract), count);
+        queued_local(db, entry, &mut item);
+        items.push(item);
     }
     sort_items(&mut items, sort);
     let path = crumbs(db, folder.as_ref())?;
@@ -488,6 +508,7 @@ pub fn children_of(
         }
         let count = if entry.is_dir() { Some(*child_count) } else { None };
         let mut item = item_from(entry, Some(contract), count);
+        queued_local(db, entry, &mut item);
         item.backup = crate::backup_actions::BackupMark::at(backups.position(&entry.path));
         items.push(item);
     }
