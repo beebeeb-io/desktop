@@ -304,8 +304,12 @@ fn everywhere_else_one_by_one_stops_at_a_call_that_gets_no_answer() {
     server.change_mode.store(DROP_CONNECTION, Ordering::SeqCst);
     source.run_notice_action();
     settle(&mut source);
+    let mut sent = server.deleted.lock().unwrap().clone();
+    let already_sent = sent.len();
+    // The engine sends a dropped call again (bounded transport retries): the same session, never the next one.
+    sent.dedup();
     assert_eq!(
-        server.deleted.lock().unwrap().clone(),
+        sent,
         ["s-phone"],
         "nothing is sent after a call that got no answer"
     );
@@ -320,8 +324,8 @@ fn everywhere_else_one_by_one_stops_at_a_call_that_gets_no_answer() {
     source.run_notice_action();
     settle(&mut source);
     assert_eq!(
-        server.deleted.lock().unwrap().clone(),
-        ["s-phone", "s-phone", "s-web"],
+        server.deleted.lock().unwrap()[already_sent..],
+        ["s-phone", "s-web"],
         "an answered error does not end it, and the unsent one was kept"
     );
     assert_eq!(source.notice(), Some(NOT_ALL_SIGNED_OUT));

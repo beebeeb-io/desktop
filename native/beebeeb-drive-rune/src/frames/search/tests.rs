@@ -338,13 +338,13 @@ fn only_this_groups_scenes_name_the_sample() {
 #[test]
 fn ctrl_f_opens_search_and_esc_takes_the_window_back_to_files() {
     let mut rt = window(init());
-    assert!(has(&rt, "file-list-col"));
+    assert!(has(&rt, "pane-list"));
     press(&mut rt, Key::Command('f'), CTRL);
     assert_eq!(text(&rt, "folder-title"), "Search");
-    assert!(!has(&rt, "file-list-col"), "search replaces the list");
+    assert!(!has(&rt, "pane-list"), "search replaces the list");
     press(&mut rt, Key::Escape, NONE);
     assert!(!rt.state.frames.find.open && rt.state.search.text.is_empty());
-    assert!(has(&rt, "file-list-col"), "Files' list is back");
+    assert!(has(&rt, "pane-list"), "Files' list is back");
     assert_ne!(text(&rt, "folder-title"), "Search");
 
 }
@@ -357,7 +357,7 @@ fn typing_in_the_files_field_opens_search_and_keeps_the_keyboard() {
     state.frames.find.source = Box::new(BoardSearch::new());
     let mut rt = window(state);
     click(&mut rt, SEARCH_KEY);
-    assert!(has(&rt, "file-list-col"), "a click alone leaves the list");
+    assert!(has(&rt, "pane-list"), "a click alone leaves the list");
     type_text(&mut rt, "contr");
     assert_eq!(
         focused(&rt).as_deref(),
@@ -566,7 +566,7 @@ fn typing_in_a_window_goes_through_results_no_results_recent_and_back_to_files()
     }
     assert_eq!(rt.state.search.text, "");
     // The field emptied by hand closes search, as before it was typed in: Files is back.
-    assert!(has(&rt, "file-list-col"));
+    assert!(has(&rt, "pane-list"));
     type_text(&mut rt, "harbr");
     assert_eq!(text(&rt, "item-count"), "No results");
     assert_eq!(text(&rt, "empty-title"), "No results for \u{201C}harbr\u{201D}");
@@ -579,7 +579,7 @@ fn typing_in_a_window_goes_through_results_no_results_recent_and_back_to_files()
     assert_eq!(text(&rt, "item-count"), "Files");
     assert_eq!(text(&rt, "item-0-0-title"), "contract");
     press(&mut rt, Key::Escape, NONE);
-    assert!(has(&rt, "file-list-col") && !super::is_open(&rt.state));
+    assert!(has(&rt, "pane-list") && !super::is_open(&rt.state));
 }
 
 /// A double-click opens the result (DW-0802: "Double-click a result: opens it").
