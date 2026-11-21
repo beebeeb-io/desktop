@@ -148,11 +148,15 @@ fn main() {
         assert!(VIEWS.contains(&view.as_str()), "no view {view}");
     }
 
+    let t0 = Instant::now();
     // The seeded account and the fake server that serves it.
     let (account, _phrase) = FakeAccount::register(EMAIL, PASSWORD, TEST_PHRASE);
+    eprintln!("bench_large: registered ({:.1}s)", t0.elapsed().as_secs_f64());
     seed(&account, &LargeAccount::GUUS);
+    eprintln!("bench_large: seeded ({:.1}s)", t0.elapsed().as_secs_f64());
     let owner = Identity::new(Some(&account.user_id), Some(&account.email));
     let rows = local_rows(&account);
+    eprintln!("bench_large: rows listed ({:.1}s)", t0.elapsed().as_secs_f64());
     let api = FakeApi::start(account_handler(Arc::new(account)));
 
     // The engine, signed in and unlocked; its local state is what a sync of that account leaves.
@@ -172,7 +176,10 @@ fn main() {
     let local = tempfile::tempdir().expect("a folder for the local state");
     let db_path = local.path().join("state.db");
     let db = StateDb::open(&db_path).expect("the local state opens");
-    for row in &rows {
+    for (n, row) in rows.iter().enumerate() {
+        if n % 5000 == 0 {
+            eprintln!("bench_large: local state row {n} ({:.1}s)", t0.elapsed().as_secs_f64());
+        }
         let kind = if row.is_folder { ItemKind::Folder } else { ItemKind::File };
         let entry = FileEntry {
             file_id: row.id.clone(),
