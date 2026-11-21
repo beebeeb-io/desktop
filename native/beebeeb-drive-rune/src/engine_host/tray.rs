@@ -163,6 +163,12 @@ impl<C: CredentialStores> TraySource for EngineTraySource<C> {
                     log("the flyout could not open the plans page");
                 }
             }
+            // Lift the metered hold until the connection changes; the engine ticks now.
+            Action::SyncAnyway => {
+                if self.live.sync_anyway().is_err() {
+                    log("the flyout could not ask the engine to sync anyway");
+                }
+            }
             Action::TryAgain => {
                 let mut read = self.storage.lock().unwrap_or_else(PoisonError::into_inner);
                 read.began = None;
@@ -244,6 +250,7 @@ pub(super) fn report_of(view: &EngineStatusView) -> Report {
         ("error", Some(REASON_AUTH)) => Report::Unknown,
         ("error", Some(REASON_ENGINE_ERROR)) => Report::Failed,
         ("error", _) => Report::ServerError,
+        ("paused", Some(code)) if code == beebeeb_engine::power::PausedFor::Metered.code() => Report::Metered,
         ("paused" | "stopped", _) => Report::Quiet,
         _ => Report::Unknown,
     }
@@ -258,7 +265,7 @@ pub(super) fn engine_state(view: &EngineStatusView) -> EngineState {
         Report::Offline | Report::ServerError => EngineState::Offline,
         Report::Failed => EngineState::Error,
         Report::Idle => EngineState::Idle,
-        Report::Unknown | Report::Starting | Report::Quiet => EngineState::Checking,
+        Report::Unknown | Report::Starting | Report::Quiet | Report::Metered => EngineState::Checking,
     }
 }
 

@@ -28,7 +28,7 @@ pub(super) fn power_hold(identity: &'static crate::identity::EngineIdentity, use
         None
     } else {
         let metered = crate::config::DesktopConfig::load_for(identity).ok().and_then(|c| c.metered);
-        crate::power::decide(metered, &crate::power::SystemPower)
+        crate::power::hold_now(metered, &crate::power::SystemPower)
     };
     crate::power::set_current(hold);
     hold

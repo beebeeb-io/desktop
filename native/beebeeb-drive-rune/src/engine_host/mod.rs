@@ -506,6 +506,12 @@ impl<C: CredentialStores> LiveEngine<C> {
     }
 }
 
+/// Sync anyway on `engine`: the lift is asked, then a tick wakes to apply it. Shared by the tray and Settings.
+pub(crate) fn sync_anyway_now<C: CredentialStores>(engine: &beebeeb_engine::app::Engine<C>) {
+    beebeeb_engine::power::sync_anyway();
+    engine.retry_first_list();
+}
+
 /// What the tray reads of one message. The engine's report of itself (`engine-status`) goes into `view` as the
 /// engine's own listener folds it (`EngineStatusView::apply`), and so does the pause switch's `paused`. The resume
 /// switch's `idle` says nothing about a check (it is not a report of one), so it empties the state: not known
@@ -561,6 +567,13 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
 
     fn resume_sync(&self) -> Result<(), actions::ActionError> {
         self.engine.resume().map_err(actions::ActionError::Failed)
+    }
+
+    /// The engine lifts its metered or battery-saver hold until the connection changes, and its next tick runs now
+    /// (the whole-tick wake that Try again on the first list uses). Never waits.
+    fn sync_anyway(&self) -> Result<(), actions::ActionError> {
+        sync_anyway_now(&self.engine);
+        Ok(())
     }
 
     fn open_in_file_explorer(&self) -> Result<(), actions::ActionError> {

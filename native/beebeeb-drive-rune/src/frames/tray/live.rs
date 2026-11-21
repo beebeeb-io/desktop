@@ -54,6 +54,9 @@ pub enum Report {
     Failed,
     /// Paused or stopped: what it says when it is not working.
     Quiet,
+    /// Paused by the engine itself: this PC is on a metered connection and syncing on those is off (the
+    /// `paused` report with reason `metered`). Sync anyway lifts it until the connection changes.
+    Metered,
 }
 
 /// The numbers of the engine's last report while it syncs.
@@ -185,6 +188,10 @@ fn ready(facts: &Facts, now: DateTime<LocalTime>) -> Status {
     if matches!(facts.report, Report::Unknown | Report::Starting) {
         return Status::Checking;
     }
+    // DW-1222: the engine holds sync on a metered connection; the button is Sync anyway.
+    if facts.report == Report::Metered {
+        return Status::WaitingMetered;
+    }
     if local.held_for_quota > 0 {
         return Status::StorageFull {
             waiting: local.held_for_quota,
@@ -241,8 +248,8 @@ fn ready(facts: &Facts, now: DateTime<LocalTime>) -> Status {
 /// the shell), Review… and Show (they move the window), Sign in while signed out and Unlock while locked
 /// (the window shows what the session needs), Try again (the engine checks again), Restart to update
 /// (Settings, where the updater is), and Add storage and Choose a plan (the plans page in the browser).
-/// Sync anyway waits for the metered-network switch (090); Try again for File Explorer waits for a
-/// shell call that adds Beebeeb to it.
+/// Sync anyway lifts the engine's metered hold until the connection changes (`EngineActions::sync_anyway`); Try
+/// again for File Explorer waits for a shell call that adds Beebeeb to it.
 fn offered(action: Action, gate: Gate) -> bool {
     match action {
         Action::Pause
@@ -252,10 +259,11 @@ fn offered(action: Action, gate: Gate) -> bool {
         | Action::TryAgain
         | Action::AddStorage
         | Action::ChoosePlan
-        | Action::RestartToUpdate => true,
+        | Action::RestartToUpdate
+        | Action::SyncAnyway => true,
         Action::SignIn => gate == Gate::SignedOut,
         Action::Unlock => gate == Gate::Locked,
-        Action::SyncAnyway | Action::RetryExplorer => false,
+        Action::RetryExplorer => false,
     }
 }
 

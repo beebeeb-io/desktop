@@ -161,6 +161,8 @@ pub trait DriveEngine: Send + Sync + 'static {
     /// How many items the account's Trash holds, as Beebeeb counts them (`Engine::trash_count_for`). BLOCKS.
     fn trash_count(&self, session: SessionGeneration) -> Result<u64, String>;
     fn set_paused(&self, paused: bool) -> Result<(), String>;
+    /// Sync anyway: lift the metered hold until the connection changes, and tick now. Never waits.
+    fn sync_anyway(&self) {}
     /// Sync runs for this handle. May wait: a worker's.
     fn syncing(&self) -> bool;
     fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String>;
@@ -217,6 +219,9 @@ impl<C: CredentialStores> DriveEngine for Engine<C> {
     }
     fn set_paused(&self, paused: bool) -> Result<(), String> {
         if paused { self.pause() } else { self.resume() }
+    }
+    fn sync_anyway(&self) {
+        super::sync_anyway_now(self);
     }
     fn syncing(&self) -> bool {
         self.is_syncing()
@@ -401,6 +406,9 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     /// Thumbnails and previews (`drive_previews`): off until the app's start hands it the engine.
     previews: super::drive_previews::PreviewsHost,
 }
+
+/// The Sync row while the engine holds sync on a metered connection (DW-0746e).
+pub(crate) const METERED_WORDS: &str = "Paused: metered connection";
 
 impl<E: DriveEngine> EngineDriveSettings<E> {
     /// `base` with "Right now" filled from the engine's transfer rate and its metered hold.
@@ -1052,6 +1060,8 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             repair: if mine { self.repair } else { Repair::Idle },
             status: if view.paused {
                 SyncStatus::Paused
+            } else if beebeeb_engine::power::current() == Some(beebeeb_engine::power::PausedFor::Metered) {
+                SyncStatus::WaitingMetered(METERED_WORDS.into())
             } else {
                 SyncStatus::Running(says)
             },
@@ -1082,8 +1092,10 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         self.change(Ask::Pause(paused));
     }
 
-    /// Not bound: no metered state is read here, so `sync()` never says sync waits on one.
-    fn sync_anyway(&mut self) {}
+    /// The engine lifts its metered hold until the connection changes; `sync()` says so after its next tick.
+    fn sync_anyway(&mut self) {
+        self.engine.sync_anyway();
+    }
 
     /// Sync stops and starts again into the configured folder (the registration path Setup's "Try again" asks);
     /// the row says "Repairing..." while it runs, and a refusal says why.

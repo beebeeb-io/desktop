@@ -531,3 +531,28 @@ fn a_rows_tile_follows_the_files_kind() {
         assert_eq!(live::tile_for(name), tile, "{name}");
     }
 }
+
+/// 090b: the engine's `paused` report with reason `metered` is "This PC is on a metered connection" with Sync
+/// anyway; once the engine lifts its hold it reports a check again, and the flyout follows it.
+#[test]
+fn sync_anyway_is_offered_while_the_engine_holds_on_a_metered_connection() {
+    let held = snap(&Facts {
+        report: Report::Metered,
+        ..ready()
+    });
+    assert_eq!(held.status, Status::WaitingMetered);
+    assert_eq!(held.button, Some((Action::SyncAnyway, false)));
+    // The person's own pause says Paused, never metered.
+    let paused = snap(&Facts {
+        paused: true,
+        report: Report::Metered,
+        ..ready()
+    });
+    assert!(matches!(paused.status, Status::Paused { .. }), "{:?}", paused.status);
+    // Lifted: the engine syncs, and says so.
+    let lifted = snap(&Facts {
+        report: Report::Syncing,
+        ..ready()
+    });
+    assert!(matches!(lifted.status, Status::Syncing { .. }), "{:?}", lifted.status);
+}
