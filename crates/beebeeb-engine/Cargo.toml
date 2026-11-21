@@ -224,6 +224,11 @@ doc = false
 name = "fake_api"
 required-features = ["test-support"]
 
+# dc-086 scratch (diagnosis only, never merged): the fixture account seeded with LargeAccount::GUUS on loopback.
+[[example]]
+name = "dc086_large_fake"
+required-features = ["test-support"]
+
 # Task 2448: the Windows engine job ran into its 30-minute limit. Each integration binary in `tests/` registers the
 # invented account, signs in and unlocks with core's production Argon2id parameters, and at opt-level 0 that cost
 # 45-63 s per binary on both hosted runners (18 binaries, about 20 minutes, run one after another). The list the
