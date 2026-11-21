@@ -439,6 +439,11 @@ pub unsafe extern "system" fn fetch_data_callback(
                 if let Some(path) = normalized_path(info) {
                     unsafe { mark_in_sync(&path) };
                 }
+                if let Some(path) = db_placeholder_path(&bridge, &file_id) {
+                    if let Err(e) = super::mark_of_web::mark_if_foreign_share(bridge.db(), &file_id, &path) {
+                        tracing::warn!(file_id = %file_id, error = %e, "could not write the Mark of the Web");
+                    }
+                }
             }
         }
         Err(e) => {

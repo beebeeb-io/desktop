@@ -403,6 +403,11 @@ pub fn is_dangerous_executable(path: &Path) -> bool {
     const DANGEROUS_EXTS: &[&str] = &[
         "exe", "bat", "cmd", "com", "scr", "lnk", "url", "hta", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi",
         "reg", "cpl", "pif", "msc", "jar",
+        // Dc-009: interpreter scripts, web pages, shell-launched manifests and library/search kinds.
+        "py", "pyw", "sh", "html", "htm", "appref-ms", "settingcontent-ms", "application", "xbap", "library-ms",
+        "search-ms", "chm", "iqy", "slk",
+        // Macro Office kinds: open only in the app's viewer or editor, never handed over.
+        "docm", "xlsm", "pptm", "dotm", "xltm", "potm", "xlam", "ppam", "ppsm", "sldm",
     ];
     // Strip trailing dots and spaces (Windows ignores them) before extracting the extension.
     let name = path
@@ -764,6 +769,17 @@ mod tests {
     }
 
     // ── injection safety ────────────────────────────────────────────
+
+    #[test]
+    fn open_refuses_script_web_and_macro_kinds() {
+        for ext in [
+            "py", "pyw", "sh", "html", "htm", "appref-ms", "settingcontent-ms", "application", "xbap", "library-ms",
+            "search-ms", "chm", "iqy", "slk", "docm", "xlsm", "pptm",
+        ] {
+            assert!(is_dangerous_executable(Path::new(&format!("name.{ext}"))), "{ext} must be refused");
+            assert!(is_dangerous_executable(Path::new(&format!("NAME.{}", ext.to_uppercase()))), "{ext} upper");
+        }
+    }
 
     #[test]
     fn dangerous_executable_matches_the_old_shells_list() {
