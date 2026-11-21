@@ -176,6 +176,7 @@ fn toolbar(s: &State, sub: &str, t: &Theme) -> El {
     );
     bar(
         Bar {
+            gate_closed: false,
             name: "Search".into(),
             // The board draws Back and Forward off while searching: Esc is the way back.
             back: (false, None),
