@@ -121,15 +121,13 @@ fn tab_to(rt: &mut Runtime<State>, target: &str) {
             return;
         }
         key(rt, Key::Tab);
-        // A roving group is one Tab stop: arrows reach its other members.
-        for arrow in [Key::Down, Key::Right] {
-            for _ in 0..8 {
-                if find(rt, target).is_some_and(|e| e.focused) {
-                    return;
-                }
-                key(rt, arrow.clone());
-            }
+    }
+    // A roving group is one Tab stop: its other members take arrows.
+    for _ in 0..12 {
+        if find(rt, target).is_some_and(|e| e.focused) {
+            return;
         }
+        key(rt, Key::Down);
     }
     panic!("Tab never reaches {target}");
 }
