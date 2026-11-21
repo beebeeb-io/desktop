@@ -169,21 +169,6 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
-/// `.mk-tbtn`: a 28 pt square with a glyph.
-fn tool(key: &str, name: &str, icon: &'static rune::Icon, size: f32, t: &Theme) -> El {
-    row()
-        .key(key.to_string())
-        .role("button")
-        .label(name)
-        .size(28.0, 28.0)
-        .center()
-        .radius(7.0)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph(format!("{key}-icon"), icon, size, t.text_secondary))
-}
-
 /// The card's head: close, the file's name and where the preview is, Share, Open in its app (Files' panel only).
 fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
     let mut title = col().key("pv-title").grow(1.0).min_w(0.0).px(4.0).child(
@@ -200,7 +185,7 @@ fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
             t.text_tertiary,
         ));
     }
-    let close = tool("pv-close", "Close preview", &icons_files::CLOSE, 14.0, t);
+    let close = crate::ui::toolbar::tool("pv-close", "Close preview", &icons_files::CLOSE, t);
     let close = match mode {
         Mode::Files => close.on_press_tx(|s: &mut State, tx: &mut Tx| s.close_dialog(tx)),
         Mode::ReadOnly { close: press, .. } => close.on_press_tx(*press),
@@ -227,7 +212,7 @@ fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
         return head;
     }
     let mut head = head.child(
-        tool("pv-share", "Share\u{2026}", &icons::SHARE, 15.0, t).on_press(|s: &mut State| s.share_from_preview()),
+        crate::ui::toolbar::tool("pv-share", "Share\u{2026}", &icons::SHARE, t).on_press(|s: &mut State| s.share_from_preview()),
     );
     if matches!(state, Previewed::Shown(_)) {
         head = head.child(
