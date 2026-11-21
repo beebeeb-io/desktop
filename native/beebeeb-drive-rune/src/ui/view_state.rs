@@ -44,16 +44,23 @@ pub const TRY_AGAIN: &str = "Try again";
 const WRAP: f32 = 227.11;
 
 pub fn view_state(state: ViewState, t: &Theme) -> El {
+    view_state_sized(state, "loading", Size::Md, t)
+}
+
+/// [`view_state`] with a size and the key prefix of the Loading strip (`<loading_key>`,
+/// `-words`, `-bar`, `-bar-fill`; Empty and Failed carry their own `key`). Md is the default look;
+/// Sm is compact: 16/16 padding, a 40 pt tile with a 20 pt glyph, 6 between parts.
+pub fn view_state_sized(state: ViewState, loading_key: &str, size: Size, t: &Theme) -> El {
     match state {
-        ViewState::Loading { words } => loading(words, t),
+        ViewState::Loading { words } => loading(loading_key, words, t),
         ViewState::Empty {
             key,
             icon,
             title,
             body,
             action,
-        } => empty(key, icon, title, body, action, t),
-        ViewState::Failed { key, title, why, retry } => failed(key, title, why, retry, t),
+        } => empty(key, icon, title, body, action, size, t),
+        ViewState::Failed { key, title, why, retry } => failed(key, title, why, retry, size, t),
     }
 }
 
@@ -109,17 +116,18 @@ pub(super) fn strip_bar(key: &str, fraction: f32, t: &Theme) -> El {
 }
 
 /// Loading: the words over a bar with no value (a progressbar without a value reads as busy).
-fn loading(words: &str, t: &Theme) -> El {
-    strip_box("loading", t)
+fn loading(key: &str, words: &str, t: &Theme) -> El {
+    strip_box(key, t)
         .label(words)
         .live_region(LiveRegion::Polite)
-        .child(kit::label("loading-words", words, type_::HEAD, t.text))
-        .child(strip_bar("loading-bar", 0.3, t).role("progressbar").label(words))
+        .child(kit::label(format!("{key}-words"), words, type_::HEAD, t.text))
+        .child(strip_bar(&format!("{key}-bar"), 0.3, t).role("progressbar").label(words))
 }
 
 /// The centred column Empty and Failed share: 28/24 padding, 8 between its parts.
-fn column(key: &str, title: &str) -> El {
-    col().key(key).role("group").label(title).py(28.0).px(24.0).gap(8.0).items_center()
+fn column(key: &str, title: &str, size: Size) -> El {
+    let (py, px, gap) = if size == Size::Sm { (16.0, 16.0, 6.0) } else { (28.0, 24.0, 8.0) };
+    col().key(key).role("group").label(title).py(py).px(px).gap(gap).items_center()
 }
 
 fn sentence(key: &str, words: &str, t: &Theme) -> El {
@@ -129,15 +137,16 @@ fn sentence(key: &str, words: &str, t: &Theme) -> El {
         .align(Align::Center)
 }
 
-fn empty(key: &str, ic: &'static rune::Icon, title: &str, body: &str, action: Option<El>, t: &Theme) -> El {
-    let mut c = column(key, title)
+fn empty(key: &str, ic: &'static rune::Icon, title: &str, body: &str, action: Option<El>, size: Size, t: &Theme) -> El {
+    let (tile, glyph) = if size == Size::Sm { (40.0, 20.0) } else { (52.0, 26.0) };
+    let mut c = column(key, title, size)
         .child(
             el().key(format!("{key}-tile"))
-                .size(52.0, 52.0)
+                .size(tile, tile)
                 .radius(15.0)
                 .fill(t.tile)
                 .center()
-                .child(kit::glyph(format!("{key}-icon"), ic, 26.0, t.text_secondary)),
+                .child(kit::glyph(format!("{key}-icon"), ic, glyph, t.text_secondary)),
         )
         .child(kit::label(format!("{key}-title"), title, TITLE, t.text))
         .child(sentence(key, body, t));
@@ -147,8 +156,8 @@ fn empty(key: &str, ic: &'static rune::Icon, title: &str, body: &str, action: Op
     c
 }
 
-fn failed(key: &str, title: &str, why: &str, retry: Option<El>, t: &Theme) -> El {
-    let mut c = column(key, title)
+fn failed(key: &str, title: &str, why: &str, retry: Option<El>, size: Size, t: &Theme) -> El {
+    let mut c = column(key, title, size)
         .live_region(LiveRegion::Polite)
         .child(kit::label(format!("{key}-title"), title, TITLE, t.text))
         .child(sentence(key, why, t));
