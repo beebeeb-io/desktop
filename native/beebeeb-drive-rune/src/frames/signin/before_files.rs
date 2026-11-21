@@ -25,12 +25,14 @@ use crate::shell::app::{Event, GateState, Screen};
 use crate::shell::host;
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
 use crate::theme::icons_settings as ic;
-use crate::theme::tokens::{self, Theme, radius, type_};
+use crate::theme::tokens::{self, Theme};
+use crate::ui::button::{ButtonState, Size, Variant, button as ui_button, keys};
 use crate::ui::settings_dialog::DIALOG_TITLE;
 use crate::ui::sidebar::{self, Standing};
+use crate::ui::status_bar::{self, Dot};
 use crate::ui::toolbar::{self, Closed};
 use crate::ui::{caption, kit};
-use rune::{Align, Color, Cx, El, Icon, TextStyle, col, el, row};
+use rune::{Align, Cx, El, Icon, TextStyle, col, el, row};
 
 /// The action each button names, for tests and the log.
 pub const OPEN_PLANS: &str = "open-plans";
@@ -42,8 +44,6 @@ pub const USE_PASSWORD_KEY: &str = "gate-btn-1";
 /// The cover's sign-in button, shown while the engine's look failed and nothing passed (`shell::away`).
 pub const COVER_SIGN_IN_KEY: &str = "cover-sign-in";
 
-/// `.kit-btn-lg`'s words: 13px/500 on 19.5px.
-const BUTTON_LG: TextStyle = TextStyle::new(13.0, 500.0).lh(19.5).tracking(-0.065);
 /// `.t-sub`: 12px on 15px.
 const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 /// The no-plan column is 380 wide (`max-width: 380px`).
@@ -145,45 +145,10 @@ fn open_page(s: &mut State, name: &'static str) {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Look {
-    Primary,
-    Plain,
-    Quiet,
-}
-
-/// A button of the block: `h` tall, as wide as its words unless the caller sets a width.
+/// A button of the block (`ui::button::button`), as wide as its words unless the caller sets a width.
 /// Keys: `<key>`, `<key>-icon`, `<key>-label`.
-fn button(key: &str, label: &str, icon: Option<&'static Icon>, look: Look, h: f32, style: TextStyle, t: &Theme) -> El {
-    let (fill, ink) = match look {
-        Look::Primary => (t.accent, t.accent_text_on),
-        Look::Plain => (t.paper, t.text),
-        Look::Quiet => (Color::TRANSPARENT, t.text_secondary),
-    };
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(h)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD)
-        .fill(fill)
-        .focusable(true);
-    b = match look {
-        Look::Primary => b
-            .hover(fill.mix(Color::BLACK, 0.05))
-            .press(fill.mix(Color::BLACK, 0.10)),
-        _ => b.hover(t.paper2).press(t.paper3),
-    };
-    if look == Look::Plain {
-        b = b.border(1.0, t.card_border).border_layout();
-    }
-    if let Some(icon) = icon {
-        b = b.child(kit::glyph(format!("{key}-icon"), icon, 16.0, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, style, ink))
+fn button(key: &str, label: &str, icon: Option<&'static Icon>, variant: Variant, size: Size, t: &Theme) -> El {
+    ui_button(keys(key), label, icon, variant, size, ButtonState::Enabled, t)
 }
 
 /// The head of the block: a neutral tile, the heading, one sentence, centred.
@@ -235,9 +200,8 @@ fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
             super::lock::UNLOCK_KEY,
             "Unlock",
             Some(&ic::APP_LOCK),
-            Look::Primary,
-            28.0,
-            crate::ui::settings_dialog::BUTTON_MD,
+            Variant::Primary,
+            Size::Md,
             t,
         )
         .default_button()
@@ -250,9 +214,8 @@ fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
                 USE_PASSWORD_KEY,
                 "Use your password",
                 None,
-                Look::Plain,
-                28.0,
-                crate::ui::settings_dialog::BUTTON_MD,
+                Variant::Secondary,
+                Size::Md,
                 t,
             )
             .on_press_tx(super::act(super::Ui::lock_use_password)),
@@ -280,9 +243,8 @@ fn cover_sign_in(t: &Theme) -> El {
                 COVER_SIGN_IN_KEY,
                 "Sign in",
                 Some(&ic::APP_LOCK),
-                Look::Primary,
-                28.0,
-                crate::ui::settings_dialog::BUTTON_MD,
+                Variant::Primary,
+                Size::Md,
                 t,
             )
             .default_button()
@@ -304,7 +266,7 @@ fn no_plan(t: &Theme) -> El {
     ) {
         block = block.child(child);
     }
-    let wide = |key: &str, label: &str, icon, look| button(key, label, icon, look, 32.0, BUTTON_LG, t).w_full();
+    let wide = |key: &str, label: &str, icon, look| button(key, label, icon, look, Size::Lg, t).w_full();
     block.child(
         col()
             .key("gate-actions")
@@ -316,7 +278,7 @@ fn no_plan(t: &Theme) -> El {
                     "gate-btn-0",
                     "Choose a plan on beebeeb.io",
                     Some(&ic::EXTERNAL),
-                    Look::Primary,
+                    Variant::Primary,
                 )
                 // It opens the browser: said to assistive technology, as the glyph says it to the eye.
                 .label("Choose a plan on beebeeb.io, opens in your browser")
@@ -324,35 +286,9 @@ fn no_plan(t: &Theme) -> El {
                 .autofocus()
                 .on_press(|s: &mut State| open_page(s, "plan")),
             )
-            .child(wide("gate-btn-1", "Check again", None, Look::Plain).on_press(recheck))
-            .child(wide("gate-btn-2", "Sign out", None, Look::Quiet).on_press(sign_out)),
+            .child(wide("gate-btn-1", "Check again", None, Variant::Secondary).on_press(recheck))
+            .child(wide("gate-btn-2", "Sign out", None, Variant::Ghost).on_press(sign_out)),
     )
-}
-
-/// The status line (`.mk-foot`): a dot and what sync is doing. The dot is never green here.
-fn status(words: &str, dot: Color, t: &Theme) -> El {
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(
-            row()
-                .key("status-left")
-                .center_y()
-                .gap(7.0)
-                .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(dot))
-                .child(kit::label("status-text", words, type_::STATUS_STRONG, t.text_secondary)),
-        )
-        .child(el().key("status-spacer").grow(1.0))
-        // Nothing to count: the board keeps the place, empty.
-        .child(kit::label("status-details", "", type_::STATUS, t.text_tertiary).w(0.0))
 }
 
 /// The lock screen's sync line: the tray's words (`frames/tray/source.rs`), true to what the engine does.
@@ -401,7 +337,7 @@ fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
             },
             keystore::block(&t),
             "Not syncing \u{00B7} can't read your keys",
-            t.text_quaternary,
+            Dot::Idle,
         )
     } else if is_locked {
         (
@@ -416,7 +352,7 @@ fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
                 locked(lock_said, &t)
             },
             locked_line(s.shell.sync_runs()),
-            t.text_tertiary,
+            Dot::Busy,
         )
     } else {
         (
@@ -427,7 +363,7 @@ fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
             },
             no_plan(&t),
             "Not syncing \u{00B7} no plan",
-            t.text_quaternary,
+            Dot::Idle,
         )
     };
     // The notice a button raised: drawn under the buttons, shown only while the gate that
@@ -462,7 +398,7 @@ fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
         .fill(t.bg)
         .child(toolbar::toolbar_in(s, &t, 0.0, Some(&closed)))
         .child(gate_block)
-        .child(status(words, dot, &t));
+        .child(status_bar::bar(Some(dot), Some(words), "", &t));
     col()
         .key("window")
         .role("window")

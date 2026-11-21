@@ -6,10 +6,11 @@
 //! Buttons: Try again (the engine reads its gate once more; the frame leaves when the store answers), Get help
 //! (the website's support page), Quit. There is no Sign out here: it needs the store that is not answering.
 
-use super::{BUTTON_LG, Look, button, head, open_page, recheck};
+use super::{button, head, open_page, recheck};
 use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::Theme;
+use crate::ui::button::{Size, Variant};
 use rune::{El, col};
 
 pub const TRY_AGAIN_KEY: &str = "gate-btn-0";
@@ -28,7 +29,7 @@ pub fn block(t: &Theme) -> El {
     ) {
         block = block.child(child);
     }
-    let wide = |key: &str, label: &str, look| button(key, label, None, look, 32.0, BUTTON_LG, t).w_full();
+    let wide = |key: &str, label: &str, look| button(key, label, None, look, Size::Lg, t).w_full();
     block.child(
         col()
             .key("gate-actions")
@@ -36,12 +37,12 @@ pub fn block(t: &Theme) -> El {
             .gap(8.0)
             .mt(12.0)
             .child(
-                wide(TRY_AGAIN_KEY, "Try again", Look::Primary)
+                wide(TRY_AGAIN_KEY, "Try again", Variant::Primary)
                     .default_button()
                     .autofocus()
                     .on_press(recheck),
             )
-            .child(wide(GET_HELP_KEY, "Get help", Look::Plain).on_press(|s: &mut State| open_page(s, "support")))
-            .child(wide(QUIT_KEY, "Quit", Look::Quiet).on_press_tx(|_: &mut State, tx: &mut rune::Tx| tx.quit())),
+            .child(wide(GET_HELP_KEY, "Get help", Variant::Secondary).on_press(|s: &mut State| open_page(s, "support")))
+            .child(wide(QUIT_KEY, "Quit", Variant::Ghost).on_press_tx(|_: &mut State, tx: &mut rune::Tx| tx.quit())),
     )
 }
