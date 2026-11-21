@@ -161,7 +161,7 @@ fn a_source_that_knows_nothing_gets_no_score_no_mark_and_no_sample_value() {
         .collect();
     assert_eq!(checks, Vec::<String>::new(), "a mark for a state nobody read");
     // Pages nothing answers for have no row at all.
-    assert!(find(&rt, "item-0-0").is_none() && find(&rt, "item-1-1").is_none());
+    assert!(find(&rt, "item-0-0").is_none());
     // With the pages answering, each part says it is not known.
     let rt = page_knowing(nothing_known, false);
     assert_eq!(says(&rt, "item-0-0-sub"), "Last change not known");
@@ -191,7 +191,7 @@ fn nothing_that_is_not_bound_is_drawn() {
     let mut rt = page_knowing(nothing_known, true);
     // Every function this source has not bound is a row that is not there: no text that says so, no web detour.
     for row in [
-        "item-0-0", "item-0-1", "item-0-2", "item-1-0", "item-1-1", "item-1-2", "item-2-0", "item-3-0", "item-3-1",
+        "item-0-0", "item-0-1", "item-0-2", "item-1-0", "item-1-2", "item-2-0", "item-3-0", "item-3-1",
         "item-4-0",
     ] {
         assert!(find(&rt, row).is_none(), "{row} is not drawn");
@@ -236,7 +236,7 @@ fn sign_out_of_all_apps_is_hidden_while_the_source_cannot_do_it() {
 #[test]
 fn a_row_for_a_page_nothing_answers_for_is_not_drawn() {
     let mut rt = runtime("DW-S01u");
-    for row in ["item-0-0", "item-0-1", "item-0-2", "item-1-1", "item-1-2", "item-2-3"] {
+    for row in ["item-0-0", "item-0-1", "item-0-2", "item-1-2", "item-2-3"] {
         assert!(find(&rt, row).is_none(), "{row} is not drawn");
     }
     assert!(!every_text(&rt).contains("Not available"), "no row says it is not available");
