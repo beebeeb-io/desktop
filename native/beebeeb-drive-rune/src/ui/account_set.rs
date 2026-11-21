@@ -319,8 +319,12 @@ pub fn item(list: usize, index: usize, it: &Row, extra: Vec<El>, t: &Theme) -> E
         .gap(8.0)
         .center_y()
         .label(it.says());
+    // A link or selectable row is itself the focusable item, so a `roving_list` can hold it;
+    // a row with buttons of its own stays text around them.
     r = if it.link {
-        r.role("link").hover(t.hover).press(t.press).focusable(true)
+        r.role("link").hover(t.hover).press(t.press).focusable(true).focus_selected(it.selected)
+    } else if it.selected && extra.is_empty() {
+        r.role("listitem").focusable(true).focus_selected(true)
     } else {
         r.role("listitem")
     };
