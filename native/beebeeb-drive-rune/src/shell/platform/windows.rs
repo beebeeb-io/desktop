@@ -390,3 +390,8 @@ pub(super) fn pc_idle() -> Option<Duration> {
     let now = unsafe { GetTickCount() };
     Some(Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime))))
 }
+
+/// `WM_SETTINGCHANGE`: re-read the Windows contrast theme. True if it changed, so the app redraws.
+pub(super) fn on_setting_change() -> bool {
+    super::windows_contrast::refresh()
+}
