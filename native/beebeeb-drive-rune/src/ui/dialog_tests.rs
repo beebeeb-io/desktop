@@ -530,7 +530,7 @@ fn card_keeps_its_keys_and_boxes() {
 
 #[test]
 fn old_presets_press_their_enter_button() {
-    use super::{account_set as set, settings_dialog as sd};
+    use crate::ui::{account_set as set, settings_dialog as sd};
     fn unsaved(t: &Theme) -> El {
         set::dialog_enter("U", 440.0, "U", "words", vec![], vec![(btn(0, "Save", t), false), (btn(1, "Discard", t), false), (btn(2, "Cancel", t), true)], Some(0), t)
     }
