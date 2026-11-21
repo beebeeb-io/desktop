@@ -163,8 +163,11 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     // Lists are numbered in the order the pane draws them.
     let mut list = 0;
     if matches!(crop, Crop::Whole | Crop::FromDevices) {
-        children.push(devices(list, &bw.devices, t));
-        list += 1;
+        // No source of other devices' reports: no card, never one with zero rows.
+        if !bw.devices.is_empty() {
+            children.push(devices(list, &bw.devices, t));
+            list += 1;
+        }
     }
     if crop != Crop::Head {
         children.push(limits(

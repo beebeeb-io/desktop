@@ -470,6 +470,11 @@ fn field_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     }
     match ev.key {
+        // Esc clears the words first, then closes.
+        Key::Escape if !s.search.text.is_empty() => {
+            s.search = TextEdit::new("");
+            true
+        }
         Key::Escape => {
             close(s, tx);
             true
@@ -558,6 +563,9 @@ fn recent_key(s: &mut State, key: &str, ev: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
+/// Results one PageUp or PageDown moves.
+const PAGE: usize = 10;
+
 /// The results' keys, with focus on a result or nowhere.
 fn results_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let hits = hits(s);
@@ -584,6 +592,19 @@ fn results_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Up => select(s, &hits, at - 1, tx),
         Key::Home => select(s, &hits, 0, tx),
         Key::End => select(s, &hits, last, tx),
+        Key::PageDown => select(s, &hits, (at + PAGE).min(last), tx),
+        Key::PageUp => select(s, &hits, at.saturating_sub(PAGE), tx),
+        // Typed letters jump to the next result whose name starts with them.
+        Key::Text(ref t) if t.chars().count() == 1 && !t.trim().is_empty() => {
+            let t = t.to_lowercase();
+            let at_t = (1..=hits.len())
+                .map(|d| (at + d) % hits.len())
+                .find(|i| hits[*i].name.to_lowercase().starts_with(&t));
+            match at_t {
+                Some(i) => select(s, &hits, i, tx),
+                None => return false,
+            }
+        }
         Key::Enter => return open_result(s, &hits, at),
         _ => return false,
     }

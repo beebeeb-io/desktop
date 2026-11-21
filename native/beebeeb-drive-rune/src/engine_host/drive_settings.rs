@@ -74,7 +74,7 @@ use beebeeb_engine::sync_view::{Explorer, SyncView};
 use super::log;
 use super::scaffold::not_wired;
 use crate::frames::settings::Pane;
-use crate::frames::settings::bandwidth_data::{Bandwidth, Direction, History, SpeedTest, Step};
+use crate::frames::settings::bandwidth_data::{live_flows, Bandwidth, Direction, History, SpeedTest, Step};
 use crate::frames::settings::diagnostics::{Bundle, Diagnostics};
 use crate::frames::settings::drive::{
     Control, DriveSettings, Insights, InsightsData, Kept, KeptOnPc, KindShare, LargeFile, Limit, Repair, Storage,
@@ -99,6 +99,25 @@ pub use tools::SPEED_TEST_ON;
 mod tests;
 
 /// How recently insights must have been read for `opened` not to ask again.
+/// How often Bandwidth's "Right now" reads the engine's newest transfer sample while the pane is shown.
+const RATE_EVERY: Duration = Duration::from_secs(2);
+/// A transfer sample older than this is no "right now" (the recorder samples every 20 seconds).
+const RATE_FRESH_SECS: i64 = 45;
+
+/// The engine's newest transfer rate (up, down bytes per second); `None`: nothing recorded, or too old to be now.
+fn read_rate<E: DriveEngine>(engine: &E) -> Option<(u64, u64)> {
+    let sample = engine
+        .local_state(|db| db.latest_bandwidth_sample())
+        .ok()
+        .and_then(Result::ok)
+        .flatten()?;
+    if chrono::Local::now().timestamp() - sample.sampled_at > RATE_FRESH_SECS {
+        return None;
+    }
+    let secs = u64::from(sample.period_secs.max(1));
+    Some((sample.up_bytes / secs, sample.down_bytes / secs))
+}
+
 pub const INSIGHTS_FRESH_FOR: Duration = Duration::from_secs(30);
 /// The largest files the page lists by name; the rest of the top 50 is "And N more, down to …".
 const LARGEST_SHOWN: usize = 7;
@@ -121,6 +140,7 @@ pub const OPEN_AT_LOGIN_FAILED: &str = "Couldn't change Open at login. Try again
 pub const CHANGE_LOCKED: &str = "Unlock Beebeeb to change this.";
 pub const LIMIT_FAILED: &str = "Couldn't change the limit. Try again.";
 /// A press on a control this version does not draw: said, never done.
+pub const METERED_FAILED: &str = "Couldn't change the setting. Try again.";
 pub const METERED_NOT_AVAILABLE: &str = "Not available in this version yet.";
 /// How far back the Bandwidth pane's traffic goes, and how long one of its buckets is.
 const TRAFFIC_HOURS: i64 = 20;
@@ -155,6 +175,14 @@ pub trait DriveEngine: Send + Sync + 'static {
     fn limits(&self) -> Result<TransferLimits, String>;
     /// WRITES the settings file: change the limits, under `session` and no other. A worker's.
     fn set_limits(&self, session: SessionGeneration, change: TransferLimitsChange) -> Result<TransferLimits, String>;
+    /// Whether sync pauses on a metered network (the settings file's `metered`; none stored: it does not). A worker's.
+    fn metered_pause(&self) -> Result<bool, String> {
+        Err("not available".into())
+    }
+    /// WRITES the settings file: pause sync on metered networks or not, under `session` and no other. A worker's.
+    fn set_metered_pause(&self, _session: SessionGeneration, _pause: bool) -> Result<(), String> {
+        Err("not available".into())
+    }
     /// Repair Beebeeb in File Explorer under `session`: sync stops and starts again, which registers the folder.
     /// BLOCKS: a worker's.
     fn repair_explorer(&self, session: SessionGeneration) -> Result<(), ExplorerChangeRefused>;
@@ -214,6 +242,21 @@ impl<C: CredentialStores> DriveEngine for Engine<C> {
         self.set_transfer_limits_for(session, change)
             .map_err(|error| error.words().to_string())
     }
+    fn metered_pause(&self) -> Result<bool, String> {
+        let config = DesktopConfig::load_for(crate::shell::identity::engine_identity())?;
+        Ok(config.metered == Some(true))
+    }
+    fn set_metered_pause(&self, session: SessionGeneration, pause: bool) -> Result<(), String> {
+        if self.session_turn() != session {
+            return Err("the session moved on".into());
+        }
+        let path = DesktopConfig::path_for(crate::shell::identity::engine_identity())?;
+        DesktopConfig::update_at(&path, |config| {
+            let changed = config.metered != Some(pause);
+            config.metered = Some(pause);
+            (changed, ())
+        })
+    }
     fn repair_explorer(&self, session: SessionGeneration) -> Result<(), ExplorerChangeRefused> {
         Engine::repair_explorer_for(self, session)
     }
@@ -257,6 +300,8 @@ enum Ask {
     Bandwidth,
     /// Change this PC's transfer limits.
     Limits(TransferLimitsChange),
+    /// Pause sync on metered networks (`true`) or not.
+    Metered(bool),
     /// Repair, and turn off, Beebeeb in File Explorer.
     Repair,
     TurnOff,
@@ -277,6 +322,8 @@ enum Answer {
     /// The limits the settings file holds, and the traffic of the last 20 hours (`None`: the local state did not
     /// hand it out). `None`: the limits could not be read.
     Bandwidth(Option<(TransferLimits, Option<History>)>),
+    /// Whether sync pauses on a metered network, as the settings file holds it (`None`: not readable).
+    Metered(Option<bool>),
     OnThisPc(Option<OnThisPc>),
     OpenAtLogin(Option<bool>),
     Keep(Keep),
@@ -316,6 +363,12 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     trash: Option<u64>,
     /// The Bandwidth pane's limits and traffic, as last read (`None`: not read yet, or not readable).
     bandwidth: Option<(TransferLimits, Option<History>)>,
+    /// The settings file's "pause on metered networks"; none until read.
+    metered_pause: Option<bool>,
+    /// The engine's newest transfer rate (up, down bytes per second); none until read, and while nothing is
+    /// recorded or the sample is old. Sampled only while Bandwidth is shown.
+    rate: Option<(u64, u64)>,
+    rate_at: Option<Instant>,
     insights: Insights,
     keep: Keep,
     /// When insights were last answered: `opened(Insights)` re-asks when this is older than [`INSIGHTS_FRESH_FOR`].
@@ -350,6 +403,14 @@ pub struct EngineDriveSettings<E: DriveEngine> {
 }
 
 impl<E: DriveEngine> EngineDriveSettings<E> {
+    /// `base` with "Right now" filled from the engine's transfer rate and its metered hold.
+    fn live(&self, mut base: Bandwidth) -> Bandwidth {
+        let waiting = beebeeb_engine::power::current() == Some(beebeeb_engine::power::PausedFor::Metered);
+        (base.now, base.upload, base.download) = live_flows(self.rate, waiting);
+        base.waiting_metered = waiting;
+        base
+    }
+
     /// The source of the running app. Starts nothing: a pane reads when it opens.
     pub fn new(engine: Arc<E>, platform: Arc<dyn Platform>) -> Self {
         let (answers, inbox) = mpsc::channel();
@@ -367,6 +428,9 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             usage: None,
             trash: None,
             bandwidth: None,
+            metered_pause: None,
+            rate: None,
+            rate_at: None,
             insights: Insights::Loading,
             keep: Keep::Failed,
             insights_at: None,
@@ -637,7 +701,18 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
             }
             send(Answer::OpenAtLogin(platform.autostart_enabled().ok()));
         }
-        Ask::Bandwidth => send(Answer::Bandwidth(read_bandwidth(engine, &account))),
+        Ask::Bandwidth => {
+            send(Answer::Bandwidth(read_bandwidth(engine, &account)));
+            send(Answer::Metered(still_for(engine, &account).then(|| engine.metered_pause().ok()).flatten()));
+        }
+        Ask::Metered(pause) => {
+            if engine.set_metered_pause(session, pause).is_err() {
+                log("drive settings: the metered setting was not changed (the session moved on, or the settings file)");
+                refuse(METERED_FAILED);
+            }
+            // What the file holds now, changed or not.
+            send(Answer::Metered(still_for(engine, &account).then(|| engine.metered_pause().ok()).flatten()));
+        }
         Ask::Limits(change) => {
             // Under the session of the press and no other: the engine asks it again before it writes.
             if engine.set_limits(session, change).is_err() {
@@ -730,8 +805,8 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         match control {
             // The engine stores the setting and nothing honours it.
             Control::StatusOnFiles => false,
-            // No metered-network detection: a switch would do nothing.
-            Control::SyncOnMetered => false,
+            // The engine's tick holds sync on a metered network while the file says `metered`.
+            Control::SyncOnMetered => true,
             Control::SpeedTest => SPEED_TEST_ON,
             // No honest source for what previews hold or their limit: the row would read " of 0 GB".
             Control::PreviewsRow => false,
@@ -752,6 +827,8 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             self.usage = None;
             self.trash = None;
             self.bandwidth = None;
+            self.metered_pause = None;
+            self.rate = None;
             self.keep = Keep::Failed;
             self.insights_at = None;
             self.insights_reading = false;
@@ -817,6 +894,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
                 _ if !mine => {}
                 Answer::Trash(count) => self.trash = count,
                 Answer::Bandwidth(read) => self.bandwidth = read,
+                Answer::Metered(read) => self.metered_pause = read,
                 Answer::OnThisPc(on_pc) => self.on_pc = on_pc,
                 Answer::OpenAtLogin(on) => self.open_at_login = on,
                 Answer::Repaired(repair) => self.repair = repair,
@@ -828,6 +906,14 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         // App activity: a sample every 2 seconds while Diagnostics is shown; the rates are the engine's newest
         // bandwidth sample, read only when a sample is due.
         let sampling = self.activity.running();
+        // Bandwidth's "Right now": the newest sample, every 2 seconds while the pane is shown.
+        let rate_wanted = self.open == Some(Pane::Bandwidth) && self.mine();
+        if rate_wanted && self.rate_at.is_none_or(|at| at.elapsed() >= RATE_EVERY) {
+            self.rate_at = Some(Instant::now());
+            let rate = read_rate(&*self.engine);
+            changed |= rate != self.rate;
+            self.rate = rate;
+        }
         if sampling {
             let engine = &self.engine;
             let rates = || {
@@ -843,7 +929,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             };
             changed |= self.activity.tick(Instant::now(), rates);
         }
-        (changed, !self.idle() || sampling)
+        (changed, !self.idle() || sampling || rate_wanted)
     }
 
     /// The window left Settings: the App activity sampler stops and its samples go, whatever pane was open.
@@ -1028,7 +1114,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         let Some((limits, history)) = self.bandwidth.clone() else {
             return Bandwidth {
                 test: self.speed.clone(),
-                ..Bandwidth::default()
+                ..self.live(Bandwidth::default())
             };
         };
         Bandwidth {
@@ -1036,14 +1122,20 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             download_limit: mbps(limits.download_kib_per_s),
             history: history.unwrap_or_default(),
             test: self.speed.clone(),
-            ..Bandwidth::default()
+            sync_on_metered: self.metered_pause.map_or(true, |pause| !pause),
+            ..self.live(Bandwidth::default())
         }
     }
 
     /// No metered-network detection exists: no switch is drawn (`shows`), and a press that arrives anyway changes
     /// nothing and says so.
-    fn set_sync_on_metered(&mut self, _on: bool) {
-        self.toast = Some(METERED_NOT_AVAILABLE);
+    fn set_sync_on_metered(&mut self, on: bool) {
+        self.change(Ask::Metered(!on));
+    }
+
+    /// The engine's tick reads and honours the setting (`power::decide`).
+    fn metered_control(&self) -> bool {
+        true
     }
 
     /// Start the speed test against Beebeeb's own servers on a thread of its own (it takes up to 90 seconds and

@@ -284,6 +284,41 @@ impl Ui {
         ((self.width - 32.0 - (n - 1.0) * 3.0) / n).max(8.0)
     }
 
+    /// A photo's place (1-based) among every photo of the timeline, not only the lines in view.
+    pub fn position_of(&self, day: usize, index: usize) -> usize {
+        self.days.iter().take(day).map(|d| d.len).sum::<usize>() + index + 1
+    }
+
+    /// How many photos the timeline holds.
+    pub fn total(&self) -> usize {
+        self.days.iter().map(|d| d.len).sum()
+    }
+
+    /// Home, End, PageUp and PageDown: the first or last tile, or a screen of lines up or down.
+    fn jump_cursor(&mut self, key: &Key) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let at = self.cursor.and_then(|(day, index)| {
+            self.lines.iter().position(|l| l.day == day && l.start <= index && index < l.start + l.len)
+        });
+        let page = 5isize;
+        let line = match key {
+            Key::Home => 0,
+            Key::End => self.lines.len() - 1,
+            Key::PageUp => (at.unwrap_or(0) as isize - page).max(0) as usize,
+            _ => (at.unwrap_or(0) as isize + page).min(self.lines.len() as isize - 1) as usize,
+        };
+        let l = self.lines[line];
+        let column = match (key, self.cursor, at) {
+            (Key::Home, ..) => 0,
+            (Key::End, ..) => l.len - 1,
+            (_, Some((_, index)), Some(from)) => (index - self.lines[from].start).min(l.len - 1),
+            _ => 0,
+        };
+        self.cursor = Some((l.day, l.start + column));
+    }
+
     pub fn photo_at(&self, day: usize, index: usize) -> Option<Photo> {
         self.source.photo(self.filter, day, index)
     }
@@ -747,6 +782,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     if !s.photos.source.wired() {
         return crate::shell::placeholder::window(s, cx, crate::shell::registry::group_for(&s.shell.app));
     }
+    cx.web_focus();
     let t = tokens::theme(cx.system_dark());
     let ui = &s.photos;
     let mut front = Vec::new();
@@ -871,6 +907,21 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 ui.trash_open();
                 true
             }
+            Key::Function(2) => {
+                if let Some(id) = ui.viewer.as_ref().map(|v| v.id) {
+                    ui.ask(Intent::Rename(id));
+                }
+                true
+            }
+            // The menu key and Shift+F10 open More, the photo's menu.
+            Key::ContextMenu => {
+                ui.toggle_menu(Menu::More);
+                true
+            }
+            Key::Function(10) if ev.mods.shift => {
+                ui.toggle_menu(Menu::More);
+                true
+            }
             // Space closes a photo and plays or pauses a video (DW-0605, DW-0611).
             _ if space && video => {
                 ui.play_pause();
@@ -884,6 +935,41 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         };
     }
     match ev.key {
+        Key::Home | Key::End | Key::PageUp | Key::PageDown if plain => {
+            ui.jump_cursor(&ev.key);
+            true
+        }
+        // Shift+arrow extends: the tile moved onto is checked. Ctrl+Space toggles the tile under the cursor.
+        Key::Left | Key::Right | Key::Up | Key::Down if ev.mods.shift && !ev.mods.cmd && !ev.mods.alt => {
+            let (dx, dy) = match ev.key {
+                Key::Left => (-1, 0),
+                Key::Right => (1, 0),
+                Key::Up => (0, -1),
+                _ => (0, 1),
+            };
+            if ui.cursor.is_none() {
+                ui.move_cursor(0, 0);
+            }
+            if let Some((day, index)) = ui.cursor
+                && !ui.selected.contains_key(&ui.photo_at(day, index).map_or(PhotoId(u64::MAX), |p| p.id))
+            {
+                ui.check_tile(day, index);
+            }
+            ui.move_cursor(dx, dy);
+            if let Some((day, index)) = ui.cursor
+                && !ui.selected.contains_key(&ui.photo_at(day, index).map_or(PhotoId(u64::MAX), |p| p.id))
+            {
+                ui.check_tile(day, index);
+            }
+            true
+        }
+        _ if space && ev.mods.ctrl => match ui.cursor {
+            Some((day, index)) => {
+                ui.check_tile(day, index);
+                true
+            }
+            None => false,
+        },
         Key::Escape if ui.selecting => {
             ui.end_selecting();
             true

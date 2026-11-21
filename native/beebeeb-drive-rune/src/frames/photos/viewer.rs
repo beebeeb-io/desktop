@@ -54,6 +54,7 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
             row()
                 .key("ph-seg")
                 .role("tablist")
+                .focus_group()
                 .label("Rendition")
                 .padding(2.0)
                 .radius(10.0)

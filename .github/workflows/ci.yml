@@ -608,16 +608,14 @@ jobs:
           fi
 
       # macOS: the crate must compile with every target (tests included). Its tests that open an Engine are
-      # refused on macOS under the test identity until dc-084 lands, so the run is reported but does not fail the
-      # leg yet; once 084 is in, delete `continue-on-error` below and the run is blocking.
+      # refused on macOS under the test identity unless the macos-test-engine dev feature is on (dc-084, in).
       - name: Check the native app (macOS)
         if: runner.os == 'macOS'
         working-directory: native/beebeeb-drive-rune
         run: cargo check --locked --all-targets
 
-      - name: Run the native app's tests (macOS, not blocking until dc-084)
+      - name: Run the native app's tests (macOS)
         if: runner.os == 'macOS'
-        continue-on-error: true
         working-directory: native/beebeeb-drive-rune
         env:
           TMPDIR: ${{ runner.temp }}/beebeeb-tmp

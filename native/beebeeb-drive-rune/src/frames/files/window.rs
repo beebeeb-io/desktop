@@ -262,8 +262,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     } else {
         // The folder as a grid, where the person chose that view (`frames::global::grid`, DW-0119).
         body = body.child(crate::frames::global::grid_body(s, &t).unwrap_or_else(|| {
-            col()
-                .key("file-list-col")
+            // F6 stop: the list pane, its first Tab stop is the rows.
+            crate::ui::focus::pane(col(), "pane-list")
                 .grow(1.0)
                 .min_w(0.0)
                 .h_full()
@@ -303,7 +303,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 }
                 (item, facts)
             });
-            body = body.child(if s.selects_several() {
+            let details_pane = if s.selects_several() {
                 let items: Vec<_> = s
                     .selected_rows()
                     .iter()
@@ -312,7 +312,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 select_bar::panel(&items, &t)
             } else {
                 details::details_pane(facts, &t)
-            });
+            };
+            body = body.child(crate::ui::focus::pane(col().h_full().child(details_pane), "pane-details"));
         }
     }
 
@@ -323,7 +324,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar::toolbar(s, &t, 0.0))
+        .child(crate::ui::focus::pane(
+            col().w_full().child(toolbar::toolbar(s, &t, 0.0)),
+            "pane-toolbar",
+        ))
         // The one banner of the whole window, or the loading strip (`frames::global`).
         .children(
             super::browse_states::card(s, &t)
