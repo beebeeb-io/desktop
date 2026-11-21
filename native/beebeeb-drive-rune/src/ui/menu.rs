@@ -140,6 +140,38 @@ pub fn height(entries: &[Entry]) -> f32 {
             .sum::<f32>()
 }
 
+/// Where the top-left of a menu of `size` goes when it opens at the point `at` inside a window of
+/// `win`: at the point, moved back in when it would run past the right or bottom edge (flipped
+/// up or left of the point if there is room there), never past the top-left edge. `(x, y)` pairs.
+pub fn place_at(at: (f32, f32), size: (f32, f32), win: (f32, f32)) -> (f32, f32) {
+    let fit = |p: f32, len: f32, max: f32| {
+        if p + len <= max {
+            p
+        } else if p - len >= 0.0 {
+            p - len
+        } else {
+            (max - len).max(0.0)
+        }
+    };
+    (fit(at.0, size.0, win.0), fit(at.1, size.1, win.1))
+}
+
+/// Where a menu of `size` goes under the element `anchor` (`x, y, w, h`): its left edge on the
+/// element's, just below it (`gap`); above it when there is no room below; shifted left to stay inside `win`.
+pub fn place_under(anchor: (f32, f32, f32, f32), size: (f32, f32), win: (f32, f32), gap: f32) -> (f32, f32) {
+    let (ax, ay, _aw, ah) = anchor;
+    let x = ax.min(win.0 - size.0).max(0.0);
+    let below = ay + ah + gap;
+    let y = if below + size.1 <= win.1 {
+        below
+    } else if ay - gap - size.1 >= 0.0 {
+        ay - gap - size.1
+    } else {
+        (win.1 - size.1).max(0.0)
+    };
+    (x, y)
+}
+
 /// The key of the entry `index` of the menu keyed `key` (`<key>-item-<n>`: separators are not
 /// counted), so its owner can put keyboard focus on the highlighted item.
 pub fn item_key(key: &str, entries: &[Entry], index: usize) -> Option<String> {
@@ -379,3 +411,7 @@ pub fn danger_ink(t: &Theme) -> Color {
         rune::oklch(0.48, 0.19, 25.0)
     }
 }
+
+#[cfg(test)]
+#[path = "menu_tests.rs"]
+mod tests;
