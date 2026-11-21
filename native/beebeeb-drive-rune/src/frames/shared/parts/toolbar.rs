@@ -99,6 +99,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
             details: Details::NotHere,
             on_details: None,
             inert: false,
+            gate_closed: false,
             // These sections show no folder: the Beebeeb location.
             on_explorer: Box::new(tb::open_beebeeb_location),
             // New is unavailable in Trash: drawn at 40 %, not focusable.
