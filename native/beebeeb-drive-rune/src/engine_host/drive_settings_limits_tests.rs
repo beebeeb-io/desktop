@@ -240,3 +240,22 @@ fn a_speed_limit_keeps_its_megabits_through_the_engines_unit() {
     }
     assert_eq!(kib_per_s(Some(10)), 1_220);
 }
+
+#[test]
+fn bandwidth_pane_shows_the_live_rate_read_from_the_transfer_board() {
+    let fake = Fake::new();
+    *fake.board.lock().unwrap() = Some((0, 0));
+    let mut source = open_bandwidth(&fake);
+    assert!(source.bandwidth().upload.speed.is_none(), "nothing moved yet: a dash");
+
+    // An upload moved 20 MB and a download 5 MB in the 10 seconds since the last read.
+    *fake.board.lock().unwrap() = Some((20_000_000, 5_000_000));
+    let back = Duration::from_secs(10);
+    source.rate_at = source.rate_at.map(|at| at - back);
+    source.totals = source.totals.map(|(at, up, down)| (at - back, up, down));
+    source.pump(0.0);
+    let pane = source.bandwidth();
+    assert_eq!(pane.upload.speed, Some(("2.0".into(), "MB/s".into())));
+    assert_eq!(pane.download.speed, Some(("500".into(), "KB/s".into())));
+    assert_eq!(pane.now, "Syncing");
+}

@@ -90,6 +90,8 @@ struct Fake {
     usage: Mutex<Result<(i64, i64), String>>,
     trash: Mutex<Result<u64, String>>,
     broken: AtomicBool,
+    /// The transfer board's (upload, download) bytes done; `None`: no board.
+    board: Mutex<Option<(u64, u64)>>,
     syncing: AtomicBool,
     paused: Mutex<Vec<bool>>,
     kept_calls: Mutex<Vec<(String, bool)>>,
@@ -137,6 +139,7 @@ impl Fake {
             usage: Mutex::new(Ok((240 * GB, 1_000 * GB))),
             trash: Mutex::new(Ok(3)),
             broken: AtomicBool::new(false),
+            board: Mutex::new(None),
             syncing: AtomicBool::new(true),
             paused: Mutex::new(Vec::new()),
             kept_calls: Mutex::new(Vec::new()),
@@ -182,6 +185,9 @@ impl DriveEngine for Fake {
         let answer = read(&db);
         self.after_read.pass();
         Ok(answer)
+    }
+    fn transfer_totals(&self) -> Option<(u64, u64)> {
+        *self.board.lock().unwrap()
     }
     fn trash_count(&self, _session: SessionGeneration) -> Result<u64, String> {
         self.trash.lock().unwrap().clone()
