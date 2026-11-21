@@ -120,6 +120,11 @@ pub trait TrashSource {
     fn count(&self) -> Option<usize> {
         Some(self.totals().items)
     }
+    /// The server's own count, for the sidebar of every other window (ux-55). `None`: not known, or a source
+    /// that is not an engine's (a sample is never shown there).
+    fn server_count(&self) -> Option<usize> {
+        None
+    }
     /// Whether Empty Trash, Details, Preview and Delete permanently can do anything here. `false`: pressing them
     /// says "not available yet" instead.
     fn actions_available(&self) -> bool {
