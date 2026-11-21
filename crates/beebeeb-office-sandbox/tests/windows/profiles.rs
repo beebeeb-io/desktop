@@ -3,7 +3,7 @@
 
 use super::*;
 
-// ── profiles (decision 2541): the system-decoder profile adds registry reads and nothing else ─────────────
+// ── profiles (decision 2541): the system-decoder profile adds registry reads and COM, and nothing else ───────
 
 const EVERY_PROFILE: [Profile; 3] = [
     Profile::NoCapabilities,
@@ -13,7 +13,8 @@ const EVERY_PROFILE: [Profile; 3] = [
 
 /// A loopback connection refused: before any socket exists (no capability, measured), or by the system at the
 /// connection (`registryRead` with `lpacCom`, and the five HEVC capabilities: 10013, measured by the media spike).
-/// `registryRead` alone was not measured on the network: one of the two, and the listener counts nothing.
+/// `registryRead` with `lpacCom` alone (no HEVC) was not measured on the network: one of the two, and the listener
+/// counts nothing.
 const SYSTEM_DECODER_LOOPBACK_REFUSED: [&str; 2] = [NETWORK_REFUSED, "err 10013"];
 
 /// Keys every Windows has: the machine's, the classes' and the user's environment (the spike opened these too).
@@ -227,4 +228,26 @@ fn the_token_holds_exactly_the_profiles_capabilities() {
     }
     // The instrument tells the three profiles apart.
     assert_eq!(counts, [0, 1, 5]);
+}
+
+/// Windows' decoders start in the system-decoder profile, with and without HEVC: COM (`lpacCom`, Guus 2026-11-21),
+/// Media Foundation, Microsoft's AAC decoder (a video's sound) and WIC (HEIC and camera RAW pictures). The default
+/// profile cannot start them. The plain probe first: the instrument can say `ok`.
+#[test]
+fn windows_decoders_start_in_the_system_decoder_profile_only() {
+    let _serial = serial();
+    let mut plain = Probe::plain();
+    assert_eq!(plain.attempt("decoders"), "ok", "the instrument can say ok: the plain probe starts them");
+    drop(plain);
+    let mut counted = 0;
+    for profile in EVERY_PROFILE {
+        let answer = Probe::confined_as(profile).attempt("decoders");
+        if profile == Profile::NoCapabilities {
+            assert!(answer.starts_with("err "), "{profile:?}: {answer}");
+        } else {
+            assert_eq!(answer, "ok", "{profile:?}");
+        }
+        counted += 1;
+    }
+    assert_eq!(counted, EVERY_PROFILE.len());
 }

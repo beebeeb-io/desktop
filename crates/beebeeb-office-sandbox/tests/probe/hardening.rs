@@ -492,3 +492,90 @@ pub(crate) fn memory() -> String {
 pub(crate) fn memory() -> String {
     "err unsupported".into()
 }
+
+/// Windows' decoders starting in this process, through libraries loaded at run time: COM (multithreaded), Media
+/// Foundation, Microsoft's AAC decoder and the WIC imaging factory (HEIC and camera RAW pictures), each made and let go.
+/// `ok`, or the first step that failed with its code (`err load|lookup <system code>`, `err <step> <hresult hex>`).
+/// The system-decoder profile must answer `ok` (it holds `lpacCom`); the default profile must not.
+#[cfg(windows)]
+pub(crate) fn decoders() -> String {
+    use std::ffi::c_void;
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows_sys::core::GUID;
+    type CoInitializeEx = unsafe extern "system" fn(*const c_void, u32) -> i32;
+    type CoCreateInstance =
+        unsafe extern "system" fn(*const GUID, *mut c_void, u32, *const GUID, *mut *mut c_void) -> i32;
+    type MfStartup = unsafe extern "system" fn(u32, u32) -> i32;
+    type MfShutdown = unsafe extern "system" fn() -> i32;
+    type Release = unsafe extern "system" fn(*mut c_void) -> u32;
+    /// `MF_VERSION` (SDK 2, API 0x70) and `MFSTARTUP_NOSOCKET`, as the media helper starts it.
+    const MF_VERSION: u32 = 0x0002_0070;
+    const MFSTARTUP_NOSOCKET: u32 = 1;
+    const COINIT_MULTITHREADED: u32 = 0;
+    const CLSCTX_INPROC_SERVER: u32 = 1;
+    /// `IUnknown`.
+    const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
+    /// `CLSID_CMSAACDecMFT`: Microsoft's AAC decoder.
+    const CLSID_AAC_DECODER: GUID = GUID::from_u128(0x32d186a7_218f_4c75_8876_dd77273a8999);
+    /// `CLSID_WICImagingFactory`.
+    const CLSID_WIC_FACTORY: GUID = GUID::from_u128(0xcacaf262_9370_4615_a13b_9f5539da4c0a);
+
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    // SAFETY: terminated UTF-16 names; each result is checked before use.
+    let (ole32, mfplat) = unsafe { (LoadLibraryW(wide("ole32.dll").as_ptr()), LoadLibraryW(wide("mfplat.dll").as_ptr())) };
+    if ole32.is_null() || mfplat.is_null() {
+        return format!("err load {}", last_error());
+    }
+    // SAFETY: each name is a terminated ASCII string and each module is loaded; each function is turned into the
+    // signature the system documents for it, and only when it was found.
+    let (co_initialize, co_create, mf_startup, mf_shutdown) = unsafe {
+        let (Some(init), Some(create), Some(startup), Some(shutdown)) = (
+            GetProcAddress(ole32, c"CoInitializeEx".as_ptr().cast()),
+            GetProcAddress(ole32, c"CoCreateInstance".as_ptr().cast()),
+            GetProcAddress(mfplat, c"MFStartup".as_ptr().cast()),
+            GetProcAddress(mfplat, c"MFShutdown".as_ptr().cast()),
+        ) else {
+            return format!("err lookup {}", last_error());
+        };
+        (
+            std::mem::transmute::<_, CoInitializeEx>(init),
+            std::mem::transmute::<_, CoCreateInstance>(create),
+            std::mem::transmute::<_, MfStartup>(startup),
+            std::mem::transmute::<_, MfShutdown>(shutdown),
+        )
+    };
+    // SAFETY: no reserved pointer; this thread joins the multithreaded apartment (and stays in it until exit).
+    let hr = unsafe { co_initialize(std::ptr::null(), COINIT_MULTITHREADED) };
+    if hr < 0 {
+        return format!("err com {:08x}", hr as u32);
+    }
+    // SAFETY: the version these constants describe; no sockets.
+    let hr = unsafe { mf_startup(MF_VERSION, MFSTARTUP_NOSOCKET) };
+    if hr < 0 {
+        return format!("err mf {:08x}", hr as u32);
+    }
+    for (step, class) in [("aac", CLSID_AAC_DECODER), ("wic", CLSID_WIC_FACTORY)] {
+        let mut object: *mut c_void = std::ptr::null_mut();
+        // SAFETY: valid GUIDs, no outer object, an in-process server; `object` receives one reference on success.
+        let hr = unsafe { co_create(&class, std::ptr::null_mut(), CLSCTX_INPROC_SERVER, &IID_IUNKNOWN, &mut object) };
+        if hr < 0 || object.is_null() {
+            // SAFETY: Media Foundation was started above.
+            unsafe { mf_shutdown() };
+            return format!("err {step} {:08x}", hr as u32);
+        }
+        // SAFETY: `object` is a live COM object; slot 2 of every COM vtable is `Release`, called once for the one
+        // reference this call took.
+        unsafe {
+            let vtable = *object.cast::<*const Release>();
+            (*vtable.add(2))(object);
+        }
+    }
+    // SAFETY: Media Foundation was started above.
+    unsafe { mf_shutdown() };
+    "ok".into()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn decoders() -> String {
+    "err unsupported".into()
+}
