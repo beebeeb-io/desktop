@@ -753,6 +753,8 @@ impl<S: Starter> Worker<S> {
             (Asked::Open, Message::Opened(opened)) if pages => self.opened(opened),
             (Asked::Open, Message::OpenedSheets(opened)) if !pages => self.opened_sheets(opened),
             (Asked::Open, Message::Error(error)) => self.open_refused(error.code),
+            // The editor's guard: the file opens in the viewer instead, and the window says why.
+            (Asked::Open, Message::EditGuarded(guarded)) => self.edit_guarded(guarded),
             (Asked::Edit(asked), message) => self.edit_answer(asked, message),
             // Cancelled: its answer is checked for id, order and kind (above), then discarded with its section.
             (Asked::Render { .. } | Asked::Anchor { .. }, Message::Rendered(_) | Message::Error(_)) if cancelled => {

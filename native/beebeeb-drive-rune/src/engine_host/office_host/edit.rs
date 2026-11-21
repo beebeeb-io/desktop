@@ -22,7 +22,7 @@ use zeroize::{Zeroize, Zeroizing};
 use std::path::Path;
 
 use super::super::{
-    Confined, DocKind, EditKind, EditOp, Edited, HitMode, OfficeHost, OfficeState, Purpose, Registry, RequestId,
+    Confined, DocKind, DroppedPart, EditKind, EditOp, Edited, HitMode, OfficeHost, OfficeState, Purpose, Registry, RequestId,
     Template, Timeouts, Wake, lock, open_mode, open_mode_held,
 };
 use super::restart::Cadence;
@@ -401,9 +401,19 @@ impl OfficeHost {
         lock(&self.shared.inner).read_only
     }
 
+    /// What the editor's guard said editing this file would drop (`EditGuarded`): the document opened in the viewer
+    /// instead, read-only. Empty: the file was not guarded.
+    pub fn guarded(&self) -> Vec<DroppedPart> {
+        lock(&self.shared.inner).guarded.clone()
+    }
+
     /// An editing session whose document is open.
     fn ready(&self) -> Result<(), EditRefused> {
-        if self.editing && !lock(&self.shared.inner).read_only && self.is_open() {
+        let (read_only, guarded) = {
+            let inner = lock(&self.shared.inner);
+            (inner.read_only, !inner.guarded.is_empty())
+        };
+        if self.editing && !read_only && !guarded && self.is_open() {
             Ok(())
         } else {
             Err(EditRefused::NotEditing)
@@ -441,6 +451,23 @@ impl<S: Starter> Worker<S> {
             Mode::Edit(kind) => Message::OpenEdit(office::OpenEdit { doc, kind }),
             _ => Message::Open(office::Open { kind: self.kind, doc }),
         })
+    }
+
+    /// The answer to `OpenEdit` for a file the editor would damage on save (`EditGuarded`): no session exists and the
+    /// helper ends. The parts are kept for the window to name, and the same section opens again in the viewer
+    /// (`Open`, read-only) with a new helper. Only an `OpenEdit` may be answered so; a guard that names nothing
+    /// fails its check.
+    pub(super) fn edit_guarded(&mut self, guarded: office::EditGuarded) {
+        if !matches!(self.mode, Mode::Edit(_)) || guarded.dropped.is_empty() {
+            return self.stopped(Stop::Protocol);
+        }
+        self.kill_run();
+        self.mode = Mode::View;
+        // Nothing to restart from: the viewer never edits.
+        self.held = None;
+        lock(&self.shared.inner).guarded = guarded.dropped;
+        self.phase = Phase::Opening;
+        self.start_helper();
     }
 
     pub(super) fn editable(&self) -> bool {

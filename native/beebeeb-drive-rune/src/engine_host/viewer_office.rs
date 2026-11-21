@@ -121,6 +121,10 @@ pub(crate) trait Host: Send {
         Vec::new()
     }
     /// Where this editing session's unsaved work is sealed when a lock comes (the host's worker calls it).
+    /// What the editor's guard said editing would drop (the file opened read-only in the viewer). Default: nothing.
+    fn guarded(&self) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
+        Vec::new()
+    }
     fn set_flush_sink(&mut self, _sink: crate::engine_host::office_host::FlushSink) {}
 }
 
@@ -345,6 +349,10 @@ impl Host for Live {
 
     fn set_flush_sink(&mut self, sink: crate::engine_host::office_host::FlushSink) {
         self.host.set_flush_sink(sink);
+    }
+
+    fn guarded(&self) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
+        self.host.guarded()
     }
 
     fn poll_edit(&mut self) -> Vec<HostEdit> {
@@ -946,7 +954,15 @@ impl OfficeView {
 
     /// An editing session whose document is open (the renderer answered with its pages or sheets).
     pub(crate) fn can_edit(&self) -> bool {
-        self.editing.is_some() && matches!(self.model.borrow().phase, Phase::Pages(_) | Phase::Sheets(_))
+        self.editing.is_some()
+            && matches!(self.model.borrow().phase, Phase::Pages(_) | Phase::Sheets(_))
+            && self.guarded().is_empty()
+    }
+
+    /// What the editor's guard said editing would drop: the document is open read-only in the viewer. Empty: not
+    /// guarded (or no renderer).
+    pub(crate) fn guarded(&self) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
+        self.host.borrow().as_ref().map(|host| host.guarded()).unwrap_or_default()
     }
 
     /// The renderer ended or failed (not opening, not open): nothing more comes of it.
