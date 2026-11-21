@@ -13,12 +13,23 @@ use rune::{El, col, el, row};
 const SIDEBAR_W: f32 = 220.0;
 
 pub fn sidebar(s: &State, t: &Theme) -> El {
+    sidebar_with(s, t, None)
+}
+
+/// The Shared and Trash windows: the same sidebar, with those two figures from the lane's own
+/// source, `(invitations waiting, items in Trash)` (`None`: no figure, as for an unknown count).
+pub fn sidebar_with(s: &State, t: &Theme, lane: Option<(Option<u32>, Option<u32>)>) -> El {
     let storage = s.storage;
     let active = s.sidebar_section;
     // What the source does not know is left out: no count, no split, no account. Never a sample.
     let counts = s.actions.source.counts();
-    let waiting = counts.map(|c| c.shared_waiting).filter(|&n| n > 0);
-    let trash = counts.map(|c| c.trash).filter(|&n| n > 0);
+    let (waiting, trash) = match lane {
+        Some((w, tr)) => (w.filter(|&n| n > 0), tr.filter(|&n| n > 0)),
+        None => (
+            counts.map(|c| c.shared_waiting).filter(|&n| n > 0),
+            counts.map(|c| c.trash).filter(|&n| n > 0),
+        ),
+    };
     let kept = counts.map(|c| c.available_offline).filter(|&n| n > 0);
     let split = s.actions.source.storage_split().filter(|_| s.storage_known);
 

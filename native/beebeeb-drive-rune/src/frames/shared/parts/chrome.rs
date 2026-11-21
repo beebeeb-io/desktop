@@ -43,7 +43,14 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .child(crate::frames::files::sidebar::sidebar(s, t))
+                .child(crate::frames::files::sidebar::sidebar_with(
+                    s,
+                    t,
+                    Some((
+                        Some(s.frames.shared.source.invitations().len() as u32),
+                        s.frames.trash.source.count().map(|n| n as u32),
+                    )),
+                ))
                 .child(main),
         );
     if let Some(layer) = layer {
