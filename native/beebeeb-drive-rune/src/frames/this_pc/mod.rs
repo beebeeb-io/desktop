@@ -204,7 +204,7 @@ impl Ui {
         self.source.kept_count()
     }
 
-    pub fn kept(&self) -> Vec<Kept> {
+    pub fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
         self.source.kept()
     }
 
@@ -335,6 +335,11 @@ impl Ui {
         true
     }
 
+    /// Try again after a failed read: the source reads again.
+    pub fn read_again(&mut self) {
+        self.source.refresh();
+    }
+
     pub fn open_menu(&mut self, row: usize, at: (f32, f32)) {
         if row < self.kept_count() {
             self.selected = Some(row);
@@ -349,7 +354,7 @@ impl Ui {
     /// Pick an item of the open row menu.
     pub fn pick(&mut self, item: usize) {
         let Some(menu) = self.menu.take() else { return };
-        let Some(kept) = self.source.kept().into_iter().nth(menu.row) else {
+        let Some(kept) = self.source.kept().get(menu.row).cloned() else {
             return;
         };
         match item {
@@ -361,7 +366,7 @@ impl Ui {
     }
 
     pub fn open_selected(&mut self) -> bool {
-        let Some(kept) = self.selected.and_then(|i| self.source.kept().into_iter().nth(i)) else {
+        let Some(kept) = self.selected.and_then(|i| self.source.kept().get(i).cloned()) else {
             return false;
         };
         self.ask(Intent::Open(kept.id));
@@ -404,7 +409,7 @@ pub fn carry_out(s: &mut State, tx: &mut Tx) -> bool {
     let asked = !intents.is_empty();
     for intent in intents {
         let refused = match intent {
-            // The window on Trash for a file that went there, else on Files.
+            // Trash for a file that went there, else Files with the item selected and in view.
             Intent::ShowInBeebeeb(id) => {
                 let trashed = s
                     .this_pc
@@ -412,8 +417,11 @@ pub fn carry_out(s: &mut State, tx: &mut Tx) -> bool {
                     .history()
                     .iter()
                     .any(|change| change.id == id && matches!(change.what, What::MovedToTrash { .. }));
-                let section = if trashed { Section::Trash } else { Section::Files };
-                host::dispatch(s, Event::Navigate(Route::section(section)));
+                if trashed {
+                    host::dispatch(s, Event::Navigate(Route::section(Section::Trash)));
+                } else {
+                    crate::frames::files::reveal::reveal(s, tx, &id);
+                }
                 None
             }
             Intent::ShowInFileExplorer(id) => s
@@ -448,7 +456,7 @@ pub fn carry_out(s: &mut State, tx: &mut Tx) -> bool {
 fn open_kept(s: &mut State, id: &str) -> Option<&'static str> {
     use crate::shell::app::{Event, Route};
 
-    let kept = s.this_pc.source.kept().into_iter().find(|kept| kept.id == id)?;
+    let kept = s.this_pc.source.kept().iter().find(|kept| kept.id == id).cloned()?;
     let item = offline::drive_item(&kept.id, &kept.name, kept.kind == source::Kind::Folder);
     if item.is_folder {
         let route = Route {
@@ -518,7 +526,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     // The selected kept ITEM and the one a menu is open for, before the lists change under them: a read lands between
     // polls, and an index would then name another item (the menu would act on it).
     let kept_ids: Vec<String> = if ui.selected.is_some() || ui.menu.is_some() {
-        ui.source.kept().into_iter().map(|k| k.id).collect()
+        ui.source.kept().iter().map(|k| k.id.clone()).collect()
     } else {
         Vec::new()
     };
@@ -526,7 +534,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let menu_item = ui.menu.as_ref().and_then(|m| kept_ids.get(m.row).cloned());
     let pumped = ui.source.pump();
     if pumped.changed && (chosen.is_some() || menu_item.is_some() || ui.selected.is_some() || ui.menu.is_some()) {
-        let now: Vec<String> = ui.source.kept().into_iter().map(|k| k.id).collect();
+        let now: Vec<String> = ui.source.kept().iter().map(|k| k.id.clone()).collect();
         let place = |id: Option<String>| id.and_then(|id| now.iter().position(|have| *have == id));
         ui.selected = place(chosen);
         match place(menu_item) {

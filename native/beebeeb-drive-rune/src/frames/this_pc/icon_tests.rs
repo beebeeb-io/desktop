@@ -4,7 +4,7 @@ use crate::theme::tokens;
 use crate::ui::kit;
 
 use super::super::source::{Change, Kind, Origin, What};
-use super::tile;
+use super::change_row;
 use chrono::NaiveDate;
 
 /// A clip in the history draws the registry's video icon in the video tint.
@@ -21,9 +21,9 @@ fn a_history_row_draws_its_icon_from_the_registry() {
         time: "09:39".into(),
     };
     kit::record();
-    let _ = tile("change-0", &change, &t);
+    let _ = change_row(0, &change, 0, 1, &t);
     let notes = kit::take();
-    let n = notes.get("change-0-icon").expect("icon note");
+    let n = notes.get("change-0-tile-icon").expect("icon note");
     assert!(n.icon.is_some());
     assert!(n.color == Some(tint_color(Tint::Video, false)));
 }

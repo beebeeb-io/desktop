@@ -611,8 +611,8 @@ fn going_from_one_section_to_the_other_asks_the_source_again() {
         fn retry(&mut self, _: &str) {}
         fn retry_all(&mut self) {}
         fn settle(&mut self, _: &str, _: Exit) {}
-        fn kept(&self) -> Vec<Kept> {
-            Vec::new()
+        fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+            std::borrow::Cow::Borrowed(&[])
         }
         fn remove_from_pc(&mut self, _: &str) {}
         fn remove_all_from_pc(&mut self) {}
@@ -667,8 +667,8 @@ impl ThisPcSource for NoLists {
     fn retry(&mut self, _: &str) {}
     fn retry_all(&mut self) {}
     fn settle(&mut self, _: &str, _: Exit) {}
-    fn kept(&self) -> Vec<Kept> {
-        Vec::new()
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&[])
     }
     fn remove_from_pc(&mut self, _: &str) {}
     fn remove_all_from_pc(&mut self) {}
@@ -826,8 +826,8 @@ impl ThisPcSource for Problems {
     fn settle(&mut self, problem: &str, exit: Exit) {
         self.1.lock().unwrap().push((problem.to_string(), exit));
     }
-    fn kept(&self) -> Vec<Kept> {
-        Vec::new()
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&[])
     }
     fn remove_from_pc(&mut self, _: &str) {}
     fn remove_all_from_pc(&mut self) {}
@@ -1071,8 +1071,8 @@ mod reread {
         fn retry(&mut self, _: &str) {}
         fn retry_all(&mut self) {}
         fn settle(&mut self, _: &str, _: Exit) {}
-        fn kept(&self) -> Vec<Kept> {
-            self.0.borrow().kept.clone()
+        fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+            std::borrow::Cow::Owned(self.0.borrow().kept.clone())
         }
         fn remove_from_pc(&mut self, _: &str) {}
         fn remove_all_from_pc(&mut self) {}
@@ -1090,7 +1090,7 @@ mod reread {
     }
 
     fn ids(rt: &Runtime<State>) -> Vec<String> {
-        rt.state.this_pc.source.kept().into_iter().map(|k| k.id).collect()
+        rt.state.this_pc.source.kept().iter().map(|k| k.id.clone()).collect()
     }
 
     fn window() -> (Runtime<State>, Rc<RefCell<Held>>) {
