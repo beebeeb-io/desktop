@@ -1029,8 +1029,9 @@ fn the_phrase_hint_names_another_device_only_where_the_source_has_the_door() {
 fn two_factor_then_the_recovery_phrase_never_says_the_account_changed() {
     let (mut rt, calls) = signed_in(Script::default());
     assert_eq!(ui(&mut rt).screen, Screen::TwoFactor { backup: false });
+    // The sixth digit is on its way to the engine (no fixture answer is queued: the test gives the answer below).
     ui(&mut rt).code.replace_text(board::TOTP);
-    ui(&mut rt).verify_code();
+    ui(&mut rt).verifying = true;
     // The engine's answer for this account: the code is right, the vault key is not on this PC.
     rt.update(|s, _| {
         let ui_ = s.signin.as_mut().expect("the sign-in window is open");
@@ -1044,7 +1045,8 @@ fn two_factor_then_the_recovery_phrase_never_says_the_account_changed() {
     rt.frame(0.0);
     assert!(ui(&mut rt).can_restore());
     assert!(!a11y(&rt).to_lowercase().contains("account changed"));
-    press(&mut rt, Key::Enter);
+    ui(&mut rt).restore();
+    ui(&mut rt).pump();
     assert!(calls.borrow().contains(&"restore"));
     assert_eq!(ui(&mut rt).take_intents(), vec![Intent::Next(NextAfterSignIn::Drive)]);
     assert!(!a11y(&rt).to_lowercase().contains("account changed"));
