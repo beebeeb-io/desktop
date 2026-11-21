@@ -94,6 +94,7 @@ pub fn toolbar(_s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> E
                 }
             }),
             inert: false,
+            gate_closed: false,
             on_explorer: Box::new(|s, _| {
                 let Some((id, name)) = super::ui(s).map(|ui| (ui.file.id.clone(), ui.file.name.clone())) else {
                     return;

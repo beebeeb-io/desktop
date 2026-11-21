@@ -2,10 +2,10 @@
 //! encryption mark, where it was decrypted, the facts, Available offline, Share and Version
 //! history. Built from `ui::detail_pane`'s parts; the facts are the source's.
 
-use rune::{El, Span, col, el, row};
+use rune::{El, Span, col, row};
 
 use super::source::OpenFile;
-use super::{Intent, style, ui};
+use super::{Intent, ui};
 use crate::State;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};

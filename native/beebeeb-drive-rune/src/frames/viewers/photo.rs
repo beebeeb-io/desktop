@@ -7,7 +7,7 @@ use rune::{Align, Color, El, Icon, SurfaceFit, TextStyle, col, el, row};
 
 use super::chrome::{Dot, Status};
 use super::source::{OpenFile, PhotoDoc, Picture};
-use super::{Intent, Ui, details, media, media_icons, style};
+use super::{Intent, Ui, details, media, media_icons};
 use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::{kit, pill};

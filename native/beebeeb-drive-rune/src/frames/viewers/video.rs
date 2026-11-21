@@ -9,7 +9,7 @@
 
 use beebeeb_media_protocol::Codec;
 use rune::tok::Family;
-use rune::{Align, Color, El, SurfaceFit, TextStyle, col, el, row};
+use rune::{Color, El, SurfaceFit, TextStyle, col, el, row};
 
 use super::chrome::{Dot, Status};
 use super::kinds::clock;
@@ -100,11 +100,6 @@ pub fn refusal_action_with(system_decoder_on: bool, why: &Refusal) -> &'static s
 pub fn refused_for(why: &Refusal, t: &Theme) -> El {
     let text = refusal_text::text(why);
     refused_with(&text.sentence, text.action, text.link, t)
-}
-
-/// The refusal's state: the words and "Open in another app\u{2026}" one press away.
-pub fn refused(words: &str, t: &Theme) -> El {
-    refused_with(words, OPEN_ELSEWHERE, None, t)
 }
 
 /// `store`: the Microsoft Store page to offer beside the button, only where the refusal says Windows lacks the

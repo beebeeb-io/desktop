@@ -131,17 +131,15 @@ pub fn body(ui: &Ui, t: &Theme) -> El {
     let body = col().key("viewer-body").grow(1.0).min_w(0.0).h_full().fill(t.bg);
     if total == 0 {
         // Nothing to list: said, never a header over a blank list.
-        let (title, words) = if ui.media.dir.is_empty() {
-            ("This archive is empty", "It holds no files or folders.")
-        } else {
-            ("This folder is empty", "Go back to see the rest of the archive.")
-        };
+        if ui.media.dir.is_empty() {
+            return super::states::empty_file(&ui.file.name, t);
+        }
         return body.center().child(view_state(
             ViewState::Empty {
                 key: "archive-empty",
                 icon: &media_icons::FILE_ARCHIVE,
-                title,
-                body: words,
+                title: "This folder is empty",
+                body: "Go back to see the rest of the archive.",
                 action: None,
             },
             t,
