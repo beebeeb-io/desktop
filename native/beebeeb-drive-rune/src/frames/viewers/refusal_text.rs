@@ -18,6 +18,11 @@ pub const HEVC_STORE_URL: &str = "https://apps.microsoft.com/search?query=HEVC%2
 /// Photos the app cannot draw (HEIC, RAW): said once at the top of Photos and on the viewer.
 pub const UNSHOWABLE: &str = "HEIC and RAW photos can\u{2019}t be shown in Beebeeb yet. Open them in your default app.";
 
+/// The Photos Original tab's words for a HEIC (ux-24: its own reason, not the combined one).
+pub const HEIC_WORDS: &str = "HEIC photos can\u{2019}t be shown at full size on this PC yet. This is the preview.";
+/// The same for a camera RAW.
+pub const RAW_WORDS: &str = "RAW photos can\u{2019}t be shown at full size on this PC yet. This is the camera\u{2019}s preview.";
+
 /// A refusal in full.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Text {
@@ -97,6 +102,20 @@ pub fn text_with(system_decoder_on: bool, why: &Refusal) -> Text {
             None,
             "no system media",
         ),
+        Refusal::TenBit => (
+            "This video is 10-bit H.264, which this PC can\u{2019}t play in Beebeeb. Open it in its default app.".into(),
+            OPEN_DEFAULT,
+            None,
+            "ten bit",
+        ),
+        Refusal::UnknownCodec => (
+            "This video uses a codec Beebeeb doesn\u{2019}t recognise. Open it in another app.".into(),
+            OPEN_ELSEWHERE,
+            None,
+            "unknown codec",
+        ),
+        Refusal::Heic => (HEIC_WORDS.into(), OPEN_DEFAULT, None, "heic"),
+        Refusal::Raw => (RAW_WORDS.into(), OPEN_DEFAULT, None, "raw"),
         Refusal::CouldNotPlay => (
             "Beebeeb could not play this file: it may be damaged, or the player stopped while opening it. Open it in \
              another app."
@@ -141,6 +160,10 @@ pub fn every_reason() -> Vec<Refusal> {
         Refusal::NoSystemDecoder(Codec::Hevc),
         Refusal::NoSystemDecoder(Codec::H264),
         Refusal::NoSystemMedia(Codec::Aac),
+        Refusal::TenBit,
+        Refusal::UnknownCodec,
+        Refusal::Heic,
+        Refusal::Raw,
         Refusal::CouldNotPlay,
         Refusal::NotSignedIn,
         Refusal::NeedsWindowsUpdate,
@@ -179,6 +202,37 @@ mod tests {
         assert!(off.sentence.contains("HEVC (H.265)") && !off.sentence.contains("Extensions"));
         assert_eq!(off.link, None);
         assert_eq!(text_with(true, &Refusal::NoSystemDecoder(Codec::Aac)).link, None);
+    }
+
+    /// Every variant is named in an exhaustive match (no wildcard arm), so a new reason cannot ship without a count here.
+    #[test]
+    fn every_variant_is_listed_in_every_reason() {
+        let n = every_reason()
+            .iter()
+            .map(|why| match why {
+                Refusal::NoDecoder(_) => 1,
+                Refusal::NoSystemDecoder(_) => 1,
+                Refusal::NoSystemMedia(_) => 1,
+                Refusal::TenBit => 1,
+                Refusal::UnknownCodec => 1,
+                Refusal::Heic => 1,
+                Refusal::Raw => 1,
+                Refusal::CouldNotPlay => 1,
+                Refusal::NotSignedIn => 1,
+                Refusal::NotInstalled => 1,
+                Refusal::NoSandbox => 1,
+                Refusal::NeedsWindowsUpdate => 1,
+            })
+            .sum::<usize>();
+        assert_eq!(n, 14);
+    }
+
+    #[test]
+    fn the_new_reasons_say_their_own_cause() {
+        assert!(text(&Refusal::TenBit).sentence.contains("10-bit"));
+        assert!(text(&Refusal::UnknownCodec).sentence.contains("recognise"));
+        assert!(text(&Refusal::Heic).sentence.contains("HEIC"));
+        assert!(text(&Refusal::Raw).sentence.contains("RAW"));
     }
 
     #[test]

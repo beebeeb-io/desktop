@@ -108,6 +108,8 @@ pub struct Track {
     /// FilmCraft's decoder refused the stream when the file opened (H.264 interlaced or 10-bit): it needs the
     /// system's decoder when its codec is in [`SYSTEM_FALLBACK`], and nothing here decodes it otherwise.
     pub refused: bool,
+    /// With `refused`: the refusal was the stream's 10-bit depth (FilmCraft's "bit depth" words), not interlacing.
+    pub ten_bit: bool,
 }
 
 /// What a track takes, given its route and whether FilmCraft refused it.
@@ -130,6 +132,7 @@ impl Track {
             codec,
             route: route_in(table, codec),
             refused: false,
+            ten_bit: false,
         }
     }
 
@@ -145,6 +148,7 @@ impl Track {
             codec,
             route,
             refused: false,
+            ten_bit: false,
         }
     }
 
@@ -258,8 +262,12 @@ pub fn decide(video: Option<Track>, audio: Option<Track>, system: SystemState) -
         };
     };
     match video.need() {
+        Need::Unavailable if video.codec == Codec::Other => return Decision::Error(ErrorCode::UnknownCodec),
         Need::Unavailable => return Decision::Error(ErrorCode::Unsupported(video.codec)),
         Need::NoDecoder => return Decision::Error(ErrorCode::NoDecoder),
+        Need::System if !available && video.refused && video.ten_bit && system != SystemState::NoSystemMedia => {
+            return Decision::Error(ErrorCode::TenBit);
+        }
         Need::System if !available => return Decision::Error(refusal(system, video.codec)),
         Need::System | Need::Ours => {}
     }

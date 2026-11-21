@@ -151,7 +151,8 @@ pub(crate) fn original_refused_for(name: &str) -> Option<&'static str> {
     }
     let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()).unwrap_or_default();
     Some(match ext.as_str() {
-        "heic" | "heif" => "HEIC photos can\u{2019}t be shown at full size on this PC yet. This is the preview.",
+        "heic" | "heif" => crate::frames::viewers::refusal_text::HEIC_WORDS,
+        "dng" | "cr2" | "cr3" | "arw" | "nef" | "raf" | "orf" | "rw2" => crate::frames::viewers::refusal_text::RAW_WORDS,
         _ => "This format can\u{2019}t be shown at full size on this PC yet. This is the preview.",
     })
 }

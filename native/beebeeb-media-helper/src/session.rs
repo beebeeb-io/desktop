@@ -200,7 +200,7 @@ fn open(
     let source = match filmcraft_source(reader, bare) {
         Ok(source) => source,
         Err(e) if h264_refused(&e) && map_error(&e, flags) != ErrorCode::ReadFailed => {
-            return Err(refused_at_open(table, system_on));
+            return Err(refused_at_open(table, system_on, h264_ten_bit(&e)));
         }
         Err(e) => return Err(map_error(&e, flags)),
     };
@@ -408,13 +408,19 @@ fn h264_refused(e: &MediaError) -> bool {
     matches!(e, MediaError::Unsupported(s) if s.starts_with(H264_REFUSED))
 }
 
+/// Whether FilmCraft's H.264 refusal is the stream's bit depth ("H.264: bit depth luma 10 ...").
+fn h264_ten_bit(e: &MediaError) -> bool {
+    matches!(e, MediaError::Unsupported(s) if s.starts_with("H.264: bit depth"))
+}
+
 /// The answer for a container whose H.264 video FilmCraft refused while it opened (MPEG-TS/PS: interlaced, 10-bit).
 /// The video decides first, so the audio (unknown here) does not change it: a refused H.264 track needs the system's
 /// decoder (row 19), and without it here the answer names H.264. Where the system's decoder runs, Windows' reader
 /// over a file FilmCraft could not describe is not wired: the same honest `NoSystemDecoder(H264)`.
-fn refused_at_open(table: &[(Codec, Route)], system_on: bool) -> ErrorCode {
+fn refused_at_open(table: &[(Codec, Route)], system_on: bool, ten_bit: bool) -> ErrorCode {
     let video = Some(Track {
         refused: true,
+        ten_bit,
         ..Track::of(table, Codec::H264)
     });
     let state = state_for(video, None, system_on, || system::availability(Codec::H264));
@@ -463,7 +469,10 @@ fn track_of_video(
         Err(e) => match map_error(&e, flags) {
             ErrorCode::ReadFailed => return Err(ErrorCode::ReadFailed),
             // A damaged first frame is answered where it always was: at the first `WantVideo`.
-            _ => track.refused = matches!(e, MediaError::Unsupported(_)),
+            _ => {
+                track.refused = matches!(e, MediaError::Unsupported(_));
+                track.ten_bit = track.refused && h264_ten_bit(&e);
+            }
         },
     }
     Ok(track)
@@ -789,16 +798,19 @@ mod tests {
             assert!(!h264_refused(&MediaError::Unsupported(other.into())), "{other}");
         }
         assert!(!h264_refused(&MediaError::Decode("H.264: bad slice".into())));
+        assert!(h264_ten_bit(&MediaError::Unsupported("H.264: bit depth luma 10 chroma 10".into())));
+        assert!(!h264_ten_bit(&MediaError::Unsupported("H.264: interlaced (field / MBAFF) coding".into())));
+        assert_eq!(refused_at_open(ROUTES, false, true), ErrorCode::TenBit);
 
         // H.264 is FilmCraft's and falls back: with the switch off the refusal names it (M9's interlaced row).
-        assert_eq!(refused_at_open(ROUTES, false), ErrorCode::NoSystemDecoder(Codec::H264));
+        assert_eq!(refused_at_open(ROUTES, false, false), ErrorCode::NoSystemDecoder(Codec::H264));
         assert_eq!(
-            refused_at_open(&[(Codec::H264, Route::Rust)], false),
+            refused_at_open(&[(Codec::H264, Route::Rust)], false, false),
             ErrorCode::NoSystemDecoder(Codec::H264)
         );
         // An H.264 row that is off answers as any video that is not played here.
         assert_eq!(
-            refused_at_open(&[(Codec::H264, Route::Unavailable)], false),
+            refused_at_open(&[(Codec::H264, Route::Unavailable)], false, false),
             ErrorCode::Unsupported(Codec::H264)
         );
     }

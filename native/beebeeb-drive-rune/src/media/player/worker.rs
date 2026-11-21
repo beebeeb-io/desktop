@@ -1087,6 +1087,8 @@ pub(super) fn refusal_of(code: ErrorCode) -> Refusal {
         ErrorCode::NoSystemMedia(codec) => Refusal::NoSystemMedia(codec),
         ErrorCode::Unsupported(codec) => Refusal::NoDecoder(codec.name().unwrap_or_default().to_string()),
         ErrorCode::NoDecoder => Refusal::NoDecoder(String::new()),
+        ErrorCode::TenBit => Refusal::TenBit,
+        ErrorCode::UnknownCodec => Refusal::UnknownCodec,
         ErrorCode::Corrupt | ErrorCode::TooLarge | ErrorCode::ReadFailed | ErrorCode::Timeout | ErrorCode::Internal => {
             Refusal::CouldNotPlay
         }

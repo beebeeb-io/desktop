@@ -29,7 +29,14 @@ pub(crate) fn helper_error(code: ErrorCode) {
         ErrorCode::Unsupported(codec) | ErrorCode::NoSystemDecoder(codec) | ErrorCode::NoSystemMedia(codec) => {
             Some(codec)
         }
-        _ => None,
+        ErrorCode::NoDecoder
+        | ErrorCode::Corrupt
+        | ErrorCode::TooLarge
+        | ErrorCode::ReadFailed
+        | ErrorCode::Timeout
+        | ErrorCode::Internal
+        | ErrorCode::TenBit
+        | ErrorCode::UnknownCodec => None,
     };
     tracing::warn!(
         answer = match code {
@@ -42,6 +49,8 @@ pub(crate) fn helper_error(code: ErrorCode) {
             ErrorCode::ReadFailed => "read failed",
             ErrorCode::Timeout => "timeout",
             ErrorCode::Internal => "internal",
+            ErrorCode::TenBit => "ten bit",
+            ErrorCode::UnknownCodec => "unknown codec",
         },
         codec = match codec {
             None => "none",

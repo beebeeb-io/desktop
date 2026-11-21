@@ -99,16 +99,19 @@ pub fn refusal_action_with(system_decoder_on: bool, why: &Refusal) -> &'static s
 
 /// The state of the refusal `why`: its words ([`refusal_words`]) and its button ([`refusal_action`]).
 pub fn refused_for(why: &Refusal, t: &Theme) -> El {
-    refused_with(&refusal_words(why), refusal_action(why), t)
+    let text = refusal_text::text(why);
+    refused_with(&text.sentence, text.action, text.link, t)
 }
 
 /// The refusal's state: the words and "Open in another app\u{2026}" one press away.
 pub fn refused(words: &str, t: &Theme) -> El {
-    refused_with(words, OPEN_ELSEWHERE, t)
+    refused_with(words, OPEN_ELSEWHERE, None, t)
 }
 
-fn refused_with(words: &str, action: &'static str, t: &Theme) -> El {
-    col()
+/// `store`: the Microsoft Store page to offer beside the button, only where the refusal says Windows lacks the
+/// extension (`refusal_text::Text::link`).
+fn refused_with(words: &str, action: &'static str, store: Option<&'static str>, t: &Theme) -> El {
+    let mut body = col()
         .key("viewer-body")
         .grow(1.0)
         .h_full()
@@ -124,7 +127,17 @@ fn refused_with(words: &str, action: &'static str, t: &Theme) -> El {
                     }
                 },
             ),
-        )
+        );
+    if let Some(url) = store {
+        body = body.child(super::text::tool_action("refused-store", "Get HEVC Video Extensions", None, None, t).on_press(
+            move |s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.intent(Intent::OpenInBrowser(url.to_string()));
+                }
+            },
+        ));
+    }
+    body
 }
 
 /// The size a `frame` takes in a `stage`, both in the same unit: scaled to fit, never enlarged past the stage,
