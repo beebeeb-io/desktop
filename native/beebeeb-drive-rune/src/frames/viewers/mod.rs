@@ -807,6 +807,10 @@ pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
 /// nothing. It is handed to the field as the line break, so undo and a held key work as for any typing.
 pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
+    // The field reads Esc as "blur", so it is taken here while the find bar is open.
+    if ev.key == Key::Escape && !m.alt && !m.cmd && !m.ctrl && !m.shift && close_find(s) {
+        return true;
+    }
     if ev.key == Key::Tab && !m.alt && !m.cmd && !m.ctrl {
         let Some(editor) = s.viewer.ui.as_mut().and_then(|ui| ui.editor.as_mut()) else {
             return false;
