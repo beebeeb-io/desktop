@@ -84,7 +84,8 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 ("app.rs", 3),
                 // kept_key_proof.rs: the sign-in's kept-key install (the write moved here from app.rs), inside a
                 // `claim` (the session-write lock is held), only after the server confirmed the key.
-                ("kept_key_proof.rs", 1),
+                // (three more are in the file's own tests, which read the session cell to assert on it.)
+                ("kept_key_proof.rs", 4),
                 ("owned_state.rs", 1),
                 ("lock_api.rs", 2),
                 // Sign-up has no earlier session: it installs the new one (`signup_api::install_new_account`).
@@ -106,6 +107,8 @@ fn every_person_accessor_goes_through_the_choke_point() {
             "while_session_is(",
             &[
                 ("owned_state.rs", 1),
+                // thumb_cache_api.rs: the sealing key of the thumbnail cache, read under the session generation (079).
+                ("thumb_cache_api.rs", 1),
                 ("guide_mark.rs", 2),
                 ("trash_api.rs", 1),
                 ("photos_api.rs", 1),
