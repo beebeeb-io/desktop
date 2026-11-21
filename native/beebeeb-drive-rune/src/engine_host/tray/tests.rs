@@ -226,6 +226,7 @@ fn texts(snapshot: &Snapshot) -> Vec<String> {
     match &snapshot.changes {
         Changes::Hidden(why) => out.extend([why.title().to_string(), why.sentence(name)]),
         Changes::Empty { text } => out.push(text.clone()),
+        Changes::Loading | Changes::Failed => {}
         Changes::Rows { rows, .. } => {
             for row in rows {
                 out.push(row.name.clone());

@@ -363,6 +363,9 @@ fn change_row<S: 'static>(i: usize, change: &Change, selected: bool, host: Host<
     } else {
         "Show in File Explorer"
     })
+    // The list is the one focus stop: the arrow keys move through its rows (`active_descendant`).
+    .role("listitem")
+    .focusable(false)
     .cursor(Cursor::Pointer)
     .on_press_tx(host.act(move |ui| ui.open_row(i)))
 }

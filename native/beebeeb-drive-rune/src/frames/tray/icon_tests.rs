@@ -4,14 +4,14 @@ use crate::theme::tokens;
 use crate::ui::kit;
 
 use super::super::source::Tile;
-use super::file_tile;
+use super::tile;
 
 /// A recent image without a thumbnail draws the registry's image icon.
 #[test]
 fn a_tray_tile_draws_its_icon_from_the_registry() {
     let t = tokens::theme(false);
     kit::record();
-    let _ = file_tile("row-0", "photo.heic", Tile::Image, &t);
+    let _ = tile("row-0", "photo.heic", Tile::Image, &t);
     let notes = kit::take();
     let n = notes.get("row-0-icon").expect("icon note");
     assert!(n.icon.is_some());
