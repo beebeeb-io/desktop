@@ -180,69 +180,17 @@ pub fn toolbar(
     )
 }
 
-/// An outlined small button (`.kit-btn-sm`, 22 pt): an optional glyph and its words. Keys:
-/// `<key>`, `<key>-icon`, `<key>-label`.
-pub fn outline_button(key: &str, words: &str, ic: Option<&'static Icon>, t: &Theme) -> El {
-    let mut button = row()
-        .key(key)
-        .role("button")
-        .label(words)
-        .h(22.0)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .hover(t.paper2)
-        .press(t.paper3)
-        .focusable(true);
-    if let Some(ic) = ic {
-        button = button.child(kit::glyph(format!("{key}-icon"), ic, 14.0, t.text));
-    }
-    button.child(kit::label(
-        format!("{key}-label"),
-        words,
-        type_::BUTTON_SM.lh(17.14),
-        t.text,
-    ))
-}
-
 /// The status line (`.mk-foot`): the sync state at the left, the section's words at the right. The state is "Sync
 /// stopped" while an item of this PC did not sync, else the word the window's own source has for sync (the one
 /// Files' status line says); a source with none gets no dot and no word, never "Up to date" nobody read.
 pub fn status_line(s: &State, ui: &Ui, right: String, t: &Theme) -> El {
-    use crate::ui::status_line::{SYNC_STOPPED, SYNCING, UP_TO_DATE};
+    use crate::ui::status_bar::{Dot, SYNC_STOPPED, bar, dot_for};
     let stopped = ui.problem_count() > 0;
     let state = if stopped {
         Some(SYNC_STOPPED.to_string())
     } else {
         s.actions.source.sync_state()
     };
-    let mut left = row().key("status-left").center_y().gap(7.0);
-    if let Some(state) = state {
-        let dot = match state.as_str() {
-            _ if stopped => t.red,
-            SYNCING | UP_TO_DATE => t.green,
-            _ => t.text_quaternary,
-        };
-        left = left
-            .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(dot))
-            .child(kit::label("status-text", state, type_::STATUS_STRONG, t.text_secondary));
-    }
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(left)
-        .child(el().key("status-spacer").grow(1.0))
-        .child(kit::label("status-details", right, type_::STATUS, t.text_tertiary))
+    let dot = state.as_deref().map(|w| if stopped { Dot::Red } else { dot_for(w) });
+    bar(dot, state.as_deref(), &right, t)
 }

@@ -12,6 +12,7 @@ use rune::{El, col, el, row};
 
 use super::{chrome, icons};
 use crate::State;
+use crate::ui::button;
 use crate::theme::icons as base;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::{banner, kit};
@@ -233,7 +234,7 @@ pub fn view(card: &Card, press: fn(&mut State, Action), t: &Theme) -> Option<El>
 
 /// An outline button that does nothing while it is off (an action is in flight, or there is nothing to decide).
 fn button(key: &str, words: &str, on: bool, action: Action, press: fn(&mut State, Action), t: &Theme) -> El {
-    let b = chrome::outline_button(key, words, None, t);
+    let b = button::button(button::keys(key), words, None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, t);
     if on {
         b.on_press(move |s: &mut State| press(s, action))
     } else {
