@@ -8,9 +8,11 @@
 use crate::theme::file_icons::FileIcon;
 use crate::theme::tokens::Theme;
 use rune::tok::Family;
-use rune::{Align, Color, El, TextStyle, col, el, row};
+use rune::{Color, El, TextStyle, col, row};
 
-use super::{file_icon, file_list, global_icons, kit};
+use super::file_row::RowLook;
+use super::file_tile::{self, TilePicture, TileSize};
+use super::{file_list, global_icons, kit};
 
 /// `.mk-gcell`: 128 x 150 (`grid-template-columns: repeat(auto-fill, 128px)`, `grid-auto-rows: 150px`).
 pub const CELL_W: f32 = 128.0;
@@ -88,81 +90,55 @@ pub fn items_in_view(offset: f32, viewport: f32, columns: usize, count: usize) -
     (first * columns).min(count)..(last * columns).min(count)
 }
 
-/// One tile (`.mk-gcell`). The caller adds what a press does.
+/// One tile (`.mk-gcell`): the one file tile at its Medium size, with the grid's figures under the
+/// name and a video's length on the picture. The caller adds what a press does, its label and its
+/// position in the set.
 pub fn tile(i: usize, item: &Tile, t: &Theme) -> El {
     let k = format!("grid-{i}");
-    let mut thumb = el()
-        .key(format!("{k}-thumb"))
-        .a11y_hidden()
-        .size(104.0, 96.0)
-        .radius(9.0)
-        .clip_rounded(9.0)
-        .center();
-    thumb = match item.thumb {
-        Thumb::Type(fi, size) => thumb
-            .fill(t.text.alpha(0.06))
-            .child(file_icon::file_icon(format!("{k}-icon"), fi, size, t)),
-        Thumb::Plain => thumb.fill(t.text.alpha(0.08)),
-        Thumb::Picture => match &item.pixels {
-            // The real picture, covering the tile (the toolkit crops what does not fit).
-            Some(pixels) => thumb.pixels_fit(pixels, rune::SurfaceFit::Fill),
-            None => file_list::thumbnail(thumb),
-        },
-        Thumb::Sample(n) => sample(thumb, n),
-    };
-    if let Some(length) = item.length {
-        thumb = thumb.child(
-            row()
-                .key(format!("{k}-badge"))
-                .pin(None, None, Some(5.0), Some(5.0))
-                .h(18.0)
-                .px(5.0)
-                .gap(3.0)
-                .radius(6.0)
-                .items_center()
-                .fill(Color::BLACK.alpha(0.55))
-                .child(kit::glyph(
-                    format!("{k}-badge-icon"),
-                    &global_icons::PLAY,
-                    9.0,
-                    Color::WHITE,
-                ))
-                .child(kit::label(format!("{k}-badge-text"), length, BADGE, Color::WHITE)),
-        );
-    }
-    col()
-        .key(k.clone())
-        .size(CELL_W, CELL_H)
-        .padding(6.0)
-        .gap(6.0)
-        .radius(10.0)
-        .items_center()
-        .fill(if item.selected {
-            t.selection_row
+    let badge = item.length.map(|length| {
+        row()
+            .key(format!("{k}-badge"))
+            .h(18.0)
+            .px(5.0)
+            .gap(3.0)
+            .radius(6.0)
+            .items_center()
+            .fill(Color::BLACK.alpha(0.55))
+            .child(kit::glyph(
+                format!("{k}-badge-icon"),
+                &global_icons::PLAY,
+                9.0,
+                Color::WHITE,
+            ))
+            .child(kit::label(format!("{k}-badge-text"), length, BADGE, Color::WHITE))
+    });
+    // `.mk-gsub { margin-top: -4px }`: 2 under the name.
+    let sub = kit::label(
+        format!("{k}-sub"),
+        item.sub,
+        SUB,
+        if item.selected {
+            t.text_secondary
         } else {
-            Color::TRANSPARENT
-        })
-        .child(thumb)
-        .child(
-            kit::label(format!("{k}-name"), item.name, NAME, t.text)
-                .max_lines(2)
-                .w_full()
-                .align(Align::Center),
-        )
-        .child(
-            // `.mk-gsub { margin-top: -4px }`: 2 under the name.
-            kit::label(
-                format!("{k}-sub"),
-                item.sub,
-                SUB,
-                if item.selected {
-                    t.text_secondary
-                } else {
-                    t.text_tertiary
-                },
-            )
-            .mt(-4.0),
-        )
+            t.text_tertiary
+        },
+    )
+    .mt(-4.0);
+    file_tile::tile_with(
+        &k,
+        item.name,
+        TilePicture::Thumb(&item.thumb),
+        item.pixels.as_ref(),
+        item.name,
+        Some(sub),
+        badge,
+        RowLook {
+            selected: item.selected,
+            ..RowLook::default()
+        },
+        TileSize::Medium,
+        t,
+    )
 }
 
 /// The grid: `tiles` in rows of as many as fit, scrolling when they do not fit the height.
