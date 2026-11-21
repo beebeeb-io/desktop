@@ -50,12 +50,11 @@ pub fn counts(s: &State) -> DriveCounts {
             shared_waiting = some(s.frames.shared.source.invitations().len() as u32);
             trash = s.frames.trash.source.count().and_then(|n| some(n as u32));
         }
-        // Another window: the Trash list's own figure once it has read (the Files source knows none of
-        // its own, ux-55), never before; with no Files source behind the window there is no badge.
-        _ if files.is_some() && s.frames.trash.source.loaded() == crate::frames::trash::source::Loaded::Ready => {
-            trash = s.frames.trash.source.count().and_then(|n| some(n as u32)).or(trash);
+        // Another window: the engine's Trash figure once the server has said one (the Files source knows
+        // none of its own, ux-55); never a sample.
+        _ => {
+            trash = s.frames.trash.source.server_count().and_then(|n| some(n as u32)).or(trash);
         }
-        _ => {}
     }
     DriveCounts {
         shared_waiting,

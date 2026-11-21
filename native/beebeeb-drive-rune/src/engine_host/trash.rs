@@ -610,6 +610,10 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         self.badge()
     }
 
+    fn server_count(&self) -> Option<usize> {
+        self.badge()
+    }
+
     /// Details and Preview: while a list of the session in memory is here (an item is looked up in it).
     fn actions_available(&self) -> bool {
         self.current().is_some()
