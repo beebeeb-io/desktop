@@ -179,3 +179,56 @@ pub fn banner(b: &Banner, t: &Theme) -> El {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::tokens::theme;
+    use rune::{Cx, Env, Runtime};
+    use serde_json::Value;
+
+    struct Page;
+
+    const WORDS: [Run; 3] = [Run::Words(String::new()), Run::Figure(String::new()), Run::Words(String::new())];
+
+    fn runs() -> Vec<Run> {
+        let _ = WORDS;
+        vec![
+            Run::Words("Rebuilt at ".into()),
+            Run::Figure("14:02".into()),
+            Run::Words(" from your files.".into()),
+        ]
+    }
+
+    fn view(_: &Page, _: &mut Cx<Page>) -> El {
+        let r = runs();
+        let b = Banner { tone: Tone::Neutral, icon: &global_icons::CLOSE, runs: &r, action: None, dismiss: None };
+        row().key("page").w(500.0).child(banner(&b, &theme(false)))
+    }
+
+    fn walk<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+        out.push(v);
+        for c in v["children"].as_array().into_iter().flatten() {
+            walk(c, out);
+        }
+    }
+
+    #[test]
+    fn banner_uia_sentence_is_a_text_element_and_the_row_stays_a_status() {
+        let env = Env { system_dark: false, scale: 2.0 };
+        let mut rt = Runtime::new(Page, view, (500.0, 200.0), env);
+        rt.frame(0.0);
+        rt.settle_all();
+        rt.frame(0.0);
+        let tree = rt.accessibility_json();
+        let mut all = Vec::new();
+        walk(&tree, &mut all);
+        let sentence = "Rebuilt at 14:02 from your files.";
+        let named: Vec<_> = all.iter().filter(|n| n["label"] == sentence || n["name"] == sentence).collect();
+        assert!(
+            named.iter().any(|n| n["role"] != "status"),
+            "no text node with the sentence: {tree:#}"
+        );
+        assert!(named.iter().any(|n| n["role"] == "status"), "the status row keeps its label");
+    }
+}
